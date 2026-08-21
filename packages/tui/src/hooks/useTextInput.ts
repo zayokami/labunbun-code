@@ -1,12 +1,16 @@
 /**
  * Terminal text editor state: multiline buffer, cursor motion, word jumps,
- * kill/yank, and history recall. Pure state transitions; the component maps
- * ink useInput keys onto these actions. Optional vim layer: normal/insert
- * modal editing over the same buffer.
+ * kill/yank, undo/redo, and history recall. Pure state transitions; the
+ * component maps ink useInput keys onto these actions.
+ *
+ * The optional vim layer delegates to the pure VimEngine (../vim.ts); this
+ * hook only supplies the editor operations (read/replace/undo) and keeps a
+ * synchronous state mirror so the engine can read the buffer between renders.
  */
 
 import type { Key } from "ink";
 import { useCallback, useRef, useState } from "react";
+import { VimEngine, type VimMode } from "../vim.ts";
 
 export interface TextInputState {
 	text: string;
@@ -29,26 +33,40 @@ export interface TextInputActions {
 	yank(): void;
 	clear(): void;
 	setText(text: string): void;
+	undo(): void;
+	redo(): void;
 }
+
+const UNDO_LIMIT = 200;
 
 export function useTextInput(initialHistory: string[] = [], vim = false) {
 	const [state, setState] = useState<TextInputState>({ text: "", cursor: 0 });
-	const [vimMode, setVimModeState] = useState<"normal" | "insert">(vim ? "normal" : "insert");
-	// Mirror for synchronous reads inside key handlers (state updates lag one render).
-	const vimModeRef = useRef<"normal" | "insert">(vim ? "normal" : "insert");
-	const setVimMode = (mode: "normal" | "insert") => {
-		vimModeRef.current = mode;
-		setVimModeState(mode);
-	};
+	// Synchronous mirror — the vim engine reads the buffer between renders.
+	const stateRef = useRef<TextInputState>({ text: "", cursor: 0 });
+	const commit = useCallback((next: TextInputState | ((s: TextInputState) => TextInputState)) => {
+		const resolved = typeof next === "function" ? next(stateRef.current) : next;
+		stateRef.current = resolved;
+		setState(resolved);
+	}, []);
+
 	const historyRef = useRef<string[]>([...initialHistory]);
 	const historyIndexRef = useRef<number>(-1);
 	const draftRef = useRef<string>("");
 	const killRingRef = useRef<string>("");
+	const undoStackRef = useRef<TextInputState[]>([]);
+	const redoStackRef = useRef<TextInputState[]>([]);
+
+	/** Record the current state on the undo stack (call BEFORE mutating). */
+	const recordUndo = useCallback(() => {
+		undoStackRef.current.push({ ...stateRef.current });
+		if (undoStackRef.current.length > UNDO_LIMIT) undoStackRef.current.shift();
+		redoStackRef.current = [];
+	}, []);
 
 	const historyUp = useCallback(() => {
 		if (historyRef.current.length === 0) return;
 		if (historyIndexRef.current === -1) {
-			draftRef.current = state.text;
+			draftRef.current = stateRef.current.text;
 			historyIndexRef.current = historyRef.current.length - 1;
 		} else if (historyIndexRef.current > 0) {
 			historyIndexRef.current--;
@@ -56,20 +74,20 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 			return;
 		}
 		const entry = historyRef.current[historyIndexRef.current];
-		setState({ text: entry, cursor: entry.length });
-	}, [state.text]);
+		commit({ text: entry, cursor: entry.length });
+	}, [commit]);
 
 	const historyDown = useCallback(() => {
 		if (historyIndexRef.current === -1) return;
 		if (historyIndexRef.current < historyRef.current.length - 1) {
 			historyIndexRef.current++;
 			const entry = historyRef.current[historyIndexRef.current];
-			setState({ text: entry, cursor: entry.length });
+			commit({ text: entry, cursor: entry.length });
 		} else {
 			historyIndexRef.current = -1;
-			setState({ text: draftRef.current, cursor: draftRef.current.length });
+			commit({ text: draftRef.current, cursor: draftRef.current.length });
 		}
-	}, []);
+	}, [commit]);
 
 	const pushHistory = useCallback((entry: string) => {
 		const trimmed = entry.trim();
@@ -84,53 +102,121 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 
 	const actions: TextInputActions = {
 		insert: (text) =>
-			setState((s) => ({
+			commitWithUndo((s) => ({
 				text: s.text.slice(0, s.cursor) + text + s.text.slice(s.cursor),
 				cursor: s.cursor + text.length,
 			})),
 		newline: () => actions.insert("\n"),
 		backspace: () =>
-			setState((s) =>
-				s.cursor === 0 ? s : { text: s.text.slice(0, s.cursor - 1) + s.text.slice(s.cursor), cursor: s.cursor - 1 },
+			commitWithUndo((s) =>
+				s.cursor === 0
+					? s
+					: { text: s.text.slice(0, s.cursor - 1) + s.text.slice(s.cursor), cursor: s.cursor - 1 },
 			),
 		delete: () =>
-			setState((s) =>
+			commitWithUndo((s) =>
 				s.cursor >= s.text.length
 					? s
 					: { text: s.text.slice(0, s.cursor) + s.text.slice(s.cursor + 1), cursor: s.cursor },
 			),
-		moveLeft: () => setState((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) })),
-		moveRight: () => setState((s) => ({ ...s, cursor: Math.min(s.text.length, s.cursor + 1) })),
-		moveToLineStart: () => setState((s) => ({ ...s, cursor: 0 })),
-		moveToLineEnd: () => setState((s) => ({ ...s, cursor: s.text.length })),
+		moveLeft: () => commit((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) })),
+		moveRight: () => commit((s) => ({ ...s, cursor: Math.min(s.text.length, s.cursor + 1) })),
+		moveToLineStart: () => commit((s) => ({ ...s, cursor: 0 })),
+		moveToLineEnd: () => commit((s) => ({ ...s, cursor: s.text.length })),
 		moveWordLeft: () =>
-			setState((s) => {
+			commit((s) => {
 				let i = s.cursor;
 				while (i > 0 && /\s/.test(s.text[i - 1])) i--;
 				while (i > 0 && !/\s/.test(s.text[i - 1])) i--;
 				return { ...s, cursor: i };
 			}),
 		moveWordRight: () =>
-			setState((s) => {
+			commit((s) => {
 				let i = s.cursor;
 				while (i < s.text.length && !/\s/.test(s.text[i])) i++;
 				while (i < s.text.length && /\s/.test(s.text[i])) i++;
 				return { ...s, cursor: i };
 			}),
 		killToEnd: () =>
-			setState((s) => {
+			commitWithUndo((s) => {
 				killRingRef.current = s.text.slice(s.cursor);
 				return { text: s.text.slice(0, s.cursor), cursor: s.cursor };
 			}),
 		killToStart: () =>
-			setState((s) => {
+			commitWithUndo((s) => {
 				killRingRef.current = s.text.slice(0, s.cursor);
 				return { text: s.text.slice(s.cursor), cursor: 0 };
 			}),
 		yank: () => actions.insert(killRingRef.current),
-		clear: () => setState({ text: "", cursor: 0 }),
-		setText: (text) => setState({ text, cursor: text.length }),
+		clear: () => commitWithUndo(() => ({ text: "", cursor: 0 })),
+		setText: (text) => commitWithUndo(() => ({ text, cursor: text.length })),
+		undo: () => {
+			const prev = undoStackRef.current.pop();
+			if (!prev) return;
+			redoStackRef.current.push({ ...stateRef.current });
+			commit(prev);
+		},
+		redo: () => {
+			const next = redoStackRef.current.pop();
+			if (!next) return;
+			undoStackRef.current.push({ ...stateRef.current });
+			commit(next);
+		},
 	};
+
+	function commitWithUndo(fn: (s: TextInputState) => TextInputState): void {
+		recordUndo();
+		commit(fn(stateRef.current));
+	}
+
+	// -- vim engine -----------------------------------------------------------
+
+	const engineRef = useRef<VimEngine | null>(null);
+	if (vim && engineRef.current === null) {
+		engineRef.current = new VimEngine(
+			{
+				getText: () => stateRef.current.text,
+				getCursor: () => stateRef.current.cursor,
+				setCursor: (pos) => commit((s) => ({ ...s, cursor: Math.max(0, Math.min(pos, s.text.length)) })),
+				setAll: (text, cursor) => commitWithUndo(() => ({ text, cursor })),
+				enterInsert: () => {},
+				toNormal: () => {},
+				recallHistory: (dir) => (dir === "up" ? historyUp() : historyDown()),
+				undo: () => actions.undo(),
+				redo: () => actions.redo(),
+			},
+			true,
+		);
+	}
+
+	// Pure mode/selection flips don't touch React state — bump a tick so the
+	// mode badge and selection highlight stay live.
+	const [, setRenderTick] = useState(0);
+	const handleVimKey = useCallback(
+		(input: string, key: Partial<Key>): boolean => {
+			const engine = engineRef.current;
+			if (!engine) return false;
+			const before = `${engine.mode}:${JSON.stringify(engine.selection)}`;
+			const consumed = engine.handleKey(input, {
+				escape: key.escape,
+				return: key.return,
+				ctrl: key.ctrl,
+				meta: key.meta,
+				upArrow: key.upArrow,
+				downArrow: key.downArrow,
+				leftArrow: key.leftArrow,
+				rightArrow: key.rightArrow,
+			});
+			if (consumed && `${engine.mode}:${JSON.stringify(engine.selection)}` !== before) {
+				setRenderTick((t) => t + 1);
+			}
+			return consumed;
+		},
+		[],
+	);
+
+	const vimMode: VimMode = engineRef.current ? engineRef.current.mode : "insert";
+	const selection = engineRef.current?.selection ?? null;
 
 	return {
 		state,
@@ -138,74 +224,8 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 		historyUp,
 		historyDown,
 		pushHistory,
-		// Read through the ref so key handlers see the mode synchronously;
-		// the mirrored state exists only to re-render the mode indicator.
-		get vimMode() {
-			return vim ? vimModeRef.current : ("insert" as const);
-		},
-		/**
-		 * Vim key handler — call before default handling; returns true when the
-		 * key was consumed by normal mode (insert mode falls through except Esc).
-		 */
-		handleVimKey(input: string, key: Key): boolean {
-			if (!vim) return false;
-			if (vimModeRef.current === "insert") {
-				if (key.escape) {
-					setVimMode("normal");
-					return true;
-				}
-				return false;
-			}
-			switch (true) {
-				case input === "h":
-					actions.moveLeft();
-					break;
-				case input === "l":
-					actions.moveRight();
-					break;
-				case input === "0":
-					actions.moveToLineStart();
-					break;
-				case input === "$":
-					actions.moveToLineEnd();
-					break;
-				case input === "w":
-					actions.moveWordRight();
-					break;
-				case input === "b":
-					actions.moveWordLeft();
-					break;
-				case input === "x":
-					actions.delete();
-					break;
-				case input === "D":
-					actions.killToEnd();
-					break;
-				case input === "i":
-					setVimMode("insert");
-					break;
-				case input === "a":
-					setVimMode("insert");
-					setState((s) => ({ ...s, cursor: Math.min(s.text.length, s.cursor + 1) }));
-					break;
-				case input === "A":
-					setVimMode("insert");
-					setState((s) => ({ ...s, cursor: s.text.length }));
-					break;
-				case input === "o":
-					setVimMode("insert");
-					setState((s) => ({ text: `${s.text}\n`, cursor: s.text.length + 1 }));
-					break;
-				case input === "j":
-					historyDown();
-					break;
-				case input === "k":
-					historyUp();
-					break;
-				default:
-					break;
-			}
-			return true; // normal mode consumes everything
-		},
+		vimMode,
+		handleVimKey,
+		selection,
 	};
 }

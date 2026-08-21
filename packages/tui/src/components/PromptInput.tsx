@@ -27,7 +27,10 @@ export function PromptInput({
 	vim = false,
 }: PromptInputProps) {
 	const theme = useTheme();
-	const { state, actions, historyUp, historyDown, pushHistory, vimMode, handleVimKey } = useTextInput([], vim);
+	const { state, actions, historyUp, historyDown, pushHistory, vimMode, handleVimKey, selection } = useTextInput(
+		[],
+		vim,
+	);
 	const [suggestionIndex, setSuggestionIndex] = useState(0);
 
 	const suggestions =
@@ -105,6 +108,14 @@ export function PromptInput({
 	const lines = state.text.split("\n");
 	const cursorLine = state.text.slice(0, state.cursor).split("\n").length - 1;
 	const selected = suggestions.length > 0 ? suggestions[suggestionIndex % suggestions.length] : null;
+	const sel = vimMode.startsWith("visual") ? selection : null;
+
+	const MODE_LABEL: Record<string, string> = {
+		normal: "NORMAL",
+		insert: "INSERT",
+		visual: "VISUAL",
+		"visual-line": "V-LINE",
+	};
 
 	return (
 		<Box flexDirection="column">
@@ -130,12 +141,8 @@ export function PromptInput({
 				) : (
 					lines.map((line, i) => (
 						<Text key={i} color={theme.text}>
-							{i === cursorLine ? (
-								<>
-									{line.slice(0, cursorColumn(state.text, state.cursor, i))}
-									<Text inverse> </Text>
-									{line.slice(cursorColumn(state.text, state.cursor, i))}
-								</>
+							{i === cursorLine || (sel && sel.start < lineEndOf(state.text, i)) ? (
+								renderLineWithCursorAndSelection(state, i, cursorColumn(state.text, state.cursor, i), sel)
 							) : (
 								line
 							)}
@@ -143,7 +150,7 @@ export function PromptInput({
 					))
 				)}
 				<Text dimColor>
-					{vim ? `[${vimMode === "normal" ? "NORMAL" : "INSERT"}] ` : ""}
+					{vim ? `[${MODE_LABEL[vimMode] ?? "NORMAL"}] ` : ""}
 					Enter send · Shift+Enter newline · ↑↓ history · Esc interrupt · /help
 				</Text>
 			</Box>
@@ -156,4 +163,66 @@ function cursorColumn(text: string, cursor: number, lineIndex: number): number {
 	let offset = 0;
 	for (let i = 0; i < lineIndex; i++) offset += lines[i].length + 1;
 	return cursor - offset;
+}
+
+function lineEndOf(text: string, lineIndex: number): number {
+	const lines = text.split("\n");
+	let offset = 0;
+	for (let i = 0; i <= lineIndex && i < lines.length; i++) offset += lines[i].length + (i < lines.length - 1 ? 1 : 0);
+	return offset;
+}
+
+/** Render one line with the vim selection range and cursor position highlighted. */
+function renderLineWithCursorAndSelection(
+	state: { text: string; cursor: number },
+	lineIndex: number,
+	cursorCol: number,
+	sel: { start: number; end: number } | null,
+) {
+	const lines = state.text.split("\n");
+	const line = lines[lineIndex] ?? "";
+	let offset = 0;
+	for (let i = 0; i < lineIndex; i++) offset += lines[i].length + 1;
+	const lineStartPos = offset;
+	const lineEndPos = offset + line.length;
+
+	const selStart = sel ? Math.max(sel.start, lineStartPos) : -1;
+	const selEnd = sel ? Math.min(sel.end, lineEndPos) : -1;
+	const hasSelection = sel !== null && selEnd > selStart;
+
+	if (!hasSelection) {
+		// Cursor-only rendering.
+		if (state.cursor < lineStartPos || state.cursor > lineEndPos) return line;
+		const col = cursorCol;
+		return (
+			<>
+				{line.slice(0, col)}
+				<Text inverse>{line.slice(col, col + 1) || " "}</Text>
+				{line.slice(col + 1)}
+			</>
+		);
+	}
+
+	// Selection may span multiple lines — clip to this line.
+	const pieces: React.ReactNode[] = [];
+	const before = line.slice(0, Math.max(0, selStart - lineStartPos));
+	const midStart = Math.max(0, selStart - lineStartPos);
+	const midEnd = Math.min(line.length, selEnd - lineStartPos);
+	const middle = line.slice(midStart, midEnd);
+	const after = line.slice(midEnd);
+
+	pieces.push(before);
+	if (state.cursor >= lineStartPos && state.cursor <= lineEndPos && state.cursor >= selStart && state.cursor < selEnd) {
+		const relCursor = state.cursor - lineStartPos - midStart;
+		if (relCursor >= 0 && relCursor < middle.length) {
+			pieces.push(<Text inverse key="c">{middle.slice(relCursor, relCursor + 1)}</Text>);
+			pieces.push(middle.slice(relCursor + 1));
+		} else {
+			pieces.push(middle);
+		}
+	} else {
+		pieces.push(<Text inverse key="s">{middle}</Text>);
+	}
+	pieces.push(after);
+	return pieces;
 }
