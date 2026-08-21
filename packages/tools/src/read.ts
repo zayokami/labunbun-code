@@ -1,6 +1,6 @@
-import { isAbsolute, resolve } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
+import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
 const MAX_LINES = 2000;
@@ -26,7 +26,15 @@ export function createReadTool(cwd: string, ops: Operations): AnyTool {
 		isConcurrencySafe: () => true,
 		maxResultSizeChars: Number.POSITIVE_INFINITY,
 		call: async (input) => {
-			const path = isAbsolute(input.file_path) ? input.file_path : resolve(cwd, input.file_path);
+			let path: string;
+			try {
+				path = guardPathContainment(input.file_path, cwd, "Read");
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: String(error) }],
+					isError: true,
+				};
+			}
 			const text = await ops.readTextFile(path).catch(() => null);
 			if (text === null) {
 				return {

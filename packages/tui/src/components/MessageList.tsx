@@ -2,13 +2,29 @@ import { Box, Static, Text } from "ink";
 import { useTheme } from "../theme.ts";
 import type { UiEntry } from "../ui-state.ts";
 
+// biome-ignore format: keep the regex on one line so the ignore comment below stays attached
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching raw C0/C1 control bytes is the point
+const ANSI_ESCAPE_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x1b\x9b][[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping raw C0/C1 control bytes is the point
+const CONTROL_CHARS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+
+/**
+ * Strip ANSI escape sequences and other control characters before handing
+ * text to Ink's <Text>. Tool output and model text are untrusted — without
+ * this, an adversarial file/command/response can inject cursor moves, screen
+ * clears, or color resets that corrupt the rendered transcript.
+ */
+export function stripAnsi(text: string): string {
+	return text.replace(ANSI_ESCAPE_RE, "").replace(CONTROL_CHARS_RE, "");
+}
+
 function UserMessageView({ text }: { text: string }) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1}>
 			<Text color={theme.userMessage}>
 				{"> "}
-				<Text bold>{text}</Text>
+				<Text bold>{stripAnsi(text)}</Text>
 			</Text>
 		</Box>
 	);
@@ -18,7 +34,7 @@ function AssistantMessageView({ text }: { text: string }) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1} flexDirection="column">
-			{renderMarkdownLite(text, theme.text)}
+			{renderMarkdownLite(stripAnsi(text), theme.text)}
 		</Box>
 	);
 }
@@ -89,7 +105,8 @@ function ToolUseView({ entry }: { entry: Extract<UiEntry, { kind: "toolUse" }> }
 /** Render result lines; unified-diff markers (+/-/@@) get diff coloring. */
 function ResultLines({ text, isError }: { text: string; isError?: boolean }) {
 	const theme = useTheme();
-	const capped = text.length > 400 ? `${text.slice(0, 397)}...` : text || "(no output)";
+	const sanitized = stripAnsi(text);
+	const capped = sanitized.length > 400 ? `${sanitized.slice(0, 397)}...` : sanitized || "(no output)";
 	if (isError) {
 		return <Text color={theme.error}>{capped}</Text>;
 	}

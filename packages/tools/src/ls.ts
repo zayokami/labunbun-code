@@ -1,6 +1,7 @@
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
+import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
 /** Directory listing with sizes and type markers. */
@@ -16,7 +17,12 @@ export function createLsTool(cwd: string, ops: Operations): AnyTool {
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
 		call: async (input) => {
-			const dir = isAbsolute(input.path) ? input.path : resolve(cwd, input.path);
+			let dir: string;
+			try {
+				dir = guardPathContainment(input.path, cwd, "LS");
+			} catch (error) {
+				return { content: [{ type: "text", text: String(error) }], isError: true };
+			}
 			if (!(await ops.exists(dir))) {
 				return { content: [{ type: "text", text: `Path not found: ${dir}` }], isError: true };
 			}

@@ -3,8 +3,8 @@
  * tools into the agent Tool registry under `mcp__<server>__<tool>` names.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { type AnyTool, buildTool, type ToolResult } from "@labunbun/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -154,6 +154,58 @@ export function loadMcpConfig(cwd: string): Record<string, McpServerConfig> {
 		} catch {}
 	}
 	return out;
+}
+
+/**
+ * Server names sourced specifically from the project-level `<cwd>/.mcp.json`
+ * — as opposed to user scope (`~/.labunbun/.mcp.json`). When `cwd` is a
+ * cloned repo the user doesn't control, this file ships with the repo and is
+ * attacker-controlled, unlike the home-directory config the user wrote themselves.
+ */
+export function loadProjectMcpServerNames(cwd: string): Set<string> {
+	const path = join(cwd, ".mcp.json");
+	try {
+		if (!existsSync(path)) return new Set();
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as { mcpServers?: Record<string, McpServerConfig> };
+		return new Set(Object.keys(parsed.mcpServers ?? {}));
+	} catch {
+		return new Set();
+	}
+}
+
+function localSettingsPath(cwd: string): string {
+	return join(cwd, ".labunbun", "settings.local.json");
+}
+
+/**
+ * Project-scoped MCP servers explicitly approved by the user, read from
+ * `.labunbun/settings.local.json` — gitignored and machine-local, so unlike
+ * `.labunbun/settings.json` it can't be pre-populated by a cloned repo to
+ * self-approve its own servers.
+ */
+export function loadApprovedMcpServers(cwd: string): Set<string> {
+	const path = localSettingsPath(cwd);
+	try {
+		if (!existsSync(path)) return new Set();
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as { approvedMcpServers?: string[] };
+		return new Set(parsed.approvedMcpServers ?? []);
+	} catch {
+		return new Set();
+	}
+}
+
+/** Persist one more approved server name into local settings (creates the file/dir as needed). */
+export function approveMcpServer(cwd: string, serverName: string): void {
+	const path = localSettingsPath(cwd);
+	let existing: Record<string, unknown> = {};
+	try {
+		if (existsSync(path)) existing = JSON.parse(readFileSync(path, "utf8"));
+	} catch {}
+	const approved = new Set<string>(Array.isArray(existing.approvedMcpServers) ? existing.approvedMcpServers : []);
+	approved.add(serverName);
+	existing.approvedMcpServers = [...approved];
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(existing, null, 2)}\n`, "utf8");
 }
 
 /** Connect all configured servers in parallel. */

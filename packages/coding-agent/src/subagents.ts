@@ -7,7 +7,15 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AgentSession, type AnyTool, buildTool, type SessionStore } from "@labunbun/agent";
+import {
+	AgentSession,
+	type AnyTool,
+	buildTool,
+	evaluatePermissions,
+	type PermissionMode,
+	type PermissionRule,
+	type SessionStore,
+} from "@labunbun/agent";
 import type { Model, StreamFn } from "@labunbun/ai";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
@@ -74,6 +82,10 @@ export interface TaskToolContext {
 	definitions: AgentDefinition[];
 	store?: SessionStore;
 	systemPromptFor?: (agent: AgentDefinition) => string;
+	/** Permission mode inherited from the parent session (undefined → subagents run unrestricted, e.g. tests). */
+	permissionMode?: PermissionMode;
+	/** Resolved fresh per call so session-scoped allow rules added mid-conversation apply to new subagents. */
+	getPermissionRules?: () => PermissionRule[];
 }
 
 export const GENERAL_PURPOSE: AgentDefinition = {
@@ -123,7 +135,28 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 				tools,
 				maxTurns: input.max_turns ?? definition.maxTurns,
 				cwd: toolCtx.cwd,
-				deps: { streamFn: ctx.streamFn },
+				permissionMode: ctx.permissionMode,
+				deps: {
+					streamFn: ctx.streamFn,
+					// Subagents inherit the parent's rules but have no dialog of their
+					// own to resolve an "ask" — fail closed rather than hang or auto-allow.
+					canUseTool: ctx.permissionMode
+						? async (toolName, permInput, permCtx) => {
+								const decision = evaluatePermissions(toolName, permInput, {
+									mode: permCtx.mode,
+									rules: ctx.getPermissionRules?.() ?? [],
+									cwd: toolCtx.cwd,
+								});
+								if (decision.behavior === "ask") {
+									return {
+										behavior: "deny",
+										message: decision.message ?? `Permission required for ${toolName} (subagents cannot prompt interactively)`,
+									};
+								}
+								return decision;
+							}
+						: undefined,
+				},
 			});
 
 			// Sidechain persistence: record start + final transcript in the parent tree.

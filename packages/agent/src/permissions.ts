@@ -11,6 +11,7 @@
  * auto-allows Edit/Write in the workspace; plan denies mutating tools;
  * dontAsk turns unresolved asks into denies (handled by the caller).
  */
+import { resolve } from "node:path";
 import type { PermissionContext, PermissionMode, PermissionResult } from "./types.ts";
 
 export type RuleSource = "userSettings" | "projectSettings" | "localSettings" | "policy" | "cliArg" | "session";
@@ -109,13 +110,19 @@ export function inputMatchesSpecifier(toolName: string, specifier: string, input
 	}
 }
 
+/** Resolve a path against cwd, collapsing `..`/`.` segments so traversal
+ *  sequences can't defeat the string-prefix containment checks below. */
+function resolveCanonical(filePath: string, cwd: string): string {
+	return normalizePathSpec(resolve(cwd, filePath));
+}
+
 function pathMatches(filePath: string, specifier: string, cwd: string): boolean {
-	const file = normalizePathSpec(filePath);
+	const file = resolveCanonical(filePath, cwd);
 	const spec = normalizePathSpec(specifier);
 	const candidates = new Set([file, file.toLowerCase()]);
 
 	// Workspace-relative form.
-	const normalizedCwd = `${normalizePathSpec(cwd).replace(/\/$/, "")}/`;
+	const normalizedCwd = `${resolveCanonical(cwd, cwd).replace(/\/$/, "")}/`;
 	if (file.toLowerCase().startsWith(normalizedCwd.toLowerCase())) {
 		candidates.add(file.slice(normalizedCwd.length));
 	}
@@ -152,20 +159,20 @@ export function evaluatePermissions(
 ): PermissionResult {
 	if (config.mode === "bypassPermissions") return { behavior: "allow" };
 
-	// Mode shortcuts first.
-	if (config.mode === "plan" && !isReadOnlyTool(toolName)) {
-		return { behavior: "deny", message: `Plan mode: ${toolName} is not allowed (read-only mode)` };
-	}
-	if (config.mode === "acceptEdits" && isWorkspaceEdit(toolName, input, config)) {
-		return { behavior: "allow" };
-	}
-
-	// Deny rules win across every source.
+	// Deny rules win across every source (check before mode shortcuts).
 	for (const rule of config.rules) {
 		if (rule.behavior !== "deny") continue;
 		if (ruleMatches(rule, toolName, input, config.cwd)) {
 			return { behavior: "deny", message: `Denied by ${rule.source} rule: ${formatRule(rule)}` };
 		}
+	}
+
+	// Mode shortcuts after deny rules (so explicit denies can override mode shortcuts).
+	if (config.mode === "plan" && !isReadOnlyTool(toolName)) {
+		return { behavior: "deny", message: `Plan mode: ${toolName} is not allowed (read-only mode)` };
+	}
+	if (config.mode === "acceptEdits" && isWorkspaceEdit(toolName, input, config)) {
+		return { behavior: "allow" };
 	}
 
 	// Among allows, later sources win — any match is enough since denies lost.
@@ -194,10 +201,11 @@ function isWorkspaceEdit(toolName: string, input: unknown, config: PermissionEng
 	if (typeof input !== "object" || input === null) return false;
 	const filePath = String((input as Record<string, unknown>).file_path ?? "");
 	if (!filePath) return false;
+	const resolved = resolveCanonical(filePath, config.cwd);
 	const roots = config.workspaceRoots ?? [config.cwd];
 	return roots.some((root) => {
-		const normalizedRoot = `${normalizePathSpec(root).replace(/\/$/, "")}/`;
-		return normalizePathSpec(filePath).toLowerCase().startsWith(normalizedRoot.toLowerCase());
+		const normalizedRoot = `${resolveCanonical(root, config.cwd).replace(/\/$/, "")}/`;
+		return resolved.toLowerCase().startsWith(normalizedRoot.toLowerCase());
 	});
 }
 

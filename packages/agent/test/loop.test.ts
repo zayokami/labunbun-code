@@ -312,6 +312,39 @@ describe("AgentSession loop", () => {
 		const results = toolResultsOf(session.messages);
 		expect(results).toHaveLength(1);
 	});
+
+	test("early-start streaming path caps concurrency same as the post-stream batcher", async () => {
+		let active = 0;
+		let maxActive = 0;
+		const CALL_COUNT = 15;
+		const slow = buildTool({
+			name: "slow",
+			description: "concurrency-safe, tracks peak overlap",
+			inputSchema: z.object({ id: z.number() }),
+			isConcurrencySafe: () => true,
+			call: async (input) => {
+				active++;
+				maxActive = Math.max(maxActive, active);
+				await new Promise((r) => setTimeout(r, 15));
+				active--;
+				return { content: [{ type: "text", text: `done-${input.id}` }] };
+			},
+		});
+
+		const toolCalls = Array.from({ length: CALL_COUNT }, (_, i) => ({ name: "slow", arguments: { id: i } }));
+		const faux = fauxProvider([{ toolCalls }, { text: "done" }]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [slow],
+			deps: { streamFn: faux.streamFn },
+		});
+		const reason = await session.prompt("go");
+
+		expect(reason).toBe("completed");
+		expect(maxActive).toBeLessThanOrEqual(10);
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(CALL_COUNT);
+	});
 });
 
 describe("session persistence replay", () => {

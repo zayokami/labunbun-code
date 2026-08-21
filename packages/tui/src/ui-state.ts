@@ -158,7 +158,8 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 		}
 
 		case "tool_execution_end": {
-			const resultText = event.result.content
+			const content = Array.isArray(event.result.content) ? event.result.content : [];
+			const resultText = content
 				.filter((b) => b.type === "text")
 				.map((b) => b.text)
 				.join("\n")

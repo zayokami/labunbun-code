@@ -32,16 +32,44 @@ function readIfExists(path: string): string | null {
 	}
 }
 
-/** Expand `@path/to/file` includes recursively (cycle-guarded). */
-export function expandIncludes(content: string, baseDir: string, seen: Set<string> = new Set()): string {
+/** Normalize for cross-platform, case-insensitive path comparison. */
+function normalizeForCompare(path: string): string {
+	return path.replace(/\\/g, "/").toLowerCase();
+}
+
+/** Is `target` equal to or nested inside `root`? Both must already be resolved/absolute. */
+function isWithinRoot(target: string, root: string): boolean {
+	const normalizedTarget = normalizeForCompare(target);
+	const normalizedRoot = normalizeForCompare(root).replace(/\/$/, "");
+	return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}/`);
+}
+
+/**
+ * Expand `@path/to/file` includes recursively (cycle-guarded).
+ *
+ * `root` pins the containment boundary to the directory of the file that
+ * originally referenced an include (defaults to `baseDir` on the initial
+ * call, then threaded unchanged through recursion) — an untrusted
+ * AGENTS.md/LABUNBUN.md pulled in from a cloned repo can't use `@../../../
+ * etc/passwd` or a `\\host\share` UNC path to read or trigger network
+ * access outside its own directory tree.
+ */
+export function expandIncludes(
+	content: string,
+	baseDir: string,
+	seen: Set<string> = new Set(),
+	root: string = baseDir,
+): string {
+	const resolvedRoot = resolve(root);
 	return content.replace(/^@([\w./\\-]+)\s*$/gm, (_match, rawPath: string) => {
 		const includePath = resolve(baseDir, rawPath);
+		if (!isWithinRoot(includePath, resolvedRoot)) return `[include outside allowed directory: ${rawPath}]`;
 		if (seen.has(includePath)) return `[circular include: ${rawPath}]`;
 		if (seen.size > MAX_INCLUDE_DEPTH * 10) return "[include depth exceeded]";
 		const text = readIfExists(includePath);
 		if (text === null) return `[include not found: ${rawPath}]`;
 		seen.add(includePath);
-		return expandIncludes(text, dirname(includePath), seen);
+		return expandIncludes(text, dirname(includePath), seen, resolvedRoot);
 	});
 }
 

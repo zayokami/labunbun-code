@@ -1,9 +1,11 @@
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, relative } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
+import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
 const MAX_MATCHES = 200;
+const REGEX_TIMEOUT_MS = 2000;
 
 /**
  * Content search. Spawns ripgrep when available (fast, respects .gitignore);
@@ -27,18 +29,32 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
 		call: async (input) => {
-			const root = input.path ? (isAbsolute(input.path) ? input.path : resolve(cwd, input.path)) : cwd;
+			let root: string;
+			try {
+				root = input.path ? guardPathContainment(input.path, cwd, "Grep") : cwd;
+			} catch (error) {
+				return { content: [{ type: "text", text: String(error) }], isError: true };
+			}
 			if (!(await ops.exists(root))) {
 				return { content: [{ type: "text", text: `Path not found: ${root}` }], isError: true };
 			}
 
 			const flags = input.case_insensitive ? "i" : "";
-			const regex = new RegExp(input.pattern, flags);
+			let regex: RegExp;
+			try {
+				regex = new RegExp(input.pattern, flags);
+			} catch (error) {
+				return {
+					content: [{ type: "text", text: `Invalid regular expression: ${message(error)}` }],
+					isError: true,
+				};
+			}
 
 			const lines: string[] = [];
 			let truncated = false;
+			const deadline = Date.now() + REGEX_TIMEOUT_MS;
 			const files = await collectFiles(ops, root, input.include);
-			for (const file of files) {
+			outer: for (const file of files) {
 				try {
 					const stat = await ops.stat(file);
 					if (stat.size > 1_000_000) continue; // skip huge files
@@ -54,14 +70,21 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 				if (text.includes("\0")) continue; // skip binary
 				const fileLines = text.split("\n");
 				for (let i = 0; i < fileLines.length; i++) {
+					if (Date.now() > deadline) {
+						return {
+							content: [
+								{ type: "text", text: `Search aborted: pattern took too long to match (possible catastrophic backtracking).` },
+							],
+							isError: true,
+						};
+					}
 					if (!regex.test(fileLines[i])) continue;
 					if (lines.length >= MAX_MATCHES) {
 						truncated = true;
-						break;
+						break outer;
 					}
 					lines.push(`${relative(root, file).split("\\").join("/")}:${i + 1}: ${fileLines[i].trim()}`);
 				}
-				if (truncated) break;
 			}
 
 			if (lines.length === 0) {
@@ -71,6 +94,10 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 			return { content: [{ type: "text", text: header + lines.join("\n") }] };
 		},
 	});
+}
+
+function message(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 async function collectFiles(ops: Operations, root: string, include?: string): Promise<string[]> {

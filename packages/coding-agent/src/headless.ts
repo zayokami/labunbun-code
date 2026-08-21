@@ -7,9 +7,10 @@
  * - stream-json: one JSON line per event, live
  */
 import type { AgentEvent, PermissionMode } from "@labunbun/agent";
-import { AgentSession, SessionStore } from "@labunbun/agent";
+import { AgentSession, evaluatePermissions, parseRuleList, SessionStore } from "@labunbun/agent";
 import { type AgentMessage, createDefaultStreamFn, resolveModel } from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
+import { loadSettings } from "./settings.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 
 export type OutputFormat = "text" | "json" | "stream-json";
@@ -45,6 +46,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 
 	const tools = createAllTools(cwd);
 	const store = options.noSession ? undefined : SessionStore.startNew(cwd);
+	const { settings } = loadSettings(cwd);
+	const rules = [
+		...parseRuleList(settings.permissions.deny, "deny", "userSettings"),
+		...parseRuleList(settings.permissions.allow, "allow", "userSettings"),
+	];
 	const session = new AgentSession({
 		model,
 		systemPrompt: buildSystemPrompt(tools, {
@@ -59,6 +65,18 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		permissionMode: options.permissionMode ?? "bypassPermissions",
 		deps: {
 			streamFn: createDefaultStreamFn(),
+			// Headless has no interactive dialog, so an unresolved "ask" fails
+			// closed rather than hanging — matches dontAsk's documented contract.
+			canUseTool: async (toolName, input, ctx) => {
+				const decision = evaluatePermissions(toolName, input, { mode: ctx.mode, rules, cwd });
+				if (decision.behavior === "ask") {
+					return {
+						behavior: "deny",
+						message: decision.message ?? `Permission required for ${toolName} (no interactive dialog in headless mode)`,
+					};
+				}
+				return decision;
+			},
 		},
 	});
 

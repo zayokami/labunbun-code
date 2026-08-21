@@ -19,7 +19,16 @@ import {
 	SessionStore,
 } from "@labunbun/agent";
 import { createDefaultStreamFn, registerOpenAICompatibleProvider, resolveModel, withModelFallback } from "@labunbun/ai";
-import { connectAllMcpServers, loadMcpConfig, type McpConnection } from "@labunbun/mcp";
+import {
+	approveMcpServer as persistMcpApproval,
+	connectAllMcpServers,
+	connectMcpServer,
+	loadApprovedMcpServers,
+	loadMcpConfig,
+	loadProjectMcpServerNames,
+	type McpConnection,
+	type McpServerConfig,
+} from "@labunbun/mcp";
 import { createAllTools, TaskStore } from "@labunbun/tools";
 import { mountRepl, type ReplAppHandle } from "@labunbun/tui";
 import { createAskUserQuestionTool } from "./ask-user.ts";
@@ -129,8 +138,23 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const hooksRuntime = snapshotHooks(settings.hooks);
 
 	// ---- MCP servers ----
-	const mcpConnections = await connectAllMcpServers(loadMcpConfig(cwd));
+	// User-scoped servers (~/.labunbun/.mcp.json) are trusted like any other
+	// setting the user wrote themselves. Project-scoped servers ship with the
+	// repo's .mcp.json — a cloned/untrusted repo could otherwise auto-spawn
+	// arbitrary commands or connect to arbitrary URLs with zero user action —
+	// so they need one-time approval, persisted to the gitignored local
+	// settings file, before they're allowed to connect.
+	const mcpConfig = loadMcpConfig(cwd);
+	const projectMcpServerNames = loadProjectMcpServerNames(cwd);
+	const approvedProjectMcpServers = loadApprovedMcpServers(cwd);
+	const approvedMcpServers = new Set(
+		Object.keys(mcpConfig).filter(
+			(name) => !projectMcpServerNames.has(name) || approvedProjectMcpServers.has(name),
+		),
+	);
+	const mcpConnections = await connectAllMcpServers(mcpConfig, approvedMcpServers);
 	const mcpTools = mcpConnections.flatMap((c) => c.tools);
+	const pendingMcpApprovals = [...projectMcpServerNames].filter((name) => !approvedProjectMcpServers.has(name));
 
 	// ---- subagents, skills, plan mode ----
 	const agentDefinitions = loadAgentDefinitions(cwd);
@@ -140,6 +164,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		allTools: [...tools, ...mcpTools],
 		definitions: agentDefinitions,
 		store,
+		permissionMode: options.permissionMode ?? settings.permissionMode ?? "default",
+		getPermissionRules: () => [...baseRules, ...sessionRules],
 	});
 	const skills = loadSkills(cwd);
 	const planCallbacks: PlanModeCallbacks = {
@@ -173,7 +199,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					rules: [...baseRules, ...sessionRules],
 					cwd,
 				});
-				if (decision.behavior !== "ask" || !handle) return decision;
+				if (decision.behavior !== "ask") return decision;
+				// dontAsk has no dialog of its own — an unresolved ask fails closed
+				// rather than falling through to the interactive prompt it exists to skip.
+				if (ctx.mode === "dontAsk" || !handle) {
+					return { behavior: "deny", message: "Permission required (dontAsk mode denies unresolved prompts)" };
+				}
 				const allowed = await handle.requestPermission(toolName, input);
 				return allowed ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
 			},
@@ -273,6 +304,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				commands,
 				compaction,
 				mcpConnections,
+				mcpConfig,
+				pendingMcpApprovals,
 				sessionStore: store,
 			}),
 	});
@@ -340,6 +373,8 @@ interface AppCommandContext {
 	commands: Command[];
 	compaction: CompactionManager;
 	mcpConnections: McpConnection[];
+	mcpConfig: Record<string, McpServerConfig>;
+	pendingMcpApprovals: string[];
 	sessionStore?: SessionStore;
 }
 
@@ -401,7 +436,34 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return true;
 		}
 		case "/mcp": {
-			if (ctx.mcpConnections.length === 0) {
+			const [, sub, serverName] = text.split(/\s+/);
+			if (sub === "approve" && serverName) {
+				if (!ctx.pendingMcpApprovals.includes(serverName)) {
+					pushInfo(ctx.handle, `No pending approval for "${serverName}". See /mcp for the list.`);
+					return true;
+				}
+				const config = ctx.mcpConfig[serverName];
+				if (!config) {
+					pushInfo(ctx.handle, `Unknown server: ${serverName}`);
+					return true;
+				}
+				persistMcpApproval(ctx.cwd, serverName);
+				void connectMcpServer(serverName, config).then((connection) => {
+					ctx.mcpConnections.push(connection);
+					const index = ctx.pendingMcpApprovals.indexOf(serverName);
+					if (index !== -1) ctx.pendingMcpApprovals.splice(index, 1);
+					ctx.session.setTools([...ctx.session.tools, ...connection.tools]);
+					pushInfo(
+						ctx.handle,
+						connection.error
+							? `Approved "${serverName}" but connection failed: ${connection.error}`
+							: `Approved "${serverName}" — connected with ${connection.tools.length} tools.`,
+					);
+				});
+				return true;
+			}
+
+			if (ctx.mcpConnections.length === 0 && ctx.pendingMcpApprovals.length === 0) {
 				pushInfo(ctx.handle, "No MCP servers configured (.mcp.json or ~/.labunbun/.mcp.json).");
 				return true;
 			}
@@ -409,6 +471,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const status = c.error ? `✗ ${c.error}` : `✓ ${c.tools.length} tools`;
 				return `  ${c.serverName}: ${status}`;
 			});
+			for (const name of ctx.pendingMcpApprovals) {
+				lines.push(`  ${name}: pending approval — run /mcp approve ${name}`);
+			}
 			pushInfo(ctx.handle, `MCP servers:\n${lines.join("\n")}`);
 			return true;
 		}
@@ -519,4 +584,4 @@ function pushInfo(handle: ReplAppHandle | null, text: string): void {
 	handle?.store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text }] }));
 }
 
-export { appendHistory };
+export { appendHistory, type AppCommandContext, handleAppCommand };

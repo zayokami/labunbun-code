@@ -22,7 +22,7 @@ import type {
 	ToolResultMessage,
 } from "@labunbun/ai";
 import { textContent, toolResultMessage, userMessage } from "@labunbun/ai";
-import { partitionToolCalls } from "./concurrency.ts";
+import { DEFAULT_MAX_CONCURRENCY, partitionToolCalls, Semaphore } from "./concurrency.ts";
 import { runToolPipeline } from "./pipeline.ts";
 import type {
 	AgentDeps,
@@ -125,7 +125,17 @@ export class AgentSession {
 
 	async #emit(event: AgentEvent): Promise<void> {
 		for (const handler of this.#handlers) {
-			await handler(event);
+			try {
+				await handler(event);
+			} catch (handlerError) {
+				// A subscriber's bug (a UI reducer, a hook, a logger) must never
+				// abort the agent loop or reject prompt() — that turns a rendering
+				// bug into a fatal unhandled rejection at every fire-and-forget
+				// `void session.prompt(...)` call site.
+				console.error(
+					`AgentSession: event handler threw on "${event.type}": ${handlerError instanceof Error ? handlerError.message : handlerError}`,
+				);
+			}
 		}
 	}
 
@@ -218,6 +228,7 @@ export class AgentSession {
 				// their toolCall block completes, while the model keeps streaming.
 				const earlyResults = new Map<string, ToolResultMessage>();
 				const earlyPromises = new Map<string, Promise<void>>();
+				const toolSemaphore = new Semaphore(DEFAULT_MAX_CONCURRENCY);
 				try {
 					for await (const event of this.#deps.streamFn(this.#model, context, streamOptions)) {
 						if (event.type === "done" || event.type === "error") {
@@ -230,7 +241,7 @@ export class AgentSession {
 								assistantMessageEvent: event,
 							});
 							if (event.type === "toolcall_end") {
-								this.#maybeStartEarlyTool(event.toolCall, earlyResults, earlyPromises);
+								this.#maybeStartEarlyTool(event.toolCall, earlyResults, earlyPromises, toolSemaphore);
 							}
 						}
 					}
@@ -306,7 +317,7 @@ export class AgentSession {
 					break;
 				}
 
-				const results = await this.#executeToolCalls(toolCalls, earlyPromises, earlyResults);
+				const results = await this.#executeToolCalls(toolCalls, earlyPromises, earlyResults, toolSemaphore);
 				for (const result of results) {
 					this.messages.push(result);
 					this.#store?.appendMessage(result);
@@ -334,6 +345,7 @@ export class AgentSession {
 		toolCalls: ToolCall[],
 		earlyPromises: Map<string, Promise<void>>,
 		earlyResults: Map<string, ToolResultMessage>,
+		semaphore: Semaphore,
 	): Promise<ToolResultMessage[]> {
 		const resolved: ResolvedToolCall[] = [];
 		const unknownResults: ToolResultMessage[] = [];
@@ -354,7 +366,7 @@ export class AgentSession {
 		const batches = partitionToolCalls(resolved);
 		for (const batch of batches) {
 			if (batch.parallel) {
-				await Promise.all(batch.calls.map((call) => this.#runOne(call, resultsByCallId)));
+				await Promise.all(batch.calls.map((call) => this.#runWithSemaphore(call, resultsByCallId, semaphore)));
 			} else {
 				for (const call of batch.calls) {
 					await this.#runOne(call, resultsByCallId);
@@ -375,25 +387,52 @@ export class AgentSession {
 	}
 
 	/**
+	 * Acquire a shared permit before running a parallel-batch call, so the
+	 * post-stream path draws from the same budget the early-start path already
+	 * spent from instead of stacking a second, independent cap on top of it.
+	 */
+	async #runWithSemaphore(
+		call: ResolvedToolCall,
+		out: Map<string, ToolResultMessage>,
+		semaphore: Semaphore,
+	): Promise<void> {
+		await semaphore.acquire();
+		try {
+			await this.#runOne(call, out);
+		} finally {
+			semaphore.release();
+		}
+	}
+
+	/**
 	 * Start a concurrency-safe tool while the model is still streaming. Unsafe
-	 * tools wait for the normal post-message path so they never overlap.
+	 * tools wait for the normal post-message path so they never overlap. Early
+	 * starts draw permits from the same `semaphore` the post-stream batch path
+	 * uses (see `#runWithSemaphore`), so the two paths share one combined cap
+	 * instead of each enforcing an independent one — once the shared budget is
+	 * exhausted, later calls are left for the post-stream path, which blocks on
+	 * the same semaphore until a permit frees up.
 	 */
 	#maybeStartEarlyTool(
 		toolCall: ToolCall,
 		earlyResults: Map<string, ToolResultMessage>,
 		earlyPromises: Map<string, Promise<void>>,
+		semaphore: Semaphore,
 	): void {
 		if (this.#abortController?.signal.aborted) return;
 		const tool = this.#tools.find((t) => t.name === toolCall.name);
 		if (!tool?.isEnabled?.()) return;
 		const input = parseArguments(toolCall.arguments);
 		if (!tool.isConcurrencySafe?.(input)) return;
+		if (!semaphore.tryAcquire()) return; // no shared budget left; post-stream path will run it
 
 		const resolved: ResolvedToolCall = { callId: toolCall.id, tool, input };
-		const promise = this.#runOne(resolved, earlyResults).catch(() => {
-			// #runOne never throws by contract; belt-and-braces for event handler
-			// rejections — orphan synthesis covers any missing result.
-		});
+		const promise = this.#runOne(resolved, earlyResults)
+			.catch(() => {
+				// #runOne never throws by contract; belt-and-braces for event handler
+				// rejections — orphan synthesis covers any missing result.
+			})
+			.finally(() => semaphore.release());
 		earlyPromises.set(toolCall.id, promise);
 	}
 

@@ -91,6 +91,63 @@ describe("Task tool (subagents)", () => {
 		expect(kinds).toContain("subagent_start");
 		expect(kinds).toContain("subagent_end");
 	});
+
+	test("subagent inherits parent permissionMode and denies a tool the rules don't allow", async () => {
+		// Subagent script attempts the echo tool; with no allow rule and mode
+		// "default", an unresolved ask must fail closed to a tool-result error
+		// (there is no interactive dialog inside a subagent), not run the tool.
+		const subScript = [{ toolCalls: [{ name: "echo", arguments: { text: "should be blocked" } }] }, { text: "done" }];
+		const subFaux = fauxProvider(subScript);
+		const ctx = {
+			streamFn: subFaux.streamFn,
+			model: FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: [],
+			permissionMode: "default" as const,
+			getPermissionRules: () => [],
+		};
+		const taskTool = createTaskTool(ctx);
+		const result = await taskTool.call(
+			{ description: "run sub", prompt: "do the thing" },
+			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+		);
+		expect(result.isError).toBeFalsy();
+		// The subagent's own transcript recorded a denied tool call rather than "ok".
+		expect((result.content[0] as any).text).not.toContain("should be blocked");
+	});
+
+	test("subagent with an explicit allow rule can use the tool", async () => {
+		const subScript = [
+			{ toolCalls: [{ name: "echo", arguments: { text: "allowed run" } }] },
+			{ text: "SUBAGENT DONE" },
+		];
+		const subFaux = fauxProvider(subScript);
+		const ctx = {
+			streamFn: subFaux.streamFn,
+			model: FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: [],
+			permissionMode: "default" as const,
+			getPermissionRules: () => [{ toolName: "echo", behavior: "allow" as const, source: "session" as const }],
+		};
+		const taskTool = createTaskTool(ctx);
+		const result = await taskTool.call(
+			{ description: "run sub", prompt: "do the thing" },
+			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+		);
+		expect(result.isError).toBeFalsy();
+		expect((result.content[0] as any).text).toContain("SUBAGENT DONE");
+	});
+
+	test("undefined permissionMode leaves subagents unrestricted (back-compat default)", async () => {
+		const { taskTool } = makeHarness();
+		const result = await taskTool.call(
+			{ description: "run sub", prompt: "do the thing" },
+			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+		);
+		expect(result.isError).toBeFalsy();
+		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
+	});
 });
 
 describe("skills", () => {

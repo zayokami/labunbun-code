@@ -1,6 +1,7 @@
-import { isAbsolute, join, resolve as pathResolve, relative } from "node:path";
+import { join, relative } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
+import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
 const MAX_RESULTS = 200;
@@ -20,7 +21,12 @@ export function createGlobTool(cwd: string, ops: Operations): AnyTool {
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
 		call: async (input) => {
-			const root = input.path ? (isAbsolute(input.path) ? input.path : resolve(cwd, input.path)) : cwd;
+			let root: string;
+			try {
+				root = input.path ? guardPathContainment(input.path, cwd, "Glob") : cwd;
+			} catch (error) {
+				return { content: [{ type: "text", text: String(error) }], isError: true };
+			}
 			if (!(await ops.exists(root))) {
 				return { content: [{ type: "text", text: `Path not found: ${root}` }], isError: true };
 			}
@@ -61,8 +67,4 @@ export function createGlobTool(cwd: string, ops: Operations): AnyTool {
 			};
 		},
 	});
-}
-
-function resolve(p: string, base: string): string {
-	return isAbsolute(p) ? p : pathResolve(base, p);
 }

@@ -1,6 +1,7 @@
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
+import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
 export function createWriteTool(cwd: string, ops: Operations): AnyTool {
@@ -23,7 +24,12 @@ export function createWriteTool(cwd: string, ops: Operations): AnyTool {
 			return { behavior: "ask", message: `Allow writing ${input.file_path}?` };
 		},
 		call: async (input) => {
-			const path = isAbsolute(input.file_path) ? input.file_path : resolve(cwd, input.file_path);
+			let path: string;
+			try {
+				path = guardPathContainment(input.file_path, cwd, "Write");
+			} catch (error) {
+				return { content: [{ type: "text", text: String(error) }], isError: true };
+			}
 			try {
 				await ops.mkdir(dirname(path));
 				await ops.writeTextFileAtomic(path, input.content);

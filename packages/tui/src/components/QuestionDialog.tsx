@@ -16,7 +16,7 @@ export function QuestionDialog({ questions, resolve }: QuestionDialogState) {
 	const current = questions[questionIndex];
 
 	useInput((_input, key) => {
-		if (!current) return;
+		if (!current || current.options.length === 0) return;
 		if (key.escape) {
 			resolve(null);
 			return;
@@ -42,7 +42,7 @@ export function QuestionDialog({ questions, resolve }: QuestionDialogState) {
 		}
 	});
 
-	if (!current) return null;
+	if (!current || current.options.length === 0) return null;
 
 	return (
 		<Box flexDirection="column" borderStyle="round" borderColor={theme.primary} paddingX={1} marginBottom={1}>

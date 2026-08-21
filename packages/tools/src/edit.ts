@@ -1,7 +1,7 @@
-import { isAbsolute, resolve } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
+import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
 export function createEditTool(cwd: string, ops: Operations): AnyTool {
@@ -32,7 +32,12 @@ export function createEditTool(cwd: string, ops: Operations): AnyTool {
 			return null;
 		},
 		call: async (input) => {
-			const path = isAbsolute(input.file_path) ? input.file_path : resolve(cwd, input.file_path);
+			let path: string;
+			try {
+				path = guardPathContainment(input.file_path, cwd, "Edit");
+			} catch (error) {
+				return { content: [{ type: "text", text: String(error) }], isError: true };
+			}
 			let content: string;
 			try {
 				content = await ops.readTextFile(path);

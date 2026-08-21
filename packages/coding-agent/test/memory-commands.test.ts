@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { builtInCommands, completeCommands, findCommand } from "../src/commands.ts";
 import { expandIncludes, loadMemoryFiles } from "../src/memory.ts";
 
@@ -29,6 +29,33 @@ describe("expandIncludes", () => {
 		writeFileSync(join(dir, "x.md"), "@x.md");
 		const expanded = expandIncludes("@x.md", dir);
 		expect(expanded).toContain("circular include");
+	});
+
+	test("traversal outside the root directory is rejected", () => {
+		const root = mkdtempSync(join(tmpdir(), "lbb-mem-root-"));
+		const secretDir = mkdtempSync(join(tmpdir(), "lbb-mem-secret-"));
+		writeFileSync(join(secretDir, "secret.md"), "TOP SECRET");
+		const project = join(root, "project");
+		mkdirSync(project, { recursive: true });
+
+		const relativePath = relative(project, join(secretDir, "secret.md"));
+		const expanded = expandIncludes(`@${relativePath.replace(/\\/g, "/")}`, project);
+		expect(expanded).toContain("include outside allowed directory");
+		expect(expanded).not.toContain("TOP SECRET");
+	});
+
+	test("UNC-style include paths are rejected", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-mem-unc-"));
+		const expanded = expandIncludes("@\\\\evil-host\\share\\file.md", dir);
+		expect(expanded).toContain("include outside allowed directory");
+	});
+
+	test("includes within nested subdirectories of the root still resolve", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-mem-nested-"));
+		mkdirSync(join(dir, "sub"), { recursive: true });
+		writeFileSync(join(dir, "sub", "inner.md"), "INNER CONTENT");
+		const expanded = expandIncludes("@sub/inner.md", dir);
+		expect(expanded).toContain("INNER CONTENT");
 	});
 });
 

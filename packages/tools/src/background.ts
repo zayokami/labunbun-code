@@ -102,7 +102,12 @@ export class BackgroundShellManager {
 		const entry = this.#entries.get(id);
 		if (!entry || entry.info.status !== "running" || !entry.proc.pid) return false;
 		if (process.platform === "win32") {
-			spawn("taskkill", ["/pid", String(entry.proc.pid), "/T", "/F"], { windowsHide: true });
+			const killer = spawn("taskkill", ["/pid", String(entry.proc.pid), "/T", "/F"], { windowsHide: true });
+			killer.on("error", () => {
+				// taskkill itself failed to spawn — fall back to the direct signal so
+				// the process doesn't linger while we've already reported it killed.
+				entry.proc.kill();
+			});
 		} else {
 			entry.proc.kill();
 		}

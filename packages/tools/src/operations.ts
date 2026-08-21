@@ -166,17 +166,25 @@ export class ChildProcessExecOperations implements ExecOperations {
 			let killed = false;
 			let settled = false;
 
+			const killTree = () => {
+				if (process.platform === "win32" && child.pid) {
+					spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+				} else {
+					child.kill();
+				}
+			};
+
 			const timer =
 				timeoutMs > 0
 					? setTimeout(() => {
 							killed = true;
-							child.kill();
+							killTree();
 						}, timeoutMs)
 					: null;
 
 			const onAbort = () => {
 				killed = true;
-				child.kill();
+				killTree();
 			};
 			signal?.addEventListener("abort", onAbort, { once: true });
 
