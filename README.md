@@ -1,0 +1,105 @@
+# LaBunbun Code 🐰
+
+A terminal-native AI coding agent built with **Bun** and **pnpm**.
+
+```
+labunbun -p "fix the failing tests"     # headless: one prompt, print result
+labunbun                                # interactive REPL
+```
+
+## Features
+
+- **Multi-provider LLM support** — Anthropic plus any OpenAI-compatible API
+  (DeepSeek, Kimi, GLM, OpenRouter, custom endpoints) via settings.
+- **Core coding tools** — Bash, Read, Write, Edit (exact string replace),
+  Grep, Glob, LS; parallel execution of safe tools with source-ordered results.
+- **Permission system** — rule engine (`Bash(git *)`, `Edit(src/**)`,
+  `mcp__server__*`), five permission modes, interactive approval dialog,
+  "don't ask again" session rules.
+- **Sessions** — append-only JSONL tree per project (`~/.labunbun/projects/`),
+  crash-safe resume with `--resume`, prompt history with ↑ recall.
+- **Context management** — automatic compaction at the context-window
+  threshold (structured summary + re-injected recent files), microcompaction,
+  live context-remaining indicator.
+- **Hooks** — user-configurable `PreToolUse` / `PostToolUse` / `Stop` /
+  `SessionStart` … command hooks with a JSON stdin/stdout contract.
+- **MCP client** — stdio + StreamableHTTP servers from `.mcp.json`; tools merge
+  into the registry as `mcp__server__tool`.
+- **Subagents** — the Task tool runs nested agent sessions (sidechain
+  transcripts persisted); custom agents via frontmatter `.md` files.
+- **Skills** — `SKILL.md` folders become prompt-expanding slash commands.
+- **Plan mode** — read-only research then plan approval before mutations.
+- **Headless output** — `--output-format text|json|stream-json`.
+
+## Quick start
+
+```bash
+pnpm install
+export ANTHROPIC_API_KEY=sk-...        # or DEEPSEEK_API_KEY etc.
+bun run dev                            # interactive REPL
+bun run dev -p "list files here"       # headless
+```
+
+### Custom OpenAI-compatible provider
+
+`~/.labunbun/settings.json`:
+
+```json
+{
+  "model": "myprovider/my-model",
+  "providers": {
+    "openaiCompatible": [
+      {
+        "id": "myprovider",
+        "baseUrl": "https://api.example.com/v1",
+        "apiKeyEnv": "MYPROVIDER_API_KEY",
+        "models": [{ "id": "my-model", "contextWindow": 128000, "maxOutputTokens": 8192 }]
+      }
+    ]
+  }
+}
+```
+
+## Project layout
+
+| Package | Purpose |
+|---------|---------|
+| `@labunbun/ai` | Provider-neutral message model, streaming protocol, Anthropic/OpenAI-compat adapters, retry, faux test provider |
+| `@labunbun/agent` | Agent loop, Tool interface, execution pipeline, permission engine, JSONL session tree, compaction |
+| `@labunbun/tools` | Built-in coding tools behind an FS/exec operations abstraction |
+| `@labunbun/mcp` | MCP client (stdio/HTTP), tool adaptation |
+| `@labunbun/tui` | React Ink REPL: store, message views, editor, dialogs, themes |
+| `@labunbun/coding-agent` | CLI entry, settings hierarchy, commands, memory, hooks, subagents, skills |
+
+Dependency direction is strictly layered: `ai ← agent ← tools/mcp/tui ← coding-agent`.
+The loop never imports provider adapters directly — they arrive via injected
+`StreamFn`, which is what makes the zero-network faux-provider test strategy work.
+
+## Development
+
+```bash
+pnpm typecheck        # tsc over all packages (source-mapped, no build step)
+pnpm test             # bun test — 130+ tests, no network needed
+pnpm lint             # biome check
+bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
+pnpm bin:build        # standalone executable via bun build --compile
+```
+
+TypeScript runs in erasable-syntax-only mode and packages export their `src/`
+directly — Bun executes TS natively, so there is no build step in the dev loop.
+
+### Configuration roots
+
+- User: `~/.labunbun/` — `settings.json`, `MEMORY.md`, `agents/`, `skills/`
+- Project: `.labunbun/` — `settings.json`, `settings.local.json` (gitignored),
+  `rules/*.md`, `agents/`, `skills/`
+- Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
+
+## License & provenance
+
+MIT © 2026 zayoka — see [LICENSE](./LICENSE).
+
+All code in this repository is original work. Architectural ideas were informed
+by studying publicly available open-source agent projects (notably
+[pi](https://github.com/badlogic/pi-mono), MIT licensed). No proprietary code
+was copied or decompiled.

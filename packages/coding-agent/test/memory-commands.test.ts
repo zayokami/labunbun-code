@@ -1,0 +1,89 @@
+import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { builtInCommands, completeCommands, findCommand } from "../src/commands.ts";
+import { expandIncludes, loadMemoryFiles } from "../src/memory.ts";
+
+describe("expandIncludes", () => {
+	test("expands @path references recursively", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-mem-"));
+		writeFileSync(join(dir, "main.md"), "# Main\n@sub.md\nend\n");
+		writeFileSync(join(dir, "sub.md"), "SUB CONTENT\n@nested.md");
+		writeFileSync(join(dir, "nested.md"), "NESTED");
+
+		const expanded = expandIncludes("# Main\n@sub.md\nend\n", dir);
+		expect(expanded).toContain("SUB CONTENT");
+		expect(expanded).toContain("NESTED");
+	});
+
+	test("missing and circular includes degrade gracefully", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-mem2-"));
+		writeFileSync(join(dir, "a.md"), "@b.md\n@missing.md");
+		const expanded = expandIncludes("@b.md\n@missing.md", dir);
+		expect(expanded).toContain("include not found: @missing.md".replace("@", ""));
+	});
+
+	test("circular include is detected", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-mem3-"));
+		writeFileSync(join(dir, "x.md"), "@x.md");
+		const expanded = expandIncludes("@x.md", dir);
+		expect(expanded).toContain("circular include");
+	});
+});
+
+describe("loadMemoryFiles", () => {
+	test("nearest LABUNBUN.md wins per level; rules dir included", () => {
+		const root = mkdtempSync(join(tmpdir(), "lbb-memroot-"));
+		const project = join(root, "project");
+		const sub = join(project, "sub");
+		mkdirSync(sub, { recursive: true });
+		mkdirSync(join(project, ".labunbun", "rules"), { recursive: true });
+
+		writeFileSync(join(root, "AGENTS.md"), "ROOT LEVEL");
+		writeFileSync(join(project, "LABUNBUN.md"), "PROJECT LEVEL");
+		writeFileSync(join(project, ".labunbun", "rules", "style.md"), "STYLE RULE");
+		writeFileSync(join(sub, "child.txt"), "not memory");
+
+		const result = loadMemoryFiles(sub, join(root, "fakehome"));
+		const combined = result.files.join("|");
+		expect(combined).toContain("AGENTS.md"); // root level
+		expect(combined).toContain("LABUNBUN.md"); // project level (nearest)
+		expect(combined).toContain("style.md");
+		expect(result.content).toContain("ROOT LEVEL");
+		expect(result.content).toContain("PROJECT LEVEL");
+		expect(result.content).toContain("STYLE RULE");
+	});
+
+	test("empty when no memory files exist", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-memempty-"));
+		const result = loadMemoryFiles(dir, join(dir, "home"));
+		expect(result.content).toBe("");
+		expect(result.files).toHaveLength(0);
+	});
+});
+
+describe("command registry", () => {
+	const commands = builtInCommands();
+
+	test("find by name and alias, case-insensitive", () => {
+		expect(findCommand(commands, "/compact")?.name).toBe("compact");
+		expect(findCommand(commands, "COMPACT")?.name).toBe("compact");
+		expect(findCommand(commands, "/nope")).toBeUndefined();
+	});
+
+	test("autocomplete prefix and fuzzy matching", () => {
+		const names = completeCommands(commands, "co").map((c) => c.name);
+		expect(names).toContain("compact");
+		const all = completeCommands(commands, "");
+		expect(all.length).toBe(commands.length);
+	});
+
+	test("prompt commands produce expansion text", () => {
+		const explain = findCommand(commands, "explain");
+		expect(explain?.type).toBe("prompt");
+		if (explain?.type === "prompt") {
+			expect(explain.getPrompt("src/index.ts")).toContain("src/index.ts");
+		}
+	});
+});

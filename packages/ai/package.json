@@ -1,0 +1,14 @@
+{
+	"name": "@labunbun/ai",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@anthropic-ai/sdk": "^0.120.0",
+		"openai": "^7.5.0"
+	},
+	"license": "MIT"
+}

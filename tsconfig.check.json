@@ -1,0 +1,19 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"paths": {
+			"@labunbun/ai": ["./packages/ai/src/index.ts"],
+			"@labunbun/agent": ["./packages/agent/src/index.ts"],
+			"@labunbun/tools": ["./packages/tools/src/index.ts"],
+			"@labunbun/mcp": ["./packages/mcp/src/index.ts"],
+			"@labunbun/tui": ["./packages/tui/src/index.ts"],
+			"@labunbun/coding-agent": ["./packages/coding-agent/src/index.ts"]
+		}
+	},
+	"include": [
+		"packages/*/src/**/*.ts",
+		"packages/*/src/**/*.tsx",
+		"packages/*/test/**/*.ts",
+		"packages/*/test/**/*.tsx"
+	]
+}

@@ -1,0 +1,22 @@
+{
+	"name": "@labunbun/coding-agent",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"labunbun": "./bin/labunbun.ts",
+		"lbb": "./bin/labunbun.ts"
+	},
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@labunbun/ai": "workspace:*",
+		"@labunbun/agent": "workspace:*",
+		"@labunbun/mcp": "workspace:*",
+		"@labunbun/tools": "workspace:*",
+		"@labunbun/tui": "workspace:*",
+		"zod": "^4.4.3"
+	},
+	"license": "MIT"
+}

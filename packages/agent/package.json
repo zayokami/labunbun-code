@@ -1,0 +1,14 @@
+{
+	"name": "@labunbun/agent",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@labunbun/ai": "workspace:*",
+		"zod": "^4.4.3"
+	},
+	"license": "MIT"
+}
