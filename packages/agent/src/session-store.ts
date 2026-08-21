@@ -175,7 +175,65 @@ export class SessionStore {
 			.map((e) => e.message);
 	}
 
+	/**
+	 * Branch from an existing entry: the active leaf moves there, so the next
+	 * append becomes a child of it. Entries on the abandoned branch stay in
+	 * the file — history is never rewritten.
+	 */
+	branch(entryId: string): boolean {
+		const target = this.entries.find((e) => e.id === entryId || e.id.startsWith(entryId));
+		if (!target || target.type === "header") return false;
+		this.#leafId = target.id;
+		return true;
+	}
+
+	/** All branch points: entries with more than one child. */
+	branchPoints(): SessionEntry[] {
+		const childCounts = new Map<string, number>();
+		for (const entry of this.entries) {
+			if (!entry.parentId) continue;
+			childCounts.set(entry.parentId, (childCounts.get(entry.parentId) ?? 0) + 1);
+		}
+		return this.entries.filter((e) => (childCounts.get(e.id) ?? 0) > 1);
+	}
+
+	/** Compact tree description for /tree: one line per entry, active path marked. */
+	describeTree(): string {
+		const activeIds = new Set(this.linearEntries().map((e) => e.id));
+		const lines: string[] = [];
+		for (const entry of this.entries) {
+			if (entry.type === "header") continue;
+			const marker = activeIds.has(entry.id) ? "*" : " ";
+			if (entry.type === "message") {
+				const m = entry.message;
+				let label = m.role;
+				if (m.role === "user") {
+					label += `: ${textPreview(typeof m.content === "string" ? m.content : "[blocks]")}`;
+				} else if (m.role === "assistant") {
+					const text = m.content
+						.filter((b) => b.type === "text")
+						.map((b) => b.text)
+						.join(" ");
+					label += `: ${textPreview(text)}`;
+				} else {
+					label += `: ${m.toolName}`;
+				}
+				lines.push(`${marker} ${entry.id.slice(0, 8)} ${label}`);
+			} else if (entry.type === "compaction") {
+				lines.push(`${marker} ${entry.id.slice(0, 8)} [compaction]`);
+			} else if (entry.type === "custom") {
+				lines.push(`${marker} ${entry.id.slice(0, 8)} [${entry.kind}]`);
+			}
+		}
+		return lines.join("\n") || "(empty session)";
+	}
+
 	#recomputeLeaf(): void {
 		this.#leafId = this.entries[this.entries.length - 1]?.id ?? null;
 	}
+}
+
+function textPreview(text: string, max = 60): string {
+	const single = text.replace(/\s+/g, " ").trim();
+	return single.length > max ? `${single.slice(0, max - 3)}...` : single;
 }

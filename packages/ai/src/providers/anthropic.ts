@@ -216,6 +216,10 @@ export async function* mapAnthropicStream(
 ): AsyncGenerator<AssistantMessageEvent> {
 	const builder = new MessageBuilder(provider, modelId);
 	const blockTypes = new Map<number, string>();
+	// signature_delta arrives as its own delta event before block stop; buffer
+	// per index and attach when the thinking block closes. Without it, extended
+	// thinking blocks can't round-trip on the next request.
+	const signatures = new Map<number, string>();
 
 	for await (const event of rawEvents) {
 		switch (event.type) {
@@ -257,10 +261,11 @@ export async function* mapAnthropicStream(
 					yield builder.textDelta(index, delta.text);
 				} else if (delta.type === "thinking_delta" && delta.thinking) {
 					yield builder.thinkingDelta(index, delta.thinking);
+				} else if (delta.type === "signature_delta" && delta.signature) {
+					signatures.set(index, delta.signature);
 				} else if (delta.type === "input_json_delta" && delta.partial_json) {
 					yield builder.toolCallDelta(index, delta.partial_json);
 				}
-				// signature_delta handled at block stop (final signature).
 				break;
 			}
 			case "content_block_stop": {
@@ -269,7 +274,7 @@ export async function* mapAnthropicStream(
 				if (kind === "text") {
 					yield builder.textEnd(index);
 				} else if (kind === "thinking") {
-					yield builder.thinkingEnd(index);
+					yield builder.thinkingEnd(index, signatures.get(index));
 				} else if (kind === "tool_use") {
 					yield builder.toolCallEnd(index);
 				}

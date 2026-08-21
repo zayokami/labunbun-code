@@ -42,31 +42,31 @@ export class MessageBuilder {
 
 	textStart(index: number): AssistantMessageEvent {
 		this.#ensure(index, { type: "text", text: "" });
-		return { type: "text_start", contentIndex: index, partial: this.#snapshot() };
+		return { type: "text_start", contentIndex: index, partial: this.#snapshot(index) };
 	}
 
 	textDelta(index: number, delta: string): AssistantMessageEvent {
 		const block = this.#get(index, "text");
 		block.text += delta;
-		return { type: "text_delta", contentIndex: index, delta, partial: this.#snapshot() };
+		return { type: "text_delta", contentIndex: index, delta, partial: this.#snapshot(index) };
 	}
 
 	textEnd(index: number): AssistantMessageEvent {
 		const block = this.#get(index, "text");
-		return { type: "text_end", contentIndex: index, content: block.text, partial: this.#snapshot() };
+		return { type: "text_end", contentIndex: index, content: block.text, partial: this.#snapshot(index) };
 	}
 
 	// -- thinking -------------------------------------------------------------
 
 	thinkingStart(index: number, signature?: string): AssistantMessageEvent {
 		this.#ensure(index, { type: "thinking", thinking: "", signature });
-		return { type: "thinking_start", contentIndex: index, partial: this.#snapshot() };
+		return { type: "thinking_start", contentIndex: index, partial: this.#snapshot(index) };
 	}
 
 	thinkingDelta(index: number, delta: string): AssistantMessageEvent {
 		const block = this.#get(index, "thinking");
 		block.thinking += delta;
-		return { type: "thinking_delta", contentIndex: index, delta, partial: this.#snapshot() };
+		return { type: "thinking_delta", contentIndex: index, delta, partial: this.#snapshot(index) };
 	}
 
 	thinkingEnd(index: number, signature?: string): AssistantMessageEvent {
@@ -84,13 +84,13 @@ export class MessageBuilder {
 
 	toolCallStart(index: number, id: string, name: string): AssistantMessageEvent {
 		this.#ensure(index, { type: "toolCall", id, name, arguments: "" });
-		return { type: "toolcall_start", contentIndex: index, partial: this.#snapshot() };
+		return { type: "toolcall_start", contentIndex: index, partial: this.#snapshot(index) };
 	}
 
 	toolCallDelta(index: number, fragment: string): AssistantMessageEvent {
 		const block = this.#get(index, "toolCall");
 		block.arguments += fragment;
-		return { type: "toolcall_delta", contentIndex: index, delta: fragment, partial: this.#snapshot() };
+		return { type: "toolcall_delta", contentIndex: index, delta: fragment, partial: this.#snapshot(index) };
 	}
 
 	/**
@@ -102,7 +102,7 @@ export class MessageBuilder {
 	toolCallEnd(index: number): AssistantMessageEvent {
 		const block = this.#get(index, "toolCall");
 		const toolCall: ToolCall = { ...block };
-		return { type: "toolcall_end", contentIndex: index, toolCall, partial: this.#snapshot() };
+		return { type: "toolcall_end", contentIndex: index, toolCall, partial: this.#snapshot(index) };
 	}
 
 	// -- terminal -------------------------------------------------------------
@@ -128,8 +128,17 @@ export class MessageBuilder {
 
 	// -- internals ------------------------------------------------------------
 
-	#snapshot(): AssistantMessage {
-		return { ...this.#message, content: this.#message.content.map((c) => ({ ...c })) };
+	/**
+	 * Snapshot for an event. Copy-on-write: only the block being mutated is
+	 * copied; untouched blocks are shared between snapshots (consumers treat
+	 * blocks as immutable). This keeps the streaming hot path from allocating
+	 * a full content-array copy per delta.
+	 */
+	#snapshot(changedIndex = -1): AssistantMessage {
+		return {
+			...this.#message,
+			content: this.#message.content.map((c, i) => (i === changedIndex ? { ...c } : c)),
+		};
 	}
 
 	#ensure(index: number, block: AssistantMessage["content"][number]): void {

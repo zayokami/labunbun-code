@@ -61,6 +61,18 @@ describe("loadMemoryFiles", () => {
 		expect(result.content).toBe("");
 		expect(result.files).toHaveLength(0);
 	});
+
+	test("oversized memory is truncated at the 40k cap with a notice", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-memcap-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-memcap2-"));
+		mkdirSync(join(home, ".labunbun"), { recursive: true });
+		writeFileSync(join(home, ".labunbun", "MEMORY.md"), "x".repeat(60_000));
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.truncated).toBe(true);
+		expect(result.content.length).toBeLessThanOrEqual(40_000 + 100); // cap + notice line
+		expect(result.content).toContain("[memory files truncated");
+	});
 });
 
 describe("command registry", () => {

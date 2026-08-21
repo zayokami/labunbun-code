@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
+import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import type { Operations } from "./operations.ts";
 
@@ -79,16 +80,44 @@ export function createEditTool(cwd: string, ops: Operations): AnyTool {
 				};
 			}
 
+			const diff = miniDiff(content, input.old_string, input.new_string);
+			const summary = `Edited ${path}: ${input.replace_all ? occurrences : 1} replacement(s) applied.`;
 			return {
-				content: [
-					{
-						type: "text",
-						text: `Edited ${path}: ${input.replace_all ? occurrences : 1} replacement(s) applied.`,
-					},
-				],
+				content: [textContent(diff ? `${summary}\n${diff}` : summary)],
 			};
 		},
 	});
+}
+
+const DIFF_CONTEXT_LINES = 2;
+
+/**
+ * Unified-style hunk around the first replacement — enough for the UI to show
+ * what changed without a full diff engine.
+ */
+export function miniDiff(oldContent: string, oldString: string, newString: string): string {
+	const oldLines = oldContent.split("\n");
+	const start = oldContent.indexOf(oldString);
+	if (start === -1) return "";
+	const before = oldContent.slice(0, start);
+	const lineIndex = before.split("\n").length - 1;
+	const removedLines = oldString.split("\n");
+	const addedLines = newString.split("\n");
+
+	const contextStart = Math.max(0, lineIndex - DIFF_CONTEXT_LINES);
+	const contextBefore = oldLines.slice(contextStart, lineIndex);
+	const contextAfter = oldLines.slice(
+		lineIndex + removedLines.length,
+		lineIndex + removedLines.length + DIFF_CONTEXT_LINES,
+	);
+
+	const hunk: string[] = [];
+	hunk.push(`@@ -${lineIndex + 1},${removedLines.length} +${lineIndex + 1},${addedLines.length} @@`);
+	for (const line of contextBefore) hunk.push(`  ${line}`);
+	for (const line of removedLines) hunk.push(`- ${line}`);
+	for (const line of addedLines) hunk.push(`+ ${line}`);
+	for (const line of contextAfter) hunk.push(`  ${line}`);
+	return hunk.join("\n");
 }
 
 function message(error: unknown): string {

@@ -30,9 +30,7 @@ export async function runDoctorChecks(settings: Settings, cwd: string): Promise<
 	checks.push({
 		name: "Shell",
 		status: isCmd ? "warn" : "ok",
-		detail: isCmd
-			? "cmd.exe fallback — install Git for Windows for POSIX syntax"
-			: `${shell.command} (POSIX)`,
+		detail: isCmd ? "cmd.exe fallback — install Git for Windows for POSIX syntax" : `${shell.command} (POSIX)`,
 	});
 
 	// ripgrep presence (informational; Grep has a JS fallback)

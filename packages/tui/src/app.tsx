@@ -15,6 +15,8 @@ export interface ReplAppOptions {
 	session: AgentSession;
 	modelName: string;
 	theme?: "dark" | "light";
+	/** Modal vim editing in the prompt. */
+	vimMode?: boolean;
 	/** App-level slash-command handler; false falls through to built-ins. */
 	onCommand?: (text: string) => boolean;
 	/** Called for every non-slash prompt the user submits. */
@@ -31,8 +33,20 @@ export interface ReplAppHandle {
 	store: Store<UiState>;
 	waitUntilExit: () => Promise<void>;
 	requestPermission: (toolName: string, input: unknown) => Promise<boolean>;
+	/** Show a structured question dialog; resolves with answers or null on cancel. */
+	askUser: (
+		questions: Array<{
+			question: string;
+			header: string;
+			options: Array<{ label: string; description?: string }>;
+			multiSelect?: boolean;
+		}>,
+	) => Promise<string[] | null>;
 	clearPermissionRequest: () => void;
 	setContextInfo(info: { usedTokens: number; threshold: number }): void;
+	setTasks(
+		tasks: Array<{ id: string; subject: string; status: "pending" | "in_progress" | "completed"; activeForm?: string }>,
+	): void;
 }
 
 /**
@@ -52,6 +66,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				store={store}
 				modelName={options.modelName}
 				onExit={() => instance.unmount()}
+				vimMode={options.vimMode}
 				onCommand={options.onCommand}
 				onSubmitText={options.onSubmitText}
 				onMemoryShortcut={options.onMemoryShortcut}
@@ -89,6 +104,22 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		setContextInfo: (info) => {
 			store.set((s) => ({ ...s, contextInfo: info }));
 		},
+		setTasks: (tasks) => {
+			store.set((s) => ({ ...s, tasks }));
+		},
+		askUser: (questions) =>
+			new Promise<string[] | null>((resolve) => {
+				store.set((s) => ({
+					...s,
+					question: {
+						questions,
+						resolve: (answers) => {
+							store.set((st) => ({ ...st, question: null }));
+							resolve(answers);
+						},
+					},
+				}));
+			}),
 		clearPermissionRequest: () => {
 			store.set((s) => ({ ...s, dialog: null }));
 			pendingPermission = null;

@@ -39,6 +39,12 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 			let truncated = false;
 			const files = await collectFiles(ops, root, input.include);
 			for (const file of files) {
+				try {
+					const stat = await ops.stat(file);
+					if (stat.size > 1_000_000) continue; // skip huge files
+				} catch {
+					continue;
+				}
 				let text: string;
 				try {
 					text = await ops.readTextFile(file);

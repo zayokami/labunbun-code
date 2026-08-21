@@ -1,5 +1,6 @@
 export const AI_PACKAGE_VERSION = "0.1.0";
 
+export { withModelFallback } from "./fallback.ts";
 // Streaming internals
 export { MessageBuilder, parseToolArguments } from "./message-builder.ts";
 export {

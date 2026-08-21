@@ -3,7 +3,7 @@
  * permission engine + dialog bridge → Ink REPL with app-level commands.
  */
 
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -15,12 +15,14 @@ import {
 	type PermissionMode,
 	type PermissionRule,
 	parseRuleList,
+	type SessionEntry,
 	SessionStore,
 } from "@labunbun/agent";
-import { createDefaultStreamFn, registerOpenAICompatibleProvider, resolveModel } from "@labunbun/ai";
+import { createDefaultStreamFn, registerOpenAICompatibleProvider, resolveModel, withModelFallback } from "@labunbun/ai";
 import { connectAllMcpServers, loadMcpConfig, type McpConnection } from "@labunbun/mcp";
-import { createAllTools } from "@labunbun/tools";
+import { createAllTools, TaskStore } from "@labunbun/tools";
 import { mountRepl, type ReplAppHandle } from "@labunbun/tui";
+import { createAskUserQuestionTool } from "./ask-user.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { CostTracker, formatCostState } from "./cost-tracker.ts";
 import { appendHistory, loadHistory } from "./history.ts";
@@ -82,7 +84,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	}
 
 	// ---- tools & session ----
-	const tools = createAllTools(cwd);
+	const taskStore = new TaskStore();
+	const tools = createAllTools(cwd, { taskStore });
 	const sessionRules: PermissionRule[] = [];
 	const baseRules: PermissionRule[] = [
 		...parseRuleList(settings.permissions.deny, "deny", "userSettings"),
@@ -95,6 +98,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const memory = loadMemoryFiles(cwd);
 	let memoryInjected = false;
 
+	// ---- model fallback chain ----
+	const baseStreamFn = createDefaultStreamFn();
+	const fallbackChain = (settings.fallbackModels ?? [])
+		.map((ref) => resolveModel(ref))
+		.filter((m): m is NonNullable<typeof m> => Boolean(m));
+	const streamFn = withModelFallback(baseStreamFn, () => fallbackChain);
+
 	// Compaction.
 	const compactionThresholdValue = compactionThreshold({
 		contextWindow: model.contextWindow,
@@ -103,7 +113,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const compaction = new CompactionManager(
 		{ contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
 		{
-			streamFn: createDefaultStreamFn(),
+			streamFn,
 			store,
 			readFile: (path) => {
 				try {
@@ -125,7 +135,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- subagents, skills, plan mode ----
 	const agentDefinitions = loadAgentDefinitions(cwd);
 	const taskTool = createTaskTool({
-		streamFn: createDefaultStreamFn(),
+		streamFn,
 		model,
 		allTools: [...tools, ...mcpTools],
 		definitions: agentDefinitions,
@@ -142,8 +152,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	};
 	let sessionRef: AgentSession | null = null;
 	const planTools = createPlanModeTools(planCallbacks);
+	const askUserTool = createAskUserQuestionTool({
+		askUser: (questions) => (handle ? handle.askUser(questions) : Promise.resolve(null)),
+	});
 
-	const allTools = [...tools, ...mcpTools, taskTool, ...planTools];
+	const allTools = [...tools, ...mcpTools, taskTool, ...planTools, askUserTool];
 
 	const session = new AgentSession({
 		model,
@@ -153,7 +166,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		cwd,
 		permissionMode: options.permissionMode ?? settings.permissionMode ?? "default",
 		deps: {
-			streamFn: createDefaultStreamFn(),
+			streamFn,
 			canUseTool: async (toolName, input, ctx) => {
 				const decision = evaluatePermissions(toolName, input, {
 					mode: ctx.mode,
@@ -190,6 +203,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					return { ...context, messages };
 				},
 				beforeToolCall: async (toolName, input) => {
+					// File checkpoint before mutations — powers /rewind.
+					if (store && (toolName === "Edit" || toolName === "Write")) {
+						snapshotCheckpoint(store, input);
+					}
 					if (!hooksRuntime.has("PreToolUse")) return undefined;
 					const outcome = await hooksRuntime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
 					if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
@@ -233,6 +250,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		session,
 		modelName: `${model.provider}/${model.id}`,
 		theme: options.theme ?? settings.theme,
+		vimMode: settings.vimMode,
 		commandSuggestions: completeCommands(commands, "").map((c) => [`/${c.name}`, c.description] as [string, string]),
 		onAlwaysAllow: (toolName) => {
 			sessionRules.push({ toolName, behavior: "allow", source: "session" });
@@ -255,10 +273,17 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				commands,
 				compaction,
 				mcpConnections,
+				sessionStore: store,
 			}),
 	});
 
+	// Task list → UI strip subscription.
+	const unsubTasks = taskStore.subscribe(() => {
+		handle?.setTasks(taskStore.summary());
+	});
+
 	await handle.waitUntilExit();
+	unsubTasks();
 	return 0;
 }
 
@@ -272,6 +297,38 @@ function appendMemoryNote(note: string): void {
 	}
 }
 
+const CHECKPOINT_MAX_CHARS = 200_000;
+
+/** Snapshot a file's content before Edit/Write mutates it (for /rewind). */
+function snapshotCheckpoint(store: SessionStore, input: unknown): void {
+	try {
+		const filePath = (input as { file_path?: unknown }).file_path;
+		if (typeof filePath !== "string" || !existsSync(filePath)) return;
+		const content = readFileSync(filePath, "utf8");
+		if (content.length > CHECKPOINT_MAX_CHARS) return; // too large to inline
+		store.appendCustom("file_checkpoint", { path: filePath, content, at: Date.now() });
+	} catch {
+		// best-effort — never block the tool call on checkpoint failure
+	}
+}
+
+interface CheckpointInfo {
+	entryId: string;
+	path: string;
+	at: number;
+	content: string;
+}
+
+function listCheckpoints(store: SessionStore): CheckpointInfo[] {
+	return store
+		.linearEntries()
+		.filter((e): e is Extract<SessionEntry, { type: "custom" }> => e.type === "custom" && e.kind === "file_checkpoint")
+		.map((e) => {
+			const data = e.data as { path?: string; content?: string; at?: number };
+			return { entryId: e.id, path: data.path ?? "?", at: data.at ?? 0, content: data.content ?? "" };
+		});
+}
+
 interface AppCommandContext {
 	session: AgentSession;
 	handle: ReplAppHandle | null;
@@ -283,6 +340,7 @@ interface AppCommandContext {
 	commands: Command[];
 	compaction: CompactionManager;
 	mcpConnections: McpConnection[];
+	sessionStore?: SessionStore;
 }
 
 function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
@@ -365,6 +423,73 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			}
 			return true;
 		}
+		case "/tree": {
+			if (!ctx.sessionStore) {
+				pushInfo(ctx.handle, "No session store in this session.");
+				return true;
+			}
+			const tree = ctx.sessionStore.describeTree();
+			const branches = ctx.sessionStore.branchPoints();
+			pushInfo(ctx.handle, `Session tree (* = active path, ${branches.length} branch point(s)):\n${tree}`);
+			return true;
+		}
+		case "/fork": {
+			const arg = text.split(/\s+/)[1];
+			const store = ctx.sessionStore;
+			if (!store) {
+				pushInfo(ctx.handle, "No session store in this session.");
+				return true;
+			}
+			if (!arg) {
+				pushInfo(ctx.handle, "Usage: /fork <entry-id> — see /tree for ids");
+				return true;
+			}
+			if (!store.branch(arg)) {
+				pushInfo(ctx.handle, `Entry not found: ${arg}`);
+				return true;
+			}
+			// Rebuild in-memory transcript from the new branch.
+			ctx.session.messages = store.messages();
+			pushInfo(ctx.handle, `Branched from ${arg.slice(0, 8)}. New messages continue on this branch.`);
+			return true;
+		}
+		case "/rewind": {
+			const rewindStore = ctx.sessionStore;
+			if (!rewindStore) {
+				pushInfo(ctx.handle, "No session store in this session.");
+				return true;
+			}
+			const checkpoints = listCheckpoints(rewindStore);
+			if (checkpoints.length === 0) {
+				pushInfo(ctx.handle, "No checkpoints yet — they are captured before every Edit/Write.");
+				return true;
+			}
+			const arg = text.split(/\s+/)[1];
+			if (!arg) {
+				const lines = checkpoints
+					.slice(-10)
+					.reverse()
+					.map((c, i) => `${checkpoints.length - 1 - i}. ${new Date(c.at).toLocaleTimeString()}  ${c.path}`);
+				pushInfo(ctx.handle, `Checkpoints (newest first). Restore with /rewind <number>:\n${lines.join("\n")}`);
+				return true;
+			}
+			const index = Number(arg);
+			if (!Number.isInteger(index) || index < 0 || index >= checkpoints.length) {
+				pushInfo(ctx.handle, `Invalid checkpoint number: ${arg} (0-${checkpoints.length - 1})`);
+				return true;
+			}
+			const checkpoint = checkpoints[index];
+			try {
+				writeFileSync(checkpoint.path, checkpoint.content, "utf8");
+				pushInfo(
+					ctx.handle,
+					`Restored ${checkpoint.path} to the ${new Date(checkpoint.at).toLocaleTimeString()} state.`,
+				);
+			} catch (error) {
+				pushInfo(ctx.handle, `Restore failed: ${error instanceof Error ? error.message : error}`);
+			}
+			return true;
+		}
 		case "/doctor": {
 			void (async () => {
 				const { runDoctorChecks, formatDoctorReport } = await import("./doctor.ts");
@@ -376,7 +501,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/theme": {
 			const arg = text.split(/\s+/)[1];
 			if (arg === "dark" || arg === "light") {
-				pushInfo(ctx.handle, `Theme "${arg}" takes effect on next launch (persist via settings.json: {"theme":"${arg}"}).`);
+				pushInfo(
+					ctx.handle,
+					`Theme "${arg}" takes effect on next launch (persist via settings.json: {"theme":"${arg}"}).`,
+				);
 			} else {
 				pushInfo(ctx.handle, `Usage: /theme dark|light — persists in ~/.labunbun/settings.json`);
 			}

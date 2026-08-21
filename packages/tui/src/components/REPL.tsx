@@ -5,10 +5,12 @@ import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
 import { useTheme } from "../theme.ts";
 import { initialUiState, reduceEvent, type UiState } from "../ui-state.ts";
-import { MessageList, StreamingPreview } from "./MessageList.tsx";
+import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
 import { PromptInput } from "./PromptInput.tsx";
+import { QuestionDialog } from "./QuestionDialog.tsx";
 import { StatusLine } from "./StatusLine.tsx";
+import { TaskStrip } from "./TaskStrip.tsx";
 
 export interface ReplProps {
 	session: AgentSession;
@@ -26,6 +28,8 @@ export interface ReplProps {
 	onMemoryShortcut?: (note: string) => void;
 	/** Slash-command suggestions for autocomplete. */
 	commandSuggestions?: Array<[string, string]>;
+	/** Modal vim editing in the prompt. */
+	vimMode?: boolean;
 	/** Context-window usage for the status line. */
 	contextInfo?: { usedTokens: number; threshold: number };
 }
@@ -51,6 +55,7 @@ export function REPL({
 	onSubmitText,
 	onMemoryShortcut,
 	commandSuggestions,
+	vimMode,
 }: ReplProps) {
 	const theme = useTheme();
 	const entries = useStore(store, (s) => s.entries);
@@ -58,7 +63,9 @@ export function REPL({
 	const thinkingText = useStore(store, (s) => s.thinkingText);
 	const statusPhase = useStore(store, (s) => s.statusPhase);
 	const dialog = useStore(store, (s) => s.dialog);
+	const question = useStore(store, (s) => s.question);
 	const contextInfo = useStore(store, (s) => s.contextInfo);
+	const tasks = useStore(store, (s) => s.tasks);
 	const [elapsedMs, setElapsedMs] = useState(0);
 
 	// Elapsed timer while busy.
@@ -83,12 +90,40 @@ export function REPL({
 				return;
 			}
 			onSubmitText?.(text);
+			store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user", text: trimmed }] }));
+			if (session.isRunning) {
+				// Queue for the next turn boundary instead of erroring —
+				// followUp drains when the current run terminates naturally.
+				session.followUp(text);
+				store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text: "[queued]" }] }));
+				return;
+			}
 			void session.prompt(text);
 		},
 		[session, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut],
 	);
 
+	const [transcriptMode, setTranscriptMode] = useState(false);
+	const [transcriptOffset, setTranscriptOffset] = useState(0);
+	const TRANSCRIPT_PAGE = 10;
+
 	useInput((input, key) => {
+		if (key.ctrl && input === "o") {
+			setTranscriptMode((v) => !v);
+			setTranscriptOffset(0);
+			return;
+		}
+		if (transcriptMode) {
+			if (key.upArrow || input === "k") {
+				setTranscriptOffset((o) => Math.min(o + TRANSCRIPT_PAGE, entries.length));
+			} else if (key.downArrow || input === "j") {
+				setTranscriptOffset((o) => Math.max(0, o - TRANSCRIPT_PAGE));
+			} else if (key.escape || input === "q") {
+				setTranscriptMode(false);
+				setTranscriptOffset(0);
+			}
+			return;
+		}
 		if (key.escape && session.isRunning) {
 			session.abort();
 			return;
@@ -102,10 +137,26 @@ export function REPL({
 		}
 	});
 
+	if (transcriptMode) {
+		const windowSize = Math.min(entries.length, 25);
+		const end = Math.max(windowSize, entries.length - transcriptOffset);
+		const start = end - windowSize;
+		const windowEntries = entries.slice(start, end);
+		return (
+			<Box flexDirection="column">
+				<MessageList entries={windowEntries} />
+				<Text dimColor>
+					Transcript {start + 1}-{end} of {entries.length} · ↑/↓ page · ctrl+o/Esc back
+				</Text>
+			</Box>
+		);
+	}
+
 	return (
 		<Box flexDirection="column">
-			<MessageList entries={entries} />
+			<VirtualMessageList entries={entries} />
 			<StreamingPreview text={streamingText} thinking={thinkingText} />
+			{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
 			<Box marginBottom={1}>
 				<StatusLine phase={statusPhase} modelName={modelName} elapsedMs={elapsedMs} contextInfo={contextInfo} />
 			</Box>
@@ -116,7 +167,13 @@ export function REPL({
 					onResolve={(allow, alwaysAllow) => dialog.resolve(allow, alwaysAllow)}
 				/>
 			) : null}
-			<PromptInput onSubmit={handleSubmit} disabled={dialog !== null} commandSuggestions={commandSuggestions} />
+			{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} /> : null}
+			<PromptInput
+				onSubmit={handleSubmit}
+				disabled={dialog !== null || question !== null}
+				commandSuggestions={commandSuggestions}
+				vim={vimMode}
+			/>
 			<Text dimColor> </Text>
 		</Box>
 	);

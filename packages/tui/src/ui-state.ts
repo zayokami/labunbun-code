@@ -26,6 +26,13 @@ export interface PendingTool {
 
 export type StatusPhase = "idle" | "thinking" | "responding" | "tools";
 
+export interface UiTask {
+	id: string;
+	subject: string;
+	status: "pending" | "in_progress" | "completed";
+	activeForm?: string;
+}
+
 export interface UiState {
 	entries: UiEntry[];
 	streamingText: string;
@@ -33,7 +40,9 @@ export interface UiState {
 	pendingTools: PendingTool[];
 	statusPhase: StatusPhase;
 	dialog: PermissionDialogState | null;
+	question: QuestionDialogState | null;
 	contextInfo?: { usedTokens: number; threshold: number };
+	tasks?: UiTask[];
 }
 
 export interface PermissionDialogState {
@@ -41,6 +50,19 @@ export interface PermissionDialogState {
 	toolName: string;
 	inputPreview: string;
 	resolve: (allow: boolean, alwaysAllow: boolean) => void;
+}
+
+export interface UiQuestion {
+	question: string;
+	header: string;
+	options: Array<{ label: string; description?: string }>;
+	multiSelect?: boolean;
+}
+
+export interface QuestionDialogState {
+	questions: UiQuestion[];
+	/** Resolves with per-question selected labels; null = user cancelled. */
+	resolve: (answers: string[] | null) => void;
 }
 
 export function initialUiState(): UiState {
@@ -51,6 +73,7 @@ export function initialUiState(): UiState {
 		pendingTools: [],
 		statusPhase: "idle",
 		dialog: null,
+		question: null,
 	};
 }
 
@@ -78,30 +101,25 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 			return { ...state, streamingText: "", thinkingText: "", statusPhase: "thinking" };
 
 		case "message_update": {
-			const partial = event.message;
-			let next = state;
-			if (event.assistantMessageEvent.type === "thinking_delta") {
-				next = {
-					...next,
-					thinkingText: partial.content
-						.filter((b) => b.type === "thinking")
-						.map((b) => b.thinking)
-						.join(""),
-				};
-			} else if (
-				event.assistantMessageEvent.type === "text_start" ||
-				event.assistantMessageEvent.type === "text_delta"
-			) {
-				next = {
-					...next,
-					statusPhase: "responding",
-					streamingText: partial.content
-						.filter((b) => b.type === "text")
-						.map((b) => b.text)
-						.join(""),
-				};
+			// Incremental append from the delta itself — rejoining the full
+			// content array per delta is O(n²) on long responses.
+			const ae = event.assistantMessageEvent;
+			switch (ae.type) {
+				case "thinking_start":
+					return { ...state, thinkingText: "" };
+				case "thinking_delta":
+					return { ...state, thinkingText: state.thinkingText + ae.delta };
+				case "text_start":
+					return { ...state, statusPhase: "responding", streamingText: "" };
+				case "text_delta":
+					return {
+						...state,
+						statusPhase: "responding",
+						streamingText: state.streamingText + ae.delta,
+					};
+				default:
+					return state;
 			}
-			return next;
 		}
 
 		case "turn_end":

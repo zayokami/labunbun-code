@@ -257,6 +257,61 @@ describe("AgentSession loop", () => {
 		const reason = await promise;
 		expect(reason).toBe("aborted");
 	});
+
+	test("streaming execution starts concurrency-safe tools before the message completes", async () => {
+		let startPhase = "never";
+		const probe = buildTool({
+			name: "probe",
+			description: "records when it starts relative to the stream",
+			inputSchema: z.object({}),
+			isConcurrencySafe: () => true,
+			call: async () => {
+				startPhase = "during-stream";
+				await new Promise((r) => setTimeout(r, 10));
+				return { content: [{ type: "text", text: "probed" }] };
+			},
+		});
+
+		const faux = fauxProvider([{ toolCalls: [{ name: "probe", arguments: {} }] }, { text: "done" }]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [probe],
+			deps: { streamFn: faux.streamFn },
+		});
+		const reason = await session.prompt("go");
+
+		expect(reason).toBe("completed");
+		expect(startPhase).toBe("during-stream");
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(1);
+		expect((results[0].content[0] as any).text).toBe("probed");
+	});
+
+	test("unsafe tools wait for the post-message path", async () => {
+		let started = false;
+		const serial = buildTool({
+			name: "serial_probe",
+			description: "must not start during streaming",
+			inputSchema: z.object({}),
+			isConcurrencySafe: () => false,
+			call: async () => {
+				started = true;
+				return { content: [{ type: "text", text: "ran" }] };
+			},
+		});
+
+		const faux = fauxProvider([{ toolCalls: [{ name: "serial_probe", arguments: {} }] }, { text: "done" }]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [serial],
+			deps: { streamFn: faux.streamFn },
+		});
+		await session.prompt("go");
+
+		expect(started).toBe(true); // executed, but after the message finalized
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(1);
+	});
 });
 
 describe("session persistence replay", () => {

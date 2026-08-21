@@ -211,9 +211,9 @@ describe("Bash tool", () => {
 });
 
 describe("tool registry shape", () => {
-	test("default set is exactly the seven core tools", () => {
-		const names = createAllTools(process.cwd()).map((t) => t.name);
-		expect(names).toEqual(["Bash", "Edit", "Glob", "Grep", "LS", "Read", "Write"]);
+	test("default set: core tools, background shell pair, and web tools", () => {
+		const names = createAllTools(process.cwd(), { webTools: false }).map((t) => t.name);
+		expect(names).toEqual(["Bash", "Edit", "Glob", "Grep", "LS", "Read", "Write", "BashOutput", "KillBash"]);
 	});
 
 	test("every tool contributes wire-safe JSON schema", () => {

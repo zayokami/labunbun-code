@@ -146,6 +146,9 @@ export class AgentSession {
 	}
 
 	abort(): void {
+		// Dropping queued follow-ups on explicit abort is the least surprising
+		// behavior — stale queued prompts should not fire after an interrupt.
+		this.#followUp = [];
 		this.#abortController?.abort();
 	}
 
@@ -211,6 +214,10 @@ export class AgentSession {
 
 				let assistant: AssistantMessage | null = null;
 				let lastPartial: AssistantMessage | null = null;
+				// Streaming tool execution: concurrency-safe tools start the moment
+				// their toolCall block completes, while the model keeps streaming.
+				const earlyResults = new Map<string, ToolResultMessage>();
+				const earlyPromises = new Map<string, Promise<void>>();
 				try {
 					for await (const event of this.#deps.streamFn(this.#model, context, streamOptions)) {
 						if (event.type === "done" || event.type === "error") {
@@ -222,6 +229,9 @@ export class AgentSession {
 								message: event.partial,
 								assistantMessageEvent: event,
 							});
+							if (event.type === "toolcall_end") {
+								this.#maybeStartEarlyTool(event.toolCall, earlyResults, earlyPromises);
+							}
 						}
 					}
 				} catch (streamError) {
@@ -296,7 +306,7 @@ export class AgentSession {
 					break;
 				}
 
-				const results = await this.#executeToolCalls(toolCalls);
+				const results = await this.#executeToolCalls(toolCalls, earlyPromises, earlyResults);
 				for (const result of results) {
 					this.messages.push(result);
 					this.#store?.appendMessage(result);
@@ -320,11 +330,16 @@ export class AgentSession {
 
 	// -- tool execution -------------------------------------------------------
 
-	async #executeToolCalls(toolCalls: ToolCall[]): Promise<ToolResultMessage[]> {
+	async #executeToolCalls(
+		toolCalls: ToolCall[],
+		earlyPromises: Map<string, Promise<void>>,
+		earlyResults: Map<string, ToolResultMessage>,
+	): Promise<ToolResultMessage[]> {
 		const resolved: ResolvedToolCall[] = [];
 		const unknownResults: ToolResultMessage[] = [];
 
 		for (const call of toolCalls) {
+			if (earlyPromises.has(call.id)) continue; // already executing from the stream
 			const tool = this.#tools.find((t) => t.name === call.name);
 			if (!tool?.isEnabled?.()) {
 				unknownResults.push(toolResultMessage(call.id, call.name, [textContent(`Unknown tool: ${call.name}`)], true));
@@ -347,8 +362,39 @@ export class AgentSession {
 			}
 		}
 
+		// Wait for tools that started mid-stream and merge their buffered results.
+		if (earlyPromises.size > 0) {
+			await Promise.all(earlyPromises.values());
+			for (const [callId, result] of earlyResults) {
+				resultsByCallId.set(callId, result);
+			}
+		}
+
 		// Assemble strictly in assistant source order.
 		return toolCalls.map((call) => resultsByCallId.get(call.id)).filter((r) => r !== undefined);
+	}
+
+	/**
+	 * Start a concurrency-safe tool while the model is still streaming. Unsafe
+	 * tools wait for the normal post-message path so they never overlap.
+	 */
+	#maybeStartEarlyTool(
+		toolCall: ToolCall,
+		earlyResults: Map<string, ToolResultMessage>,
+		earlyPromises: Map<string, Promise<void>>,
+	): void {
+		if (this.#abortController?.signal.aborted) return;
+		const tool = this.#tools.find((t) => t.name === toolCall.name);
+		if (!tool?.isEnabled?.()) return;
+		const input = parseArguments(toolCall.arguments);
+		if (!tool.isConcurrencySafe?.(input)) return;
+
+		const resolved: ResolvedToolCall = { callId: toolCall.id, tool, input };
+		const promise = this.#runOne(resolved, earlyResults).catch(() => {
+			// #runOne never throws by contract; belt-and-braces for event handler
+			// rejections — orphan synthesis covers any missing result.
+		});
+		earlyPromises.set(toolCall.id, promise);
 	}
 
 	async #runOne(call: ResolvedToolCall, out: Map<string, ToolResultMessage>): Promise<void> {

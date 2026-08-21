@@ -187,17 +187,71 @@ describe("mapAnthropicStream", () => {
 		expect((events.at(-1) as any).message.errorMessage).toBe("overloaded");
 	});
 
-	test("truncated stream (no message_stop) yields error terminal", async () => {
+	test("signature_delta attaches to the thinking block at close (extended thinking round-trip)", async () => {
 		const events = await collect(
 			mapAnthropicStream(
 				raw([
 					{ type: "message_start", message: {} },
-					{ type: "content_block_start", index: 0, content_block: { type: "text" } },
+					{ type: "content_block_start", index: 0, content_block: { type: "thinking" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hmm" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig9" } },
+					{ type: "content_block_stop", index: 0 },
+					{ type: "content_block_start", index: 1, content_block: { type: "text" } },
+					{ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "ans" } },
+					{ type: "content_block_stop", index: 1 },
+					{ type: "message_delta", delta: { stop_reason: "end_turn" } },
+					{ type: "message_stop" },
 				]),
 				"anthropic",
 				"claude-sonnet-5",
 			),
 		);
-		expect(events.at(-1)?.type).toBe("error");
+		const done = events.at(-1) as any;
+		expect(done.type).toBe("done");
+		const thinking = done.message.content.find((b: any) => b.type === "thinking");
+		expect(thinking.signature).toBe("sig9");
+		expect(thinking.thinking).toBe("hmm");
+	});
+
+	test("tool_use with inline input object (no deltas) still yields a complete call", async () => {
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{
+						type: "content_block_start",
+						index: 0,
+						content_block: { type: "tool_use", id: "tu_9", name: "write", input: { path: "a.txt" } },
+					},
+					{ type: "content_block_stop", index: 0 },
+					{ type: "message_delta", delta: { stop_reason: "tool_use" } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-sonnet-5",
+			),
+		);
+		const end = events.find((e) => e.type === "toolcall_end") as any;
+		expect(JSON.parse(end.toolCall.arguments)).toEqual({ path: "a.txt" });
+	});
+
+	test("redacted_thinking blocks pass through without crashing", async () => {
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{ type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "xx" } },
+					{ type: "content_block_stop", index: 0 },
+					{ type: "content_block_start", index: 1, content_block: { type: "text" } },
+					{ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "ok" } },
+					{ type: "content_block_stop", index: 1 },
+					{ type: "message_delta", delta: { stop_reason: "end_turn" } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-sonnet-5",
+			),
+		);
+		expect(events.at(-1)?.type).toBe("done");
 	});
 });

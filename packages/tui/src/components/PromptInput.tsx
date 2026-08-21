@@ -9,21 +9,25 @@ export interface PromptInputProps {
 	placeholder?: string;
 	/** Slash-command suggestions: [name, description]. */
 	commandSuggestions?: Array<[string, string]>;
+	/** Modal vim editing (normal/insert). */
+	vim?: boolean;
 }
 
 /**
  * Multiline prompt: Enter submits, shift+enter / alt+enter inserts a newline.
  * Up/down recall history when the caret is on a single-line buffer. Tab
- * completes the top slash-command suggestion.
+ * completes the top slash-command suggestion. With `vim`, normal-mode keys
+ * are consumed by the modal layer.
  */
 export function PromptInput({
 	onSubmit,
 	disabled = false,
 	placeholder = 'Try "fix the failing test" — / for commands',
 	commandSuggestions = [],
+	vim = false,
 }: PromptInputProps) {
 	const theme = useTheme();
-	const { state, actions, historyUp, historyDown, pushHistory } = useTextInput();
+	const { state, actions, historyUp, historyDown, pushHistory, vimMode, handleVimKey } = useTextInput([], vim);
 	const [suggestionIndex, setSuggestionIndex] = useState(0);
 
 	const suggestions =
@@ -33,6 +37,7 @@ export function PromptInput({
 
 	useInput(
 		(input, key) => {
+			if (handleVimKey(input, key)) return;
 			if (key.tab && suggestions.length > 0) {
 				setSuggestionIndex((i) => (i + 1) % suggestions.length);
 				return;
@@ -137,7 +142,10 @@ export function PromptInput({
 						</Text>
 					))
 				)}
-				<Text dimColor>Enter send · Shift+Enter newline · ↑↓ history · Esc interrupt · /help</Text>
+				<Text dimColor>
+					{vim ? `[${vimMode === "normal" ? "NORMAL" : "INSERT"}] ` : ""}
+					Enter send · Shift+Enter newline · ↑↓ history · Esc interrupt · /help
+				</Text>
 			</Box>
 		</Box>
 	);

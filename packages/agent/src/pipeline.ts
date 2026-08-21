@@ -42,7 +42,7 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 				isError: true,
 			});
 		}
-		const input = parsed.data;
+		let input: unknown = parsed.data;
 
 		// 2. Semantic validation
 		if (tool.validateInput) {
@@ -75,6 +75,9 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 					content: [textContent(`Permission required but unresolved: ${decision.message ?? tool.name}`)],
 					isError: true,
 				});
+			}
+			if (decision.updatedInput !== undefined) {
+				input = decision.updatedInput;
 			}
 		}
 

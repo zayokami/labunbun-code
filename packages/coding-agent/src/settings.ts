@@ -33,8 +33,11 @@ export const OpenAICompatibleProviderSchema = z.object({
 
 export const SettingsSchema = z.object({
 	model: z.string().optional(),
+	/** Model references tried in order when the primary errors before streaming. */
+	fallbackModels: z.array(z.string()).optional(),
 	permissionMode: PermissionModeSchema.optional(),
 	theme: z.enum(["dark", "light"]).optional(),
+	vimMode: z.boolean().optional(),
 	permissions: z
 		.object({
 			allow: z.array(z.string()).default([]),

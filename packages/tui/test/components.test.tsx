@@ -136,7 +136,7 @@ describe("ui-state reducer", () => {
 		state = reduceEvent(state, {
 			type: "message_update",
 			message: partial("Hello"),
-			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "o", partial: partial("Hello") },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "lo", partial: partial("Hello") },
 		});
 		expect(state.streamingText).toBe("Hello");
 
@@ -178,6 +178,41 @@ describe("ui-state reducer", () => {
 		expect(toolPreview("Bash", { command: "git status" })).toBe("git status");
 		expect(toolPreview("Read", { file_path: "/a/b.ts" })).toBe("/a/b.ts");
 		expect(toolPreview("Grep", { pattern: "foo", path: "/x" })).toBe("foo");
+	});
+
+	test("agent_end commits streaming text and records error/abort entries", () => {
+		let state: UiState = initialUiState();
+		const partial = (text: string) =>
+			({
+				role: "assistant",
+				content: [{ type: "text", text }],
+				provider: "faux",
+				model: "faux-1",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				stopReason: "pending",
+				timestamp: 0,
+			}) as any;
+
+		state = reduceEvent(state, { type: "agent_start" });
+		state = reduceEvent(state, {
+			type: "message_update",
+			message: partial("partial answer"),
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: "partial answer",
+				partial: partial("partial answer"),
+			},
+		});
+		state = reduceEvent(state, { type: "agent_end", reason: "error", messages: [], errorMessage: "provider down" });
+		const kinds = state.entries.map((e) => e.kind);
+		expect(kinds).toContain("assistant");
+		expect(state.entries.at(-1)).toMatchObject({ kind: "error", text: "Error: provider down" });
+		expect(state.statusPhase).toBe("idle");
+
+		let aborted: UiState = initialUiState();
+		aborted = reduceEvent(aborted, { type: "agent_end", reason: "aborted", messages: [] });
+		expect(aborted.entries.at(-1)).toMatchObject({ kind: "info", text: "[interrupted]" });
 	});
 });
 

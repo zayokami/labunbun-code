@@ -6,11 +6,10 @@
  * - json: single JSON result object at the end
  * - stream-json: one JSON line per event, live
  */
-import type { AgentEvent } from "@labunbun/agent";
+import type { AgentEvent, PermissionMode } from "@labunbun/agent";
 import { AgentSession, SessionStore } from "@labunbun/agent";
-import { createDefaultStreamFn, resolveModel, type AgentMessage } from "@labunbun/ai";
+import { type AgentMessage, createDefaultStreamFn, resolveModel } from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
-import type { PermissionMode } from "@labunbun/agent";
 import { buildSystemPrompt } from "./system-prompt.ts";
 
 export type OutputFormat = "text" | "json" | "stream-json";

@@ -11,8 +11,14 @@ labunbun                                # interactive REPL
 
 - **Multi-provider LLM support** — Anthropic plus any OpenAI-compatible API
   (DeepSeek, Kimi, GLM, OpenRouter, custom endpoints) via settings.
-- **Core coding tools** — Bash, Read, Write, Edit (exact string replace),
-  Grep, Glob, LS; parallel execution of safe tools with source-ordered results.
+- **Core coding tools** — Bash (incl. `run_in_background` with BashOutput /
+  KillBash), Read, Write, Edit (exact string replace with diff preview),
+  Grep, Glob, LS, WebFetch, WebSearch; parallel execution of safe tools,
+  started mid-stream as soon as their arguments finish arriving.
+- **Task list** — TaskCreate/TaskList/TaskGet/TaskUpdate let the agent plan
+  and track multi-step work; progress renders in the REPL.
+- **Interactive dialogs** — permission approvals plus structured
+  AskUserQuestion multiple-choice prompts.
 - **Permission system** — rule engine (`Bash(git *)`, `Edit(src/**)`,
   `mcp__server__*`), five permission modes, interactive approval dialog,
   "don't ask again" session rules.
@@ -29,6 +35,11 @@ labunbun                                # interactive REPL
   transcripts persisted); custom agents via frontmatter `.md` files.
 - **Skills** — `SKILL.md` folders become prompt-expanding slash commands.
 - **Plan mode** — read-only research then plan approval before mutations.
+- **Model fallback chain** — `fallbackModels` in settings are tried in order
+  when the primary model fails before streaming any content.
+- **Terminal UX** — virtualized transcript (sealed history + live tail),
+  ctrl+O full-transcript browser, vim modal editing (`vimMode: true`),
+  token-based dark/light themes.
 - **Headless output** — `--output-format text|json|stream-json`.
 
 ## Quick start
@@ -95,11 +106,6 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
   `rules/*.md`, `agents/`, `skills/`
 - Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
 
-## License & provenance
+## License
 
 MIT © 2026 zayoka — see [LICENSE](./LICENSE).
-
-All code in this repository is original work. Architectural ideas were informed
-by studying publicly available open-source agent projects (notably
-[pi](https://github.com/badlogic/pi-mono), MIT licensed). No proprietary code
-was copied or decompiled.

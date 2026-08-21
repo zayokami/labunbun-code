@@ -1,8 +1,11 @@
 /**
  * Terminal text editor state: multiline buffer, cursor motion, word jumps,
  * kill/yank, and history recall. Pure state transitions; the component maps
- * ink useInput keys onto these actions.
+ * ink useInput keys onto these actions. Optional vim layer: normal/insert
+ * modal editing over the same buffer.
  */
+
+import type { Key } from "ink";
 import { useCallback, useRef, useState } from "react";
 
 export interface TextInputState {
@@ -28,8 +31,15 @@ export interface TextInputActions {
 	setText(text: string): void;
 }
 
-export function useTextInput(initialHistory: string[] = []) {
+export function useTextInput(initialHistory: string[] = [], vim = false) {
 	const [state, setState] = useState<TextInputState>({ text: "", cursor: 0 });
+	const [vimMode, setVimModeState] = useState<"normal" | "insert">(vim ? "normal" : "insert");
+	// Mirror for synchronous reads inside key handlers (state updates lag one render).
+	const vimModeRef = useRef<"normal" | "insert">(vim ? "normal" : "insert");
+	const setVimMode = (mode: "normal" | "insert") => {
+		vimModeRef.current = mode;
+		setVimModeState(mode);
+	};
 	const historyRef = useRef<string[]>([...initialHistory]);
 	const historyIndexRef = useRef<number>(-1);
 	const draftRef = useRef<string>("");
@@ -128,5 +138,74 @@ export function useTextInput(initialHistory: string[] = []) {
 		historyUp,
 		historyDown,
 		pushHistory,
+		// Read through the ref so key handlers see the mode synchronously;
+		// the mirrored state exists only to re-render the mode indicator.
+		get vimMode() {
+			return vim ? vimModeRef.current : ("insert" as const);
+		},
+		/**
+		 * Vim key handler — call before default handling; returns true when the
+		 * key was consumed by normal mode (insert mode falls through except Esc).
+		 */
+		handleVimKey(input: string, key: Key): boolean {
+			if (!vim) return false;
+			if (vimModeRef.current === "insert") {
+				if (key.escape) {
+					setVimMode("normal");
+					return true;
+				}
+				return false;
+			}
+			switch (true) {
+				case input === "h":
+					actions.moveLeft();
+					break;
+				case input === "l":
+					actions.moveRight();
+					break;
+				case input === "0":
+					actions.moveToLineStart();
+					break;
+				case input === "$":
+					actions.moveToLineEnd();
+					break;
+				case input === "w":
+					actions.moveWordRight();
+					break;
+				case input === "b":
+					actions.moveWordLeft();
+					break;
+				case input === "x":
+					actions.delete();
+					break;
+				case input === "D":
+					actions.killToEnd();
+					break;
+				case input === "i":
+					setVimMode("insert");
+					break;
+				case input === "a":
+					setVimMode("insert");
+					setState((s) => ({ ...s, cursor: Math.min(s.text.length, s.cursor + 1) }));
+					break;
+				case input === "A":
+					setVimMode("insert");
+					setState((s) => ({ ...s, cursor: s.text.length }));
+					break;
+				case input === "o":
+					setVimMode("insert");
+					setState((s) => ({ text: `${s.text}\n`, cursor: s.text.length + 1 }));
+					break;
+				case input === "j":
+					historyDown();
+					break;
+				case input === "k":
+					historyUp();
+					break;
+				default:
+					break;
+			}
+			return true; // normal mode consumes everything
+		},
 	};
 }
