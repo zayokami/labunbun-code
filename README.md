@@ -106,6 +106,15 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
   `rules/*.md`, `agents/`, `skills/`
 - Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
 
+## Sponsor
+
+If LaBunbun Code saves you time, consider supporting development:
+
+| Network | Address |
+|---------|---------|
+| **BTC** | `bc1qv9zhpzzdddyakzsetgwr4tkznl4ycsuxn7d00g` |
+| **ETH** | `0x8dFB632F494C694a1a0Ff4CC2566617230530020` |
+
 ## License
 
 MIT © 2026 zayoka — see [LICENSE](./LICENSE).
