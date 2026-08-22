@@ -12,6 +12,7 @@
  */
 
 import { MessageBuilder } from "../message-builder.ts";
+import { resolveApiKey } from "../model.ts";
 import type { AssistantMessageEvent, Context, Model, StreamOptions, ThinkingLevel, WireTool } from "../types.ts";
 
 // ---------------------------------------------------------------------------
@@ -337,7 +338,7 @@ export function createAnthropicStreamFn(clientFactory?: () => AnthropicClientLik
 
 async function defaultClient(model: Model, options?: StreamOptions): Promise<AnthropicClientLike> {
 	const { default: Anthropic } = await import("@anthropic-ai/sdk");
-	const apiKey = options?.apiKey ?? process.env[model.apiKeyEnv] ?? "";
+	const apiKey = options?.apiKey ?? resolveApiKey(model) ?? "";
 	return new Anthropic({
 		apiKey,
 		baseURL: model.baseUrl || undefined,

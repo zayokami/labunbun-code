@@ -82,6 +82,35 @@ describe("loadMemoryFiles", () => {
 		expect(result.content).toContain("STYLE RULE");
 	});
 
+	/**
+	 * User-scope rules live at `~/.labunbun/rules`, which the cwd→root walk only
+	 * reaches when cwd happens to sit under the home directory. They get their own
+	 * read so they apply from any working directory — this is what makes imported
+	 * rule files take effect.
+	 */
+	test("user-scope rules load from any working directory", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-memhome-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-memcwd-"));
+		mkdirSync(join(home, ".labunbun", "rules"), { recursive: true });
+		writeFileSync(join(home, ".labunbun", "rules", "global.md"), "GLOBAL RULE");
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.content).toContain("GLOBAL RULE");
+		expect(result.files.join("|")).toContain("global.md");
+	});
+
+	test("a user-scope rule is not counted twice when cwd sits under home", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-memdup-"));
+		const cwd = join(home, "project");
+		mkdirSync(cwd, { recursive: true });
+		mkdirSync(join(home, ".labunbun", "rules"), { recursive: true });
+		writeFileSync(join(home, ".labunbun", "rules", "once.md"), "ONCE ONLY");
+
+		const result = loadMemoryFiles(cwd, home);
+		expect(result.files.filter((p) => p.endsWith("once.md"))).toHaveLength(1);
+		expect(result.content.split("ONCE ONLY")).toHaveLength(2);
+	});
+
 	test("empty when no memory files exist", () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-memempty-"));
 		const result = loadMemoryFiles(dir, join(dir, "home"));

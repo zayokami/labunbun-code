@@ -154,6 +154,12 @@ export interface Model<Api extends ApiId = ApiId> {
 	baseUrl: string;
 	/** Environment variable holding the API key. */
 	apiKeyEnv: string;
+	/**
+	 * Additional environment variables to try when `apiKeyEnv` is unset, in
+	 * order. Exists because the same provider is commonly configured under more
+	 * than one variable name depending on how the credential was issued.
+	 */
+	apiKeyEnvFallbacks?: string[];
 	contextWindow: number;
 	maxOutputTokens: number;
 	reasoning: boolean;

@@ -322,7 +322,28 @@ export function evaluatePermissions(
 	return { behavior: "ask" };
 }
 
+/**
+ * Does a bare (specifier-less) MCP rule cover this tool?
+ *
+ * MCP tools are named `mcp__<server>__<tool>`, and rules for them are written
+ * as bare tool names rather than `Tool(specifier)` form: `mcp__github` for a
+ * whole server, `mcp__github__*` for the same thing spelled with a wildcard,
+ * `mcp__github__create_issue` for one tool. Without this, all three fell
+ * through to the exact-equality check in `ruleMatches`, so only the fully
+ * spelled-out third form ever matched and the server-wide forms were silently
+ * inert — a rule the user believed was in force doing nothing at all.
+ */
+function mcpRuleMatches(ruleToolName: string, toolName: string): boolean {
+	if (ruleToolName === toolName) return true;
+	if (ruleToolName.includes("*")) return specifierToRegExp(ruleToolName).test(toolName);
+	// Server-wide form: `mcp__github` covers every tool that server exposes.
+	return toolName.startsWith(`${ruleToolName}__`);
+}
+
 function ruleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd: string): boolean {
+	if (rule.specifier === undefined && rule.toolName.startsWith("mcp__")) {
+		return mcpRuleMatches(rule.toolName, toolName);
+	}
 	if (rule.toolName !== toolName && rule.toolName !== "*") return false;
 	if (rule.specifier === undefined) return true; // bare tool rule
 	return inputMatchesSpecifier(toolName, rule.specifier, input, cwd);

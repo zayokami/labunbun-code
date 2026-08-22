@@ -19,6 +19,9 @@ function anthropicModel(
 		provider: "anthropic",
 		baseUrl: ANTHROPIC_BASE,
 		apiKeyEnv: "ANTHROPIC_API_KEY",
+		// Proxies and gateways in front of the Anthropic API commonly issue the
+		// credential as ANTHROPIC_AUTH_TOKEN instead.
+		apiKeyEnvFallbacks: ["ANTHROPIC_AUTH_TOKEN"],
 		contextWindow: opts.contextWindow,
 		maxOutputTokens: opts.maxOutputTokens,
 		reasoning: opts.reasoning ?? true,
@@ -136,6 +139,45 @@ export function listModels(): Model[] {
 }
 
 /**
+ * Environment variable that overrides a provider's base URL, e.g.
+ * `ANTHROPIC_BASE_URL` for the anthropic provider.
+ */
+export function baseUrlEnvVar(provider: string): string {
+	return `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_BASE_URL`;
+}
+
+/**
+ * Point a model at a proxy or gateway via `<PROVIDER>_BASE_URL`.
+ *
+ * Applied on the `resolveModel` path so every consumer sees the redirected
+ * URL: both provider adapters already build their client from `model.baseUrl`,
+ * so nothing downstream needs to know an override happened.
+ */
+export function applyBaseUrlOverrides(model: Model): Model {
+	const override = process.env[baseUrlEnvVar(model.provider)]?.trim();
+	if (!override) return model;
+	return { ...model, baseUrl: override };
+}
+
+/**
+ * The API key for a model: `apiKeyEnv` first, then `apiKeyEnvFallbacks` in
+ * order. Returns undefined when none of them is set, so callers can tell
+ * "missing" apart from "empty".
+ */
+export function resolveApiKey(model: Model): string | undefined {
+	for (const name of [model.apiKeyEnv, ...(model.apiKeyEnvFallbacks ?? [])]) {
+		const value = process.env[name];
+		if (value) return value;
+	}
+	return undefined;
+}
+
+/** Env var names a model will accept its key from, in precedence order. */
+export function apiKeyEnvNames(model: Model): string[] {
+	return [model.apiKeyEnv, ...(model.apiKeyEnvFallbacks ?? [])];
+}
+
+/**
  * Resolve a model reference:
  * - "provider/model" → exact match on provider + id
  * - "model-id" → unique id match across providers
@@ -145,8 +187,9 @@ export function resolveModel(reference: string): Model | undefined {
 	if (slash > 0) {
 		const provider = reference.slice(0, slash);
 		const id = reference.slice(slash + 1);
-		return listModels().find((m) => m.provider === provider && m.id === id);
+		const match = listModels().find((m) => m.provider === provider && m.id === id);
+		return match ? applyBaseUrlOverrides(match) : undefined;
 	}
 	const matches = listModels().filter((m) => m.id === reference);
-	return matches.length > 0 ? matches[0] : undefined;
+	return matches.length > 0 ? applyBaseUrlOverrides(matches[0]) : undefined;
 }

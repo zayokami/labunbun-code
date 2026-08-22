@@ -4,10 +4,14 @@ export { withModelFallback } from "./fallback.ts";
 // Streaming internals
 export { MessageBuilder, parseToolArguments } from "./message-builder.ts";
 export {
+	apiKeyEnvNames,
+	applyBaseUrlOverrides,
+	baseUrlEnvVar,
 	clearCustomModels,
 	listModels,
 	type OpenAICompatibleProviderSpec,
 	registerOpenAICompatibleProvider,
+	resolveApiKey,
 	resolveModel,
 } from "./model.ts";
 export { type CostBreakdown, computeCost, formatCost } from "./pricing.ts";

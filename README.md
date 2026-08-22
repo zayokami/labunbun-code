@@ -41,6 +41,8 @@ labunbun                                # interactive REPL
   ctrl+O full-transcript browser, vim modal editing (`vimMode: true`),
   token-based dark/light themes.
 - **Headless output** — `--output-format text|json|stream-json`.
+- **Config import** — `labunbun migrate` maps an existing agent-tool setup
+  (`--from claude-code|codex`) onto labunbun's own config; dry run by default.
 
 ## Quick start
 
@@ -71,6 +73,23 @@ bun run dev -p "list files here"       # headless
 }
 ```
 
+### Import an existing setup
+
+Already configured another agent tool? Copy over what has an equivalent:
+
+```bash
+bun run dev migrate                    # dry run: report only, writes nothing
+bun run dev migrate --from codex       # one source (claude-code | codex | all)
+bun run dev migrate --apply            # write it
+bun run dev migrate --apply --force    # also overwrite values that exist
+```
+
+Sources are only read, never modified. Model names, `env`, MCP servers, skills
+and rules carry over; anything without an equivalent is reported as skipped with
+a reason rather than dropped silently, and existing values are kept unless
+`--force` says otherwise. The report names every written file that ends up
+holding a credential. `/migrate` does the same from inside the REPL.
+
 ## Project layout
 
 | Package | Purpose |
@@ -90,7 +109,7 @@ The loop never imports provider adapters directly — they arrive via injected
 
 ```bash
 pnpm typecheck        # tsc over all packages (source-mapped, no build step)
-pnpm test             # bun test — 130+ tests, no network needed
+pnpm test             # bun test — 330+ tests, no network needed
 pnpm lint             # biome check
 bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
 pnpm bin:build        # standalone executable via bun build --compile
@@ -101,10 +120,13 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
 
 ### Configuration roots
 
-- User: `~/.labunbun/` — `settings.json`, `MEMORY.md`, `agents/`, `skills/`
+- User: `~/.labunbun/` — `settings.json`, `.mcp.json`, `MEMORY.md`, `rules/*.md`,
+  `agents/`, `skills/`
 - Project: `.labunbun/` — `settings.json`, `settings.local.json` (gitignored),
   `rules/*.md`, `agents/`, `skills/`
 - Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
+- Base URLs are overridable per provider via `<PROVIDER>_BASE_URL`, e.g.
+  `ANTHROPIC_BASE_URL` for a gateway or proxy
 
 ## Sponsor
 
@@ -114,6 +136,7 @@ If LaBunbun Code saves you time, consider supporting development:
 |---------|---------|
 | **BTC** | `bc1qv9zhpzzdddyakzsetgwr4tkznl4ycsuxn7d00g` |
 | **ETH** | `0x8dFB632F494C694a1a0Ff4CC2566617230530020` |
+| **SOL** | `AdryGzPCKyH5PPzEmZ9ZxW77A5kCbBuapmrqeYFGcPna` |
 
 ## License
 

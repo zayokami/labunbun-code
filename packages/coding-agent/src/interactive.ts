@@ -17,7 +17,14 @@ import {
 	type SessionEntry,
 	SessionStore,
 } from "@labunbun/agent";
-import { createDefaultStreamFn, registerOpenAICompatibleProvider, resolveModel, withModelFallback } from "@labunbun/ai";
+import {
+	apiKeyEnvNames,
+	createDefaultStreamFn,
+	registerOpenAICompatibleProvider,
+	resolveApiKey,
+	resolveModel,
+	withModelFallback,
+} from "@labunbun/ai";
 import {
 	connectAllMcpServers,
 	connectMcpServer,
@@ -78,9 +85,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		console.error(`Unknown model: ${modelRef}`);
 		return 1;
 	}
-	if (!process.env[model.apiKeyEnv]) {
+	if (!resolveApiKey(model)) {
+		const names = apiKeyEnvNames(model);
 		console.error(
-			`Missing API key for ${model.provider}: set ${model.apiKeyEnv} in your environment.\n` +
+			`Missing API key for ${model.provider}: set ${names.join(" or ")} in your environment.\n` +
 				`Example: export ${model.apiKeyEnv}=sk-...`,
 		);
 		return 1;

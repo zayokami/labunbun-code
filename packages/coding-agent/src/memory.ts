@@ -73,20 +73,9 @@ export function expandIncludes(
 	});
 }
 
-/** Collect memory files for one directory level: LABUNBUN.md else AGENTS.md + rules/. */
-function collectLevel(dir: string): Array<{ path: string; content: string }> {
+/** Read every `*.md` in a rules directory, sorted, skipping an unreadable dir. */
+function collectRules(rulesDir: string): Array<{ path: string; content: string }> {
 	const out: Array<{ path: string; content: string }> = [];
-	const labunbunPath = join(dir, "LABUNBUN.md");
-	const agentsPath = join(dir, "AGENTS.md");
-	const mainContent = readIfExists(labunbunPath);
-	if (mainContent !== null) {
-		out.push({ path: labunbunPath, content: mainContent });
-	} else {
-		const agentsContent = readIfExists(agentsPath);
-		if (agentsContent !== null) out.push({ path: agentsPath, content: agentsContent });
-	}
-
-	const rulesDir = join(dir, ".labunbun", "rules");
 	try {
 		if (existsSync(rulesDir)) {
 			for (const name of readdirSync(rulesDir).sort()) {
@@ -101,12 +90,32 @@ function collectLevel(dir: string): Array<{ path: string; content: string }> {
 	return out;
 }
 
+/** Collect memory files for one directory level: LABUNBUN.md else AGENTS.md + rules/. */
+function collectLevel(dir: string): Array<{ path: string; content: string }> {
+	const out: Array<{ path: string; content: string }> = [];
+	const labunbunPath = join(dir, "LABUNBUN.md");
+	const agentsPath = join(dir, "AGENTS.md");
+	const mainContent = readIfExists(labunbunPath);
+	if (mainContent !== null) {
+		out.push({ path: labunbunPath, content: mainContent });
+	} else {
+		const agentsContent = readIfExists(agentsPath);
+		if (agentsContent !== null) out.push({ path: agentsPath, content: agentsContent });
+	}
+
+	out.push(...collectRules(join(dir, ".labunbun", "rules")));
+	return out;
+}
+
 export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult {
 	const files: Array<{ path: string; content: string }> = [];
 
-	// 1. User-global memory.
+	// 1. User-global memory, plus user-global rules. The cwd→root walk below
+	// only reaches `~/.labunbun/rules` when cwd happens to sit under the home
+	// directory, so user-scope rules need their own read to apply everywhere.
 	const userMemory = readIfExists(join(home, ".labunbun", "MEMORY.md"));
 	if (userMemory !== null) files.push({ path: join(home, ".labunbun", "MEMORY.md"), content: userMemory });
+	files.push(...collectRules(join(home, ".labunbun", "rules")));
 
 	// 2. Walk cwd → root; root-level files first so nearest wins by later append.
 	const start = resolve(cwd);
@@ -122,13 +131,17 @@ export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult
 		files.push(...collectLevel(dir));
 	}
 
-	// 3. Expand includes and join.
+	// 3. Expand includes and join. Deduped by path: when cwd sits under the home
+	// directory the walk revisits `~/.labunbun/rules`, which step 1 already read.
 	const parts: string[] = [];
 	const contributing: string[] = [];
+	const seenPaths = new Set<string>();
 	let total = 0;
 	let truncated = false;
 
 	for (const file of files) {
+		if (seenPaths.has(file.path)) continue;
+		seenPaths.add(file.path);
 		const expanded = expandIncludes(file.content, dirname(file.path), new Set([file.path]));
 		contributing.push(file.path);
 		parts.push(expanded);

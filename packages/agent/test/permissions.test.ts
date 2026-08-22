@@ -122,6 +122,57 @@ describe("evaluatePermissions", () => {
 		const parsed = parseRuleList(["Bash", "bad(rule", ""], "allow", "session");
 		expect(parsed).toHaveLength(1);
 	});
+
+	/**
+	 * MCP rules are written as bare tool names (`mcp__github`), not in
+	 * `Tool(specifier)` form, so they need their own matching. Both directions are
+	 * asserted: the server-wide form has to cover the server's tools, and it must
+	 * not reach past that server — a rule that over-matches on the deny side
+	 * blocks unrelated tools, and on the allow side grants them.
+	 */
+	describe.each([["allow", "allow", "ask"] as const, ["deny", "deny", "ask"] as const])(
+		"bare MCP rules in the %s direction",
+		(behavior, onMatch, onMiss) => {
+			test.each([
+				["mcp__github__*", "mcp__github__create_issue", true],
+				["mcp__github", "mcp__github__create_issue", true],
+				["mcp__github", "mcp__github", true],
+				["mcp__github__create_issue", "mcp__github__create_issue", true],
+				["mcp__github__create_*", "mcp__github__create_issue", true],
+				["mcp__github__create_*", "mcp__github__delete_repo", false],
+				["mcp__github", "mcp__gitlab__create_issue", false],
+				["mcp__github__*", "mcp__gitlab__anything", false],
+				// A server whose name merely starts with another's must not be covered.
+				["mcp__github", "mcp__githubby__whatever", false],
+				["mcp__github", "Read", false],
+			])("%s vs %s", (ruleText, toolName, shouldMatch) => {
+				const config = { mode: "default" as const, rules: rules([[ruleText, behavior]]), cwd: CWD };
+				expect(evaluatePermissions(toolName, {}, config).behavior).toBe(shouldMatch ? onMatch : onMiss);
+			});
+		},
+	);
+
+	test("a non-MCP rule is unaffected by MCP matching", () => {
+		const config = { mode: "default" as const, rules: rules([["Read", "allow"]]), cwd: CWD };
+		expect(evaluatePermissions("Read", { file_path: "a.ts" }, config).behavior).toBe("allow");
+		expect(evaluatePermissions("Write", { file_path: "a.ts" }, config).behavior).toBe("ask");
+		// `*` still matches everything, including MCP tools.
+		const wildcard = { mode: "default" as const, rules: rules([["*", "allow"]]), cwd: CWD };
+		expect(evaluatePermissions("mcp__github__x", {}, wildcard).behavior).toBe("allow");
+	});
+
+	test("an MCP deny beats an MCP allow for the same server", () => {
+		const config = {
+			mode: "default" as const,
+			rules: rules([
+				["mcp__github", "allow"],
+				["mcp__github__delete_repo", "deny"],
+			]),
+			cwd: CWD,
+		};
+		expect(evaluatePermissions("mcp__github__create_issue", {}, config).behavior).toBe("allow");
+		expect(evaluatePermissions("mcp__github__delete_repo", {}, config).behavior).toBe("deny");
+	});
 });
 
 describe("normalizePathSpec", () => {

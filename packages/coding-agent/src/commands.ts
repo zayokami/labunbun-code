@@ -8,6 +8,7 @@
  *   directly through the TUI for now)
  */
 import type { AgentSession, CompactionManager } from "@labunbun/agent";
+import { runMigration } from "./migrate.ts";
 
 export interface CommandBase {
 	name: string;
@@ -86,6 +87,25 @@ export function builtInCommands(): Command[] {
 			type: "prompt",
 			getPrompt: (args) =>
 				`Explain ${args || "the most recently discussed code"}. Cover what it does, why it is written this way, and any gotchas. Reference specific files and line numbers.`,
+		},
+		{
+			name: "migrate",
+			description: "Import settings from another agent tool: /migrate [--from <sources>] [--apply] [--force]",
+			type: "local",
+			call: (_ctx, args) => {
+				const tokens = args.split(/\s+/).filter(Boolean);
+				const fromIndex = tokens.indexOf("--from");
+				const result = runMigration({
+					from: fromIndex === -1 ? undefined : tokens[fromIndex + 1],
+					apply: tokens.includes("--apply"),
+					force: tokens.includes("--force"),
+				});
+				if (result.error) return result.error;
+				if (!result.applied) return result.report;
+				// Settings, skills and rules are all read at startup, so an applied
+				// migration only takes effect on the next launch.
+				return `${result.report}\n\nRestart to pick up the imported configuration.`;
+			},
 		},
 		{
 			name: "init",

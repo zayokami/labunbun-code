@@ -2,8 +2,13 @@
 import { runHeadless } from "./headless.ts";
 import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
+import { MIGRATION_SOURCE_IDS, runMigration } from "./migrate.ts";
+
+/** Subcommands, recognised only as the first argument. */
+const SUBCOMMANDS = new Set(["migrate"]);
 
 interface CliArgs {
+	subcommand: string | null;
 	help: boolean;
 	version: boolean;
 	print: string | null;
@@ -13,10 +18,14 @@ interface CliArgs {
 	noSession: boolean;
 	resume: string | null;
 	outputFormat: string | null;
+	apply: boolean;
+	force: boolean;
+	from: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
 	const args: CliArgs = {
+		subcommand: null,
 		help: false,
 		version: false,
 		print: null,
@@ -26,9 +35,19 @@ function parseArgs(argv: string[]): CliArgs {
 		noSession: false,
 		resume: null,
 		outputFormat: null,
+		apply: false,
+		force: false,
+		from: null,
 	};
-	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i];
+	// A leading bare word is a subcommand. Only the first argument is eligible,
+	// so a stray word later in the line is still the error it was before.
+	let rest = argv;
+	if (argv.length > 0 && !argv[0].startsWith("-") && SUBCOMMANDS.has(argv[0])) {
+		args.subcommand = argv[0];
+		rest = argv.slice(1);
+	}
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i];
 		switch (arg) {
 			case "--help":
 			case "-h":
@@ -40,25 +59,34 @@ function parseArgs(argv: string[]): CliArgs {
 				break;
 			case "--print":
 			case "-p":
-				args.print = argv[++i] ?? "";
+				args.print = rest[++i] ?? "";
 				break;
 			case "--model":
-				args.model = argv[++i] ?? null;
+				args.model = rest[++i] ?? null;
 				break;
 			case "--permission-mode":
-				args.permissionMode = argv[++i] ?? null;
+				args.permissionMode = rest[++i] ?? null;
 				break;
 			case "--max-turns":
-				args.maxTurns = Number(argv[++i]) || null;
+				args.maxTurns = Number(rest[++i]) || null;
 				break;
 			case "--no-session":
 				args.noSession = true;
 				break;
 			case "--resume":
-				args.resume = argv[++i] ?? null;
+				args.resume = rest[++i] ?? null;
 				break;
 			case "--output-format":
-				args.outputFormat = argv[++i] ?? null;
+				args.outputFormat = rest[++i] ?? null;
+				break;
+			case "--apply":
+				args.apply = true;
+				break;
+			case "--force":
+				args.force = true;
+				break;
+			case "--from":
+				args.from = rest[++i] ?? null;
 				break;
 			default:
 				console.error(`Unknown argument: ${arg} (see --help)`);
@@ -74,6 +102,7 @@ function printHelp(): void {
 Usage:
   labunbun                     Interactive REPL (Phase 3)
   labunbun -p "<prompt>"       Headless: run one prompt and print the result
+  labunbun migrate             Import settings from another agent tool
   labunbun --version           Show version
 
 Options:
@@ -84,7 +113,12 @@ Options:
       --no-session             Don't persist this session to disk
       --resume <id>            Resume a saved session
       --output-format <f>      Headless output: text | json | stream-json
-  -h, --help                   Show this help`);
+  -h, --help                   Show this help
+
+migrate options:
+      --from <sources>         ${MIGRATION_SOURCE_IDS.join(" | ")} | all (default all)
+      --apply                  Write the changes (default is a dry run)
+      --force                  Overwrite values and files that already exist`);
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
@@ -97,6 +131,23 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 	if (args.help) {
 		printHelp();
 		return 0;
+	}
+
+	// Subcommands run before model resolution and the API-key check: importing a
+	// configuration is exactly what someone does when they have no working
+	// configuration yet, so it must not require one.
+	if (args.subcommand === "migrate") {
+		const result = runMigration({
+			from: args.from ?? undefined,
+			apply: args.apply,
+			force: args.force,
+		});
+		if (result.error) {
+			console.error(result.error);
+			return 2;
+		}
+		console.log(result.report);
+		return result.applied && result.applied.failed.length > 0 ? 1 : 0;
 	}
 
 	if (args.print !== null) {

@@ -15,6 +15,7 @@
  *   calls and map to our StopReason.
  */
 import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
+import { resolveApiKey } from "../model.ts";
 import type { AssistantMessageEvent, Context, Model, StreamOptions, WireTool } from "../types.ts";
 
 // ---------------------------------------------------------------------------
@@ -301,7 +302,7 @@ export function createOpenAIStreamFn(clientFactory?: () => OpenAIClientLike) {
 
 async function defaultClient(model: Model, options?: StreamOptions): Promise<OpenAIClientLike> {
 	const { default: OpenAI } = await import("openai");
-	const apiKey = options?.apiKey ?? process.env[model.apiKeyEnv] ?? "";
+	const apiKey = options?.apiKey ?? resolveApiKey(model) ?? "";
 	return new OpenAI({
 		apiKey,
 		baseURL: model.baseUrl || undefined,
