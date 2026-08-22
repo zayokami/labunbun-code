@@ -30,13 +30,13 @@ export interface LocalCommandContext {
 
 export interface LocalCommand extends CommandBase {
 	type: "local";
-	call(ctx: LocalCommandContext, args: string): Promise<string | void> | string | void;
+	call(ctx: LocalCommandContext, args: string): Promise<string | undefined> | string | undefined;
 }
 
 export interface LocalJsxCommand extends CommandBase {
 	type: "local-jsx";
 	/** Placeholder until dialogs route through the TUI dialog slot. */
-	call(ctx: LocalCommandContext, args: string): Promise<string | void> | string | void;
+	call(ctx: LocalCommandContext, args: string): Promise<string | undefined> | string | undefined;
 }
 
 export type Command = PromptCommand | LocalCommand | LocalJsxCommand;
@@ -70,7 +70,7 @@ export function builtInCommands(): Command[] {
 			name: "compact",
 			description: "Summarize the conversation to free context; optional focus instructions",
 			type: "local",
-			call: async (ctx, args) => {
+			call: async (ctx, _args) => {
 				if (!ctx.compaction) return "Compaction is not available in this session.";
 				ctx.pushInfo("Compacting conversation…");
 				await ctx.compaction.compact({

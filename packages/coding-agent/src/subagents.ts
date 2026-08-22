@@ -125,7 +125,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 				};
 			}
 
-			const tools = definition.tools ? ctx.allTools.filter((t) => definition.tools!.includes(t.name)) : ctx.allTools;
+			const tools = definition.tools ? ctx.allTools.filter((t) => definition.tools?.includes(t.name)) : ctx.allTools;
 
 			const subSession = new AgentSession({
 				model: ctx.model,
@@ -150,7 +150,8 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 								if (decision.behavior === "ask") {
 									return {
 										behavior: "deny",
-										message: decision.message ?? `Permission required for ${toolName} (subagents cannot prompt interactively)`,
+										message:
+											decision.message ?? `Permission required for ${toolName} (subagents cannot prompt interactively)`,
 									};
 								}
 								return decision;

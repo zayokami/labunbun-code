@@ -26,7 +26,8 @@ describe("session branching", () => {
 
 		store.appendMessage(textMessage("user", "start"));
 		store.appendMessage(textMessage("assistant", "answer A"));
-		const branchPointEntry = store.linearEntries().at(-1)!;
+		const branchPointEntry = store.linearEntries().at(-1);
+		if (!branchPointEntry) throw new Error("expected at least one entry");
 
 		// Continue linearly.
 		store.appendMessage(textMessage("user", "follow-up"));
@@ -53,7 +54,8 @@ describe("session branching", () => {
 		const store = SessionStore.startNew(dir);
 		store.appendMessage(textMessage("user", "q1"));
 		store.appendMessage(textMessage("assistant", "a1"));
-		const forkAt = store.linearEntries().at(-1)!;
+		const forkAt = store.linearEntries().at(-1);
+		if (!forkAt) throw new Error("expected at least one entry");
 		store.appendMessage(textMessage("user", "b1"));
 		store.branch(forkAt.id);
 		store.appendMessage(textMessage("user", "b2"));

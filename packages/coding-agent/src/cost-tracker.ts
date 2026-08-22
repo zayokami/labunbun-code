@@ -90,7 +90,7 @@ export function loadCostState(path: string): CostState {
 }
 
 export function formatCostState(state: CostState): string {
-	const lines = ["Total cost: $" + state.totalCostUSD.toFixed(4)];
+	const lines = [`Total cost: $${state.totalCostUSD.toFixed(4)}`];
 	for (const [key, usage] of Object.entries(state.modelsUsage)) {
 		lines.push(
 			`  ${key}: ${usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens} tokens, $${usage.costUSD.toFixed(4)}`,

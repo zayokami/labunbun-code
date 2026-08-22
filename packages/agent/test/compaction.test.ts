@@ -99,8 +99,9 @@ describe("CompactionManager", () => {
 		];
 		const result = await manager.maybeCompact({ systemPrompt: "sys", messages });
 		expect(result).not.toBeNull();
-		expect(result!.messages).toHaveLength(1);
-		const boundary = result!.messages[0];
+		if (!result) throw new Error("expected compaction result");
+		expect(result.messages).toHaveLength(1);
+		const boundary = result.messages[0];
 		if (boundary.role !== "user") throw new Error("expected user boundary message");
 		const text = typeof boundary.content === "string" ? boundary.content : "";
 		expect(text).toContain("[Conversation compacted");

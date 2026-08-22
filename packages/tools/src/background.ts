@@ -100,7 +100,7 @@ export class BackgroundShellManager {
 
 	kill(id: string): boolean {
 		const entry = this.#entries.get(id);
-		if (!entry || entry.info.status !== "running" || !entry.proc.pid) return false;
+		if (entry?.info.status !== "running" || !entry.proc.pid) return false;
 		if (process.platform === "win32") {
 			const killer = spawn("taskkill", ["/pid", String(entry.proc.pid), "/T", "/F"], { windowsHide: true });
 			killer.on("error", () => {

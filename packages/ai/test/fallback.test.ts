@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { withModelFallback } from "../src/fallback.ts";
 import { MessageBuilder } from "../src/message-builder.ts";
-import { FAUX_MODEL, fauxProvider } from "../src/providers/faux.ts";
+import { FAUX_MODEL } from "../src/providers/faux.ts";
 import type { AssistantMessageEvent, Model, StreamFn } from "../src/types.ts";
 import { userMessage } from "../src/types.ts";
 

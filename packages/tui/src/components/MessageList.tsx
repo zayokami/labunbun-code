@@ -53,6 +53,7 @@ function renderMarkdownLite(text: string, color: string) {
 				out.push(
 					<Box key={`code-${out.length}`} flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
 						{codeBuffer.map((l, j) => (
+							// biome-ignore lint/suspicious/noArrayIndexKey: codeBuffer is rebuilt fresh per fenced block and never reordered
 							<Text key={j} color="gray">
 								{l}
 							</Text>
@@ -80,6 +81,7 @@ function renderMarkdownLite(text: string, color: string) {
 		out.push(
 			<Box key="code-tail" flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
 				{codeBuffer.map((l, j) => (
+					// biome-ignore lint/suspicious/noArrayIndexKey: codeBuffer is rebuilt fresh per fenced block and never reordered
 					<Text key={j} color="gray">
 						{l}
 					</Text>
@@ -122,6 +124,7 @@ function ResultLines({ text, isError }: { text: string; isError?: boolean }) {
 				else if (line.startsWith("-")) color = theme.error;
 				else if (line.startsWith("@@")) color = theme.primary;
 				return (
+					// biome-ignore lint/suspicious/noArrayIndexKey: capped is a fixed string slice split into immutable, never-reordered lines
 					<Text key={i} color={color}>
 						{line}
 					</Text>
@@ -135,6 +138,7 @@ export function MessageList({ entries }: { entries: UiEntry[] }) {
 	return (
 		<Box flexDirection="column">
 			{entries.map((entry, i) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: entries is append-only, existing indices never change identity
 				<EntryView key={i} entry={entry} />
 			))}
 		</Box>
@@ -193,6 +197,7 @@ export function VirtualMessageList({ entries }: { entries: UiEntry[] }) {
 		<Box flexDirection="column">
 			<Static items={head}>{(entry, i) => <EntryView key={`sealed-${i}`} entry={entry} />}</Static>
 			{tail.map((entry, i) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: sealed + i reconstructs the entry's stable absolute position in the full list
 				<EntryView key={`live-${sealed + i}`} entry={entry} />
 			))}
 		</Box>

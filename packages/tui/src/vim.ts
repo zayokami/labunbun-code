@@ -242,9 +242,9 @@ export class VimEngine {
 				return true;
 			}
 			this.#lastFind = { char, forward: kind === "f" || kind === "t", till: kind === "t" || kind === "T" };
-			if (this.#pendingCharWithOp) {
-				const op = this.#pending!.operator;
-				const preCount = this.#pending!.count;
+			if (this.#pendingCharWithOp && this.#pending) {
+				const op = this.#pending.operator;
+				const preCount = this.#pending.count;
 				this.#pending = null;
 				this.#applyOperator(op, kind, Math.max(1, preCount) * this.#takeCount(), char);
 			} else {

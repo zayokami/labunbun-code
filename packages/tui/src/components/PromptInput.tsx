@@ -140,12 +140,11 @@ export function PromptInput({
 					<Text dimColor>{placeholder}</Text>
 				) : (
 					lines.map((line, i) => (
+						// biome-ignore lint/suspicious/noArrayIndexKey: lines are plain text renders with no per-item state to preserve
 						<Text key={i} color={theme.text}>
-							{i === cursorLine || (sel && sel.start < lineEndOf(state.text, i)) ? (
-								renderLineWithCursorAndSelection(state, i, cursorColumn(state.text, state.cursor, i), sel)
-							) : (
-								line
-							)}
+							{i === cursorLine || (sel && sel.start < lineEndOf(state.text, i))
+								? renderLineWithCursorAndSelection(state, i, cursorColumn(state.text, state.cursor, i), sel)
+								: line}
 						</Text>
 					))
 				)}
@@ -215,13 +214,21 @@ function renderLineWithCursorAndSelection(
 	if (state.cursor >= lineStartPos && state.cursor <= lineEndPos && state.cursor >= selStart && state.cursor < selEnd) {
 		const relCursor = state.cursor - lineStartPos - midStart;
 		if (relCursor >= 0 && relCursor < middle.length) {
-			pieces.push(<Text inverse key="c">{middle.slice(relCursor, relCursor + 1)}</Text>);
+			pieces.push(
+				<Text inverse key="c">
+					{middle.slice(relCursor, relCursor + 1)}
+				</Text>,
+			);
 			pieces.push(middle.slice(relCursor + 1));
 		} else {
 			pieces.push(middle);
 		}
 	} else {
-		pieces.push(<Text inverse key="s">{middle}</Text>);
+		pieces.push(
+			<Text inverse key="s">
+				{middle}
+			</Text>,
+		);
 	}
 	pieces.push(after);
 	return pieces;

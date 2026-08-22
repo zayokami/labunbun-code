@@ -48,12 +48,15 @@ export function parseDuckDuckGoResults(html: string): SearchResult[] {
 	const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
 
 	const anchors: Array<{ url: string; title: string }> = [];
-	let match: RegExpExecArray | null;
-	while ((match = anchorRe.exec(html)) !== null) {
+	for (;;) {
+		const match = anchorRe.exec(html);
+		if (!match) break;
 		anchors.push({ url: decodeDdgUrl(match[1]), title: htmlToText(match[2]) });
 	}
 	const snippets: string[] = [];
-	while ((match = snippetRe.exec(html)) !== null) {
+	for (;;) {
+		const match = snippetRe.exec(html);
+		if (!match) break;
 		snippets.push(htmlToText(match[1]));
 	}
 	for (let i = 0; i < anchors.length; i++) {

@@ -33,7 +33,7 @@ import { mountRepl, type ReplAppHandle } from "@labunbun/tui";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { CostTracker, formatCostState } from "./cost-tracker.ts";
-import { appendHistory, loadHistory } from "./history.ts";
+import { appendHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
@@ -89,10 +89,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- session persistence: resume or new ----
 	let store: SessionStore | undefined;
 	if (options.resumeSessionId) {
+		const resumeId = options.resumeSessionId;
 		const sessions = listSessions(cwd);
 		const match =
-			sessions.find((s) => s.sessionId === options.resumeSessionId) ??
-			sessions.find((s) => s.sessionId.includes(options.resumeSessionId!));
+			sessions.find((s) => s.sessionId === resumeId) ?? sessions.find((s) => s.sessionId.includes(resumeId));
 		if (!match) {
 			console.error(`Session not found: ${options.resumeSessionId}`);
 			return 1;

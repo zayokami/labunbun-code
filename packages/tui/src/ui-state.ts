@@ -84,7 +84,7 @@ function previewInput(input: unknown): string {
 }
 
 /** Extract the primary preview for common tools (command, path, pattern). */
-export function toolPreview(toolName: string, input: unknown): string {
+export function toolPreview(_toolName: string, input: unknown): string {
 	if (typeof input !== "object" || input === null) return previewInput(input);
 	const record = input as Record<string, unknown>;
 	const key = ["command", "file_path", "pattern", "path"].find((k) => k in record);

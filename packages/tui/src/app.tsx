@@ -5,7 +5,6 @@
 
 import type { AgentSession, PermissionMode } from "@labunbun/agent";
 import { render } from "ink";
-import React from "react";
 import { connectSessionToStore, type PromptSubmitResult, type PromptSubmitVerdict, REPL } from "./components/REPL.tsx";
 import { createStore, type Store } from "./store.ts";
 import { DARK_THEME, LIGHT_THEME, ThemeContext } from "./theme.ts";
@@ -60,8 +59,6 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	const store = createStore<UiState>(initialUiState());
 	const theme = options.theme === "light" ? LIGHT_THEME : DARK_THEME;
 
-	let pendingPermission: ((allow: boolean) => void) | null = null;
-
 	const instance = render(
 		<ThemeContext.Provider value={theme}>
 			<REPL
@@ -88,7 +85,6 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		},
 		requestPermission: (toolName: string, input: unknown) =>
 			new Promise<boolean>((resolve) => {
-				pendingPermission = resolve;
 				store.set((state) => ({
 					...state,
 					dialog: {
@@ -98,7 +94,6 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 						resolve: (allow, alwaysAllow) => {
 							store.set((s) => ({ ...s, dialog: null }));
 							if (allow && alwaysAllow) options.onAlwaysAllow?.(toolName);
-							pendingPermission = null;
 							resolve(allow);
 						},
 					},
@@ -125,7 +120,6 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 			}),
 		clearPermissionRequest: () => {
 			store.set((s) => ({ ...s, dialog: null }));
-			pendingPermission = null;
 		},
 	};
 }

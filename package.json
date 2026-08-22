@@ -10,7 +10,7 @@
 		"dev": "bun run packages/coding-agent/src/main.ts",
 		"typecheck": "tsc -p tsconfig.check.json",
 		"test": "bun test",
-		"lint": "biome check .",
+		"lint": "biome check --error-on-warnings .",
 		"fmt": "biome format --write .",
 		"bin:build": "bun build --compile packages/coding-agent/src/main.ts --outfile dist/labunbun-x64.exe"
 	},

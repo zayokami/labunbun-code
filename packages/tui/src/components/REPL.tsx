@@ -3,7 +3,6 @@ import { Box, Text, useInput } from "ink";
 import { useCallback, useEffect, useState } from "react";
 import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
-import { useTheme } from "../theme.ts";
 import { initialUiState, reduceEvent, type UiState } from "../ui-state.ts";
 import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
@@ -72,7 +71,6 @@ export function REPL({
 	commandSuggestions,
 	vimMode,
 }: ReplProps) {
-	const theme = useTheme();
 	const entries = useStore(store, (s) => s.entries);
 	const streamingText = useStore(store, (s) => s.streamingText);
 	const thinkingText = useStore(store, (s) => s.thinkingText);
@@ -97,7 +95,7 @@ export function REPL({
 			const trimmed = text.trim();
 			if (trimmed.startsWith("/")) {
 				if (onCommand?.(trimmed)) return;
-				handleCommand(trimmed, { store, session, modelName, onExit });
+				handleCommand(trimmed, { store, modelName, onExit });
 				return;
 			}
 			if (trimmed.startsWith("#")) {
@@ -215,11 +213,8 @@ export function REPL({
 	);
 }
 
-function handleCommand(
-	text: string,
-	context: { store: Store<UiState>; session: AgentSession; modelName: string; onExit: () => void },
-): void {
-	const { store, session, modelName, onExit } = context;
+function handleCommand(text: string, context: { store: Store<UiState>; modelName: string; onExit: () => void }): void {
+	const { store, modelName, onExit } = context;
 	const [command, ...args] = text.split(/\s+/);
 
 	switch (command) {

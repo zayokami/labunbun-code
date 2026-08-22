@@ -63,7 +63,8 @@ describe("inputMatchesSpecifier", () => {
 describe("evaluatePermissions", () => {
 	const rules = (entries: Array<[string, "allow" | "deny"]>): PermissionRule[] =>
 		entries.map(([text, behavior]) => {
-			const parsed = parseRuleText(text)!;
+			const parsed = parseRuleText(text);
+			if (!parsed) throw new Error(`invalid rule text in test fixture: ${text}`);
 			return { ...parsed, behavior, source: "projectSettings" as const };
 		});
 

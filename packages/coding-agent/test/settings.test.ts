@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CostTracker, formatCostState } from "../src/cost-tracker.ts";
@@ -118,16 +118,17 @@ describe("session resume roundtrip", () => {
 		expect(sessions).toHaveLength(1);
 		const loaded = loadSessionForResume(sessions[0].path);
 		expect(loaded).not.toBeNull();
-		expect(loaded!.messages.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		if (!loaded) throw new Error("expected loaded session");
+		expect(loaded.messages.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
 
 		const faux2 = fauxProvider([{ text: "continued" }]);
 		const session2 = new AgentSession({
 			model: FAUX_MODEL,
-			store: loaded!.store,
+			store: loaded.store,
 			cwd: dir,
 			deps: { streamFn: faux2.streamFn },
 		});
-		session2.messages.push(...loaded!.messages);
+		session2.messages.push(...loaded.messages);
 		await session2.prompt("continue please");
 
 		const reloaded = SessionStore.load(sessions[0].path);

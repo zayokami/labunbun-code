@@ -12,7 +12,7 @@
  * dontAsk turns unresolved asks into denies (handled by the caller).
  */
 import { resolve } from "node:path";
-import type { PermissionContext, PermissionMode, PermissionResult } from "./types.ts";
+import type { PermissionMode, PermissionResult } from "./types.ts";
 
 export type RuleSource = "userSettings" | "projectSettings" | "localSettings" | "policy" | "cliArg" | "session";
 
