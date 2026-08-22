@@ -298,6 +298,33 @@ describe("operators and edits", () => {
 		expect(till.state.text).toBe("=b=c"); // deletes "a" only
 	});
 
+	test("d{n}f{c} carries the operator across the pending find char; counts on both sides multiply", () => {
+		const e = editor("0x1x2x3x4x5", 0);
+		e.engine.handleKey("2", e.key());
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("2", e.key());
+		e.engine.handleKey("f", e.key());
+		e.engine.handleKey("x", e.key());
+		expect(e.state.text).toBe("4x5"); // 2 (operator) x 2 (find) = deletes through the 4th 'x'
+		expect(e.state.cursor).toBe(0);
+
+		const single = editor("1x2x3x4", 0);
+		single.engine.handleKey("d", single.key());
+		single.engine.handleKey("2", single.key());
+		single.engine.handleKey("f", single.key());
+		single.engine.handleKey("x", single.key());
+		expect(single.state.text).toBe("3x4"); // deletes through the 2nd 'x'
+	});
+
+	test("{n}f{c} without a pending operator only moves the cursor", () => {
+		const e = editor("1x2x3x4", 0);
+		e.engine.handleKey("2", e.key());
+		e.engine.handleKey("f", e.key());
+		e.engine.handleKey("x", e.key());
+		expect(e.state.text).toBe("1x2x3x4");
+		expect(e.state.cursor).toBe(3);
+	});
+
 	test("dj deletes two whole lines linewise", () => {
 		const e = editor("l1\nl2\nl3\nl4", 2);
 		e.engine.handleKey("d", e.key());
