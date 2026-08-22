@@ -40,8 +40,8 @@ export function PermissionDialog({ toolName, inputPreview, onResolve }: Permissi
 	});
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.warning} paddingX={1} marginBottom={1}>
-			<Text color={theme.warning} bold>
+		<Box flexDirection="column" borderStyle="round" borderColor={theme.permission} paddingX={1} marginBottom={1}>
+			<Text color={theme.permission} bold>
 				Permission required
 			</Text>
 			<Text>
@@ -51,11 +51,11 @@ export function PermissionDialog({ toolName, inputPreview, onResolve }: Permissi
 				</Text>{" "}
 				wants to:
 			</Text>
-			<Text dimColor>{inputPreview}</Text>
+			<Text color={theme.toolArgs}>{inputPreview}</Text>
 			<Box flexDirection="column" marginTop={1}>
 				{options.map((option, i) => (
-					<Text key={option} color={i === selected ? theme.primary : theme.dim}>
-						{i === selected ? "❯ " : "  "}
+					<Text key={option} color={i === selected ? theme.selection : theme.textMuted}>
+						{i === selected ? `${theme.marks.selected} ` : "  "}
 						{i + 1}. {option}
 					</Text>
 				))}

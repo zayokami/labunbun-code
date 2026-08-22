@@ -1,53 +1,39 @@
 /**
- * Theme tokens — components consume semantic names via context, never raw
- * color names, so dark/light switching is a single provider swap.
+ * Theme context. The tokens themselves live in `themes/` — this module is the
+ * React binding plus the import path components already use, so a component
+ * only ever needs `useTheme()`.
  */
 import { createContext, useContext } from "react";
-
-export interface Theme {
-	name: string;
-	text: string;
-	dim: string;
-	primary: string;
-	success: string;
-	warning: string;
-	error: string;
-	toolBorder: string;
-	toolName: string;
-	userMessage: string;
-	thinking: string;
-}
-
-export const DARK_THEME: Theme = {
-	name: "dark",
-	text: "white",
-	dim: "gray",
-	primary: "cyan",
-	success: "green",
-	warning: "yellow",
-	error: "red",
-	toolBorder: "gray",
-	toolName: "magenta",
-	userMessage: "blue",
-	thinking: "gray",
-};
-
-export const LIGHT_THEME: Theme = {
-	name: "light",
-	text: "black",
-	dim: "gray",
-	primary: "blue",
-	success: "green",
-	warning: "#b45309",
-	error: "red",
-	toolBorder: "gray",
-	toolName: "magenta",
-	userMessage: "blue",
-	thinking: "gray",
-};
+import { DARK_THEME } from "./themes/index.ts";
+import type { Theme } from "./themes/tokens.ts";
 
 export const ThemeContext = createContext<Theme>(DARK_THEME);
 
 export function useTheme(): Theme {
 	return useContext(ThemeContext);
 }
+
+export {
+	AUTO_THEME_NAME,
+	BUILT_IN_THEME_NAMES,
+	BUILT_IN_THEMES,
+	DARK_THEME,
+	DEFAULT_THEME,
+	DEUTERANOPIA_DARK,
+	defineTheme,
+	deriveTheme,
+	HIGH_CONTRAST_DARK,
+	HIGH_CONTRAST_LIGHT,
+	LIGHT_THEME,
+	resolveBuiltInTheme,
+	SPIDERMAN,
+	SPLATOON,
+	THEME_TOKEN_KEYS,
+	type Theme,
+	type ThemeBold,
+	type ThemeMarks,
+	type ThemeOverrides,
+	type ThemeSpec,
+	TRITANOPIA_DARK,
+	themeForAppearance,
+} from "./themes/index.ts";

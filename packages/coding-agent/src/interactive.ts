@@ -36,7 +36,7 @@ import {
 	approveMcpServer as persistMcpApproval,
 } from "@labunbun/mcp";
 import { createAllTools, TaskStore } from "@labunbun/tools";
-import { mountRepl, type ReplAppHandle } from "@labunbun/tui";
+import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle } from "@labunbun/tui";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { CostTracker, formatCostState } from "./cost-tracker.ts";
@@ -55,13 +55,15 @@ import {
 import { loadSkills, skillsAsCommands } from "./skills.ts";
 import { createTaskTool, loadAgentDefinitions } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
+import { persistThemeChoice, type ResolvedTheme, resolveTheme } from "./theme-file.ts";
 
 export interface InteractiveOptions {
 	modelRef?: string;
 	permissionMode?: PermissionMode;
 	resumeSessionId?: string;
 	cwd?: string;
-	theme?: "dark" | "light";
+	/** Theme name: a built-in, a theme file, or "auto". */
+	theme?: string;
 }
 
 export async function runInteractive(options: InteractiveOptions = {}): Promise<number> {
@@ -371,11 +373,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- command registry ----
 	const commands: Command[] = [...builtInCommands(), ...skillsAsCommands(skills)];
 
+	// ---- theme ----
+	// Resolved before mounting: "auto" probes the terminal in raw mode, and Ink
+	// claims stdin the moment it renders.
+	const resolvedTheme = await resolveTheme(options.theme ?? settings.theme, cwd);
+
 	// ---- REPL ----
 	handle = mountRepl({
 		session,
 		modelName: `${model.provider}/${model.id}`,
-		theme: options.theme ?? settings.theme,
+		theme: resolvedTheme.theme,
 		vimMode: settings.vimMode,
 		commandSuggestions: completeCommands(commands, "").map((c) => [`/${c.name}`, c.description] as [string, string]),
 		onAlwaysAllow: (toolName) => {
@@ -417,6 +424,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				mcpConfig,
 				pendingMcpApprovals,
 				sessionStore: store,
+				theme: resolvedTheme,
 			}),
 	});
 
@@ -506,6 +514,8 @@ interface AppCommandContext {
 	mcpConfig: Record<string, McpServerConfig>;
 	pendingMcpApprovals: string[];
 	sessionStore?: SessionStore;
+	/** Theme resolved at startup; `/theme` reads its name and available list. */
+	theme: ResolvedTheme;
 }
 
 function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
@@ -695,14 +705,42 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		}
 		case "/theme": {
 			const arg = text.split(/\s+/)[1];
-			if (arg === "dark" || arg === "light") {
+			if (!arg) {
+				const lines = ctx.theme.available.map((name) => `  ${name === ctx.theme.theme.name ? "*" : " "} ${name}`);
 				pushInfo(
 					ctx.handle,
-					`Theme "${arg}" takes effect on next launch (persist via settings.json: {"theme":"${arg}"}).`,
+					[
+						`Themes (* = active):`,
+						...lines,
+						`  ${AUTO_THEME_NAME === ctx.theme.theme.name ? "*" : " "} ${AUTO_THEME_NAME} — follow the terminal background`,
+						"",
+						`/theme <name> applies it now and saves it to ~/.labunbun/settings.json`,
+					].join("\n"),
 				);
-			} else {
-				pushInfo(ctx.handle, `Usage: /theme dark|light — persists in ~/.labunbun/settings.json`);
+				return true;
 			}
+			void (async () => {
+				const resolved = await resolveTheme(arg, ctx.cwd);
+				// resolveTheme falls back to the default for an unknown name, so
+				// check the name rather than trusting that a theme came back.
+				if (arg !== AUTO_THEME_NAME && resolved.theme.name !== arg) {
+					pushInfo(ctx.handle, `Unknown theme "${arg}". Available: ${resolved.available.join(", ")}`);
+					return;
+				}
+				ctx.theme.theme = resolved.theme;
+				ctx.theme.available = resolved.available;
+				ctx.handle?.setTheme(resolved.theme);
+				try {
+					persistThemeChoice(arg);
+					pushInfo(ctx.handle, `Theme: ${resolved.theme.name}${arg === AUTO_THEME_NAME ? " (detected)" : ""}`);
+				} catch (error) {
+					// The theme is already applied; only the persistence failed.
+					pushInfo(
+						ctx.handle,
+						`Theme: ${resolved.theme.name} (not saved: ${error instanceof Error ? error.message : String(error)})`,
+					);
+				}
+			})();
 			return true;
 		}
 		default:

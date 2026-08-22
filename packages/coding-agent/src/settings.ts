@@ -37,7 +37,13 @@ export const SettingsSchema = z.object({
 	/** Model references tried in order when the primary errors before streaming. */
 	fallbackModels: z.array(z.string()).optional(),
 	permissionMode: PermissionModeSchema.optional(),
-	theme: z.enum(["dark", "light"]).optional(),
+	/**
+	 * Theme name: a built-in, a theme file from `~/.labunbun/themes/`, or
+	 * `"auto"` to follow the terminal background. Free-form rather than an enum
+	 * because third-party theme names cannot be enumerated here; a name that
+	 * does not resolve falls back to the default and is reported by `/doctor`.
+	 */
+	theme: z.string().optional(),
 	vimMode: z.boolean().optional(),
 	permissions: z
 		.object({

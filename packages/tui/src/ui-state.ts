@@ -3,6 +3,8 @@
  * renderable entries plus transient streaming/status slices.
  */
 import type { AgentEvent } from "@labunbun/agent";
+import { DEFAULT_THEME } from "./themes/index.ts";
+import type { Theme } from "./themes/tokens.ts";
 
 export type UiEntry =
 	| { kind: "user"; text: string }
@@ -43,6 +45,11 @@ export interface UiState {
 	question: QuestionDialogState | null;
 	contextInfo?: { usedTokens: number; threshold: number };
 	tasks?: UiTask[];
+	/**
+	 * Active theme. Lives in the store so `/theme` can take effect immediately:
+	 * the provider reads it from here, so a change rerenders the tree.
+	 */
+	theme: Theme;
 }
 
 export interface PermissionDialogState {
@@ -74,6 +81,7 @@ export function initialUiState(): UiState {
 		statusPhase: "idle",
 		dialog: null,
 		question: null,
+		theme: DEFAULT_THEME,
 	};
 }
 

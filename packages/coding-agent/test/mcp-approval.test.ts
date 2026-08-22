@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { AgentSession } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { loadApprovedMcpServers, loadProjectMcpServerNames } from "@labunbun/mcp";
-import { createStore } from "@labunbun/tui";
+import { createStore, DARK_THEME } from "@labunbun/tui";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
 
 const FIXTURE_SERVER = join(
@@ -35,6 +35,7 @@ function makeCtx(overrides: Partial<AppCommandContext> = {}): AppCommandContext 
 		mcpConfig: {},
 		pendingMcpApprovals: [],
 		sessionStore: undefined,
+		theme: { theme: DARK_THEME, available: [DARK_THEME.name], problems: [] },
 		...overrides,
 	};
 }

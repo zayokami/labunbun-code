@@ -4,13 +4,13 @@ import type React from "react";
 import { MessageList } from "../src/components/MessageList.tsx";
 import { PermissionDialog } from "../src/components/PermissionDialog.tsx";
 import { createStore } from "../src/store.ts";
-import { DARK_THEME, ThemeContext } from "../src/theme.ts";
+import { DARK_THEME, HIGH_CONTRAST_DARK, type Theme, ThemeContext } from "../src/theme.ts";
 import { initialUiState, reduceEvent, toolPreview, type UiState } from "../src/ui-state.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function withTheme(node: React.ReactNode) {
-	return <ThemeContext.Provider value={DARK_THEME}>{node}</ThemeContext.Provider>;
+function withTheme(node: React.ReactNode, theme: Theme = DARK_THEME) {
+	return <ThemeContext.Provider value={theme}>{node}</ThemeContext.Provider>;
 }
 
 describe("MessageList", () => {
@@ -47,6 +47,24 @@ describe("MessageList", () => {
 		const frame = lastFrame() ?? "";
 		expect(frame).toContain("...");
 		expect(frame).not.toContain("x".repeat(500)); // full output never rendered
+	});
+
+	// State cannot rely on color alone: a colorblind reader, or anyone piping the
+	// output through something that strips ANSI, still has to be able to tell an
+	// error from a success.
+	test("marks state with a symbol, so it survives without color", () => {
+		const { lastFrame } = render(
+			withTheme(<MessageList entries={[{ kind: "error", text: "boom" }]} />, HIGH_CONTRAST_DARK),
+		);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain(HIGH_CONTRAST_DARK.marks.error);
+		expect(frame).toContain("boom");
+	});
+
+	test("takes the error mark from the active theme", () => {
+		const custom: Theme = { ...DARK_THEME, marks: { ...DARK_THEME.marks, error: "[FAIL]" } };
+		const { lastFrame } = render(withTheme(<MessageList entries={[{ kind: "error", text: "boom" }]} />, custom));
+		expect(lastFrame() ?? "").toContain("[FAIL]");
 	});
 });
 

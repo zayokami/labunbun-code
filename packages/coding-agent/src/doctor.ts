@@ -6,7 +6,9 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { detectShell } from "@labunbun/tools";
+import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
 import type { Settings } from "./settings.ts";
+import { loadThemeFiles } from "./theme-file.ts";
 
 export interface DoctorCheck {
 	name: string;
@@ -71,6 +73,21 @@ export async function runDoctorChecks(settings: Settings, cwd: string): Promise<
 		name: "Settings",
 		status: found.length > 0 ? "ok" : "warn",
 		detail: found.length > 0 ? found.join(", ") : "no settings files (all defaults)",
+	});
+
+	// Theme resolution: an unresolved name or a broken theme file shows up as a
+	// theme that silently did nothing, so it is worth naming here.
+	const themeName = settings.theme ?? DEFAULT_THEME.name;
+	const loadedThemes = loadThemeFiles(cwd);
+	const known =
+		themeName === AUTO_THEME_NAME || loadedThemes.themes.has(themeName) || resolveBuiltInTheme(themeName) !== undefined;
+	const themeDetails = [known ? themeName : `unknown theme "${themeName}" — using ${DEFAULT_THEME.name}`];
+	if (loadedThemes.themes.size > 0) themeDetails.push(`${loadedThemes.themes.size} from theme files`);
+	themeDetails.push(...loadedThemes.problems);
+	checks.push({
+		name: "Theme",
+		status: known && loadedThemes.problems.length === 0 ? "ok" : "warn",
+		detail: themeDetails.join(" · "),
 	});
 
 	// Session storage writable

@@ -1,5 +1,5 @@
 import { Box, Static, Text } from "ink";
-import { useTheme } from "../theme.ts";
+import { type Theme, useTheme } from "../theme.ts";
 import type { UiEntry } from "../ui-state.ts";
 
 // biome-ignore format: keep the regex on one line so the ignore comment below stays attached
@@ -22,7 +22,7 @@ function UserMessageView({ text }: { text: string }) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1}>
-			<Text color={theme.userMessage}>
+			<Text color={theme.userInput}>
 				{"> "}
 				<Text bold>{stripAnsi(text)}</Text>
 			</Text>
@@ -34,32 +34,34 @@ function AssistantMessageView({ text }: { text: string }) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1} flexDirection="column">
-			{renderMarkdownLite(stripAnsi(text), theme.text)}
+			{renderMarkdownLite(stripAnsi(text), theme)}
 		</Box>
 	);
 }
 
-/** Minimal markdown: fenced code blocks dimmed, rest plain. */
-function renderMarkdownLite(text: string, color: string) {
+/** Minimal markdown: fenced code blocks boxed, rest plain. */
+function renderMarkdownLite(text: string, theme: Theme) {
 	const lines = text.split("\n");
 	const out: React.ReactNode[] = [];
 	let inCode = false;
 	let codeBuffer: string[] = [];
 
+	const codeBlock = (key: string, body: string[]) => (
+		<Box key={key} flexDirection="column" borderStyle="round" borderColor={theme.codeBorder} paddingX={1}>
+			{body.map((l, j) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: codeBuffer is rebuilt fresh per fenced block and never reordered
+				<Text key={j} color={theme.codeText}>
+					{l}
+				</Text>
+			))}
+		</Box>
+	);
+
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		if (line.trimStart().startsWith("```")) {
 			if (inCode) {
-				out.push(
-					<Box key={`code-${out.length}`} flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
-						{codeBuffer.map((l, j) => (
-							// biome-ignore lint/suspicious/noArrayIndexKey: codeBuffer is rebuilt fresh per fenced block and never reordered
-							<Text key={j} color="gray">
-								{l}
-							</Text>
-						))}
-					</Box>,
-				);
+				out.push(codeBlock(`code-${out.length}`, codeBuffer));
 				codeBuffer = [];
 				inCode = false;
 			} else {
@@ -72,22 +74,13 @@ function renderMarkdownLite(text: string, color: string) {
 			continue;
 		}
 		out.push(
-			<Text key={`line-${i}`} color={color}>
+			<Text key={`line-${i}`} color={theme.text}>
 				{line || " "}
 			</Text>,
 		);
 	}
 	if (codeBuffer.length > 0) {
-		out.push(
-			<Box key="code-tail" flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
-				{codeBuffer.map((l, j) => (
-					// biome-ignore lint/suspicious/noArrayIndexKey: codeBuffer is rebuilt fresh per fenced block and never reordered
-					<Text key={j} color="gray">
-						{l}
-					</Text>
-				))}
-			</Box>,
-		);
+		out.push(codeBlock("code-tail", codeBuffer));
 	}
 	return out;
 }
@@ -97,7 +90,7 @@ function ToolUseView({ entry }: { entry: Extract<UiEntry, { kind: "toolUse" }> }
 	return (
 		<Box marginBottom={1} flexDirection="column" borderStyle="round" borderColor={theme.toolBorder} paddingX={1}>
 			<Text>
-				<Text color={theme.toolName}>[{entry.toolName}]</Text> <Text dimColor>{entry.inputPreview}</Text>
+				<Text color={theme.toolName}>[{entry.toolName}]</Text> <Text color={theme.toolArgs}>{entry.inputPreview}</Text>
 			</Text>
 			{entry.resultText !== undefined && <ResultLines text={entry.resultText} isError={entry.isError} />}
 		</Box>
@@ -110,19 +103,23 @@ function ResultLines({ text, isError }: { text: string; isError?: boolean }) {
 	const sanitized = stripAnsi(text);
 	const capped = sanitized.length > 400 ? `${sanitized.slice(0, 397)}...` : sanitized || "(no output)";
 	if (isError) {
-		return <Text color={theme.error}>{capped}</Text>;
+		return (
+			<Text color={theme.error} bold={theme.bold.error}>
+				{theme.marks.error} {capped}
+			</Text>
+		);
 	}
 	const hasDiff = /^[-+@ ]/m.test(capped) && (capped.includes("\n- ") || capped.includes("\n+ "));
 	if (!hasDiff) {
-		return <Text color={theme.dim}>{capped}</Text>;
+		return <Text color={theme.toolOutput}>{capped}</Text>;
 	}
 	return (
 		<Box flexDirection="column">
 			{capped.split("\n").map((line, i) => {
-				let color = theme.dim;
-				if (line.startsWith("+")) color = theme.success;
-				else if (line.startsWith("-")) color = theme.error;
-				else if (line.startsWith("@@")) color = theme.primary;
+				let color = theme.toolOutput;
+				if (line.startsWith("+")) color = theme.diffAdded;
+				else if (line.startsWith("-")) color = theme.diffRemoved;
+				else if (line.startsWith("@@")) color = theme.diffHeader;
 				return (
 					// biome-ignore lint/suspicious/noArrayIndexKey: capped is a fixed string slice split into immutable, never-reordered lines
 					<Text key={i} color={color}>
@@ -145,6 +142,31 @@ export function MessageList({ entries }: { entries: UiEntry[] }) {
 	);
 }
 
+/**
+ * An error entry. Carries the theme's error mark and weight as well as its
+ * color, so the entry is still identifiable as an error when color is not
+ * available — a colorblind reader, a monochrome terminal, piped output.
+ */
+function ErrorView({ text }: { text: string }) {
+	const theme = useTheme();
+	return (
+		<Box marginBottom={1}>
+			<Text color={theme.error} bold={theme.bold.error}>
+				{theme.marks.error} {stripAnsi(text)}
+			</Text>
+		</Box>
+	);
+}
+
+function InfoView({ text }: { text: string }) {
+	const theme = useTheme();
+	return (
+		<Box marginBottom={1}>
+			<Text color={theme.textMuted}>{text}</Text>
+		</Box>
+	);
+}
+
 export function EntryView({ entry }: { entry: UiEntry }) {
 	switch (entry.kind) {
 		case "user":
@@ -154,17 +176,9 @@ export function EntryView({ entry }: { entry: UiEntry }) {
 		case "toolUse":
 			return <ToolUseView entry={entry} />;
 		case "error":
-			return (
-				<Box marginBottom={1}>
-					<Text color="red">{entry.text}</Text>
-				</Box>
-			);
+			return <ErrorView text={entry.text} />;
 		case "info":
-			return (
-				<Box marginBottom={1}>
-					<Text dimColor>{entry.text}</Text>
-				</Box>
-			);
+			return <InfoView text={entry.text} />;
 	}
 }
 

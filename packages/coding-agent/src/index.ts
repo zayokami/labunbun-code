@@ -22,3 +22,13 @@ export {
 	resolveModelReference,
 	runMigration,
 } from "./migrate.ts";
+export {
+	type LoadedThemes,
+	loadThemeFiles,
+	persistThemeChoice,
+	type ResolvedTheme,
+	resolveTheme,
+	type ThemeFile,
+	ThemeFileSchema,
+	themeFromFile,
+} from "./theme-file.ts";

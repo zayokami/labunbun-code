@@ -39,7 +39,8 @@ labunbun                                # interactive REPL
   when the primary model fails before streaming any content.
 - **Terminal UX** — virtualized transcript (sealed history + live tail),
   ctrl+O full-transcript browser, vim modal editing (`vimMode: true`),
-  token-based dark/light themes.
+  eight token-based themes with `auto` background detection and third-party
+  theme files.
 - **Headless output** — `--output-format text|json|stream-json`.
 - **Config import** — `labunbun migrate` maps an existing agent-tool setup
   (`--from claude-code|codex`) onto labunbun's own config; dry run by default.
@@ -90,6 +91,63 @@ a reason rather than dropped silently, and existing values are kept unless
 `--force` says otherwise. The report names every written file that ends up
 holding a credential. `/migrate` does the same from inside the REPL.
 
+## Themes
+
+```bash
+/theme                    # list every theme, marking the active one
+/theme high-contrast-dark # switch immediately and remember the choice
+/theme auto               # match the terminal background
+```
+
+| Name | For |
+|------|-----|
+| `dark` | default; follows the terminal's own palette |
+| `light` | light backgrounds, where terminal-default colors wash out |
+| `high-contrast-dark` | maximum contrast on dark, every state bold |
+| `high-contrast-light` | maximum contrast on light, every state bold |
+| `deuteranopia-dark` | red/green color blindness — success is blue, not green |
+| `tritanopia-dark` | blue/yellow color blindness — avoids the blue/green pair |
+| `spiderman` | red and blue |
+| `splatoon` | green and magenta |
+
+`theme` in `settings.json` selects one; `"auto"` asks the terminal for its
+background color (OSC 11, then `COLORFGBG`) and picks `light` or `dark`. Detection
+never blocks startup: a terminal that does not answer gets `dark`.
+
+State is never carried by color alone. Success, warning, error, pending and the
+selected row each render a symbol as well, so the transcript stays readable to a
+colorblind reader and through anything that strips ANSI.
+
+### Writing a theme
+
+Drop a JSON file in `~/.labunbun/themes/` (or `.labunbun/themes/` for one
+project, which wins on a name collision):
+
+```json
+{
+  "name": "midnight",
+  "appearance": "dark",
+  "extends": "dark",
+  "tokens": {
+    "accent": "#7aa2f7",
+    "error": "#f7768e",
+    "codeText": "#9aa5ce",
+    "marks": { "error": "×" }
+  }
+}
+```
+
+`extends` names a built-in that supplies every token the file leaves out, so a
+theme that changes a handful of colors does not have to restate the two dozen it
+is happy with. Values are anything Ink accepts: `"red"`, `"#d55e00"`,
+`"rgb(215,95,0)"`.
+
+The full token list is the `Theme` interface in
+`packages/tui/src/themes/tokens.ts`, where each token documents what it colors.
+A broken theme file never stops the REPL from starting; run `/doctor` to see
+which file failed and why — including misspelled token names, which otherwise
+just do nothing.
+
 ## Project layout
 
 | Package | Purpose |
@@ -109,7 +167,7 @@ The loop never imports provider adapters directly — they arrive via injected
 
 ```bash
 pnpm typecheck        # tsc over all packages (source-mapped, no build step)
-pnpm test             # bun test — 330+ tests, no network needed
+pnpm test             # bun test — 400+ tests, no network needed
 pnpm lint             # biome check
 bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
 pnpm bin:build        # standalone executable via bun build --compile
@@ -121,9 +179,9 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
 ### Configuration roots
 
 - User: `~/.labunbun/` — `settings.json`, `.mcp.json`, `MEMORY.md`, `rules/*.md`,
-  `agents/`, `skills/`
+  `agents/`, `skills/`, `themes/`
 - Project: `.labunbun/` — `settings.json`, `settings.local.json` (gitignored),
-  `rules/*.md`, `agents/`, `skills/`
+  `rules/*.md`, `agents/`, `skills/`, `themes/`
 - Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
 - Base URLs are overridable per provider via `<PROVIDER>_BASE_URL`, e.g.
   `ANTHROPIC_BASE_URL` for a gateway or proxy

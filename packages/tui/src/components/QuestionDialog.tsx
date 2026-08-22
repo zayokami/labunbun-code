@@ -45,8 +45,8 @@ export function QuestionDialog({ questions, resolve }: QuestionDialogState) {
 	if (!current || current.options.length === 0) return null;
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.primary} paddingX={1} marginBottom={1}>
-			<Text color={theme.primary} bold>
+		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
+			<Text color={theme.accent} bold>
 				{current.header}
 				{questions.length > 1 ? ` (${questionIndex + 1}/${questions.length})` : ""}
 			</Text>
@@ -54,8 +54,8 @@ export function QuestionDialog({ questions, resolve }: QuestionDialogState) {
 			<Box flexDirection="column" marginTop={1}>
 				{current.options.map((option, i) => (
 					<Box key={option.label} flexDirection="column">
-						<Text color={i === selected ? theme.primary : theme.dim}>
-							{i === selected ? "❯ " : "  "}
+						<Text color={i === selected ? theme.selection : theme.textMuted}>
+							{i === selected ? `${theme.marks.selected} ` : "  "}
 							{option.label}
 						</Text>
 						{i === selected && option.description && <Text dimColor> {option.description}</Text>}

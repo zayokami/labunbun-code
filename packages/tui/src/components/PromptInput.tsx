@@ -124,8 +124,8 @@ export function PromptInput({
 					{suggestions.map(([name, description], i) => {
 						const isSelected = suggestionIndex % suggestions.length === i;
 						return (
-							<Text key={name} color={isSelected ? theme.primary : theme.dim}>
-								{isSelected ? "❯ " : "  "}
+							<Text key={name} color={isSelected ? theme.selection : theme.textMuted}>
+								{isSelected ? `${theme.marks.selected} ` : "  "}
 								{name}
 								{description ? ` — ${description}` : ""}
 							</Text>
@@ -135,7 +135,7 @@ export function PromptInput({
 				</Box>
 			)}
 			{selected && state.text !== selected[0] && <Text dimColor> </Text>}
-			<Box flexDirection="column" borderStyle="round" borderColor={theme.primary} paddingX={1}>
+			<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1}>
 				{state.text.length === 0 ? (
 					<Text dimColor>{placeholder}</Text>
 				) : (

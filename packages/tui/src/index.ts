@@ -12,9 +12,41 @@ export { PermissionDialog } from "./components/PermissionDialog.tsx";
 export { PromptInput } from "./components/PromptInput.tsx";
 export { connectSessionToStore, REPL, type ReplProps } from "./components/REPL.tsx";
 export { StatusLine } from "./components/StatusLine.tsx";
+export {
+	type Appearance,
+	appearanceFromColorFgBg,
+	type DetectAppearanceOptions,
+	detectAppearance,
+	parseBackgroundLuminance,
+} from "./detect-appearance.ts";
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
 export { createStore, type Store, useStore } from "./store.ts";
-export { DARK_THEME, LIGHT_THEME, type Theme, ThemeContext, useTheme } from "./theme.ts";
+export {
+	AUTO_THEME_NAME,
+	BUILT_IN_THEME_NAMES,
+	BUILT_IN_THEMES,
+	DARK_THEME,
+	DEFAULT_THEME,
+	DEUTERANOPIA_DARK,
+	defineTheme,
+	deriveTheme,
+	HIGH_CONTRAST_DARK,
+	HIGH_CONTRAST_LIGHT,
+	LIGHT_THEME,
+	resolveBuiltInTheme,
+	SPIDERMAN,
+	SPLATOON,
+	THEME_TOKEN_KEYS,
+	type Theme,
+	type ThemeBold,
+	ThemeContext,
+	type ThemeMarks,
+	type ThemeOverrides,
+	type ThemeSpec,
+	TRITANOPIA_DARK,
+	themeForAppearance,
+	useTheme,
+} from "./theme.ts";
 export {
 	initialUiState,
 	type PendingTool,

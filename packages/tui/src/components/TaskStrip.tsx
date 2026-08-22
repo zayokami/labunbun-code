@@ -22,12 +22,12 @@ export function TaskStrip({ tasks }: { tasks: UiTask[] }) {
 
 	return (
 		<Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor={theme.toolBorder} paddingX={1}>
-			<Text color={theme.dim}>
+			<Text color={theme.textMuted}>
 				Tasks {completed}/{tasks.length}
 			</Text>
-			{active?.activeForm && <Text color={theme.primary}>▸ {active.activeForm}</Text>}
+			{active?.activeForm && <Text color={theme.accent}>▸ {active.activeForm}</Text>}
 			{visible.map((task) => (
-				<Text key={task.id} color={task.status === "in_progress" ? theme.primary : theme.dim}>
+				<Text key={task.id} color={task.status === "in_progress" ? theme.accent : theme.pending}>
 					{ICONS[task.status]} #{task.id} {task.subject}
 				</Text>
 			))}
