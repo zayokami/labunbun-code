@@ -109,9 +109,7 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 		newline: () => actions.insert("\n"),
 		backspace: () =>
 			commitWithUndo((s) =>
-				s.cursor === 0
-					? s
-					: { text: s.text.slice(0, s.cursor - 1) + s.text.slice(s.cursor), cursor: s.cursor - 1 },
+				s.cursor === 0 ? s : { text: s.text.slice(0, s.cursor - 1) + s.text.slice(s.cursor), cursor: s.cursor - 1 },
 			),
 		delete: () =>
 			commitWithUndo((s) =>
@@ -192,28 +190,25 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 	// Pure mode/selection flips don't touch React state — bump a tick so the
 	// mode badge and selection highlight stay live.
 	const [, setRenderTick] = useState(0);
-	const handleVimKey = useCallback(
-		(input: string, key: Partial<Key>): boolean => {
-			const engine = engineRef.current;
-			if (!engine) return false;
-			const before = `${engine.mode}:${JSON.stringify(engine.selection)}`;
-			const consumed = engine.handleKey(input, {
-				escape: key.escape,
-				return: key.return,
-				ctrl: key.ctrl,
-				meta: key.meta,
-				upArrow: key.upArrow,
-				downArrow: key.downArrow,
-				leftArrow: key.leftArrow,
-				rightArrow: key.rightArrow,
-			});
-			if (consumed && `${engine.mode}:${JSON.stringify(engine.selection)}` !== before) {
-				setRenderTick((t) => t + 1);
-			}
-			return consumed;
-		},
-		[],
-	);
+	const handleVimKey = useCallback((input: string, key: Partial<Key>): boolean => {
+		const engine = engineRef.current;
+		if (!engine) return false;
+		const before = `${engine.mode}:${JSON.stringify(engine.selection)}`;
+		const consumed = engine.handleKey(input, {
+			escape: key.escape,
+			return: key.return,
+			ctrl: key.ctrl,
+			meta: key.meta,
+			upArrow: key.upArrow,
+			downArrow: key.downArrow,
+			leftArrow: key.leftArrow,
+			rightArrow: key.rightArrow,
+		});
+		if (consumed && `${engine.mode}:${JSON.stringify(engine.selection)}` !== before) {
+			setRenderTick((t) => t + 1);
+		}
+		return consumed;
+	}, []);
 
 	const vimMode: VimMode = engineRef.current ? engineRef.current.mode : "insert";
 	const selection = engineRef.current?.selection ?? null;

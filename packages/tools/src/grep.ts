@@ -73,7 +73,10 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 					if (Date.now() > deadline) {
 						return {
 							content: [
-								{ type: "text", text: `Search aborted: pattern took too long to match (possible catastrophic backtracking).` },
+								{
+									type: "text",
+									text: `Search aborted: pattern took too long to match (possible catastrophic backtracking).`,
+								},
 							],
 							isError: true,
 						};

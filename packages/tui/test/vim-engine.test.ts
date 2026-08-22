@@ -16,7 +16,7 @@ import {
 
 function editor(text: string, cursor = 0) {
 	const recalled: Array<"up" | "down"> = [];
-	let undoBuf: Array<{ text: string; cursor: number }> = [];
+	const undoBuf: Array<{ text: string; cursor: number }> = [];
 	let redoBuf: Array<{ text: string; cursor: number }> = [];
 	const state = { text, cursor };
 
