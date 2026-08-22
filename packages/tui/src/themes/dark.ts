@@ -31,6 +31,16 @@ export const DARK_THEME: Theme = defineTheme({
 	diffHeader: "cyan",
 	codeText: "gray",
 	codeBorder: "gray",
+	syntax: {
+		keyword: "magenta",
+		string: "green",
+		comment: "gray",
+		number: "yellow",
+		function: "blue",
+	},
+
+	tableHeader: "cyan",
+	tableBorder: "gray",
 
 	path: "cyan",
 	link: "blue",
@@ -39,6 +49,6 @@ export const DARK_THEME: Theme = defineTheme({
 	cursor: "cyan",
 	accent: "cyan",
 
-	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯" },
+	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯", tableColumn: "│" },
 	bold: { error: true, warning: false, success: false },
 });

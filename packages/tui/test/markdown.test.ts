@@ -6,7 +6,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { type Block, type InlineSpan, parseBlocks, parseInline } from "../src/markdown.ts";
+import {
+	type Block,
+	type InlineSpan,
+	parseBlocks,
+	parseInline,
+	parseTableDelimiter,
+	splitTableRow,
+} from "../src/markdown.ts";
 
 /** Collapse spans to `text` only, for cases where the marks are not the point. */
 function plain(spans: InlineSpan[]): string {
@@ -14,7 +21,7 @@ function plain(spans: InlineSpan[]): string {
 }
 
 function spansOf(block: Block): InlineSpan[] {
-	if (block.kind === "code" || block.kind === "rule" || block.kind === "blank") {
+	if (block.kind === "code" || block.kind === "rule" || block.kind === "blank" || block.kind === "table") {
 		throw new Error(`block kind ${block.kind} carries no spans`);
 	}
 	return block.spans;
@@ -220,5 +227,92 @@ describe("parseBlocks structure", () => {
 			"blank",
 			"quote",
 		]);
+	});
+});
+
+describe("splitTableRow", () => {
+	test("leading and trailing pipes are optional", () => {
+		expect(splitTableRow("| a | b |")).toEqual(["a", "b"]);
+		expect(splitTableRow("a | b")).toEqual(["a", "b"]);
+	});
+
+	test("an escaped pipe stays inside its cell", () => {
+		// The backslash survives the split: unescaping is parseInline's job, and
+		// doing it here too would turn `\\|` into a separator again.
+		expect(splitTableRow("| a \\| b | c |")).toEqual(["a \\| b", "c"]);
+		expect(plain(parseInline("a \\| b"))).toBe("a | b");
+	});
+
+	test("a pipe inside inline code is not a separator", () => {
+		// Two cells, not three: the table would otherwise split every shell
+		// pipeline a model puts in a cell.
+		expect(splitTableRow("| a | `b|c` |")).toEqual(["a", "`b|c`"]);
+	});
+
+	test("an empty interior cell is kept", () => {
+		expect(splitTableRow("| a |  | c |")).toEqual(["a", "", "c"]);
+	});
+});
+
+describe("parseTableDelimiter", () => {
+	test("reads alignment off each cell", () => {
+		expect(parseTableDelimiter("|---|:---|:---:|---:|")).toEqual(["left", "left", "center", "right"]);
+	});
+
+	test("a paragraph containing pipes is not a delimiter row", () => {
+		// This null is the whole reason prose with pipes stays prose.
+		expect(parseTableDelimiter("| not a delimiter |")).toBeNull();
+		expect(parseTableDelimiter("a | b")).toBeNull();
+		expect(parseTableDelimiter("")).toBeNull();
+		expect(parseTableDelimiter("-----")).toBeNull();
+	});
+});
+
+describe("parseBlocks tables", () => {
+	function tableOf(text: string): Extract<Block, { kind: "table" }> {
+		const block = parseBlocks(text)[0];
+		if (block.kind !== "table") throw new Error(`expected a table, got ${block.kind}`);
+		return block;
+	}
+
+	test("headers, alignment, and rows all land", () => {
+		const table = tableOf("| Name | Size |\n|:-----|-----:|\n| a | 1 |\n| b | 2 |");
+		expect(table.headers.map(plain)).toEqual(["Name", "Size"]);
+		expect(table.align).toEqual(["left", "right"]);
+		expect(table.rows.map((row) => row.map(plain))).toEqual([
+			["a", "1"],
+			["b", "2"],
+		]);
+	});
+
+	test("cells keep their inline marks", () => {
+		const table = tableOf("| a | b |\n|---|---|\n| **bold** | `code` |");
+		expect(table.rows[0][0]).toEqual([{ text: "bold", bold: true }]);
+		expect(table.rows[0][1]).toEqual([{ text: "code", code: true }]);
+	});
+
+	test("a ragged row is kept rather than dropped", () => {
+		// Models emit these routinely; dropping the row would lose real content.
+		const table = tableOf("| a | b | c |\n|---|---|---|\n| 1 | 2 |");
+		expect(table.rows).toHaveLength(1);
+		expect(table.rows[0].map(plain)).toEqual(["1", "2"]);
+	});
+
+	test("the table ends at the first blank line", () => {
+		const blocks = parseBlocks("| a |\n|---|\n| 1 |\n\nafter");
+		expect(blocks.map((b) => b.kind)).toEqual(["table", "blank", "paragraph"]);
+	});
+
+	test("a header with no rows is still a table", () => {
+		expect(tableOf("| a | b |\n|---|---|").rows).toEqual([]);
+	});
+
+	test("pipes without a delimiter row stay a paragraph", () => {
+		expect(parseBlocks("| a | b |\njust text")[0].kind).toBe("paragraph");
+		expect(parseBlocks("run a | b to pipe")[0].kind).toBe("paragraph");
+	});
+
+	test("a table inside a fence is code, not a table", () => {
+		expect(parseBlocks("```\n| a |\n|---|\n```")[0].kind).toBe("code");
 	});
 });

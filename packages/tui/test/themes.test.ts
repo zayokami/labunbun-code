@@ -61,10 +61,21 @@ describe("token completeness", () => {
 	test("every color token is a non-empty string", () => {
 		for (const theme of ALL) {
 			for (const key of THEME_TOKEN_KEYS) {
-				if (key === "marks" || key === "bold") continue;
+				// The three grouped tokens are objects; they get their own assertions.
+				if (key === "marks" || key === "bold" || key === "syntax") continue;
 				const value = theme[key];
 				expect(typeof value).toBe("string");
 				expect((value as string).trim()).not.toBe("");
+			}
+		}
+	});
+
+	test("every theme colors all five syntax token kinds", () => {
+		for (const theme of ALL) {
+			expect(Object.keys(theme.syntax).sort()).toEqual(["comment", "function", "keyword", "number", "string"]);
+			for (const [kind, color] of Object.entries(theme.syntax)) {
+				expect(typeof color, `${theme.name}.syntax.${kind}`).toBe("string");
+				expect(color.trim()).not.toBe("");
 			}
 		}
 	});
@@ -98,9 +109,16 @@ describe("state legibility", () => {
 		}
 	});
 
-	test("every theme carries all five marks, non-empty", () => {
+	test("every theme carries all six marks, non-empty", () => {
 		for (const theme of ALL) {
-			expect(Object.keys(theme.marks).sort()).toEqual(["error", "pending", "selected", "success", "warning"]);
+			expect(Object.keys(theme.marks).sort()).toEqual([
+				"error",
+				"pending",
+				"selected",
+				"success",
+				"tableColumn",
+				"warning",
+			]);
 			for (const [key, mark] of Object.entries(theme.marks)) {
 				expect(typeof mark, `${theme.name}.marks.${key}`).toBe("string");
 				expect(mark.trim()).not.toBe("");
@@ -120,6 +138,18 @@ describe("state legibility", () => {
 	test("high-contrast themes bold every state", () => {
 		for (const theme of ALL.filter((t) => t.name.startsWith("high-contrast"))) {
 			expect(theme.bold).toEqual({ error: true, warning: true, success: true });
+		}
+	});
+
+	// Same failure mode as the state tokens: a theme where strings and comments
+	// share a color turns a commented-out string literal into one flat block.
+	test("the five syntax colors are pairwise distinct in every theme", () => {
+		for (const theme of ALL) {
+			const seen = new Map<string, string>();
+			for (const [kind, color] of Object.entries(theme.syntax)) {
+				expect(seen.has(color), `${theme.name}: syntax.${kind} duplicates ${seen.get(color)} (${color})`).toBe(false);
+				seen.set(color, kind);
+			}
 		}
 	});
 });
@@ -148,6 +178,15 @@ describe("deriveTheme", () => {
 		expect(derived.bold.success).toBe(DARK_THEME.bold.success);
 	});
 
+	test("merges syntax per key instead of replacing the group", () => {
+		const derived = deriveTheme(DARK_THEME, { syntax: { keyword: "#abcdef" } });
+		expect(derived.syntax.keyword).toBe("#abcdef");
+		expect(derived.syntax.string).toBe(DARK_THEME.syntax.string);
+		expect(derived.syntax.comment).toBe(DARK_THEME.syntax.comment);
+		expect(derived.syntax.number).toBe(DARK_THEME.syntax.number);
+		expect(derived.syntax.function).toBe(DARK_THEME.syntax.function);
+	});
+
 	test("recomputes aliases from the overridden tokens", () => {
 		const derived = deriveTheme(DARK_THEME, { accent: "#123456", textMuted: "#654321", userInput: "#abcdef" });
 		expect(derived.primary).toBe("#123456");
@@ -157,7 +196,12 @@ describe("deriveTheme", () => {
 
 	test("does not mutate the base theme", () => {
 		const before = structuredClone(DARK_THEME) as Theme;
-		deriveTheme(DARK_THEME, { error: "#000000", marks: { error: "x" }, bold: { success: true } });
+		deriveTheme(DARK_THEME, {
+			error: "#000000",
+			marks: { error: "x" },
+			bold: { success: true },
+			syntax: { keyword: "#000000" },
+		});
 		expect(DARK_THEME).toEqual(before);
 	});
 });

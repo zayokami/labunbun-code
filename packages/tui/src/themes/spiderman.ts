@@ -36,6 +36,18 @@ export const SPIDERMAN: Theme = deriveTheme(DARK_THEME, {
 	diffHeader: "#8ea2ff",
 	codeText: "#d5d8e5",
 	codeBorder: "#3b4a8f",
+	// Keywords take the blue rather than the signature red: the red is spent on
+	// `error`, and a code block full of red keywords would bury a real error.
+	syntax: {
+		keyword: "#8ea2ff",
+		string: "#00b74a",
+		comment: "#9aa0b5",
+		number: "#ffb300",
+		function: "#f5a3a6",
+	},
+
+	tableHeader: "#8ea2ff",
+	tableBorder: "#3b4a8f",
 
 	path: "#8ea2ff",
 	link: "#8ea2ff",
@@ -44,6 +56,6 @@ export const SPIDERMAN: Theme = deriveTheme(DARK_THEME, {
 	cursor: "#e62429",
 	accent: "#4d61c4",
 
-	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯" },
+	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯", tableColumn: "│" },
 	bold: { error: true, warning: false, success: false },
 });

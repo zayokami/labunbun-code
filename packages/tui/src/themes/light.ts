@@ -32,6 +32,16 @@ export const LIGHT_THEME: Theme = defineTheme({
 	diffHeader: "#0969da",
 	codeText: "#57606a",
 	codeBorder: "#8c959f",
+	syntax: {
+		keyword: "#cf222e",
+		string: "#0a3069",
+		comment: "#6e7781",
+		number: "#0550ae",
+		function: "#8250df",
+	},
+
+	tableHeader: "#0969da",
+	tableBorder: "#8c959f",
 
 	path: "#0969da",
 	link: "#0550ae",
@@ -40,6 +50,6 @@ export const LIGHT_THEME: Theme = defineTheme({
 	cursor: "#0969da",
 	accent: "#0969da",
 
-	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯" },
+	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯", tableColumn: "│" },
 	bold: { error: true, warning: false, success: false },
 });

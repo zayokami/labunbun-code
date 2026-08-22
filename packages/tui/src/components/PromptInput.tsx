@@ -48,17 +48,35 @@ export function PromptInput({
 		vim,
 	);
 	const [suggestionIndex, setSuggestionIndex] = useState(0);
+	/**
+	 * What was typed before the first Tab, or null when nothing has been completed
+	 * yet. Filtering on the buffer alone collapses the list to a single entry the
+	 * moment Tab writes a full command into it, which makes further cycling
+	 * impossible — so the original prefix keeps driving the list.
+	 */
+	const [completionPrefix, setCompletionPrefix] = useState<string | null>(null);
 
+	const query = completionPrefix ?? state.text;
 	const suggestions =
 		state.text.startsWith("/") && !state.text.includes(" ")
-			? commandSuggestions.filter(([name]) => name.startsWith(state.text.toLowerCase())).slice(0, 5)
+			? commandSuggestions.filter(([name]) => name.startsWith(query.toLowerCase())).slice(0, 5)
 			: [];
 
 	useInput(
 		(input, key) => {
 			if (handleVimKey(input, key)) return;
+			// Tab writes the highlighted suggestion into the buffer. Cycling alone
+			// left the user staring at a list they could not accept.
 			if (key.tab && suggestions.length > 0) {
-				setSuggestionIndex((i) => (i + 1) % suggestions.length);
+				if (completionPrefix === null) {
+					setCompletionPrefix(state.text);
+					actions.setText(suggestions[suggestionIndex % suggestions.length][0]);
+					return;
+				}
+				// Already completed: Tab again accepts the next match.
+				const next = (suggestionIndex + 1) % suggestions.length;
+				setSuggestionIndex(next);
+				actions.setText(suggestions[next][0]);
 				return;
 			}
 			if (key.return && (input === "" || input === "\r")) {
@@ -67,15 +85,27 @@ export function PromptInput({
 				pushHistory(text);
 				actions.clear();
 				setSuggestionIndex(0);
+				setCompletionPrefix(null);
 				onSubmit(text);
 				return;
 			}
+			// While the suggestion list is open the arrows move through it. Recalling
+			// history here would replace the half-typed command with an old prompt,
+			// which is the opposite of what someone browsing commands wants.
 			if (key.upArrow) {
-				if (!state.text.includes("\n")) historyUp();
+				if (suggestions.length > 0) {
+					setSuggestionIndex((i) => (i - 1 + suggestions.length) % suggestions.length);
+				} else if (!state.text.includes("\n")) {
+					historyUp();
+				}
 				return;
 			}
 			if (key.downArrow) {
-				if (!state.text.includes("\n")) historyDown();
+				if (suggestions.length > 0) {
+					setSuggestionIndex((i) => (i + 1) % suggestions.length);
+				} else if (!state.text.includes("\n")) {
+					historyDown();
+				}
 				return;
 			}
 			if (key.leftArrow) {
@@ -107,6 +137,9 @@ export function PromptInput({
 				return;
 			}
 			if (key.backspace || key.delete) {
+				// Editing invalidates the remembered prefix: the list should follow
+				// what is in the buffer again.
+				setCompletionPrefix(null);
 				actions.backspace();
 				return;
 			}
@@ -115,6 +148,8 @@ export function PromptInput({
 				return;
 			}
 			if (input && !key.ctrl && !key.meta && input !== "\r") {
+				setCompletionPrefix(null);
+				setSuggestionIndex(0);
 				actions.insert(input);
 			}
 		},

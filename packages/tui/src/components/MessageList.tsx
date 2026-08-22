@@ -1,5 +1,6 @@
 import { Box, Static, Text } from "ink";
-import { type InlineSpan, parseBlocks } from "../markdown.ts";
+import { type CodeToken, highlightCode } from "../highlight.ts";
+import { type Block, type ColumnAlign, type InlineSpan, parseBlocks } from "../markdown.ts";
 import { type Theme, useTheme } from "../theme.ts";
 import type { UiEntry } from "../ui-state.ts";
 
@@ -44,22 +45,28 @@ function AssistantMessageView({ text }: { text: string }) {
  * Render the parsed blocks. Code keeps its box; everything else maps marks onto
  * Ink's text attributes, falling back to color where the terminal has no
  * equivalent (inline code, links).
+ *
+ * Exported so the streaming preview renders identically to the sealed
+ * transcript — the alternative is markdown appearing only once a response
+ * finishes, which is what a reader notices first.
  */
-function renderMarkdownLite(text: string, theme: Theme) {
+export function renderMarkdownLite(text: string, theme: Theme) {
 	return parseBlocks(text).map((block, i) => {
 		const key = `b-${i}`;
 		switch (block.kind) {
 			case "code":
 				return (
 					<Box key={key} flexDirection="column" borderStyle="round" borderColor={theme.codeBorder} paddingX={1}>
-						{block.lines.map((line, j) => (
+						{highlightCode(block.lines, block.language).map((tokens, j) => (
 							// biome-ignore lint/suspicious/noArrayIndexKey: code lines are positional and never reordered
 							<Text key={j} color={theme.codeText}>
-								{line || " "}
+								{tokens.length === 0 ? " " : renderCodeTokens(tokens, theme)}
 							</Text>
 						))}
 					</Box>
 				);
+			case "table":
+				return <TableView key={key} block={block} theme={theme} />;
 			case "heading":
 				return (
 					<Text key={key} color={theme.accent} bold>
@@ -113,6 +120,93 @@ function renderSpans(spans: InlineSpan[], theme: Theme) {
 			{span.text}
 		</Text>
 	));
+}
+
+/** Syntax token kinds onto theme colors. `plain` inherits the code body color. */
+function renderCodeTokens(tokens: CodeToken[], theme: Theme) {
+	return tokens.map((token, i) => (
+		<Text
+			// biome-ignore lint/suspicious/noArrayIndexKey: tokens are positional within one line
+			key={i}
+			color={token.kind === "plain" ? undefined : theme.syntax[token.kind]}
+		>
+			{token.text}
+		</Text>
+	));
+}
+
+/** Printable width of a cell, for padding columns to a common width. */
+function cellWidth(spans: InlineSpan[]): number {
+	return spans.reduce((sum, span) => sum + span.text.length, 0);
+}
+
+function pad(text: string, width: number, align: ColumnAlign): { before: string; after: string } {
+	const slack = Math.max(0, width - text.length);
+	if (align === "right") return { before: " ".repeat(slack), after: "" };
+	if (align === "center") {
+		const left = Math.floor(slack / 2);
+		return { before: " ".repeat(left), after: " ".repeat(slack - left) };
+	}
+	return { before: "", after: " ".repeat(slack) };
+}
+
+/**
+ * A table, laid out as aligned columns with a rule under the header.
+ *
+ * Column widths are computed from the content rather than fixed, and ragged
+ * rows are tolerated — a model that emits four headers and a three-cell row is
+ * common enough that dropping the row would lose real content.
+ */
+function TableView({ block, theme }: { block: Extract<Block, { kind: "table" }>; theme: Theme }) {
+	const columns = Math.max(block.headers.length, ...block.rows.map((row) => row.length), 1);
+	const widths = Array.from({ length: columns }, (_, c) =>
+		Math.max(cellWidth(block.headers[c] ?? []), ...block.rows.map((row) => cellWidth(row[c] ?? [])), 1),
+	);
+	const align = (c: number): ColumnAlign => block.align[c] ?? "left";
+	const separator = ` ${theme.marks.tableColumn} `;
+
+	return (
+		<Box flexDirection="column">
+			<Text>
+				{widths.map((width, c) => {
+					const spans = block.headers[c] ?? [];
+					const { before, after } = pad(spans.map((s) => s.text).join(""), width, align(c));
+					return (
+						// biome-ignore lint/suspicious/noArrayIndexKey: columns are positional
+						<Text key={c}>
+							{c > 0 && <Text color={theme.tableBorder}>{separator}</Text>}
+							{before}
+							<Text color={theme.tableHeader} bold>
+								{renderSpans(spans, theme)}
+							</Text>
+							{after}
+						</Text>
+					);
+				})}
+			</Text>
+			<Text color={theme.tableBorder}>
+				{widths.map((width, c) => `${c > 0 ? separator : ""}${"─".repeat(width)}`).join("")}
+			</Text>
+			{block.rows.map((row, r) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: rows are positional and never reordered
+				<Text key={r} color={theme.text}>
+					{widths.map((width, c) => {
+						const spans = row[c] ?? [];
+						const { before, after } = pad(spans.map((s) => s.text).join(""), width, align(c));
+						return (
+							// biome-ignore lint/suspicious/noArrayIndexKey: columns are positional
+							<Text key={c}>
+								{c > 0 && <Text color={theme.tableBorder}>{separator}</Text>}
+								{before}
+								{renderSpans(spans, theme)}
+								{after}
+							</Text>
+						);
+					})}
+				</Text>
+			))}
+		</Box>
+	);
 }
 
 function ToolUseView({ entry }: { entry: Extract<UiEntry, { kind: "toolUse" }> }) {
@@ -248,13 +342,20 @@ export function VirtualMessageList({ entries }: { entries: UiEntry[] }) {
 	);
 }
 
-/** Streaming preview shown while the assistant is responding. */
+/**
+ * Streaming preview shown while the assistant is responding.
+ *
+ * Renders through the same markdown path as a sealed entry, so formatting
+ * appears as the text arrives instead of snapping into place at the end of the
+ * response. The parser tolerates half-arrived marks and unterminated fences,
+ * which is what makes this safe to run on every delta.
+ */
 export function StreamingPreview({ text, thinking }: { text: string; thinking: string }) {
 	const theme = useTheme();
 	if (!text && !thinking) return null;
 	return (
 		<Box flexDirection="column" marginBottom={1}>
-			{text && <Text color={theme.text}>{text}</Text>}
+			{text ? <Box flexDirection="column">{renderMarkdownLite(stripAnsi(text), theme)}</Box> : null}
 			{thinking && !text && <Text color={theme.thinking}>… {thinking.slice(-200)}</Text>}
 		</Box>
 	);

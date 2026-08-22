@@ -47,6 +47,18 @@ export const DEUTERANOPIA_DARK: Theme = deriveTheme(DARK_THEME, {
 	diffHeader: "#56b4e9",
 	codeText: "#d0d0d0",
 	codeBorder: "#a0a0a0",
+	// Strings move off green for the same reason `success` did: under
+	// deuteranopia a green string and an orange-red comment converge.
+	syntax: {
+		keyword: "#cc79a7",
+		string: "#56b4e9",
+		comment: "#a0a0a0",
+		number: "#f0e442",
+		function: "#0072b2",
+	},
+
+	tableHeader: "#56b4e9",
+	tableBorder: "#a0a0a0",
 
 	path: "#56b4e9",
 	link: "#56b4e9",
@@ -92,6 +104,18 @@ export const TRITANOPIA_DARK: Theme = deriveTheme(DARK_THEME, {
 	diffHeader: "#7fdbd0",
 	codeText: "#d0d0d0",
 	codeBorder: "#a0a0a0",
+	// No blue and no yellow: both converge with the greens here. Numbers take
+	// the pink that `warning` uses, which never appears beside them in code.
+	syntax: {
+		keyword: "#ff9ecb",
+		string: "#00a86b",
+		comment: "#a0a0a0",
+		number: "#ff8a80",
+		function: "#7fdbd0",
+	},
+
+	tableHeader: "#7fdbd0",
+	tableBorder: "#a0a0a0",
 
 	path: "#7fdbd0",
 	link: "#7fdbd0",

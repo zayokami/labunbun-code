@@ -36,6 +36,16 @@ export const HIGH_CONTRAST_DARK: Theme = deriveTheme(DARK_THEME, {
 	diffHeader: "#00ffff",
 	codeText: "#ffffff",
 	codeBorder: "#ffffff",
+	syntax: {
+		keyword: "#ff8cff",
+		string: "#00ff7f",
+		comment: "#d0d0d0",
+		number: "#ffd400",
+		function: "#7fd4ff",
+	},
+
+	tableHeader: "#00ffff",
+	tableBorder: "#ffffff",
 
 	path: "#00ffff",
 	link: "#7fd4ff",
@@ -71,6 +81,16 @@ export const HIGH_CONTRAST_LIGHT: Theme = deriveTheme(LIGHT_THEME, {
 	diffHeader: "#0000cc",
 	codeText: "#000000",
 	codeBorder: "#000000",
+	syntax: {
+		keyword: "#8b0072",
+		string: "#006400",
+		comment: "#3a3a3a",
+		number: "#7a4d00",
+		function: "#0000cc",
+	},
+
+	tableHeader: "#0000cc",
+	tableBorder: "#000000",
 
 	path: "#0000cc",
 	link: "#0000cc",

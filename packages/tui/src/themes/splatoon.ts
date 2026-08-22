@@ -35,6 +35,18 @@ export const SPLATOON: Theme = deriveTheme(DARK_THEME, {
 	diffHeader: "#fa4d95",
 	codeText: "#dcdce4",
 	codeBorder: "#7a2f52",
+	// Strings take the cyan instead of the signature green, which is reserved
+	// for `success` so a green "done" still reads as state and not decoration.
+	syntax: {
+		keyword: "#fa4d95",
+		string: "#00e5ff",
+		comment: "#9b9bad",
+		number: "#ffe600",
+		function: "#8a4dff",
+	},
+
+	tableHeader: "#fa4d95",
+	tableBorder: "#7a2f52",
 
 	path: "#00e5ff",
 	link: "#00e5ff",
@@ -43,6 +55,6 @@ export const SPLATOON: Theme = deriveTheme(DARK_THEME, {
 	cursor: "#19d719",
 	accent: "#fa4d95",
 
-	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯" },
+	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯", tableColumn: "│" },
 	bold: { error: true, warning: false, success: false },
 });

@@ -27,6 +27,8 @@ export interface ThemeMarks {
 	pending: string;
 	/** Cursor for the highlighted row of a list or dialog. */
 	selected: string;
+	/** Column separator in a rendered table. */
+	tableColumn: string;
 }
 
 /** Which state text renders bold. Weight is the second non-color channel. */
@@ -34,6 +36,20 @@ export interface ThemeBold {
 	error: boolean;
 	warning: boolean;
 	success: boolean;
+}
+
+/** Colors for the five syntax classes a fenced code block is split into. */
+export interface ThemeSyntax {
+	/** Language keywords (`const`, `def`, `fn`). */
+	keyword: string;
+	/** String and character literals, including their quotes. */
+	string: string;
+	/** Line and block comments. */
+	comment: string;
+	/** Numeric literals. */
+	number: string;
+	/** Identifiers in a call or declaration position. */
+	function: string;
 }
 
 export interface Theme {
@@ -85,10 +101,21 @@ export interface Theme {
 	diffRemoved: string;
 	/** Hunk headers (`@@`). */
 	diffHeader: string;
-	/** Body text inside a fenced code block. */
+	/** Body text inside a fenced code block, and any unhighlighted run of it. */
 	codeText: string;
 	/** Border around a fenced code block. */
 	codeBorder: string;
+	/**
+	 * Syntax colors for highlighted code. Only fenced blocks with a recognized
+	 * language tag are highlighted; everything else stays `codeText`.
+	 */
+	syntax: ThemeSyntax;
+
+	// ---- tables ----
+	/** Table header text. */
+	tableHeader: string;
+	/** Table rules and column separators. */
+	tableBorder: string;
 
 	// ---- structure ----
 	/** File paths. */
@@ -137,16 +164,18 @@ export function defineTheme(spec: ThemeSpec): Theme {
 }
 
 /** Overrides accepted by `deriveTheme`: any token, with partial nested groups. */
-export type ThemeOverrides = Partial<Omit<Theme, "marks" | "bold">> & {
+export type ThemeOverrides = Partial<Omit<Theme, "marks" | "bold" | "syntax">> & {
 	marks?: Partial<ThemeMarks>;
 	bold?: Partial<ThemeBold>;
+	syntax?: Partial<ThemeSyntax>;
 };
 
 /**
- * Derive a variant from an existing theme. `marks` and `bold` merge per key so
- * a variant can change one symbol without restating the other four, and the
- * aliases are recomputed from whatever the result's canonical tokens ended up
- * being — overriding `accent` alone still moves `primary` with it.
+ * Derive a variant from an existing theme. `marks`, `bold` and `syntax` merge
+ * per key so a variant can change one symbol or one syntax color without
+ * restating the others, and the aliases are recomputed from whatever the
+ * result's canonical tokens ended up being — overriding `accent` alone still
+ * moves `primary` with it.
  */
 export function deriveTheme(base: Theme, overrides: ThemeOverrides): Theme {
 	const merged: Theme = {
@@ -154,6 +183,7 @@ export function deriveTheme(base: Theme, overrides: ThemeOverrides): Theme {
 		...overrides,
 		marks: { ...base.marks, ...overrides.marks },
 		bold: { ...base.bold, ...overrides.bold },
+		syntax: { ...base.syntax, ...overrides.syntax },
 	};
 	return {
 		...merged,
@@ -185,6 +215,9 @@ export const THEME_TOKEN_KEYS: ReadonlyArray<keyof Theme> = [
 	"diffHeader",
 	"codeText",
 	"codeBorder",
+	"syntax",
+	"tableHeader",
+	"tableBorder",
 	"path",
 	"link",
 	"selection",

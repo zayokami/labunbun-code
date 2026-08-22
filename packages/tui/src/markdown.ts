@@ -24,8 +24,12 @@ export type Block =
 	| { kind: "listItem"; marker: string; indent: number; spans: InlineSpan[] }
 	| { kind: "quote"; spans: InlineSpan[] }
 	| { kind: "code"; language: string; lines: string[] }
+	| { kind: "table"; headers: InlineSpan[][]; align: ColumnAlign[]; rows: InlineSpan[][][] }
 	| { kind: "rule" }
 	| { kind: "blank" };
+
+/** Column alignment, from the `:---`/`:---:`/`---:` delimiter row. */
+export type ColumnAlign = "left" | "center" | "right";
 
 /** Inline code spans a backtick run of the same length, so `` `a` `` nests. */
 const CODE_RE = /^(`+)([\s\S]*?)\1/;
@@ -109,6 +113,64 @@ export function parseInline(text: string): InlineSpan[] {
 }
 
 /**
+ * Split a table row into cells. Escaped pipes stay literal, and pipes inside
+ * inline code are not separators — `| a | `b|c` |` is two cells, not three.
+ * Leading and trailing pipes are optional, per GFM.
+ */
+export function splitTableRow(line: string): string[] {
+	const cells: string[] = [];
+	let cell = "";
+	let backticks = 0;
+	for (let i = 0; i < line.length; i++) {
+		const char = line[i];
+		if (char === "\\" && i + 1 < line.length) {
+			cell += char + line[i + 1];
+			i++;
+			continue;
+		}
+		if (char === "`") {
+			// Count the run so a closing run of equal length can be matched.
+			let run = 0;
+			while (line[i + run] === "`") run++;
+			if (backticks === 0) backticks = run;
+			else if (backticks === run) backticks = 0;
+			cell += "`".repeat(run);
+			i += run - 1;
+			continue;
+		}
+		if (char === "|" && backticks === 0) {
+			cells.push(cell);
+			cell = "";
+			continue;
+		}
+		cell += char;
+	}
+	cells.push(cell);
+	// A leading or trailing pipe produces an empty edge cell; drop those, but
+	// keep genuinely empty interior cells.
+	if (cells.length > 1 && cells[0].trim() === "" && line.trimStart().startsWith("|")) cells.shift();
+	if (cells.length > 1 && cells[cells.length - 1].trim() === "" && line.trimEnd().endsWith("|")) cells.pop();
+	return cells.map((c) => c.trim());
+}
+
+/**
+ * Parse the delimiter row that makes the line above it a header. Returns null
+ * when the line is not one, which is what distinguishes a table from an
+ * ordinary paragraph that happens to contain pipes.
+ */
+export function parseTableDelimiter(line: string): ColumnAlign[] | null {
+	if (!line.includes("-") || !line.includes("|")) return null;
+	const cells = splitTableRow(line);
+	const align: ColumnAlign[] = [];
+	for (const cell of cells) {
+		const match = /^(:?)-+(:?)$/.exec(cell);
+		if (!match) return null;
+		align.push(match[1] && match[2] ? "center" : match[2] ? "right" : "left");
+	}
+	return align.length > 0 ? align : null;
+}
+
+/**
  * Split text into blocks. Fenced code wins over everything inside it, and an
  * unterminated fence still yields its lines — the streaming case, where the
  * closing fence has not arrived yet.
@@ -118,7 +180,8 @@ export function parseBlocks(text: string): Block[] {
 	const lines = text.split("\n");
 	let fence: { marker: string; language: string; lines: string[] } | null = null;
 
-	for (const line of lines) {
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
 		const fenceMatch = /^\s*(`{3,}|~{3,})\s*(\S*)/.exec(line);
 		if (fence) {
 			// Only a fence of the same character closes the block.
@@ -142,6 +205,24 @@ export function parseBlocks(text: string): Block[] {
 		if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
 			out.push({ kind: "rule" });
 			continue;
+		}
+
+		// A table is only a table once the delimiter row confirms it, so a lone
+		// line containing pipes stays a paragraph.
+		if (line.includes("|")) {
+			const align = parseTableDelimiter(lines[index + 1] ?? "");
+			if (align) {
+				const headers = splitTableRow(line).map((cell) => parseInline(cell));
+				const rows: InlineSpan[][][] = [];
+				let cursor = index + 2;
+				while (cursor < lines.length && lines[cursor].includes("|") && lines[cursor].trim()) {
+					rows.push(splitTableRow(lines[cursor]).map((cell) => parseInline(cell)));
+					cursor++;
+				}
+				out.push({ kind: "table", headers, align, rows });
+				index = cursor - 1;
+				continue;
+			}
 		}
 
 		const heading = /^\s*(#{1,6})\s+(.*)$/.exec(line);
