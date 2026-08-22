@@ -2,7 +2,45 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { snapshotHooks } from "../src/hooks.ts";
+import { advisoryHookFailures, snapshotHooks } from "../src/hooks.ts";
+
+describe("advisoryHookFailures", () => {
+	test("a non-zero exit is reported even though it only sets blocked", () => {
+		// The contract routes a non-zero exit to `blocked`, not `errors`. An
+		// advisory call site that read only `errors` would silently swallow a
+		// hook failing on every run.
+		const messages = advisoryHookFailures("SessionStart", {
+			blocked: true,
+			reason: "hook exited 3",
+			addedContext: [],
+			suppressOutput: false,
+			errors: [],
+		});
+		expect(messages).toHaveLength(1);
+		expect(messages[0]).toContain("SessionStart");
+		expect(messages[0]).toContain("hook exited 3");
+	});
+
+	test("spawn errors are reported with the event name", () => {
+		const messages = advisoryHookFailures("SessionEnd", {
+			blocked: false,
+			addedContext: [],
+			suppressOutput: false,
+			errors: ["spawn ENOENT"],
+		});
+		expect(messages).toEqual(["SessionEnd hook failed: spawn ENOENT"]);
+	});
+
+	test("a clean outcome produces no noise", () => {
+		const messages = advisoryHookFailures("Notification", {
+			blocked: false,
+			addedContext: ["some context"],
+			suppressOutput: false,
+			errors: [],
+		});
+		expect(messages).toHaveLength(0);
+	});
+});
 
 describe("snapshotHooks", () => {
 	test("invalid config is rejected, not thrown", () => {

@@ -28,6 +28,36 @@ export const McpServerConfigSchema = z.union([
 
 export type McpServerConfig = z.input<typeof McpServerConfigSchema>;
 
+/** How long a server gets to complete connect + capability discovery. */
+export const CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * Strip secret *values* out of a message, keeping key names.
+ *
+ * A stdio server's `env` typically holds API keys and an HTTP server's
+ * `headers` hold bearer tokens. Config-validation errors quote the value they
+ * rejected, and connection failures can echo the spawn environment — both
+ * paths would otherwise write live credentials into the transcript UI and the
+ * session JSONL on disk, where they persist long after the error scrolled past.
+ */
+export function sanitizeMcpError(message: string, config: McpServerConfig): string {
+	const secrets = new Set<string>();
+	const record = config as { env?: Record<string, string>; headers?: Record<string, string> };
+	for (const value of Object.values(record.env ?? {})) {
+		if (value) secrets.add(value);
+	}
+	for (const value of Object.values(record.headers ?? {})) {
+		if (value) secrets.add(value);
+	}
+
+	let out = message;
+	// Longest first, so a value that contains another is redacted whole.
+	for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+		out = out.split(secret).join("[redacted]");
+	}
+	return out;
+}
+
 export interface McpConnection {
 	serverName: string;
 	client: Client;
@@ -59,8 +89,42 @@ function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodType {
 	return z.unknown();
 }
 
+/**
+ * Bound a connect attempt. On timeout the pending work is abandoned and
+ * `onTimeout` gets a chance to release the transport (a stdio server would
+ * otherwise leave an orphaned child process behind for the session's lifetime).
+ */
+async function withTimeout<T>(work: Promise<T>, onTimeout: () => void, timeoutMs: number): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => {
+					onTimeout();
+					reject(new Error(`timed out after ${timeoutMs}ms`));
+				}, timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+		// A rejected `work` promise is already surfaced by the race; swallow any
+		// later rejection so losing the race can't raise an unhandled rejection.
+		void work.catch(() => {});
+	}
+}
+
+export interface ConnectMcpOptions {
+	/** Connect + discovery budget. Defaults to CONNECT_TIMEOUT_MS. */
+	timeoutMs?: number;
+}
+
 /** Connect to one MCP server and adapt its tools. Never throws. */
-export async function connectMcpServer(serverName: string, config: McpServerConfig): Promise<McpConnection> {
+export async function connectMcpServer(
+	serverName: string,
+	config: McpServerConfig,
+	options?: ConnectMcpOptions,
+): Promise<McpConnection> {
 	const parsed = McpServerConfigSchema.safeParse(config);
 	if (!parsed.success) {
 		return {
@@ -68,7 +132,7 @@ export async function connectMcpServer(serverName: string, config: McpServerConf
 			client: null as never,
 			tools: [],
 			prompts: [],
-			error: `invalid config: ${parsed.error.message}`,
+			error: `invalid config: ${sanitizeMcpError(parsed.error.message, config)}`,
 		};
 	}
 
@@ -86,10 +150,20 @@ export async function connectMcpServer(serverName: string, config: McpServerConf
 					});
 
 		const client = new Client({ name: "labunbun", version: "0.1.0" });
-		await client.connect(transport);
-
-		const toolList = await client.listTools();
-		const promptList = await client.listPrompts().catch(() => ({ prompts: [] }));
+		// A server that accepts the connection but never answers would otherwise
+		// hang startup forever — every server gets a bounded window to finish
+		// connecting and reporting its capabilities.
+		const { toolList, promptList } = await withTimeout(
+			(async () => {
+				await client.connect(transport);
+				return {
+					toolList: await client.listTools(),
+					promptList: await client.listPrompts().catch(() => ({ prompts: [] })),
+				};
+			})(),
+			() => void client.close().catch(() => {}),
+			options?.timeoutMs ?? CONNECT_TIMEOUT_MS,
+		);
 
 		const tools: AnyTool[] = (toolList.tools ?? []).map((mcpTool) =>
 			buildTool({
@@ -115,9 +189,10 @@ export async function connectMcpServer(serverName: string, config: McpServerConf
 							: [{ type: "text" as const, text: JSON.stringify(result) }];
 						return { content, isError: Boolean(result.isError) };
 					} catch (error) {
-						ctx.onUpdate({ mcpError: String(error) });
+						const message = sanitizeMcpError(error instanceof Error ? error.message : String(error), config);
+						ctx.onUpdate({ mcpError: message });
 						return {
-							content: [{ type: "text", text: `MCP call failed: ${error instanceof Error ? error.message : error}` }],
+							content: [{ type: "text", text: `MCP call failed: ${message}` }],
 							isError: true,
 						};
 					}
@@ -137,7 +212,7 @@ export async function connectMcpServer(serverName: string, config: McpServerConf
 			client: null as never,
 			tools: [],
 			prompts: [],
-			error: error instanceof Error ? error.message : String(error),
+			error: sanitizeMcpError(error instanceof Error ? error.message : String(error), config),
 		};
 	}
 }
@@ -212,13 +287,14 @@ export function approveMcpServer(cwd: string, serverName: string): void {
 export async function connectAllMcpServers(
 	configs: Record<string, McpServerConfig>,
 	approvedServers?: Set<string>,
+	options?: ConnectMcpOptions,
 ): Promise<McpConnection[]> {
 	return Promise.all(
 		Object.entries(configs).map(async ([name, config]) => {
 			if (approvedServers && !approvedServers.has(name)) {
 				return { serverName: name, client: null as never, tools: [], prompts: [], error: "not approved" };
 			}
-			return connectMcpServer(name, config);
+			return connectMcpServer(name, config, options);
 		}),
 	);
 }

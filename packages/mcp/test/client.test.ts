@@ -10,12 +10,12 @@ import {
 	loadMcpConfig,
 	loadProjectMcpServerNames,
 	McpServerConfigSchema,
+	sanitizeMcpError,
 } from "../src/client.ts";
 
-const FIXTURE_SERVER = join(
-	dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
-	"fixture-server.ts",
-);
+const TEST_DIR = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+const FIXTURE_SERVER = join(TEST_DIR, "fixture-server.ts");
+const STALLING_SERVER = join(TEST_DIR, "fixture-stalling-server.ts");
 
 describe("McpServerConfigSchema", () => {
 	test("stdio and http variants", () => {
@@ -57,6 +57,105 @@ describe("connectMcpServer (fixture stdio server)", () => {
 	test("invalid config yields error connection, not a throw", async () => {
 		const connection = await connectMcpServer("bad", { command: "" } as never);
 		expect(connection.error).toBeDefined();
+	});
+});
+
+describe("connect timeout", () => {
+	test("a server that accepts the connection but never answers is bounded, not a hang", async () => {
+		const started = Date.now();
+		const connection = await connectMcpServer(
+			"stalling",
+			{ command: process.execPath, args: [STALLING_SERVER] },
+			{ timeoutMs: 750 },
+		);
+		const elapsed = Date.now() - started;
+
+		expect(connection.error).toBeDefined();
+		expect(connection.error).toContain("timed out");
+		expect(connection.tools).toHaveLength(0);
+		// Bounded by the budget rather than running to the default 30s.
+		expect(elapsed).toBeLessThan(15_000);
+	}, 30_000);
+
+	test("a stalling server does not block other servers in the same batch", async () => {
+		const connections = await connectAllMcpServers(
+			{
+				stalling: { command: process.execPath, args: [STALLING_SERVER] },
+				working: { command: process.execPath, args: [FIXTURE_SERVER] },
+			},
+			undefined,
+			{ timeoutMs: 5_000 },
+		);
+		const stalling = connections.find((c) => c.serverName === "stalling");
+		const working = connections.find((c) => c.serverName === "working");
+		expect(stalling?.error).toContain("timed out");
+		expect(working?.error).toBeUndefined();
+		expect(working?.tools.length).toBeGreaterThan(0);
+	}, 30_000);
+});
+
+describe("sanitizeMcpError", () => {
+	const stdioConfig = {
+		type: "stdio" as const,
+		command: "node",
+		args: [],
+		env: { API_KEY: "sk-secret-value-12345", EMPTY: "" },
+	};
+	const httpConfig = {
+		type: "http" as const,
+		url: "https://example.test/mcp",
+		headers: { Authorization: "Bearer tok-abcdef-9876" },
+	};
+
+	test("redacts stdio env values", () => {
+		const out = sanitizeMcpError("spawn failed with env API_KEY=sk-secret-value-12345", stdioConfig);
+		expect(out).not.toContain("sk-secret-value-12345");
+		expect(out).toContain("[redacted]");
+	});
+
+	test("redacts HTTP header values", () => {
+		const out = sanitizeMcpError("401 sent Authorization: Bearer tok-abcdef-9876", httpConfig);
+		expect(out).not.toContain("tok-abcdef-9876");
+		expect(out).toContain("[redacted]");
+	});
+
+	test("keeps key names so the message stays diagnosable", () => {
+		expect(sanitizeMcpError("missing API_KEY in environment", stdioConfig)).toContain("API_KEY");
+	});
+
+	test("an empty env value does not blank out the whole message", () => {
+		expect(sanitizeMcpError("connection refused", stdioConfig)).toBe("connection refused");
+	});
+
+	test("redacts every occurrence, not just the first", () => {
+		const out = sanitizeMcpError("sk-secret-value-12345 then sk-secret-value-12345 again", stdioConfig);
+		expect(out).not.toContain("sk-secret-value-12345");
+	});
+
+	test("a value containing another is redacted whole", () => {
+		const nested = {
+			type: "stdio" as const,
+			command: "node",
+			args: [],
+			env: { SHORT: "abc123", LONG: "abc123-extended-secret" },
+		};
+		const out = sanitizeMcpError("token abc123-extended-secret leaked", nested);
+		expect(out).toBe("token [redacted] leaked");
+	});
+
+	test("a config with no env or headers passes the message through untouched", () => {
+		expect(sanitizeMcpError("plain failure", { command: "node" } as never)).toBe("plain failure");
+	});
+
+	test("invalid-config errors do not echo the rejected secret value", async () => {
+		const connection = await connectMcpServer("bad", {
+			// `url` is required for the http variant; omitting it makes zod quote
+			// the object it rejected, which would otherwise include the token.
+			type: "http",
+			headers: { Authorization: "Bearer tok-must-not-leak" },
+		} as never);
+		expect(connection.error).toBeDefined();
+		expect(connection.error).not.toContain("tok-must-not-leak");
 	});
 });
 

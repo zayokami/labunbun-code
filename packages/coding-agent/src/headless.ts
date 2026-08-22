@@ -7,10 +7,11 @@
  * - stream-json: one JSON line per event, live
  */
 import type { AgentEvent, PermissionMode } from "@labunbun/agent";
-import { AgentSession, evaluatePermissions, parseRuleList, SessionStore } from "@labunbun/agent";
+import { AgentSession, evaluatePermissions, SessionStore } from "@labunbun/agent";
 import { type AgentMessage, createDefaultStreamFn, resolveModel } from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
-import { loadSettings } from "./settings.ts";
+import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
+import { applySettingsEnv, collectPermissionRules, loadSettings, resolvePermissionMode } from "./settings.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 
 export type OutputFormat = "text" | "json" | "stream-json";
@@ -46,11 +47,34 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 
 	const tools = createAllTools(cwd);
 	const store = options.noSession ? undefined : SessionStore.startNew(cwd);
-	const { settings } = loadSettings(cwd);
-	const rules = [
-		...parseRuleList(settings.permissions.deny, "deny", "userSettings"),
-		...parseRuleList(settings.permissions.allow, "allow", "userSettings"),
-	];
+	const loadedSettings = loadSettings(cwd);
+	const { settings } = loadedSettings;
+	applySettingsEnv(settings);
+	const rules = collectPermissionRules(loadedSettings);
+	// Headless defaults to bypassPermissions, so this is the tier check that
+	// matters most: managed settings can veto it and force real evaluation.
+	// Note `settings.permissionMode` is deliberately not consulted here — it
+	// governs the interactive default, and honouring it would change what
+	// existing scripted `-p` runs are allowed to do.
+	const { mode: effectiveMode, downgradeReason } = resolvePermissionMode(
+		options.permissionMode ?? "bypassPermissions",
+		loadedSettings,
+	);
+	if (downgradeReason) console.error(`Warning: ${downgradeReason}`);
+
+	// ---- user hooks (snapshotted at startup against mid-session injection) ----
+	const hooksRuntime = snapshotHooks(settings.hooks);
+	const sessionId = store?.sessionId ?? undefined;
+	const hookContext: string[] = [];
+
+	// SessionStart runs before the prompt so its context reaches the model.
+	// Hook failures are reported on stderr and never change the exit code.
+	const sessionStart = await hooksRuntime.run("SessionStart", { session_id: sessionId, cwd });
+	hookContext.push(...sessionStart.addedContext);
+	for (const message of advisoryHookFailures("SessionStart", sessionStart)) {
+		console.error(`Warning: ${message}`);
+	}
+	let hookContextInjected = false;
 	const session = new AgentSession({
 		model,
 		systemPrompt: buildSystemPrompt(tools, {
@@ -62,7 +86,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		store,
 		cwd,
 		maxTurns: options.maxTurns,
-		permissionMode: options.permissionMode ?? "bypassPermissions",
+		permissionMode: effectiveMode,
 		deps: {
 			streamFn: createDefaultStreamFn(),
 			// Headless has no interactive dialog, so an unresolved "ask" fails
@@ -76,6 +100,39 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 					};
 				}
 				return decision;
+			},
+			hooks: {
+				transformContext: (context) => {
+					if (hookContextInjected || hookContext.length === 0) return context;
+					hookContextInjected = true;
+					const prefix = hookContext.join("\n\n");
+					const messages = [...context.messages];
+					for (let i = messages.length - 1; i >= 0; i--) {
+						const message = messages[i];
+						if (message.role === "user") {
+							const text = typeof message.content === "string" ? message.content : "";
+							messages[i] = { ...message, content: `${prefix}\n\n---\n\n${text}`.trimEnd() };
+							break;
+						}
+					}
+					return { ...context, messages };
+				},
+				beforeToolCall: async (toolName, input) => {
+					if (!hooksRuntime.has("PreToolUse")) return undefined;
+					const outcome = await hooksRuntime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
+					for (const error of outcome.errors) console.error(`Warning: PreToolUse hook failed: ${error}`);
+					if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
+					return undefined;
+				},
+				afterToolCall: async (toolName, input) => {
+					if (!hooksRuntime.has("PostToolUse")) return undefined;
+					const outcome = await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
+					// Advisory: the call already ran, so a block has nothing to stop.
+					for (const message of advisoryHookFailures("PostToolUse", outcome)) {
+						console.error(`Warning: ${message}`);
+					}
+					return undefined;
+				},
 			},
 		},
 	});
@@ -123,6 +180,26 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		}
 	});
 
+	// UserPromptSubmit gates the single headless prompt. A block exits non-zero
+	// without ever reaching the model, so scripted callers can detect it.
+	if (hooksRuntime.has("UserPromptSubmit")) {
+		const outcome = await hooksRuntime.run("UserPromptSubmit", {
+			prompt: options.prompt,
+			session_id: sessionId,
+			cwd,
+		});
+		for (const error of outcome.errors) console.error(`Warning: UserPromptSubmit hook failed: ${error}`);
+		hookContext.push(...outcome.addedContext);
+		if (outcome.blocked) {
+			console.error(`[prompt blocked by UserPromptSubmit hook${outcome.reason ? `: ${outcome.reason}` : ""}]`);
+			const endOutcome = await hooksRuntime.run("SessionEnd", { session_id: sessionId, cwd });
+			for (const message of advisoryHookFailures("SessionEnd", endOutcome)) {
+				console.error(`Warning: ${message}`);
+			}
+			return 1;
+		}
+	}
+
 	const reason = await session.prompt(options.prompt);
 	const finalText = finalAssistantText(session.messages);
 	const usage = totalUsage(session.messages);
@@ -167,6 +244,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		console.error(`[session saved: ${store.path}]`);
 	} else if (store) {
 		console.error(`[session saved: ${store.path}]`);
+	}
+
+	// SessionEnd is last, and its failures never change the exit code.
+	const sessionEnd = await hooksRuntime.run("SessionEnd", { session_id: sessionId, cwd });
+	for (const message of advisoryHookFailures("SessionEnd", sessionEnd)) {
+		console.error(`Warning: ${message}`);
 	}
 	return reason === "completed" ? 0 : reason === "aborted" ? 130 : 1;
 }

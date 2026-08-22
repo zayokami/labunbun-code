@@ -6,7 +6,7 @@
 import type { AgentSession, PermissionMode } from "@labunbun/agent";
 import { render } from "ink";
 import React from "react";
-import { connectSessionToStore, REPL } from "./components/REPL.tsx";
+import { connectSessionToStore, type PromptSubmitResult, type PromptSubmitVerdict, REPL } from "./components/REPL.tsx";
 import { createStore, type Store } from "./store.ts";
 import { DARK_THEME, LIGHT_THEME, ThemeContext } from "./theme.ts";
 import { initialUiState, toolPreview, type UiState } from "./ui-state.ts";
@@ -19,8 +19,11 @@ export interface ReplAppOptions {
 	vimMode?: boolean;
 	/** App-level slash-command handler; false falls through to built-ins. */
 	onCommand?: (text: string) => boolean;
-	/** Called for every non-slash prompt the user submits. */
-	onSubmitText?: (text: string) => void;
+	/**
+	 * Called for every non-slash prompt the user submits, before it reaches the
+	 * transcript or the model. Returning `{ block: true }` rejects the prompt.
+	 */
+	onSubmitText?: (text: string) => PromptSubmitResult | Promise<PromptSubmitResult>;
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
 	/** Slash-command suggestions for autocomplete. */
@@ -127,5 +130,5 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	};
 }
 
-export type { PermissionMode };
+export type { PermissionMode, PromptSubmitResult, PromptSubmitVerdict };
 export { DARK_THEME, LIGHT_THEME, ThemeContext };

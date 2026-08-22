@@ -75,6 +75,131 @@ export function specifierToRegExp(specifier: string): RegExp {
 	return new RegExp(`^${pattern}$`);
 }
 
+/**
+ * Programs whose positional arguments are files they read. Used to extend
+ * file deny rules across the shell (see extractBashFilePaths).
+ */
+const FILE_READING_COMMANDS = new Set([
+	"cat",
+	"head",
+	"tail",
+	"less",
+	"more",
+	"type",
+	"strings",
+	"od",
+	"xxd",
+	"hexdump",
+	"base64",
+	"nl",
+	"tac",
+	"cp",
+	"install",
+]);
+
+/** Shell metacharacters that separate one command from the next. */
+const COMMAND_SEPARATOR_RE = /(?:\|\||&&|[;|&\n])/;
+
+/**
+ * Best-effort extraction of file paths a shell command would read or write.
+ *
+ * This exists so that a deny rule like `Read(**\/.env)` also covers
+ * `Bash(cat .env)` — without it the shell is an open bypass around every file
+ * deny rule the user configured.
+ *
+ * Deliberately defense-in-depth, NOT a sandbox: a shell can express file
+ * access in unbounded ways (`$(printf ...)`, variable indirection, `bash -c`,
+ * `eval`), so static extraction can always be evaded by someone trying. The
+ * contract that keeps this safe to rely on is directional — callers use the
+ * result only to *deny*, never to allow. Failing to extract a path leaves the
+ * original decision untouched rather than widening it.
+ */
+export function extractBashFilePaths(command: string): string[] {
+	const found: string[] = [];
+
+	for (const segment of command.split(COMMAND_SEPARATOR_RE)) {
+		const tokens = tokenizeShell(segment);
+		if (tokens.length === 0) continue;
+
+		// Redirections apply regardless of which program runs: `> f`, `>> f`,
+		// `< f`, `2> f`, and the attached forms (`>f`).
+		for (let i = 0; i < tokens.length; i++) {
+			const token = tokens[i];
+			const redirect = token.match(/^\d*(?:>>|>|<)(.*)$/);
+			if (!redirect) continue;
+			const attached = redirect[1];
+			const target = attached !== "" ? attached : tokens[i + 1];
+			if (target && !target.startsWith("&")) found.push(target);
+		}
+
+		// Positional arguments of known file-reading programs. Strip a leading
+		// path so `/bin/cat` and `cat` are treated alike.
+		const program = (tokens[0].split("/").pop() ?? "").replace(/\.exe$/i, "").toLowerCase();
+		if (!FILE_READING_COMMANDS.has(program)) continue;
+		for (const token of tokens.slice(1)) {
+			if (token.startsWith("-")) continue; // flag
+			if (/^\d*(?:>>|>|<)/.test(token)) continue; // redirection, handled above
+			if (/^\d+$/.test(token)) continue; // bare count, e.g. `head -n 5`
+			found.push(token);
+		}
+	}
+
+	return found.filter((path) => path.length > 0);
+}
+
+/**
+ * Split a shell segment into tokens, honoring quotes so a quoted path with
+ * spaces stays one token, and unwrapping the quotes as the shell would.
+ */
+function tokenizeShell(segment: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: '"' | "'" | null = null;
+	let started = false;
+
+	for (let i = 0; i < segment.length; i++) {
+		const char = segment[i];
+		if (quote) {
+			if (char === quote) quote = null;
+			else current += char;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			quote = char;
+			started = true;
+			continue;
+		}
+		if (/\s/.test(char)) {
+			if (started) tokens.push(current);
+			current = "";
+			started = false;
+			continue;
+		}
+		current += char;
+		started = true;
+	}
+	if (started) tokens.push(current);
+	return tokens;
+}
+
+/** Tools whose file deny rules a Bash command should also be held to. */
+const FILE_TOOL_NAMES = new Set(["Read", "Edit", "Write", "NotebookEdit"]);
+
+/**
+ * Does a Bash command touch a file that a file-tool deny rule protects?
+ * Returns the offending path so the denial can name it.
+ */
+function bashHitsFileDenyRule(rule: PermissionRule, input: unknown, cwd: string): string | null {
+	if (!FILE_TOOL_NAMES.has(rule.toolName) || rule.specifier === undefined) return null;
+	if (typeof input !== "object" || input === null) return null;
+	const command = (input as Record<string, unknown>).command;
+	if (typeof command !== "string") return null;
+	for (const path of extractBashFilePaths(command)) {
+		if (pathMatches(path, rule.specifier, cwd)) return path;
+	}
+	return null;
+}
+
 /** Does a tool input match a specifier, per that tool's matching grammar? */
 export function inputMatchesSpecifier(toolName: string, specifier: string, input: unknown, cwd: string): boolean {
 	if (typeof input !== "object" || input === null) return false;
@@ -164,6 +289,17 @@ export function evaluatePermissions(
 		if (rule.behavior !== "deny") continue;
 		if (ruleMatches(rule, toolName, input, config.cwd)) {
 			return { behavior: "deny", message: `Denied by ${rule.source} rule: ${formatRule(rule)}` };
+		}
+		// A file deny rule also covers shell commands that read that file —
+		// otherwise Bash is an open bypass around every file deny rule.
+		if (toolName === "Bash") {
+			const path = bashHitsFileDenyRule(rule, input, config.cwd);
+			if (path !== null) {
+				return {
+					behavior: "deny",
+					message: `Denied by ${rule.source} rule: ${formatRule(rule)} (command accesses "${path}")`,
+				};
+			}
 		}
 	}
 

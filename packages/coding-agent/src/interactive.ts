@@ -14,13 +14,11 @@ import {
 	evaluatePermissions,
 	type PermissionMode,
 	type PermissionRule,
-	parseRuleList,
 	type SessionEntry,
 	SessionStore,
 } from "@labunbun/agent";
 import { createDefaultStreamFn, registerOpenAICompatibleProvider, resolveModel, withModelFallback } from "@labunbun/ai";
 import {
-	approveMcpServer as persistMcpApproval,
 	connectAllMcpServers,
 	connectMcpServer,
 	loadApprovedMcpServers,
@@ -28,6 +26,7 @@ import {
 	loadProjectMcpServerNames,
 	type McpConnection,
 	type McpServerConfig,
+	approveMcpServer as persistMcpApproval,
 } from "@labunbun/mcp";
 import { createAllTools, TaskStore } from "@labunbun/tools";
 import { mountRepl, type ReplAppHandle } from "@labunbun/tui";
@@ -35,11 +34,17 @@ import { createAskUserQuestionTool } from "./ask-user.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { CostTracker, formatCostState } from "./cost-tracker.ts";
 import { appendHistory, loadHistory } from "./history.ts";
-import { snapshotHooks } from "./hooks.ts";
+import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import { formatSessionList, listSessions, loadSessionForResume } from "./session-resume.ts";
-import { loadSettings, type Settings } from "./settings.ts";
+import {
+	applySettingsEnv,
+	collectPermissionRules,
+	loadSettings,
+	resolvePermissionMode,
+	type Settings,
+} from "./settings.ts";
 import { loadSkills, skillsAsCommands } from "./skills.ts";
 import { createTaskTool, loadAgentDefinitions } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
@@ -56,7 +61,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const cwd = options.cwd ?? process.cwd();
 
 	// ---- settings & providers ----
-	const { settings } = loadSettings(cwd);
+	const loadedSettings = loadSettings(cwd);
+	const { settings } = loadedSettings;
+	// Before provider registration and the API-key check below, both of which
+	// read process.env — a key configured via settings.env has to be in place
+	// by then or it would have no effect at all.
+	applySettingsEnv(settings);
 	for (const provider of settings.providers?.openaiCompatible ?? []) {
 		registerOpenAICompatibleProvider(provider);
 	}
@@ -96,10 +106,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const taskStore = new TaskStore();
 	const tools = createAllTools(cwd, { taskStore });
 	const sessionRules: PermissionRule[] = [];
-	const baseRules: PermissionRule[] = [
-		...parseRuleList(settings.permissions.deny, "deny", "userSettings"),
-		...parseRuleList(settings.permissions.allow, "allow", "userSettings"),
-	];
+	const baseRules: PermissionRule[] = collectPermissionRules(loadedSettings);
+	const requestedMode = options.permissionMode ?? settings.permissionMode ?? "default";
+	const { mode: effectiveMode, downgradeReason } = resolvePermissionMode(requestedMode, loadedSettings);
 	let handle: ReplAppHandle | null = null;
 
 	// Memory files (LABUNBUN.md / AGENTS.md), injected into the first user
@@ -136,6 +145,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	// ---- user hooks (snapshotted at startup against mid-session injection) ----
 	const hooksRuntime = snapshotHooks(settings.hooks);
+	const sessionId = store?.sessionId ?? undefined;
+
+	// Context contributed by hooks (SessionStart / UserPromptSubmit). Injected
+	// into the next user message alongside memory, so the cached system-prompt
+	// prefix stays byte-stable.
+	const pendingHookContext: string[] = [];
+
+	// ---- SessionStart: runs before the REPL mounts, so its context is
+	// available to the very first prompt. Errors are reported, never fatal.
+	const sessionStartOutcome = await hooksRuntime.run("SessionStart", { session_id: sessionId, cwd });
+	pendingHookContext.push(...sessionStartOutcome.addedContext);
+	const startupHookErrors = advisoryHookFailures("SessionStart", sessionStartOutcome);
 
 	// ---- MCP servers ----
 	// User-scoped servers (~/.labunbun/.mcp.json) are trusted like any other
@@ -148,9 +169,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const projectMcpServerNames = loadProjectMcpServerNames(cwd);
 	const approvedProjectMcpServers = loadApprovedMcpServers(cwd);
 	const approvedMcpServers = new Set(
-		Object.keys(mcpConfig).filter(
-			(name) => !projectMcpServerNames.has(name) || approvedProjectMcpServers.has(name),
-		),
+		Object.keys(mcpConfig).filter((name) => !projectMcpServerNames.has(name) || approvedProjectMcpServers.has(name)),
 	);
 	const mcpConnections = await connectAllMcpServers(mcpConfig, approvedMcpServers);
 	const mcpTools = mcpConnections.flatMap((c) => c.tools);
@@ -164,7 +183,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		allTools: [...tools, ...mcpTools],
 		definitions: agentDefinitions,
 		store,
-		permissionMode: options.permissionMode ?? settings.permissionMode ?? "default",
+		permissionMode: effectiveMode,
 		getPermissionRules: () => [...baseRules, ...sessionRules],
 	});
 	const skills = loadSkills(cwd);
@@ -190,7 +209,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		tools: allTools,
 		store,
 		cwd,
-		permissionMode: options.permissionMode ?? settings.permissionMode ?? "default",
+		permissionMode: effectiveMode,
 		deps: {
 			streamFn,
 			canUseTool: async (toolName, input, ctx) => {
@@ -205,11 +224,37 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				if (ctx.mode === "dontAsk" || !handle) {
 					return { behavior: "deny", message: "Permission required (dontAsk mode denies unresolved prompts)" };
 				}
+				// Notification: the session is about to block on a human. This is
+				// the hook users wire to desktop alerts, so it fires before the
+				// dialog appears rather than after it resolves.
+				if (hooksRuntime.has("Notification")) {
+					const outcome = await hooksRuntime.run("Notification", {
+						tool_name: toolName,
+						tool_input: input,
+						session_id: sessionId,
+						cwd,
+					});
+					// Advisory: a Notification hook cannot veto the dialog.
+					reportHookErrors(handle, advisoryHookFailures("Notification", outcome));
+				}
 				const allowed = await handle.requestPermission(toolName, input);
 				return allowed ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
 			},
 			checkCompaction: async (context) => {
 				try {
+					if (hooksRuntime.has("PreCompact")) {
+						const outcome = await hooksRuntime.run("PreCompact", { session_id: sessionId, cwd });
+						reportHookErrors(
+							handle,
+							outcome.errors.map((e) => `PreCompact hook failed: ${e}`),
+						);
+						if (outcome.blocked) {
+							// A hook may veto this compaction pass; the threshold check
+							// runs again next turn, so this defers rather than disables.
+							pushInfo(handle, `Compaction skipped by PreCompact hook${outcome.reason ? `: ${outcome.reason}` : ""}`);
+							return null;
+						}
+					}
 					return await compaction.maybeCompact(context);
 				} catch {
 					return null; // circuit breaker handles repeated failures
@@ -217,16 +262,25 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			},
 			hooks: {
 				transformContext: (context) => {
-					if (memoryInjected || !memory.content) return context;
-					memoryInjected = true;
+					// Memory files inject once; hook-contributed context drains
+					// whenever it has accumulated. Both ride on the next user
+					// message so the cached system-prompt prefix stays stable.
+					const injectMemory = !memoryInjected && Boolean(memory.content);
+					const hookContext = pendingHookContext.splice(0, pendingHookContext.length);
+					if (!injectMemory && hookContext.length === 0) return context;
+					if (injectMemory) memoryInjected = true;
+
+					const prefix = [...(injectMemory ? [memory.content] : []), ...hookContext].join("\n\n");
 					const messages = [...context.messages];
-					for (let i = 0; i < messages.length; i++) {
+					// Last user message, so hook context lands on the prompt it
+					// belongs to rather than on stale history.
+					for (let i = messages.length - 1; i >= 0; i--) {
 						const message = messages[i];
 						if (message.role === "user") {
 							const text = typeof message.content === "string" ? message.content : "";
 							messages[i] = {
 								...message,
-								content: `${memory.content}\n\n---\n\n${text}`.trimEnd(),
+								content: `${prefix}\n\n---\n\n${text}`.trimEnd(),
 							};
 							break;
 						}
@@ -240,12 +294,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					}
 					if (!hooksRuntime.has("PreToolUse")) return undefined;
 					const outcome = await hooksRuntime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
+					reportHookErrors(
+						handle,
+						outcome.errors.map((e) => `PreToolUse hook failed: ${e}`),
+					);
 					if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
 					return undefined;
 				},
 				afterToolCall: async (toolName, input) => {
 					if (!hooksRuntime.has("PostToolUse")) return undefined;
-					await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
+					const outcome = await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
+					// Advisory: the call already ran, so a block has nothing to stop.
+					reportHookErrors(handle, advisoryHookFailures("PostToolUse", outcome));
 					return undefined;
 				},
 			},
@@ -260,7 +320,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	// ---- cost tracking + context indicator ----
 	const costTracker = new CostTracker(cwd);
-	session.on((event) => {
+	// Guards against a Stop hook that blocks every turn: each resume is only
+	// allowed to be driven by a hook a bounded number of times per session.
+	let stopHookResumes = 0;
+	const MAX_STOP_HOOK_RESUMES = 10;
+	session.on(async (event) => {
 		if (event.type === "turn_end") {
 			costTracker.recordUsage(event.message.provider, event.message.model, event.message.usage);
 			costTracker.persist();
@@ -270,6 +334,29 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				usedTokens: estimateContextTokens(session.messages),
 				threshold: compactionThresholdValue,
 			});
+		}
+		// Stop: the loop reached a natural end. A hook may send it back to work
+		// (e.g. "tests still failing"), which followUp() does by design. Only
+		// natural completion is resumable — an abort or error stays stopped.
+		if (event.type === "agent_end" && event.reason === "completed" && hooksRuntime.has("Stop")) {
+			const outcome = await hooksRuntime.run("Stop", { session_id: sessionId, cwd });
+			reportHookErrors(
+				handle,
+				outcome.errors.map((e) => `Stop hook failed: ${e}`),
+			);
+			if (outcome.blocked) {
+				if (stopHookResumes >= MAX_STOP_HOOK_RESUMES) {
+					pushInfo(
+						handle,
+						`Stop hook asked to continue but the per-session resume limit (${MAX_STOP_HOOK_RESUMES}) is reached.`,
+					);
+				} else {
+					stopHookResumes++;
+					const reason = outcome.reason ?? "Stop hook requested that work continue.";
+					pushInfo(handle, `Continuing: ${reason}`);
+					session.followUp(reason);
+				}
+			}
 		}
 	});
 
@@ -286,7 +373,22 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		onAlwaysAllow: (toolName) => {
 			sessionRules.push({ toolName, behavior: "allow", source: "session" });
 		},
-		onSubmitText: (text) => appendHistory(text, cwd),
+		onSubmitText: async (text) => {
+			appendHistory(text, cwd);
+			if (!hooksRuntime.has("UserPromptSubmit")) return undefined;
+			const outcome = await hooksRuntime.run("UserPromptSubmit", { prompt: text, session_id: sessionId, cwd });
+			reportHookErrors(
+				handle,
+				outcome.errors.map((e) => `UserPromptSubmit hook failed: ${e}`),
+			);
+			// Context a hook attaches to this prompt rides along on the next
+			// model call via transformContext.
+			pendingHookContext.push(...outcome.addedContext);
+			if (outcome.blocked) {
+				return { block: true, reason: outcome.reason ?? "Prompt blocked by UserPromptSubmit hook" };
+			}
+			return undefined;
+		},
 		onMemoryShortcut: (note) => {
 			if (!note) return;
 			appendMemoryNote(note);
@@ -315,9 +417,29 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		handle?.setTasks(taskStore.summary());
 	});
 
+	// SessionStart ran before the REPL existed, so its failures surface now.
+	reportHookErrors(handle, startupHookErrors);
+	// Silently running in a weaker mode than the one asked for would be the
+	// worst outcome here, so the veto is stated explicitly.
+	if (downgradeReason) pushInfo(handle, `Warning: ${downgradeReason}`);
+
 	await handle.waitUntilExit();
 	unsubTasks();
+
+	// ---- SessionEnd: the UI is gone, so failures go to stderr. Never fatal —
+	// a broken cleanup hook must not change the process exit code.
+	const sessionEndOutcome = await hooksRuntime.run("SessionEnd", { session_id: sessionId, cwd });
+	for (const message of advisoryHookFailures("SessionEnd", sessionEndOutcome)) {
+		console.error(`Warning: ${message}`);
+	}
 	return 0;
+}
+
+/** Surface hook failures in the transcript without interrupting the session. */
+function reportHookErrors(handle: ReplAppHandle | null, messages: string[]): void {
+	for (const message of messages) {
+		pushInfo(handle, `Warning: ${message}`);
+	}
 }
 
 function appendMemoryNote(note: string): void {
@@ -584,4 +706,4 @@ function pushInfo(handle: ReplAppHandle | null, text: string): void {
 	handle?.store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text }] }));
 }
 
-export { appendHistory, type AppCommandContext, handleAppCommand };
+export { type AppCommandContext, appendHistory, handleAppCommand };

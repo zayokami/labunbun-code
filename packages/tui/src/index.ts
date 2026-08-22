@@ -1,6 +1,12 @@
 export const TUI_PACKAGE_VERSION = "0.1.0";
 
-export { mountRepl, type ReplAppHandle, type ReplAppOptions } from "./app.tsx";
+export {
+	mountRepl,
+	type PromptSubmitResult,
+	type PromptSubmitVerdict,
+	type ReplAppHandle,
+	type ReplAppOptions,
+} from "./app.tsx";
 export { MessageList, StreamingPreview } from "./components/MessageList.tsx";
 export { PermissionDialog } from "./components/PermissionDialog.tsx";
 export { PromptInput } from "./components/PromptInput.tsx";

@@ -141,6 +141,24 @@ function matchesPattern(pattern: string, toolName: string): boolean {
 	return regex.test(toolName);
 }
 
+/**
+ * Failure lines for an *advisory* event — one where a hook's "block" reply
+ * carries no control-flow meaning (SessionStart, SessionEnd, Notification,
+ * PostToolUse).
+ *
+ * Per the hook contract a non-zero exit sets `blocked` rather than pushing to
+ * `errors`, so a caller that reported only `errors` would silently swallow a
+ * hook that is failing on every single run — the exact dead-configuration
+ * failure these call sites exist to prevent.
+ */
+export function advisoryHookFailures(event: HookEventName, outcome: HookOutcome): string[] {
+	const messages = outcome.errors.map((error) => `${event} hook failed: ${error}`);
+	if (outcome.blocked) {
+		messages.push(`${event} hook reported failure${outcome.reason ? `: ${outcome.reason}` : ""}`);
+	}
+	return messages;
+}
+
 interface CommandHookResult {
 	blocked: boolean;
 	reason?: string;

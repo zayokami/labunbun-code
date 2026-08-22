@@ -12,6 +12,18 @@ import { QuestionDialog } from "./QuestionDialog.tsx";
 import { StatusLine } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
 
+/** Verdict from the app layer's prompt gate (UserPromptSubmit hooks). */
+export interface PromptSubmitVerdict {
+	block?: boolean;
+	reason?: string;
+}
+
+/**
+ * Prompt gate result. `undefined` means "no opinion, let it through" — the
+ * common case when no UserPromptSubmit hook is configured.
+ */
+export type PromptSubmitResult = PromptSubmitVerdict | undefined;
+
 export interface ReplProps {
 	session: AgentSession;
 	store: Store<UiState>;
@@ -22,8 +34,11 @@ export interface ReplProps {
 	 * the command was consumed; false falls through to the built-ins.
 	 */
 	onCommand?: (text: string) => boolean;
-	/** Called for every non-slash prompt the user submits. */
-	onSubmitText?: (text: string) => void;
+	/**
+	 * Called for every non-slash prompt the user submits, before it reaches the
+	 * transcript or the model. Returning `{ block: true }` rejects the prompt.
+	 */
+	onSubmitText?: (text: string) => PromptSubmitResult | Promise<PromptSubmitResult>;
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
 	/** Slash-command suggestions for autocomplete. */
@@ -89,16 +104,37 @@ export function REPL({
 				onMemoryShortcut?.(trimmed.slice(1).trim());
 				return;
 			}
-			onSubmitText?.(text);
-			store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user", text: trimmed }] }));
-			if (session.isRunning) {
-				// Queue for the next turn boundary instead of erroring —
-				// followUp drains when the current run terminates naturally.
-				session.followUp(text);
-				store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text: "[queued]" }] }));
-				return;
-			}
-			void session.prompt(text);
+			// The submit gate may be async (UserPromptSubmit hooks shell out), so
+			// the prompt is held until it reports back. A blocked prompt never
+			// reaches the transcript or the model.
+			void (async () => {
+				let verdict: PromptSubmitResult;
+				try {
+					verdict = await onSubmitText?.(text);
+				} catch {
+					verdict = undefined; // a failing gate must not swallow the prompt
+				}
+				if (verdict?.block) {
+					store.set((s) => ({
+						...s,
+						entries: [
+							...s.entries,
+							{ kind: "user", text: trimmed },
+							{ kind: "error", text: verdict?.reason ?? "Prompt blocked by UserPromptSubmit hook" },
+						],
+					}));
+					return;
+				}
+				store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user", text: trimmed }] }));
+				if (session.isRunning) {
+					// Queue for the next turn boundary instead of erroring —
+					// followUp drains when the current run terminates naturally.
+					session.followUp(text);
+					store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text: "[queued]" }] }));
+					return;
+				}
+				void session.prompt(text);
+			})();
 		},
 		[session, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut],
 	);
