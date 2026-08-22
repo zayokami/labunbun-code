@@ -4,6 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../src/session-store.ts";
 
+/**
+ * Sessions are stored under a home directory, defaulting to the real one. Tests
+ * pass a temp home so a run does not leave session files in ~/.labunbun/projects.
+ */
+function tmpHome(): string {
+	return mkdtempSync(join(tmpdir(), "lbb-session-home-"));
+}
+
 function textMessage(role: "user" | "assistant", text: string) {
 	if (role === "user") {
 		return { role: "user" as const, content: text, timestamp: Date.now() };
@@ -22,7 +30,7 @@ function textMessage(role: "user" | "assistant", text: string) {
 describe("session branching", () => {
 	test("branch moves the leaf; abandoned branch stays in file", () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-branch-"));
-		const store = SessionStore.startNew(dir);
+		const store = SessionStore.startNew(dir, tmpHome());
 
 		store.appendMessage(textMessage("user", "start"));
 		store.appendMessage(textMessage("assistant", "answer A"));
@@ -51,7 +59,7 @@ describe("session branching", () => {
 
 	test("branchPoints detects forks; describeTree marks the active path", () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-tree-"));
-		const store = SessionStore.startNew(dir);
+		const store = SessionStore.startNew(dir, tmpHome());
 		store.appendMessage(textMessage("user", "q1"));
 		store.appendMessage(textMessage("assistant", "a1"));
 		const forkAt = store.linearEntries().at(-1);
@@ -72,7 +80,7 @@ describe("session branching", () => {
 
 	test("branch rejects header entries and unknown ids", () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-branch2-"));
-		const store = SessionStore.startNew(dir);
+		const store = SessionStore.startNew(dir, tmpHome());
 		store.appendMessage(textMessage("user", "x"));
 		const headerId = store.entries[0].id;
 		expect(store.branch(headerId)).toBe(false);

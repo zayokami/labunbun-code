@@ -78,7 +78,8 @@ describe("Task tool (subagents)", () => {
 
 	test("sidechain entries persist to the parent session tree", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-side-"));
-		const store = SessionStore.startNew(dir);
+		// Temp home: without it the session file lands in ~/.labunbun/projects.
+		const store = SessionStore.startNew(dir, mkdtempSync(join(tmpdir(), "lbb-side-home-")));
 		const { taskTool } = makeHarness(store);
 
 		await taskTool.call(

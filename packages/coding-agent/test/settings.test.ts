@@ -66,30 +66,48 @@ describe("CostTracker", () => {
 	});
 
 	test("persists and reloads per-project state", () => {
+		// HOME decides where costs.json lands, and CostTracker reads it in its
+		// constructor. Without the override the suite writes into the real
+		// ~/.labunbun/projects/ and leaves a directory behind on every run.
+		const home = mkdtempSync(join(tmpdir(), "lbb-cost-home-"));
 		const dir = mkdtempSync(join(tmpdir(), "lbb-cost-"));
-		const first = new CostTracker(dir);
-		first.recordUsage("faux", "faux-1", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 });
-		first.persist();
+		const previousHome = process.env.HOME;
+		const previousProfile = process.env.USERPROFILE;
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		try {
+			const first = new CostTracker(dir);
+			first.recordUsage("faux", "faux-1", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 });
+			first.persist();
 
-		const reloaded = new CostTracker(dir);
-		expect(reloaded.state.modelsUsage["faux/faux-1"].inputTokens).toBe(10);
+			const reloaded = new CostTracker(dir);
+			expect(reloaded.state.modelsUsage["faux/faux-1"].inputTokens).toBe(10);
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousProfile;
+		}
 	});
 });
 
 describe("history", () => {
 	test("append + load roundtrip with dedupe and cwd filter", () => {
+		// Every append goes to the home passed here. Omitting it appends to the
+		// user's real prompt history.
+		const home = mkdtempSync(join(tmpdir(), "lbb-hist-home-"));
 		const dirA = mkdtempSync(join(tmpdir(), "lbb-hist-a-"));
 		const dirB = mkdtempSync(join(tmpdir(), "lbb-hist-b-"));
-		appendHistory("first prompt", dirA);
-		appendHistory("second prompt", dirA);
-		appendHistory("other project", dirB);
-		appendHistory("second prompt", dirA); // dedupe moves it to front
+		appendHistory("first prompt", dirA, home);
+		appendHistory("second prompt", dirA, home);
+		appendHistory("other project", dirB, home);
+		appendHistory("second prompt", dirA, home); // dedupe moves it to front
 
-		const forA = loadHistory(dirA);
+		const forA = loadHistory(dirA, 100, home);
 		// Oldest → newest: ↑ recall pops from the end (most recent first).
 		expect(forA).toEqual(["first prompt", "second prompt"]);
-		expect(loadHistory(dirB)).toEqual(["other project"]);
-		expect(loadHistory(dirA, 1)).toEqual(["second prompt"]);
+		expect(loadHistory(dirB, 100, home)).toEqual(["other project"]);
+		expect(loadHistory(dirA, 1, home)).toEqual(["second prompt"]);
 	});
 });
 
@@ -101,9 +119,12 @@ describe("session resume roundtrip", () => {
 
 		const dir = mkdtempSync(join(tmpdir(), "lbb-resume-"));
 		mkdirSync(join(dir, ".labunbun"), { recursive: true });
+		// Sessions live under a home directory; a temp one keeps this run out of
+		// ~/.labunbun/projects. Both the store and the listing need to agree on it.
+		const home = mkdtempSync(join(tmpdir(), "lbb-resume-home-"));
 
 		// Session 1: a scripted conversation.
-		const store = SessionStore.startNew(dir);
+		const store = SessionStore.startNew(dir, home);
 		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "x" } }] }, { text: "done" }]);
 		const session1 = new AgentSession({
 			model: FAUX_MODEL,
@@ -114,7 +135,7 @@ describe("session resume roundtrip", () => {
 		await session1.prompt("hello world");
 
 		// Resume: same store path, messages replayed, new prompt appends.
-		const sessions = listSessions(dir);
+		const sessions = listSessions(dir, home);
 		expect(sessions).toHaveLength(1);
 		const loaded = loadSessionForResume(sessions[0].path);
 		expect(loaded).not.toBeNull();

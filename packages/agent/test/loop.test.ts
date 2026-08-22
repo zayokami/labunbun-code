@@ -350,7 +350,8 @@ describe("AgentSession loop", () => {
 describe("session persistence replay", () => {
 	test("store file replay equals in-memory transcript", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-agent-"));
-		const store = SessionStore.startNew(dir);
+		// Temp home: without it the session file lands in ~/.labunbun/projects.
+		const store = SessionStore.startNew(dir, mkdtempSync(join(tmpdir(), "lbb-agent-home-")));
 		const tool = echoTool();
 
 		const { session } = await runHarness(

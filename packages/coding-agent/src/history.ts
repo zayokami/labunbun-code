@@ -16,10 +16,10 @@ export function historyFilePath(home = homedir()): string {
 	return join(home, ".labunbun", "history.jsonl");
 }
 
-export function appendHistory(text: string, cwd: string): void {
+export function appendHistory(text: string, cwd: string, home?: string): void {
 	const trimmed = text.trim();
 	if (!trimmed || trimmed.startsWith("/")) return;
-	const path = historyFilePath();
+	const path = historyFilePath(home);
 	try {
 		mkdirSync(dirname(path), { recursive: true });
 		const entry: HistoryEntry = { text: trimmed, cwd, timestamp: Date.now() };
@@ -30,8 +30,8 @@ export function appendHistory(text: string, cwd: string): void {
 }
 
 /** Most recent entries, newest last. Optionally filter by project cwd. */
-export function loadHistory(cwd?: string, limit = 100): string[] {
-	const path = historyFilePath();
+export function loadHistory(cwd?: string, limit = 100, home?: string): string[] {
+	const path = historyFilePath(home);
 	if (!existsSync(path)) return [];
 	const out: string[] = [];
 	const seen = new Set<string>();

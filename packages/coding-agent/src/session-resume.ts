@@ -14,8 +14,8 @@ export interface SessionSummary {
 	messageCount: number;
 }
 
-export function listSessions(cwd?: string): SessionSummary[] {
-	return SessionStore.listSessions(cwd).map((entry) => {
+export function listSessions(cwd?: string, home?: string): SessionSummary[] {
+	return SessionStore.listSessions(cwd, home).map((entry) => {
 		const store = SessionStore.load(entry.path);
 		const firstUser = store.messages().find((m) => m.role === "user");
 		return {

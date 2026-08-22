@@ -264,7 +264,8 @@ describe("applySettingsEnv", () => {
 describe("SessionStore resilience", () => {
 	test("torn trailing line is ignored on load", () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-torn-"));
-		const store = SessionStore.startNew(dir);
+		// Temp home: without it the session file lands in ~/.labunbun/projects.
+		const store = SessionStore.startNew(dir, mkdtempSync(join(tmpdir(), "lbb-torn-home-")));
 		store.appendMessage({ role: "user", content: "intact", timestamp: 1 });
 
 		// Simulate a crash mid-write: append a partial JSON line.
