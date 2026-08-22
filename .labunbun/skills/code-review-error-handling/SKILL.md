@@ -1,0 +1,13 @@
+---
+name: code-review-error-handling
+description: Check whether a new failure path fits labunbun's existing error-handling conventions — deliberate silent catches vs. advisory-vs-blocking hook failures vs. the pipeline's convert-to-isError contract.
+---
+
+labunbun's error handling isn't one convention — it's three, chosen deliberately per situation. Check that a new failure path picks the right one instead of defaulting to "catch and ignore":
+
+- **Deliberate silent catches are rare and narrow.** The whole codebase has a handful of bare `catch {}` blocks (`skills.ts`, `subagents.ts`, `history.ts`, `compaction.ts`, `session-store.ts`, `mcp/client.ts`, `tools/operations.ts`) — each one guards a genuinely optional read (a missing/malformed user config file, best-effort history dedup, a losing timeout race, tmp-file cleanup) where absence is not an error. A new bare `catch {}` needs the same property: if you can't articulate why failure here is truly inconsequential, it isn't a candidate for silent swallowing.
+- **Advisory vs. blocking hook failure** (`packages/coding-agent/src/hooks.ts`, `advisoryHookFailures`): `PreToolUse`/`UserPromptSubmit`/`Stop` failures have real control-flow meaning (they can block); `SessionStart`/`SessionEnd`/`Notification`/`PostToolUse` failures are advisory-only. The existing code is explicit that a caller must still surface advisory failures (via `errors`) rather than dropping them just because they don't block — otherwise a hook silently failing on every run looks identical to a hook that's never misfiring. A new event or call site needs to decide which category it's in and handle both `blocked` and `errors`, not just one.
+- **The pipeline's never-throws contract** (`packages/agent/src/pipeline.ts`): every failure — validation, hook, permission, tool execution — converts to an `isError: true` `ToolResultMessage` with a message describing what happened (`Tool error: ${message}`, not a bare rethrow). A new tool or hook integration should raise a real error with a useful message and let the pipeline convert it, rather than swallowing it internally and returning a success result that lies about what happened.
+- **`.catch(() => {})` is for abandoned results, not swallowed ones** (`mcp/client.ts:113`/`164`, `operations.ts:83`): these exist only where the promise's result is already irrelevant — the timeout race's loser, a best-effort tmp-file cleanup after the real write succeeded. A new `.catch(() => {})` should be checked for whether the caller actually still needs that result; if it does, this is the wrong pattern.
+
+Flag any new failure path that doesn't match one of these three shapes, and say which shape it should use instead and why.
