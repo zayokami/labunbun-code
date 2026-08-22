@@ -31,6 +31,8 @@ export interface ReplAppOptions {
 	onMemoryShortcut?: (note: string) => void;
 	/** Slash-command suggestions for autocomplete. */
 	commandSuggestions?: Array<[string, string]>;
+	/** Prompts from earlier sessions, oldest first, for ↑ recall in the prompt. */
+	history?: string[];
 	/** Called with "allow" decisions so the app can persist don't-ask-again rules. */
 	onAlwaysAllow?: (toolName: string) => void;
 }
@@ -86,6 +88,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				onSubmitText={options.onSubmitText}
 				onMemoryShortcut={options.onMemoryShortcut}
 				commandSuggestions={options.commandSuggestions}
+				history={options.history}
 			/>
 		</ThemedTree>,
 	);

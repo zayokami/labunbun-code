@@ -40,7 +40,7 @@ import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle } from "@labunbun/tui";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { CostTracker, formatCostState } from "./cost-tracker.ts";
-import { appendHistory } from "./history.ts";
+import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
@@ -384,7 +384,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		modelName: `${model.provider}/${model.id}`,
 		theme: resolvedTheme.theme,
 		vimMode: settings.vimMode,
-		commandSuggestions: completeCommands(commands, "").map((c) => [`/${c.name}`, c.description] as [string, string]),
+		// Both the registry commands and the app-level ones, so /help and Tab
+		// completion cover everything that actually dispatches.
+		commandSuggestions: [
+			...completeCommands(commands, "").map((c) => [`/${c.name}`, c.description] as [string, string]),
+			...appCommandTable(),
+		].sort(([a], [b]) => a.localeCompare(b)),
+		// Oldest first, which is the order ↑ recall walks backwards through.
+		history: loadHistory(cwd),
 		onAlwaysAllow: (toolName) => {
 			sessionRules.push({ toolName, behavior: "allow", source: "session" });
 		},
@@ -546,6 +553,29 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 	}
 
 	return handleAppCommand(text, ctx);
+}
+
+/**
+ * App-level commands, which live in `handleAppCommand`'s switch rather than in
+ * the command registry. `/help` is generated from the command table, so a
+ * command missing from this list is a command the user cannot discover — that
+ * was the `/theme` bug. The switch below is the source of truth for behaviour;
+ * `appCommandTable` keeps `/help` in step with it, and a test asserts the two
+ * agree so a new `case` cannot be added without a description.
+ */
+export function appCommandTable(): Array<[string, string]> {
+	return [
+		["/cost", "Show token usage and cost for this session"],
+		["/doctor", "Check the environment, settings, and provider setup"],
+		["/fork", "Branch the session from an entry id: /fork <id>"],
+		["/mcp", "List configured MCP servers and their tools"],
+		["/mode", "Show or set the permission mode: /mode <mode>"],
+		["/permissions", "Show the active permission mode and rules"],
+		["/resume", "List earlier sessions in this directory"],
+		["/rewind", "Restore a file from a checkpoint: /rewind [number]"],
+		["/theme", "Show or switch the theme: /theme [name|auto]"],
+		["/tree", "Show the session branch tree"],
+	];
 }
 
 function handleAppCommand(text: string, ctx: AppCommandContext): boolean {

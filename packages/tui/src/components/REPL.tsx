@@ -46,19 +46,37 @@ export interface ReplProps {
 	vimMode?: boolean;
 	/** Context-window usage for the status line. */
 	contextInfo?: { usedTokens: number; threshold: number };
+	/** Prompts from earlier sessions, oldest first, for ↑ recall. */
+	history?: string[];
 }
 
-const HELP_TEXT = `Commands:
-  /help          Show this help
-  /clear         Clear the conversation display
-  /model <name>  Show or switch model (e.g. /model deepseek/deepseek-chat)
-  /cost          Show session cost and token usage
-  /permissions   Show permission rules and mode
-  /resume        Resume a saved session
-  /exit          Exit LaBunbun Code
-
-Keys:
+const KEYS_HELP = `Keys:
   Enter send · Shift+Enter newline · ↑/↓ history · Esc interrupt · Ctrl+C exit`;
+
+/**
+ * Commands this component dispatches itself, which no caller-supplied registry
+ * knows about. They are merged into `/help` so the list covers everything that
+ * works, not just what the app layer contributed.
+ */
+const BUILT_IN_HELP: Array<[string, string]> = [
+	["/clear", "Clear the conversation display"],
+	["/exit", "Exit"],
+	["/help", "Show this help"],
+	["/model", "Show or switch model"],
+];
+
+/**
+ * Help text built from the command table the REPL was given, so a command added
+ * to the registry cannot go missing from `/help`.
+ */
+export function helpText(commandSuggestions?: Array<[string, string]>): string {
+	const byName = new Map<string, string>(BUILT_IN_HELP);
+	for (const [name, description] of commandSuggestions ?? []) byName.set(name, description);
+	const rows = [...byName].sort(([a], [b]) => a.localeCompare(b));
+	const width = Math.max(...rows.map(([name]) => name.length));
+	const lines = rows.map(([name, description]) => `  ${name.padEnd(width)}  ${description}`);
+	return `Commands:\n${lines.join("\n")}\n\n${KEYS_HELP}`;
+}
 
 export function REPL({
 	session,
@@ -70,6 +88,7 @@ export function REPL({
 	onMemoryShortcut,
 	commandSuggestions,
 	vimMode,
+	history,
 }: ReplProps) {
 	const entries = useStore(store, (s) => s.entries);
 	const streamingText = useStore(store, (s) => s.streamingText);
@@ -95,7 +114,7 @@ export function REPL({
 			const trimmed = text.trim();
 			if (trimmed.startsWith("/")) {
 				if (onCommand?.(trimmed)) return;
-				handleCommand(trimmed, { store, modelName, onExit });
+				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions });
 				return;
 			}
 			if (trimmed.startsWith("#")) {
@@ -134,7 +153,7 @@ export function REPL({
 				void session.prompt(text);
 			})();
 		},
-		[session, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut],
+		[session, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions],
 	);
 
 	const [transcriptMode, setTranscriptMode] = useState(false);
@@ -207,19 +226,28 @@ export function REPL({
 				disabled={dialog !== null || question !== null}
 				commandSuggestions={commandSuggestions}
 				vim={vimMode}
+				history={history}
 			/>
 			<Text dimColor> </Text>
 		</Box>
 	);
 }
 
-function handleCommand(text: string, context: { store: Store<UiState>; modelName: string; onExit: () => void }): void {
-	const { store, modelName, onExit } = context;
+function handleCommand(
+	text: string,
+	context: {
+		store: Store<UiState>;
+		modelName: string;
+		onExit: () => void;
+		commandSuggestions?: Array<[string, string]>;
+	},
+): void {
+	const { store, modelName, onExit, commandSuggestions } = context;
 	const [command, ...args] = text.split(/\s+/);
 
 	switch (command) {
 		case "/help":
-			pushInfo(store, HELP_TEXT);
+			pushInfo(store, helpText(commandSuggestions));
 			break;
 		case "/clear":
 			store.set((s) => ({ ...initialUiState(), dialog: s.dialog }));

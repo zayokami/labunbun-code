@@ -10,7 +10,7 @@ export {
 export { MessageList, StreamingPreview } from "./components/MessageList.tsx";
 export { PermissionDialog } from "./components/PermissionDialog.tsx";
 export { PromptInput } from "./components/PromptInput.tsx";
-export { connectSessionToStore, REPL, type ReplProps } from "./components/REPL.tsx";
+export { connectSessionToStore, helpText, REPL, type ReplProps } from "./components/REPL.tsx";
 export { StatusLine } from "./components/StatusLine.tsx";
 export {
 	type Appearance,
@@ -20,6 +20,7 @@ export {
 	parseBackgroundLuminance,
 } from "./detect-appearance.ts";
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
+export { type Block, type InlineSpan, parseBlocks, parseInline } from "./markdown.ts";
 export { createStore, type Store, useStore } from "./store.ts";
 export {
 	AUTO_THEME_NAME,

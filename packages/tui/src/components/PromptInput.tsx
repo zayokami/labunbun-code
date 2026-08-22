@@ -11,6 +11,21 @@ export interface PromptInputProps {
 	commandSuggestions?: Array<[string, string]>;
 	/** Modal vim editing (normal/insert). */
 	vim?: boolean;
+	/**
+	 * Prompts from earlier sessions, oldest first, for ↑ recall. Without this the
+	 * buffer starts empty and ↑ only reaches prompts typed in this session.
+	 */
+	history?: string[];
+}
+
+/**
+ * Split the placeholder so the first character can be drawn as a caret. An empty
+ * prompt with no caret reads as unfocused — there is nothing on screen saying the
+ * REPL is accepting input. Returned as data so the choice is testable: rendered
+ * frames carry no ANSI when stdout is not a TTY, which is every test run.
+ */
+export function placeholderCaret(placeholder: string): { caret: string; rest: string } {
+	return { caret: placeholder.slice(0, 1) || " ", rest: placeholder.slice(1) };
 }
 
 /**
@@ -25,10 +40,11 @@ export function PromptInput({
 	placeholder = 'Try "fix the failing test" — / for commands',
 	commandSuggestions = [],
 	vim = false,
+	history = [],
 }: PromptInputProps) {
 	const theme = useTheme();
 	const { state, actions, historyUp, historyDown, pushHistory, vimMode, handleVimKey, selection } = useTextInput(
-		[],
+		history,
 		vim,
 	);
 	const [suggestionIndex, setSuggestionIndex] = useState(0);
@@ -137,7 +153,13 @@ export function PromptInput({
 			{selected && state.text !== selected[0] && <Text dimColor> </Text>}
 			<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1}>
 				{state.text.length === 0 ? (
-					<Text dimColor>{placeholder}</Text>
+					// The cursor has to be drawn here too. Falling through to the
+					// placeholder alone leaves an empty prompt with no caret, so the
+					// terminal looks unfocused until the first keystroke.
+					<Text>
+						<Text inverse>{placeholderCaret(placeholder).caret}</Text>
+						<Text dimColor>{placeholderCaret(placeholder).rest}</Text>
+					</Text>
 				) : (
 					lines.map((line, i) => (
 						// biome-ignore lint/suspicious/noArrayIndexKey: lines are plain text renders with no per-item state to preserve

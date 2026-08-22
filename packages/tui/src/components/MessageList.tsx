@@ -1,4 +1,5 @@
 import { Box, Static, Text } from "ink";
+import { type InlineSpan, parseBlocks } from "../markdown.ts";
 import { type Theme, useTheme } from "../theme.ts";
 import type { UiEntry } from "../ui-state.ts";
 
@@ -39,50 +40,79 @@ function AssistantMessageView({ text }: { text: string }) {
 	);
 }
 
-/** Minimal markdown: fenced code blocks boxed, rest plain. */
+/**
+ * Render the parsed blocks. Code keeps its box; everything else maps marks onto
+ * Ink's text attributes, falling back to color where the terminal has no
+ * equivalent (inline code, links).
+ */
 function renderMarkdownLite(text: string, theme: Theme) {
-	const lines = text.split("\n");
-	const out: React.ReactNode[] = [];
-	let inCode = false;
-	let codeBuffer: string[] = [];
-
-	const codeBlock = (key: string, body: string[]) => (
-		<Box key={key} flexDirection="column" borderStyle="round" borderColor={theme.codeBorder} paddingX={1}>
-			{body.map((l, j) => (
-				// biome-ignore lint/suspicious/noArrayIndexKey: codeBuffer is rebuilt fresh per fenced block and never reordered
-				<Text key={j} color={theme.codeText}>
-					{l}
-				</Text>
-			))}
-		</Box>
-	);
-
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		if (line.trimStart().startsWith("```")) {
-			if (inCode) {
-				out.push(codeBlock(`code-${out.length}`, codeBuffer));
-				codeBuffer = [];
-				inCode = false;
-			} else {
-				inCode = true;
-			}
-			continue;
+	return parseBlocks(text).map((block, i) => {
+		const key = `b-${i}`;
+		switch (block.kind) {
+			case "code":
+				return (
+					<Box key={key} flexDirection="column" borderStyle="round" borderColor={theme.codeBorder} paddingX={1}>
+						{block.lines.map((line, j) => (
+							// biome-ignore lint/suspicious/noArrayIndexKey: code lines are positional and never reordered
+							<Text key={j} color={theme.codeText}>
+								{line || " "}
+							</Text>
+						))}
+					</Box>
+				);
+			case "heading":
+				return (
+					<Text key={key} color={theme.accent} bold>
+						{renderSpans(block.spans, theme)}
+					</Text>
+				);
+			case "listItem":
+				return (
+					<Text key={key} color={theme.text}>
+						{"  ".repeat(block.indent)}
+						<Text color={theme.accent}>{block.marker}</Text> {renderSpans(block.spans, theme)}
+					</Text>
+				);
+			case "quote":
+				return (
+					<Text key={key} color={theme.textMuted}>
+						{"│ "}
+						{renderSpans(block.spans, theme)}
+					</Text>
+				);
+			case "rule":
+				return (
+					<Text key={key} color={theme.border}>
+						{"─".repeat(40)}
+					</Text>
+				);
+			case "blank":
+				return <Text key={key}> </Text>;
+			default:
+				return (
+					<Text key={key} color={theme.text}>
+						{renderSpans(block.spans, theme)}
+					</Text>
+				);
 		}
-		if (inCode) {
-			codeBuffer.push(line);
-			continue;
-		}
-		out.push(
-			<Text key={`line-${i}`} color={theme.text}>
-				{line || " "}
-			</Text>,
-		);
-	}
-	if (codeBuffer.length > 0) {
-		out.push(codeBlock("code-tail", codeBuffer));
-	}
-	return out;
+	});
+}
+
+/** Marks onto Ink text attributes. Inline code and links get a color instead. */
+function renderSpans(spans: InlineSpan[], theme: Theme) {
+	return spans.map((span, i) => (
+		<Text
+			// biome-ignore lint/suspicious/noArrayIndexKey: spans are positional within one line
+			key={i}
+			bold={span.bold}
+			italic={span.italic}
+			strikethrough={span.strike}
+			color={span.code ? theme.codeText : span.href ? theme.link : undefined}
+			underline={span.href !== undefined}
+		>
+			{span.text}
+		</Text>
+	));
 }
 
 function ToolUseView({ entry }: { entry: Extract<UiEntry, { kind: "toolUse" }> }) {
