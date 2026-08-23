@@ -31,6 +31,10 @@ export interface ReplAppOptions {
 	onMemoryShortcut?: (note: string) => void;
 	/** Slash-command suggestions for autocomplete. */
 	commandSuggestions?: Array<[string, string]>;
+	/** Candidate file paths for @-mention completion in the prompt. */
+	completeFiles?: (query: string) => Promise<string[]>;
+	/** Basename of the session directory, for the terminal window title. */
+	dirName?: string;
 	/** Prompts from earlier sessions, oldest first, for ↑ recall in the prompt. */
 	history?: string[];
 	/** Called with "allow" decisions so the app can persist don't-ask-again rules. */
@@ -50,6 +54,11 @@ export interface ReplAppHandle {
 			multiSelect?: boolean;
 		}>,
 	) => Promise<string[] | null>;
+	/**
+	 * Show a scrollable pick-one list; resolves with the chosen index or null on
+	 * cancel. The in-app /resume and /model pickers both run on this.
+	 */
+	pickFromList: (title: string, items: Array<{ label: string; description?: string }>) => Promise<number | null>;
 	clearPermissionRequest: () => void;
 	setContextInfo(info: { usedTokens: number; threshold: number }): void;
 	setTasks(
@@ -57,6 +66,14 @@ export interface ReplAppHandle {
 	): void;
 	/** Swap the active theme; takes effect on the next render. */
 	setTheme(theme: Theme): void;
+	/**
+	 * Hot-swap the running REPL onto a different AgentSession (in-app /resume):
+	 * rebinds event subscription, clears transient transcript state, and keeps
+	 * dialogs/theme/model name.
+	 */
+	setSession(next: AgentSession): void;
+	/** Rename the model shown in the status line (/model switch). */
+	setModelName(name: string): void;
 }
 
 /**
@@ -74,12 +91,28 @@ function ThemedTree({ store, children }: { store: Store<UiState>; children: Reac
  * app layer wires into `deps.canUseTool`.
  */
 export function mountRepl(options: ReplAppOptions): ReplAppHandle {
-	const store = createStore<UiState>({ ...initialUiState(), theme: options.theme ?? DEFAULT_THEME });
+	const store = createStore<UiState>({
+		...initialUiState(),
+		theme: options.theme ?? DEFAULT_THEME,
+		modelName: options.modelName,
+	});
 
+	/**
+	 * The session lives behind a holder so an in-app /resume can hot-swap it
+	 * without remounting: every REPL read goes through getSession() at call
+	 * time, so no closure ever holds a stale session.
+	 */
+	const sessionHolder = { current: options.session };
+	let unsubscribeSession = connectSessionToStore(sessionHolder.current, store);
+
+	// exitOnCtrlC: false hands Ctrl+C to the REPL's own handler, which aborts a
+	// running turn first and requires a second press when idle. Ink's default
+	// (true) unmounts the whole app on the first \x03 before any handler runs,
+	// discarding in-flight work with no chance to interrupt cleanly.
 	const instance = render(
 		<ThemedTree store={store}>
 			<REPL
-				session={options.session}
+				getSession={() => sessionHolder.current}
 				store={store}
 				modelName={options.modelName}
 				onExit={() => instance.unmount()}
@@ -88,18 +121,19 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				onSubmitText={options.onSubmitText}
 				onMemoryShortcut={options.onMemoryShortcut}
 				commandSuggestions={options.commandSuggestions}
+				completeFiles={options.completeFiles}
+				dirName={options.dirName}
 				history={options.history}
 			/>
 		</ThemedTree>,
+		{ exitOnCtrlC: false },
 	);
-
-	const unsubscribe = connectSessionToStore(options.session, store);
 
 	return {
 		store,
 		waitUntilExit: async () => {
 			await instance.waitUntilExit();
-			unsubscribe();
+			unsubscribeSession();
 		},
 		requestPermission: (toolName: string, input: unknown) =>
 			new Promise<boolean>((resolve) => {
@@ -123,8 +157,42 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		setTasks: (tasks) => {
 			store.set((s) => ({ ...s, tasks }));
 		},
+		pickFromList: (title, items) =>
+			new Promise<number | null>((resolve) => {
+				store.set((s) => ({
+					...s,
+					picker: {
+						title,
+						items,
+						resolve: (index) => {
+							store.set((st) => ({ ...st, picker: null }));
+							resolve(index);
+						},
+					},
+				}));
+			}),
 		setTheme: (theme) => {
 			store.set((s) => ({ ...s, theme }));
+		},
+		setSession: (next) => {
+			sessionHolder.current = next;
+			unsubscribeSession();
+			unsubscribeSession = connectSessionToStore(next, store);
+			// Transient transcript state belongs to the old session; dialogs and
+			// the theme belong to the app and survive.
+			store.set((s) => ({
+				...s,
+				entries: [],
+				streamingText: "",
+				thinkingText: "",
+				pendingTools: [],
+				statusPhase: "idle",
+				contextInfo: undefined,
+				tasks: [],
+			}));
+		},
+		setModelName: (name) => {
+			store.set((s) => ({ ...s, modelName: name }));
 		},
 		askUser: (questions) =>
 			new Promise<string[] | null>((resolve) => {

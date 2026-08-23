@@ -30,14 +30,37 @@ export interface TextInputActions {
 	moveWordRight(): void;
 	killToEnd(): void;
 	killToStart(): void;
+	killWordBack(): void;
+	killWordForward(): void;
 	yank(): void;
 	clear(): void;
 	setText(text: string): void;
+	/** Replace the whole buffer and place the cursor exactly — completions use this. */
+	setBuffer(text: string, cursor: number): void;
 	undo(): void;
 	redo(): void;
 }
 
 const UNDO_LIMIT = 200;
+
+/**
+ * Word-kill primitives, pure so the boundaries are testable without a
+ * component. Boundary logic matches moveWordLeft/moveWordRight: whitespace
+ * collapses together with the adjacent word, readline-style.
+ */
+export function killWordBack(text: string, cursor: number): { text: string; cursor: number; killed: string } {
+	let i = cursor;
+	while (i > 0 && /\s/.test(text[i - 1])) i--;
+	while (i > 0 && !/\s/.test(text[i - 1])) i--;
+	return { text: text.slice(0, i) + text.slice(cursor), cursor: i, killed: text.slice(i, cursor) };
+}
+
+export function killWordForward(text: string, cursor: number): { text: string; cursor: number; killed: string } {
+	let i = cursor;
+	while (i < text.length && !/\s/.test(text[i])) i++;
+	while (i < text.length && /\s/.test(text[i])) i++;
+	return { text: text.slice(0, cursor) + text.slice(i), cursor, killed: text.slice(cursor, i) };
+}
 
 export function useTextInput(initialHistory: string[] = [], vim = false) {
 	const [state, setState] = useState<TextInputState>({ text: "", cursor: 0 });
@@ -53,8 +76,22 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 	const historyIndexRef = useRef<number>(-1);
 	const draftRef = useRef<string>("");
 	const killRingRef = useRef<string>("");
+	// Readline kill semantics: consecutive kills accumulate in the ring, any
+	// other edit starts a fresh one. Motions do not break the chain.
+	const lastActionWasKillRef = useRef(false);
 	const undoStackRef = useRef<TextInputState[]>([]);
 	const redoStackRef = useRef<TextInputState[]>([]);
+
+	/** Fold a freshly killed region into the ring, honoring consecutive kills. */
+	const recordKill = useCallback((killed: string, direction: "back" | "forward") => {
+		if (killed.length === 0) return;
+		if (lastActionWasKillRef.current && killed.length > 0) {
+			killRingRef.current = direction === "back" ? killed + killRingRef.current : killRingRef.current + killed;
+		} else {
+			killRingRef.current = killed;
+		}
+		lastActionWasKillRef.current = true;
+	}, []);
 
 	/** Record the current state on the undo stack (call BEFORE mutating). */
 	const recordUndo = useCallback(() => {
@@ -101,22 +138,28 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 	}, []);
 
 	const actions: TextInputActions = {
-		insert: (text) =>
+		insert: (text) => {
+			lastActionWasKillRef.current = false;
 			commitWithUndo((s) => ({
 				text: s.text.slice(0, s.cursor) + text + s.text.slice(s.cursor),
 				cursor: s.cursor + text.length,
-			})),
+			}));
+		},
 		newline: () => actions.insert("\n"),
-		backspace: () =>
+		backspace: () => {
+			lastActionWasKillRef.current = false;
 			commitWithUndo((s) =>
 				s.cursor === 0 ? s : { text: s.text.slice(0, s.cursor - 1) + s.text.slice(s.cursor), cursor: s.cursor - 1 },
-			),
-		delete: () =>
+			);
+		},
+		delete: () => {
+			lastActionWasKillRef.current = false;
 			commitWithUndo((s) =>
 				s.cursor >= s.text.length
 					? s
 					: { text: s.text.slice(0, s.cursor) + s.text.slice(s.cursor + 1), cursor: s.cursor },
-			),
+			);
+		},
 		moveLeft: () => commit((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) })),
 		moveRight: () => commit((s) => ({ ...s, cursor: Math.min(s.text.length, s.cursor + 1) })),
 		moveToLineStart: () => commit((s) => ({ ...s, cursor: 0 })),
@@ -137,24 +180,48 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 			}),
 		killToEnd: () =>
 			commitWithUndo((s) => {
-				killRingRef.current = s.text.slice(s.cursor);
+				recordKill(s.text.slice(s.cursor), "forward");
 				return { text: s.text.slice(0, s.cursor), cursor: s.cursor };
 			}),
 		killToStart: () =>
 			commitWithUndo((s) => {
-				killRingRef.current = s.text.slice(0, s.cursor);
+				recordKill(s.text.slice(0, s.cursor), "back");
 				return { text: s.text.slice(s.cursor), cursor: 0 };
 			}),
+		killWordBack: () =>
+			commitWithUndo((s) => {
+				const next = killWordBack(s.text, s.cursor);
+				recordKill(next.killed, "back");
+				return { text: next.text, cursor: next.cursor };
+			}),
+		killWordForward: () =>
+			commitWithUndo((s) => {
+				const next = killWordForward(s.text, s.cursor);
+				recordKill(next.killed, "forward");
+				return { text: next.text, cursor: next.cursor };
+			}),
 		yank: () => actions.insert(killRingRef.current),
-		clear: () => commitWithUndo(() => ({ text: "", cursor: 0 })),
-		setText: (text) => commitWithUndo(() => ({ text, cursor: text.length })),
+		clear: () => {
+			lastActionWasKillRef.current = false;
+			commitWithUndo(() => ({ text: "", cursor: 0 }));
+		},
+		setText: (text) => {
+			lastActionWasKillRef.current = false;
+			commitWithUndo(() => ({ text, cursor: text.length }));
+		},
+		setBuffer: (text, cursor) => {
+			lastActionWasKillRef.current = false;
+			commitWithUndo(() => ({ text, cursor }));
+		},
 		undo: () => {
+			lastActionWasKillRef.current = false;
 			const prev = undoStackRef.current.pop();
 			if (!prev) return;
 			redoStackRef.current.push({ ...stateRef.current });
 			commit(prev);
 		},
 		redo: () => {
+			lastActionWasKillRef.current = false;
 			const next = redoStackRef.current.pop();
 			if (!next) return;
 			undoStackRef.current.push({ ...stateRef.current });

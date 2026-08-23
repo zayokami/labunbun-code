@@ -42,6 +42,17 @@ function isRetryableStatus(status: number): boolean {
 	return status === 408 || status === 409 || status === 429 || status >= 500;
 }
 
+/**
+ * True for an abort surfaced as an exception (fetch and the various SDKs name
+ * it AbortError or APIUserAbortError). An abort is the user's own cancel, not
+ * a provider fault: retrying it would override the interrupt, and the
+ * fallback chain would walk every model before giving up. Callers rethrow so
+ * the session loop can map it to stopReason "aborted".
+ */
+export function isAbortError(error: unknown): boolean {
+	return error instanceof Error && /^(API)?(User)?AbortError$/.test(error.name);
+}
+
 function isNetworkError(error: unknown): boolean {
 	if (error instanceof Error) {
 		// fetch failures surface as TypeError("fetch failed") or similar
@@ -99,6 +110,10 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				// After anything was emitted downstream we can no longer retry
 				// safely — the consumer already saw partial output.
 				if (emittedAny) throw error;
+
+				// A user interrupt is not a provider fault: rethrow immediately so
+				// the session loop sees the abort instead of a retry ladder.
+				if (streamOptions?.signal?.aborted || isAbortError(error)) throw error;
 
 				const status = statusCodeOf(error);
 				const overloaded = status === 529;

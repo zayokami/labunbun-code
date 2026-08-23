@@ -209,23 +209,28 @@ function TableView({ block, theme }: { block: Extract<Block, { kind: "table" }>;
 	);
 }
 
-function ToolUseView({ entry }: { entry: Extract<UiEntry, { kind: "toolUse" }> }) {
+function ToolUseView({ entry, full }: { entry: Extract<UiEntry, { kind: "toolUse" }>; full?: boolean }) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1} flexDirection="column" borderStyle="round" borderColor={theme.toolBorder} paddingX={1}>
 			<Text>
 				<Text color={theme.toolName}>[{entry.toolName}]</Text> <Text color={theme.toolArgs}>{entry.inputPreview}</Text>
 			</Text>
-			{entry.resultText !== undefined && <ResultLines text={entry.resultText} isError={entry.isError} />}
+			{entry.resultText !== undefined && <ResultLines text={entry.resultText} isError={entry.isError} full={full} />}
 		</Box>
 	);
 }
 
-/** Render result lines; unified-diff markers (+/-/@@) get diff coloring. */
-function ResultLines({ text, isError }: { text: string; isError?: boolean }) {
+/**
+ * Render result lines; unified-diff markers (+/-/@@) get diff coloring. The
+ * live view truncates hard — layout matters more than completeness while the
+ * transcript scrolls — and transcript mode passes `full` to lift that cap
+ * (still bounded by what the reducer stored).
+ */
+function ResultLines({ text, isError, full }: { text: string; isError?: boolean; full?: boolean }) {
 	const theme = useTheme();
 	const sanitized = stripAnsi(text);
-	const capped = sanitized.length > 400 ? `${sanitized.slice(0, 397)}...` : sanitized || "(no output)";
+	const capped = full || sanitized.length <= 400 ? sanitized || "(no output)" : `${sanitized.slice(0, 397)}...`;
 	if (isError) {
 		return (
 			<Text color={theme.error} bold={theme.bold.error}>
@@ -255,12 +260,12 @@ function ResultLines({ text, isError }: { text: string; isError?: boolean }) {
 	);
 }
 
-export function MessageList({ entries }: { entries: UiEntry[] }) {
+export function MessageList({ entries, full }: { entries: UiEntry[]; full?: boolean }) {
 	return (
 		<Box flexDirection="column">
 			{entries.map((entry, i) => (
 				// biome-ignore lint/suspicious/noArrayIndexKey: entries is append-only, existing indices never change identity
-				<EntryView key={i} entry={entry} />
+				<EntryView key={i} entry={entry} full={full} />
 			))}
 		</Box>
 	);
@@ -291,14 +296,14 @@ function InfoView({ text }: { text: string }) {
 	);
 }
 
-export function EntryView({ entry }: { entry: UiEntry }) {
+export function EntryView({ entry, full }: { entry: UiEntry; full?: boolean }) {
 	switch (entry.kind) {
 		case "user":
 			return <UserMessageView text={entry.text} />;
 		case "assistant":
 			return <AssistantMessageView text={entry.text} />;
 		case "toolUse":
-			return <ToolUseView entry={entry} />;
+			return <ToolUseView entry={entry} full={full} />;
 		case "error":
 			return <ErrorView text={entry.text} />;
 		case "info":

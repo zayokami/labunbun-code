@@ -3,6 +3,7 @@
  * renderable entries plus transient streaming/status slices.
  */
 import type { AgentEvent } from "@labunbun/agent";
+import type { ListPickerState } from "./components/ListPickerDialog.tsx";
 import { DEFAULT_THEME } from "./themes/index.ts";
 import type { Theme } from "./themes/tokens.ts";
 
@@ -43,6 +44,8 @@ export interface UiState {
 	statusPhase: StatusPhase;
 	dialog: PermissionDialogState | null;
 	question: QuestionDialogState | null;
+	/** Pick-one dialog (resume, model switch). Like `question`, carries a resolve closure. */
+	picker: ListPickerState | null;
 	contextInfo?: { usedTokens: number; threshold: number };
 	tasks?: UiTask[];
 	/**
@@ -50,6 +53,8 @@ export interface UiState {
 	 * the provider reads it from here, so a change rerenders the tree.
 	 */
 	theme: Theme;
+	/** Display name of the active model. In the store so /model switching updates the status line live. */
+	modelName: string;
 }
 
 export interface PermissionDialogState {
@@ -72,6 +77,13 @@ export interface QuestionDialogState {
 	resolve: (answers: string[] | null) => void;
 }
 
+/**
+ * Tool output kept per entry. Generous on purpose — transcript mode (Ctrl+O)
+ * renders up to this much so real command output stays readable — while the
+ * live view still truncates for layout.
+ */
+export const RESULT_TEXT_CAP = 16_000;
+
 export function initialUiState(): UiState {
 	return {
 		entries: [],
@@ -81,7 +93,9 @@ export function initialUiState(): UiState {
 		statusPhase: "idle",
 		dialog: null,
 		question: null,
+		picker: null,
 		theme: DEFAULT_THEME,
+		modelName: "",
 	};
 }
 
@@ -171,7 +185,7 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				.filter((b) => b.type === "text")
 				.map((b) => b.text)
 				.join("\n")
-				.slice(0, 2000);
+				.slice(0, RESULT_TEXT_CAP);
 			return {
 				...state,
 				pendingTools: state.pendingTools.filter((p) => p.callId !== event.callId),

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { MessageBuilder } from "../src/message-builder.ts";
 import { FAUX_MODEL, fauxProvider } from "../src/providers/faux.ts";
-import { statusCodeOf, withRetry } from "../src/retry.ts";
+import { isAbortError, statusCodeOf, withRetry } from "../src/retry.ts";
 import type { AssistantMessageEvent, StreamFn } from "../src/types.ts";
 
 async function collect(events: AsyncIterable<AssistantMessageEvent>) {
@@ -101,5 +101,57 @@ describe("withRetry", () => {
 		const wrapped = withRetry(faux.streamFn);
 		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
 		expect(events.at(-1)?.type).toBe("done");
+	});
+});
+
+describe("abort handling", () => {
+	function abortError(): Error {
+		return Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+	}
+
+	test("isAbortError recognizes the abort error names", () => {
+		expect(isAbortError(abortError())).toBe(true);
+		expect(isAbortError(Object.assign(new Error("x"), { name: "APIUserAbortError" }))).toBe(true);
+		expect(isAbortError(new Error("plain"))).toBe(false);
+		expect(isAbortError({ name: "AbortError" })).toBe(false); // not an Error instance
+	});
+
+	// The reported failure mode: pressing Esc during the connection phase used
+	// to enter the retry ladder — up to 10 backoff attempts against a request
+	// the user had already cancelled.
+	test("an abort before the first byte fails in exactly one attempt, with no backoff", async () => {
+		let calls = 0;
+		let slept = false;
+		const fn: StreamFn = async function* (_model, _context, options) {
+			calls++;
+			options?.signal?.throwIfAborted();
+			yield new MessageBuilder(FAUX_MODEL.provider, FAUX_MODEL.id).start();
+		};
+		const controller = new AbortController();
+		controller.abort();
+		const wrapped = withRetry(fn, {
+			baseDelayMs: 1,
+			sleep: async () => {
+				slept = true;
+			},
+		});
+
+		await expect(
+			collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { signal: controller.signal })),
+		).rejects.toThrow();
+		expect(calls).toBe(1);
+		expect(slept).toBe(false);
+	});
+
+	test("an abort error thrown by the adapter propagates even without the signal", async () => {
+		// biome-ignore lint/correctness/useYield: the abort must surface before any event exists
+		const fn: StreamFn = async function* () {
+			throw abortError();
+		};
+		// No terminal conversion: the raw abort must reach the caller so the
+		// session loop can map it to stopReason "aborted".
+		await expect(collect(withRetry(fn)(FAUX_MODEL, { systemPrompt: "", messages: [] }))).rejects.toThrow(
+			"This operation was aborted",
+		);
 	});
 });

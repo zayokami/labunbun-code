@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { buildOpenAIRequest, convertMessages, mapOpenAIStream } from "../src/providers/openai-compat.ts";
 import type { Context, Model } from "../src/types.ts";
 import { assistantMessage, toolResultMessage, userMessage } from "../src/types.ts";
@@ -213,5 +213,43 @@ describe("mapOpenAIStream", () => {
 	test("empty stream yields terminal error event", async () => {
 		const events = await collect(mapOpenAIStream(raw([]), "deepseek", "deepseek-chat"));
 		expect(events.map((e) => e.type)).toEqual(["start", "error"]);
+	});
+});
+
+describe("defaultClient signal threading", () => {
+	test("the caller's abort signal reaches fetch through the client factory", async () => {
+		let capturedOptions: Record<string, unknown> = {};
+		mock.module("openai", () => ({
+			default: class FakeOpenAI {
+				constructor(options: Record<string, unknown>) {
+					capturedOptions = options;
+				}
+				chat = { completions: { create: async () => raw([]) } };
+			},
+		}));
+		const { createOpenAIStreamFn } = await import("../src/providers/openai-compat.ts");
+
+		const controller = new AbortController();
+		const iterator = createOpenAIStreamFn()(MODEL, ctx(), { signal: controller.signal });
+		await iterator.next();
+
+		expect(capturedOptions.maxRetries).toBe(0);
+		const customFetch = capturedOptions.fetch as (input: unknown, init?: RequestInit) => Promise<unknown>;
+		expect(typeof customFetch).toBe("function");
+
+		// The wrapper's whole job is injecting the signal into the init it
+		// forwards, so that is what is asserted — not just that a function exists.
+		let seenSignal: AbortSignal | null | undefined;
+		const realFetch = globalThis.fetch;
+		globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+			seenSignal = init?.signal;
+			throw new Error("request must not actually be sent");
+		}) as unknown as typeof fetch;
+		try {
+			await customFetch("http://localhost/v1", {}).catch(() => {});
+		} finally {
+			globalThis.fetch = realFetch;
+		}
+		expect(seenSignal).toBe(controller.signal);
 	});
 });

@@ -5,6 +5,7 @@
  * content started flowing propagate unchanged — the loop's recovery ladder
  * owns mid-stream failures.
  */
+import { isAbortError } from "./retry.ts";
 import type { AssistantMessageEvent, Context, Model, StreamFn, StreamOptions } from "./types.ts";
 
 export function withModelFallback(base: StreamFn, resolveChain: (model: Model) => Model[]): StreamFn {
@@ -35,8 +36,10 @@ export function withModelFallback(base: StreamFn, resolveChain: (model: Model) =
 					yield event;
 				}
 			} catch (error) {
-				// Pre-content throw (network/SDK): fall through to the next model.
-				if (sawContent || isLast) throw error;
+				// Pre-content throw (network/SDK): fall through to the next model —
+				// but an abort must propagate even then, or Esc would silently walk
+				// the entire fallback chain before taking effect.
+				if (sawContent || isLast || options?.signal?.aborted || isAbortError(error)) throw error;
 				continue;
 			}
 

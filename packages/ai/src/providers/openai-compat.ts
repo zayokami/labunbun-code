@@ -307,6 +307,9 @@ async function defaultClient(model: Model, options?: StreamOptions): Promise<Ope
 		apiKey,
 		baseURL: model.baseUrl || undefined,
 		maxRetries: 0, // our retry wrapper owns retry policy
+		// Thread the caller's abort signal into every request so Esc cancels
+		// OpenAI-compatible providers the same way it cancels Anthropic.
+		fetch: options?.signal ? (input, init) => fetch(input, { ...init, signal: options.signal }) : undefined,
 	}) as unknown as OpenAIClientLike;
 }
 

@@ -1,6 +1,8 @@
-import { Box, Text, useInput } from "ink";
-import { useState } from "react";
+import { Box, Text, useInput, usePaste } from "ink";
+import { useEffect, useRef, useState } from "react";
 import { useTextInput } from "../hooks/useTextInput.ts";
+import { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "../paste.ts";
+import { applyFileCompletion, currentAtWord, filterFiles } from "../prompt-files.ts";
 import { useTheme } from "../theme.ts";
 
 export interface PromptInputProps {
@@ -9,6 +11,12 @@ export interface PromptInputProps {
 	placeholder?: string;
 	/** Slash-command suggestions: [name, description]. */
 	commandSuggestions?: Array<[string, string]>;
+	/**
+	 * Candidate file paths for @-mention completion. Receives the typed query
+	 * but MAY return an unfiltered superset — this component always applies its
+	 * own ranking and cap.
+	 */
+	completeFiles?: (query: string) => Promise<string[]>;
 	/** Modal vim editing (normal/insert). */
 	vim?: boolean;
 	/**
@@ -39,6 +47,7 @@ export function PromptInput({
 	disabled = false,
 	placeholder = 'Try "fix the failing test" — / for commands',
 	commandSuggestions = [],
+	completeFiles,
 	vim = false,
 	history = [],
 }: PromptInputProps) {
@@ -55,6 +64,28 @@ export function PromptInput({
 	 * impossible — so the original prefix keeps driving the list.
 	 */
 	const [completionPrefix, setCompletionPrefix] = useState<string | null>(null);
+	// Bracketed-paste payloads fold into placeholder tokens; this map holds the
+	// originals until submit. It survives submits so a recalled history entry
+	// containing tokens can still be re-expanded.
+	const pasteMapRef = useRef(new Map<string, string>());
+	const pasteSeqRef = useRef(0);
+
+	usePaste(
+		(text) => {
+			const clean = normalizePaste(text);
+			setCompletionPrefix(null);
+			setSuggestionIndex(0);
+			if (!shouldPlaceholderize(clean)) {
+				actions.insert(clean);
+				return;
+			}
+			pasteSeqRef.current += 1;
+			const token = makePasteToken(pasteSeqRef.current, clean.length);
+			pasteMapRef.current.set(token, clean);
+			actions.insert(token);
+		},
+		{ isActive: !disabled },
+	);
 
 	const query = completionPrefix ?? state.text;
 	const suggestions =
@@ -62,11 +93,44 @@ export function PromptInput({
 			? commandSuggestions.filter(([name]) => name.startsWith(query.toLowerCase())).slice(0, 5)
 			: [];
 
+	// @-mention suggestions. The slash list and the at-word are exclusive by
+	// construction: slash needs a buffer starting with "/" and no space, an
+	// at-word is a single token that starts with "@".
+	const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
+	const [fileIndex, setFileIndex] = useState(0);
+	const atQuery = currentAtWord(state.text, state.cursor);
+
+	useEffect(() => {
+		if (!completeFiles || atQuery === null) return;
+		const timer = setTimeout(() => {
+			completeFiles(atQuery)
+				.then((files) => {
+					setFileSuggestions(filterFiles(files, atQuery));
+					setFileIndex(0);
+				})
+				.catch(() => setFileSuggestions([]));
+		}, 120);
+		return () => clearTimeout(timer);
+	}, [atQuery, completeFiles]);
+
+	// A stale list must not linger once the caret leaves the at-word.
+	useEffect(() => {
+		if (atQuery === null) setFileSuggestions([]);
+	}, [atQuery]);
+
 	useInput(
 		(input, key) => {
 			if (handleVimKey(input, key)) return;
 			// Tab writes the highlighted suggestion into the buffer. Cycling alone
 			// left the user staring at a list they could not accept.
+			if (key.tab && fileSuggestions.length > 0) {
+				const path = fileSuggestions[fileIndex % fileSuggestions.length];
+				const applied = applyFileCompletion(state.text, state.cursor, path);
+				setCompletionPrefix(null);
+				setFileSuggestions([]);
+				actions.setBuffer(applied.text, applied.cursor);
+				return;
+			}
 			if (key.tab && suggestions.length > 0) {
 				if (completionPrefix === null) {
 					setCompletionPrefix(state.text);
@@ -79,21 +143,32 @@ export function PromptInput({
 				actions.setText(suggestions[next][0]);
 				return;
 			}
+			if (key.escape && fileSuggestions.length > 0) {
+				setFileSuggestions([]);
+				return;
+			}
 			if (key.return && (input === "" || input === "\r")) {
-				const text = state.text;
+				// Placeholder tokens expand here, so the model and the transcript see
+				// the real payload. History keeps the compact token form — recall and
+				// resubmit expand through the still-live map. A partially deleted
+				// token no longer matches and stays literal text (accepted limitation).
+				const raw = state.text;
+				const text = expandPasteTokens(raw, pasteMapRef.current);
 				if (!text.trim()) return;
-				pushHistory(text);
+				pushHistory(raw);
 				actions.clear();
 				setSuggestionIndex(0);
 				setCompletionPrefix(null);
 				onSubmit(text);
 				return;
 			}
-			// While the suggestion list is open the arrows move through it. Recalling
+			// While a suggestion list is open the arrows move through it. Recalling
 			// history here would replace the half-typed command with an old prompt,
 			// which is the opposite of what someone browsing commands wants.
 			if (key.upArrow) {
-				if (suggestions.length > 0) {
+				if (fileSuggestions.length > 0) {
+					setFileIndex((i) => (i - 1 + fileSuggestions.length) % fileSuggestions.length);
+				} else if (suggestions.length > 0) {
 					setSuggestionIndex((i) => (i - 1 + suggestions.length) % suggestions.length);
 				} else if (!state.text.includes("\n")) {
 					historyUp();
@@ -101,7 +176,9 @@ export function PromptInput({
 				return;
 			}
 			if (key.downArrow) {
-				if (suggestions.length > 0) {
+				if (fileSuggestions.length > 0) {
+					setFileIndex((i) => (i + 1) % fileSuggestions.length);
+				} else if (suggestions.length > 0) {
 					setSuggestionIndex((i) => (i + 1) % suggestions.length);
 				} else if (!state.text.includes("\n")) {
 					historyDown();
@@ -124,6 +201,26 @@ export function PromptInput({
 				actions.moveToLineEnd();
 				return;
 			}
+			// Readline word motions and word kills. The kill ring accumulates
+			// consecutive kills, so Ctrl+W Ctrl+W yanks both words back.
+			if (key.meta && input === "b") {
+				actions.moveWordLeft();
+				return;
+			}
+			if (key.meta && input === "f") {
+				actions.moveWordRight();
+				return;
+			}
+			if ((key.ctrl && input === "w") || (key.meta && key.backspace)) {
+				setCompletionPrefix(null);
+				actions.killWordBack();
+				return;
+			}
+			if (key.meta && input === "d") {
+				setCompletionPrefix(null);
+				actions.killWordForward();
+				return;
+			}
 			if (key.ctrl && input === "k") {
 				actions.killToEnd();
 				return;
@@ -136,11 +233,20 @@ export function PromptInput({
 				actions.yank();
 				return;
 			}
+			// Ctrl+_ arrives as the raw 0x1f byte on most terminals — ink only
+			// treats bytes up to 0x1A as ctrl+letter. The same byte is often sent
+			// for Ctrl+/, which is an acceptable alias.
+			if (input === "\x1f" || (key.ctrl && input === "_")) {
+				actions.undo();
+				return;
+			}
 			if (key.backspace || key.delete) {
 				// Editing invalidates the remembered prefix: the list should follow
-				// what is in the buffer again.
+				// what is in the buffer again. Forward-delete finally reaches the
+				// hook's own delete action instead of masquerading as backspace.
 				setCompletionPrefix(null);
-				actions.backspace();
+				if (key.delete) actions.delete();
+				else actions.backspace();
 				return;
 			}
 			if (input === "\n" || (key.meta && key.return)) {
@@ -170,7 +276,7 @@ export function PromptInput({
 
 	return (
 		<Box flexDirection="column">
-			{suggestions.length > 0 && (
+			{(suggestions.length > 0 || fileSuggestions.length > 0) && (
 				<Box flexDirection="column" marginBottom={0}>
 					{suggestions.map(([name, description], i) => {
 						const isSelected = suggestionIndex % suggestions.length === i;
@@ -182,7 +288,19 @@ export function PromptInput({
 							</Text>
 						);
 					})}
-					<Text dimColor>Tab cycle · Enter run</Text>
+					{fileSuggestions.map((path, i) => {
+						const isSelected = fileIndex % fileSuggestions.length === i;
+						return (
+							<Text key={path} color={isSelected ? theme.selection : theme.textMuted}>
+								{isSelected ? `${theme.marks.selected} ` : "  "}@{path}
+							</Text>
+						);
+					})}
+					{fileSuggestions.length > 0 ? (
+						<Text dimColor>↑/↓ select · Tab complete · Esc dismiss</Text>
+					) : (
+						<Text dimColor>Tab cycle · Enter run</Text>
+					)}
 				</Box>
 			)}
 			{selected && state.text !== selected[0] && <Text dimColor> </Text>}

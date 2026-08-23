@@ -1,20 +1,28 @@
 import type { AgentEvent, AgentSession } from "@labunbun/agent";
 import { Box, Text, useInput } from "ink";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
 import { initialUiState, reduceEvent, type UiState } from "../ui-state.ts";
+import { ListPickerDialog } from "./ListPickerDialog.tsx";
 import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { QuestionDialog } from "./QuestionDialog.tsx";
-import { StatusLine } from "./StatusLine.tsx";
+import { estimateOutputTokens, StatusLine } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
+import { TerminalTitle } from "./TerminalTitle.tsx";
 
 /** Verdict from the app layer's prompt gate (UserPromptSubmit hooks). */
 export interface PromptSubmitVerdict {
 	block?: boolean;
 	reason?: string;
+	/**
+	 * The gate consumed this input entirely (the "!" shell passthrough does) —
+	 * it already wrote whatever belongs in the transcript, so the REPL must not
+	 * push a user entry, queue the text, or prompt the model.
+	 */
+	handled?: true;
 }
 
 /**
@@ -24,7 +32,11 @@ export interface PromptSubmitVerdict {
 export type PromptSubmitResult = PromptSubmitVerdict | undefined;
 
 export interface ReplProps {
-	session: AgentSession;
+	/**
+	 * Read the active session at call time. An in-app /resume swaps sessions
+	 * without remounting, so holding the session in a prop would go stale.
+	 */
+	getSession: () => AgentSession;
 	store: Store<UiState>;
 	modelName: string;
 	onExit: () => void;
@@ -42,16 +54,37 @@ export interface ReplProps {
 	onMemoryShortcut?: (note: string) => void;
 	/** Slash-command suggestions for autocomplete. */
 	commandSuggestions?: Array<[string, string]>;
+	/** Candidate file paths for @-mention completion in the prompt. */
+	completeFiles?: (query: string) => Promise<string[]>;
 	/** Modal vim editing in the prompt. */
 	vimMode?: boolean;
 	/** Context-window usage for the status line. */
 	contextInfo?: { usedTokens: number; threshold: number };
 	/** Prompts from earlier sessions, oldest first, for ↑ recall. */
 	history?: string[];
+	/** Basename of the session directory, for the terminal window title. */
+	dirName?: string;
 }
 
 const KEYS_HELP = `Keys:
-  Enter send · Shift+Enter newline · ↑/↓ history · Esc interrupt · Ctrl+C exit`;
+  Enter send · Shift+Enter newline · ↑/↓ history · Esc interrupt · Ctrl+C exit (twice when idle)`;
+
+/** Clear screen, clear scrollback, home cursor — the full terminal wipe. */
+export const CLEAR_SCREEN = "\x1b[2J\x1b[3J\x1b[H";
+
+/** Terminal bell — rings when a run finishes and attention is needed. */
+export const BEL = "\x07";
+
+/** Double-press window for the idle Ctrl+C exit confirmation. */
+export const CTRL_C_EXIT_WINDOW_MS = 2000;
+
+/**
+ * True when a second Ctrl+C inside the window should exit. Pure so the
+ * two-press rule is testable without rendering the REPL.
+ */
+export function ctrlCShouldExit(lastAt: number, now: number, windowMs = CTRL_C_EXIT_WINDOW_MS): boolean {
+	return lastAt > 0 && now - lastAt <= windowMs;
+}
 
 /**
  * Commands this component dispatches itself, which no caller-supplied registry
@@ -62,7 +95,6 @@ const BUILT_IN_HELP: Array<[string, string]> = [
 	["/clear", "Clear the conversation display"],
 	["/exit", "Exit"],
 	["/help", "Show this help"],
-	["/model", "Show or switch model"],
 ];
 
 /**
@@ -79,16 +111,18 @@ export function helpText(commandSuggestions?: Array<[string, string]>): string {
 }
 
 export function REPL({
-	session,
+	getSession,
 	store,
-	modelName,
+	modelName: modelNameProp,
 	onExit,
 	onCommand,
 	onSubmitText,
 	onMemoryShortcut,
 	commandSuggestions,
+	completeFiles,
 	vimMode,
 	history,
+	dirName = "",
 }: ReplProps) {
 	const entries = useStore(store, (s) => s.entries);
 	const streamingText = useStore(store, (s) => s.streamingText);
@@ -96,9 +130,23 @@ export function REPL({
 	const statusPhase = useStore(store, (s) => s.statusPhase);
 	const dialog = useStore(store, (s) => s.dialog);
 	const question = useStore(store, (s) => s.question);
+	const picker = useStore(store, (s) => s.picker);
 	const contextInfo = useStore(store, (s) => s.contextInfo);
 	const tasks = useStore(store, (s) => s.tasks);
+	const modelName = useStore(store, (s) => s.modelName) || modelNameProp;
 	const [elapsedMs, setElapsedMs] = useState(0);
+	// Idle Ctrl+C confirmation state: the timestamp of the first press and the
+	// hint line shown until the window lapses.
+	const lastCtrlCAtRef = useRef(0);
+	const ctrlCTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const [ctrlCHint, setCtrlCHint] = useState(false);
+
+	useEffect(
+		() => () => {
+			if (ctrlCTimerRef.current) clearTimeout(ctrlCTimerRef.current);
+		},
+		[],
+	);
 
 	// Elapsed timer while busy.
 	useEffect(() => {
@@ -107,6 +155,19 @@ export function REPL({
 		setElapsedMs(0);
 		const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 500);
 		return () => clearInterval(timer);
+	}, [statusPhase]);
+
+	// Completion bell: a run ending is the moment attention matters, and the
+	// user may be in another window. Only on a real busy → idle transition.
+	const wasBusyRef = useRef(false);
+	useEffect(() => {
+		const busy = statusPhase !== "idle";
+		if (busy) {
+			wasBusyRef.current = true;
+		} else if (wasBusyRef.current) {
+			wasBusyRef.current = false;
+			if (process.stdout.isTTY) process.stdout.write(BEL);
+		}
 	}, [statusPhase]);
 
 	const handleSubmit = useCallback(
@@ -142,6 +203,8 @@ export function REPL({
 					}));
 					return;
 				}
+				if (verdict?.handled) return;
+				const session = getSession();
 				store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user", text: trimmed }] }));
 				if (session.isRunning) {
 					// Queue for the next turn boundary instead of erroring —
@@ -153,7 +216,7 @@ export function REPL({
 				void session.prompt(text);
 			})();
 		},
-		[session, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions],
+		[getSession, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions],
 	);
 
 	const [transcriptMode, setTranscriptMode] = useState(false);
@@ -177,16 +240,36 @@ export function REPL({
 			}
 			return;
 		}
-		if (key.escape && session.isRunning) {
-			session.abort();
+		if (key.ctrl && input === "l") {
+			// Wipe the terminal, not the conversation. Sealed Static rows are not
+			// redrawn after an external clear — an accepted cosmetic cost of
+			// keeping transcript state out of the terminal's own scrollback.
+			if (process.stdout.isTTY) process.stdout.write(CLEAR_SCREEN);
+			return;
+		}
+		if (key.escape && getSession().isRunning) {
+			getSession().abort();
 			return;
 		}
 		if (key.ctrl && input === "c") {
-			if (session.isRunning) {
-				session.abort();
-			} else {
-				onExit();
+			if (getSession().isRunning) {
+				getSession().abort();
+				return;
 			}
+			// Idle exit asks for a second press: one stray Ctrl+C must not throw
+			// away a half-typed prompt or the session view.
+			const now = Date.now();
+			if (ctrlCShouldExit(lastCtrlCAtRef.current, now)) {
+				onExit();
+				return;
+			}
+			lastCtrlCAtRef.current = now;
+			setCtrlCHint(true);
+			if (ctrlCTimerRef.current) clearTimeout(ctrlCTimerRef.current);
+			ctrlCTimerRef.current = setTimeout(() => {
+				setCtrlCHint(false);
+				lastCtrlCAtRef.current = 0;
+			}, CTRL_C_EXIT_WINDOW_MS);
 		}
 	});
 
@@ -197,7 +280,8 @@ export function REPL({
 		const windowEntries = entries.slice(start, end);
 		return (
 			<Box flexDirection="column">
-				<MessageList entries={windowEntries} />
+				{/* full output here — reading back is exactly when truncation hurts */}
+				<MessageList entries={windowEntries} full />
 				<Text dimColor>
 					Transcript {start + 1}-{end} of {entries.length} · ↑/↓ page · ctrl+o/Esc back
 				</Text>
@@ -207,11 +291,18 @@ export function REPL({
 
 	return (
 		<Box flexDirection="column">
+			<TerminalTitle phase={statusPhase} dirName={dirName} />
 			<VirtualMessageList entries={entries} />
 			<StreamingPreview text={streamingText} thinking={thinkingText} />
 			{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
 			<Box marginBottom={1}>
-				<StatusLine phase={statusPhase} modelName={modelName} elapsedMs={elapsedMs} contextInfo={contextInfo} />
+				<StatusLine
+					phase={statusPhase}
+					modelName={modelName}
+					elapsedMs={elapsedMs}
+					contextInfo={contextInfo}
+					outputEstimate={estimateOutputTokens(streamingText.length)}
+				/>
 			</Box>
 			{dialog ? (
 				<PermissionDialog
@@ -221,10 +312,13 @@ export function REPL({
 				/>
 			) : null}
 			{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} /> : null}
+			{picker ? <ListPickerDialog title={picker.title} items={picker.items} resolve={picker.resolve} /> : null}
+			{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
 			<PromptInput
 				onSubmit={handleSubmit}
-				disabled={dialog !== null || question !== null}
+				disabled={dialog !== null || question !== null || picker !== null}
 				commandSuggestions={commandSuggestions}
+				completeFiles={completeFiles}
 				vim={vimMode}
 				history={history}
 			/>
@@ -242,24 +336,17 @@ function handleCommand(
 		commandSuggestions?: Array<[string, string]>;
 	},
 ): void {
-	const { store, modelName, onExit, commandSuggestions } = context;
-	const [command, ...args] = text.split(/\s+/);
+	const { store, onExit, commandSuggestions } = context;
+	const [command] = text.split(/\s+/);
 
 	switch (command) {
 		case "/help":
 			pushInfo(store, helpText(commandSuggestions));
 			break;
 		case "/clear":
-			store.set((s) => ({ ...initialUiState(), dialog: s.dialog }));
+			// Display-only: the persisted session and the model context survive.
+			store.set((s) => ({ ...initialUiState(), dialog: s.dialog, picker: s.picker }));
 			break;
-		case "/model": {
-			if (args[0]) {
-				pushInfo(store, `Model switching arrives with the settings layer (Phase 4). Requested: ${args[0]}`);
-			} else {
-				pushInfo(store, `Current model: ${modelName}`);
-			}
-			break;
-		}
 		case "/exit":
 		case "/quit":
 			onExit();

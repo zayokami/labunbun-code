@@ -17,6 +17,7 @@ interface CliArgs {
 	maxTurns: number | null;
 	noSession: boolean;
 	resume: string | null;
+	continueLast: boolean;
 	outputFormat: string | null;
 	apply: boolean;
 	force: boolean;
@@ -34,6 +35,7 @@ function parseArgs(argv: string[]): CliArgs {
 		maxTurns: null,
 		noSession: false,
 		resume: null,
+		continueLast: false,
 		outputFormat: null,
 		apply: false,
 		force: false,
@@ -76,6 +78,10 @@ function parseArgs(argv: string[]): CliArgs {
 			case "--resume":
 				args.resume = rest[++i] ?? null;
 				break;
+			case "--continue":
+			case "-c":
+				args.continueLast = true;
+				break;
 			case "--output-format":
 				args.outputFormat = rest[++i] ?? null;
 				break;
@@ -100,7 +106,7 @@ function printHelp(): void {
 	console.log(`${CLI_NAME} — a coding agent for your terminal
 
 Usage:
-  labunbun                     Interactive REPL (Phase 3)
+  labunbun                     Interactive REPL
   labunbun -p "<prompt>"       Headless: run one prompt and print the result
   labunbun migrate             Import settings from another agent tool
   labunbun --version           Show version
@@ -112,6 +118,7 @@ Options:
       --max-turns <n>          Cap agent turns in headless mode
       --no-session             Don't persist this session to disk
       --resume <id>            Resume a saved session
+  -c, --continue               Continue the most recent session
       --output-format <f>      Headless output: text | json | stream-json
   -h, --help                   Show this help
 
@@ -180,6 +187,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 		modelRef: args.model ?? undefined,
 		permissionMode: (args.permissionMode as never) ?? undefined,
 		resumeSessionId: args.resume ?? undefined,
+		continueLast: args.continueLast,
 	});
 }
 

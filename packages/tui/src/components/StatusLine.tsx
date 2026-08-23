@@ -12,16 +12,24 @@ const PHASE_LABEL: Record<StatusPhase, string> = {
 	tools: "Running tools…",
 };
 
+/** Rough live output size in tokens — chars/4, the usual English heuristic. */
+export function estimateOutputTokens(chars: number): number {
+	return Math.ceil(chars / 4);
+}
+
 export function StatusLine({
 	phase,
 	modelName,
 	elapsedMs,
 	contextInfo,
+	outputEstimate,
 }: {
 	phase: StatusPhase;
 	modelName: string;
 	elapsedMs: number;
 	contextInfo?: { usedTokens: number; threshold: number };
+	/** Live output-token estimate for the in-flight response. */
+	outputEstimate?: number;
 }) {
 	const theme = useTheme();
 	const [frame, setFrame] = useState(0);
@@ -49,12 +57,14 @@ export function StatusLine({
 		) : null;
 	}
 	const seconds = (elapsedMs / 1000).toFixed(0);
+	const outputPart = outputEstimate && outputEstimate > 0 ? ` · ~${formatTokens(outputEstimate)} out` : "";
 	return (
 		<Text color={theme.primary}>
 			{FRAMES[frame]} {PHASE_LABEL[phase]}{" "}
 			<Text dimColor>
 				({seconds}s · {modelName}
-				{contextPart})
+				{outputPart}
+				{contextPart} · esc to interrupt)
 			</Text>
 		</Text>
 	);

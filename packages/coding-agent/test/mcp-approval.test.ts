@@ -22,7 +22,8 @@ function makeCtx(overrides: Partial<AppCommandContext> = {}): AppCommandContext 
 	const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
 	const store = createStore<{ entries: Array<{ kind: string; text: string }> }>({ entries: [] });
 	return {
-		session,
+		sessionRef: session,
+		getSession: () => session,
 		handle: { store } as never,
 		settings: {} as never,
 		cwd: overrides.cwd ?? process.cwd(),
@@ -30,12 +31,14 @@ function makeCtx(overrides: Partial<AppCommandContext> = {}): AppCommandContext 
 		baseRules: [],
 		sessionRules: [],
 		commands: [],
-		compaction: {} as never,
+		compaction: () => ({}) as never,
 		mcpConnections: [],
 		mcpConfig: {},
 		pendingMcpApprovals: [],
-		sessionStore: undefined,
+		sessionStore: () => undefined,
 		theme: { theme: DARK_THEME, available: [DARK_THEME.name], problems: [] },
+		hotSwapSession: async () => {},
+		switchModel: () => false,
 		...overrides,
 	};
 }
@@ -86,7 +89,9 @@ describe("/mcp command", () => {
 		expect(loadApprovedMcpServers(dir).has("fixture")).toBe(true);
 		expect(ctx.pendingMcpApprovals).not.toContain("fixture");
 		expect(ctx.mcpConnections.some((c) => c.serverName === "fixture")).toBe(true);
-		expect(ctx.session.tools.some((t) => t.name === "mcp__fixture__echo")).toBe(true);
+		const session = ctx.getSession();
+		if (!session) throw new Error("session missing from context");
+		expect(session.tools.some((t: { name: string }) => t.name === "mcp__fixture__echo")).toBe(true);
 		expect(infoTexts(ctx).join("\n")).toContain("connected with");
 	}, 20_000);
 });

@@ -5,8 +5,9 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
+	type AgentDeps,
 	AgentSession,
 	CompactionManager,
 	compactionThreshold,
@@ -20,6 +21,8 @@ import {
 import {
 	apiKeyEnvNames,
 	createDefaultStreamFn,
+	listModels,
+	type Model,
 	registerOpenAICompatibleProvider,
 	resolveApiKey,
 	resolveModel,
@@ -35,16 +38,18 @@ import {
 	type McpServerConfig,
 	approveMcpServer as persistMcpApproval,
 } from "@labunbun/mcp";
-import { createAllTools, TaskStore } from "@labunbun/tools";
+import { createAllTools, defaultOperations, type Operations, TaskStore } from "@labunbun/tools";
 import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle } from "@labunbun/tui";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { CostTracker, formatCostState } from "./cost-tracker.ts";
+import { sessionToMarkdown } from "./export-session.ts";
+import { createFileCompleter } from "./file-completions.ts";
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
-import { formatSessionList, listSessions, loadSessionForResume } from "./session-resume.ts";
+import { listSessions, loadSessionForResume, resolveContinueTarget, type SessionSummary } from "./session-resume.ts";
 import {
 	applySettingsEnv,
 	collectPermissionRules,
@@ -52,15 +57,20 @@ import {
 	resolvePermissionMode,
 	type Settings,
 } from "./settings.ts";
+import { createShellPassthrough } from "./shell-passthrough.ts";
 import { loadSkills, skillsAsCommands } from "./skills.ts";
 import { createTaskTool, loadAgentDefinitions } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { persistThemeChoice, type ResolvedTheme, resolveTheme } from "./theme-file.ts";
+import { persistModelChoice } from "./user-settings.ts";
+import { runWizard, shouldRunWizard } from "./wizard.ts";
 
 export interface InteractiveOptions {
 	modelRef?: string;
 	permissionMode?: PermissionMode;
 	resumeSessionId?: string;
+	/** Continue the most recent session (the --continue flag). */
+	continueLast?: boolean;
 	cwd?: string;
 	/** Theme name: a built-in, a theme file, or "auto". */
 	theme?: string;
@@ -68,6 +78,9 @@ export interface InteractiveOptions {
 
 export async function runInteractive(options: InteractiveOptions = {}): Promise<number> {
 	const cwd = options.cwd ?? process.cwd();
+
+	// ---- first-run setup (before settings load, so it can create them) ----
+	if (shouldRunWizard()) await runWizard(cwd);
 
 	// ---- settings & providers ----
 	const loadedSettings = loadSettings(cwd);
@@ -87,6 +100,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		console.error(`Unknown model: ${modelRef}`);
 		return 1;
 	}
+	// Narrowed alias: closures below (hot-swap) read the startup model without
+	// re-narrowing.
+	const startupModel: Model = model;
 	if (!resolveApiKey(model)) {
 		const names = apiKeyEnvNames(model);
 		console.error(
@@ -96,7 +112,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		return 1;
 	}
 
-	// ---- session persistence: resume or new ----
+	// ---- session persistence: resume, continue, or new ----
 	let store: SessionStore | undefined;
 	if (options.resumeSessionId) {
 		const resumeId = options.resumeSessionId;
@@ -108,13 +124,27 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			return 1;
 		}
 		store = loadSessionForResume(match.path)?.store;
+	} else if (options.continueLast) {
+		// --resume wins when both are given; this is the shorthand.
+		const target = resolveContinueTarget(cwd);
+		if (target) {
+			store = loadSessionForResume(target.path)?.store;
+		}
+		if (!store) {
+			console.error("No previous session to continue — starting a new one.");
+			store = SessionStore.startNew(cwd);
+		}
 	} else {
 		store = SessionStore.startNew(cwd);
 	}
 
 	// ---- tools & session ----
 	const taskStore = new TaskStore();
-	const tools = createAllTools(cwd, { taskStore });
+	// One shared Operations instance: the "!" shell passthrough and the Bash
+	// tool must resolve shells and kill process trees identically.
+	const ops: Operations = defaultOperations();
+	const shellPassthrough = createShellPassthrough({ cwd, ops });
+	const tools = createAllTools(cwd, { taskStore, operations: ops });
 	const sessionRules: PermissionRule[] = [];
 	const baseRules: PermissionRule[] = collectPermissionRules(loadedSettings);
 	const requestedMode = options.permissionMode ?? settings.permissionMode ?? "default";
@@ -133,29 +163,37 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		.filter((m): m is NonNullable<typeof m> => Boolean(m));
 	const streamFn = withModelFallback(baseStreamFn, () => fallbackChain);
 
-	// Compaction.
-	const compactionThresholdValue = compactionThreshold({
-		contextWindow: model.contextWindow,
-		maxOutputTokens: model.maxOutputTokens,
-	});
-	const compaction = new CompactionManager(
-		{ contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens },
-		{
-			streamFn,
-			store,
-			readFile: (path) => {
-				try {
-					return readFileSync(path, "utf8");
-				} catch {
-					return null;
-				}
+	// Compaction. Recreated on /resume or /model switch — the manager binds to
+	// one store and one model's window, so a swap must rebuild it.
+	const buildCompaction = (forModel: Model, forStore: SessionStore | undefined): CompactionManager =>
+		new CompactionManager(
+			{ contextWindow: forModel.contextWindow, maxOutputTokens: forModel.maxOutputTokens },
+			{
+				streamFn,
+				store: forStore,
+				readFile: (path) => {
+					try {
+						return readFileSync(path, "utf8");
+					} catch {
+						return null;
+					}
+				},
 			},
-		},
-	);
+		);
+	let compaction = buildCompaction(model, store);
+	// Read by the setContextInfo closure on every turn boundary.
+	const thresholdHolder = {
+		current: compactionThreshold({ contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens }),
+	};
 
 	// ---- user hooks (snapshotted at startup against mid-session injection) ----
 	const hooksRuntime = snapshotHooks(settings.hooks);
-	const sessionId = store?.sessionId ?? undefined;
+	/**
+	 * Session-scoped mutable state lives behind holders. An in-app /resume or a
+	 * /model switch rebinds them without invalidating any closure that captured
+	 * the holder itself.
+	 */
+	const sessionIdHolder: { current: string | undefined } = { current: store?.sessionId ?? undefined };
 
 	// Context contributed by hooks (SessionStart / UserPromptSubmit). Injected
 	// into the next user message alongside memory, so the cached system-prompt
@@ -164,7 +202,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	// ---- SessionStart: runs before the REPL mounts, so its context is
 	// available to the very first prompt. Errors are reported, never fatal.
-	const sessionStartOutcome = await hooksRuntime.run("SessionStart", { session_id: sessionId, cwd });
+	const sessionStartOutcome = await hooksRuntime.run("SessionStart", {
+		session_id: sessionIdHolder.current,
+		cwd,
+	});
 	pendingHookContext.push(...sessionStartOutcome.addedContext);
 	const startupHookErrors = advisoryHookFailures("SessionStart", sessionStartOutcome);
 
@@ -213,113 +254,125 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	const allTools = [...tools, ...mcpTools, taskTool, ...planTools, askUserTool];
 
+	const systemPrompt = buildSystemPrompt(allTools, { cwd, platform: process.platform, isTTY: true });
+
+	/**
+	 * Named so a hot-swap can hand the SAME deps object to the next session.
+	 * Its closures read only holder-bound or let-bound state (compaction,
+	 * store, sessionIdHolder, handle), so they stay correct across swaps.
+	 */
+	const sessionDeps: AgentDeps = {
+		streamFn,
+		canUseTool: async (toolName, input, ctx) => {
+			const decision = evaluatePermissions(toolName, input, {
+				mode: ctx.mode,
+				rules: [...baseRules, ...sessionRules],
+				cwd,
+			});
+			if (decision.behavior !== "ask") return decision;
+			// dontAsk has no dialog of its own — an unresolved ask fails closed
+			// rather than falling through to the interactive prompt it exists to skip.
+			if (ctx.mode === "dontAsk" || !handle) {
+				return { behavior: "deny", message: "Permission required (dontAsk mode denies unresolved prompts)" };
+			}
+			// Notification: the session is about to block on a human. This is
+			// the hook users wire to desktop alerts, so it fires before the
+			// dialog appears rather than after it resolves.
+			if (hooksRuntime.has("Notification")) {
+				const outcome = await hooksRuntime.run("Notification", {
+					tool_name: toolName,
+					tool_input: input,
+					session_id: sessionIdHolder.current,
+					cwd,
+				});
+				// Advisory: a Notification hook cannot veto the dialog.
+				reportHookErrors(handle, advisoryHookFailures("Notification", outcome));
+			}
+			const allowed = await handle.requestPermission(toolName, input);
+			return allowed ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
+		},
+		checkCompaction: async (context) => {
+			try {
+				if (hooksRuntime.has("PreCompact")) {
+					const outcome = await hooksRuntime.run("PreCompact", {
+						session_id: sessionIdHolder.current,
+						cwd,
+					});
+					reportHookErrors(
+						handle,
+						outcome.errors.map((e) => `PreCompact hook failed: ${e}`),
+					);
+					if (outcome.blocked) {
+						// A hook may veto this compaction pass; the threshold check
+						// runs again next turn, so this defers rather than disables.
+						pushInfo(handle, `Compaction skipped by PreCompact hook${outcome.reason ? `: ${outcome.reason}` : ""}`);
+						return null;
+					}
+				}
+				return await compaction.maybeCompact(context);
+			} catch {
+				return null; // circuit breaker handles repeated failures
+			}
+		},
+		hooks: {
+			transformContext: (context) => {
+				// Memory files inject once; hook-contributed context drains
+				// whenever it has accumulated. Both ride on the next user
+				// message so the cached system-prompt prefix stays stable.
+				const injectMemory = !memoryInjected && Boolean(memory.content);
+				const hookContext = pendingHookContext.splice(0, pendingHookContext.length);
+				if (!injectMemory && hookContext.length === 0) return context;
+				if (injectMemory) memoryInjected = true;
+
+				const prefix = [...(injectMemory ? [memory.content] : []), ...hookContext].join("\n\n");
+				const messages = [...context.messages];
+				// Last user message, so hook context lands on the prompt it
+				// belongs to rather than on stale history.
+				for (let i = messages.length - 1; i >= 0; i--) {
+					const message = messages[i];
+					if (message.role === "user") {
+						const text = typeof message.content === "string" ? message.content : "";
+						messages[i] = {
+							...message,
+							content: `${prefix}\n\n---\n\n${text}`.trimEnd(),
+						};
+						break;
+					}
+				}
+				return { ...context, messages };
+			},
+			beforeToolCall: async (toolName, input) => {
+				// File checkpoint before mutations — powers /rewind.
+				if (store && (toolName === "Edit" || toolName === "Write")) {
+					snapshotCheckpoint(store, input);
+				}
+				if (!hooksRuntime.has("PreToolUse")) return undefined;
+				const outcome = await hooksRuntime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
+				reportHookErrors(
+					handle,
+					outcome.errors.map((e) => `PreToolUse hook failed: ${e}`),
+				);
+				if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
+				return undefined;
+			},
+			afterToolCall: async (toolName, input) => {
+				if (!hooksRuntime.has("PostToolUse")) return undefined;
+				const outcome = await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
+				// Advisory: the call already ran, so a block has nothing to stop.
+				reportHookErrors(handle, advisoryHookFailures("PostToolUse", outcome));
+				return undefined;
+			},
+		},
+	};
+
 	const session = new AgentSession({
 		model,
-		systemPrompt: buildSystemPrompt(allTools, { cwd, platform: process.platform, isTTY: true }),
+		systemPrompt,
 		tools: allTools,
 		store,
 		cwd,
 		permissionMode: effectiveMode,
-		deps: {
-			streamFn,
-			canUseTool: async (toolName, input, ctx) => {
-				const decision = evaluatePermissions(toolName, input, {
-					mode: ctx.mode,
-					rules: [...baseRules, ...sessionRules],
-					cwd,
-				});
-				if (decision.behavior !== "ask") return decision;
-				// dontAsk has no dialog of its own — an unresolved ask fails closed
-				// rather than falling through to the interactive prompt it exists to skip.
-				if (ctx.mode === "dontAsk" || !handle) {
-					return { behavior: "deny", message: "Permission required (dontAsk mode denies unresolved prompts)" };
-				}
-				// Notification: the session is about to block on a human. This is
-				// the hook users wire to desktop alerts, so it fires before the
-				// dialog appears rather than after it resolves.
-				if (hooksRuntime.has("Notification")) {
-					const outcome = await hooksRuntime.run("Notification", {
-						tool_name: toolName,
-						tool_input: input,
-						session_id: sessionId,
-						cwd,
-					});
-					// Advisory: a Notification hook cannot veto the dialog.
-					reportHookErrors(handle, advisoryHookFailures("Notification", outcome));
-				}
-				const allowed = await handle.requestPermission(toolName, input);
-				return allowed ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
-			},
-			checkCompaction: async (context) => {
-				try {
-					if (hooksRuntime.has("PreCompact")) {
-						const outcome = await hooksRuntime.run("PreCompact", { session_id: sessionId, cwd });
-						reportHookErrors(
-							handle,
-							outcome.errors.map((e) => `PreCompact hook failed: ${e}`),
-						);
-						if (outcome.blocked) {
-							// A hook may veto this compaction pass; the threshold check
-							// runs again next turn, so this defers rather than disables.
-							pushInfo(handle, `Compaction skipped by PreCompact hook${outcome.reason ? `: ${outcome.reason}` : ""}`);
-							return null;
-						}
-					}
-					return await compaction.maybeCompact(context);
-				} catch {
-					return null; // circuit breaker handles repeated failures
-				}
-			},
-			hooks: {
-				transformContext: (context) => {
-					// Memory files inject once; hook-contributed context drains
-					// whenever it has accumulated. Both ride on the next user
-					// message so the cached system-prompt prefix stays stable.
-					const injectMemory = !memoryInjected && Boolean(memory.content);
-					const hookContext = pendingHookContext.splice(0, pendingHookContext.length);
-					if (!injectMemory && hookContext.length === 0) return context;
-					if (injectMemory) memoryInjected = true;
-
-					const prefix = [...(injectMemory ? [memory.content] : []), ...hookContext].join("\n\n");
-					const messages = [...context.messages];
-					// Last user message, so hook context lands on the prompt it
-					// belongs to rather than on stale history.
-					for (let i = messages.length - 1; i >= 0; i--) {
-						const message = messages[i];
-						if (message.role === "user") {
-							const text = typeof message.content === "string" ? message.content : "";
-							messages[i] = {
-								...message,
-								content: `${prefix}\n\n---\n\n${text}`.trimEnd(),
-							};
-							break;
-						}
-					}
-					return { ...context, messages };
-				},
-				beforeToolCall: async (toolName, input) => {
-					// File checkpoint before mutations — powers /rewind.
-					if (store && (toolName === "Edit" || toolName === "Write")) {
-						snapshotCheckpoint(store, input);
-					}
-					if (!hooksRuntime.has("PreToolUse")) return undefined;
-					const outcome = await hooksRuntime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
-					reportHookErrors(
-						handle,
-						outcome.errors.map((e) => `PreToolUse hook failed: ${e}`),
-					);
-					if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
-					return undefined;
-				},
-				afterToolCall: async (toolName, input) => {
-					if (!hooksRuntime.has("PostToolUse")) return undefined;
-					const outcome = await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
-					// Advisory: the call already ran, so a block has nothing to stop.
-					reportHookErrors(handle, advisoryHookFailures("PostToolUse", outcome));
-					return undefined;
-				},
-			},
-		},
+		deps: sessionDeps,
 	});
 	sessionRef = session;
 
@@ -328,47 +381,143 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		session.messages.push(...store.messages());
 	}
 
-	// ---- cost tracking + context indicator ----
+	// ---- cost tracking + context indicator + session-scoped listeners ----
 	const costTracker = new CostTracker(cwd);
+	// @-mention file list for the prompt, cached with a short TTL.
+	const fileCompleter = createFileCompleter(cwd);
 	// Guards against a Stop hook that blocks every turn: each resume is only
 	// allowed to be driven by a hook a bounded number of times per session.
 	let stopHookResumes = 0;
 	const MAX_STOP_HOOK_RESUMES = 10;
-	session.on(async (event) => {
-		if (event.type === "turn_end") {
-			costTracker.recordUsage(event.message.provider, event.message.model, event.message.usage);
-			costTracker.persist();
-		}
-		if (handle && (event.type === "turn_end" || event.type === "agent_end")) {
-			handle.setContextInfo({
-				usedTokens: estimateContextTokens(session.messages),
-				threshold: compactionThresholdValue,
-			});
-		}
-		// Stop: the loop reached a natural end. A hook may send it back to work
-		// (e.g. "tests still failing"), which followUp() does by design. Only
-		// natural completion is resumable — an abort or error stays stopped.
-		if (event.type === "agent_end" && event.reason === "completed" && hooksRuntime.has("Stop")) {
-			const outcome = await hooksRuntime.run("Stop", { session_id: sessionId, cwd });
-			reportHookErrors(
-				handle,
-				outcome.errors.map((e) => `Stop hook failed: ${e}`),
-			);
-			if (outcome.blocked) {
-				if (stopHookResumes >= MAX_STOP_HOOK_RESUMES) {
-					pushInfo(
+
+	/**
+	 * Coding-agent-side session listeners (cost, context indicator, Stop hook).
+	 * Extracted so a hot-swap can attach them to the incoming session and drop
+	 * the ones on the outgoing one — the store subscription in app.tsx is
+	 * rebound separately by setSession.
+	 */
+	let detachSessionListeners: (() => void) | null = null;
+	function attachSessionListeners(target: AgentSession): void {
+		detachSessionListeners?.();
+		detachSessionListeners = target.on(async (event) => {
+			if (event.type === "turn_end") {
+				costTracker.recordUsage(event.message.provider, event.message.model, event.message.usage);
+				costTracker.persist();
+			}
+			// Tool calls may have created or deleted files; the next user turn should
+			// see the tree as it is now, not as it was when they last typed.
+			if (event.type === "agent_end") fileCompleter.bust();
+			if (handle && (event.type === "turn_end" || event.type === "agent_end")) {
+				handle.setContextInfo({
+					usedTokens: estimateContextTokens(target.messages),
+					threshold: thresholdHolder.current,
+				});
+			}
+			// Stop: the loop reached a natural end. A hook may send it back to work
+			// (e.g. "tests still failing"), which followUp() does by design. Only
+			// natural completion is resumable — an abort or error stays stopped.
+			if (event.type === "agent_end" && event.reason === "completed") {
+				if (hooksRuntime.has("Notification")) {
+					const notification = await hooksRuntime.run("Notification", {
+						session_id: sessionIdHolder.current,
+						cwd,
+					});
+					reportHookErrors(handle, advisoryHookFailures("Notification", notification));
+				}
+				if (hooksRuntime.has("Stop")) {
+					const outcome = await hooksRuntime.run("Stop", { session_id: sessionIdHolder.current, cwd });
+					reportHookErrors(
 						handle,
-						`Stop hook asked to continue but the per-session resume limit (${MAX_STOP_HOOK_RESUMES}) is reached.`,
+						outcome.errors.map((e) => `Stop hook failed: ${e}`),
 					);
-				} else {
-					stopHookResumes++;
-					const reason = outcome.reason ?? "Stop hook requested that work continue.";
-					pushInfo(handle, `Continuing: ${reason}`);
-					session.followUp(reason);
+					if (outcome.blocked) {
+						if (stopHookResumes >= MAX_STOP_HOOK_RESUMES) {
+							pushInfo(
+								handle,
+								`Stop hook asked to continue but the per-session resume limit (${MAX_STOP_HOOK_RESUMES}) is reached.`,
+							);
+						} else {
+							stopHookResumes++;
+							const reason = outcome.reason ?? "Stop hook requested that work continue.";
+							pushInfo(handle, `Continuing: ${reason}`);
+							target.followUp(reason);
+						}
+					}
 				}
 			}
+		});
+	}
+
+	/**
+	 * Hot-swap the running REPL onto another saved session (in-app /resume):
+	 * abort any in-flight work, rebuild the session and its compaction manager,
+	 * rebind holders and listeners, and hand the new session to the UI.
+	 *
+	 * Memory is NOT re-injected into a resumed session — memoryInjected stays
+	 * consumed across swaps, matching how --resume behaves at startup.
+	 */
+	async function hotSwapSession(summary: SessionSummary): Promise<void> {
+		const loaded = loadSessionForResume(summary.path);
+		if (!loaded || !handle) {
+			pushInfo(handle, `Could not load session ${summary.sessionId}`);
+			return;
 		}
-	});
+		if (sessionRef?.isRunning) sessionRef.abort();
+
+		const current = sessionRef;
+		const next = new AgentSession({
+			model: current?.model ?? startupModel,
+			systemPrompt,
+			tools: [...(current?.tools ?? allTools)],
+			store: loaded.store,
+			cwd,
+			permissionMode: effectiveMode,
+			deps: sessionDeps,
+		});
+		next.messages.push(...loaded.messages);
+
+		store = loaded.store;
+		sessionIdHolder.current = loaded.store.sessionId ?? undefined;
+		compaction = buildCompaction(next.model, loaded.store);
+		thresholdHolder.current = compactionThreshold({
+			contextWindow: next.model.contextWindow,
+			maxOutputTokens: next.model.maxOutputTokens,
+		});
+		handle.setTasks([]);
+		handle.setSession(next);
+		attachSessionListeners(next);
+		sessionRef = next;
+		pushInfo(handle, `Resumed session ${summary.sessionId.slice(0, 8)} (${loaded.messages.length} messages).`);
+	}
+
+	/** Switch the active model mid-session (/model). Returns false when refused. */
+	function switchModel(ref: string): boolean {
+		const next = resolveModel(ref);
+		if (!next) {
+			pushInfo(handle, `Unknown model: ${ref}`);
+			return false;
+		}
+		if (!resolveApiKey(next)) {
+			pushInfo(handle, `No API key for ${next.provider} — set ${next.apiKeyEnv}. Model unchanged.`);
+			return false;
+		}
+		sessionRef?.setModel(next);
+		compaction = buildCompaction(next, store);
+		thresholdHolder.current = compactionThreshold({
+			contextWindow: next.contextWindow,
+			maxOutputTokens: next.maxOutputTokens,
+		});
+		try {
+			persistModelChoice(ref);
+		} catch (error) {
+			pushInfo(handle, `Model switched but not saved: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		handle?.setModelName(`${next.provider}/${next.id}`);
+		pushInfo(handle, `Model: ${ref} — takes effect on the next prompt`);
+		return true;
+	}
+
+	attachSessionListeners(session);
 
 	// ---- command registry ----
 	const commands: Command[] = [...builtInCommands(), ...skillsAsCommands(skills)];
@@ -390,6 +539,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			...completeCommands(commands, "").map((c) => [`/${c.name}`, c.description] as [string, string]),
 			...appCommandTable(),
 		].sort(([a], [b]) => a.localeCompare(b)),
+		completeFiles: (query) => fileCompleter(query),
+		dirName: basename(cwd),
 		// Oldest first, which is the order ↑ recall walks backwards through.
 		history: loadHistory(cwd),
 		onAlwaysAllow: (toolName) => {
@@ -397,8 +548,19 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		},
 		onSubmitText: async (text) => {
 			appendHistory(text, cwd);
+			// "!cmd" runs the shell directly — no model, no permission prompt (the
+			// user typed the command themselves). The handled verdict keeps the
+			// REPL from also pushing a user entry or prompting.
+			if (text.startsWith("!")) {
+				if (handle) await shellPassthrough.run(text.slice(1).trim(), handle.store);
+				return { handled: true };
+			}
 			if (!hooksRuntime.has("UserPromptSubmit")) return undefined;
-			const outcome = await hooksRuntime.run("UserPromptSubmit", { prompt: text, session_id: sessionId, cwd });
+			const outcome = await hooksRuntime.run("UserPromptSubmit", {
+				prompt: text,
+				session_id: sessionIdHolder.current,
+				cwd,
+			});
 			reportHookErrors(
 				handle,
 				outcome.errors.map((e) => `UserPromptSubmit hook failed: ${e}`),
@@ -418,7 +580,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		},
 		onCommand: (text) =>
 			handleCommandDispatch(text, {
-				session,
+				sessionRef,
+				getSession: () => sessionRef,
 				handle,
 				settings,
 				cwd,
@@ -426,12 +589,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				baseRules,
 				sessionRules,
 				commands,
-				compaction,
+				compaction: () => compaction,
 				mcpConnections,
 				mcpConfig,
 				pendingMcpApprovals,
-				sessionStore: store,
+				sessionStore: () => store,
 				theme: resolvedTheme,
+				hotSwapSession,
+				switchModel,
 			}),
 	});
 
@@ -451,7 +616,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	// ---- SessionEnd: the UI is gone, so failures go to stderr. Never fatal —
 	// a broken cleanup hook must not change the process exit code.
-	const sessionEndOutcome = await hooksRuntime.run("SessionEnd", { session_id: sessionId, cwd });
+	const sessionEndOutcome = await hooksRuntime.run("SessionEnd", {
+		session_id: sessionIdHolder.current,
+		cwd,
+	});
 	for (const message of advisoryHookFailures("SessionEnd", sessionEndOutcome)) {
 		console.error(`Warning: ${message}`);
 	}
@@ -508,7 +676,9 @@ function listCheckpoints(store: SessionStore): CheckpointInfo[] {
 }
 
 interface AppCommandContext {
-	session: AgentSession;
+	/** The live session, read at dispatch time — /resume may have swapped it. */
+	getSession(): AgentSession | null;
+	sessionRef: AgentSession | null;
 	handle: ReplAppHandle | null;
 	settings: Settings;
 	cwd: string;
@@ -516,13 +686,16 @@ interface AppCommandContext {
 	baseRules: PermissionRule[];
 	sessionRules: PermissionRule[];
 	commands: Command[];
-	compaction: CompactionManager;
+	/** Read at dispatch time; a swap or model switch rebuilds the manager. */
+	compaction(): CompactionManager;
 	mcpConnections: McpConnection[];
 	mcpConfig: Record<string, McpServerConfig>;
 	pendingMcpApprovals: string[];
-	sessionStore?: SessionStore;
+	sessionStore(): SessionStore | undefined;
 	/** Theme resolved at startup; `/theme` reads its name and available list. */
 	theme: ResolvedTheme;
+	hotSwapSession(summary: SessionSummary): Promise<void>;
+	switchModel(ref: string): boolean;
 }
 
 function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
@@ -532,17 +705,19 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 	// Registry commands first (prompt-type expands into a model prompt).
 	const command = findCommand(ctx.commands, rawName);
 	if (command) {
+		const session = ctx.getSession();
+		if (!session) return true;
 		if (command.type === "prompt") {
 			ctx.handle?.store.set((s) => ({
 				...s,
 				entries: [...s.entries, { kind: "user", text }],
 			}));
-			void ctx.session.prompt(command.getPrompt(args));
+			void session.prompt(command.getPrompt(args));
 			return true;
 		}
 		const localCtx: LocalCommandContext = {
-			session: ctx.session,
-			compaction: ctx.compaction,
+			session,
+			compaction: ctx.compaction(),
 			cwd: ctx.cwd,
 			pushInfo: (info) => pushInfo(ctx.handle, info),
 		};
@@ -567,12 +742,15 @@ export function appCommandTable(): Array<[string, string]> {
 	return [
 		["/cost", "Show token usage and cost for this session"],
 		["/doctor", "Check the environment, settings, and provider setup"],
+		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
 		["/mcp", "List configured MCP servers and their tools"],
 		["/mode", "Show or set the permission mode: /mode <mode>"],
+		["/model", "Show or switch the model: /model [provider/id]"],
 		["/permissions", "Show the active permission mode and rules"],
-		["/resume", "List earlier sessions in this directory"],
+		["/resume", "Resume an earlier session in this directory (pick from a list)"],
 		["/rewind", "Restore a file from a checkpoint: /rewind [number]"],
+		["/status", "Show model, context usage, cost, and settings at a glance"],
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/tree", "Show the session branch tree"],
 	];
@@ -580,6 +758,7 @@ export function appCommandTable(): Array<[string, string]> {
 
 function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 	const [command] = text.split(/\s+/);
+	const session = ctx.getSession();
 
 	switch (command) {
 		case "/cost": {
@@ -587,9 +766,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return true;
 		}
 		case "/permissions": {
+			if (!session) return true;
 			const rules = [...ctx.baseRules, ...ctx.sessionRules];
 			const lines = [
-				`Mode: ${ctx.session.permissionMode}`,
+				`Mode: ${session.permissionMode}`,
 				`Rules (${rules.length}):`,
 				...rules.map(
 					(r) =>
@@ -600,9 +780,89 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return true;
 		}
 		case "/resume": {
+			if (!session || !ctx.handle) return true;
+			if (session.isRunning) {
+				pushInfo(ctx.handle, "Interrupt the current run first (Esc), then /resume.");
+				return true;
+			}
 			const sessions = listSessions(ctx.cwd);
-			pushInfo(ctx.handle, formatSessionList(sessions));
-			pushInfo(ctx.handle, "Restart with --resume <session-id> to continue one of these.");
+			if (sessions.length === 0) {
+				pushInfo(ctx.handle, "No saved sessions for this project.");
+				return true;
+			}
+			void (async () => {
+				const handleRef = ctx.handle;
+				if (!handleRef) return;
+				const items = sessions.map((s) => ({
+					label: `${s.sessionId.slice(0, 8)}  ${new Date(s.mtimeMs).toLocaleString()}`,
+					description: `${s.messageCount} msgs — ${s.firstUserText}`,
+				}));
+				const index = await handleRef.pickFromList("Resume a session", items);
+				if (index === null) return;
+				await ctx.hotSwapSession(sessions[index]);
+			})();
+			return true;
+		}
+		case "/model": {
+			if (!ctx.handle) return true;
+			const arg = text.split(/\s+/).slice(1).join(" ").trim();
+			if (arg) {
+				ctx.switchModel(arg);
+				return true;
+			}
+			void (async () => {
+				const handleRef = ctx.handle;
+				if (!handleRef) return;
+				const current = ctx.getSession()?.model;
+				const models = listModels();
+				const items = models.map((m) => {
+					const ref = `${m.provider}/${m.id}`;
+					const isActive = current && m.provider === current.provider && m.id === current.id;
+					const hasKey = Boolean(resolveApiKey(m));
+					return {
+						label: `${isActive ? "* " : "  "}${ref}`,
+						description: `${Math.round(m.contextWindow / 1000)}k context${hasKey ? "" : " — no API key"}`,
+					};
+				});
+				const index = await handleRef.pickFromList("Switch model", items);
+				if (index === null || index < 0 || index >= models.length) return;
+				const chosen = models[index];
+				ctx.switchModel(`${chosen.provider}/${chosen.id}`);
+			})();
+			return true;
+		}
+		case "/status": {
+			if (!session) return true;
+			const info = ctx.handle?.store.get().contextInfo;
+			const storeId = ctx.sessionStore()?.sessionId;
+			const lines = [
+				`Model: ${session.model.provider}/${session.model.id}`,
+				`Permission mode: ${session.permissionMode}`,
+				`Session: ${storeId ? storeId.slice(0, 8) : "(not persisted)"}`,
+				info
+					? `Context: ~${info.usedTokens.toLocaleString()} tokens (auto-compacts near ${info.threshold.toLocaleString()})`
+					: "Context: measured after the first turn",
+				`Cost this project (all sessions): $${ctx.costTracker.state.totalCostUSD.toFixed(4)}`,
+				`Theme: ${ctx.theme.theme.name} · Vim: ${ctx.settings.vimMode ? "on" : "off"}`,
+				`MCP servers: ${ctx.mcpConnections.length} connected${
+					ctx.pendingMcpApprovals.length > 0 ? `, ${ctx.pendingMcpApprovals.length} pending approval` : ""
+				}`,
+			];
+			pushInfo(ctx.handle, lines.join("\n"));
+			return true;
+		}
+		case "/export": {
+			if (!session) return true;
+			const arg = text.split(/\s+/).slice(1).join(" ").trim();
+			const id = ctx.sessionStore()?.sessionId ?? Date.now().toString(36);
+			const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+			const path = arg || join(ctx.cwd, `labunbun-${id.slice(0, 8)}-${stamp}.md`);
+			try {
+				writeFileSync(path, sessionToMarkdown(session.messages), "utf8");
+				pushInfo(ctx.handle, `Session exported to ${path}`);
+			} catch (error) {
+				pushInfo(ctx.handle, `Export failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
 			return true;
 		}
 		case "/mcp": {
@@ -622,7 +882,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					ctx.mcpConnections.push(connection);
 					const index = ctx.pendingMcpApprovals.indexOf(serverName);
 					if (index !== -1) ctx.pendingMcpApprovals.splice(index, 1);
-					ctx.session.setTools([...ctx.session.tools, ...connection.tools]);
+					ctx.getSession()?.setTools([...(ctx.getSession()?.tools ?? []), ...connection.tools]);
 					pushInfo(
 						ctx.handle,
 						connection.error
@@ -651,7 +911,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/mode": {
 			const arg = text.split(/\s+/)[1] as PermissionMode | undefined;
 			if (arg && ["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"].includes(arg)) {
-				ctx.session.setPermissionMode(arg);
+				ctx.getSession()?.setPermissionMode(arg);
 				pushInfo(ctx.handle, `Permission mode: ${arg}`);
 			} else {
 				pushInfo(ctx.handle, `Usage: /mode default|plan|acceptEdits|dontAsk|bypassPermissions`);
@@ -659,19 +919,21 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return true;
 		}
 		case "/tree": {
-			if (!ctx.sessionStore) {
+			const treeStore = ctx.sessionStore();
+			if (!treeStore) {
 				pushInfo(ctx.handle, "No session store in this session.");
 				return true;
 			}
-			const tree = ctx.sessionStore.describeTree();
-			const branches = ctx.sessionStore.branchPoints();
+			const tree = treeStore.describeTree();
+			const branches = treeStore.branchPoints();
 			pushInfo(ctx.handle, `Session tree (* = active path, ${branches.length} branch point(s)):\n${tree}`);
 			return true;
 		}
 		case "/fork": {
 			const arg = text.split(/\s+/)[1];
-			const store = ctx.sessionStore;
-			if (!store) {
+			const forkSession = ctx.getSession();
+			const forkStore = ctx.sessionStore();
+			if (!forkStore || !forkSession) {
 				pushInfo(ctx.handle, "No session store in this session.");
 				return true;
 			}
@@ -679,17 +941,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				pushInfo(ctx.handle, "Usage: /fork <entry-id> — see /tree for ids");
 				return true;
 			}
-			if (!store.branch(arg)) {
+			if (!forkStore.branch(arg)) {
 				pushInfo(ctx.handle, `Entry not found: ${arg}`);
 				return true;
 			}
 			// Rebuild in-memory transcript from the new branch.
-			ctx.session.messages = store.messages();
+			forkSession.messages = forkStore.messages();
 			pushInfo(ctx.handle, `Branched from ${arg.slice(0, 8)}. New messages continue on this branch.`);
 			return true;
 		}
 		case "/rewind": {
-			const rewindStore = ctx.sessionStore;
+			const rewindStore = ctx.sessionStore();
 			if (!rewindStore) {
 				pushInfo(ctx.handle, "No session store in this session.");
 				return true;

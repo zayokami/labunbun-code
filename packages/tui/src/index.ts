@@ -21,6 +21,8 @@ export {
 } from "./detect-appearance.ts";
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
 export { type Block, type InlineSpan, parseBlocks, parseInline } from "./markdown.ts";
+export { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "./paste.ts";
+export { applyFileCompletion, currentAtWord, filterFiles } from "./prompt-files.ts";
 export { createStore, type Store, useStore } from "./store.ts";
 export {
 	AUTO_THEME_NAME,
@@ -52,6 +54,7 @@ export {
 	initialUiState,
 	type PendingTool,
 	type PermissionDialogState,
+	RESULT_TEXT_CAP,
 	reduceEvent,
 	type StatusPhase,
 	toolPreview,

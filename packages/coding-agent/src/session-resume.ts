@@ -26,6 +26,14 @@ export function listSessions(cwd?: string, home?: string): SessionSummary[] {
 	});
 }
 
+/**
+ * The most recent saved session for a project — the target of `--continue`.
+ * Null when nothing was ever saved; callers start fresh and say so.
+ */
+export function resolveContinueTarget(cwd?: string, home?: string): SessionSummary | null {
+	return listSessions(cwd, home)[0] ?? null;
+}
+
 function textOf(message: AgentMessage): string {
 	if (message.role === "user") return typeof message.content === "string" ? message.content : "[content blocks]";
 	if (message.role === "assistant")

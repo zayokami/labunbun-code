@@ -12,7 +12,8 @@
  * problem is recorded for `/doctor` to report.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -27,6 +28,7 @@ import {
 	themeForAppearance,
 } from "@labunbun/tui";
 import { z } from "zod";
+import { writeUserSettingsPatch } from "./user-settings.ts";
 
 export const ThemeFileSchema = z.object({
 	/** Theme name, as used by `theme` in settings and `/theme <name>`. */
@@ -182,25 +184,9 @@ export async function resolveTheme(name: string | undefined, cwd: string, home =
 }
 
 /**
- * Persist the chosen theme to the user settings file, leaving every other key
- * as it was — this file is the user's, and a theme change is no reason to
- * rewrite the rest of it.
+ * Persist the theme choice. Delegates to the shared read-merge-write helper;
+ * kept as its own export because several call sites and tests name it.
  */
 export function persistThemeChoice(name: string, home = homedir()): void {
-	const path = join(home, ".labunbun", "settings.json");
-	let existing: Record<string, unknown> = {};
-	if (existsSync(path)) {
-		try {
-			const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-			if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-				existing = parsed as Record<string, unknown>;
-			}
-		} catch {
-			// A settings file we cannot parse is not one we should overwrite:
-			// rewriting it would discard whatever the user has in there.
-			throw new Error(`${path} is not valid JSON; fix it before changing the theme`);
-		}
-	}
-	mkdirSync(join(home, ".labunbun"), { recursive: true });
-	writeFileSync(path, `${JSON.stringify({ ...existing, theme: name }, null, 2)}\n`, "utf8");
+	writeUserSettingsPatch({ theme: name }, home);
 }

@@ -67,4 +67,25 @@ describe("withModelFallback", () => {
 		expect(events.at(-1)?.type).toBe("error");
 		expect((events.at(-1) as any).message.errorMessage).toContain(FALLBACK_MODEL.id);
 	});
+
+	// Without this guard an interrupt thrown before the first byte would be
+	// treated as an ordinary pre-content failure and the chain would try every
+	// remaining model — Esc would appear to do nothing until all of them ran.
+	test("an abort propagates instead of walking the chain", async () => {
+		const calledFor: string[] = [];
+		const aborting: StreamFn = async function* (model, _context, options) {
+			calledFor.push(model.id);
+			options?.signal?.throwIfAborted();
+			yield new MessageBuilder(FAUX_MODEL.provider, FAUX_MODEL.id).start();
+		};
+		const controller = new AbortController();
+		controller.abort();
+		const wrapped = withModelFallback(aborting, () => [FALLBACK_MODEL]);
+
+		await expect(
+			collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { signal: controller.signal })),
+		).rejects.toThrow();
+		expect(calledFor).toEqual([FAUX_MODEL.id]);
+		expect(calledFor).not.toContain(FALLBACK_MODEL.id);
+	});
 });
