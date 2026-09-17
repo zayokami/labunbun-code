@@ -66,6 +66,7 @@ export class AgentSession {
 	#steering: string[] = [];
 	#followUp: string[] = [];
 	#abortController: AbortController | null = null;
+	#interruptRequested = false;
 	#running = false;
 
 	constructor(options: AgentSessionOptions) {
@@ -116,6 +117,14 @@ export class AgentSession {
 		return this.#running;
 	}
 
+	/** True while an interrupt has been requested and not yet superseded by a
+	 *  new run. Latched so a cancellation that lands between the loop's finally
+	 *  (which clears the controller) and a pending approval callback is still
+	 *  observable. */
+	get isInterrupted(): boolean {
+		return this.#interruptRequested || (this.#abortController?.signal.aborted ?? false);
+	}
+
 	// -- events ---------------------------------------------------------------
 
 	on(handler: AgentEventHandler): () => void {
@@ -159,6 +168,7 @@ export class AgentSession {
 		// Dropping queued follow-ups on explicit abort is the least surprising
 		// behavior — stale queued prompts should not fire after an interrupt.
 		this.#followUp = [];
+		this.#interruptRequested = true;
 		this.#abortController?.abort();
 	}
 
@@ -167,6 +177,7 @@ export class AgentSession {
 	async prompt(text: string): Promise<AgentEndReason> {
 		if (this.#running) throw new Error("AgentSession is already running");
 		this.#running = true;
+		this.#interruptRequested = false;
 		this.#abortController = new AbortController();
 
 		const userMsg = userMessage(text);
@@ -323,6 +334,15 @@ export class AgentSession {
 					this.#store?.appendMessage(result);
 				}
 				await this.#emit({ type: "turn_end", message: assistant, toolResults: results });
+
+				// An abort during tool execution must end the run — otherwise the
+				// loop streams another turn as if the interrupt never happened.
+				// All dispatched calls are settled (results above include the
+				// interrupted settlements), so pairing stays intact.
+				if (this.#abortController?.signal.aborted) {
+					reason = "aborted";
+					break;
+				}
 			}
 		} catch (loopError) {
 			reason = "error";
@@ -365,6 +385,16 @@ export class AgentSession {
 
 		const batches = partitionToolCalls(resolved);
 		for (const batch of batches) {
+			if (this.#abortController?.signal.aborted) {
+				// Cancelled while earlier batches ran: settle every remaining call
+				// as a paired interrupted result instead of starting new tools.
+				for (const call of batch.calls) {
+					if (!resultsByCallId.has(call.callId)) {
+						resultsByCallId.set(call.callId, interruptedToolResult(call));
+					}
+				}
+				continue;
+			}
 			if (batch.parallel) {
 				await Promise.all(batch.calls.map((call) => this.#runWithSemaphore(call, resultsByCallId, semaphore)));
 			} else {
@@ -398,6 +428,11 @@ export class AgentSession {
 	): Promise<void> {
 		await semaphore.acquire();
 		try {
+			// The wait above can outlast an abort — settle instead of running.
+			if (this.#abortController?.signal.aborted) {
+				out.set(call.callId, interruptedToolResult(call));
+				return;
+			}
 			await this.#runOne(call, out);
 		} finally {
 			semaphore.release();
@@ -497,6 +532,20 @@ export class AgentSession {
 			this.#store?.appendMessage(orphan);
 		}
 	}
+}
+
+/**
+ * Paired isError result for a tool call that was cancelled before it could
+ * run — same wording as the orphan synthesis below, so interrupted calls read
+ * consistently in the transcript regardless of where cancellation landed.
+ */
+function interruptedToolResult(call: ResolvedToolCall): ToolResultMessage {
+	return toolResultMessage(
+		call.callId,
+		call.tool.name,
+		[textContent("Tool execution was interrupted before completion.")],
+		true,
+	);
 }
 
 function interruptedAssistant(model: Model, stopReason: "error" | "aborted", message?: string): AssistantMessage {

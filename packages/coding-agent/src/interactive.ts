@@ -48,7 +48,7 @@ import { createFileCompleter } from "./file-completions.ts";
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
-import { createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
+import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import { listSessions, loadSessionForResume, resolveContinueTarget, type SessionSummary } from "./session-resume.ts";
 import {
 	applySettingsEnv,
@@ -238,14 +238,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		getPermissionRules: () => [...baseRules, ...sessionRules],
 	});
 	const skills = loadSkills(cwd);
-	const planCallbacks: PlanModeCallbacks = {
-		enterPlanMode: () => sessionRef?.setPermissionMode("plan"),
-		requestPlanApproval: async (plan) => {
-			if (!handle) return { approved: true };
-			const approved = await handle.requestPermission("ExitPlanMode", { plan });
-			return { approved };
-		},
-	};
+	const planCallbacks: PlanModeCallbacks = createPlanModeCallbacks(
+		() => sessionRef,
+		() => handle,
+	);
 	let sessionRef: AgentSession | null = null;
 	const planTools = createPlanModeTools(planCallbacks);
 	const askUserTool = createAskUserQuestionTool({
@@ -376,8 +372,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	});
 	sessionRef = session;
 
-	// Restore resumed transcript into memory.
-	if (options.resumeSessionId && store) {
+	// Restore the selected store's transcript for both --resume and --continue.
+	// A newly created store simply has no messages yet.
+	if (store) {
 		session.messages.push(...store.messages());
 	}
 

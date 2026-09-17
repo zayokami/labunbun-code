@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentSession, type AnyTool, buildTool, SessionStore } from "@labunbun/agent";
+import { AgentSession, type AnyTool, buildTool, type PermissionMode, SessionStore } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { z } from "zod";
-import { createPlanModeTools } from "../src/plan-mode.ts";
+import { createPlanModeCallbacks, createPlanModeTools, type PlanApprovalUi } from "../src/plan-mode.ts";
 import { loadSkills, skillsAsCommands } from "../src/skills.ts";
 import { createTaskTool, loadAgentDefinitions } from "../src/subagents.ts";
 
@@ -206,6 +206,123 @@ describe("plan mode tools", () => {
 
 		const approved = await exit.call({ plan: "solid plan" }, ctx);
 		expect((approved.content[0] as any).text).toContain("approved");
+	});
+});
+
+describe("plan mode callbacks", () => {
+	interface HarnessOptions {
+		mode?: PermissionMode;
+		ui?: PlanApprovalUi | null;
+		approve?: boolean;
+		swapDuringApproval?: () => void;
+		rejectApproval?: () => void;
+	}
+
+	function makeHarness(options: HarnessOptions = {}) {
+		const faux = fauxProvider([{ text: "done" }]);
+		const events: string[] = [];
+		let current: AgentSession | null = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [],
+			permissionMode: options.mode ?? "default",
+			deps: { streamFn: faux.streamFn },
+		});
+		const ui: PlanApprovalUi | null =
+			options.ui === undefined
+				? {
+						requestPermission: async () => {
+							events.push(`approval:${options.approve === false ? "rejected" : "accepted"}`);
+							options.swapDuringApproval?.();
+							options.rejectApproval?.();
+							return options.approve !== false;
+						},
+					}
+				: options.ui;
+		const callbacks = createPlanModeCallbacks(
+			() => current,
+			() => ui,
+		);
+		return {
+			callbacks,
+			events,
+			get session() {
+				return current;
+			},
+			swapSession(nextMode: PermissionMode = "default") {
+				current = new AgentSession({
+					model: FAUX_MODEL,
+					tools: [],
+					permissionMode: nextMode,
+					deps: { streamFn: faux.streamFn },
+				});
+			},
+			abortSession() {
+				current?.abort();
+			},
+		};
+	}
+
+	test("approval restores the mode the session had before plan mode", async () => {
+		const harness = makeHarness({ mode: "acceptEdits" });
+		const decision = await harness.callbacks.requestPlanApproval("the plan");
+		expect(decision.approved).toBe(true);
+		expect(harness.session?.permissionMode).toBe("acceptEdits");
+	});
+
+	test("initial plan approval defaults to default mode", async () => {
+		const harness = makeHarness({ mode: "plan" });
+		const decision = await harness.callbacks.requestPlanApproval("the plan");
+		expect(decision.approved).toBe(true);
+		expect(harness.session?.permissionMode).toBe("default");
+	});
+
+	test("rejection keeps plan mode active", async () => {
+		const harness = makeHarness({ approve: false, mode: "plan" });
+		const decision = await harness.callbacks.requestPlanApproval("the plan");
+		expect(decision.approved).toBe(false);
+		expect(harness.session?.permissionMode).toBe("plan");
+	});
+
+	test("absent UI denies instead of silently approving", async () => {
+		const harness = makeHarness({ ui: null, mode: "plan" });
+		const decision = await harness.callbacks.requestPlanApproval("the plan");
+		expect(decision.approved).toBe(false);
+		expect(harness.session?.permissionMode).toBe("plan");
+	});
+
+	test("canceled approval (interrupt during dialog) keeps plan mode", async () => {
+		const harness = makeHarness({ mode: "plan", rejectApproval: () => harness.abortSession() });
+		const decision = await harness.callbacks.requestPlanApproval("the plan");
+		expect(decision.approved).toBe(false);
+		expect(harness.session?.permissionMode).toBe("plan");
+	});
+
+	test("interrupted run then approval inside the same dialog resolve stays canceled", async () => {
+		const harness = makeHarness({ mode: "plan" });
+		const session = harness.session;
+		if (session) {
+			// Simulate the loop unwinding mid-dialog: abort() then the run's finally
+			// clears the controller, so the interrupt must be latched, not polled.
+			session.abort();
+		}
+		const decision = await harness.callbacks.requestPlanApproval("the plan");
+		expect(decision.approved).toBe(false);
+		expect(session?.permissionMode).toBe("plan");
+	});
+
+	test("session swapped mid-dialog leaves the new session's mode untouched", async () => {
+		const harness = makeHarness({ mode: "plan", swapDuringApproval: () => harness.swapSession("default") });
+		const swapped = harness.session;
+		const decision = await harness.callbacks.requestPlanApproval("the plan");
+		expect(decision.approved).toBe(false);
+		expect(swapped?.permissionMode).toBe("plan");
+		expect(harness.session?.permissionMode).toBe("default");
+	});
+
+	test("EnterPlanMode flips only the captured session", async () => {
+		const harness = makeHarness({ mode: "default" });
+		harness.callbacks.enterPlanMode();
+		expect(harness.session?.permissionMode).toBe("plan");
 	});
 });
 

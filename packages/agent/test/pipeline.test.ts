@@ -42,6 +42,51 @@ async function run(tool: AnyTool, rawInput: unknown, deps: Partial<AgentDeps> = 
 }
 
 describe("runToolPipeline stages", () => {
+	for (const stage of ["entry", "validation", "hook", "permission"] as const) {
+		test(`cancellation at ${stage} prevents execution and later gates`, async () => {
+			const controller = new AbortController();
+			const visited: string[] = [];
+			const tool = echoTool({
+				validateInput: async () => {
+					visited.push("validation");
+					if (stage === "validation") controller.abort();
+					return null;
+				},
+				call: async () => {
+					visited.push("call");
+					return { content: [] };
+				},
+			});
+			if (stage === "entry") controller.abort();
+			const result = await runToolPipeline({
+				callId: "cancelled",
+				tool,
+				rawInput: { text: "hello" },
+				ctx: { ...BASE_CTX, signal: controller.signal },
+				permissionContext: PERM_CTX,
+				onUpdate: () => {},
+				deps: {
+					...NO_STREAM,
+					hooks: {
+						beforeToolCall: async () => {
+							visited.push("hook");
+							if (stage === "hook") controller.abort();
+						},
+					},
+					canUseTool: async () => {
+						visited.push("permission");
+						if (stage === "permission") controller.abort();
+						return allow();
+					},
+				},
+			});
+			const gates = ["validation", "hook", "permission"];
+			expect(visited).toEqual(stage === "entry" ? [] : gates.slice(0, gates.indexOf(stage) + 1));
+			expect(result).toMatchObject({ toolCallId: "cancelled", isError: true });
+			expect(result.content).toEqual([{ type: "text", text: "Tool execution aborted" }]);
+		});
+	}
+
 	test("schema failure reports the offending input", async () => {
 		const result = await run(echoTool(), { wrong: 42 });
 		expect(result.isError).toBe(true);

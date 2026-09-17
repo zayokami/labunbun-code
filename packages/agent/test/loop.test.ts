@@ -20,6 +20,59 @@ function echoTool(overrides: Partial<AnyTool> = {}): AnyTool {
 const toolResultsOf = (messages: any[]): ToolResultMessage[] => messages.filter((m) => m.role === "toolResult");
 
 describe("AgentSession loop", () => {
+	test("abort in a serial batch skips later tools and preserves result pairing", async () => {
+		let writes = 0;
+		const permissions: string[] = [];
+		const faux = fauxProvider([
+			{
+				toolCalls: [
+					{ name: "interrupt", arguments: { text: "stop" } },
+					{ name: "Write", arguments: { text: "must not write" } },
+				],
+			},
+			{ text: "must not request another turn" },
+		]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			systemPrompt: "test",
+			tools: [
+				echoTool({
+					name: "interrupt",
+					isConcurrencySafe: () => false,
+					call: async () => {
+						session.abort();
+						return { content: [] };
+					},
+				}),
+				echoTool({
+					name: "Write",
+					isConcurrencySafe: () => false,
+					call: async () => {
+						writes++;
+						return { content: [] };
+					},
+				}),
+			],
+			deps: {
+				streamFn: faux.streamFn,
+				canUseTool: async (name) => {
+					permissions.push(name);
+					return { behavior: "allow" };
+				},
+			},
+		});
+		expect(await session.prompt("go")).toBe("aborted");
+		expect(writes).toBe(0);
+		expect(permissions).toEqual(["interrupt"]);
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(2);
+		expect(results[1]).toMatchObject({ toolName: "Write", isError: true });
+		const calls = session.messages.flatMap((m) =>
+			m.role === "assistant" ? m.content.filter((b) => b.type === "toolCall").map((b) => b.id) : [],
+		);
+		expect(results.map((r) => r.toolCallId)).toEqual(calls);
+	});
+
 	test("plain reply terminates completed", async () => {
 		const { session, events, reason } = await runHarness([{ text: "Hello!" }]);
 		expect(reason).toBe("completed");

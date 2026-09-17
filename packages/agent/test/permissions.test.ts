@@ -87,6 +87,37 @@ describe("evaluatePermissions", () => {
 		expect(evaluatePermissions("Read", { file_path: "a.txt" }, config).behavior).toBe("ask");
 	});
 
+	test.each(["EnterPlanMode", "ExitPlanMode"])(
+		"plan mode permits %s to reach approval without bypassing denies",
+		(toolName) => {
+			const config = { mode: "plan" as const, rules: [], cwd: CWD };
+			expect(evaluatePermissions(toolName, { plan: "proposal" }, config).behavior).toBe("ask");
+			expect(evaluatePermissions(toolName, {}, { ...config, rules: rules([[toolName, "allow"]]) }).behavior).toBe(
+				"allow",
+			);
+			expect(
+				evaluatePermissions(
+					toolName,
+					{},
+					{
+						...config,
+						rules: rules([
+							[toolName, "allow"],
+							[toolName, "deny"],
+						]),
+					},
+				).behavior,
+			).toBe("deny");
+		},
+	);
+
+	test("plan control exceptions do not permit mutation even with allow rules", () => {
+		const config = { mode: "plan" as const, rules: rules([["*", "allow"]]), cwd: CWD };
+		for (const toolName of ["Write", "Edit", "Bash", "NotebookEdit", "mcp__server__mutate"]) {
+			expect(evaluatePermissions(toolName, {}, config).behavior).toBe("deny");
+		}
+	});
+
 	test("acceptEdits auto-allows workspace edits only", () => {
 		const config = { mode: "acceptEdits" as const, rules: [], cwd: CWD };
 		expect(

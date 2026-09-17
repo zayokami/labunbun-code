@@ -350,7 +350,9 @@ function ruleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd
 }
 
 function isReadOnlyTool(toolName: string): boolean {
-	return ["Read", "Grep", "Glob", "LS", "TodoWrite", "TaskList", "TaskGet"].includes(toolName);
+	return ["Read", "Grep", "Glob", "LS", "TodoWrite", "TaskList", "TaskGet", "EnterPlanMode", "ExitPlanMode"].includes(
+		toolName,
+	);
 }
 
 function isWorkspaceEdit(toolName: string, input: unknown, config: PermissionEngineConfig): boolean {

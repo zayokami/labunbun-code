@@ -22,12 +22,30 @@ export interface PipelineRunOptions {
 
 const MAX_RESULT_CHARS_DEFAULT = 30_000;
 
+/**
+ * True once the run has been cancelled — checked before each pipeline stage
+ * so an abort (user interrupt, hot-swap) during an async gate (validation,
+ * hooks, permission dialog) or while queued behind a serial batch never
+ * reaches tool execution. Cancelled calls still return a paired isError
+ * result so the wire's tool_use/tool_result pairing stays intact.
+ */
+function isAborted(ctx: Omit<ToolCallContext, "onUpdate">): boolean {
+	return ctx.signal.aborted;
+}
+
+const ABORTED_RESULT_TEXT = "Tool execution aborted";
+
 export async function runToolPipeline(options: PipelineRunOptions): Promise<ToolResultMessage> {
 	const { callId, tool, rawInput, deps, ctx, permissionContext } = options;
 	const finish = (result: ToolResult): ToolResultMessage =>
 		truncate(toolResultMessage(callId, tool.name, result.content, result.isError ?? false), tool);
 
 	try {
+		// 0. Cancellation — an already-aborted signal never reaches the tool.
+		if (isAborted(ctx)) {
+			return finish({ content: [textContent(ABORTED_RESULT_TEXT)], isError: true });
+		}
+
 		// 1. Schema validation
 		const parsed = tool.inputSchema.safeParse(rawInput);
 		if (!parsed.success) {
@@ -51,6 +69,9 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 				return finish({ content: [textContent(`Validation failed: ${error}`)], isError: true });
 			}
 		}
+		if (isAborted(ctx)) {
+			return finish({ content: [textContent(ABORTED_RESULT_TEXT)], isError: true });
+		}
 
 		// 3. Loop hooks (before)
 		if (deps.hooks?.beforeToolCall) {
@@ -61,6 +82,9 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 					isError: true,
 				});
 			}
+		}
+		if (isAborted(ctx)) {
+			return finish({ content: [textContent(ABORTED_RESULT_TEXT)], isError: true });
 		}
 
 		// 4. Permissions — the resolver must resolve "ask" itself (dialog); a
@@ -81,7 +105,11 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 			}
 		}
 
-		// 5. Execute
+		// 5. Execute — recheck after the permission wait: a dialog resolved only
+		// because the user interrupted must not run the tool anyway.
+		if (isAborted(ctx)) {
+			return finish({ content: [textContent(ABORTED_RESULT_TEXT)], isError: true });
+		}
 		let result: ToolResult;
 		try {
 			result = await tool.call(input, { ...ctx, onUpdate: options.onUpdate });
