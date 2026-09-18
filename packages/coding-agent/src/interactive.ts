@@ -293,7 +293,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// Advisory: a Notification hook cannot veto the dialog.
 				reportHookErrors(handle, advisoryHookFailures("Notification", outcome));
 			}
-			const allowed = await handle.requestPermission(toolName, input);
+			const allowed = await requestPermissionOrAbort(handle, toolName, input, ctx.signal);
 			return allowed ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
 		},
 		checkCompaction: async (context) => {
@@ -631,6 +631,44 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		console.error(`Warning: ${message}`);
 	}
 	return 0;
+}
+
+/**
+ * Ask the UI for permission, with the run's abort as a second way out.
+ *
+ * Waiting for an answer is the one pipeline stage that depends on a human, and
+ * the run can be aborted while the dialog is up (Ctrl+C, a hot-swap on /resume).
+ * Without the race, that wait would outlive the run: the tool batch awaits this
+ * call, so the turn would sit unfinished behind a question that no longer means
+ * anything, and the next prompt would queue behind a session still marked
+ * running. On abort the pending dialogs are denied and dismissed, which fails
+ * closed and lets the aborted turn settle.
+ */
+async function requestPermissionOrAbort(
+	handle: ReplAppHandle,
+	toolName: string,
+	input: unknown,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	const answer = handle.requestPermission(toolName, input);
+	if (!signal) return answer;
+	if (signal.aborted) {
+		handle.clearPermissionRequest();
+		return false;
+	}
+
+	let onAbort: (() => void) | undefined;
+	const abort = new Promise<boolean>((resolve) => {
+		onAbort = () => resolve(false);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([answer, abort]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+		// Deny anything still queued: whatever is left belongs to the aborted run.
+		if (signal.aborted) handle.clearPermissionRequest();
+	}
 }
 
 /** Surface hook failures in the transcript without interrupting the session. */

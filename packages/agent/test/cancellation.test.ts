@@ -151,6 +151,35 @@ describe("session cancellation integration", () => {
 		},
 	);
 
+	// The permission gate is the one stage that waits on a human. Its resolver
+	// (the dialog bridge) needs to see the abort to give up on a question the
+	// run no longer cares about — otherwise the batch awaiting this call would
+	// wait forever, and the session would never leave "running".
+	test("the permission context carries the run's abort signal", async () => {
+		const entered = deferred<void>();
+		let seen: AbortSignal | undefined;
+		const faux = fauxProvider([{ toolCalls: [{ name: "probe", arguments: {} }] }]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [probe(async () => ({ content: [] }))],
+			deps: {
+				streamFn: faux.streamFn,
+				canUseTool: async (_name, _input, ctx) => {
+					seen = ctx.signal;
+					entered.resolve();
+					return { behavior: "allow" };
+				},
+			},
+		});
+		const run = session.prompt("go");
+		await entered.promise;
+		expect(seen?.aborted).toBe(false);
+		session.abort();
+		expect(seen?.aborted).toBe(true);
+		expect(await run).toBe("aborted");
+		expect(session.isRunning).toBe(false);
+	});
+
 	test("aborted serial batch persists all results, drops follow-ups and allows a fresh run", async () => {
 		const home = mkdtempSync(join(tmpdir(), "lbb-cancel-test-"));
 		roots.push(home);

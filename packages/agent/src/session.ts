@@ -508,6 +508,7 @@ export class AgentSession {
 				toolName: call.tool.name,
 				input: call.input,
 				cwd: this.cwd,
+				signal,
 			},
 			onUpdate: (partial) => {
 				void this.#emit({

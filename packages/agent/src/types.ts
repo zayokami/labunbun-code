@@ -36,6 +36,13 @@ export interface PermissionContext {
 	toolName: string;
 	input: unknown;
 	cwd: string;
+	/**
+	 * The run's abort signal. A resolver that shows a dialog should give up when
+	 * this fires: the tool it is asking about is already being settled as
+	 * interrupted, and the batch awaiting the answer would otherwise wait on a
+	 * question nobody is looking at any more.
+	 */
+	signal?: AbortSignal;
 }
 
 export function allow(updatedInput?: unknown): PermissionResult {
