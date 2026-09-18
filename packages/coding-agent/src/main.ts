@@ -2,7 +2,7 @@
 import { runHeadless } from "./headless.ts";
 import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
-import { MIGRATION_SOURCE_IDS, runMigration } from "./migrate.ts";
+import { DEFAULT_HISTORY_LIMIT, MIGRATION_SOURCE_IDS, runMigration } from "./migrate.ts";
 
 /** Subcommands, recognised only as the first argument. */
 const SUBCOMMANDS = new Set(["migrate"]);
@@ -22,6 +22,9 @@ interface CliArgs {
 	apply: boolean;
 	force: boolean;
 	from: string | null;
+	only: string | null;
+	historyScope: string | null;
+	historyLimit: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -40,6 +43,9 @@ function parseArgs(argv: string[]): CliArgs {
 		apply: false,
 		force: false,
 		from: null,
+		only: null,
+		historyScope: null,
+		historyLimit: null,
 	};
 	// A leading bare word is a subcommand. Only the first argument is eligible,
 	// so a stray word later in the line is still the error it was before.
@@ -94,6 +100,21 @@ function parseArgs(argv: string[]): CliArgs {
 			case "--from":
 				args.from = rest[++i] ?? null;
 				break;
+			case "--migrate":
+				// Alias for the subcommand, handled here so it too runs before the
+				// API-key check — importing a configuration is what someone does
+				// when they have no working configuration yet.
+				args.subcommand = "migrate";
+				break;
+			case "--only":
+				args.only = rest[++i] ?? null;
+				break;
+			case "--history-scope":
+				args.historyScope = rest[++i] ?? null;
+				break;
+			case "--history-limit":
+				args.historyLimit = rest[++i] ?? null;
+				break;
 			default:
 				console.error(`Unknown argument: ${arg} (see --help)`);
 				process.exit(2);
@@ -124,8 +145,13 @@ Options:
 
 migrate options:
       --from <sources>         ${MIGRATION_SOURCE_IDS.join(" | ")} | all (default all)
+      --only <categories>      settings | assets | history | all (default all)
+      --history-scope <s>      cwd | all | none (default cwd)
+      --history-limit <n>      Sessions to import per source (default ${DEFAULT_HISTORY_LIMIT}, 0 for none)
       --apply                  Write the changes (default is a dry run)
-      --force                  Overwrite values and files that already exist`);
+      --force                  Overwrite values and files that already exist
+
+  --migrate is an alias for the migrate subcommand.`);
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
@@ -148,6 +174,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 			from: args.from ?? undefined,
 			apply: args.apply,
 			force: args.force,
+			only: args.only ?? undefined,
+			historyScope: args.historyScope ?? undefined,
+			historyLimit: args.historyLimit ?? undefined,
 		});
 		if (result.error) {
 			console.error(result.error);
