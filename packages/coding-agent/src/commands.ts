@@ -9,6 +9,7 @@
  */
 import type { AgentSession, CompactionManager } from "@labunbun/agent";
 import { runMigration } from "./migrate.ts";
+import { type MigrationDialogBridge, runMigrationWizard } from "./migrate-wizard.ts";
 
 export interface CommandBase {
 	name: string;
@@ -27,6 +28,11 @@ export interface LocalCommandContext {
 	compaction?: CompactionManager;
 	cwd: string;
 	pushInfo(text: string): void;
+	/**
+	 * Present only with a REPL attached. A command that can ask the user checks
+	 * for it and falls back to its non-interactive form without it.
+	 */
+	dialog?: MigrationDialogBridge;
 }
 
 export interface LocalCommand extends CommandBase {
@@ -90,10 +96,19 @@ export function builtInCommands(): Command[] {
 		},
 		{
 			name: "migrate",
-			description: "Import settings from another agent tool: /migrate [--from <sources>] [--apply] [--force]",
+			description: "Import from another agent tool: /migrate asks, or pass [--from <sources>] [--apply] [--force]",
 			type: "local",
-			call: (_ctx, args) => {
+			call: async (ctx, args) => {
 				const tokens = args.split(/\s+/).filter(Boolean);
+				// Bare `/migrate` in a REPL asks the same questions the flags below
+				// spell out, and ends in the same runMigration call.
+				if (tokens.length === 0 && ctx.dialog) {
+					return runMigrationWizard({
+						dialog: ctx.dialog,
+						cwd: ctx.cwd,
+						report: (text) => ctx.pushInfo(text),
+					});
+				}
 				const fromIndex = tokens.indexOf("--from");
 				const result = runMigration({
 					from: fromIndex === -1 ? undefined : tokens[fromIndex + 1],

@@ -767,6 +767,7 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			compaction: ctx.compaction(),
 			cwd: ctx.cwd,
 			pushInfo: (info) => pushInfo(ctx.handle, info),
+			dialog: ctx.handle ?? undefined,
 		};
 		void Promise.resolve(command.call(localCtx, args)).then((result) => {
 			if (typeof result === "string" && result) pushInfo(ctx.handle, result);
