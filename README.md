@@ -43,7 +43,9 @@ labunbun                                # interactive REPL
   theme files.
 - **Headless output** — `--output-format text|json|stream-json`.
 - **Config import** — `labunbun migrate` maps an existing agent-tool setup
-  (`--from claude-code|codex`) onto labunbun's own config; dry run by default.
+  (Claude Code, Codex, ZCode, `~/.agents`) onto labunbun's own config, settings
+  and files and past conversations alike; dry run by default, and a `/migrate`
+  wizard that asks what to take.
 
 ## Quick start
 
@@ -80,16 +82,29 @@ Already configured another agent tool? Copy over what has an equivalent:
 
 ```bash
 bun run dev migrate                    # dry run: report only, writes nothing
-bun run dev migrate --from codex       # one source (claude-code | codex | all)
+bun run dev migrate --from codex       # one source (claude-code | codex | zcode | agents | all)
+bun run dev migrate --only settings    # categories: settings | assets | history | all
 bun run dev migrate --apply            # write it
 bun run dev migrate --apply --force    # also overwrite values that exist
 ```
 
-Sources are only read, never modified. Model names, `env`, MCP servers, skills
-and rules carry over; anything without an equivalent is reported as skipped with
-a reason rather than dropped silently, and existing values are kept unless
-`--force` says otherwise. The report names every written file that ends up
-holding a credential. `/migrate` does the same from inside the REPL.
+Sources are only read, never modified. Model names, `env`, MCP servers,
+permission rules, skills, agents (`~/.labunbun/agents/`) and rules carry over;
+anything without an equivalent is reported as skipped with a reason rather than
+dropped silently, and existing values are kept unless `--force` says otherwise.
+The report names every written file that ends up holding a credential.
+
+Past conversations import as sessions under `~/.labunbun/projects/<cwd>/`, so
+`--continue` finds them. Only the current project's sessions are taken by
+default — `--history-scope all` goes across projects, `none` skips history
+entirely — and `--history-limit <n>` (default 20) caps how many come from each
+source. A tool call whose other half is missing is dropped on the way in:
+a transcript the messages API would reject is worse than a shorter one.
+
+`/migrate` in the REPL asks rather than assumes — which sources, which
+categories, and which conversations — prints the same dry-run report, and
+writes only after you confirm. `--migrate` is the same command as the
+subcommand, for when the flag is easier to type than the word.
 
 ## Themes
 
