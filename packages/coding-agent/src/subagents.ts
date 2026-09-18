@@ -28,9 +28,28 @@ export interface AgentDefinition {
 	model?: string;
 	maxTurns?: number;
 	source: "builtin" | "user" | "project";
+	/**
+	 * Markdown body after the frontmatter — the subagent's system prompt. This
+	 * is where a hand-written agent says what it is actually for, so dropping it
+	 * silently turned every custom agent into its own one-line description.
+	 */
+	body?: string;
 }
 
-function parseFrontmatter(content: string): { data: Record<string, string>; body: string } {
+/**
+ * System prompt for a subagent: the definition's body when it has one, and the
+ * generic fallback otherwise. Exported so the fallback wording is pinned by a
+ * test rather than re-derived at each call site.
+ */
+export function agentSystemPrompt(definition: AgentDefinition): string {
+	return (
+		definition.body ??
+		`You are ${definition.agentType}, a focused subagent. ${definition.whenToUse}\nComplete the task and report results concisely.`
+	);
+}
+
+/** Split a frontmatter `.md` into its key/value header and its markdown body. */
+export function parseFrontmatter(content: string): { data: Record<string, string>; body: string } {
 	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
 	if (!match) return { data: {}, body: content };
 	const data: Record<string, string> = {};
@@ -49,7 +68,7 @@ function loadDefinitionsFromDir(dir: string, source: "user" | "project"): AgentD
 		for (const name of readdirSync(dir)) {
 			if (!name.endsWith(".md")) continue;
 			try {
-				const { data } = parseFrontmatter(readFileSync(join(dir, name), "utf8"));
+				const { data, body } = parseFrontmatter(readFileSync(join(dir, name), "utf8"));
 				const agentType = data.name ?? data.agent ?? name.replace(/\.md$/, "");
 				if (!agentType) continue;
 				out.push({
@@ -59,6 +78,7 @@ function loadDefinitionsFromDir(dir: string, source: "user" | "project"): AgentD
 					model: data.model || undefined,
 					maxTurns: data.maxTurns ? Number(data.maxTurns) : undefined,
 					source,
+					body: body.trim() || undefined,
 				});
 			} catch {}
 		}
@@ -129,9 +149,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 
 			const subSession = new AgentSession({
 				model: ctx.model,
-				systemPrompt:
-					ctx.systemPromptFor?.(definition) ??
-					`You are ${definition.agentType}, a focused subagent. ${definition.whenToUse}\nComplete the task and report results concisely.`,
+				systemPrompt: ctx.systemPromptFor?.(definition) ?? agentSystemPrompt(definition),
 				tools,
 				maxTurns: input.max_turns ?? definition.maxTurns,
 				cwd: toolCtx.cwd,

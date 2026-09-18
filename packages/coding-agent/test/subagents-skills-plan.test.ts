@@ -7,7 +7,7 @@ import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { z } from "zod";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanApprovalUi } from "../src/plan-mode.ts";
 import { loadSkills, skillsAsCommands } from "../src/skills.ts";
-import { createTaskTool, loadAgentDefinitions } from "../src/subagents.ts";
+import { agentSystemPrompt, createTaskTool, loadAgentDefinitions } from "../src/subagents.ts";
 
 function echoTool(): AnyTool {
 	return buildTool({
@@ -35,6 +35,31 @@ describe("agent definitions", () => {
 		expect(researcher).toMatchObject({ whenToUse: "Deep research agent", source: "user", maxTurns: 5 });
 		expect(researcher?.tools).toEqual(["Read", "Grep"]);
 		expect(defs.find((d) => d.agentType === "deployer")?.source).toBe("project");
+	});
+
+	// The body is the agent's actual instructions; discarding it left every
+	// custom agent running on its one-line description instead.
+	test("keeps the markdown body as the agent's prompt", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-ag-body-"));
+		mkdirSync(join(home, ".labunbun", "agents"), { recursive: true });
+		writeFileSync(
+			join(home, ".labunbun", "agents", "researcher.md"),
+			"---\nname: researcher\ndescription: Deep research agent\n---\n\nYou write terse reports.\n",
+		);
+		writeFileSync(join(home, ".labunbun", "agents", "bare.md"), "No frontmatter at all.\n");
+
+		const defs = loadAgentDefinitions(process.cwd(), home);
+		expect(defs.find((d) => d.agentType === "researcher")?.body).toBe("You write terse reports.");
+		expect(defs.find((d) => d.agentType === "bare")?.body).toBe("No frontmatter at all.");
+	});
+
+	test("a definition without a body falls back to the generic prompt, byte for byte", () => {
+		expect(agentSystemPrompt({ agentType: "researcher", whenToUse: "Deep research agent", source: "user" })).toBe(
+			"You are researcher, a focused subagent. Deep research agent\nComplete the task and report results concisely.",
+		);
+		expect(agentSystemPrompt({ agentType: "x", whenToUse: "", source: "builtin", body: "Custom body." })).toBe(
+			"Custom body.",
+		);
 	});
 });
 
@@ -148,6 +173,39 @@ describe("Task tool (subagents)", () => {
 		);
 		expect(result.isError).toBeFalsy();
 		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
+	});
+
+	test("a definition's body reaches the subagent system prompt", async () => {
+		const subFaux = fauxProvider([{ text: "done" }]);
+		const taskTool = createTaskTool({
+			streamFn: subFaux.streamFn,
+			model: FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: [
+				{ agentType: "scribe", whenToUse: "Writes things", source: "user", body: "You write terse commit messages." },
+			],
+		});
+		await taskTool.call(
+			{ description: "run sub", prompt: "do the thing", subagent_type: "scribe" },
+			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+		);
+		expect(subFaux.receivedContexts[0]?.systemPrompt).toBe("You write terse commit messages.");
+	});
+
+	test("systemPromptFor still overrides the definition body", async () => {
+		const subFaux = fauxProvider([{ text: "done" }]);
+		const taskTool = createTaskTool({
+			streamFn: subFaux.streamFn,
+			model: FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: [{ agentType: "scribe", whenToUse: "Writes things", source: "user", body: "Body." }],
+			systemPromptFor: () => "OVERRIDE",
+		});
+		await taskTool.call(
+			{ description: "run sub", prompt: "do the thing", subagent_type: "scribe" },
+			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+		);
+		expect(subFaux.receivedContexts[0]?.systemPrompt).toBe("OVERRIDE");
 	});
 
 	describe("cancellation", () => {
