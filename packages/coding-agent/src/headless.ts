@@ -11,7 +11,13 @@ import { AgentSession, evaluatePermissions, SessionStore } from "@labunbun/agent
 import { type AgentMessage, createDefaultStreamFn, resolveModel } from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
-import { applySettingsEnv, collectPermissionRules, loadSettings, resolvePermissionMode } from "./settings.ts";
+import {
+	applySettingsEnv,
+	collectPermissionRules,
+	formatIgnoredKeysNotice,
+	loadSettings,
+	resolvePermissionMode,
+} from "./settings.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 
 export type OutputFormat = "text" | "json" | "stream-json";
@@ -49,6 +55,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const store = options.noSession ? undefined : SessionStore.startNew(cwd);
 	const loadedSettings = loadSettings(cwd);
 	const { settings } = loadedSettings;
+	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
+	if (ignoredNotice) console.error(`Warning: ${ignoredNotice}`);
 	applySettingsEnv(settings);
 	const rules = collectPermissionRules(loadedSettings);
 	// Headless defaults to bypassPermissions, so this is the tier check that

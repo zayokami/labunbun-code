@@ -53,6 +53,7 @@ import { listSessions, loadSessionForResume, resolveContinueTarget, type Session
 import {
 	applySettingsEnv,
 	collectPermissionRules,
+	formatIgnoredKeysNotice,
 	loadSettings,
 	resolvePermissionMode,
 	type Settings,
@@ -85,6 +86,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- settings & providers ----
 	const loadedSettings = loadSettings(cwd);
 	const { settings } = loadedSettings;
+	// Say out loud what a file inside this project asked for and did not get —
+	// silence here would look like the setting simply didn't work.
+	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
+	if (ignoredNotice) console.error(`Warning: ${ignoredNotice}`);
 	// Before provider registration and the API-key check below, both of which
 	// read process.env — a key configured via settings.env has to be in place
 	// by then or it would have no effect at all.

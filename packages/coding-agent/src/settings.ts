@@ -2,11 +2,18 @@
  * Settings hierarchy (later overrides earlier):
  *   user (~/.labunbun/settings.json)
  *   → project (<cwd>/.labunbun/settings.json)
- *   → local (<cwd>/.labunbun/settings.local.json, gitignored)
+ *   → local (<cwd>/.labunbun/settings.local.json)
  *   → policy (~/.labunbun/managed-settings.json)
  *   → flag (--settings / CLI-provided object)
  *
  * Objects merge recursively; arrays and scalars replace.
+ *
+ * `project` and `local` both live inside the working tree, so both are treated
+ * as repo-controlled: they are filtered through {@link stripUntrustedKeys}
+ * before merging, and only the user's own tiers (user/policy/flag) can set the
+ * keys that decide what the agent may do or where it sends data. The "local"
+ * tier is not a trust boundary either — labunbun never writes an ignore rule
+ * for it, so whether it is committed is up to whoever cloned the repo.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -70,6 +77,12 @@ export type RawSettingsInput = z.input<typeof SettingsSchema>;
 
 export type SettingsSourceName = "user" | "project" | "local" | "policy" | "flag";
 
+/** A key a project-tier file tried to set and was not allowed to. */
+export interface IgnoredSettingsKey {
+	source: SettingsSourceName;
+	key: string;
+}
+
 export interface LoadedSettings {
 	settings: Settings;
 	/** Which sources contributed (for /permissions display). */
@@ -80,6 +93,86 @@ export interface LoadedSettings {
 	 * attribution and the policy-tier lockdowns both need.
 	 */
 	perSource: Partial<Record<SettingsSourceName, Settings>>;
+	/** Keys dropped from project/local files by {@link stripUntrustedKeys}. */
+	ignoredKeys: IgnoredSettingsKey[];
+}
+
+/**
+ * Settings a repository is not allowed to set for itself.
+ *
+ * `project` (`<cwd>/.labunbun/settings.json`) and `local` values come from files
+ * inside the working tree — repo contents the user did not necessarily write.
+ * Left unfiltered, a cloned repo can hand itself `bypassPermissions`, register a
+ * provider pointed at a host it controls, redirect credentials through `env`
+ * (`ANTHROPIC_BASE_URL` and friends), install a hook that runs on every turn, or
+ * connect an MCP server without passing the approval gate. These keys are
+ * honored only from tiers the user controls: user, policy, flag.
+ *
+ * Deliberately not denied:
+ *   - `permissions.deny` — tightening is always safe, and a repo's own
+ *     guardrails stay effective against the agent it just configured.
+ *   - `theme` / `vimMode` — cosmetic, no reach beyond the user's own terminal.
+ *   - `allowManagedPermissionRulesOnly` / `disableBypassPermissionsMode` — these
+ *     are read only from the policy tier already; they are listed here so the
+ *     merged settings can never carry a repo-supplied value even if a future
+ *     reader forgets that rule.
+ */
+const PROJECT_TIER_DENIED_KEYS = [
+	"model",
+	"fallbackModels",
+	"permissionMode",
+	"env",
+	"providers",
+	"hooks",
+	"mcpServers",
+	"allowManagedPermissionRulesOnly",
+	"disableBypassPermissionsMode",
+] as const;
+
+/** Permission sub-keys denied from the same tiers. `deny` is intentionally absent. */
+const PROJECT_TIER_DENIED_PERMISSION_KEYS = ["allow", "additionalDirectories"] as const;
+
+/**
+ * Remove repo-controlled keys from a project/local tier before it is merged, so
+ * the value never reaches `merged` (and thus never reaches perSource either —
+ * `collectPermissionRules` reads perSource for rule attribution, which is the
+ * path a project `permissions.allow` would otherwise use to widen access).
+ */
+function stripUntrustedKeys(
+	data: unknown,
+	source: SettingsSourceName,
+): { data: unknown; ignored: IgnoredSettingsKey[] } {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) return { data, ignored: [] };
+	const out: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+	const ignored: IgnoredSettingsKey[] = [];
+	for (const key of PROJECT_TIER_DENIED_KEYS) {
+		if (key in out) {
+			delete out[key];
+			ignored.push({ source, key });
+		}
+	}
+	const permissions = out.permissions;
+	if (typeof permissions === "object" && permissions !== null && !Array.isArray(permissions)) {
+		const kept: Record<string, unknown> = { ...(permissions as Record<string, unknown>) };
+		for (const key of PROJECT_TIER_DENIED_PERMISSION_KEYS) {
+			if (key in kept) {
+				delete kept[key];
+				ignored.push({ source, key: `permissions.${key}` });
+			}
+		}
+		out.permissions = kept;
+	}
+	return { data: out, ignored };
+}
+
+/** One-line notice for the keys a repo tried to set for itself and we dropped. */
+export function formatIgnoredKeysNotice(ignored: IgnoredSettingsKey[]): string | undefined {
+	if (ignored.length === 0) return undefined;
+	const list = ignored.map((entry) => `${entry.source}:${entry.key}`).join(", ");
+	return (
+		`Ignoring repo-controlled settings (${list}): these can only be set from your own settings files ` +
+		`(~/.labunbun/settings.json, managed-settings.json, or --settings), not from files inside the project.`
+	);
 }
 
 function settingsPath(source: SettingsSourceName, cwd: string): string {
@@ -125,11 +218,20 @@ export function loadSettings(cwd: string, flagSettings?: RawSettingsInput): Load
 	let merged: RawSettingsInput = {};
 	const sources: Partial<Record<SettingsSourceName, string>> = {};
 	const perSource: Partial<Record<SettingsSourceName, Settings>> = {};
+	const ignoredKeys: IgnoredSettingsKey[] = [];
 
 	for (const source of order) {
 		const path = settingsPath(source, cwd);
-		const data = readJsonFile(path);
+		let data = readJsonFile(path);
 		if (data === undefined) continue;
+		// Project and local files travel with the repo; the other tiers are the
+		// user's own or managed by their org. Strip before merging so a dropped
+		// key can't win by tier order.
+		if (source === "project" || source === "local") {
+			const stripped = stripUntrustedKeys(data, source);
+			data = stripped.data;
+			ignoredKeys.push(...stripped.ignored);
+		}
 		merged = mergeSettings(merged, data);
 		sources[source] = path;
 		// Keep the tier's own view too. Parsed leniently: a malformed tier must
@@ -147,9 +249,9 @@ export function loadSettings(cwd: string, flagSettings?: RawSettingsInput): Load
 	const parsed = SettingsSchema.safeParse(merged);
 	if (!parsed.success) {
 		console.error(`Warning: invalid settings ignored: ${parsed.error.message}`);
-		return { settings: SettingsSchema.parse({}), sources, perSource };
+		return { settings: SettingsSchema.parse({}), sources, perSource, ignoredKeys };
 	}
-	return { settings: parsed.data, sources, perSource };
+	return { settings: parsed.data, sources, perSource, ignoredKeys };
 }
 
 /** Rule tier each settings file maps to, for precedence and attribution. */

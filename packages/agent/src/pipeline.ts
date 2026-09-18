@@ -74,6 +74,13 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 		}
 
 		// 3. Loop hooks (before)
+		// Before the permission check on purpose: a hook is the user's own code
+		// and is how prompt policies get enforced (e.g. "block anything touching
+		// prod"), so it must be able to refuse a call that permissions would
+		// otherwise allow. The corresponding hazard — a *repo* shipping hooks
+		// that run before the agent's own guardrails — is handled at the source,
+		// by refusing hooks from project/local settings tiers; by the time a
+		// hooksRuntime exists here, every hook in it came from the user.
 		if (deps.hooks?.beforeToolCall) {
 			const decision = await deps.hooks.beforeToolCall(tool.name, input, permissionContext);
 			if (decision?.block) {

@@ -179,9 +179,18 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
 ### Configuration roots
 
 - User: `~/.labunbun/` — `settings.json`, `.mcp.json`, `MEMORY.md`, `rules/*.md`,
-  `agents/`, `skills/`, `themes/`
-- Project: `.labunbun/` — `settings.json`, `settings.local.json` (gitignored),
+  `agents/`, `skills/`, `themes/`, plus `projects/<cwd>/` for that project's
+  sessions and MCP approvals
+- Project: `.labunbun/` — `settings.json`, `settings.local.json`,
   `rules/*.md`, `agents/`, `skills/`, `themes/`
+- Project and local settings are read as **repo-controlled**: they may not set
+  `model`, `fallbackModels`, `permissionMode`, `env`, `providers`, `hooks`,
+  `mcpServers`, `permissions.allow`, or `permissions.additionalDirectories`.
+  Those are honored from the user, policy (`managed-settings.json`), and
+  `--settings` tiers only; anything dropped is listed at startup. `permissions.deny`
+  is still honored from every tier — tightening is always allowed. Whether
+  `settings.local.json` is committed is up to you; labunbun writes no ignore
+  rule for it.
 - Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
 - Base URLs are overridable per provider via `<PROVIDER>_BASE_URL`, e.g.
   `ANTHROPIC_BASE_URL` for a gateway or proxy

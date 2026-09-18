@@ -32,17 +32,39 @@ function blockingHook(scriptPath: string, reason: string): string {
 	return `${process.execPath} ${scriptPath}`;
 }
 
-function projectWithHooks(prefix: string, hooks: Record<string, unknown>): { dir: string; markerPath: string } {
-	const dir = mkdtempSync(join(tmpdir(), prefix));
-	mkdirSync(join(dir, ".labunbun"), { recursive: true });
-	writeFileSync(join(dir, ".labunbun", "settings.json"), JSON.stringify({ hooks }, null, 2));
-	return { dir, markerPath: join(dir, "markers.txt") };
+/**
+ * A throwaway home plus a project dir to run in. Hooks are honored only from
+ * tiers the user controls — a hooks block inside the working tree is
+ * repo-controlled and deliberately ignored (see stripUntrustedKeys in
+ * settings.ts) — so these tests declare hooks in the home tier via `setHooks`
+ * and point the child process at that home.
+ */
+function hookFixture(prefix: string): {
+	home: string;
+	dir: string;
+	markerPath: string;
+	setHooks: (hooks: Record<string, unknown>) => void;
+} {
+	const home = mkdtempSync(join(tmpdir(), prefix));
+	const dir = mkdtempSync(join(tmpdir(), `${prefix}proj-`));
+	mkdirSync(join(home, ".labunbun"), { recursive: true });
+	return {
+		home,
+		dir,
+		markerPath: join(dir, "markers.txt"),
+		setHooks: (hooks) => writeFileSync(join(home, ".labunbun", "settings.json"), JSON.stringify({ hooks }, null, 2)),
+	};
 }
 
-async function runCli(dir: string, args: string[]): Promise<{ exitCode: number; stderr: string; stdout: string }> {
+async function runCli(
+	dir: string,
+	args: string[],
+	home: string,
+): Promise<{ exitCode: number; stderr: string; stdout: string }> {
 	const proc = Bun.spawn([process.execPath, CLI, ...args], {
 		cwd: dir,
-		env: { ...process.env, ANTHROPIC_API_KEY: "sk-not-a-real-key-for-tests" },
+		// Both names: homedir() reads USERPROFILE on Windows and HOME elsewhere.
+		env: { ...process.env, USERPROFILE: home, HOME: home, ANTHROPIC_API_KEY: "sk-not-a-real-key-for-tests" },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -57,48 +79,34 @@ function markers(markerPath: string): string[] {
 
 describe("hook wiring (headless, real process)", () => {
 	test("UserPromptSubmit blocks the prompt before any model call", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-hookwire-block-"));
-		mkdirSync(join(dir, ".labunbun"), { recursive: true });
-		const markerPath = join(dir, "markers.txt");
-		const script = join(dir, "block.mjs");
+		const f = hookFixture("lbb-hookwire-block-");
+		const script = join(f.dir, "block.mjs");
 		writeFileSync(
 			script,
 			`import { appendFileSync } from "node:fs";\n` +
-				`appendFileSync(${JSON.stringify(markerPath)}, "UserPromptSubmit\\n");\n` +
+				`appendFileSync(${JSON.stringify(f.markerPath)}, "UserPromptSubmit\\n");\n` +
 				`console.log(JSON.stringify({ decision: "block", reason: "prompt refused by policy" }));\n`,
 		);
-		writeFileSync(
-			join(dir, ".labunbun", "settings.json"),
-			JSON.stringify({
-				hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: `${process.execPath} ${script}` }] }] },
-			}),
-		);
+		f.setHooks({ UserPromptSubmit: [{ hooks: [{ type: "command", command: `${process.execPath} ${script}` }] }] });
 
-		const result = await runCli(dir, ["-p", "hello", "--no-session"]);
-		expect(markers(markerPath)).toContain("UserPromptSubmit");
+		const result = await runCli(f.dir, ["-p", "hello", "--no-session"], f.home);
+		expect(markers(f.markerPath)).toContain("UserPromptSubmit");
 		expect(result.stderr).toContain("prompt refused by policy");
 		expect(result.exitCode).toBe(1);
 	}, 60_000);
 
 	test("SessionStart and SessionEnd both fire around a headless run", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-hookwire-session-"));
-		mkdirSync(join(dir, ".labunbun"), { recursive: true });
-		const markerPath = join(dir, "markers.txt");
-		writeFileSync(
-			join(dir, ".labunbun", "settings.json"),
-			JSON.stringify({
-				hooks: {
-					SessionStart: [{ hooks: [{ command: markerHook(join(dir, "start.mjs"), markerPath, "SessionStart") }] }],
-					SessionEnd: [{ hooks: [{ command: markerHook(join(dir, "end.mjs"), markerPath, "SessionEnd") }] }],
-					// Block so the run never needs a working API key, while still
-					// passing through SessionStart -> ... -> SessionEnd.
-					UserPromptSubmit: [{ hooks: [{ command: blockingHook(join(dir, "block.mjs"), "short-circuit") }] }],
-				},
-			}),
-		);
+		const f = hookFixture("lbb-hookwire-session-");
+		f.setHooks({
+			SessionStart: [{ hooks: [{ command: markerHook(join(f.dir, "start.mjs"), f.markerPath, "SessionStart") }] }],
+			SessionEnd: [{ hooks: [{ command: markerHook(join(f.dir, "end.mjs"), f.markerPath, "SessionEnd") }] }],
+			// Block so the run never needs a working API key, while still
+			// passing through SessionStart -> ... -> SessionEnd.
+			UserPromptSubmit: [{ hooks: [{ command: blockingHook(join(f.dir, "block.mjs"), "short-circuit") }] }],
+		});
 
-		await runCli(dir, ["-p", "hello", "--no-session"]);
-		const fired = markers(markerPath);
+		await runCli(f.dir, ["-p", "hello", "--no-session"], f.home);
+		const fired = markers(f.markerPath);
 		expect(fired).toContain("SessionStart");
 		expect(fired).toContain("SessionEnd");
 		// Ordering matters: start must precede end.
@@ -106,21 +114,15 @@ describe("hook wiring (headless, real process)", () => {
 	}, 60_000);
 
 	test("a hook that exits non-zero is reported but does not crash the session", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-hookwire-fail-"));
-		mkdirSync(join(dir, ".labunbun"), { recursive: true });
-		const failScript = join(dir, "fail.mjs");
+		const f = hookFixture("lbb-hookwire-fail-");
+		const failScript = join(f.dir, "fail.mjs");
 		writeFileSync(failScript, `process.stderr.write("hook exploded"); process.exit(3);\n`);
-		writeFileSync(
-			join(dir, ".labunbun", "settings.json"),
-			JSON.stringify({
-				hooks: {
-					SessionStart: [{ hooks: [{ command: `${process.execPath} ${failScript}` }] }],
-					UserPromptSubmit: [{ hooks: [{ command: blockingHook(join(dir, "block.mjs"), "stop here") }] }],
-				},
-			}),
-		);
+		f.setHooks({
+			SessionStart: [{ hooks: [{ command: `${process.execPath} ${failScript}` }] }],
+			UserPromptSubmit: [{ hooks: [{ command: blockingHook(join(f.dir, "block.mjs"), "stop here") }] }],
+		});
 
-		const result = await runCli(dir, ["-p", "hello", "--no-session"]);
+		const result = await runCli(f.dir, ["-p", "hello", "--no-session"], f.home);
 		// The failing SessionStart hook is surfaced, and the run still reaches
 		// the UserPromptSubmit block rather than dying at startup.
 		expect(result.stderr).toContain("SessionStart hook reported failure");
@@ -129,29 +131,52 @@ describe("hook wiring (headless, real process)", () => {
 	}, 60_000);
 
 	test("SessionStart addedContext is accepted without breaking startup", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-hookwire-ctx-"));
-		mkdirSync(join(dir, ".labunbun"), { recursive: true });
-		const ctxScript = join(dir, "ctx.mjs");
+		const f = hookFixture("lbb-hookwire-ctx-");
+		const ctxScript = join(f.dir, "ctx.mjs");
 		writeFileSync(ctxScript, `console.log(JSON.stringify({ addedContext: "the build runs via make" }));\n`);
-		writeFileSync(
-			join(dir, ".labunbun", "settings.json"),
-			JSON.stringify({
-				hooks: {
-					SessionStart: [{ hooks: [{ command: `${process.execPath} ${ctxScript}` }] }],
-					UserPromptSubmit: [{ hooks: [{ command: blockingHook(join(dir, "block.mjs"), "halt") }] }],
-				},
-			}),
-		);
+		f.setHooks({
+			SessionStart: [{ hooks: [{ command: `${process.execPath} ${ctxScript}` }] }],
+			UserPromptSubmit: [{ hooks: [{ command: blockingHook(join(f.dir, "block.mjs"), "halt") }] }],
+		});
 
-		const result = await runCli(dir, ["-p", "hello", "--no-session"]);
+		const result = await runCli(f.dir, ["-p", "hello", "--no-session"], f.home);
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toContain("halt");
 	}, 60_000);
 
 	test("no hooks configured leaves headless behavior unchanged", async () => {
-		const { dir } = projectWithHooks("lbb-hookwire-none-", {});
-		const result = await runCli(dir, ["--help"]);
+		const f = hookFixture("lbb-hookwire-none-");
+		f.setHooks({});
+		const result = await runCli(f.dir, ["--help"], f.home);
 		expect(result.exitCode).toBe(0);
+	}, 60_000);
+
+	test("hooks declared inside the project are ignored, with a notice", async () => {
+		const f = hookFixture("lbb-hookwire-repo-");
+		// The user's own hook blocks the prompt, so the run needs no API key
+		// while still proving which of the two hooks was reached.
+		f.setHooks({ UserPromptSubmit: [{ hooks: [{ command: blockingHook(join(f.dir, "user-block.mjs"), "halt") }] }] });
+
+		// A cloned repo shipping hooks: without the filter these would run on
+		// every turn, before any permission check.
+		const repoMarker = join(f.dir, "repo-markers.txt");
+		mkdirSync(join(f.dir, ".labunbun"), { recursive: true });
+		writeFileSync(
+			join(f.dir, ".labunbun", "settings.json"),
+			JSON.stringify({
+				hooks: {
+					UserPromptSubmit: [
+						{ hooks: [{ command: markerHook(join(f.dir, "repo.mjs"), repoMarker, "from the repo") }] },
+					],
+				},
+			}),
+		);
+
+		const result = await runCli(f.dir, ["-p", "hello", "--no-session"], f.home);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("halt"); // the user's hook ran
+		expect(markers(repoMarker)).toEqual([]); // the repo's did not
+		expect(result.stderr).toContain("project:hooks"); // and it said so
 	}, 60_000);
 });
 
