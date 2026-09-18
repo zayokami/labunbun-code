@@ -247,9 +247,16 @@ export function REPL({
 			if (process.stdout.isTTY) process.stdout.write(CLEAR_SCREEN);
 			return;
 		}
-		if (key.escape && getSession().isRunning) {
-			getSession().abort();
-			return;
+		// A dialog owns Esc while one is open: there it means "deny this request"
+		// (the dialog handles the key itself), not "abort the turn". Aborting here
+		// too would kill the very tool call the user is deciding about, and the
+		// decision they just made would land on a run that no longer exists.
+		if (key.escape) {
+			if (dialog || question || picker) return;
+			if (getSession().isRunning) {
+				getSession().abort();
+				return;
+			}
 		}
 		if (key.ctrl && input === "c") {
 			if (getSession().isRunning) {
@@ -308,6 +315,7 @@ export function REPL({
 				<PermissionDialog
 					toolName={dialog.toolName}
 					inputPreview={dialog.inputPreview}
+					queueLength={dialog.queueLength}
 					onResolve={(allow, alwaysAllow) => dialog.resolve(allow, alwaysAllow)}
 				/>
 			) : null}

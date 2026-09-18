@@ -6,6 +6,7 @@
 import type { AgentSession, PermissionMode } from "@labunbun/agent";
 import { render } from "ink";
 import { connectSessionToStore, type PromptSubmitResult, type PromptSubmitVerdict, REPL } from "./components/REPL.tsx";
+import { createPermissionQueue } from "./permission-queue.ts";
 import { createStore, type Store, useStore } from "./store.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
 import { initialUiState, toolPreview, type UiState } from "./ui-state.ts";
@@ -59,6 +60,11 @@ export interface ReplAppHandle {
 	 * cancel. The in-app /resume and /model pickers both run on this.
 	 */
 	pickFromList: (title: string, items: Array<{ label: string; description?: string }>) => Promise<number | null>;
+	/**
+	 * Deny every pending permission request and dismiss the dialog. For a run
+	 * being aborted: the answers no longer matter, but their callers are still
+	 * awaiting them, so they must be settled rather than dropped.
+	 */
 	clearPermissionRequest: () => void;
 	setContextInfo(info: { usedTokens: number; threshold: number }): void;
 	setTasks(
@@ -129,28 +135,19 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		{ exitOnCtrlC: false },
 	);
 
+	const permissionQueue = createPermissionQueue({
+		show: (dialog) => store.set((state) => ({ ...state, dialog })),
+		preview: toolPreview,
+		onAlwaysAllow: options.onAlwaysAllow,
+	});
+
 	return {
 		store,
 		waitUntilExit: async () => {
 			await instance.waitUntilExit();
 			unsubscribeSession();
 		},
-		requestPermission: (toolName: string, input: unknown) =>
-			new Promise<boolean>((resolve) => {
-				store.set((state) => ({
-					...state,
-					dialog: {
-						callId: `perm-${toolName}`,
-						toolName,
-						inputPreview: toolPreview(toolName, input),
-						resolve: (allow, alwaysAllow) => {
-							store.set((s) => ({ ...s, dialog: null }));
-							if (allow && alwaysAllow) options.onAlwaysAllow?.(toolName);
-							resolve(allow);
-						},
-					},
-				}));
-			}),
+		requestPermission: permissionQueue.request,
 		setContextInfo: (info) => {
 			store.set((s) => ({ ...s, contextInfo: info }));
 		},
@@ -207,9 +204,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 					},
 				}));
 			}),
-		clearPermissionRequest: () => {
-			store.set((s) => ({ ...s, dialog: null }));
-		},
+		clearPermissionRequest: permissionQueue.clear,
 	};
 }
 

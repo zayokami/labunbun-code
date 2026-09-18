@@ -6,6 +6,8 @@ export interface PermissionDialogProps {
 	toolName: string;
 	inputPreview: string;
 	onResolve: (allow: boolean, alwaysAllow: boolean) => void;
+	/** Requests queued behind this one, including it (see PermissionDialogState). */
+	queueLength?: number;
 }
 
 /**
@@ -13,7 +15,7 @@ export interface PermissionDialogProps {
  * 3) deny. Esc denies. The promise passed in via onResolve comes from the
  * app-layer canUseTool implementation.
  */
-export function PermissionDialog({ toolName, inputPreview, onResolve }: PermissionDialogProps) {
+export function PermissionDialog({ toolName, inputPreview, onResolve, queueLength }: PermissionDialogProps) {
 	const theme = useTheme();
 	const [selected, setSelected] = useState(0);
 	const options = ["Yes", "Yes, and don't ask again for this tool", "No, tell it what to do differently"];
@@ -43,6 +45,7 @@ export function PermissionDialog({ toolName, inputPreview, onResolve }: Permissi
 		<Box flexDirection="column" borderStyle="round" borderColor={theme.permission} paddingX={1} marginBottom={1}>
 			<Text color={theme.permission} bold>
 				Permission required
+				{queueLength !== undefined && queueLength > 1 ? ` (+${queueLength - 1} more waiting)` : ""}
 			</Text>
 			<Text>
 				Tool{" "}

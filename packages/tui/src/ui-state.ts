@@ -61,6 +61,13 @@ export interface PermissionDialogState {
 	callId: string;
 	toolName: string;
 	inputPreview: string;
+	/**
+	 * Requests still waiting behind this one, including it. Requests arrive
+	 * concurrently (a turn runs several tools at once) and are answered in
+	 * order, so the dialog says how many answers are queued rather than
+	 * appearing to repeat itself.
+	 */
+	queueLength?: number;
 	resolve: (allow: boolean, alwaysAllow: boolean) => void;
 }
 
