@@ -75,10 +75,13 @@ export interface InteractiveOptions {
 	cwd?: string;
 	/** Theme name: a built-in, a theme file, or "auto". */
 	theme?: string;
+	/** Home directory for user-owned state; injectable so tests don't touch the real one. */
+	home?: string;
 }
 
 export async function runInteractive(options: InteractiveOptions = {}): Promise<number> {
 	const cwd = options.cwd ?? process.cwd();
+	const home = options.home ?? homedir();
 
 	// ---- first-run setup (before settings load, so it can create them) ----
 	if (shouldRunWizard()) await runWizard(cwd);
@@ -219,11 +222,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// setting the user wrote themselves. Project-scoped servers ship with the
 	// repo's .mcp.json — a cloned/untrusted repo could otherwise auto-spawn
 	// arbitrary commands or connect to arbitrary URLs with zero user action —
-	// so they need one-time approval, persisted to the gitignored local
-	// settings file, before they're allowed to connect.
+	// so they need one-time approval, persisted under the user's home directory
+	// (~/.labunbun/projects/<cwd>/mcp-approved.json) where repo contents cannot
+	// pre-approve them.
 	const mcpConfig = loadMcpConfig(cwd);
 	const projectMcpServerNames = loadProjectMcpServerNames(cwd);
-	const approvedProjectMcpServers = loadApprovedMcpServers(cwd);
+	const approvedProjectMcpServers = loadApprovedMcpServers(cwd, home);
 	const approvedMcpServers = new Set(
 		Object.keys(mcpConfig).filter((name) => !projectMcpServerNames.has(name) || approvedProjectMcpServers.has(name)),
 	);
@@ -587,6 +591,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				handle,
 				settings,
 				cwd,
+				home,
 				costTracker,
 				baseRules,
 				sessionRules,
@@ -684,6 +689,8 @@ interface AppCommandContext {
 	handle: ReplAppHandle | null;
 	settings: Settings;
 	cwd: string;
+	/** Home directory for user-owned state (MCP approvals). Defaults to the real one. */
+	home?: string;
 	costTracker: CostTracker;
 	baseRules: PermissionRule[];
 	sessionRules: PermissionRule[];
@@ -879,7 +886,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					pushInfo(ctx.handle, `Unknown server: ${serverName}`);
 					return true;
 				}
-				persistMcpApproval(ctx.cwd, serverName);
+				persistMcpApproval(ctx.cwd, serverName, ctx.home);
 				void connectMcpServer(serverName, config).then((connection) => {
 					ctx.mcpConnections.push(connection);
 					const index = ctx.pendingMcpApprovals.indexOf(serverName);

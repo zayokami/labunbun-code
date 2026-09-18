@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { sanitizeCwd } from "@labunbun/agent";
 import {
 	approveMcpServer,
 	connectAllMcpServers,
@@ -228,42 +229,69 @@ describe("loadProjectMcpServerNames", () => {
 });
 
 describe("loadApprovedMcpServers / approveMcpServer", () => {
+	// Every case passes an explicit throwaway home: the store is deliberately
+	// outside the working tree, so a default-homedir call here would write real
+	// files under the developer's own ~/.labunbun.
+	function dirs(prefix: string): { cwd: string; home: string } {
+		return { cwd: mkdtempSync(join(tmpdir(), prefix)), home: mkdtempSync(join(tmpdir(), `${prefix}home-`)) };
+	}
+
 	test("empty set before any approval", () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-mcp-approve-"));
-		expect(loadApprovedMcpServers(dir).size).toBe(0);
+		const { cwd, home } = dirs("lbb-mcp-approve-");
+		expect(loadApprovedMcpServers(cwd, home).size).toBe(0);
 	});
 
-	test("approveMcpServer persists to .labunbun/settings.local.json and is readable back", () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-mcp-approve2-"));
-		approveMcpServer(dir, "alpha");
-		const approved = loadApprovedMcpServers(dir);
+	test("approveMcpServer persists under the home directory and is readable back", () => {
+		const { cwd, home } = dirs("lbb-mcp-approve2-");
+		approveMcpServer(cwd, "alpha", home);
+		const approved = loadApprovedMcpServers(cwd, home);
 		expect(approved.has("alpha")).toBe(true);
 
-		const settingsPath = join(dir, ".labunbun", "settings.local.json");
-		expect(existsSync(settingsPath)).toBe(true);
-		const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+		const storePath = join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
+		expect(existsSync(storePath)).toBe(true);
+		const raw = JSON.parse(readFileSync(storePath, "utf8"));
 		expect(raw.approvedMcpServers).toContain("alpha");
 	});
 
+	test("nothing is written inside the working tree", () => {
+		const { cwd, home } = dirs("lbb-mcp-approve-tree-");
+		approveMcpServer(cwd, "alpha", home);
+		// A repo that gets a stray settings.local.json committed would hand the
+		// next clone a pre-approved server; the store must stay out of the tree.
+		expect(existsSync(join(cwd, ".labunbun"))).toBe(false);
+	});
+
+	test("a repo-supplied settings.local.json cannot pre-approve a server", () => {
+		const { cwd, home } = dirs("lbb-mcp-approve-legacy-");
+		mkdirSync(join(cwd, ".labunbun"), { recursive: true });
+		writeFileSync(join(cwd, ".labunbun", "settings.local.json"), JSON.stringify({ approvedMcpServers: ["evil"] }));
+		expect(loadApprovedMcpServers(cwd, home).has("evil")).toBe(false);
+	});
+
+	test("approvals are per-project: another cwd does not inherit them", () => {
+		const { cwd, home } = dirs("lbb-mcp-approve-scope-");
+		const other = mkdtempSync(join(tmpdir(), "lbb-mcp-approve-other-"));
+		approveMcpServer(cwd, "alpha", home);
+		expect(loadApprovedMcpServers(other, home).has("alpha")).toBe(false);
+	});
+
 	test("approving a second server preserves the first and dedupes repeats", () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-mcp-approve3-"));
-		approveMcpServer(dir, "alpha");
-		approveMcpServer(dir, "beta");
-		approveMcpServer(dir, "alpha");
-		const approved = loadApprovedMcpServers(dir);
+		const { cwd, home } = dirs("lbb-mcp-approve3-");
+		approveMcpServer(cwd, "alpha", home);
+		approveMcpServer(cwd, "beta", home);
+		approveMcpServer(cwd, "alpha", home);
+		const approved = loadApprovedMcpServers(cwd, home);
 		expect(approved.size).toBe(2);
 		expect(approved.has("alpha")).toBe(true);
 		expect(approved.has("beta")).toBe(true);
 	});
 
-	test("preserves unrelated keys already in settings.local.json", () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-mcp-approve4-"));
-		mkdirSync(join(dir, ".labunbun"), { recursive: true });
-		writeFileSync(join(dir, ".labunbun", "settings.local.json"), JSON.stringify({ someOtherKey: "keep-me" }));
-		approveMcpServer(dir, "alpha");
-		const raw = JSON.parse(readFileSync(join(dir, ".labunbun", "settings.local.json"), "utf8"));
-		expect(raw.someOtherKey).toBe("keep-me");
-		expect(raw.approvedMcpServers).toContain("alpha");
+	test("an unreadable store degrades to empty rather than throwing", () => {
+		const { cwd, home } = dirs("lbb-mcp-approve5-");
+		const storePath = join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
+		mkdirSync(dirname(storePath), { recursive: true });
+		writeFileSync(storePath, "{ not json");
+		expect(loadApprovedMcpServers(cwd, home).size).toBe(0);
 	});
 });
 

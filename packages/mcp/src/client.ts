@@ -4,8 +4,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { type AnyTool, buildTool, type ToolResult } from "@labunbun/agent";
+import { type AnyTool, buildTool, sanitizeCwd, type ToolResult } from "@labunbun/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -261,18 +262,35 @@ export function loadProjectMcpServerNames(cwd: string): Set<string> {
 	}
 }
 
-function localSettingsPath(cwd: string): string {
-	return join(cwd, ".labunbun", "settings.local.json");
+/**
+ * Where a project server's approval is remembered:
+ * `~/.labunbun/projects/<cwd-slug>/mcp-approved.json`.
+ *
+ * This used to live in `<cwd>/.labunbun/settings.local.json`, on the reasoning
+ * that the file was gitignored and therefore machine-local. Nothing ever wrote
+ * that ignore rule, so a cloned repo could ship the file and pre-approve its
+ * own servers — the exact hole the approval gate exists to close, since
+ * `.mcp.json` and `settings.local.json` sit in the same directory and travel
+ * together. Approvals now live under the user's home, keyed by the resolved
+ * cwd, where repo contents cannot reach them. Approvals granted before this
+ * change are intentionally not read from the old location: re-approving a
+ * server costs one `/mcp approve`, reading a repo-controlled file costs
+ * everything.
+ *
+ * The directory is keyed with `sanitizeCwd` exactly as SessionStore keys its
+ * sessions, so a project's approvals land next to that project's history.
+ */
+function approvalStorePath(cwd: string, home: string): string {
+	return join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
 }
 
 /**
- * Project-scoped MCP servers explicitly approved by the user, read from
- * `.labunbun/settings.local.json` — gitignored and machine-local, so unlike
- * `.labunbun/settings.json` it can't be pre-populated by a cloned repo to
- * self-approve its own servers.
+ * Project-scoped MCP servers explicitly approved by the user. Stored outside
+ * the working tree (see {@link approvalStorePath}) so a cloned repo can't
+ * pre-approve its own servers. `home` is injectable for tests.
  */
-export function loadApprovedMcpServers(cwd: string): Set<string> {
-	const path = localSettingsPath(cwd);
+export function loadApprovedMcpServers(cwd: string, home: string = homedir()): Set<string> {
+	const path = approvalStorePath(cwd, home);
 	try {
 		if (!existsSync(path)) return new Set();
 		const parsed = JSON.parse(readFileSync(path, "utf8")) as { approvedMcpServers?: string[] };
@@ -282,9 +300,9 @@ export function loadApprovedMcpServers(cwd: string): Set<string> {
 	}
 }
 
-/** Persist one more approved server name into local settings (creates the file/dir as needed). */
-export function approveMcpServer(cwd: string, serverName: string): void {
-	const path = localSettingsPath(cwd);
+/** Persist one more approved server name (creates the file/dir as needed). */
+export function approveMcpServer(cwd: string, serverName: string, home: string = homedir()): void {
+	const path = approvalStorePath(cwd, home);
 	let existing: Record<string, unknown> = {};
 	try {
 		if (existsSync(path)) existing = JSON.parse(readFileSync(path, "utf8"));

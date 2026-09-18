@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AgentSession } from "@labunbun/agent";
@@ -74,10 +74,12 @@ describe("/mcp command", () => {
 
 	test("approve connects the server, persists approval, and merges tools into the session", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-mcpcmd-"));
+		const home = mkdtempSync(join(tmpdir(), "lbb-mcpcmd-home-"));
 		writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: "x" } } }));
 
 		const ctx = makeCtx({
 			cwd: dir,
+			home,
 			pendingMcpApprovals: ["fixture"],
 			mcpConfig: { fixture: { command: process.execPath, args: [FIXTURE_SERVER] } },
 		});
@@ -86,7 +88,7 @@ describe("/mcp command", () => {
 		// Connection is async (fire-and-forget inside handleAppCommand); wait for it.
 		await new Promise((r) => setTimeout(r, 3000));
 
-		expect(loadApprovedMcpServers(dir).has("fixture")).toBe(true);
+		expect(loadApprovedMcpServers(dir, home).has("fixture")).toBe(true);
 		expect(ctx.pendingMcpApprovals).not.toContain("fixture");
 		expect(ctx.mcpConnections.some((c) => c.serverName === "fixture")).toBe(true);
 		const session = ctx.getSession();
@@ -99,11 +101,24 @@ describe("/mcp command", () => {
 describe("end-to-end project-server approval gate (loadProjectMcpServerNames + loadApprovedMcpServers)", () => {
 	test("a fresh clone's project server starts unapproved", () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-mcpgate-"));
+		const home = mkdtempSync(join(tmpdir(), "lbb-mcpgate-home-"));
 		writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { evil: { command: "whoami" } } }));
 
 		const projectNames = loadProjectMcpServerNames(dir);
-		const approved = loadApprovedMcpServers(dir);
+		const approved = loadApprovedMcpServers(dir, home);
 		expect(projectNames.has("evil")).toBe(true);
 		expect(approved.has("evil")).toBe(false);
+	});
+
+	test("a repo cannot ship its own approval ledger", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-mcpgate-ledger-"));
+		const home = mkdtempSync(join(tmpdir(), "lbb-mcpgate-ledger-home-"));
+		writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { evil: { command: "whoami" } } }));
+		// The old ledger location: a file in the repo, next to .mcp.json, is
+		// attacker-controlled and must not be read as evidence of approval.
+		mkdirSync(join(dir, ".labunbun"), { recursive: true });
+		writeFileSync(join(dir, ".labunbun", "settings.local.json"), JSON.stringify({ approvedMcpServers: ["evil"] }));
+
+		expect(loadApprovedMcpServers(dir, home).has("evil")).toBe(false);
 	});
 });
