@@ -2,6 +2,7 @@ export const TOOLS_PACKAGE_VERSION = "0.1.0";
 
 export { type BackgroundShell, BackgroundShellManager, type ShellStatus } from "./background.ts";
 export { createBashOutputTool, createBashTool, createKillBashTool } from "./bash.ts";
+export { caseInsensitivePaths } from "./containment.ts";
 export { createEditTool } from "./edit.ts";
 export { createGlobTool, type FileWalkerOps, walkProjectFiles } from "./glob.ts";
 export { createGrepTool, globToRegExp } from "./grep.ts";
