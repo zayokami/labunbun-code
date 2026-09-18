@@ -1,7 +1,7 @@
 import { dirname } from "node:path";
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
-import { guardPathContainment } from "./containment.ts";
+import { guardWritablePath } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
 export function createWriteTool(cwd: string, ops: Operations): AnyTool {
@@ -26,7 +26,7 @@ export function createWriteTool(cwd: string, ops: Operations): AnyTool {
 		call: async (input) => {
 			let path: string;
 			try {
-				path = guardPathContainment(input.file_path, cwd, "Write");
+				path = guardWritablePath(input.file_path, cwd, "Write");
 			} catch (error) {
 				return { content: [{ type: "text", text: String(error) }], isError: true };
 			}

@@ -1,7 +1,7 @@
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
-import { guardPathContainment } from "./containment.ts";
+import { guardWritablePath } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
 export function createEditTool(cwd: string, ops: Operations): AnyTool {
@@ -34,7 +34,7 @@ export function createEditTool(cwd: string, ops: Operations): AnyTool {
 		call: async (input) => {
 			let path: string;
 			try {
-				path = guardPathContainment(input.file_path, cwd, "Edit");
+				path = guardWritablePath(input.file_path, cwd, "Edit");
 			} catch (error) {
 				return { content: [{ type: "text", text: String(error) }], isError: true };
 			}

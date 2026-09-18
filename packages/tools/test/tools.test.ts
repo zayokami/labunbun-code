@@ -85,6 +85,37 @@ describe("Write + Edit tools", () => {
 		expect(missing.isError).toBe(true);
 	});
 
+	// Containment alone allows this — .git/ is inside the workspace. The refusal
+	// is about recoverability: history the agent rewrites is history the user
+	// cannot get back, so it is not something a permission can grant.
+	test("refuses to write inside .git", async () => {
+		const dir = tempDir();
+		const gitDir = join(dir, ".git");
+		mkdirSync(gitDir);
+		writeFileSync(join(gitDir, "config"), "[core]\n");
+
+		const write = createWriteTool(dir, defaultOperations());
+		const edit = createEditTool(dir, defaultOperations());
+
+		const wrote = await call(write, { file_path: join(gitDir, "config"), content: "[core]\n\tevil = 1\n" });
+		expect(wrote.isError).toBe(true);
+		expect((wrote.content[0] as any).text).toContain("version-control metadata");
+
+		const edited = await call(edit, { file_path: join(gitDir, "HEAD"), old_string: "a", new_string: "b" });
+		expect(edited.isError).toBe(true);
+
+		expect(await Bun.file(join(gitDir, "config")).text()).toBe("[core]\n");
+	});
+
+	test("still writes ordinary files beside it", async () => {
+		const dir = tempDir();
+		mkdirSync(join(dir, ".git"));
+		const write = createWriteTool(dir, defaultOperations());
+		const result = await call(write, { file_path: join(dir, ".gitignore"), content: "dist\n" });
+		expect(result.isError).toBeFalsy();
+		expect(await Bun.file(join(dir, ".gitignore")).text()).toBe("dist\n");
+	});
+
 	test("replace_all replaces every occurrence", async () => {
 		const dir = tempDir();
 		const file = join(dir, "r.txt");
