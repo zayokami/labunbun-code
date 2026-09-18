@@ -149,6 +149,107 @@ describe("Task tool (subagents)", () => {
 		expect(result.isError).toBeFalsy();
 		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
 	});
+
+	describe("cancellation", () => {
+		/** Blocks until its own ctx.signal aborts — stands in for a slow subagent step. */
+		function stallingTool(onEnter: () => void): AnyTool {
+			return buildTool({
+				name: "stall",
+				description: "blocks until its signal aborts",
+				inputSchema: z.object({}),
+				call: async (_input, ctx) => {
+					onEnter();
+					if (!ctx.signal.aborted) {
+						await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+					}
+					return { content: [{ type: "text", text: ctx.signal.aborted ? "stall aborted" : "stall released" }] };
+				},
+			});
+		}
+
+		async function settleWithin<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					promise,
+					new Promise<"timeout">((resolve) => {
+						timer = setTimeout(() => resolve("timeout"), ms);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		}
+
+		test("a parent abort stops the subagent and settles the call", async () => {
+			const entered = Promise.withResolvers<void>();
+			const abortController = new AbortController();
+			const subFaux = fauxProvider([
+				{ toolCalls: [{ id: "s1", name: "stall", arguments: {} }] },
+				{ text: "subagent continued anyway" },
+			]);
+			const taskTool = createTaskTool({
+				streamFn: subFaux.streamFn,
+				model: FAUX_MODEL,
+				allTools: [stallingTool(() => entered.resolve())],
+				definitions: [],
+			});
+
+			const call = taskTool.call(
+				{ description: "run sub", prompt: "do the thing" },
+				{ callId: "t1", signal: abortController.signal, cwd: process.cwd(), onUpdate: () => {} },
+			);
+			expect(await settleWithin(entered.promise, 5_000)).not.toBe("timeout");
+			abortController.abort();
+
+			const result = await settleWithin(call, 5_000);
+			expect(result).not.toBe("timeout");
+			if (result === "timeout") return;
+			expect(result.isError).toBe(true);
+			expect((result.content[0] as any).text).toBe("Tool execution aborted");
+			expect(result.details).toMatchObject({ reason: "aborted" });
+			// The subagent must not have been handed another turn after the cancel.
+			expect(subFaux.receivedContexts).toHaveLength(1);
+		});
+
+		test("aborting the parent session ends the run instead of blocking on the tool batch", async () => {
+			// End-to-end shape of the reported bug: Esc during a Task call left the
+			// spinner on "Running tools…" until the subagent finished on its own.
+			const entered = Promise.withResolvers<void>();
+			const subFaux = fauxProvider([{ toolCalls: [{ id: "s1", name: "stall", arguments: {} }] }, { text: "sub done" }]);
+			const taskTool = createTaskTool({
+				streamFn: subFaux.streamFn,
+				model: FAUX_MODEL,
+				allTools: [stallingTool(() => entered.resolve())],
+				definitions: [],
+			});
+			const parentFaux = fauxProvider([
+				{
+					toolCalls: [{ id: "t1", name: "Task", arguments: { description: "stall", prompt: "block until cancelled" } }],
+				},
+				{ text: "parent finished" },
+			]);
+			const session = new AgentSession({
+				model: FAUX_MODEL,
+				tools: [taskTool],
+				permissionMode: "bypassPermissions",
+				deps: { streamFn: parentFaux.streamFn, canUseTool: async () => ({ behavior: "allow" as const }) },
+			});
+
+			const run = session.prompt("go");
+			expect(await settleWithin(entered.promise, 5_000)).not.toBe("timeout");
+			expect(session.isRunning).toBe(true);
+			session.abort();
+
+			expect(await settleWithin(run, 5_000)).toBe("aborted");
+			const results = session.messages.filter((m) => m.role === "toolResult");
+			expect(results).toHaveLength(1);
+			expect(results[0].isError).toBe(true);
+			expect((results[0].content[0] as { text: string }).text).toBe("Tool execution aborted");
+			expect(parentFaux.receivedContexts).toHaveLength(1);
+			expect(session.isRunning).toBe(false);
+		});
+	});
 });
 
 describe("skills", () => {

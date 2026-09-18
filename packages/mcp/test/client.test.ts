@@ -37,9 +37,9 @@ describe("connectMcpServer (fixture stdio server)", () => {
 			throw new Error(`fixture failed: ${connection.error}`);
 		}
 
-		expect(connection.tools).toHaveLength(1);
-		const tool = connection.tools[0];
-		expect(tool.name).toBe("mcp__fixture__echo");
+		expect(connection.tools.map((t) => t.name).sort()).toEqual(["mcp__fixture__echo", "mcp__fixture__sleep"]);
+		const tool = connection.tools.find((t) => t.name === "mcp__fixture__echo");
+		if (!tool) throw new Error("fixture echo tool missing");
 
 		const result = await tool.call(
 			{ text: "hello mcp" },
@@ -52,6 +52,42 @@ describe("connectMcpServer (fixture stdio server)", () => {
 		);
 		expect(result.isError).toBeFalsy();
 		expect((result.content[0] as any).text).toContain("hello mcp");
+	}, 20_000);
+
+	test("an in-flight call is cancelled by the run's abort signal", async () => {
+		// Without forwarding ctx.signal an Esc leaves the request in flight until
+		// the server answers, so the parent's tool batch (and the "Running tools…"
+		// spinner) stays blocked for as long as the server takes.
+		const connection = await connectMcpServer("fixture", {
+			command: process.execPath,
+			args: [FIXTURE_SERVER],
+		});
+		if (connection.error) {
+			throw new Error(`fixture failed: ${connection.error}`);
+		}
+		const sleepTool = connection.tools.find((t) => t.name === "mcp__fixture__sleep");
+		if (!sleepTool) throw new Error("fixture sleep tool missing");
+
+		const controller = new AbortController();
+		const started = Date.now();
+		const pending = sleepTool.call(
+			{ ms: 5_000 },
+			{ callId: "t1", signal: controller.signal, cwd: process.cwd(), onUpdate: () => {} },
+		);
+		setTimeout(() => controller.abort(), 150);
+		const result = await pending;
+
+		expect(Date.now() - started).toBeLessThan(3_000);
+		expect(result.isError).toBe(true);
+		expect((result.content[0] as any).text).toBe("Tool execution aborted");
+
+		// The connection survives the cancel — later calls still go through.
+		const after = await sleepTool.call(
+			{ ms: 1 },
+			{ callId: "t2", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+		);
+		expect(after.isError).toBeFalsy();
+		expect((after.content[0] as any).text).toBe("slept 1ms");
 	}, 20_000);
 
 	test("invalid config yields error connection, not a throw", async () => {

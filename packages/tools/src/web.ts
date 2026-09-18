@@ -80,13 +80,18 @@ function decodeDdgUrl(raw: string): string {
 	}
 }
 
-async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+async function fetchWithTimeout(url: string, init?: RequestInit, signal?: AbortSignal): Promise<Response> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+	// The run's own cancel has to reach the request too, or an interrupted turn
+	// stays parked on the network until the timeout above expires.
+	const onAbort = () => controller.abort();
+	signal?.addEventListener("abort", onAbort, { once: true });
 	try {
 		return await fetch(url, { ...init, signal: controller.signal });
 	} finally {
 		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
 	}
 }
 
@@ -181,12 +186,17 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
  * runtime from silently following a redirect to a blocked address after the
  * initial URL passed the check — a public URL can 302 to a private one.
  */
-async function fetchGuarded(url: string, init: RequestInit, maxRedirects = 5): Promise<Response | { blocked: string }> {
+async function fetchGuarded(
+	url: string,
+	init: RequestInit,
+	maxRedirects = 5,
+	signal?: AbortSignal,
+): Promise<Response | { blocked: string }> {
 	let current = url;
 	for (let hop = 0; hop <= maxRedirects; hop++) {
 		const blockReason = await guardPublicUrl(current);
 		if (blockReason) return { blocked: blockReason };
-		const response = await fetchWithTimeout(current, { ...init, redirect: "manual" });
+		const response = await fetchWithTimeout(current, { ...init, redirect: "manual" }, signal);
 		const isRedirect = response.status >= 300 && response.status < 400;
 		const location = response.headers.get("location");
 		if (!isRedirect || !location) return response;
@@ -210,17 +220,23 @@ export function createWebFetchTool(): AnyTool {
 			"- For docs, fetch the most specific page rather than a landing page.",
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
-		call: async (input) => {
+		call: async (input, ctx) => {
 			let response: Response;
 			try {
-				const result = await fetchGuarded(input.url, {
-					headers: { "user-agent": "labunbun-code/0.1 (+webfetch)" },
-				});
+				const result = await fetchGuarded(
+					input.url,
+					{ headers: { "user-agent": "labunbun-code/0.1 (+webfetch)" } },
+					5,
+					ctx.signal,
+				);
 				if ("blocked" in result) {
 					return { content: [textContent(`Fetch blocked: ${result.blocked}`)], isError: true };
 				}
 				response = result;
 			} catch (error) {
+				if (ctx.signal.aborted) {
+					return { content: [textContent("Tool execution aborted")], isError: true };
+				}
 				return {
 					content: [textContent(`Fetch failed: ${error instanceof Error ? error.message : error}`)],
 					isError: true,
@@ -258,13 +274,18 @@ export function createWebSearchTool(): AnyTool {
 		prompt: "- Search when you need current information beyond your knowledge.",
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
-		call: async (input) => {
+		call: async (input, ctx) => {
 			let response: Response;
 			try {
-				response = await fetchWithTimeout(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(input.query)}`, {
-					headers: { "user-agent": "labunbun-code/0.1 (+websearch)" },
-				});
+				response = await fetchWithTimeout(
+					`https://html.duckduckgo.com/html/?q=${encodeURIComponent(input.query)}`,
+					{ headers: { "user-agent": "labunbun-code/0.1 (+websearch)" } },
+					ctx.signal,
+				);
 			} catch (error) {
+				if (ctx.signal.aborted) {
+					return { content: [textContent("Tool execution aborted")], isError: true };
+				}
 				return {
 					content: [textContent(`Search failed: ${error instanceof Error ? error.message : error}`)],
 					isError: true,

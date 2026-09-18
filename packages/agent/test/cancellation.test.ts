@@ -255,6 +255,61 @@ describe("session cancellation integration", () => {
 		},
 	);
 
+	test("a stream that completes normally after a cancel is still recorded as aborted", async () => {
+		// Transports disagree on how a cancel surfaces: some throw, others just
+		// stop the stream. The OpenAI SDK ends an aborted SSE response with no
+		// error, so the turn arrives looking like a normal completion — and the
+		// tool calls it carries would be dispatched after the user pressed Esc.
+		const streaming = deferred<void>();
+		const release = deferred<void>();
+		let executions = 0;
+		const faux = fauxProvider([
+			{ text: "working on it", toolCalls: [{ id: "late", name: "probe", arguments: {} }] },
+			{ text: "should never be reached" },
+		]);
+		const streamFn: StreamFn = async function* (model, context, options) {
+			for await (const event of faux.streamFn(model, context, options)) {
+				if (event.type === "done") {
+					// Hold the terminal event past the cancel, then deliver it —
+					// exactly what an already-buffered SSE finish looks like.
+					streaming.resolve();
+					await release.promise;
+				}
+				yield event;
+			}
+		};
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [
+				probe(async () => {
+					executions++;
+					return { content: [{ type: "text", text: "ran anyway" }] };
+				}),
+			],
+			deps: { streamFn },
+		});
+
+		const run = session.prompt("go");
+		await streaming.promise;
+		expect(session.isRunning).toBe(true);
+		session.abort();
+		release.resolve();
+
+		expect(await run).toBe("aborted");
+		expect(executions).toBe(0);
+		expect(faux.receivedContexts).toHaveLength(1);
+		const assistant = session.messages.find((m) => m.role === "assistant");
+		expect(assistant).toMatchObject({ stopReason: "aborted" });
+		const results = paired(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0].isError).toBe(true);
+		expect(session.isRunning).toBe(false);
+		expect(session.isInterrupted).toBe(true);
+		// The session stays usable — the cancelled turn must not wedge it.
+		expect(await session.prompt("next")).toBe("completed");
+		expect(faux.receivedContexts).toHaveLength(2);
+	});
+
 	test("abort in an async tool-start subscriber prevents permissions and execution", async () => {
 		let calls = 0;
 		let permissions = 0;

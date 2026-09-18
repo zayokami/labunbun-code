@@ -240,6 +240,17 @@ export class AgentSession {
 				const earlyResults = new Map<string, ToolResultMessage>();
 				const earlyPromises = new Map<string, Promise<void>>();
 				const toolSemaphore = new Semaphore(DEFAULT_MAX_CONCURRENCY);
+				// A cancel that lands while the stream is in flight must end the turn as
+				// aborted. Transports surface a cancel differently: some throw (handled
+				// below), others merely stop the stream — the OpenAI SDK ends an aborted
+				// SSE response without an error, which would otherwise be recorded as a
+				// completed turn and dispatch that turn's tool calls after the user
+				// pressed Esc.
+				let abortedWhileStreaming = false;
+				const onAbort = () => {
+					abortedWhileStreaming = true;
+				};
+				streamOptions.signal?.addEventListener("abort", onAbort, { once: true });
 				try {
 					for await (const event of this.#deps.streamFn(this.#model, context, streamOptions)) {
 						if (event.type === "done" || event.type === "error") {
@@ -267,6 +278,12 @@ export class AgentSession {
 					} else {
 						throw streamError;
 					}
+				} finally {
+					streamOptions.signal?.removeEventListener("abort", onAbort);
+				}
+
+				if (assistant && abortedWhileStreaming && assistant.stopReason !== "aborted") {
+					assistant = { ...assistant, stopReason: "aborted" };
 				}
 
 				if (!assistant) {

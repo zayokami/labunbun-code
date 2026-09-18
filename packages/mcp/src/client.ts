@@ -176,10 +176,18 @@ export async function connectMcpServer(
 				isConcurrencySafe: () => true,
 				call: async (input, ctx): Promise<ToolResult> => {
 					try {
-						const result = await client.callTool({
-							name: mcpTool.name,
-							arguments: input as Record<string, unknown>,
-						});
+						// Forward the run's cancel signal: without it an Esc leaves the
+						// request in flight until the server answers, blocking the parent's
+						// tool batch (and the "Running tools…" spinner) for as long as the
+						// server takes. The SDK turns the abort into a notifications/cancelled
+						// to the server as well as rejecting the pending request.
+						const result = await client.callTool(
+							{ name: mcpTool.name, arguments: input as Record<string, unknown> },
+							undefined,
+							{
+								signal: ctx.signal,
+							},
+						);
 						const content = Array.isArray(result.content)
 							? result.content.map((block) =>
 									(block as { type: string; text?: string }).type === "text"
@@ -189,6 +197,11 @@ export async function connectMcpServer(
 							: [{ type: "text" as const, text: JSON.stringify(result) }];
 						return { content, isError: Boolean(result.isError) };
 					} catch (error) {
+						// The SDK rejects the pending request when the signal aborts — that
+						// is the run being cancelled, not an MCP server failure.
+						if (ctx.signal.aborted) {
+							return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
+						}
 						const message = sanitizeMcpError(error instanceof Error ? error.message : String(error), config);
 						ctx.onUpdate({ mcpError: message });
 						return {

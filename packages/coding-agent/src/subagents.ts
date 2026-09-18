@@ -171,8 +171,19 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 				}
 			});
 
+			// A parent interrupt (Esc) must stop the nested session too. Without this
+			// the subagent keeps streaming after the user cancels, and the parent's
+			// tool batch — plus its "Running tools…" spinner — stays blocked until the
+			// subagent finishes on its own, which reads as Esc doing nothing.
+			const onAbort = () => subSession.abort();
+			toolCtx.signal.addEventListener("abort", onAbort, { once: true });
+
 			try {
-				const reason = await subSession.prompt(input.prompt);
+				const promptPromise = subSession.prompt(input.prompt);
+				// The cancel can land before prompt() created its controller, where
+				// abort() is a no-op on a null controller; re-check now that one exists.
+				if (toolCtx.signal.aborted) subSession.abort();
+				const reason = await promptPromise;
 				const finalAssistant = [...subSession.messages].reverse().find((m) => m.role === "assistant");
 				const finalText =
 					finalAssistant && finalAssistant.role === "assistant"
@@ -189,12 +200,23 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 					messages: subSession.messages.length,
 				});
 
+				// Interrupted subagents report the interruption, not a summary that
+				// happens to trail off mid-thought.
+				if (toolCtx.signal.aborted) {
+					return {
+						content: [textContent("Tool execution aborted")],
+						isError: true,
+						details: { sidechainId, agentType: definition.agentType, reason },
+					};
+				}
+
 				const summary = reason === "completed" ? finalText : `${finalText}\n\n[subagent ended: ${reason}]`;
 				return {
 					content: [textContent(summary)],
 					details: { sidechainId, agentType: definition.agentType, reason },
 				};
 			} finally {
+				toolCtx.signal.removeEventListener("abort", onAbort);
 				unsubscribe();
 			}
 		},

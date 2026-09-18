@@ -1,5 +1,6 @@
 /**
- * Minimal MCP stdio fixture server for tests: exposes one `echo` tool.
+ * Minimal MCP stdio fixture server for tests: exposes `echo` and a deliberately
+ * slow `sleep` tool (the slow one is what cancellation tests abort against).
  * Run directly — it speaks JSON-RPC over stdio via the MCP SDK.
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -19,6 +20,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 				required: ["text"],
 			},
 		},
+		{
+			name: "sleep",
+			description: "Waits the requested number of milliseconds before answering",
+			inputSchema: {
+				type: "object",
+				properties: { ms: { type: "number" } },
+				required: ["ms"],
+			},
+		},
 	],
 }));
 
@@ -26,6 +36,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 	if (request.params.name === "echo") {
 		const text = String((request.params.arguments as { text?: string })?.text ?? "");
 		return { content: [{ type: "text", text: `echo: ${text}` }] };
+	}
+	if (request.params.name === "sleep") {
+		const ms = Number((request.params.arguments as { ms?: number })?.ms ?? 0);
+		await new Promise((resolve) => setTimeout(resolve, ms));
+		return { content: [{ type: "text", text: `slept ${ms}ms` }] };
 	}
 	return { content: [{ type: "text", text: `unknown tool ${request.params.name}` }], isError: true };
 });
