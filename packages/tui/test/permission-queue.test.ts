@@ -12,13 +12,15 @@ import { describe, expect, test } from "bun:test";
 import { createPermissionQueue } from "../src/permission-queue.ts";
 import type { PermissionDialogState } from "../src/ui-state.ts";
 
-function harness() {
+function harness(cwd?: string) {
 	const shown: Array<PermissionDialogState | null> = [];
-	const alwaysAllowed: string[] = [];
+	const alwaysAllowed: Array<[string, unknown]> = [];
 	const queue = createPermissionQueue({
 		show: (dialog) => shown.push(dialog),
 		preview: (toolName, input) => `${toolName}: ${JSON.stringify(input)}`,
-		onAlwaysAllow: (toolName) => alwaysAllowed.push(toolName),
+		fullPreview: (toolName, input) => `${toolName} full:\n${JSON.stringify(input, null, 2)}`,
+		cwd,
+		onAlwaysAllow: (toolName, input) => alwaysAllowed.push([toolName, input]),
 	});
 	return {
 		queue,
@@ -108,7 +110,7 @@ describe("permission queue", () => {
 
 		expect(await first).toBe(true);
 		expect(await sameTool).toBe(true);
-		expect(alwaysAllowed).toEqual(["Write"]);
+		expect(alwaysAllowed).toEqual([["Write", { file_path: "a" }]]);
 		// The grant is per tool: the queued Bash request still asks.
 		expect(current()?.toolName).toBe("Bash");
 		expect(current()?.queueLength).toBe(1);
@@ -144,5 +146,79 @@ describe("permission queue", () => {
 		staleDialog?.resolve(true, false);
 		expect(await stale).toBe(false);
 		expect(current()).toBeNull();
+	});
+});
+
+/**
+ * What "don't ask again" is allowed to cover.
+ *
+ * Answering every queued request with the same tool name was correct only while
+ * the grant *was* the whole tool. A grant can now be scoped to the command the
+ * user was looking at, and matching by name would then silently approve the
+ * `rm -rf` queued behind that `git status` — the same tool, a different rule.
+ */
+describe("scoped always-allow", () => {
+	const CWD = "C:\\work\\proj";
+
+	test("covers the queued calls the rule matches, and only those", async () => {
+		const { queue, current, alwaysAllowed } = harness(CWD);
+		const asked = queue.request("Bash", { command: "git status" });
+		const covered = queue.request("Bash", { command: "git log --oneline" });
+		const notCovered = queue.request("Bash", { command: "rm -rf /" });
+
+		expect(current()?.options?.[1].label).toContain("commands starting with `git `");
+		current()?.resolve(true, true);
+
+		expect(await asked).toBe(true);
+		expect(await covered).toBe(true); // `git *` is the rule, and this is a git command
+		expect(alwaysAllowed).toEqual([["Bash", { command: "git status" }]]);
+		// Still asking: the grant was for git, and this is not git.
+		expect(current()?.toolName).toBe("Bash");
+		expect(current()?.inputPreview).toContain("rm -rf /");
+		expect(current()?.queueLength).toBe(1);
+
+		current()?.resolve(false, false);
+		expect(await notCovered).toBe(false);
+	});
+
+	test("without a workspace root a scoped grant covers nothing queued", async () => {
+		// The rule's reach cannot be established here, and assuming is how the
+		// `rm -rf` gets through.
+		const { queue, current } = harness();
+		const asked = queue.request("Bash", { command: "git status" });
+		const queued = queue.request("Bash", { command: "git log" });
+
+		current()?.resolve(true, true);
+
+		expect(await asked).toBe(true);
+		expect(current()?.inputPreview).toContain("git log");
+		current()?.resolve(false, false);
+		expect(await queued).toBe(false);
+	});
+
+	test("an unscopable tool still covers its own queued calls", async () => {
+		// WebFetch has no specifier grammar, so the grant is the bare tool and
+		// re-asking would read as the answer having been ignored.
+		const { queue, current } = harness(CWD);
+		const first = queue.request("WebFetch", { url: "https://example.com" });
+		const second = queue.request("WebFetch", { url: "https://example.org" });
+
+		current()?.resolve(true, true);
+
+		expect(await first).toBe(true);
+		expect(await second).toBe(true);
+		expect(current()).toBeNull();
+	});
+
+	test("the dialog carries the full input for the Ctrl+A view", async () => {
+		const { queue, current } = harness(CWD);
+		const answer = queue.request("Bash", { command: "npm test" });
+
+		expect(current()?.inputFull).toContain('"command": "npm test"');
+		// The one-line preview is still what the dialog opens with.
+		expect(current()?.inputPreview).toBe('Bash: {"command":"npm test"}');
+
+		current()?.resolve(false, false);
+		await answer;
 	});
 });

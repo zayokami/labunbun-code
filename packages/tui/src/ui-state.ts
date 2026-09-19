@@ -4,6 +4,7 @@
  */
 import type { AgentEvent } from "@labunbun/agent";
 import type { ListPickerState } from "./components/ListPickerDialog.tsx";
+import type { PermissionOption } from "./permission-options.ts";
 import { DEFAULT_THEME } from "./themes/index.ts";
 import type { Theme } from "./themes/tokens.ts";
 
@@ -24,7 +25,6 @@ export type UiEntry =
 export interface PendingTool {
 	callId: string;
 	toolName: string;
-	partial?: unknown;
 }
 
 export type StatusPhase = "idle" | "thinking" | "responding" | "tools";
@@ -41,6 +41,13 @@ export interface UiState {
 	streamingText: string;
 	thinkingText: string;
 	pendingTools: PendingTool[];
+	/**
+	 * Output streamed by a tool that is still running, by callId. Separate from
+	 * `pendingTools` because it changes on a different cadence — a command can
+	 * print thousands of lines while the list of running tools stays put — and
+	 * dropped as soon as the tool's result lands, since the result supersedes it.
+	 */
+	liveOutputs: Record<string, string>;
 	statusPhase: StatusPhase;
 	dialog: PermissionDialogState | null;
 	question: QuestionDialogState | null;
@@ -55,12 +62,30 @@ export interface UiState {
 	theme: Theme;
 	/** Display name of the active model. In the store so /model switching updates the status line live. */
 	modelName: string;
+	/**
+	 * Modal vim editing in the prompt. In the store rather than a prop because
+	 * `/vim` turns it on and off while the app is running — and because `/help`
+	 * and the key-list overlay have to describe the editor that is actually up.
+	 */
+	vim: boolean;
 }
 
 export interface PermissionDialogState {
 	callId: string;
 	toolName: string;
 	inputPreview: string;
+	/**
+	 * The same input in full, several lines, for the Ctrl+A view. The one-line
+	 * preview is short on purpose; this is what makes the dialog answerable when
+	 * a command is long enough that its tail is where the danger is.
+	 */
+	inputFull?: string;
+	/**
+	 * The answers to offer, named for what each one grants (permission-options).
+	 * Absent when the host had no input to scope a rule to, in which case the
+	 * dialog falls back to the widest truthful wording — the bare tool.
+	 */
+	options?: PermissionOption[];
 	/**
 	 * Requests still waiting behind this one, including it. Requests arrive
 	 * concurrently (a turn runs several tools at once) and are answered in
@@ -91,18 +116,20 @@ export interface QuestionDialogState {
  */
 export const RESULT_TEXT_CAP = 16_000;
 
-export function initialUiState(): UiState {
+export function initialUiState(vim = false): UiState {
 	return {
 		entries: [],
 		streamingText: "",
 		thinkingText: "",
 		pendingTools: [],
+		liveOutputs: {},
 		statusPhase: "idle",
 		dialog: null,
 		question: null,
 		picker: null,
 		theme: DEFAULT_THEME,
 		modelName: "",
+		vim,
 	};
 }
 
@@ -112,6 +139,20 @@ function previewInput(input: unknown): string {
 	return text.length > 120 ? `${text.slice(0, 117)}...` : text;
 }
 
+/**
+ * The text a tool streamed, whatever shape it wrapped it in.
+ *
+ * `partial` is `unknown` by design — every tool decides what progress looks like
+ * — so the only thing worth rendering here is text, and a tool whose update is a
+ * percentage or a count simply has nothing for the output window.
+ */
+function streamedText(partial: unknown): string | undefined {
+	if (typeof partial === "string") return partial;
+	if (typeof partial !== "object" || partial === null) return undefined;
+	const value = (partial as Record<string, unknown>).partialOutput;
+	return typeof value === "string" ? value : undefined;
+}
+
 /** Extract the primary preview for common tools (command, path, pattern). */
 export function toolPreview(_toolName: string, input: unknown): string {
 	if (typeof input !== "object" || input === null) return previewInput(input);
@@ -119,6 +160,27 @@ export function toolPreview(_toolName: string, input: unknown): string {
 	const key = ["command", "file_path", "pattern", "path"].find((k) => k in record);
 	if (key) return String(record[key]);
 	return previewInput(input);
+}
+
+/**
+ * How much of an input the Ctrl+A view shows. Generous — a command long enough
+ * to be truncated here is a command nobody can read at a glance anyway — but
+ * bounded, because this string is held in React state and rendered every frame.
+ */
+export const INPUT_FULL_MAX = 4000;
+
+/**
+ * The whole tool input for the Ctrl+A view, key by key, instead of the one-line
+ * preview that trims it to 120 characters.
+ *
+ * The preview answers "roughly what is this"; this answers "yes, and what was
+ * on the end of it", which is the question that matters when the payload is a
+ * long command or a diff.
+ */
+export function toolFullView(_toolName: string, input: unknown): string {
+	const text = typeof input === "string" ? input : (JSON.stringify(input, null, 2) ?? "");
+	if (text.length <= INPUT_FULL_MAX) return text;
+	return `${text.slice(0, INPUT_FULL_MAX)}\n… (${text.length - INPUT_FULL_MAX} more characters)`;
 }
 
 export function reduceEvent(state: UiState, event: AgentEvent): UiState {
@@ -180,10 +242,9 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 			};
 
 		case "tool_execution_update": {
-			const pendingTools = state.pendingTools.map((p) =>
-				p.callId === event.callId ? { ...p, partial: event.partial } : p,
-			);
-			return { ...state, pendingTools };
+			const text = streamedText(event.partial);
+			if (text === undefined) return state;
+			return { ...state, liveOutputs: { ...state.liveOutputs, [event.callId]: text } };
 		}
 
 		case "tool_execution_end": {
@@ -193,8 +254,13 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				.map((b) => b.text)
 				.join("\n")
 				.slice(0, RESULT_TEXT_CAP);
+			// The result supersedes the stream: keeping both would hold every
+			// command's output in memory for the life of the session.
+			const liveOutputs = { ...state.liveOutputs };
+			delete liveOutputs[event.callId];
 			return {
 				...state,
+				liveOutputs,
 				pendingTools: state.pendingTools.filter((p) => p.callId !== event.callId),
 				entries: state.entries.map((entry) =>
 					entry.kind === "toolUse" && entry.callId === event.callId
@@ -219,6 +285,8 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				entries,
 				streamingText: "",
 				thinkingText: "",
+				pendingTools: [],
+				liveOutputs: {},
 				statusPhase: "idle",
 			};
 		}

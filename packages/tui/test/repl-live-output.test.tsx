@@ -1,0 +1,65 @@
+/**
+ * The live command preview, end to end through a mounted REPL.
+ *
+ * Each piece has its own test already — the reducer records the stream, the
+ * shaping lives in live-output.ts, the drawing in MessageList. What none of
+ * those can see is the wiring between them: a REPL that never selected
+ * `liveOutputs` off the store renders exactly as it did before the feature
+ * existed, with every unit test still green.
+ *
+ * No provider is involved. The events are the real ones the session emits, fed
+ * straight into the store, so this stays a rendering test rather than a second
+ * copy of the loop tests.
+ */
+import { describe, expect, test } from "bun:test";
+import type { AgentEvent, AgentSession } from "@labunbun/agent";
+import { render } from "ink-testing-library";
+import { REPL } from "../src/components/REPL.tsx";
+import { createStore } from "../src/store.ts";
+import { initialUiState, reduceEvent, type UiState } from "../src/ui-state.ts";
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The REPL only reaches for the session on submit or Esc; neither happens here. */
+const idleSession = { isRunning: false, abort: () => {} } as unknown as AgentSession;
+
+describe("live tool output in the REPL", () => {
+	test("streamed output reaches the screen, then gives way to the result", async () => {
+		const store = createStore<UiState>({ ...initialUiState(), statusPhase: "tools" });
+		const view = render(<REPL getSession={() => idleSession} store={store} modelName="test" onExit={() => {}} />);
+		const send = (event: AgentEvent) => store.set((s) => reduceEvent(s, event));
+
+		send({ type: "tool_execution_start", callId: "c1", toolName: "Bash", input: { command: "bun run build" } });
+		send({
+			type: "tool_execution_update",
+			callId: "c1",
+			toolName: "Bash",
+			partial: { partialOutput: "bundling\nchunk 1 done\n" },
+		});
+		await delay(30);
+		const running = view.lastFrame() ?? "";
+		expect(running).toContain("bun run build");
+		expect(running).toContain("chunk 1 done");
+		// The status row says what is running, not just that something is.
+		expect(running).toContain("└ Bash");
+
+		send({
+			type: "tool_execution_end",
+			callId: "c1",
+			toolName: "Bash",
+			result: {
+				role: "toolResult",
+				toolCallId: "c1",
+				toolName: "Bash",
+				content: [{ type: "text", text: "build finished" }],
+				isError: false,
+				timestamp: 0,
+			},
+		});
+		await delay(30);
+		const finished = view.lastFrame() ?? "";
+		expect(finished).toContain("build finished");
+		expect(finished).not.toContain("chunk 1 done");
+		view.unmount();
+	});
+});

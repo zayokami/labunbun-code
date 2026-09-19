@@ -37,7 +37,12 @@ export function createAskUserQuestionTool(bridge: AskUserBridge): AnyTool {
 						question: z.string().describe("The complete question, ending with a question mark"),
 						header: z.string().max(12).describe("Very short label shown as a chip"),
 						options: z.array(optionSchema).min(2).max(4).describe("Mutually exclusive choices"),
-						multiSelect: z.boolean().optional(),
+						multiSelect: z
+							.boolean()
+							.optional()
+							.describe(
+								'True when more than one option may be chosen; the answer comes back as the chosen labels joined with ", "',
+							),
 					}),
 				)
 				.min(1)

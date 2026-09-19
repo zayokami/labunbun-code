@@ -1,6 +1,9 @@
 import type { AgentEvent, AgentSession } from "@labunbun/agent";
 import { Box, Text, useInput } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTurnTimer } from "../hooks/useTurnTimer.ts";
+import { type LastNotification, type NotifyKind, notificationSequence, shouldNotify } from "../notify.ts";
+import { shortcutGroups } from "../shortcuts.ts";
 import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
 import { initialUiState, reduceEvent, type UiState } from "../ui-state.ts";
@@ -9,7 +12,8 @@ import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList
 import { PermissionDialog } from "./PermissionDialog.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { QuestionDialog } from "./QuestionDialog.tsx";
-import { estimateOutputTokens, StatusLine } from "./StatusLine.tsx";
+import { ShortcutOverlay } from "./ShortcutOverlay.tsx";
+import { estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
 import { TerminalTitle } from "./TerminalTitle.tsx";
 
@@ -56,8 +60,6 @@ export interface ReplProps {
 	commandSuggestions?: Array<[string, string]>;
 	/** Candidate file paths for @-mention completion in the prompt. */
 	completeFiles?: (query: string) => Promise<string[]>;
-	/** Modal vim editing in the prompt. */
-	vimMode?: boolean;
 	/** Context-window usage for the status line. */
 	contextInfo?: { usedTokens: number; threshold: number };
 	/** Prompts from earlier sessions, oldest first, for ↑ recall. */
@@ -78,9 +80,6 @@ const VIM_KEYS_HELP = `  vim: i a insert · Esc leave insert · v/V Esc cancel s
 
 /** Clear screen, clear scrollback, home cursor — the full terminal wipe. */
 export const CLEAR_SCREEN = "\x1b[2J\x1b[3J\x1b[H";
-
-/** Terminal bell — rings when a run finishes and attention is needed. */
-export const BEL = "\x07";
 
 /** Double-press window for the idle Ctrl+C exit confirmation. */
 export const CTRL_C_EXIT_WINDOW_MS = 2000;
@@ -128,7 +127,6 @@ export function REPL({
 	onMemoryShortcut,
 	commandSuggestions,
 	completeFiles,
-	vimMode,
 	history,
 	dirName = "",
 }: ReplProps) {
@@ -141,8 +139,20 @@ export function REPL({
 	const picker = useStore(store, (s) => s.picker);
 	const contextInfo = useStore(store, (s) => s.contextInfo);
 	const tasks = useStore(store, (s) => s.tasks);
+	const liveOutputs = useStore(store, (s) => s.liveOutputs);
+	const pendingTools = useStore(store, (s) => s.pendingTools);
+	// From the store, not a prop: `/vim` flips it while the app is running, and
+	// the editor, `/help` and the key-list overlay all have to agree.
+	const vim = useStore(store, (s) => s.vim);
 	const modelName = useStore(store, (s) => s.modelName) || modelNameProp;
-	const [elapsedMs, setElapsedMs] = useState(0);
+	// A dialog is the user deciding, not the model working. The clock stops while
+	// one is open, so a turn that spent two minutes waiting on an approval does
+	// not go on to report those two minutes as its own work.
+	// All three overlays mean the same thing: the run is stopped until the user
+	// answers. The clock, the title and the notification all read it from here so
+	// a new overlay cannot be added to one and forgotten in another.
+	const awaitingUser = dialog !== null || question !== null || picker !== null;
+	const elapsedMs = useTurnTimer({ busy: statusPhase !== "idle", frozen: awaitingUser });
 	// Idle Ctrl+C confirmation state: the timestamp of the first press and the
 	// hint line shown until the window lapses.
 	const lastCtrlCAtRef = useRef(0);
@@ -158,34 +168,46 @@ export function REPL({
 		[],
 	);
 
-	// Elapsed timer while busy.
-	useEffect(() => {
-		if (statusPhase === "idle") return;
-		const startedAt = Date.now();
-		setElapsedMs(0);
-		const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 500);
-		return () => clearInterval(timer);
-	}, [statusPhase]);
-
-	// Completion bell: a run ending is the moment attention matters, and the
-	// user may be in another window. Only on a real busy → idle transition.
+	// Desktop notifications, on the two edges where the user is likely to be
+	// looking at another window: a run ending, and a dialog opening. Coalescing
+	// keeps a completion from burying the approval request that preceded it.
 	const wasBusyRef = useRef(false);
+	const wasBlockedRef = useRef(false);
+	const lastNotifyRef = useRef<LastNotification | null>(null);
 	useEffect(() => {
+		const notify = (kind: NotifyKind, message: string): void => {
+			// Ink 7 reports nothing about terminal focus — no `Key` field, no hook,
+			// no kitty flag — so there is no way to tell whether anyone is looking.
+			// Guessing would either ring during focused work or stay silent while
+			// the user waits; notifying and coalescing is the honest default.
+			if (!process.stdout.isTTY) return;
+			const now = Date.now();
+			if (!shouldNotify(kind, lastNotifyRef.current, now)) return;
+			lastNotifyRef.current = { kind, at: now };
+			const sequence = notificationSequence(message);
+			if (sequence) process.stdout.write(sequence);
+		};
+
 		const busy = statusPhase !== "idle";
 		if (busy) {
 			wasBusyRef.current = true;
 		} else if (wasBusyRef.current) {
 			wasBusyRef.current = false;
-			if (process.stdout.isTTY) process.stdout.write(BEL);
+			notify("complete", "labunbun: turn complete");
 		}
-	}, [statusPhase]);
+
+		// Only the opening edge: a second dialog replacing the first is the same
+		// interruption, and the terminal already rang for it.
+		if (dialog !== null && !wasBlockedRef.current) notify("action", `labunbun: approval needed for ${dialog.toolName}`);
+		wasBlockedRef.current = dialog !== null;
+	}, [statusPhase, dialog]);
 
 	const handleSubmit = useCallback(
 		(text: string) => {
 			const trimmed = text.trim();
 			if (trimmed.startsWith("/")) {
 				if (onCommand?.(trimmed)) return;
-				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions, vim: vimMode === true });
+				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions, vim });
 				return;
 			}
 			if (trimmed.startsWith("#")) {
@@ -226,14 +248,22 @@ export function REPL({
 				void session.prompt(text);
 			})();
 		},
-		[getSession, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions, vimMode],
+		[getSession, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions, vim],
 	);
 
+	const [shortcutsOpen, setShortcutsOpen] = useState(false);
 	const [transcriptMode, setTranscriptMode] = useState(false);
 	const [transcriptOffset, setTranscriptOffset] = useState(0);
 	const TRANSCRIPT_PAGE = 10;
 
 	useInput((input, key) => {
+		// The key list is dismissed by either key, and while it is up the prompt is
+		// disabled — so this branch owns `?` for as long as it is open, and the
+		// overlay cannot be closed onto a running turn by the Esc beneath it.
+		if (shortcutsOpen && (key.escape || input === "?")) {
+			setShortcutsOpen(false);
+			return;
+		}
 		if (key.ctrl && input === "o") {
 			setTranscriptMode((v) => !v);
 			setTranscriptOffset(0);
@@ -312,11 +342,11 @@ export function REPL({
 
 	return (
 		<Box flexDirection="column">
-			<TerminalTitle phase={statusPhase} dirName={dirName} />
-			<VirtualMessageList entries={entries} />
+			<TerminalTitle phase={statusPhase} dirName={dirName} actionRequired={awaitingUser} />
+			<VirtualMessageList entries={entries} liveOutputs={liveOutputs} />
 			<StreamingPreview text={streamingText} thinking={thinkingText} />
 			{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
-			<Box marginBottom={1}>
+			<Box marginBottom={1} flexDirection="column">
 				<StatusLine
 					phase={statusPhase}
 					modelName={modelName}
@@ -324,24 +354,36 @@ export function REPL({
 					contextInfo={contextInfo}
 					outputEstimate={estimateOutputTokens(streamingText.length)}
 				/>
+				{/* "Running tools…" for twenty seconds says nothing about what is
+				    running; the row underneath is what makes the wait legible. */}
+				{pendingTools.length > 0 && (
+					<Text dimColor>
+						{"  └ "}
+						{toolSummary(pendingTools)}
+					</Text>
+				)}
 			</Box>
 			{dialog ? (
 				<PermissionDialog
 					toolName={dialog.toolName}
 					inputPreview={dialog.inputPreview}
+					inputFull={dialog.inputFull}
+					options={dialog.options}
 					queueLength={dialog.queueLength}
 					onResolve={(allow, alwaysAllow) => dialog.resolve(allow, alwaysAllow)}
 				/>
 			) : null}
 			{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} /> : null}
 			{picker ? <ListPickerDialog title={picker.title} items={picker.items} resolve={picker.resolve} /> : null}
+			{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ vim, commands: commandSuggestions })} />}
 			{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
 			<PromptInput
 				onSubmit={handleSubmit}
-				disabled={dialog !== null || question !== null || picker !== null}
+				disabled={dialog !== null || question !== null || picker !== null || shortcutsOpen}
+				onToggleHelp={() => setShortcutsOpen(true)}
 				commandSuggestions={commandSuggestions}
 				completeFiles={completeFiles}
-				vim={vimMode}
+				vim={vim}
 				history={history}
 				escapeRef={escapeRef}
 			/>

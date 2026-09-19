@@ -9,7 +9,7 @@ import { connectSessionToStore, type PromptSubmitResult, type PromptSubmitVerdic
 import { createPermissionQueue } from "./permission-queue.ts";
 import { createStore, type Store, useStore } from "./store.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
-import { initialUiState, toolPreview, type UiState } from "./ui-state.ts";
+import { initialUiState, toolFullView, toolPreview, type UiState } from "./ui-state.ts";
 
 export interface ReplAppOptions {
 	session: AgentSession;
@@ -38,8 +38,14 @@ export interface ReplAppOptions {
 	dirName?: string;
 	/** Prompts from earlier sessions, oldest first, for ↑ recall in the prompt. */
 	history?: string[];
-	/** Called with "allow" decisions so the app can persist don't-ask-again rules. */
-	onAlwaysAllow?: (toolName: string) => void;
+	/** Workspace root — what a "don't ask again" rule for a file tool is scoped to. */
+	cwd?: string;
+	/**
+	 * Called with "allow" decisions so the app can record don't-ask-again rules.
+	 * The input comes along because the scope of the rule is derived from what
+	 * the user was looking at when they answered.
+	 */
+	onAlwaysAllow?: (toolName: string, input: unknown) => void;
 }
 
 export interface ReplAppHandle {
@@ -72,6 +78,8 @@ export interface ReplAppHandle {
 	): void;
 	/** Swap the active theme; takes effect on the next render. */
 	setTheme(theme: Theme): void;
+	/** Turn modal vim editing in the prompt on or off (`/vim`). */
+	setVimMode(on: boolean): void;
 	/**
 	 * Hot-swap the running REPL onto a different AgentSession (in-app /resume):
 	 * rebinds event subscription, clears transient transcript state, and keeps
@@ -98,7 +106,7 @@ function ThemedTree({ store, children }: { store: Store<UiState>; children: Reac
  */
 export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	const store = createStore<UiState>({
-		...initialUiState(),
+		...initialUiState(options.vimMode ?? false),
 		theme: options.theme ?? DEFAULT_THEME,
 		modelName: options.modelName,
 	});
@@ -122,7 +130,6 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				store={store}
 				modelName={options.modelName}
 				onExit={() => instance.unmount()}
-				vimMode={options.vimMode}
 				onCommand={options.onCommand}
 				onSubmitText={options.onSubmitText}
 				onMemoryShortcut={options.onMemoryShortcut}
@@ -138,6 +145,8 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	const permissionQueue = createPermissionQueue({
 		show: (dialog) => store.set((state) => ({ ...state, dialog })),
 		preview: toolPreview,
+		fullPreview: toolFullView,
+		cwd: options.cwd,
 		onAlwaysAllow: options.onAlwaysAllow,
 	});
 
@@ -150,6 +159,9 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		requestPermission: permissionQueue.request,
 		setContextInfo: (info) => {
 			store.set((s) => ({ ...s, contextInfo: info }));
+		},
+		setVimMode: (on) => {
+			store.set((s) => ({ ...s, vim: on }));
 		},
 		setTasks: (tasks) => {
 			store.set((s) => ({ ...s, tasks }));

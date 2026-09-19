@@ -10,6 +10,7 @@ import {
 	createGrepTool,
 	createLsTool,
 	createReadTool,
+	createTailBuffer,
 	createWriteTool,
 	defaultOperations,
 	type Operations,
@@ -238,6 +239,60 @@ describe("Bash tool", () => {
 			{ callId: "t", signal: ABORT, cwd: dir, onUpdate: (p: unknown) => updates.push(p) },
 		);
 		expect(updates.length).toBeGreaterThan(0);
+	});
+
+	test("a chatty command does not become a chatty stream of updates", async () => {
+		const updates: Array<{ partialOutput?: string }> = [];
+		const fakeOps: Operations = {
+			...defaultOperations(),
+			exec: async (options) => {
+				// A build tool with unbuffered stdout: thousands of chunks, all in
+				// one synchronous burst. Before the throttle this was one store
+				// update per chunk, each one rejoining the whole output.
+				for (let i = 0; i < 2000; i++) options.onOutput?.(`line ${i}\n`);
+				return { stdout: "", stderr: "", exitCode: 0, killed: false };
+			},
+		};
+		const dir = tempDir();
+		const tool = toolByName("Bash", fakeOps);
+		await tool.call(
+			{ command: "x" },
+			{ callId: "t", signal: ABORT, cwd: dir, onUpdate: (p: unknown) => updates.push(p as { partialOutput?: string }) },
+		);
+		expect(updates.length).toBeLessThanOrEqual(3);
+		for (const update of updates) {
+			expect((update.partialOutput ?? "").length).toBeLessThanOrEqual(30_000);
+		}
+	});
+});
+
+describe("the tail buffer behind live Bash output", () => {
+	test("keeps the end of the stream, not the beginning", () => {
+		const buffer = createTailBuffer(10);
+		buffer.push("aaaaaaaaaa");
+		buffer.push("bbbbbbbbbb");
+		expect(buffer.read()).toBe("bbbbbbbbbb");
+	});
+
+	test("retained chunks stay near the cap however long the command runs", () => {
+		const buffer = createTailBuffer(100);
+		for (let i = 0; i < 5000; i++) buffer.push("0123456789");
+		const text = buffer.read();
+		expect(text).toHaveLength(100);
+		expect(text).toBe("0123456789".repeat(10));
+	});
+
+	test("a single oversized chunk is trimmed at read time", () => {
+		const buffer = createTailBuffer(5);
+		buffer.push("abcdefghij");
+		expect(buffer.read()).toBe("fghij");
+	});
+
+	test("empty chunks are ignored rather than banked", () => {
+		const buffer = createTailBuffer(4);
+		buffer.push("");
+		buffer.push("ab");
+		expect(buffer.read()).toBe("ab");
 	});
 });
 

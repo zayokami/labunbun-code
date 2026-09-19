@@ -37,6 +37,8 @@ export interface TextInputActions {
 	setText(text: string): void;
 	/** Replace the whole buffer and place the cursor exactly — completions use this. */
 	setBuffer(text: string, cursor: number): void;
+	/** Put a recalled entry in the buffer, caret at the end — history search uses this. */
+	recall(text: string): void;
 	undo(): void;
 	redo(): void;
 }
@@ -229,6 +231,10 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 			lastActionWasKillRef.current = false;
 			commitWithUndo(() => ({ text, cursor }));
 		},
+		recall: (text) => {
+			lastActionWasKillRef.current = false;
+			commitWithUndo(() => ({ text, cursor: text.length }));
+		},
 		undo: () => {
 			lastActionWasKillRef.current = false;
 			const prev = undoStackRef.current.pop();
@@ -257,6 +263,12 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 	// -- vim engine -----------------------------------------------------------
 
 	const engineRef = useRef<VimEngine | null>(null);
+	// Turning vim off has to drop the engine, not just stop creating one. It was
+	// only ever constructed — never discarded — so the hook kept handing keys to
+	// an engine that was no longer vim mode's to consume, and `r` went on redoing
+	// instead of typing. Re-enabling builds a fresh engine, which starts in
+	// normal mode, as it should.
+	if (!vim) engineRef.current = null;
 	if (vim && engineRef.current === null) {
 		engineRef.current = new VimEngine({
 			getText: () => stateRef.current.text,
@@ -302,12 +314,20 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 	const vimMode: VimMode = engineRef.current ? engineRef.current.mode : "insert";
 	const selection = engineRef.current?.selection ?? null;
 
+	/**
+	 * The live history, newest last — the same array ↑ recall walks, not just the
+	 * seed it started from. A copy, because a search that mutated what it was
+	 * reading would be a fine way to lose a prompt.
+	 */
+	const getHistory = useCallback(() => [...historyRef.current], []);
+
 	return {
 		state,
 		actions,
 		historyUp,
 		historyDown,
 		pushHistory,
+		getHistory,
 		vimMode,
 		handleVimKey,
 		selection,

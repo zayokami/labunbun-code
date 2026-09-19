@@ -22,6 +22,7 @@ export {
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
 export { type Block, type InlineSpan, parseBlocks, parseInline } from "./markdown.ts";
 export { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "./paste.ts";
+export { alwaysAllowLabel, type PermissionOption, permissionOptions, ruleSpecifierFor } from "./permission-options.ts";
 export { applyFileCompletion, currentAtWord, filterFiles } from "./prompt-files.ts";
 export { createStore, type Store, useStore } from "./store.ts";
 export {
@@ -51,12 +52,14 @@ export {
 	useTheme,
 } from "./theme.ts";
 export {
+	INPUT_FULL_MAX,
 	initialUiState,
 	type PendingTool,
 	type PermissionDialogState,
 	RESULT_TEXT_CAP,
 	reduceEvent,
 	type StatusPhase,
+	toolFullView,
 	toolPreview,
 	type UiEntry,
 	type UiState,

@@ -1,9 +1,14 @@
 import { Text } from "ink";
 import { useEffect, useState } from "react";
+import { formatElapsed } from "../elapsed.ts";
 import { useTheme } from "../theme.ts";
-import type { StatusPhase } from "../ui-state.ts";
+import type { PendingTool, StatusPhase } from "../ui-state.ts";
 
-const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/** Braille spinner, shared with the terminal title so both turn at one rate. */
+export const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/** Milliseconds between spinner frames. */
+export const SPINNER_INTERVAL_MS = 80;
 
 const PHASE_LABEL: Record<StatusPhase, string> = {
 	idle: "",
@@ -15,6 +20,19 @@ const PHASE_LABEL: Record<StatusPhase, string> = {
 /** Rough live output size in tokens — chars/4, the usual English heuristic. */
 export function estimateOutputTokens(chars: number): number {
 	return Math.ceil(chars / 4);
+}
+
+/**
+ * What is running, for the detail row under the spinner.
+ *
+ * Repeats are counted rather than listed: three parallel Bash calls reading
+ * "Bash · Bash · Bash" is the same word three times over, and the reader has to
+ * count it to learn what "Bash ×3" says outright.
+ */
+export function toolSummary(tools: PendingTool[]): string {
+	const counts = new Map<string, number>();
+	for (const tool of tools) counts.set(tool.toolName, (counts.get(tool.toolName) ?? 0) + 1);
+	return [...counts].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(" · ");
 }
 
 export function StatusLine({
@@ -36,7 +54,7 @@ export function StatusLine({
 
 	useEffect(() => {
 		if (phase === "idle") return;
-		const timer = setInterval(() => setFrame((f) => (f + 1) % FRAMES.length), 80);
+		const timer = setInterval(() => setFrame((f) => (f + 1) % FRAMES.length), SPINNER_INTERVAL_MS);
 		return () => clearInterval(timer);
 	}, [phase]);
 
@@ -56,13 +74,12 @@ export function StatusLine({
 			</Text>
 		) : null;
 	}
-	const seconds = (elapsedMs / 1000).toFixed(0);
 	const outputPart = outputEstimate && outputEstimate > 0 ? ` · ~${formatTokens(outputEstimate)} out` : "";
 	return (
 		<Text color={theme.primary}>
 			{FRAMES[frame]} {PHASE_LABEL[phase]}{" "}
 			<Text dimColor>
-				({seconds}s · {modelName}
+				({formatElapsed(elapsedMs)} · {modelName}
 				{outputPart}
 				{contextPart} · esc to interrupt)
 			</Text>

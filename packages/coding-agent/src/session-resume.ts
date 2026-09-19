@@ -57,6 +57,18 @@ export function loadSessionForResume(path: string): { store: SessionStore; messa
 	return { store, messages: store.messages() };
 }
 
+/**
+ * The line printed after the TUI unmounts, telling the user how to come back to
+ * this session. Null when there is nothing to come back to — a run that saved no
+ * session, or one where no message was ever exchanged.
+ */
+export function exitSummaryLine(opts: { sessionId?: string; messageCount: number; cliName: string }): string | null {
+	if (!opts.sessionId || opts.messageCount === 0) return null;
+	// Eight characters is enough: resume matches by prefix, falling back to a
+	// substring search (see the session lookup in interactive.ts).
+	return `To resume: ${opts.cliName} --resume ${opts.sessionId.slice(0, 8)}`;
+}
+
 export function formatSessionList(sessions: SessionSummary[]): string {
 	if (sessions.length === 0) return "No saved sessions for this project.";
 	return sessions

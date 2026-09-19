@@ -34,7 +34,9 @@ function setup(options: { vim?: boolean; completeFiles?: (query: string) => Prom
 	};
 
 	const session = new AgentSession({ model: FAUX_MODEL, maxTurns: 4, deps: { streamFn } });
-	const store = createStore<UiState>({ ...initialUiState(), statusPhase: "responding" });
+	// vim is store state, not a prop: the REPL reads what `/vim` toggles, so the
+	// test seeds the store the same way mountRepl does.
+	const store = createStore<UiState>({ ...initialUiState(options.vim ?? false), statusPhase: "responding" });
 	const unsubscribe = connectSessionToStore(session, store);
 	const view = render(
 		<REPL
@@ -42,7 +44,6 @@ function setup(options: { vim?: boolean; completeFiles?: (query: string) => Prom
 			store={store}
 			modelName="test"
 			onExit={() => {}}
-			vimMode={options.vim}
 			completeFiles={options.completeFiles}
 		/>,
 	);
@@ -178,6 +179,204 @@ describe("Esc and the vim layer", () => {
 		await delay(60);
 		expect(h.session.isInterrupted).toBe(false);
 		expect(h.frame()).not.toContain("@src/index.ts");
+
+		h.release.resolve();
+		await delay(150);
+		h.unmount();
+	}, 20_000);
+});
+
+/**
+ * `?` and the key list behind it.
+ *
+ * Two presses of Escape that look identical to the terminal mean different
+ * things: the first closes the overlay, the second interrupts the run. Without
+ * the overlay getting first refusal on the key, opening the key list during a
+ * turn and dismissing it would kill the turn — the same class of bug as the
+ * dialog that used to lose its own answer to the interrupt.
+ */
+describe("the ? key list", () => {
+	test("Esc closes it without interrupting the turn behind it", async () => {
+		const h = setup();
+		await delay(40);
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+		expect(h.session.isRunning).toBe(true);
+
+		h.stdin.write("?");
+		await delay(40);
+		expect(h.frame()).toContain("Keyboard shortcuts");
+
+		h.stdin.write("\x1b");
+		await delay(40);
+		expect(h.frame()).not.toContain("Keyboard shortcuts");
+		expect(h.session.isInterrupted).toBe(false); // the turn is still there
+
+		// With the overlay gone, Escape means what it always did.
+		h.stdin.write("\x1b");
+		await delay(60);
+		expect(h.session.isInterrupted).toBe(true);
+
+		h.release.resolve();
+		await delay(150);
+		h.unmount();
+	}, 20_000);
+
+	test("? closes it again, and the key never reaches the buffer", async () => {
+		const h = setup();
+		await delay(40);
+		h.stdin.write("?");
+		await delay(40);
+		expect(h.frame()).toContain("Keyboard shortcuts");
+
+		h.stdin.write("?");
+		await delay(40);
+		expect(h.frame()).not.toContain("Keyboard shortcuts");
+		expect(h.frame()).not.toContain("?"); // not left in the prompt either
+		h.unmount();
+	}, 20_000);
+});
+
+/**
+ * Ctrl+R and the host's Escape.
+ *
+ * The search is closed with the same key that interrupts a run, and an Escape
+ * meant for the search must not reach the turn behind it — the editor gets the
+ * key first through the same ref the vim layer uses.
+ */
+describe("the history search and the host", () => {
+	test("Esc closes the search instead of interrupting the turn", async () => {
+		const h = setup();
+		await delay(40);
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+		expect(h.session.isRunning).toBe(true);
+
+		h.stdin.write("\x12");
+		await delay(40);
+		expect(h.frame()).toContain("reverse-i-search");
+
+		h.stdin.write("\x1b");
+		await delay(40);
+		expect(h.frame()).not.toContain("reverse-i-search");
+		expect(h.session.isInterrupted).toBe(false); // the turn is still there
+
+		// With the search gone, Escape means what it always did.
+		h.stdin.write("\x1b");
+		await delay(60);
+		expect(h.session.isInterrupted).toBe(true);
+
+		h.release.resolve();
+		await delay(150);
+		h.unmount();
+	}, 20_000);
+
+	test("a recalled prompt is submitted, not the search query", async () => {
+		const h = setup();
+		await delay(40);
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+		h.release.resolve();
+		await delay(150);
+
+		// The earlier prompt is in this session's history, so the search finds it.
+		h.stdin.write("\x12");
+		await delay(40);
+		h.stdin.write("slow");
+		await delay(40);
+		h.stdin.write("\r"); // recall it into the buffer
+		await delay(40);
+		expect(h.frame()).toContain("run something slow");
+		expect(h.frame()).not.toContain("reverse-i-search");
+
+		h.stdin.write("\r"); // and now send it
+		await delay(60);
+		const userMessages = h.session.messages.filter((m) => m.role === "user");
+		expect(userMessages.length).toBe(2);
+		h.unmount();
+	}, 20_000);
+});
+
+/**
+ * The key list has to describe the editor that is actually up. It used to be
+ * built from a startup prop, so `/vim` (or anything else that changed the mode
+ * mid-session) left `/help` and the `?` overlay describing an editor the user no
+ * longer had.
+ */
+describe("what the key list says about vim", () => {
+	test("/help follows the store, not the startup flag", async () => {
+		const h = setup();
+		await delay(40);
+		await submit(h.stdin, "/help");
+		await delay(60);
+		expect(h.frame()).not.toContain("vim: i a insert");
+
+		// Exactly what /vim does to the store.
+		h.store.set((s) => ({ ...s, vim: true }));
+		await delay(40);
+		h.stdin.write("i"); // the editor is in NORMAL now, where letters are commands
+		await delay(30);
+		await submit(h.stdin, "/help");
+		await delay(60);
+		expect(h.frame()).toContain("vim: i a insert");
+		h.unmount();
+	}, 20_000);
+
+	test("the ? overlay gains the vim group when the mode goes on", async () => {
+		const h = setup();
+		await delay(40);
+		h.stdin.write("?");
+		await delay(40);
+		expect(h.frame()).not.toContain("redo");
+
+		h.stdin.write("?"); // close
+		await delay(40);
+		h.store.set((s) => ({ ...s, vim: true }));
+		await delay(40);
+		h.stdin.write("i"); // NORMAL would take "?" for itself
+		await delay(30);
+		h.stdin.write("?");
+		await delay(40);
+		expect(h.frame()).toContain("redo");
+		h.unmount();
+	}, 20_000);
+});
+
+/** The parenthesised turn clock on the status row, e.g. "1m 05s". */
+function clockOf(frame: string): string | undefined {
+	return /\(([^)·]+?) ·/.exec(frame)?.[1];
+}
+
+/**
+ * The turn clock against a pause for input.
+ *
+ * A dialog means the model is not working — it is waiting on the person in front
+ * of the terminal. Charging that wait to the turn makes a run that asked for one
+ * approval look like it took two minutes to do nothing, which is exactly the
+ * number someone reads to decide whether the model is stuck.
+ */
+describe("the turn clock and dialogs", () => {
+	test("the clock stops while a dialog waits for an answer", async () => {
+		const h = setup();
+		await delay(40);
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+		await delay(1200);
+		expect(clockOf(h.frame())).toBeDefined();
+
+		h.store.set((state) => ({
+			...state,
+			dialog: { callId: "p1", toolName: "Write", inputPreview: "Allow Write?", resolve: () => {} },
+		}));
+		await delay(700);
+		const whileWaiting = clockOf(h.frame());
+
+		await delay(1200);
+		expect(clockOf(h.frame())).toBe(whileWaiting);
+
+		h.store.set((state) => ({ ...state, dialog: null }));
+		await delay(1600);
+		expect(clockOf(h.frame())).not.toBe(whileWaiting);
 
 		h.release.resolve();
 		await delay(150);

@@ -1,5 +1,6 @@
 import { Box, Static, Text } from "ink";
 import { type CodeToken, highlightCode } from "../highlight.ts";
+import { LIVE_OUTPUT_LINES, LIVE_PREVIEW_MAX, liveOutputLines, livePreviewTargets } from "../live-output.ts";
 import { type Block, type ColumnAlign, type InlineSpan, parseBlocks } from "../markdown.ts";
 import { type Theme, useTheme } from "../theme.ts";
 import type { UiEntry } from "../ui-state.ts";
@@ -209,14 +210,50 @@ function TableView({ block, theme }: { block: Extract<Block, { kind: "table" }>;
 	);
 }
 
-function ToolUseView({ entry, full }: { entry: Extract<UiEntry, { kind: "toolUse" }>; full?: boolean }) {
+function ToolUseView({
+	entry,
+	full,
+	liveText,
+}: {
+	entry: Extract<UiEntry, { kind: "toolUse" }>;
+	full?: boolean;
+	/** Output the tool has streamed so far, if the caller tracks it. */
+	liveText?: string;
+}) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1} flexDirection="column" borderStyle="round" borderColor={theme.toolBorder} paddingX={1}>
 			<Text>
 				<Text color={theme.toolName}>[{entry.toolName}]</Text> <Text color={theme.toolArgs}>{entry.inputPreview}</Text>
 			</Text>
-			{entry.resultText !== undefined && <ResultLines text={entry.resultText} isError={entry.isError} full={full} />}
+			{entry.resultText !== undefined ? (
+				<ResultLines text={entry.resultText} isError={entry.isError} full={full} />
+			) : liveText ? (
+				<LiveOutputLines text={liveText} />
+			) : null}
+		</Box>
+	);
+}
+
+/**
+ * The tail of a running command's output, inside the tool's own box.
+ *
+ * Bounded to a handful of lines on purpose: this sits above the prompt, and a
+ * command printing megabytes must not push the conversation off the screen. The
+ * full output is still there when it finishes — the result replaces this.
+ */
+function LiveOutputLines({ text }: { text: string }) {
+	const theme = useTheme();
+	const lines = liveOutputLines(stripAnsi(text), LIVE_OUTPUT_LINES);
+	if (lines.length === 0) return null;
+	return (
+		<Box flexDirection="column" marginTop={1}>
+			{lines.map((line, i) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: the window is a sliding tail of immutable lines with no per-line state
+				<Text key={i} color={theme.textMuted} dimColor>
+					{line}
+				</Text>
+			))}
 		</Box>
 	);
 }
@@ -260,12 +297,45 @@ function ResultLines({ text, isError, full }: { text: string; isError?: boolean;
 	);
 }
 
-export function MessageList({ entries, full }: { entries: UiEntry[]; full?: boolean }) {
+/**
+ * Which entries get a preview of their running tool's output, keyed by entry.
+ *
+ * Resolved once per list rather than per entry: the cap is a property of the
+ * whole screen, so deciding it inside each row would let every row think it was
+ * one of the chosen few. Concurrent tools each stream their own output, and
+ * without the cap a batch of ten would push the prompt off the bottom.
+ */
+function previewTexts(entries: UiEntry[], liveOutputs?: Record<string, string>): Record<string, string> {
+	if (!liveOutputs) return {};
+	const pending = entries.flatMap((e) =>
+		e.kind === "toolUse" && e.resultText === undefined ? [{ callId: e.callId, toolName: e.toolName }] : [],
+	);
+	const texts: Record<string, string> = {};
+	for (const target of livePreviewTargets(pending, liveOutputs, LIVE_PREVIEW_MAX)) texts[target.callId] = target.text;
+	return texts;
+}
+
+/** The preview belonging to one entry — only tools have one. */
+function liveTextOf(entry: UiEntry, previews: Record<string, string>): string | undefined {
+	return entry.kind === "toolUse" ? previews[entry.callId] : undefined;
+}
+
+export function MessageList({
+	entries,
+	full,
+	liveOutputs,
+}: {
+	entries: UiEntry[];
+	full?: boolean;
+	/** Output streamed by tools that are still running, keyed by call id. */
+	liveOutputs?: Record<string, string>;
+}) {
+	const previews = previewTexts(entries, liveOutputs);
 	return (
 		<Box flexDirection="column">
 			{entries.map((entry, i) => (
 				// biome-ignore lint/suspicious/noArrayIndexKey: entries is append-only, existing indices never change identity
-				<EntryView key={i} entry={entry} full={full} />
+				<EntryView key={i} entry={entry} full={full} liveText={liveTextOf(entry, previews)} />
 			))}
 		</Box>
 	);
@@ -296,14 +366,14 @@ function InfoView({ text }: { text: string }) {
 	);
 }
 
-export function EntryView({ entry, full }: { entry: UiEntry; full?: boolean }) {
+export function EntryView({ entry, full, liveText }: { entry: UiEntry; full?: boolean; liveText?: string }) {
 	switch (entry.kind) {
 		case "user":
 			return <UserMessageView text={entry.text} />;
 		case "assistant":
 			return <AssistantMessageView text={entry.text} />;
 		case "toolUse":
-			return <ToolUseView entry={entry} full={full} />;
+			return <ToolUseView entry={entry} full={full} liveText={liveText} />;
 		case "error":
 			return <ErrorView text={entry.text} />;
 		case "info":
@@ -331,17 +401,27 @@ export function sealCount(entries: UiEntry[]): number {
 }
 
 /** Virtualized transcript: sealed history via Static + live tail re-rendered. */
-export function VirtualMessageList({ entries }: { entries: UiEntry[] }) {
+export function VirtualMessageList({
+	entries,
+	liveOutputs,
+}: {
+	entries: UiEntry[];
+	/** Output streamed by tools that are still running, keyed by call id. */
+	liveOutputs?: Record<string, string>;
+}) {
 	const sealed = sealCount(entries);
 	const head = entries.slice(0, sealed);
 	const tail = entries.slice(sealed);
+	// Only the tail needs previews: a pending tool blocks sealing, so every
+	// running tool is on this side of the boundary by construction.
+	const previews = previewTexts(tail, liveOutputs);
 
 	return (
 		<Box flexDirection="column">
 			<Static items={head}>{(entry, i) => <EntryView key={`sealed-${i}`} entry={entry} />}</Static>
 			{tail.map((entry, i) => (
 				// biome-ignore lint/suspicious/noArrayIndexKey: sealed + i reconstructs the entry's stable absolute position in the full list
-				<EntryView key={`live-${sealed + i}`} entry={entry} />
+				<EntryView key={`live-${sealed + i}`} entry={entry} liveText={liveTextOf(entry, previews)} />
 			))}
 		</Box>
 	);

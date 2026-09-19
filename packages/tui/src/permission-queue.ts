@@ -1,3 +1,5 @@
+import { inputMatchesSpecifier } from "@labunbun/agent";
+import { permissionOptions, ruleSpecifierFor } from "./permission-options.ts";
 import type { PermissionDialogState } from "./ui-state.ts";
 
 export interface PermissionRequestQueueOptions {
@@ -5,8 +7,19 @@ export interface PermissionRequestQueueOptions {
 	show: (dialog: PermissionDialogState | null) => void;
 	/** Body text for the dialog: what the tool wants to do. */
 	preview: (toolName: string, input: unknown) => string;
-	/** Called when the user grants "always allow" so the app can persist a rule. */
-	onAlwaysAllow?: (toolName: string) => void;
+	/** The same input in full, for the dialog's Ctrl+A view. */
+	fullPreview?: (toolName: string, input: unknown) => string;
+	/**
+	 * Workspace root. Specifiers for file tools are relative paths, so without
+	 * this the queue cannot tell what a granted rule does and will not apply it
+	 * to anything still waiting.
+	 */
+	cwd?: string;
+	/**
+	 * Called when the user grants "don't ask again", with the input it was
+	 * granted for — the scope of the rule depends on what they were looking at.
+	 */
+	onAlwaysAllow?: (toolName: string, input: unknown) => void;
 }
 
 export interface PermissionRequestQueue {
@@ -39,15 +52,21 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 			callId: `perm-${next.toolName}`,
 			toolName: next.toolName,
 			inputPreview: options.preview(next.toolName, next.input),
+			inputFull: options.fullPreview?.(next.toolName, next.input),
+			options: permissionOptions(next.toolName, next.input, options.cwd),
 			queueLength: pending.length,
 			resolve: (allow, alwaysAllow) => {
 				pending.shift();
 				if (allow && alwaysAllow) {
-					options.onAlwaysAllow?.(next.toolName);
-					// The rule just granted covers everything else queued for this
-					// tool, so asking again would contradict the answer.
+					options.onAlwaysAllow?.(next.toolName, next.input);
+					// The rule just granted covers everything else queued for the same
+					// tool *and the same scope* — so asking again would contradict the
+					// answer. Same tool name is not the same rule: granting `Bash(git *)`
+					// must not silently approve the `rm -rf` queued behind it, which is
+					// what a name-only check would do.
+					const specifier = ruleSpecifierFor(next.toolName, next.input, options.cwd);
 					for (let i = pending.length - 1; i >= 0; i--) {
-						if (pending[i].toolName === next.toolName) pending.splice(i, 1)[0].resolve(true);
+						if (coveredBy(pending[i], next.toolName, specifier, options.cwd)) pending.splice(i, 1)[0].resolve(true);
 					}
 				}
 				show();
@@ -72,4 +91,27 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 			for (const request of dropped) request.resolve(false);
 		},
 	};
+}
+
+/**
+ * Does the rule the user just granted cover a request still in the queue?
+ *
+ * A bare tool rule covers every call of that tool (the rule *is* the whole
+ * tool). A scoped one covers only what it matches, and matching is the same
+ * grammar the permission engine will use on every later call — if the two
+ * disagreed, a request would be answered here by a rule that would not have
+ * allowed it there.
+ */
+function coveredBy(
+	request: { toolName: string; input: unknown },
+	toolName: string,
+	specifier: string | undefined,
+	cwd: string | undefined,
+): boolean {
+	if (request.toolName !== toolName) return false;
+	if (specifier === undefined) return true;
+	// No workspace root to resolve a relative specifier against: the rule's reach
+	// cannot be established here, so ask instead of assuming.
+	if (cwd === undefined) return false;
+	return inputMatchesSpecifier(toolName, specifier, request.input, cwd);
 }

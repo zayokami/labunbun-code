@@ -39,7 +39,7 @@ import {
 	approveMcpServer as persistMcpApproval,
 } from "@labunbun/mcp";
 import { createAllTools, defaultOperations, type Operations, TaskStore } from "@labunbun/tools";
-import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle } from "@labunbun/tui";
+import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle, ruleSpecifierFor } from "@labunbun/tui";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { CostTracker, formatCostState } from "./cost-tracker.ts";
@@ -47,9 +47,16 @@ import { sessionToMarkdown } from "./export-session.ts";
 import { createFileCompleter } from "./file-completions.ts";
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
+import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
-import { listSessions, loadSessionForResume, resolveContinueTarget, type SessionSummary } from "./session-resume.ts";
+import {
+	exitSummaryLine,
+	listSessions,
+	loadSessionForResume,
+	resolveContinueTarget,
+	type SessionSummary,
+} from "./session-resume.ts";
 import {
 	applySettingsEnv,
 	collectPermissionRules,
@@ -63,7 +70,7 @@ import { loadSkills, skillsAsCommands } from "./skills.ts";
 import { createTaskTool, loadAgentDefinitions } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { persistThemeChoice, type ResolvedTheme, resolveTheme } from "./theme-file.ts";
-import { persistModelChoice } from "./user-settings.ts";
+import { persistModelChoice, writeUserSettingsPatch } from "./user-settings.ts";
 import { runWizard, shouldRunWizard } from "./wizard.ts";
 
 export interface InteractiveOptions {
@@ -547,10 +554,19 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		].sort(([a], [b]) => a.localeCompare(b)),
 		completeFiles: (query) => fileCompleter(query),
 		dirName: basename(cwd),
+		cwd,
 		// Oldest first, which is the order ↑ recall walks backwards through.
 		history: loadHistory(cwd),
-		onAlwaysAllow: (toolName) => {
-			sessionRules.push({ toolName, behavior: "allow", source: "session" });
+		onAlwaysAllow: (toolName, input) => {
+			// Scoped to what the user was looking at: `Bash(git *)`, not all of Bash.
+			// No specifier means the tool could not be scoped, and the rule is the
+			// bare tool — which is what every "don't ask again" answer used to mean.
+			sessionRules.push({
+				toolName,
+				specifier: ruleSpecifierFor(toolName, input, cwd),
+				behavior: "allow",
+				source: "session",
+			});
 		},
 		onSubmitText: async (text) => {
 			appendHistory(text, cwd);
@@ -620,6 +636,17 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	await handle.waitUntilExit();
 	unsubTasks();
+
+	// How to come back to this conversation. Printed here rather than through the
+	// REPL because the Ink frame owns the screen: a line written while it is up is
+	// erased by the next render and never reaches the scrollback the user is about
+	// to read. Only when there is something to resume, and only on a terminal.
+	const summary = exitSummaryLine({
+		sessionId: sessionIdHolder.current,
+		messageCount: sessionRef?.messages.length ?? 0,
+		cliName: CLI_NAME,
+	});
+	if (summary && process.stdout.isTTY) process.stdout.write(`\n${summary}\n`);
 
 	// ---- SessionEnd: the UI is gone, so failures go to stderr. Never fatal —
 	// a broken cleanup hook must not change the process exit code.
@@ -801,6 +828,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/status", "Show model, context usage, cost, and settings at a glance"],
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/tree", "Show the session branch tree"],
+		["/vim", "Turn modal vim editing in the prompt on or off: /vim [on|off]"],
 	];
 }
 
@@ -1081,6 +1109,29 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					);
 				}
 			})();
+			return true;
+		}
+		case "/vim": {
+			const arg = text.split(/\s+/)[1]?.toLowerCase();
+			if (arg && arg !== "on" && arg !== "off") {
+				pushInfo(ctx.handle, "Usage: /vim [on|off] — with no argument it toggles");
+				return true;
+			}
+			// Toggled from what is actually on, not from the settings file: /vim on
+			// after a session that started in vim mode means off, and reading the
+			// saved value would give the same answer every time.
+			const next = arg ? arg === "on" : !(ctx.handle?.store.get().vim ?? false);
+			ctx.handle?.setVimMode(next);
+			try {
+				writeUserSettingsPatch({ vimMode: next }, ctx.home);
+				pushInfo(ctx.handle, `Vim mode ${next ? "on" : "off"}`);
+			} catch (error) {
+				// Already in effect; only the write failed.
+				pushInfo(
+					ctx.handle,
+					`Vim mode ${next ? "on" : "off"} (not saved: ${error instanceof Error ? error.message : String(error)})`,
+				);
+			}
 			return true;
 		}
 		default:

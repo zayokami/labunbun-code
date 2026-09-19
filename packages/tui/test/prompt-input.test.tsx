@@ -163,6 +163,58 @@ describe("prompt input", () => {
 		expect(flat(lastFrame())).toContain("Esc interrupt");
 		unmount();
 	});
+
+	test("`?` on an empty prompt asks for the key list", async () => {
+		// `?` is an ordinary character everywhere else, so the buffer's owner has
+		// to be the one to give it up — the host's key handler cannot take it back.
+		let asked = 0;
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={() => {}} onToggleHelp={() => asked++} />),
+		);
+		await delay(30);
+		stdin.write("?");
+		await delay(30);
+		expect(asked).toBe(1);
+		expect(flat(lastFrame())).toContain("Try"); // still the placeholder
+		unmount();
+	});
+
+	test("`?` after a character is just a question mark", async () => {
+		const submitted: string[] = [];
+		const { stdin, unmount } = render(
+			withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} onToggleHelp={() => submitted.push("HELP")} />),
+		);
+		await delay(30);
+		stdin.write("what?");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["what?"]);
+		unmount();
+	});
+
+	test("turning vim off hands the keys back to the editor", async () => {
+		// The engine was created but never dropped, so the hooks went on feeding
+		// it keys long after the flag went false: `r` stayed vim's redo and the
+		// letter never reached the buffer.
+		const { stdin, lastFrame, rerender, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} vim />));
+		await delay(30);
+		expect(flat(lastFrame())).toContain("[NORMAL]");
+
+		stdin.write("r"); // normal mode: redo, and there is nothing to redo
+		await delay(30);
+		expect(flat(lastFrame())).toContain("Try"); // still the placeholder
+
+		rerender(withTheme(<PromptInput onSubmit={() => {}} />));
+		await delay(30);
+		expect(flat(lastFrame())).not.toContain("[NORMAL]");
+		expect(flat(lastFrame())).toContain("Esc interrupt");
+
+		stdin.write("r");
+		await delay(30);
+		expect(flat(lastFrame())).not.toContain("Try"); // the letter landed
+		unmount();
+	});
 });
 
 /**
@@ -314,6 +366,127 @@ describe("slash command suggestions", () => {
 		stdin.write("\x1b[A");
 		await delay(30);
 		expect(flat(lastFrame())).toContain("an old prompt");
+		unmount();
+	});
+});
+
+/**
+ * Ctrl+R. The rule about vim is not re-implemented here — the vim engine claims
+ * Ctrl+R for redo in normal and visual mode before this component sees it, and
+ * that is the whole rule.
+ */
+describe("reverse history search", () => {
+	const HISTORY = ["run the tests", "fix the build", "run the linter"];
+
+	test("Ctrl+R opens the search and filters as the query is typed", async () => {
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} history={HISTORY} />));
+		await delay(30);
+		stdin.write("\x12");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("(reverse-i-search)`':");
+
+		stdin.write("fix");
+		await delay(30);
+		const frame = flat(lastFrame());
+		expect(frame).toContain("`fix'");
+		expect(frame).toContain("fix the build");
+		expect(frame).not.toContain("run the tests");
+		unmount();
+	});
+
+	test("Enter puts the match in the buffer without submitting it", async () => {
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} history={HISTORY} />),
+		);
+		await delay(30);
+		stdin.write("\x12");
+		await delay(30);
+		stdin.write("linter");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual([]); // still editable, not sent
+		expect(flat(lastFrame())).not.toContain("reverse-i-search");
+		expect(flat(lastFrame())).toContain("run the linter");
+		unmount();
+	});
+
+	test("Esc closes the search and leaves the buffer alone", async () => {
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={() => {}} history={HISTORY} placeholder="ph" />),
+		);
+		await delay(30);
+		stdin.write("\x12");
+		await delay(30);
+		stdin.write("\x1b");
+		await delay(30);
+		const frame = flat(lastFrame());
+		expect(frame).not.toContain("reverse-i-search");
+		expect(frame).toContain("ph"); // the buffer was never written
+		unmount();
+	});
+
+	test("up walks to the next older match, and wraps", async () => {
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} history={HISTORY} />));
+		await delay(30);
+		stdin.write("\x12");
+		await delay(30);
+		stdin.write("run");
+		await delay(30);
+		// Newest match first: "run the linter".
+		expect(flat(lastFrame())).toContain("`run': run the linter");
+		stdin.write("\x1b[A");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("`run': run the tests");
+		unmount();
+	});
+
+	test("a query with no match says so instead of promising an entry", async () => {
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} history={HISTORY} />));
+		await delay(30);
+		stdin.write("\x12");
+		await delay(30);
+		stdin.write("zzz");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("no match");
+		unmount();
+	});
+
+	test("history typed in this session is searchable too", async () => {
+		// The prop only seeds the list; what ↑ recall walks is the live one.
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} />));
+		await delay(30);
+		stdin.write("deploy the thing");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		stdin.write("\x12");
+		await delay(30);
+		stdin.write("deploy");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("`deploy': deploy the thing");
+		unmount();
+	});
+
+	test("in vim normal mode Ctrl+R is redo, so no search opens", async () => {
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} history={HISTORY} vim />));
+		await delay(30);
+		expect(flat(lastFrame())).toContain("[NORMAL]");
+		stdin.write("\x12");
+		await delay(30);
+		expect(flat(lastFrame())).not.toContain("reverse-i-search");
+		unmount();
+	});
+
+	test("in vim insert mode it is the search again", async () => {
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} history={HISTORY} vim />));
+		await delay(30);
+		stdin.write("i");
+		await delay(30);
+		stdin.write("\x12");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("reverse-i-search");
 		unmount();
 	});
 });

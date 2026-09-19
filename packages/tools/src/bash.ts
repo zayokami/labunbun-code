@@ -6,6 +6,45 @@ import type { Operations } from "./operations.ts";
 
 const MAX_OUTPUT_CHARS = 30_000;
 
+/**
+ * How often a running command may push its output to the UI.
+ *
+ * The stream is a preview, not a transcript — the full output arrives with the
+ * result either way — so ten updates a second is indistinguishable from every
+ * chunk, while a command printing thousands of lines a second would otherwise
+ * drive one store update and one React render per line.
+ */
+export const BASH_UPDATE_INTERVAL_MS = 100;
+
+/**
+ * Holds the last `maxChars` of a stream without rejoining it on every chunk.
+ *
+ * Chunks are dropped whole from the front once enough have accumulated, so the
+ * set retained stays near the cap instead of growing with the command's total
+ * output; only `read()` joins, and it is called once per emission rather than
+ * once per chunk. The tail can therefore overshoot the cap by at most the length
+ * of one chunk, which `read()` trims.
+ */
+export function createTailBuffer(maxChars: number): { push(chunk: string): void; read(): string } {
+	const chunks: string[] = [];
+	let size = 0;
+	return {
+		push(chunk: string): void {
+			if (!chunk) return;
+			chunks.push(chunk);
+			size += chunk.length;
+			while (chunks.length > 1 && size - chunks[0].length >= maxChars) {
+				size -= chunks[0].length;
+				chunks.shift();
+			}
+		},
+		read(): string {
+			const joined = chunks.join("");
+			return joined.length > maxChars ? joined.slice(-maxChars) : joined;
+		},
+	};
+}
+
 export function createBashTool(cwd: string, ops: Operations, background?: BackgroundShellManager): AnyTool {
 	return buildTool({
 		name: "Bash",
@@ -48,15 +87,19 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 				};
 			}
 
-			const chunks: string[] = [];
+			const buffer = createTailBuffer(MAX_OUTPUT_CHARS);
+			let lastUpdateAt = 0;
 			const result = await ops.exec({
 				command: input.command,
 				cwd,
 				timeoutMs: input.timeout ?? 120_000,
 				signal: ctx.signal,
 				onOutput: (chunk) => {
-					chunks.push(chunk);
-					ctx.onUpdate({ partialOutput: chunks.join("").slice(-MAX_OUTPUT_CHARS) });
+					buffer.push(chunk);
+					const now = Date.now();
+					if (now - lastUpdateAt < BASH_UPDATE_INTERVAL_MS) return;
+					lastUpdateAt = now;
+					ctx.onUpdate({ partialOutput: buffer.read() });
 				},
 			});
 
