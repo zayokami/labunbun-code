@@ -92,6 +92,21 @@ function importedPath(home: string, sessionId: string, cwd = CWD): string {
 	return join(home, ".labunbun", "projects", project, `${importedSessionId("claude-code", sessionId)}.jsonl`);
 }
 
+/** A line of `~/.claude/history.jsonl`: `project` is the directory it was typed in. */
+function claudePrompt(text: string, cwd: string, ms: number): Record<string, unknown> {
+	return { display: text, pastedContents: {}, project: cwd, sessionId: "s-1", timestamp: ms };
+}
+
+function jsonl(rows: Array<Record<string, unknown>>): string {
+	return `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
+}
+
+/** The recall file the run wrote, or "" when it wrote none. */
+function recallText(home: string): string {
+	const path = join(home, ".labunbun", "history.jsonl");
+	return existsSync(path) ? readFileSync(path, "utf8") : "";
+}
+
 interface Asked {
 	question: string;
 	header: string;
@@ -136,32 +151,49 @@ async function wizard(
 describe("migrate wizard: sources", () => {
 	test("the first questions name the sources that were detected", async () => {
 		await withHome(twoSources(), async (home) => {
-			const { bridge, asked } = scriptedDialog({ answers: [["No", "No"]] });
+			const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], ["No", "No"]] });
 			const { result } = await wizard(home, bridge);
 			expect(result).toBe("No source selected — nothing to import.");
-			expect(asked).toHaveLength(2);
-			expect(asked.map((question) => question.question)).toEqual(["Import from Claude Code?", "Import from Codex?"]);
+			expect(asked).toHaveLength(3); // the mode question, then one per source
+			expect(asked.map((question) => question.question)).toEqual([
+				"Import your existing setup?",
+				"Import from Claude Code?",
+				"Import from Codex?",
+			]);
 			// The question is answerable without knowing which tools exist, and it
 			// is not a menu of raw ids.
-			expect(asked[0].options.map((option) => option.label)).toEqual(["Yes", "No"]);
+			expect(asked[1].options.map((option) => option.label)).toEqual(["Yes", "No"]);
 			expect(existsSync(join(home, ".labunbun"))).toBe(false);
 		});
 	});
 
 	test("cancelling the source dialog stops before anything is read or written", async () => {
 		await withHome(twoSources(), async (home) => {
-			const { bridge, asked } = scriptedDialog({ answers: [null] });
+			const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], null] });
 			const { result, reported } = await wizard(home, bridge);
 			expect(result).toBe("Migration cancelled — nothing was read or written.");
-			expect(asked).toHaveLength(2); // the dialog was one call of two questions
+			// The mode question, then the source dialog's one call of two questions.
+			expect(asked).toHaveLength(3);
 			expect(reported).toEqual([]);
 			expect(existsSync(join(home, ".labunbun"))).toBe(false);
 		});
 	});
 
+	test("a source directory with nothing in it is not asked about", async () => {
+		await withHome(twoSources(), async (home) => {
+			mkdirSync(join(home, ".agents"), { recursive: true });
+			const { bridge, asked } = scriptedDialog({
+				answers: [["Choose…"], ["Yes", "Yes"], ["Yes", "Yes", "No"], ["Apply"]],
+			});
+			const { result } = await wizard(home, bridge);
+			expect(asked.map((question) => question.question)).not.toContain("Import from ~/.agents (shared agent home)?");
+			expect(result).toContain("Restart to pick up the imported configuration.");
+		});
+	});
+
 	test("answering no to a source keeps that source out of the plan", async () => {
 		await withHome(twoSources(), async (home) => {
-			const { bridge } = scriptedDialog({ answers: [["Yes", "No"], ["Yes", "Yes", "No"], ["Apply"]] });
+			const { bridge } = scriptedDialog({ answers: [["Choose…"], ["Yes", "No"], ["Yes", "Yes", "No"], ["Apply"]] });
 			const { result } = await wizard(home, bridge);
 			expect(result).toContain("Restart to pick up the imported configuration.");
 			expect(existsSync(join(home, ".labunbun", "settings.json"))).toBe(true);
@@ -175,7 +207,7 @@ describe("migrate wizard: sources", () => {
 describe("migrate wizard: categories", () => {
 	test("declining a category leaves its files alone, even where there is something to take", async () => {
 		await withHome(historyTree(), async (home) => {
-			const { bridge, asked } = scriptedDialog({ answers: [["Yes"], ["Yes", "No", "No"], ["Apply"]] });
+			const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], ["Yes"], ["Yes", "No", "No"], ["Apply"]] });
 			const { result } = await wizard(home, bridge);
 			// The transcripts are on disk, and the user still was not asked about
 			// them, because the category answer already settled it.
@@ -190,7 +222,7 @@ describe("migrate wizard: categories", () => {
 
 	test("cancelling the category dialog writes nothing", async () => {
 		await withHome(historyTree(), async (home) => {
-			const { bridge } = scriptedDialog({ answers: [["Yes"], null] });
+			const { bridge } = scriptedDialog({ answers: [["Choose…"], ["Yes"], null] });
 			const { result, reported } = await wizard(home, bridge);
 			expect(result).toBe("Migration cancelled — nothing was read or written.");
 			expect(reported).toEqual([]);
@@ -200,7 +232,7 @@ describe("migrate wizard: categories", () => {
 
 	test("declining every category writes nothing", async () => {
 		await withHome(historyTree(), async (home) => {
-			const { bridge } = scriptedDialog({ answers: [["Yes"], ["No", "No", "No"]] });
+			const { bridge } = scriptedDialog({ answers: [["Choose…"], ["Yes"], ["No", "No", "No"]] });
 			const { result } = await wizard(home, bridge);
 			expect(result).toBe("No category selected — nothing to import.");
 			expect(existsSync(join(home, ".labunbun"))).toBe(false);
@@ -211,7 +243,7 @@ describe("migrate wizard: categories", () => {
 describe("migrate wizard: history", () => {
 	/** Source yes, settings yes, history yes, then the history answer itself. */
 	function historyAnswers(scope: string): Array<string[] | null> {
-		return [["Yes"], ["Yes", "No", "Yes"], [scope], ["Apply"]];
+		return [["Choose…"], ["Yes"], ["Yes", "No", "Yes"], [scope], ["Apply"]];
 	}
 
 	test("'only this project' leaves the other project's sessions behind", async () => {
@@ -277,9 +309,9 @@ describe("migrate wizard: history", () => {
 
 	test("a source with no sessions at all is not asked about", async () => {
 		await withHome({ ".claude/settings.json": CLAUDE_SETTINGS }, async (home) => {
-			// Three answers, not four: with nothing to list there is no history
+			// Four answers, not five: with nothing to list there is no history
 			// question to answer.
-			const { bridge, asked } = scriptedDialog({ answers: [["Yes"], ["Yes", "Yes", "Yes"], ["Apply"]] });
+			const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], ["Yes"], ["Yes", "Yes", "Yes"], ["Apply"]] });
 			const { result } = await wizard(home, bridge);
 			expect(asked.map((question) => question.question)).not.toContain(
 				"Which Claude Code conversations should come across?",
@@ -309,10 +341,178 @@ describe("migrate wizard: history", () => {
 	});
 });
 
+describe("migrate wizard: prompts ride along with the history answer", () => {
+	/** One session here, one elsewhere, and prompts typed in both directories. */
+	function promptTree(): SourceTree {
+		return {
+			".claude/settings.json": CLAUDE_SETTINGS,
+			".claude/projects/-tmp-proj/newest.jsonl": claudeRows(CWD, "2026-01-03T00:00:00.000Z"),
+			".claude/projects/-tmp-proj/elsewhere.jsonl": claudeRows(tmpdir(), "2026-01-01T00:00:00.000Z"),
+			".claude/history.jsonl": jsonl([
+				claudePrompt("typed here", CWD, 1_700_000_000_000),
+				claudePrompt("typed over there", tmpdir(), 1_700_000_001_000),
+			]),
+		};
+	}
+
+	/** What ↑ would read back, oldest first. */
+	function recall(home: string): Array<{ text: string; cwd: string }> {
+		return recallText(home)
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as { text: string; cwd: string });
+	}
+
+	/** Step-by-step, source yes, settings yes, history yes, then the history answer. */
+	function answers(scope: string): Array<string[] | null> {
+		return [["Choose…"], ["Yes"], ["Yes", "No", "Yes"], [scope], ["Apply"]];
+	}
+
+	test("'only this project' brings its prompts and leaves the other directory's", async () => {
+		await withHome(promptTree(), async (home) => {
+			const { bridge } = scriptedDialog({ answers: answers("Only this project (1)") });
+			const { result, reported } = await wizard(home, bridge);
+			expect(result).toContain("Restart to pick up the imported configuration.");
+			expect(recall(home).map((entry) => [entry.text, entry.cwd])).toEqual([["typed here", CWD]]);
+			// The prompt that stayed behind is reported, not silently dropped.
+			expect(reported.join("\n")).toContain("prompt from another directory — 1 not imported");
+		});
+	});
+
+	test("'everything' brings the other directory's prompts with it", async () => {
+		await withHome(promptTree(), async (home) => {
+			const { bridge } = scriptedDialog({ answers: answers("Everything (2)") });
+			await wizard(home, bridge);
+			// Each prompt keeps the directory it was typed in: recall filters by it.
+			expect(recall(home).map((entry) => [entry.text, entry.cwd])).toEqual([
+				["typed here", CWD],
+				["typed over there", tmpdir()],
+			]);
+		});
+	});
+
+	test("picking one conversation takes the prompts of the directory it happened in", async () => {
+		await withHome(promptTree(), async (home) => {
+			// Entry 0 is "all of them"; entry 2 is the session from the other directory.
+			const { bridge } = scriptedDialog({ answers: answers("Choose sessions…"), picks: [2] });
+			await wizard(home, bridge);
+			expect(recall(home).map((entry) => [entry.text, entry.cwd])).toEqual([["typed over there", tmpdir()]]);
+		});
+	});
+
+	test("'skip history' leaves the recall list alone", async () => {
+		await withHome(promptTree(), async (home) => {
+			const { bridge } = scriptedDialog({ answers: answers("Skip history") });
+			const { result } = await wizard(home, bridge);
+			expect(result).toContain("Restart to pick up the imported configuration.");
+			expect(existsSync(join(home, ".labunbun", "settings.json"))).toBe(true);
+			expect(recallText(home)).toBe("");
+		});
+	});
+
+	test("a second run adds no prompt the recall list already has", async () => {
+		await withHome(promptTree(), async (home) => {
+			const first = scriptedDialog({ answers: answers("Everything (2)") });
+			await wizard(home, first.bridge);
+			const written = recallText(home);
+			expect(written).toContain("typed here");
+
+			const second = scriptedDialog({ answers: answers("Everything (2)") });
+			const { reported } = await wizard(home, second.bridge);
+			expect(recallText(home)).toBe(written);
+			expect(reported.join("\n")).toContain("already in the recall history");
+		});
+	});
+});
+
+describe("migrate wizard: the one-question path", () => {
+	/** Two sources, a skill, sessions here and elsewhere, prompts in both. */
+	function quickTree(): SourceTree {
+		return {
+			".claude/settings.json": CLAUDE_SETTINGS,
+			".claude/skills/pdf/SKILL.md": "---\nname: pdf\n---\nfill forms\n",
+			".claude/projects/-tmp-proj/newest.jsonl": claudeRows(CWD, "2026-01-03T00:00:00.000Z"),
+			".claude/projects/-tmp-proj/elsewhere.jsonl": claudeRows(tmpdir(), "2026-01-01T00:00:00.000Z"),
+			".claude/history.jsonl": jsonl([
+				claudePrompt("typed here", CWD, 1_700_000_000_000),
+				claudePrompt("typed over there", tmpdir(), 1_700_000_001_000),
+			]),
+			".codex/config.toml": CODEX_CONFIG,
+			".codex/AGENTS.md": "Codex memory content.\n",
+		};
+	}
+
+	/** The mode answer, the history answer it still asks for, then the confirm. */
+	function everythingAnswers(scope: string): Array<string[] | null> {
+		return [["Import everything"], [scope], ["Apply"]];
+	}
+
+	test("'import everything' takes every source and category after one question", async () => {
+		await withHome(quickTree(), async (home) => {
+			const { bridge, asked } = scriptedDialog({ answers: everythingAnswers("Everything (2)") });
+			const { result } = await wizard(home, bridge);
+			expect(asked.map((question) => question.header)).toEqual(["Migration", "History", "Confirm"]);
+			expect(result).toContain("Restart to pick up the imported configuration.");
+			// One from each category, without either of them being asked about.
+			expect(existsSync(join(home, ".labunbun", "settings.json"))).toBe(true);
+			expect(existsSync(join(home, ".labunbun", "skills", "pdf", "SKILL.md"))).toBe(true);
+			expect(existsSync(join(home, ".labunbun", "rules", "imported-codex.md"))).toBe(true);
+			expect(existsSync(importedPath(home, "elsewhere", tmpdir()))).toBe(true);
+			expect(recallText(home)).toContain("typed over there");
+		});
+	});
+
+	test("the one-question path still asks about history", async () => {
+		await withHome(quickTree(), async (home) => {
+			const { bridge, asked } = scriptedDialog({ answers: everythingAnswers("Skip history") });
+			const { result } = await wizard(home, bridge);
+			expect(asked.map((question) => question.question)).toContain(
+				"Which Claude Code conversations should come across?",
+			);
+			expect(result).toContain("Restart to pick up the imported configuration.");
+			expect(existsSync(join(home, ".labunbun", "settings.json"))).toBe(true);
+			expect(existsSync(join(home, ".labunbun", "projects"))).toBe(false);
+			expect(existsSync(join(home, ".labunbun", "history.jsonl"))).toBe(false);
+		});
+	});
+
+	test("cancelling the first question reads and writes nothing", async () => {
+		await withHome(quickTree(), async (home) => {
+			const { bridge, asked } = scriptedDialog({ answers: [null] });
+			const { result, reported } = await wizard(home, bridge);
+			expect(result).toBe("Migration cancelled — nothing was read or written.");
+			expect(asked).toHaveLength(1);
+			expect(reported).toEqual([]);
+			expect(existsSync(join(home, ".labunbun"))).toBe(false);
+		});
+	});
+
+	test("'choose' leads to the step-by-step questions", async () => {
+		await withHome(quickTree(), async (home) => {
+			const { bridge, asked } = scriptedDialog({
+				answers: [["Choose…"], ["Yes", "No"], ["Yes", "No", "No"], ["Apply"]],
+			});
+			const { result } = await wizard(home, bridge);
+			expect(asked.map((question) => question.header)).toEqual([
+				"Migration",
+				"Claude Code",
+				"Codex",
+				"Categories",
+				"Categories",
+				"Categories",
+				"Confirm",
+			]);
+			expect(result).toContain("Restart to pick up the imported configuration.");
+			// Codex was declined at the source question, so its memory stays put.
+			expect(existsSync(join(home, ".labunbun", "rules", "imported-codex.md"))).toBe(false);
+		});
+	});
+});
+
 describe("migrate wizard: the plan is shown before it is written", () => {
 	test("declining the preview leaves the home untouched", async () => {
 		await withHome(twoSources(), async (home) => {
-			const { bridge, asked } = scriptedDialog({ answers: [["Yes"], ["Yes", "Yes", "No"], ["Cancel"]] });
+			const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], ["Yes"], ["Yes", "Yes", "No"], ["Cancel"]] });
 			const { result, reported } = await wizard(home, bridge);
 			expect(result).toBe("Nothing written (dry run only).");
 			expect(reported).toHaveLength(1);
@@ -326,7 +526,7 @@ describe("migrate wizard: the plan is shown before it is written", () => {
 
 	test("what the preview listed is what lands on disk", async () => {
 		await withHome(twoSources(), async (home) => {
-			const { bridge } = scriptedDialog({ answers: [["Yes"], ["Yes", "Yes", "No"], ["Apply"]] });
+			const { bridge } = scriptedDialog({ answers: [["Choose…"], ["Yes"], ["Yes", "Yes", "No"], ["Apply"]] });
 			const { result, reported } = await wizard(home, bridge);
 			expect(reported[0]).toContain("~/.labunbun/settings.json");
 			expect(reported[0]).toContain("~/.labunbun/skills/pdf/SKILL.md");
@@ -345,9 +545,10 @@ describe("migrate wizard: the plan is shown before it is written", () => {
 				".labunbun/settings.json": JSON.stringify({ model: "opus" }),
 			},
 			async (home) => {
-				const { bridge, asked } = scriptedDialog({ answers: [["Yes"], ["Yes", "No", "No"]] });
+				const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], ["Yes"], ["Yes", "No", "No"]] });
 				const { result, reported } = await wizard(home, bridge);
 				expect(asked.map((question) => question.header)).toEqual([
+					"Migration",
 					"Claude Code",
 					"Categories",
 					"Categories",

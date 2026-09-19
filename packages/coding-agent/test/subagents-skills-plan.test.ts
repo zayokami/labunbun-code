@@ -338,6 +338,59 @@ describe("skills", () => {
 			expect(expanded.endsWith("to staging")).toBe(true);
 		}
 	});
+
+	test("a description wrapped over several lines is one description", () => {
+		// `description: >-` is how a skill written for another tool wraps a long
+		// sentence. Reading only the marker would leave the model with ">-" where
+		// the text telling it when to use the skill should be.
+		const home = mkdtempSync(join(tmpdir(), "lbb-skill-home-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-skill-proj-"));
+		mkdirSync(join(home, ".labunbun", "skills", "find-docs"), { recursive: true });
+		writeFileSync(
+			join(home, ".labunbun", "skills", "find-docs", "SKILL.md"),
+			[
+				"---",
+				"name: find-docs",
+				"description: >-",
+				"  Answer questions about a library's API by fetching its live documentation.",
+				"  Use when the question is about how something is used today.",
+				"---",
+				"Body text.",
+			].join("\n"),
+		);
+		const skills = loadSkills(cwd, home);
+		const findDocs = skills.find((s) => s.name === "find-docs");
+		expect(findDocs?.description).toBe(
+			"Answer questions about a library's API by fetching its live documentation. " +
+				"Use when the question is about how something is used today.",
+		);
+		expect(findDocs?.body).toBe("Body text.");
+	});
+
+	test("a literal block keeps its line breaks", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-skill-home-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-skill-proj-"));
+		mkdirSync(join(home, ".labunbun", "skills", "steps"), { recursive: true });
+		writeFileSync(
+			join(home, ".labunbun", "skills", "steps", "SKILL.md"),
+			["---", "name: steps", "description: |", "  First line.", "  Second line.", "---", "Body."].join("\n"),
+		);
+		const steps = loadSkills(cwd, home).find((s) => s.name === "steps");
+		expect(steps?.description).toBe("First line.\nSecond line.");
+	});
+
+	test("plain frontmatter is read exactly as before", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-skill-home-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-skill-proj-"));
+		mkdirSync(join(home, ".labunbun", "skills", "plain"), { recursive: true });
+		writeFileSync(
+			join(home, ".labunbun", "skills", "plain", "SKILL.md"),
+			"---\nname: plain\ndescription: A demo: with a colon\n---\nBody here.",
+		);
+		const plain = loadSkills(cwd, home).find((s) => s.name === "plain");
+		expect(plain?.description).toBe("A demo: with a colon");
+		expect(plain?.body).toBe("Body here.");
+	});
 });
 
 describe("plan mode tools", () => {

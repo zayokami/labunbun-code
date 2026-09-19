@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendHistory, type HistoryEntry, historyFilePath, loadHistory } from "../src/history.ts";
+import { appendHistory, type HistoryEntry, historyFilePath, loadHistory, readHistoryFile } from "../src/history.ts";
 
 function tmpHome(): string {
 	return mkdtempSync(join(tmpdir(), "lbb-history-"));
@@ -136,5 +136,53 @@ describe("loadHistory", () => {
 		mkdirSync(join(home, ".labunbun"), { recursive: true });
 		writeFileSync(historyFilePath(home), "not json\nnor this\n", "utf8");
 		expect(loadHistory("/p", 100, home)).toEqual([]);
+	});
+});
+
+describe("readHistoryFile", () => {
+	test("a missing file is no lines and no entries", () => {
+		expect(readHistoryFile(tmpHome())).toEqual({ lines: [], entries: [] });
+	});
+
+	test("returns the lines as written, with the entries they define", () => {
+		const home = tmpHome();
+		appendHistory("one", "/p", home);
+		appendHistory("two", "/q", home);
+		const file = readHistoryFile(home);
+		expect(file.lines).toEqual(readFileSync(historyFilePath(home), "utf8").split("\n").filter(Boolean));
+		expect(file.entries.map((entry) => [entry.text, entry.cwd])).toEqual([
+			["one", "/p"],
+			["two", "/q"],
+		]);
+	});
+
+	// The importer merges into this file, and a merge that re-emitted only what it
+	// could parse would delete the half-written line of a process that was killed.
+	test("a line that does not parse is still a line", () => {
+		const home = tmpHome();
+		appendHistory("good", "/p", home);
+		const path = historyFilePath(home);
+		writeFileSync(path, `${readFileSync(path, "utf8")}{ truncated\n`, "utf8");
+		const file = readHistoryFile(home);
+		expect(file.lines).toHaveLength(2);
+		expect(file.lines[1]).toBe("{ truncated");
+		expect(file.entries.map((entry) => entry.text)).toEqual(["good"]);
+	});
+
+	test("blank lines are not lines", () => {
+		const home = tmpHome();
+		appendHistory("kept", "/p", home);
+		const path = historyFilePath(home);
+		writeFileSync(path, `\n${readFileSync(path, "utf8")}\n\n`, "utf8");
+		expect(readHistoryFile(home).lines).toHaveLength(1);
+	});
+
+	test("an entry missing its cwd is a line without being an entry", () => {
+		const home = tmpHome();
+		mkdirSync(join(home, ".labunbun"), { recursive: true });
+		writeFileSync(historyFilePath(home), `${JSON.stringify({ text: "no cwd" })}\n`, "utf8");
+		const file = readHistoryFile(home);
+		expect(file.lines).toHaveLength(1);
+		expect(file.entries).toEqual([]);
 	});
 });

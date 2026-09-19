@@ -38,14 +38,68 @@ function loadSkillsFromDir(skillsRoot: string): Skill[] {
 	return out;
 }
 
-function parseFrontmatter(content: string): { data: Record<string, string>; body: string } {
+/**
+ * The lines of a YAML block scalar starting at `start`, unindented.
+ *
+ * `>` (folded) joins wrapped lines with spaces and keeps blank lines as breaks;
+ * `|` (literal) keeps every line break. The chomping and indent indicators
+ * (`-`, `+`, a digit) do not change the result here: the value is a one-line
+ * description, and a trailing break is not part of it either way.
+ */
+function readBlockScalar(lines: string[], start: number, marker: string): { value: string; next: number } {
+	const collected: string[] = [];
+	let index = start;
+	while (index < lines.length && (lines[index].trim() === "" || /^\s/.test(lines[index]))) {
+		collected.push(lines[index]);
+		index += 1;
+	}
+	while (collected.length > 0 && collected[collected.length - 1].trim() === "") collected.pop();
+	const indent = collected.find((line) => line.trim() !== "")?.match(/^\s*/)?.[0].length ?? 0;
+	const stripped = collected.map((line) => line.slice(indent));
+	const value =
+		marker === "|"
+			? stripped.join("\n")
+			: stripped
+					.join("\n")
+					.split(/\n\s*\n/)
+					.map((paragraph) =>
+						paragraph
+							.split("\n")
+							.map((line) => line.trim())
+							.filter((line) => line !== "")
+							.join(" "),
+					)
+					.filter((paragraph) => paragraph !== "")
+					.join("\n");
+	return { value, next: index };
+}
+
+/**
+ * Split a skill's frontmatter from its body. Exported because the importer has
+ * to read a skill file with the same reader the loader uses — a description it
+ * cannot parse there would be written back as a description this build cannot
+ * read either.
+ */
+export function parseFrontmatter(content: string): { data: Record<string, string>; body: string } {
 	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
 	if (!match) return { data: {}, body: content };
 	const data: Record<string, string> = {};
-	for (const line of match[1].split(/\r?\n/)) {
+	const lines = match[1].split(/\r?\n/);
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
 		const idx = line.indexOf(":");
 		if (idx === -1) continue;
-		data[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+		const value = line.slice(idx + 1).trim();
+		// A skill description written as `description: >-` carries its text on the
+		// lines below. Reading only the marker loses the one sentence that tells
+		// the model when to reach for the skill.
+		if (/^[>|]([+-]?\d?|\d[+-]?)?$/.test(value)) {
+			const block = readBlockScalar(lines, index + 1, value[0]);
+			index = block.next - 1;
+			data[line.slice(0, idx).trim()] = block.value;
+			continue;
+		}
+		data[line.slice(0, idx).trim()] = value;
 	}
 	return { data, body: content.slice(match[0].length) };
 }
@@ -59,15 +113,29 @@ export function loadSkills(cwd: string, home = homedir()): Skill[] {
 	return [...byName.values()];
 }
 
-/** Convert skills into prompt-type commands: invoking expands to the body. */
+/**
+ * Convert skills into prompt-type commands: invoking expands to the body.
+ *
+ * A body that says `$ARGUMENTS` — how command files written for other tools
+ * address the text typed after the name — gets the arguments substituted in
+ * place, and they are not also appended. Nothing else is expanded: `$1`-`$9`
+ * and inline shell expansion would be a second, undocumented language, and a
+ * body that uses them reads as written instead of losing its arguments
+ * silently. The report says so when a migrated command relies on them.
+ */
 export function skillsAsCommands(skills: Skill[]): Command[] {
-	return skills.map(
-		(skill): PromptCommand => ({
+	return skills.map((skill): PromptCommand => {
+		// Decided once, at load: whether the body addresses its arguments at all.
+		const placeholder = skill.body.includes("$ARGUMENTS");
+		return {
 			name: `skill-${skill.name}`,
 			description: skill.description || `Skill: ${skill.name}`,
 			type: "prompt",
-			getPrompt: (args) =>
-				`<skill name="${skill.name}" source="${skill.sourcePath}">\n${skill.body}\n</skill>\n\n${args}`.trim(),
-		}),
-	);
+			getPrompt: (args) => {
+				const body = placeholder ? skill.body.replaceAll("$ARGUMENTS", args) : skill.body;
+				const tail = placeholder ? "" : `\n\n${args}`;
+				return `<skill name="${skill.name}" source="${skill.sourcePath}">\n${body}\n</skill>${tail}`.trim();
+			},
+		};
+	});
 }

@@ -6,6 +6,11 @@
  * argument to `runMigration`, the same call the CLI makes, so the wizard cannot
  * import anything `labunbun migrate` would not.
  *
+ * The first question is the shortcut. "Import everything" answers the source and
+ * category questions with "every source found, every category" and goes straight
+ * to the plan; history is still asked about, because that one answer decides how
+ * much of the user's past is read and no default is worth guessing at.
+ *
  * Two things about the dialog it has to live with, both visible in
  * `packages/tui`: a question offers radio-style options and answers with the
  * chosen label (there is no multi-select), and a picker scrolls a long list but
@@ -17,6 +22,7 @@ import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
 	detectSources,
+	MIGRATION_CATEGORIES,
 	MIGRATION_SOURCE_LABELS,
 	type MigrationCategory,
 	type MigrationSourceId,
@@ -25,9 +31,14 @@ import {
 import {
 	collectHistory,
 	DEFAULT_HISTORY_LIMIT,
+	DEFAULT_PROMPT_HISTORY_LIMIT,
 	type HistoryImport,
 	type HistoryInput,
+	type HistoryScope,
 	listHistory,
+	type PromptHistoryImport,
+	type PromptHistoryInput,
+	readPromptHistory,
 	sameProject,
 } from "./migrate-history.ts";
 
@@ -59,6 +70,10 @@ export interface MigrationWizardContext {
 
 const YES = "Yes";
 const NO = "No";
+const EVERYTHING = "Import everything";
+const CHOOSE = "Choose…";
+/** The first question's header; the rest are labelled with what they are about. */
+const MODE_HEADER = "Migration";
 
 /** The three categories, phrased as questions the user can answer. */
 const CATEGORY_QUESTIONS: Array<{ category: MigrationCategory; question: string; detail: string }> = [
@@ -75,7 +90,7 @@ const CATEGORY_QUESTIONS: Array<{ category: MigrationCategory; question: string;
 	{
 		category: "history",
 		question: "Import past conversations?",
-		detail: "writes resumable session files under ~/.labunbun/projects",
+		detail: "resumable session files under ~/.labunbun/projects, and your prompts for ↑ recall",
 	},
 ];
 
@@ -91,6 +106,35 @@ function sessionLabel(candidate: { title: string; sourceId: string; cwd: string;
 	const title = candidate.title || candidate.sourceId.slice(0, 8);
 	const date = candidate.startedAt ? new Date(candidate.startedAt).toLocaleDateString() : "unknown date";
 	return `${title} — ${basename(candidate.cwd)} — ${date}`;
+}
+
+/**
+ * The shortcut question: everything, or the step-by-step path?
+ *
+ * `null` means the user cancelled the dialog, and then nothing at all was read:
+ * the sources are only listed, never opened, until an answer says which of them
+ * count.
+ */
+async function askImportEverything(
+	dialog: MigrationDialogBridge,
+	sources: MigrationSourceId[],
+): Promise<boolean | null> {
+	const names = sources.map((source) => MIGRATION_SOURCE_LABELS[source]).join(", ");
+	const answers = await dialog.askUser([
+		{
+			question: "Import your existing setup?",
+			header: MODE_HEADER,
+			options: [
+				{
+					label: EVERYTHING,
+					description: `settings, files and history from ${names} — history is still asked about`,
+				},
+				{ label: CHOOSE, description: "pick the sources and the categories yourself" },
+			],
+		},
+	]);
+	if (!answers) return null;
+	return answers[0] === EVERYTHING;
 }
 
 /** Ask which sources to consider. `null` means the user cancelled the dialog. */
@@ -122,18 +166,38 @@ async function askCategories(dialog: MigrationDialogBridge): Promise<MigrationCa
 }
 
 /**
+ * What one history answer buys: the sessions to bring, and the prompts that come
+ * with them.
+ *
+ * The recall list rides on the same answer on purpose. The user was asked what of
+ * theirs should come across, and "this project only" is an answer about their
+ * words as much as about their transcripts — importing every prompt they ever
+ * typed in every directory would be answering a question they did not say yes to,
+ * and "skip history" cannot sensibly mean "except the recall list".
+ */
+interface HistoryTake {
+	/** Sessions to bring. */
+	history: HistoryInput;
+	/** Prompts to merge into the recall list, under the same answer's scope. */
+	prompts: PromptHistoryInput;
+}
+
+/**
  * How much of one source's history to take.
  *
  * `null` means "leave this source's history alone" — the user said so, or
- * cancelled the picker, or there is nothing to take.
+ * cancelled the picker, or there is nothing to take. A source with nothing to
+ * list is not asked about, and nothing of it is read: without an answer there is
+ * no scope to read under.
  */
 async function askHistory(
 	dialog: MigrationDialogBridge,
 	source: MigrationSourceId,
 	ctx: MigrationWizardContext,
-): Promise<HistoryInput | null> {
+): Promise<HistoryTake | null> {
+	const home = ctx.home ?? homedir();
 	const label = MIGRATION_SOURCE_LABELS[source];
-	const listing = listHistory(source, ctx.home ?? homedir(), { cwd: ctx.cwd, scope: "all" });
+	const listing = listHistory(source, home, { cwd: ctx.cwd, scope: "all" });
 	if (listing.candidates.length === 0) return null;
 	const here = listing.candidates.filter((candidate) => sameProject(candidate.cwd, ctx.cwd));
 	const newest = listing.candidates.slice(0, DEFAULT_HISTORY_LIMIT);
@@ -143,10 +207,13 @@ async function askHistory(
 			question: `Which ${label} conversations should come across?`,
 			header: "History",
 			options: [
-				{ label: `Only this project (${here.length})`, description: "sessions whose working directory is this one" },
+				{
+					label: `Only this project (${here.length})`,
+					description: "sessions and recalled prompts from this directory",
+				},
 				{
 					label: `Everything (${listing.candidates.length})`,
-					description: `newest ${DEFAULT_HISTORY_LIMIT} per source`,
+					description: `newest ${DEFAULT_HISTORY_LIMIT} per source, plus the prompts it remembers`,
 				},
 				{ label: "Choose sessions…", description: "pick from the most recent" },
 				{ label: "Skip history", description: `${label} settings still come across` },
@@ -157,10 +224,15 @@ async function askHistory(
 	const answer = answers[0] ?? "";
 	if (answer === "Skip history") return null;
 
-	let scope: "cwd" | "all" = "all";
+	let scope: HistoryScope = "all";
+	// Prompt scope follows the session scope, which is the same decision once more:
+	// one directory, or everywhere the source remembers.
+	let promptScope: HistoryScope = "all";
+	let promptCwd = ctx.cwd;
 	let selected: string[] | undefined;
 	if (answer.startsWith("Only this project")) {
 		scope = "cwd";
+		promptScope = "cwd";
 	} else if (answer === "Choose sessions…") {
 		// Entry 0 stands for the whole list, so the cap does not have to be turned
 		// into a question of its own.
@@ -170,10 +242,20 @@ async function askHistory(
 		];
 		const index = await dialog.pickFromList(`${label} sessions`, items);
 		if (index === null) return null;
-		if (index > 0) selected = [newest[index - 1].sourceId];
+		if (index > 0) {
+			const picked = newest[index - 1];
+			selected = [picked.sourceId];
+			// One conversation, chosen out of the list: its prompts come from the
+			// directory it happened in, not from every directory on the machine.
+			if (picked.cwd) {
+				promptScope = "cwd";
+				promptCwd = picked.cwd;
+			}
+		}
+		// Entry 0 is "all of them", which is the "Everything" answer with a name.
 	}
 
-	const result = collectHistory(source, ctx.home ?? homedir(), {
+	const result = collectHistory(source, home, {
 		cwd: ctx.cwd,
 		scope,
 		limit: DEFAULT_HISTORY_LIMIT,
@@ -186,7 +268,14 @@ async function askHistory(
 		ctx.report(`${label}: no sessions imported${why ? ` (${why})` : ""}`);
 		return null;
 	}
-	return result;
+	return {
+		history: result,
+		prompts: readPromptHistory(source, home, {
+			cwd: promptCwd,
+			scope: promptScope,
+			limit: DEFAULT_PROMPT_HISTORY_LIMIT,
+		}),
+	};
 }
 
 /** Ask the source, category and history questions, then plan and confirm. */
@@ -196,19 +285,29 @@ export async function runMigrationWizard(ctx: MigrationWizardContext): Promise<s
 	const detected = detectSources(home);
 	if (detected.length === 0) return "No source configuration found. Nothing to import.";
 
-	const sources = await askSources(ctx.dialog, detected);
+	// Not asked when there is nothing to ask about: a machine with no source at
+	// all is answered above, without a question whose only answer is "no".
+	const everything = await askImportEverything(ctx.dialog, detected);
+	if (everything === null) return "Migration cancelled — nothing was read or written.";
+
+	const sources = everything ? detected : await askSources(ctx.dialog, detected);
 	if (!sources) return "Migration cancelled — nothing was read or written.";
 	if (sources.length === 0) return "No source selected — nothing to import.";
 
-	const categories = await askCategories(ctx.dialog);
+	// The shortcut's answers: every detected source, every category. `--only all`
+	// and `--from all` mean the same thing to the runner.
+	const categories = everything ? [...MIGRATION_CATEGORIES] : await askCategories(ctx.dialog);
 	if (!categories) return "Migration cancelled — nothing was read or written.";
 	if (categories.length === 0) return "No category selected — nothing to import.";
 
 	const history: HistoryImport = {};
+	const promptHistory: PromptHistoryImport = {};
 	if (categories.includes("history")) {
 		for (const source of sources) {
 			const taken = await askHistory(ctx.dialog, source, ctx);
-			if (taken) history[source] = taken;
+			if (!taken) continue;
+			history[source] = taken.history;
+			promptHistory[source] = taken.prompts;
 		}
 	}
 
@@ -217,6 +316,11 @@ export async function runMigrationWizard(ctx: MigrationWizardContext): Promise<s
 		only: categories,
 		from: sources.join(","),
 		history,
+		// Both history inputs were read above, from the answers the user gave. The
+		// scope here only says the category is on — the per-source scopes travelled
+		// with the entries themselves — and passing the prompts in keeps the dry run
+		// and the write from reading the sources twice.
+		promptHistory,
 		historyScope: "all",
 	};
 

@@ -14,6 +14,8 @@ import { join, relative } from "node:path";
 import {
 	detectSources,
 	formatMigrationReport,
+	type MigrationItem,
+	type MigrationPlan,
 	planMigration,
 	readSources,
 	resolveModelReference,
@@ -118,6 +120,15 @@ describe("source detection", () => {
 		});
 		withHome(FULL_TREE, (home) => {
 			expect(detectSources(home)).toEqual(["claude-code", "codex"]);
+		});
+	});
+
+	test("a source directory holding nothing is not a source", () => {
+		withHome({ ".claude/settings.json": "{}" }, (home) => {
+			// `~/.agents` is a shared directory other tools create; on its own it
+			// offers nothing to import, so it is not worth a question.
+			mkdirSync(join(home, ".agents"), { recursive: true });
+			expect(detectSources(home)).toEqual(["claude-code"]);
 		});
 	});
 
@@ -417,7 +428,7 @@ describe("apply", () => {
 				const written = readFileSync(join(home, ".labunbun", "skills", "shared", "SKILL.md"), "utf8");
 				expect(written).toBe("FROM THE FIRST SOURCE\n");
 				// The loser is reported rather than silently discarded.
-				const skipped = result.plan.items.find((i) => i.detail.includes("another source"));
+				const skipped = result.plan.items.find((i) => i.detail.includes("kept the first one"));
 				expect(skipped?.action).toBe("skip");
 				expect(skipped?.source).toBe("codex");
 				// One target path means one write, not two racing to the same file.
@@ -457,5 +468,375 @@ describe("apply", () => {
 				expect(existsSync(path)).toBe(true);
 			}
 		});
+	});
+});
+
+/** A claude settings file holding just `permissions`, planned on its own. */
+function planPermissions(permissions: Record<string, unknown>): MigrationPlan {
+	let planned: MigrationPlan | undefined;
+	withHome({ ".claude/settings.json": JSON.stringify({ permissions }) }, (home) => {
+		planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+	});
+	if (!planned) throw new Error("the fake home did not survive");
+	return planned;
+}
+
+/** The settings file a plan would write, parsed. */
+function writtenSettings(planned: MigrationPlan): Record<string, unknown> {
+	return JSON.parse(planned.writes.find((w) => w.kind === "settings")?.content ?? "{}");
+}
+
+function plannedItem(planned: MigrationPlan, from: string): MigrationItem | undefined {
+	return planned.items.find((i) => i.from.includes(from));
+}
+
+describe("claude code permissions", () => {
+	test.each([
+		["default", "default"],
+		["manual", "default"],
+		["plan", "plan"],
+		["acceptEdits", "acceptEdits"],
+		["bypassPermissions", "bypassPermissions"],
+	] as Array<[string, string]>)("defaultMode %s becomes permissionMode %s", (mode, expected) => {
+		expect(writtenSettings(planPermissions({ defaultMode: mode })).permissionMode).toBe(expected);
+	});
+
+	test("the classifier mode is skipped, because the nearest mode means the opposite", () => {
+		const planned = planPermissions({ defaultMode: "auto" });
+		expect(writtenSettings(planned).permissionMode).toBeUndefined();
+		const skipped = plannedItem(planned, '"auto"');
+		expect(skipped?.action).toBe("skip");
+		expect(skipped?.detail).toContain("classifier");
+		expect(skipped?.detail).toContain("dontAsk");
+	});
+
+	test("the ask list is skipped with what its absence means", () => {
+		const planned = planPermissions({ ask: ["Bash(rm *)", "WebFetch"] });
+		const skipped = plannedItem(planned, "permissions.ask");
+		expect(skipped?.action).toBe("skip");
+		expect(skipped?.detail).toContain("2 rule(s)");
+		// A call that the source would have asked about now just runs; the report
+		// points at the one place that can still gate it.
+		expect(skipped?.detail).toContain("deny");
+	});
+
+	test("allow, deny and additionalDirectories are carried, each reported", () => {
+		const planned = planPermissions({
+			allow: ["Bash(git *)"],
+			deny: ["Read(**/.env)"],
+			additionalDirectories: ["G:/work"],
+		});
+		expect(writtenSettings(planned).permissions).toEqual({
+			allow: ["Bash(git *)"],
+			deny: ["Read(**/.env)"],
+			additionalDirectories: ["G:/work"],
+		});
+		expect(plannedItem(planned, "permissions.allow")?.action).toBe("map");
+		expect(plannedItem(planned, "permissions.deny")?.action).toBe("map");
+		expect(plannedItem(planned, "permissions.additionalDirectories")?.action).toBe("map");
+	});
+
+	test("a rule the target cannot parse is dropped with a count, not in silence", () => {
+		const planned = planPermissions({ allow: ["Bash(git *)", "Bash(git *"] });
+		expect(writtenSettings(planned).permissions).toEqual({
+			allow: ["Bash(git *)"],
+			deny: [],
+			additionalDirectories: [],
+		});
+		expect(planned.items.find((i) => i.detail.includes("1 of 2"))?.action).toBe("skip");
+	});
+
+	test("a lockdown that only the policy tier honours is a downgrade, not a write", () => {
+		const planned = planPermissions({ disableBypassPermissionsMode: "disable" });
+		expect(JSON.stringify(writtenSettings(planned))).not.toContain("disableBypassPermissionsMode");
+		const item = plannedItem(planned, "disableBypassPermissionsMode");
+		expect(item?.action).toBe("downgrade");
+		expect(item?.detail).toContain("managed-settings.json");
+	});
+
+	test("an existing target list is kept, and the other list still comes across", () => {
+		const existing = {
+			permissions: { allow: ["Bash(ls)"], deny: [], additionalDirectories: [] },
+		};
+		let planned: MigrationPlan | undefined;
+		withHome(
+			{
+				".claude/settings.json": JSON.stringify({ permissions: { allow: ["Bash(git *)"], deny: ["Read(**/.env)"] } }),
+				".labunbun/settings.json": JSON.stringify(existing),
+			},
+			(home) => {
+				planned = planMigration(readSources(home), existing, { only: ["claude-code"] });
+			},
+		);
+		if (!planned) throw new Error("the fake home did not survive");
+		expect(plannedItem(planned, "permissions.allow")?.detail).toContain("--force");
+		expect(plannedItem(planned, "permissions.deny")?.action).toBe("map");
+		// The rule the user already had is not lost to the one that was imported.
+		expect(writtenSettings(planned).permissions).toEqual({
+			allow: ["Bash(ls)"],
+			deny: ["Read(**/.env)"],
+			additionalDirectories: [],
+		});
+	});
+});
+
+/** A claude settings file holding just `hooks`, planned on its own. */
+function planHooks(hooks: unknown, existing: Record<string, unknown> = {}): MigrationPlan {
+	let planned: MigrationPlan | undefined;
+	withHome(
+		{ ".claude/settings.json": JSON.stringify({ hooks }), ".labunbun/settings.json": JSON.stringify(existing) },
+		(home) => {
+			planned = planMigration(readSources(home), existing, { only: ["claude-code"] });
+		},
+	);
+	if (!planned) throw new Error("the fake home did not survive");
+	return planned;
+}
+
+describe("claude code hooks", () => {
+	test("a command handler for a known event is rewritten as-is", () => {
+		const planned = planHooks({
+			PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "./check.sh", timeout: 5000 }] }],
+		});
+		expect(writtenSettings(planned).hooks).toEqual({
+			PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "./check.sh", timeout: 5000 }] }],
+		});
+		expect(plannedItem(planned, "hooks")?.action).toBe("map");
+	});
+
+	test("an event this build has no hook for is dropped and counted", () => {
+		const planned = planHooks({
+			PreToolUse: [{ hooks: [{ type: "command", command: "keep.sh" }] }],
+			PostToolUseFailure: [{ hooks: [{ type: "command", command: "gone.sh" }] }],
+		});
+		const written = writtenSettings(planned).hooks as Record<string, unknown>;
+		expect(Object.keys(written)).toEqual(["PreToolUse"]);
+		const item = plannedItem(planned, "→ hooks");
+		expect(item?.action).toBe("downgrade");
+		expect(item?.detail).toContain("PostToolUseFailure");
+		expect(item?.detail).toContain("no hook here");
+	});
+
+	test("a handler that is not a shell command is dropped, keeping the ones that are", () => {
+		const planned = planHooks({
+			Stop: [
+				{
+					hooks: [
+						{ type: "prompt", prompt: "did you finish?" },
+						{ type: "command", command: "done.sh" },
+					],
+				},
+			],
+		});
+		expect(writtenSettings(planned).hooks).toEqual({ Stop: [{ hooks: [{ type: "command", command: "done.sh" }] }] });
+		expect(plannedItem(planned, "→ hooks")?.detail).toContain("not shell commands");
+	});
+
+	test("A|B is one matcher per name, because it is not an alternation here", () => {
+		const planned = planHooks({
+			PostToolUse: [{ matcher: "Bash|Edit", hooks: [{ type: "command", command: "after.sh" }] }],
+		});
+		expect(writtenSettings(planned).hooks).toEqual({
+			PostToolUse: [
+				{ matcher: "Bash", hooks: [{ type: "command", command: "after.sh" }] },
+				{ matcher: "Edit", hooks: [{ type: "command", command: "after.sh" }] },
+			],
+		});
+		const detail = plannedItem(planned, "→ hooks")?.detail ?? "";
+		expect(detail).toContain("Bash|Edit");
+		expect(detail).toContain("one entry per name");
+	});
+
+	test("a matcher written as a regular expression is dropped with the reason", () => {
+		const planned = planHooks({
+			PreToolUse: [{ matcher: "mcp__.*__delete.*", hooks: [{ type: "command", command: "guard.sh" }] }],
+		});
+		expect(writtenSettings(planned).hooks).toBeUndefined();
+		const skipped = plannedItem(planned, "→ hooks");
+		expect(skipped?.action).toBe("skip");
+		expect(skipped?.detail).toContain("escapes");
+	});
+
+	test("hooks the target already defines are kept", () => {
+		const existing = { hooks: { Stop: [{ hooks: [{ type: "command", command: "mine.sh" }] }] } };
+		const planned = planHooks({ Stop: [{ hooks: [{ type: "command", command: "theirs.sh" }] }] }, existing);
+		const item = plannedItem(planned, "→ hooks");
+		expect(item?.action).toBe("skip");
+		expect(item?.detail).toContain("--force");
+		// Nothing is written at all, so the file on disk keeps its own hooks.
+		expect(planned.writes.some((w) => w.kind === "settings")).toBe(false);
+	});
+
+	test("a hook file with nothing runnable says so instead of writing an empty block", () => {
+		const planned = planHooks({ PreToolUse: [{ hooks: [{ type: "prompt", prompt: "think" }] }] });
+		expect(planned.writes.some((w) => w.kind === "settings")).toBe(false);
+		expect(plannedItem(planned, "→ hooks")?.detail).toContain("nothing here would run");
+	});
+});
+
+describe("keys with no mapping", () => {
+	test("are named once per file, and their values never printed", () => {
+		let planned: MigrationPlan | undefined;
+		withHome(
+			{
+				".claude/settings.json": JSON.stringify({
+					modelSettings: { value: "SHOULD-NOT-APPEAR" },
+					skipWorkflowUsageWarning: true,
+					somethingElse: 3,
+				}),
+				".claude.json": JSON.stringify({ oauthAccount: { emailAddress: "NOT-THIS-EITHER" }, model: "opus" }),
+			},
+			(home) => {
+				planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			},
+		);
+		if (!planned) throw new Error("the fake home did not survive");
+		const settingsItem = planned.items.find((i) => i.from.includes("modelSettings"));
+		expect(settingsItem?.action).toBe("skip");
+		expect(settingsItem?.detail).toContain("3 key(s)");
+		// A key that is accounted for is not part of the leftover list.
+		expect(settingsItem?.from).not.toContain("effortLevel");
+		expect(planned.items.find((i) => i.from.includes("oauthAccount"))?.action).toBe("skip");
+		// Names, not contents: the report is read by a model and pasted into issues.
+		const report = formatMigrationReport(planned);
+		expect(report).not.toContain("SHOULD-NOT-APPEAR");
+		expect(report).not.toContain("NOT-THIS-EITHER");
+	});
+
+	test("a file with nothing left over says nothing", () => {
+		const planned = planPermissions({ allow: ["Bash(git *)"] });
+		expect(planned.items.some((i) => i.from.includes("key(s)") || i.detail.includes("no mapping"))).toBe(false);
+	});
+});
+
+describe("fallbackModel", () => {
+	test("resolves like the primary model", () => {
+		let planned: MigrationPlan | undefined;
+		withHome({ ".claude/settings.json": JSON.stringify({ fallbackModel: "sonnet" }) }, (home) => {
+			planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+		});
+		if (!planned) throw new Error("the fake home did not survive");
+		expect(writtenSettings(planned).fallbackModels).toEqual(["anthropic/claude-sonnet-5"]);
+	});
+
+	test("an unresolvable fallback is reported, not written as a broken reference", () => {
+		let planned: MigrationPlan | undefined;
+		withHome({ ".claude/settings.json": JSON.stringify({ fallbackModel: "gpt-9-ultra" }) }, (home) => {
+			planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+		});
+		if (!planned) throw new Error("the fake home did not survive");
+		expect(writtenSettings(planned).fallbackModels).toBeUndefined();
+		expect(plannedItem(planned, "fallbackModel")?.action).toBe("skip");
+	});
+});
+
+describe("a skill's supporting files", () => {
+	const SKILL_TREE: SourceTree = {
+		".claude/skills/unity/SKILL.md": "---\nname: unity\n---\nRead references/api.md first.\n",
+		".claude/skills/unity/references/api.md": "# API\n\nCall it like this.\n",
+		".claude/skills/unity/scripts/run.sh": "#!/bin/sh\necho hi\n",
+		".claude/skills/unity/assets/logo.png": "\u0000\u0001binary-ish",
+		".claude/skills/unity/node_modules/dep/index.js": "module.exports = 1;\n",
+	};
+
+	test("come along, so the links in the body still point at something", () => {
+		withHome(SKILL_TREE, (home) => {
+			runMigration({ home, from: "claude-code", apply: true });
+			const skillDir = join(home, ".labunbun", "skills", "unity");
+			expect(readFileSync(join(skillDir, "references", "api.md"), "utf8")).toBe("# API\n\nCall it like this.\n");
+			expect(readFileSync(join(skillDir, "scripts", "run.sh"), "utf8")).toBe("#!/bin/sh\necho hi\n");
+		});
+	});
+
+	test("a binary or an installed dependency is reported, not written as text", () => {
+		withHome(SKILL_TREE, (home) => {
+			const result = runMigration({ home, from: "claude-code", apply: true });
+			const skillDir = join(home, ".labunbun", "skills", "unity");
+			expect(existsSync(join(skillDir, "assets", "logo.png"))).toBe(false);
+			expect(existsSync(join(skillDir, "node_modules"))).toBe(false);
+
+			const item = result.plan.items.find((i) => i.from.includes("skills/unity/SKILL.md") && i.to.includes("SKILL.md"));
+			expect(item?.detail).toContain("2 supporting file(s)");
+			const skipped = result.plan.items.find((i) => i.detail.includes("supporting file(s) not copied"));
+			expect(skipped?.detail).toContain("logo.png (binary file)");
+			expect(skipped?.detail).toContain("node_modules");
+		});
+	});
+
+	test("a supporting file the user already edited is kept", () => {
+		withHome(
+			{
+				...SKILL_TREE,
+				".labunbun/skills/unity/references/api.md": "edited by hand\n",
+			},
+			(home) => {
+				const result = runMigration({ home, from: "claude-code", apply: true });
+				expect(readFileSync(join(home, ".labunbun", "skills", "unity", "references", "api.md"), "utf8")).toBe(
+					"edited by hand\n",
+				);
+				const skip = result.plan.items.find((i) => i.detail.includes("supporting skill file already exists"));
+				expect(skip?.action).toBe("skip");
+			},
+		);
+	});
+
+	test("a skill with nothing beside it is still one file", () => {
+		withHome({ ".claude/skills/plain/SKILL.md": "---\nname: plain\n---\nNothing else.\n" }, (home) => {
+			const result = runMigration({ home, from: "claude-code", apply: true });
+			expect(result.plan.writes.filter((w) => w.kind === "skill").length).toBe(1);
+			const item = result.plan.items.find((i) => i.from.includes("skills/plain"));
+			expect(item?.detail).toBe("skill copied verbatim");
+		});
+	});
+});
+
+/** `${VAR}` built in pieces so a linter does not read it as a lost interpolation. */
+function placeholder(name: string): string {
+	return `\${${name}}`;
+}
+
+describe("MCP values that hold a variable placeholder", () => {
+	test("are copied but flagged, because nothing here expands them", () => {
+		let withPlaceholder: MigrationPlan | undefined;
+		withHome(
+			{
+				".claude/settings.json": "{}",
+				".claude.json": JSON.stringify({
+					mcpServers: {
+						hosted: {
+							type: "http",
+							url: "https://mcp.example/api",
+							headers: { Authorization: `Bearer ${placeholder("API_TOKEN")}` },
+						},
+					},
+				}),
+			},
+			(home) => {
+				withPlaceholder = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			},
+		);
+		if (!withPlaceholder) throw new Error("the fake home did not survive");
+		const item = plannedItem(withPlaceholder, "mcpServers.hosted");
+		expect(item?.action).toBe("downgrade");
+		expect(item?.detail).toContain(placeholder("API_TOKEN"));
+		expect(item?.detail).toContain("not expanded");
+		// The name is named; the value it would have come from is not invented.
+		const servers = JSON.parse(withPlaceholder.writes.find((w) => w.kind === "mcp")?.content ?? "{}").mcpServers;
+		expect(servers.hosted.headers.Authorization).toBe(`Bearer ${placeholder("API_TOKEN")}`);
+	});
+
+	test("a server without one is a plain copy", () => {
+		let planned: MigrationPlan | undefined;
+		withHome(
+			{
+				".claude/settings.json": "{}",
+				".claude.json": JSON.stringify({ mcpServers: { plain: { type: "stdio", command: "node", args: ["x.js"] } } }),
+			},
+			(home) => {
+				planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			},
+		);
+		if (!planned) throw new Error("the fake home did not survive");
+		expect(plannedItem(planned, "mcpServers.plain")?.action).toBe("map");
 	});
 });

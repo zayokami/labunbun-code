@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
 import type { AgentMessage } from "@labunbun/ai";
+import { loadHistory } from "../src/history.ts";
 import { type RunMigrationResult, runMigration } from "../src/migrate.ts";
-import { importedSessionId, parseHistoryScope, repairToolPairing } from "../src/migrate-history.ts";
+import { importedSessionId, parseHistoryScope, readPromptHistory, repairToolPairing } from "../src/migrate-history.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
 type SourceTree = Record<string, string>;
@@ -752,6 +753,209 @@ describe("migrate: history options", () => {
 				expect(store.messages().length).toBeGreaterThan(0);
 				expect(store.linearEntries()[0].type).toBe("header");
 			}
+		});
+	});
+});
+
+describe("migrate: prompt history", () => {
+	/** A line of the source's prompt history, in the shape Claude Code writes. */
+	function sourcePrompt(text: string, cwd: string, ms: number): Record<string, unknown> {
+		return { display: text, pastedContents: {}, project: cwd, sessionId: "s-1", timestamp: ms };
+	}
+
+	/** A line of the recall file as this build writes it. */
+	function recallEntry(text: string, cwd: string, ms: number): Record<string, unknown> {
+		return { text, cwd, timestamp: ms };
+	}
+
+	const claudePrompts = (home: string): string => join(home, ".claude", "history.jsonl");
+	const recallPath = (home: string): string => join(home, ".labunbun", "history.jsonl");
+
+	/** The recall file the run would write, parsed line by line. */
+	function writtenPrompts(result: RunMigrationResult): Array<{ text: string; cwd: string; timestamp: number }> {
+		const write = result.plan.writes.find((w) => w.kind === "prompt-history");
+		return (write?.content ?? "")
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as { text: string; cwd: string; timestamp: number });
+	}
+
+	test("prompts become recall entries tagged with the directory they were typed in", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [
+				sourcePrompt("  first prompt  ", CWD, T0),
+				sourcePrompt("second prompt", CWD, T0 + 1000),
+			]);
+			const result = runHistory(home, { apply: true });
+			expect(result.error).toBeUndefined();
+			expect(writtenPrompts(result)).toEqual([
+				{ text: "first prompt", cwd: CWD, timestamp: T0 },
+				{ text: "second prompt", cwd: CWD, timestamp: T0 + 1000 },
+			]);
+			// The written shape is the one ↑ reads back, so check it through recall.
+			expect(loadHistory(CWD, 100, home)).toEqual(["first prompt", "second prompt"]);
+		});
+	});
+
+	test("what the source's own recorder would have skipped is skipped here too", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [
+				sourcePrompt("/compact", CWD, T0),
+				sourcePrompt("   ", CWD, T0),
+				sourcePrompt("[Pasted text #1 +42 lines]", CWD, T0),
+				sourcePrompt("look at [Pasted text #2 +3 lines] and fix it", CWD, T0 + 4000),
+			]);
+			const result = runHistory(home);
+			// A prompt that merely mentions a paste is a real prompt and travels.
+			expect(writtenPrompts(result).map((entry) => entry.text)).toEqual([
+				"look at [Pasted text #2 +3 lines] and fix it",
+			]);
+			const report = result.report;
+			expect(report).toContain("slash command — 1 not imported");
+			expect(report).toContain("empty prompt — 1 not imported");
+			expect(report).toContain("pasted block");
+		});
+	});
+
+	test("a history of nothing but slash commands writes nothing, and says why", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [sourcePrompt("/compact", CWD, T0), sourcePrompt("/migrate", CWD, T0)]);
+			const result = runHistory(home, { apply: true });
+			expect(result.plan.writes).toEqual([]);
+			expect(result.report).toContain("slash command — 2 not imported");
+		});
+	});
+
+	test("the default scope is this project, and the rest is accounted for", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [
+				sourcePrompt("here", CWD, T0),
+				sourcePrompt("elsewhere", join(CWD, "..", "other-project"), T0 + 1000),
+			]);
+			const result = runMigration({ home, only: ["history"] });
+			expect(writtenPrompts(result).map((entry) => entry.text)).toEqual(["here"]);
+			expect(result.report).toContain("prompt from another directory — 1 not imported");
+		});
+	});
+
+	test("codex prompts find their directory through the session's rollout", () => {
+		withHome({}, (home) => {
+			writeJsonl(join(home, ".codex", "sessions", "2026", "01", "02", "rollout-2026-01-02T00-00-00-sess-1.jsonl"), [
+				{ timestamp: at(0), type: "session_meta", payload: { cwd: CWD, session_id: "sess-1" } },
+			]);
+			writeJsonl(join(home, ".codex", "history.jsonl"), [
+				// Codex records seconds; the target stores epoch ms.
+				{ session_id: "sess-1", text: "codex prompt", ts: (T0 + 1000) / 1000 },
+				{ session_id: "sess-unknown", text: "orphan prompt", ts: (T0 + 2000) / 1000 },
+			]);
+			const result = runHistory(home, { apply: true });
+			expect(writtenPrompts(result)).toEqual([{ text: "codex prompt", cwd: CWD, timestamp: T0 + 1000 }]);
+			// A prompt no directory can recall is not worth writing, but it is worth saying.
+			expect(result.report).toContain("no rollout on disk — 1 not imported");
+		});
+	});
+
+	test("both sources land in one file, in the order they were typed", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [sourcePrompt("claude prompt", CWD, T0 + 5000)]);
+			writeJsonl(join(home, ".codex", "sessions", "2026", "01", "02", "rollout-2026-01-02T00-00-00-sess-1.jsonl"), [
+				{ timestamp: at(0), type: "session_meta", payload: { cwd: CWD, session_id: "sess-1" } },
+			]);
+			writeJsonl(join(home, ".codex", "history.jsonl"), [
+				{ session_id: "sess-1", text: "codex prompt", ts: (T0 + 1000) / 1000 },
+			]);
+			const result = runHistory(home, { apply: true });
+			expect(writtenPrompts(result).map((entry) => entry.text)).toEqual(["codex prompt", "claude prompt"]);
+		});
+	});
+
+	test("an entry already in the recall file is kept there, not written twice", () => {
+		withHome({}, (home) => {
+			writeJsonl(recallPath(home), [recallEntry("mine already", CWD, T0 + 9000)]);
+			writeJsonl(claudePrompts(home), [
+				sourcePrompt("imported one", CWD, T0),
+				sourcePrompt("mine already", CWD, T0 - 10_000),
+			]);
+			const result = runHistory(home);
+			// Imported prompts go in front: the newest entries are what ↑ offers first.
+			expect(writtenPrompts(result)).toEqual([
+				{ text: "imported one", cwd: CWD, timestamp: T0 },
+				{ text: "mine already", cwd: CWD, timestamp: T0 + 9000 },
+			]);
+			expect(result.report).toContain("1 prompt(s) added to the recall history, 1 already there");
+			expect(result.plan.writes.find((w) => w.kind === "prompt-history")?.path).toBe(recallPath(home));
+		});
+	});
+
+	test("the same prompt typed in two directories is two entries", () => {
+		withHome({}, (home) => {
+			const other = join(CWD, "..", "other-project");
+			writeJsonl(recallPath(home), [recallEntry("same words", other, T0 + 9000)]);
+			writeJsonl(claudePrompts(home), [sourcePrompt("same words", CWD, T0), sourcePrompt("same words", other, T0)]);
+			const result = runHistory(home);
+			// Recall is filtered per directory, so the copy for this project is not a
+			// duplicate of the one under another — while the copy under the other
+			// directory is, and is left where it already is.
+			expect(writtenPrompts(result).map((entry) => entry.cwd)).toEqual([CWD, other]);
+		});
+	});
+
+	test("a second run writes nothing at all", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [sourcePrompt("remember me", CWD, T0)]);
+			const first = runHistory(home, { apply: true });
+			const path = first.plan.writes[0].path;
+			const content = readFileSync(path, "utf8");
+
+			const second = runHistory(home, { apply: true });
+			expect(second.plan.writes).toEqual([]);
+			expect(details(second).some((detail) => detail.includes("already in the recall history"))).toBe(true);
+			expect(readFileSync(path, "utf8")).toBe(content);
+			// The source keeps its own history: a migration reads, never rewrites.
+			expect(readFileSync(claudePrompts(home), "utf8")).toContain("remember me");
+		});
+	});
+
+	test("the limit takes the newest prompts, and counts the rest", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [
+				sourcePrompt("old", CWD, T0),
+				sourcePrompt("middle", CWD, T0 + 1000),
+				sourcePrompt("new", CWD, T0 + 2000),
+			]);
+			const read = readPromptHistory("claude-code", home, { cwd: CWD, scope: "all", limit: 2 });
+			expect(read.seen).toBe(3);
+			expect(read.entries.map((entry) => entry.text)).toEqual(["middle", "new"]);
+			expect(read.overLimit).toBe(1);
+		});
+	});
+
+	test("a line that is not a prompt is counted, not fatal", () => {
+		withHome(
+			{
+				".claude/history.jsonl": `not json at all\n${JSON.stringify(sourcePrompt("real", CWD, T0))}\n`,
+			},
+			(home) => {
+				const result = runMigration({ home, only: ["history"], historyScope: "all" });
+				expect(writtenPrompts(result).map((entry) => entry.text)).toEqual(["real"]);
+				expect(result.report).toContain("line not in the history shape — 1 not imported");
+			},
+		);
+	});
+
+	test("scope none leaves the recall list alone", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [sourcePrompt("keep out", CWD, T0)]);
+			const result = runMigration({ home, only: ["history"], historyScope: "none" });
+			expect(result.plan.writes).toEqual([]);
+		});
+	});
+
+	test("the categories decide: history off means no recall entries either", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePrompts(home), [sourcePrompt("keep out", CWD, T0)]);
+			const result = runMigration({ home, only: ["settings", "assets"], historyScope: "all" });
+			expect(result.plan.writes).toEqual([]);
 		});
 	});
 });

@@ -22,20 +22,30 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { parseRuleText } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
 import { McpServerConfigSchema } from "@labunbun/mcp";
+import { historyFilePath, readHistoryFile } from "./history.ts";
+import { HOOK_EVENTS, type HookEventName, HooksConfigSchema } from "./hooks.ts";
 import {
 	collectHistory,
 	DEFAULT_HISTORY_LIMIT,
+	DEFAULT_PROMPT_HISTORY_LIMIT,
 	type HistoryImport,
 	type HistoryScope,
 	historyPath,
+	type PromptEntry,
+	type PromptHistoryImport,
 	parseHistoryScope,
+	promptKey,
+	readPromptHistory,
 	renderHistorySession,
 } from "./migrate-history.ts";
 import { mergeSettings, OpenAICompatibleProviderSchema, type RawSettingsInput, SettingsSchema } from "./settings.ts";
-import { parseFrontmatter } from "./subagents.ts";
+// The same reader the skill loader uses, so what the importer writes back is
+// what the loader will read.
+import { parseFrontmatter } from "./skills.ts";
 import { readZcodeSettings, type ZcodeSettingRow } from "./zcode-db.ts";
 
 // ---------------------------------------------------------------------------
@@ -67,13 +77,44 @@ const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	agents: ".agents",
 };
 
+/**
+ * Detect a source by what is in it, not by whether its directory exists.
+ *
+ * `~/.agents` (and `~/.claude`, `~/.codex`) are directories other tools create —
+ * an empty one has nothing to import, and offering it is a question whose only
+ * possible answer still costs the user a read and a keystroke. A root that is
+ * present but unreadable counts as empty for the same reason: nothing can be
+ * read from it either way.
+ */
+function sourceHasContent(root: string): boolean {
+	try {
+		return readdirSync(root).length > 0;
+	} catch {
+		return false;
+	}
+}
+
 export function detectSources(home: string): MigrationSourceId[] {
-	return MIGRATION_SOURCE_IDS.filter((id) => existsSync(join(home, SOURCE_ROOTS[id])));
+	return MIGRATION_SOURCE_IDS.filter((id) => sourceHasContent(join(home, SOURCE_ROOTS[id])));
 }
 
 // ---------------------------------------------------------------------------
 // Raw source data
 // ---------------------------------------------------------------------------
+
+/**
+ * A file that travels with a {@link RawFile} rather than standing on its own: a
+ * skill's `references/*.md`, `scripts/`, and so on.
+ *
+ * A skill is a directory, not a document. Copying only its `SKILL.md` leaves the
+ * body pointing at files that are not there, so the supporting files are read
+ * alongside it and written next to it.
+ */
+export interface RawAttachment {
+	/** Path relative to the owning file's directory, e.g. `references/api.md`. */
+	relativePath: string;
+	content: string;
+}
 
 /** A skill, rule or agent file found in a source tree, carried as content. */
 export interface RawFile {
@@ -83,6 +124,27 @@ export interface RawFile {
 	content: string;
 	/** Overrides the report's "copied verbatim" note when the copy has a caveat. */
 	detail?: string;
+	/** Files belonging beside this one, written into the same target directory. */
+	attachments?: RawAttachment[];
+	/**
+	 * Supporting files deliberately left behind, with the reason. Carried out of
+	 * the reading phase because the report is written from the plan, and a file
+	 * that neither travels nor is explained reads as an importer bug.
+	 */
+	attachmentSkips?: Array<{ relativePath: string; reason: string }>;
+}
+
+/**
+ * Command files found under a source's commands directory, with the ones that
+ * could not become a skill.
+ *
+ * Separate from {@link RawFile} because a command file is not carried as it
+ * stands: its header is rewritten, and the reason a file was refused (a README,
+ * a name too long to be a directory here) has to survive into the report.
+ */
+export interface RawCommands {
+	files: RawFile[];
+	skips: Array<{ path: string; reason: string }>;
 }
 
 export interface RawClaudeCode {
@@ -93,7 +155,16 @@ export interface RawClaudeCode {
 	skills: RawFile[];
 	rules: RawFile[];
 	agents: RawFile[];
+	/** ~/.claude/commands/**\/*.md — slash commands, imported as skills. */
+	commands: RawCommands;
 	present: boolean;
+}
+
+/** One `*.rules` execpolicy file, as text. */
+export interface RawRuleFile {
+	/** File name under `rules/`, e.g. `default.rules`. */
+	name: string;
+	content: string;
 }
 
 export interface RawCodex {
@@ -103,6 +174,18 @@ export interface RawCodex {
 	memory: string | null;
 	skills: RawFile[];
 	agents: RawFile[];
+	/**
+	 * ~/.codex/prompts/*.md — custom prompts. Absent from the Codex versions
+	 * this importer was written against (it turns foreign commands into skills
+	 * instead), so this is normally empty and read only if the directory appears.
+	 */
+	prompts: RawCommands;
+	/** ~/.codex/rules/*.rules — the user's own execpolicy decisions. */
+	execpolicy: RawRuleFile[];
+	/** ~/.codex/hooks.json — reported by name, never opened. */
+	hooksPresent: boolean;
+	/** Definition files under ~/.codex/agents that are not markdown — counted, never parsed. */
+	agentTomlCount: number;
 	present: boolean;
 }
 
@@ -169,21 +252,145 @@ function readText(path: string): string | null {
 	}
 }
 
-/** Skill directories, each contributing its SKILL.md. */
+/** Directories inside a skill that hold somebody else's files, not the skill's. */
+const SKILL_EXCLUDED_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv"]);
+
+/** Largest supporting file worth carrying; a skill is prose, not an asset store. */
+const MAX_ATTACHMENT_BYTES = 256 * 1024;
+
+/** Most supporting files one skill may bring along. */
+const MAX_ATTACHMENTS = 200;
+
+/**
+ * The files beside a skill's `SKILL.md`, as attachments.
+ *
+ * A skill is a directory, not a document: its body points at `references/*.md`,
+ * `scripts/`, and so on, and copying only the `SKILL.md` leaves those pointers
+ * dangling. Text files are carried; binaries and anything oversized are counted
+ * and named in the report instead of written, because the writer is text-only
+ * and a silent truncation would be worse than an explanation.
+ */
+function readAttachments(skillDir: string): Pick<RawFile, "attachments" | "attachmentSkips"> {
+	const attachments: RawAttachment[] = [];
+	const attachmentSkips: Array<{ relativePath: string; reason: string }> = [];
+	const walk = (dir: string, prefix: string): void => {
+		let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+			if (attachments.length >= MAX_ATTACHMENTS) {
+				attachmentSkips.push({ relativePath, reason: `more than ${MAX_ATTACHMENTS} files` });
+				continue;
+			}
+			const full = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				if (SKILL_EXCLUDED_DIRS.has(entry.name)) {
+					attachmentSkips.push({ relativePath, reason: "not part of the skill (dependencies or VCS data)" });
+					continue;
+				}
+				walk(full, relativePath);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			if (entry.name === "SKILL.md" && prefix === "") continue;
+			let bytes: Buffer;
+			try {
+				bytes = readFileSync(full);
+			} catch {
+				attachmentSkips.push({ relativePath, reason: "unreadable" });
+				continue;
+			}
+			if (bytes.length > MAX_ATTACHMENT_BYTES) {
+				attachmentSkips.push({ relativePath, reason: `larger than ${Math.round(MAX_ATTACHMENT_BYTES / 1024)} KB` });
+				continue;
+			}
+			if (bytes.includes(0)) {
+				attachmentSkips.push({ relativePath, reason: "binary file" });
+				continue;
+			}
+			attachments.push({ relativePath, content: bytes.toString("utf8") });
+		}
+	};
+	walk(skillDir, "");
+	return { attachments, attachmentSkips };
+}
+
+/** Skill directories, each contributing its SKILL.md and the files beside it. */
 function readSkillDirs(skillsRoot: string): RawFile[] {
 	const out: RawFile[] = [];
 	try {
 		if (!existsSync(skillsRoot)) return out;
 		for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
 			if (!entry.isDirectory()) continue;
-			const path = join(skillsRoot, entry.name, "SKILL.md");
-			const content = readText(path);
-			if (content !== null) out.push({ name: entry.name, sourcePath: path, content });
+			const skillDir = join(skillsRoot, entry.name);
+			const content = readText(join(skillDir, "SKILL.md"));
+			if (content === null) continue;
+			const { attachments, attachmentSkips } = readAttachments(skillDir);
+			out.push({ name: entry.name, sourcePath: join(skillDir, "SKILL.md"), content, attachments, attachmentSkips });
 		}
 	} catch {
 		// unreadable skills dir — contributes nothing
 	}
 	return out;
+}
+
+/** Longest skill name to derive from a command file's path. */
+const MAX_COMMAND_NAME = 64;
+
+/**
+ * Slash-command markdown files, read recursively.
+ *
+ * Unlike a rules or agents directory, a commands tree mirrors how the source
+ * tool namespaced its commands: `fix/bugs.md` is a different command from
+ * `fix.md`, and the two files may say different things. The nesting is
+ * flattened into the name (`fix-bugs`) because a skill here is one directory
+ * per name, and a collision would be reported as one skill having been kept.
+ */
+function readCommandFiles(root: string): RawCommands {
+	const files: RawFile[] = [];
+	const skips: Array<{ path: string; reason: string }> = [];
+	const walk = (dir: string, prefix: string): void => {
+		let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+			if (entry.isDirectory()) {
+				if (SKILL_EXCLUDED_DIRS.has(entry.name)) continue;
+				walk(join(dir, entry.name), relativePath);
+				continue;
+			}
+			if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".md")) continue;
+			if (entry.name.toLowerCase() === "readme.md") {
+				skips.push({ path: relativePath, reason: "a README, not a command" });
+				continue;
+			}
+			const name = relativePath.slice(0, -3).split("/").join("-");
+			if (name === "") {
+				skips.push({ path: relativePath, reason: "no usable name" });
+				continue;
+			}
+			if (name.length > MAX_COMMAND_NAME) {
+				skips.push({ path: relativePath, reason: `name would be longer than ${MAX_COMMAND_NAME} characters` });
+				continue;
+			}
+			const content = readText(join(dir, entry.name));
+			if (content === null) {
+				skips.push({ path: relativePath, reason: "unreadable" });
+				continue;
+			}
+			files.push({ name, sourcePath: join(dir, entry.name), content });
+		}
+	};
+	walk(root, "");
+	return { files, skips };
 }
 
 function readMarkdownDir(dir: string): RawFile[] {
@@ -228,6 +435,7 @@ export function readClaudeCode(home: string): RawClaudeCode {
 		skills: readSkillDirs(join(root, "skills")),
 		rules: readMarkdownDir(join(root, "rules")),
 		agents: readAgentFiles(join(root, "agents")),
+		commands: readCommandFiles(join(root, "commands")),
 		present: existsSync(root),
 	};
 }
@@ -249,8 +457,45 @@ export function readCodex(home: string): RawCodex {
 		memory: readText(join(root, "AGENTS.md")),
 		skills: readSkillDirs(join(root, "skills")),
 		agents: readAgentFiles(join(root, "agents")),
+		prompts: readCommandFiles(join(root, "prompts")),
+		execpolicy: readRuleFiles(join(root, "rules")),
+		hooksPresent: existsSync(join(root, "hooks.json")),
+		agentTomlCount: countFilesWithExtension(join(root, "agents"), ".toml"),
 		present: existsSync(root),
 	};
+}
+
+/**
+ * `~/.codex/rules/*.rules` — the execpolicy files, read as text.
+ *
+ * These hold decisions the user made by hand about what may run (`prefix_rule`)
+ * and are the closest thing Codex has to this build's permission rules, so they
+ * are worth reading. Parsing them is left to the planner: a `.rules` file is
+ * Starlark, and the planner is where the "cannot express this" decisions belong.
+ */
+function readRuleFiles(dir: string): RawRuleFile[] {
+	const out: RawRuleFile[] = [];
+	try {
+		if (!existsSync(dir)) return out;
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			if (!entry.isFile() || !entry.name.endsWith(".rules")) continue;
+			const content = readText(join(dir, entry.name));
+			if (content !== null) out.push({ name: entry.name, content });
+		}
+	} catch {
+		// unreadable rules directory — contributes nothing
+	}
+	return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Files directly under `dir` with the given extension; unreadable counts as none. */
+function countFilesWithExtension(dir: string, extension: string): number {
+	try {
+		if (!existsSync(dir)) return 0;
+		return readdirSync(dir).filter((name) => name.endsWith(extension)).length;
+	} catch {
+		return 0;
+	}
 }
 
 export function readZcode(home: string): RawZcode {
@@ -310,13 +555,7 @@ function countPluginDirs(root: string): number {
  * the importer treats them as a source it may name and must not open.
  */
 function countRolloutLogs(root: string): number {
-	try {
-		const dir = join(root, "rollout");
-		if (!existsSync(dir)) return 0;
-		return readdirSync(dir).filter((name) => name.endsWith(".jsonl")).length;
-	} catch {
-		return 0;
-	}
+	return countFilesWithExtension(join(root, "rollout"), ".jsonl");
 }
 
 export function readSources(home: string): RawSources {
@@ -359,7 +598,7 @@ export interface MigrationItem {
 /** File writes the plan would perform, keyed by absolute target path. */
 export interface PlannedWrite {
 	path: string;
-	kind: "settings" | "mcp" | "skill" | "rule" | "memory" | "agent" | "history";
+	kind: "settings" | "mcp" | "skill" | "rule" | "memory" | "agent" | "history" | "prompt-history";
 	/** Full file content to write. */
 	content: string;
 	/** True when `content` embeds a credential. */
@@ -384,6 +623,7 @@ const KIND_CATEGORY: Record<PlannedWrite["kind"], MigrationCategory> = {
 	memory: "assets",
 	agent: "assets",
 	history: "history",
+	"prompt-history": "history",
 };
 
 export function categoryOfKind(kind: PlannedWrite["kind"]): MigrationCategory {
@@ -414,6 +654,12 @@ export interface PlanOptions {
 	 * expensive to redo, so they are read once and handed over.
 	 */
 	history?: HistoryImport;
+	/**
+	 * Prompts to merge into `~/.labunbun/history.jsonl`, produced by the reading
+	 * phase for the same reason the sessions are: the target is read during
+	 * planning, the sources are not.
+	 */
+	promptHistory?: PromptHistoryImport;
 	/** Why `history` is empty, when the user turned history import off. */
 	historyScope?: HistoryScope;
 }
@@ -461,6 +707,23 @@ export function resolveModelReference(value: string): string | undefined {
 
 /** Keys in the source state file that are telemetry or runtime bookkeeping. */
 const STATE_TELEMETRY_KEYS = new Set(["projects", "tipsHistory", "promptQueueUseCount", "cachedChangelog"]);
+
+/**
+ * Keys of `~/.claude/settings.json` that either get imported or get a note of
+ * their own. Anything else is named by the closing aggregate item.
+ */
+const CLAUDE_SETTINGS_HANDLED = new Set([
+	"env",
+	"model",
+	"permissions",
+	"hooks",
+	"fallbackModel",
+	"effortLevel",
+	"enabledPlugins",
+]);
+
+/** Keys of `~/.claude.json` that are accounted for above; the rest is state. */
+const CLAUDE_STATE_HANDLED = new Set(["env", "model", "mcpServers", ...STATE_TELEMETRY_KEYS]);
 
 function targetSettingsPath(home: string): string {
 	return join(home, ".labunbun", "settings.json");
@@ -522,8 +785,8 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 	/** Claim a scalar settings key, respecting an existing value unless forced. */
 	const claimScalar = (
 		source: MigrationSourceId,
-		key: "model" | "theme",
-		value: string,
+		key: ClaimableScalarKey,
+		value: ClaimedScalarValue,
 		from: string,
 		detail: string,
 	): void => {
@@ -534,13 +797,123 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				from,
 				to: "—",
 				action: "skip",
-				detail: `target already sets ${key} to "${String(current)}" — kept (use --force to overwrite)`,
+				// `JSON.stringify` quotes strings and renders lists and booleans as
+				// they would appear in the file — the user is being told what their
+				// own settings hold, so it should read like their settings.
+				detail: `target already sets ${key} to ${JSON.stringify(current)} — kept (use --force to overwrite)`,
 				containsSecret: false,
 			});
 			return;
 		}
 		settingsPatch[key] = value;
 		items.push({ source, from, to: `settings.json → ${key}`, action: "map", detail, containsSecret: false });
+	};
+
+	/**
+	 * Permission rules claimed across sources, written once at the end.
+	 *
+	 * Two sources can each have decided something about what may run unasked, and
+	 * a later source must add to what an earlier one claimed rather than replace
+	 * it — a rules list that silently loses half its entries is worse than one
+	 * that was never imported.
+	 */
+	const permissionRules: { allow: string[]; deny: string[]; additionalDirectories: string[] } = {
+		allow: [],
+		deny: [],
+		additionalDirectories: [],
+	};
+	let permissionsTouched = false;
+
+	/** Claim a whole permission list, respecting an existing one unless forced. */
+	const claimPermissionList = (
+		source: MigrationSourceId,
+		behavior: "allow" | "deny" | "additionalDirectories",
+		rules: string[],
+		from: string,
+		detail: string,
+	): void => {
+		// A rule the target cannot parse is not a rule. Dropping it in silence is
+		// how a deny rule disappears from a migration report.
+		const unique = [...new Set(rules)];
+		const usable =
+			behavior === "additionalDirectories" ? unique : unique.filter((rule) => parseRuleText(rule) !== null);
+		if (usable.length < rules.length) {
+			items.push({
+				source,
+				from,
+				to: "—",
+				action: "skip",
+				detail: `${rules.length - usable.length} of ${rules.length} rule(s) are not in the \`Tool(specifier)\` form this build parses — written by hand would mean written to no effect`,
+				containsSecret: false,
+			});
+		}
+		if (usable.length === 0) return;
+		const current = existing.permissions?.[behavior];
+		// An empty list at the target is not a decision to protect: nothing is
+		// lost by filling it in.
+		if (current !== undefined && current.length > 0 && !force) {
+			items.push({
+				source,
+				from,
+				to: "—",
+				action: "skip",
+				detail: `target already defines permissions.${behavior} — kept (use --force to overwrite)`,
+				containsSecret: false,
+			});
+			return;
+		}
+		permissionRules[behavior] = usable;
+		permissionsTouched = true;
+		items.push({
+			source,
+			from,
+			to: `settings.json → permissions.${behavior}`,
+			action: "map",
+			detail,
+			containsSecret: false,
+		});
+	};
+
+	/** Add rules beside whatever is already claimed. Adding a rule never removes one. */
+	const addPermissionRules = (
+		source: MigrationSourceId,
+		behavior: "allow" | "deny",
+		rules: string[],
+		from: string,
+		caveat: string,
+	): void => {
+		const present = new Set([...(existing.permissions?.[behavior] ?? []), ...permissionRules[behavior]]);
+		const unique = [...new Set(rules)];
+		const added = unique.filter((rule) => !present.has(rule));
+		if (added.length === 0) {
+			items.push({
+				source,
+				from,
+				to: "—",
+				action: "skip",
+				detail: `${unique.length === 1 ? "the rule is" : `all ${unique.length} rules are`} already defined here — nothing to add`,
+				containsSecret: false,
+			});
+			return;
+		}
+		// The accumulator holds the whole list this migration would leave behind,
+		// not just the new part: it is written as one value at the end, and a list
+		// missing the user's own rules would drop them on the way through.
+		permissionRules[behavior] = [
+			...new Set([...(existing.permissions?.[behavior] ?? []), ...permissionRules[behavior], ...added]),
+		];
+		permissionsTouched = true;
+		const already = unique.length - added.length;
+		items.push({
+			source,
+			from,
+			to: `settings.json → permissions.${behavior}`,
+			action: "map",
+			detail:
+				`${added.length} rule(s) added${already > 0 ? `, ${already} already present` : ""}; ${caveat}` +
+				" — review them with /permissions",
+			containsSecret: false,
+		});
 	};
 
 	/** Claim one env var, respecting an existing value unless forced. */
@@ -578,6 +951,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				items,
 				claimEnv,
 				claimScalar,
+				claimPermissionList,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
@@ -619,11 +993,27 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				writes,
 				raw.home,
 			);
+			planCommands("claude-code", raw.claudeCode.commands, "~/.claude/commands", raw.home, force, items, writes);
 		}
 	}
 
 	if (only.includes("codex") && raw.codex.present) {
-		if (wants("settings")) planCodex(raw.codex, items, claimScalar, settingsPatch, existing, force);
+		if (wants("settings")) {
+			planCodex(
+				raw.codex,
+				items,
+				claimScalar,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				settingsPatch,
+				existing,
+				existingMcpServers,
+				force,
+			);
+			planCodexRules(raw.codex, items, addPermissionRules);
+		}
 		if (wants("assets")) {
 			collectFileWrites(
 				"codex",
@@ -645,6 +1035,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				writes,
 				raw.home,
 			);
+			planCommands("codex", raw.codex.prompts, "~/.codex/prompts", raw.home, force, items, writes);
 			if (raw.codex.memory?.trim()) {
 				planMemoryAsRule(
 					"codex",
@@ -698,8 +1089,26 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 	if (wants("history") && options.history) {
 		planHistory(raw.home, options.history, only, items, writes, force);
 	}
+	if (wants("history") && options.promptHistory && options.historyScope !== "none") {
+		planPromptHistory(raw.home, options.promptHistory, only, items, writes);
+	}
 
 	if (Object.keys(env).length > 0) settingsPatch.env = env;
+
+	// Permission rules are written once, from every source that contributed. The
+	// lists the target already had are carried in as well, so this cannot drop a
+	// rule through a shallow merge whatever the claimed lists happen to hold.
+	if (permissionsTouched) {
+		const merged = {
+			allow: [...(existing.permissions?.allow ?? [])],
+			deny: [...(existing.permissions?.deny ?? [])],
+			additionalDirectories: [...(existing.permissions?.additionalDirectories ?? [])],
+		};
+		for (const behavior of ["allow", "deny", "additionalDirectories"] as const) {
+			if (permissionRules[behavior].length > 0) merged[behavior] = permissionRules[behavior];
+		}
+		settingsPatch.permissions = merged;
+	}
 
 	if (Object.keys(settingsPatch).length > 0) {
 		const merged = mergeSettings(existing as Record<string, unknown>, settingsPatch);
@@ -726,10 +1135,578 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 }
 
 type ClaimEnv = (source: MigrationSourceId, name: string, value: string, from: string) => void;
+
+/**
+ * Settings keys a source may claim outright, and the value shapes they carry.
+ * Widening this list is cheap; claiming a key that the merge cannot undo is not,
+ * which is why permission rules take the accumulating path instead.
+ */
+export type ClaimableScalarKey =
+	| "model"
+	| "theme"
+	| "permissionMode"
+	| "fallbackModels"
+	| "disableBypassPermissionsMode";
+
+export type ClaimedScalarValue = string | string[] | boolean;
+
+/**
+ * Claude Code's `permissions.defaultMode` → this build's permission mode.
+ *
+ * `manual` is an older spelling of `default`. `auto` is deliberately absent: it
+ * means a classifier decides, and the nearest mode here (`dontAsk`) means the
+ * opposite — anything not explicitly allowed is denied — so carrying it over
+ * under a different name would be a lie about what the session will do.
+ */
+const CLAUDE_PERMISSION_MODES: Record<string, string> = {
+	default: "default",
+	manual: "default",
+	plan: "plan",
+	acceptEdits: "acceptEdits",
+	bypassPermissions: "bypassPermissions",
+};
+
+/**
+ * Characters that make a hook matcher mean something different in each tool.
+ *
+ * `matchesPattern` in `hooks.ts` treats `*` as the only wildcard and escapes
+ * every other pattern character, so a source matcher written as a regular
+ * expression (`mcp__.*__delete.*`) imports as a literal that can never match.
+ * Keeping this list equal to the escape list there is what makes the check
+ * honest — a character escaped there but not here would be a silent miss.
+ */
+const HOOK_MATCHER_METACHARACTERS = /[.+^${}()|[\]\\]/;
+
+/** A matcher name this build can reproduce: tool names, MCP ids, and `*`. */
+const HOOK_MATCHER_NAME = /^[A-Za-z0-9_:*-]+$/;
+
+/** One entry of the target's hook config. */
+export interface NormalizedHookEntry {
+	matcher?: string;
+	hooks: Array<{ type: "command"; command: string; timeout?: number }>;
+}
+
+/** What survived hook normalization, and what did not. */
+export interface NormalizedHooks {
+	/** Event name → entries that will run. Events with nothing runnable are absent. */
+	config: Record<string, NormalizedHookEntry[]>;
+	/** Source event names this build has no event for; hooks under them never fire. */
+	droppedEvents: string[];
+	/** Handlers dropped because their `type` is not a shell command (e.g. `prompt`). */
+	droppedHandlers: number;
+	/** Matchers dropped because this build would escape their pattern characters. */
+	droppedMatchers: string[];
+	/** Alternation matchers (`A|B`) split into one entry per name. */
+	splitMatchers: string[];
+	/** Handlers that carried no usable command, or entries that were not objects. */
+	malformed: number;
+}
+
+/** One handler in the target's shape, or nothing plus a count of why not. */
+function normalizeClaudeHandler(handler: unknown, counts: NormalizedHooks): NormalizedHookEntry["hooks"] {
+	if (!isRecord(handler)) {
+		counts.malformed += 1;
+		return [];
+	}
+	if ((handler.type ?? "command") !== "command") {
+		counts.droppedHandlers += 1;
+		return [];
+	}
+	if (typeof handler.command !== "string" || handler.command.trim() === "") {
+		counts.malformed += 1;
+		return [];
+	}
+	const timeout = handler.timeout;
+	const usableTimeout =
+		typeof timeout === "number" && Number.isInteger(timeout) && timeout > 0 && timeout <= 600_000 ? timeout : undefined;
+	return [
+		usableTimeout === undefined
+			? { type: "command", command: handler.command }
+			: { type: "command", command: handler.command, timeout: usableTimeout },
+	];
+}
+
+/**
+ * Rewrite source hooks as the target's hook config.
+ *
+ * The two shapes look alike enough that copying the block reads as faithful and
+ * is not: the target runs a fixed set of events, only shell-command handlers,
+ * and a matcher where `*` is the only wildcard. Counting each difference here
+ * lets the report say what did not come across, rather than writing a hook that
+ * never fires.
+ */
+export function normalizeClaudeHooks(raw: unknown): NormalizedHooks {
+	const result: NormalizedHooks = {
+		config: {},
+		droppedEvents: [],
+		droppedHandlers: 0,
+		droppedMatchers: [],
+		splitMatchers: [],
+		malformed: 0,
+	};
+	if (!isRecord(raw)) {
+		if (raw !== undefined) result.malformed += 1;
+		return result;
+	}
+	for (const [event, entries] of Object.entries(raw)) {
+		if (!HOOK_EVENTS.includes(event as HookEventName)) {
+			result.droppedEvents.push(event);
+			continue;
+		}
+		if (!Array.isArray(entries)) {
+			result.malformed += 1;
+			continue;
+		}
+		const kept: NormalizedHookEntry[] = [];
+		for (const entry of entries) {
+			if (!isRecord(entry) || !Array.isArray(entry.hooks)) {
+				result.malformed += 1;
+				continue;
+			}
+			const hooks = entry.hooks.flatMap((handler) => normalizeClaudeHandler(handler, result));
+			if (hooks.length === 0) continue;
+			const matcher = typeof entry.matcher === "string" ? entry.matcher.trim() : "";
+			if (matcher === "") {
+				kept.push({ hooks });
+				continue;
+			}
+			// `A|B` is an alternation in the source and a literal here — `|` is one
+			// of the characters `matchesPattern` escapes — so the source matcher
+			// would import as one that can never match. One entry per name is what
+			// it meant, and it is not a widening: those are the tools it named.
+			const parts = matcher.split("|");
+			if (parts.length > 1) {
+				if (!parts.every((part) => HOOK_MATCHER_NAME.test(part))) {
+					// An alternation with something in it this build cannot express;
+					// splitting it would guess at what the source meant.
+					result.droppedMatchers.push(matcher);
+					continue;
+				}
+				result.splitMatchers.push(matcher);
+				for (const part of parts) kept.push({ matcher: part, hooks });
+				continue;
+			}
+			if (HOOK_MATCHER_METACHARACTERS.test(matcher)) {
+				result.droppedMatchers.push(matcher);
+				continue;
+			}
+			kept.push({ matcher, hooks });
+		}
+		if (kept.length > 0) result.config[event] = kept;
+	}
+	return result;
+}
+
+type AddPermissionRules = (
+	source: MigrationSourceId,
+	behavior: "allow" | "deny",
+	rules: string[],
+	from: string,
+	caveat: string,
+) => void;
+
+/** A `name(args)` call in a `.rules` file, with its arguments as text. */
+interface RuleCall {
+	name: string;
+	args: Record<string, string | string[]>;
+}
+
+/** Index just past the string literal starting at `start`, or past the end. */
+function skipString(text: string, start: number): number {
+	const quote = text[start];
+	let index = start + 1;
+	while (index < text.length) {
+		if (text[index] === "\\") index += 2;
+		else if (text[index] === quote) return index + 1;
+		else index += 1;
+	}
+	return text.length;
+}
+
+/** Index of the `)` matching the `(` at `open`, or -1 when the call is unterminated. */
+function matchParen(text: string, open: number): number {
+	let depth = 0;
+	let index = open;
+	while (index < text.length) {
+		const char = text[index];
+		if (char === "#") {
+			const lineEnd = text.indexOf("\n", index);
+			index = lineEnd === -1 ? text.length : lineEnd + 1;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			index = skipString(text, index);
+			continue;
+		}
+		if (char === "(") depth += 1;
+		else if (char === ")") {
+			depth -= 1;
+			if (depth === 0) return index;
+		}
+		index += 1;
+	}
+	return -1;
+}
+
+function unquote(literal: string): string {
+	return literal.slice(1, -1).replace(/\\(.)/g, "$1");
+}
+
+/** `key = value` pairs inside a call body; values stay strings or string lists. */
+function parseRuleArgs(body: string): Record<string, string | string[]> {
+	const args: Record<string, string | string[]> = {};
+	const pair = /([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\[[\s\S]*?\]|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g;
+	for (const match of body.matchAll(pair)) {
+		const value = match[2];
+		args[match[1]] = value.startsWith("[")
+			? [...value.matchAll(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g)].map((item) => unquote(item[0]))
+			: unquote(value);
+	}
+	return args;
+}
+
+/**
+ * The `name(...)` calls in a `.rules` file, in order.
+ *
+ * A `.rules` file is Starlark, and this is not a Starlark interpreter: it finds
+ * calls, steps over string literals (so a `)` inside a pattern does not end the
+ * call early) and comments, and reads `key = value` pairs. Whatever it cannot
+ * follow is counted rather than guessed at, and the count reaches the report.
+ */
+function ruleCalls(content: string): { calls: RuleCall[]; unparsed: number } {
+	const calls: RuleCall[] = [];
+	let unparsed = 0;
+	let index = 0;
+	while (index < content.length) {
+		const char = content[index];
+		if (char === "#") {
+			const lineEnd = content.indexOf("\n", index);
+			index = lineEnd === -1 ? content.length : lineEnd + 1;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			index = skipString(content, index);
+			continue;
+		}
+		if (!/[A-Za-z_]/.test(char)) {
+			index += 1;
+			continue;
+		}
+		const start = index;
+		while (index < content.length && /[A-Za-z0-9_]/.test(content[index])) index += 1;
+		const name = content.slice(start, index);
+		while (index < content.length && /\s/.test(content[index])) index += 1;
+		if (content[index] !== "(") continue;
+		const end = matchParen(content, index);
+		if (end === -1) {
+			unparsed += 1;
+			break;
+		}
+		calls.push({ name, args: parseRuleArgs(content.slice(index + 1, end)) });
+		index = end + 1;
+	}
+	return { calls, unparsed };
+}
+
+/**
+ * `prefix_rule` pattern → a `Bash(...)` rule for this build.
+ *
+ * Codex matches the pattern against the parsed argv, token by token; this build
+ * matches a rule against the command line as text, so the tokens are joined and a
+ * trailing `*` lets the arguments match. A token holding a character that means
+ * something else here (`*`, `?`, parentheses) is refused rather than translated:
+ * widening a permission rule is not something an importer should do quietly.
+ */
+function codexPatternToSpecifier(tokens: string[]): { specifier: string } | { reason: string } {
+	if (tokens.length === 0) return { reason: "its pattern is empty" };
+	for (const token of tokens) {
+		if (/[*?()[\]]/.test(token)) {
+			// Quoted back truncated: a pattern is whatever the user typed there, and
+			// the report ends up in a transcript, so only its head travels.
+			const shown = token.length > 80 ? `${token.slice(0, 80)}…` : token;
+			return { reason: `its pattern token "${shown}" means something else in this build's rule syntax` };
+		}
+	}
+	// The `*` is glued to the last token so the command matches with and without
+	// arguments, the way a prefix match does.
+	return { specifier: `Bash(${tokens.join(" ")}*)` };
+}
+
+/**
+ * Carry `prefix_rule` decisions over as permission rules.
+ *
+ * The source's allow means "run it without a prompt inside a sandbox that still
+ * confines it"; an allow rule here is the whole gate, which is why the report
+ * says so on every rule it adds. Rules are added, never replaced — the target's
+ * own rules and the other source's rules have to survive the import.
+ */
+function planCodexRules(raw: RawCodex, items: MigrationItem[], addPermissionRules: AddPermissionRules): void {
+	for (const file of raw.execpolicy) {
+		const { calls, unparsed } = ruleCalls(file.content);
+		const from = `~/.codex/rules/${file.name}`;
+		const allow: string[] = [];
+		const deny: string[] = [];
+		const skipped: string[] = [];
+		for (const call of calls) {
+			if (call.name !== "prefix_rule") {
+				skipped.push(`a ${call.name} rule — this build only has command rules`);
+				continue;
+			}
+			const pattern = call.args.pattern;
+			const tokens = Array.isArray(pattern) ? pattern : typeof pattern === "string" ? [pattern] : undefined;
+			if (tokens === undefined) {
+				skipped.push("a prefix_rule with no readable pattern");
+				continue;
+			}
+			const translated = codexPatternToSpecifier(tokens);
+			if ("reason" in translated) {
+				skipped.push(`a prefix_rule — ${translated.reason}`);
+				continue;
+			}
+			const decision = call.args.decision;
+			if (decision === "allow") allow.push(translated.specifier);
+			else if (decision === "forbidden" || decision === "deny") deny.push(translated.specifier);
+			else if (decision === "prompt") {
+				skipped.push(`${translated.specifier} — the source prompts before running it, and there is no ask tier here`);
+			} else if (decision === undefined) {
+				skipped.push(
+					`${translated.specifier} — no decision was given, which Codex reads as allow; nothing is allowed implicitly here`,
+				);
+			} else {
+				skipped.push(`${translated.specifier} — unknown decision "${String(decision)}"`);
+			}
+		}
+		if (unparsed > 0) skipped.push(`${unparsed} call(s) the reader could not follow`);
+
+		const caveat =
+			"an allowed command runs without a prompt and without Codex's sandbox, and the whole command line is matched, so a chained command that begins the same way matches too";
+		if (allow.length > 0) addPermissionRules("codex", "allow", allow, from, caveat);
+		if (deny.length > 0) {
+			addPermissionRules(
+				"codex",
+				"deny",
+				deny,
+				from,
+				"a denied command is refused here whether or not another rule allows it",
+			);
+		}
+		if (skipped.length > 0) {
+			items.push({
+				source: "codex",
+				from,
+				to: "—",
+				action: "skip",
+				detail: `${skipped.length} rule(s) not carried: ${summarizeNames(skipped, 3)}`,
+				containsSecret: false,
+			});
+		}
+	}
+}
+
+type ClaimPermissionList = (
+	source: MigrationSourceId,
+	behavior: "allow" | "deny" | "additionalDirectories",
+	rules: string[],
+	from: string,
+	detail: string,
+) => void;
+
+/**
+ * One line naming the keys that were neither imported nor explained.
+ *
+ * Silence is the one thing a migration report may not do: a key the user set is
+ * either carried across or named here, so the report cannot leave them
+ * wondering whether something went missing. Values are never printed — the
+ * names are the report, the contents are the user's own.
+ */
+function reportUnhandledKeys(
+	source: MigrationSourceId,
+	container: Record<string, unknown>,
+	handled: Set<string>,
+	from: string,
+	items: MigrationItem[],
+): void {
+	const unhandled = Object.keys(container).filter((key) => !handled.has(key));
+	if (unhandled.length === 0) return;
+	items.push({
+		source,
+		from: `${from} → ${summarizeNames(unhandled, 8)}`,
+		to: "—",
+		action: "skip",
+		detail: `${unhandled.length} key(s) this importer has no mapping for and no note about, so they were left where they are — copy over by hand whatever matters`,
+		containsSecret: false,
+	});
+}
+
+/** Map Claude Code's `permissions` block onto this build's, sub-key by sub-key. */
+function planClaudePermissions(
+	settings: Record<string, unknown>,
+	items: MigrationItem[],
+	claimScalar: ClaimScalar,
+	claimPermissionList: ClaimPermissionList,
+): void {
+	const permissions = isRecord(settings.permissions) ? settings.permissions : undefined;
+	if (!permissions) return;
+	const from = "~/.claude/settings.json → permissions";
+
+	const mode = typeof permissions.defaultMode === "string" ? permissions.defaultMode.trim() : "";
+	if (mode) {
+		const mapped = CLAUDE_PERMISSION_MODES[mode];
+		if (mapped) {
+			claimScalar("claude-code", "permissionMode", mapped, `${from}.defaultMode ("${mode}")`, `mapped to "${mapped}"`);
+		} else {
+			items.push({
+				source: "claude-code",
+				from: `${from}.defaultMode ("${mode}")`,
+				to: "—",
+				action: "skip",
+				detail:
+					mode === "auto"
+						? '"auto" has no equivalent here: it is a classifier that approves calls it judges safe, and the nearest mode, "dontAsk", does the opposite — anything not explicitly allowed is denied'
+						: "no permission mode here corresponds to this value — the session keeps the mode it would otherwise start in",
+				containsSecret: false,
+			});
+		}
+	}
+
+	// A rule list the target cannot parse is a list that would take effect
+	// silently as nothing; both lists go through the claimer, which says so.
+	for (const behavior of ["allow", "deny"] as const) {
+		const list = permissions[behavior];
+		if (!Array.isArray(list)) continue;
+		const rules = list.filter((rule): rule is string => typeof rule === "string" && rule.trim() !== "");
+		if (rules.length === 0) continue;
+		claimPermissionList(
+			"claude-code",
+			behavior,
+			rules,
+			`${from}.${behavior}`,
+			`${rules.length} rule(s) copied verbatim; a Bash rule matches the whole command line here, so a chained command counts as a match too`,
+		);
+	}
+
+	const dirs = permissions.additionalDirectories;
+	if (Array.isArray(dirs)) {
+		const paths = dirs.filter((dir): dir is string => typeof dir === "string" && dir.trim() !== "");
+		if (paths.length > 0) {
+			claimPermissionList(
+				"claude-code",
+				"additionalDirectories",
+				paths,
+				`${from}.additionalDirectories`,
+				`${paths.length} path(s) added to the directories this session may work in`,
+			);
+		}
+	}
+
+	const ask = permissions.ask;
+	if (Array.isArray(ask) && ask.length > 0) {
+		items.push({
+			source: "claude-code",
+			from: `${from}.ask`,
+			to: "—",
+			action: "skip",
+			detail: `${ask.length} rule(s) did not come across: there is no ask tier here, and a call that is neither denied nor allowed simply runs under the session's permission mode — move the ones you still want to be asked about into permissions.deny`,
+			containsSecret: false,
+		});
+	}
+
+	const lockdown = permissions.disableBypassPermissionsMode;
+	if (lockdown !== undefined) {
+		items.push({
+			source: "claude-code",
+			from: `${from}.disableBypassPermissionsMode`,
+			to: "—",
+			action: "downgrade",
+			detail: `not written to ~/.labunbun/settings.json: this key is honoured only from the policy tier, where the file being restricted cannot lift its own restriction — put "disableBypassPermissionsMode": ${JSON.stringify(lockdown)} in ~/.labunbun/managed-settings.json instead`,
+			containsSecret: false,
+		});
+	}
+}
+
+/** Map source hooks onto the target's hook config, reporting what cannot run. */
+function planClaudeHooks(
+	settings: Record<string, unknown>,
+	items: MigrationItem[],
+	settingsPatch: Record<string, unknown>,
+	existing: RawSettingsInput,
+	force: boolean,
+): void {
+	if (settings.hooks === undefined) return;
+	// An empty block is not a hook file with nothing runnable; it is nothing.
+	if (isRecord(settings.hooks) && Object.keys(settings.hooks).length === 0) return;
+	const from = "~/.claude/settings.json → hooks";
+	const normalized = normalizeClaudeHooks(settings.hooks);
+	const losses: string[] = [];
+	if (normalized.droppedEvents.length > 0) {
+		losses.push(
+			`${normalized.droppedEvents.length} event(s) with no hook here (${summarizeNames(normalized.droppedEvents)})`,
+		);
+	}
+	if (normalized.droppedHandlers > 0)
+		losses.push(`${normalized.droppedHandlers} handler(s) that are not shell commands`);
+	if (normalized.droppedMatchers.length > 0) {
+		losses.push(`${normalized.droppedMatchers.length} matcher(s) using pattern characters this build escapes`);
+	}
+	if (normalized.malformed > 0) losses.push(`${normalized.malformed} entr(ies) not in the hook shape`);
+
+	const events = Object.keys(normalized.config);
+	if (events.length === 0) {
+		items.push({
+			source: "claude-code",
+			from,
+			to: "—",
+			action: "skip",
+			detail:
+				losses.length > 0
+					? `nothing here would run: ${losses.join("; ")}`
+					: "no hook in this file has a command this build could run",
+			containsSecret: false,
+		});
+		return;
+	}
+	if (!HooksConfigSchema.safeParse(normalized.config).success) {
+		items.push({
+			source: "claude-code",
+			from,
+			to: "—",
+			action: "skip",
+			detail: "hooks are not in a shape this build accepts, even after rewriting",
+			containsSecret: false,
+		});
+		return;
+	}
+	if (existing.hooks !== undefined && !force) {
+		items.push({
+			source: "claude-code",
+			from,
+			to: "—",
+			action: "skip",
+			detail: "target already defines hooks — kept (use --force to overwrite)",
+			containsSecret: false,
+		});
+		return;
+	}
+	settingsPatch.hooks = normalized.config;
+	const entries = events.reduce((count, event) => count + normalized.config[event].length, 0);
+	const split =
+		normalized.splitMatchers.length > 0
+			? `; ${summarizeNames(normalized.splitMatchers)} written as A|B, split into one entry per name`
+			: "";
+	items.push({
+		source: "claude-code",
+		from,
+		to: "settings.json → hooks",
+		action: losses.length > 0 ? "downgrade" : "map",
+		detail: `${entries} matcher entr(ies) over ${events.length} event(s) rewritten${split}${losses.length > 0 ? `; not carried: ${losses.join("; ")}` : ""}`,
+		containsSecret: false,
+	});
+}
+
 type ClaimScalar = (
 	source: MigrationSourceId,
-	key: "model" | "theme",
-	value: string,
+	key: ClaimableScalarKey,
+	value: ClaimedScalarValue,
 	from: string,
 	detail: string,
 ) => void;
@@ -739,6 +1716,7 @@ function planClaudeCode(
 	items: MigrationItem[],
 	claimEnv: ClaimEnv,
 	claimScalar: ClaimScalar,
+	claimPermissionList: ClaimPermissionList,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
 	settingsPatch: Record<string, unknown>,
@@ -815,59 +1793,48 @@ function planClaudeCode(
 			const secret =
 				Object.keys(record.headers ?? {}).length > 0 ||
 				Object.keys(record.env ?? {}).some((key) => looksLikeSecretName(key));
+			const placeholder = placeholderNote(record as Record<string, unknown>);
 			mcpServers[name] = config;
 			markMcpSecret(secret);
+			const copied = secret ? "copied verbatim, including credential headers" : "copied verbatim";
 			items.push({
 				source: "claude-code",
 				from: `~/.claude.json → mcpServers.${name}`,
 				to: `.mcp.json → mcpServers.${name}`,
-				action: "map",
-				detail: secret ? "copied verbatim, including credential headers" : "copied verbatim",
+				action: placeholder ? "downgrade" : "map",
+				detail: placeholder ? `${copied} — ${placeholder}` : copied,
 				containsSecret: secret,
 			});
 		}
 	}
 
-	// permissions / hooks: same rule grammar and hook shape on both sides, so
-	// these carry over structurally when present.
-	for (const [key, label] of [
-		["permissions", "permissions"],
-		["hooks", "hooks"],
-	] as const) {
-		if (raw.settings[key] === undefined) continue;
-		const probe = SettingsSchema.safeParse({ [key]: raw.settings[key] });
-		if (!probe.success) {
+	// fallback model: the source names one, the target keeps a list.
+	const fallback = typeof raw.settings.fallbackModel === "string" ? raw.settings.fallbackModel : undefined;
+	if (fallback?.trim()) {
+		const resolved = resolveModelReference(fallback);
+		if (resolved) {
+			claimScalar(
+				"claude-code",
+				"fallbackModels",
+				[resolved],
+				`~/.claude/settings.json → fallbackModel ("${fallback}")`,
+				`resolved to ${resolved}`,
+			);
+		} else {
 			items.push({
 				source: "claude-code",
-				from: `~/.claude/settings.json → ${label}`,
+				from: `~/.claude/settings.json → fallbackModel ("${fallback}")`,
 				to: "—",
 				action: "skip",
-				detail: "shape not accepted by the settings schema",
+				detail:
+					"no model in the registry matches this name — set fallbackModels manually if you want it tried after the primary",
 				containsSecret: false,
 			});
-			continue;
 		}
-		if (existing[key] !== undefined && !force) {
-			items.push({
-				source: "claude-code",
-				from: `~/.claude/settings.json → ${label}`,
-				to: "—",
-				action: "skip",
-				detail: `target already defines ${label} — kept (use --force to overwrite)`,
-				containsSecret: false,
-			});
-			continue;
-		}
-		settingsPatch[key] = raw.settings[key];
-		items.push({
-			source: "claude-code",
-			from: `~/.claude/settings.json → ${label}`,
-			to: `settings.json → ${label}`,
-			action: "map",
-			detail: "same rule grammar on both sides",
-			containsSecret: false,
-		});
 	}
+
+	planClaudePermissions(raw.settings, items, claimScalar, claimPermissionList);
+	planClaudeHooks(raw.settings, items, settingsPatch, existing, force);
 
 	if (raw.settings.effortLevel !== undefined) {
 		items.push({
@@ -900,19 +1867,41 @@ function planClaudeCode(
 			containsSecret: false,
 		});
 	}
+
+	// Everything else, so that no key is absent from the report without saying
+	// so. One line per file, names only: the user's settings may hold values
+	// this importer has no business printing.
+	reportUnhandledKeys("claude-code", raw.settings, CLAUDE_SETTINGS_HANDLED, "~/.claude/settings.json", items);
+	reportUnhandledKeys("claude-code", raw.state, CLAUDE_STATE_HANDLED, "~/.claude.json", items);
 }
 
 function planCodex(
 	raw: RawCodex,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
+	mcpServers: Record<string, unknown>,
+	markMcpSecret: (hasSecret: boolean) => void,
 	settingsPatch: Record<string, unknown>,
 	existing: RawSettingsInput,
+	existingMcpServers: Record<string, unknown>,
 	force: boolean,
 ): void {
 	// Providers. `base_url` maps directly; the wire protocol may not.
 	const providers = raw.config.model_providers;
 	const openaiCompatible: Array<Record<string, unknown>> = [];
+	// `model` and `model_context_window` are top-level keys that describe the one
+	// model this machine is set up to run: with both present, the provider entry
+	// can carry the model instead of being written model-less and unusable.
+	const modelName =
+		typeof raw.config.model === "string" && raw.config.model.trim() ? raw.config.model.trim() : undefined;
+	const providerName =
+		typeof raw.config.model_provider === "string" && raw.config.model_provider.trim()
+			? raw.config.model_provider.trim()
+			: undefined;
+	const modelContextWindow =
+		typeof raw.config.model_context_window === "number" && raw.config.model_context_window > 0
+			? Math.floor(raw.config.model_context_window)
+			: undefined;
 	if (typeof providers === "object" && providers !== null && !Array.isArray(providers)) {
 		for (const [name, value] of Object.entries(providers as Record<string, unknown>)) {
 			if (typeof value !== "object" || value === null) continue;
@@ -929,10 +1918,30 @@ function planCodex(
 				});
 				continue;
 			}
-			const apiKeyEnv = `${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+			// The credential variable is named by the source, not guessed: `env_key`
+			// is the only place Codex records which variable holds the key. The
+			// synthesized fallback is for entries that expect no key at all.
+			const envKey = typeof spec.env_key === "string" && spec.env_key.trim() ? spec.env_key.trim() : undefined;
+			const apiKeyEnv = envKey ?? `${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+			// `requires_openai_auth` means ChatGPT sign-in rather than a key; telling
+			// the user to "set X_API_KEY" for such a provider sends them looking for
+			// a credential that the source never used.
+			const credentialNote =
+				spec.requires_openai_auth === true
+					? `the source reached it by signing in to an OpenAI account (requires_openai_auth), which this build ` +
+						`cannot do — export ${apiKeyEnv} with an API key to use this endpoint here`
+					: `set ${apiKeyEnv} in your environment${envKey ? " (the variable its env_key names)" : ""}`;
+			const models: Array<Record<string, unknown>> = [];
+			if (name === providerName && modelName && modelContextWindow !== undefined) {
+				models.push({
+					id: modelName,
+					contextWindow: modelContextWindow,
+					maxOutputTokens: ASSUMED_MAX_OUTPUT_TOKENS,
+				});
+			}
 			// A provider entry with no models is still worth writing: it records the
 			// endpoint and credential variable, and models can be added to it later.
-			openaiCompatible.push({ id: name, baseUrl, apiKeyEnv, models: [] });
+			openaiCompatible.push({ id: name, baseUrl, apiKeyEnv, models });
 			const wireApi = typeof spec.wire_api === "string" ? spec.wire_api : undefined;
 			if (wireApi && wireApi !== "chat" && wireApi !== "completions") {
 				items.push({
@@ -942,7 +1951,7 @@ function planCodex(
 					action: "downgrade",
 					detail:
 						`only the chat-completions and Anthropic messages protocols are supported, so this ` +
-						`provider is registered as chat-completions; set ${apiKeyEnv} in your environment`,
+						`provider is registered as chat-completions; ${credentialNote}`,
 					containsSecret: false,
 				});
 			} else {
@@ -951,7 +1960,19 @@ function planCodex(
 					from: `~/.codex/config.toml → model_providers.${name}`,
 					to: `settings.json → providers.openaiCompatible[${name}]`,
 					action: "map",
-					detail: `base_url carried over; set ${apiKeyEnv} in your environment`,
+					detail: `base_url carried over; ${credentialNote}`,
+					containsSecret: false,
+				});
+			}
+			if (isRecord(spec.http_headers)) {
+				items.push({
+					source: "codex",
+					from: `~/.codex/config.toml → model_providers.${name}.http_headers`,
+					to: "—",
+					action: "skip",
+					detail:
+						"a provider entry here carries an endpoint and a credential variable, not request headers — " +
+						"the gateway has to accept what this endpoint sends",
 					containsSecret: false,
 				});
 			}
@@ -969,22 +1990,145 @@ function planCodex(
 
 	// model: only meaningful if the registry (built-in or just-added provider)
 	// can resolve it. A provider-scoped id needs the provider prefix.
-	const model = raw.config.model;
-	if (typeof model === "string" && model.trim()) {
-		const provider = typeof raw.config.model_provider === "string" ? raw.config.model_provider : undefined;
-		const resolved = resolveModelReference(model);
-		if (resolved) {
-			claimScalar("codex", "model", resolved, `~/.codex/config.toml → model ("${model}")`, `resolved to ${resolved}`);
+	if (modelName) {
+		// Which providers actually made it into the patch — the target may already
+		// define one and keep its own definition, in which case the model entry
+		// written above is not there either.
+		const acceptedProviders = isRecord(settingsPatch.providers) ? settingsPatch.providers.openaiCompatible : undefined;
+		const providerAccepted =
+			providerName !== undefined &&
+			Array.isArray(acceptedProviders) &&
+			acceptedProviders.some((entry) => isRecord(entry) && entry.id === providerName);
+		if (providerAccepted && modelContextWindow !== undefined && providerName) {
+			const reference = `${providerName}/${modelName}`;
+			claimScalar(
+				"codex",
+				"model",
+				reference,
+				`~/.codex/config.toml → model ("${modelName}")`,
+				`registered under the "${providerName}" provider with the ${modelContextWindow}-token context window the source records — the protocol is spoken as chat-completions`,
+			);
 		} else {
+			const resolved = resolveModelReference(modelName);
+			if (resolved) {
+				claimScalar(
+					"codex",
+					"model",
+					resolved,
+					`~/.codex/config.toml → model ("${modelName}")`,
+					`resolved to ${resolved}`,
+				);
+			} else {
+				const providerKeptItsOwn =
+					providerName !== undefined && modelContextWindow !== undefined
+						? `the target already defines a "${providerName}" provider — add "${modelName}" to its models and set model to "${providerName}/${modelName}"`
+						: undefined;
+				items.push({
+					source: "codex",
+					from: `~/.codex/config.toml → model ("${modelName}")`,
+					to: "—",
+					action: "skip",
+					detail:
+						providerKeptItsOwn ??
+						(providerName
+							? `not in the registry — add it under providers.openaiCompatible[${providerName}].models, then set model to "${providerName}/${modelName}"`
+							: "no model in the registry matches this name — set a model reference manually"),
+					containsSecret: false,
+				});
+			}
+		}
+	}
+	if (raw.config.model_context_window !== undefined && modelContextWindow === undefined) {
+		items.push({
+			source: "codex",
+			from: "~/.codex/config.toml → model_context_window",
+			to: "—",
+			action: "skip",
+			detail: "not a positive number of tokens, so no model entry could be built from it",
+			containsSecret: false,
+		});
+	}
+	if (raw.config.model_auto_compact_token_limit !== undefined) {
+		items.push({
+			source: "codex",
+			from: "~/.codex/config.toml → model_auto_compact_token_limit",
+			to: "—",
+			action: "skip",
+			detail:
+				"no equivalent threshold — compaction starts at the context-window threshold here, and the model's " +
+				"context window is what decides it",
+			containsSecret: false,
+		});
+	}
+	if (raw.config.disable_response_storage !== undefined) {
+		items.push({
+			source: "codex",
+			from: "~/.codex/config.toml → disable_response_storage",
+			to: "—",
+			action: "skip",
+			detail: "server-side response storage is a request field of that API; nothing here sends it either way",
+			containsSecret: false,
+		});
+	}
+
+	// MCP servers. Codex keeps them in the same TOML file as the model settings,
+	// in a shape that maps onto ours except for the two ways it supplies a
+	// credential without storing one: `env_vars` names variables to forward from
+	// the shell, and `bearer_token_env_var` does the same for a header.
+	const servers = raw.config.mcp_servers;
+	if (isRecord(servers)) {
+		for (const [name, value] of Object.entries(servers)) {
+			const label = `~/.codex/config.toml → mcp_servers.${name}`;
+			if (!isRecord(value)) continue;
+			if (value.enabled === false) {
+				items.push({
+					source: "codex",
+					from: label,
+					to: "—",
+					action: "skip",
+					detail: "disabled in Codex",
+					containsSecret: false,
+				});
+				continue;
+			}
+			const normalized = normalizeCodexMcp(value);
+			if (normalized === null || !McpServerConfigSchema.safeParse(normalized.config).success) {
+				items.push({
+					source: "codex",
+					from: label,
+					to: "—",
+					action: "skip",
+					detail: "server definition does not match the supported stdio/http shapes",
+					containsSecret: false,
+				});
+				continue;
+			}
+			if (name in existingMcpServers && !force) {
+				items.push({
+					source: "codex",
+					from: label,
+					to: "—",
+					action: "skip",
+					detail: "target already defines a server with this name — kept (use --force to overwrite)",
+					containsSecret: false,
+				});
+				continue;
+			}
+			const secret =
+				Object.keys(isRecord(normalized.config.headers) ? normalized.config.headers : {}).length > 0 ||
+				Object.keys(isRecord(normalized.config.env) ? normalized.config.env : {}).some((key) =>
+					looksLikeSecretName(key),
+				);
+			mcpServers[name] = normalized.config;
+			markMcpSecret(secret);
+			const copied = secret ? "copied verbatim, including credential headers" : "copied verbatim";
 			items.push({
 				source: "codex",
-				from: `~/.codex/config.toml → model ("${model}")`,
-				to: "—",
-				action: "skip",
-				detail: provider
-					? `not in the registry — add it under providers.openaiCompatible[${provider}].models, then set model to "${provider}/${model}"`
-					: "no model in the registry matches this name — set a model reference manually",
-				containsSecret: false,
+				from: label,
+				to: `.mcp.json → mcpServers.${name}`,
+				action: normalized.downgrades.length > 0 ? "downgrade" : "map",
+				detail: normalized.downgrades.length > 0 ? `${copied} — ${normalized.downgrades.join("; ")}` : copied,
+				containsSecret: secret,
 			});
 		}
 	}
@@ -1031,6 +2175,149 @@ function planCodex(
 			containsSecret: false,
 		});
 	}
+	for (const [key, reason] of UNMIGRATED_CODEX_KEYS) {
+		if (raw.config[key] === undefined) continue;
+		items.push({
+			source: "codex",
+			from: `~/.codex/config.toml → ${key}`,
+			to: "—",
+			action: "skip",
+			detail: reason,
+			containsSecret: false,
+		});
+	}
+	if (raw.hooksPresent) {
+		items.push({
+			source: "codex",
+			from: "~/.codex/hooks.json",
+			to: "—",
+			action: "skip",
+			detail:
+				"event handlers in a shape this build does not read — hooks here are command hooks in " +
+				"settings.json → hooks, written by hand rather than translated",
+			containsSecret: false,
+		});
+	}
+	if (raw.agentTomlCount > 0) {
+		items.push({
+			source: "codex",
+			from: "~/.codex/agents/*.toml",
+			to: "—",
+			action: "skip",
+			detail: `${raw.agentTomlCount} agent definition(s) in Codex's TOML shape; agents here are markdown files with frontmatter`,
+			containsSecret: false,
+		});
+	}
+}
+
+/**
+ * Codex configuration this importer reports but does not carry.
+ *
+ * Each names something a user could have set and then gone looking for after the
+ * migration. `[projects]`, `[windows]` and `[tui]` are reported by their own code
+ * above because their wording is pinned by tests; these are the rest.
+ */
+const UNMIGRATED_CODEX_KEYS: Array<[key: string, reason: string]> = [
+	[
+		"notify",
+		"an external program Codex runs on events; the equivalent here is a command hook " +
+			"(settings.json → hooks), which is not derived from this argv",
+	],
+	["history", "Codex's own transcript-persistence settings; prompt history here is one file with its own limit"],
+	[
+		"shell_environment_policy",
+		"controls what Codex's child processes inherit; settings env injects variables into this process " +
+			"instead, which is a different thing",
+	],
+	["profiles", "named overlays selected with --profile; there is no profile switch here"],
+	["features", "feature flags for Codex's own runtime"],
+	["agents", "per-agent overrides for Codex's built-in agents"],
+	["oss_provider", "which provider Codex's local OSS model would use"],
+];
+
+/**
+ * Rewrite one Codex `[mcp_servers.<name>]` entry into labunbun's config shape.
+ *
+ * The differences are all about credentials Codex does not store: `env_vars` and
+ * `bearer_token_env_var` name variables in the user's shell environment rather
+ * than holding values. The importer copies the server and says which variables
+ * it used to read — it will not read them itself, and inventing an empty value
+ * would turn a working server into one that fails at connect time.
+ *
+ * Returns `null` when the entry is neither of the two shapes that can be
+ * carried over; the caller reports that as a skip.
+ */
+/**
+ * `${VAR}` names used in the values of an env or header block.
+ *
+ * The target's MCP client does not expand variables (`packages/mcp` has no such
+ * step), so a copied value that says `${TOKEN}` stays the literal text — a
+ * server that would have authenticated does not. Names only: whatever else is in
+ * the value is the user's.
+ */
+function placeholderNames(config: unknown): string[] {
+	const names = new Set<string>();
+	if (!isRecord(config)) return [];
+	for (const value of Object.values(config)) {
+		if (typeof value !== "string") continue;
+		for (const match of value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) names.add(match[1]);
+	}
+	return [...names];
+}
+
+/** The reason a copied MCP config is a downgrade rather than a plain copy. */
+function placeholderNote(config: Record<string, unknown>): string | undefined {
+	const names = [...placeholderNames(config.env), ...placeholderNames(config.headers)];
+	if (names.length === 0) return undefined;
+	return `${names.map((name) => `\${${name}}`).join(", ")} is not expanded here — replace it with the value itself`;
+}
+
+function normalizeCodexMcp(
+	entry: Record<string, unknown>,
+): { config: Record<string, unknown>; downgrades: string[] } | null {
+	const downgrades: string[] = [];
+	const url = typeof entry.url === "string" ? entry.url : undefined;
+	if (url) {
+		const out: Record<string, unknown> = { type: "http", url };
+		if (isRecord(entry.http_headers)) out.headers = entry.http_headers;
+		if (typeof entry.bearer_token_env_var === "string") {
+			downgrades.push(`its Authorization header came from $${entry.bearer_token_env_var}, which is not expanded here`);
+		}
+		if (isRecord(entry.env_http_headers)) {
+			const names = Object.values(entry.env_http_headers).filter((value) => typeof value === "string");
+			if (names.length > 0) {
+				downgrades.push(
+					`header values came from ${names.map((name) => `$${name}`).join(", ")}, which are not expanded here`,
+				);
+			}
+		}
+		const placeholder = placeholderNote(out);
+		if (placeholder) downgrades.push(placeholder);
+		return { config: out, downgrades };
+	}
+	const command = entry.command;
+	if (typeof command === "string" && command) {
+		const out: Record<string, unknown> = {
+			type: "stdio",
+			command,
+			args: Array.isArray(entry.args) ? entry.args.filter((arg): arg is string => typeof arg === "string") : [],
+		};
+		if (isRecord(entry.env)) out.env = entry.env;
+		if (typeof entry.cwd === "string") out.cwd = entry.cwd;
+		const forwarded = Array.isArray(entry.env_vars)
+			? entry.env_vars.filter((name): name is string => typeof name === "string")
+			: [];
+		if (forwarded.length > 0) {
+			downgrades.push(
+				`it expected ${summarizeNames(forwarded.map((name) => `$${name}`))} forwarded from your shell environment — ` +
+					"set them under env here if it needs them",
+			);
+		}
+		const placeholder = placeholderNote(out);
+		if (placeholder) downgrades.push(placeholder);
+		return { config: out, downgrades };
+	}
+	return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1497,6 +2784,82 @@ function planAssetTrees(
 	}
 }
 
+/** Command frontmatter keys that do nothing once the file is a skill here. */
+const UNHONORED_COMMAND_KEYS = ["allowed-tools", "model", "argument-hint"];
+
+/**
+ * Rewrite a source command file as a skill.
+ *
+ * The body is carried byte for byte — a command is prose the user wrote, and
+ * the only part that has to change is the header, which this build reads as a
+ * skill's `name`/`description`. Everything else the source understood is named
+ * in the report rather than copied into a file that looks like it honours it:
+ * `allowed-tools` and `model` do nothing here, and `$1`-`$9` and inline shell
+ * expansion are never substituted.
+ */
+function commandAsSkill(file: RawFile): RawFile {
+	const { data, body } = parseFrontmatter(file.content);
+	const description = (data.description ?? "").replace(/\s+/g, " ").trim();
+	// A description spread over several lines — a YAML block scalar, say — is
+	// collapsed onto one: the reader here takes one line per key, and a header
+	// that splits its own value would come back as an empty description.
+	const header = [`name: ${file.name}`, ...(description ? [`description: ${description}`] : [])];
+	const unhonored = UNHONORED_COMMAND_KEYS.filter((key) => data[key] !== undefined);
+	return {
+		...file,
+		content: `---\n${header.join("\n")}\n---\n${body}`,
+		detail: [
+			"command imported as a skill: frontmatter rewritten to name/description",
+			description ? "" : "the source had no description, so none was written",
+			unhonored.length > 0 ? `${summarizeNames(unhonored)} is not honoured here` : "",
+			"$ARGUMENTS is substituted, $1..$9 and inline shell expansion are not",
+		]
+			.filter(Boolean)
+			.join("; "),
+	};
+}
+
+/**
+ * Command files become skills: a command is a named prompt, and a skill here is
+ * exactly that, so this is a rewrite of the header rather than a translation.
+ *
+ * Codex's own importer turns Claude Code commands into skills the same way,
+ * which is a sign the mapping is the intended one rather than merely the
+ * convenient one.
+ */
+function planCommands(
+	source: MigrationSourceId,
+	commands: RawCommands,
+	fromLabel: string,
+	home: string,
+	force: boolean,
+	items: MigrationItem[],
+	writes: PlannedWrite[],
+): void {
+	if (commands.skips.length > 0) {
+		items.push({
+			source,
+			from: fromLabel,
+			to: "—",
+			action: "skip",
+			detail: `${commands.skips.length} command file(s) not imported — ${summarizeNames(
+				commands.skips.map((skip) => `${skip.path} (${skip.reason})`),
+			)}`,
+			containsSecret: false,
+		});
+	}
+	collectFileWrites(
+		source,
+		commands.files.map(commandAsSkill),
+		(name) => join(home, ".labunbun", "skills", name, "SKILL.md"),
+		"skill",
+		force,
+		items,
+		writes,
+		home,
+	);
+}
+
 /**
  * An imported memory document becomes a rule file rather than `MEMORY.md`.
  *
@@ -1605,7 +2968,7 @@ function collectFileWrites(
 				from,
 				to: "—",
 				action: "skip",
-				detail: `another source already provides this ${kind} — kept the first one`,
+				detail: `this ${kind} is already being written by this run — kept the first one`,
 				containsSecret: false,
 			});
 			continue;
@@ -1622,15 +2985,176 @@ function collectFileWrites(
 			continue;
 		}
 		writes.push({ path, kind, content: file.content, containsSecret: false });
+		const attachments = collectAttachmentWrites(file, path, force, items, writes, home, source, kind);
 		items.push({
 			source,
 			from,
 			to: tildePath(home, path),
 			action: "map",
-			detail: file.detail ?? `${kind} copied verbatim`,
+			detail:
+				attachments.copied === 0
+					? (file.detail ?? `${kind} copied verbatim`)
+					: `${file.detail ?? `${kind} copied verbatim`}, with ${attachments.copied} supporting file(s)`,
 			containsSecret: false,
 		});
+		if (file.attachmentSkips?.length) {
+			// One line per file, whatever the mix of reasons: a skill with a dozen
+			// images should not turn the report into a directory listing.
+			items.push({
+				source,
+				from,
+				to: "—",
+				action: "skip",
+				detail: `${file.attachmentSkips.length} supporting file(s) not copied — ${summarizeNames(
+					file.attachmentSkips.map((skip) => `${skip.relativePath} (${skip.reason})`),
+				)}`,
+				containsSecret: false,
+			});
+		}
 	}
+}
+
+/**
+ * Queue the files that belong beside `file` (a skill's `references/`, say).
+ *
+ * They are written into the same directory as the file they arrived with, which
+ * is what keeps a skill's internal links pointing at something real after the
+ * move. A supporting file that is already at the target is kept rather than
+ * overwritten, for the same reason the main file is: the user may have edited
+ * it, and `--force` is how they say they did not.
+ */
+function collectAttachmentWrites(
+	file: RawFile,
+	mainPath: string,
+	force: boolean,
+	items: MigrationItem[],
+	writes: PlannedWrite[],
+	home: string,
+	source: MigrationSourceId,
+	kind: PlannedWrite["kind"],
+): { copied: number } {
+	if (!file.attachments?.length) return { copied: 0 };
+	const root = dirname(mainPath);
+	let copied = 0;
+	for (const attachment of file.attachments) {
+		const path = join(root, attachment.relativePath);
+		// Guarded rather than assumed: two entries resolving to one path would
+		// otherwise write twice, and the report would show one of them only.
+		if (writes.some((write) => write.path === path)) continue;
+		if (existsSync(path) && !force) {
+			items.push({
+				source,
+				from: tildePath(home, join(dirname(file.sourcePath), attachment.relativePath)),
+				to: "—",
+				action: "skip",
+				detail: `supporting ${kind} file already exists at the target — kept (use --force to overwrite)`,
+				containsSecret: false,
+			});
+			continue;
+		}
+		writes.push({ path, kind, content: attachment.content, containsSecret: false });
+		copied += 1;
+	}
+	return { copied };
+}
+
+/**
+ * Merge imported prompts into `~/.labunbun/history.jsonl`.
+ *
+ * Targets are read, not written, everywhere else in this file; this is the one
+ * path that rewrites a file the user is also writing to, since ↑ recall appends
+ * to it as they type. So the merge is a single whole-file write, the imported
+ * prompts go *before* the existing ones — the newest entries are what ↑ offers
+ * first, and those should be the ones typed here — and an entry already in the
+ * file is never written again. That last rule is also what makes a second run
+ * write nothing at all.
+ *
+ * There is no `--force`: the file is merged, never replaced, and the only thing
+ * forcing could do is duplicate prompts the user already has.
+ */
+function planPromptHistory(
+	home: string,
+	promptHistory: PromptHistoryImport,
+	only: MigrationSourceId[],
+	items: MigrationItem[],
+	writes: PlannedWrite[],
+): void {
+	const existing = readHistoryFile(home);
+	// Keyed by prompt *and* directory: recall is filtered by project, so a prompt
+	// typed in two projects is two entries, and the target may hold it in either.
+	const seen = new Set(existing.entries.map((entry) => promptKey(entry.text, entry.cwd)));
+	const accepted: PromptEntry[] = [];
+	for (const source of only) {
+		const input = promptHistory[source];
+		if (!input || input.seen === 0) continue;
+		const from = `${MIGRATION_SOURCE_LABELS[source]} prompt history`;
+		let taken = 0;
+		let already = 0;
+		for (const entry of input.entries) {
+			const key = promptKey(entry.text, entry.cwd);
+			if (seen.has(key)) {
+				already += 1;
+				continue;
+			}
+			seen.add(key);
+			accepted.push(entry);
+			taken += 1;
+		}
+		const loss = input.truncated
+			? "; the source file is larger than this reads, so only its newest end was considered"
+			: "";
+		if (taken > 0) {
+			items.push({
+				source,
+				from,
+				to: tildePath(home, historyFilePath(home)),
+				action: "map",
+				detail:
+					`${taken} prompt(s) added to the recall history${already > 0 ? `, ${already} already there` : ""}` +
+					` — ↑ offers them in the directory each was typed in${loss}`,
+				containsSecret: false,
+			});
+		} else if (already > 0) {
+			items.push({
+				source,
+				from,
+				to: "—",
+				action: "skip",
+				detail: `${already} prompt(s) already in the recall history — nothing to add`,
+				containsSecret: false,
+			});
+		}
+		for (const note of input.notes) {
+			items.push({
+				source,
+				from,
+				to: "—",
+				action: "skip",
+				detail: `${note.reason} — ${note.count} not imported`,
+				containsSecret: false,
+			});
+		}
+		if (input.overLimit > 0) {
+			items.push({
+				source,
+				from,
+				to: "—",
+				action: "skip",
+				detail: `${input.overLimit} older prompt(s) beyond the newest ones imported — the recall list is not a transcript`,
+				containsSecret: false,
+			});
+		}
+	}
+	if (accepted.length === 0) return;
+	accepted.sort((a, b) => a.timestamp - b.timestamp);
+	// Imported lines first, then the file's own lines exactly as they were.
+	const merged = [...accepted.map((entry) => JSON.stringify(entry)), ...existing.lines].join("\n");
+	writes.push({
+		path: historyFilePath(home),
+		kind: "prompt-history",
+		content: `${merged}\n`,
+		containsSecret: false,
+	});
 }
 
 /**
@@ -1819,6 +3343,8 @@ export interface RunMigrationOptions {
 	only?: string | MigrationCategory[];
 	/** Raw `--history-limit` value; the CLI passes its string through. */
 	historyLimit?: string | number;
+	/** Prompts to merge into the recall list; read from the sources when absent. */
+	promptHistory?: PromptHistoryImport;
 	/** Raw `--history-scope` value; defaults to the current project only. */
 	historyScope?: string;
 	/**
@@ -1926,6 +3452,33 @@ function readHistoryFor(
 	return history;
 }
 
+/**
+ * Read the prompts each source remembers, under the same scope as its sessions.
+ *
+ * The scope question is asked once per source and means "what of mine should
+ * come across" — a user who asked for this project's history did not ask for
+ * every prompt they have ever typed, and one who said no to history did not mean
+ * "except the recall list".
+ */
+function readPromptHistoryFor(
+	raw: RawSources,
+	only: MigrationSourceId[],
+	categories: MigrationCategory[],
+	options: { scope: HistoryScope; cwd: string },
+): PromptHistoryImport {
+	if (options.scope === "none" || !categories.includes("history")) return {};
+	const prompts: PromptHistoryImport = {};
+	for (const source of only) {
+		if (!historySourcePresent(raw, source)) continue;
+		prompts[source] = readPromptHistory(source, raw.home, {
+			cwd: options.cwd,
+			scope: options.scope,
+			limit: DEFAULT_PROMPT_HISTORY_LIMIT,
+		});
+	}
+	return prompts;
+}
+
 export function runMigration(options: RunMigrationOptions = {}): RunMigrationResult {
 	const home = options.home ?? homedir();
 	const only = parseFromOption(options.from, home);
@@ -1961,12 +3514,15 @@ export function runMigration(options: RunMigrationOptions = {}): RunMigrationRes
 			limit: historyLimit,
 			selected: options.historySelected,
 		});
+	const promptHistory =
+		options.promptHistory ?? readPromptHistoryFor(raw, only, categories, { scope: historyScope, cwd: process.cwd() });
 	const plan = planMigration(raw, existing, {
 		only,
 		force: options.force,
 		categories,
 		historyLimit,
 		history,
+		promptHistory,
 		historyScope,
 	});
 

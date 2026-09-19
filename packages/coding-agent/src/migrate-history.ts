@@ -14,7 +14,7 @@
  *   read…  — full conversion of the sessions the user actually chose
  */
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { type SessionEntry, sessionFilePath } from "@labunbun/agent";
 import {
@@ -143,13 +143,31 @@ export function repairToolPairing(messages: AgentMessage[]): { messages: AgentMe
 	return { messages: out, dropped };
 }
 
+/** Canonical form of a project path, so two spellings of one directory compare equal. */
+export function projectKey(path: string): string {
+	const slashed = path.replace(/\\/g, "/").replace(/\/+$/, "");
+	return caseInsensitivePaths ? slashed.toLowerCase() : slashed;
+}
+
 /** Does this path name the same project directory as `cwd`? */
 export function sameProject(a: string, b: string): boolean {
-	const normalize = (path: string): string => {
-		const slashed = path.replace(/\\/g, "/").replace(/\/+$/, "");
-		return caseInsensitivePaths ? slashed.toLowerCase() : slashed;
-	};
-	return normalize(a) === normalize(b);
+	return projectKey(a) === projectKey(b);
+}
+
+/**
+ * Identity of a recall entry: the prompt plus the directory it was typed in.
+ *
+ * Recall is filtered by directory, so the same words typed in two projects are
+ * two entries; and the path has to be normalised, or one directory spelled with
+ * a backslash and with a slash would count twice.
+ *
+ * The two halves are joined by a NUL: both are free text, and any separator a
+ * prompt could itself contain would let `{cwd: "a b", text: "c"}` and
+ * `{cwd: "a", text: "b c"}` collide — which would drop a prompt rather than
+ * merge it.
+ */
+export function promptKey(text: string, cwd: string): string {
+	return `${projectKey(cwd)}\u0000${text}`;
 }
 
 /**
@@ -217,6 +235,36 @@ function readHeadLines(path: string, maxBytes = 65_536): string[] {
 		return out;
 	} catch {
 		return [];
+	}
+}
+
+/**
+ * The closing lines of a file, up to about `maxBytes` of them.
+ *
+ * The mirror of {@link readHeadLines}, and for the same class of file: a prompt
+ * history is appended to, so its newest prompts are at the end, and a limit-based
+ * import reading from the front would carry the oldest prompts on the machine.
+ * `truncated` says the window was smaller than the file, so the report can admit
+ * that something before it went unread rather than implying the count is all of it.
+ */
+function readTailLines(path: string, maxBytes: number): { lines: string[]; truncated: boolean } {
+	try {
+		const size = statSync(path).size;
+		const start = Math.max(0, size - maxBytes);
+		const fd = openSync(path, "r");
+		try {
+			const buffer = Buffer.alloc(size - start);
+			readSync(fd, buffer, 0, buffer.length, start);
+			const lines = buffer.toString("utf8").split("\n");
+			// The window can open mid-line, and half a JSON object is not the object
+			// it was cut from. The first line goes; the rest are whole.
+			if (start > 0) lines.shift();
+			return { lines, truncated: start > 0 };
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return { lines: [], truncated: false };
 	}
 }
 
@@ -879,6 +927,207 @@ function readZcodeSession(sourceId: string, home: string): { entries: HistoryEnt
 // ---------------------------------------------------------------------------
 // Dispatch and output
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Prompt history (the ↑ recall list)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prompts imported per source.
+ *
+ * Deliberately not `--history-limit`: that one counts conversations, where each
+ * is a file and a resume candidate. A prompt is a line, and a user who wanted
+ * twenty conversations did not ask for twenty remembered prompts.
+ */
+export const DEFAULT_PROMPT_HISTORY_LIMIT = 500;
+
+/** How much of a history file to read; the newest prompts are at its end. */
+const PROMPT_HISTORY_BYTES = 4 * 1024 * 1024;
+
+/** One recalled prompt, in the shape `~/.labunbun/history.jsonl` stores. */
+export interface PromptEntry {
+	text: string;
+	cwd: string;
+	timestamp: number;
+}
+
+/** What one source contributes to the recall list, and what it held back. */
+export interface PromptHistoryInput {
+	/** Lines the source's history had, before any filter. Zero means it has none. */
+	seen: number;
+	entries: PromptEntry[];
+	notes: HistoryNote[];
+	/** Prompts inside the scope but past the limit. */
+	overLimit: number;
+	/** The file was larger than this reads, so only its newest end was considered. */
+	truncated: boolean;
+}
+
+export type PromptHistoryImport = Partial<Record<MigrationSourceId, PromptHistoryInput>>;
+
+/**
+ * `[Pasted text #1 +42 lines]` — a pointer into the paste store, not a prompt.
+ *
+ * A display that only names a paste would be recalled as that sentence, which
+ * is not something anyone can use; a display that merely contains one is a real
+ * prompt and travels as it is written.
+ */
+const PASTE_PLACEHOLDER = /^\[Pasted text #\d+(\s*\+\s*\d+ lines?)?\]$/;
+
+/** Epoch ms from either seconds or milliseconds — the sources disagree. */
+function toEpochMs(value: unknown): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+	return value < 1e11 ? Math.round(value * 1000) : value;
+}
+
+/** A prompt that passed the shape checks, before the scope and the limit. */
+interface PromptCandidate {
+	text: string;
+	cwd: string;
+	timestamp: number;
+}
+
+/** Why lines were left behind, counted as they are read. */
+interface PromptScan {
+	candidates: PromptCandidate[];
+	counts: Map<string, number>;
+	seen: number;
+	truncated: boolean;
+}
+
+function bump(counts: Map<string, number>, reason: string, by = 1): void {
+	counts.set(reason, (counts.get(reason) ?? 0) + by);
+}
+
+/**
+ * Apply the scope, the limit and the ordering to the prompts of one source.
+ *
+ * The limit takes the newest prompts: the point of importing them is to have
+ * them back, and a user reaching for ↑ is reaching for what they were doing
+ * recently, not for what they were doing last year.
+ */
+function selectPrompts(
+	scan: PromptScan,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	const inScope =
+		options.scope === "cwd" ? scan.candidates.filter((c) => sameProject(c.cwd, options.cwd)) : scan.candidates;
+	if (inScope.length < scan.candidates.length) {
+		bump(scan.counts, "prompt from another directory", scan.candidates.length - inScope.length);
+	}
+	const newest = [...inScope].sort((a, b) => b.timestamp - a.timestamp);
+	const kept = newest.slice(0, Math.max(0, options.limit));
+	return {
+		seen: scan.seen,
+		entries: kept.sort((a, b) => a.timestamp - b.timestamp),
+		notes: [...scan.counts].map(([reason, count]) => ({ reason, count })),
+		overLimit: inScope.length - kept.length,
+		truncated: scan.truncated,
+	};
+}
+
+/** `~/.claude/history.jsonl`: `{display, project, timestamp}`. */
+function readClaudePromptHistory(
+	home: string,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
+	if (!existsSync(join(home, ".claude", "history.jsonl"))) return selectPrompts(scan, options);
+	const tail = readTailLines(join(home, ".claude", "history.jsonl"), PROMPT_HISTORY_BYTES);
+	scan.truncated = tail.truncated;
+	for (const line of tail.lines) {
+		if (!line.trim()) continue;
+		const parsed = parseJsonLine(line);
+		if (!parsed) {
+			bump(scan.counts, "line not in the history shape");
+			continue;
+		}
+		scan.seen += 1;
+		const text = asText(parsed.display).trim();
+		const cwd = asText(parsed.project);
+		if (!text) {
+			bump(scan.counts, "empty prompt");
+			continue;
+		}
+		// The local recorder skips these, so importing them would put lines in the
+		// file that this build's own ↑ would never have offered.
+		if (text.startsWith("/")) {
+			bump(scan.counts, "slash command");
+			continue;
+		}
+		if (PASTE_PLACEHOLDER.test(text)) {
+			bump(scan.counts, "prompt whose text was a pasted block, stored without its body");
+			continue;
+		}
+		if (!cwd) {
+			bump(scan.counts, "prompt with no project recorded");
+			continue;
+		}
+		scan.candidates.push({ text, cwd, timestamp: toEpochMs(parsed.timestamp) });
+	}
+	return selectPrompts(scan, options);
+}
+
+/**
+ * `~/.codex/history.jsonl`: `{session_id, text, ts}`.
+ *
+ * It names the session, not the directory, so the directory comes from the
+ * rollout of that session — the same metadata the session listing reads. A
+ * prompt whose session has no rollout left on disk cannot be located to a
+ * project, and an entry that no directory can recall is not worth writing.
+ */
+function readCodexPromptHistory(
+	home: string,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
+	// Before the rollout scan, not after: locating each prompt costs a head-read
+	// per rollout, and a home with no prompt history has nothing to locate.
+	if (!existsSync(join(home, ".codex", "history.jsonl"))) return selectPrompts(scan, options);
+	const directories = new Map<string, string>();
+	for (const candidate of listCodexHistory(home).candidates) {
+		if (candidate.cwd) directories.set(candidate.sourceId, candidate.cwd);
+	}
+	const tail = readTailLines(join(home, ".codex", "history.jsonl"), PROMPT_HISTORY_BYTES);
+	scan.truncated = tail.truncated;
+	for (const line of tail.lines) {
+		if (!line.trim()) continue;
+		const parsed = parseJsonLine(line);
+		if (!parsed) {
+			bump(scan.counts, "line not in the history shape");
+			continue;
+		}
+		scan.seen += 1;
+		const text = asText(parsed.text).trim();
+		if (!text) {
+			bump(scan.counts, "empty prompt");
+			continue;
+		}
+		if (text.startsWith("/")) {
+			bump(scan.counts, "slash command");
+			continue;
+		}
+		const cwd = directories.get(asText(parsed.session_id));
+		if (!cwd) {
+			bump(scan.counts, "prompt whose session has no rollout on disk");
+			continue;
+		}
+		scan.candidates.push({ text, cwd, timestamp: toEpochMs(parsed.ts) });
+	}
+	return selectPrompts(scan, options);
+}
+
+/** Prompts a source remembers, ready to be merged into the recall list. */
+export function readPromptHistory(
+	source: MigrationSourceId,
+	home: string,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	if (options.scope === "none") return { seen: 0, entries: [], notes: [], overLimit: 0, truncated: false };
+	if (source === "claude-code") return readClaudePromptHistory(home, options);
+	if (source === "codex") return readCodexPromptHistory(home, options);
+	return { seen: 0, entries: [], notes: [], overLimit: 0, truncated: false };
+}
 
 /** What a source offers, narrowed to the requested scope. */
 export function listHistory(
