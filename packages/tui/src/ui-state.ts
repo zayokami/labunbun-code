@@ -9,7 +9,8 @@ import { DEFAULT_THEME } from "./themes/index.ts";
 import type { Theme } from "./themes/tokens.ts";
 
 export type UiEntry =
-	| { kind: "user"; text: string }
+	/** `steered` marks a message sent into a running turn rather than as a new one. */
+	| { kind: "user"; text: string; steered?: boolean }
 	| { kind: "assistant"; text: string }
 	| {
 			kind: "toolUse";
@@ -36,6 +37,49 @@ export interface UiTask {
 	activeForm?: string;
 }
 
+/**
+ * A message typed while a turn was running. `queue` waits for the turn to end;
+ * `steer` goes in at the next tool boundary, before the model is called again.
+ * Both are promises about a run, so both die with it — see the reducer.
+ */
+export interface QueuedMessage {
+	/** Stable key for the preview list; the text alone can repeat. */
+	id: string;
+	text: string;
+	mode: "queue" | "steer";
+}
+
+/**
+ * A background shell, as far as the UI is concerned: what it is and whether it
+ * is still going. The manager's own record carries a temp output path and a
+ * child process — neither belongs in a rendering layer.
+ */
+export interface UiBackgroundShell {
+	id: string;
+	command: string;
+	status: "running" | "completed" | "killed";
+}
+
+/**
+ * What `/status` shows, as data rather than as an info line.
+ *
+ * A card is read as a whole — model, directory, permission mode, session id,
+ * how full the context is — and the transcript is the wrong place for it: a
+ * dozen info lines scroll away exactly when the answer is needed again. The
+ * values are already formatted by the caller, which is the layer that knows what
+ * the numbers mean.
+ */
+export interface StatusCardData {
+	model: string;
+	directory: string;
+	permissions: string;
+	session: string;
+	/** Context usage, drawn as a bar; absent until the first turn is measured. */
+	context?: { usedTokens: number; threshold: number };
+	/** Anything else worth a row, in display order: cost, theme, MCP, … */
+	details: Array<[label: string, value: string]>;
+}
+
 export interface UiState {
 	entries: UiEntry[];
 	streamingText: string;
@@ -54,6 +98,23 @@ export interface UiState {
 	/** Pick-one dialog (resume, model switch). Like `question`, carries a resolve closure. */
 	picker: ListPickerState | null;
 	contextInfo?: { usedTokens: number; threshold: number };
+	/**
+	 * The `/status` card, shown over the prompt until Esc or the next submit.
+	 * Not modal: it reports on the run, it does not block it.
+	 */
+	statusCard: StatusCardData | null;
+	/**
+	 * Long-running shells started by the Bash tool. In the store because the app
+	 * layer only learns about them by polling the manager, and a dev server that
+	 * is still up after the turn ended is exactly what the user needs told.
+	 */
+	backgroundShells: UiBackgroundShell[];
+	/**
+	 * Messages typed during a run, waiting to be delivered. Reported above the
+	 * prompt because the transcript already holds them: what the user cannot see
+	 * without this is that they have not been sent *yet*.
+	 */
+	queued: QueuedMessage[];
 	tasks?: UiTask[];
 	/**
 	 * Active theme. Lives in the store so `/theme` can take effect immediately:
@@ -127,6 +188,9 @@ export function initialUiState(vim = false): UiState {
 		dialog: null,
 		question: null,
 		picker: null,
+		statusCard: null,
+		backgroundShells: [],
+		queued: [],
 		theme: DEFAULT_THEME,
 		modelName: "",
 		vim,
@@ -189,7 +253,17 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 			return { ...state, statusPhase: "thinking" };
 
 		case "turn_start":
-			return { ...state, streamingText: "", thinkingText: "", statusPhase: "thinking" };
+			// A turn only starts after the loop has drained both queues into the
+			// transcript (steering right before, follow-ups just before that), so
+			// anything still listed as waiting has been delivered and is now a
+			// user message in the entries above.
+			return {
+				...state,
+				streamingText: "",
+				thinkingText: "",
+				statusPhase: "thinking",
+				queued: state.queued.length > 0 ? [] : state.queued,
+			};
 
 		case "message_update": {
 			// Incremental append from the delta itself — rejoining the full
@@ -278,7 +352,17 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 			if (event.reason === "error" && event.errorMessage) {
 				entries.push({ kind: "error", text: `Error: ${event.errorMessage}` });
 			} else if (event.reason === "aborted") {
-				entries.push({ kind: "info", text: "[interrupted]" });
+				// The run these were queued for is gone, and the session dropped
+				// them with it. Saying so is the difference between a message that
+				// was refused and one that was silently thrown away.
+				const dropped = state.queued.length;
+				entries.push({
+					kind: "info",
+					text:
+						dropped > 0
+							? `[interrupted · ${dropped} queued message${dropped === 1 ? "" : "s"} dropped]`
+							: "[interrupted]",
+				});
 			}
 			return {
 				...state,
@@ -288,6 +372,9 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 				pendingTools: [],
 				liveOutputs: {},
 				statusPhase: "idle",
+				// A run that ended naturally has already drained them into the
+				// transcript; the ones left here ended with it.
+				queued: [],
 			};
 		}
 

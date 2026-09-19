@@ -298,6 +298,63 @@ describe("the history search and the host", () => {
 });
 
 /**
+ * The `/status` card is on screen while the turn it describes is still running,
+ * so the order in which it and the interrupt answer Escape is the whole test:
+ * the card is what the user just asked to see, and pressing Escape to put it
+ * away must not kill the run behind it.
+ */
+describe("the status card and the host", () => {
+	const card = {
+		model: "test/model",
+		directory: "~/project",
+		permissions: "default",
+		session: "abc12345",
+		details: [["Theme", "dark · Vim off"]] as Array<[string, string]>,
+	};
+
+	test("Esc puts the card away and leaves the turn running", async () => {
+		const h = setup();
+		await delay(40);
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+
+		h.store.set((s) => ({ ...s, statusCard: card }));
+		await delay(40);
+		expect(h.frame()).toContain("Esc to dismiss");
+
+		h.stdin.write("\x1b");
+		await delay(40);
+		expect(h.frame()).not.toContain("Esc to dismiss");
+		expect(h.session.isInterrupted).toBe(false);
+
+		// With the card gone, Escape means what it always did.
+		h.stdin.write("\x1b");
+		await delay(60);
+		expect(h.session.isInterrupted).toBe(true);
+
+		h.release.resolve();
+		await delay(150);
+		h.unmount();
+	}, 20_000);
+
+	test("sending the next prompt takes it off the screen", async () => {
+		const h = setup();
+		await delay(40);
+		h.store.set((s) => ({ ...s, statusCard: card }));
+		await delay(40);
+		expect(h.frame()).toContain("Esc to dismiss");
+
+		await submit(h.stdin, "hello");
+		await delay(60);
+		expect(h.frame()).not.toContain("Esc to dismiss");
+
+		h.release.resolve();
+		await delay(150);
+		h.unmount();
+	}, 20_000);
+});
+
+/**
  * The key list has to describe the editor that is actually up. It used to be
  * built from a startup prop, so `/vim` (or anything else that changed the mode
  * mid-session) left `/help` and the `?` overlay describing an editor the user no

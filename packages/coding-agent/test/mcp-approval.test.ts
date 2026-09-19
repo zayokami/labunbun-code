@@ -25,6 +25,9 @@ function makeCtx(overrides: Partial<AppCommandContext> = {}): AppCommandContext 
 		sessionRef: session,
 		getSession: () => session,
 		handle: { store } as never,
+		// /ps and /stop are not exercised here; the stubs keep the context total.
+		backgroundShells: { list: () => [], output: () => "", kill: () => false },
+		refreshBackgroundShells: () => {},
 		settings: {} as never,
 		cwd: overrides.cwd ?? process.cwd(),
 		costTracker: { state: { totalCostUSD: 0, totalDurationMs: 0, modelsUsage: {} } } as never,
@@ -40,7 +43,7 @@ function makeCtx(overrides: Partial<AppCommandContext> = {}): AppCommandContext 
 		hotSwapSession: async () => {},
 		switchModel: () => false,
 		...overrides,
-	};
+	} as AppCommandContext;
 }
 
 function infoTexts(ctx: AppCommandContext): string[] {

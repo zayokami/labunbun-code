@@ -299,6 +299,28 @@ describe("AgentSession loop", () => {
 		expect(userMsgs.map((m) => m.content)).toEqual(["start", "user says: hurry up"]);
 	});
 
+	// A steering message promises "before the next model call". An abort is the
+	// end of the run that made that promise, so the message must die with it —
+	// otherwise it resurfaces at the top of a later run's first turn, after
+	// whatever the user typed in the meantime.
+	test("an interrupt drops steered messages instead of leaking them into the next run", async () => {
+		const faux = fauxProvider([{ text: "slow response", abortIfSignaled: true, delayMs: 50 }, { text: "second run" }]);
+		const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
+
+		const first = session.prompt("start");
+		// Mid-turn, not before it: a steer typed before the first model call is
+		// simply delivered by that call, and there is nothing left to drop.
+		await new Promise((r) => setTimeout(r, 10));
+		session.steer("typed for the interrupted turn");
+		session.abort();
+		expect(await first).toBe("aborted");
+
+		await session.prompt("what I actually asked next");
+
+		const userMsgs = session.messages.filter((m) => m.role === "user") as any[];
+		expect(userMsgs.map((m) => m.content)).toEqual(["start", "what I actually asked next"]);
+	});
+
 	test("abort during run ends with aborted reason", async () => {
 		const faux = fauxProvider([{ text: "slow response", abortIfSignaled: true, delayMs: 50 }]);
 		const session = new AgentSession({

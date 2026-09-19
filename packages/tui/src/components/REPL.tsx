@@ -6,14 +6,16 @@ import { type LastNotification, type NotifyKind, notificationSequence, shouldNot
 import { shortcutGroups } from "../shortcuts.ts";
 import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
-import { initialUiState, reduceEvent, type UiState } from "../ui-state.ts";
+import { initialUiState, type QueuedMessage, reduceEvent, type UiState } from "../ui-state.ts";
 import { ListPickerDialog } from "./ListPickerDialog.tsx";
 import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
 import { PromptInput } from "./PromptInput.tsx";
 import { QuestionDialog } from "./QuestionDialog.tsx";
+import { QueuedMessages } from "./QueuedMessages.tsx";
 import { ShortcutOverlay } from "./ShortcutOverlay.tsx";
-import { estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
+import { StatusCard } from "./StatusCard.tsx";
+import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
 import { TerminalTitle } from "./TerminalTitle.tsx";
 
@@ -138,9 +140,13 @@ export function REPL({
 	const question = useStore(store, (s) => s.question);
 	const picker = useStore(store, (s) => s.picker);
 	const contextInfo = useStore(store, (s) => s.contextInfo);
+	const statusCard = useStore(store, (s) => s.statusCard);
+	const backgroundShells = useStore(store, (s) => s.backgroundShells);
+	const shellRow = backgroundShellRow(backgroundShells);
 	const tasks = useStore(store, (s) => s.tasks);
 	const liveOutputs = useStore(store, (s) => s.liveOutputs);
 	const pendingTools = useStore(store, (s) => s.pendingTools);
+	const queued = useStore(store, (s) => s.queued);
 	// From the store, not a prop: `/vim` flips it while the app is running, and
 	// the editor, `/help` and the key-list overlay all have to agree.
 	const vim = useStore(store, (s) => s.vim);
@@ -152,6 +158,16 @@ export function REPL({
 	// answers. The clock, the title and the notification all read it from here so
 	// a new overlay cannot be added to one and forgotten in another.
 	const awaitingUser = dialog !== null || question !== null || picker !== null;
+	/** A key pressed now would land mid-turn, so the prompt's keys change meaning. */
+	const busy = statusPhase !== "idle";
+	/**
+	 * Whether the running turn will call the model again — tools are executing,
+	 * so a steered message has somewhere to land. Without this Enter would queue
+	 * while promising to steer.
+	 */
+	const canSteer = pendingTools.length > 0;
+	/** Keys for the queued-message previews; text alone can repeat. */
+	const queuedIdRef = useRef(0);
 	const elapsedMs = useTurnTimer({ busy: statusPhase !== "idle", frozen: awaitingUser });
 	// Idle Ctrl+C confirmation state: the timestamp of the first press and the
 	// hint line shown until the window lapses.
@@ -202,9 +218,74 @@ export function REPL({
 		wasBlockedRef.current = dialog !== null;
 	}, [statusPhase, dialog]);
 
+	/**
+	 * Queue or steer a message into the running turn.
+	 *
+	 * The transcript entry goes in now rather than at delivery: it is what the
+	 * user did, and waiting for the turn boundary would leave the screen silent
+	 * about a keystroke they just made. `queued` is what carries the part they
+	 * cannot see — that it has not been sent yet.
+	 */
+	const enqueue = useCallback(
+		(text: string, mode: QueuedMessage["mode"]) => {
+			const session = getSession();
+			queuedIdRef.current += 1;
+			store.set((s) => ({ ...s, queued: [...s.queued, { id: `q${queuedIdRef.current}`, text, mode }] }));
+			if (mode === "steer") session.steer(text);
+			else session.followUp(text);
+		},
+		[getSession, store],
+	);
+
+	const sendMidRun = useCallback(
+		(text: string, mode: QueuedMessage["mode"]) => {
+			// Same rule as an ordinary submit: sending something dismisses the
+			// status card, which is a snapshot the new work has invalidated.
+			store.set((s) => ({
+				...s,
+				statusCard: null,
+				entries: [...s.entries, { kind: "user" as const, text, steered: mode === "steer" }],
+			}));
+			enqueue(text, mode);
+		},
+		[enqueue, store],
+	);
+
+	/**
+	 * Escape during a run, with something typed: stop the run, then send it.
+	 *
+	 * `abort()` only asks the run to stop — the session stays "running" until the
+	 * loop unwinds, and `prompt()` throws while it does. So the send waits for
+	 * this run's own `agent_end`, which is the event that means the session is
+	 * free again. If it was already free (an abort a moment earlier), there is
+	 * nothing to wait for.
+	 */
+	const interruptAndSend = useCallback(
+		(text: string) => {
+			const session = getSession();
+			store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user" as const, text, steered: true }] }));
+			session.abort();
+			if (!session.isRunning) {
+				void session.prompt(text);
+				return;
+			}
+			const unsubscribe = session.on((event) => {
+				if (event.type !== "agent_end") return;
+				unsubscribe();
+				void session.prompt(text);
+			});
+		},
+		[getSession, store],
+	);
+
 	const handleSubmit = useCallback(
 		(text: string) => {
 			const trimmed = text.trim();
+			// Anything the user sends dismisses the status card: it is a snapshot of
+			// the moment it was asked for, and the work they are about to start
+			// invalidates it. Clearing before dispatch is also what lets `/status`
+			// replace an open card rather than stack one behind it.
+			store.set((s) => (s.statusCard ? { ...s, statusCard: null } : s));
 			if (trimmed.startsWith("/")) {
 				if (onCommand?.(trimmed)) return;
 				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions, vim });
@@ -239,16 +320,16 @@ export function REPL({
 				const session = getSession();
 				store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user", text: trimmed }] }));
 				if (session.isRunning) {
-					// Queue for the next turn boundary instead of erroring —
-					// followUp drains when the current run terminates naturally.
-					session.followUp(text);
-					store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text: "[queued]" }] }));
+					// The key handler in PromptInput owns this during a run; landing
+					// here means the session went busy before the store heard about
+					// it. The entry is already in; only the queueing is left.
+					enqueue(text, "queue");
 					return;
 				}
 				void session.prompt(text);
 			})();
 		},
-		[getSession, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions, vim],
+		[getSession, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions, vim, enqueue],
 	);
 
 	const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -262,6 +343,13 @@ export function REPL({
 		// overlay cannot be closed onto a running turn by the Esc beneath it.
 		if (shortcutsOpen && (key.escape || input === "?")) {
 			setShortcutsOpen(false);
+			return;
+		}
+		// The status card answers to the same rule as the key list: what is on
+		// screen takes the key before the key means something behind it. It is not
+		// modal — the prompt still works, and typing over it dismisses it.
+		if (statusCard && key.escape) {
+			store.set((s) => ({ ...s, statusCard: null }));
 			return;
 		}
 		if (key.ctrl && input === "o") {
@@ -362,7 +450,13 @@ export function REPL({
 						{toolSummary(pendingTools)}
 					</Text>
 				)}
+				{/* Not part of the turn: a background shell outlives it, which is
+				    precisely why it has to stay on screen after the turn ends. */}
+				{shellRow && <Text dimColor>{`  └ ${shellRow}`}</Text>}
 			</Box>
+			{/* Above the dialogs: it reports, it does not ask, and a dialog that
+			    appears while it is open is the more urgent of the two. */}
+			{statusCard ? <StatusCard data={statusCard} /> : null}
 			{dialog ? (
 				<PermissionDialog
 					toolName={dialog.toolName}
@@ -374,9 +468,18 @@ export function REPL({
 				/>
 			) : null}
 			{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} /> : null}
-			{picker ? <ListPickerDialog title={picker.title} items={picker.items} resolve={picker.resolve} /> : null}
+			{picker ? (
+				<ListPickerDialog
+					title={picker.title}
+					items={picker.items}
+					resolve={picker.resolve}
+					onHighlight={picker.onHighlight}
+					onCancel={picker.onCancel}
+				/>
+			) : null}
 			{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ vim, commands: commandSuggestions })} />}
 			{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
+			<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
 			<PromptInput
 				onSubmit={handleSubmit}
 				disabled={dialog !== null || question !== null || picker !== null || shortcutsOpen}
@@ -386,6 +489,11 @@ export function REPL({
 				vim={vim}
 				history={history}
 				escapeRef={escapeRef}
+				busy={busy}
+				canSteer={canSteer}
+				onQueue={(text) => sendMidRun(text, "queue")}
+				onSteer={(text) => sendMidRun(text, "steer")}
+				onInterruptSend={interruptAndSend}
 			/>
 			<Text dimColor> </Text>
 		</Box>

@@ -9,7 +9,14 @@ import { connectSessionToStore, type PromptSubmitResult, type PromptSubmitVerdic
 import { createPermissionQueue } from "./permission-queue.ts";
 import { createStore, type Store, useStore } from "./store.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
-import { initialUiState, toolFullView, toolPreview, type UiState } from "./ui-state.ts";
+import {
+	initialUiState,
+	type StatusCardData,
+	toolFullView,
+	toolPreview,
+	type UiBackgroundShell,
+	type UiState,
+} from "./ui-state.ts";
 
 export interface ReplAppOptions {
 	session: AgentSession;
@@ -64,8 +71,16 @@ export interface ReplAppHandle {
 	/**
 	 * Show a scrollable pick-one list; resolves with the chosen index or null on
 	 * cancel. The in-app /resume and /model pickers both run on this.
+	 *
+	 * `onHighlight` fires as the highlight moves so the caller can preview the
+	 * choice (the theme picker does); `onCancel` fires before the null resolution
+	 * so that preview can be undone.
 	 */
-	pickFromList: (title: string, items: Array<{ label: string; description?: string }>) => Promise<number | null>;
+	pickFromList: (
+		title: string,
+		items: Array<{ label: string; description?: string }>,
+		options?: { onHighlight?: (index: number) => void; onCancel?: () => void },
+	) => Promise<number | null>;
 	/**
 	 * Deny every pending permission request and dismiss the dialog. For a run
 	 * being aborted: the answers no longer matter, but their callers are still
@@ -73,6 +88,14 @@ export interface ReplAppHandle {
 	 */
 	clearPermissionRequest: () => void;
 	setContextInfo(info: { usedTokens: number; threshold: number }): void;
+	/** Show the `/status` card over the prompt; null dismisses it. */
+	setStatusCard(card: StatusCardData | null): void;
+	/**
+	 * Long-running shells for the status row. Called on a poll, so an unchanged
+	 * list must keep the same array identity — otherwise every tick rerenders the
+	 * whole tree to say what it already said.
+	 */
+	setBackgroundShells(shells: UiBackgroundShell[]): void;
 	setTasks(
 		tasks: Array<{ id: string; subject: string; status: "pending" | "in_progress" | "completed"; activeForm?: string }>,
 	): void;
@@ -95,6 +118,18 @@ export interface ReplAppHandle {
  * Without this the provider value would be captured once at `render()` time,
  * outside any component, and a store change would never reach it.
  */
+/**
+ * Whether two shell lists would render identically.
+ *
+ * The app layer polls the shell manager, so this runs every couple of seconds
+ * forever: it decides between "nothing to say" and a full tree render.
+ */
+export function sameShells(a: UiBackgroundShell[], b: UiBackgroundShell[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	return a.every((shell, i) => shell.id === b[i].id && shell.status === b[i].status && shell.command === b[i].command);
+}
+
 function ThemedTree({ store, children }: { store: Store<UiState>; children: React.ReactNode }) {
 	const theme = useStore(store, (state) => state.theme);
 	return <ThemeContext.Provider value={theme}>{children}</ThemeContext.Provider>;
@@ -160,19 +195,27 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		setContextInfo: (info) => {
 			store.set((s) => ({ ...s, contextInfo: info }));
 		},
+		setStatusCard: (card) => {
+			store.set((s) => ({ ...s, statusCard: card }));
+		},
+		setBackgroundShells: (shells) => {
+			store.set((s) => (sameShells(s.backgroundShells, shells) ? s : { ...s, backgroundShells: shells }));
+		},
 		setVimMode: (on) => {
 			store.set((s) => ({ ...s, vim: on }));
 		},
 		setTasks: (tasks) => {
 			store.set((s) => ({ ...s, tasks }));
 		},
-		pickFromList: (title, items) =>
+		pickFromList: (title, items, options) =>
 			new Promise<number | null>((resolve) => {
 				store.set((s) => ({
 					...s,
 					picker: {
 						title,
 						items,
+						onHighlight: options?.onHighlight,
+						onCancel: options?.onCancel,
 						resolve: (index) => {
 							store.set((st) => ({ ...st, picker: null }));
 							resolve(index);

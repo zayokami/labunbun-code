@@ -10,6 +10,16 @@ export interface PickerItem {
 export interface ListPickerState {
 	title: string;
 	items: PickerItem[];
+	/**
+	 * Called when the highlight moves — and only then, never on open. A caller
+	 * that previews the highlighted choice (the theme picker does, so the choice
+	 * is made by looking at it) must not apply something the user has not reached
+	 * yet: opening the list would otherwise silently switch the theme to whatever
+	 * happens to be first.
+	 */
+	onHighlight?: (index: number) => void;
+	/** Called before resolving null, so a preview can be undone. */
+	onCancel?: () => void;
 	/** Resolves with the chosen index, or null when the user cancelled. */
 	resolve: (index: number | null) => void;
 }
@@ -23,25 +33,33 @@ const VISIBLE_ROWS = 8;
  * wrapping, the window scrolls to keep the selection visible, Enter resolves,
  * Esc cancels.
  */
-export function ListPickerDialog({ title, items, resolve }: ListPickerState) {
+export function ListPickerDialog({ title, items, resolve, onHighlight, onCancel }: ListPickerState) {
 	const theme = useTheme();
 	const [selected, setSelected] = useState(0);
 
 	useInput((_input, key) => {
+		const cancel = () => {
+			onCancel?.();
+			resolve(null);
+		};
 		if (items.length === 0) {
-			if (key.escape || key.return) resolve(null);
+			if (key.escape || key.return) cancel();
 			return;
 		}
 		if (key.escape) {
-			resolve(null);
+			cancel();
 			return;
 		}
 		if (key.upArrow) {
-			setSelected((s) => (s + items.length - 1) % items.length);
+			const next = (selected + items.length - 1) % items.length;
+			setSelected(next);
+			onHighlight?.(next);
 			return;
 		}
 		if (key.downArrow) {
-			setSelected((s) => (s + 1) % items.length);
+			const next = (selected + 1) % items.length;
+			setSelected(next);
+			onHighlight?.(next);
 			return;
 		}
 		if (key.return) resolve(selected);

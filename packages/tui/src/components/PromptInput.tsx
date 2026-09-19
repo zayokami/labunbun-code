@@ -41,6 +41,30 @@ export interface PromptInputProps {
 	 * so whoever owns the buffer has to be the one to decide.
 	 */
 	onToggleHelp?: () => void;
+	/**
+	 * A run is in progress, so there is nothing to submit *to*: the keys that
+	 * normally send the buffer queue it instead, for the run to pick up.
+	 */
+	busy?: boolean;
+	/**
+	 * Whether the running turn can actually take a message mid-flight (tools are
+	 * executing, so another model call is coming). Without that, "send it now"
+	 * would be a promise the session cannot keep, and the key queues instead.
+	 */
+	canSteer?: boolean;
+	/** `busy` + a non-empty buffer: send after the current turn ends. */
+	onQueue?: (text: string) => void;
+	/**
+	 * `busy` + `canSteer` + a non-empty buffer: send into the running turn, at
+	 * the next tool boundary.
+	 */
+	onSteer?: (text: string) => void;
+	/**
+	 * Escape on a non-empty buffer during a run: stop the run and send what was
+	 * typed. Handled here rather than by the host because the buffer is here —
+	 * the same reason `?` and Ctrl+R are.
+	 */
+	onInterruptSend?: (text: string) => void;
 }
 
 /**
@@ -51,6 +75,16 @@ export interface PromptInputProps {
  */
 export function placeholderCaret(placeholder: string): { caret: string; rest: string } {
 	return { caret: placeholder.slice(0, 1) || " ", rest: placeholder.slice(1) };
+}
+
+/**
+ * Not a message: a command acts on the app *now* (`/stop`, `/status`, `/help`),
+ * so a running turn is no reason to hold it back — `/stop` delivered one turn
+ * later is worse than useless. The host owns these prefixes; this only has to
+ * keep them out of the queue.
+ */
+function isHostCommand(text: string): boolean {
+	return text.startsWith("/") || text.startsWith("#");
 }
 
 /**
@@ -69,6 +103,11 @@ export function PromptInput({
 	history = [],
 	escapeRef,
 	onToggleHelp,
+	busy = false,
+	canSteer = false,
+	onQueue,
+	onSteer,
+	onInterruptSend,
 }: PromptInputProps) {
 	const theme = useTheme();
 	const { columns } = useWindowSize();
@@ -157,12 +196,28 @@ export function PromptInput({
 				return true;
 			}
 			// True only when vim had something to cancel; an idle Esc is the host's.
-			return handleVimKey("", { escape: true });
+			if (handleVimKey("", { escape: true })) return true;
+			// Escape during a run with something typed means "stop, and send this":
+			// the alternative — throwing away the run *and* the text — reads as a
+			// lost keystroke. An empty buffer still falls through, so a bare Escape
+			// keeps meaning interrupt.
+			//
+			// Not in vim mode. There Escape is a mode key pressed by reflex dozens of
+			// times an hour, and a reflex that fires the buffer as a prompt while
+			// killing the run is not a feature — vim users keep the plain interrupt.
+			const text = expandPasteTokens(state.text, pasteMapRef.current);
+			if (busy && !vim && text.trim() && onInterruptSend) {
+				pushHistory(state.text);
+				actions.clear();
+				onInterruptSend(text);
+				return true;
+			}
+			return false;
 		};
 		return () => {
 			escapeRef.current = null;
 		};
-	}, [escapeRef, fileSuggestions, handleVimKey, search]);
+	}, [escapeRef, fileSuggestions, handleVimKey, search, busy, vim, onInterruptSend, state.text, actions, pushHistory]);
 
 	useInput(
 		(input, key) => {
@@ -233,6 +288,17 @@ export function PromptInput({
 				setFileSuggestions([]);
 				return;
 			}
+			// Tab is completion first: while a suggestion list is open it accepts
+			// from it (above). Queueing is what is left over — during a run, with
+			// nothing to complete, which is exactly when the buffer has nowhere
+			// else to go.
+			if (key.tab && busy && onQueue && state.text.trim() && !isHostCommand(state.text.trim())) {
+				const text = expandPasteTokens(state.text, pasteMapRef.current);
+				pushHistory(state.text);
+				actions.clear();
+				onQueue(text);
+				return;
+			}
 			if (key.return && (input === "" || input === "\r")) {
 				// Placeholder tokens expand here, so the model and the transcript see
 				// the real payload. History keeps the compact token form — recall and
@@ -245,6 +311,17 @@ export function PromptInput({
 				actions.clear();
 				setSuggestionIndex(0);
 				setCompletionPrefix(null);
+				// Mid-run there is nothing to submit to. Enter means "as soon as this
+				// turn can take it" — into the turn when it can (tools are running, so
+				// another model call is coming), otherwise queued behind it. The two
+				// are told apart because a steer is delivered *before* the next model
+				// call and a queue after the whole turn: picking the wrong one would
+				// silently reorder what the user said.
+				if (busy && onQueue && !isHostCommand(text)) {
+					if (canSteer && onSteer) onSteer(text);
+					else onQueue(text);
+					return;
+				}
 				onSubmit(text);
 				return;
 			}

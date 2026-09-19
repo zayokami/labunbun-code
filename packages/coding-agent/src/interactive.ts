@@ -5,7 +5,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import {
 	type AgentDeps,
 	AgentSession,
@@ -38,9 +38,22 @@ import {
 	type McpServerConfig,
 	approveMcpServer as persistMcpApproval,
 } from "@labunbun/mcp";
-import { createAllTools, defaultOperations, type Operations, TaskStore } from "@labunbun/tools";
+import {
+	type BackgroundShell,
+	BackgroundShellManager,
+	createAllTools,
+	defaultOperations,
+	type Operations,
+	TaskStore,
+} from "@labunbun/tools";
 import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle, ruleSpecifierFor } from "@labunbun/tui";
 import { createAskUserQuestionTool } from "./ask-user.ts";
+import {
+	BACKGROUND_SHELL_POLL_MS,
+	formatShellOutput,
+	resolveShellId,
+	shellPickerItems,
+} from "./background-commands.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { CostTracker, formatCostState } from "./cost-tracker.ts";
 import { sessionToMarkdown } from "./export-session.ts";
@@ -159,7 +172,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// tool must resolve shells and kill process trees identically.
 	const ops: Operations = defaultOperations();
 	const shellPassthrough = createShellPassthrough({ cwd, ops });
-	const tools = createAllTools(cwd, { taskStore, operations: ops });
+	// Owned here rather than inside createAllTools so `/ps` and `/stop` can reach
+	// the same shells the Bash tool started; the factory would otherwise make a
+	// private manager nobody else can see.
+	const backgroundShells = new BackgroundShellManager();
+	const tools = createAllTools(cwd, { taskStore, operations: ops, backgroundShells });
 	const sessionRules: PermissionRule[] = [];
 	const baseRules: PermissionRule[] = collectPermissionRules(loadedSettings);
 	const requestedMode = options.permissionMode ?? settings.permissionMode ?? "default";
@@ -605,6 +622,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				sessionRef,
 				getSession: () => sessionRef,
 				handle,
+				backgroundShells,
+				refreshBackgroundShells: publishShells,
 				settings,
 				cwd,
 				home,
@@ -628,6 +647,26 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		handle?.setTasks(taskStore.summary());
 	});
 
+	/**
+	 * Background shells → the status row.
+	 *
+	 * The manager has no change events, so this polls — the same shape as the task
+	 * strip, which is pushed but could equally be polled. `setBackgroundShells`
+	 * compares before publishing, so a tick that changed nothing costs one array
+	 * walk and no render. Killing a shell publishes immediately rather than
+	 * waiting out the interval: the row disappearing is the confirmation the
+	 * command worked.
+	 */
+	const publishShells = () => {
+		handle?.setBackgroundShells(
+			backgroundShells.list().map((shell) => ({ id: shell.id, command: shell.command, status: shell.status })),
+		);
+	};
+	const shellPoll = setInterval(publishShells, BACKGROUND_SHELL_POLL_MS);
+	// A poll must not be the reason the process stays alive.
+	shellPoll.unref();
+	publishShells();
+
 	// SessionStart ran before the REPL existed, so its failures surface now.
 	reportHookErrors(handle, startupHookErrors);
 	// Silently running in a weaker mode than the one asked for would be the
@@ -636,6 +675,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	await handle.waitUntilExit();
 	unsubTasks();
+	clearInterval(shellPoll);
 
 	// How to come back to this conversation. Printed here rather than through the
 	// REPL because the Ink frame owns the screen: a line written while it is up is
@@ -752,6 +792,10 @@ interface AppCommandContext {
 	getSession(): AgentSession | null;
 	sessionRef: AgentSession | null;
 	handle: ReplAppHandle | null;
+	/** The shells the Bash tool started; `/ps` and `/stop` act on these. */
+	backgroundShells: BackgroundShellAccess;
+	/** Republish the status row after a shell changes state outside the poll. */
+	refreshBackgroundShells(): void;
 	settings: Settings;
 	cwd: string;
 	/** Home directory for user-owned state (MCP approvals). Defaults to the real one. */
@@ -823,9 +867,11 @@ export function appCommandTable(): Array<[string, string]> {
 		["/mode", "Show or set the permission mode: /mode <mode>"],
 		["/model", "Show or switch the model: /model [provider/id]"],
 		["/permissions", "Show the active permission mode and rules"],
+		["/ps", "List background shells and show what one has printed"],
 		["/resume", "Resume an earlier session in this directory (pick from a list)"],
 		["/rewind", "Restore a file from a checkpoint: /rewind [number]"],
 		["/status", "Show model, context usage, cost, and settings at a glance"],
+		["/stop", "Stop a background shell: /stop [id]"],
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/tree", "Show the session branch tree"],
 		["/vim", "Turn modal vim editing in the prompt on or off: /vim [on|off]"],
@@ -909,22 +955,83 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		}
 		case "/status": {
 			if (!session) return true;
-			const info = ctx.handle?.store.get().contextInfo;
+			const store = ctx.handle?.store;
+			const info = store?.get().contextInfo;
 			const storeId = ctx.sessionStore()?.sessionId;
-			const lines = [
-				`Model: ${session.model.provider}/${session.model.id}`,
-				`Permission mode: ${session.permissionMode}`,
-				`Session: ${storeId ? storeId.slice(0, 8) : "(not persisted)"}`,
-				info
-					? `Context: ~${info.usedTokens.toLocaleString()} tokens (auto-compacts near ${info.threshold.toLocaleString()})`
-					: "Context: measured after the first turn",
-				`Cost this project (all sessions): $${ctx.costTracker.state.totalCostUSD.toFixed(4)}`,
-				`Theme: ${ctx.theme.theme.name} · Vim: ${ctx.settings.vimMode ? "on" : "off"}`,
-				`MCP servers: ${ctx.mcpConnections.length} connected${
-					ctx.pendingMcpApprovals.length > 0 ? `, ${ctx.pendingMcpApprovals.length} pending approval` : ""
+			// The live editor, not the startup flag: `/vim` may have changed it since.
+			const vim = store?.get().vim ?? ctx.settings.vimMode === true;
+			ctx.handle?.setStatusCard({
+				model: `${session.model.provider}/${session.model.id}`,
+				directory: shortenHome(ctx.cwd, ctx.home),
+				permissions: session.permissionMode,
+				session: storeId ? storeId.slice(0, 8) : "(not persisted)",
+				context: info,
+				details: [
+					["Cost", `$${ctx.costTracker.state.totalCostUSD.toFixed(4)} (this project, all sessions)`],
+					["Theme", `${ctx.theme.theme.name} · Vim ${vim ? "on" : "off"}`],
+					[
+						"MCP",
+						`${ctx.mcpConnections.length} connected${
+							ctx.pendingMcpApprovals.length > 0 ? `, ${ctx.pendingMcpApprovals.length} pending approval` : ""
+						}`,
+					],
+				],
+			});
+			// The card carries the detail; the transcript keeps the one line, so the
+			// fact that it was asked for is still in the session's own history.
+			pushInfo(
+				ctx.handle,
+				`Status: ${session.model.provider}/${session.model.id} · ${session.permissionMode} · ${
+					storeId ? storeId.slice(0, 8) : "not persisted"
 				}`,
-			];
-			pushInfo(ctx.handle, lines.join("\n"));
+			);
+			return true;
+		}
+		case "/ps": {
+			void (async () => {
+				const shells = ctx.backgroundShells.list();
+				if (shells.length === 0) {
+					pushInfo(ctx.handle, "No background shells.");
+					return;
+				}
+				if (!ctx.handle) return;
+				const index = await ctx.handle.pickFromList("Background shells", shellPickerItems(shells));
+				if (index === null || index >= shells.length) return;
+				const shell = shells[index];
+				// The tail, not the whole file: the question is what it is saying now,
+				// and a dev server's log is mostly the first ten lines over and over.
+				pushInfo(ctx.handle, formatShellOutput(shell.id, ctx.backgroundShells.output(shell.id)));
+			})();
+			return true;
+		}
+		case "/stop": {
+			const arg = text.split(/\s+/).slice(1).join(" ").trim();
+			const stop = (shell: BackgroundShell): void => {
+				const killed = ctx.backgroundShells.kill(shell.id);
+				ctx.refreshBackgroundShells();
+				pushInfo(ctx.handle, killed ? `Stopped ${shell.id}.` : `${shell.id} is not running.`);
+			};
+			void (async () => {
+				const all = ctx.backgroundShells.list();
+				if (arg) {
+					const target = resolveShellId(arg, all);
+					if (!target) {
+						pushInfo(ctx.handle, `No shell "${arg}". /ps lists them.`);
+						return;
+					}
+					stop(target);
+					return;
+				}
+				const running = all.filter((shell) => shell.status === "running");
+				if (running.length === 0) {
+					pushInfo(ctx.handle, "No background shells are running.");
+					return;
+				}
+				if (!ctx.handle) return;
+				const index = await ctx.handle.pickFromList("Stop a background shell", shellPickerItems(running));
+				if (index === null || index >= running.length) return;
+				stop(running[index]);
+			})();
 			return true;
 		}
 		case "/export": {
@@ -1073,41 +1180,66 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		}
 		case "/theme": {
 			const arg = text.split(/\s+/)[1];
-			if (!arg) {
-				const lines = ctx.theme.available.map((name) => `  ${name === ctx.theme.theme.name ? "*" : " "} ${name}`);
-				pushInfo(
-					ctx.handle,
-					[
-						`Themes (* = active):`,
-						...lines,
-						`  ${AUTO_THEME_NAME === ctx.theme.theme.name ? "*" : " "} ${AUTO_THEME_NAME} — follow the terminal background`,
-						"",
-						`/theme <name> applies it now and saves it to ~/.labunbun/settings.json`,
-					].join("\n"),
-				);
-				return true;
-			}
 			void (async () => {
-				const resolved = await resolveTheme(arg, ctx.cwd);
-				// resolveTheme falls back to the default for an unknown name, so
-				// check the name rather than trusting that a theme came back.
-				if (arg !== AUTO_THEME_NAME && resolved.theme.name !== arg) {
-					pushInfo(ctx.handle, `Unknown theme "${arg}". Available: ${resolved.available.join(", ")}`);
+				/** Show a theme: the app's idea of the current one and the tree's. */
+				const apply = (resolved: ResolvedTheme) => {
+					ctx.theme.theme = resolved.theme;
+					ctx.theme.available = resolved.available;
+					ctx.handle?.setTheme(resolved.theme);
+				};
+				const save = (name: string, resolved: ResolvedTheme) => {
+					try {
+						persistThemeChoice(name, ctx.home);
+						pushInfo(ctx.handle, `Theme: ${resolved.theme.name}${name === AUTO_THEME_NAME ? " (detected)" : ""}`);
+					} catch (error) {
+						// The theme is already applied; only the persistence failed.
+						pushInfo(
+							ctx.handle,
+							`Theme: ${resolved.theme.name} (not saved: ${error instanceof Error ? error.message : String(error)})`,
+						);
+					}
+				};
+				if (arg) {
+					const resolved = await resolveTheme(arg, ctx.cwd);
+					// resolveTheme falls back to the default for an unknown name, so
+					// check the name rather than trusting that a theme came back.
+					if (arg !== AUTO_THEME_NAME && resolved.theme.name !== arg) {
+						pushInfo(ctx.handle, `Unknown theme "${arg}". Available: ${resolved.available.join(", ")}`);
+						return;
+					}
+					apply(resolved);
+					save(arg, resolved);
 					return;
 				}
-				ctx.theme.theme = resolved.theme;
-				ctx.theme.available = resolved.available;
-				ctx.handle?.setTheme(resolved.theme);
-				try {
-					persistThemeChoice(arg);
-					pushInfo(ctx.handle, `Theme: ${resolved.theme.name}${arg === AUTO_THEME_NAME ? " (detected)" : ""}`);
-				} catch (error) {
-					// The theme is already applied; only the persistence failed.
-					pushInfo(
-						ctx.handle,
-						`Theme: ${resolved.theme.name} (not saved: ${error instanceof Error ? error.message : String(error)})`,
-					);
-				}
+
+				// No name: pick from a list that previews itself. Every theme is
+				// resolved up front — including `auto`, whose probe needs stdin and
+				// cannot run while the picker owns the keyboard — so a highlight can
+				// repaint the whole screen in the same keystroke.
+				const previous = ctx.theme.theme;
+				const previousAvailable = ctx.theme.available;
+				const names = [...previousAvailable, AUTO_THEME_NAME];
+				const resolved = await Promise.all(names.map((name) => resolveTheme(name, ctx.cwd)));
+				if (!ctx.handle) return;
+				const index = await ctx.handle.pickFromList(
+					"Theme — the highlight is a preview",
+					names.map((name, i) => ({
+						label: `${name === previous.name ? "* " : "  "}${name}`,
+						description:
+							name === previous.name ? "active" : resolved[i].theme.name !== name ? resolved[i].theme.name : undefined,
+					})),
+					{
+						onHighlight: (i) => apply(resolved[i]),
+						onCancel: () => {
+							ctx.theme.theme = previous;
+							ctx.theme.available = previousAvailable;
+							ctx.handle?.setTheme(previous);
+						},
+					},
+				);
+				if (index === null) return;
+				apply(resolved[index]);
+				save(names[index], resolved[index]);
 			})();
 			return true;
 		}
@@ -1139,8 +1271,33 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 	}
 }
 
+/**
+ * What `/ps` and `/stop` need from the shell manager. Structural rather than the
+ * class itself so a test can hand in shells without spawning anything.
+ */
+export interface BackgroundShellAccess {
+	list(): BackgroundShell[];
+	output(id: string, maxChars?: number): string;
+	kill(id: string): boolean;
+}
+
 function pushInfo(handle: ReplAppHandle | null, text: string): void {
 	handle?.store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text }] }));
+}
+
+/**
+ * A path as the user thinks of it, with `~` for their home directory.
+ *
+ * The status card is the one place the working directory is spelled out, and
+ * `/Users/someone/projects/thing` is mostly noise next to `~/projects/thing`.
+ * A home that is not a prefix (a `--cwd` outside it) is left exactly as given —
+ * showing a partial match would be worse than showing the whole path.
+ */
+export function shortenHome(path: string, home: string | undefined): string {
+	if (!home) return path;
+	if (path === home) return "~";
+	const prefix = home.endsWith(sep) ? home : `${home}${sep}`;
+	return path.startsWith(prefix) ? `~${sep}${path.slice(prefix.length)}` : path;
 }
 
 export { type AppCommandContext, appendHistory, handleAppCommand };

@@ -21,12 +21,15 @@ export function stripAnsi(text: string): string {
 	return text.replace(ANSI_ESCAPE_RE, "").replace(CONTROL_CHARS_RE, "");
 }
 
-function UserMessageView({ text }: { text: string }) {
+function UserMessageView({ text, steered = false }: { text: string; steered?: boolean }) {
 	const theme = useTheme();
 	return (
 		<Box marginBottom={1}>
 			<Text color={theme.userInput}>
-				{"> "}
+				{/* A message sent into a running turn went in at a different point in
+				    the conversation than the one it appears after; the marker is what
+				    makes that legible when reading the transcript back. */}
+				{steered ? "≫ " : "> "}
 				<Text bold>{stripAnsi(text)}</Text>
 			</Text>
 		</Box>
@@ -369,7 +372,7 @@ function InfoView({ text }: { text: string }) {
 export function EntryView({ entry, full, liveText }: { entry: UiEntry; full?: boolean; liveText?: string }) {
 	switch (entry.kind) {
 		case "user":
-			return <UserMessageView text={entry.text} />;
+			return <UserMessageView text={entry.text} steered={entry.steered} />;
 		case "assistant":
 			return <AssistantMessageView text={entry.text} />;
 		case "toolUse":

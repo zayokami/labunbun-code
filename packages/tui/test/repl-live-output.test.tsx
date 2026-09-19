@@ -63,3 +63,34 @@ describe("live tool output in the REPL", () => {
 		view.unmount();
 	});
 });
+
+describe("the background shell row in the REPL", () => {
+	// The row is one `useStore` slice away from existing at all. `backgroundShellRow`
+	// itself is covered in components.test.tsx; what a unit test cannot see is a
+	// REPL that never reads the slice, which renders identically to before the
+	// feature and leaves every other test green.
+	test("a running shell shows up under the status line, and goes away with it", async () => {
+		const store = createStore<UiState>({ ...initialUiState(), statusPhase: "idle" });
+		const view = render(<REPL getSession={() => idleSession} store={store} modelName="test" onExit={() => {}} />);
+
+		expect(view.lastFrame() ?? "").not.toContain("background shell");
+
+		store.set((s) => ({
+			...s,
+			backgroundShells: [{ id: "shell_1", command: "npm run dev", status: "running" }],
+		}));
+		await delay(30);
+		const running = view.lastFrame() ?? "";
+		expect(running).toContain("1 background shell running · /ps to view · /stop to close");
+
+		// The poll publishes the same list with the shell now finished; the row is
+		// what the user reads to know the port is free again.
+		store.set((s) => ({
+			...s,
+			backgroundShells: [{ id: "shell_1", command: "npm run dev", status: "completed" }],
+		}));
+		await delay(30);
+		expect(view.lastFrame() ?? "").not.toContain("background shell");
+		view.unmount();
+	});
+});

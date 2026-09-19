@@ -2,7 +2,7 @@ import { Text } from "ink";
 import { useEffect, useState } from "react";
 import { formatElapsed } from "../elapsed.ts";
 import { useTheme } from "../theme.ts";
-import type { PendingTool, StatusPhase } from "../ui-state.ts";
+import type { PendingTool, StatusPhase, UiBackgroundShell } from "../ui-state.ts";
 
 /** Braille spinner, shared with the terminal title so both turn at one rate. */
 export const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -33,6 +33,19 @@ export function toolSummary(tools: PendingTool[]): string {
 	const counts = new Map<string, number>();
 	for (const tool of tools) counts.set(tool.toolName, (counts.get(tool.toolName) ?? 0) + 1);
 	return [...counts].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(" · ");
+}
+
+/**
+ * The background-shell row, or null when there is nothing to report.
+ *
+ * Only running shells are counted, and the row carries the two commands that do
+ * something about them: a dev server outliving its turn is normal, but a dev
+ * server nobody remembers starting is how ports get stuck.
+ */
+export function backgroundShellRow(shells: UiBackgroundShell[]): string | null {
+	const running = shells.filter((shell) => shell.status === "running").length;
+	if (running === 0) return null;
+	return `${running} background shell${running === 1 ? "" : "s"} running · /ps to view · /stop to close`;
 }
 
 export function StatusLine({

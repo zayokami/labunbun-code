@@ -168,6 +168,11 @@ export class AgentSession {
 		// Dropping queued follow-ups on explicit abort is the least surprising
 		// behavior — stale queued prompts should not fire after an interrupt.
 		this.#followUp = [];
+		// Steering is the same promise: it says "deliver before the next model
+		// call", and there will not be one. Left in place it would be drained at
+		// the top of a *later* run's first turn, landing a message the user typed
+		// for an interrupted turn after whatever they typed instead.
+		this.#steering = [];
 		this.#interruptRequested = true;
 		this.#abortController?.abort();
 	}

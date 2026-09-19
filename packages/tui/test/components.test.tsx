@@ -4,12 +4,13 @@ import type React from "react";
 import { MessageList } from "../src/components/MessageList.tsx";
 import { PermissionDialog } from "../src/components/PermissionDialog.tsx";
 import { ShortcutOverlay } from "../src/components/ShortcutOverlay.tsx";
-import { StatusLine, toolSummary } from "../src/components/StatusLine.tsx";
+import { CONTEXT_BAR_SEGMENTS, contextBar, StatusCard } from "../src/components/StatusCard.tsx";
+import { backgroundShellRow, StatusLine, toolSummary } from "../src/components/StatusLine.tsx";
 import { permissionOptions } from "../src/permission-options.ts";
 import { shortcutGroups } from "../src/shortcuts.ts";
 import { createStore } from "../src/store.ts";
 import { DARK_THEME, HIGH_CONTRAST_DARK, type Theme, ThemeContext } from "../src/theme.ts";
-import { initialUiState, reduceEvent, toolPreview, type UiState } from "../src/ui-state.ts";
+import { initialUiState, reduceEvent, toolPreview, type UiBackgroundShell, type UiState } from "../src/ui-state.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -150,6 +151,92 @@ describe("StatusLine", () => {
 		expect(toolSummary(tools(["Bash", "Bash", "Read"]))).toBe("Bash ×2 · Read");
 		expect(toolSummary(tools(["Grep"]))).toBe("Grep");
 		expect(toolSummary([])).toBe("");
+	});
+});
+
+describe("background shell row", () => {
+	const shell = (id: string, status: UiBackgroundShell["status"]): UiBackgroundShell => ({
+		id,
+		command: `run ${id}`,
+		status,
+	});
+
+	test("says nothing at all until something is actually running", () => {
+		expect(backgroundShellRow([])).toBeNull();
+		// A finished shell is not news: the row exists to answer "is anything
+		// still going", and answering it forever would make the row permanent.
+		expect(backgroundShellRow([shell("shell_1", "completed"), shell("shell_2", "killed")])).toBeNull();
+	});
+
+	test("counts only the running ones, and points at both commands", () => {
+		const row = backgroundShellRow([shell("shell_1", "running"), shell("shell_2", "completed")]);
+		expect(row).toContain("1 background shell running");
+		expect(row).toContain("/ps to view");
+		expect(row).toContain("/stop to close");
+	});
+
+	test("one shell is singular, two are plural", () => {
+		expect(backgroundShellRow([shell("shell_1", "running"), shell("shell_2", "running")])).toContain(
+			"2 background shells running",
+		);
+	});
+});
+
+describe("StatusCard", () => {
+	const data = {
+		model: "anthropic/claude-sonnet-5",
+		directory: "~/projects/thing",
+		permissions: "default",
+		session: "abc12345",
+		details: [["Cost", "$0.1234 (this project, all sessions)"]] as Array<[string, string]>,
+	};
+
+	test("one row per fact, and a hint for the key that closes it", () => {
+		const frame = flatFrame(
+			render(
+				withTheme(<StatusCard data={{ ...data, context: { usedTokens: 76_000, threshold: 200_000 } }} />),
+			).lastFrame() ?? "",
+		);
+		for (const text of [
+			"Model",
+			"anthropic/claude-sonnet-5",
+			"Directory",
+			"~/projects/thing",
+			"Permissions",
+			"abc12345",
+			"Cost",
+		]) {
+			expect(frame).toContain(text);
+		}
+		expect(frame).toContain("38%");
+		expect(frame).toContain("Esc to dismiss");
+	});
+
+	test("before anything is measured it says so instead of drawing an empty bar", () => {
+		const frame = flatFrame(render(withTheme(<StatusCard data={data} />)).lastFrame() ?? "");
+		expect(frame).toContain("measured after the first turn");
+		expect(frame).not.toContain("░");
+	});
+
+	test("the bar is proportional, and clamps when the context is over the line", () => {
+		const empty = contextBar(0, 100);
+		expect(empty.filled).toBe(0);
+		expect(empty.percent).toBe(0);
+		expect(empty.bar).toBe("░".repeat(CONTEXT_BAR_SEGMENTS));
+
+		const half = contextBar(50, 100);
+		expect(half.filled).toBe(CONTEXT_BAR_SEGMENTS / 2);
+		expect(half.percent).toBe(50);
+
+		// Past the threshold the bar is full, not overflowing: the card is a
+		// rectangle whose width cannot depend on how far past the limit it is.
+		const over = contextBar(250, 100);
+		expect(over.filled).toBe(CONTEXT_BAR_SEGMENTS);
+		expect(over.percent).toBe(100);
+		expect(over.bar).toBe("█".repeat(CONTEXT_BAR_SEGMENTS));
+
+		// An unmeasured threshold must not divide by zero.
+		expect(contextBar(10, 0).filled).toBe(0);
 	});
 });
 

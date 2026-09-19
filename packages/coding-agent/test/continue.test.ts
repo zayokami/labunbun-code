@@ -40,7 +40,7 @@ async function startup(home: string, cwd: string, options: { continueLast?: bool
 			mountRepl: ({ session }) => {
 				mountedMessages = structuredClone(session.messages);
 				return {
-					setTasks() {}, setContextInfo() {},
+					setTasks() {}, setContextInfo() {}, setBackgroundShells() {},
 					store: { set() {} },
 					waitUntilExit: async () => { reason = await session.prompt("new question"); }
 				};
