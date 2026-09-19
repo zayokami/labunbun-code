@@ -17,7 +17,7 @@ import { initialUiState, type UiState } from "../src/ui-state.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function setup() {
+function setup(options: { vim?: boolean; completeFiles?: (query: string) => Promise<string[]> } = {}) {
 	const streaming = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	const faux = fauxProvider([{ text: "thinking hard" }, { text: "never reached" }]);
@@ -36,7 +36,16 @@ function setup() {
 	const session = new AgentSession({ model: FAUX_MODEL, maxTurns: 4, deps: { streamFn } });
 	const store = createStore<UiState>({ ...initialUiState(), statusPhase: "responding" });
 	const unsubscribe = connectSessionToStore(session, store);
-	const view = render(<REPL getSession={() => session} store={store} modelName="test" onExit={() => {}} />);
+	const view = render(
+		<REPL
+			getSession={() => session}
+			store={store}
+			modelName="test"
+			onExit={() => {}}
+			vimMode={options.vim}
+			completeFiles={options.completeFiles}
+		/>,
+	);
 
 	return {
 		session,
@@ -44,6 +53,7 @@ function setup() {
 		streaming,
 		release,
 		stdin: view.stdin,
+		frame: () => view.lastFrame() ?? "",
 		unmount: () => {
 			unsubscribe();
 			view.unmount();
@@ -96,6 +106,81 @@ describe("Esc interrupts a run", () => {
 		expect(h.session.isRunning).toBe(false);
 		expect(h.session.isInterrupted).toBe(false);
 		expect(transcript(h.store)).not.toContain("info:[interrupted]");
+		h.unmount();
+	}, 20_000);
+});
+
+/**
+ * Ink hands every keypress to every active listener, so "the vim engine
+ * consumed it" cannot keep the REPL's own Escape binding from firing. The
+ * editor therefore gets the key first — through a ref the REPL calls — and only
+ * an Escape it declines to use reaches the session.
+ */
+describe("Esc and the vim layer", () => {
+	test("escape from insert mode leaves insert without killing the turn", async () => {
+		const h = setup({ vim: true });
+		await delay(40);
+		// vim starts in NORMAL, where the letters are commands — the prompt has to
+		// be typed into the buffer from insert mode.
+		h.stdin.write("i");
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+		expect(h.session.isRunning).toBe(true);
+
+		h.stdin.write("half typed");
+		await delay(20);
+		h.stdin.write("\x1b");
+		await delay(60);
+
+		expect(h.session.isInterrupted).toBe(false); // insert mode used the key
+		expect(h.frame()).toContain("[NORMAL]");
+
+		// Nothing left to cancel: this one is the interrupt.
+		h.stdin.write("\x1b");
+		await delay(60);
+		expect(h.session.isInterrupted).toBe(true);
+
+		h.release.resolve();
+		await delay(150);
+		h.unmount();
+	}, 20_000);
+
+	test("an idle Escape in normal mode interrupts right away", async () => {
+		const h = setup({ vim: true });
+		await delay(40);
+		h.stdin.write("i");
+		await submit(h.stdin, "run something slow");
+		await delay(20);
+		h.stdin.write("\x1b"); // back to NORMAL, so the next Esc is not "leave insert"
+		await h.streaming.promise;
+		await delay(20);
+
+		h.stdin.write("\x1b");
+		await delay(60);
+		expect(h.session.isInterrupted).toBe(true);
+
+		h.release.resolve();
+		await delay(150);
+		h.unmount();
+	}, 20_000);
+
+	test("escape dismisses the @-list instead of aborting", async () => {
+		const h = setup({ completeFiles: async () => ["src/index.ts"] });
+		await delay(40);
+		await submit(h.stdin, "run something slow");
+		await h.streaming.promise;
+
+		h.stdin.write("@src");
+		await delay(250); // the list loads behind a debounce
+		expect(h.frame()).toContain("@src/index.ts");
+
+		h.stdin.write("\x1b");
+		await delay(60);
+		expect(h.session.isInterrupted).toBe(false);
+		expect(h.frame()).not.toContain("@src/index.ts");
+
+		h.release.resolve();
+		await delay(150);
 		h.unmount();
 	}, 20_000);
 });

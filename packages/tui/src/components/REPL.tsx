@@ -69,6 +69,13 @@ export interface ReplProps {
 const KEYS_HELP = `Keys:
   Enter send · Shift+Enter newline · ↑/↓ history · Esc interrupt · Ctrl+C exit (twice when idle)`;
 
+/**
+ * Appended to the key list when modal editing is on. Without it `/help` promised
+ * the one thing vim mode changes: the editor claims Escape first, so the press
+ * that leaves insert (or drops a half-typed command) never reaches the session.
+ */
+const VIM_KEYS_HELP = `  vim: i a insert · Esc leave insert · v/V Esc cancel selection · Esc interrupt when idle`;
+
 /** Clear screen, clear scrollback, home cursor — the full terminal wipe. */
 export const CLEAR_SCREEN = "\x1b[2J\x1b[3J\x1b[H";
 
@@ -101,13 +108,14 @@ const BUILT_IN_HELP: Array<[string, string]> = [
  * Help text built from the command table the REPL was given, so a command added
  * to the registry cannot go missing from `/help`.
  */
-export function helpText(commandSuggestions?: Array<[string, string]>): string {
+export function helpText(commandSuggestions?: Array<[string, string]>, vim = false): string {
 	const byName = new Map<string, string>(BUILT_IN_HELP);
 	for (const [name, description] of commandSuggestions ?? []) byName.set(name, description);
 	const rows = [...byName].sort(([a], [b]) => a.localeCompare(b));
 	const width = Math.max(...rows.map(([name]) => name.length));
 	const lines = rows.map(([name, description]) => `  ${name.padEnd(width)}  ${description}`);
-	return `Commands:\n${lines.join("\n")}\n\n${KEYS_HELP}`;
+	const keys = vim ? `${KEYS_HELP}\n${VIM_KEYS_HELP}` : KEYS_HELP;
+	return `Commands:\n${lines.join("\n")}\n\n${keys}`;
 }
 
 export function REPL({
@@ -140,6 +148,8 @@ export function REPL({
 	const lastCtrlCAtRef = useRef(0);
 	const ctrlCTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const [ctrlCHint, setCtrlCHint] = useState(false);
+	/** Escape routing into the prompt editor — see the Esc branch below. */
+	const escapeRef = useRef<(() => boolean) | null>(null);
 
 	useEffect(
 		() => () => {
@@ -175,7 +185,7 @@ export function REPL({
 			const trimmed = text.trim();
 			if (trimmed.startsWith("/")) {
 				if (onCommand?.(trimmed)) return;
-				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions });
+				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions, vim: vimMode === true });
 				return;
 			}
 			if (trimmed.startsWith("#")) {
@@ -216,7 +226,7 @@ export function REPL({
 				void session.prompt(text);
 			})();
 		},
-		[getSession, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions],
+		[getSession, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions, vimMode],
 	);
 
 	const [transcriptMode, setTranscriptMode] = useState(false);
@@ -253,6 +263,10 @@ export function REPL({
 		// decision they just made would land on a run that no longer exists.
 		if (key.escape) {
 			if (dialog || question || picker) return;
+			// The editor gets the first look — it may have something of its own to
+			// cancel (an @-list, insert mode, a half-typed vim command) that is not
+			// an interrupt. Only what it declines to use reaches the session.
+			if (escapeRef.current?.()) return;
 			if (getSession().isRunning) {
 				getSession().abort();
 				return;
@@ -329,6 +343,7 @@ export function REPL({
 				completeFiles={completeFiles}
 				vim={vimMode}
 				history={history}
+				escapeRef={escapeRef}
 			/>
 			<Text dimColor> </Text>
 		</Box>
@@ -342,6 +357,8 @@ function handleCommand(
 		modelName: string;
 		onExit: () => void;
 		commandSuggestions?: Array<[string, string]>;
+		/** Modal editing is on, so the key list says what Escape does there. */
+		vim?: boolean;
 	},
 ): void {
 	const { store, onExit, commandSuggestions } = context;
@@ -349,7 +366,7 @@ function handleCommand(
 
 	switch (command) {
 		case "/help":
-			pushInfo(store, helpText(commandSuggestions));
+			pushInfo(store, helpText(commandSuggestions, context.vim));
 			break;
 		case "/clear":
 			// Display-only: the persisted session and the model context survive.

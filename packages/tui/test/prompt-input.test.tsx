@@ -111,6 +111,97 @@ describe("prompt input", () => {
 		expect(lastFrame() ?? "").toContain("ph"); // still the placeholder
 		unmount();
 	});
+
+	// Escape means something different in every vim mode, and the one it does not
+	// mean in insert is the one that kills the turn. A single fixed "Esc interrupt"
+	// was wrong for exactly the press a user makes most.
+	test("the Esc hint follows the vim mode", async () => {
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} vim />));
+		await delay(30);
+		// NORMAL with an empty buffer: nothing to cancel, so the host keeps it.
+		expect(flat(lastFrame())).toContain("Esc interrupt");
+
+		stdin.write("i");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("Esc normal");
+
+		stdin.write("\x1b");
+		await delay(30);
+		stdin.write("v");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("Esc cancel");
+
+		stdin.write("\x1b");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("Esc interrupt");
+		unmount();
+	});
+
+	test("Backspace in normal mode moves instead of erasing", async () => {
+		// Ink hands the key to the component either way, so the mode has to decide
+		// what it means: in NORMAL it is vim's motion, in INSERT the host's delete.
+		const { stdin, lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} vim />));
+		await delay(30);
+		stdin.write("i");
+		stdin.write("abc");
+		await delay(30);
+		stdin.write("\x1b"); // leave insert: the caret steps back onto "c"
+		await delay(30);
+		stdin.write("\x7f"); // Backspace: one step left, no edit
+		await delay(30);
+		expect(flat(lastFrame())).toContain("abc");
+
+		stdin.write("\x1b[3~"); // Delete: `x` on the character under the caret
+		await delay(30);
+		expect(flat(lastFrame())).toContain("ac"); // 'b' gone: the motion left it there
+		unmount();
+	});
+
+	test("without vim the hint is always the interrupt", async () => {
+		const { lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} />));
+		await delay(30);
+		expect(flat(lastFrame())).toContain("Esc interrupt");
+		unmount();
+	});
+});
+
+/**
+ * Editing around characters that are more than one UTF-16 unit. Asserted on the
+ * submitted text rather than a frame: a corrupted surrogate pair renders as a
+ * replacement box, and the frame comparison would not tell the two apart.
+ */
+describe("insert-mode editing over astral characters", () => {
+	/** Type keys, submit, and hand back what the REPL would have received. */
+	async function submitAfter(keys: string[]): Promise<string[]> {
+		const submitted: string[] = [];
+		const { stdin, unmount } = render(withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} />));
+		await delay(30);
+		for (const k of keys) {
+			stdin.write(k);
+			await delay(30);
+		}
+		unmount();
+		return submitted;
+	}
+
+	test("Backspace deletes the whole emoji, not the low surrogate half", async () => {
+		expect(await submitAfter(["ab😀", "\x7f", "\r"])).toEqual(["ab"]);
+	});
+
+	test("Delete takes the whole emoji under the caret", async () => {
+		// Ctrl+A to the line start, one step right (past "a"), then Delete.
+		expect(await submitAfter(["a😀b", "\x01", "\x1b[C", "\x1b[3~", "\r"])).toEqual(["ab"]);
+	});
+
+	test("Left steps over the pair instead of landing inside it", async () => {
+		// Two steps from the end land before the emoji, so the X goes in front of
+		// it; a unit-wise step would land on the low surrogate and split the pair.
+		expect(await submitAfter(["a😀", "\x1b[D", "\x1b[D", "X", "\r"])).toEqual(["Xa😀"]);
+	});
+
+	test("Right steps over the pair", async () => {
+		expect(await submitAfter(["😀b", "\x01", "\x1b[C", "X", "\r"])).toEqual(["😀Xb"]);
+	});
 });
 
 describe("slash command suggestions", () => {

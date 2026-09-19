@@ -1,9 +1,10 @@
 import { Box, Text, useInput, usePaste } from "ink";
-import { useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useRef, useState } from "react";
 import { useTextInput } from "../hooks/useTextInput.ts";
 import { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "../paste.ts";
 import { applyFileCompletion, currentAtWord, filterFiles } from "../prompt-files.ts";
 import { useTheme } from "../theme.ts";
+import type { VimMode } from "../vim.ts";
 
 export interface PromptInputProps {
 	onSubmit: (text: string) => void;
@@ -24,6 +25,14 @@ export interface PromptInputProps {
 	 * buffer starts empty and ↑ only reaches prompts typed in this session.
 	 */
 	history?: string[];
+	/**
+	 * Filled in here with a handler the owner calls when it sees Escape (see
+	 * REPL). Ink hands every press to every active listener, so the editor cannot
+	 * "consume" the key on its own: this is how it gets the first look, and how an
+	 * Escape it did not want still reaches the host. Without it the component
+	 * handles Escape itself.
+	 */
+	escapeRef?: RefObject<(() => boolean) | null>;
 }
 
 /**
@@ -50,6 +59,7 @@ export function PromptInput({
 	completeFiles,
 	vim = false,
 	history = [],
+	escapeRef,
 }: PromptInputProps) {
 	const theme = useTheme();
 	const { state, actions, historyUp, historyDown, pushHistory, vimMode, handleVimKey, selection } = useTextInput(
@@ -118,8 +128,29 @@ export function PromptInput({
 		if (atQuery === null) setFileSuggestions([]);
 	}, [atQuery]);
 
+	// Escape routing for an owner that took the key (REPL). A vim user needs Esc to
+	// leave insert or drop a half-typed command without the same press also
+	// aborting the turn the host aborts on.
+	useEffect(() => {
+		if (!escapeRef) return;
+		escapeRef.current = () => {
+			if (fileSuggestions.length > 0) {
+				setFileSuggestions([]);
+				return true;
+			}
+			// True only when vim had something to cancel; an idle Esc is the host's.
+			return handleVimKey("", { escape: true });
+		};
+		return () => {
+			escapeRef.current = null;
+		};
+	}, [escapeRef, fileSuggestions, handleVimKey]);
+
 	useInput(
 		(input, key) => {
+			// The owner calls back into the handler above; acting on it here as well
+			// would run the cancel twice.
+			if (key.escape && escapeRef) return;
 			if (handleVimKey(input, key)) return;
 			// Tab writes the highlighted suggestion into the buffer. Cycling alone
 			// left the user staring at a list they could not accept.
@@ -325,11 +356,23 @@ export function PromptInput({
 				)}
 				<Text dimColor>
 					{vim ? `[${MODE_LABEL[vimMode] ?? "NORMAL"}] ` : ""}
-					Enter send · Shift+Enter newline · ↑↓ history · Esc interrupt · /help
+					Enter send · Shift+Enter newline · ↑↓ history · {escapeHint(vim, vimMode)} · /help
 				</Text>
 			</Box>
 		</Box>
 	);
+}
+
+/**
+ * What Escape does right now. With vim it depends on the mode: leaving insert or
+ * cancelling a selection never reaches the session's interrupt, so one fixed
+ * "Esc interrupt" was wrong half the time.
+ */
+function escapeHint(vim: boolean, vimMode: VimMode): string {
+	if (!vim) return "Esc interrupt";
+	if (vimMode === "insert") return "Esc normal";
+	if (vimMode.startsWith("visual")) return "Esc cancel";
+	return "Esc interrupt";
 }
 
 function cursorColumn(text: string, cursor: number, lineIndex: number): number {

@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { killWordBack, killWordForward } from "../src/hooks/useTextInput.ts";
+import { backspaceChar, deleteChar, killWordBack, killWordForward } from "../src/hooks/useTextInput.ts";
 import {
 	expandPasteTokens,
 	makePasteToken,
@@ -14,6 +14,51 @@ import {
 	PASTE_TOKEN_RE,
 	shouldPlaceholderize,
 } from "../src/paste.ts";
+
+describe("backspaceChar", () => {
+	test("removes one plain character", () => {
+		expect(backspaceChar("abc", 3)).toEqual({ text: "ab", cursor: 2 });
+	});
+
+	test("deletes the whole emoji, not the low surrogate half", () => {
+		// "ab😀" is five UTF-16 units; a unit-wise step left a lone surrogate behind,
+		// which renders as a replacement box and destroys the character.
+		expect(backspaceChar("ab\u{1F600}", 4)).toEqual({ text: "ab", cursor: 2 });
+	});
+
+	test("deletes a combining mark together with its base", () => {
+		// vim 9.1 insert-mode <BS> on "a" + "e" + U+0301 leaves "a". Written as an
+		// escape on purpose: a literal combining mark is invisible, and an editor that
+		// normalized it to the precomposed "é" would leave the cluster case untested.
+		expect(backspaceChar("ae\u0301", 3)).toEqual({ text: "a", cursor: 1 });
+	});
+
+	test("at the buffer start it deletes nothing", () => {
+		expect(backspaceChar("abc", 0)).toEqual({ text: "abc", cursor: 0 });
+	});
+
+	test("a stale mid-pair cursor snaps onto the character first", () => {
+		expect(backspaceChar("\u{1F600}\u{1F600}", 3)).toEqual({ text: "\u{1F600}", cursor: 0 });
+	});
+});
+
+describe("deleteChar", () => {
+	test("removes one plain character", () => {
+		expect(deleteChar("abc", 1)).toEqual({ text: "ac", cursor: 1 });
+	});
+
+	test("deletes the whole emoji under the cursor", () => {
+		expect(deleteChar("a\u{1F600}b", 1)).toEqual({ text: "ab", cursor: 1 });
+	});
+
+	test("deletes a combining mark with its base", () => {
+		expect(deleteChar("ae\u0301", 1)).toEqual({ text: "a", cursor: 1 });
+	});
+
+	test("at the buffer end it deletes nothing", () => {
+		expect(deleteChar("abc", 3)).toEqual({ text: "abc", cursor: 3 });
+	});
+});
 
 describe("killWordBack", () => {
 	test("removes one word under the cursor", () => {

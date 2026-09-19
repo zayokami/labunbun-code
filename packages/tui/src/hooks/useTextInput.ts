@@ -10,7 +10,7 @@
 
 import type { Key } from "ink";
 import { useCallback, useRef, useState } from "react";
-import { VimEngine, type VimMode } from "../vim.ts";
+import { nextChar, prevChar, snapToChar, VimEngine, type VimMode } from "../vim.ts";
 
 export interface TextInputState {
 	text: string;
@@ -42,6 +42,25 @@ export interface TextInputActions {
 }
 
 const UNDO_LIMIT = 200;
+
+/**
+ * One insert-mode Backspace step. A character is not a code unit: an emoji is a
+ * surrogate pair and `é` may be `e` plus a combining acute, so stepping by one
+ * unit would leave half a character behind. vim's insert-mode <BS> deletes the
+ * whole cluster — and a lone leading mark on its own — which is exactly what the
+ * engine's prevChar/nextChar boundaries give (verified against vim 9.1).
+ */
+export function backspaceChar(text: string, cursor: number): { text: string; cursor: number } {
+	const end = snapToChar(text, cursor);
+	const start = prevChar(text, end);
+	return { text: text.slice(0, start) + text.slice(end), cursor: start };
+}
+
+/** The forward twin: vim's insert-mode <Del>, deleting the whole character. */
+export function deleteChar(text: string, cursor: number): { text: string; cursor: number } {
+	const end = snapToChar(text, cursor);
+	return { text: text.slice(0, end) + text.slice(nextChar(text, end)), cursor: end };
+}
 
 /**
  * Word-kill primitives, pure so the boundaries are testable without a
@@ -146,22 +165,19 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 			}));
 		},
 		newline: () => actions.insert("\n"),
+		// At the buffer ends the primitives return the buffer unchanged, and
+		// commitWithUndo's no-change rule keeps that out of the undo stack.
 		backspace: () => {
 			lastActionWasKillRef.current = false;
-			commitWithUndo((s) =>
-				s.cursor === 0 ? s : { text: s.text.slice(0, s.cursor - 1) + s.text.slice(s.cursor), cursor: s.cursor - 1 },
-			);
+			commitWithUndo((s) => backspaceChar(s.text, s.cursor));
 		},
 		delete: () => {
 			lastActionWasKillRef.current = false;
-			commitWithUndo((s) =>
-				s.cursor >= s.text.length
-					? s
-					: { text: s.text.slice(0, s.cursor) + s.text.slice(s.cursor + 1), cursor: s.cursor },
-			);
+			commitWithUndo((s) => deleteChar(s.text, s.cursor));
 		},
-		moveLeft: () => commit((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) })),
-		moveRight: () => commit((s) => ({ ...s, cursor: Math.min(s.text.length, s.cursor + 1) })),
+		moveLeft: () => commit((s) => ({ ...s, cursor: prevChar(s.text, s.cursor) })),
+		// nextChar steps past the buffer end; the clamp is what keeps the cursor legal.
+		moveRight: () => commit((s) => ({ ...s, cursor: Math.min(s.text.length, nextChar(s.text, s.cursor)) })),
 		moveToLineStart: () => commit((s) => ({ ...s, cursor: 0 })),
 		moveToLineEnd: () => commit((s) => ({ ...s, cursor: s.text.length })),
 		moveWordLeft: () =>
@@ -230,28 +246,29 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 	};
 
 	function commitWithUndo(fn: (s: TextInputState) => TextInputState): void {
+		const next = fn(stateRef.current);
+		// An edit that changes nothing must not push a snapshot: the push would
+		// clear the redo stack the user still expects to walk back through.
+		if (next.text === stateRef.current.text && next.cursor === stateRef.current.cursor) return;
 		recordUndo();
-		commit(fn(stateRef.current));
+		commit(next);
 	}
 
 	// -- vim engine -----------------------------------------------------------
 
 	const engineRef = useRef<VimEngine | null>(null);
 	if (vim && engineRef.current === null) {
-		engineRef.current = new VimEngine(
-			{
-				getText: () => stateRef.current.text,
-				getCursor: () => stateRef.current.cursor,
-				setCursor: (pos) => commit((s) => ({ ...s, cursor: Math.max(0, Math.min(pos, s.text.length)) })),
-				setAll: (text, cursor) => commitWithUndo(() => ({ text, cursor })),
-				enterInsert: () => {},
-				toNormal: () => {},
-				recallHistory: (dir) => (dir === "up" ? historyUp() : historyDown()),
-				undo: () => actions.undo(),
-				redo: () => actions.redo(),
-			},
-			true,
-		);
+		engineRef.current = new VimEngine({
+			getText: () => stateRef.current.text,
+			getCursor: () => stateRef.current.cursor,
+			setCursor: (pos) => commit((s) => ({ ...s, cursor: Math.max(0, Math.min(pos, s.text.length)) })),
+			setAll: (text, cursor) => commitWithUndo(() => ({ text, cursor })),
+			enterInsert: () => {},
+			toNormal: () => {},
+			recallHistory: (dir) => (dir === "up" ? historyUp() : historyDown()),
+			undo: () => actions.undo(),
+			redo: () => actions.redo(),
+		});
 	}
 
 	// Pure mode/selection flips don't touch React state — bump a tick so the
@@ -266,10 +283,15 @@ export function useTextInput(initialHistory: string[] = [], vim = false) {
 			return: key.return,
 			ctrl: key.ctrl,
 			meta: key.meta,
+			tab: key.tab,
 			upArrow: key.upArrow,
 			downArrow: key.downArrow,
 			leftArrow: key.leftArrow,
 			rightArrow: key.rightArrow,
+			home: key.home,
+			end: key.end,
+			backspace: key.backspace,
+			delete: key.delete,
 		});
 		if (consumed && `${engine.mode}:${JSON.stringify(engine.selection)}` !== before) {
 			setRenderTick((t) => t + 1);

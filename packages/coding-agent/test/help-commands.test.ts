@@ -150,4 +150,20 @@ describe("helpText", () => {
 			.map((line) => line.trim().split(/\s+/)[0]);
 		expect(new Set(names).size).toBe(names.length);
 	});
+
+	test("with vim on it says what Escape does in the editor", () => {
+		// The key list promised "Esc interrupt" even where the editor takes the
+		// key first. The plain list stays byte-identical for everyone else.
+		const plain = helpText(suggestions());
+		const vim = helpText(suggestions(), true);
+		expect(vim.startsWith(plain)).toBe(true);
+		expect(vim).toContain("Esc leave insert");
+
+		const added = vim
+			.slice(plain.length)
+			.split("\n")
+			.filter((line) => line.trim() !== "");
+		expect(added).toHaveLength(1);
+		expect(added[0]).toContain("vim:");
+	});
 });
