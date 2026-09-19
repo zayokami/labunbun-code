@@ -43,9 +43,10 @@ labunbun                                # interactive REPL
   theme files.
 - **Headless output** — `--output-format text|json|stream-json`.
 - **Config import** — `labunbun migrate` maps an existing agent-tool setup
-  (Claude Code, Codex, ZCode, `~/.agents`) onto labunbun's own config, settings
-  and files and past conversations alike; dry run by default, and a `/migrate`
-  wizard that asks what to take.
+  (Claude Code, Codex, ZCode, `~/.agents`) onto labunbun's own config: settings,
+  skills, rules, slash commands, past conversations and the prompts ↑ recalls.
+  Dry run by default, and a `/migrate` wizard that asks what to take — or takes
+  everything after one question.
 
 ## Quick start
 
@@ -89,22 +90,36 @@ bun run dev migrate --apply --force    # also overwrite values that exist
 ```
 
 Sources are only read, never modified. Model names, `env`, MCP servers,
-permission rules, skills, agents (`~/.labunbun/agents/`) and rules carry over;
-anything without an equivalent is reported as skipped with a reason rather than
-dropped silently, and existing values are kept unless `--force` says otherwise.
+permission rules, skills, agents (`~/.labunbun/agents/`) and rules carry over,
+and a skill directory travels whole — a body pointing at `references/x.md` finds
+it on the other side, and the supporting files that could not come (binary, too
+large) are counted in the report. Slash commands (`~/.claude/commands/**`)
+arrive as skills with `$ARGUMENTS` expanded; a frontmatter key with no
+equivalent here (`allowed-tools`, `model`, `argument-hint`) is named in the
+report rather than written as if it worked. Codex's `~/.codex/rules/*.rules`
+become permission rules — Codex matches a parsed argv prefix where labunbun
+matches the whole command line, so a chained `git commit && …` matches here too.
+
+Anything without an equivalent is reported as skipped with a reason rather than
+dropped silently, keys the importer does not know included: they are listed by
+name, never by value. Existing values are kept unless `--force` says otherwise.
 The report names every written file that ends up holding a credential.
 
 Past conversations import as sessions under `~/.labunbun/projects/<cwd>/`, so
-`--continue` finds them. Only the current project's sessions are taken by
-default — `--history-scope all` goes across projects, `none` skips history
-entirely — and `--history-limit <n>` (default 20) caps how many come from each
-source. A tool call whose other half is missing is dropped on the way in:
-a transcript the messages API would reject is worse than a shorter one.
+`--continue` finds them, and the prompts you typed import into
+`~/.labunbun/history.jsonl`, so ↑ recalls them in the directory each was typed
+in. Both answer to the same scope: only the current project is taken by default
+— `--history-scope all` goes across projects, `none` skips history entirely —
+and `--history-limit <n>` (default 20) caps the sessions from each source, with
+a separate cap for prompts. A tool call whose other half is missing is dropped
+on the way in: a transcript the messages API would reject is worse than a
+shorter one.
 
-`/migrate` in the REPL asks rather than assumes — which sources, which
-categories, and which conversations — prints the same dry-run report, and
-writes only after you confirm. `--migrate` is the same command as the
-subcommand, for when the flag is easier to type than the word.
+`/migrate` in the REPL asks rather than assumes. The first question offers
+`Import everything` — every source found, every category — or `Choose…` for the
+step-by-step questions; either way it asks once about history, prints the same
+dry-run report, and writes only after you confirm. `--migrate` is the same
+command as the subcommand, for when the flag is easier to type than the word.
 
 ## Themes
 
