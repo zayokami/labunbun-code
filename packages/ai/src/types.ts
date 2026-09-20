@@ -209,6 +209,24 @@ export interface StreamOptions {
 	/** Explicit API key override (rare; usually resolved from `model.apiKeyEnv`). */
 	apiKey?: string;
 	headers?: Record<string, string>;
+	/**
+	 * Called once per retry, just before the wrapper sleeps.
+	 *
+	 * A ladder that backs off to thirty seconds a step runs for minutes, and
+	 * without this the whole of it is silence: the request may be per-model, so
+	 * the callback rides on the options rather than on the wrapper.
+	 */
+	onRetry?: (retry: RetryNotice) => void;
+}
+
+/** One step of a retry ladder, before the sleep that follows it. */
+export interface RetryNotice {
+	/** 1 for the first failure, i.e. the attempt that just failed. */
+	attempt: number;
+	error: unknown;
+	delayMs: number;
+	/** The error's own message, so a caller that only displays need not narrow it. */
+	message: string;
 }
 
 export type StreamFn = (

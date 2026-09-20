@@ -280,6 +280,11 @@ export class AgentSession {
 				const streamOptions: StreamOptions = {
 					signal: this.#abortController.signal,
 					maxOutputTokens: escalatedOnce ? Math.min(this.#model.maxOutputTokens * 2, MAX_OUTPUT_TOKENS_CAP) : undefined,
+					// The wrapper awaits this before it sleeps, so the announcement lands
+					// ahead of the wait it describes. Subscribers get it as an event like
+					// anything else the loop reports; nothing in the loop reacts to it.
+					onRetry: (retry) =>
+						this.#emit({ type: "retry", attempt: retry.attempt, delayMs: retry.delayMs, message: retry.message }),
 				};
 
 				let assistant: AssistantMessage | null = null;

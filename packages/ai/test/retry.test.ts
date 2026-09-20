@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createDefaultStreamFn, MissingApiKeyError, missingApiKey } from "../src/index.ts";
 import { MessageBuilder } from "../src/message-builder.ts";
 import { FAUX_MODEL, fauxProvider } from "../src/providers/faux.ts";
 import {
@@ -8,7 +9,7 @@ import {
 	statusCodeOf,
 	withRetry,
 } from "../src/retry.ts";
-import type { AssistantMessageEvent, StreamFn } from "../src/types.ts";
+import type { AssistantMessageEvent, Model, RetryNotice, StreamFn } from "../src/types.ts";
 
 async function collect(events: AsyncIterable<AssistantMessageEvent>) {
 	const out: AssistantMessageEvent[] = [];
@@ -44,7 +45,7 @@ describe("withRetry", () => {
 	test("retries pre-content failures and eventually succeeds", async () => {
 		const { fn, calls } = failingStreamFn(2, Object.assign(new Error("rate limited"), { status: 429 }));
 		const retries: number[] = [];
-		const wrapped = withRetry(fn, { baseDelayMs: 1, onRetry: (a) => retries.push(a) });
+		const wrapped = withRetry(fn, { baseDelayMs: 1, onRetry: (notice) => retries.push(notice.attempt) });
 
 		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
 		expect(calls()).toBe(3);
@@ -225,5 +226,138 @@ describe("abort handling", () => {
 		await expect(collect(withRetry(fn)(FAUX_MODEL, { systemPrompt: "", messages: [] }))).rejects.toThrow(
 			"This operation was aborted",
 		);
+	});
+});
+
+describe("retry notices", () => {
+	test("a notice carries the attempt, the wait, and the reason, and is awaited before the sleep", async () => {
+		const { fn } = failingStreamFn(1, Object.assign(new Error("rate limited"), { status: 429 }));
+		const order: string[] = [];
+		const notices: RetryNotice[] = [];
+		const wrapped = withRetry(fn, {
+			baseDelayMs: 1000,
+			onRetry: (notice) => {
+				order.push("notice");
+				notices.push(notice);
+			},
+			sleep: async () => {
+				order.push("sleep");
+			},
+		});
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect(events.at(-1)?.type).toBe("done");
+		expect(notices).toHaveLength(1);
+		expect(notices[0].attempt).toBe(1);
+		expect(notices[0].delayMs).toBe(1000);
+		expect(notices[0].message).toBe("rate limited");
+		expect(notices[0].error).toBeInstanceOf(Error);
+		// The announcement is the point of the callback, so it has to land before
+		// the wait it describes rather than with it.
+		expect(order).toEqual(["notice", "sleep"]);
+	});
+
+	// A turn belonging to one session is retried per request, so the callback
+	// rides on `streamOptions` — the loop's own handle on this call. The
+	// wrapper-level one is the fallback for callers that have no turn to name.
+	test("the per-request callback runs instead of the wrapper's", async () => {
+		const { fn } = failingStreamFn(1, Object.assign(new Error("rate limited"), { status: 429 }));
+		const wrapperLevel: number[] = [];
+		const perRequest: number[] = [];
+		const wrapped = withRetry(fn, {
+			baseDelayMs: 1,
+			onRetry: (notice) => wrapperLevel.push(notice.attempt),
+			sleep: async () => {},
+		});
+
+		await collect(
+			wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { onRetry: (notice) => perRequest.push(notice.attempt) }),
+		);
+		expect(perRequest).toEqual([1]);
+		expect(wrapperLevel).toEqual([]);
+	});
+});
+
+describe("missing API key", () => {
+	test("names the provider and every variable that would have satisfied it", () => {
+		expect(new MissingApiKeyError(FAUX_MODEL).message).toBe(
+			"Missing API key for faux: set FAUX_API_KEY in your environment.",
+		);
+		const withFallback: Model = { ...FAUX_MODEL, apiKeyEnvFallbacks: ["FAUX_API_KEY_ALT"] };
+		const error = new MissingApiKeyError(withFallback);
+		expect(error.provider).toBe("faux");
+		expect(error.envNames).toEqual(["FAUX_API_KEY", "FAUX_API_KEY_ALT"]);
+		expect(error.message).toBe("Missing API key for faux: set FAUX_API_KEY or FAUX_API_KEY_ALT in your environment.");
+	});
+
+	// The reported failure mode: with no key in the environment, `-p` was silent
+	// for two minutes and then blamed the network. An unresolvable credential
+	// arrives status-less, which used to read as "try again" — so this is the
+	// branch that makes it terminal on the first attempt. The sleep count proves
+	// it rather than the clock.
+	test("fails on the first attempt, without climbing the ladder", async () => {
+		const { fn, calls } = failingStreamFn(99, new MissingApiKeyError(FAUX_MODEL));
+		let slept = 0;
+		const wrapped = withRetry(fn, {
+			baseDelayMs: 1,
+			sleep: async () => {
+				slept++;
+			},
+		});
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect(calls()).toBe(1);
+		expect(slept).toBe(0);
+		const terminal = events.at(-1);
+		expect(terminal?.type).toBe("error");
+		// The message, not a retry report: no "after N attempt(s)" prefix claiming
+		// attempts that were never made.
+		expect((terminal as any).message.errorMessage).toBe(
+			"Missing API key for faux: set FAUX_API_KEY in your environment.",
+		);
+	});
+});
+
+describe("the missing-key pre-flight", () => {
+	// `createDefaultStreamFn` is production's own wiring, and the pre-flight is
+	// what it runs before dispatch — so this covers the shipped path with no
+	// provider and no network on the happy side. The base URL is loopback
+	// because the falsified version of this test would otherwise leave the
+	// machine: a missing guard means the adapter builds a client with an empty
+	// key and dials the real endpoint.
+	const model: Model = { ...FAUX_MODEL, baseUrl: "http://127.0.0.1:9" };
+
+	async function withNoKey<T>(body: () => T | Promise<T>): Promise<T> {
+		const saved = process.env.FAUX_API_KEY;
+		delete process.env.FAUX_API_KEY;
+		try {
+			return await body();
+		} finally {
+			if (saved === undefined) delete process.env.FAUX_API_KEY;
+			else process.env.FAUX_API_KEY = saved;
+		}
+	}
+
+	test("answers from the environment, and yields to an explicit key", async () => {
+		await withNoKey(() => {
+			const missing = missingApiKey(model);
+			expect(missing).toBeInstanceOf(MissingApiKeyError);
+			expect((missing as MissingApiKeyError).provider).toBe("faux");
+			expect(missingApiKey(model, { apiKey: "sk-test" })).toBeUndefined();
+		});
+		process.env.FAUX_API_KEY = "sk-test";
+		try {
+			expect(missingApiKey(model)).toBeUndefined();
+		} finally {
+			delete process.env.FAUX_API_KEY;
+		}
+	});
+
+	test("the default stream fn ends the turn on a missing key instead of dialling", async () => {
+		await withNoKey(async () => {
+			const events = await collect(createDefaultStreamFn()(model, { systemPrompt: "", messages: [] }));
+			expect(events.at(-1)?.type).toBe("error");
+			expect((events.at(-1) as any).message.errorMessage).toContain("set FAUX_API_KEY");
+		});
 	});
 });

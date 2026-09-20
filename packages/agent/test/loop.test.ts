@@ -10,6 +10,7 @@ import {
 	type StreamFn,
 	type ToolResultMessage,
 	userMessage,
+	withRetry,
 } from "@labunbun/ai";
 import { z } from "zod";
 import {
@@ -648,5 +649,37 @@ describe("session persistence replay", () => {
 		const reloaded = SessionStore.load(store.path);
 		expect(reloaded.sessionId).toBe(store.sessionId);
 		expect(reloaded.messages()).toEqual(session.messages);
+	});
+});
+
+describe("a retried request", () => {
+	// Why this needs an event at all: a turn that is backing off is still in
+	// flight, so nothing downstream — no turn_end, no message on screen —
+	// reports that anything is happening. The ladder runs for minutes, and
+	// without the notice the only difference between "working" and "waiting on
+	// a key that does not exist" is the clock.
+	test("is announced to subscribers inside the turn it belongs to", async () => {
+		const faux = fauxProvider([{ text: "recovered" }]);
+		let calls = 0;
+		const flaky: StreamFn = async function* (model, context, options) {
+			calls++;
+			if (calls === 1) throw Object.assign(new Error("rate limited"), { status: 429 });
+			yield* faux.streamFn(model, context, options);
+		};
+
+		// Steps are empty because the harness's own script is replaced wholesale
+		// by the retrying transport under test.
+		const { events, reason } = await runHarness([], {
+			depsOverrides: { streamFn: withRetry(flaky, { baseDelayMs: 1, sleep: async () => {} }) },
+		});
+
+		expect(reason).toBe("completed");
+		expect(calls).toBe(2);
+		expect(events.filter((e) => e.type === "retry")).toEqual([
+			{ type: "retry", attempt: 1, delayMs: 1, message: "rate limited" },
+		]);
+		const retried = events.findIndex((e) => e.type === "retry");
+		expect(events.findIndex((e) => e.type === "turn_start")).toBeLessThan(retried);
+		expect(retried).toBeLessThan(events.findIndex((e) => e.type === "turn_end"));
 	});
 });

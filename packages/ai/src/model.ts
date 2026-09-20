@@ -681,6 +681,28 @@ export function apiKeyEnvNames(model: Model): string[] {
 }
 
 /**
+ * A model whose key could not be resolved from the environment.
+ *
+ * Raised before a request is built, in place of handing an empty key to the
+ * provider's SDK: the SDKs report that as an authentication failure, which reads
+ * like something a later attempt might fix. It is not — no attempt can supply a
+ * credential the environment does not hold — so the type is what lets the retry
+ * wrapper end the turn on the first try and say which variable is missing.
+ */
+export class MissingApiKeyError extends Error {
+	readonly provider: string;
+	readonly envNames: string[];
+
+	constructor(model: Model) {
+		const envNames = apiKeyEnvNames(model);
+		super(`Missing API key for ${model.provider}: set ${envNames.join(" or ")} in your environment.`);
+		this.name = "MissingApiKeyError";
+		this.provider = model.provider;
+		this.envNames = envNames;
+	}
+}
+
+/**
  * Resolve a model reference:
  * - "provider/model" → exact match on provider + id
  * - "model-id" → unique id match across providers

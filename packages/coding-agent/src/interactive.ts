@@ -15,6 +15,7 @@ import {
 	contextBreakdown,
 	estimateContextUsage,
 	evaluatePermissions,
+	formatRetryNotice,
 	type PermissionMode,
 	type PermissionRule,
 	type SessionEntry,
@@ -546,6 +547,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// Tool calls may have created or deleted files; the next user turn should
 			// see the tree as it is now, not as it was when they last typed.
 			if (event.type === "agent_end") fileCompleter.bust();
+			// The one thing that happens between a turn starting and its first token,
+			// and it can last minutes: with nothing said here, a provider that is
+			// down reads exactly like an app that has hung.
+			if (event.type === "retry") {
+				pushInfo(handle, formatRetryNotice(event));
+			}
 			if (event.type === "turn_end" || event.type === "agent_end") {
 				refreshContextInfo(target);
 				// Said once per crossing. A warning repeated on every turn is a

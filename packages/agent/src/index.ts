@@ -77,4 +77,4 @@ export type {
 	ToolResult,
 	TrimmedToolResults,
 } from "./types.ts";
-export { allow, ask, buildTool, deny, toWireTools } from "./types.ts";
+export { allow, ask, buildTool, deny, formatRetryNotice, toWireTools } from "./types.ts";

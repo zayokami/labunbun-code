@@ -229,9 +229,29 @@ export type AgentEvent =
 	| { type: "message_update"; message: AssistantMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "tool_execution_start"; callId: string; toolName: string; input: unknown }
 	| { type: "tool_execution_update"; callId: string; toolName: string; partial: unknown }
-	| { type: "tool_execution_end"; callId: string; toolName: string; result: ToolResultMessage };
+	| { type: "tool_execution_end"; callId: string; toolName: string; result: ToolResultMessage }
+	/**
+	 * A failed attempt is about to be retried after `delayMs`.
+	 *
+	 * The ladder can run for minutes and says nothing on its own, so the wait is
+	 * announced rather than merely suffered. Not a turn boundary: the turn that
+	 * raised this is still in flight.
+	 */
+	| { type: "retry"; attempt: number; delayMs: number; message: string };
 
 export type AgentEventHandler = (event: AgentEvent) => void | Promise<void>;
+
+/**
+ * One line for a retry event: what failed, and how long the wait is.
+ *
+ * Shared so the REPL and headless mode describe the same wait the same way —
+ * the retry itself is silent otherwise, and a user watching two different
+ * phrasings of it would be reading two different products.
+ */
+export function formatRetryNotice(retry: { attempt: number; delayMs: number; message: string }): string {
+	const wait = retry.delayMs < 1000 ? `${retry.delayMs}ms` : `${Math.round(retry.delayMs / 1000)}s`;
+	return `Retrying in ${wait} (attempt ${retry.attempt} failed): ${retry.message}`;
+}
 
 // ---------------------------------------------------------------------------
 // Wire conversion

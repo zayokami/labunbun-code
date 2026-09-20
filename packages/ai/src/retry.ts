@@ -9,7 +9,8 @@
  */
 
 import { MessageBuilder } from "./message-builder.ts";
-import type { AssistantMessageEvent, Context, Model, StreamFn, StreamOptions } from "./types.ts";
+import { MissingApiKeyError } from "./model.ts";
+import type { AssistantMessageEvent, Context, Model, RetryNotice, StreamFn, StreamOptions } from "./types.ts";
 
 export interface RetryOptions {
 	maxAttempts?: number;
@@ -17,7 +18,7 @@ export interface RetryOptions {
 	maxDelayMs?: number;
 	/** Cap on attempts for 529 (overloaded) responses. */
 	overloadedMaxAttempts?: number;
-	onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
+	onRetry?: (retry: RetryNotice) => void;
 	sleep?: (ms: number) => Promise<void>;
 }
 
@@ -160,6 +161,16 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				// the session loop sees the abort instead of a retry ladder.
 				if (streamOptions?.signal?.aborted || isAbortError(error)) throw error;
 
+				// A credential the environment does not hold is not something a later
+				// attempt can produce. It arrives status-less, like the unknown errors
+				// that earn "one more shot", so without this it takes the whole ladder
+				// — two minutes of silence — to report a key that was never there.
+				if (error instanceof MissingApiKeyError) {
+					const builder = new MessageBuilder(model.provider, model.id);
+					yield builder.error(error.message);
+					return;
+				}
+
 				const status = statusCodeOf(error);
 				const overloaded = status === 529;
 				const overflow = isContextOverflowError(error);
@@ -188,7 +199,15 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				const retryAfter = retryAfterMsOf(error);
 				const backoff = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
 				const delayMs = retryAfter ?? backoff;
-				options.onRetry?.(attempt, error, delayMs);
+				// Per-request first: the caller that knows which turn this is retrying is
+				// also the one holding a place to say so.
+				const notice: RetryNotice = {
+					attempt,
+					error,
+					delayMs,
+					message: error instanceof Error ? error.message : String(error),
+				};
+				await (streamOptions?.onRetry ?? options.onRetry)?.(notice);
 				await sleep(delayMs);
 			}
 		}

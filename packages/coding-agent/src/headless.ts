@@ -7,7 +7,7 @@
  * - stream-json: one JSON line per event, live
  */
 import type { AgentEvent, PermissionMode } from "@labunbun/agent";
-import { AgentSession, evaluatePermissions, SessionStore } from "@labunbun/agent";
+import { AgentSession, evaluatePermissions, formatRetryNotice, SessionStore } from "@labunbun/agent";
 import { type AgentMessage, createDefaultStreamFn, resolveModel, type StreamFn } from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
 import { costStateFromMessages } from "./cost-tracker.ts";
@@ -175,6 +175,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 
 	session.on((event: AgentEvent) => {
 		if (event.type === "turn_start") turns++;
+
+		// On stderr, not stdout: a `-p` run may be piped, and the wait for a retry
+		// is not part of the answer being piped. It is still said out loud — the
+		// ladder runs for minutes, and silence is what made a wrong key look like a
+		// hang rather than a mistake.
+		if (event.type === "retry") {
+			process.stderr.write(`${formatRetryNotice(event)}\n`);
+		}
 
 		if (event.type === "message_update") {
 			const text = event.message.content
