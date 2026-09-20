@@ -145,4 +145,68 @@ describe("a spilled result, end to end through the real tools", () => {
 		expect(tail?.isError).toBeUndefined();
 		expect(text).toContain("line 4000");
 	});
+
+	test("a real command's output is cut by the pipeline, and the file holds what it cut", async () => {
+		// The test above hands `cutText` the text it wants to see cut. This one runs
+		// a command that really prints more than the model may read, through the
+		// shell the app itself resolves, and follows the path the result names.
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-spill-cwd-"));
+		const home = tempHome();
+		const tools = createAllTools(cwd, {
+			operations: defaultOperations(),
+			readOnlyRoots: [toolOutputRoot(cwd, home)],
+		});
+		const bash = tools.find((tool) => tool.name === "Bash");
+		if (!bash) throw new Error("the default tool set has no Bash tool");
+
+		// Where a build says what went wrong: the end. A tool that had cut its own
+		// output to the pipeline's limit would have thrown this line away before
+		// anything could spill it.
+		const last = "FAILED: expected 2, got 3";
+		const script = join(cwd, "noisy.js");
+		writeFileSync(
+			script,
+			`const line = "x".repeat(120);\n` +
+				`for (let i = 1; i <= 400; i++) console.log("line " + i + " " + line);\n` +
+				`console.log(${JSON.stringify(last)});\n`,
+		);
+		// Slashes forward, script relative: the same line has to survive whichever
+		// shell this machine resolves, and a POSIX one eats the backslashes of a
+		// Windows path before the command it belongs to ever runs.
+		const result = await bash.call(
+			{ command: `${process.execPath.replace(/\\/g, "/")} noisy.js` },
+			{ callId: "call_1", signal: new AbortController().signal, cwd, onUpdate: () => {} },
+		);
+		const shown = (result.content[0] as { text: string }).text;
+
+		const limit = bash.maxResultSizeChars ?? 0;
+		expect(limit).toBeGreaterThan(0);
+		// The tool hands the whole log on...
+		expect(shown.length).toBeGreaterThan(limit * 1.5);
+		expect(shown).toContain(last);
+		expect(shown.startsWith("[exit code: 0]\n")).toBe(true);
+
+		// ...and what the conversation gets is the pipeline's cut of it, written out
+		// in full first. Same call the pipeline makes for a tool that declared
+		// `overflow: "spill"` (agent/src/pipeline.ts, `bound`).
+		const bounded = cutText(shown, limit, (request) => writeToolOutput(request, { cwd, sessionId: "s1", home }), {
+			callId: "call_1",
+			toolName: "Bash",
+			text: "",
+		});
+		expect(bounded.length).toBeLessThan(limit + 100);
+		expect(bounded).not.toContain(last);
+		const path = /\[full output: \d+ chars → ([^\]]+)\]/.exec(bounded)?.[1];
+		expect(path).toBeTruthy();
+		expect(readFileSync(path as string, "utf8")).toContain(last);
+		expect(readFileSync(path as string, "utf8")).toContain("line 400 ");
+
+		// And the tail of it is reachable through the tools the model is given.
+		const read = tools.find((tool) => tool.name === "Read");
+		const tail = await read?.call(
+			{ file_path: path, offset: 401 },
+			{ callId: "call_2", signal: new AbortController().signal, cwd, onUpdate: () => {} },
+		);
+		expect((tail?.content[0] as { text?: string } | undefined)?.text).toContain(last);
+	}, 30_000);
 });

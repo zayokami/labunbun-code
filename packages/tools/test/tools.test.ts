@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -13,11 +13,30 @@ import {
 	createTailBuffer,
 	createWriteTool,
 	defaultOperations,
+	detectShell,
 	type Operations,
 } from "../src/index.ts";
 
 function tempDir(): string {
 	return mkdtempSync(join(tmpdir(), "lbb-tools-"));
+}
+
+/** Run `body` with those environment variables, and put them all back after. */
+function withEnv(values: Record<string, string | undefined>, body: () => void): void {
+	const saved = new Map<string, string | undefined>();
+	for (const [key, value] of Object.entries(values)) {
+		saved.set(key, process.env[key]);
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+	try {
+		body();
+	} finally {
+		for (const [key, value] of saved) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
 }
 
 const NO_UPDATE = () => {};
@@ -325,6 +344,52 @@ describe("Bash tool", () => {
 			expect((update.partialOutput ?? "").length).toBeLessThanOrEqual(30_000);
 		}
 	});
+
+	test("the whole output is handed over, not a head the spill file would only repeat", async () => {
+		// `overflow: "spill"` promises that what does not fit is written out in full
+		// and pointed at, which is a promise only if the text arriving at the
+		// pipeline is longer than the pipeline's limit for this tool. Cutting here
+		// first — to that same limit — made the spilled file a copy of what the
+		// model could already read, and lost the end of the output for good.
+		const full = Array.from({ length: 2_000 }, (_, i) => `line ${i + 1} ${"y".repeat(20)}`).join("\n");
+		const fakeOps: Operations = {
+			...defaultOperations(),
+			exec: async () => ({ stdout: full, stderr: "", exitCode: 0, killed: false }),
+		};
+		const tool = toolByName("Bash", fakeOps);
+		const result = await call(tool, { command: "build" });
+		const text = (result.content[0] as any).text as string;
+
+		expect(full.length).toBeGreaterThan(tool.maxResultSizeChars);
+		// Substantially more, not a few characters over: a cut at the limit used to
+		// leave the result just past it, on the strength of the exit code alone.
+		expect(text.length).toBeGreaterThan(tool.maxResultSizeChars * 1.5);
+		// The last line is where a build says what went wrong.
+		expect(text).toContain(`line 2000 ${"y".repeat(20)}`);
+	});
+
+	test("the exit code leads the result, where no cut can reach it", async () => {
+		const fakeOps: Operations = {
+			...defaultOperations(),
+			exec: async () => ({ stdout: "x".repeat(40_000), stderr: "", exitCode: 0, killed: false }),
+		};
+		const tool = toolByName("Bash", fakeOps);
+		const result = await call(tool, { command: "build" });
+		expect(((result.content[0] as any).text as string).startsWith("[exit code: 0]\n")).toBe(true);
+	});
+
+	test("a timed-out command says so on the line after the code", async () => {
+		const fakeOps: Operations = {
+			...defaultOperations(),
+			exec: async () => ({ stdout: "partial", stderr: "", exitCode: 124, killed: true }),
+		};
+		const tool = toolByName("Bash", fakeOps);
+		const result = await call(tool, { command: "sleep 999" });
+		expect(
+			((result.content[0] as any).text as string).startsWith("[exit code: 124]\n[command timed out or was killed]\n"),
+		).toBe(true);
+		expect(result.isError).toBe(true);
+	});
 });
 
 describe("the tail buffer behind live Bash output", () => {
@@ -354,6 +419,72 @@ describe("the tail buffer behind live Bash output", () => {
 		buffer.push("");
 		buffer.push("ab");
 		expect(buffer.read()).toBe("ab");
+	});
+});
+
+describe("shell resolution", () => {
+	// One machine's install could sit anywhere; these tests move PATH instead of
+	// assuming where it is. The two probes the code tries first are hardcoded
+	// (deliberately — that install is the one the user chose), so a machine that
+	// has it answers with it whatever PATH says, and the PATH test steps aside.
+	const realGit = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files\\Git\\usr\\bin\\bash.exe"];
+	const hasRealGit = realGit.some((path) => existsSync(path));
+
+	test("a bash.exe on PATH is found, not only one in the conventional places", () => {
+		if (process.platform !== "win32" || hasRealGit) return;
+		// Git on another drive, or bash from scoop or chocolatey: a machine where
+		// no hardcoded probe hits, and every POSIX-shaped command used to come back
+		// as a cmd.exe error until PATH was consulted too.
+		const dir = tempDir();
+		writeFileSync(join(dir, "bash.exe"), "");
+
+		withEnv({ PATH: dir, LBB_BASH_PATH: undefined, USERPROFILE: tempDir() }, () => {
+			const shell = detectShell();
+			expect(shell.command).toBe(join(dir, "bash.exe"));
+			// Still a login shell: PATH lookup was the fix, not the flags.
+			expect(shell.args("echo hi")).toEqual(["-lc", "echo hi"]);
+		});
+	});
+
+	test("Windows' own bash.exe is the WSL launcher, not a shell for these commands", () => {
+		if (process.platform !== "win32") return;
+		// It answers to the same name and is on every PATH, but it starts a Linux
+		// VM: every path this tool hands it would mean something else there. A
+		// PATH that offers only that one offers cmd.exe.
+		const root = tempDir();
+		const system32 = join(root, "System32");
+		mkdirSync(system32, { recursive: true });
+		writeFileSync(join(system32, "bash.exe"), "");
+		const windowsApps = join(root, "Microsoft", "WindowsApps");
+		mkdirSync(windowsApps, { recursive: true });
+		writeFileSync(join(windowsApps, "bash.exe"), "");
+
+		withEnv(
+			{
+				PATH: [system32, windowsApps].join(";"),
+				SystemRoot: root,
+				windir: root,
+				LBB_BASH_PATH: undefined,
+				USERPROFILE: tempDir(),
+			},
+			() => {
+				expect(detectShell().command).toBe("cmd.exe");
+			},
+		);
+
+		// ...but a path the user names outright is theirs to name, launcher or not.
+		withEnv({ LBB_BASH_PATH: join(system32, "bash.exe"), PATH: tempDir() }, () => {
+			expect(detectShell().command).toBe(join(system32, "bash.exe"));
+		});
+	});
+
+	test("whatever this machine resolves, it is never the WSL launcher", () => {
+		if (process.platform !== "win32") return;
+		// The machine's real environment, not a staged one: the exclusion above is
+		// only worth anything if the installs actually present here go around it.
+		const shell = detectShell();
+		expect(/\\microsoft\\windowsapps\\/i.test(shell.command)).toBe(false);
+		expect(/\\system32\\bash\.exe$/i.test(shell.command)).toBe(false);
 	});
 });
 

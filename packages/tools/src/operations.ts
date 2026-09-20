@@ -6,8 +6,9 @@
  * remote/container backend slot in without touching tool logic.
  */
 import { spawn } from "node:child_process";
-import { accessSync } from "node:fs";
+import { statSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 export interface FileStat {
 	size: number;
@@ -116,23 +117,71 @@ export class NodeFileSystemOperations implements FileSystemOperations {
 	}
 }
 
+/** A path that exists and is a file — a directory named `bash.exe` is not one. */
+function isFileSync(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether a `bash.exe` found on PATH is Windows' own — the WSL launcher.
+ *
+ * It answers to the same name and sits in directories that are on every PATH,
+ * but it starts a Linux VM: every command this tool runs names Windows paths,
+ * and a shell that resolves them somewhere else is not the shell it promises.
+ * Only PATH-derived candidates are held to this: `LBB_BASH_PATH` is a user
+ * saying "this one", and that is the end of the question.
+ */
+function isWindowsBash(path: string): boolean {
+	const normalized = path.toLowerCase().replace(/\//g, "\\");
+	const systemRoot = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
+	if (normalized.startsWith(`${systemRoot.toLowerCase().replace(/\//g, "\\")}\\system32\\`)) return true;
+	return normalized.includes("\\microsoft\\windowsapps\\");
+}
+
+/**
+ * Every PATH directory that could hold an executable by that name, in order.
+ *
+ * Only drive-anchored entries are searched: a shell that is itself MSYS hands
+ * its children a PATH made of POSIX paths (`/usr/bin`), which no Windows
+ * process can open — the same directories are behind them under their real
+ * names, so nothing is lost by skipping the ones that cannot be opened.
+ */
+function* pathCandidates(name: string): Generator<string> {
+	for (const entry of (process.env.PATH ?? "").split(";")) {
+		const dir = entry.trim().replace(/^"|"$/g, "");
+		if (!/^[A-Za-z]:[\\/]/.test(dir)) continue;
+		yield join(dir, name);
+	}
+}
+
 /**
  * Shell resolution: prefer a POSIX-compatible shell (Git Bash / MSYS2) on
  * Windows since most agent commands assume POSIX syntax; fall back to cmd.
+ *
+ * The conventional locations are answered first — that install is a deliberate
+ * one, and it is where the user pointed us if they set `LBB_BASH_PATH`. PATH
+ * is the long tail: an install under scoop, chocolatey, or simply on another
+ * drive was, before this, a machine where every command quietly ran through
+ * cmd.exe instead, and the tool's POSIX-shaped commands failed one at a time.
  */
 export function detectShell(): { command: string; args: (cmd: string) => string[] } {
 	if (process.platform === "win32") {
-		const candidates = [
+		const conventional = [
 			process.env.LBB_BASH_PATH,
 			"C:\\Program Files\\Git\\bin\\bash.exe",
 			"C:\\Program Files\\Git\\usr\\bin\\bash.exe",
 			`${process.env.USERPROFILE ?? ""}\\.bun\\bin\\bash.exe`,
 		].filter(Boolean) as string[];
-		for (const candidate of candidates) {
-			try {
-				accessSync(candidate);
-				return { command: candidate, args: (cmd) => ["-lc", cmd] };
-			} catch {}
+		for (const candidate of conventional) {
+			if (isFileSync(candidate)) return { command: candidate, args: (cmd) => ["-lc", cmd] };
+		}
+		for (const candidate of pathCandidates("bash.exe")) {
+			if (isWindowsBash(candidate)) continue;
+			if (isFileSync(candidate)) return { command: candidate, args: (cmd) => ["-lc", cmd] };
 		}
 		return { command: "cmd.exe", args: (cmd) => ["/d", "/s", "/c", cmd] };
 	}

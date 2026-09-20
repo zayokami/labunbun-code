@@ -4,7 +4,8 @@ import { z } from "zod";
 import type { BackgroundShellManager } from "./background.ts";
 import type { Operations } from "./operations.ts";
 
-const MAX_OUTPUT_CHARS = 30_000;
+/** How much output the live preview keeps — the tail of it, and not the result. */
+const MAX_PREVIEW_CHARS = 30_000;
 
 /**
  * How often a running command may push its output to the UI.
@@ -90,7 +91,7 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 				};
 			}
 
-			const buffer = createTailBuffer(MAX_OUTPUT_CHARS);
+			const buffer = createTailBuffer(MAX_PREVIEW_CHARS);
 			let lastUpdateAt = 0;
 			const result = await ops.exec({
 				command: input.command,
@@ -106,13 +107,16 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 				},
 			});
 
-			const output = [result.stdout, result.stderr]
-				.filter((s) => s.length > 0)
-				.join("\n--- stderr ---\n")
-				.slice(0, MAX_OUTPUT_CHARS);
-
-			const suffix = result.killed ? "\n[command timed out or was killed]" : "";
-			const text = `${output}${suffix}\n[exit code: ${result.exitCode}]`;
+			// The whole output goes to the model, uncut: `overflow: "spill"` above is
+			// a promise that what does not fit is written out in full and pointed at,
+			// and a cut here would have kept it to a head the model already had —
+			// the spill file would hold exactly what the conversation showed.
+			const output = [result.stdout, result.stderr].filter((s) => s.length > 0).join("\n--- stderr ---\n");
+			// The verdict leads. A long result is cut at the head on its way into the
+			// conversation, and the one line worth keeping through any cut is the one
+			// that says whether the command worked.
+			const status = result.killed ? "[command timed out or was killed]\n" : "";
+			const text = `[exit code: ${result.exitCode}]\n${status}${output}`;
 			return { content: [{ type: "text", text }], isError: result.exitCode !== 0 };
 		},
 	});

@@ -4,10 +4,41 @@
  * file; BashOutput tails it, KillBash terminates the process tree.
  */
 import { type ChildProcess, spawn } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectShell } from "./operations.ts";
+
+/** How much of a shell's log one read may bring back. */
+const MAX_SHELL_OUTPUT_CHARS = 30_000;
+
+/**
+ * The last `maxChars` characters of a file, without reading the whole thing.
+ *
+ * One character is at most four UTF-8 bytes, so a window of `4 * maxChars`
+ * bytes always holds at least that many characters: the last `maxChars` of what
+ * it decodes are the last `maxChars` of the file, and everything before them
+ * never had to be read. A window that opens in the middle of a character
+ * decodes its leftover bytes as a replacement character — at the front of the
+ * window, ahead of everything kept, so the text that comes back is a suffix of
+ * the file and made of characters the file contains.
+ */
+export function readTail(path: string, maxChars: number): { text: string; truncated: boolean; bytes: number } {
+	const bytes = statSync(path).size;
+	const window = Math.min(bytes, maxChars * 4);
+	const fd = openSync(path, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(window);
+		const read = readSync(fd, buffer, 0, window, bytes - window);
+		const text = buffer.subarray(0, read).toString("utf8");
+		const tail = text.length > maxChars ? text.slice(-maxChars) : text;
+		// Two ways to have lost something: the window did not cover the file, or
+		// it did and the characters in it still did not fit.
+		return { text: tail, truncated: bytes > window || tail.length < text.length, bytes };
+	} finally {
+		closeSync(fd);
+	}
+}
 
 export type ShellStatus = "running" | "completed" | "killed";
 
@@ -90,12 +121,24 @@ export class BackgroundShellManager {
 		return [...this.#entries.values()].map((e) => e.info);
 	}
 
-	/** Read the full output so far (tail-capped). */
-	output(id: string, maxChars = 30_000): string {
+	/**
+	 * The end of a shell's output so far, at most `maxChars` of it.
+	 *
+	 * A shell is polled while it runs, so the log only ever grows: a dev server
+	 * left up for an hour would otherwise be read whole — as bytes and again as
+	 * a string — to show the last few lines of it, once per poll. The read
+	 * starts at an offset instead, and what it skipped is said out loud along
+	 * with the path to the whole thing, because a tail is a window on the log
+	 * and not the log.
+	 */
+	output(id: string, maxChars = MAX_SHELL_OUTPUT_CHARS): string {
 		const entry = this.#entries.get(id);
 		if (!entry || !existsSync(entry.info.outputFile)) return "";
-		const text = readFileSync(entry.info.outputFile, "utf8");
-		return text.length > maxChars ? `...[truncated]...\n${text.slice(-maxChars)}` : text;
+		const tail = readTail(entry.info.outputFile, maxChars);
+		const header = tail.truncated
+			? `[log tail: last ${tail.text.length} characters of ${tail.bytes} bytes — full log: ${entry.info.outputFile}]\n`
+			: "";
+		return `${header}${tail.text}`;
 	}
 
 	kill(id: string): boolean {
