@@ -1,4 +1,5 @@
 import { Box, Static, Text } from "ink";
+import { memo, useMemo } from "react";
 import { type CodeToken, highlightCode } from "../highlight.ts";
 import { LIVE_OUTPUT_LINES, LIVE_PREVIEW_MAX, liveOutputLines, livePreviewTargets } from "../live-output.ts";
 import { type Block, type ColumnAlign, type InlineSpan, parseBlocks } from "../markdown.ts";
@@ -369,7 +370,25 @@ function InfoView({ text }: { text: string }) {
 	);
 }
 
-export function EntryView({ entry, full, liveText }: { entry: UiEntry; full?: boolean; liveText?: string }) {
+/**
+ * One entry, memoized: entries are immutable once they are in the list, so a
+ * frame that does not change this row has nothing here to do. The live window
+ * re-renders on every delta and every tool chunk, and without this it re-parsed
+ * and re-drew every assistant message in it — the whole tail, in full, tens of
+ * times a second, to add one line to the end of it.
+ *
+ * The result of a tool call replaces its entry rather than mutating it, which is
+ * what makes identity a sound "unchanged" test.
+ */
+export const EntryView = memo(function EntryView({
+	entry,
+	full,
+	liveText,
+}: {
+	entry: UiEntry;
+	full?: boolean;
+	liveText?: string;
+}) {
 	switch (entry.kind) {
 		case "user":
 			return <UserMessageView text={entry.text} steered={entry.steered} />;
@@ -382,7 +401,7 @@ export function EntryView({ entry, full, liveText }: { entry: UiEntry; full?: bo
 		case "info":
 			return <InfoView text={entry.text} />;
 	}
-}
+});
 
 /**
  * Number of trailing entries kept live (re-rendered every frame). Everything
@@ -440,10 +459,15 @@ export function VirtualMessageList({
  */
 export function StreamingPreview({ text, thinking }: { text: string; thinking: string }) {
 	const theme = useTheme();
+	// The parse is kept with the text it parsed: this row sits in the tree that
+	// any store change re-renders — a tool's output arriving, the turn timer
+	// ticking twice a second — and each of those would otherwise re-parse the
+	// whole answer to redraw it identically.
+	const rendered = useMemo(() => (text ? renderMarkdownLite(stripAnsi(text), theme) : null), [text, theme]);
 	if (!text && !thinking) return null;
 	return (
 		<Box flexDirection="column" marginBottom={1}>
-			{text ? <Box flexDirection="column">{renderMarkdownLite(stripAnsi(text), theme)}</Box> : null}
+			{rendered ? <Box flexDirection="column">{rendered}</Box> : null}
 			{thinking && !text && <Text color={theme.thinking}>… {thinking.slice(-200)}</Text>}
 		</Box>
 	);

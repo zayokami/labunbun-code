@@ -316,3 +316,153 @@ describe("parseBlocks tables", () => {
 		expect(parseBlocks("```\n| a |\n|---|\n```")[0].kind).toBe("code");
 	});
 });
+
+/**
+ * The parser as it was before the patterns were anchored to a position: each one
+ * matched `^`-anchored against `text.slice(i)`. Kept here as an oracle, because
+ * the rewrite is meant to be the same parser — and a corpus says that better than
+ * an argument does.
+ */
+function parseInlineBySlicing(text: string): InlineSpan[] {
+	const spans: InlineSpan[] = [];
+	let buffer = "";
+
+	const flush = () => {
+		if (buffer) spans.push({ text: buffer });
+		buffer = "";
+	};
+	const nested = (inner: string, mark: Partial<InlineSpan>) => {
+		flush();
+		for (const span of parseInlineBySlicing(inner)) spans.push({ ...span, ...mark });
+	};
+
+	let i = 0;
+	while (i < text.length) {
+		const rest = text.slice(i);
+
+		if (rest[0] === "\\" && rest.length > 1) {
+			buffer += rest[1];
+			i += 2;
+			continue;
+		}
+
+		const code = /^(`+)([\s\S]*?)\1/.exec(rest);
+		if (code) {
+			flush();
+			spans.push({ text: code[2].replace(/^ (.*) $/, "$1"), code: true });
+			i += code[0].length;
+			continue;
+		}
+
+		const link = /^\[([^\]]*)\]\(([^)\s]*)\)/.exec(rest);
+		if (link) {
+			flush();
+			const label = link[1] || link[2];
+			for (const span of parseInlineBySlicing(label)) spans.push({ ...span, href: link[2] });
+			i += link[0].length;
+			continue;
+		}
+
+		const strike = /^~~([\s\S]+?)~~/.exec(rest);
+		if (strike) {
+			nested(strike[1], { strike: true });
+			i += strike[0].length;
+			continue;
+		}
+
+		const bold = /^(\*\*|__)(?=\S)([\s\S]+?)(?<=\S)\1/.exec(rest);
+		if (bold) {
+			nested(bold[2], { bold: true });
+			i += bold[0].length;
+			continue;
+		}
+
+		const italic = /^(\*|_)(?=\S)([\s\S]+?)(?<=\S)\1/.exec(rest);
+		if (italic && !(italic[1] === "_" && /\w$/.test(text.slice(0, i)))) {
+			nested(italic[2], { italic: true });
+			i += italic[0].length;
+			continue;
+		}
+
+		buffer += rest[0];
+		i += 1;
+	}
+	flush();
+	return spans;
+}
+
+describe("parseInline against the parser it replaced", () => {
+	/** Lines picked for the places the patterns have to look around themselves. */
+	const CORPUS = [
+		"",
+		"plain prose, nothing marked",
+		"**bold** _italic_ ~~struck~~ `code`",
+		"a**b**c*d*e~~f~~g`h`i",
+		"***three stars***",
+		"____",
+		"*",
+		"**",
+		"`",
+		"[]()",
+		"[label](https://example.com/a_b) and [bare](url)",
+		"[**marked** label](target)",
+		"snake_case_name and _real italic_ and _ leading underscore",
+		"a * b and a _ b",
+		"`a``b` and `` ` `` and ```fence```",
+		"`` **not bold** ``",
+		"\\*escaped\\* and a trailing backslash \\",
+		"**unterminated and *also",
+		"~~no close",
+		"| a | b |",
+		"*_~`[]()\\ mixed ** _ ~ mark soup !",
+		"a very long word without any marks at all, twice over, and again",
+	];
+
+	/** A deterministic walk over the characters that mean something to the parser. */
+	function* fuzz(count: number): Generator<string> {
+		let state = 0x2545f491;
+		const next = () => {
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			return state >>> 0;
+		};
+		const alphabet = "*_~`[]()\\ ab.|-#!";
+		for (let line = 0; line < count; line++) {
+			const length = next() % 60;
+			let text = "";
+			for (let i = 0; i < length; i++) text += alphabet[next() % alphabet.length];
+			yield text;
+		}
+	}
+
+	test("the anchored parse is the sliced parse, mark for mark", () => {
+		for (const input of [...CORPUS, ...fuzz(300)]) {
+			// The input travels with the spans so a failure says which line did it.
+			expect({ input, spans: parseInline(input) }).toEqual({ input, spans: parseInlineBySlicing(input) });
+		}
+	});
+
+	test("a long line costs its length, not its square", () => {
+		// The streaming preview re-parses the whole answer on every delta, so the
+		// cost of a line has to stay proportional to how long it is. It did not:
+		// every pattern was `^`-anchored against the rest of the line at every
+		// position, each failed attempt costing that whole tail, and one long
+		// paragraph from the model — a wall of text with no newline in it — took
+		// seconds to parse.
+		const line = (chars: number) => `${"word ".repeat(Math.ceil(chars / 5))}**end**`;
+		const measure = (text: string) => {
+			parseInline(text); // warm
+			const start = performance.now();
+			for (let i = 0; i < 3; i++) parseInline(text);
+			return performance.now() - start;
+		};
+
+		const small = measure(line(40_000));
+		const large = measure(line(160_000));
+
+		// Four times the text is four times the work; four times the copies is
+		// sixteen. The bound sits between the two, with room for a noisy machine.
+		expect(large / small).toBeLessThan(10);
+	});
+});
