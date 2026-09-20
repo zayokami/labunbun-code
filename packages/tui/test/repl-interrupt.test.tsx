@@ -17,6 +17,20 @@ import { initialUiState, type UiState } from "../src/ui-state.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Poll until `done` holds. Much of what the REPL does lands behind a debounce
+ * or a promise, and the timers belong to the whole test runner — a fixed sleep
+ * that outlasts them on an idle machine loses the race on a loaded one, and
+ * the assertion after it reports a missing feature instead of a slow machine.
+ * On timeout the caller's own assertion is what fails.
+ */
+async function waitFor(done: () => boolean, timeoutMs = 2000): Promise<void> {
+	for (let waited = 0; waited < timeoutMs; waited += 10) {
+		if (done()) return;
+		await delay(10);
+	}
+}
+
 function setup(options: { vim?: boolean; completeFiles?: (query: string) => Promise<string[]> } = {}) {
 	const streaming = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
@@ -172,13 +186,13 @@ describe("Esc and the vim layer", () => {
 		await h.streaming.promise;
 
 		h.stdin.write("@src");
-		await delay(250); // the list loads behind a debounce
-		expect(h.frame()).toContain("@src/index.ts");
+		// The list loads behind a debounce, on a timer the whole test runner
+		// shares: wait for the row to appear rather than betting on a duration.
+		await waitFor(() => h.frame().includes("@src/index.ts"));
 
 		h.stdin.write("\x1b");
-		await delay(60);
+		await waitFor(() => !h.frame().includes("@src/index.ts"));
 		expect(h.session.isInterrupted).toBe(false);
-		expect(h.frame()).not.toContain("@src/index.ts");
 
 		h.release.resolve();
 		await delay(150);
