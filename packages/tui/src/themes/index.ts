@@ -47,14 +47,12 @@ export function themeForAppearance(appearance: "dark" | "light"): Theme {
 }
 
 export {
-	defineTheme,
 	deriveTheme,
 	THEME_TOKEN_KEYS,
 	type Theme,
 	type ThemeBold,
 	type ThemeMarks,
 	type ThemeOverrides,
-	type ThemeSpec,
 } from "./tokens.ts";
 export {
 	DARK_THEME,

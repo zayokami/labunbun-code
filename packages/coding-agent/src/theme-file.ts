@@ -28,6 +28,7 @@ import {
 	themeForAppearance,
 } from "@labunbun/tui";
 import { z } from "zod";
+import { stripBom } from "./json-text.ts";
 import { writeUserSettingsPatch } from "./user-settings.ts";
 
 export const ThemeFileSchema = z.object({
@@ -168,7 +169,12 @@ function loadThemesFromDir(themesRoot: string): LoadedThemes {
 	for (const name of entries.sort()) {
 		const path = join(themesRoot, name);
 		try {
-			const parsed = ThemeFileSchema.safeParse(JSON.parse(readFileSync(path, "utf8").replace(/^﻿/, "")));
+			// The byte-order mark some Windows editors and shells put in front of a
+			// UTF-8 file is not JSON, and JSON.parse names it "Unexpected token" at
+			// position 0 — a report about the parser, about a file whose only fault
+			// is where it was saved from.
+			const text = stripBom(readFileSync(path, "utf8"));
+			const parsed = ThemeFileSchema.safeParse(JSON.parse(text));
 			if (!parsed.success) {
 				problems.push(
 					`${path}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"} ${i.message}`).join("; ")}`,
@@ -196,6 +202,20 @@ export function loadThemeFiles(cwd: string, home = homedir()): LoadedThemes {
 	return { themes, problems: [...user.problems, ...project.problems] };
 }
 
+/**
+ * Every name a user can pick, built-ins in presentation order, then theme files
+ * — each exactly once.
+ *
+ * A theme file may call itself after a built-in, and the file wins; listing both
+ * would put two rows in `/theme` that resolve to the same theme, one of them
+ * always unreachable. Deduped here rather than at each list site so the
+ * selector, the "Unknown theme … Available:" line and the startup list cannot
+ * disagree about what exists.
+ */
+export function selectableThemeNames(loaded: LoadedThemes): string[] {
+	return [...new Set([...BUILT_IN_THEME_NAMES, ...loaded.themes.keys()])];
+}
+
 export interface ResolvedTheme {
 	theme: Theme;
 	/**
@@ -208,7 +228,7 @@ export interface ResolvedTheme {
 	 * an `auto` setting save the built-in it happened to detect.
 	 */
 	choice: string;
-	/** Every selectable name, built-ins first, then theme files. */
+	/** Every selectable name, built-ins first, then theme files — see `selectableThemeNames`. */
 	available: string[];
 	/** Problems from theme files, plus an unresolved name, for `/doctor`. */
 	problems: string[];
@@ -223,12 +243,19 @@ export interface ResolvedTheme {
  */
 export async function resolveTheme(name: string | undefined, cwd: string, home = homedir()): Promise<ResolvedTheme> {
 	const loaded = loadThemeFiles(cwd, home);
-	const available = [...BUILT_IN_THEME_NAMES, ...loaded.themes.keys()];
+	const available = selectableThemeNames(loaded);
 	const problems = [...loaded.problems];
 
 	if (!name) return { theme: DEFAULT_THEME, choice: DEFAULT_THEME.name, available, problems };
 	if (name === AUTO_THEME_NAME) {
-		return { theme: themeForAppearance(await detectAppearance()), choice: name, available, problems };
+		const appearance = await detectAppearance();
+		// A theme file that states its appearance is a theme the author wrote for
+		// this background; the built-in is the fallback for a workspace that has
+		// none. Last one wins, the same rule the loader applies to the files
+		// themselves (sorted within a directory, project after user), so `auto`
+		// agrees with what `/theme <name>` would have selected by hand.
+		const fromFiles = [...loaded.themes.values()].filter((theme) => theme.appearance === appearance);
+		return { theme: fromFiles.at(-1) ?? themeForAppearance(appearance), choice: name, available, problems };
 	}
 	const theme = loaded.themes.get(name) ?? resolveBuiltInTheme(name);
 	if (!theme) {

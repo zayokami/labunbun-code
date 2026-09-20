@@ -18,6 +18,9 @@ function tmpRoot(): string {
 	return tmpdir();
 }
 
+/** U+FEFF: the mark a Windows editor puts in front of a UTF-8 file. */
+const BOM = String.fromCharCode(0xfeff);
+
 /**
  * Run `body` against a throwaway home + project dir, with settings files
  * written per tier. Restores USERPROFILE afterwards — loadSettings resolves the
@@ -98,6 +101,30 @@ describe("loadSettings hierarchy", () => {
 				expect(settings.permissionMode).toBe("plan");
 			},
 		);
+	});
+
+	// The same failure as a corrupt file, but with no diagnosis at all: the mark
+	// is not JSON, so the whole tier was read as unparseable and dropped.
+	test("a byte-order mark costs the user tier nothing", () => {
+		const cwd = mkdtempSync(join(tmpRoot(), "lbb-bom-"));
+		const home = mkdtempSync(join(tmpRoot(), "lbb-bom-home-"));
+		const prevHome = process.env.USERPROFILE;
+		try {
+			process.env.USERPROFILE = home;
+			mkdirSync(join(home, ".labunbun"), { recursive: true });
+			writeFileSync(
+				join(home, ".labunbun", "settings.json"),
+				`${BOM}${JSON.stringify({ theme: "light", vimMode: true })}`,
+			);
+			const { settings } = loadSettings(cwd);
+			expect(settings.theme).toBe("light");
+			expect(settings.vimMode).toBe(true);
+		} finally {
+			if (prevHome === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = prevHome;
+			rmSync(home, { recursive: true, force: true });
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 
 	test("corrupt settings file is skipped with a warning, not a crash", () => {

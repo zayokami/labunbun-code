@@ -84,6 +84,32 @@ describe("the sealed rows repaint when the palette changes", () => {
 		// it was built from the same values.
 		expect(transcriptPaintKey({ ...DARK_THEME })).not.toBe(transcriptPaintKey(DARK_THEME));
 	});
+
+	// The palette is not the only thing that changes; the screen is not the only
+	// thing that can be wiped. Ctrl+L takes the rows off the terminal without
+	// touching the list, so the counter goes in the same key and the same remount
+	// brings them back.
+	test("a repaint prints the sealed rows again, from the list as it is now", () => {
+		const stale: UiEntry[] = [{ kind: "error", text: "boom" }, ...settledRows(20)];
+		const view = render(withTheme(<VirtualMessageList entries={stale} paint={0} />));
+		expect(view.lastFrame()).toContain(oldRow);
+
+		// A sealed row can only ever change by being replaced — entries are
+		// immutable — and until something asks for a repaint, the copy ink printed
+		// is the copy on screen.
+		const fresh: UiEntry[] = [{ kind: "error", text: "bang" }, ...settledRows(20)];
+		view.rerender(withTheme(<VirtualMessageList entries={fresh} paint={0} />));
+		expect(view.lastFrame()).toContain(oldRow);
+		expect(view.lastFrame()).not.toContain("bang");
+
+		view.rerender(withTheme(<VirtualMessageList entries={fresh} paint={1} />));
+		const frame = view.lastFrame() ?? "";
+		expect(frame).toContain(`${DARK_THEME.marks.error} bang`);
+		expect(frame).not.toContain(oldRow);
+		// One copy, as with the theme path: the reprint replaces what it reprints.
+		expect(frame.match(/answer \d+/g)).toHaveLength(20);
+		view.unmount();
+	});
 });
 
 describe("the screen is taken back before the reprint", () => {

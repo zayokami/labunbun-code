@@ -50,7 +50,7 @@ function GroupView({ group }: { group: ShortcutGroup }) {
 	const width = Math.max(...group.rows.map(([keys]) => keys.length));
 	return (
 		<Box flexDirection="column" marginBottom={1}>
-			<Text color={theme.primary} bold>
+			<Text color={theme.accent} bold>
 				{group.title}
 			</Text>
 			{group.rows.map(([keys, what]) => (

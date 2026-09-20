@@ -50,7 +50,7 @@ import {
 	type Operations,
 	TaskStore,
 } from "@labunbun/tools";
-import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle, ruleSpecifierFor } from "@labunbun/tui";
+import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle, resolveBuiltInTheme, ruleSpecifierFor } from "@labunbun/tui";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import {
 	BACKGROUND_SHELL_POLL_MS,
@@ -93,7 +93,13 @@ import { loadSkills, skillsAsCommands } from "./skills.ts";
 import { createTaskTool, loadAgentDefinitions } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { bindTaskStore, restoreTasks } from "./task-snapshot.ts";
-import { persistThemeChoice, type ResolvedTheme, resolveTheme } from "./theme-file.ts";
+import {
+	loadThemeFiles,
+	persistThemeChoice,
+	type ResolvedTheme,
+	resolveTheme,
+	selectableThemeNames,
+} from "./theme-file.ts";
 import { pruneToolOutput, toolOutputRoot, writeToolOutput } from "./tool-output.ts";
 import { persistModelChoice, writeUserSettingsPatch } from "./user-settings.ts";
 import { runWizard, shouldRunWizard } from "./wizard.ts";
@@ -116,7 +122,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const home = options.home ?? homedir();
 
 	// ---- first-run setup (before settings load, so it can create them) ----
-	if (shouldRunWizard()) await runWizard(cwd);
+	// `home` is threaded through both halves: the wizard reads and writes the
+	// settings this session is about to load, so a session pointed at another
+	// home must not set up the real one.
+	if (shouldRunWizard({ home })) await runWizard(cwd, home);
 
 	// ---- settings & providers ----
 	const loadedSettings = loadSettings(cwd);
@@ -700,7 +709,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- theme ----
 	// Resolved before mounting: "auto" probes the terminal in raw mode, and Ink
 	// claims stdin the moment it renders.
-	const resolvedTheme = await resolveTheme(options.theme ?? settings.theme, cwd);
+	const resolvedTheme = await resolveTheme(options.theme ?? settings.theme, cwd, home);
 
 	// ---- REPL ----
 	handle = mountRepl({
@@ -1379,7 +1388,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/doctor": {
 			void (async () => {
 				const { runDoctorChecks, formatDoctorReport } = await import("./doctor.ts");
-				const checks = await runDoctorChecks(ctx.settings, ctx.cwd);
+				const checks = await runDoctorChecks(ctx.settings, ctx.cwd, ctx.home, ctx.theme.choice);
 				pushInfo(ctx.handle, formatDoctorReport(checks));
 			})();
 			return true;
@@ -1415,7 +1424,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					}
 				};
 				if (arg) {
-					const resolved = await resolveTheme(arg, ctx.cwd);
+					const resolved = await resolveTheme(arg, ctx.cwd, ctx.home);
 					// resolveTheme falls back to the default for an unknown name, so
 					// check the name rather than trusting that a theme came back.
 					if (arg !== AUTO_THEME_NAME && resolved.theme.name !== arg) {
@@ -1431,10 +1440,16 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// resolved up front — including `auto`, whose probe needs stdin and
 				// cannot run while the picker owns the keyboard — so a highlight can
 				// repaint the whole screen in the same keystroke.
+				//
+				// The list is read from disk here rather than taken from the startup
+				// snapshot: opening `/theme` is how a user reaches the file they just
+				// saved, and a row left behind by a file they just deleted is a row
+				// that lies.
 				const previous = ctx.theme.theme;
 				const previousAvailable = ctx.theme.available;
-				const names = [...previousAvailable, AUTO_THEME_NAME];
-				const resolved = await Promise.all(names.map((name) => resolveTheme(name, ctx.cwd)));
+				const loaded = loadThemeFiles(ctx.cwd, ctx.home);
+				const names = [...selectableThemeNames(loaded), AUTO_THEME_NAME];
+				const resolved = await Promise.all(names.map((name) => resolveTheme(name, ctx.cwd, ctx.home)));
 				if (!ctx.handle) return;
 				// Marked, and opened on, is the choice — what Enter would save — not
 				// the theme it resolved to. Under `auto` those differ, and marking the
@@ -1446,7 +1461,14 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					"Theme — the highlight is a preview",
 					names.map((name, i) => ({
 						label: `${i === active ? "* " : "  "}${name}`,
-						description: i === active ? "active" : resolved[i].theme.name !== name ? resolved[i].theme.name : undefined,
+						description:
+							i === active
+								? "active"
+								: loaded.themes.has(name) && resolveBuiltInTheme(name) !== undefined
+									? "theme file shadows the built-in"
+									: resolved[i].theme.name !== name
+										? resolved[i].theme.name
+										: undefined,
 					})),
 					{
 						initialIndex: Math.max(active, 0),

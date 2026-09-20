@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { detectShell } from "@labunbun/tools";
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
 import type { Settings } from "./settings.ts";
-import { loadThemeFiles } from "./theme-file.ts";
+import { loadThemeFiles, resolveTheme } from "./theme-file.ts";
 
 export interface DoctorCheck {
 	name: string;
@@ -16,7 +16,19 @@ export interface DoctorCheck {
 	detail: string;
 }
 
-export async function runDoctorChecks(settings: Settings, cwd: string): Promise<DoctorCheck[]> {
+/**
+ * `home` and `liveThemeName` are the two things this cannot read off `settings`:
+ * where the user's files are (a session may be pointed at another home), and
+ * which theme is on screen right now (`/theme` may have changed it since
+ * startup). Both default to the setting-based answer, which is right for a
+ * caller that has neither.
+ */
+export async function runDoctorChecks(
+	settings: Settings,
+	cwd: string,
+	home = homedir(),
+	liveThemeName?: string,
+): Promise<DoctorCheck[]> {
 	const checks: DoctorCheck[] = [];
 
 	// Runtime
@@ -76,7 +88,7 @@ export async function runDoctorChecks(settings: Settings, cwd: string): Promise<
 	});
 
 	// Settings files present
-	const userSettings = join(homedir(), ".labunbun", "settings.json");
+	const userSettings = join(home, ".labunbun", "settings.json");
 	const projectSettings = join(cwd, ".labunbun", "settings.json");
 	const found = [userSettings, projectSettings].filter((p) => existsSync(p));
 	checks.push({
@@ -87,11 +99,22 @@ export async function runDoctorChecks(settings: Settings, cwd: string): Promise<
 
 	// Theme resolution: an unresolved name or a broken theme file shows up as a
 	// theme that silently did nothing, so it is worth naming here.
-	const themeName = settings.theme ?? DEFAULT_THEME.name;
-	const loadedThemes = loadThemeFiles(cwd);
+	//
+	// The live choice rather than the one the session started with: /theme may
+	// have changed it since, and a row naming the theme that was on screen an hour
+	// ago is a row about a screen nobody is looking at.
+	const themeName = liveThemeName ?? settings.theme ?? DEFAULT_THEME.name;
+	const loadedThemes = loadThemeFiles(cwd, home);
 	const known =
 		themeName === AUTO_THEME_NAME || loadedThemes.themes.has(themeName) || resolveBuiltInTheme(themeName) !== undefined;
-	const themeDetails = [known ? themeName : `unknown theme "${themeName}" — using ${DEFAULT_THEME.name}`];
+	// `auto` is the one choice that does not say what it resolved to, and saying
+	// what it resolved to is the only thing this row is for. Resolved through the
+	// same call the session uses, so a theme file that claims the detected
+	// appearance is reported here exactly as it is applied.
+	const resolvedName =
+		themeName === AUTO_THEME_NAME ? (await resolveTheme(themeName, cwd, home)).theme.name : themeName;
+	const label = resolvedName === themeName ? themeName : `${themeName} → ${resolvedName}`;
+	const themeDetails = [known ? label : `unknown theme "${themeName}" — using ${DEFAULT_THEME.name}`];
 	if (loadedThemes.themes.size > 0) themeDetails.push(`${loadedThemes.themes.size} from theme files`);
 	themeDetails.push(...loadedThemes.problems);
 	checks.push({
@@ -103,7 +126,7 @@ export async function runDoctorChecks(settings: Settings, cwd: string): Promise<
 	// Session storage writable
 	try {
 		const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
-		const probe = join(homedir(), ".labunbun", "projects", ".doctor-probe");
+		const probe = join(home, ".labunbun", "projects", ".doctor-probe");
 		mkdirSync(probe, { recursive: true });
 		writeFileSync(join(probe, "probe"), "x");
 		rmSync(probe, { recursive: true, force: true });

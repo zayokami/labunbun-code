@@ -135,6 +135,13 @@ export interface UiState {
 	 * and the key-list overlay have to describe the editor that is actually up.
 	 */
 	vim: boolean;
+	/**
+	 * Asked-for repaints of the transcript. `<Static>` prints its children once
+	 * and only prints them again when the list remounts, so anything that wipes
+	 * the terminal underneath a sealed transcript (Ctrl+L) has to ask for one.
+	 * Only the identity of the value matters, which is why nothing resets it.
+	 */
+	paint: number;
 }
 
 export interface PermissionDialogState {
@@ -200,6 +207,7 @@ export function initialUiState(vim = false): UiState {
 		theme: DEFAULT_THEME,
 		modelName: "",
 		vim,
+		paint: 0,
 	};
 }
 

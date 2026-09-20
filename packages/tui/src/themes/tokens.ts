@@ -83,12 +83,23 @@ export interface Theme {
 	toolBorder: string;
 
 	// ---- state ----
+	/**
+	 * The state colors. `error` is the only one a row renders today — the entry
+	 * model is user, assistant, toolUse, error and info, and only `error` is a
+	 * state — but the colorblind palettes pick their success and warning hues
+	 * deliberately (blue against yellow where green against red would not read),
+	 * so the contract keeps them rather than making every palette restate that
+	 * work the day the row arrives. Nothing reads them yet; that is the whole
+	 * of what is wrong with them.
+	 */
 	success: string;
 	warning: string;
 	error: string;
 	/**
-	 * Permission prompts. Deliberately distinct from `warning`: this means
-	 * "waiting on your decision", not "something went wrong".
+	 * Permission prompts. Deliberately distinct from `warning` (this means
+	 * "waiting on your decision", not "something went wrong") and from `accent`
+	 * (a prompt for you is not ordinary chrome) — `themes.test.ts` holds every
+	 * built-in to both.
 	 */
 	permission: string;
 	/** Queued or not-yet-started work. */
@@ -118,7 +129,12 @@ export interface Theme {
 	tableBorder: string;
 
 	// ---- structure ----
-	/** File paths. */
+	/**
+	 * File paths. Nothing renders it yet — a path in prose or in tool output
+	 * goes through `link` and `toolArgs` — and it is kept for the same reason
+	 * as `success`: a palette that has decided what a path should look like
+	 * should not have to decide again.
+	 */
 	path: string;
 	/** URLs. */
 	link: string;
@@ -126,41 +142,19 @@ export interface Theme {
 	selection: string;
 	/** General-purpose border: dialogs, the prompt input. */
 	border: string;
-	/** Text cursor. */
-	cursor: string;
 	/** Primary accent. */
 	accent: string;
-
-	// ---- aliases ----
-	/**
-	 * Same value as `accent`. Kept so existing components keep working; new
-	 * code should read `accent`.
-	 */
-	primary: string;
-	/** Same value as `textMuted`. New code should read `textMuted`. */
-	dim: string;
-	/** Same value as `userInput`. New code should read `userInput`. */
-	userMessage: string;
 
 	// ---- non-color encoding ----
 	/**
 	 * State must be distinguishable without color: a red/green colorblind
 	 * reader cannot tell success from error by hue, and neither can anyone
-	 * piping output through a tool that strips ANSI.
+	 * piping output through a tool that strips ANSI. `marks.success`,
+	 * `marks.warning`, `marks.pending` and the `bold.success`/`bold.warning`
+	 * flags are waiting on the same rows as the colors above.
 	 */
 	marks: ThemeMarks;
 	bold: ThemeBold;
-}
-
-/** A theme with the alias tokens omitted — `defineTheme` fills them in. */
-export type ThemeSpec = Omit<Theme, "primary" | "dim" | "userMessage">;
-
-/**
- * Build a theme from its canonical tokens, deriving the compatibility aliases
- * so the two spellings of a token can never drift apart.
- */
-export function defineTheme(spec: ThemeSpec): Theme {
-	return { ...spec, primary: spec.accent, dim: spec.textMuted, userMessage: spec.userInput };
 }
 
 /** Overrides accepted by `deriveTheme`: any token, with partial nested groups. */
@@ -173,23 +167,15 @@ export type ThemeOverrides = Partial<Omit<Theme, "marks" | "bold" | "syntax">> &
 /**
  * Derive a variant from an existing theme. `marks`, `bold` and `syntax` merge
  * per key so a variant can change one symbol or one syntax color without
- * restating the others, and the aliases are recomputed from whatever the
- * result's canonical tokens ended up being — overriding `accent` alone still
- * moves `primary` with it.
+ * restating the others.
  */
 export function deriveTheme(base: Theme, overrides: ThemeOverrides): Theme {
-	const merged: Theme = {
+	return {
 		...base,
 		...overrides,
 		marks: { ...base.marks, ...overrides.marks },
 		bold: { ...base.bold, ...overrides.bold },
 		syntax: { ...base.syntax, ...overrides.syntax },
-	};
-	return {
-		...merged,
-		primary: overrides.primary ?? merged.accent,
-		dim: overrides.dim ?? merged.textMuted,
-		userMessage: overrides.userMessage ?? merged.userInput,
 	};
 }
 
@@ -222,11 +208,7 @@ export const THEME_TOKEN_KEYS: ReadonlyArray<keyof Theme> = [
 	"link",
 	"selection",
 	"border",
-	"cursor",
 	"accent",
-	"primary",
-	"dim",
-	"userMessage",
 	"marks",
 	"bold",
 ];

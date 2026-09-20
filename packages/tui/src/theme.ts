@@ -20,7 +20,6 @@ export {
 	DARK_THEME,
 	DEFAULT_THEME,
 	DEUTERANOPIA_DARK,
-	defineTheme,
 	deriveTheme,
 	HIGH_CONTRAST_DARK,
 	HIGH_CONTRAST_LIGHT,
@@ -33,7 +32,6 @@ export {
 	type ThemeBold,
 	type ThemeMarks,
 	type ThemeOverrides,
-	type ThemeSpec,
 	TRITANOPIA_DARK,
 	themeForAppearance,
 } from "./themes/index.ts";

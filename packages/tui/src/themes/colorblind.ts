@@ -64,7 +64,6 @@ export const DEUTERANOPIA_DARK: Theme = deriveTheme(DARK_THEME, {
 	link: "#56b4e9",
 	selection: "#56b4e9",
 	border: "#a0a0a0",
-	cursor: "#56b4e9",
 	accent: "#56b4e9",
 
 	bold: { error: true, warning: true, success: true },
@@ -121,7 +120,6 @@ export const TRITANOPIA_DARK: Theme = deriveTheme(DARK_THEME, {
 	link: "#7fdbd0",
 	selection: "#7fdbd0",
 	border: "#a0a0a0",
-	cursor: "#7fdbd0",
 	accent: "#7fdbd0",
 
 	bold: { error: true, warning: true, success: true },

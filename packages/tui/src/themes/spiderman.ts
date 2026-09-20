@@ -8,7 +8,7 @@ import { deriveTheme, type Theme } from "./tokens.ts";
  * a state color: if the accent is the same red as `error`, an error message
  * stops standing out because everything around it is already red. Here the red
  * is reserved for `error`, `diffRemoved`, and the user's own prompt line, while
- * the structural accent — borders, selection, cursor, paths — takes the blue.
+ * the structural accent — borders, selection, paths — takes the blue.
  * The five state hues stay pairwise distinct (red / amber / green / blue /
  * violet), which the theme tests assert rather than leaving to the eye.
  */
@@ -53,7 +53,6 @@ export const SPIDERMAN: Theme = deriveTheme(DARK_THEME, {
 	link: "#8ea2ff",
 	selection: "#8ea2ff",
 	border: "#3b4a8f",
-	cursor: "#e62429",
 	accent: "#4d61c4",
 
 	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯", tableColumn: "│" },

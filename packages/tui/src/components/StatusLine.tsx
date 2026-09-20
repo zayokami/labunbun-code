@@ -89,7 +89,7 @@ export function StatusLine({
 	}
 	const outputPart = outputEstimate && outputEstimate > 0 ? ` · ~${formatTokens(outputEstimate)} out` : "";
 	return (
-		<Text color={theme.primary}>
+		<Text color={theme.accent}>
 			{FRAMES[frame]} {PHASE_LABEL[phase]}{" "}
 			<Text dimColor>
 				({formatElapsed(elapsedMs)} · {modelName}

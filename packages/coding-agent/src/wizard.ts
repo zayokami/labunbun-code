@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { AUTO_THEME_NAME, BUILT_IN_THEME_NAMES, DEFAULT_THEME } from "@labunbun/tui";
 
 export function userSettingsPath(home = homedir()): string {
 	return join(home, ".labunbun", "settings.json");
@@ -76,22 +77,37 @@ export function buildWizardSettings(a: WizardAnswers): Record<string, unknown> {
 	};
 }
 
-const THEMES = [
-	"dark",
-	"light",
-	"high-contrast-dark",
-	"high-contrast-light",
-	"deuteranopia-dark",
-	"tritanopia-dark",
-	"spiderman",
-	"splatoon",
-];
+/**
+ * The theme names the wizard accepts, and the one a bare Enter takes.
+ *
+ * The REPL's own list rather than a copy of it written out here: the copy is
+ * what would let the wizard quietly offer a theme that no longer exists, or
+ * miss one that does. Theme files are deliberately not included — they are found
+ * by the REPL, and a name that has to be typed exactly is not a first-run
+ * question.
+ */
+export const WIZARD_THEME_CHOICES: readonly string[] = [...BUILT_IN_THEME_NAMES, AUTO_THEME_NAME];
+export const WIZARD_THEME_DEFAULT: string = DEFAULT_THEME.name;
 
 type Ask = (question: string) => Promise<string>;
 
-async function askChoice(ask: Ask, prompt: string, valid: string[], fallback: string): Promise<string> {
+/**
+ * A question with a set of answers, asked until one of them arrives.
+ *
+ * Exported for the tests: the retry is the part that used to be missing, and it
+ * cannot be checked without driving this loop. `hint` shortens what is shown in
+ * the parentheses when the full list is too long to read — the accepted set is
+ * still `valid`, which is what the re-ask prints in full.
+ */
+export async function askChoice(
+	ask: Ask,
+	prompt: string,
+	valid: readonly string[],
+	fallback: string,
+	hint?: string,
+): Promise<string> {
 	while (true) {
-		const answer = (await ask(`${prompt} (${valid.join("/")}) [${fallback}]: `)).trim().toLowerCase();
+		const answer = (await ask(`${prompt} (${hint ?? valid.join("/")}) [${fallback}]: `)).trim().toLowerCase();
 		if (answer === "") return fallback;
 		if (valid.includes(answer)) return answer;
 		console.log(`  Please answer one of: ${valid.join(", ")}`);
@@ -184,9 +200,10 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			apiKey = pasted.trim() === "" ? null : pasted.trim();
 		}
 
-		const themeAnswer = (await ask(`Theme (${THEMES.slice(0, 2).join("/")}… or auto) [dark]: `)).trim();
-		const theme =
-			themeAnswer === "" || themeAnswer === "auto" ? "auto" : THEMES.includes(themeAnswer) ? themeAnswer : "auto";
+		// Asked, validated and re-asked rather than read as free text: a name that
+		// is not a theme used to be rewritten to "auto" without a word, so the
+		// setting the user then found in settings.json was one they never chose.
+		const theme = await askChoice(ask, "Theme", WIZARD_THEME_CHOICES, WIZARD_THEME_DEFAULT, "dark/light… or auto");
 		const vimMode = (await askChoice(ask, "Vim modal editing", ["y", "n"], "n")).startsWith("y");
 
 		const settings = buildWizardSettings({

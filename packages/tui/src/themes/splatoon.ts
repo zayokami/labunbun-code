@@ -6,7 +6,7 @@ import { deriveTheme, type Theme } from "./tokens.ts";
  *
  * As with the other tinted theme, the signature colors are kept off the state
  * tokens they would otherwise drown out. Magenta carries the structure —
- * borders, selection, cursor — and the neon green stays on `success`, so a
+ * borders, selection — and the neon green stays on `success`, so a
  * green "done" still reads as a state rather than as more decoration. Error
  * takes a plain red, distinct from the magenta accent in both hue and
  * lightness, and warning takes the yellow.
@@ -52,7 +52,6 @@ export const SPLATOON: Theme = deriveTheme(DARK_THEME, {
 	link: "#00e5ff",
 	selection: "#fa4d95",
 	border: "#7a2f52",
-	cursor: "#19d719",
 	accent: "#fa4d95",
 
 	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯", tableColumn: "│" },

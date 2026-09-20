@@ -1,4 +1,4 @@
-import { defineTheme, type Theme } from "./tokens.ts";
+import type { Theme } from "./tokens.ts";
 
 /**
  * The default theme, and the base every other built-in derives from. Uses the
@@ -6,7 +6,7 @@ import { defineTheme, type Theme } from "./tokens.ts";
  * user already configured — a theme meant to be unobtrusive should not fight
  * the terminal it runs in.
  */
-export const DARK_THEME: Theme = defineTheme({
+export const DARK_THEME: Theme = {
 	name: "dark",
 	appearance: "dark",
 
@@ -23,7 +23,7 @@ export const DARK_THEME: Theme = defineTheme({
 	success: "green",
 	warning: "yellow",
 	error: "red",
-	permission: "cyan",
+	permission: "magenta",
 	pending: "gray",
 
 	diffAdded: "green",
@@ -46,9 +46,8 @@ export const DARK_THEME: Theme = defineTheme({
 	link: "blue",
 	selection: "cyan",
 	border: "gray",
-	cursor: "cyan",
 	accent: "cyan",
 
 	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯", tableColumn: "│" },
 	bold: { error: true, warning: false, success: false },
-});
+};

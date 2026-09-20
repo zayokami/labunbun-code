@@ -451,10 +451,17 @@ export function transcriptPaintKey(theme: Theme): number {
 export function VirtualMessageList({
 	entries,
 	liveOutputs,
+	paint = 0,
 }: {
 	entries: UiEntry[];
 	/** Output streamed by tools that are still running, keyed by call id. */
 	liveOutputs?: Record<string, string>;
+	/**
+	 * Repaint counter. Part of the key for the same reason the theme is: the
+	 * sealed rows are re-printed by remounting the list, and a screen someone
+	 * wiped with Ctrl+L needs them printed again without the palette changing.
+	 */
+	paint?: number;
 }) {
 	const theme = useTheme();
 	const sealed = sealCount(entries);
@@ -466,7 +473,7 @@ export function VirtualMessageList({
 
 	return (
 		<Box flexDirection="column">
-			<Static key={transcriptPaintKey(theme)} items={head}>
+			<Static key={`${transcriptPaintKey(theme)}:${paint}`} items={head}>
 				{(entry, i) => <EntryView key={`sealed-${i}`} entry={entry} />}
 			</Static>
 			{tail.map((entry, i) => (

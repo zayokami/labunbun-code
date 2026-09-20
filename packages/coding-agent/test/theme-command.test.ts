@@ -9,7 +9,7 @@
  * the real one.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSession } from "@labunbun/agent";
@@ -340,6 +340,92 @@ describe("/theme: the preview and the choice", () => {
 		expect(markedRow(h.picks[0])).toBe("* auto");
 		expect(h.picks[0].initialIndex).toBe(h.picks[0].items.length - 1);
 		h.finish(null);
+	});
+});
+
+/**
+ * Where the theme files are read from, and when.
+ *
+ * A session can be pointed at a home other than the one the process runs under,
+ * and both halves have to agree on which: resolving the name from one home while
+ * writing the choice to another is a theme that applies now and is gone at the
+ * next start. The other half of the same question is the moment of the read — a
+ * file saved after the session started is exactly the file the user is opening
+ * the list to reach.
+ */
+describe("/theme and the theme files on disk", () => {
+	/** A theme file, written into `home`'s themes directory. */
+	function writeThemeFile(home: string, file: string, body: unknown): void {
+		const dir = join(home, ".labunbun", "themes");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, file), JSON.stringify(body));
+	}
+
+	/** Open the picker and wait for it; `/theme` resolves every row before it does. */
+	async function openList(h: { ctx: AppCommandContext; picks: Pick[] }, nth = 1): Promise<Pick> {
+		handleAppCommand("/theme", h.ctx);
+		for (let i = 0; i < 100 && h.picks.length < nth; i++) await delay(10);
+		expect(h.picks.length).toBeGreaterThanOrEqual(nth);
+		return h.picks[nth - 1];
+	}
+
+	// The session's home is the one the picker reads; the real one is not part of
+	// this session at all.
+	test("a theme file in the session's own home is selectable by name", async () => {
+		const h = await makeCtx();
+		writeThemeFile(h.home, "ocean.json", { name: "ocean", tokens: { accent: "#0000ff" } });
+
+		handleAppCommand("/theme ocean", h.ctx);
+		await delay(30);
+
+		expect(h.picks).toHaveLength(0);
+		expect(h.store.get().theme.name).toBe("ocean");
+		expect(savedSettings(h.home)).toEqual({ theme: "ocean" });
+	});
+
+	test("a file saved after the session started shows up the next time the list opens", async () => {
+		const h = await makeCtx();
+		writeThemeFile(h.home, "late.json", { name: "late" });
+
+		const pick = await openList(h);
+		expect(rowNames(pick)).toEqual([...h.names, "late", "auto"]);
+		h.finish(null);
+		await delay(10);
+	});
+
+	test("a file deleted since the session started stops being a row", async () => {
+		const h = await makeCtx();
+		writeThemeFile(h.home, "doomed.json", { name: "doomed" });
+		expect(rowNames(await openList(h))).toContain("doomed");
+		h.finish(null);
+		await delay(10);
+
+		rmSync(join(h.home, ".labunbun", "themes", "doomed.json"));
+		expect(rowNames(await openList(h, 2))).not.toContain("doomed");
+		h.finish(null);
+		await delay(10);
+	});
+
+	// Dedupe is invisible by design — the file simply owns the row the built-in
+	// had — so the one thing the user cannot see from the list is that the file
+	// took it over. The row says so.
+	test("a theme file wearing a built-in's name is named as a shadow", async () => {
+		const h = await makeCtx();
+		// `light`, not `dark`: the active row is the one row whose description is
+		// already spoken for.
+		writeThemeFile(h.home, "light.json", { name: "light", tokens: { accent: "#c0ffee" } });
+		writeThemeFile(h.home, "ocean.json", { name: "ocean" });
+
+		const pick = await openList(h);
+		const names = rowNames(pick);
+		const description = (name: string) => pick.items[names.indexOf(name)].description;
+		expect(names.filter((name) => name === "light")).toHaveLength(1);
+		expect(description("light")).toBe("theme file shadows the built-in");
+		// Only for the shadowed row: a name with no built-in behind it has nothing
+		// to explain.
+		expect(description("ocean")).toBeUndefined();
+		h.finish(null);
+		await delay(10);
 	});
 });
 

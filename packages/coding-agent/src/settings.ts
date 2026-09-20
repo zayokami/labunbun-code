@@ -22,6 +22,7 @@ import { join, resolve } from "node:path";
 import { type PermissionMode, type PermissionRule, parseRuleList, type RuleSource } from "@labunbun/agent";
 import { registerOpenAICompatibleProvider, setPricingOverride } from "@labunbun/ai";
 import { z } from "zod";
+import { stripBom } from "./json-text.ts";
 
 export const PermissionModeSchema = z.enum(["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"]);
 
@@ -314,7 +315,10 @@ function settingsPath(source: SettingsSourceName, cwd: string): string {
 function readJsonFile(path: string): unknown {
 	if (!existsSync(path)) return undefined;
 	try {
-		return JSON.parse(readFileSync(path, "utf8"));
+		// Read the same way everywhere settings are read: a byte-order mark from a
+		// Windows editor is not a parse error, and treating it as one drops a
+		// whole tier of settings without the user ever learning why.
+		return JSON.parse(stripBom(readFileSync(path, "utf8")));
 	} catch (error) {
 		console.error(`Warning: failed to parse ${path}: ${error instanceof Error ? error.message : error}`);
 		return undefined;

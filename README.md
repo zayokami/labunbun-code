@@ -167,8 +167,9 @@ command as the subcommand, for when the flag is easier to type than the word.
 | `splatoon` | green and magenta |
 
 `theme` in `settings.json` selects one; `"auto"` asks the terminal for its
-background color (OSC 11, then `COLORFGBG`) and picks `light` or `dark`. Detection
-never blocks startup: a terminal that does not answer gets `dark`.
+background color (OSC 11, then `COLORFGBG`) and picks the theme that states that
+appearance — one of yours if any of them does, the matching built-in otherwise.
+Detection never blocks startup: a terminal that does not answer gets `dark`.
 
 State is never carried by color alone. Success, warning, error, pending and the
 selected row each render a symbol as well, so the transcript stays readable to a

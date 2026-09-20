@@ -151,4 +151,15 @@ describe("test suite isolation", () => {
 		}).map((f) => f.name);
 		expect(offenders, "set process.env.HOME to a temp dir around CostTracker(cwd)").toEqual([]);
 	});
+
+	// `runDoctorChecks(settings, cwd)` probes ~/.labunbun/projects to see whether
+	// it can write there, and reads the user's theme files. The third argument is
+	// the home override; without it every run leaves a probe directory in the
+	// operator's own home.
+	test("no test runs the doctor against the real home", () => {
+		const offenders = FILES.filter(({ source }) => callersWithTooFewArguments(source, "runDoctorChecks", 3) > 0).map(
+			(f) => f.name,
+		);
+		expect(offenders, "pass a temp home as the third argument to runDoctorChecks").toEqual([]);
+	});
 });

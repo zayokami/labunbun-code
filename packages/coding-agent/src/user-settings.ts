@@ -10,13 +10,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { stripBom } from "./json-text.ts";
 
 export function writeUserSettingsPatch(patch: Record<string, unknown>, home = homedir()): void {
 	const path = join(home, ".labunbun", "settings.json");
 	let existing: Record<string, unknown> = {};
 	if (existsSync(path)) {
 		try {
-			const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+			const parsed: unknown = JSON.parse(stripBom(readFileSync(path, "utf8")));
 			if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
 				existing = parsed as Record<string, unknown>;
 			}

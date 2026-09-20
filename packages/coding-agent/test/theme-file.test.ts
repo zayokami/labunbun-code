@@ -7,8 +7,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DARK_THEME, LIGHT_THEME } from "@labunbun/tui";
-import { loadThemeFiles, persistThemeChoice, resolveTheme, ThemeFileSchema, themeFromFile } from "../src/theme-file.ts";
+import { BUILT_IN_THEME_NAMES, DARK_THEME, LIGHT_THEME } from "@labunbun/tui";
+import {
+	loadThemeFiles,
+	persistThemeChoice,
+	resolveTheme,
+	selectableThemeNames,
+	ThemeFileSchema,
+	themeFromFile,
+} from "../src/theme-file.ts";
 
 /** A home and cwd pair with themes directories ready to write into. */
 function makeDirs() {
@@ -50,11 +57,11 @@ describe("themeFromFile", () => {
 
 	// The tokens that used to alias another one are gone from the contract, and a
 	// file that still writes them is told so rather than being quietly ignored.
-	test("aliases follow the overridden tokens", () => {
-		const parsed = ThemeFileSchema.parse({ name: "mine", tokens: { accent: "#abcdef", textMuted: "#fedcba" } });
-		const { theme } = themeFromFile(parsed, "mine.json");
-		expect(theme?.primary).toBe("#abcdef");
-		expect(theme?.dim).toBe("#fedcba");
+	test("a file setting a token the contract dropped is reported", () => {
+		const parsed = ThemeFileSchema.parse({ name: "mine", tokens: { cursor: "#ff0000", primary: "#00ff00" } });
+		const { theme, problems } = themeFromFile(parsed, "mine.json");
+		expect(problems).toEqual(['mine.json: unknown token "cursor"', 'mine.json: unknown token "primary"']);
+		expect(theme?.accent).toBe(DARK_THEME.accent);
 	});
 
 	test("appearance picks the base theme when extends is omitted", () => {
@@ -292,6 +299,28 @@ describe("theme files that are merely strange", () => {
 	});
 });
 
+describe("selectableThemeNames", () => {
+	// Order is part of the contract: the built-ins are what `/theme` opens on and
+	// what the unknown-name message lists first, so a set that reordered them
+	// would be a visible change to both.
+	test("lists the built-ins in order, then the names only a file has", () => {
+		const { home, cwd, userThemes } = makeDirs();
+		writeTheme(userThemes, "ocean.json", { name: "ocean" });
+		expect(selectableThemeNames(loadThemeFiles(cwd, home))).toEqual([...BUILT_IN_THEME_NAMES, "ocean"]);
+	});
+
+	// A file may legitimately be named after a built-in — it wins, and that is
+	// what shadowing means. What it must not do is put a second row in the list
+	// that resolves to the same theme as the first.
+	test("a file named after a built-in takes that one row, not a second one", () => {
+		const { home, cwd, userThemes } = makeDirs();
+		writeTheme(userThemes, "dark.json", { name: "dark", tokens: { accent: "#c0ffee" } });
+		const names = selectableThemeNames(loadThemeFiles(cwd, home));
+		expect(names).toEqual([...BUILT_IN_THEME_NAMES]);
+		expect(names.filter((name) => name === "dark")).toHaveLength(1);
+	});
+});
+
 describe("resolveTheme", () => {
 	test("no configured name resolves the default and still lists what is available", async () => {
 		const { home, cwd, userThemes } = makeDirs();
@@ -339,6 +368,44 @@ describe("resolveTheme", () => {
 		// No TTY here, so detection declines to probe and returns dark.
 		expect(resolved.theme).toBe(DARK_THEME);
 	});
+
+	// Every test below leans on the same fact as the one above: with no terminal
+	// to probe, `auto` means dark.
+
+	test("auto prefers a theme file written for the detected background", async () => {
+		const { home, cwd, userThemes } = makeDirs();
+		writeTheme(userThemes, "midnight.json", { name: "midnight", appearance: "dark", tokens: { accent: "#0a0b0c" } });
+		const resolved = await resolveTheme("auto", cwd, home);
+		expect(resolved.theme.name).toBe("midnight");
+		// The choice stays `auto`: what is on screen is a theme file, but what the
+		// user asked for — and what gets written back — is still detection.
+		expect(resolved.choice).toBe("auto");
+	});
+
+	test("auto does not take a theme file written for the other background", async () => {
+		const { home, cwd, userThemes } = makeDirs();
+		writeTheme(userThemes, "day.json", { name: "day", appearance: "light" });
+		const resolved = await resolveTheme("auto", cwd, home);
+		expect(resolved.theme).toBe(DARK_THEME);
+	});
+
+	test("auto takes the project's theme file over the user's", async () => {
+		const { home, cwd, userThemes, projectThemes } = makeDirs();
+		writeTheme(userThemes, "a-user.json", { name: "user-dark", appearance: "dark" });
+		writeTheme(projectThemes, "b-project.json", { name: "project-dark", appearance: "dark" });
+		// Last one loaded wins, the same rule the loader applies everywhere else:
+		// sorted within a directory, project after user.
+		const resolved = await resolveTheme("auto", cwd, home);
+		expect(resolved.theme.name).toBe("project-dark");
+	});
+
+	test("a theme file claiming a built-in's name is shadowing it, not replacing it twice", async () => {
+		const { home, cwd, userThemes } = makeDirs();
+		writeTheme(userThemes, "dark.json", { name: "dark", tokens: { accent: "#c0ffee" } });
+		const resolved = await resolveTheme("dark", cwd, home);
+		expect(resolved.theme.accent).toBe("#c0ffee");
+		expect(resolved.available.filter((name) => name === "dark")).toHaveLength(1);
+	});
 });
 
 describe("persistThemeChoice", () => {
@@ -374,6 +441,15 @@ describe("persistThemeChoice", () => {
 	// A byte-order mark is not a broken file, and refusing to write over one
 	// meant `/theme` reported "not valid JSON" about a settings file that was
 	// perfectly valid.
+	test("updates a settings file that starts with a byte-order mark", async () => {
+		const { home } = makeDirs();
+		const path = join(home, ".labunbun", "settings.json");
+		mkdirSync(join(home, ".labunbun"), { recursive: true });
+		writeFileSync(path, `${BOM}${JSON.stringify({ model: "anthropic/claude-sonnet-5" })}`);
+		persistThemeChoice("light", home);
+		const written = JSON.parse(await Bun.file(path).text());
+		expect(written).toEqual({ model: "anthropic/claude-sonnet-5", theme: "light" });
+	});
 
 	// Overwriting a file we cannot parse would discard whatever the user has in
 	// it, so this refuses instead.

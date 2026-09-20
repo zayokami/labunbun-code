@@ -5,7 +5,6 @@ import {
 	BUILT_IN_THEMES,
 	DARK_THEME,
 	DEFAULT_THEME,
-	defineTheme,
 	deriveTheme,
 	resolveBuiltInTheme,
 	THEME_TOKEN_KEYS,
@@ -16,7 +15,7 @@ import {
 const ALL = [...BUILT_IN_THEMES.values()];
 
 /** Tokens that must differ from each other so state stays readable. */
-const STATE_TOKENS = ["success", "warning", "error", "accent"] as const;
+const STATE_TOKENS = ["success", "warning", "error", "permission", "accent"] as const;
 
 describe("built-in theme registry", () => {
 	test("registers all eight themes, addressable by name", () => {
@@ -85,20 +84,14 @@ describe("token completeness", () => {
 			expect(["dark", "light"]).toContain(theme.appearance);
 		}
 	});
-
-	test("aliases hold the same value as the tokens they alias", () => {
-		for (const theme of ALL) {
-			expect(theme.primary).toBe(theme.accent);
-			expect(theme.dim).toBe(theme.textMuted);
-			expect(theme.userMessage).toBe(theme.userInput);
-		}
-	});
 });
 
 describe("state legibility", () => {
 	// The failure this guards against: a themed accent color that happens to
 	// equal the error color, so an error message vanishes into the decoration.
-	test("success, warning, error, and accent are pairwise distinct in every theme", () => {
+	// `permission` is in the set because an approval dialog is a state the reader
+	// has to pick out of the frame, not decoration.
+	test("success, warning, error, permission, and accent are pairwise distinct in every theme", () => {
 		for (const theme of ALL) {
 			const seen = new Map<string, string>();
 			for (const token of STATE_TOKENS) {
@@ -187,13 +180,6 @@ describe("deriveTheme", () => {
 		expect(derived.syntax.function).toBe(DARK_THEME.syntax.function);
 	});
 
-	test("recomputes aliases from the overridden tokens", () => {
-		const derived = deriveTheme(DARK_THEME, { accent: "#123456", textMuted: "#654321", userInput: "#abcdef" });
-		expect(derived.primary).toBe("#123456");
-		expect(derived.dim).toBe("#654321");
-		expect(derived.userMessage).toBe("#abcdef");
-	});
-
 	test("does not mutate the base theme", () => {
 		const before = structuredClone(DARK_THEME) as Theme;
 		deriveTheme(DARK_THEME, {
@@ -203,14 +189,5 @@ describe("deriveTheme", () => {
 			syntax: { keyword: "#000000" },
 		});
 		expect(DARK_THEME).toEqual(before);
-	});
-});
-
-describe("defineTheme", () => {
-	test("fills in the aliases from the canonical tokens", () => {
-		const theme = defineTheme({ ...DARK_THEME, accent: "#111111", textMuted: "#222222", userInput: "#333333" });
-		expect(theme.primary).toBe("#111111");
-		expect(theme.dim).toBe("#222222");
-		expect(theme.userMessage).toBe("#333333");
 	});
 });

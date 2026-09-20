@@ -8,7 +8,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { buildWizardSettings, shouldRunWizard, userSettingsPath } from "../src/wizard.ts";
+import { AUTO_THEME_NAME, BUILT_IN_THEME_NAMES } from "@labunbun/tui";
+import {
+	askChoice,
+	buildWizardSettings,
+	shouldRunWizard,
+	userSettingsPath,
+	WIZARD_THEME_CHOICES,
+	WIZARD_THEME_DEFAULT,
+} from "../src/wizard.ts";
 
 let home: string;
 
@@ -34,6 +42,45 @@ describe("shouldRunWizard", () => {
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, "{}\n", "utf8");
 		expect(shouldRunWizard({ home, isTTY: true })).toBe(false);
+	});
+});
+
+describe("the theme question", () => {
+	// The list the wizard offers is the REPL's own: a copy written out here is how
+	// it came to accept a set of names that could drift from the themes that exist.
+	test("offers every built-in plus auto, and no others", () => {
+		expect([...WIZARD_THEME_CHOICES]).toEqual([...BUILT_IN_THEME_NAMES, AUTO_THEME_NAME]);
+		expect(WIZARD_THEME_DEFAULT).toBe("dark");
+	});
+
+	/** Drive the question with a scripted answer or two. */
+	async function ask(answers: string[]): Promise<string> {
+		let i = 0;
+		return askChoice(
+			async () => answers[Math.min(i++, answers.length - 1)] ?? "",
+			"Theme",
+			WIZARD_THEME_CHOICES,
+			WIZARD_THEME_DEFAULT,
+		);
+	}
+
+	test("a named theme is taken as given", async () => {
+		expect(await ask(["splatoon"])).toBe("splatoon");
+		expect(await ask(["AUTO"])).toBe("auto"); // the answer is folded, the name is not invented
+	});
+
+	test("an empty answer takes the default the prompt promised", async () => {
+		expect(await ask([""])).toBe("dark");
+		expect(await ask(["   "])).toBe("dark");
+	});
+
+	// The bug this replaces: an unrecognised name was rewritten to "auto" without
+	// a word, so the setting the user found afterwards was one they never chose.
+	test("an unknown name is re-asked rather than rewritten", async () => {
+		expect(await ask(["nord", "light"])).toBe("light");
+		// Still unknown on the second try: the loop keeps asking rather than
+		// falling back to something the user did not ask for.
+		expect(await ask(["nord", "nord", "light"])).toBe("light");
 	});
 });
 

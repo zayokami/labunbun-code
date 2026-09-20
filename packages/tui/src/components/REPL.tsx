@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentSession } from "@labunbun/agent";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTurnTimer } from "../hooks/useTurnTimer.ts";
 import { type LastNotification, type NotifyKind, notificationSequence, shouldNotify } from "../notify.ts";
@@ -150,7 +150,13 @@ export function REPL({
 	// From the store, not a prop: `/vim` flips it while the app is running, and
 	// the editor, `/help` and the key-list overlay all have to agree.
 	const vim = useStore(store, (s) => s.vim);
+	// Ctrl+L wipes the screen the sealed transcript was printed onto; this is the
+	// stamp that says so, and it rides along in the list's key.
+	const paint = useStore(store, (s) => s.paint);
 	const modelName = useStore(store, (s) => s.modelName) || modelNameProp;
+	// Ink's own writer, not `process.stdout`: it knows where the frame it drew is,
+	// so it can take it down and put it back around whatever we write.
+	const { stdout, write: writeStdout } = useStdout();
 	// A dialog is the user deciding, not the model working. The clock stops while
 	// one is open, so a turn that spent two minutes waiting on an approval does
 	// not go on to report those two minutes as its own work.
@@ -369,10 +375,17 @@ export function REPL({
 			return;
 		}
 		if (key.ctrl && input === "l") {
-			// Wipe the terminal, not the conversation. Sealed Static rows are not
-			// redrawn after an external clear — an accepted cosmetic cost of
-			// keeping transcript state out of the terminal's own scrollback.
-			if (process.stdout.isTTY) process.stdout.write(CLEAR_SCREEN);
+			// Wipe the terminal, not the conversation: the sealed rows are about to
+			// be printed again onto the blank screen, so nothing is lost but the
+			// scrollback the user asked to be rid of.
+			//
+			// Through ink's writer, which takes its own frame down and puts it back
+			// around the clear. Writing to `process.stdout` directly leaves ink
+			// holding a frame it believes is on screen, and the frame that follows
+			// is byte-identical to the last one — so it skips the write and the
+			// clear is all the user sees.
+			if (stdout.isTTY) writeStdout(CLEAR_SCREEN);
+			store.set((s) => ({ ...s, paint: s.paint + 1 }));
 			return;
 		}
 		// A dialog owns Esc while one is open: there it means "deny this request"
@@ -431,7 +444,7 @@ export function REPL({
 	return (
 		<Box flexDirection="column">
 			<TerminalTitle phase={statusPhase} dirName={dirName} actionRequired={awaitingUser} />
-			<VirtualMessageList entries={entries} liveOutputs={liveOutputs} />
+			<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} />
 			<StreamingPreview text={streamingText} thinking={thinkingText} />
 			{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
 			<Box marginBottom={1} flexDirection="column">

@@ -51,7 +51,6 @@ export const HIGH_CONTRAST_DARK: Theme = deriveTheme(DARK_THEME, {
 	link: "#7fd4ff",
 	selection: "#00ffff",
 	border: "#ffffff",
-	cursor: "#00ffff",
 	accent: "#00ffff",
 
 	bold: { error: true, warning: true, success: true },
@@ -96,7 +95,6 @@ export const HIGH_CONTRAST_LIGHT: Theme = deriveTheme(LIGHT_THEME, {
 	link: "#0000cc",
 	selection: "#0000cc",
 	border: "#000000",
-	cursor: "#000000",
 	accent: "#0000cc",
 
 	bold: { error: true, warning: true, success: true },

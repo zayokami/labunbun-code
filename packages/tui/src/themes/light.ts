@@ -1,4 +1,4 @@
-import { defineTheme, type Theme } from "./tokens.ts";
+import type { Theme } from "./tokens.ts";
 
 /**
  * Light theme. Unlike the dark base this uses explicit hex values rather than
@@ -7,7 +7,7 @@ import { defineTheme, type Theme } from "./tokens.ts";
  * bright variants of red and green wash out — so the shades are pinned here
  * instead of inherited.
  */
-export const LIGHT_THEME: Theme = defineTheme({
+export const LIGHT_THEME: Theme = {
 	name: "light",
 	appearance: "light",
 
@@ -47,9 +47,8 @@ export const LIGHT_THEME: Theme = defineTheme({
 	link: "#0550ae",
 	selection: "#0969da",
 	border: "#8c959f",
-	cursor: "#0969da",
 	accent: "#0969da",
 
 	marks: { success: "✓", warning: "!", error: "✗", pending: "·", selected: "❯", tableColumn: "│" },
 	bold: { error: true, warning: false, success: false },
-});
+};
