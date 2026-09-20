@@ -208,7 +208,18 @@ export async function detectAppearance(options: DetectAppearanceOptions = {}): P
 		stdin.resume();
 		stdin.on("data", onData);
 		timer = setTimeout(() => finish(fromEnv()), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-		stdout.write(QUERY_BACKGROUND);
-		stdout.write(QUERY_DA1);
+		try {
+			stdout.write(QUERY_BACKGROUND);
+			stdout.write(QUERY_DA1);
+		} catch {
+			// The terminal cannot be written to, so it has not been asked and will
+			// not answer: give up now rather than sit out the timeout waiting on a
+			// question nobody heard. What matters more is that the stream comes
+			// back — this is the one moment stdin is out of its readers' hands, and
+			// a probe that fails is normal while a probe that keeps the keyboard
+			// (raw mode on, nothing listening) is not.
+			finish(fromEnv());
+			release();
+		}
 	});
 }

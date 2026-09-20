@@ -54,6 +54,24 @@ describe("the sealed rows repaint when the palette changes", () => {
 		// sitting above it for the rest of the session.
 		expect(frame).not.toContain(oldRow);
 		expect(frame.match(/@@ boom/g)).toHaveLength(1);
+		// And the reprint is the whole transcript: the newest row is not a
+		// courtesy reprint with the rest left behind in the old palette.
+		expect(frame.match(/answer \d+/g)).toHaveLength(20);
+		view.unmount();
+	});
+
+	// The boundary moves at the same moment the key does: a turn that adds a row
+	// while the theme changes seals one row more in that very commit. So the
+	// reprint and the live tail have to partition the list — the static side
+	// covering exactly the rows the tail does not. Overlap, and the row is on
+	// screen twice: once where the tail redraws it, and once frozen above it in
+	// the palette it was printed with.
+	test("a row that seals in the same frame as the repaint is printed once", () => {
+		const view = render(withTheme(<VirtualMessageList entries={settledRows(20)} />));
+		view.rerender(withTheme(<VirtualMessageList entries={settledRows(21)} />, LOUD));
+
+		const frame = view.lastFrame() ?? "";
+		expect(frame.match(/answer \d+/g)).toHaveLength(21);
 		view.unmount();
 	});
 
@@ -109,6 +127,18 @@ describe("the screen is taken back before the reprint", () => {
 		expect(store.get().theme).toBe(LOUD);
 	});
 
+	// The wipe is what pays for the reprint, so it is spent on the exact
+	// boundary: a full live window has nothing sealed, one row past it has one.
+	test("one row past the live window is one row to reprint", () => {
+		const { stream, writes } = fakeStdout();
+
+		applyTheme(storeWith(settledRows(8)), LOUD, stream);
+		expect(writes).toEqual([]);
+
+		applyTheme(storeWith(settledRows(9)), LOUD, stream);
+		expect(writes).toEqual([CLEAR_SCREEN]);
+	});
+
 	test("applying the theme that is already there changes nothing at all", () => {
 		const store = storeWith(errorThenAnswers);
 		const before = store.get();
@@ -120,11 +150,38 @@ describe("the screen is taken back before the reprint", () => {
 		expect(store.get()).toBe(before);
 	});
 
+	// Coming back to the first palette is a change like any other: the rows on
+	// screen are in the second one and ink prints them again for the first. A
+	// "have we painted this before" test that answered yes here would leave the
+	// transcript in the palette the user just left.
+	test("a theme that has been on screen before is still a change", () => {
+		const store = storeWith(errorThenAnswers);
+		const { stream, writes } = fakeStdout();
+
+		applyTheme(store, LOUD, stream);
+		applyTheme(store, DARK_THEME, stream);
+
+		expect(writes).toEqual([CLEAR_SCREEN, CLEAR_SCREEN]);
+		expect(store.get().theme).toBe(DARK_THEME);
+	});
+
 	test("output that is not a terminal has no screen to take back", () => {
 		const store = storeWith(errorThenAnswers);
 		const { stream, writes } = fakeStdout(false);
 
 		applyTheme(store, LOUD, stream);
+
+		expect(writes).toEqual([]);
+		expect(store.get().theme).toBe(LOUD);
+	});
+
+	// `isTTY` is a property of a stream that might not have one at all: a stream
+	// that cannot say what it is is not a terminal, and the wipe goes nowhere.
+	test("a stream that does not say whether it is a terminal is not one", () => {
+		const store = storeWith(errorThenAnswers);
+		const writes: string[] = [];
+
+		applyTheme(store, LOUD, { write: (data: string) => writes.push(data) });
 
 		expect(writes).toEqual([]);
 		expect(store.get().theme).toBe(LOUD);

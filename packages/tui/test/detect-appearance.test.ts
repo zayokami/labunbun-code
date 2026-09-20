@@ -10,9 +10,16 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { appearanceFromColorFgBg, detectAppearance, parseBackgroundLuminance } from "../src/detect-appearance.ts";
+import {
+	type Appearance,
+	appearanceFromColorFgBg,
+	detectAppearance,
+	parseBackgroundLuminance,
+} from "../src/detect-appearance.ts";
 
 const ESC = String.fromCharCode(0x1b);
+/** What the OSC 11 query ends with, and what some terminals answer with. */
+const BEL = String.fromCharCode(0x07);
 
 /** Records writes and never blocks, standing in for a TTY stdout. */
 function fakeStdout(isTTY = true) {
@@ -143,6 +150,9 @@ function reply(stdin: FakeStdin, data: string): void {
 	setTimeout(() => stdin.emit("data", Buffer.from(data)), 5);
 }
 
+/** Wait, for the assertions that are about bytes arriving on their own time. */
+const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 describe("parseBackgroundLuminance", () => {
 	test("reads white and black at full four-digit width", () => {
 		expect(parseBackgroundLuminance("rgb:ffff/ffff/ffff")).toBeCloseTo(1, 5);
@@ -174,6 +184,25 @@ describe("parseBackgroundLuminance", () => {
 		expect(parseBackgroundLuminance("")).toBeUndefined();
 		expect(parseBackgroundLuminance(`${ESC}[?62;c`)).toBeUndefined();
 		expect(parseBackgroundLuminance("rgb:zz/zz/zz")).toBeUndefined();
+	});
+
+	test("scales each channel by its own width when the widths differ", () => {
+		// xterm pads all three channels to a single width, but nothing in the
+		// reply format promises it, and a shared divisor would move the colour.
+		expect(parseBackgroundLuminance("rgb:f/ff/fff")).toBeCloseTo(1, 5);
+		expect(parseBackgroundLuminance("rgb:0/00/000")).toBeCloseTo(0, 5);
+	});
+
+	test("a channel too wide to be one is not truncated into a colour", () => {
+		// Read as `rgb:ffff/ffff/ffff` this would be white — a confident answer to
+		// a reply nobody understands, which is worse than saying nothing.
+		expect(parseBackgroundLuminance("rgb:fffff/ffff/ffff")).toBeUndefined();
+		expect(parseBackgroundLuminance("rgb:00000/0000/0000")).toBeUndefined();
+	});
+
+	test("a reply that is missing a channel is not a colour", () => {
+		expect(parseBackgroundLuminance("rgb:ffff/ffff")).toBeUndefined();
+		expect(parseBackgroundLuminance("rgb:ffff/ffff/")).toBeUndefined();
 	});
 });
 
@@ -347,8 +376,11 @@ describe("detectAppearance probing a terminal", () => {
 		const stdout = fakeStdout();
 		reply(stdin, "hello there");
 		const started = performance.now();
-		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 80 })).toBe("dark");
-		expect(performance.now() - started).toBeGreaterThanOrEqual(60);
+		// Same bar as the false-answer tests below, and for the same reason: a
+		// probe that took "hello there" for a reply would still be draining the
+		// stream when a shorter wait came up, and the assertion would pass.
+		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 250 })).toBe("dark");
+		expect(performance.now() - started).toBeGreaterThanOrEqual(200);
 	});
 
 	test("a late second reply after settling does not throw", async () => {
@@ -409,8 +441,6 @@ describe("detectAppearance probing a terminal", () => {
  * and `[?61;4;6;7;…c` ended up in the prompt.
  */
 describe("detectAppearance sharing stdin with the REPL", () => {
-	const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 	test("the colour reply arriving behind the tripwire's is not left for the reader", async () => {
 		const stdin = fakeStreamStdin();
 		const stdout = fakeStdout();
@@ -464,5 +494,133 @@ describe("detectAppearance sharing stdin with the REPL", () => {
 		pushReply(stdin, "typed", 5);
 		await tick(30);
 		expect(reader.seen).toEqual(["typed"]);
+	});
+});
+
+/**
+ * Answers the probe must not take for one.
+ *
+ * Both queries are designed to be recognised cheaply, and a reply is what ends
+ * the wait — including the fallback that DA1 triggers. A false positive here is
+ * the opposite of the bug the probe was written for: instead of waiting on a
+ * terminal that never answers, it stops listening to one that is about to.
+ */
+describe("what the probe will not accept as an answer", () => {
+	/**
+	 * How long this describe lets the probe wait before it gives up.
+	 *
+	 * Longer than `DRAIN_TIMEOUT_MS` (100ms) on purpose. A reply wrongly taken
+	 * for an answer does not return at once — it settles and *then* drains the
+	 * stream — so a bar under the drain is cleared by the right and the wrong
+	 * behaviour alike, and the test says nothing.
+	 */
+	const WAIT = 250;
+
+	/** Resolves once the probe has given up, and says how long that took. */
+	async function waitOut(stdin: FakeStdin, answer: Appearance): Promise<number> {
+		const started = performance.now();
+		expect(await detectAppearance({ stdin, stdout: fakeStdout(), env: {}, timeoutMs: WAIT })).toBe(answer);
+		return performance.now() - started;
+	}
+
+	test("the cursor-hide sequence is not a DA1 reply", async () => {
+		// `ESC[?25l` shares the tripwire's prefix and nothing else, and is written
+		// by the terminal's own caller rather than in answer to anything.
+		const stdin = fakeStdin();
+		reply(stdin, `${ESC}[?25l`);
+		expect(await waitOut(stdin, "dark")).toBeGreaterThanOrEqual(WAIT * 0.8);
+	});
+
+	test("the queries coming back as an echo are not answers", async () => {
+		// A terminal with local echo, or a multiplexer that replays what it was
+		// sent, hands back both queries verbatim: bytes addressed to it, saying
+		// nothing about its background.
+		const stdin = fakeStdin();
+		reply(stdin, `${ESC}]11;?${BEL}${ESC}[c`);
+		expect(await waitOut(stdin, "dark")).toBeGreaterThanOrEqual(WAIT * 0.8);
+	});
+
+	test("a colour one step under the threshold is dark and one step over is light", async () => {
+		// 0x7fff and 0x8000 of 0xffff are the two greys either side of the cut:
+		// they hold the threshold at a half, which a cut at 0.4 or 0.6 would put
+		// on the wrong side of one of them. Neither grey lands *on* it — whether
+		// the cut itself counts as dark is the next test's question.
+		const under = fakeStdin();
+		reply(under, `${ESC}]11;rgb:7fff/7fff/7fff${ESC}\\`);
+		expect(await detectAppearance({ stdin: under, stdout: fakeStdout(), env: {}, timeoutMs: 500 })).toBe("dark");
+
+		const over = fakeStdin();
+		reply(over, `${ESC}]11;rgb:8000/8000/8000${ESC}\\`);
+		expect(await detectAppearance({ stdin: over, stdout: fakeStdout(), env: {}, timeoutMs: 500 })).toBe("light");
+	});
+
+	// "Above this relative luminance the background counts as light": the cut
+	// itself is dark, so the comparison is `>` and not `>=`. This colour is the
+	// case that says which — its luminance is exactly 0.5, which the weights can
+	// produce (they are decimals, and 0.5 · 2 is representable), so a `>=` here
+	// would answer light to a background the constant calls dark.
+	test("a reply that lands exactly on the threshold is dark", async () => {
+		const on = fakeStdin();
+		reply(on, `${ESC}]11;rgb:2f/8f/d3${ESC}\\`); // 0.5 exactly
+		expect(await detectAppearance({ stdin: on, stdout: fakeStdout(), env: {}, timeoutMs: 500 })).toBe("dark");
+
+		const step = fakeStdin();
+		reply(step, `${ESC}]11;rgb:2f/8f/d4${ESC}\\`); // one increment up
+		expect(await detectAppearance({ stdin: step, stdout: fakeStdout(), env: {}, timeoutMs: 500 })).toBe("light");
+	});
+
+	// The window is a wait, not a promise: a terminal slower than it hands its
+	// bytes to whoever is reading when they arrive. Pinned deliberately — the
+	// alternative, holding stdin until the terminal says something, takes the
+	// keyboard away from the REPL for as long as it stays quiet.
+	test("a reply that misses the window belongs to the reader instead", async () => {
+		const stdin = fakeStreamStdin();
+		const reader = streamReader(stdin);
+
+		pushReply(stdin, `${ESC}[?61;c`, 5); // answers the tripwire only
+		expect(await detectAppearance({ stdin, stdout: fakeStdout(), env: {}, timeoutMs: 5000 })).toBe("dark");
+
+		pushReply(stdin, `${ESC}]11;rgb:ffff/ffff/ffff${ESC}\\`, 20);
+		await tick(60);
+		expect(reader.seen.join("")).toContain("rgb:ffff");
+	});
+});
+
+/**
+ * A terminal that cannot even be asked.
+ *
+ * `stdout.write` throws when the thing it is writing to has gone — the window
+ * closed, the pipe closed — and the probe is the only thing holding stdin in
+ * raw mode at that moment. Whatever went wrong out there, the stream has to
+ * come back: an app that mounts onto a raw-mode stream with no readers gets no
+ * keyboard, and the fault it reports is not the one that happened.
+ */
+describe("detectAppearance when the query cannot be written", () => {
+	const refusingStdout = () =>
+		({
+			isTTY: true,
+			write: () => {
+				throw new Error("EPIPE");
+			},
+		}) as unknown as NodeJS.WriteStream;
+
+	test("gives the stream back and falls back to the environment", async () => {
+		const stdin = fakeStdin();
+		const other = () => {};
+		stdin.on("data", other);
+
+		expect(
+			await detectAppearance({ stdin, stdout: refusingStdout(), env: { COLORFGBG: "0;15" }, timeoutMs: 500 }),
+		).toBe("light");
+		expect(stdin.rawModeCalls).toEqual([true, false]);
+		expect(stdin.isRaw).toBe(false);
+		expect(stdin.listeners("data")).toEqual([other]);
+	});
+
+	test("does not sit out the timeout waiting on a question nobody was asked", async () => {
+		const stdin = fakeStdin();
+		const started = performance.now();
+		expect(await detectAppearance({ stdin, stdout: refusingStdout(), env: {}, timeoutMs: 5000 })).toBe("dark");
+		expect(performance.now() - started).toBeLessThan(1000);
 	});
 });

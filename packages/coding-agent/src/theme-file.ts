@@ -168,7 +168,7 @@ function loadThemesFromDir(themesRoot: string): LoadedThemes {
 	for (const name of entries.sort()) {
 		const path = join(themesRoot, name);
 		try {
-			const parsed = ThemeFileSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+			const parsed = ThemeFileSchema.safeParse(JSON.parse(readFileSync(path, "utf8").replace(/^﻿/, "")));
 			if (!parsed.success) {
 				problems.push(
 					`${path}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"} ${i.message}`).join("; ")}`,

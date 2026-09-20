@@ -55,6 +55,29 @@ describe("sealCount", () => {
 		expect(sealCount(settledRows(5))).toBe(0);
 		expect(sealCount([])).toBe(0);
 	});
+
+	// The window is eight rows, so the eighth row of a transcript is live and the
+	// ninth seals one. An off-by-one here is invisible in every test that only
+	// looks at long transcripts.
+	test("the window is exact: eight rows are all live, nine seal one", () => {
+		expect(sealCount(settledRows(8))).toBe(0);
+		expect(sealCount(settledRows(9))).toBe(1);
+	});
+
+	test("a pending tool at the last row inside the window holds the boundary to it", () => {
+		const entries = settledRows(20);
+		entries[11] = runningTool("c-inside");
+		expect(sealCount(entries)).toBe(11);
+	});
+
+	// Empty output is output: a command that printed nothing has still finished,
+	// and reading `resultText` for truth rather than for undefined would keep its
+	// row — and every row behind it — live for the rest of the session.
+	test("a tool whose result is the empty string counts as finished", () => {
+		const entries = settledRows(20);
+		entries[2] = finishedTool("c-empty", "");
+		expect(sealCount(entries)).toBe(12);
+	});
 });
 
 describe("rows left live", () => {

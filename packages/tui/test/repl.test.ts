@@ -9,7 +9,7 @@ import { sameShells } from "../src/app.tsx";
 import { CTRL_C_EXIT_WINDOW_MS, ctrlCShouldExit, handleCommand } from "../src/components/REPL.tsx";
 import { createStore } from "../src/store.ts";
 import { LIGHT_THEME } from "../src/themes/index.ts";
-import { initialUiState, type UiState } from "../src/ui-state.ts";
+import { initialUiState, reduceEvent, type UiState } from "../src/ui-state.ts";
 
 /**
  * `/clear` clears the transcript, and nothing else.
@@ -81,6 +81,76 @@ describe("/clear", () => {
 		expect(s.backgroundShells).toBe(before.backgroundShells);
 		expect(s.queued).toBe(before.queued);
 		expect(s.statusPhase).toBe("tools");
+	});
+
+	/**
+	 * The five tests above are a list someone wrote down, and a list is only as
+	 * good as the day it was written: the field added to `UiState` next month is
+	 * not on it, so a `/clear` that resets it is not caught by anything — the
+	 * test that would have caught it does not mention the field.
+	 *
+	 * So the state is asked for its own keys instead. Everything `initialUiState`
+	 * knows about is walked, and only the transcript is allowed to change
+	 * identity; every other field is a bug report with its own name on it.
+	 */
+	test("every field it does not own keeps its identity", () => {
+		/** What `/clear` is for. A field added here has to be argued for. */
+		const cleared = new Set<string>(["entries", "streamingText", "thinkingText", "pendingTools", "liveOutputs"]);
+
+		const before = loadedState();
+		const store = createStore<UiState>(before);
+		handleCommand("/clear", { store, modelName: "m", onExit: () => {} });
+		const after = store.get();
+
+		// Collected rather than asserted one at a time: the failure is then the
+		// list of fields `/clear` reached into, not whichever one it walked past
+		// first.
+		const keys = Object.keys(initialUiState(true)) as Array<keyof UiState>;
+		const touched = keys.filter((key) => !cleared.has(key as string)).filter((key) => after[key] !== before[key]);
+
+		expect(touched).toEqual([]);
+		// ...and the walk covered something: an `initialUiState` that returned
+		// nothing would make the line above pass for a `/clear` that reset it all.
+		expect(keys.length).toBeGreaterThan(cleared.size + 5);
+	});
+
+	// The transcript can be cleared in the middle of a tool call, and the result
+	// is already on its way — it lands on a row that is no longer there.
+	test("a result that arrives after a clear does not resurrect its row", () => {
+		const before = loadedState();
+		const store = createStore<UiState>(before);
+		handleCommand("/clear", { store, modelName: "m", onExit: () => {} });
+
+		store.set((s) =>
+			reduceEvent(s, {
+				type: "tool_execution_end",
+				callId: "c1",
+				toolName: "Bash",
+				result: {
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "Bash",
+					content: [{ type: "text", text: "build finished" }],
+					isError: false,
+					timestamp: 0,
+				},
+			}),
+		);
+
+		// Dropped, not appended: a tool result printed with no call above it reads
+		// as output from a command the user cannot see. What matters beyond that is
+		// that nothing crashed looking for the row.
+		const s = store.get();
+		expect(s.entries).toEqual([]);
+		expect(s.pendingTools).toEqual([]);
+		expect(s.liveOutputs).toEqual({});
+
+		// And the next call, made after the clear, still gets its row.
+		store.set((prev) =>
+			reduceEvent(prev, { type: "tool_execution_start", callId: "c2", toolName: "Bash", input: { command: "ls" } }),
+		);
+		expect(store.get().entries.map((e) => e.kind)).toEqual(["toolUse"]);
+		expect(store.get().pendingTools.map((p) => p.callId)).toEqual(["c2"]);
 	});
 });
 

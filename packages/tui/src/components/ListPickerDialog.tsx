@@ -44,11 +44,18 @@ const VISIBLE_ROWS = 8;
  */
 export function ListPickerDialog({ title, items, initialIndex, resolve, onHighlight, onCancel }: ListPickerState) {
 	const theme = useTheme();
-	// Clamped: an index computed against a list that has since shrunk must still
-	// open on a row rather than on none.
-	const [selected, setSelected] = useState(() =>
-		Math.min(Math.max(initialIndex ?? 0, 0), Math.max(items.length - 1, 0)),
-	);
+	// A whole number first: a fraction highlights no row at all (`index === 1.9`
+	// is false for every row) and the caller is handed an index no item has to
+	// look up. NaN does not even move afterwards — `(NaN + 1) % items.length` is
+	// NaN — so every arrow key is spent going nowhere; it has no position to
+	// clamp, so it opens at the top. Everything else is clamped, because an index
+	// computed against a list that has since shrunk must still open on a row
+	// rather than on none.
+	const [selected, setSelected] = useState(() => {
+		const asked = initialIndex ?? 0;
+		const whole = Number.isNaN(asked) ? 0 : Math.trunc(asked);
+		return Math.min(Math.max(whole, 0), Math.max(items.length - 1, 0));
+	});
 
 	useInput((_input, key) => {
 		const cancel = () => {
@@ -94,7 +101,12 @@ export function ListPickerDialog({ title, items, initialIndex, resolve, onHighli
 					const index = start + row;
 					const isSelected = index === selected;
 					return (
-						<Text key={item.label} color={isSelected ? theme.selection : theme.textMuted}>
+						// Keyed by row, not by label: the labels are theme names, and two of
+						// them can be the same one — two files that call themselves the same
+						// thing, or a file named after a built-in. React on duplicate keys
+						// is not a cosmetic warning; the behavior is unsupported, and the row
+						// that goes missing would be a theme.
+						<Text key={`row-${index}`} color={isSelected ? theme.selection : theme.textMuted}>
 							{isSelected ? `${theme.marks.selected} ` : "  "}
 							{item.label}
 							{item.description ? ` — ${item.description}` : ""}

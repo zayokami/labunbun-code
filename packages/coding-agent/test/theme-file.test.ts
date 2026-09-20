@@ -22,6 +22,9 @@ function makeDirs() {
 	return { root, home, cwd, userThemes, projectThemes };
 }
 
+/** U+FEFF: the mark a Windows editor puts in front of a UTF-8 file. */
+const BOM = String.fromCharCode(0xfeff);
+
 function writeTheme(dir: string, file: string, body: unknown): void {
 	writeFileSync(join(dir, file), typeof body === "string" ? body : JSON.stringify(body));
 }
@@ -45,6 +48,8 @@ describe("themeFromFile", () => {
 		expect(theme?.marks).toEqual(DARK_THEME.marks);
 	});
 
+	// The tokens that used to alias another one are gone from the contract, and a
+	// file that still writes them is told so rather than being quietly ignored.
 	test("aliases follow the overridden tokens", () => {
 		const parsed = ThemeFileSchema.parse({ name: "mine", tokens: { accent: "#abcdef", textMuted: "#fedcba" } });
 		const { theme } = themeFromFile(parsed, "mine.json");
@@ -253,6 +258,40 @@ describe("loadThemeFiles", () => {
 	});
 });
 
+/**
+ * Files that are unusual rather than wrong.
+ *
+ * The load path reads files people wrote by hand, with the editors and shells
+ * that are on their machines — so what arrives is not always what an author
+ * imagined. Each of these used to be reported as a problem, or is one today.
+ */
+describe("theme files that are merely strange", () => {
+	test("a file saved with a byte-order mark loads instead of being refused", () => {
+		// What Windows editors and PowerShell's `Set-Content` write by default. The
+		// mark is not JSON, so JSON.parse names it "Unexpected token" at position 0
+		// — a report about the parser, in a file whose whole point is to say what
+		// is wrong with the file.
+		const { home, cwd, userThemes } = makeDirs();
+		writeTheme(userThemes, "bom.json", `${BOM}${JSON.stringify({ name: "bommed", tokens: { accent: "#123456" } })}`);
+		const loaded = loadThemeFiles(cwd, home);
+		expect(loaded.problems).toEqual([]);
+		expect(loaded.themes.get("bommed")?.accent).toBe("#123456");
+	});
+
+	// Reported rather than resolved quietly: a theme that extends another theme
+	// file is a reasonable thing to try, and the message is the only thing that
+	// says the base name has to be a built-in.
+	test("extends names a built-in, not another theme file", () => {
+		const { home, cwd, userThemes } = makeDirs();
+		writeTheme(userThemes, "base.json", { name: "base", tokens: { accent: "#010203" } });
+		writeTheme(userThemes, "child.json", { name: "child", extends: "base", tokens: { text: "#040506" } });
+		const loaded = loadThemeFiles(cwd, home);
+		expect(loaded.themes.has("child")).toBe(false);
+		expect(loaded.themes.has("base")).toBe(true);
+		expect(loaded.problems.join("\n")).toContain('extends unknown theme "base"');
+	});
+});
+
 describe("resolveTheme", () => {
 	test("no configured name resolves the default and still lists what is available", async () => {
 		const { home, cwd, userThemes } = makeDirs();
@@ -331,6 +370,10 @@ describe("persistThemeChoice", () => {
 		const written = JSON.parse(await Bun.file(path).text());
 		expect(written).toEqual({ theme: "light", model: "x" });
 	});
+
+	// A byte-order mark is not a broken file, and refusing to write over one
+	// meant `/theme` reported "not valid JSON" about a settings file that was
+	// perfectly valid.
 
 	// Overwriting a file we cannot parse would discard whatever the user has in
 	// it, so this refuses instead.
