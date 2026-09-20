@@ -168,6 +168,143 @@ describe("reading only the head of a session file", () => {
 	});
 });
 
+describe("the chain the store hands back", () => {
+	/**
+	 * The walk is rebuilt when the tree changes and handed back as it stands when
+	 * it has not. Identity is the assertion because it is the optimization: a
+	 * store that rebuilds on every read still returns an equal array every time,
+	 * so anything content-shaped would pass either way.
+	 */
+	test("an unchanged tree is walked once", () => {
+		const store = newStore([user("first"), assistant("an answer")]);
+
+		const first = store.linearEntries();
+
+		expect(store.linearEntries()).toBe(first);
+		expect(store.linearEntries()).toHaveLength(3);
+	});
+
+	test("an append is a new chain, and the array handed out before is untouched", () => {
+		const store = newStore([user("first")]);
+		const before = store.linearEntries();
+
+		const appended = store.appendMessage(assistant("an answer"));
+		const after = store.linearEntries();
+
+		expect(after).not.toBe(before);
+		expect(after.at(-1)).toBe(appended);
+		// The first array was a snapshot of the session as it stood, not a view
+		// that grew under the caller holding it.
+		expect(before).toHaveLength(2);
+		expect(after).toHaveLength(3);
+	});
+
+	test("a branch moves the chain even though it writes nothing", () => {
+		const store = newStore([user("first"), assistant("answer A"), user("second")]);
+		const full = store.linearEntries();
+		const answerId = full[2]?.id;
+		if (!answerId) throw new Error("expected the chain to hold the assistant answer");
+		// Walked already, so the branch below has a cached chain to invalidate —
+		// which is the only way this case can come out wrong.
+		expect(store.linearEntries()).toBe(full);
+
+		expect(store.branch(answerId)).toBe(true);
+		const branched = store.linearEntries();
+
+		expect(branched).not.toBe(full);
+		expect(branched).toHaveLength(3);
+		expect(branched.at(-1)?.id).toBe(answerId);
+		expect(texts(store.messages())).toEqual(["first", "answer A"]);
+	});
+
+	/** A session of `count` messages, written in one go — 20,000 appends would be
+	 * 20,000 file writes, and these tests are about reading what is there. */
+	function longSession(count: number): SessionStore {
+		const path = join(tmpDir("lbb-store-long-"), "long.jsonl");
+		const lines = [
+			JSON.stringify({
+				id: "h",
+				parentId: null,
+				type: "header",
+				version: 1,
+				sessionId: "long",
+				cwd: "G:/long",
+				createdAt: 0,
+			}),
+		];
+		for (let i = 0; i < count; i++) {
+			lines.push(
+				JSON.stringify({
+					id: `m${i}`,
+					parentId: i === 0 ? "h" : `m${i - 1}`,
+					type: "message",
+					timestamp: i,
+					message: user(`message ${i}`),
+				}),
+			);
+		}
+		writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+		return SessionStore.load(path);
+	}
+
+	/** Best of three, so a scheduling hiccup on one round does not decide it. */
+	function fastest(rounds: number, fn: () => void): number {
+		fn();
+		let best = Number.POSITIVE_INFINITY;
+		for (let round = 0; round < 3; round++) {
+			const start = performance.now();
+			for (let i = 0; i < rounds; i++) fn();
+			best = Math.min(best, performance.now() - start);
+		}
+		return best;
+	}
+
+	test("a hundred reads cost less than one walk", () => {
+		// What the cache is for. `readTaskSnapshot` walks the chain on every task
+		// change, and the session it walks is whatever the person has been doing
+		// for hours — so the reads have to be free, not merely fast.
+		const store = longSession(20_000);
+		const leaf = store.linearEntries().at(-1)?.id ?? "";
+		const walk = () => {
+			store.branch(leaf);
+			store.linearEntries();
+		};
+		const oneWalk = fastest(1, walk);
+		const hundredReads = fastest(1, () => {
+			for (let i = 0; i < 100; i++) store.linearEntries();
+		});
+
+		expect(hundredReads).toBeLessThan(oneWalk / 10);
+	});
+
+	test("the walk costs its length, not its square", () => {
+		// The walk is what `readTaskSnapshot` pays on every task change, so its
+		// shape is what decides whether a long session gets slower as it grows. It
+		// did: the chain was built a step at a time with `unshift` — which moves the
+		// whole chain on every step — and answered from a map of every entry built
+		// the same way. Four times the entries measured fourteen times the time.
+		const walkCost = (count: number): number => {
+			const store = longSession(count);
+			const leaf = store.linearEntries().at(-1)?.id ?? "";
+			const walk = () => {
+				store.branch(leaf);
+				store.linearEntries();
+			};
+			// `branch` is a scan of the entries in its own right, linear, and it is
+			// part of the walk measurement — taking it out leaves the walk.
+			return fastest(20, walk) - fastest(20, () => void store.branch(leaf));
+		};
+
+		const small = walkCost(5_000);
+		const large = walkCost(20_000);
+
+		// Four times the entries is four times the work; four times the *steps* of
+		// the walk would be sixteen. The bound sits between, with room for a noisy
+		// machine: it is 5 on the code below and was 14 on the code above.
+		expect(large / small).toBeLessThan(8);
+	});
+});
+
 describe("a session file that is not there", () => {
 	test("loading a path that does not exist is an empty store, not an error", () => {
 		const path = join(tmpDir("lbb-store-missing-"), "nope.jsonl");
