@@ -10,6 +10,8 @@ import {
 	loadSettings,
 	resolvePermissionMode,
 	SettingsSchema,
+	shadowedChoiceNotice,
+	shadowingTier,
 } from "../src/settings.ts";
 
 function tmpRoot(): string {
@@ -407,6 +409,55 @@ describe("applySettingsEnv", () => {
 		} finally {
 			delete process.env[key];
 		}
+	});
+});
+
+/**
+ * `/theme`, `/model` and `/vim` write the user's own file. A tier merged on top
+ * of it wins at the next startup, so the confirmation has to name the file
+ * instead of reporting a save that will not be there tomorrow.
+ */
+describe("choices a higher tier would override", () => {
+	test("names the file that wins, and says what it wins over", () => {
+		withSettingsTiers({ user: { theme: "light" }, project: { theme: "nord" } }, (cwd) => {
+			const loaded = loadSettings(cwd);
+			const tier = shadowingTier(loaded, "theme");
+			expect(tier?.source).toBe("project");
+			expect(tier?.path).toContain(".labunbun");
+			expect(shadowedChoiceNotice(loaded, "theme", (path) => path)).toBe(
+				`${tier?.path} sets theme and wins on the next start`,
+			);
+		});
+	});
+
+	test("stays quiet when only the user's own file sets it", () => {
+		withSettingsTiers({ user: { theme: "light" } }, (cwd) => {
+			const loaded = loadSettings(cwd);
+			expect(shadowingTier(loaded, "theme")).toBeUndefined();
+			expect(shadowedChoiceNotice(loaded, "theme", (path) => path)).toBeUndefined();
+		});
+	});
+
+	// Precedence, not file order: a local file beats the project's, and the
+	// managed file beats both. (`model` is denied to project and local files, so
+	// the managed tier is the only one that can override it.)
+	test("reports the highest tier that sets the key", () => {
+		withSettingsTiers({ project: { vimMode: true }, local: { vimMode: false } }, (cwd) => {
+			expect(shadowingTier(loadSettings(cwd), "vimMode")?.source).toBe("local");
+		});
+		withSettingsTiers({ local: { model: "x/y" }, policy: { model: "a/b" } }, (cwd) => {
+			expect(shadowingTier(loadSettings(cwd), "model")?.source).toBe("policy");
+		});
+	});
+
+	// The settings a command writes are the user's; a repo setting that was
+	// dropped for being repo-controlled is not a reason to warn about it.
+	test("a dropped repo key does not count as an override", () => {
+		withSettingsTiers({ project: { model: "x/y" } }, (cwd) => {
+			const loaded = loadSettings(cwd);
+			expect(loaded.perSource.project?.model).toBeUndefined();
+			expect(shadowingTier(loaded, "model")).toBeUndefined();
+		});
 	});
 });
 

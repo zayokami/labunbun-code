@@ -422,6 +422,31 @@ export function sealCount(entries: UiEntry[]): number {
 	return boundary;
 }
 
+/**
+ * A key that changes with the palette, and only with the palette.
+ *
+ * `<Static>` prints its children once and then takes them back out of the tree
+ * — its index moves to the end — so ink is never asked for those bytes again,
+ * and a row already in the scrollback keeps the colors it was printed with.
+ * Re-mounting the list is the one thing that makes ink print it again, and
+ * that needs a key: one per distinct theme object, issued on first sight.
+ * Re-applying the theme that is already on screen is not a change and gets the
+ * key it already has — no remount, no second copy of the transcript.
+ *
+ * The other half of the repaint, emptying the screen these rows print onto,
+ * belongs to whoever applies the theme (see `applyTheme`).
+ */
+const paintKeys = new WeakMap<Theme, number>();
+let paintKeySeq = 0;
+export function transcriptPaintKey(theme: Theme): number {
+	let key = paintKeys.get(theme);
+	if (key === undefined) {
+		key = ++paintKeySeq;
+		paintKeys.set(theme, key);
+	}
+	return key;
+}
+
 /** Virtualized transcript: sealed history via Static + live tail re-rendered. */
 export function VirtualMessageList({
 	entries,
@@ -431,6 +456,7 @@ export function VirtualMessageList({
 	/** Output streamed by tools that are still running, keyed by call id. */
 	liveOutputs?: Record<string, string>;
 }) {
+	const theme = useTheme();
 	const sealed = sealCount(entries);
 	const head = entries.slice(0, sealed);
 	const tail = entries.slice(sealed);
@@ -440,7 +466,9 @@ export function VirtualMessageList({
 
 	return (
 		<Box flexDirection="column">
-			<Static items={head}>{(entry, i) => <EntryView key={`sealed-${i}`} entry={entry} />}</Static>
+			<Static key={transcriptPaintKey(theme)} items={head}>
+				{(entry, i) => <EntryView key={`sealed-${i}`} entry={entry} />}
+			</Static>
 			{tail.map((entry, i) => (
 				// biome-ignore lint/suspicious/noArrayIndexKey: sealed + i reconstructs the entry's stable absolute position in the full list
 				<EntryView key={`live-${sealed + i}`} entry={entry} liveText={liveTextOf(entry, previews)} />

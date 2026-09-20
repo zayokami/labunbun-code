@@ -239,6 +239,62 @@ export function formatIgnoredKeysNotice(ignored: IgnoredSettingsKey[]): string |
 	);
 }
 
+/** The settings a command persists for the user, which another tier can override. */
+export type UserChoiceKey = "theme" | "model" | "vimMode";
+
+/** Tiers that outrank the user's own file, highest first. */
+const OVERRIDING_TIERS = ["flag", "policy", "local", "project"] as const;
+
+interface TierSource {
+	perSource: Partial<Record<SettingsSourceName, Settings>>;
+	sources: Partial<Record<SettingsSourceName, string>>;
+}
+
+/**
+ * The tier that would win over a choice written to the user file, if there is
+ * one.
+ *
+ * `/theme`, `/model` and `/vim` all write `~/.labunbun/settings.json`, and every
+ * other tier is merged on top of it. So a project's settings file, a local
+ * override or the managed one quietly undoes the choice at the next startup —
+ * the write is fine, and the silence about it is what leaves a user setting the
+ * same theme every morning.
+ *
+ * Ordered by precedence, so the tier reported is the one that actually wins.
+ * Only keys with no schema default are meaningful here: `theme`, `model` and
+ * `vimMode` are all optional, so a value present in a tier's own parsed
+ * settings is a value its file really set.
+ */
+export function shadowingTier(
+	loaded: TierSource,
+	key: UserChoiceKey,
+): { source: SettingsSourceName; path: string } | undefined {
+	for (const source of OVERRIDING_TIERS) {
+		if (loaded.perSource[source]?.[key] !== undefined) {
+			return { source, path: loaded.sources[source] ?? source };
+		}
+	}
+	return undefined;
+}
+
+/**
+ * One clause for a confirmation line, saying where the choice that was just
+ * saved will be overridden. Undefined when nothing outranks the user file — the
+ * common case, and the one that must stay quiet.
+ *
+ * `display` is how the caller shortens a path for the screen; passed in rather
+ * than applied here so this module keeps knowing nothing about `~`.
+ */
+export function shadowedChoiceNotice(
+	loaded: TierSource,
+	key: UserChoiceKey,
+	display: (path: string) => string,
+): string | undefined {
+	const tier = shadowingTier(loaded, key);
+	if (!tier) return undefined;
+	return `${display(tier.path)} sets ${key} and wins on the next start`;
+}
+
 function settingsPath(source: SettingsSourceName, cwd: string): string {
 	const home = homedir();
 	switch (source) {

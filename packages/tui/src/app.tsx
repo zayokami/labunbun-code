@@ -5,7 +5,14 @@
 
 import type { AgentSession, PermissionMode } from "@labunbun/agent";
 import { render } from "ink";
-import { connectSessionToStore, type PromptSubmitResult, type PromptSubmitVerdict, REPL } from "./components/REPL.tsx";
+import { sealCount } from "./components/MessageList.tsx";
+import {
+	CLEAR_SCREEN,
+	connectSessionToStore,
+	type PromptSubmitResult,
+	type PromptSubmitVerdict,
+	REPL,
+} from "./components/REPL.tsx";
 import { createPermissionQueue } from "./permission-queue.ts";
 import { createStore, type Store, useStore } from "./store.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
@@ -79,7 +86,7 @@ export interface ReplAppHandle {
 	pickFromList: (
 		title: string,
 		items: Array<{ label: string; description?: string }>,
-		options?: { onHighlight?: (index: number) => void; onCancel?: () => void },
+		options?: { initialIndex?: number; onHighlight?: (index: number) => void; onCancel?: () => void },
 	) => Promise<number | null>;
 	/**
 	 * Deny every pending permission request and dismiss the dialog. For a run
@@ -114,11 +121,6 @@ export interface ReplAppHandle {
 }
 
 /**
- * Reads the theme from the store so a `setTheme` call rerenders the tree.
- * Without this the provider value would be captured once at `render()` time,
- * outside any component, and a store change would never reach it.
- */
-/**
  * Whether two shell lists would render identically.
  *
  * The app layer polls the shell manager, so this runs every couple of seconds
@@ -130,6 +132,33 @@ export function sameShells(a: UiBackgroundShell[], b: UiBackgroundShell[]): bool
 	return a.every((shell, i) => shell.id === b[i].id && shell.status === b[i].status && shell.command === b[i].command);
 }
 
+/**
+ * Change the theme: the palette in the store, and the screen underneath it.
+ *
+ * Ink appends `<Static>` output and never erases it, so a row that has been
+ * printed belongs to the terminal's scrollback with the colors it was born
+ * with. The transcript remounts on a new theme object and ink prints every
+ * sealed row again (see `transcriptPaintKey`) — which is a repaint only if the
+ * screen is empty first, or the transcript would simply appear twice, the old
+ * palette above the new. Taking the screen back takes the scrollback with it,
+ * so it is spent only when there is both something to reprint and something to
+ * change.
+ */
+export function applyTheme(
+	store: Store<UiState>,
+	theme: Theme,
+	stream: { isTTY?: boolean; write: (data: string) => void } = process.stdout,
+): void {
+	if (store.get().theme === theme) return;
+	if (stream.isTTY && sealCount(store.get().entries) > 0) stream.write(CLEAR_SCREEN);
+	store.set((s) => ({ ...s, theme }));
+}
+
+/**
+ * Reads the theme from the store so a `setTheme` call rerenders the tree.
+ * Without this the provider value would be captured once at `render()` time,
+ * outside any component, and a store change would never reach it.
+ */
 function ThemedTree({ store, children }: { store: Store<UiState>; children: React.ReactNode }) {
 	const theme = useStore(store, (state) => state.theme);
 	return <ThemeContext.Provider value={theme}>{children}</ThemeContext.Provider>;
@@ -214,6 +243,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 					picker: {
 						title,
 						items,
+						initialIndex: options?.initialIndex,
 						onHighlight: options?.onHighlight,
 						onCancel: options?.onCancel,
 						resolve: (index) => {
@@ -224,7 +254,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				}));
 			}),
 		setTheme: (theme) => {
-			store.set((s) => ({ ...s, theme }));
+			applyTheme(store, theme);
 		},
 		setSession: (next) => {
 			sessionHolder.current = next;

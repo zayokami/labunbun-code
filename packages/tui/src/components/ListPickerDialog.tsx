@@ -11,6 +11,15 @@ export interface ListPickerState {
 	title: string;
 	items: PickerItem[];
 	/**
+	 * The row to open on, for a list that has a current one (the theme picker
+	 * opens on the configured theme). Without it the highlight starts at the top
+	 * and Enter takes the first entry, which for a picker that writes its answer
+	 * down is a silent change the user never asked for.
+	 *
+	 * Opening is not a highlight move: `onHighlight` is not called for it.
+	 */
+	initialIndex?: number;
+	/**
 	 * Called when the highlight moves — and only then, never on open. A caller
 	 * that previews the highlighted choice (the theme picker does, so the choice
 	 * is made by looking at it) must not apply something the user has not reached
@@ -33,9 +42,13 @@ const VISIBLE_ROWS = 8;
  * wrapping, the window scrolls to keep the selection visible, Enter resolves,
  * Esc cancels.
  */
-export function ListPickerDialog({ title, items, resolve, onHighlight, onCancel }: ListPickerState) {
+export function ListPickerDialog({ title, items, initialIndex, resolve, onHighlight, onCancel }: ListPickerState) {
 	const theme = useTheme();
-	const [selected, setSelected] = useState(0);
+	// Clamped: an index computed against a list that has since shrunk must still
+	// open on a row rather than on none.
+	const [selected, setSelected] = useState(() =>
+		Math.min(Math.max(initialIndex ?? 0, 0), Math.max(items.length - 1, 0)),
+	);
 
 	useInput((_input, key) => {
 		const cancel = () => {

@@ -107,6 +107,66 @@ describe("themeFromFile", () => {
 		expect(problems.join("\n")).toContain("top level");
 		expect(theme?.name).toBe("mine");
 	});
+
+	// `syntax` is a group like marks and bold, not a color: a file that sets it
+	// used to be told it "must be a non-empty string".
+	test("a file can set the syntax group", () => {
+		const parsed = ThemeFileSchema.parse({
+			name: "mine",
+			tokens: { syntax: { keyword: "#ff0000", comment: "#888888" } },
+		});
+		const { theme, problems } = themeFromFile(parsed, "mine.json");
+		expect(problems).toEqual([]);
+		expect(theme?.syntax.keyword).toBe("#ff0000");
+		expect(theme?.syntax.comment).toBe("#888888");
+		// Merged per key: the classes it did not name keep the base's colors.
+		expect(theme?.syntax.number).toBe(DARK_THEME.syntax.number);
+	});
+
+	test("reports a group member of the wrong type, keeping the others", () => {
+		const parsed = ThemeFileSchema.parse({
+			name: "mine",
+			tokens: { marks: { error: 7, success: "OK" }, bold: { warning: "yes" }, syntax: { keyword: "" } },
+		});
+		const { theme, problems } = themeFromFile(parsed, "mine.json");
+		expect(problems).toEqual([
+			'mine.json: token "marks.error" must be a non-empty string',
+			'mine.json: token "bold.warning" must be true or false',
+			'mine.json: token "syntax.keyword" must be a non-empty string',
+		]);
+		expect(theme?.marks.error).toBe(DARK_THEME.marks.error);
+		expect(theme?.bold.warning).toBe(DARK_THEME.bold.warning);
+		expect(theme?.marks.success).toBe("OK");
+	});
+
+	// A typo inside a group is the same silent failure as a typo at the top
+	// level, and takes the same route out: named, and skipped.
+	test("reports a group member the contract does not have", () => {
+		const parsed = ThemeFileSchema.parse({ name: "mine", tokens: { marks: { sucess: "✓", toString: "x" } } });
+		const { theme, problems } = themeFromFile(parsed, "mine.json");
+		expect(problems).toHaveLength(2);
+		expect(problems.join("\n")).toContain("sucess");
+		expect(problems.join("\n")).toContain("toString");
+		expect(theme?.marks).toEqual(DARK_THEME.marks);
+	});
+
+	// The file's own appearance is what `auto` matches on, so a theme derived
+	// from the light built-in is light — stating nothing is not stating "dark".
+	test("a file that states no appearance takes the one it extends", () => {
+		const { theme, problems } = themeFromFile(ThemeFileSchema.parse({ name: "mine", extends: "light" }), "mine.json");
+		expect(problems).toEqual([]);
+		expect(theme?.appearance).toBe("light");
+		expect(theme?.text).toBe(LIGHT_THEME.text);
+	});
+
+	test("a stated appearance still wins over the extended theme's", () => {
+		const { theme } = themeFromFile(
+			ThemeFileSchema.parse({ name: "mine", extends: "dark", appearance: "light" }),
+			"mine.json",
+		);
+		expect(theme?.appearance).toBe("light");
+		expect(theme?.text).toBe(DARK_THEME.text);
+	});
 });
 
 describe("loadThemeFiles", () => {

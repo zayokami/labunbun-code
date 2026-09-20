@@ -82,9 +82,11 @@ import {
 	applySettingsEnv,
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
+	type LoadedSettings,
 	loadSettings,
 	resolvePermissionMode,
 	type Settings,
+	shadowedChoiceNotice,
 } from "./settings.ts";
 import { createShellPassthrough } from "./shell-passthrough.ts";
 import { loadSkills, skillsAsCommands } from "./skills.ts";
@@ -682,7 +684,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// Another window, another threshold, and typically another tool budget:
 		// the indicator is measured against the model that is now selected.
 		if (sessionRef) refreshContextInfo(sessionRef);
-		pushInfo(handle, `Model: ${ref} — takes effect on the next prompt`);
+		const shadowed = shadowedChoiceNotice(loadedSettings, "model", (path) => shortenHome(path, home));
+		pushInfo(handle, `Model: ${ref} — takes effect on the next prompt${shadowed ? ` (${shadowed})` : ""}`);
 		return true;
 	}
 
@@ -778,6 +781,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				mcpConfig,
 				pendingMcpApprovals,
 				sessionStore: () => store,
+				loadedSettings,
 				theme: resolvedTheme,
 				refreshContextInfo,
 				memory: memory.content,
@@ -961,6 +965,13 @@ interface AppCommandContext {
 	/** Republish the status row after a shell changes state outside the poll. */
 	refreshBackgroundShells(): void;
 	settings: Settings;
+	/**
+	 * The same settings with their tiers kept. `/theme`, `/model` and `/vim` all
+	 * write the user file, and a project, local or managed file setting the same
+	 * key wins at the next startup — which the confirmation has to say, or it
+	 * reports a save that will be gone by tomorrow.
+	 */
+	loadedSettings: LoadedSettings;
 	cwd: string;
 	/** Home directory for user-owned state (MCP approvals). Defaults to the real one. */
 	home?: string;
@@ -1113,16 +1124,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				if (!handleRef) return;
 				const current = ctx.getSession()?.model;
 				const models = listModels();
-				const items = models.map((m) => {
-					const ref = `${m.provider}/${m.id}`;
-					const isActive = current && m.provider === current.provider && m.id === current.id;
+				// Opened on the model in use, so Enter without moving anything keeps
+				// it rather than switching to whichever happens to be first.
+				const active = models.findIndex((m) => current && m.provider === current.provider && m.id === current.id);
+				const items = models.map((m, i) => {
 					const hasKey = Boolean(resolveApiKey(m));
 					return {
-						label: `${isActive ? "* " : "  "}${ref}`,
+						label: `${i === active ? "* " : "  "}${m.provider}/${m.id}`,
 						description: `${Math.round(m.contextWindow / 1000)}k context${hasKey ? "" : " — no API key"}`,
 					};
 				});
-				const index = await handleRef.pickFromList("Switch model", items);
+				const index = await handleRef.pickFromList("Switch model", items, { initialIndex: Math.max(active, 0) });
 				if (index === null || index < 0 || index >= models.length) return;
 				const chosen = models[index];
 				ctx.switchModel(`${chosen.provider}/${chosen.id}`);
@@ -1382,9 +1394,18 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					ctx.handle?.setTheme(resolved.theme);
 				};
 				const save = (name: string, resolved: ResolvedTheme) => {
+					// The choice moves with the choice, not with the write: if the
+					// settings file cannot be written the session still shows this
+					// theme, and a second `/theme` should open on what is on screen.
+					ctx.theme.choice = name;
+					const shadowed = shadowedChoiceNotice(ctx.loadedSettings, "theme", (path) => shortenHome(path, ctx.home));
 					try {
 						persistThemeChoice(name, ctx.home);
-						pushInfo(ctx.handle, `Theme: ${resolved.theme.name}${name === AUTO_THEME_NAME ? " (detected)" : ""}`);
+						pushInfo(
+							ctx.handle,
+							`Theme: ${resolved.theme.name}${name === AUTO_THEME_NAME ? " (detected)" : ""}` +
+								`${shadowed ? ` (${shadowed})` : ""}`,
+						);
 					} catch (error) {
 						// The theme is already applied; only the persistence failed.
 						pushInfo(
@@ -1415,14 +1436,20 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const names = [...previousAvailable, AUTO_THEME_NAME];
 				const resolved = await Promise.all(names.map((name) => resolveTheme(name, ctx.cwd)));
 				if (!ctx.handle) return;
+				// Marked, and opened on, is the choice — what Enter would save — not
+				// the theme it resolved to. Under `auto` those differ, and marking the
+				// resolved built-in meant Enter saved it over the setting. A choice
+				// that no longer resolves (its file was deleted) marks nothing and
+				// opens at the top.
+				const active = names.indexOf(ctx.theme.choice);
 				const index = await ctx.handle.pickFromList(
 					"Theme — the highlight is a preview",
 					names.map((name, i) => ({
-						label: `${name === previous.name ? "* " : "  "}${name}`,
-						description:
-							name === previous.name ? "active" : resolved[i].theme.name !== name ? resolved[i].theme.name : undefined,
+						label: `${i === active ? "* " : "  "}${name}`,
+						description: i === active ? "active" : resolved[i].theme.name !== name ? resolved[i].theme.name : undefined,
 					})),
 					{
+						initialIndex: Math.max(active, 0),
 						onHighlight: (i) => apply(resolved[i]),
 						onCancel: () => {
 							ctx.theme.theme = previous;
@@ -1448,9 +1475,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// saved value would give the same answer every time.
 			const next = arg ? arg === "on" : !(ctx.handle?.store.get().vim ?? false);
 			ctx.handle?.setVimMode(next);
+			const shadowed = shadowedChoiceNotice(ctx.loadedSettings, "vimMode", (path) => shortenHome(path, ctx.home));
 			try {
 				writeUserSettingsPatch({ vimMode: next }, ctx.home);
-				pushInfo(ctx.handle, `Vim mode ${next ? "on" : "off"}`);
+				pushInfo(ctx.handle, `Vim mode ${next ? "on" : "off"}${shadowed ? ` (${shadowed})` : ""}`);
 			} catch (error) {
 				// Already in effect; only the write failed.
 				pushInfo(

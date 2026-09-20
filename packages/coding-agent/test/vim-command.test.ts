@@ -15,9 +15,24 @@ import { AgentSession } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
+import { SettingsSchema } from "../src/settings.ts";
 import { writeUserSettingsPatch } from "../src/user-settings.ts";
 
-function makeCtx(vim: boolean, home = mkdtempSync(join(tmpdir(), "lbb-vim-"))) {
+/** A settings file per tier, in the shape `loadSettings` hands the commands. */
+function settingsWithVim(vimMode: boolean, path = "/repo/.labunbun/settings.json") {
+	return {
+		settings: {},
+		sources: { project: path },
+		perSource: { project: SettingsSchema.parse({ vimMode }) },
+		ignoredKeys: [],
+	};
+}
+
+function makeCtx(
+	vim: boolean,
+	home = mkdtempSync(join(tmpdir(), "lbb-vim-")),
+	tiers: ReturnType<typeof settingsWithVim> | undefined = undefined,
+) {
 	const store = createStore<UiState>({ ...initialUiState(vim) });
 	const faux = fauxProvider([{ text: "n/a" }]);
 	const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
@@ -31,6 +46,7 @@ function makeCtx(vim: boolean, home = mkdtempSync(join(tmpdir(), "lbb-vim-"))) {
 		home,
 		cwd: process.cwd(),
 		settings: {},
+		loadedSettings: tiers ?? { settings: {}, sources: {}, perSource: {}, ignoredKeys: [] },
 		costTracker: { state: { totalCostUSD: 0, totalDurationMs: 0, modelsUsage: {} } },
 		baseRules: [],
 		sessionRules: [],
@@ -94,6 +110,18 @@ describe("/vim command", () => {
 
 		expect(savedSettings(home)).toEqual({ theme: "nord", vimMode: true });
 		expect(store.get().vim).toBe(true);
+	});
+
+	// Written to the user's file, overridden by a project file at the next
+	// startup — the same shape as the theme, and the same reason to say so.
+	test("says which file will override the choice on the next start", () => {
+		const { ctx, store } = makeCtx(false, undefined, settingsWithVim(false, "/repo/.labunbun/settings.local.json"));
+		handleAppCommand("/vim on", ctx);
+
+		expect(store.get().vim).toBe(true);
+		expect(infoTexts(store)).toContain("Vim mode on");
+		expect(infoTexts(store)).toContain("sets vimMode and wins on the next start");
+		expect(infoTexts(store)).toContain("/repo/.labunbun/settings.local.json");
 	});
 
 	test("a nonsense argument changes nothing and says the usage", () => {

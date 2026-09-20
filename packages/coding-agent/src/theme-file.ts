@@ -33,8 +33,12 @@ import { writeUserSettingsPatch } from "./user-settings.ts";
 export const ThemeFileSchema = z.object({
 	/** Theme name, as used by `theme` in settings and `/theme <name>`. */
 	name: z.string().min(1),
-	/** Which background the theme was designed for; also what `auto` matches on. */
-	appearance: z.enum(["dark", "light"]).default("dark"),
+	/**
+	 * Which background the theme was designed for; also what `auto` matches on.
+	 * Optional, and inherited from the extended theme when left out — an author
+	 * extending the light theme is stating everything that matters already.
+	 */
+	appearance: z.enum(["dark", "light"]).optional(),
 	/** Built-in theme supplying every token this file does not set. */
 	extends: z.string().optional(),
 	/** Token overrides. Validated against the contract, not blindly trusted. */
@@ -51,11 +55,50 @@ export interface LoadedThemes {
 }
 
 /** Tokens whose values are nested objects rather than color strings. */
-const GROUP_KEYS = new Set(["marks", "bold"]);
+const GROUP_KEYS = new Set(["marks", "bold", "syntax"]);
+
+type GroupName = "marks" | "bold" | "syntax";
+
 /** Tokens a file may not set: they are identity, not appearance. */
 const RESERVED_KEYS = new Set(["name", "appearance"]);
 
 const TOKEN_KEYS = new Set<string>(THEME_TOKEN_KEYS as readonly string[]);
+
+/**
+ * Check one nested group against the base theme's own members, which are the
+ * contract — a new mark or syntax class is valid the moment the built-ins have
+ * one, and nothing has to be listed in two places to stay in step.
+ *
+ * As at the top level, a bad member is reported and dropped rather than passed
+ * through: a `marks` value that is not a string prints as `null` or `7` in
+ * place of a symbol, which reads as the app being broken instead of the file.
+ */
+function groupOverrides(
+	base: Theme,
+	group: GroupName,
+	values: Record<string, unknown>,
+	path: string,
+	problems: string[],
+): Record<string, string | boolean> {
+	const reference = base[group] as unknown as Record<string, string | boolean>;
+	const accepted: Record<string, string | boolean> = {};
+	for (const [member, value] of Object.entries(values)) {
+		// hasOwn, not `in`: "toString" is not a mark, and `in` would say it is.
+		if (!Object.hasOwn(reference, member)) {
+			problems.push(`${path}: unknown token "${group}.${member}"; ${group} has ${Object.keys(reference).join(", ")}`);
+			continue;
+		}
+		const wantsBoolean = typeof reference[member] === "boolean";
+		if (wantsBoolean ? typeof value !== "boolean" : typeof value !== "string" || value.trim() === "") {
+			problems.push(
+				`${path}: token "${group}.${member}" must be ${wantsBoolean ? "true or false" : "a non-empty string"}`,
+			);
+			continue;
+		}
+		accepted[member] = value as string | boolean;
+	}
+	return accepted;
+}
 
 /**
  * Turn a parsed file into a theme, or explain why it cannot become one.
@@ -92,7 +135,7 @@ export function themeFromFile(file: ThemeFile, path: string): { theme?: Theme; p
 				problems.push(`${path}: token "${key}" must be an object`);
 				continue;
 			}
-			overrides[key] = value;
+			overrides[key] = groupOverrides(base, key as GroupName, value as Record<string, unknown>, path, problems);
 			continue;
 		}
 		if (typeof value !== "string" || value.trim() === "") {
@@ -102,7 +145,9 @@ export function themeFromFile(file: ThemeFile, path: string): { theme?: Theme; p
 		overrides[key] = value;
 	}
 
-	const theme = deriveTheme(base, { ...overrides, name: file.name, appearance: file.appearance });
+	// Inherited, not defaulted to dark: a file that says nothing about its
+	// appearance is whatever the theme it extends is, and `auto` matches on it.
+	const theme = deriveTheme(base, { ...overrides, name: file.name, appearance: file.appearance ?? base.appearance });
 	return { theme, problems };
 }
 
@@ -153,6 +198,16 @@ export function loadThemeFiles(cwd: string, home = homedir()): LoadedThemes {
 
 export interface ResolvedTheme {
 	theme: Theme;
+	/**
+	 * The name that was asked for, defaulted when none was given.
+	 *
+	 * Not the same as `theme.name`: `"auto"` resolves to whichever built-in the
+	 * terminal probe picked, and a theme file named `mine.json` can call itself
+	 * anything. This is the name that gets written back and the row `/theme`
+	 * marks as current — taking it from the resolved theme instead made Enter on
+	 * an `auto` setting save the built-in it happened to detect.
+	 */
+	choice: string;
 	/** Every selectable name, built-ins first, then theme files. */
 	available: string[];
 	/** Problems from theme files, plus an unresolved name, for `/doctor`. */
@@ -171,16 +226,18 @@ export async function resolveTheme(name: string | undefined, cwd: string, home =
 	const available = [...BUILT_IN_THEME_NAMES, ...loaded.themes.keys()];
 	const problems = [...loaded.problems];
 
-	if (!name) return { theme: DEFAULT_THEME, available, problems };
+	if (!name) return { theme: DEFAULT_THEME, choice: DEFAULT_THEME.name, available, problems };
 	if (name === AUTO_THEME_NAME) {
-		return { theme: themeForAppearance(await detectAppearance()), available, problems };
+		return { theme: themeForAppearance(await detectAppearance()), choice: name, available, problems };
 	}
 	const theme = loaded.themes.get(name) ?? resolveBuiltInTheme(name);
 	if (!theme) {
+		// The choice stays the name that was asked for even though it did not
+		// resolve: the problem above says so, and the caller checks it.
 		problems.push(`Unknown theme "${name}"; using "${DEFAULT_THEME.name}". Available: ${available.join(", ")}`);
-		return { theme: DEFAULT_THEME, available, problems };
+		return { theme: DEFAULT_THEME, choice: name, available, problems };
 	}
-	return { theme, available, problems };
+	return { theme, choice: name, available, problems };
 }
 
 /**

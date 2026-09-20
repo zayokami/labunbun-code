@@ -6,7 +6,7 @@ import { type LastNotification, type NotifyKind, notificationSequence, shouldNot
 import { shortcutGroups } from "../shortcuts.ts";
 import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
-import { initialUiState, type QueuedMessage, reduceEvent, type UiState } from "../ui-state.ts";
+import { type QueuedMessage, reduceEvent, type UiState } from "../ui-state.ts";
 import { ListPickerDialog } from "./ListPickerDialog.tsx";
 import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
@@ -500,7 +500,8 @@ export function REPL({
 	);
 }
 
-function handleCommand(
+/** Exported for its own test: the component renders, this decides. */
+export function handleCommand(
 	text: string,
 	context: {
 		store: Store<UiState>;
@@ -520,7 +521,19 @@ function handleCommand(
 			break;
 		case "/clear":
 			// Display-only: the persisted session and the model context survive.
-			store.set((s) => ({ ...initialUiState(), dialog: s.dialog, picker: s.picker }));
+			// So does everything that is not the transcript — the theme, the model
+			// name, the editing mode, the shells that are still running — along with
+			// the dialog, picker and question, which hold the closures a running
+			// turn is waiting on. Rebuilding from a fresh initial state dropped all
+			// of it, and the theme came back as the default.
+			store.set((s) => ({
+				...s,
+				entries: [],
+				streamingText: "",
+				thinkingText: "",
+				pendingTools: [],
+				liveOutputs: {},
+			}));
 			break;
 		case "/exit":
 		case "/quit":

@@ -17,7 +17,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const ITEMS = [{ label: "dark" }, { label: "light" }, { label: "nord" }];
 
-function open(withHooks: boolean) {
+function open(withHooks: boolean, initialIndex?: number) {
 	const highlights: number[] = [];
 	let cancels = 0;
 	let result: number | null | undefined;
@@ -27,6 +27,7 @@ function open(withHooks: boolean) {
 				<ListPickerDialog
 					title="Theme"
 					items={ITEMS}
+					initialIndex={initialIndex}
 					resolve={(index) => (result = index)}
 					onHighlight={withHooks ? (i) => highlights.push(i) : undefined}
 					onCancel={withHooks ? () => cancels++ : undefined}
@@ -109,5 +110,52 @@ describe("ListPickerDialog preview hooks", () => {
 		await delay(30);
 		expect(p.result()).toBe(1);
 		p.unmount();
+	});
+});
+
+/**
+ * Opening on a row, for lists that have a current one: `/theme` opens on the
+ * configured theme. Without it the highlight starts at the top, so Enter picks
+ * the first entry — which for the theme picker wrote that entry down over the
+ * setting the user actually had.
+ */
+describe("ListPickerDialog opening on a row", () => {
+	test("Enter takes the row it opened on, and opening is not a move", async () => {
+		const p = open(true, 2);
+		await delay(30);
+		// The preview hook must not hear about a highlight nobody moved.
+		expect(p.highlights).toEqual([]);
+		p.stdin.write("\r");
+		await delay(30);
+		expect(p.result()).toBe(2);
+		p.unmount();
+	});
+
+	test("the arrows move from the row it opened on, not from the top", async () => {
+		const p = open(true, 2);
+		await delay(30);
+		p.stdin.write("\x1b[A"); // up from the last entry
+		await delay(30);
+		expect(p.highlights).toEqual([1]);
+		p.unmount();
+	});
+
+	// A caller computing the index from a list that no longer holds it (a theme
+	// file deleted since the setting was written) must not open with nothing
+	// highlighted.
+	test("an index outside the list opens on the nearest row", async () => {
+		const past = open(false, 99);
+		await delay(30);
+		past.stdin.write("\r");
+		await delay(30);
+		expect(past.result()).toBe(ITEMS.length - 1);
+		past.unmount();
+
+		const below = open(false, -1);
+		await delay(30);
+		below.stdin.write("\r");
+		await delay(30);
+		expect(below.result()).toBe(0);
+		below.unmount();
 	});
 });
