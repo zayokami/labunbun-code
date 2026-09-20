@@ -9,6 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { appearanceFromColorFgBg, detectAppearance, parseBackgroundLuminance } from "../src/detect-appearance.ts";
 
 const ESC = String.fromCharCode(0x1b);
@@ -75,6 +76,66 @@ function fakeStdin(options: { isTTY?: boolean; setRawMode?: boolean; paused?: bo
 		return emitter;
 	};
 	return emitter;
+}
+
+/**
+ * A TTY stdin with real stream semantics: what is pushed can be read back, and
+ * pausing it holds bytes in the buffer the way a terminal stream does. The fake
+ * above is enough for the probe's own logic; this one is for standing in for the
+ * reader that shares stdin with it — Ink.
+ */
+function fakeStreamStdin(options: { paused?: boolean } = {}): FakeStdin {
+	const base = new PassThrough();
+	const stdin = base as unknown as FakeStdin & { setRawMode: (mode: boolean) => unknown };
+	const resume = base.resume.bind(base);
+	const pause = base.pause.bind(base);
+	stdin.isTTY = true;
+	stdin.isRaw = false;
+	stdin.rawModeCalls = [];
+	stdin.resumeCalls = 0;
+	stdin.pauseCalls = 0;
+	stdin.setRawMode = (mode: boolean) => {
+		stdin.rawModeCalls.push(mode);
+		stdin.isRaw = mode;
+		return stdin;
+	};
+	stdin.resume = () => {
+		stdin.resumeCalls += 1;
+		resume();
+		return stdin;
+	};
+	stdin.pause = () => {
+		stdin.pauseCalls += 1;
+		pause();
+		return stdin;
+	};
+	// A terminal that nothing is being typed into: Ink has finished its last read
+	// and is waiting for the next `readable` before it reads again.
+	if (options.paused ?? true) pause();
+	return stdin;
+}
+
+/** The terminal answering, on the stream rather than on a synthetic event. */
+function pushReply(stdin: FakeStdin, data: string, afterMs: number): void {
+	setTimeout(() => (stdin as unknown as PassThrough).push(Buffer.from(data)), afterMs);
+}
+
+/**
+ * Ink's own reading shape: a `readable` listener that pulls with `read()`. Ink
+ * 7 attaches no `data` listener at all, so a reader stood in for with one would
+ * miss exactly the replies that reach the prompt.
+ */
+function streamReader(stdin: FakeStdin): { seen: string[] } {
+	const seen: string[] = [];
+	const pull = () => {
+		let chunk = stdin.read();
+		while (chunk !== null) {
+			seen.push(chunk.toString());
+			chunk = stdin.read();
+		}
+	};
+	stdin.on("readable", pull);
+	return { seen };
 }
 
 /** Feed a terminal reply on the next tick, once the probe is listening. */
@@ -337,5 +398,71 @@ describe("detectAppearance probing a terminal", () => {
 		};
 		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 500 })).toBe("dark");
 		expect(stdin.listeners("data")).toEqual([other]);
+	});
+});
+
+/**
+ * The probe and the REPL read the same stdin, and the terminal answers the two
+ * queries it was sent in its own order — the tripwire's reply is cheap and often
+ * lands first, the colour behind it. Whatever is still in flight when the probe
+ * stops listening is bytes arriving on a stream Ink reads, which is how `]11;rgb:…`
+ * and `[?61;4;6;7;…c` ended up in the prompt.
+ */
+describe("detectAppearance sharing stdin with the REPL", () => {
+	const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+	test("the colour reply arriving behind the tripwire's is not left for the reader", async () => {
+		const stdin = fakeStreamStdin();
+		const stdout = fakeStdout();
+		const reader = streamReader(stdin);
+
+		pushReply(stdin, `${ESC}[?61;4;6;7;14;21;22;23;24;28;32;42;52c`, 5);
+		pushReply(stdin, `${ESC}]11;rgb:0c0c/0c0c/0c0c${ESC}\\`, 15);
+
+		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 500 })).toBe("dark");
+		// Outlast the second reply: an assertion made the moment the probe returns
+		// would pass on a leak that had not landed yet.
+		await tick(60);
+		expect(reader.seen).toEqual([]);
+	});
+
+	test("the tripwire's reply arriving behind the colour's does not reach the reader", async () => {
+		const stdin = fakeStreamStdin();
+		const stdout = fakeStdout();
+		const reader = streamReader(stdin);
+
+		pushReply(stdin, `${ESC}]11;rgb:ffff/ffff/ffff${ESC}\\`, 5);
+		pushReply(stdin, `${ESC}[?61;c`, 15);
+
+		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 500 })).toBe("light");
+		await tick(60);
+		expect(reader.seen).toEqual([]);
+	});
+
+	// The window is not a fixed wait: it closes as soon as there is nothing left
+	// in flight, which is the whole point of holding the stream at all.
+	test("a terminal that answers both holds the stream only for the answers", async () => {
+		const stdin = fakeStreamStdin();
+		const stdout = fakeStdout();
+		streamReader(stdin);
+
+		pushReply(stdin, `${ESC}]11;rgb:ffff/ffff/ffff${ESC}\\${ESC}[?61;c`, 5);
+		const started = performance.now();
+		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 5000 })).toBe("light");
+		expect(performance.now() - started).toBeLessThan(60);
+	});
+
+	test("the stream is the reader's again once the probe releases it", async () => {
+		const stdin = fakeStreamStdin();
+		const stdout = fakeStdout();
+		const reader = streamReader(stdin);
+
+		pushReply(stdin, `${ESC}]11;rgb:ffff/ffff/ffff${ESC}\\`, 5);
+		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 500 })).toBe("light");
+		expect(stdin.listenerCount("data")).toBe(0);
+
+		pushReply(stdin, "typed", 5);
+		await tick(30);
+		expect(reader.seen).toEqual(["typed"]);
 	});
 });

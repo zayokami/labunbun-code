@@ -37,6 +37,21 @@ function hasDa1Reply(buffer: string): boolean {
 /** How long to wait for a reply before giving up and using the environment. */
 const DEFAULT_TIMEOUT_MS = 150;
 
+/**
+ * How long the stream is held after the answer, waiting for the terminal's other
+ * reply.
+ *
+ * Two queries go out and the terminal answers them in whatever order it reaches
+ * them, milliseconds apart. The reply that is still in flight when the probe
+ * stops listening arrives on a stream the REPL is reading, and a key handler
+ * that receives escape bytes types them into the prompt. The window ends as soon
+ * as both replies are accounted for, so a terminal that answers both (nearly all
+ * of them) holds the stream for no longer than it takes the slower reply to
+ * arrive; this is only paid in full by a terminal that answers one query and not
+ * the other, where there is nothing left to wait for but nothing that says so.
+ */
+const DRAIN_TIMEOUT_MS = 100;
+
 /** Above this relative luminance the background counts as light. */
 const LIGHT_LUMINANCE_THRESHOLD = 0.5;
 
@@ -90,8 +105,10 @@ function canProbe(stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream, env: Nod
  * not a real terminal, ask via OSC 11, fall back to `COLORFGBG`, then default
  * to dark.
  *
- * Must be awaited before the REPL mounts. It puts stdin in raw mode, and Ink
- * installs its own input handling on mount — the two cannot overlap.
+ * Runs before the REPL mounts, and again from inside it when `/theme auto` is
+ * picked. Mid-session the readers already on stdin — Ink's among them — are
+ * stood down while the queries are outstanding and put back when the terminal
+ * is done answering, so the replies are read here and not typed into the prompt.
  */
 export async function detectAppearance(options: DetectAppearanceOptions = {}): Promise<Appearance> {
 	const stdin = options.stdin ?? process.stdin;
@@ -106,15 +123,31 @@ export async function detectAppearance(options: DetectAppearanceOptions = {}): P
 	/**
 	 * Whoever else is reading stdin — Ink, when `/theme auto` runs from inside the
 	 * REPL — is stood down for the duration. The reply is escape bytes, and a key
-	 * handler that receives them types them into the prompt.
+	 * handler that receives them types them into the prompt. Both events are
+	 * taken: Ink 7 reads through a `readable` listener and attaches no `data` one
+	 * at all, so standing down only the `data` readers leaves it reading. Ink
+	 * re-attaches that listener only when it enables raw mode from zero — a
+	 * component with input mounting on an otherwise idle stream — which cannot
+	 * happen here: the prompt that ran the command already holds raw mode.
 	 */
-	const displaced = stdin.listeners("data") as Array<(...args: unknown[]) => void>;
+	const displacedData = stdin.listeners("data") as Array<(...args: unknown[]) => void>;
+	const displacedReadable = stdin.listeners("readable") as Array<(...args: unknown[]) => void>;
+	const restore = (): void => {
+		for (const listener of displacedData) stdin.on("data", listener);
+		for (const listener of displacedReadable) stdin.on("readable", listener);
+	};
 	stdin.removeAllListeners("data");
+	stdin.removeAllListeners("readable");
 
 	return await new Promise<Appearance>((resolve) => {
 		let settled = false;
+		let released = false;
+		let seenBackground = false;
+		let seenDa1 = false;
+		let answer: Appearance | undefined;
 		let buffer = "";
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let drain: ReturnType<typeof setTimeout> | undefined;
 
 		/**
 		 * Single exit path for every outcome. Leaving raw mode on, or leaving the
@@ -122,35 +155,53 @@ export async function detectAppearance(options: DetectAppearanceOptions = {}): P
 		 * immediately afterwards — so timeout, success, and the
 		 * unsupported-terminal path all come through here.
 		 */
-		const finish = (appearance: Appearance): void => {
-			if (settled) return;
-			settled = true;
+		const release = (): void => {
+			if (released) return;
+			released = true;
 			if (timer) clearTimeout(timer);
+			if (drain) clearTimeout(drain);
+			// Restored before our own listener goes: a byte that arrives while the
+			// readers are being put back is still swallowed, not handed to them.
+			restore();
 			stdin.off("data", onData);
-			for (const listener of displaced) stdin.on("data", listener);
 			try {
 				stdin.setRawMode(wasRaw);
 			} catch {
 				// Nothing actionable: the stream may already be closed.
 			}
 			if (wasPaused) stdin.pause();
-			resolve(appearance);
+			resolve(answer ?? fromEnv());
+		};
+
+		const finish = (appearance: Appearance): void => {
+			if (settled) return;
+			settled = true;
+			answer = appearance;
+			if (timer) clearTimeout(timer);
+			drain = setTimeout(release, DRAIN_TIMEOUT_MS);
 		};
 
 		function onData(chunk: Buffer | string): void {
 			buffer += chunk.toString();
 			const luminance = parseBackgroundLuminance(buffer);
-			if (luminance !== undefined) {
-				finish(luminance > LIGHT_LUMINANCE_THRESHOLD ? "light" : "dark");
-				return;
+			// The two replies can share a chunk, so both are looked for in each one.
+			if (luminance !== undefined && !seenBackground) {
+				seenBackground = true;
+				if (!settled) finish(luminance > LIGHT_LUMINANCE_THRESHOLD ? "light" : "dark");
 			}
-			if (hasDa1Reply(buffer)) finish(fromEnv());
+			if (hasDa1Reply(buffer) && !seenDa1) {
+				seenDa1 = true;
+				if (!settled) finish(fromEnv());
+			}
+			// Both queries answered: nothing is in flight any more, so the window
+			// can close without waiting the rest of it out.
+			if (settled && seenBackground && seenDa1) release();
 		}
 
 		try {
 			stdin.setRawMode(true);
 		} catch {
-			for (const listener of displaced) stdin.on("data", listener);
+			restore();
 			resolve(fromEnv());
 			return;
 		}
