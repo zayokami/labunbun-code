@@ -90,7 +90,7 @@ describe("migrate CLI", () => {
 			const { code, err } = await run(["migrate", "--from", "nope"]);
 			expect(code).toBe(2);
 			expect(err).toContain("Unknown migration source: nope");
-			expect(err).toContain("claude-code, codex, zcode, agents, all");
+			expect(err).toContain("claude-code, codex, zcode, agents, deepseek-harness, all");
 		});
 	});
 
@@ -158,7 +158,7 @@ describe("migrate CLI", () => {
 	test("--help lists the new sources and flags", async () => {
 		const { code, out } = await run(["--help"]);
 		expect(code).toBe(0);
-		expect(out).toContain("claude-code | codex | zcode | agents | all");
+		expect(out).toContain("claude-code | codex | zcode | agents | deepseek-harness | all");
 		expect(out).toContain("--only <categories>");
 		expect(out).toContain("--history-scope <s>");
 		expect(out).toContain("--history-limit <n>");

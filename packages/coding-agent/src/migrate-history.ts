@@ -30,6 +30,8 @@ import {
 	userMessage,
 } from "@labunbun/ai";
 import { caseInsensitivePaths } from "@labunbun/tools";
+import { dshRoot } from "./dsh-home.ts";
+import { listDshSessions, readDshLog } from "./dsh-session.ts";
 import type { MigrationSourceId } from "./migrate.ts";
 import { readZcodeConversation, readZcodeSessions, type ZcodePartRow } from "./zcode-db.ts";
 
@@ -310,11 +312,19 @@ function narrowCandidates(listing: HistoryListing, options: { cwd: string; scope
 	const notes: HistoryNote[] = [...listing.notes];
 	const alive: HistoryCandidate[] = [];
 	let missing = 0;
+	// A session with no directory at all is a different fact from one whose
+	// directory has since been deleted, and telling the user the second when the
+	// first is true sends them looking for something they never had. dsh records
+	// it plainly: a session started outside any project lands in its `_no-cwd`
+	// bucket, so this path is ordinary there rather than an edge case.
+	let unattributed = 0;
 	for (const candidate of listing.candidates) {
-		if (!candidate.cwd || !directoryExists(candidate.cwd)) missing += 1;
+		if (!candidate.cwd) unattributed += 1;
+		else if (!directoryExists(candidate.cwd)) missing += 1;
 		else alive.push(candidate);
 	}
 	if (missing > 0) notes.push({ reason: "working directory no longer exists", count: missing });
+	if (unattributed > 0) notes.push({ reason: "no working directory recorded", count: unattributed });
 
 	let matching = alive;
 	if (options.scope === "cwd") {
@@ -892,6 +902,25 @@ function readZcodeSession(sourceId: string, home: string): { entries: HistoryEnt
 }
 
 // ---------------------------------------------------------------------------
+// DeepSeek Harness
+// ---------------------------------------------------------------------------
+
+function listDshHistory(home: string): HistoryListing {
+	const listed = listDshSessions(dshRoot(home));
+	return {
+		candidates: listed.sessions.map((session) => ({
+			source: "deepseek-harness",
+			sourceId: session.sessionId,
+			cwd: session.cwd,
+			title: session.title,
+			startedAt: session.startedAt,
+			path: session.path,
+		})),
+		notes: listed.notes,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch and output
 // ---------------------------------------------------------------------------
 
@@ -1110,7 +1139,9 @@ export function listHistory(
 				? listCodexHistory(home)
 				: source === "zcode"
 					? listZcodeHistory(home)
-					: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
+					: source === "deepseek-harness"
+						? listDshHistory(home)
+						: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
 	return narrowCandidates(listed, options);
 }
 
@@ -1171,7 +1202,17 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 			if (source === "claude-code") converted = readClaudeCodeSession(candidate.path, candidate);
 			else if (source === "codex") converted = readCodexSession(candidate.path, candidate);
 			else if (source === "zcode") converted = readZcodeSession(candidate.sourceId, home);
-			else continue;
+			else if (source === "deepseek-harness") {
+				const read = readDshLog(candidate.path);
+				// A log this build must not reconstruct (an event type it does not know)
+				// is a skip, not a failure of the run: the reader's own reason becomes
+				// the note, and the session it names is reported rather than guessed at.
+				if ("error" in read) {
+					notes.push({ reason: read.error, count: 1 });
+					continue;
+				}
+				converted = { entries: read.entries, notes: read.notes };
+			} else continue;
 		} catch {
 			failed += 1;
 			continue;

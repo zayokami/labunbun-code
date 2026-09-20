@@ -138,14 +138,27 @@ function scriptedDialog(options: { answers?: Array<string[] | null>; picks?: Arr
 	return { bridge, asked, titles };
 }
 
-/** Run the wizard against a fake home, collecting what it pushed to the user. */
+/**
+ * Run the wizard against a fake home, collecting what it pushed to the user.
+ *
+ * Detection reads the environment as well as the home, and `$DSH_HOME` — not the
+ * fake home's `~/.dsh` — decides where the harness root is when it is set, so the
+ * run clears it the way `withHome` fixes `HOME`. A developer whose own shell
+ * exports `$DSH_HOME` must not change which sources these tests are asked about.
+ */
 async function wizard(
 	home: string,
 	dialog: MigrationDialogBridge,
 ): Promise<{ result: string | undefined; reported: string[] }> {
+	const prevDsh = process.env.DSH_HOME;
 	const reported: string[] = [];
-	const result = await runMigrationWizard({ dialog, home, cwd: CWD, report: (text) => reported.push(text) });
-	return { result, reported };
+	try {
+		delete process.env.DSH_HOME;
+		const result = await runMigrationWizard({ dialog, home, cwd: CWD, report: (text) => reported.push(text) });
+		return { result, reported };
+	} finally {
+		if (prevDsh !== undefined) process.env.DSH_HOME = prevDsh;
+	}
 }
 
 describe("migrate wizard: sources", () => {
@@ -181,14 +194,42 @@ describe("migrate wizard: sources", () => {
 
 	test("a source directory with nothing in it is not asked about", async () => {
 		await withHome(twoSources(), async (home) => {
+			// Both extra roots exist empty, so neither adds a question — and the
+			// answers above stay one per *detected* source, in `detectSources`
+			// order: `~/.dsh` is appended after the four original sources, so
+			// filling it in would add its question last, not move the others.
 			mkdirSync(join(home, ".agents"), { recursive: true });
+			mkdirSync(join(home, ".dsh"), { recursive: true });
 			const { bridge, asked } = scriptedDialog({
 				answers: [["Choose…"], ["Yes", "Yes"], ["Yes", "Yes", "No"], ["Apply"]],
 			});
 			const { result } = await wizard(home, bridge);
 			expect(asked.map((question) => question.question)).not.toContain("Import from ~/.agents (shared agent home)?");
+			expect(asked.map((question) => question.question)).not.toContain("Import from DeepSeek Harness?");
 			expect(result).toContain("Restart to pick up the imported configuration.");
 		});
+	});
+
+	test("the harness source is asked about last", async () => {
+		await withHome(
+			{
+				...twoSources(),
+				".dsh/settings.yaml": "agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-pro\n",
+			},
+			async (home) => {
+				const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], ["No", "No", "No"]] });
+				const { result } = await wizard(home, bridge);
+				// A new source is appended: the four original questions keep their
+				// order and answers, and the harness is asked about after them.
+				expect(asked.map((question) => question.question)).toEqual([
+					"Import your existing setup?",
+					"Import from Claude Code?",
+					"Import from Codex?",
+					"Import from DeepSeek Harness?",
+				]);
+				expect(result).toBe("No source selected — nothing to import.");
+			},
+		);
 	});
 
 	test("answering no to a source keeps that source out of the plan", async () => {

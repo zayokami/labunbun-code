@@ -113,22 +113,59 @@ const FULL_TREE: SourceTree = {
 	".codex/AGENTS.md": "Codex memory content.\n",
 };
 
+/**
+ * Detection is the only place `$DSH_HOME` matters — every other tree in this
+ * file lives under `~`, where the variable is not consulted — so it is cleared
+ * here rather than in `withHome`, which the rest of the file shares.
+ */
+function withoutDshHome(body: () => void): void {
+	const prev = process.env.DSH_HOME;
+	try {
+		delete process.env.DSH_HOME;
+		body();
+	} finally {
+		if (prev !== undefined) process.env.DSH_HOME = prev;
+	}
+}
+
+/** A harness home, marked present by the settings document every one has. */
+const DSH_TREE: SourceTree = {
+	".dsh/settings.yaml": "agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-pro\n",
+};
+
 describe("source detection", () => {
 	test("reports only the sources that exist", () => {
-		withHome({ ".claude/settings.json": "{}" }, (home) => {
-			expect(detectSources(home)).toEqual(["claude-code"]);
+		withoutDshHome(() => {
+			withHome({ ".claude/settings.json": "{}" }, (home) => {
+				expect(detectSources(home)).toEqual(["claude-code"]);
+			});
+			withHome(FULL_TREE, (home) => {
+				expect(detectSources(home)).toEqual(["claude-code", "codex"]);
+			});
+			withHome(DSH_TREE, (home) => {
+				expect(detectSources(home)).toEqual(["deepseek-harness"]);
+			});
 		});
-		withHome(FULL_TREE, (home) => {
-			expect(detectSources(home)).toEqual(["claude-code", "codex"]);
+	});
+
+	test("a fifth source is appended, so it never displaces an earlier one", () => {
+		withoutDshHome(() => {
+			withHome({ ".claude/settings.json": "{}", ...DSH_TREE }, (home) => {
+				expect(detectSources(home)).toEqual(["claude-code", "deepseek-harness"]);
+			});
 		});
 	});
 
 	test("a source directory holding nothing is not a source", () => {
-		withHome({ ".claude/settings.json": "{}" }, (home) => {
-			// `~/.agents` is a shared directory other tools create; on its own it
-			// offers nothing to import, so it is not worth a question.
-			mkdirSync(join(home, ".agents"), { recursive: true });
-			expect(detectSources(home)).toEqual(["claude-code"]);
+		withoutDshHome(() => {
+			withHome({ ".claude/settings.json": "{}" }, (home) => {
+				// `~/.agents` and `~/.dsh` are shared directories other tools create;
+				// on their own they offer nothing to import, so they are not worth a
+				// question either.
+				mkdirSync(join(home, ".agents"), { recursive: true });
+				mkdirSync(join(home, ".dsh"), { recursive: true });
+				expect(detectSources(home)).toEqual(["claude-code"]);
+			});
 		});
 	});
 
