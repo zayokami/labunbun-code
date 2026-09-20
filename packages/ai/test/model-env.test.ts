@@ -73,7 +73,7 @@ describe("applyBaseUrlOverrides", () => {
 
 	test("the override is per provider", () => {
 		setEnv("ANTHROPIC_BASE_URL", "https://only-anthropic.example");
-		expect(resolveModel("deepseek/deepseek-chat")?.baseUrl).not.toBe("https://only-anthropic.example");
+		expect(resolveModel("deepseek/deepseek-flash")?.baseUrl).not.toBe("https://only-anthropic.example");
 	});
 
 	test("does not mutate the registry entry it copies from", () => {
@@ -115,7 +115,7 @@ describe("resolveApiKey", () => {
 	});
 
 	test("a model without fallbacks reads only its own variable", () => {
-		const model = resolveModel("deepseek/deepseek-chat");
+		const model = resolveModel("deepseek/deepseek-flash");
 		if (!model) throw new Error("expected the built-in model to resolve");
 		expect(apiKeyEnvNames(model)).toEqual([model.apiKeyEnv]);
 	});

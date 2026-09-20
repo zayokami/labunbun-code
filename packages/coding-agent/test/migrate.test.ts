@@ -154,7 +154,7 @@ describe("model references", () => {
 		["opus", "anthropic/claude-opus-5"],
 		["sonnet", "anthropic/claude-sonnet-5"],
 		["haiku", "anthropic/claude-haiku-4-5"],
-		["fable", "anthropic/claude-fable-5"],
+		["fable", "anthropic/claude-fable-5-1"],
 		["anthropic/claude-opus-5", "anthropic/claude-opus-5"],
 	])("resolves %s", (input, expected) => {
 		expect(resolveModelReference(input)).toBe(expected);

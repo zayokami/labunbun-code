@@ -25,13 +25,14 @@ afterEach(() => {
 /** The catalog as shipped. Named rather than read off `listModels()`, which also
  * carries whatever custom providers other test files registered. */
 const BUILT_IN_REFS = [
+	"anthropic/claude-fable-5-1",
 	"anthropic/claude-fable-5",
 	"anthropic/claude-opus-5",
 	"anthropic/claude-sonnet-5",
 	"anthropic/claude-haiku-4-5",
-	"deepseek/deepseek-chat",
-	"deepseek/deepseek-reasoner",
-	"kimi/kimi-k2-0905-preview",
+	"deepseek/deepseek-flash",
+	"deepseek/deepseek-v4-pro",
+	"kimi/kimi-k2.6",
 	"glm/glm-4.6",
 ];
 
@@ -44,6 +45,15 @@ describe("the built-in catalog", () => {
 	});
 
 	test("Anthropic prices are the published list rates", () => {
+		// Fable 5.1 is the current Fable, and the only model in the catalog whose
+		// cache reads are billed at 0.025x input rather than 0.1x.
+		expect(resolveModel("anthropic/claude-fable-5-1")?.pricing).toEqual({
+			input: 10,
+			output: 50,
+			cacheRead: 0.25,
+			cacheWrite: 12.5,
+		});
+		// Fable 5 is legacy — still served, still on the standard read multiplier.
 		expect(resolveModel("anthropic/claude-fable-5")?.pricing).toEqual({
 			input: 10,
 			output: 50,
@@ -72,22 +82,75 @@ describe("the built-in catalog", () => {
 		});
 	});
 
-	test("a cache read is a tenth of input, on every Anthropic model", () => {
+	test("a cache read is a tenth of input, except on the family that is not", () => {
 		// The multiplier is the rule; if a rate changes the read rate has to move
 		// with it, and a hand-typed table is exactly where that goes wrong.
+		const offTheRule = new Map([["anthropic/claude-fable-5-1", 0.025]]);
 		for (const ref of BUILT_IN_REFS.filter((r) => r.startsWith("anthropic/"))) {
 			const pricing = resolveModel(ref)?.pricing;
-			expect(pricing?.cacheRead).toBeCloseTo((pricing?.input ?? 0) * 0.1, 10);
+			expect(pricing?.cacheRead).toBeCloseTo((pricing?.input ?? 0) * (offTheRule.get(ref) ?? 0.1), 10);
 			expect(pricing?.cacheWrite).toBeCloseTo((pricing?.input ?? 0) * 1.25, 10);
 		}
+		// The exception has to be a real one, or it is a loophole in the loop.
+		expect(offTheRule.get("anthropic/claude-fable-5-1")).not.toBe(0.1);
+	});
+
+	test("windows and output caps are the published ones", () => {
+		// Not decoration: the compaction threshold is derived from the window, so a
+		// 1M model declared as 200k compacts five times too early, and an output cap
+		// below the published one stops an answer the model would have finished.
+		expect(
+			BUILT_IN_REFS.map((ref) => {
+				const model = resolveModel(ref);
+				return [ref, model?.contextWindow, model?.maxOutputTokens];
+			}),
+		).toEqual([
+			["anthropic/claude-fable-5-1", 1_000_000, 128_000],
+			["anthropic/claude-fable-5", 1_000_000, 128_000],
+			["anthropic/claude-opus-5", 1_000_000, 128_000],
+			["anthropic/claude-sonnet-5", 1_000_000, 128_000],
+			["anthropic/claude-haiku-4-5", 200_000, 64_000],
+			["deepseek/deepseek-flash", 1_000_000, 384_000],
+			["deepseek/deepseek-v4-pro", 1_000_000, 384_000],
+			["kimi/kimi-k2.6", 262_144, 8_192],
+			["glm/glm-4.6", 200_000, 128_000],
+		]);
 	});
 
 	test("a provider that does not bill cached input separately says so with a zero", () => {
 		// Not "unknown": these APIs charge a cache write as ordinary input, so the
 		// write channel is genuinely nothing, and the read channel is discounted.
-		const kimi = resolveModel("kimi/kimi-k2-0905-preview");
+		const kimi = resolveModel("kimi/kimi-k2.6");
 		expect(kimi?.pricing?.cacheWrite).toBe(0);
 		expect(kimi?.pricing?.cacheRead).toBeLessThan(kimi?.pricing?.input ?? 0);
+	});
+});
+
+describe("ids that were retired", () => {
+	test("a retired id resolves to the model that answers to it now", () => {
+		// A settings file outlives the model it names. Without this the reference
+		// stops resolving, and the app reports a model that is still being served.
+		expect(resolveModel("deepseek/deepseek-chat")?.id).toBe("deepseek-flash");
+		expect(resolveModel("deepseek-chat")?.provider).toBe("deepseek");
+		expect(resolveModel("kimi/kimi-k2-0905-preview")?.id).toBe("kimi-k2.6");
+	});
+
+	test("both retired DeepSeek ids land on the model that serves both modes", () => {
+		expect(resolveModel("deepseek-reasoner")?.id).toBe("deepseek-flash");
+		// And they carry the price that id is billed at, not the price they cost.
+		expect(resolveModel("deepseek-reasoner")?.pricing?.output).toBe(1.2);
+	});
+
+	test("another provider's model of the same name is left alone", () => {
+		// `gateway/deepseek-chat` is not this table's id to rename; a wrong model
+		// served quietly is worse than one that does not resolve.
+		expect(resolveModel("gateway/deepseek-chat")).toBeUndefined();
+	});
+
+	test("retired ids are not offered as models", () => {
+		// The map is for references already written, not a catalog to choose from.
+		const retired = ["deepseek-chat", "deepseek-reasoner", "kimi-k2-0905-preview"];
+		expect(listModels().filter((m) => retired.includes(m.id))).toEqual([]);
 	});
 });
 
@@ -96,7 +159,7 @@ describe("declared prices", () => {
 		setPricingOverride("anthropic/claude-sonnet-5", { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 1.9 });
 		expect(resolveModel("anthropic/claude-sonnet-5")?.pricing?.input).toBe(1.5);
 		// And the rest of the entry is left alone: a price is not a model redefinition.
-		expect(resolveModel("anthropic/claude-sonnet-5")?.contextWindow).toBe(200_000);
+		expect(resolveModel("anthropic/claude-sonnet-5")?.contextWindow).toBe(1_000_000);
 	});
 
 	test("a bare model id applies to whichever provider serves it", () => {

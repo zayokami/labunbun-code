@@ -18,7 +18,7 @@ const prompt = process.argv[3] ?? "Reply with exactly: smoke ok";
 const model = resolveModel(reference);
 if (!model) {
 	console.error(`Unknown model reference: ${reference}`);
-	console.error(`Known: anthropic/claude-sonnet-5, deepseek/deepseek-chat, ...`);
+	console.error(`Known: anthropic/claude-sonnet-5, deepseek/deepseek-flash, ...`);
 	process.exit(1);
 }
 
