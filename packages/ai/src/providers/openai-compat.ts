@@ -15,7 +15,7 @@
  *   calls and map to our StopReason.
  */
 import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
-import { resolveApiKey } from "../model.ts";
+import { type DiscoveredModel, resolveApiKey } from "../model.ts";
 import type { AssistantMessageEvent, Context, Model, StreamOptions, WireTool } from "../types.ts";
 
 // ---------------------------------------------------------------------------
@@ -319,3 +319,47 @@ async function defaultClient(model: Model, options?: StreamOptions): Promise<Ope
 }
 
 export { parseToolArguments };
+
+// ---------------------------------------------------------------------------
+// Catalog listing
+// ---------------------------------------------------------------------------
+
+/** `GET /models` answers with one page and no cursor — this is the whole shape. */
+export interface OpenAIModelPage {
+	data?: Array<{ id?: string }>;
+}
+
+export interface OpenAIModelsClientLike {
+	models: { list(options?: { signal?: AbortSignal }): Promise<OpenAIModelPage> };
+}
+
+/**
+ * What this key can reach. Ids only: unlike Anthropic's, this endpoint states no
+ * window, no output cap and no price, so the entries it returns can confirm an
+ * id exists and can report one that does not — nothing more.
+ *
+ * Unpaginated by the spec, so whatever comes back is the whole catalog and is
+ * reported as complete.
+ */
+export async function listOpenAIModels(
+	model: Model,
+	options?: { client?: OpenAIModelsClientLike; signal?: AbortSignal },
+): Promise<{ models: DiscoveredModel[]; complete: boolean }> {
+	const client = options?.client ?? (await defaultModelsClient(model));
+	const response = await client.models.list({ signal: options?.signal });
+	const models = (response.data ?? [])
+		.map((entry) => entry.id)
+		.filter((id): id is string => Boolean(id))
+		.map((id) => ({ id }));
+	return { models, complete: true };
+}
+
+async function defaultModelsClient(model: Model): Promise<OpenAIModelsClientLike> {
+	const { default: OpenAI } = await import("openai");
+	// As in the Anthropic adapter: how long to wait arrives as a signal.
+	return new OpenAI({
+		apiKey: resolveApiKey(model) ?? "",
+		baseURL: model.baseUrl || undefined,
+		maxRetries: 0,
+	}) as unknown as OpenAIModelsClientLike;
+}

@@ -139,6 +139,9 @@ describe("repo-controlled settings (project + local tiers)", () => {
 					// makes them report a number that never happened.
 					pricing: { "anthropic/claude-sonnet-5": { input: 0, output: 0 } },
 					trimOldToolResults: true,
+					// Whether this startup phones the vendor is the user's call: a
+					// repository does not get to decide what leaves the machine.
+					modelDiscovery: false,
 					theme: "light",
 				},
 			},
@@ -156,6 +159,8 @@ describe("repo-controlled settings (project + local tiers)", () => {
 				// Lossy-context keys are out of a repo's hands too: what the model keeps
 				// of the user's own conversation is the user's call, not the clone's.
 				expect(settings.trimOldToolResults).toBeUndefined();
+				expect(settings.modelDiscovery).toBeUndefined();
+				expect(perSource.project?.modelDiscovery).toBeUndefined();
 				// The tier's own view is filtered too, which is what stops rule
 				// attribution and the policy lockdowns from reading repo values.
 				expect(perSource.project?.hooks).toBeUndefined();
@@ -174,6 +179,7 @@ describe("repo-controlled settings (project + local tiers)", () => {
 					permissionMode: "acceptEdits",
 					model: "kimi/kimi-k2-0905-preview",
 					trimOldToolResults: true,
+					modelDiscovery: false,
 					env: { LBB_TEST_USER_TIER: "yes" },
 					providers: { openaiCompatible: [EVIL_PROVIDER] },
 					hooks: { SessionStart: [{ hooks: [{ command: "true" }] }] },
@@ -188,6 +194,7 @@ describe("repo-controlled settings (project + local tiers)", () => {
 				expect(settings.providers?.openaiCompatible[0]?.id).toBe("evil");
 				expect(settings.hooks?.SessionStart).toHaveLength(1);
 				expect(settings.trimOldToolResults).toBe(true);
+				expect(settings.modelDiscovery).toBe(false);
 				expect(settings.pricing?.["kimi/kimi-k2-0905-preview"]?.input).toBe(0.6);
 			},
 		);

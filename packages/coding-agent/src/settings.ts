@@ -71,6 +71,14 @@ export const SettingsSchema = z.object({
 	 * `/trim` does the same thing on request.
 	 */
 	trimOldToolResults: z.boolean().optional(),
+	/**
+	 * Ask each provider with a key what it serves, once at startup, and let the
+	 * answer narrow the `/model` picker. On by default: it is one request per
+	 * provider, it never blocks anything, and a failure leaves the catalog's own
+	 * table in place. Set false to keep the picker to the table — an air-gapped
+	 * or metered machine should not have to firewall a startup chat.
+	 */
+	modelDiscovery: z.boolean().optional(),
 	permissions: z
 		.object({
 			allow: z.array(z.string()).default([]),
@@ -178,6 +186,9 @@ const PROJECT_TIER_DENIED_KEYS = [
 	"mcpServers",
 	"pricing",
 	"trimOldToolResults",
+	// Not a lockdown but the same rule: whether this startup asks the network a
+	// question is the user's decision, not the repository's.
+	"modelDiscovery",
 	"allowManagedPermissionRulesOnly",
 	"disableBypassPermissionsMode",
 ] as const;

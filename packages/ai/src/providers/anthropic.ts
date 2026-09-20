@@ -12,7 +12,7 @@
  */
 
 import { MessageBuilder } from "../message-builder.ts";
-import { resolveApiKey } from "../model.ts";
+import { type DiscoveredModel, resolveApiKey } from "../model.ts";
 import { looksLikeContextOverflow } from "../retry.ts";
 import type { AssistantMessageEvent, Context, Model, StreamOptions, ThinkingLevel, WireTool } from "../types.ts";
 
@@ -351,4 +351,86 @@ async function defaultClient(model: Model, options?: StreamOptions): Promise<Ant
 		maxRetries: 0, // our retry wrapper owns retry policy
 		fetch: options?.signal ? (input, init) => fetch(input, { ...init, signal: options.signal }) : undefined,
 	}) as unknown as AnthropicClientLike;
+}
+
+// ---------------------------------------------------------------------------
+// Catalog listing
+// ---------------------------------------------------------------------------
+
+/** Rows per page. The endpoint's own maximum, and it defaults to 20. */
+const MODELS_PAGE_SIZE = 1_000;
+
+/** Pages to follow before giving up on seeing the whole catalog. */
+const MAX_MODEL_PAGES = 10;
+
+/** One page of `GET /v1/models`, structurally. */
+export interface AnthropicModelPage {
+	data?: Array<{
+		id?: string;
+		display_name?: string | null;
+		max_input_tokens?: number | null;
+		max_tokens?: number | null;
+	}>;
+	has_more?: boolean;
+	last_id?: string | null;
+}
+
+export interface AnthropicModelsClientLike {
+	models: { list(params: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<AnthropicModelPage> };
+}
+
+/**
+ * What this key can reach, with the limits the API states for each model.
+ *
+ * Paginated: the endpoint answers 20 rows at a time unless asked for more, and a
+ * list truncated at the page cap would be a list that says the models past it do
+ * not exist. `complete` reports whether we saw all of them — a partial listing is
+ * still worth reading for its limits, but it must never be used to conclude that
+ * something is gone.
+ */
+export async function listAnthropicModels(
+	model: Model,
+	options?: { client?: AnthropicModelsClientLike; signal?: AbortSignal },
+): Promise<{ models: DiscoveredModel[]; complete: boolean }> {
+	const client = options?.client ?? (await defaultModelsClient(model));
+	const models: DiscoveredModel[] = [];
+	let after: string | undefined;
+	let complete = false;
+
+	for (let page = 0; page < MAX_MODEL_PAGES; page++) {
+		const response = await client.models.list(
+			{ limit: MODELS_PAGE_SIZE, ...(after ? { after_id: after } : {}) },
+			{ signal: options?.signal },
+		);
+		for (const entry of response.data ?? []) {
+			if (!entry.id) continue;
+			models.push({
+				id: entry.id,
+				displayName: entry.display_name ?? undefined,
+				contextWindow: entry.max_input_tokens ?? undefined,
+				maxOutputTokens: entry.max_tokens ?? undefined,
+			});
+		}
+		if (!response.has_more) {
+			complete = true;
+			break;
+		}
+		after = response.last_id ?? undefined;
+		// More rows exist but there is no cursor to reach them: what we have is a
+		// fragment, and it stays marked as one.
+		if (!after) break;
+	}
+
+	return { models, complete };
+}
+
+async function defaultModelsClient(model: Model): Promise<AnthropicModelsClientLike> {
+	const { default: Anthropic } = await import("@anthropic-ai/sdk");
+	// No retries and no timeout of its own: how long the caller is willing to
+	// wait is the caller's policy, and it says so with the signal it passes.
+	return new Anthropic({
+		apiKey: resolveApiKey(model) ?? "",
+		baseURL: model.baseUrl || undefined,
+		maxRetries: 0,
+	}) as unknown as AnthropicModelsClientLike;
 }

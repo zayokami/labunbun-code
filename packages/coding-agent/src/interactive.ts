@@ -23,8 +23,10 @@ import {
 import {
 	apiKeyEnvNames,
 	createDefaultStreamFn,
+	formatCatalogNotice,
 	listModels,
 	type Model,
+	refreshModelCatalog,
 	resolveApiKey,
 	resolveModel,
 	withModelFallback,
@@ -145,6 +147,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		);
 		return 1;
 	}
+
+	// ---- catalog refresh ----
+	// Ask each provider with a key what it serves, in the background. Started
+	// here — after the key check, before the long startup awaits — so the answer
+	// is in place by the time the user opens /model, and nothing waits on it: the
+	// catalog's own table is already usable, and a provider that does not answer
+	// leaves it exactly as it was.
+	const catalogAbort = new AbortController();
+	const catalogRefresh =
+		settings.modelDiscovery === false ? undefined : refreshModelCatalog({ signal: catalogAbort.signal });
 
 	// ---- session persistence: resume, continue, or new ----
 	let store: SessionStore | undefined;
@@ -800,8 +812,25 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Silently running in a weaker mode than the one asked for would be the
 	// worst outcome here, so the veto is stated explicitly.
 	if (downgradeReason) pushInfo(handle, `Warning: ${downgradeReason}`);
+	// The catalog refresh started before there was anywhere to put an answer.
+	if (catalogRefresh) {
+		void catalogRefresh
+			.then((refresh) => {
+				const notice = formatCatalogNotice(refresh);
+				if (notice) pushInfo(handle, notice);
+			})
+			.catch((error: unknown) => {
+				// Fire-and-forget, but not silent: the refresh promises not to throw,
+				// so a rejection here is a bug in it, and the only place it can be
+				// seen is the screen.
+				pushInfo(handle, `Model catalog refresh failed: ${error instanceof Error ? error.message : error}`);
+			});
+	}
 
 	await handle.waitUntilExit();
+	// Nothing is waiting for the answer, and an in-flight request would hold the
+	// process open after the user has quit.
+	catalogAbort.abort();
 	unsubTasks();
 	clearInterval(shellPoll);
 

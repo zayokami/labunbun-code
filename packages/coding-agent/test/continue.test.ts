@@ -24,7 +24,12 @@ function fixture() {
 }
 
 /** Run the real startup and AgentSession, isolating module mocks from the suite. */
-async function startup(home: string, cwd: string, options: { continueLast?: boolean; resumeSessionId?: string }) {
+async function startup(
+	home: string,
+	cwd: string,
+	options: { continueLast?: boolean; resumeSessionId?: string },
+	env: Record<string, string> = {},
+) {
 	const script = `
 		import { mock } from "bun:test";
 		import * as ai from "@labunbun/ai";
@@ -33,9 +38,15 @@ async function startup(home: string, cwd: string, options: { continueLast?: bool
 		let mountedMessages = null;
 		let reason = null;
 		const taskCalls = [];
+		const catalogCalls = [];
+		const entries = [];
 		mock.module("@labunbun/ai", () => ({
 			...ai,
 			resolveApiKey: () => "local-test-key",
+			// Startup asks the providers what they serve. The real one would reach
+			// for the network with the key above, which is a thing a test must not do
+			// — so it is counted instead, and the count is what says startup asked.
+			refreshModelCatalog: async () => { catalogCalls.push("asked"); return JSON.parse(process.env.LBB_STUB_REFRESH ?? "null"); },
 			createDefaultStreamFn: () => async function* (_model, context) {
 				requests.push(structuredClone(context.messages));
 				yield { type: "done", message: ai.assistantMessage({
@@ -49,18 +60,21 @@ async function startup(home: string, cwd: string, options: { continueLast?: bool
 				mountedMessages = structuredClone(session.messages);
 				return {
 					setTasks(tasks) { taskCalls.push(tasks); }, setContextInfo() {}, setBackgroundShells() {},
-					store: { set() {} },
+					store: { set(updater) {
+						if (typeof updater !== "function") return;
+						for (const entry of updater({ entries: [] }).entries ?? []) entries.push(entry);
+					} },
 					waitUntilExit: async () => { reason = await session.prompt("new question"); }
 				};
 			}
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
 		const exitCode = await runInteractive(${JSON.stringify({ ...options, cwd, theme: "dark" })});
-		console.log(JSON.stringify({ exitCode, mountedMessages, requests, reason, taskCalls }));
+		console.log(JSON.stringify({ exitCode, mountedMessages, requests, reason, taskCalls, catalogCalls, entries }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
-		env: { ...process.env, HOME: home, USERPROFILE: home },
+		env: { ...process.env, HOME: home, USERPROFILE: home, ...env },
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -78,6 +92,8 @@ async function startup(home: string, cwd: string, options: { continueLast?: bool
 			requests: AgentMessage[][];
 			reason: string | null;
 			taskCalls: Array<Array<{ id: string; subject: string; status: string; activeForm?: string }>>;
+			catalogCalls: string[];
+			entries: Array<{ kind: string; text?: string }>;
 		}),
 		stderr,
 	};
@@ -309,6 +325,59 @@ describe("interactive --continue startup", () => {
 		expect(result.requests).toEqual([]);
 		expect(SessionStore.listSessions(cwd, home)).toHaveLength(1);
 		expect(SessionStore.load(existing.path).messages()).toEqual(existing.messages());
+	}, 30_000);
+});
+
+/**
+ * The one question startup asks the network.
+ *
+ * It is a background nicety — nothing waits for it, and the catalog works
+ * without it — which is exactly why it needs an assertion: a call whose failure
+ * is invisible is also a call whose absence is invisible.
+ */
+describe("the catalog refresh at startup", () => {
+	test("startup asks each provider what it serves, once", async () => {
+		const { home, cwd } = fixture();
+
+		const result = await startup(home, cwd, {});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.catalogCalls).toHaveLength(1);
+	}, 30_000);
+
+	test("modelDiscovery: false keeps startup off the network", async () => {
+		const { home, cwd } = fixture();
+		mkdirSync(join(home, ".labunbun"), { recursive: true });
+		writeFileSync(join(home, ".labunbun", "settings.json"), JSON.stringify({ modelDiscovery: false }));
+
+		const result = await startup(home, cwd, {});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.catalogCalls).toEqual([]);
+	}, 30_000);
+
+	test("what the refresh changed is said out loud, once the transcript can hold it", async () => {
+		const { home, cwd } = fixture();
+
+		const result = await startup(
+			home,
+			cwd,
+			{},
+			{
+				LBB_STUB_REFRESH: JSON.stringify({
+					checked: ["anthropic"],
+					dropped: ["anthropic/claude-fable-5"],
+					added: [],
+				}),
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		// The refresh starts before the REPL exists, and `pushInfo` on no handle is
+		// a silent no-op — so the answer has to be held until there is a screen.
+		expect(result.entries.map((entry) => entry.text)).toContainEqual(
+			"Model catalog refreshed: anthropic/claude-fable-5 not listed by the provider any more — hidden from /model, still usable by name.",
+		);
 	}, 30_000);
 });
 

@@ -253,13 +253,158 @@ export function clearCustomModels(): void {
 }
 
 /**
- * All known models: built-ins first, then custom, each carrying the price it is
- * actually billed at.
+ * A model a provider listed about itself. Only `id` is guaranteed: Anthropic's
+ * models endpoint also reports a display name, a context window and an output
+ * cap, while the OpenAI-compatible one reports ids and nothing else.
+ */
+export interface DiscoveredModel {
+	id: string;
+	displayName?: string;
+	contextWindow?: number;
+	maxOutputTokens?: number;
+}
+
+/**
+ * What the providers said they serve, filled in once at startup by
+ * `refreshModelCatalog`. Empty until then, and empty forever on a machine that
+ * is offline or has no key — in which case the table above is the whole truth,
+ * exactly as it was before any of this existed.
+ *
+ * `providerCatalogue` holds only listings that came back complete and non-empty.
+ * The empty set means something here — it is what hides a model — so a provider
+ * we could not reach must not be recorded as a provider that serves nothing.
+ */
+const providerCatalogue = new Map<string, Set<string>>();
+
+/** Limits a provider stated for an id, keyed "provider/id". Beats the table. */
+const liveLimits = new Map<string, { contextWindow: number; maxOutputTokens: number }>();
+
+/** Models discovery added because a vendor serves one the table has never heard of. */
+const discoveredModels = new Map<string, Model>();
+
+/**
+ * Build a model from what the provider said, borrowing the transport fields —
+ * api, base URL, key variable — from a model of the same provider we already
+ * know.
+ *
+ * Only reachable when the provider stated both limits, which is the whole rule:
+ * a window we would have to guess is a compaction threshold we would be guessing
+ * at, and a wrong threshold is worse than a missing row. In practice that means
+ * Anthropic's unknowns are added and the OpenAI-compatible ones are not, but the
+ * rule is about the data, not about which vendors are trusted.
+ *
+ * No price, deliberately. The table is keyed by id and this id is not in it, so
+ * the honest answer is "not priced" — which the cost report already knows how to
+ * print — rather than $0, which reads as free.
+ */
+function synthesizeModel(provider: string, discovered: DiscoveredModel): Model | undefined {
+	const { contextWindow, maxOutputTokens } = discovered;
+	if (contextWindow === undefined || maxOutputTokens === undefined) return undefined;
+	const template = [...BUILT_IN_MODELS, ...customModels.values()].find((model) => model.provider === provider);
+	if (!template) return undefined;
+	return {
+		...template,
+		id: discovered.id,
+		name: discovered.displayName ?? discovered.id,
+		contextWindow,
+		maxOutputTokens,
+		pricing: undefined,
+	};
+}
+
+/**
+ * Record what one provider reported it serves.
+ *
+ * `complete` says whether the listing is the provider's whole catalog. A listing
+ * cut short by the page cap still carries usable limits — each row describes
+ * itself — but it may be missing ids, so it must not hide anything.
+ *
+ * Returns the ids the visible catalog gained and lost, so the caller can say so.
+ */
+export function setProviderCatalogue(
+	provider: string,
+	models: DiscoveredModel[],
+	options?: { complete?: boolean },
+): { added: string[]; dropped: string[] } {
+	const prefix = `${provider}/`;
+	const known = new Set(
+		[...BUILT_IN_MODELS, ...customModels.values()]
+			.filter((model) => model.provider === provider)
+			.map((model) => model.id),
+	);
+	const before = new Set(
+		[...discoveredModels.keys()].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length)),
+	);
+
+	// Replace rather than merge: this is what the provider serves now.
+	for (const key of [...liveLimits.keys()]) {
+		if (key.startsWith(prefix)) liveLimits.delete(key);
+	}
+	for (const key of [...discoveredModels.keys()]) {
+		if (key.startsWith(prefix)) discoveredModels.delete(key);
+	}
+
+	const ids = new Set<string>();
+	const added: string[] = [];
+	for (const model of models) {
+		ids.add(model.id);
+		if (model.contextWindow !== undefined && model.maxOutputTokens !== undefined) {
+			liveLimits.set(prefix + model.id, {
+				contextWindow: model.contextWindow,
+				maxOutputTokens: model.maxOutputTokens,
+			});
+		}
+		if (known.has(model.id) || before.has(model.id)) continue;
+		const synthesized = synthesizeModel(provider, model);
+		if (!synthesized) continue;
+		discoveredModels.set(prefix + model.id, synthesized);
+		added.push(model.id);
+	}
+
+	// Only a complete, non-empty listing may hide anything.
+	const hiding = options?.complete === true && ids.size > 0;
+	if (hiding) providerCatalogue.set(provider, ids);
+	else providerCatalogue.delete(provider);
+	const dropped = hiding ? [...known, ...before].filter((id) => !ids.has(id)) : [];
+	return { added, dropped };
+}
+
+/** Undo discovery, for tests that need to start from the table alone. */
+export function clearDiscovery(): void {
+	providerCatalogue.clear();
+	liveLimits.clear();
+	discoveredModels.clear();
+}
+
+function withLiveLimits(model: Model): Model {
+	const limits = liveLimits.get(`${model.provider}/${model.id}`);
+	return limits ? { ...model, ...limits } : model;
+}
+
+/**
+ * Everything this process knows about, including models a provider has since
+ * stopped listing.
+ *
+ * Resolution reads this, not `listModels`. A model a vendor retired this morning
+ * is still the model yesterday's session recorded, and that transcript has to
+ * resolve and cost with the row it was written against. Discovery narrows what
+ * can be *chosen*; it never narrows what can be *named*.
+ */
+export function allModels(): Model[] {
+	const models = [...BUILT_IN_MODELS, ...customModels.values(), ...discoveredModels.values()];
+	if (liveLimits.size === 0 && pricingOverrides.size === 0) return models;
+	return models.map(withLiveLimits).map(withPricingOverride);
+}
+
+/**
+ * The models a user may choose: everything known, minus what a provider's own
+ * listing has disowned. An enumeration — the `/model` picker — rather than a
+ * lookup; `allModels` is what resolution is built on.
  */
 export function listModels(): Model[] {
-	const models = [...BUILT_IN_MODELS, ...customModels.values()];
-	if (pricingOverrides.size === 0) return models;
-	return models.map(withPricingOverride);
+	const models = allModels();
+	if (providerCatalogue.size === 0) return models;
+	return models.filter((model) => providerCatalogue.get(model.provider)?.has(model.id) ?? true);
 }
 
 /**
@@ -319,10 +464,10 @@ function lookupModel(reference: string): Model | undefined {
 	if (slash > 0) {
 		const provider = reference.slice(0, slash);
 		const id = reference.slice(slash + 1);
-		const match = listModels().find((m) => m.provider === provider && m.id === id);
+		const match = allModels().find((m) => m.provider === provider && m.id === id);
 		return match ? applyBaseUrlOverrides(match) : undefined;
 	}
-	const matches = listModels().filter((m) => m.id === reference);
+	const matches = allModels().filter((m) => m.id === reference);
 	return matches.length > 0 ? applyBaseUrlOverrides(matches[0]) : undefined;
 }
 

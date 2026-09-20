@@ -1,5 +1,12 @@
 export const AI_PACKAGE_VERSION = "0.1.0";
 
+export {
+	type CatalogProbe,
+	type CatalogRefresh,
+	type DiscoveredListing,
+	formatCatalogNotice,
+	refreshModelCatalog,
+} from "./discovery.ts";
 export { withModelFallback } from "./fallback.ts";
 // Streaming internals
 export { MessageBuilder, parseToolArguments } from "./message-builder.ts";
@@ -8,13 +15,16 @@ export {
 	applyBaseUrlOverrides,
 	baseUrlEnvVar,
 	clearCustomModels,
+	clearDiscovery,
 	clearPricingOverrides,
+	type DiscoveredModel,
 	listModels,
 	type OpenAICompatibleProviderSpec,
 	registerOpenAICompatibleProvider,
 	resolveApiKey,
 	resolveModel,
 	setPricingOverride,
+	setProviderCatalogue,
 } from "./model.ts";
 export { type CostBreakdown, computeCost, formatCost } from "./pricing.ts";
 
