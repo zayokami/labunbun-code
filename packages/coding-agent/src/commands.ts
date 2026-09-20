@@ -8,6 +8,7 @@
  *   directly through the TUI for now)
  */
 import type { AgentSession, CompactionManager } from "@labunbun/agent";
+import { estimateContextUsage } from "@labunbun/agent";
 import { runMigration } from "./migrate.ts";
 import { type MigrationDialogBridge, runMigrationWizard } from "./migrate-wizard.ts";
 
@@ -33,6 +34,13 @@ export interface LocalCommandContext {
 	 * for it and falls back to its non-interactive form without it.
 	 */
 	dialog?: MigrationDialogBridge;
+	/**
+	 * Republish the context indicator. A command that changes how much of the
+	 * window is in use calls this — the indicator otherwise only hears about
+	 * turn boundaries, and `/compact` would leave it showing the number the user
+	 * ran the command to change.
+	 */
+	refreshContext?(): void;
 }
 
 export interface LocalCommand extends CommandBase {
@@ -77,14 +85,19 @@ export function builtInCommands(): Command[] {
 			name: "compact",
 			description: "Summarize the conversation to free context; optional focus instructions",
 			type: "local",
-			call: async (ctx, _args) => {
+			call: async (ctx, args) => {
 				if (!ctx.compaction) return "Compaction is not available in this session.";
 				ctx.pushInfo("Compacting conversation…");
-				await ctx.compaction.compact({
-					systemPrompt: "",
-					messages: ctx.session.messages,
-				});
-				return "Conversation compacted.";
+				const context = ctx.session.currentContext();
+				const before = estimateContextUsage(context);
+				const compacted = await ctx.compaction.compact(context, { trigger: "manual", focus: args });
+				// Adopting the result is the whole command. Reporting success without
+				// it costs a full summarization call and changes nothing.
+				ctx.session.applyCompaction(compacted);
+				ctx.refreshContext?.();
+				const after = estimateContextUsage(compacted);
+				const freed = Math.max(0, before - after);
+				return `Conversation compacted: ~${freed.toLocaleString()} tokens freed (${before.toLocaleString()} → ${after.toLocaleString()}).`;
 			},
 		},
 		{
@@ -132,6 +145,30 @@ export function builtInCommands(): Command[] {
 				`2. Otherwise create it with: build/lint/test commands (especially for running a single test),\n` +
 				`   architecture overview, and any conventions an agent must follow.\n` +
 				`Be concise — future agent sessions will read this file first.`,
+		},
+		{
+			name: "trim",
+			description: "Replace old tool results with short previews to free context without summarizing",
+			type: "local",
+			call: (ctx) => {
+				if (!ctx.compaction) return "Trimming is not available in this session.";
+				const context = ctx.session.currentContext();
+				const before = estimateContextUsage(context);
+				const trimmed = ctx.compaction.trim(context);
+				// Nothing to do is not a failure, and it has one cause worth naming:
+				// the older results were already small, so cutting them would free
+				// nothing and lose what little they still said.
+				if (!trimmed) return "Nothing to trim: no old tool results are large enough to be worth previewing.";
+				ctx.session.applyCompaction(trimmed.context);
+				ctx.refreshContext?.();
+				const after = estimateContextUsage(trimmed.context);
+				const freed = Math.max(0, before - after);
+				return (
+					`Replaced ${trimmed.cleared.results} old tool result${trimmed.cleared.results === 1 ? "" : "s"} with previews: ` +
+					`~${freed.toLocaleString()} tokens freed (${before.toLocaleString()} → ${after.toLocaleString()}). ` +
+					"Files on disk are unchanged; /compact summarizes instead when this is not enough."
+				);
+			},
 		},
 	];
 }

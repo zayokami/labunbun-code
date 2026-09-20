@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clearCustomModels, clearPricingOverrides, resolveModel } from "@labunbun/ai";
 import { CostTracker, formatCostState } from "../src/cost-tracker.ts";
 import { appendHistory, loadHistory } from "../src/history.ts";
-import { mergeSettings, type RawSettingsInput, SettingsSchema } from "../src/settings.ts";
+import { applyCatalogSettings, mergeSettings, type RawSettingsInput, SettingsSchema } from "../src/settings.ts";
 
 describe("mergeSettings", () => {
 	test("objects merge recursively, arrays and scalars replace", () => {
@@ -52,6 +53,87 @@ describe("SettingsSchema", () => {
 			}).success,
 		).toBe(false);
 	});
+
+	test("prices can be declared for a whole catalog, per provider or as an override", () => {
+		const parsed = SettingsSchema.parse({
+			providers: {
+				openaiCompatible: [
+					{
+						id: "custom",
+						baseUrl: "https://api.example.com/v1",
+						apiKeyEnv: "CUSTOM_KEY",
+						models: [
+							{
+								id: "m1",
+								contextWindow: 128000,
+								maxOutputTokens: 8192,
+								pricing: { input: 1, output: 2, cacheRead: 0.1 },
+							},
+						],
+					},
+				],
+			},
+			// A price that overrides the catalog, which is the only way to be right
+			// about a gateway or a negotiated rate.
+			pricing: { "anthropic/claude-sonnet-5": { input: 1.5, output: 7.5 } },
+		});
+		// A channel nobody declared is "not billed separately", which is 0 rather
+		// than undefined: the token math would otherwise produce NaN.
+		expect(parsed.providers?.openaiCompatible[0].models[0].pricing).toEqual({
+			input: 1,
+			output: 2,
+			cacheRead: 0.1,
+			cacheWrite: 0,
+		});
+		expect(parsed.pricing?.["anthropic/claude-sonnet-5"]).toEqual({
+			input: 1.5,
+			output: 7.5,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+	});
+
+	test("a negative price is refused", () => {
+		expect(SettingsSchema.safeParse({ pricing: { "a/b": { input: -1, output: 0 } } }).success).toBe(false);
+	});
+});
+
+describe("applyCatalogSettings", () => {
+	test("makes the declared providers and prices real for the model catalog", () => {
+		// Both entry points call this before resolving a model, so a provider that
+		// only exists in settings resolves and a declared price is the one used.
+		// Without it the price is parsed, merged, stored — and then ignored.
+		const settings = SettingsSchema.parse({
+			providers: {
+				openaiCompatible: [
+					{
+						id: "declared",
+						baseUrl: "https://api.example.com/v1",
+						apiKeyEnv: "DECLARED_KEY",
+						models: [
+							{
+								id: "m1",
+								contextWindow: 128000,
+								maxOutputTokens: 8192,
+								pricing: { input: 1, output: 2 },
+							},
+						],
+					},
+				],
+			},
+			pricing: { "declared/m1": { input: 0.5, output: 1 } },
+		});
+		applyCatalogSettings(settings);
+		try {
+			// The override addresses the model the same call just registered, which is
+			// the ordering the two loops depend on.
+			expect(resolveModel("declared/m1")?.pricing?.input).toBe(0.5);
+			expect(resolveModel("declared/m1")?.contextWindow).toBe(128_000);
+		} finally {
+			clearCustomModels();
+			clearPricingOverrides();
+		}
+	});
 });
 
 describe("CostTracker", () => {
@@ -62,7 +144,7 @@ describe("CostTracker", () => {
 		const state = tracker.state;
 		expect(state.modelsUsage["faux/faux-1"].inputTokens).toBe(1_000_000);
 		expect(state.totalCostUSD).toBeGreaterThanOrEqual(0); // no pricing → 0
-		expect(formatCostState(state)).toContain("faux/faux-1");
+		expect(formatCostState(state, "This project, all sessions")).toContain("faux/faux-1");
 	});
 
 	test("persists and reloads per-project state", () => {

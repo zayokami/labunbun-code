@@ -8,11 +8,13 @@ export {
 	applyBaseUrlOverrides,
 	baseUrlEnvVar,
 	clearCustomModels,
+	clearPricingOverrides,
 	listModels,
 	type OpenAICompatibleProviderSpec,
 	registerOpenAICompatibleProvider,
 	resolveApiKey,
 	resolveModel,
+	setPricingOverride,
 } from "./model.ts";
 export { type CostBreakdown, computeCost, formatCost } from "./pricing.ts";
 
@@ -36,7 +38,14 @@ export {
 } from "./providers/openai-compat.ts";
 
 // Retry / pricing / registry
-export { type RetryOptions, statusCodeOf, withRetry } from "./retry.ts";
+export {
+	isContextOverflowError,
+	looksLikeContextOverflow,
+	type RetryOptions,
+	statusCodeOf,
+	withRetry,
+} from "./retry.ts";
+export { repairToolPairing } from "./transcript.ts";
 // Types
 export type {
 	AgentMessage,

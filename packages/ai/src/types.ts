@@ -53,12 +53,25 @@ export type ToolResultContent = TextContent | ImageContent;
 export type StopReason = "pending" | "stop" | "toolUse" | "length" | "error" | "aborted";
 
 export interface Usage {
+	/**
+	 * Input tokens billed at the full rate — the *uncached* part of the prompt.
+	 * The wire formats disagree: Anthropic's `input_tokens` already excludes the
+	 * cached prefix, OpenAI's `prompt_tokens` includes it. Adapters normalize to
+	 * the Anthropic reading, so summing all four channels is the true token
+	 * count and never counts a cached token twice.
+	 */
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
 	/** Reasoning tokens; a subset of `output`, reported separately when known. */
 	reasoning?: number;
+	/**
+	 * Every token in the request prefix, cached or not — the number to compare
+	 * against a context window, and the only one that means the same thing on
+	 * both APIs. Absent on messages recorded before adapters reported it.
+	 */
+	promptTotal?: number;
 }
 
 export interface UserMessage {
@@ -75,6 +88,15 @@ export interface AssistantMessage {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/**
+	 * Why the request failed, when the reason is one the caller can act on.
+	 *
+	 * "context_overflow" means the provider refused the request for being bigger
+	 * than the model's window. Nothing about the request changes by sending it
+	 * again or sending it to the next model in a fallback chain, so callers stop
+	 * rather than replay: only sending less can help.
+	 */
+	errorKind?: "context_overflow";
 	timestamp: number;
 }
 

@@ -99,6 +99,32 @@ describe("mapOpenAIStream", () => {
 		expect(done.message.usage).toMatchObject({ input: 7, output: 2 });
 	});
 
+	test("cached prompt tokens are not also counted as input", async () => {
+		// `prompt_tokens` covers the whole prefix including the cached part, while
+		// Anthropic's `input_tokens` does not. Normalizing to the Anthropic reading
+		// keeps row-by-row pricing honest — otherwise the cached tokens are billed
+		// twice — and keeps the four usage channels non-overlapping.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { content: "x" } }] },
+					{
+						choices: [{ delta: {}, finish_reason: "stop" }],
+						usage: {
+							prompt_tokens: 10_000,
+							completion_tokens: 5,
+							prompt_tokens_details: { cached_tokens: 9_600 },
+						},
+					},
+				]),
+				"deepseek",
+				"deepseek-chat",
+			),
+		);
+		const done = events.at(-1) as any;
+		expect(done.message.usage).toMatchObject({ input: 400, cacheRead: 9_600, promptTotal: 10_000 });
+	});
+
 	test("fragmented tool_calls keyed by index reassemble; id only on first fragment", async () => {
 		const events = await collect(
 			mapOpenAIStream(
@@ -207,7 +233,16 @@ describe("mapOpenAIStream", () => {
 			),
 		);
 		const done = events.at(-1) as any;
-		expect(done.message.usage).toEqual({ input: 10, output: 20, cacheRead: 4, cacheWrite: 0, reasoning: 15 });
+		// 10 prompt tokens, 4 of them cached: `input` is the other 6, and
+		// `promptTotal` is the whole prefix the model actually read.
+		expect(done.message.usage).toEqual({
+			input: 6,
+			output: 20,
+			cacheRead: 4,
+			cacheWrite: 0,
+			reasoning: 15,
+			promptTotal: 10,
+		});
 	});
 
 	test("empty stream yields terminal error event", async () => {

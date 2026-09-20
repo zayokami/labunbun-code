@@ -238,6 +238,29 @@ describe("StatusCard", () => {
 		// An unmeasured threshold must not divide by zero.
 		expect(contextBar(10, 0).filled).toBe(0);
 	});
+
+	test("a card with no session rows is a card about one other thing", () => {
+		// `/context` draws its breakdown on the same card. It has no model or
+		// directory to report, and a blank row for each would be two rows of noise
+		// on a card whose whole point is the numbers.
+		const frame = flatFrame(
+			render(
+				withTheme(
+					<StatusCard
+						data={{
+							title: "Context",
+							context: { usedTokens: 20_000, threshold: 100_000 },
+							details: [["System prompt", "5.0k"]],
+						}}
+					/>,
+				),
+			).lastFrame() ?? "",
+		);
+		expect(frame).toContain("Context");
+		expect(frame).toContain("System prompt");
+		expect(frame).not.toContain("Status");
+		expect(frame).not.toContain("Model");
+	});
 });
 
 describe("ShortcutOverlay", () => {

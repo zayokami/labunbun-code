@@ -68,6 +68,9 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 			"- Use run_in_background for servers/watchers; check with BashOutput.",
 		isReadOnly: () => false,
 		isConcurrencySafe: () => false,
+		// Command output happens once. A failing build ends its report with the
+		// error, and a head-only cut would throw exactly that part away.
+		overflow: "spill",
 		call: async (input, ctx) => {
 			if (input.run_in_background) {
 				if (!background) {

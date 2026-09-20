@@ -20,9 +20,20 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { type PermissionMode, type PermissionRule, parseRuleList, type RuleSource } from "@labunbun/agent";
+import { registerOpenAICompatibleProvider, setPricingOverride } from "@labunbun/ai";
 import { z } from "zod";
 
 export const PermissionModeSchema = z.enum(["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"]);
+
+/** USD per million tokens, the same shape the built-in catalog uses. */
+export const ModelPricingSchema = z.object({
+	input: z.number().nonnegative(),
+	output: z.number().nonnegative(),
+	/** OpenAI-style APIs charge cached input at a discount; 0 means "not billed here". */
+	cacheRead: z.number().nonnegative().default(0),
+	/** 0 is the norm outside Anthropic: populating a cache is ordinary input. */
+	cacheWrite: z.number().nonnegative().default(0),
+});
 
 export const OpenAICompatibleProviderSchema = z.object({
 	id: z.string(),
@@ -35,6 +46,7 @@ export const OpenAICompatibleProviderSchema = z.object({
 			contextWindow: z.number().int().positive(),
 			maxOutputTokens: z.number().int().positive(),
 			reasoning: z.boolean().optional(),
+			pricing: ModelPricingSchema.optional(),
 		}),
 	),
 });
@@ -52,6 +64,13 @@ export const SettingsSchema = z.object({
 	 */
 	theme: z.string().optional(),
 	vimMode: z.boolean().optional(),
+	/**
+	 * Let the cheap rung run by itself when the context crosses the compaction
+	 * threshold: the older tool results become previews, and a summarization call
+	 * happens only if that did not free enough. Off by default — it is lossy, and
+	 * `/trim` does the same thing on request.
+	 */
+	trimOldToolResults: z.boolean().optional(),
 	permissions: z
 		.object({
 			allow: z.array(z.string()).default([]),
@@ -68,12 +87,40 @@ export const SettingsSchema = z.object({
 	allowManagedPermissionRulesOnly: z.boolean().optional(),
 	disableBypassPermissionsMode: z.boolean().optional(),
 	providers: z.object({ openaiCompatible: z.array(OpenAICompatibleProviderSchema).default([]) }).optional(),
+	/**
+	 * What a model is billed at, in USD per million tokens, keyed by
+	 * "provider/model" — or by model id alone, which applies to every provider
+	 * serving it. Overrides the catalog's dated snapshot of list prices; that is
+	 * the point, because a gateway, a negotiated rate or a repriced model makes
+	 * the published number wrong for the bill it is meant to describe.
+	 */
+	pricing: z.record(z.string(), ModelPricingSchema).optional(),
 	hooks: z.record(z.string(), z.array(z.unknown())).optional(),
 	mcpServers: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type RawSettingsInput = z.input<typeof SettingsSchema>;
+
+/**
+ * Make the providers and prices a settings file declares real: register the
+ * OpenAI-compatible providers so their models resolve, then apply the declared
+ * prices over the catalog's own.
+ *
+ * Called once at startup by both modes, before anything resolves a model — a
+ * reference to a model that only exists in settings is unknown until this runs,
+ * and a price is only used by whoever resolves the model afterwards. Shared
+ * rather than written twice so the two entry points cannot drift into costing
+ * the same run differently.
+ */
+export function applyCatalogSettings(settings: Settings): void {
+	for (const provider of settings.providers?.openaiCompatible ?? []) {
+		registerOpenAICompatibleProvider(provider);
+	}
+	for (const [reference, price] of Object.entries(settings.pricing ?? {})) {
+		setPricingOverride(reference, price);
+	}
+}
 
 export type SettingsSourceName = "user" | "project" | "local" | "policy" | "flag";
 
@@ -104,14 +151,18 @@ export interface LoadedSettings {
  * inside the working tree — repo contents the user did not necessarily write.
  * Left unfiltered, a cloned repo can hand itself `bypassPermissions`, register a
  * provider pointed at a host it controls, redirect credentials through `env`
- * (`ANTHROPIC_BASE_URL` and friends), install a hook that runs on every turn, or
- * connect an MCP server without passing the approval gate. These keys are
- * honored only from tiers the user controls: user, policy, flag.
+ * (`ANTHROPIC_BASE_URL` and friends), install a hook that runs on every turn,
+ * connect an MCP server without passing the approval gate, or declare that the
+ * model it is about to run costs nothing. These keys are honored only from tiers
+ * the user controls: user, policy, flag.
  *
  * Deliberately not denied:
  *   - `permissions.deny` — tightening is always safe, and a repo's own
  *     guardrails stay effective against the agent it just configured.
  *   - `theme` / `vimMode` — cosmetic, no reach beyond the user's own terminal.
+ *   - `trimOldToolResults` is denied for the opposite reason: it decides how much
+ *     of the user's own conversation the model keeps, and a cloned repository
+ *     should not get to make the agent forget on the user's behalf.
  *   - `allowManagedPermissionRulesOnly` / `disableBypassPermissionsMode` — these
  *     are read only from the policy tier already; they are listed here so the
  *     merged settings can never carry a repo-supplied value even if a future
@@ -125,6 +176,8 @@ const PROJECT_TIER_DENIED_KEYS = [
 	"providers",
 	"hooks",
 	"mcpServers",
+	"pricing",
+	"trimOldToolResults",
 	"allowManagedPermissionRulesOnly",
 	"disableBypassPermissionsMode",
 ] as const;

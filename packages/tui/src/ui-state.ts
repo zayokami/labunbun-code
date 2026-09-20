@@ -70,10 +70,16 @@ export interface UiBackgroundShell {
  * the numbers mean.
  */
 export interface StatusCardData {
-	model: string;
-	directory: string;
-	permissions: string;
-	session: string;
+	/**
+	 * Card heading. `/status` is one of two cards now — `/context` draws its
+	 * breakdown the same way — so the subject belongs to the caller.
+	 */
+	title?: string;
+	/** The rows about *where* this session is. Absent on a card that is not about it. */
+	model?: string;
+	directory?: string;
+	permissions?: string;
+	session?: string;
 	/** Context usage, drawn as a bar; absent until the first turn is measured. */
 	context?: { usedTokens: number; threshold: number };
 	/** Anything else worth a row, in display order: cost, theme, MCP, … */

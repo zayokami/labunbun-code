@@ -54,6 +54,15 @@ export function withModelFallback(base: StreamFn, resolveChain: (model: Model) =
 				continue;
 			}
 
+			// The context itself is too large for this model, so it is too large for
+			// every model after it that has the same window — and for the ones that
+			// would take it, the caller asked the wrong question. Walking the chain
+			// turns one explainable refusal into a generic error per model.
+			if (terminal.type === "error" && terminal.message.errorKind === "context_overflow") {
+				yield terminal;
+				return;
+			}
+
 			if (terminal.type === "done" || sawContent || isLast) {
 				yield terminal;
 				return;

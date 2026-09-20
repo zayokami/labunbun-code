@@ -43,6 +43,51 @@ function isRetryableStatus(status: number): boolean {
 }
 
 /**
+ * Provider wordings for "this request is bigger than the model's window".
+ *
+ * They all arrive as 400, which is indistinguishable from a malformed request
+ * unless the message is read — and the difference matters: one is worth fixing
+ * by sending less, the other is not worth sending at all.
+ */
+const OVERFLOW_PATTERNS = [
+	/maximum context length/i, // OpenAI, and the OpenAI-compatible clones
+	/prompt is too long/i, // Anthropic
+	/context length exceeded/i,
+	/exceeds? the maximum number of tokens/i, // Google
+	/input (?:is )?too long/i,
+	/too many (?:input )?tokens/i,
+];
+
+/** Statuses a provider uses to refuse a body it considers too large. */
+function isOverflowStatus(status: number): boolean {
+	return status === 400 || status === 413 || status === 422;
+}
+
+/** A message that reads like a context-window refusal (in-stream errors too). */
+export function looksLikeContextOverflow(message: string): boolean {
+	return OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/**
+ * True when the provider refused the request for being too large to send.
+ *
+ * Nothing is gained by retrying it — the request does not shrink on its own —
+ * and nothing is gained by replaying it against the next model in a fallback
+ * chain, which is how an oversized context turns into a generic error on every
+ * later turn. Only the caller can make it smaller.
+ */
+export function isContextOverflowError(error: unknown): boolean {
+	const status = statusCodeOf(error);
+	if (status !== null && !isOverflowStatus(status)) return false;
+	// A gateway's "Request Entity Too Large" needs no wording check: the remedy is
+	// the same, send less.
+	if (status === 413) return true;
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+	if (message && looksLikeContextOverflow(message)) return true;
+	return false;
+}
+
+/**
  * True for an abort surfaced as an exception (fetch and the various SDKs name
  * it AbortError or APIUserAbortError). An abort is the user's own cancel, not
  * a provider fault: retrying it would override the interrupt, and the
@@ -117,15 +162,24 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 
 				const status = statusCodeOf(error);
 				const overloaded = status === 529;
+				const overflow = isContextOverflowError(error);
 				const retryable = isNetworkError(error) || (status !== null && isRetryableStatus(status)) || status === null; // unknown errors before first byte: give one more shot below
 
 				const attemptCap = overloaded ? Math.min(overloadedMaxAttempts, maxAttempts) : maxAttempts;
 				const attemptsUsed = overloaded ? overloadedAttempts + 1 : attempt;
 
-				if (!retryable || attemptsUsed >= attemptCap) {
+				// Overflow is terminal on the first try, including the status-less case
+				// that would otherwise earn a retry: the request is not going to get
+				// smaller by being sent again.
+				if (overflow || !retryable || attemptsUsed >= attemptCap) {
 					const builder = new MessageBuilder(model.provider, model.id);
 					const message = error instanceof Error ? error.message : String(error);
-					yield builder.error(`Request failed after ${attemptsUsed} attempt(s): ${message}`);
+					yield builder.error(
+						overflow
+							? `The request is larger than ${model.id}'s context window: ${message}`
+							: `Request failed after ${attemptsUsed} attempt(s): ${message}`,
+						overflow ? { errorKind: "context_overflow" } : {},
+					);
 					return;
 				}
 

@@ -3,10 +3,25 @@
  * branching and forking are structural rather than bolted on.
  *
  * Every entry links to its parent by id, so branching/forking is structural.
- * The linear conversation view walks header → active leaf. Appends are
- * crash-safe: a torn final line is ignored on load.
+ * The linear conversation view walks header → active leaf.
+ *
+ * Appends are crash-safe in the small: a torn final line is skipped on load.
+ * A line can also be lost from the middle of a file — an append that ran out
+ * of disk writes half an entry and the next append lands after it — so a line
+ * that does not parse costs its own entry and nothing else. What that costs the
+ * *chain* is repaired in {@link SessionStore.linearEntries}.
  */
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+	appendFileSync,
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readSync,
+	statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@labunbun/ai";
@@ -27,11 +42,40 @@ export type SessionEntry =
 			parentId: string;
 			type: "compaction";
 			timestamp: number;
+			/**
+			 * The user message that stands in for everything above it. It lives on
+			 * this entry rather than as a `message` entry of its own so the boundary
+			 * and the record of it are written together — a torn pair would resume
+			 * from a summary whose context was already gone.
+			 */
+			message: AgentMessage;
 			summary: string;
 			preservedFiles: string[];
 			preTokens: number;
+			postTokens: number;
+			/** Which model wrote the summary. */
+			model: string;
+			trigger: "auto" | "manual";
 	  }
 	| { id: string; parentId: string; type: "custom"; timestamp: number; kind: string; data: unknown };
+
+/** What a compaction leaves behind. */
+export interface CompactionRecord {
+	/** The boundary message that replaces everything above the suffix. */
+	boundary: AgentMessage;
+	/** Messages kept verbatim below it, in order. */
+	suffix: AgentMessage[];
+	summary: string;
+	preservedFiles: string[];
+	preTokens: number;
+	postTokens: number;
+	model: string;
+	trigger: "auto" | "manual";
+}
+
+function isMessageEntry(entry: SessionEntry): entry is Extract<SessionEntry, { type: "message" }> {
+	return entry.type === "message";
+}
 
 /** Sanitize a cwd into a filesystem-safe project directory name. */
 export function sanitizeCwd(cwd: string): string {
@@ -60,6 +104,8 @@ export class SessionStore {
 	readonly path: string;
 	readonly entries: SessionEntry[] = [];
 	#leafId: string | null = null;
+	#skippedLines = 0;
+	#truncated = false;
 
 	constructor(path: string) {
 		this.path = path;
@@ -68,6 +114,23 @@ export class SessionStore {
 	get sessionId(): string | null {
 		const header = this.entries.find((e): e is Extract<SessionEntry, { type: "header" }> => e.type === "header");
 		return header?.sessionId ?? null;
+	}
+
+	/**
+	 * Lines this store could not read: they were not an entry, or not JSON.
+	 *
+	 * Not a diagnostic counter — a session that came back shorter than it was
+	 * written is something the person resuming it should be told, and this is
+	 * where the number of missing messages can be counted. Zero for a read that
+	 * stopped at `maxBytes`, which cuts the file rather than losing it.
+	 */
+	get skippedLines(): number {
+		return this.#skippedLines;
+	}
+
+	/** True when the file was longer than the caller let this store read. */
+	get truncated(): boolean {
+		return this.#truncated;
 	}
 
 	static startNew(cwd: string, home?: string): SessionStore {
@@ -87,19 +150,50 @@ export class SessionStore {
 		return store;
 	}
 
-	/** Load an existing session file; torn trailing lines are skipped. */
-	static load(path: string): SessionStore {
+	/**
+	 * Load an existing session file, one line at a time.
+	 *
+	 * A line that will not parse is skipped rather than ending the read: the
+	 * file is append-only, so a damaged line is a damaged *entry*, and stopping
+	 * there would throw away every message written after it. The count is kept
+	 * so the caller can say what is missing.
+	 *
+	 * `maxBytes` reads only the head of the file, for callers that want a label
+	 * rather than a conversation (`listSessions`). The last line of a capped read
+	 * is usually a fragment, which the same skip handles.
+	 */
+	static load(path: string, options: { maxBytes?: number } = {}): SessionStore {
 		const store = new SessionStore(path);
 		if (!existsSync(path)) return store;
-		const text = readFileSync(path, "utf8");
+		let text = options.maxBytes === undefined ? readFileSync(path, "utf8") : readHead(path, options.maxBytes);
+		if (options.maxBytes !== undefined) {
+			// The size, not the read: a file that is exactly the cap was read whole.
+			store.#truncated = statSync(path).size > options.maxBytes;
+			if (store.#truncated) {
+				// A byte prefix ends mid-line, and that fragment is not damage — it is
+				// where the caller's cap fell. Dropping it here keeps `skippedLines`
+				// meaning damage, so a capped read cannot report a loss it did not find.
+				const lastBreak = text.lastIndexOf("\n");
+				text = lastBreak === -1 ? "" : text.slice(0, lastBreak);
+			}
+		}
 		for (const line of text.split("\n")) {
 			const trimmed = line.trim();
 			if (!trimmed) continue;
+			let entry: unknown;
 			try {
-				store.entries.push(JSON.parse(trimmed) as SessionEntry);
+				entry = JSON.parse(trimmed);
 			} catch {
-				break; // torn write at the tail — stop there
+				store.#skippedLines++;
+				continue;
 			}
+			// Parsed JSON is not yet an entry: `{}` parses, and an entry with no id
+			// would join the chain as a node nothing can point at.
+			if (!isEntryShaped(entry)) {
+				store.#skippedLines++;
+				continue;
+			}
+			store.entries.push(entry);
 		}
 		store.#recomputeLeaf();
 		return store;
@@ -154,16 +248,44 @@ export class SessionStore {
 		return entry;
 	}
 
-	/** Linear view: header → active leaf. */
+	/**
+	 * Linear view: header → active leaf.
+	 *
+	 * `parentId` is the link, but it can name an entry that is not there — a
+	 * damaged line takes its entry's id with it, and the child that pointed at
+	 * it is orphaned. The fallback is the entry written just before the orphan:
+	 * entries are appended in the order they happened, so the line above a
+	 * missing one is the message that came before it. Without that, one bad line
+	 * would hide every *older* message from the session that owns them, which is
+	 * the largest part of the conversation.
+	 *
+	 * The visited set is what keeps both paths from looping: a file whose links
+	 * were edited by hand can point forward, or in a circle, and a walk that
+	 * trusted it would never return.
+	 */
 	linearEntries(): SessionEntry[] {
 		if (this.entries.length === 0) return [];
 		const byId = new Map(this.entries.map((e) => [e.id, e]));
+		const position = new Map(this.entries.map((e, index): [string, number] => [e.id, index]));
 		const leaf = (this.#leafId && byId.get(this.#leafId)) || this.entries[this.entries.length - 1];
 		const chain: SessionEntry[] = [];
+		const seen = new Set<string>();
 		let cursor: SessionEntry | undefined = leaf;
-		while (cursor) {
+		while (cursor && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
 			chain.unshift(cursor);
-			cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+			if (!cursor.parentId) break;
+			const parent = byId.get(cursor.parentId);
+			if (parent) {
+				cursor = parent;
+				continue;
+			}
+			// Annotated because the walk closes a loop over this variable: the
+			// narrowed type of `cursor` on the line below is computed from the
+			// assignment that uses `index`, so letting `index` be inferred from the
+			// lookup would ask for both types at once.
+			const index: number = position.get(cursor.id) ?? 0;
+			cursor = index > 0 ? this.entries[index - 1] : undefined;
 		}
 		return chain;
 	}
@@ -171,8 +293,82 @@ export class SessionStore {
 	/** Messages in the linear view (header/compaction/custom filtered). */
 	messages(): AgentMessage[] {
 		return this.linearEntries()
-			.filter((e): e is Extract<SessionEntry, { type: "message" }> => e.type === "message")
+			.filter(isMessageEntry)
 			.map((e) => e.message);
+	}
+
+	/**
+	 * What the model is sent when this session is resumed: the boundary of the
+	 * last compaction, then everything after it.
+	 *
+	 * Not the same as `messages()`. A compaction leaves the transcript it
+	 * replaced in the file — that is the audit trail, and replaying it would
+	 * resurrect the very context the summary was written to replace, at full
+	 * price, and then summarize it again.
+	 */
+	contextMessages(): AgentMessage[] {
+		const linear = this.linearEntries();
+		let start = 0;
+		for (let i = linear.length - 1; i >= 0; i--) {
+			if (linear[i]?.type === "compaction") {
+				start = i;
+				break;
+			}
+		}
+		const out: AgentMessage[] = [];
+		for (let i = start; i < linear.length; i++) {
+			const entry = linear[i];
+			if (!entry) continue;
+			if (entry.type === "message") out.push(entry.message);
+			else if (entry.type === "compaction") out.push(entry.message);
+		}
+		return out;
+	}
+
+	/**
+	 * Record a compaction: `boundary` replaces everything above `suffix`.
+	 *
+	 * The replaced entries stay in the file as an abandoned branch — history is
+	 * never rewritten — while the active chain becomes [root, boundary, ..suffix],
+	 * so the session on disk reads exactly like the one in memory.
+	 *
+	 * The boundary hangs off the root rather than the last replaced entry: it
+	 * stands *in place of* everything above it, so leaving those entries on the
+	 * chain would make `linearEntries()` — and every view built on it, `/tree`
+	 * included — claim the session still holds the transcript it just summarized
+	 * away. The full history stays reachable in the file, and `/tree` can still
+	 * branch back into it.
+	 *
+	 * Returns null when the trailing entries are not the messages being kept: a
+	 * live array that has diverged from the store must not be guessed at.
+	 */
+	appendCompaction(record: CompactionRecord): SessionEntry | null {
+		const linear = this.linearEntries();
+		const messageEntries = linear.filter(isMessageEntry);
+		// `slice(-0)` is `slice(0)`, so an empty suffix needs its own path.
+		const kept = record.suffix.length > 0 ? messageEntries.slice(-record.suffix.length) : [];
+		if (kept.length !== record.suffix.length || !kept.every((entry, i) => entry.message === record.suffix[i])) {
+			return null;
+		}
+
+		const entry: SessionEntry = {
+			id: newEntryId(),
+			// The chain's root: the header for a session this store started, or
+			// whatever the loaded file's chain begins at.
+			parentId: linear[0]?.id ?? "",
+			type: "compaction",
+			timestamp: Date.now(),
+			message: record.boundary,
+			summary: record.summary,
+			preservedFiles: record.preservedFiles,
+			preTokens: record.preTokens,
+			postTokens: record.postTokens,
+			model: record.model,
+			trigger: record.trigger,
+		};
+		this.append(entry);
+		for (const message of record.suffix) this.appendMessage(message);
+		return entry;
 	}
 
 	/**
@@ -231,6 +427,31 @@ export class SessionStore {
 	#recomputeLeaf(): void {
 		this.#leafId = this.entries[this.entries.length - 1]?.id ?? null;
 	}
+}
+
+/** The first `maxBytes` bytes of a file, decoded as UTF-8. */
+function readHead(path: string, maxBytes: number): string {
+	const descriptor = openSync(path, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(maxBytes);
+		const read = readSync(descriptor, buffer, 0, maxBytes, 0);
+		return buffer.subarray(0, read).toString("utf8");
+	} finally {
+		closeSync(descriptor);
+	}
+}
+
+/**
+ * Whether a parsed line is an entry this build can hold: an id the chain can
+ * point at, and a type it knows. `{"foo": 1}` parses and is not an entry; a
+ * type written by a newer version is one this build cannot interpret, and
+ * keeping it would put a node in the chain whose meaning is unknown.
+ */
+function isEntryShaped(value: unknown): value is SessionEntry {
+	if (typeof value !== "object" || value === null) return false;
+	const entry = value as { id?: unknown; type?: unknown };
+	if (typeof entry.id !== "string" || entry.id.length === 0) return false;
+	return entry.type === "header" || entry.type === "message" || entry.type === "compaction" || entry.type === "custom";
 }
 
 function textPreview(text: string, max = 60): string {

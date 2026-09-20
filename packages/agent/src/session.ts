@@ -23,6 +23,7 @@ import type {
 } from "@labunbun/ai";
 import { textContent, toolResultMessage, userMessage } from "@labunbun/ai";
 import { DEFAULT_MAX_CONCURRENCY, partitionToolCalls, Semaphore } from "./concurrency.ts";
+import { capRoundResults } from "./output-limits.ts";
 import { runToolPipeline } from "./pipeline.ts";
 import type {
 	AgentDeps,
@@ -68,6 +69,7 @@ export class AgentSession {
 	#abortController: AbortController | null = null;
 	#interruptRequested = false;
 	#running = false;
+	#contextOverflowed = false;
 
 	constructor(options: AgentSessionOptions) {
 		this.#model = options.model;
@@ -179,6 +181,37 @@ export class AgentSession {
 
 	// -- the loop -------------------------------------------------------------
 
+	/**
+	 * The context as it would be sent right now, hooks aside.
+	 *
+	 * `/compact` measures this and summarizes it: the numbers it reports and the
+	 * record it writes must be about the whole request — system prompt and tool
+	 * schemas included — rather than about the transcript alone, which is what
+	 * they were when callers had to hand-build a context and had nothing to put
+	 * in those fields.
+	 */
+	currentContext(): Context {
+		return { systemPrompt: this.#systemPrompt, messages: this.messages, tools: this.#wireTools };
+	}
+
+	/**
+	 * Adopt a context that has been made smaller: the live history becomes what
+	 * the pass returned, and — for a summary — the store has already recorded the
+	 * boundary it starts from. Used by the auto path, by `/compact`, and by the
+	 * cheap rung, whose previews exist only here until the session reloads them.
+	 */
+	applyCompaction(context: Context): void {
+		this.messages = context.messages;
+		// Room was made, so the next request is not known to be too large: the
+		// estimate gets to decide again.
+		this.#contextOverflowed = false;
+	}
+
+	/** True when the provider refused the last request for being too large. */
+	get contextOverflowed(): boolean {
+		return this.#contextOverflowed;
+	}
+
 	async prompt(text: string): Promise<AgentEndReason> {
 		if (this.#running) throw new Error("AgentSession is already running");
 		this.#running = true;
@@ -209,10 +242,21 @@ export class AgentSession {
 					context = await this.#deps.hooks.transformContext(context);
 				}
 				if (this.#deps.checkCompaction) {
-					const compacted = await this.#deps.checkCompaction(context);
-					if (compacted) {
-						this.messages = compacted.messages;
-						context = compacted;
+					// After a refusal for size, the estimate is known to be wrong about
+					// this session, so the next turn does not get to consult it.
+					const decision = await this.#deps.checkCompaction(context, { force: this.#contextOverflowed });
+					if (decision?.action === "blocked") {
+						// Nothing was sent. Ending the run here is the whole point: the
+						// alternative is a provider 400 with no explanation, repeated on
+						// every later turn because the history that caused it is still
+						// the history.
+						errorMessage = decision.message;
+						reason = "error";
+						break;
+					}
+					if (decision?.action === "compact" || decision?.action === "reduced") {
+						this.applyCompaction(decision.context);
+						context = decision.context;
 					}
 				}
 
@@ -331,6 +375,10 @@ export class AgentSession {
 				}
 				if (assistant.stopReason === "error") {
 					this.#synthesizeOrphanResults(assistant);
+					// The provider is the ground truth on what fits. When it refuses for
+					// size, the estimate was wrong — so the next turn compacts without
+					// consulting it, and says so if it cannot.
+					if (assistant.errorKind === "context_overflow") this.#contextOverflowed = true;
 					errorMessage = assistant.errorMessage ?? "Unknown provider error";
 					reason = "error";
 					break;
@@ -350,7 +398,10 @@ export class AgentSession {
 					break;
 				}
 
-				const results = await this.#executeToolCalls(toolCalls, earlyPromises, earlyResults, toolSemaphore);
+				const results = capRoundResults(
+					await this.#executeToolCalls(toolCalls, earlyPromises, earlyResults, toolSemaphore),
+					this.#deps.spillOutput,
+				);
 				for (const result of results) {
 					this.messages.push(result);
 					this.#store?.appendMessage(result);

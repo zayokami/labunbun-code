@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { MessageBuilder } from "../src/message-builder.ts";
 import { FAUX_MODEL, fauxProvider } from "../src/providers/faux.ts";
-import { isAbortError, statusCodeOf, withRetry } from "../src/retry.ts";
+import {
+	isAbortError,
+	isContextOverflowError,
+	looksLikeContextOverflow,
+	statusCodeOf,
+	withRetry,
+} from "../src/retry.ts";
 import type { AssistantMessageEvent, StreamFn } from "../src/types.ts";
 
 async function collect(events: AsyncIterable<AssistantMessageEvent>) {
@@ -101,6 +107,72 @@ describe("withRetry", () => {
 		const wrapped = withRetry(faux.streamFn);
 		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
 		expect(events.at(-1)?.type).toBe("done");
+	});
+});
+
+describe("context overflow classification", () => {
+	test("recognizes the provider wordings for an oversized request", () => {
+		expect(looksLikeContextOverflow("This model's maximum context length is 200000 tokens")).toBe(true);
+		expect(looksLikeContextOverflow("prompt is too long: 250000 tokens > 200000 maximum")).toBe(true);
+		expect(looksLikeContextOverflow("input is too long for requested model")).toBe(true);
+		expect(looksLikeContextOverflow("Request failed: context length exceeded")).toBe(true);
+		expect(looksLikeContextOverflow("invalid api key")).toBe(false);
+		expect(looksLikeContextOverflow("model not found")).toBe(false);
+	});
+
+	test("an overflow-shaped message is only an overflow under an overflow status", () => {
+		// 429 with that wording is a rate limit that happens to mention tokens;
+		// classifying it as an overflow would skip the backoff it needs.
+		const rateLimited = Object.assign(new Error("prompt is too long"), { status: 429 });
+		expect(isContextOverflowError(rateLimited)).toBe(false);
+		const badRequest = Object.assign(new Error("prompt is too long: 250000 tokens"), { status: 400 });
+		expect(isContextOverflowError(badRequest)).toBe(true);
+		// A gateway's 413 needs no wording: the remedy is the same.
+		expect(isContextOverflowError(Object.assign(new Error("Request Entity Too Large"), { status: 413 }))).toBe(true);
+		// Status-less (a wrapper that dropped it) still classifies on wording.
+		expect(isContextOverflowError(new Error("maximum context length exceeded"))).toBe(true);
+		expect(isContextOverflowError(new Error("ECONNRESET"))).toBe(false);
+	});
+
+	// The whole point of the classification: a request that is too large must not
+	// be sent again. The retry burns the backoff ladder, and with a fallback chain
+	// configured the same context is then replayed against every later model.
+	//
+	// The status-less shape is the one that proves it. An error with no status is
+	// assumed transient and earns a retry; a 400 would not be retried either way.
+	test("an overflow fails on the first attempt, tagged so callers can act on it", async () => {
+		const { fn, calls } = failingStreamFn(99, new Error("prompt is too long: 250000 tokens > 200000 maximum"));
+		let slept = false;
+		const wrapped = withRetry(fn, {
+			baseDelayMs: 1,
+			sleep: async () => {
+				slept = true;
+			},
+		});
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect(calls()).toBe(1);
+		expect(slept).toBe(false);
+		const terminal = events.at(-1);
+		expect(terminal?.type).toBe("error");
+		expect((terminal as any).message.errorKind).toBe("context_overflow");
+		expect((terminal as any).message.errorMessage).toContain("larger than");
+	});
+
+	test("a tagged 400 is not retried and does not lose the tag", async () => {
+		const { fn, calls } = failingStreamFn(
+			99,
+			Object.assign(new Error("This model's maximum context length is 200000 tokens"), { status: 400 }),
+		);
+		const events = await collect(withRetry(fn, { baseDelayMs: 1 })(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect(calls()).toBe(1);
+		expect((events.at(-1) as any).message.errorKind).toBe("context_overflow");
+	});
+
+	test("an ordinary 400 is not tagged as an overflow", async () => {
+		const { fn } = failingStreamFn(99, Object.assign(new Error("bad request: unknown field"), { status: 400 }));
+		const events = await collect(withRetry(fn, { baseDelayMs: 1 })(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect((events.at(-1) as any).message.errorKind).toBeUndefined();
 	});
 });
 

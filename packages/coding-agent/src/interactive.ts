@@ -9,9 +9,11 @@ import { basename, dirname, join, sep } from "node:path";
 import {
 	type AgentDeps,
 	AgentSession,
+	COMPACTION_DISABLED_NOTICE,
 	CompactionManager,
 	compactionThreshold,
-	estimateContextTokens,
+	contextBreakdown,
+	estimateContextUsage,
 	evaluatePermissions,
 	type PermissionMode,
 	type PermissionRule,
@@ -23,7 +25,6 @@ import {
 	createDefaultStreamFn,
 	listModels,
 	type Model,
-	registerOpenAICompatibleProvider,
 	resolveApiKey,
 	resolveModel,
 	withModelFallback,
@@ -55,7 +56,8 @@ import {
 	shellPickerItems,
 } from "./background-commands.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
-import { CostTracker, formatCostState } from "./cost-tracker.ts";
+import { contextRows, contextSummaryLine, isContextLow, lowContextWarning } from "./context-report.ts";
+import { CostTracker, formatCostReport } from "./cost-tracker.ts";
 import { sessionToMarkdown } from "./export-session.ts";
 import { createFileCompleter } from "./file-completions.ts";
 import { appendHistory, loadHistory } from "./history.ts";
@@ -64,13 +66,16 @@ import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import {
+	damagedSessionNotice,
 	exitSummaryLine,
+	formatMessageCount,
 	listSessions,
 	loadSessionForResume,
 	resolveContinueTarget,
 	type SessionSummary,
 } from "./session-resume.ts";
 import {
+	applyCatalogSettings,
 	applySettingsEnv,
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
@@ -82,7 +87,9 @@ import { createShellPassthrough } from "./shell-passthrough.ts";
 import { loadSkills, skillsAsCommands } from "./skills.ts";
 import { createTaskTool, loadAgentDefinitions } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
+import { bindTaskStore, restoreTasks } from "./task-snapshot.ts";
 import { persistThemeChoice, type ResolvedTheme, resolveTheme } from "./theme-file.ts";
+import { pruneToolOutput, toolOutputRoot, writeToolOutput } from "./tool-output.ts";
 import { persistModelChoice, writeUserSettingsPatch } from "./user-settings.ts";
 import { runWizard, shouldRunWizard } from "./wizard.ts";
 
@@ -117,9 +124,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// read process.env — a key configured via settings.env has to be in place
 	// by then or it would have no effect at all.
 	applySettingsEnv(settings);
-	for (const provider of settings.providers?.openaiCompatible ?? []) {
-		registerOpenAICompatibleProvider(provider);
-	}
+	// Models and prices the settings file declares, before anything resolves one.
+	applyCatalogSettings(settings);
 
 	// ---- model ----
 	const modelRef = options.modelRef ?? settings.model ?? "anthropic/claude-sonnet-5";
@@ -142,6 +148,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	// ---- session persistence: resume, continue, or new ----
 	let store: SessionStore | undefined;
+	/** Said out loud below: a resumed conversation that is missing messages. */
+	let damageNotice: string | undefined;
 	if (options.resumeSessionId) {
 		const resumeId = options.resumeSessionId;
 		const sessions = listSessions(cwd);
@@ -151,12 +159,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			console.error(`Session not found: ${options.resumeSessionId}`);
 			return 1;
 		}
-		store = loadSessionForResume(match.path)?.store;
+		const loaded = loadSessionForResume(match.path);
+		store = loaded?.store;
+		if (loaded) damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
 	} else if (options.continueLast) {
 		// --resume wins when both are given; this is the shorthand.
 		const target = resolveContinueTarget(cwd);
 		if (target) {
-			store = loadSessionForResume(target.path)?.store;
+			const loaded = loadSessionForResume(target.path);
+			store = loaded?.store;
+			if (loaded) damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
 		}
 		if (!store) {
 			console.error("No previous session to continue — starting a new one.");
@@ -165,9 +177,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	} else {
 		store = SessionStore.startNew(cwd);
 	}
+	// Before the transcript is on screen, so the count the user is about to read
+	// is explained rather than contradicted.
+	if (damageNotice) console.error(`Warning: ${damageNotice}`);
 
 	// ---- tools & session ----
 	const taskStore = new TaskStore();
+	// The list survives the process by living in the session file: this run starts
+	// from the plan the last one left, and every change after that is recorded.
+	// Read through `store` (not the value it holds now) so `/resume` takes effect.
+	bindTaskStore(taskStore, () => store);
 	// One shared Operations instance: the "!" shell passthrough and the Bash
 	// tool must resolve shells and kill process trees identically.
 	const ops: Operations = defaultOperations();
@@ -176,17 +195,28 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// the same shells the Bash tool started; the factory would otherwise make a
 	// private manager nobody else can see.
 	const backgroundShells = new BackgroundShellManager();
-	const tools = createAllTools(cwd, { taskStore, operations: ops, backgroundShells });
+	// Results too large for the context go here instead of being thrown away, and
+	// Read is allowed back into this directory to fetch them.
+	const tools = createAllTools(cwd, {
+		taskStore,
+		operations: ops,
+		backgroundShells,
+		readOnlyRoots: [toolOutputRoot(cwd, home)],
+	});
+	// Best effort, and before anything can spill: an expired file is one the
+	// context cannot be pointing at, since nothing has run yet this session.
+	pruneToolOutput(cwd, { home });
 	const sessionRules: PermissionRule[] = [];
 	const baseRules: PermissionRule[] = collectPermissionRules(loadedSettings);
 	const requestedMode = options.permissionMode ?? settings.permissionMode ?? "default";
 	const { mode: effectiveMode, downgradeReason } = resolvePermissionMode(requestedMode, loadedSettings);
 	let handle: ReplAppHandle | null = null;
 
-	// Memory files (LABUNBUN.md / AGENTS.md), injected into the first user
-	// message to keep the cached system-prompt prefix byte-stable.
-	const memory = loadMemoryFiles(cwd);
-	let memoryInjected = false;
+	// Memory files (LABUNBUN.md / AGENTS.md), part of the system prompt. `home` is
+	// passed rather than left to `homedir()`: the caller may have named one, and a
+	// home the code reads but does not honour is how a test run ends up reading
+	// the operator's own memory files.
+	const memory = loadMemoryFiles(cwd, home);
 
 	// ---- model fallback chain ----
 	const baseStreamFn = createDefaultStreamFn();
@@ -199,10 +229,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// one store and one model's window, so a swap must rebuild it.
 	const buildCompaction = (forModel: Model, forStore: SessionStore | undefined): CompactionManager =>
 		new CompactionManager(
-			{ contextWindow: forModel.contextWindow, maxOutputTokens: forModel.maxOutputTokens },
+			{
+				contextWindow: forModel.contextWindow,
+				maxOutputTokens: forModel.maxOutputTokens,
+				microcompactFirst: settings.trimOldToolResults === true,
+			},
 			{
 				streamFn,
 				store: forStore,
+				summarizerModel: forModel,
 				readFile: (path) => {
 					try {
 						return readFileSync(path, "utf8");
@@ -213,10 +248,32 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			},
 		);
 	let compaction = buildCompaction(model, store);
+	// Whether the breaker's notice has been shown for the current trip. Edge-
+	// triggered off `isTripped` so a rebuild (which cannot be tripped) resets it.
+	let breakerWarned = false;
 	// Read by the setContextInfo closure on every turn boundary.
 	const thresholdHolder = {
 		current: compactionThreshold({ contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens }),
 	};
+
+	/**
+	 * What the context indicator measures, and what it measures against.
+	 *
+	 * The whole request the model will be sent — system prompt and tool schemas
+	 * included, not just the transcript: a session with a large toolset carries
+	 * thousands of tokens before the user types anything, and an indicator that
+	 * reads the messages alone calls that session empty right up until it
+	 * compacts. The denominator is the threshold where the session acts, so the
+	 * line answers "how much room before this conversation changes shape".
+	 */
+	function contextInfoFor(target: AgentSession): { usedTokens: number; threshold: number } {
+		return { usedTokens: estimateContextUsage(target.currentContext()), threshold: thresholdHolder.current };
+	}
+
+	/** Republish the indicator. Anything that changes the context calls this. */
+	function refreshContextInfo(target: AgentSession): void {
+		handle?.setContextInfo(contextInfoFor(target));
+	}
 
 	// ---- user hooks (snapshotted at startup against mid-session injection) ----
 	const hooksRuntime = snapshotHooks(settings.hooks);
@@ -283,7 +340,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	const allTools = [...tools, ...mcpTools, taskTool, ...planTools, askUserTool];
 
-	const systemPrompt = buildSystemPrompt(allTools, { cwd, platform: process.platform, isTTY: true });
+	const systemPrompt = buildSystemPrompt(allTools, {
+		cwd,
+		platform: process.platform,
+		isTTY: true,
+		memory: memory.content,
+	});
 
 	/**
 	 * Named so a hot-swap can hand the SAME deps object to the next session.
@@ -292,6 +354,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 */
 	const sessionDeps: AgentDeps = {
 		streamFn,
+		// Read through the holder rather than a captured id: /resume swaps the
+		// session, and the spills belong to whichever one is live.
+		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId: sessionIdHolder.current, home }),
 		canUseTool: async (toolName, input, ctx) => {
 			const decision = evaluatePermissions(toolName, input, {
 				mode: ctx.mode,
@@ -320,7 +385,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			const allowed = await requestPermissionOrAbort(handle, toolName, input, ctx.signal);
 			return allowed ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
 		},
-		checkCompaction: async (context) => {
+		checkCompaction: async (context, options) => {
 			try {
 				if (hooksRuntime.has("PreCompact")) {
 					const outcome = await hooksRuntime.run("PreCompact", {
@@ -335,25 +400,49 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 						// A hook may veto this compaction pass; the threshold check
 						// runs again next turn, so this defers rather than disables.
 						pushInfo(handle, `Compaction skipped by PreCompact hook${outcome.reason ? `: ${outcome.reason}` : ""}`);
-						return null;
+						// A veto can defer a pass the estimate asked for. It cannot defer
+						// one the provider already refused: the next turn would send the
+						// same request and get the same refusal. End the run with what
+						// can actually be done about it instead.
+						return options?.force ? { action: "blocked", message: compaction.blockedMessage() } : null;
 					}
 				}
-				return await compaction.maybeCompact(context);
+				const decision = await compaction.check(context, options);
+				// The cheap rung is not a compaction, and saying so is the whole
+				// report: the user asked for nothing here, and the model is now
+				// working from previews of older results. Silence would make that
+				// indistinguishable from the transcript having been summarized.
+				if (decision?.action === "reduced") {
+					pushInfo(
+						handle,
+						`Context trimmed: ${decision.cleared.results} old tool result${decision.cleared.results === 1 ? "" : "s"} replaced by previews ` +
+							`(${decision.cleared.chars.toLocaleString()} characters freed, no summarization needed).`,
+					);
+				}
+				// The breaker has no other way to be seen. Silent, it looks like the
+				// session simply stopped managing its context — until the run ends with
+				// a request that cannot be sent, long after the failures that caused it.
+				const tripped = compaction.isTripped;
+				if (tripped !== breakerWarned) {
+					breakerWarned = tripped;
+					if (tripped) pushInfo(handle, COMPACTION_DISABLED_NOTICE);
+				}
+				return decision;
 			} catch {
 				return null; // circuit breaker handles repeated failures
 			}
 		},
 		hooks: {
 			transformContext: (context) => {
-				// Memory files inject once; hook-contributed context drains
-				// whenever it has accumulated. Both ride on the next user
-				// message so the cached system-prompt prefix stays stable.
-				const injectMemory = !memoryInjected && Boolean(memory.content);
+				// Hook-contributed context drains whenever it has accumulated, and
+				// rides on the next user message so the cached system-prompt prefix
+				// stays stable. Memory is not here: it is a section of the system
+				// prompt, which is the only place that survives a compaction and
+				// the only place the cache breakpoint covers.
 				const hookContext = pendingHookContext.splice(0, pendingHookContext.length);
-				if (!injectMemory && hookContext.length === 0) return context;
-				if (injectMemory) memoryInjected = true;
+				if (hookContext.length === 0) return context;
 
-				const prefix = [...(injectMemory ? [memory.content] : []), ...hookContext].join("\n\n");
+				const prefix = hookContext.join("\n\n");
 				const messages = [...context.messages];
 				// Last user message, so hook context lands on the prompt it
 				// belongs to rather than on stale history.
@@ -406,13 +495,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	sessionRef = session;
 
 	// Restore the selected store's transcript for both --resume and --continue.
-	// A newly created store simply has no messages yet.
+	// A newly created store simply has no messages yet. A compacted session
+	// resumes from its boundary, not from the transcript the summary replaced.
 	if (store) {
-		session.messages.push(...store.messages());
+		session.messages.push(...store.contextMessages());
 	}
 
 	// ---- cost tracking + context indicator + session-scoped listeners ----
 	const costTracker = new CostTracker(cwd);
+	// "This session" is the conversation being opened, not the project it lives
+	// in: a resumed one arrives having already spent what its messages record, and
+	// leaving that out would make /cost report less the moment a session continues.
+	costTracker.beginSession(store?.messages() ?? []);
 	// @-mention file list for the prompt, cached with a short TTL.
 	const fileCompleter = createFileCompleter(cwd);
 	// Guards against a Stop hook that blocks every turn: each resume is only
@@ -428,6 +522,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 */
 	let detachSessionListeners: (() => void) | null = null;
 	function attachSessionListeners(target: AgentSession): void {
+		// Edge-triggered state for the low-context warning, per attached session:
+		// after a hot swap the incoming conversation has its own size.
+		let contextLowWarned = false;
 		detachSessionListeners?.();
 		detachSessionListeners = target.on(async (event) => {
 			if (event.type === "turn_end") {
@@ -437,11 +534,21 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// Tool calls may have created or deleted files; the next user turn should
 			// see the tree as it is now, not as it was when they last typed.
 			if (event.type === "agent_end") fileCompleter.bust();
-			if (handle && (event.type === "turn_end" || event.type === "agent_end")) {
-				handle.setContextInfo({
-					usedTokens: estimateContextTokens(target.messages),
-					threshold: thresholdHolder.current,
-				});
+			if (event.type === "turn_end" || event.type === "agent_end") {
+				refreshContextInfo(target);
+				// Said once per crossing. A warning repeated on every turn is a
+				// warning nobody reads; a compaction — or a /trim — brings the
+				// measurement back down and arms it again, which is what makes the
+				// next crossing worth mentioning too.
+				const info = contextInfoFor(target);
+				if (isContextLow(info.usedTokens, info.threshold)) {
+					if (!contextLowWarned) {
+						contextLowWarned = true;
+						pushInfo(handle, lowContextWarning(info.usedTokens, info.threshold));
+					}
+				} else {
+					contextLowWarned = false;
+				}
 			}
 			// Stop: the loop reached a natural end. A hook may send it back to work
 			// (e.g. "tests still failing"), which followUp() does by design. Only
@@ -483,8 +590,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * abort any in-flight work, rebuild the session and its compaction manager,
 	 * rebind holders and listeners, and hand the new session to the UI.
 	 *
-	 * Memory is NOT re-injected into a resumed session — memoryInjected stays
-	 * consumed across swaps, matching how --resume behaves at startup.
+	 * The incoming session is built with the same system prompt, memory files
+	 * included, so there is nothing session-specific to re-inject: whatever the
+	 * conversation being left behind had been told to work under, the one
+	 * arriving is told too.
 	 */
 	async function hotSwapSession(summary: SessionSummary): Promise<void> {
 		const loaded = loadSessionForResume(summary.path);
@@ -508,14 +617,22 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 		store = loaded.store;
 		sessionIdHolder.current = loaded.store.sessionId ?? undefined;
+		// The incoming conversation brings its own spend; without this the new one
+		// would open carrying the totals of the session just left.
+		costTracker.beginSession(loaded.store.messages());
 		compaction = buildCompaction(next.model, loaded.store);
 		thresholdHolder.current = compactionThreshold({
 			contextWindow: next.model.contextWindow,
 			maxOutputTokens: next.model.maxOutputTokens,
 		});
-		handle.setTasks([]);
+		// The strip follows the conversation across the swap: the incoming session
+		// brings its own list, and the store stopped being bound to the one being
+		// left when `store` was reassigned above.
+		restoreTasks(taskStore, loaded.store);
+		handle.setTasks(taskStore.summary());
 		handle.setSession(next);
 		attachSessionListeners(next);
+		refreshContextInfo(next);
 		sessionRef = next;
 		pushInfo(handle, `Resumed session ${summary.sessionId.slice(0, 8)} (${loaded.messages.length} messages).`);
 	}
@@ -543,11 +660,17 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			pushInfo(handle, `Model switched but not saved: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		handle?.setModelName(`${next.provider}/${next.id}`);
+		// Another window, another threshold, and typically another tool budget:
+		// the indicator is measured against the model that is now selected.
+		if (sessionRef) refreshContextInfo(sessionRef);
 		pushInfo(handle, `Model: ${ref} — takes effect on the next prompt`);
 		return true;
 	}
 
 	attachSessionListeners(session);
+	// Before the first turn: the system prompt and the tool schemas are already
+	// part of every request, and a resumed conversation arrives with its history.
+	refreshContextInfo(session);
 
 	// ---- command registry ----
 	const commands: Command[] = [...builtInCommands(), ...skillsAsCommands(skills)];
@@ -637,6 +760,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				pendingMcpApprovals,
 				sessionStore: () => store,
 				theme: resolvedTheme,
+				refreshContextInfo,
+				memory: memory.content,
 				hotSwapSession,
 				switchModel,
 			}),
@@ -646,6 +771,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const unsubTasks = taskStore.subscribe(() => {
 		handle?.setTasks(taskStore.summary());
 	});
+	// And the strip's starting state: a restored list is already there before any
+	// task changes, so nothing would have pushed it to the UI.
+	handle?.setTasks(taskStore.summary());
 
 	/**
 	 * Background shells → the status row.
@@ -812,6 +940,10 @@ interface AppCommandContext {
 	sessionStore(): SessionStore | undefined;
 	/** Theme resolved at startup; `/theme` reads its name and available list. */
 	theme: ResolvedTheme;
+	/** Republish the context indicator for a session whose context just changed. */
+	refreshContextInfo(target: AgentSession): void;
+	/** The memory files as loaded, which the system prompt carries; `/context` sizes them. */
+	memory?: string;
 	hotSwapSession(summary: SessionSummary): Promise<void>;
 	switchModel(ref: string): boolean;
 }
@@ -839,10 +971,17 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			cwd: ctx.cwd,
 			pushInfo: (info) => pushInfo(ctx.handle, info),
 			dialog: ctx.handle ?? undefined,
+			refreshContext: () => ctx.refreshContextInfo(session),
 		};
-		void Promise.resolve(command.call(localCtx, args)).then((result) => {
-			if (typeof result === "string" && result) pushInfo(ctx.handle, result);
-		});
+		void Promise.resolve(command.call(localCtx, args))
+			.then((result) => {
+				if (typeof result === "string" && result) pushInfo(ctx.handle, result);
+			})
+			.catch((error: unknown) => {
+				// Fire-and-forget, but not silent: a command that throws is the user's
+				// only signal that what they asked for did not happen.
+				pushInfo(ctx.handle, `/${command.name} failed: ${error instanceof Error ? error.message : error}`);
+			});
 		return true;
 	}
 
@@ -859,7 +998,8 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
  */
 export function appCommandTable(): Array<[string, string]> {
 	return [
-		["/cost", "Show token usage and cost for this session"],
+		["/context", "Show what the context window is made of, and what is left"],
+		["/cost", "Show token usage and cost for this conversation, then for this project"],
 		["/doctor", "Check the environment, settings, and provider setup"],
 		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
@@ -884,7 +1024,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 
 	switch (command) {
 		case "/cost": {
-			pushInfo(ctx.handle, formatCostState(ctx.costTracker.state));
+			pushInfo(ctx.handle, formatCostReport(ctx.costTracker.sessionState, ctx.costTracker.state));
 			return true;
 		}
 		case "/permissions": {
@@ -917,7 +1057,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				if (!handleRef) return;
 				const items = sessions.map((s) => ({
 					label: `${s.sessionId.slice(0, 8)}  ${new Date(s.mtimeMs).toLocaleString()}`,
-					description: `${s.messageCount} msgs — ${s.firstUserText}`,
+					description: `${formatMessageCount(s)} msgs — ${s.firstUserText}`,
 				}));
 				const index = await handleRef.pickFromList("Resume a session", items);
 				if (index === null) return;
@@ -967,7 +1107,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				session: storeId ? storeId.slice(0, 8) : "(not persisted)",
 				context: info,
 				details: [
-					["Cost", `$${ctx.costTracker.state.totalCostUSD.toFixed(4)} (this project, all sessions)`],
+					[
+						"Cost",
+						`$${ctx.costTracker.sessionState.totalCostUSD.toFixed(4)} this session · ` +
+							`$${ctx.costTracker.state.totalCostUSD.toFixed(4)} this project`,
+					],
 					["Theme", `${ctx.theme.theme.name} · Vim ${vim ? "on" : "off"}`],
 					[
 						"MCP",
@@ -1128,8 +1272,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				pushInfo(ctx.handle, `Entry not found: ${arg}`);
 				return true;
 			}
-			// Rebuild in-memory transcript from the new branch.
-			forkSession.messages = forkStore.messages();
+			// Rebuild in-memory transcript from the new branch. The branch point may
+			// sit above a compaction boundary, in which case the whole history from
+			// there is live again — and below one, in which case it is not.
+			forkSession.messages = forkStore.contextMessages();
 			pushInfo(ctx.handle, `Branched from ${arg.slice(0, 8)}. New messages continue on this branch.`);
 			return true;
 		}
@@ -1168,6 +1314,18 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			} catch (error) {
 				pushInfo(ctx.handle, `Restore failed: ${error instanceof Error ? error.message : error}`);
 			}
+			return true;
+		}
+		case "/context": {
+			if (!session) return true;
+			const breakdown = contextBreakdown(session.currentContext());
+			const limits = ctx.compaction().limits();
+			ctx.handle?.setStatusCard({
+				title: "Context",
+				context: { usedTokens: breakdown.usedTokens, threshold: limits.threshold },
+				details: contextRows(breakdown, limits, { memoryChars: ctx.memory?.length ?? 0 }),
+			});
+			pushInfo(ctx.handle, contextSummaryLine(breakdown, limits));
 			return true;
 		}
 		case "/doctor": {
@@ -1300,4 +1458,4 @@ export function shortenHome(path: string, home: string | undefined): string {
 	return path.startsWith(prefix) ? `~${sep}${path.slice(prefix.length)}` : path;
 }
 
-export { type AppCommandContext, appendHistory, handleAppCommand };
+export { type AppCommandContext, appendHistory, handleAppCommand, handleCommandDispatch };

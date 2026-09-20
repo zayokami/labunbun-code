@@ -41,6 +41,8 @@ export interface FauxStep {
 	stopReason?: "stop" | "toolUse" | "length" | "error" | "aborted";
 	/** Error message when stopReason is "error"/"aborted". */
 	errorMessage?: string;
+	/** Classification for a scripted error, e.g. "context_overflow". */
+	errorKind?: "context_overflow";
 	usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
 	/** Thrown (not emitted) when the model call receives a mismatching context. */
 	assertContext?: (context: Context, callIndex: number) => void;
@@ -133,7 +135,10 @@ export function fauxProvider(steps: FauxStep[]): FauxProvider {
 			if (stop === "aborted") {
 				yield builder.aborted(step.usage);
 			} else {
-				yield builder.error(step.errorMessage ?? "faux error", step.usage);
+				yield builder.error(step.errorMessage ?? "faux error", {
+					errorKind: step.errorKind,
+					usage: step.usage,
+				});
 			}
 		} else {
 			yield builder.done(stop, step.usage);

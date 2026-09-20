@@ -68,6 +68,29 @@ describe("withModelFallback", () => {
 		expect((events.at(-1) as any).message.errorMessage).toContain(FALLBACK_MODEL.id);
 	});
 
+	// A context that is too large for the primary is too large for the model
+	// after it. Walking the chain replays the same oversized request against
+	// every remaining model, turning one explainable refusal into a generic
+	// failure per model — and the caller still cannot tell why.
+	test("a context overflow is yielded instead of replayed on the next model", async () => {
+		const calledFor: string[] = [];
+		const overflowing: StreamFn = async function* (model, _context, _options) {
+			calledFor.push(model.id);
+			const builder = new MessageBuilder(model.provider, model.id);
+			yield builder.start();
+			yield builder.error(`The request is larger than ${model.id}'s context window`, {
+				errorKind: "context_overflow",
+			});
+		};
+		const wrapped = withModelFallback(overflowing, () => [FALLBACK_MODEL]);
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [userMessage("hi")] }));
+		expect(calledFor).toEqual([FAUX_MODEL.id]);
+		const terminal = events.at(-1);
+		expect(terminal?.type).toBe("error");
+		expect((terminal as any).message.errorKind).toBe("context_overflow");
+	});
+
 	// Without this guard an interrupt thrown before the first byte would be
 	// treated as an ordinary pre-content failure and the chain would try every
 	// remaining model — Esc would appear to do nothing until all of them ran.

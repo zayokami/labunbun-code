@@ -9,8 +9,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { COMPACTION_DISABLED_NOTICE, CompactionManager } from "@labunbun/agent";
+import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { helpText } from "@labunbun/tui";
 import { builtInCommands, completeCommands } from "../src/commands.ts";
+import { lowContextWarning } from "../src/context-report.ts";
 import { appCommandTable } from "../src/interactive.ts";
 
 const INTERACTIVE_SOURCE = readFileSync(join(import.meta.dir, "..", "src", "interactive.ts"), "utf8");
@@ -70,6 +73,57 @@ describe("app command table", () => {
 			expect(name.startsWith("/"), `${name} should start with a slash`).toBe(true);
 			expect(description.length, `${name} needs a description`).toBeGreaterThan(0);
 		}
+	});
+});
+
+/**
+ * The messages that tell a stuck user what to type.
+ *
+ * They are written where the trouble is detected — the compaction manager says
+ * the conversation no longer fits, the context report says it is nearly there —
+ * which is a long way from the switch that decides what a command means. A line
+ * that says `/new` reads as help and behaves as an error, and it is read at the
+ * one moment the user has no room to work out what to do instead.
+ */
+describe("advice about a context that is full", () => {
+	/** Every command the user can type and have dispatched. */
+	function knownCommands(): Set<string> {
+		// The REPL answers these itself, and keeps them out of any caller's table.
+		return new Set([
+			...appCommandTable().map(([name]) => name),
+			...builtInCommands().map((command) => `/${command.name}`),
+			"/help",
+			"/clear",
+			"/exit",
+			"/quit",
+		]);
+	}
+
+	function advice(): string[] {
+		// Constructed for one string method: what a blocked request says is a
+		// property of the window it was configured with.
+		const manager = new CompactionManager(
+			{ contextWindow: 200_000, maxOutputTokens: 8_192 },
+			{ streamFn: fauxProvider([{ text: "unused" }]).streamFn, summarizerModel: FAUX_MODEL },
+		);
+		return [manager.blockedMessage(), COMPACTION_DISABLED_NOTICE, lowContextWarning(1_600, 2_000)];
+	}
+
+	test("every command they name is a command that exists", () => {
+		const known = knownCommands();
+		const named = advice().flatMap((text) => text.match(/\/[a-z-]+/g) ?? []);
+		// The scan has to be finding something, or the check below is vacuous.
+		expect(named.length).toBeGreaterThan(2);
+		expect(named).toContain("/compact");
+		for (const name of named) {
+			expect(known.has(name), `${name} is named in advice but no command answers to it`).toBe(true);
+		}
+	});
+
+	test("the way out of a blocked request needs no model call", () => {
+		// The summary is what stopped working when the breaker tripped, so a
+		// message that offers only /compact offers only the thing that failed.
+		expect(COMPACTION_DISABLED_NOTICE).toContain("/trim");
 	});
 });
 

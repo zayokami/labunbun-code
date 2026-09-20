@@ -2,18 +2,34 @@ export const AGENT_PACKAGE_VERSION = "0.1.0";
 
 // Compaction
 export {
+	COMPACTION_DISABLED_NOTICE,
 	type CompactionConfig,
 	CompactionManager,
 	type CompactionManagerDeps,
+	type ContextBreakdown,
+	compactionBoundary,
 	compactionThreshold,
+	contextBreakdown,
+	dropOldestRound,
 	estimateContextTokens,
+	estimateContextUsage,
 	extractRecentFiles,
 	hardContextLimit,
+	keepSuffix,
 	microcompact,
 	SUMMARY_PROMPT,
 	stripAnalysis,
 } from "./compaction.ts";
 export { partitionToolCalls, type ToolBatch } from "./concurrency.ts";
+// Bounding what tool output may enter the conversation
+export {
+	capRoundResults,
+	cutText,
+	MAX_ROUND_RESULT_CHARS,
+	MIN_ROUND_RESULT_CHARS,
+	type SpillRequest,
+	type SpillWriter,
+} from "./output-limits.ts";
 // Permission rule engine
 export {
 	evaluatePermissions,
@@ -34,6 +50,7 @@ export { type PipelineRunOptions, runToolPipeline } from "./pipeline.ts";
 export { AgentSession, type AgentSessionOptions } from "./session.ts";
 // Session persistence
 export {
+	type CompactionRecord,
 	newEntryId,
 	type SessionEntry,
 	SessionStore,
@@ -49,6 +66,7 @@ export type {
 	AgentEventHandler,
 	AnyTool,
 	BeforeToolCallDecision,
+	CompactionCheck,
 	LoopHooks,
 	PermissionContext,
 	PermissionMode,
@@ -57,5 +75,6 @@ export type {
 	Tool,
 	ToolCallContext,
 	ToolResult,
+	TrimmedToolResults,
 } from "./types.ts";
 export { allow, ask, buildTool, deny, toWireTools } from "./types.ts";

@@ -195,6 +195,91 @@ describe("runToolPipeline stages", () => {
 		expect(text).toContain("truncated"); // "[output truncated]" when the cap leaves no room for a preview
 	});
 
+	test("a tool that spills keeps its output and hands back a path", async () => {
+		const written: string[] = [];
+		const tool = echoTool({ maxResultSizeChars: 50, overflow: "spill" });
+		const result = await run(
+			tool,
+			{ text: "s".repeat(500) },
+			{
+				spillOutput: (request) => {
+					written.push(request.text);
+					return `/spill/${request.toolName}-${request.callId}.txt`;
+				},
+			},
+		);
+		const text = (result.content[0] as any).text as string;
+		expect(written).toEqual(["s".repeat(500)]);
+		expect(text).toContain("[full output: 500 chars → /spill/echo-t1.txt]");
+		// The path is addressed by the same call id the model will quote back.
+		expect(text).toContain("truncated");
+	});
+
+	test("a truncating tool is not spilled, even with a writer configured", async () => {
+		// Read is the reason this matters: its content is on disk already, and a
+		// spilled copy of a file is a copy nobody asked for.
+		let calls = 0;
+		const tool = echoTool({ maxResultSizeChars: 50 });
+		const result = await run(
+			tool,
+			{ text: "z".repeat(500) },
+			{
+				spillOutput: () => {
+					calls++;
+					return "/spill/never.txt";
+				},
+			},
+		);
+		expect(calls).toBe(0);
+		expect((result.content[0] as any).text).not.toContain("full output:");
+	});
+
+	test("what an afterToolCall hook substitutes is bounded too", async () => {
+		// The hook's replacement is still a result going into the context; leaving
+		// it unbounded would make the hook a way around every limit in this file.
+		const tool = echoTool({ maxResultSizeChars: 50 });
+		const result = await run(
+			tool,
+			{ text: "small" },
+			{
+				hooks: {
+					afterToolCall: async () => ({
+						role: "toolResult" as const,
+						toolCallId: "t1",
+						toolName: "echo",
+						content: [{ type: "text" as const, text: "h".repeat(1_000) }],
+						isError: false,
+						timestamp: 1,
+					}),
+				},
+			},
+		);
+		const text = (result.content[0] as any).text as string;
+		expect(text.length).toBeLessThan(200);
+		expect(text).toContain("truncated");
+	});
+
+	test("an error thrown by a hook is bounded like any other result", async () => {
+		// The catch-all used to build its message outside the limit — a failure
+		// path that could put any amount of text into the context.
+		const tool = echoTool();
+		const result = await run(
+			tool,
+			{ text: "small" },
+			{
+				hooks: {
+					afterToolCall: async () => {
+						throw new Error("k".repeat(500_000));
+					},
+				},
+			},
+		);
+		const text = (result.content[0] as any).text as string;
+		expect(result.isError).toBe(true);
+		expect(text.length).toBeLessThan(31_000);
+		expect(text).toContain("truncated");
+	});
+
 	test("tool throw inside call becomes isError result, not a rejection", async () => {
 		const tool = echoTool({
 			call: async () => {

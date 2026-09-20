@@ -25,8 +25,11 @@ labunbun                                # interactive REPL
 - **Sessions** — append-only JSONL tree per project (`~/.labunbun/projects/`),
   crash-safe resume with `--resume`, prompt history with ↑ recall.
 - **Context management** — automatic compaction at the context-window
-  threshold (structured summary + re-injected recent files), microcompaction,
-  live context-remaining indicator.
+  threshold (structured summary + re-injected recent files), `/trim` to replace
+  old tool results with previews before paying for a summary (`trimOldToolResults`
+  does the same ahead of the threshold), `/context` for what the window is made
+  of, and a live indicator measured against the compaction point — system prompt
+  and tool schemas included, so it reads as full when the session is.
 - **Hooks** — user-configurable `PreToolUse` / `PostToolUse` / `Stop` /
   `SessionStart` … command hooks with a JSON stdin/stdout contract.
 - **MCP client** — stdio + StreamableHTTP servers from `.mcp.json`; tools merge
@@ -37,6 +40,12 @@ labunbun                                # interactive REPL
 - **Plan mode** — read-only research then plan approval before mutations.
 - **Model fallback chain** — `fallbackModels` in settings are tried in order
   when the primary model fails before streaming any content.
+- **Cost** — the built-in catalog carries each model's list price, and `pricing`
+  in settings overrides it (per `"provider/model"`, for any model, built-in or
+  not). `/cost` reports the conversation you are in and the project it lives in
+  as two separate totals, and names any model whose tokens it could not price
+  rather than counting them as free. `-p --output-format json` reports the same
+  arithmetic as `cost_usd`.
 - **Terminal UX** — virtualized transcript (sealed history + live tail),
   ctrl+O full-transcript browser, vim modal editing (`vimMode: true`),
   eight token-based themes with `auto` background detection and third-party
@@ -70,12 +79,27 @@ bun run dev -p "list files here"       # headless
         "id": "myprovider",
         "baseUrl": "https://api.example.com/v1",
         "apiKeyEnv": "MYPROVIDER_API_KEY",
-        "models": [{ "id": "my-model", "contextWindow": 128000, "maxOutputTokens": 8192 }]
+        "models": [
+          {
+            "id": "my-model",
+            "contextWindow": 128000,
+            "maxOutputTokens": 8192,
+            "pricing": { "input": 0.6, "output": 2.2, "cacheRead": 0.11 }
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+`pricing` is USD per million tokens (`cacheRead`/`cacheWrite` default to 0,
+which is what an API that does not bill cached tokens separately means). A
+top-level `pricing` map — `{ "anthropic/claude-sonnet-5": { "input": 1.5,
+"output": 7.5 } }` — overrides the catalog's own list prices, which is how a
+gateway or a negotiated rate gets costed correctly. Without a price, tokens are
+counted and `/cost` says they could not be costed; it does not report them as
+free.
 
 ### Import an existing setup
 
@@ -215,7 +239,8 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
   `rules/*.md`, `agents/`, `skills/`, `themes/`
 - Project and local settings are read as **repo-controlled**: they may not set
   `model`, `fallbackModels`, `permissionMode`, `env`, `providers`, `hooks`,
-  `mcpServers`, `permissions.allow`, or `permissions.additionalDirectories`.
+  `mcpServers`, `pricing`, `trimOldToolResults`, `permissions.allow`, or
+  `permissions.additionalDirectories`.
   Those are honored from the user, policy (`managed-settings.json`), and
   `--settings` tiers only; anything dropped is listed at startup. `permissions.deny`
   is still honored from every tier — tightening is always allowed. Whether

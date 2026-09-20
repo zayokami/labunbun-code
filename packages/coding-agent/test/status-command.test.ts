@@ -35,7 +35,10 @@ function makeCtx(options: { cwd?: string; sessionId?: string } = {}) {
 		home,
 		cwd,
 		settings: {},
-		costTracker: { state: { totalCostUSD: 0.1234, totalDurationMs: 0, modelsUsage: {} } },
+		costTracker: {
+			state: { totalCostUSD: 0.1234, totalDurationMs: 0, modelsUsage: {} },
+			sessionState: { totalCostUSD: 0.0567, totalDurationMs: 0, modelsUsage: {} },
+		},
 		baseRules: [],
 		sessionRules: [],
 		commands: [],
@@ -73,7 +76,10 @@ describe("/status", () => {
 		expect(card?.session).toBe("abcdef01");
 		expect(card?.context).toEqual({ usedTokens: 42_000, threshold: 200_000 });
 		expect(card?.details.map(([label]) => label)).toEqual(["Cost", "Theme", "MCP"]);
-		expect(card?.details[0]?.[1]).toContain("$0.1234");
+		// Both totals on one row: a single number here would be read as whichever of
+		// the two the reader assumed, and the two differ by an order of magnitude.
+		expect(card?.details[0]?.[1]).toContain("$0.0567 this session");
+		expect(card?.details[0]?.[1]).toContain("$0.1234 this project");
 		expect(card?.details[1]?.[1]).toContain("nord");
 	});
 

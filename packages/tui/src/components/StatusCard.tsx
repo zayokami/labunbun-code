@@ -29,30 +29,36 @@ function formatTokens(tokens: number): string {
 }
 
 /**
- * The `/status` card: one row per fact, a bar for the context window, and the
- * reminder that Esc puts it away. Like the other overlays it is dismissed with
- * Escape, which is why it is rendered next to them rather than in the
- * transcript, where it would scroll out of reach.
+ * The `/status` and `/context` card: one row per fact, a bar for the context
+ * window, and the reminder that Esc puts it away. Like the other overlays it is
+ * dismissed with Escape, which is why it is rendered next to them rather than
+ * in the transcript, where it would scroll out of reach.
+ *
+ * The identity rows are optional because the card is not always about a
+ * session's whereabouts: `/context` is about one number and what it is made of,
+ * and the model and directory belong on the card the user asked for them on.
  */
 export function StatusCard({ data }: { data: StatusCardData }) {
 	const theme = useTheme();
 	const context = data.context ? contextBar(data.context.usedTokens, data.context.threshold) : undefined;
 	const rows: Array<[string, string]> = [
-		["Model", data.model],
-		["Directory", data.directory],
-		["Permissions", data.permissions],
-		["Session", data.session],
+		...(data.model ? ([["Model", data.model]] as Array<[string, string]>) : []),
+		...(data.directory ? ([["Directory", data.directory]] as Array<[string, string]>) : []),
+		...(data.permissions ? ([["Permissions", data.permissions]] as Array<[string, string]>) : []),
+		...(data.session ? ([["Session", data.session]] as Array<[string, string]>) : []),
 		...(context && data.context
 			? ([["Context", `${context.bar} ${context.percent}%`]] as Array<[string, string]>)
 			: []),
 		...data.details,
 	];
-	const width = Math.max(...rows.map(([label]) => label.length));
+	// Every part of a row is now optional, so a card can arrive with none of them
+	// and an unguarded maximum would be -Infinity.
+	const width = Math.max(0, ...rows.map(([label]) => label.length));
 
 	return (
 		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
 			<Text color={theme.accent} bold>
-				Status
+				{data.title ?? "Status"}
 			</Text>
 			<Box flexDirection="column" marginTop={1}>
 				{rows.map(([label, value]) => (

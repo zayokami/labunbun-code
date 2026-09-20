@@ -9,8 +9,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Usage } from "@labunbun/ai";
-import { CostTracker, emptyCostState, formatCostState, loadCostState } from "../src/cost-tracker.ts";
+import { assistantMessage, type Usage, userMessage } from "@labunbun/ai";
+import {
+	CostTracker,
+	emptyCostState,
+	formatCostReport,
+	formatCostState,
+	loadCostState,
+	type ModelUsage,
+} from "../src/cost-tracker.ts";
 
 const usage = (over: Partial<Usage> = {}): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...over });
 
@@ -87,18 +94,25 @@ describe("CostTracker.recordUsage", () => {
 		expect(tracker.state.totalCostUSD).toBe(0);
 	});
 
-	// No catalog model carries a pricing table yet, so a resolvable model is
-	// costed the same as an unknown one. Tokens are still counted, which is what
-	// the status line and /cost read. This pins the current behaviour so that
-	// adding pricing to the catalog shows up here as a failure rather than as a
-	// silent change in what users are billed.
-	test("a resolvable model is counted in tokens and costed at zero", () => {
+	// Sonnet 5 is $2/$10 per Mtok: a million of each costs twelve dollars, not
+	// zero. The count and the bill come from the same bucket, which is what makes
+	// /cost trustworthy — an earlier version of this test pinned zero here.
+	test("a model with a price is billed at it", () => {
 		const tracker = new CostTracker();
 		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000, output: 1_000_000 }));
 		const bucket = tracker.state.modelsUsage["anthropic/claude-sonnet-5"];
 		expect(bucket.inputTokens).toBe(1_000_000);
 		expect(bucket.outputTokens).toBe(1_000_000);
-		expect(bucket.costUSD).toBe(0);
+		expect(bucket.costUSD).toBeCloseTo(12, 10);
+	});
+
+	test("cache traffic is billed at the cache rates, not the input rate", () => {
+		// Anthropic prices a cache read at 0.1x input and a 5-minute write at
+		// 1.25x. Reading them as input would overcharge a cached session twelvefold,
+		// which is exactly the session shape this agent runs.
+		const tracker = new CostTracker();
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ cacheRead: 1_000_000, cacheWrite: 1_000_000 }));
+		expect(tracker.state.totalCostUSD).toBeCloseTo(0.2 + 2.5, 10);
 	});
 
 	// Holds whatever the pricing table says: the invariant is that the total is
@@ -212,33 +226,115 @@ describe("CostTracker persistence", () => {
 });
 
 describe("formatCostState", () => {
-	test("reports the total to four decimal places", () => {
-		expect(formatCostState(emptyCostState())).toBe("Total cost: $0.0000");
+	test("reports the total to four decimal places, under the label it was given", () => {
+		expect(formatCostState(emptyCostState(), "This project, all sessions")).toBe("This project, all sessions: $0.0000");
 	});
 
 	test("lists each model with its summed token count and cost", () => {
-		const text = formatCostState({
-			totalCostUSD: 0.5,
-			totalDurationMs: 0,
-			modelsUsage: {
-				"p/m": { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40, costUSD: 0.5 },
+		const text = formatCostState(
+			{
+				totalCostUSD: 0.5,
+				totalDurationMs: 0,
+				modelsUsage: {
+					"p/m": { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40, costUSD: 0.5 },
+				},
 			},
-		});
-		expect(text).toContain("Total cost: $0.5000");
+			"This project, all sessions",
+		);
+		expect(text).toContain("This project, all sessions: $0.5000");
 		expect(text).toContain("p/m");
 		expect(text).toContain("100 tokens");
 		expect(text).toContain("$0.5000");
 	});
 
 	test("one line per model, plus the total line", () => {
-		const text = formatCostState({
+		const text = formatCostState(
+			{
+				totalCostUSD: 0,
+				totalDurationMs: 0,
+				modelsUsage: {
+					"p/a": { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 0 },
+					"p/b": { inputTokens: 2, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 0 },
+				},
+			},
+			"This project, all sessions",
+		);
+		expect(text.split("\n")).toHaveLength(3);
+	});
+});
+
+describe("CostTracker sessions", () => {
+	test("this session counts from the moment it began, not from the project's history", () => {
+		// The project total is persisted across restarts; the session one is not,
+		// or "this session" would mean "every session this directory has seen".
+		const tracker = new CostTracker();
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000 }));
+		tracker.beginSession();
+		expect(tracker.state.totalCostUSD).toBeCloseTo(2, 10);
+		expect(tracker.sessionState.totalCostUSD).toBe(0);
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ output: 1_000_000 }));
+		expect(tracker.sessionState.totalCostUSD).toBeCloseTo(10, 10);
+		expect(tracker.state.totalCostUSD).toBeCloseTo(12, 10);
+	});
+
+	test("a resumed conversation opens with the spend its messages record", () => {
+		const tracker = new CostTracker();
+		tracker.beginSession([
+			userMessage("hello"),
+			assistantMessage({
+				provider: "anthropic",
+				model: "claude-sonnet-5",
+				content: [{ type: "text", text: "hi" }],
+				usage: { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 },
+			}),
+		]);
+		expect(tracker.sessionState.modelsUsage["anthropic/claude-sonnet-5"]?.inputTokens).toBe(1_000_000);
+		expect(tracker.sessionState.totalCostUSD).toBeCloseTo(2, 10);
+	});
+});
+
+describe("formatCostReport", () => {
+	test("both totals, each under a label that says which one it is", () => {
+		const session = { ...emptyCostState(), totalCostUSD: 0.25 };
+		const project = { ...emptyCostState(), totalCostUSD: 3 };
+		const text = formatCostReport(session, project);
+		expect(text).toContain("This session: $0.2500");
+		expect(text).toContain("This project, all sessions: $3.0000");
+	});
+
+	test("an unpriced model is named rather than shown as free", () => {
+		// Tokens from a model with no price are counted and cost nothing. Without
+		// this line the report would claim a spend of zero for a session that cost
+		// money, which is worse than saying it does not know.
+		const priced: ModelUsage = {
+			inputTokens: 10,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			costUSD: 0,
+		};
+		const text = formatCostReport(emptyCostState(), {
 			totalCostUSD: 0,
 			totalDurationMs: 0,
-			modelsUsage: {
-				"p/a": { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 0 },
-				"p/b": { inputTokens: 2, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 0 },
-			},
+			modelsUsage: { "nobody/nothing": priced },
 		});
-		expect(text.split("\n")).toHaveLength(3);
+		expect(text).toContain("No price is known for nobody/nothing");
+		expect(text).toContain("settings.json");
+	});
+
+	test("a fully priced report says nothing about prices", () => {
+		const bucket: ModelUsage = {
+			inputTokens: 1_000_000,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			costUSD: 2,
+		};
+		const text = formatCostReport(emptyCostState(), {
+			totalCostUSD: 2,
+			totalDurationMs: 0,
+			modelsUsage: { "anthropic/claude-sonnet-5": bucket },
+		});
+		expect(text).not.toContain("No price is known");
 	});
 });

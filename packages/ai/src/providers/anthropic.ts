@@ -13,6 +13,7 @@
 
 import { MessageBuilder } from "../message-builder.ts";
 import { resolveApiKey } from "../model.ts";
+import { looksLikeContextOverflow } from "../retry.ts";
 import type { AssistantMessageEvent, Context, Model, StreamOptions, ThinkingLevel, WireTool } from "../types.ts";
 
 // ---------------------------------------------------------------------------
@@ -226,11 +227,14 @@ export async function* mapAnthropicStream(
 		switch (event.type) {
 			case "message_start": {
 				const usage = event.message?.usage;
+				const cacheRead = usage?.cache_read_input_tokens ?? 0;
+				const cacheWrite = usage?.cache_creation_input_tokens ?? 0;
 				builder.message.usage = {
 					input: usage?.input_tokens ?? 0,
 					output: usage?.output_tokens ?? 0,
-					cacheRead: usage?.cache_read_input_tokens ?? 0,
-					cacheWrite: usage?.cache_creation_input_tokens ?? 0,
+					cacheRead,
+					cacheWrite,
+					promptTotal: (usage?.input_tokens ?? 0) + cacheRead + cacheWrite,
 				};
 				yield builder.start();
 				break;
@@ -297,7 +301,9 @@ export async function* mapAnthropicStream(
 			}
 			case "error": {
 				const message = event.error?.message ?? "Unknown Anthropic stream error";
-				yield builder.error(message);
+				// Classify here too: an in-stream refusal never becomes a throw, so
+				// the retry layer above cannot see it.
+				yield builder.error(message, looksLikeContextOverflow(message) ? { errorKind: "context_overflow" } : {});
 				return;
 			}
 			default:

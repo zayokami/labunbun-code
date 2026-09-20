@@ -142,6 +142,32 @@ describe("mapAnthropicStream", () => {
 		expect(done.message.content[0]).toEqual({ type: "text", text: "Hello" });
 	});
 
+	test("promptTotal covers the cached prefix that input leaves out", async () => {
+		// The whole request was 10k tokens; only 400 of them missed the cache.
+		// `input` alone would describe a session that is 96% smaller than it is.
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{
+						type: "message_start",
+						message: {
+							usage: { input_tokens: 400, cache_read_input_tokens: 9_600, cache_creation_input_tokens: 0 },
+						},
+					},
+					{ type: "content_block_start", index: 0, content_block: { type: "text" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "x" } },
+					{ type: "content_block_stop", index: 0 },
+					{ type: "message_delta", delta: { stop_reason: "end_turn" } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-sonnet-5",
+			),
+		);
+		const done = events.at(-1) as any;
+		expect(done.message.usage).toMatchObject({ input: 400, cacheRead: 9_600, promptTotal: 10_000 });
+	});
+
 	test("tool_use with fragmented JSON deltas reassembles once", async () => {
 		const events = await collect(
 			mapAnthropicStream(
@@ -185,6 +211,36 @@ describe("mapAnthropicStream", () => {
 		);
 		expect(events.at(-1)?.type).toBe("error");
 		expect((events.at(-1) as any).message.errorMessage).toBe("overloaded");
+	});
+
+	test("an in-stream refusal for size is tagged, so it is not replayed", async () => {
+		// An in-stream error never becomes a throw, so the retry layer above cannot
+		// classify it — and an untagged error is treated as an ordinary failure:
+		// retried, then replayed against every model in the fallback chain.
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{ type: "error", error: { message: "prompt is too long: 250000 tokens > 200000 maximum" } },
+				]),
+				"anthropic",
+				"claude-sonnet-5",
+			),
+		);
+		const terminal = events.at(-1) as any;
+		expect(terminal.message.errorKind).toBe("context_overflow");
+
+		const ordinary = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{ type: "error", error: { message: "overloaded_error" } },
+				]),
+				"anthropic",
+				"claude-sonnet-5",
+			),
+		);
+		expect((ordinary.at(-1) as any).message.errorKind).toBeUndefined();
 	});
 
 	test("signature_delta attaches to the thinking block at close (extended thinking round-trip)", async () => {

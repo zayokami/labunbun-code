@@ -8,10 +8,12 @@
  */
 import type { AgentEvent, PermissionMode } from "@labunbun/agent";
 import { AgentSession, evaluatePermissions, SessionStore } from "@labunbun/agent";
-import { type AgentMessage, createDefaultStreamFn, resolveModel } from "@labunbun/ai";
+import { type AgentMessage, createDefaultStreamFn, resolveModel, type StreamFn } from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
+import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import {
+	applyCatalogSettings,
 	applySettingsEnv,
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
@@ -19,6 +21,7 @@ import {
 	resolvePermissionMode,
 } from "./settings.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
+import { pruneToolOutput, toolOutputRoot, writeToolOutput } from "./tool-output.ts";
 
 export type OutputFormat = "text" | "json" | "stream-json";
 
@@ -30,6 +33,12 @@ export interface HeadlessOptions {
 	noSession?: boolean;
 	cwd?: string;
 	outputFormat?: OutputFormat;
+	/**
+	 * The model transport. Injected by tests, which is the only way to run this
+	 * path without a network or a bill; production leaves it out and gets the
+	 * retrying default.
+	 */
+	streamFn?: StreamFn;
 }
 
 interface JsonResult {
@@ -45,19 +54,29 @@ interface JsonResult {
 export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const cwd = options.cwd ?? process.cwd();
 	const format = options.outputFormat ?? "text";
+
+	const loadedSettings = loadSettings(cwd);
+	const { settings } = loadedSettings;
+	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
+	if (ignoredNotice) console.error(`Warning: ${ignoredNotice}`);
+	// Before the model is resolved, unlike in the REPL: a provider, or a price,
+	// that lives in settings has to be registered for the reference below to
+	// resolve at all — and the price is what the reported cost is computed from.
+	applySettingsEnv(settings);
+	applyCatalogSettings(settings);
+
 	const model = resolveModel(options.modelRef ?? "anthropic/claude-sonnet-5");
 	if (!model) {
 		console.error(`Unknown model: ${options.modelRef}`);
 		return 1;
 	}
 
-	const tools = createAllTools(cwd);
+	// Spilling applies here too: a `-p` run reads a repository like any other
+	// session, and a build log that does not fit is no more reproducible for
+	// being unattended.
+	const tools = createAllTools(cwd, { readOnlyRoots: [toolOutputRoot(cwd)] });
 	const store = options.noSession ? undefined : SessionStore.startNew(cwd);
-	const loadedSettings = loadSettings(cwd);
-	const { settings } = loadedSettings;
-	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
-	if (ignoredNotice) console.error(`Warning: ${ignoredNotice}`);
-	applySettingsEnv(settings);
+	pruneToolOutput(cwd);
 	const rules = collectPermissionRules(loadedSettings);
 	// Headless defaults to bypassPermissions, so this is the tier check that
 	// matters most: managed settings can veto it and force real evaluation.
@@ -96,7 +115,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		maxTurns: options.maxTurns,
 		permissionMode: effectiveMode,
 		deps: {
-			streamFn: createDefaultStreamFn(),
+			streamFn: options.streamFn ?? createDefaultStreamFn(),
+			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
 			// Headless has no interactive dialog, so an unresolved "ask" fails
 			// closed rather than hanging — matches dontAsk's documented contract.
 			canUseTool: async (toolName, input, ctx) => {
@@ -223,7 +243,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 						: reason === "aborted"
 							? "error_aborted"
 							: "error_during_execution",
-			cost_usd: 0, // pricing-aware cost lands with the model catalog expansion
+			// Costed from the transcript's own usage records, against the prices the
+			// model resolves to — the same arithmetic `/cost` does, so a scripted run
+			// and an interactive one disagree about the bill only if the prices differ.
+			cost_usd: costStateFromMessages(session.messages).totalCostUSD,
 			duration_ms: Date.now() - startedAt,
 			num_turns: turns,
 			result: finalText,

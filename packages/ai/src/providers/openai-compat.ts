@@ -194,12 +194,17 @@ export async function* mapOpenAIStream(
 	for await (const chunk of rawChunks) {
 		sawContent = true;
 		if (chunk.usage) {
+			const promptTotal = chunk.usage.prompt_tokens ?? builder.message.usage.promptTotal;
+			const cacheRead = chunk.usage.prompt_tokens_details?.cached_tokens ?? builder.message.usage.cacheRead;
 			builder.message.usage = {
-				input: chunk.usage.prompt_tokens ?? builder.message.usage.input,
+				// `prompt_tokens` counts the cached prefix; `input` must not, or the
+				// cached tokens are billed once as input and again as cacheRead.
+				input: promptTotal === undefined ? builder.message.usage.input : Math.max(0, promptTotal - cacheRead),
 				output: chunk.usage.completion_tokens ?? builder.message.usage.output,
-				cacheRead: chunk.usage.prompt_tokens_details?.cached_tokens ?? builder.message.usage.cacheRead,
+				cacheRead,
 				cacheWrite: builder.message.usage.cacheWrite,
 				reasoning: chunk.usage.completion_tokens_details?.reasoning_tokens,
+				promptTotal,
 			};
 		}
 

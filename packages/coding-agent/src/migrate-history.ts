@@ -16,12 +16,13 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { type SessionEntry, sessionFilePath } from "@labunbun/agent";
+import { compactionBoundary, type SessionEntry, sessionFilePath } from "@labunbun/agent";
 import {
 	type AgentMessage,
 	type AssistantContent,
 	assistantMessage,
 	type ImageContent,
+	repairToolPairing,
 	type ToolResultContent,
 	textContent,
 	toolResultMessage,
@@ -103,45 +104,11 @@ export type HistoryImport = Partial<Record<MigrationSourceId, HistoryInput>>;
 /**
  * Structural repair: both halves of an unpaired tool call go.
  *
- * A transcript with a call and no result — or a result whose call was dropped
- * upstream — is rejected by the messages API on the next request, so it would
- * import as a session that can be listed but never resumed.
+ * Re-exported so this module's callers (and its tests) keep one import site;
+ * the implementation lives in `@labunbun/ai` because resuming a session whose
+ * file lost a line needs the same repair, one layer below this one.
  */
-export function repairToolPairing(messages: AgentMessage[]): { messages: AgentMessage[]; dropped: number } {
-	const callIds = new Set<string>();
-	for (const message of messages) {
-		if (message.role !== "assistant") continue;
-		for (const block of message.content) if (block.type === "toolCall") callIds.add(block.id);
-	}
-	const resultIds = new Set<string>();
-	for (const message of messages) {
-		if (message.role === "toolResult") resultIds.add(message.toolCallId);
-	}
-
-	let dropped = 0;
-	const out: AgentMessage[] = [];
-	for (const message of messages) {
-		if (message.role === "toolResult") {
-			if (callIds.has(message.toolCallId)) out.push(message);
-			else dropped += 1;
-			continue;
-		}
-		if (message.role !== "assistant") {
-			out.push(message);
-			continue;
-		}
-		const content = message.content.filter((block) => block.type !== "toolCall" || resultIds.has(block.id));
-		dropped += message.content.length - content.length;
-		// An assistant turn that held nothing but the dropped call has nothing left
-		// to say, and an empty content array is not a valid message.
-		if (content.length === 0) {
-			dropped += 1;
-			continue;
-		}
-		out.push({ ...message, content });
-	}
-	return { messages: out, dropped };
-}
+export { repairToolPairing };
 
 /** Canonical form of a project path, so two spellings of one directory compare equal. */
 export function projectKey(path: string): string {
@@ -1286,9 +1253,18 @@ export function renderHistorySession(session: HistorySession): string {
 				parentId: parent,
 				type: "compaction",
 				timestamp: session.startedAt,
+				// The source tool already replaced its own prefix with this summary, so
+				// the boundary is the same one ours would have written. Synthesized from
+				// the same builder, so an imported session resumes like a native one.
+				message: compactionBoundary(entry.summary, { timestamp: session.startedAt }),
 				summary: entry.summary,
 				preservedFiles: [],
 				preTokens: entry.preTokens,
+				// Neither is recorded by the tools we import from; zero and a source
+				// label, rather than a guess dressed up as a measurement.
+				postTokens: 0,
+				model: "imported",
+				trigger: "manual",
 			});
 			return;
 		}

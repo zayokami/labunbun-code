@@ -82,6 +82,30 @@ export class TaskStore {
 	summary(): Array<{ id: string; subject: string; status: TaskStatus; activeForm?: string }> {
 		return this.list().map((t) => ({ id: t.id, subject: t.subject, status: t.status, activeForm: t.activeForm }));
 	}
+
+	/**
+	 * Replace the whole list with a list that was saved somewhere.
+	 *
+	 * Ids come from the saved list rather than from `create`, because a restored
+	 * task is the same task: the conversation may already say "task #2 is in
+	 * progress", and renumbering it would quietly mean something else. The
+	 * counter moves past the highest restored id so the next new task gets a new
+	 * number.
+	 *
+	 * A copy is kept, so the caller's array — a session file's contents — cannot
+	 * be edited by a later `update`.
+	 */
+	restore(tasks: AgentTask[]): void {
+		this.#tasks.clear();
+		for (const task of tasks) this.#tasks.set(task.id, { ...task, blockedBy: [...task.blockedBy] });
+		this.#counter = tasks.reduce((highest, task) => Math.max(highest, Number(task.id) || 0), 0);
+		this.#notify();
+	}
+
+	/** Every field of every task, as a copy, for saving. `summary` is for display. */
+	snapshot(): AgentTask[] {
+		return this.list().map((task) => ({ ...task, blockedBy: [...task.blockedBy] }));
+	}
 }
 
 const STATUS_LABEL: Record<TaskStatus, string> = {

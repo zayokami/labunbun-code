@@ -1,13 +1,14 @@
 /**
  * Per-tool-call execution pipeline:
  *   zod safeParse → validateInput → beforeToolCall hooks → canUseTool
- *   → tool.call → afterToolCall hooks → truncate → ToolResultMessage
+ *   → tool.call → afterToolCall hooks → bound the result → ToolResultMessage
  *
  * Every failure mode produces an isError ToolResultMessage — the pipeline
  * never throws, so the loop always has paired results for the wire.
  */
 import type { ToolResultMessage } from "@labunbun/ai";
 import { textContent, toolResultMessage } from "@labunbun/ai";
+import { cutContent, type SpillWriter } from "./output-limits.ts";
 import type { AgentDeps, AnyTool, PermissionContext, ToolCallContext, ToolResult } from "./types.ts";
 
 export interface PipelineRunOptions {
@@ -38,7 +39,7 @@ const ABORTED_RESULT_TEXT = "Tool execution aborted";
 export async function runToolPipeline(options: PipelineRunOptions): Promise<ToolResultMessage> {
 	const { callId, tool, rawInput, deps, ctx, permissionContext } = options;
 	const finish = (result: ToolResult): ToolResultMessage =>
-		truncate(toolResultMessage(callId, tool.name, result.content, result.isError ?? false), tool);
+		bound(toolResultMessage(callId, tool.name, result.content, result.isError ?? false), tool, deps.spillOutput);
 
 	try {
 		// 0. Cancellation — an already-aborted signal never reaches the tool.
@@ -133,32 +134,33 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 		let resultMessage = finish(result);
 		if (deps.hooks?.afterToolCall) {
 			const replaced = await deps.hooks.afterToolCall(tool.name, input, resultMessage);
-			if (replaced) resultMessage = replaced;
+			// Bounded like any other result: what a hook returns is still going into
+			// the context, and an unbounded replacement would be a way to put a
+			// megabyte there that no limit in this file can see.
+			if (replaced) resultMessage = bound(replaced, tool, deps.spillOutput);
 		}
 		return resultMessage;
 	} catch (error) {
-		// Hook failures and unexpected pipeline errors — still never throw.
+		// Hook failures and unexpected pipeline errors — still never throw, and
+		// still bounded: this is a result like any other, and the branch that
+		// reports the failure is not exempt from the limit it might exceed.
 		const message = error instanceof Error ? error.message : String(error);
-		return toolResultMessage(callId, tool.name, [textContent(`Pipeline error: ${message}`)], true);
+		return finish({ content: [textContent(`Pipeline error: ${message}`)], isError: true });
 	}
 }
 
-function truncate(message: ToolResultMessage, tool: AnyTool): ToolResultMessage {
+/**
+ * Enforce the tool's own limit on one result.
+ *
+ * A tool that declared `overflow: "spill"` gets the full text written out and a
+ * pointer instead of a dead end; every other tool is cut in place, which is the
+ * right answer for a result that can be asked for again — a file read at a
+ * smaller range costs the model one call, and a spilled copy of a file that is
+ * still on disk is a copy nobody asked for.
+ */
+function bound(message: ToolResultMessage, tool: AnyTool, spill?: SpillWriter): ToolResultMessage {
 	const limit = tool.maxResultSizeChars ?? MAX_RESULT_CHARS_DEFAULT;
-	let total = 0;
-	const content = message.content.map((block) => {
-		if (block.type !== "text") return block;
-		const remaining = limit - total;
-		if (block.text.length <= remaining) {
-			total += block.text.length;
-			return block;
-		}
-		const truncated =
-			remaining > 100
-				? `${block.text.slice(0, remaining)}\n... [truncated ${block.text.length - remaining} chars]`
-				: "[output truncated]";
-		total = limit;
-		return { type: "text" as const, text: truncated };
-	});
-	return { ...message, content };
+	const writer = tool.overflow === "spill" ? spill : undefined;
+	const request = { callId: message.toolCallId, toolName: message.toolName, text: "" };
+	return { ...message, content: cutContent(message.content, limit, writer, request) };
 }

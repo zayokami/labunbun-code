@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionStore } from "@labunbun/agent";
+import { compactionBoundary, SessionStore } from "@labunbun/agent";
 import { type AgentMessage, assistantMessage, userMessage } from "@labunbun/ai";
+import {
+	damagedSessionNotice,
+	formatMessageCount,
+	formatSessionList,
+	listSessions,
+	loadSessionForResume,
+} from "../src/session-resume.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -25,6 +32,7 @@ async function startup(home: string, cwd: string, options: { continueLast?: bool
 		const requests = [];
 		let mountedMessages = null;
 		let reason = null;
+		const taskCalls = [];
 		mock.module("@labunbun/ai", () => ({
 			...ai,
 			resolveApiKey: () => "local-test-key",
@@ -40,7 +48,7 @@ async function startup(home: string, cwd: string, options: { continueLast?: bool
 			mountRepl: ({ session }) => {
 				mountedMessages = structuredClone(session.messages);
 				return {
-					setTasks() {}, setContextInfo() {}, setBackgroundShells() {},
+					setTasks(tasks) { taskCalls.push(tasks); }, setContextInfo() {}, setBackgroundShells() {},
 					store: { set() {} },
 					waitUntilExit: async () => { reason = await session.prompt("new question"); }
 				};
@@ -48,7 +56,7 @@ async function startup(home: string, cwd: string, options: { continueLast?: bool
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
 		const exitCode = await runInteractive(${JSON.stringify({ ...options, cwd, theme: "dark" })});
-		console.log(JSON.stringify({ exitCode, mountedMessages, requests, reason }));
+		console.log(JSON.stringify({ exitCode, mountedMessages, requests, reason, taskCalls }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
@@ -69,6 +77,7 @@ async function startup(home: string, cwd: string, options: { continueLast?: bool
 			mountedMessages: AgentMessage[] | null;
 			requests: AgentMessage[][];
 			reason: string | null;
+			taskCalls: Array<Array<{ id: string; subject: string; status: string; activeForm?: string }>>;
 		}),
 		stderr,
 	};
@@ -79,6 +88,13 @@ function seed(cwd: string, home: string, label: string) {
 	store.appendMessage(userMessage(`${label} question`));
 	store.appendMessage(assistantMessage({ content: [{ type: "text", text: `${label} answer` }], stopReason: "stop" }));
 	return store;
+}
+
+/** Replace one line of a session file with half an entry, the way a partial append would. */
+function damageLine(path: string, lineNumber: number): void {
+	const lines = readFileSync(path, "utf8").split("\n");
+	lines[lineNumber - 1] = '{"id":"half-written","paren';
+	writeFileSync(path, lines.join("\n"), "utf8");
 }
 
 describe("interactive --continue startup", () => {
@@ -190,6 +206,39 @@ describe("interactive --continue startup", () => {
 		expect(saved.entries[entries.length].parentId).toBe(entries[entries.length - 1].id);
 	}, 30_000);
 
+	test("continue resumes from the last compaction boundary, not the transcript", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+		const suffix = [userMessage("a later question")];
+		for (const message of suffix) store.appendMessage(message);
+		const boundary = compactionBoundary("1. Primary Request: old question");
+		store.appendCompaction({
+			boundary,
+			suffix,
+			summary: "1. Primary Request: old question",
+			preservedFiles: [],
+			preTokens: 150_000,
+			postTokens: 2_000,
+			model: "faux-1",
+			trigger: "auto",
+		});
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.mountedMessages).toEqual([boundary, ...suffix]);
+		expect(result.requests[0].slice(0, -1)).toEqual([boundary, ...suffix]);
+		// The turn the summary replaced is in the file and in nothing else.
+		expect(JSON.stringify(result.requests)).not.toContain("old answer");
+		// The new turn lands below the boundary, so the next resume is just as short.
+		const saved = SessionStore.load(store.path);
+		expect(saved.contextMessages()[0]).toEqual(boundary);
+		expect(saved.contextMessages().slice(-2)).toMatchObject([
+			{ role: "user", content: "new question" },
+			{ role: "assistant", content: [{ type: "text", text: "new answer" }] },
+		]);
+	}, 30_000);
+
 	test("tool call/result history survives two independent continue startups without duplication", async () => {
 		const { home, cwd } = fixture();
 		const store = seed(cwd, home, "old");
@@ -260,5 +309,221 @@ describe("interactive --continue startup", () => {
 		expect(result.requests).toEqual([]);
 		expect(SessionStore.listSessions(cwd, home)).toHaveLength(1);
 		expect(SessionStore.load(existing.path).messages()).toEqual(existing.messages());
+	}, 30_000);
+});
+
+/**
+ * The plan the last run was working from.
+ *
+ * The task list is the one piece of an agent's state that is neither in the
+ * transcript nor in the workspace — restoring the conversation and letting the
+ * strip come up empty leaves the model to re-derive what it was in the middle of.
+ */
+describe("the task list of a continued session", () => {
+	test("continue puts the saved tasks back on the strip", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+		// Written the way the tools write it — the kind string is on disk, so it is
+		// spelled out here rather than imported from the code under test.
+		store.appendCustom("tasks", [
+			{
+				id: "1",
+				subject: "Run the suite",
+				description: "all of it",
+				status: "in_progress",
+				blockedBy: [],
+				createdAt: 1,
+			},
+			{
+				id: "2",
+				subject: "Write it up",
+				description: "a summary",
+				status: "pending",
+				activeForm: "Writing it up",
+				blockedBy: ["1"],
+				createdAt: 2,
+			},
+		]);
+		const before = readFileSync(store.path);
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.taskCalls.at(-1)).toEqual([
+			{ id: "1", subject: "Run the suite", status: "in_progress" },
+			{ id: "2", subject: "Write it up", status: "pending", activeForm: "Writing it up" },
+		]);
+		// Reading the list is not a change to it, so the file does not gain a
+		// second copy: what is on disk is still what the previous run wrote.
+		expect(readFileSync(store.path).subarray(0, before.length)).toEqual(before);
+		expect(SessionStore.load(store.path).entries.filter((e) => e.type === "custom" && e.kind === "tasks")).toHaveLength(
+			1,
+		);
+	}, 30_000);
+
+	test("a session with no tasks starts with an empty strip", async () => {
+		const { home, cwd } = fixture();
+		seed(cwd, home, "old");
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.taskCalls).toContainEqual([]);
+	}, 30_000);
+});
+
+/**
+ * What the picker pays to draw itself.
+ *
+ * A row needs a label and a rough size, and the label is in the first user
+ * message, which is at the top of the file. Reading whole transcripts to find
+ * that out costs the entire project every time the picker opens — and the price
+ * grows with the sessions that have the least to do with the one being resumed.
+ */
+describe("what the picker reads out of a session file", () => {
+	test("a session small enough to read whole is counted exactly", () => {
+		const { home, cwd } = fixture();
+		seed(cwd, home, "old");
+
+		const [summary] = listSessions(cwd, home);
+		if (!summary) throw new Error("expected a session");
+
+		expect(summary.firstUserText).toBe("old question");
+		expect(summary.truncated).toBe(false);
+		expect(formatMessageCount(summary)).toBe("2");
+		const listed = formatSessionList(listSessions(cwd, home));
+		expect(listed).toContain("(2 msgs)");
+		expect(listed).toContain("old question");
+	});
+
+	test("a transcript too long to read for a label is counted as a floor", () => {
+		const { home, cwd } = fixture();
+		const store = SessionStore.startNew(cwd, home);
+		store.appendMessage(userMessage("fix the parser"));
+		store.appendMessage(
+			assistantMessage({ content: [{ type: "text", text: "y".repeat(400_000) }], stopReason: "stop" }),
+		);
+
+		const [summary] = listSessions(cwd, home);
+		if (!summary) throw new Error("expected a session");
+
+		// The label is the reason to read the head at all, and it is there.
+		expect(summary.firstUserText).toBe("fix the parser");
+		expect(summary.truncated).toBe(true);
+		// The count is what the head holds — the reply is past the cap — so it is
+		// marked as a floor rather than passed off as a total.
+		expect(summary.messageCount).toBe(1);
+		expect(formatMessageCount(summary)).toBe("1+");
+		expect(formatSessionList([summary])).toContain("(1+ msgs)");
+	});
+});
+
+/**
+ * A session file that came back shorter than it was written.
+ *
+ * Reading one is the moment the damage is discovered, and the moment it is most
+ * tempting to say nothing: a conversation that is simply shorter looks like a
+ * conversation the user is remembering wrong.
+ */
+describe("a session file that lost a line", () => {
+	const conversation = (cwd: string, home: string) => {
+		const store = SessionStore.startNew(cwd, home);
+		const messages = [
+			userMessage("first"),
+			assistantMessage({ content: [{ type: "text", text: "first answer" }], stopReason: "stop" }),
+			userMessage("second"),
+			assistantMessage({ content: [{ type: "text", text: "second answer" }], stopReason: "stop" }),
+		];
+		for (const message of messages) store.appendMessage(message);
+		return { store, messages };
+	};
+
+	test("resumes with the messages on both sides of the damage, and says so", () => {
+		const { home, cwd } = fixture();
+		const { store, messages } = conversation(cwd, home);
+		damageLine(store.path, 4); // line 1 is the header
+
+		const loaded = loadSessionForResume(store.path);
+		if (!loaded) throw new Error("expected the session to load");
+
+		expect(loaded.messages).toEqual([messages[0], messages[1], messages[3]]);
+		// A damaged line costs a message, and nothing was removed on top of it.
+		expect(loaded.removed).toBe(0);
+		const notice = damagedSessionNotice(loaded.store, loaded.removed);
+		expect(notice).toContain("Session file damaged: 1 damaged line");
+		expect(notice).toContain(store.path);
+		expect(notice).toContain("The rest of the conversation is intact.");
+	});
+
+	test("a tool call whose result went with the damaged line is dropped, not sent", () => {
+		const { home, cwd } = fixture();
+		const store = SessionStore.startNew(cwd, home);
+		const request = userMessage("run it");
+		store.appendMessage(request);
+		store.appendMessage(
+			assistantMessage({
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "t1", name: "Read", arguments: '{"file_path":"a.txt"}' }],
+			}),
+		);
+		store.appendMessage({
+			role: "toolResult",
+			toolCallId: "t1",
+			toolName: "Read",
+			isError: false,
+			content: [{ type: "text", text: "contents" }],
+			timestamp: 1,
+		});
+		damageLine(store.path, 4); // the result's line
+
+		const loaded = loadSessionForResume(store.path);
+		if (!loaded) throw new Error("expected the session to load");
+
+		// The call that lost its result is a request the provider rejects, so both
+		// halves go — and the message that held it is a message the conversation
+		// no longer has.
+		expect(loaded.messages).toEqual([request]);
+		expect(loaded.removed).toBe(1);
+		const notice = damagedSessionNotice(loaded.store, loaded.removed);
+		expect(notice).toContain("1 damaged line and 1 message removed with its tool call");
+	});
+
+	test("says nothing about a session that came back whole", () => {
+		const { home, cwd } = fixture();
+		const { store } = conversation(cwd, home);
+
+		const loaded = loadSessionForResume(store.path);
+		if (!loaded) throw new Error("expected the session to load");
+
+		expect(loaded.removed).toBe(0);
+		expect(damagedSessionNotice(loaded.store, loaded.removed)).toBeUndefined();
+		// And a session with no removal is not reported just because it was read
+		// through a cap: a fragment is not damage.
+		const capped = SessionStore.load(store.path, { maxBytes: 8 });
+		expect(damagedSessionNotice(capped, 0)).toBeUndefined();
+	});
+
+	test("continue on a damaged file keeps the newest turn and warns", async () => {
+		const { home, cwd } = fixture();
+		const store = SessionStore.startNew(cwd, home);
+		const first = userMessage("old question");
+		const newest = userMessage("the newest question");
+		store.appendMessage(first);
+		store.appendMessage(assistantMessage({ content: [{ type: "text", text: "old answer" }], stopReason: "stop" }));
+		store.appendMessage(newest);
+		damageLine(store.path, 3); // the answer's line
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain("Session file damaged: 1 damaged line");
+		// A reader that stopped at the damaged line would resume with the first
+		// question alone; the newest thing the user wrote is still here.
+		expect(result.mountedMessages).toEqual([first, newest]);
+		expect(result.requests[0]).toEqual([
+			first,
+			newest,
+			{ role: "user", content: "new question", timestamp: expect.any(Number) },
+		]);
 	}, 30_000);
 });

@@ -28,6 +28,9 @@ export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 			"- Narrow with `include` globs before searching broad trees.",
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
+		// A search that matched a lot is a search that has to be narrowed, and the
+		// hits it did find are not reproducible by asking again — the tree moves on.
+		overflow: "spill",
 		call: async (input) => {
 			let root: string;
 			try {

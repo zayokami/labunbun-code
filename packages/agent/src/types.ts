@@ -19,6 +19,7 @@ import type {
 	WireTool,
 } from "@labunbun/ai";
 import { z } from "zod";
+import type { SpillWriter } from "./output-limits.ts";
 
 // ---------------------------------------------------------------------------
 // Permissions
@@ -99,6 +100,19 @@ export interface Tool<TInput extends z.ZodType = z.ZodType> {
 	call: (input: z.infer<TInput>, ctx: ToolCallContext) => Promise<ToolResult>;
 	/** Results longer than this are truncated by the pipeline. */
 	maxResultSizeChars?: number;
+	/**
+	 * What happens to the text past {@link maxResultSizeChars}.
+	 *
+	 * `"truncate"` (the default) keeps the head and drops the rest, which is
+	 * right for output the model can ask for again — a smaller file range, a
+	 * narrower query. `"spill"` writes the full text to the app's tool-output
+	 * directory and leaves a path in its place, for output that exists only once
+	 * and would otherwise be gone: a command's stdout, a search over a tree.
+	 *
+	 * Either way the result says what is missing; the difference is whether
+	 * anything can be done about it.
+	 */
+	overflow?: "truncate" | "spill";
 }
 
 export type AnyTool = Tool<z.ZodType>;
@@ -111,6 +125,7 @@ export function buildTool<TInput extends z.ZodType>(def: Tool<TInput>): Tool<TIn
 		isConcurrencySafe: () => false,
 		checkPermissions: async () => allow(),
 		maxResultSizeChars: 30_000,
+		overflow: "truncate",
 		...def,
 	};
 }
@@ -161,11 +176,44 @@ export interface AgentDeps {
 	canUseTool?: (toolName: string, input: unknown, ctx: PermissionContext) => Promise<PermissionResult>;
 	hooks?: LoopHooks;
 	/**
-	 * Called each turn with the current context size estimate; returns a
-	 * compacted replacement when the threshold is crossed. (Full impl: Phase 5.)
+	 * Consulted before every model call: `null` sends the context as it is, a
+	 * `compact` or `reduced` action sends its context instead, and `blocked` ends
+	 * the run with a message the user can act on — the request does not fit and
+	 * nothing could free space.
+	 *
+	 * `force` says the estimate has been proven wrong about this session: the
+	 * provider refused the last request for size, so the threshold does not get
+	 * to decide again.
 	 */
-	checkCompaction?: (context: Context) => Promise<Context | null>;
+	checkCompaction?: (context: Context, options?: { force?: boolean }) => Promise<CompactionCheck | null>;
+	/**
+	 * Where a tool result too large for the context is kept in full, supplied by
+	 * the app layer because the agent has no filesystem of its own. Returns the
+	 * path to show the model, or null if it could not be written.
+	 */
+	spillOutput?: SpillWriter;
 }
+
+/** What the cheap rung removed, in the units a person reads. */
+export interface TrimmedToolResults {
+	/** How many tool results were replaced by a preview of themselves. */
+	results: number;
+	/** How many characters those previews gave up. */
+	chars: number;
+}
+
+/**
+ * The answer to "can this context be sent?". `null` never appears here — it is
+ * the absence of an answer — so callers that got one always have a decision.
+ *
+ * `reduced` is not a lesser `compact`: it made no model call and wrote no
+ * summary, so a caller that treats the two alike will report one that did not
+ * happen. Both are a context to send instead of the one that was offered.
+ */
+export type CompactionCheck =
+	| { action: "compact"; context: Context }
+	| { action: "reduced"; context: Context; cleared: TrimmedToolResults }
+	| { action: "blocked"; message: string };
 
 // ---------------------------------------------------------------------------
 // Agent events

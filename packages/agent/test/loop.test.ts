@@ -2,9 +2,25 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FAUX_MODEL, fauxProvider, type ToolResultMessage } from "@labunbun/ai";
+import {
+	type AgentMessage,
+	FAUX_MODEL,
+	type FauxStep,
+	fauxProvider,
+	type StreamFn,
+	type ToolResultMessage,
+	userMessage,
+} from "@labunbun/ai";
 import { z } from "zod";
-import { AgentSession, type AnyTool, buildTool, deny, SessionStore } from "../src/index.ts";
+import {
+	type AgentEvent,
+	AgentSession,
+	type AnyTool,
+	buildTool,
+	deny,
+	MAX_ROUND_RESULT_CHARS,
+	SessionStore,
+} from "../src/index.ts";
 import { runHarness } from "./harness.ts";
 
 function echoTool(overrides: Partial<AnyTool> = {}): AnyTool {
@@ -104,6 +120,47 @@ describe("AgentSession loop", () => {
 		expect(results).toHaveLength(1);
 		expect(results[0].content[0]).toEqual({ type: "text", text: "echo:hi" });
 		expect(results[0].isError).toBe(false);
+	});
+
+	test("one round's tool results are bounded together, not just one by one", async () => {
+		// Each result is inside its own limit; the turn is not, and the turn is
+		// what the context grows by. What the session records is the bounded set —
+		// the same text the next request will carry.
+		const big = buildTool({
+			name: "big",
+			description: "returns a lot",
+			inputSchema: z.object({ id: z.number(), chars: z.number() }),
+			isConcurrencySafe: () => true,
+			maxResultSizeChars: Number.POSITIVE_INFINITY,
+			call: async (input) => ({ content: [{ type: "text", text: `${input.id}`.repeat(input.chars) }] }),
+		});
+
+		const { session } = await runHarness(
+			[
+				{
+					toolCalls: [
+						{ name: "big", arguments: { id: 1, chars: 100_000 } },
+						{ name: "big", arguments: { id: 2, chars: 100_000 } },
+						{ name: "big", arguments: { id: 3, chars: 100_000 } },
+					],
+				},
+				{ text: "done" },
+			],
+			{ tools: [big] },
+		);
+
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(3);
+		const shown = results.reduce(
+			(sum, result) => sum + result.content.reduce((s, b) => s + (b.type === "text" ? b.text.length : 0), 0),
+			0,
+		);
+		expect(shown).toBeLessThan(210_000);
+		// Every one of them is still there, and says it was cut: a tool result the
+		// model cannot see at all is a call it has to run again.
+		for (const result of results) {
+			expect(JSON.stringify(result.content)).toContain("truncated");
+		}
 	});
 
 	test("parallel-safe tools run concurrently but results land in source order", async () => {
@@ -419,6 +476,160 @@ describe("AgentSession loop", () => {
 		expect(maxActive).toBeLessThanOrEqual(10);
 		const results = toolResultsOf(session.messages);
 		expect(results).toHaveLength(CALL_COUNT);
+	});
+});
+
+describe("context overflow", () => {
+	function sessionWith(
+		checkCompaction: NonNullable<ConstructorParameters<typeof AgentSession>[0]["deps"]>["checkCompaction"],
+		steps: FauxStep[] = [{ text: "answer" }],
+	) {
+		const faux = fauxProvider(steps);
+		// Snapshot what each request carried. The context the loop hands the stream
+		// holds the live message array, so reading it after the run would show the
+		// reply that came back — which is not what was sent.
+		const sent: AgentMessage[][] = [];
+		const streamFn: StreamFn = async function* (model, context, options) {
+			sent.push([...context.messages]);
+			yield* faux.streamFn(model, context, options);
+		};
+		const dir = mkdtempSync(join(tmpdir(), "lbb-agent-"));
+		const home = mkdtempSync(join(tmpdir(), "lbb-agent-home-"));
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			systemPrompt: "test system prompt",
+			store: SessionStore.startNew(dir, home),
+			deps: { streamFn, checkCompaction },
+		});
+		const events: AgentEvent[] = [];
+		session.on((event) => {
+			events.push(event);
+		});
+		return { session, sent, events };
+	}
+
+	test("a blocked check ends the run without sending anything", async () => {
+		// What the provider does with a request that cannot fit is a 400, which the
+		// retry layer turns into a generic error — and a fallback chain then replays
+		// the same oversized context against the next model. Refusing here is the
+		// only place that can say why.
+		const { session, sent, events } = sessionWith(async () => ({
+			action: "blocked",
+			message: "Too big to send. Run /compact or /new.",
+		}));
+
+		expect(await session.prompt("still here")).toBe("error");
+		expect(sent).toHaveLength(0);
+		const end = events.find((event) => event.type === "agent_end");
+		expect(end?.type === "agent_end" ? end.errorMessage : undefined).toBe("Too big to send. Run /compact or /new.");
+		// The prompt is not lost: /compact acts on it, so the retry is a retry and
+		// the user does not have to type it again.
+		expect(session.messages.at(-1)).toMatchObject({ role: "user", content: "still here" });
+	});
+
+	test("a compact decision is what gets sent, and it replaces the live history", async () => {
+		const boundary = userMessage("[Conversation compacted] the summary so far");
+		const { session, sent } = sessionWith(async (context) => ({
+			action: "compact",
+			context: { ...context, messages: [boundary, ...context.messages.slice(-1)] },
+		}));
+
+		expect(await session.prompt("go")).toBe("completed");
+		// Exactly one request, carrying exactly the compacted context.
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.[0]).toBe(boundary);
+		expect(sent[0]?.[1]).toMatchObject({ role: "user", content: "go" });
+		// The live history is the compacted one, so the next turn does not send what
+		// the summary just replaced — the same object, not a copy that can drift.
+		expect(session.messages[0]).toBe(boundary);
+	});
+
+	test("a refusal for size forces the next check, and the compaction clears it", async () => {
+		// The estimate said this session had room; the provider said otherwise. The
+		// estimate is now known to be wrong, so the next turn must not consult it —
+		// otherwise every later prompt fails exactly like the first, which is how a
+		// session gets bricked.
+		const forced: (boolean | undefined)[] = [];
+		const boundary = userMessage("[Conversation compacted] the summary so far");
+		const { session, sent } = sessionWith(
+			async (context, options) => {
+				forced.push(options?.force);
+				if (!options?.force) return null;
+				return { action: "compact", context: { ...context, messages: [boundary] } };
+			},
+			[
+				{ stopReason: "error", errorMessage: "prompt is too long: 250000 tokens", errorKind: "context_overflow" },
+				{ text: "answer" },
+				{ text: "later" },
+			],
+		);
+
+		expect(await session.prompt("first")).toBe("error");
+		expect(session.contextOverflowed).toBe(true);
+		// Unforced, this check would have answered null and the identical oversized
+		// request would have been sent again.
+		expect(await session.prompt("second")).toBe("completed");
+		expect(forced).toEqual([false, true]);
+		expect(sent[1]?.[0]).toBe(boundary);
+		// Room was made, so the flag does not outlive the compaction: the next turn
+		// gets to trust the estimate again.
+		expect(session.contextOverflowed).toBe(false);
+		expect(await session.prompt("third")).toBe("completed");
+		expect(forced).toEqual([false, true, false]);
+	});
+});
+
+describe("a round of tool output, on its way into the history", () => {
+	/** Four results of this size are 400k together: twice the round budget. */
+	const RESULT_CHARS = 100_000;
+
+	test("is spilled first and bounded after, so every cut result still names its file", async () => {
+		// The order is the whole point. The round budget cuts what is left after the
+		// tool's own limit, and spilling is what happens to a result that is still
+		// whole at that moment — so cutting before spilling would throw away the only
+		// complete copy of the text, leaving four previews of nothing.
+		const spilled: string[] = [];
+		const faux = fauxProvider([
+			{ toolCalls: [0, 1, 2, 3].map((i) => ({ name: "echo", arguments: { text: `${i}` } })) },
+			{ text: "done" },
+		]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			systemPrompt: "test",
+			tools: [
+				echoTool({
+					overflow: "spill",
+					// High enough that the tool's own limit leaves each result whole:
+					// what cuts them is the round, not the tool.
+					maxResultSizeChars: 1_000_000,
+					call: async () => ({ content: [{ type: "text" as const, text: "y".repeat(RESULT_CHARS) }] }),
+				}),
+			],
+			deps: {
+				streamFn: faux.streamFn,
+				spillOutput: (request) => {
+					spilled.push(request.text);
+					return `/spill/${request.toolName}-${request.callId}.txt`;
+				},
+			},
+		});
+
+		await session.prompt("go");
+
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(4);
+		const total = results.reduce(
+			(sum, result) =>
+				sum + result.content.reduce((s, block) => s + (block.type === "text" ? block.text.length : 0), 0),
+			0,
+		);
+		expect(total).toBeLessThanOrEqual(MAX_ROUND_RESULT_CHARS + 4 * 100);
+		// Each of them reached the disk in full before being cut...
+		expect(spilled.map((text) => text.length)).toEqual([RESULT_CHARS, RESULT_CHARS, RESULT_CHARS, RESULT_CHARS]);
+		// ...and what the model is left holding points at the file that has it.
+		for (const result of results) {
+			expect((result.content[0] as { text: string }).text).toContain("/spill/echo-");
+		}
 	});
 });
 

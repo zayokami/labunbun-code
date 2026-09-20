@@ -56,6 +56,67 @@ describe("Read tool", () => {
 		const result = await call(tool, { file_path: join(tmpdir(), "definitely-missing-xyz.txt") });
 		expect(result.isError).toBe(true);
 	});
+
+	test("a result it is cut, not spilt", async () => {
+		// Read can be asked for a smaller range, so a spilled copy of a file that
+		// is still on disk is a copy nobody asked for.
+		const tool = createReadTool(tempDir(), defaultOperations());
+		expect(tool.overflow).toBe("truncate");
+		expect(Number.isFinite(tool.maxResultSizeChars)).toBe(true);
+	});
+});
+
+describe("Read and the spill directory", () => {
+	/**
+	 * A spilled Bash result lives outside the workspace, and the path in it is a
+	 * dead end unless Read is allowed to follow it back. This is that exception,
+	 * and what it does not open.
+	 */
+	function spillFixture() {
+		const cwd = tempDir();
+		const spill = tempDir();
+		const file = join(spill, "Bash-call_1.txt");
+		writeFileSync(file, "the full output");
+		return { cwd, spill, file };
+	}
+
+	test("without the root, a spill path is still outside the workspace", async () => {
+		const { cwd, file } = spillFixture();
+		const tool = createReadTool(cwd, defaultOperations());
+		const result = await call(tool, { file_path: file });
+		expect(result.isError).toBe(true);
+		expect((result.content[0] as any).text).toContain("outside workspace");
+	});
+
+	test("with the root, a spill file reads back", async () => {
+		const { cwd, spill, file } = spillFixture();
+		const tool = createReadTool(cwd, defaultOperations(), [spill]);
+		const result = await call(tool, { file_path: file });
+		expect(result.isError).toBeUndefined();
+		expect((result.content[0] as any).text).toContain("the full output");
+	});
+
+	test("the exception does not widen past the directory it names", async () => {
+		const { cwd, spill } = spillFixture();
+		const tool = createReadTool(cwd, defaultOperations(), [spill]);
+		// A sibling of the spill directory, and its parent: naming a root is not
+		// naming everything near it.
+		const sibling = join(spill, "..", "elsewhere.txt");
+		writeFileSync(join(spill, "..", "elsewhere.txt"), "not yours");
+		const result = await call(tool, { file_path: sibling });
+		expect(result.isError).toBe(true);
+		expect((result.content[0] as any).text).toContain("outside workspace");
+	});
+
+	test("Write is not granted the same exception", async () => {
+		// The root is a permission to read spilled output and nothing else: the
+		// tool that could rewrite it goes through the writable-path guard, which
+		// knows nothing about read-only roots.
+		const { cwd, spill } = spillFixture();
+		const tool = createWriteTool(cwd, defaultOperations());
+		const result = await call(tool, { file_path: join(spill, "Bash-call_1.txt"), content: "overwritten" });
+		expect(result.isError).toBe(true);
+	});
 });
 
 describe("Write + Edit tools", () => {

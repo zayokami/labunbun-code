@@ -51,6 +51,8 @@ export interface CreateAllToolsOptions {
 	taskStore?: TaskStore;
 	backgroundShells?: BackgroundShellManager;
 	webTools?: boolean;
+	/** Directories outside the workspace Read may still open (the spill dir). */
+	readOnlyRoots?: string[];
 }
 
 /**
@@ -67,7 +69,7 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		createGlobTool(cwd, ops),
 		createGrepTool(cwd, ops),
 		createLsTool(cwd, ops),
-		createReadTool(cwd, ops),
+		createReadTool(cwd, ops, options.readOnlyRoots ?? []),
 		createWriteTool(cwd, ops),
 		createBashOutputTool(background),
 		createKillBashTool(background),

@@ -113,10 +113,14 @@ export class MessageBuilder {
 		return { type: "done", message: { ...this.#message } };
 	}
 
-	error(errorMessage: string, usage?: Partial<Usage>): AssistantMessageEvent {
+	error(
+		errorMessage: string,
+		options: { errorKind?: AssistantMessage["errorKind"]; usage?: Partial<Usage> } = {},
+	): AssistantMessageEvent {
 		this.#message.stopReason = "error";
 		this.#message.errorMessage = errorMessage;
-		if (usage) this.#message.usage = { ...this.#message.usage, ...usage };
+		if (options.errorKind) this.#message.errorKind = options.errorKind;
+		if (options.usage) this.#message.usage = { ...this.#message.usage, ...options.usage };
 		return { type: "error", message: { ...this.#message } };
 	}
 

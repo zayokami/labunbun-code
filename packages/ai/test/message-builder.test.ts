@@ -212,11 +212,14 @@ describe("terminal events", () => {
 
 	test("error records the reason, the message, and any usage billed before it", () => {
 		const b = new MessageBuilder("p", "m", 0);
-		const event = b.error("provider down", { input: 5 });
+		const event = b.error("provider down", { usage: { input: 5 } });
 		expect(event.type).toBe("error");
 		expect(b.message.stopReason).toBe("error");
 		expect(b.message.errorMessage).toBe("provider down");
 		expect(b.message.usage.input).toBe(5);
+		// Unclassified unless the caller says otherwise: a caller that does not
+		// know why the request failed must not claim it does.
+		expect(b.message.errorKind).toBeUndefined();
 	});
 
 	test("aborted is an error event with the aborted reason and no message", () => {
