@@ -1,5 +1,5 @@
 /**
- * Vim modal-editing state machine — pure logic, no React/ink dependencies.
+ * Vim modal
  *
  * Modes: NORMAL, INSERT, VISUAL (charwise), V-LINE (linewise).
  *
