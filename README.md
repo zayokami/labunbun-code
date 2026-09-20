@@ -9,8 +9,10 @@ labunbun                                # interactive REPL
 
 ## Features
 
-- **Multi-provider LLM support** — Anthropic plus any OpenAI-compatible API
-  (DeepSeek, Kimi, GLM, OpenRouter, custom endpoints) via settings.
+- **Multi-provider LLM support** — Anthropic, OpenAI, Google and any
+  OpenAI-compatible API (DeepSeek, Kimi, GLM, OpenRouter, custom endpoints) via
+  settings; the startup probe asks each provider holding a key what it serves and
+  corrects the catalog from the answer.
 - **Core coding tools** — Bash (incl. `run_in_background` with BashOutput /
   KillBash), Read, Write, Edit (exact string replace with diff preview),
   Grep, Glob, LS, WebFetch, WebSearch; parallel execution of safe tools,

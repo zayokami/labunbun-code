@@ -2010,7 +2010,14 @@ function planCodex(
 			);
 		} else {
 			const resolved = resolveModelReference(modelName);
-			if (resolved) {
+			const resolvedProvider = resolved ? resolveModel(resolved)?.provider : undefined;
+			// The endpoint is part of what the user configured. When the source said
+			// "this model, on that provider", the name must not be quietly re-pointed at
+			// a first-party row that happens to share it — the same id on a different
+			// host is somebody else's server, and it would bill a different account.
+			const scopedElsewhere =
+				resolvedProvider !== undefined && providerName !== undefined && resolvedProvider !== providerName;
+			if (resolved && !scopedElsewhere) {
 				claimScalar(
 					"codex",
 					"model",
@@ -2023,6 +2030,10 @@ function planCodex(
 					providerName !== undefined && modelContextWindow !== undefined
 						? `the target already defines a "${providerName}" provider — add "${modelName}" to its models and set model to "${providerName}/${modelName}"`
 						: undefined;
+				const scopedDetail =
+					`the name also exists on the ${resolvedProvider} provider, but the source runs it on ` +
+					`"${providerName}" — add it under providers.openaiCompatible[${providerName}].models with its ` +
+					`context window, then set model to "${providerName}/${modelName}"`;
 				items.push({
 					source: "codex",
 					from: `~/.codex/config.toml → model ("${modelName}")`,
@@ -2030,9 +2041,11 @@ function planCodex(
 					action: "skip",
 					detail:
 						providerKeptItsOwn ??
-						(providerName
-							? `not in the registry — add it under providers.openaiCompatible[${providerName}].models, then set model to "${providerName}/${modelName}"`
-							: "no model in the registry matches this name — set a model reference manually"),
+						(scopedElsewhere
+							? scopedDetail
+							: providerName
+								? `not in the registry — add it under providers.openaiCompatible[${providerName}].models, then set model to "${providerName}/${modelName}"`
+								: "no model in the registry matches this name — set a model reference manually"),
 					containsSecret: false,
 				});
 			}

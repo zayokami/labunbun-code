@@ -161,8 +161,15 @@ describe("model references", () => {
 	});
 
 	test("an unknown name resolves to nothing rather than a bad reference", () => {
-		expect(resolveModelReference("gpt-5.6-terra")).toBeUndefined();
+		expect(resolveModelReference("gpt-9-ultra")).toBeUndefined();
 		expect(resolveModelReference("")).toBeUndefined();
+	});
+
+	test("a name the registry carries resolves, whichever vendor brought it", () => {
+		// The OpenAI and Gemini rows are ordinary built-ins: a source that named one
+		// imports as a working reference, not as a skip.
+		expect(resolveModelReference("gpt-5.6-terra")).toBe("gpt-5.6-terra");
+		expect(resolveModelReference("gemini-3.8-flash")).toBe("gemini-3.8-flash");
 	});
 
 	test("an unresolvable model is reported as a skip, not dropped", () => {

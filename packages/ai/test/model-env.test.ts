@@ -14,6 +14,8 @@ const TOUCHED = [
 	"ANTHROPIC_AUTH_TOKEN",
 	"DEEPSEEK_BASE_URL",
 	"ACME_AI_BASE_URL",
+	"KIMI_API_KEY",
+	"MOONSHOT_API_KEY",
 ];
 const saved = new Map<string, string | undefined>();
 
@@ -118,6 +120,21 @@ describe("resolveApiKey", () => {
 		const model = resolveModel("deepseek/deepseek-flash");
 		if (!model) throw new Error("expected the built-in model to resolve");
 		expect(apiKeyEnvNames(model)).toEqual([model.apiKeyEnv]);
+	});
+
+	test("the Kimi rows read the vendor's own variable as well", () => {
+		// Moonshot's docs name MOONSHOT_API_KEY on both platforms; KIMI_API_KEY is a
+		// name their Codex guide chose and this table had already adopted, so both
+		// have to work: a key exported under either name is the same key.
+		const model = resolveModel("kimi/kimi-k3");
+		if (!model) throw new Error("expected the built-in model to resolve");
+		expect(apiKeyEnvNames(model)).toEqual(["KIMI_API_KEY", "MOONSHOT_API_KEY"]);
+		setEnv("KIMI_API_KEY", undefined);
+		setEnv("MOONSHOT_API_KEY", "moonshot-key");
+		expect(resolveApiKey(model)).toBe("moonshot-key");
+		// The order is the precedence: whoever set both gets the one they set first.
+		setEnv("KIMI_API_KEY", "kimi-key");
+		expect(resolveApiKey(model)).toBe("kimi-key");
 	});
 
 	test("apiKeyEnvNames lists the primary first, for error messages", () => {

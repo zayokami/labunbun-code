@@ -49,6 +49,18 @@ describe("buildOpenAIRequest", () => {
 		expect(buildOpenAIRequest(MODEL, ctx(), { thinkingLevel: "high" }).reasoning_effort).toBe("high");
 		expect(buildOpenAIRequest(MODEL, ctx(), { thinkingLevel: "off" }).reasoning_effort).toBeUndefined();
 	});
+
+	test("with no level asked for, the model's own flag decides", () => {
+		// The only path by which `model.reasoning` matters: a caller that states no
+		// level. It has to send "medium" rather than nothing, because a model that
+		// thinks by default and is told nothing thinks at whatever depth it likes —
+		// and it has to send nothing at all for the rows where "medium" is not a
+		// value the vendor takes (Kimi K3's set is low/high/max, Z.AI's 5.3 is
+		// max/high/low), which is why those rows carry `reasoning: false`.
+		const reasoning = { ...MODEL, reasoning: true };
+		expect(buildOpenAIRequest(reasoning, ctx()).reasoning_effort).toBe("medium");
+		expect(buildOpenAIRequest(MODEL, ctx()).reasoning_effort).toBeUndefined();
+	});
 });
 
 describe("convertMessages", () => {

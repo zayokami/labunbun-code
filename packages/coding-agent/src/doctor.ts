@@ -49,8 +49,18 @@ export async function runDoctorChecks(settings: Settings, cwd: string): Promise<
 	}
 	checks.push({ name: "ripgrep", status: rgStatus, detail: rgDetail });
 
-	// Auth: which API keys are visible
-	const keys = ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "KIMI_API_KEY", "GLM_API_KEY"];
+	// Auth: which API keys are visible. The same names the registry reads, so a
+	// provider that resolves here is one the probe will also ask.
+	const keys = [
+		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"DEEPSEEK_API_KEY",
+		"KIMI_API_KEY",
+		"MOONSHOT_API_KEY",
+		"GLM_API_KEY",
+		"OPENAI_API_KEY",
+		"GEMINI_API_KEY",
+	];
 	const present = keys.filter((k) => process.env[k]);
 	checks.push({
 		name: "Auth",

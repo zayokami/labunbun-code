@@ -326,7 +326,8 @@ export { parseToolArguments };
 
 /** `GET /models` answers with one page and no cursor — this is the whole shape. */
 export interface OpenAIModelPage {
-	data?: Array<{ id?: string }>;
+	/** `context_length` is Kimi's; the other vendors answer with an id and nothing else. */
+	data?: Array<{ id?: string; context_length?: number }>;
 }
 
 export interface OpenAIModelsClientLike {
@@ -334,9 +335,13 @@ export interface OpenAIModelsClientLike {
 }
 
 /**
- * What this key can reach. Ids only: unlike Anthropic's, this endpoint states no
- * window, no output cap and no price, so the entries it returns can confirm an
- * id exists and can report one that does not — nothing more.
+ * What this key can reach. Almost only ids: unlike Anthropic's, this endpoint
+ * states no price and no output cap, and only one vendor states a window at all
+ * (Kimi, as `context_length`). So the entries it returns can confirm an id exists
+ * and can report one that does not — plus, where a vendor bothers, correct a
+ * window. That window matters more than it looks: it is the input to the
+ * compaction threshold, and this is the one chance to check it against the vendor
+ * without paying for a call.
  *
  * Unpaginated by the spec, so whatever comes back is the whole catalog and is
  * reported as complete.
@@ -347,10 +352,12 @@ export async function listOpenAIModels(
 ): Promise<{ models: DiscoveredModel[]; complete: boolean }> {
 	const client = options?.client ?? (await defaultModelsClient(model));
 	const response = await client.models.list({ signal: options?.signal });
-	const models = (response.data ?? [])
-		.map((entry) => entry.id)
-		.filter((id): id is string => Boolean(id))
-		.map((id) => ({ id }));
+	const models: DiscoveredModel[] = [];
+	for (const entry of response.data ?? []) {
+		if (!entry.id) continue;
+		const window = entry.context_length;
+		models.push(typeof window === "number" && window > 0 ? { id: entry.id, contextWindow: window } : { id: entry.id });
+	}
 	return { models, complete: true };
 }
 

@@ -34,7 +34,32 @@ function modelOf(reference: string): Model {
 }
 
 /** Every variable that can hand a provider a key, so a test can take them away. */
-const KEY_VARS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_API_KEY", "KIMI_API_KEY", "GLM_API_KEY"];
+const KEY_VARS = [
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"DEEPSEEK_API_KEY",
+	"KIMI_API_KEY",
+	"MOONSHOT_API_KEY",
+	"GLM_API_KEY",
+	"OPENAI_API_KEY",
+	"GEMINI_API_KEY",
+];
+
+/** Every Anthropic id in the built-in table, in table order. A complete listing
+ * that omits one drops it from the picker, so these are the ids at stake. */
+const ANTHROPIC_TABLE = [
+	"claude-fable-5-1",
+	"claude-mythos-5-1",
+	"claude-fable-5",
+	"claude-mythos-5",
+	"claude-opus-5",
+	"claude-opus-4-8",
+	"claude-opus-4-7",
+	"claude-opus-4-6",
+	"claude-sonnet-5",
+	"claude-sonnet-4-6",
+	"claude-haiku-4-5",
+];
 
 function withoutKeys(): () => void {
 	const saved = new Map<string, string | undefined>();
@@ -97,12 +122,9 @@ describe("asking the providers", () => {
 		});
 		const refresh = await refreshModelCatalog({ probe, models: [modelOf("anthropic/claude-opus-5")] });
 
-		expect(refresh?.dropped).toEqual([
-			"anthropic/claude-fable-5-1",
-			"anthropic/claude-fable-5",
-			"anthropic/claude-sonnet-5",
-			"anthropic/claude-haiku-4-5",
-		]);
+		expect(refresh?.dropped).toEqual(
+			ANTHROPIC_TABLE.filter((id) => id !== "claude-opus-5").map((id) => `anthropic/${id}`),
+		);
 		expect(
 			listModels()
 				.filter((m) => m.provider === "anthropic")
@@ -146,7 +168,7 @@ describe("asking the providers", () => {
 		const refresh = await refreshModelCatalog({ probe, models: [modelOf("anthropic/claude-sonnet-5")] });
 
 		expect(refresh?.dropped).toEqual([]);
-		expect(listModels().filter((m) => m.provider === "anthropic")).toHaveLength(5);
+		expect(listModels().filter((m) => m.provider === "anthropic")).toHaveLength(ANTHROPIC_TABLE.length);
 		// Its own row, though, is worth reading even from a fragment.
 		expect(listModels().find((m) => m.id === "claude-sonnet-5")?.contextWindow).toBe(999_000);
 	});
@@ -177,6 +199,23 @@ describe("what the answer changes", () => {
 		// The provider said nothing about the price, and there is nothing to say:
 		// the table's row is still the only price that exists.
 		expect(sonnet?.pricing?.input).toBe(2);
+	});
+
+	test("a listing that states only a window corrects it and leaves the output cap alone", async () => {
+		// The shape the vendors actually produce: Kimi states a window and no cap at
+		// all. The window is worth taking on its own — it is the input to the
+		// compaction threshold — but on its own terms: a listing that says nothing
+		// about the cap must not be read as saying there is none.
+		const { probe } = answering({
+			provider: "kimi",
+			models: [{ id: "kimi-k2.6", contextWindow: 300_000 }],
+			complete: true,
+		});
+		await refreshModelCatalog({ probe, models: [modelOf("kimi/kimi-k2.6")] });
+		const k2 = listModels().find((m) => m.id === "kimi-k2.6");
+
+		expect(k2?.contextWindow).toBe(300_000);
+		expect(k2?.maxOutputTokens).toBe(32_768);
 	});
 
 	test("a model the table has never heard of is offered when the provider states its limits", async () => {
@@ -234,14 +273,14 @@ describe("what the answer changes", () => {
 			),
 		).toEqual({
 			added: ["a", "b"],
-			dropped: ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+			dropped: [...ANTHROPIC_TABLE],
 		});
 		expect(setProviderCatalogue("anthropic", [{ id: "b", ...one }], { complete: true })).toEqual({
 			added: [],
 			// "b" is not counted as added because it was already offered; "a" and the
 			// whole built-in table are gone, because a complete listing is taken at
 			// its word — that is what makes a stale listing expensive.
-			dropped: ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "a"],
+			dropped: [...ANTHROPIC_TABLE, "a"],
 		});
 		expect(listModels().some((m) => m.id === "a")).toBe(false);
 	});
@@ -322,12 +361,21 @@ describe("what a provider answers with", () => {
 		expect(listing).toEqual({ models: [{ id: "m1" }], complete: false });
 	});
 
-	test("an OpenAI-compatible listing is ids and nothing else", async () => {
-		const client = { models: { list: async () => ({ data: [{ id: "a" }, { id: "b" }, {}] }) } };
-		// No window, no cap, no price: this endpoint is good for "does this id
-		// exist" and for nothing more, and the entries carry that shape forward.
+	test("an OpenAI-compatible listing is an id, plus a window wherever the vendor states one", async () => {
+		const client = {
+			models: {
+				list: async () => ({
+					data: [{ id: "a" }, { id: "b", context_length: 262_144 }, { id: "c", context_length: 0 }, {}],
+				}),
+			},
+		};
+		// Mostly ids: no cap and no price on this endpoint at all, and only Kimi
+		// states `context_length`. A zero is not a window — it is a vendor that
+		// filled the field in — and an entry with no id is not a model, so neither
+		// becomes one. What does come through is worth keeping: the window is the
+		// input to the compaction threshold.
 		expect(await listOpenAIModels(deepseek, { client })).toEqual({
-			models: [{ id: "a" }, { id: "b" }],
+			models: [{ id: "a" }, { id: "b", contextWindow: 262_144 }, { id: "c" }],
 			complete: true,
 		});
 	});
