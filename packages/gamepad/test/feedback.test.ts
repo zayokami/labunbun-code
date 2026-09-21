@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	ANSI_RGB,
 	createPadFeedback,
+	PAD_BLINK_ATTENTION,
 	PAD_LOW_RGB,
 	PAD_PULSE_MS,
 	PAD_RUMBLE,
@@ -20,6 +21,7 @@ import {
 	type PadRgb,
 	type PadSignal,
 	padBatteryLow,
+	padBlinkFor,
 	padLightbarFor,
 	padPalette,
 	padRgb,
@@ -110,6 +112,29 @@ describe("padLightbarFor", () => {
 	});
 });
 
+describe("padBlinkFor", () => {
+	test("a question asks the hardware to blink, in the pad's own units", () => {
+		expect(padBlinkFor(ASKING)).toEqual(PAD_BLINK_ATTENTION);
+		// Hundredths of a second, and both halves: the pad ignores a pair with a zero
+		// in it, so a "blink" that set only one would be no blink at all.
+		expect(PAD_BLINK_ATTENTION.on).toBeGreaterThan(0);
+		expect(PAD_BLINK_ATTENTION.off).toBeGreaterThan(0);
+		expect((PAD_BLINK_ATTENTION.on + PAD_BLINK_ATTENTION.off) * 10).toBe(PAD_PULSE_MS);
+	});
+
+	test("nothing else does: work, an empty battery and an idle pad keep the light steady", () => {
+		// The battery warning pulses to black in software already, and two blinks over
+		// one light is a flicker rather than an alarm.
+		expect(padBlinkFor(BUSY)).toBeUndefined();
+		expect(padBlinkFor({ ...IDLE, battery: { level: 1, cable: false } })).toBeUndefined();
+		expect(padBlinkFor(IDLE)).toBeUndefined();
+	});
+
+	test("the same priority as the colour: a question blinks while the battery goes", () => {
+		expect(padBlinkFor({ ...ASKING, battery: { level: 0, cable: false } })).toEqual(PAD_BLINK_ATTENTION);
+	});
+});
+
 describe("padBatteryLow", () => {
 	test("low means low, on battery", () => {
 		expect(padBatteryLow({ level: 0, cable: false })).toBe(true);
@@ -145,9 +170,33 @@ describe("rumble", () => {
 				expect(motor).toBeGreaterThanOrEqual(0);
 				expect(motor).toBeLessThanOrEqual(255);
 			}
+			// A second half is a buzz of its own, and it answers to the same rules:
+			// long enough to be felt, and a real silence before it, or the two halves
+			// run together into one longer buzz and the pattern says nothing.
+			if (!("again" in command)) continue;
+			expect(command.again.durationMs, name).toBeGreaterThan(0);
+			expect(command.again.afterMs, name).toBeGreaterThan(0);
 		}
 		// The one you are meant to feel from across the room is the loudest.
 		expect(PAD_RUMBLE.alert.rumble.small).toBeGreaterThan(PAD_RUMBLE.connected.rumble.small);
+	});
+
+	test("a stop is two quick taps, and the only pattern that is two of anything", () => {
+		// The table's own consistency is checked above; this is the one property the
+		// pattern exists for, and nothing about it is derivable from the numbers. The
+		// motors have no channel but rhythm: a single buzz is `done` or `working` at
+		// some volume, and "you stopped it" has to be a different *shape* or a hand
+		// cannot tell a stop from a finish without looking at the screen.
+		const stop = PAD_RUMBLE.stopped;
+		expect(stop.again).toBeDefined();
+		expect(stop.durationMs).toBeLessThan(PAD_RUMBLE.done.durationMs);
+		expect(stop.again?.durationMs ?? 0).toBeLessThan(PAD_RUMBLE.done.durationMs);
+		// And it is the only one: two patterns a hand is meant to tell apart must not
+		// both be a double tap.
+		const doubled = Object.entries(PAD_RUMBLE)
+			.filter(([, command]) => "again" in command)
+			.map(([name]) => name);
+		expect(doubled).toEqual(["stopped"]);
 	});
 
 	test("connecting is announced, because otherwise the feature is invisible", () => {
@@ -193,5 +242,50 @@ describe("rumble", () => {
 		const feedback = createPadFeedback(PALETTE);
 		expect(feedback.rumble(IDLE, BUSY, 0)).toEqual(PAD_RUMBLE.working);
 		expect(feedback.rumble(BUSY, ASKING, PAD_RUMBLE_MIN_GAP_MS - 1)).toEqual(PAD_RUMBLE.alert);
+	});
+
+	test("the battery crossing into the low band is felt, once, at the crossing", () => {
+		const feedback = createPadFeedback(PALETTE);
+		const healthy: PadSignal = { ...IDLE, battery: { level: 3, cable: false } };
+		const dying: PadSignal = { ...IDLE, battery: { level: 2, cable: false } };
+		expect(feedback.rumble(healthy, dying, 0)).toEqual(PAD_RUMBLE.low);
+
+		// The level is not the news. Staying where it is, or dropping further inside
+		// the band, is the bar's job — a warning that repeats is one that gets ignored.
+		const emptier: PadSignal = { ...IDLE, battery: { level: 0, cable: false } };
+		expect(feedback.rumble(dying, emptier, PAD_RUMBLE_MIN_GAP_MS)).toBeUndefined();
+	});
+
+	test("a pad that connects nearly empty has not crossed anything", () => {
+		// Every pad's first reading comes out of nowhere, and the buzz that announced
+		// the connection is the one the hand is still feeling. The red bar is what
+		// tells this pad from a full one.
+		const feedback = createPadFeedback(PALETTE);
+		expect(feedback.rumble(IDLE, { ...IDLE, battery: { level: 1, cable: false } }, 0)).toBeUndefined();
+	});
+
+	test("a crossing is felt even a moment after other news", () => {
+		// The one thing the gap must not swallow: the crossing happens once, and a
+		// pad that stays quiet is a pad that dies mid-sentence. Both signals carry a
+		// battery because on a pad that has been talking for a moment they always do.
+		const feedback = createPadFeedback(PALETTE);
+		const healthy: PadSignal = { ...BUSY, battery: { level: 3, cable: false } };
+		expect(feedback.rumble(IDLE, healthy, 0)).toEqual(PAD_RUMBLE.working);
+		const crossed: PadSignal = { ...BUSY, battery: { level: 1, cable: false } };
+		expect(feedback.rumble(healthy, crossed, PAD_RUMBLE_MIN_GAP_MS - 1)).toEqual(PAD_RUMBLE.low);
+	});
+
+	test("a buzz the app asked for counts as a buzz, and cannot silence a summons", () => {
+		// `/gamepad rumble`, and ○ stopping a turn: both are heard by the hand even
+		// though no state change asked for them, so the state's own news a moment
+		// later has to be measured against them like anything else.
+		const feedback = createPadFeedback(PALETTE);
+		feedback.buzzed(0);
+		expect(feedback.rumble(IDLE, BUSY, PAD_RUMBLE_MIN_GAP_MS - 1)).toBeUndefined();
+		expect(feedback.rumble(IDLE, BUSY, PAD_RUMBLE_MIN_GAP_MS)).toEqual(PAD_RUMBLE.working);
+
+		// The question is exempt from the gap at every moment, this one included.
+		feedback.buzzed(PAD_RUMBLE_MIN_GAP_MS);
+		expect(feedback.rumble(BUSY, ASKING, PAD_RUMBLE_MIN_GAP_MS + 1)).toEqual(PAD_RUMBLE.alert);
 	});
 });

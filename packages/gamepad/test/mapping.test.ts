@@ -14,6 +14,7 @@ import {
 	createMapper,
 	DEFAULT_BINDINGS,
 	type Ds4State,
+	type Ds4Touch,
 	PAD_DEADZONE,
 	PAD_HOLD_MS,
 	PAD_STICK_HYSTERESIS,
@@ -25,6 +26,9 @@ import {
 	stickDirection,
 } from "../src/index.ts";
 
+/** A surface nobody is touching: the state most of these tests are in. */
+const NO_TOUCH: Ds4Touch = [undefined, undefined];
+
 function state(overrides: Partial<Ds4State> = {}): Ds4State {
 	return {
 		leftStick: { x: 0, y: 0 },
@@ -34,6 +38,7 @@ function state(overrides: Partial<Ds4State> = {}): Ds4State {
 		dpad: null,
 		buttons: [],
 		battery: { level: 10, cable: false },
+		touch: NO_TOUCH,
 		...overrides,
 	};
 }
@@ -125,6 +130,44 @@ describe("holding confirm", () => {
 		expect(mapper.update(pad(["cross"]), PAD_HOLD_MS + 500)).toEqual([]);
 	});
 
+	test("a hold is time the pad spent reporting, not time the clock spent passing", () => {
+		const mapper = mapperWith();
+		mapper.update(pad(["cross"]), 0);
+		expect(mapper.update(pad(["cross"]), 100)).toEqual([]);
+
+		// Eight hundred milliseconds of nothing from the pad, with ✕ still down.
+		// The button never moved, but nobody saw it not move: the run of reports
+		// vouching for the press starts again here, so five hundred of the six
+		// hundred are still to come.
+		expect(mapper.update(pad(["cross"]), 900, undefined, 800)).toEqual([]);
+		// The press is not a new one and not a released one — just nine hundred
+		// milliseconds older than anything the pad has vouched for.
+		expect(mapper.update(pad(["cross"]), 1_399)).toEqual([]);
+		expect(only(mapper.update(pad(["cross"]), 1_400))).toEqual({
+			kind: "confirm",
+			button: "cross",
+			// The true age of the press, which is what a dialog reads to ask whether
+			// it was aimed at it — and why a press older than its own hold stays on
+			// the safe side of that question.
+			heldMs: 1_400,
+			phase: "hold",
+		});
+	});
+
+	test("the quiet does not make a press look younger than it is", () => {
+		const mapper = mapperWith();
+		mapper.update(pad(["cross"]), 0);
+		// Silence, and then the thumb comes off. The release still says how long the
+		// button was really down: a question that appeared while the pad was quiet
+		// is not answered by a press that began before it.
+		expect(only(mapper.update(pad(), 1_000, undefined, 800))).toEqual({
+			kind: "confirm",
+			button: "cross",
+			phase: "release",
+			heldMs: 1_000,
+		});
+	});
+
 	test("the hold outranks a release that arrives on the same report", () => {
 		// Two milliseconds of report jitter must not turn "held for a decision"
 		// into "a press that ended". The hold comes out first, and the release
@@ -145,6 +188,70 @@ describe("holding confirm", () => {
 		mapper.update(pad(), 800);
 		mapper.update(pad(["cross"]), 900);
 		expect(mapper.update(pad(["cross"]), 900 + PAD_HOLD_MS)).toEqual([]);
+	});
+});
+
+describe("gestures", () => {
+	test("are held like a button: a press on the report they arrived, a release after", () => {
+		const mapper = mapperWith();
+		expect(only(mapper.update(pad(), 0, ["touch-left"]))).toEqual({
+			kind: "left",
+			button: "touch-left",
+			phase: "press",
+			heldMs: 0,
+		});
+		// The report after a step holds nothing, which is what makes a step an event
+		// rather than a key that stays down.
+		expect(only(mapper.update(pad(), 4, []))).toEqual({
+			kind: "left",
+			button: "touch-left",
+			phase: "release",
+			heldMs: 4,
+		});
+		expect(mapper.update(pad(), 8, [])).toEqual([]);
+	});
+
+	test("and a button in the same report are both reported, buttons first", () => {
+		const mapper = mapperWith();
+		const actions = mapper.update(pad(["cross"]), 0, ["touch-tap"]);
+		expect(actions.map((action) => action.button)).toEqual(["cross", "touch-tap"]);
+		expect(actions.map((action) => action.kind)).toEqual(["confirm", "confirm"]);
+	});
+
+	test("a tap bound to confirm never becomes a hold, however long the pad says it was down", () => {
+		// The one rule gestures do not share with buttons, and it is a safety rule: a
+		// gesture lasts exactly one report, so the only way one can reach the hold
+		// threshold is by the reports stopping — a pad that went to sleep with a
+		// finger on it. Left in, that would answer a permission dialog with "always
+		// allow", which is a decision nobody made.
+		const mapper = mapperWith();
+		mapper.update(pad(), 0, ["touch-tap"]);
+		expect(mapper.update(pad(), PAD_HOLD_MS, ["touch-tap"])).toEqual([]);
+		expect(mapper.update(pad(), PAD_HOLD_MS * 4, ["touch-tap"])).toEqual([]);
+		// And the button it is the neighbour of still holds, so this is about
+		// gestures and not about the hold having been turned off.
+		mapper.update(pad(), 10_000, []);
+		mapper.update(pad(["cross"]), 10_100);
+		expect(only(mapper.update(pad(["cross"]), 10_100 + PAD_HOLD_MS))?.phase).toBe("hold");
+	});
+
+	test("a gesture the user unbound says nothing at all", () => {
+		const { bindings } = resolveBindings({ "touch-tap": "none" });
+		const mapper = mapperWith(bindings);
+		expect(mapper.update(pad(), 0, ["touch-tap"])).toEqual([]);
+		expect(mapper.update(pad(), 4, [])).toEqual([]);
+	});
+
+	test("a gesture can be rebound to a command like any other control", () => {
+		const { bindings } = resolveBindings({ "touch-two-right": "command:/model" });
+		const mapper = mapperWith(bindings);
+		expect(only(mapper.update(pad(), 0, ["touch-two-right"]))).toEqual({
+			kind: "command",
+			button: "touch-two-right",
+			phase: "press",
+			heldMs: 0,
+			command: "/model",
+		});
 	});
 });
 

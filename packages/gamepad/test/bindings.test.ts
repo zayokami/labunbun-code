@@ -12,16 +12,16 @@ import { describe, expect, test } from "bun:test";
 import {
 	bindingText,
 	DEFAULT_BINDINGS,
-	DS4_BUTTON_IDS,
 	PAD_ACTION_KINDS,
+	PAD_INPUT_IDS,
 	type PadBindingMap,
 	resolveBindings,
 } from "../src/index.ts";
 
 describe("DEFAULT_BINDINGS", () => {
-	test("binds every button, and nothing else", () => {
-		expect(Object.keys(DEFAULT_BINDINGS).sort()).toEqual([...DS4_BUTTON_IDS].sort());
-		for (const button of DS4_BUTTON_IDS) expect(DEFAULT_BINDINGS[button]).toBeDefined();
+	test("binds every button and every gesture, and nothing else", () => {
+		expect(Object.keys(DEFAULT_BINDINGS).sort()).toEqual([...PAD_INPUT_IDS].sort());
+		for (const control of PAD_INPUT_IDS) expect(DEFAULT_BINDINGS[control]).toBeDefined();
 	});
 
 	test("the table a user reads in the docs is the table in the code", () => {
@@ -45,10 +45,23 @@ describe("DEFAULT_BINDINGS", () => {
 		expect(kinds("r2")).toBe("none");
 	});
 
+	test("the surface's gestures answer to what a thumb drawn across it means", () => {
+		const kinds = (gesture: keyof PadBindingMap) => bindingText(DEFAULT_BINDINGS[gesture]);
+		// A drag is the move the d-pad and the stick make, in the direction it went.
+		expect(kinds("touch-up")).toBe("up");
+		expect(kinds("touch-down")).toBe("down");
+		expect(kinds("touch-left")).toBe("left");
+		expect(kinds("touch-right")).toBe("right");
+		// A tap is the click's neighbour, and the only gesture worth a confirm.
+		expect(kinds("touch-tap")).toBe("confirm");
+		expect(kinds("touch-two-left")).toBe("page-prev");
+		expect(kinds("touch-two-right")).toBe("page-next");
+	});
+
 	test("every value it hands out is an action the type allows", () => {
 		// The kinds a component can ever switch on: the list, plus `command`.
 		const allowed: readonly string[] = [...PAD_ACTION_KINDS, "command"];
-		for (const button of DS4_BUTTON_IDS) expect(allowed).toContain(DEFAULT_BINDINGS[button].kind);
+		for (const control of PAD_INPUT_IDS) expect(allowed).toContain(DEFAULT_BINDINGS[control].kind);
 	});
 });
 
@@ -84,6 +97,25 @@ describe("resolveBindings", () => {
 		const { bindings, problems } = resolveBindings({ triaangle: "confirm" });
 		expect(bindings).toEqual(DEFAULT_BINDINGS);
 		expect(problems).toEqual([expect.stringContaining("bindings.triaangle: not a button")]);
+	});
+
+	test("a gesture is bound by the same name a button is", () => {
+		const { bindings, problems } = resolveBindings({ "touch-tap": "none", " Touch-TWO-Left ": "command:/model" });
+		expect(problems).toEqual([]);
+		expect(bindingText(bindings["touch-tap"])).toBe("none");
+		expect(bindingText(bindings["touch-two-left"])).toBe("command:/model");
+		// The one they were editing, and not the buttons they were not.
+		expect(bindingText(bindings.cross)).toBe("confirm");
+	});
+
+	test("a gesture spelled wrong is a problem, and the line lists the gestures by name", () => {
+		// The reason the gesture names are in the same list as the buttons: a
+		// mistyped touch gesture has to be a sentence a user can act on, not a
+		// binding that silently never fires.
+		const { bindings, problems } = resolveBindings({ "touch-tapp": "confirm" });
+		expect(bindings).toEqual(DEFAULT_BINDINGS);
+		expect(problems).toEqual([expect.stringContaining("bindings.touch-tapp: not a button or gesture")]);
+		expect(problems[0]).toContain("touch-tap");
 	});
 
 	test("an action that does not exist is a problem, and the default stands", () => {

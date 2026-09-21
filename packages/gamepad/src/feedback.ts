@@ -107,12 +107,50 @@ export const PAD_BREATHE_MS = 1600;
 /** A full on/off cycle of the low battery blink. */
 export const PAD_LOW_PULSE_MS = 1000;
 
+/** The pad counts a blink in units of this long. See `Ds4OutputState.blink`. */
+const BLINK_UNIT_MS = 10;
+
+export interface PadBlink {
+	/** Hundredths of a second lit. */
+	on: number;
+	/** Hundredths of a second dark. The pad needs both halves or neither takes. */
+	off: number;
+}
+
+/**
+ * The blink a question asks the hardware for: half a second on, half a second
+ * off — `PAD_PULSE_MS`'s own period, so the bar does not change rhythm when the
+ * hardware takes over turning it off.
+ *
+ * It is a separate thing from the software pulse on purpose. That one only dims,
+ * to `PULSE_FLOOR`, and a bar that dims is a bar you can miss from the sofa —
+ * which is the one thing a question must not be. This is the only state that asks
+ * for it: the battery warning already goes to black on its own (its pulse floor is
+ * zero), and two blinks over one light is a flicker.
+ */
+export const PAD_BLINK_ATTENTION: PadBlink = {
+	on: PAD_PULSE_MS / 2 / BLINK_UNIT_MS,
+	off: PAD_PULSE_MS / 2 / BLINK_UNIT_MS,
+};
+
 /** At or below this, on battery: tell the user before the pad dies mid-sentence. */
 export const PAD_LOW_BATTERY_LEVEL = 2;
 
 const IDLE_SCALE = 0.25;
 const PULSE_FLOOR = 0.25;
 const BREATHE_FLOOR = 0.15;
+
+/**
+ * What the bar is being asked to say, in priority order. One function because the
+ * order is one decision, and two answers from one light — a colour saying "answer
+ * me" and a blink saying "the battery is going" — is a light that says neither.
+ */
+function barState(signal: PadSignal): "awaiting" | "busy" | "low" | "idle" {
+	if (signal.awaiting) return "awaiting";
+	if (signal.phase === "busy") return "busy";
+	if (padBatteryLow(signal.battery)) return "low";
+	return "idle";
+}
 
 /**
  * The colour the lightbar should be *now*. Called on a tick, so it is pure and
@@ -124,10 +162,24 @@ const BREATHE_FLOOR = 0.15;
  * breathing accent is just noise in the user's hands.
  */
 export function padLightbarFor(signal: PadSignal, now: number, palette: PadPalette): PadRgb {
-	if (signal.awaiting) return scale(palette.alert, pulse(now, PAD_PULSE_MS, PULSE_FLOOR));
-	if (signal.phase === "busy") return scale(palette.accent, breathe(now));
-	if (padBatteryLow(signal.battery)) return scale(palette.low, pulse(now, PAD_LOW_PULSE_MS, 0));
+	const state = barState(signal);
+	if (state === "awaiting") return scale(palette.alert, pulse(now, PAD_PULSE_MS, PULSE_FLOOR));
+	if (state === "busy") return scale(palette.accent, breathe(now));
+	if (state === "low") return scale(palette.low, pulse(now, PAD_LOW_PULSE_MS, 0));
 	return scale(palette.accent, IDLE_SCALE);
+}
+
+/**
+ * The hardware blink this state asks for, if any — the other half of the same
+ * answer, asked once so the two cannot disagree about which state the bar is in.
+ *
+ * A level like the colour, not an event: it says what the pad should be doing from
+ * now on, and the way to stop it is to send a packet that does not ask for it. The
+ * whole packet describes the pad, so leaving the state turns the blinking off
+ * without anything having to unwind a timer.
+ */
+export function padBlinkFor(signal: PadSignal): PadBlink | undefined {
+	return barState(signal) === "awaiting" ? PAD_BLINK_ATTENTION : undefined;
 }
 
 /** On battery, and nearly out of it. On the cable it is charging, not dying. */
@@ -147,27 +199,53 @@ export interface PadRumbleCommand {
 	rumble: PadRumble;
 	/** How long to leave it on. The service schedules the stop. */
 	durationMs: number;
+	/**
+	 * A second buzz of the same shape, after the first has stopped and this long
+	 * has passed: `afterMs` is the silence *between* the two, not from the start.
+	 * The one pattern a hand hears as two, and the service that already owns the
+	 * stop owns the restart.
+	 */
+	again?: { afterMs: number; durationMs: number };
+	/**
+	 * Felt even if something else just buzzed. For the news that arrives once: a
+	 * question, and the battery crossing. Both are summonses rather than bulletins,
+	 * and neither comes round again — being dropped is being lost.
+	 */
+	urgent?: boolean;
 }
 
 /**
- * The buzzes. Each is one write and one scheduled stop — no patterns that take a
- * sequence, because a sequence is a timer this file would have to own.
+ * The buzzes. Each is one write and one scheduled stop — plus, for the one pattern
+ * that is heard as two, a second write on the same timer machinery. Nothing here is
+ * a queue: a command says what the hand should feel now, and the stop belongs to the
+ * service either way.
  */
 export const PAD_RUMBLE = {
 	/** The pad just answered: proof the feature is alive without looking. */
 	connected: { durationMs: 60, rumble: { large: 0, small: 0x40 } },
 	/** Someone wants a decision. Felt across the room, deliberately. */
-	alert: { durationMs: 180, rumble: { large: 0x80, small: 0x80 } },
+	alert: { durationMs: 180, rumble: { large: 0x80, small: 0x80 }, urgent: true },
 	/** Work started. */
 	working: { durationMs: 80, rumble: { large: 0, small: 0x50 } },
 	/** Work finished. Softer and longer than `working`, so the two are told apart. */
 	done: { durationMs: 200, rumble: { large: 0x40, small: 0 } },
 	/**
-	 * A key that does nothing here — the pad answered a dialog the user has not
-	 * let it answer. Deliberately the faintest thing the motors can say: it is
-	 * information, not a complaint.
+	 * The user stopped a turn that was running. Two short buzzes of one shape, which
+	 * is the only way a hand can tell "stopped" from "finished" when all the motors
+	 * offer is a level: `done` is one longer, deeper note, and this is a double tap.
+	 */
+	stopped: { durationMs: 60, rumble: { large: 0, small: 0x60 }, again: { afterMs: 70, durationMs: 60 } },
+	/**
+	 * A no from the pad: ○ on a permission dialog, or ✕ on one the user has not let
+	 * the pad answer. Deliberately the faintest thing the motors can say: it is
+	 * information, not a complaint, and the screen has already said which no it was.
 	 */
 	refused: { durationMs: 60, rumble: { large: 0, small: 0x20 } },
+	/**
+	 * The battery crossed into the low band while in use. Both motors, gently: the
+	 * warning is about later rather than about now, and the bar has gone red as well.
+	 */
+	low: { durationMs: 160, rumble: { large: 0x28, small: 0x10 }, urgent: true },
 } as const satisfies Record<string, PadRumbleCommand>;
 
 export type PadRumbleEvent = keyof typeof PAD_RUMBLE;
@@ -178,8 +256,17 @@ export const PAD_RUMBLE_MIN_GAP_MS = 1000;
 export interface PadFeedback {
 	/** The colour for right now. */
 	lightbar(signal: PadSignal, now: number): PadRgb;
+	/** The blink for right now, if the state asks for one. */
+	blink(signal: PadSignal): PadBlink | undefined;
 	/** The buzz a change deserves, or `undefined` for "leave the motors alone". */
 	rumble(prev: PadSignal | undefined, next: PadSignal | undefined, now: number): PadRumbleCommand | undefined;
+	/**
+	 * Record a buzz the app asked for directly — one that did not come from a state
+	 * change, so this file did not hand it out. The next event measures its gap
+	 * against it: without this, a buzz the user asked for and the state's own news
+	 * a moment later land as the one stutter the gap exists to prevent.
+	 */
+	buzzed(now: number): void;
 }
 
 export function createPadFeedback(palette: PadPalette): PadFeedback {
@@ -188,19 +275,30 @@ export function createPadFeedback(palette: PadPalette): PadFeedback {
 		lightbar(signal, now) {
 			return padLightbarFor(signal, now, palette);
 		},
+		blink(signal) {
+			return padBlinkFor(signal);
+		},
 		rumble(prev, next, now) {
 			if (next === undefined) return undefined;
 			const event = rumbleEvent(prev, next);
 			if (event === undefined) return undefined;
 			// A gap, not a queue: dropping the second event is the point. Two buzzes
-			// a moment apart read as one stutter, not as two pieces of news — except
-			// for the question, which is a summons rather than news. A turn that
-			// starts and is stopped by a permission a moment later is the one case
-			// where being felt is the whole job: swallowing that buzz would make the
-			// pad go quiet at the exact moment it is needed.
-			if (event !== "alert" && rumbledAt !== undefined && now - rumbledAt < PAD_RUMBLE_MIN_GAP_MS) return undefined;
+			// a moment apart read as one stutter, not as two pieces of news. The
+			// exception is the pair that is a summons rather than a bulletin — a
+			// turn that starts and is stopped by a permission a moment later, a
+			// battery that crosses into the low band as a turn begins. Both are felt
+			// once or not at all, so the gap that keeps news from stuttering must not
+			// swallow them: the pad would go quiet at the exact moment it is needed.
+			// Annotated because the table is `as const`: without it the union of entry
+			// types has `urgent` on some members and not others, and the question
+			// being asked is the one on the interface.
+			const command: PadRumbleCommand = PAD_RUMBLE[event];
+			if (!command.urgent && rumbledAt !== undefined && now - rumbledAt < PAD_RUMBLE_MIN_GAP_MS) return undefined;
 			rumbledAt = now;
-			return PAD_RUMBLE[event];
+			return command;
+		},
+		buzzed(now) {
+			rumbledAt = now;
 		},
 	};
 }
@@ -210,6 +308,16 @@ function rumbleEvent(prev: PadSignal | undefined, next: PadSignal): PadRumbleEve
 	if (prev === undefined) return "connected";
 	if (!prev.awaiting && next.awaiting) return "alert";
 	if (prev.awaiting !== next.awaiting) return undefined; // answered: the screen is the feedback
+	// The crossing, not the level: a pad that is low and drops further says nothing
+	// here — the bar has been red the whole time, and a warning that repeats is a
+	// warning that gets ignored. A battery nobody has read yet is not a crossing out
+	// of anywhere either, which is the case that matters: every pad's first report
+	// is a reading from nowhere, and the one arriving with an empty cell has just
+	// buzzed to say it is here. The red bar is what tells it apart from a full one.
+	//
+	// Asked before the phase change, because a battery that is about to die outranks
+	// a turn that is about to start: the crossing cannot happen again, the turn can.
+	if (prev.battery !== undefined && padBatteryLow(next.battery) && !padBatteryLow(prev.battery)) return "low";
 	if (prev.phase === next.phase) return undefined;
 	return next.phase === "busy" ? "working" : "done";
 }

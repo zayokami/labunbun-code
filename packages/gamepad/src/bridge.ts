@@ -41,6 +41,9 @@ export interface PadBridgeOptions {
 	reconnectMs?: number;
 	outputMs?: number;
 	silenceMs?: number;
+	/** Whether the pad may buzz, and whether it may light. Both default to on. */
+	rumble?: boolean;
+	lightbar?: boolean;
 	clock?: PadClock;
 	/**
 	 * Whether the pad may answer a permission dialog. **Off unless the user says
@@ -99,6 +102,8 @@ export function createPadBridge(options: PadBridgeOptions): PadInstallation {
 			reconnectMs: options.reconnectMs,
 			outputMs: options.outputMs,
 			silenceMs: options.silenceMs,
+			rumble: options.rumble,
+			lightbar: options.lightbar,
 		},
 		{
 			source: options.source,

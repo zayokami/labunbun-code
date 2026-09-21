@@ -14,8 +14,9 @@
  * is what tells a dialog whether the press it just saw predates it.
  */
 
-import type { PadActionKind, PadBindingMap, PadDirection } from "./bindings.ts";
-import type { Ds4ButtonId, Ds4State } from "./ds4.ts";
+import type { PadActionKind, PadBindingMap, PadDirection, PadInputId } from "./bindings.ts";
+import type { Ds4State } from "./ds4.ts";
+import { isPadTouchId, type PadTouchId } from "./touch.ts";
 
 export type PadPhase = "press" | "release" | "hold";
 
@@ -26,8 +27,8 @@ export interface PadAction {
 	 * means "do nothing" is not a thing anyone downstream has to handle.
 	 */
 	kind: Exclude<PadActionKind, "none"> | "command";
-	/** Where it came from. `"stick"` is anything the sticks produced. */
-	button: Ds4ButtonId | "stick";
+	/** Where it came from: the button, the gesture, or `"stick"` for the sticks. */
+	button: PadInputId | "stick";
 	/** A repeat is a `press`: holding up keeps walking the list. */
 	phase: PadPhase;
 	/** How long the button had been down when this came out. 0 for `scroll`. */
@@ -123,8 +124,19 @@ export interface PadMapper {
 	 * every report — a quarter of a millisecond's worth of work at 250 Hz — so
 	 * repeats are settled here too: a held button needs no timer when the reports
 	 * themselves are the timer.
+	 *
+	 * `gestures` are the touch ids held during this report, and they are held the
+	 * same way a button is: one frame of presence is a press, the next frame's
+	 * absence is the release. Nothing below asks which is which — a gesture bound
+	 * to `confirm` confirms — with one exception worth knowing about, in the holds.
+	 *
+	 * `quietMs` is how long the pad spent saying nothing between the last report
+	 * and this one, and it is the caller's to pass because the caller is the only
+	 * one who sees the wire: a mapper asked at seven hundred millisecond intervals
+	 * by a test is not a pad that went quiet. Time the pad spent silent is not
+	 * time a button spent down — see `holdFrom`.
 	 */
-	update(state: Ds4State, now: number): PadAction[];
+	update(state: Ds4State, now: number, gestures?: readonly PadTouchId[], quietMs?: number): PadAction[];
 	/** The pad went away: forget every press and say nothing. */
 	reset(): void;
 	/** Stop repeating, keep the presses. A button held across a change of owner
@@ -135,10 +147,26 @@ export interface PadMapper {
 interface Press {
 	/** When it began; every `heldMs` is measured from here. */
 	at: number;
+	/**
+	 * `confirm` only: when the run of reports vouching for this press began —
+	 * `at`, until the pad goes quiet mid-press, at which point every silent
+	 * millisecond is added on. A hold is a claim about time the pad spent saying
+	 * "still down", and a pad that stopped talking spent none of it: without this
+	 * a ✕ that was down when the pad slept would come back at the age of the
+	 * silence and answer a permission dialog with "always allow" — a decision
+	 * nobody made, and one the dialog's aimed-at rule cannot catch, since that
+	 * rule only knows when the press began, not what it survived.
+	 *
+	 * `heldMs` still reports the true age of the press. A hold that has lost time
+	 * to a silence is therefore *older* than the 600 ms it took to earn, which is
+	 * the conservative way round: a press that began before a question appeared
+	 * stays a press that began before it.
+	 */
+	holdFrom: number;
 	kind: PadActionKind | "command";
 	command?: string;
-	/** The button to report — the d-pad id, or `"stick"` when the stick made it. */
-	button: Ds4ButtonId | "stick";
+	/** The control to report — the d-pad id, the gesture, or `"stick"`. */
+	button: PadInputId | "stick";
 	/** `confirm` only: whether the hold has already been reported. */
 	reportedHold: boolean;
 	/** Cleared by `suspendRepeat`. */
@@ -157,18 +185,27 @@ export function createMapper(config: PadMapperConfig): PadMapper {
 	const repeat: PadRepeat = { ...DEFAULT_PAD_REPEAT, ...config.repeat };
 	const deadzone = config.deadzone ?? PAD_DEADZONE;
 	const { bindings } = config;
-	const presses = new Map<Ds4ButtonId, Press>();
+	const presses = new Map<PadInputId, Press>();
 	let stick: PadDirection | null = null;
 	let scroll: Scroll | undefined;
 
 	return {
-		update(state, now) {
+		update(state, now, gestures, quietMs = 0) {
 			const actions: PadAction[] = [];
 			const emit = (next: PadAction | undefined) => {
 				if (next) actions.push(next);
 			};
+			// The presses here are the ones from the previous report — new ones are
+			// made further down — so every one of them spans the quiet the caller is
+			// reporting, and every one of them loses that much of its hold. The
+			// presses themselves are untouched: nothing is released and nothing is
+			// pressed, the clock a hold is measured from just moves forward.
+			for (const press of presses.values()) press.holdFrom += quietMs;
 			stick = stickDirection(state.leftStick.x, state.leftStick.y, stick, deadzone);
-			const held = new Set<Ds4ButtonId>(state.buttons);
+			const held = new Set<PadInputId>(state.buttons);
+			// A gesture is held for the one report it was crossed on, so this is a
+			// press and a release back to back — which is what a step or a tap *is*.
+			for (const gesture of gestures ?? []) held.add(gesture);
 			if (stick) held.add(stick);
 			const intervalMs = intervalFor(repeat, state);
 
@@ -178,8 +215,11 @@ export function createMapper(config: PadMapperConfig): PadMapper {
 				const binding = bindings[slot];
 				const press: Press = {
 					at: now,
+					holdFrom: now,
 					kind: binding.kind,
-					button: stick === slot && !state.buttons.includes(slot) ? "stick" : slot,
+					// A stick direction that is not also a button held is the stick's;
+					// the comparison is by name because the two id families overlap.
+					button: stick === slot && !state.buttons.some((id) => id === slot) ? "stick" : slot,
 					reportedHold: false,
 					repeats: true,
 				};
@@ -208,7 +248,14 @@ export function createMapper(config: PadMapperConfig): PadMapper {
 			// the threshold owns the report it lands on, even if that same report
 			// also brings the release.
 			for (const press of presses.values()) {
-				if (press.reportedHold || press.kind !== "confirm" || now - press.at < PAD_HOLD_MS) continue;
+				// A gesture is an edge: it exists for exactly the one report it was
+				// crossed on, so there is no such thing as holding one — a finger on the
+				// surface for a second is a drag or nothing at all, never a press that
+				// has not been released. Left in, a tap that happened to be the last
+				// report before the pad slept would reach this threshold and answer a
+				// permission dialog with "always allow": a decision nobody made.
+				if (isPadTouchId(press.button)) continue;
+				if (press.reportedHold || press.kind !== "confirm" || now - press.holdFrom < PAD_HOLD_MS) continue;
 				press.reportedHold = true;
 				emit(action(press, "hold", now));
 			}

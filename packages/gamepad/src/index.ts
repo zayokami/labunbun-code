@@ -6,10 +6,12 @@ export {
 	PAD_ACTION_KINDS,
 	PAD_COMMAND_PREFIX,
 	PAD_DIRECTIONS,
+	PAD_INPUT_IDS,
 	type PadActionKind,
 	type PadBinding,
 	type PadBindingMap,
 	type PadDirection,
+	type PadInputId,
 	type ResolvedBindings,
 	resolveBindings,
 } from "./bindings.ts";
@@ -44,15 +46,21 @@ export {
 	type Ds4OutputState,
 	type Ds4Report,
 	type Ds4State,
+	type Ds4Touch,
+	type Ds4TouchPoint,
 	type Ds4Transport,
 	decodeBattery,
+	decodeTouch,
 	describeModel,
 	parseDs4Input,
+	TOUCH_HEIGHT,
+	TOUCH_WIDTH,
 } from "./ds4.ts";
 
 export {
 	ANSI_RGB,
 	createPadFeedback,
+	PAD_BLINK_ATTENTION,
 	PAD_BREATHE_MS,
 	PAD_LOW_BATTERY_LEVEL,
 	PAD_LOW_PULSE_MS,
@@ -61,6 +69,7 @@ export {
 	PAD_RUMBLE,
 	PAD_RUMBLE_MIN_GAP_MS,
 	PAD_WHITE,
+	type PadBlink,
 	type PadFeedback,
 	type PadPalette,
 	type PadRgb,
@@ -69,6 +78,7 @@ export {
 	type PadSignal,
 	type PadUiPhase,
 	padBatteryLow,
+	padBlinkFor,
 	padLightbarFor,
 	padPalette,
 	padRgb,
@@ -120,7 +130,6 @@ export {
 } from "./source.ts";
 
 export { createFauxSource, FAUX_DS4, type FauxSource } from "./sources/faux.ts";
-
 export {
 	createNodeHidSource,
 	importNodeHid,
@@ -132,3 +141,15 @@ export {
 	type NodeHidSourceOptions,
 	nodeHidModuleFrom,
 } from "./sources/node-hid.ts";
+export {
+	createTouchReader,
+	isPadTouchId,
+	PAD_TOUCH_IDS,
+	type PadTouchConfig,
+	type PadTouchId,
+	type PadTouchReader,
+	TOUCH_AXIS_BIAS,
+	TOUCH_STEP,
+	TOUCH_TAP_MS,
+	TOUCH_TAP_SLOP,
+} from "./touch.ts";

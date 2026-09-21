@@ -19,6 +19,7 @@ import {
 	createPadService,
 	DEFAULT_BINDINGS,
 	type FauxSource,
+	PAD_BLINK_ATTENTION,
 	PAD_LOW_RGB,
 	PAD_RUMBLE,
 	PAD_RUMBLE_MIN_GAP_MS,
@@ -30,7 +31,7 @@ import {
 } from "../src/index.ts";
 import { createFauxClock, type FauxClock } from "./clock.ts";
 import { attachedTwice, wiredDevice, wirelessDevice } from "./devices.ts";
-import { battery, bluetoothBytes, CROSS, DPAD_UP, usbBytes } from "./reports.ts";
+import { battery, bluetoothBytes, CROSS, DPAD_UP, finger, usbBytes } from "./reports.ts";
 
 const PALETTE = padPalette({ accent: "cyan", alert: "magenta" });
 const CYAN = { r: 58, g: 150, b: 221 };
@@ -76,6 +77,20 @@ const RUMBLE_NAMES = new Map(
 	Object.entries(PAD_RUMBLE).map(([name, command]) => [`${command.rumble.small}/${command.rumble.large}`, name]),
 );
 
+/** The blink bytes of a written packet, whichever transport built it. */
+function blink(packet: Uint8Array | undefined) {
+	if (packet === undefined) return undefined;
+	const at = packet[0] === 0x05 ? { on: 9, off: 10 } : { on: 11, off: 12 };
+	return { on: packet[at.on], off: packet[at.off] };
+}
+
+/** The motors of the last thing written, as the words the table uses. */
+function lastMotors(source: FauxSource): string {
+	const motors = output(source.writes().at(-1));
+	if (motors === undefined) return "nothing";
+	return RUMBLE_NAMES.get(`${motors.small}/${motors.large}`) ?? `${motors.small}/${motors.large}`;
+}
+
 /**
  * The buzzes the motors were given, in order, collapsed: sixteen writes of the
  * same 0x50 while a pattern plays are one buzz to the hand holding the pad, and
@@ -99,6 +114,31 @@ describe("finding a controller", () => {
 		expect(service.status().phase).toBe("connected");
 		expect(service.status().device?.path).toBe("faux://dualshock-4-v2");
 		expect(source.opened()).toHaveLength(1);
+	});
+
+	test("a rescan opens the pad again at once, and counts this connection from zero", async () => {
+		const { service, source, clock } = await harness();
+		source.push(usbBytes(CROSS));
+		// Past the gap that keeps two buzzes from reading as one stutter, so the hello
+		// the rescan earns is news the pad can feel rather than a stutter suppressed.
+		clock.advance(1_000);
+		source.takeWrites();
+		expect(service.stats().reports).toBe(1);
+
+		service.rescan();
+
+		// Now, not in three seconds: a fresh handle, a fresh connection, and the pad
+		// told everything again — which is the only proof the new handle is writable.
+		expect(service.status().phase).toBe("connected");
+		expect(service.stats().reports).toBe(0);
+		expect(source.opened()).toHaveLength(2);
+		expect(buzzes(source)).toContain("connected");
+
+		// And it is being read: the rescue leaves a pad that works, not a pad that is
+		// merely attached.
+		clock.advance(100);
+		source.push(usbBytes(CROSS));
+		expect(service.stats().reports).toBe(1);
 	});
 
 	test("of a pad's four interfaces, the one that carries reports", async () => {
@@ -238,9 +278,11 @@ describe("a pad attached twice", () => {
 		expect(service.status().phase).toBe("connected");
 		expect(service.status().transport).toBe("bluetooth");
 		expect(service.status().links).toEqual(["bluetooth", "usb"]);
-		// Held across the handover, so the hold is due by the time the radio's
-		// reports are read — and letting go is what it always was.
-		expect(actions.map((action) => action.phase)).toEqual(["press", "hold", "release"]);
+		// The press survives the handover — no invented release at the moment the
+		// app changes which link it believes — and the radio, which has been saying
+		// ✕ is up this whole time, ends it. No hold: two seconds nobody was reading
+		// is not two seconds of the pad saying the button was down.
+		expect(actions.map((action) => action.phase)).toEqual(["press", "release"]);
 	});
 
 	test("a cable plugged in mid-session becomes a second link, and is written to", async () => {
@@ -290,6 +332,89 @@ describe("a pad attached twice", () => {
 		expect(service.status().phase).toBe("searching");
 		expect(service.status().detail).toContain("disconnected");
 		expect(source.closed()).toBe(true);
+	});
+
+	test("two links that keep disagreeing are called two controllers", async () => {
+		// Nothing on a collection says which device it belongs to, so a second pad
+		// switched on looks exactly like one pad attached twice. The app cannot tell
+		// them apart and does not pretend to — but it can say what it sees.
+		const [wireless, wired] = attachedTwice();
+		const { service, source, clock } = await harness({ devices: [wireless, wired] });
+		source.push(usbBytes(CROSS), wired); // the reader: ✕ down
+
+		// The radio says ✕ is up, and keeps saying it. Four hundred milliseconds is
+		// plenty for one pad's slower link to catch up with its faster one, which is
+		// what the first four reports of this are.
+		for (let at = 0; at < 4; at += 1) {
+			clock.advance(100);
+			source.push(bluetoothBytes(), wireless);
+		}
+		expect(service.status().linksDisagree).toBeUndefined();
+
+		for (let at = 0; at < 7; at += 1) {
+			clock.advance(100);
+			source.push(bluetoothBytes(), wireless);
+		}
+		expect(service.status().linksDisagree).toBe(true);
+
+		// The radio catches up, and the two are one pad again.
+		source.push(bluetoothBytes(CROSS), wireless);
+		expect(service.status().linksDisagree).toBeUndefined();
+	});
+
+	test("a link a few milliseconds behind is not a second controller", async () => {
+		const [wireless, wired] = attachedTwice();
+		const { service, source, clock } = await harness({ devices: [wireless, wired] });
+		// A real pad's two links are milliseconds apart at an edge — the wire sees ✕
+		// go down and the radio says so a frame later. That is latency, not a second
+		// controller, and a card that cried wolf at every press would be ignored.
+		for (let at = 0; at < 30; at += 1) {
+			clock.advance(20);
+			source.push(usbBytes(CROSS), wired);
+			clock.advance(4);
+			source.push(bluetoothBytes(), wireless); // the radio has not caught up
+			// The moment that matters: a press seen on one link and not yet on the
+			// other, which happens at every edge on a real pad.
+			expect(service.status().linksDisagree).toBeUndefined();
+			clock.advance(8);
+			source.push(bluetoothBytes(CROSS), wireless); // and now it has
+		}
+		expect(service.status().linksDisagree).toBeUndefined();
+	});
+
+	test("the line about two controllers does not outlive the second link", async () => {
+		const [wireless, wired] = attachedTwice();
+		const { service, source, clock } = await harness({ devices: [wireless, wired] });
+		source.push(usbBytes(CROSS), wired);
+		for (let at = 0; at < 12; at += 1) {
+			clock.advance(100);
+			source.push(bluetoothBytes(), wireless);
+		}
+		expect(service.status().linksDisagree).toBe(true);
+
+		// The bag's pad is switched off: one link is left, and one link cannot
+		// disagree with itself.
+		source.detach(wireless);
+		expect(service.status().links).toEqual(["usb"]);
+		expect(service.status().linksDisagree).toBeUndefined();
+	});
+
+	test("turning the pad off forgets the second opinion too", async () => {
+		const [wireless, wired] = attachedTwice();
+		const { service, source, clock } = await harness({ devices: [wireless, wired] });
+		source.push(usbBytes(CROSS), wired);
+		for (let at = 0; at < 12; at += 1) {
+			clock.advance(100);
+			source.push(bluetoothBytes(), wireless);
+		}
+		expect(service.status().linksDisagree).toBe(true);
+
+		// The line goes off with the feature: a status still saying "these may be two
+		// controllers" while nothing at all is being read is the one thing on the
+		// card that would be about a pad nobody is listening to.
+		service.disable();
+		expect(service.status().phase).toBe("off");
+		expect(service.status().linksDisagree).toBeUndefined();
 	});
 });
 
@@ -407,6 +532,176 @@ describe("reading reports", () => {
 	});
 });
 
+describe("a pad that goes quiet", () => {
+	test("a button held across the silence is not a hold when the reports come back", async () => {
+		const { source, actions, clock } = await harness();
+		source.push(usbBytes(CROSS));
+		expect(actions.map((action) => action.phase)).toEqual(["press"]);
+
+		// The pad says nothing with ✕ still down and the link still up: the radio
+		// idle-slept, the USB pipe stalled. Nothing arrived, so nothing is known —
+		// and a hold is only ever a claim about what the pad said.
+		clock.advance(900);
+		source.push(usbBytes(CROSS));
+		// The press is neither invented again nor released. The silence cost it its
+		// hold, which is the point: without that, the age of the silence would be
+		// read as the age of the press, and a ✕ that slept through a question would
+		// answer the next one with "always allow".
+		expect(actions).toHaveLength(1);
+
+		clock.advance(200);
+		source.push(usbBytes(CROSS));
+		clock.advance(200);
+		source.push(usbBytes(CROSS));
+		expect(actions).toHaveLength(1);
+
+		// And the six hundred milliseconds are six hundred milliseconds of reports,
+		// to the millisecond — the same threshold as ever, measured on the stream.
+		clock.advance(199);
+		source.push(usbBytes(CROSS));
+		expect(actions).toHaveLength(1);
+		clock.advance(1);
+		source.push(usbBytes(CROSS));
+		expect(actions.at(-1)).toEqual({ kind: "confirm", button: "cross", phase: "hold", heldMs: 1_500 });
+	});
+
+	test("a stutter is not a silence: the hold still lands at six hundred", async () => {
+		const { source, actions, clock } = await harness();
+		source.push(usbBytes(CROSS));
+		// A hundred milliseconds between reports is a stutter — two dozen reports at
+		// the rate this pad sends them — and it costs the press nothing. Holding ✕
+		// over a link that is merely busy must not need longer than holding it over
+		// a quiet one.
+		for (let at = 0; at < 5; at += 1) {
+			clock.advance(100);
+			source.push(usbBytes(CROSS));
+		}
+		expect(actions).toHaveLength(1);
+		clock.advance(100);
+		source.push(usbBytes(CROSS));
+		expect(actions.at(-1)).toEqual({ kind: "confirm", button: "cross", phase: "hold", heldMs: 600 });
+	});
+
+	test("the other link chattering does not cover for the reader's silence", async () => {
+		// The app reads one link and ignores the other on purpose — and the other
+		// may not even be the same controller (see "these may be two controllers").
+		// So a hold is vouched for by the reports the app acts on, not by traffic
+		// that happens to be arriving on the bus.
+		const [wireless, wired] = attachedTwice();
+		const { source, actions, clock } = await harness({ devices: [wireless, wired] });
+		source.push(usbBytes(CROSS), wired); // the reader sees the press
+		expect(actions.map((action) => action.phase)).toEqual(["press"]);
+
+		for (let at = 0; at < 9; at += 1) {
+			clock.advance(100);
+			source.push(bluetoothBytes(CROSS), wireless); // the radio has plenty to say
+		}
+		source.push(usbBytes(CROSS), wired);
+
+		// The wire's own reports were what stopped, so they are what has to resume:
+		// nine hundred milliseconds of radio buy the press nothing.
+		expect(actions).toHaveLength(1);
+		for (let at = 0; at < 6; at += 1) {
+			clock.advance(100);
+			source.push(usbBytes(CROSS), wired);
+		}
+		expect(actions.at(-1)).toEqual({ kind: "confirm", button: "cross", phase: "hold", heldMs: 1_500 });
+	});
+
+	test("a handover is a silence too: the press survives it, the hold starts over", async () => {
+		const [wireless, wired] = attachedTwice();
+		const { service, source, actions, clock } = await harness({ devices: [wireless, wired] });
+		source.push(usbBytes(CROSS), wired); // the reader sees the press
+
+		// The wire goes quiet with ✕ down *and stays down*: the radio has been
+		// saying the button is held all along, but the app is not reading the radio
+		// — it is waiting for the link it was reading to speak again, and two
+		// seconds later it gives up on it and moves.
+		for (let at = 0; at < 21; at += 1) {
+			clock.advance(100);
+			source.push(bluetoothBytes(CROSS), wireless);
+		}
+		expect(service.status().transport).toBe("bluetooth");
+		// Same press, still down, and no release invented by the change of reader.
+		expect(actions.map((action) => action.phase)).toEqual(["press"]);
+
+		// The hold is then six hundred milliseconds of the radio reporting, which is
+		// the only thing that has been vouching for the press since it took over.
+		for (let at = 0; at < 6; at += 1) {
+			clock.advance(100);
+			source.push(bluetoothBytes(CROSS), wireless);
+		}
+		expect(actions.at(-1)).toEqual({ kind: "confirm", button: "cross", phase: "hold", heldMs: 2_700 });
+	});
+});
+
+describe("the touch surface", () => {
+	test("a drag becomes the action its direction maps to", async () => {
+		const { source, actions, clock } = await harness();
+		source.push(usbBytes(finger(34, 500, 400)));
+		// A step: an eighth of the surface's height, which is what a deliberate drag
+		// makes. The finger itself is not a button anywhere in the app.
+		clock.advance(4);
+		source.push(usbBytes(finger(34, 500 + 120, 400)));
+		expect(actions).toEqual([{ kind: "right", button: "touch-right", phase: "press", heldMs: 0 }]);
+		// And the report after it lets go: a step is an event, not a key held down.
+		clock.advance(4);
+		source.push(usbBytes(finger(34, 500 + 120, 400)));
+		expect(actions.at(-1)).toEqual({ kind: "right", button: "touch-right", phase: "release", heldMs: 4 });
+	});
+
+	test("a tap confirms, on the report where the finger has gone", async () => {
+		const { source, actions, clock } = await harness();
+		source.push(usbBytes(finger(34, 900, 300)));
+		clock.advance(4);
+		source.push(usbBytes(finger(34, 902, 300)));
+		clock.advance(96);
+		source.push(usbBytes());
+		expect(actions).toEqual([{ kind: "confirm", button: "touch-tap", phase: "press", heldMs: 0 }]);
+	});
+
+	test("the sample carries the gesture, for exactly the report that held it", async () => {
+		const { source, service, clock } = await harness();
+		source.push(usbBytes(finger(34, 500, 400)));
+		expect(service.lastSample()?.gestures).toBeUndefined();
+		clock.advance(4);
+		source.push(usbBytes(finger(34, 620, 400)));
+		expect(service.lastSample()?.gestures).toEqual(["touch-right"]);
+		clock.advance(4);
+		source.push(usbBytes(finger(34, 620, 400)));
+		expect(service.lastSample()?.gestures).toBeUndefined();
+	});
+
+	test("a finger that was down when the pad went away is not a drag when it comes back", async () => {
+		// The reports that would have ended the touch never arrived, so the first
+		// report after the reconnect is compared against a position from before the
+		// sleep — and a step measured across that gap is a move nobody made. The
+		// reset is the only thing that decides this one: the tap case cannot be told
+		// apart from the clock here, because a pad is away far longer than a tap.
+		const { source, actions, clock } = await harness();
+		source.push(usbBytes(finger(34, 100, 400)));
+		source.detach();
+		source.attach();
+		clock.advance(3_000);
+		// The same finger, somewhere else: a whole surface away from where the pad
+		// last saw it, which is what a hand that moved while the pad was off looks
+		// like from here.
+		source.push(usbBytes(finger(34, 900, 400)));
+		expect(actions).toEqual([]);
+	});
+
+	test("the thresholds come from the caller, so they can be tuned", async () => {
+		// Nothing here is measured on real hardware yet, so the layer has to be
+		// tunable without a code change: a step of 4 units is a test's idea of a
+		// drag, and it is the service that has to pass it through.
+		const { source, actions, clock } = await harness({ config: { touch: { step: 4, tapMs: 1 } } });
+		source.push(usbBytes(finger(34, 500, 400)));
+		clock.advance(4);
+		source.push(usbBytes(finger(34, 504, 400)));
+		expect(actions).toEqual([{ kind: "right", button: "touch-right", phase: "press", heldMs: 0 }]);
+	});
+});
+
 describe("the lightbar", () => {
 	test("idle is written once and then left alone", async () => {
 		// The property the whole output path exists for: an idle pad is not
@@ -486,6 +781,44 @@ describe("the lightbar", () => {
 		source.push(usbBytes());
 		expect(output(source.writes().at(-1))?.rgb).toEqual({ r: 64, g: 0, b: 32 });
 	});
+
+	test("a question blinks the hardware, and answering it stops the blinking", async () => {
+		const { source, service, clock } = await harness();
+		source.push(usbBytes());
+		clock.advance(PAD_RUMBLE.connected.durationMs);
+		source.takeWrites();
+
+		service.setFeedback({ phase: "busy", awaiting: true });
+		expect(blink(source.writes().at(-1))).toEqual(PAD_BLINK_ATTENTION);
+		// The colour and the blink are one answer: the bar blinks, and it blinks in
+		// the colour that says what it is blinking about.
+		expect(output(source.writes().at(-1))?.rgb).toEqual(MAGENTA);
+
+		service.setFeedback({ phase: "busy", awaiting: false });
+		source.takeWrites();
+		clock.advance(100);
+		// Nothing is sent to say "stop blinking": the packet describes the whole pad,
+		// so a packet that does not ask for a blink is the pad being told to stop. The
+		// wait is a frame or two, since the bar is an animation and its writes are
+		// frames — but every frame from here on says the same thing.
+		const after = source.takeWrites();
+		expect(after.length).toBeGreaterThan(0);
+		for (const packet of after) expect(blink(packet)).toEqual({ on: 0, off: 0 });
+	});
+
+	test("with the lightbar switched off the bar is dark, and stays that way", async () => {
+		const { source, service, clock } = await harness({ config: { lightbar: false } });
+		source.push(usbBytes());
+		// The state that would light it, blink it and pulse it, for a second of frames.
+		service.setFeedback({ phase: "busy", awaiting: true });
+		clock.advance(1_000);
+
+		expect(source.writes().length).toBeGreaterThan(0);
+		for (const packet of source.writes()) {
+			expect(output(packet)?.rgb).toEqual({ r: 0, g: 0, b: 0 });
+			expect(blink(packet)).toEqual({ on: 0, off: 0 });
+		}
+	});
 });
 
 describe("the motors", () => {
@@ -561,6 +894,68 @@ describe("the motors", () => {
 		expect(output(source.writes().at(-1))?.small).toBe(0);
 		expect(output(source.writes().at(-1))?.large).toBe(0);
 	});
+
+	test("the two-part pattern is two buzzes, with a real silence between them", async () => {
+		// The one thing a stop sounds like: two taps of one shape. Written out frame
+		// by frame because the silence is the pattern — two buzzes with no gap is one
+		// longer buzz, which is `done`.
+		const { source, service, clock } = await harness();
+		const stop = PAD_RUMBLE.stopped;
+		source.push(usbBytes());
+		clock.advance(PAD_RUMBLE.connected.durationMs);
+		source.takeWrites();
+
+		service.buzz("stopped");
+		expect(lastMotors(source)).toBe("stopped");
+		clock.advance(stop.durationMs);
+		expect(lastMotors(source)).toBe("0/0");
+		clock.advance(stop.again.afterMs - 1);
+		expect(lastMotors(source)).toBe("0/0");
+		clock.advance(1);
+		expect(lastMotors(source)).toBe("stopped");
+		clock.advance(stop.again.durationMs);
+		// Nothing is left running: a pad that buzzes after the program has moved on is
+		// the failure every duration in this file exists to prevent.
+		expect(lastMotors(source)).toBe("0/0");
+	});
+
+	test("a stop by hand is the last thing felt, not the first half of a stutter", async () => {
+		// ○ while a turn runs: the buzz is the user's own, and the phase change that
+		// follows it — the run really does go idle — would otherwise send `done` a
+		// moment later. "You stopped it" and "it finished" are not the same news.
+		const { source, service, clock } = await harness();
+		source.push(usbBytes());
+		clock.advance(PAD_RUMBLE_MIN_GAP_MS);
+		service.setFeedback({ phase: "busy", awaiting: false });
+		// Long enough that the working buzz is not the thing that swallows the `done`:
+		// the only buzz recent enough to absorb it is the stop itself.
+		clock.advance(PAD_RUMBLE_MIN_GAP_MS);
+		source.takeWrites();
+
+		service.buzz("stopped");
+		service.setFeedback({ phase: "idle", awaiting: false });
+
+		expect(buzzes(source)).toEqual(["stopped"]);
+	});
+
+	test("with the motors switched off, nothing is felt from either direction", async () => {
+		const { source, service, clock } = await harness({ config: { rumble: false } });
+		source.push(usbBytes());
+		clock.advance(PAD_RUMBLE_MIN_GAP_MS);
+		// The buzz a state change asks for, and the one a person asks for.
+		service.setFeedback({ phase: "busy", awaiting: true });
+		service.buzz("alert");
+
+		expect(buzzes(source)).toEqual([]);
+		for (const packet of source.writes()) {
+			expect(output(packet)?.small).toBe(0);
+			expect(output(packet)?.large).toBe(0);
+		}
+		// The other switch is untouched: a pad nobody can hear is not a pad nobody can
+		// see, and the question is still the question.
+		expect(output(source.writes().at(-1))?.rgb).toEqual(MAGENTA);
+		expect(blink(source.writes().at(-1))).toEqual(PAD_BLINK_ATTENTION);
+	});
 });
 
 describe("losing the pad", () => {
@@ -614,6 +1009,34 @@ describe("losing the pad", () => {
 		// the packet the greeting already sent, and two identical packets in a row are
 		// one packet's worth of news.
 		expect(source.writes()).toHaveLength(told + 1);
+	});
+
+	test("a pad that sleeps with both links down is found again, and told again", async () => {
+		const [wireless, wired] = attachedTwice();
+		const { service, source, clock, actions } = await harness({ devices: [wireless, wired] });
+		source.push(usbBytes(CROSS), wired);
+		const heard = actions.length;
+		source.takeWrites();
+
+		// Asleep: the radio stops answering and the OS lets both collections go.
+		source.detach(wireless);
+		source.detach(wired);
+		expect(service.status().phase).toBe("searching");
+
+		// Awake again, and listed again — which is all the app is ever told. It has
+		// to be looking, and the looking is the retry.
+		source.attach(wireless);
+		source.attach(wired);
+		clock.advance(3_000);
+
+		expect(service.status().phase).toBe("connected");
+		expect(service.status().links).toEqual(["usb", "bluetooth"]);
+		expect(source.opened()).toHaveLength(4); // both links, opened again
+		// Told everything again: the bar comes back, and with it the buzz that is
+		// the only proof the motors work.
+		expect(buzzes(source)).toContain("connected");
+		// And nothing is invented on the way back: waking is not a press.
+		expect(actions).toHaveLength(heard);
 	});
 
 	test("handing the pad over stops the repeats without inventing a release", async () => {

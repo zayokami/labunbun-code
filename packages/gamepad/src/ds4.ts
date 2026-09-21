@@ -133,6 +133,37 @@ export interface Ds4Battery {
 	cable: boolean;
 }
 
+/**
+ * The touch surface in the pad's own units, which is what the reports carry. Only
+ * ever used to turn a drag into a threshold — nothing here draws a cursor at
+ * these coordinates, and a caller that wants a fraction of the surface divides.
+ */
+export const TOUCH_WIDTH = 1920;
+export const TOUCH_HEIGHT = 943;
+
+/** One finger on the touchpad, as the pad describes it. */
+export interface Ds4TouchPoint {
+	/**
+	 * The pad's own counter for this touch: it counts touches, not reports, so it
+	 * stays the same number for as long as the finger is down and changes for the
+	 * next one. Used to tell "the same finger, further along" from a second one.
+	 */
+	id: number;
+	/** 0..TOUCH_WIDTH, left to right. */
+	x: number;
+	/** 0..TOUCH_HEIGHT, top to bottom. */
+	y: number;
+}
+
+/**
+ * The whole touchpad: two points, either of them `undefined` where no finger is.
+ *
+ * A tuple rather than a list because the pad always reports exactly two of them,
+ * and a gesture that means "the other finger" should not also have to wonder
+ * whether the second entry is missing or the array is short.
+ */
+export type Ds4Touch = readonly [Ds4TouchPoint | undefined, Ds4TouchPoint | undefined];
+
 export interface Ds4State {
 	/** Sticks in -1..1, 0 at rest, Y positive *up*. The report has it inverted. */
 	leftStick: Ds4Axis;
@@ -145,6 +176,12 @@ export interface Ds4State {
 	/** Pressed buttons in a fixed order, so two identical states compare equal. */
 	buttons: Ds4ButtonId[];
 	battery: Ds4Battery;
+	/**
+	 * Where the fingers are, if any. Always both points — see `Ds4Touch` — and
+	 * deliberately not part of `buttons`: a touch is a position, and only the
+	 * gesture layer above turns one into something a binding can name.
+	 */
+	touch: Ds4Touch;
 }
 
 export interface Ds4Report {
@@ -174,6 +211,12 @@ const PAYLOAD = {
 	rightTrigger: 8,
 	/** Battery nibble and cable bit; the touchpad block starts five bytes later. */
 	battery: 29,
+	/** Touch point 1: the counter byte, then three bytes of packed position. */
+	touch1Counter: 34,
+	touch1Data: 35,
+	/** Touch point 2, five bytes after the first: the same six-byte shape again. */
+	touch2Counter: 38,
+	touch2Data: 39,
 } as const;
 
 const USB_REPORT_ID = 0x01;
@@ -208,6 +251,44 @@ const SYSTEM_BUTTONS: ReadonlyArray<readonly [number, Ds4ButtonId]> = [
 
 const STICK_CENTER = 128;
 const STICK_SPAN = 127;
+
+/** Top bit of a touch counter: no finger is on this point. */
+const TOUCH_RELEASED = 0x80;
+/** Everything below it is the touch's id, which runs 0-127. */
+const TOUCH_ID_MASK = 0x7f;
+
+/**
+ * The two touch points out of their six bytes.
+ *
+ * Each point is a counter byte and three bytes of position. The counter's top bit
+ * says whether a finger is there at all — note that it is *set* for "gone", which
+ * is the opposite of how the buttons read — and the seven bits under it number
+ * the touch. The position is packed the way the pad packs a lot of things: x is
+ * one byte plus the low nibble of the next, y the high nibble of that byte plus
+ * the byte after, twelve bits each. Nothing here is rescaled; `TOUCH_WIDTH` and
+ * `TOUCH_HEIGHT` are what a caller divides by.
+ *
+ * `at` is a payload offset, and the default suits a bare payload — a caller
+ * holding a whole report passes the transport's offset, as `decode` does.
+ */
+export function decodeTouch(bytes: Uint8Array, at = 0): Ds4Touch {
+	return [
+		touchPoint(bytes, at + PAYLOAD.touch1Counter, at + PAYLOAD.touch1Data),
+		touchPoint(bytes, at + PAYLOAD.touch2Counter, at + PAYLOAD.touch2Data),
+	];
+}
+
+/** `undefined` for a point nobody is touching, and for a report too short to hold one. */
+function touchPoint(bytes: Uint8Array, counterAt: number, dataAt: number): Ds4TouchPoint | undefined {
+	if (dataAt + 2 >= bytes.length) return undefined;
+	const counter = bytes[counterAt];
+	if ((counter & TOUCH_RELEASED) !== 0) return undefined;
+	return {
+		id: counter & TOUCH_ID_MASK,
+		x: bytes[dataAt] | ((bytes[dataAt + 1] & 0x0f) << 8),
+		y: (bytes[dataAt + 1] >> 4) | (bytes[dataAt + 2] << 4),
+	};
+}
 
 /**
  * The top of the battery's scale, and the number every reading is out of.
@@ -314,6 +395,7 @@ function decode(bytes: Uint8Array, at: number): Ds4State {
 		dpad,
 		buttons,
 		battery: decodeBattery(bytes[at + PAYLOAD.battery]),
+		touch: decodeTouch(bytes, at),
 	};
 }
 

@@ -17,6 +17,7 @@ import {
 	DS4_OUTPUT_CRC_SEED,
 	type Ds4ButtonId,
 	decodeBattery,
+	decodeTouch,
 	describeModel,
 	ds4BluetoothCrc,
 	parseDs4Input,
@@ -60,6 +61,11 @@ const rest = (() => {
 	const bytes = new Uint8Array(64);
 	bytes[1] = bytes[2] = bytes[3] = bytes[4] = 0x80;
 	bytes[5] = 0x08;
+	// The touch counters: bit 7 set is "no finger", which is the state a pad at
+	// rest is in — and it has to be written here rather than left at zero, because
+	// a zero counter means a finger at (0, 0). See the real capture below.
+	bytes[35] = 0x80;
+	bytes[39] = 0x80;
 	return bytes;
 })();
 
@@ -81,6 +87,14 @@ describe("parseDs4Input", () => {
 		// Byte 30 of this capture is 0x1a: level 10 on the pad's scale, cable in.
 		expect(report?.state.battery).toEqual({ level: 10, cable: true });
 		expect(report?.crcOk).toBeUndefined();
+		// Payload 34 and 38 — bytes 35 and 39 — are 0x86 and 0x82 on a pad nobody is
+		// touching: four bytes apart, both with the top bit set, which is this pad
+		// saying "no finger here". The hardware, in other words, agrees with the
+		// offsets rather than merely failing to contradict them. The three bytes
+		// under the first point are 0xd5 0xb4 0x3a, which is *not* zero — read as a
+		// position they are a finger at (1237, 939) that nobody put there, which is
+		// why the flag and never the data is what decides.
+		expect(report?.state.touch).toEqual([undefined, undefined]);
 	});
 
 	test("the d-pad is the low nibble of byte 5", () => {
@@ -247,6 +261,68 @@ describe("parseDs4Input", () => {
 		expect(parseDs4Input(new Uint8Array(64))).toBeUndefined();
 		expect(parseDs4Input(IDLE_REPORT.subarray(0, 63))).toBeUndefined();
 		expect(parseDs4Input(hex(`04${"00".repeat(63)}`))).toBeUndefined();
+	});
+});
+
+describe("decodeTouch", () => {
+	// The two points are four bytes apart, each a counter byte and three bytes of
+	// packed position: counter at payload 34/38, position at 35/39. These are
+	// absolute byte offsets in a whole report, which is what the helpers above
+	// take, so they read one higher than the payload table in `ds4.ts` on USB.
+	const FIRST = { counter: 35, x: 36, yLow: 37, yHigh: 38 };
+	const SECOND = { counter: 39, x: 40, yLow: 41, yHigh: 42 };
+
+	test("a finger is the counter's low seven bits, and the position is packed", () => {
+		for (const transport of ["usb", "bluetooth"] as const) {
+			const bytes =
+				transport === "usb"
+					? usbReport({ [FIRST.counter]: 0x03, [FIRST.x]: 0x00, [FIRST.yLow]: 0x34, [FIRST.yHigh]: 0x12 })
+					: bluetoothReport({ [FIRST.counter]: 0x03, [FIRST.x]: 0x00, [FIRST.yLow]: 0x34, [FIRST.yHigh]: 0x12 });
+			const touch = parseDs4Input(bytes)?.state.touch;
+			// x = 0x00 | (0x34 & 0x0f) << 8, y = (0x34 >> 4) | 0x12 << 4: the pad packs
+			// a twelve-bit coordinate into a byte and a half, and the half is shared.
+			expect(touch?.[0]).toEqual({ id: 3, x: 0x400, y: 0x123 });
+			expect(touch?.[1]).toBeUndefined();
+		}
+	});
+
+	test("y is the high nibble of the second byte, not the low one", () => {
+		// Swapping the two shifts lands the finger in a different corner of the pad
+		// and reads perfectly plausibly, which is what makes it worth pinning.
+		const touch = parseDs4Input(
+			usbReport({ [FIRST.counter]: 0x01, [FIRST.x]: 0x2a, [FIRST.yLow]: 0xf0, [FIRST.yHigh]: 0x05 }),
+		)?.state.touch;
+		expect(touch?.[0]).toEqual({ id: 1, x: 0x02a, y: 0x5f });
+	});
+
+	test("both points at once, four bytes apart", () => {
+		// Two fingers is the case the whole two-finger gesture rests on, so the two
+		// blocks are read from their own bytes and not from one window twice. Note
+		// the counters: bit 7 *clear* is a finger, so 0x00 and 0x01 are both touches
+		// and 0x80 would be neither of them.
+		const touch = parseDs4Input(
+			usbReport({
+				[FIRST.counter]: 0x00,
+				[FIRST.x]: 0x01,
+				[SECOND.counter]: 0x01,
+				[SECOND.x]: 0x02,
+			}),
+		)?.state.touch;
+		expect(touch?.[0]).toEqual({ id: 0, x: 1, y: 0 });
+		expect(touch?.[1]).toEqual({ id: 1, x: 2, y: 0 });
+	});
+
+	test("a pad nobody is touching has no fingers on it", () => {
+		// The synthetic pad every test in this suite stands on: a zero counter is a
+		// finger at (0, 0), so "released" has to be written down.
+		expect(parseDs4Input(usbReport())?.state.touch).toEqual([undefined, undefined]);
+		expect(parseDs4Input(bluetoothReport())?.state.touch).toEqual([undefined, undefined]);
+	});
+
+	test("a payload that stops inside a point's three bytes has no points", () => {
+		const truncated = new Uint8Array(37);
+		truncated[34] = 0x00; // a finger's counter, with nowhere for the position to be
+		expect(decodeTouch(truncated)).toEqual([undefined, undefined]);
 	});
 });
 

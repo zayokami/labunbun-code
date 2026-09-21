@@ -1,17 +1,30 @@
 /**
  * Which button does what, and how a user's override gets in.
  *
- * The map is total: all 18 buttons have an entry, and "nothing" is an action
- * (`none`) rather than a missing key. Totality means the mapper never asks "was
- * this unbound?" — and a button a user deliberately unbinds is as quiet as one
- * they never bound, which is the only reading of `"none"` that makes sense.
+ * The map is total: every button and every touch gesture has an entry, and
+ * "nothing" is an action (`none`) rather than a missing key. Totality means the
+ * mapper never asks "was this unbound?" — and a control a user deliberately
+ * unbinds is as quiet as one they never bound, which is the only reading of
+ * `"none"` that makes sense.
  *
- * An override that cannot be read is *dropped*: the button keeps its default and
+ * An override that cannot be read is *dropped*: the control keeps its default and
  * the text lands in `problems`. A typo should cost the user the one binding they
  * were editing, never the confirm button they were not.
  */
 
 import { DS4_BUTTON_IDS, type Ds4ButtonId } from "./ds4.ts";
+import { PAD_TOUCH_IDS, type PadTouchId } from "./touch.ts";
+
+/**
+ * Everything that can be bound: the pad's own controls, and the surface's
+ * gestures. One union rather than two families threaded through separately,
+ * because a binding table that could hold a button *or* a gesture and a mapper
+ * that had to ask which is exactly the kind of split this layer exists to avoid.
+ */
+export type PadInputId = Ds4ButtonId | PadTouchId;
+
+/** Every bindable control, buttons first — what the settings table and the problem line list. */
+export const PAD_INPUT_IDS: readonly PadInputId[] = [...DS4_BUTTON_IDS, ...PAD_TOUCH_IDS];
 
 /**
  * Everything a button can be asked to do. The type is derived from the list, so
@@ -62,12 +75,13 @@ export interface PadBinding {
 }
 
 /** Totality is the point: see the file comment. */
-export type PadBindingMap = Readonly<Record<Ds4ButtonId, PadBinding>>;
+export type PadBindingMap = Readonly<Record<PadInputId, PadBinding>>;
 
 /**
- * The default mapping, in the order `ds4.ts` lists the buttons. Every line here
- * is a thing a user can change in settings; every line *not* here (the sticks,
- * the analog triggers as modifiers) is not a binding at all and cannot be.
+ * The default mapping, in the order `ds4.ts` lists the buttons and `touch.ts` the
+ * gestures. Every line here is a thing a user can change in settings; every line
+ * *not* here (the sticks, the analog triggers as modifiers) is not a binding at
+ * all and cannot be.
  *
  * `l2` and `r2` are `none` because their real job is the repeat modifier in the
  * mapper, which is not a binding. They are still rebindable — binding one gives
@@ -75,6 +89,11 @@ export type PadBindingMap = Readonly<Record<Ds4ButtonId, PadBinding>>;
  *
  * `ps` is `none` on purpose: on Windows the system or Steam usually owns it, and
  * a button that half the time opens something else is worse than no button.
+ *
+ * The surface's four drags answer to the four directions — the same move the
+ * d-pad and the stick make, which is what a thumb drawn across a touchpad is
+ * asking for. The tap confirms, which is the touchpad *click*'s neighbour and the
+ * gesture a finger makes before a press has even occurred to anyone.
  */
 export const DEFAULT_BINDINGS: PadBindingMap = {
 	up: { kind: "up" },
@@ -95,6 +114,13 @@ export const DEFAULT_BINDINGS: PadBindingMap = {
 	r3: { kind: "mode" },
 	ps: { kind: "none" },
 	touchpad: { kind: "status" },
+	"touch-tap": { kind: "confirm" },
+	"touch-up": { kind: "up" },
+	"touch-down": { kind: "down" },
+	"touch-left": { kind: "left" },
+	"touch-right": { kind: "right" },
+	"touch-two-left": { kind: "page-prev" },
+	"touch-two-right": { kind: "page-next" },
 };
 
 /** `command:` is how a binding asks for a command instead of an action. */
@@ -126,16 +152,16 @@ export function resolveBindings(
 	raw?: Readonly<Record<string, unknown>>,
 	knownCommands?: readonly string[],
 ): ResolvedBindings {
-	const bindings: Record<Ds4ButtonId, PadBinding> = { ...DEFAULT_BINDINGS };
+	const bindings: Record<PadInputId, PadBinding> = { ...DEFAULT_BINDINGS };
 	const problems: string[] = [];
 	const commands = knownCommands?.map(withoutSlash);
 
 	for (const [rawKey, rawValue] of Object.entries(raw ?? {})) {
 		const problem = (message: string) => problems.push(`bindings.${rawKey}: ${message}`);
 		const key = rawKey.trim().toLowerCase();
-		const button = DS4_BUTTON_IDS.find((id) => id === key);
-		if (!button) {
-			problem(`not a button (expected one of: ${DS4_BUTTON_IDS.join(", ")})`);
+		const control = PAD_INPUT_IDS.find((id) => id === key);
+		if (!control) {
+			problem(`not a button or gesture (expected one of: ${PAD_INPUT_IDS.join(", ")})`);
 			continue;
 		}
 		if (typeof rawValue !== "string") {
@@ -144,7 +170,7 @@ export function resolveBindings(
 		}
 		const parsed = parseBinding(rawValue, commands);
 		if (typeof parsed === "string") problem(parsed);
-		else bindings[button] = parsed;
+		else bindings[control] = parsed;
 	}
 
 	return { bindings, problems };

@@ -26,6 +26,7 @@ import type { PadBindingMap } from "./bindings.ts";
 import {
 	buildDs4Output,
 	type Ds4Battery,
+	type Ds4ButtonId,
 	type Ds4OutputState,
 	type Ds4State,
 	type Ds4Transport,
@@ -44,6 +45,7 @@ import {
 } from "./feedback.ts";
 import { createMapper, type PadAction, type PadRepeat } from "./mapping.ts";
 import { deviceTransport, type PadSource, type PadSourceDevice, type PadSourceHandle, pickLinks } from "./source.ts";
+import { createTouchReader, type PadTouchConfig, type PadTouchId } from "./touch.ts";
 
 export type PadServicePhase = "off" | "searching" | "connected" | "error";
 
@@ -73,6 +75,14 @@ export interface PadServiceStatus {
 	detail?: string;
 	/** Bluetooth only: whether the last report's CRC verified. */
 	crcOk?: boolean;
+	/**
+	 * The links have been reporting contradictory buttons for long enough that
+	 * they are probably not one pad. Nothing is done about it — there is no
+	 * identity to pick the right one by — but it explains a ✕ nobody pressed and a
+	 * bar changing colour by itself, and `gamepad.device` is how a user pins the
+	 * one they mean.
+	 */
+	linksDisagree?: boolean;
 }
 
 /** Everything the last report carried, for `/gamepad watch`. */
@@ -83,6 +93,13 @@ export interface PadSample {
 	state: Ds4State;
 	/** How long the report was: the quickest way to see the transport change. */
 	bytes: number;
+	/**
+	 * The gestures this report held, when it held any. Set only then, so a pad
+	 * nobody is touching keeps the exact sample shape it had before there were
+	 * gestures — which is also what keeps `/gamepad watch` from printing a line
+	 * per report on a pad lying on the desk.
+	 */
+	gestures?: readonly PadTouchId[];
 	/** Bluetooth only. `undefined` on USB, where there is nothing to verify. */
 	crcOk?: boolean;
 }
@@ -155,6 +172,8 @@ export interface PadServiceConfig {
 	device?: string;
 	deadzone?: number;
 	repeat?: Partial<PadRepeat>;
+	/** The touch surface's thresholds. Every one of them is a guess until measured. */
+	touch?: PadTouchConfig;
 	/** How long to wait before looking for a controller again. */
 	reconnectMs?: number;
 	/** Shortest gap between writes. The bar is an animation; 30 Hz is smooth. */
@@ -165,6 +184,15 @@ export interface PadServiceConfig {
 	 * lasts hours and not days — so two seconds of quiet is not a pause.
 	 */
 	silenceMs?: number;
+	/**
+	 * Whether the pad may buzz, and whether it may light at all. Both default to on,
+	 * and off is *silence and darkness* rather than "less of it": the field is left
+	 * out of every packet, and a packet describes the whole pad, so there is no way
+	 * to withhold one field and leave the pad's own light alone. Someone wiring a
+	 * pad they cannot silence would have to unplug it instead.
+	 */
+	rumble?: boolean;
+	lightbar?: boolean;
 }
 
 export interface PadServiceDeps {
@@ -189,6 +217,14 @@ export interface PadService {
 	lastSample(): PadSample | undefined;
 	/** Every interface of every controller attached right now. */
 	devices(): readonly PadSourceDevice[];
+	/**
+	 * Let go of every link and look again, now: the rescue for a pad that is
+	 * answering, but answering wrongly — a handle the OS has quietly re-pointed, a
+	 * link whose reports stopped short of the watchdog's two seconds. Worse than
+	 * nothing can happen to a pad that is working: every link is reopened, and a
+	 * reopened pad is told everything again, the signal included.
+	 */
+	rescan(): void;
 	/** What the app is doing, for the lightbar and the buzzes that go with it. */
 	setFeedback(ui: PadUiSignal): void;
 	/**
@@ -208,6 +244,23 @@ export interface PadService {
 const DEFAULT_RECONNECT_MS = 3_000;
 const DEFAULT_OUTPUT_MS = 33;
 const DEFAULT_SILENCE_MS = 2_000;
+/**
+ * How long the pad can say nothing before the reports count as having stopped
+ * rather than as having been a little late.
+ *
+ * A live DS4 reports every few milliseconds on either transport, so a quarter of
+ * a second is dozens of reports that never came; and it is an eighth of
+ * `silenceMs`, where the pad is declared gone and everything is forgotten. This
+ * is the gap in between: too short to be a lost pad, too long to be jitter — and
+ * what it costs the mapper is time a press was not vouched for (see `holdFrom`).
+ */
+const REPORT_GAP_MS = 250;
+/**
+ * How long two links have to disagree about the buttons before the app says out
+ * loud that they may be two controllers. One pad's links are a few milliseconds
+ * apart at every edge; a second of it is not latency.
+ */
+const LINKS_DISAGREE_MS = 1_000;
 /**
  * How often to look for a link the pad gained while we were already talking to
  * it. Nothing announces that a cable has been plugged into a controller that was
@@ -274,12 +327,23 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 	const reconnectMs = config.reconnectMs ?? DEFAULT_RECONNECT_MS;
 	const outputMs = config.outputMs ?? DEFAULT_OUTPUT_MS;
 	const silenceMs = config.silenceMs ?? DEFAULT_SILENCE_MS;
+	// `!== false` rather than a truthy read: the default is on, so the question is
+	// whether the user turned it off — and a settings object built in code (a test,
+	// an embedder) has not been through the schema that would have rejected a
+	// string. A value we cannot read leaves the feature as the documentation
+	// describes it.
+	const rumbleOn = config.rumble !== false;
+	const lightbarOn = config.lightbar !== false;
 	// One palette object, copied and then mutated in place rather than replaced:
 	// the feedback reads it on every frame, and its own bookkeeping (how recently
 	// it buzzed) lives in a closure that a theme change must not reset.
 	const palette: PadPalette = { ...config.palette };
 	const feedback = createPadFeedback(palette);
 	const mapper = createMapper({ bindings: config.bindings, deadzone: config.deadzone, repeat: config.repeat });
+	// The surface's gestures, read before the mapper sees a report. They come out
+	// as ids the mapper treats exactly like buttons, which is why nothing above
+	// this line had to learn about the touchpad at all.
+	const touch = createTouchReader(config.touch);
 
 	let enabled = false;
 	let closed = false;
@@ -294,12 +358,25 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 	 */
 	let primary: PadLink | undefined;
 	let sample: PadSample | undefined;
+	/**
+	 * When the link nobody is reading started saying something the one being read
+	 * does not: `undefined` while they agree.
+	 *
+	 * Two links of one pad report the same buttons a few milliseconds apart, so a
+	 * disagreement is expected for about as long as the slower link takes to catch
+	 * up. One that lasts is something else — two controllers, both answering to
+	 * "DualShock 4", picked up as two links of one pad because nothing on either
+	 * says which device it belongs to.
+	 */
+	let disagreeingSince: number | undefined;
 	/** The signal the pad has been told about. `undefined` = it has not been told. */
 	let signal: PadSignal | undefined;
 	let ui: PadUiSignal = { phase: "idle", awaiting: false };
 	/** The motors as currently commanded, or `undefined` for "stopped". */
 	let motors: PadRumble | undefined;
 	let stopMotors: PadTimer | undefined;
+	/** The silence before the second half of a two-part pattern. See `PAD_RUMBLE.stopped`. */
+	let againAfter: PadTimer | undefined;
 	let wroteAt: number | undefined;
 	let openedAt = 0;
 	let scannedAt = 0;
@@ -313,6 +390,34 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		if (sameStatus(status, next)) return;
 		status = next;
 		deps.onStatus?.(status);
+	}
+
+	/**
+	 * One link again, or none: there is nobody left to disagree with, and a status
+	 * still saying "these may be two controllers" would outlive the second
+	 * controller. Called from the two places the set of links changes shape rather
+	 * than from each of them by hand.
+	 */
+	function forgetSecondOpinion(): void {
+		disagreeingSince = undefined;
+		setStatus({ linksDisagree: undefined });
+	}
+
+	/**
+	 * The non-reading link's buttons, against the ones the app is reading. Called
+	 * for every report that is ignored for being the second opinion, which is the
+	 * only moment that opinion exists.
+	 */
+	function noteSecondOpinion(buttons: readonly Ds4ButtonId[], now: number): void {
+		const reading = sample?.state.buttons;
+		if (reading === undefined) return;
+		const agrees = buttons.length === reading.length && buttons.every((button, at) => reading[at] === button);
+		if (agrees) {
+			if (disagreeingSince !== undefined) forgetSecondOpinion();
+			return;
+		}
+		disagreeingSince ??= now;
+		if (now - disagreeingSince >= LINKS_DISAGREE_MS) setStatus({ linksDisagree: true });
 	}
 
 	/** The app's half of the signal, joined to what the pad says about itself. */
@@ -337,15 +442,34 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		flush(clock.now());
 	}
 
-	function buzzCommand(command: PadRumbleCommand): void {
-		motors = command.rumble;
+	/** Motors on, and off again after `durationMs`. The one place a buzz is timed. */
+	function rumbleFor(rumble: PadRumble, durationMs: number): void {
+		motors = rumble;
 		flush(clock.now(), true);
 		if (stopMotors !== undefined) clock.clearTimeout(stopMotors);
 		stopMotors = clock.setTimeout(() => {
 			stopMotors = undefined;
 			motors = undefined;
 			flush(clock.now(), true);
-		}, command.durationMs);
+		}, durationMs);
+	}
+
+	function buzzCommand(command: PadRumbleCommand): void {
+		if (!rumbleOn) return;
+		// Whatever was playing is replaced rather than queued, and its second half —
+		// if it had one — goes with it: a pattern interrupted halfway is a pattern
+		// the user would hear the tail of under the next one.
+		if (againAfter !== undefined) {
+			clock.clearTimeout(againAfter);
+			againAfter = undefined;
+		}
+		rumbleFor(command.rumble, command.durationMs);
+		const again = command.again;
+		if (again === undefined) return;
+		againAfter = clock.setTimeout(() => {
+			againAfter = undefined;
+			rumbleFor(command.rumble, again.durationMs);
+		}, command.durationMs + again.afterMs);
 	}
 
 	/**
@@ -365,7 +489,18 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 	 */
 	function flush(now: number, immediate = false): void {
 		if (links.length === 0) return;
-		const state: Ds4OutputState = { lightbar: feedback.lightbar(currentSignal(), now) };
+		const signal = currentSignal();
+		const state: Ds4OutputState = {};
+		// A field left out is a field written as zero, which is what the lightbar
+		// switch wants: dark rather than dim. There is no way to write "nothing here"
+		// and have the pad keep its own. The motors switch is not asked here — the one
+		// thing that ever turns them on is `buzzCommand`, and it returns before that
+		// when it is off, so a `motors` that reached this line is a `motors` to write.
+		if (lightbarOn) {
+			state.lightbar = feedback.lightbar(signal, now);
+			const blink = feedback.blink(signal);
+			if (blink !== undefined) state.blink = blink;
+		}
 		if (motors !== undefined) state.rumble = motors;
 		const packets = links.map((link) => ({ link, packet: buildDs4Output(link.transport, state) }));
 		const unchanged = packets.every(
@@ -417,9 +552,11 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		if (tick !== undefined) clock.clearInterval(tick);
 		if (retry !== undefined) clock.clearInterval(retry);
 		if (stopMotors !== undefined) clock.clearTimeout(stopMotors);
+		if (againAfter !== undefined) clock.clearTimeout(againAfter);
 		tick = undefined;
 		retry = undefined;
 		stopMotors = undefined;
+		againAfter = undefined;
 	}
 
 	function startTick(): void {
@@ -491,6 +628,7 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		// nothing left that could still be holding the state it was reading. With
 		// one link per transport there is at most one other to hand it to.
 		if (primary === link) primary = links[0];
+		forgetSecondOpinion();
 		setStatus({ device: primary?.device, transport: primary?.transport, links: linkTransports() });
 	}
 
@@ -505,6 +643,7 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		}
 		links = [];
 		primary = undefined;
+		forgetSecondOpinion();
 		wroteAt = undefined;
 		motors = undefined;
 		// Not "the last signal with a hole in it": a pad that comes back is a new
@@ -512,6 +651,9 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		// means "I can hear you", which is the only proof the feature works.
 		signal = undefined;
 		mapper.reset();
+		// A finger that was on the surface when the pad slept must not become a tap
+		// when it wakes: the reports that would have ended the touch never arrived.
+		touch.reset();
 		stopTimers();
 		if (reason !== undefined) stats = { ...stats, lastError: reason };
 	}
@@ -611,6 +753,10 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		// device; the pad sends those too.
 		if (report === undefined) return;
 		const now = clock.now();
+		// The gap since the last report the app acted on — the mapper's stream, so
+		// the other link's reports, which are not fed to it, are not reports. Read
+		// before the stamps below, which is what makes it a gap and not a zero.
+		const quietMs = stats.lastReportAt === undefined ? 0 : now - stats.lastReportAt;
 		link.lastReportAt = now;
 		// What the bytes say this link is, whoever is reading it: the framing of
 		// every link's packets is settled here, and a link nobody is reading still
@@ -623,10 +769,19 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 			// which is the moment the pad moved to this link and the app has to move
 			// with it — a link that has never reported at all included.
 			const readerAt = primary?.lastReportAt;
-			if (readerAt !== undefined && now - readerAt <= silenceMs) return;
+			if (readerAt !== undefined && now - readerAt <= silenceMs) {
+				noteSecondOpinion(report.state.buttons, now);
+				return;
+			}
 			primary = link;
 		}
 		const next: PadSample = { at: now, transport: link.transport, state: report.state, bytes: bytes.length };
+		// Where the surface turns into input. The gestures are read from *this*
+		// report — a tap is decided on the report where the finger is already gone —
+		// and handed to the mapper beside the buttons, so that everything downstream
+		// of it, the sample included, sees the same frame the user's thumb made.
+		const gestures = touch.push(report.state.touch, now);
+		if (gestures.length > 0) next.gestures = gestures;
 		if (report.crcOk !== undefined) next.crcOk = report.crcOk;
 		sample = next;
 		// The counter counts the reports the app acted on: the reader's.
@@ -643,7 +798,7 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		// also where the first write happens: the signal gains the battery here, so
 		// it differs from what the pad was told when it was opened.
 		pushSignal();
-		const actions = mapper.update(report.state, now);
+		const actions = mapper.update(report.state, now, gestures, quietMs > REPORT_GAP_MS ? quietMs : 0);
 		if (actions.length > 0) deps.onActions?.(actions);
 		deps.onReport?.(sample);
 	}
@@ -678,6 +833,18 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 				links: undefined,
 				crcOk: undefined,
 			});
+		},
+
+		rescan() {
+			// Off is the user's answer, not a state to look past: there is nothing to
+			// rescue when nothing is being read.
+			if (closed || !enabled) return;
+			release();
+			// No status of its own: every way `connect` can end writes one — connected,
+			// searching with the reason, error with it — and it runs before this returns,
+			// so anything said here would be overwritten unread. The retry timer `release`
+			// stopped is not restarted either: the looking happens right here.
+			connect();
 		},
 
 		close() {
@@ -716,8 +883,12 @@ export function createPadService(config: PadServiceConfig, deps: PadServiceDeps)
 		buzz(name) {
 			// Deliberately not through `feedback.rumble`: this is a person asking for
 			// a buzz, not a state change that might deserve one, so the gap rule that
-			// keeps news from stuttering does not apply to it.
+			// keeps news from stuttering cannot drop it. The pad has still buzzed,
+			// though, and the feedback is told so: a `done` a moment after a buzz the
+			// user asked for would land as the tail of a stutter, and a stop they made
+			// by hand has to be the last thing the hand feels.
 			buzzCommand(PAD_RUMBLE[name]);
+			feedback.buzzed(clock.now());
 		},
 
 		suspendRepeat() {
@@ -737,7 +908,8 @@ function sameStatus(a: PadServiceStatus, b: PadServiceStatus): boolean {
 		a.device?.path === b.device?.path &&
 		a.device?.carriesReports === b.device?.carriesReports &&
 		a.battery?.level === b.battery?.level &&
-		a.battery?.cable === b.battery?.cable
+		a.battery?.cable === b.battery?.cable &&
+		a.linksDisagree === b.linksDisagree
 	);
 }
 
