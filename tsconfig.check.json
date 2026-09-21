@@ -6,6 +6,7 @@
 			"@labunbun/agent": ["./packages/agent/src/index.ts"],
 			"@labunbun/tools": ["./packages/tools/src/index.ts"],
 			"@labunbun/mcp": ["./packages/mcp/src/index.ts"],
+			"@labunbun/gamepad": ["./packages/gamepad/src/index.ts"],
 			"@labunbun/tui": ["./packages/tui/src/index.ts"],
 			"@labunbun/coding-agent": ["./packages/coding-agent/src/index.ts"]
 		}

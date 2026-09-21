@@ -1,0 +1,13 @@
+{
+	"name": "@labunbun/gamepad",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"optionalDependencies": {
+		"node-hid": "^3.4.0"
+	},
+	"license": "MIT"
+}
