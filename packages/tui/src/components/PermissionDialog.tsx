@@ -64,6 +64,11 @@ export function PermissionDialog({
 		// Denying is always safe, and always the pad's to do: a controller that
 		// could only say yes would be worse than one that said nothing.
 		if (action.kind === "cancel") {
+			// The pad's own no, said out loud. The screen answers either way, but a
+			// press with nothing behind it is a press the thumb cannot tell from a
+			// report that never arrived — and this is the answer the dialog is happy to
+			// let the pad give, so confirming it costs nothing and settles the doubt.
+			pad?.buzz("refused");
 			onResolve(false, false);
 			return true;
 		}

@@ -32,6 +32,8 @@ async function waitFor(done: () => boolean, timeoutMs = 2000): Promise<void> {
 interface PromptOptions {
 	busy?: boolean;
 	canSteer?: boolean;
+	/** Started under a full-screen view, the way the REPL leaves it during Ctrl+O. */
+	hidden?: boolean;
 }
 
 /**
@@ -47,7 +49,7 @@ async function prompt(options: PromptOptions = {}) {
 	const submitted: string[] = [];
 	const queued: string[] = [];
 	const steered: string[] = [];
-	const view = render(
+	const element = (hidden: boolean) =>
 		(
 			<ThemeContext.Provider value={DARK_THEME}>
 				<PromptInput
@@ -57,10 +59,11 @@ async function prompt(options: PromptOptions = {}) {
 					busy={options.busy ?? false}
 					canSteer={options.canSteer ?? false}
 					pad={pad}
+					hidden={hidden}
 				/>
 			</ThemeContext.Provider>
-		) as React.ReactElement,
-	);
+		) as React.ReactElement;
+	const view = render(element(options.hidden ?? false));
 	await delay(40);
 
 	const frame = () => (view.lastFrame() ?? "").replace(/\s+/g, " ");
@@ -112,6 +115,8 @@ async function prompt(options: PromptOptions = {}) {
 		step,
 		/** ✕ on the cell under the brackets. */
 		press: () => push(padAction("confirm")),
+		/** Covered, or back on screen — the two states the window puts it in. */
+		cover: (hidden: boolean) => view.rerender(element(hidden)),
 		unmount: view.unmount,
 	};
 }
@@ -306,6 +311,33 @@ describe("the on-screen keyboard", () => {
 
 		await p.push(padAction("confirm"), () => p.submitted.length > 0);
 		expect(p.submitted).toEqual(["hi"]);
+
+		p.unmount();
+	}, 20_000);
+});
+
+/**
+ * The editor under a full-screen view, with a controller.
+ *
+ * Ink hands an action to every subscriber and the window asks the editor
+ * *first*, so a covered editor that went on answering would be the worse half of
+ * both: it would open its keyboard behind the transcript, and from then on every
+ * press that followed — a page, a row of them — would be swallowed by a screen
+ * nobody is looking at. The press that must go on working is the same press, on
+ * the same editor, one render later.
+ */
+describe("a covered prompt and the buttons", () => {
+	test("answers no buttons while it is covered, and the same one works once it is back", async () => {
+		const p = await prompt({ hidden: true });
+
+		p.pad.push(padAction("osk", { button: "share" }));
+		await delay(120);
+		expect(p.keyboard()).toBeUndefined();
+
+		p.cover(false);
+		await delay(40);
+		await p.push(padAction("osk", { button: "share" }), () => p.keyboard() !== undefined);
+		expect(p.keyboard()).toBe("letters");
 
 		p.unmount();
 	}, 20_000);

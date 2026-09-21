@@ -10,6 +10,7 @@ import { render } from "ink-testing-library";
 import type React from "react";
 import { MessageList, StreamingPreview } from "../src/components/MessageList.tsx";
 import { PromptInput, placeholderCaret } from "../src/components/PromptInput.tsx";
+import type { PadPromptRef } from "../src/pad.ts";
 import { DARK_THEME, type Theme, ThemeContext } from "../src/theme.ts";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -619,5 +620,118 @@ describe("streaming preview", () => {
 	test("nothing to show renders nothing", () => {
 		const { lastFrame } = render(withTheme(<StreamingPreview text="" thinking="" />));
 		expect((lastFrame() ?? "").trim()).toBe("");
+	});
+});
+
+/**
+ * The editor under a full-screen view.
+ *
+ * Ctrl+O leaves the prompt mounted, because what is in it — the buffer, the undo
+ * stack, the folded pastes, the history search — cannot be rebuilt from anywhere
+ * else, and the screen a user comes back to should be the screen they left. What
+ * it must not be is *listening*: ink hands a key to every subscriber, so a
+ * covered editor would take what is typed at the transcript, answer the Escape
+ * the window asks for, and hand the window a pad handle it would use to push
+ * presses into a screen nobody can see. `display: none` in the host takes it off
+ * the screen; the three below are what take it out of the conversation.
+ */
+describe("a covered prompt", () => {
+	const DRAFT = "a draft";
+
+	test("takes no keys, and still has the draft once it is back", async () => {
+		const submitted: string[] = [];
+		const editor = (hidden: boolean) => withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} hidden={hidden} />);
+		const { stdin, lastFrame, rerender, unmount } = render(editor(false));
+		await delay(30);
+		stdin.write(DRAFT);
+		await delay(30);
+
+		rerender(editor(true));
+		await delay(30);
+		stdin.write("ZZZ");
+		await delay(30);
+
+		rerender(editor(false));
+		await delay(30);
+		expect(flat(lastFrame())).toContain(DRAFT);
+		// The keys went to the transcript, where they paged it or meant nothing.
+		// Bytes in a buffer nobody can see are worse than a lost keystroke: they
+		// arrive in the message, and the draft arrives with them.
+		expect(flat(lastFrame())).not.toContain("ZZZ");
+
+		// And the buffer is the buffer, not a redraw of it: what comes back is
+		// what the user wrote, submitted by the key that submits.
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual([DRAFT]);
+		unmount();
+	});
+
+	test("takes no paste either: pasted text is not inserted into a covered buffer", async () => {
+		// Ink keeps pasted text on a channel of its own — it is delivered as one
+		// string, never as the key presses it is made of — so turning the keyboard
+		// off is not the same as turning this off. A paste that landed while the
+		// transcript was up would be found in the sentence the user came back to.
+		const paste = (text: string) => `\x1b[200~${text}\x1b[201~`;
+		const editor = (hidden: boolean) => withTheme(<PromptInput onSubmit={() => {}} hidden={hidden} />);
+		const { stdin, lastFrame, rerender, unmount } = render(editor(false));
+		await delay(30);
+		stdin.write(paste("first"));
+		await delay(30);
+		expect(flat(lastFrame())).toContain("first"); // the channel works at all
+
+		rerender(editor(true));
+		await delay(30);
+		stdin.write(paste("second"));
+		await delay(30);
+
+		rerender(editor(false));
+		await delay(30);
+		expect(flat(lastFrame())).toContain("first");
+		expect(flat(lastFrame())).not.toContain("second");
+		unmount();
+	});
+
+	test("offers the window no Escape handler while it is covered", async () => {
+		// The window asks this ref before it acts on Escape, and the editor's
+		// Escape means "close my keyboard", "drop my @-list" — answers for a screen
+		// that is not on. An empty ref is the whole of what is promised here: the
+		// window is left with nothing to call rather than a handler for the screen
+		// behind it.
+		const escapeRef: React.RefObject<(() => boolean) | null> = { current: null };
+		const editor = (hidden: boolean) =>
+			withTheme(<PromptInput onSubmit={() => {}} escapeRef={escapeRef} hidden={hidden} />);
+		const { rerender, unmount } = render(editor(false));
+		await delay(30);
+		expect(typeof escapeRef.current).toBe("function");
+
+		rerender(editor(true));
+		await delay(30);
+		expect(escapeRef.current).toBeNull();
+
+		rerender(editor(false));
+		await delay(30);
+		expect(typeof escapeRef.current).toBe("function");
+		unmount();
+	});
+
+	test("publishes no pad handle while it is covered", async () => {
+		// Same ref, same reason: the window hands a press to the editor through
+		// this handle before it does anything with it, and a covered editor taking
+		// that press would be the window's paging there and its own typing here.
+		const padRef: PadPromptRef = { current: null };
+		const editor = (hidden: boolean) => withTheme(<PromptInput onSubmit={() => {}} padRef={padRef} hidden={hidden} />);
+		const { rerender, unmount } = render(editor(false));
+		await delay(30);
+		expect(padRef.current).not.toBeNull();
+
+		rerender(editor(true));
+		await delay(30);
+		expect(padRef.current).toBeNull();
+
+		rerender(editor(false));
+		await delay(30);
+		expect(padRef.current).not.toBeNull();
+		unmount();
 	});
 });

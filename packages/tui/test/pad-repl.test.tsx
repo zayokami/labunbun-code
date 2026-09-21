@@ -188,6 +188,10 @@ describe("○ and the running turn", () => {
 
 		await press(h.pad, padAction("cancel", { button: "circle" }));
 		expect(h.session.isInterrupted).toBe(true);
+		// The user's own stop, and it is felt as one. The phase change that follows
+		// would otherwise send `done` — the one thing a stop is not — and the two
+		// patterns are shaped so a hand can tell them apart without looking.
+		expect(h.pad.buzzes).toEqual(["stopped"]);
 
 		h.release.resolve();
 		await delay(150);
@@ -209,6 +213,10 @@ describe("○ and the running turn", () => {
 		// The decision the user just made has to land on a live turn.
 		expect(h.session.isInterrupted).toBe(false);
 		expect(h.session.isRunning).toBe(true);
+		// One press, one buzz, and it is the dialog's: the two listeners this
+		// action reaches each have something to say, and saying both would be the
+		// stutter the pattern table exists to avoid.
+		expect(h.pad.buzzes).toEqual(["refused"]);
 
 		// With the dialog gone, ○ means what it always meant — and the same wait
 		// applies in reverse: the dialog is not gone until the screen says so.
@@ -216,6 +224,8 @@ describe("○ and the running turn", () => {
 		await waitFor(() => !permissionDialog(h));
 		await press(h.pad, padAction("cancel", { button: "circle" }));
 		expect(h.session.isInterrupted).toBe(true);
+		// Now it is the window's stop, and it sounds like one.
+		expect(h.pad.buzzes).toEqual(["refused", "stopped"]);
 
 		h.release.resolve();
 		await delay(150);
@@ -263,10 +273,13 @@ describe("the editor is asked first", () => {
 		// The run the user was watching is the thing ○ would have killed.
 		expect(h.session.isInterrupted).toBe(false);
 		expect(h.session.isRunning).toBe(true);
+		// Closing the keyboard is not a stop, so it is not felt as one.
+		expect(h.pad.buzzes).toEqual([]);
 
 		// And with the keyboard gone, ○ means what it always meant.
 		await push(h, padAction("cancel", { button: "circle" }), () => h.session.isInterrupted);
 		expect(h.session.isInterrupted).toBe(true);
+		expect(h.pad.buzzes).toEqual(["stopped"]);
 
 		h.release.resolve();
 		await delay(150);
@@ -367,6 +380,41 @@ describe("the keyboard inside the window", () => {
 		// reading a control sequence as often as a window. A press cannot be
 		// misread. (A transcript still up would swallow this one.)
 		await tap(h, padAction("osk", { button: "share" }), () => h.frame().includes("On-screen keyboard"));
+
+		h.unmount();
+	}, 20_000);
+
+	/**
+	 * The same round trip with something to lose.
+	 *
+	 * Options shows a screen of its own by *covering* the window rather than by
+	 * unmounting it, and everything the prompt was holding goes on existing under
+	 * it: the half-typed sentence, and the keyboard it was being typed from. A
+	 * draft that comes back empty is a sentence the user has to type twice, and a
+	 * keyboard that closes itself is the same loss in a smaller size.
+	 */
+	test("Options leaves the draft and the keyboard where they were", async () => {
+		const h = setup();
+		await delay(40);
+
+		await push(h, padAction("osk", { button: "share" }), () => h.frame().includes("On-screen keyboard"));
+		h.stdin.write("typed");
+		await delay(40);
+		expect(h.frame()).toContain("typed");
+
+		await tap(h, padAction("transcript", { button: "options" }), () => h.frame().includes("Transcript "));
+		// Covered is not the same as gone: the prompt is off the screen, so the
+		// keyboard it had open is off it too.
+		expect(h.frame()).not.toContain("On-screen keyboard");
+
+		await tap(h, padAction("transcript", { button: "options" }), () => !h.frame().includes("Transcript "));
+		// The write after the one that closes the transcript can be ink turning
+		// bracketed paste back on — the editor listening again is what does it — so
+		// the screen is waited for rather than read once and believed.
+		await waitFor(() => h.frame().includes("On-screen keyboard"));
+		const frame = h.frame();
+		expect(frame).toContain("On-screen keyboard");
+		expect(frame).toContain("typed");
 
 		h.unmount();
 	}, 20_000);

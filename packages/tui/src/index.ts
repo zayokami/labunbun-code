@@ -34,6 +34,7 @@ export {
 	detectAppearance,
 	parseBackgroundLuminance,
 } from "./detect-appearance.ts";
+export { formatElapsed } from "./elapsed.ts";
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
 export { LIVE_OUTPUT_LINES, liveOutputLines, livePreviewTargets } from "./live-output.ts";
 export { type Block, type InlineSpan, parseBlocks, parseInline } from "./markdown.ts";

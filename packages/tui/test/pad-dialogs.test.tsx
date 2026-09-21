@@ -230,12 +230,19 @@ describe("PermissionDialog and the pad", () => {
 
 		await press(pad, padAction("cancel", { button: "circle" }));
 		expect(d.answers).toEqual([[false, false]]);
+		// Said out loud as well as on screen. A press with nothing behind it is a
+		// press the thumb cannot tell from a report that never arrived — and this
+		// is the one answer the pad is always allowed to give, so confirming it
+		// costs nothing and settles the doubt.
+		expect(pad.buzzes).toEqual(["refused"]);
 
 		// The release that follows every press is not a second denial: an answer
 		// that arrived twice is a promise resolved twice, and the second one is
 		// the one whoever is waiting happens to miss.
 		await press(pad, padAction("cancel", { phase: "release", button: "circle" }));
 		expect(d.answers).toEqual([[false, false]]);
+		// Nor is it a second buzz.
+		expect(pad.buzzes).toEqual(["refused"]);
 
 		d.unmount();
 	});

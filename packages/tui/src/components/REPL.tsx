@@ -575,7 +575,14 @@ export function REPL({
 			case "cancel":
 			case "interrupt":
 				// Idle, ○ has nothing to cancel: the screen is already the answer.
-				if (getSession().isRunning) getSession().abort();
+				if (getSession().isRunning) {
+					// The user's own stop, and it gets its own shape: the phase change
+					// that follows would send `done`, which is the one thing it is not.
+					// The service records that this buzz happened, which is what keeps
+					// that `done` from landing on top of it as a stutter.
+					pad?.buzz("stopped");
+					getSession().abort();
+				}
 				return true;
 			case "transcript":
 				setTranscriptMode((open) => !open);
@@ -616,96 +623,114 @@ export function REPL({
 		}
 	});
 
-	if (transcriptMode) {
-		const windowSize = Math.min(entries.length, 25);
-		const end = Math.max(windowSize, entries.length - transcriptOffset);
-		const start = end - windowSize;
-		const windowEntries = entries.slice(start, end);
-		return (
-			<Box flexDirection="column">
-				{/* full output here — reading back is exactly when truncation hurts */}
-				<MessageList entries={windowEntries} full />
-				<Text dimColor>
-					Transcript {start + 1}-{end} of {entries.length} · ↑/↓ page · ctrl+o/Esc back
-				</Text>
-			</Box>
-		);
-	}
+	// Reading back is a screen of its own, but it is not a separate tree. The
+	// transcript used to be an early return, so opening it unmounted everything
+	// below — the half-typed draft, its undo stack, the pasted originals, the
+	// history search — and closing it handed back an empty prompt. Both screens
+	// are built on every render now, and the one that is not showing is taken out
+	// of the layout rather than out of the tree.
+	const windowSize = Math.min(entries.length, 25);
+	const end = Math.max(windowSize, entries.length - transcriptOffset);
+	const start = end - windowSize;
+	const windowEntries = entries.slice(start, end);
 
 	return (
 		<Box flexDirection="column">
-			<TerminalTitle phase={statusPhase} dirName={dirName} actionRequired={awaitingUser} />
-			<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} />
-			<StreamingPreview text={streamingText} thinking={thinkingText} />
-			{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
-			<Box marginBottom={1} flexDirection="column">
-				<StatusLine
-					phase={statusPhase}
-					modelName={modelName}
-					elapsedMs={elapsedMs}
-					contextInfo={contextInfo}
-					outputEstimate={estimateOutputTokens(streamingText.length)}
-					pad={padStatus}
-				/>
-				{/* "Running tools…" for twenty seconds says nothing about what is
-				    running; the row underneath is what makes the wait legible. */}
-				{pendingTools.length > 0 && (
+			{transcriptMode ? (
+				<Box flexDirection="column">
+					{/* full output here — reading back is exactly when truncation hurts */}
+					<MessageList entries={windowEntries} full />
 					<Text dimColor>
-						{"  └ "}
-						{toolSummary(pendingTools)}
+						Transcript {start + 1}-{end} of {entries.length} · ↑/↓ page · ctrl+o/Esc back
 					</Text>
-				)}
-				{/* Not part of the turn: a background shell outlives it, which is
-				    precisely why it has to stay on screen after the turn ends. */}
-				{shellRow && <Text dimColor>{`  └ ${shellRow}`}</Text>}
+				</Box>
+			) : (
+				<>
+					<TerminalTitle phase={statusPhase} dirName={dirName} actionRequired={awaitingUser} />
+					<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} />
+					<StreamingPreview text={streamingText} thinking={thinkingText} />
+					{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
+					<Box marginBottom={1} flexDirection="column">
+						<StatusLine
+							phase={statusPhase}
+							modelName={modelName}
+							elapsedMs={elapsedMs}
+							contextInfo={contextInfo}
+							outputEstimate={estimateOutputTokens(streamingText.length)}
+							pad={padStatus}
+						/>
+						{/* "Running tools…" for twenty seconds says nothing about what is
+						    running; the row underneath is what makes the wait legible. */}
+						{pendingTools.length > 0 && (
+							<Text dimColor>
+								{"  └ "}
+								{toolSummary(pendingTools)}
+							</Text>
+						)}
+						{/* Not part of the turn: a background shell outlives it, which is
+						    precisely why it has to stay on screen after the turn ends. */}
+						{shellRow && <Text dimColor>{`  └ ${shellRow}`}</Text>}
+					</Box>
+					{/* Above the dialogs: it reports, it does not ask, and a dialog that
+					    appears while it is open is the more urgent of the two. */}
+					{statusCard ? <StatusCard data={statusCard} /> : null}
+					{dialog ? (
+						<PermissionDialog
+							toolName={dialog.toolName}
+							inputPreview={dialog.inputPreview}
+							inputFull={dialog.inputFull}
+							options={dialog.options}
+							queueLength={dialog.queueLength}
+							onResolve={(allow, alwaysAllow) => dialog.resolve(allow, alwaysAllow)}
+							pad={pad}
+						/>
+					) : null}
+					{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} pad={pad} /> : null}
+					{picker ? (
+						<ListPickerDialog
+							title={picker.title}
+							items={picker.items}
+							resolve={picker.resolve}
+							onHighlight={picker.onHighlight}
+							onCancel={picker.onCancel}
+							pad={pad}
+						/>
+					) : null}
+					{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
+					{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ vim, commands: commandSuggestions })} />}
+					{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
+					<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
+				</>
+			)}
+			{/* The second child of this box on either screen, which is the whole
+			    trick: React matches children by position, so an editor that moved to
+			    another branch would be a new component with an empty buffer. Out of
+			    the layout while the transcript is up — and through `hidden` out of
+			    the conversation as well, since an editor under a full screen would
+			    otherwise type into a buffer nobody can see, answer Escape for a
+			    window that is not its own, and publish a `padRef` that would steal
+			    the paging buttons from the screen that is actually showing. */}
+			<Box display={transcriptMode ? "none" : "flex"} flexDirection="column">
+				<PromptInput
+					onSubmit={handleSubmit}
+					disabled={dialog !== null || question !== null || picker !== null || shortcutsOpen}
+					onToggleHelp={() => setShortcutsOpen(true)}
+					commandSuggestions={commandSuggestions}
+					completeFiles={completeFiles}
+					vim={vim}
+					history={history}
+					escapeRef={escapeRef}
+					busy={busy}
+					canSteer={canSteer}
+					onQueue={(text) => sendMidRun(text, "queue")}
+					onSteer={(text) => sendMidRun(text, "steer")}
+					onInterruptSend={interruptAndSend}
+					pad={pad}
+					padRef={padRef}
+					hidden={transcriptMode}
+				/>
+				<Text dimColor> </Text>
 			</Box>
-			{/* Above the dialogs: it reports, it does not ask, and a dialog that
-			    appears while it is open is the more urgent of the two. */}
-			{statusCard ? <StatusCard data={statusCard} /> : null}
-			{dialog ? (
-				<PermissionDialog
-					toolName={dialog.toolName}
-					inputPreview={dialog.inputPreview}
-					inputFull={dialog.inputFull}
-					options={dialog.options}
-					queueLength={dialog.queueLength}
-					onResolve={(allow, alwaysAllow) => dialog.resolve(allow, alwaysAllow)}
-					pad={pad}
-				/>
-			) : null}
-			{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} pad={pad} /> : null}
-			{picker ? (
-				<ListPickerDialog
-					title={picker.title}
-					items={picker.items}
-					resolve={picker.resolve}
-					onHighlight={picker.onHighlight}
-					onCancel={picker.onCancel}
-					pad={pad}
-				/>
-			) : null}
-			{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
-			{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ vim, commands: commandSuggestions })} />}
-			{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
-			<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
-			<PromptInput
-				onSubmit={handleSubmit}
-				disabled={dialog !== null || question !== null || picker !== null || shortcutsOpen}
-				onToggleHelp={() => setShortcutsOpen(true)}
-				commandSuggestions={commandSuggestions}
-				completeFiles={completeFiles}
-				vim={vim}
-				history={history}
-				escapeRef={escapeRef}
-				busy={busy}
-				canSteer={canSteer}
-				onQueue={(text) => sendMidRun(text, "queue")}
-				onSteer={(text) => sendMidRun(text, "steer")}
-				onInterruptSend={interruptAndSend}
-				pad={pad}
-				padRef={padRef}
-			/>
-			<Text dimColor> </Text>
 		</Box>
 	);
 }

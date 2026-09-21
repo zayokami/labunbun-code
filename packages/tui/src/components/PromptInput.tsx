@@ -83,6 +83,20 @@ export interface PromptInputProps {
 	 * same press twice.
 	 */
 	padRef?: PadPromptRef;
+	/**
+	 * On screen, or behind a full-screen view.
+	 *
+	 * The window that covers this editor still renders it, because what is in the
+	 * buffer — and the undo stack, the folded pastes, the open history search that
+	 * go with it — is not reconstructable from anywhere else, and the screen a user
+	 * comes back to should be the screen they left. What a covered editor must not
+	 * do is *listen*: ink hands a key to every subscriber and a pad action to every
+	 * subscriber, so an editor behind the transcript would type into a buffer
+	 * nobody can see, paste into it, and answer the window's Escape and pad
+	 * questions for a screen it is not part of. `display: none` takes it out of the
+	 * layout; this takes it out of the conversation.
+	 */
+	hidden?: boolean;
 }
 
 /**
@@ -128,6 +142,7 @@ export function PromptInput({
 	onInterruptSend,
 	pad,
 	padRef,
+	hidden = false,
 }: PromptInputProps) {
 	const theme = useTheme();
 	const { columns } = useWindowSize();
@@ -278,23 +293,29 @@ export function PromptInput({
 	// cells, which is a whole row of the keyboard gone past. Being asked is the
 	// more precise of the two arrangements, because the window is the only thing
 	// that knows what is in front of what; a window that stops asking is a window
-	// whose editor still works.
-	usePadAction(padRef ? undefined : pad, padAction);
+	// whose editor still works. A covered editor is asked by nobody at all, and
+	// `isActive` is the one line of that: the subscription stays where it is, and
+	// the presses stop there instead of being typed into a screen nobody is on.
+	usePadAction(padRef ? undefined : pad, padAction, { isActive: !hidden });
 
 	// A layout effect, for the reason `usePadAction` gives: the window asks
 	// this ref before it acts, so a press arriving between a commit and a passive
 	// effect would be answered by the editor of the render before — with the
-	// keyboard closed that it had just opened, or the other way round.
+	// keyboard closed that it had just opened, or the other way round. A covered
+	// editor publishes nothing: the window is looking at a screen that does not
+	// include this one, and the handle is how it would hand it a press.
 	useLayoutEffect(() => {
 		if (!padRef) return;
-		padRef.current = {
-			action: padAction,
-			fill: (text: string) => actions.setBuffer(text, text.length),
-		};
+		if (!hidden) {
+			padRef.current = {
+				action: padAction,
+				fill: (text: string) => actions.setBuffer(text, text.length),
+			};
+		}
 		return () => {
 			padRef.current = null;
 		};
-	}, [padRef, padAction, actions]);
+	}, [padRef, padAction, actions, hidden]);
 
 	usePaste(
 		(text) => {
@@ -310,7 +331,7 @@ export function PromptInput({
 			pasteMapRef.current.set(token, clean);
 			actions.insert(token);
 		},
-		{ isActive: !disabled },
+		{ isActive: !disabled && !hidden },
 	);
 
 	const query = completionPrefix ?? state.text;
@@ -349,6 +370,11 @@ export function PromptInput({
 	// aborting the turn the host aborts on.
 	useEffect(() => {
 		if (!escapeRef) return;
+		// Covered: an Escape that closes this editor's search, drops its @-list or
+		// sends its half-typed buffer belongs to a screen that is not on. The window
+		// that covers it answers Escape itself — leaving the transcript, closing a
+		// dialog — and this must not be a second answer to the same key.
+		if (hidden) return;
 		escapeRef.current = () => {
 			// The search first: an Escape that closes it must not go on to interrupt
 			// the turn behind it.
@@ -382,7 +408,19 @@ export function PromptInput({
 		return () => {
 			escapeRef.current = null;
 		};
-	}, [escapeRef, fileSuggestions, handleVimKey, search, busy, vim, onInterruptSend, state.text, actions, pushHistory]);
+	}, [
+		escapeRef,
+		fileSuggestions,
+		handleVimKey,
+		search,
+		busy,
+		vim,
+		onInterruptSend,
+		state.text,
+		actions,
+		pushHistory,
+		hidden,
+	]);
 
 	useInput(
 		(input, key) => {
@@ -571,7 +609,7 @@ export function PromptInput({
 				actions.insert(input);
 			}
 		},
-		{ isActive: !disabled },
+		{ isActive: !disabled && !hidden },
 	);
 
 	const lines = state.text.split("\n");
