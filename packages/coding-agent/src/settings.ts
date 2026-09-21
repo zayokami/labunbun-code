@@ -87,6 +87,46 @@ export const SettingsSchema = z.object({
 			additionalDirectories: z.array(z.string()).default([]),
 		})
 		.default({ allow: [], deny: [], additionalDirectories: [] }),
+	/**
+	 * The DualShock 4: whether one is read, and what its buttons do.
+	 *
+	 * Every key here is honored from the user's own tiers only (see
+	 * {@link PROJECT_TIER_DENIED_KEYS}) — the whole block is denied rather than
+	 * filtered key by key, because there is no harmless sub-key to keep: a cloned
+	 * repository that could write `allowApprove` would be handing a controller in
+	 * the user's lap the power to approve that repository's own tool calls.
+	 */
+	gamepad: z
+		.object({
+			/** Look for a controller at startup. Off until the user turns it on. */
+			enabled: z.boolean().optional(),
+			/**
+			 * Whether ✕ may answer a permission dialog. Off unless the user says
+			 * otherwise, in their own file: a button held down in a pocket is not a
+			 * person deciding.
+			 */
+			allowApprove: z.boolean().optional(),
+			/** Path, or a substring of one, of the controller to open. */
+			device: z.string().optional(),
+			/**
+			 * How far the left stick must move before it counts as a direction.
+			 * Bounded on both ends: a deadzone outside 0–1 is a stick that can never
+			 * work or one that reads every tremor as a direction.
+			 */
+			deadzone: z.number().min(0).max(1).optional(),
+			/**
+			 * Button → action, replacing the defaults one entry at a time.
+			 *
+			 * Deliberately not an enum: a name that resolves to nothing becomes a
+			 * line in `/doctor` and costs that one binding, whereas validating it here
+			 * would reject the whole settings file over a typo — the same bargain
+			 * theme files strike for an unknown token.
+			 */
+			bindings: z.record(z.string(), z.string()).optional(),
+			/** Whole prompts the command wheel offers at one press. */
+			phrases: z.array(z.string()).optional(),
+		})
+		.optional(),
 	env: z.record(z.string(), z.string()).optional(),
 	/**
 	 * Policy-tier lockdowns. These are only honoured when they come from the
@@ -172,6 +212,13 @@ export interface LoadedSettings {
  *   - `trimOldToolResults` is denied for the opposite reason: it decides how much
  *     of the user's own conversation the model keeps, and a cloned repository
  *     should not get to make the agent forget on the user's behalf.
+ *   - `gamepad` is denied *whole*, where `permissions` is denied key by key.
+ *     There is no sub-key worth keeping: `enabled` claims an input device,
+ *     `device` and `bindings` decide which one and what its buttons mean,
+ *     `phrases` puts repository-authored text one press away from the prompt, and
+ *     `allowApprove` would let a repository hand a physical button the power to
+ *     approve its own tool calls. "Tightening is always safe" has no analogue
+ *     here — every field widens what something outside the keyboard can do.
  *   - `allowManagedPermissionRulesOnly` / `disableBypassPermissionsMode` — these
  *     are read only from the policy tier already; they are listed here so the
  *     merged settings can never carry a repo-supplied value even if a future
@@ -190,6 +237,7 @@ const PROJECT_TIER_DENIED_KEYS = [
 	// Not a lockdown but the same rule: whether this startup asks the network a
 	// question is the user's decision, not the repository's.
 	"modelDiscovery",
+	"gamepad",
 	"allowManagedPermissionRulesOnly",
 	"disableBypassPermissionsMode",
 ] as const;
@@ -241,7 +289,7 @@ export function formatIgnoredKeysNotice(ignored: IgnoredSettingsKey[]): string |
 }
 
 /** The settings a command persists for the user, which another tier can override. */
-export type UserChoiceKey = "theme" | "model" | "vimMode";
+export type UserChoiceKey = "theme" | "model" | "vimMode" | "gamepad";
 
 /** Tiers that outrank the user's own file, highest first. */
 const OVERRIDING_TIERS = ["flag", "policy", "local", "project"] as const;

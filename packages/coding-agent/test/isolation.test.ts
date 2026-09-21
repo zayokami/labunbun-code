@@ -14,6 +14,7 @@ import { join } from "node:path";
 const TEST_DIRS = [
 	join(import.meta.dir, "..", "..", "agent", "test"),
 	join(import.meta.dir, "..", "..", "ai", "test"),
+	join(import.meta.dir, "..", "..", "gamepad", "test"),
 	join(import.meta.dir, "..", "..", "mcp", "test"),
 	join(import.meta.dir, "..", "..", "tools", "test"),
 	join(import.meta.dir, "..", "..", "tui", "test"),
@@ -161,5 +162,22 @@ describe("test suite isolation", () => {
 			(f) => f.name,
 		);
 		expect(offenders, "pass a temp home as the third argument to runDoctorChecks").toEqual([]);
+	});
+
+	// The two writers behind `/theme`, `/model`, `/vim` and `/gamepad`. They are
+	// read-merge-write, so a call without the home override rewrites the
+	// operator's own settings file the moment the test runs — the failure mode
+	// this whole file exists for, and the one a stray `/gamepad off` test would
+	// hit. The nested writer merges one level down; both take home last.
+	test("no test rewrites the real settings file", () => {
+		for (const [name, min] of [
+			["writeUserSettingsNestedPatch", 3],
+			["writeUserSettingsPatch", 2],
+		] as const) {
+			const offenders = FILES.filter(({ source }) => callersWithTooFewArguments(source, name, min) > 0).map(
+				(f) => `${f.name} (${name})`,
+			);
+			expect(offenders, `pass a temp home as the last argument to ${name}`).toEqual([]);
+		}
 	});
 });

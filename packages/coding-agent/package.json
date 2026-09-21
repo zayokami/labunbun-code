@@ -11,8 +11,9 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
-		"@labunbun/ai": "workspace:*",
 		"@labunbun/agent": "workspace:*",
+		"@labunbun/ai": "workspace:*",
+		"@labunbun/gamepad": "workspace:*",
 		"@labunbun/mcp": "workspace:*",
 		"@labunbun/tools": "workspace:*",
 		"@labunbun/tui": "workspace:*",

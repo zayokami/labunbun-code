@@ -16,6 +16,7 @@ import {
 	estimateContextUsage,
 	evaluatePermissions,
 	formatRetryNotice,
+	PERMISSION_MODES,
 	type PermissionMode,
 	type PermissionRule,
 	type SessionEntry,
@@ -32,6 +33,7 @@ import {
 	resolveModel,
 	withModelFallback,
 } from "@labunbun/ai";
+import { bindingText, describePadDevice, type PadSource, padPalette } from "@labunbun/gamepad";
 import {
 	connectAllMcpServers,
 	connectMcpServer,
@@ -63,6 +65,16 @@ import { contextRows, contextSummaryLine, isContextLow, lowContextWarning } from
 import { CostTracker, formatCostReport } from "./cost-tracker.ts";
 import { sessionToMarkdown } from "./export-session.ts";
 import { createFileCompleter } from "./file-completions.ts";
+import {
+	createPadRuntime,
+	createPadWatch,
+	formatPadStatus,
+	isDefaultBinding,
+	type PadRuntime,
+	padConfigFrom,
+	padHeadline,
+	padStartupNotice,
+} from "./gamepad-runtime.ts";
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { CLI_NAME } from "./index.ts";
@@ -101,7 +113,7 @@ import {
 	selectableThemeNames,
 } from "./theme-file.ts";
 import { pruneToolOutput, toolOutputRoot, writeToolOutput } from "./tool-output.ts";
-import { persistModelChoice, writeUserSettingsPatch } from "./user-settings.ts";
+import { persistModelChoice, writeUserSettingsNestedPatch, writeUserSettingsPatch } from "./user-settings.ts";
 import { runWizard, shouldRunWizard } from "./wizard.ts";
 
 export interface InteractiveOptions {
@@ -115,6 +127,18 @@ export interface InteractiveOptions {
 	theme?: string;
 	/** Home directory for user-owned state; injectable so tests don't touch the real one. */
 	home?: string;
+	/**
+	 * Read a DualShock 4 this run (the --gamepad flag). Overrides the setting for
+	 * one session and writes nothing — a flag that edited the user's file would
+	 * make "try it once" impossible.
+	 */
+	gamepad?: boolean;
+	/**
+	 * Where the controller comes from. Injected by an end-to-end test, which has
+	 * no pad and must not load node-hid; production leaves it out and gets the
+	 * real source.
+	 */
+	padSource?: PadSource;
 }
 
 export async function runInteractive(options: InteractiveOptions = {}): Promise<number> {
@@ -711,6 +735,29 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// claims stdin the moment it renders.
 	const resolvedTheme = await resolveTheme(options.theme ?? settings.theme, cwd, home);
 
+	// ---- controller ----
+	// Built before mounting, enabled after: constructing the runtime loads
+	// nothing (node-hid is imported by `enable`, which runs once the REPL is on
+	// screen), and the bridge has to exist to be handed to the tree that shows
+	// the battery and takes the buttons.
+	//
+	// The bindings are resolved against `appCommandTable` so a `command:` binding
+	// naming a command that does not exist is a `/doctor` line rather than a
+	// button that does nothing.
+	const padConfig = padConfigFrom(
+		settings,
+		appCommandTable().map(([name]) => name),
+	);
+	const pad = createPadRuntime(padConfig, {
+		palette: padPalette({ accent: resolvedTheme.theme.accent, alert: resolvedTheme.theme.permission }),
+		source: options.padSource,
+	});
+	// The flag wins for this run and is not written anywhere; the setting is the
+	// standing answer.
+	const padWanted = options.gamepad ?? padConfig.enabled;
+
+	const padWatch = createPadWatch(pad.service, (line) => pushInfo(handle, line));
+
 	// ---- REPL ----
 	handle = mountRepl({
 		session,
@@ -726,6 +773,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		completeFiles: (query) => fileCompleter(query),
 		dirName: basename(cwd),
 		cwd,
+		// Handed over even when the pad is switched off: the bridge is inert until
+		// something enables the service, and `/gamepad on` has to reach a tree that
+		// is already mounted. `--gamepad`/off decide whether anything is read, not
+		// whether the screen can hear it.
+		pad: pad.bridge,
 		// Oldest first, which is the order ↑ recall walks backwards through.
 		history: loadHistory(cwd),
 		onAlwaysAllow: (toolName, input) => {
@@ -785,6 +837,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				baseRules,
 				sessionRules,
 				commands,
+				pad,
+				padWatch,
 				compaction: () => compaction,
 				mcpConnections,
 				mcpConfig,
@@ -798,6 +852,28 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				switchModel,
 			}),
 	});
+
+	// The controller, now that there is somewhere to say what happened. Started
+	// after the mount so the first line — including a failure — lands in a
+	// transcript that exists; enabling loads node-hid, which is why it is not
+	// awaited: the REPL is already interactive, and a missing optional dependency
+	// is a status, not an exception.
+	if (padWanted) {
+		void pad.setEnabled(true).then(() => {
+			const notice = padStartupNotice(pad.service.status());
+			// Silence when it worked: the pad buzzes to say hello, and an unasked-for
+			// line on every startup is how a feature becomes noise.
+			if (notice) pushInfo(handle, notice);
+		});
+	} else {
+		// The flag is the run's answer even when it is "no": a session started with
+		// `--no-gamepad` over a settings file that says `enabled: true` otherwise
+		// keeps a config saying on, and `/gamepad status` and `/doctor` would both
+		// describe a pad that nothing is reading. Off is a state, not an absence —
+		// and nothing is written, because `/gamepad on` during the run has to be
+		// able to turn it back on.
+		void pad.setEnabled(false);
+	}
 
 	// Task list → UI strip subscription.
 	const unsubTasks = taskStore.subscribe(() => {
@@ -853,6 +929,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	catalogAbort.abort();
 	unsubTasks();
 	clearInterval(shellPoll);
+	// Same reason, and one more: an open HID handle outlives the event loop's
+	// interest in it, so a pad left open would keep the process from exiting.
+	padWatch.stop();
+	pad.close();
 
 	// How to come back to this conversation. Printed here rather than through the
 	// REPL because the Ink frame owns the screen: a line written while it is up is
@@ -988,6 +1068,14 @@ interface AppCommandContext {
 	baseRules: PermissionRule[];
 	sessionRules: PermissionRule[];
 	commands: Command[];
+	/**
+	 * The controller, when this session has one. Null only for a caller that
+	 * builds a context without one — every interactive session has a runtime,
+	 * switched on or not, because `/gamepad on` has to be able to reach it.
+	 */
+	pad: PadRuntime | null;
+	/** `/gamepad watch`'s on/off, which is state rather than a subscription. */
+	padWatch: { toggle(): boolean; stop(): void };
 	/** Read at dispatch time; a swap or model switch rebuilds the manager. */
 	compaction(): CompactionManager;
 	mcpConnections: McpConnection[];
@@ -1045,6 +1133,21 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 }
 
 /**
+ * What each permission mode means, in the one line `/mode`'s list has room for.
+ *
+ * Keyed by the mode rather than written as a list, so the compiler is what
+ * notices a mode that has a name and no explanation: adding one to
+ * `PERMISSION_MODES` fails to typecheck here until this says what it does.
+ */
+const PERMISSION_MODE_HINTS: Record<PermissionMode, string> = {
+	default: "ask before tools that change anything",
+	plan: "read-only; propose a plan and wait for approval",
+	acceptEdits: "apply file edits without asking, still ask for the rest",
+	dontAsk: "never prompt — refuse anything not already allowed",
+	bypassPermissions: "skip permission checks entirely",
+};
+
+/**
  * App-level commands, which live in `handleAppCommand`'s switch rather than in
  * the command registry. `/help` is generated from the command table, so a
  * command missing from this list is a command the user cannot discover — that
@@ -1059,8 +1162,9 @@ export function appCommandTable(): Array<[string, string]> {
 		["/doctor", "Check the environment, settings, and provider setup"],
 		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
+		["/gamepad", "Control the session from a DualShock 4: /gamepad [on|off|status|watch|list|approve|rumble]"],
 		["/mcp", "List configured MCP servers and their tools"],
-		["/mode", "Show or set the permission mode: /mode <mode>"],
+		["/mode", "Show or set the permission mode: /mode [mode]"],
 		["/model", "Show or switch the model: /model [provider/id]"],
 		["/permissions", "Show the active permission mode and rules"],
 		["/ps", "List background shells and show what one has printed"],
@@ -1294,11 +1398,34 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/permissions-mode":
 		case "/mode": {
 			const arg = text.split(/\s+/)[1] as PermissionMode | undefined;
-			if (arg && ["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"].includes(arg)) {
+			if (arg && PERMISSION_MODES.includes(arg)) {
 				ctx.getSession()?.setPermissionMode(arg);
 				pushInfo(ctx.handle, `Permission mode: ${arg}`);
+			} else if (arg) {
+				pushInfo(ctx.handle, `Usage: /mode ${PERMISSION_MODES.join("|")}`);
 			} else {
-				pushInfo(ctx.handle, `Usage: /mode default|plan|acceptEdits|dontAsk|bypassPermissions`);
+				// No argument opens the same list `/model` and `/theme` do, rather than
+				// printing a usage line. A usage line is a dead end for a user with no
+				// keyboard: `R3` on a controller runs this command, and until this
+				// existed that button printed the one thing it could not act on.
+				const handleRef = ctx.handle;
+				if (!handleRef) return true;
+				void (async () => {
+					const current = ctx.getSession()?.permissionMode;
+					const active = PERMISSION_MODES.indexOf(current as PermissionMode);
+					const items = PERMISSION_MODES.map((mode, i) => ({
+						label: `${i === active ? "* " : "  "}${mode}`,
+						description: PERMISSION_MODE_HINTS[mode],
+					}));
+					const index = await handleRef.pickFromList("Permission mode", items, {
+						initialIndex: Math.max(active, 0),
+					});
+					if (index === null || index < 0) return;
+					const chosen = PERMISSION_MODES[index];
+					if (!chosen) return;
+					ctx.getSession()?.setPermissionMode(chosen);
+					pushInfo(ctx.handle, `Permission mode: ${chosen}`);
+				})();
 			}
 			return true;
 		}
@@ -1388,7 +1515,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/doctor": {
 			void (async () => {
 				const { runDoctorChecks, formatDoctorReport } = await import("./doctor.ts");
-				const checks = await runDoctorChecks(ctx.settings, ctx.cwd, ctx.home, ctx.theme.choice);
+				// The runtime's own config, so /doctor and /gamepad cannot disagree
+				// about which bindings are readable.
+				const checks = await runDoctorChecks(ctx.settings, ctx.cwd, ctx.home, ctx.theme.choice, ctx.pad?.config);
 				pushInfo(ctx.handle, formatDoctorReport(checks));
 			})();
 			return true;
@@ -1485,6 +1614,116 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				save(names[index], resolved[index]);
 			})();
 			return true;
+		}
+		case "/gamepad": {
+			const pad = ctx.pad;
+			const arg = text.split(/\s+/)[1]?.toLowerCase();
+			if (!pad) {
+				pushInfo(ctx.handle, "No controller in this session.");
+				return true;
+			}
+
+			/**
+			 * Write one field of the `gamepad` block, and say whether it stuck.
+			 *
+			 * Nested rather than top-level: `writeUserSettingsPatch` replaces the
+			 * whole key, so `/gamepad off` written that way would take the user's
+			 * `bindings` and `phrases` with it.
+			 */
+			const save = (patch: Record<string, unknown>): string => {
+				const shadowed = shadowedChoiceNotice(ctx.loadedSettings, "gamepad", (path) => shortenHome(path, ctx.home));
+				try {
+					writeUserSettingsNestedPatch("gamepad", patch, ctx.home);
+					return shadowed ? ` (${shadowed})` : "";
+				} catch (error) {
+					// In effect either way; only the write failed.
+					return ` (not saved: ${error instanceof Error ? error.message : String(error)})`;
+				}
+			};
+
+			if (arg === "on" || arg === "off") {
+				const next = arg === "on";
+				const saved = save({ enabled: next });
+				if (!next) ctx.padWatch.stop();
+				void pad.setEnabled(next).then(() => {
+					pushInfo(ctx.handle, `${next ? padHeadline(pad.service.status()) : "Gamepad off"}${saved}`);
+				});
+				return true;
+			}
+
+			if (arg === "approve") {
+				const value = text.split(/\s+/)[2]?.toLowerCase();
+				if (value && value !== "on" && value !== "off") {
+					pushInfo(ctx.handle, "Usage: /gamepad approve [on|off] — with no argument it toggles");
+					return true;
+				}
+				// Toggled from what is in force, not from the file: the setting and the
+				// running bridge are kept together by the runtime, and a file read here
+				// would answer with what was written once rather than with what ✕ does.
+				const next = value ? value === "on" : !pad.config.allowApprove;
+				pad.setAllowApprove(next);
+				pushInfo(
+					ctx.handle,
+					`Gamepad approvals ${next ? "on — ✕ may answer a permission dialog" : "off — the keyboard answers"}` +
+						save({ allowApprove: next }),
+				);
+				return true;
+			}
+
+			switch (arg) {
+				case undefined: {
+					// The mapping, which is the manual. The button ids are what the settings
+					// file writes, so printing them is how a user learns them.
+					const lines = [padHeadline(pad.service.status()), "", `  ${"Button".padEnd(18)}Action`];
+					for (const [button, binding] of Object.entries(pad.config.bindings)) {
+						const marker = isDefaultBinding(button, binding) ? "" : "  *";
+						lines.push(`  ${button.padEnd(18)}${bindingText(binding)}${marker}`);
+					}
+					lines.push("");
+					lines.push("  * = changed from the default. Rebind them in settings.json:");
+					lines.push('  "gamepad": { "bindings": { "cross": "confirm", "r2": "command:/status" } }');
+					for (const problem of pad.config.problems) lines.push(`  ${problem}`);
+					pushInfo(ctx.handle, lines.join("\n"));
+					return true;
+				}
+				case "status":
+					pushInfo(ctx.handle, formatPadStatus(pad.service.status(), pad.config, pad.service));
+					return true;
+				case "watch": {
+					const watching = ctx.padWatch.toggle();
+					pushInfo(
+						ctx.handle,
+						watching
+							? "Watching the controller — every change is a line here. /gamepad watch again to stop."
+							: "Stopped watching the controller.",
+					);
+					return true;
+				}
+				case "list": {
+					const devices = pad.service.devices();
+					// An empty list has two very different causes — nothing plugged in,
+					// and the optional module not installed — and the status is what knows
+					// which, so it supplies the sentence.
+					pushInfo(
+						ctx.handle,
+						devices.length === 0
+							? `${padHeadline(pad.service.status())} — nothing to list.`
+							: devices
+									.map((device) => `  ${describePadDevice(device)}${device.carriesReports ? "" : " (no reports)"}`)
+									.join("\n"),
+					);
+					return true;
+				}
+				case "rumble":
+					// The one check that needs no screen: if the motors answer, the write
+					// path works.
+					pad.bridge.buzz("alert");
+					pushInfo(ctx.handle, "Buzzed.");
+					return true;
+				default:
+					pushInfo(ctx.handle, `Unknown: /gamepad ${arg} — try on, off, status, watch, list, approve, rumble`);
+					return true;
+			}
 		}
 		case "/vim": {
 			const arg = text.split(/\s+/)[1]?.toLowerCase();

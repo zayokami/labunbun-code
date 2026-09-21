@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { detectShell } from "@labunbun/tools";
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
+import { changedBindings, type PadConfig } from "./gamepad-runtime.ts";
 import type { Settings } from "./settings.ts";
 import { loadThemeFiles, resolveTheme } from "./theme-file.ts";
 
@@ -22,12 +23,20 @@ export interface DoctorCheck {
  * which theme is on screen right now (`/theme` may have changed it since
  * startup). Both default to the setting-based answer, which is right for a
  * caller that has neither.
+ *
+ * `pad` is the third, and it is passed rather than derived: the bindings a user
+ * can actually press are the ones the running session resolved against the
+ * command table, and resolving them a second time here — from the same settings
+ * but without the command names — would let `/doctor` call a binding fine that
+ * `/gamepad` calls unreadable. The runtime is built before the REPL mounts, so
+ * the caller always has it.
  */
 export async function runDoctorChecks(
 	settings: Settings,
 	cwd: string,
 	home = homedir(),
 	liveThemeName?: string,
+	pad?: PadConfig,
 ): Promise<DoctorCheck[]> {
 	const checks: DoctorCheck[] = [];
 
@@ -121,6 +130,32 @@ export async function runDoctorChecks(
 		name: "Theme",
 		status: known && loadedThemes.problems.length === 0 ? "ok" : "warn",
 		detail: themeDetails.join(" · "),
+	});
+
+	// The controller: configuration only, never the hardware.
+	//
+	// Whether a pad is plugged in, and whether node-hid loaded at all, are runtime
+	// facts that change while the user is looking at the screen — `/gamepad status`
+	// answers those, and answers them about *now*. What can be checked here is the
+	// part that is the same whether or not anything is plugged in: a binding that
+	// names a button or an action that does not exist, which is a typo in a file
+	// and is invisible until the button does nothing.
+	const padEnabled = pad?.enabled ?? settings.gamepad?.enabled === true;
+	const padDetails: string[] = [padEnabled ? "enabled" : "off — /gamepad on, or --gamepad for one run"];
+	if (padEnabled) {
+		if (pad?.allowApprove) padDetails.push("✕ may answer a permission dialog");
+		if (pad?.device) padDetails.push(`device filter: ${pad.device}`);
+		const changed = pad ? changedBindings(pad.bindings).length : 0;
+		if (changed > 0) padDetails.push(`${changed} binding${changed === 1 ? "" : "s"} changed from the default`);
+	}
+	// Printed whether or not the pad is on: a binding that cannot be read is
+	// precisely the thing that would make turning it on look like it did nothing.
+	const padProblems = pad?.problems ?? [];
+	padDetails.push(...padProblems);
+	checks.push({
+		name: "Gamepad",
+		status: padProblems.length > 0 ? "warn" : "ok",
+		detail: padDetails.join(" · "),
 	});
 
 	// Session storage writable

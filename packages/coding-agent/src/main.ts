@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { PERMISSION_MODES } from "@labunbun/agent";
 import { runHeadless } from "./headless.ts";
 import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
@@ -19,6 +20,13 @@ interface CliArgs {
 	resume: string | null;
 	continueLast: boolean;
 	outputFormat: string | null;
+	/**
+	 * `null` means "whatever the settings say". A flag rather than a value: the
+	 * two spellings are `--gamepad` and `--no-gamepad`, and neither writes the
+	 * setting — a flag that edited the user's file would make "try it once"
+	 * impossible.
+	 */
+	gamepad: boolean | null;
 	apply: boolean;
 	force: boolean;
 	from: string | null;
@@ -40,6 +48,7 @@ function parseArgs(argv: string[]): CliArgs {
 		resume: null,
 		continueLast: false,
 		outputFormat: null,
+		gamepad: null,
 		apply: false,
 		force: false,
 		from: null,
@@ -91,6 +100,12 @@ function parseArgs(argv: string[]): CliArgs {
 			case "--output-format":
 				args.outputFormat = rest[++i] ?? null;
 				break;
+			case "--gamepad":
+				args.gamepad = true;
+				break;
+			case "--no-gamepad":
+				args.gamepad = false;
+				break;
 			case "--apply":
 				args.apply = true;
 				break;
@@ -135,12 +150,13 @@ Usage:
 Options:
   -p, --print <prompt>         Run headless mode
       --model <provider/id>    Model to use (default anthropic/claude-sonnet-5)
-      --permission-mode <m>    default | plan | acceptEdits | dontAsk | bypassPermissions
+      --permission-mode <m>    ${PERMISSION_MODES.join(" | ")}
       --max-turns <n>          Cap agent turns in headless mode
       --no-session             Don't persist this session to disk
       --resume <id>            Resume a saved session
   -c, --continue               Continue the most recent session
       --output-format <f>      Headless output: text | json | stream-json
+      --gamepad                Read a DualShock 4 this run (or --no-gamepad)
   -h, --help                   Show this help
 
 migrate options:
@@ -191,7 +207,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 			console.error("-p requires a prompt string");
 			return 2;
 		}
-		const validModes = new Set(["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"]);
+		const validModes = new Set<string>(PERMISSION_MODES);
 		if (args.permissionMode && !validModes.has(args.permissionMode)) {
 			console.error(`Invalid permission mode: ${args.permissionMode}`);
 			return 2;
@@ -217,6 +233,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 		permissionMode: (args.permissionMode as never) ?? undefined,
 		resumeSessionId: args.resume ?? undefined,
 		continueLast: args.continueLast,
+		gamepad: args.gamepad ?? undefined,
 	});
 }
 

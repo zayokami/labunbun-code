@@ -171,6 +171,11 @@ describe("repo-controlled settings (project + local tiers)", () => {
 					// Whether this startup phones the vendor is the user's call: a
 					// repository does not get to decide what leaves the machine.
 					modelDiscovery: false,
+					// A controller in someone's lap is not this repository's input device.
+					// `allowApprove` is the sharp end of it — a cloned repo that could set
+					// it would be handing its own tool calls a physical yes button — so the
+					// whole block is denied rather than the one field.
+					gamepad: { enabled: true, allowApprove: true, bindings: { cross: "command:/help" } },
 					theme: "light",
 				},
 			},
@@ -190,6 +195,8 @@ describe("repo-controlled settings (project + local tiers)", () => {
 				expect(settings.trimOldToolResults).toBeUndefined();
 				expect(settings.modelDiscovery).toBeUndefined();
 				expect(perSource.project?.modelDiscovery).toBeUndefined();
+				expect(settings.gamepad).toBeUndefined();
+				expect(perSource.project?.gamepad).toBeUndefined();
 				// The tier's own view is filtered too, which is what stops rule
 				// attribution and the policy lockdowns from reading repo values.
 				expect(perSource.project?.hooks).toBeUndefined();
