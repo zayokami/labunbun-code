@@ -72,6 +72,17 @@ describe("padConfigFrom", () => {
 		expect(Object.entries(config.bindings).every(([button, b]) => isDefaultBinding(button, b))).toBe(true);
 	});
 
+	test("a control it has no default for is not a default, and asking is not a crash", () => {
+		// The table is keyed by strings, and a name that is not in it has no default
+		// to compare against — an answer, and one `/gamepad status` has to survive:
+		// the row it is comparing is whatever the caller's map holds, and a map built
+		// in code (a test, an embedder) is not proof that a name is a control.
+		expect(isDefaultBinding("nonesuch", { kind: "confirm" })).toBe(false);
+		// And the surface's gestures are in that table with the buttons, so a gesture
+		// nobody touched reads as the default it is.
+		expect(isDefaultBinding("touch-tap", { kind: "confirm" })).toBe(true);
+	});
+
 	test("reads enabled strictly, so a settings object built in code cannot turn it on", () => {
 		// The schema rejects a string, but a test or an embedder can still hand this
 		// function an object it did not come from zod, and "enabled: \"no\"" reading
@@ -102,6 +113,33 @@ describe("padConfigFrom", () => {
 
 	test("phrases default to none rather than to undefined", () => {
 		expect(padConfigFrom(settings({ gamepad: {} })).phrases).toEqual([]);
+	});
+
+	test("the motors and the light are on unless the file says otherwise", () => {
+		// Both default to on, which is the opposite of `enabled` and `allowApprove`
+		// above — so the read is `!== false`, and the test is written the way the user
+		// meets it: say nothing and the pad is as loud as it has always been, say
+		// false and it goes quiet.
+		const untouched = padConfigFrom(settings({ gamepad: { enabled: true } }));
+		expect(untouched.rumble).toBe(true);
+		expect(untouched.lightbar).toBe(true);
+		const quiet = padConfigFrom(settings({ gamepad: { rumble: false, lightbar: false } }));
+		expect(quiet.rumble).toBe(false);
+		expect(quiet.lightbar).toBe(false);
+		// Each switch its own decision: a pad whose bar you can live with and whose
+		// motors you cannot is the common case, not a contradiction.
+		const half = padConfigFrom(settings({ gamepad: { rumble: false } }));
+		expect(half.rumble).toBe(false);
+		expect(half.lightbar).toBe(true);
+	});
+
+	test("a switch written as something other than a boolean leaves the pad on", () => {
+		// The mirror of the strict read above, and for the same reason: an object that
+		// did not come from zod is not proof of anything, and a value nobody can read
+		// must not be the thing that silences a controller — the documentation says on.
+		const handmade = { gamepad: { rumble: "off", lightbar: 0 } } as unknown as Settings;
+		expect(padConfigFrom(handmade).rumble).toBe(true);
+		expect(padConfigFrom(handmade).lightbar).toBe(true);
 	});
 
 	test("the device filter and deadzone are passed through as written", () => {

@@ -33,7 +33,15 @@ import {
 	resolveModel,
 	withModelFallback,
 } from "@labunbun/ai";
-import { bindingText, describePadDevice, type PadSource, padPalette } from "@labunbun/gamepad";
+import {
+	bindingText,
+	DS4_BUTTON_IDS,
+	describePadDevice,
+	PAD_TOUCH_IDS,
+	type PadInputId,
+	type PadSource,
+	padPalette,
+} from "@labunbun/gamepad";
 import {
 	connectAllMcpServers,
 	connectMcpServer,
@@ -1162,7 +1170,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/doctor", "Check the environment, settings, and provider setup"],
 		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
-		["/gamepad", "Control the session from a DualShock 4: /gamepad [on|off|status|watch|list|approve|rumble]"],
+		["/gamepad", "Control the session from a DualShock 4: /gamepad [on|off|status|watch|list|reset|approve|rumble]"],
 		["/mcp", "List configured MCP servers and their tools"],
 		["/mode", "Show or set the permission mode: /mode [mode]"],
 		["/model", "Show or switch the model: /model [provider/id]"],
@@ -1672,12 +1680,24 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 
 			switch (arg) {
 				case undefined: {
-					// The mapping, which is the manual. The button ids are what the settings
-					// file writes, so printing them is how a user learns them.
-					const lines = [padHeadline(pad.service.status()), "", `  ${"Button".padEnd(18)}Action`];
-					for (const [button, binding] of Object.entries(pad.config.bindings)) {
-						const marker = isDefaultBinding(button, binding) ? "" : "  *";
-						lines.push(`  ${button.padEnd(18)}${bindingText(binding)}${marker}`);
+					// The mapping, which is the manual. The ids are what the settings file
+					// writes, so printing them is how a user learns them. The surface's
+					// gestures get their own heading rather than a run of rows under
+					// "Button": they are not buttons on the pad, and a table that mixed them
+					// in would read as a list of keys that half exist.
+					const families: ReadonlyArray<[string, readonly PadInputId[]]> = [
+						["Button", DS4_BUTTON_IDS],
+						["Touch surface", PAD_TOUCH_IDS],
+					];
+					const lines = [padHeadline(pad.service.status()), ""];
+					for (const [heading, ids] of families) {
+						if (lines.length > 2) lines.push("");
+						lines.push(`  ${heading.padEnd(18)}Action`);
+						for (const id of ids) {
+							const binding = pad.config.bindings[id];
+							const marker = isDefaultBinding(id, binding) ? "" : "  *";
+							lines.push(`  ${id.padEnd(18)}${bindingText(binding)}${marker}`);
+						}
 					}
 					lines.push("");
 					lines.push("  * = changed from the default. Rebind them in settings.json:");
@@ -1687,7 +1707,15 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					return true;
 				}
 				case "status":
-					pushInfo(ctx.handle, formatPadStatus(pad.service.status(), pad.config, pad.service));
+					pushInfo(ctx.handle, formatPadStatus(pad.service.status(), pad.config, pad.service, Date.now()));
+					return true;
+				case "reset":
+					// The rescue for a pad that is answering wrongly rather than not at
+					// all: a handle the OS re-pointed, a link that went quiet under the
+					// watchdog's two seconds. Reported after the fact, because the point
+					// of it is what the pad looks like now.
+					pad.service.rescan();
+					pushInfo(ctx.handle, padHeadline(pad.service.status()));
 					return true;
 				case "watch": {
 					const watching = ctx.padWatch.toggle();
@@ -1716,12 +1744,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				}
 				case "rumble":
 					// The one check that needs no screen: if the motors answer, the write
-					// path works.
+					// path works. With the switch off there is nothing to hear, and a
+					// command that silently does nothing is worse than one that says why.
+					if (!pad.config.rumble) {
+						pushInfo(ctx.handle, "Rumble is off — gamepad.rumble is false in settings.");
+						return true;
+					}
 					pad.bridge.buzz("alert");
 					pushInfo(ctx.handle, "Buzzed.");
 					return true;
 				default:
-					pushInfo(ctx.handle, `Unknown: /gamepad ${arg} — try on, off, status, watch, list, approve, rumble`);
+					pushInfo(ctx.handle, `Unknown: /gamepad ${arg} — try on, off, status, watch, list, reset, approve, rumble`);
 					return true;
 			}
 		}

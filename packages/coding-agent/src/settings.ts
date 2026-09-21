@@ -125,6 +125,13 @@ export const SettingsSchema = z.object({
 			bindings: z.record(z.string(), z.string()).optional(),
 			/** Whole prompts the command wheel offers at one press. */
 			phrases: z.array(z.string()).optional(),
+			/**
+			 * The motors, and the lightbar. Both are on unless the user says
+			 * otherwise: these are the two things a controller does to the room it is
+			 * in, and a pad that cannot be silenced is a pad that gets unplugged.
+			 */
+			rumble: z.boolean().optional(),
+			lightbar: z.boolean().optional(),
 		})
 		.optional(),
 	env: z.record(z.string(), z.string()).optional(),

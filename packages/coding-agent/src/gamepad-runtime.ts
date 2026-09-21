@@ -27,9 +27,10 @@ import {
 	createPadBridge,
 	DEFAULT_BINDINGS,
 	DS4_BATTERY_FULL,
-	type Ds4ButtonId,
+	type Ds4TouchPoint,
 	describePadDevice,
 	importNodeHid,
+	isPadTouchId,
 	type PadBinding,
 	type PadBindingMap,
 	type PadBridge,
@@ -42,6 +43,7 @@ import {
 	padBatteryLow,
 	resolveBindings,
 } from "@labunbun/gamepad";
+import { formatElapsed } from "@labunbun/tui";
 import type { Settings } from "./settings.ts";
 
 /** The `gamepad` block, with the defaults folded in and the bindings resolved. */
@@ -53,6 +55,9 @@ export interface PadConfig {
 	/** Path, or a substring of one, of the controller to open. */
 	device?: string;
 	deadzone?: number;
+	/** Whether the pad may buzz, and whether it may light. Both on by default. */
+	rumble: boolean;
+	lightbar: boolean;
 	phrases: readonly string[];
 	/** Every button, with the user's overrides applied. */
 	bindings: PadBindingMap;
@@ -84,6 +89,12 @@ export function padConfigFrom(settings: Settings, knownCommands?: readonly strin
 		allowApprove: gamepad.allowApprove === true,
 		device: gamepad.device,
 		deadzone: gamepad.deadzone,
+		// `!== false`, where the two above are `=== true`: these default to on, so the
+		// question is whether the user turned them *off*, and an unreadable value
+		// (a hand-built settings object, a string the schema would have rejected)
+		// leaves the pad behaving the way the documentation says it does.
+		rumble: gamepad.rumble !== false,
+		lightbar: gamepad.lightbar !== false,
 		phrases: gamepad.phrases ?? [],
 		bindings,
 		problems,
@@ -128,6 +139,8 @@ export function createPadRuntime(config: PadConfig, deps: PadRuntimeDeps): PadRu
 		device: config.device,
 		deadzone: config.deadzone,
 		allowApprove: config.allowApprove,
+		rumble: config.rumble,
+		lightbar: config.lightbar,
 		phrases: config.phrases,
 		clock: deps.clock,
 	});
@@ -182,8 +195,16 @@ export function padStartupNotice(status: PadServiceStatus): string | undefined {
  * Every field is one a person verifying a mapping needs: the transport (which is
  * also the payload layout), how long the report was (the quickest way to see the
  * transport change under a Bluetooth reconnect), the buttons, the axes, the
- * battery, and whether the CRC checked out. Identical samples produce identical
- * lines, which is what lets the caller print on change instead of on report.
+ * battery, whether the CRC checked out, and where the fingers are. Identical
+ * samples produce identical lines, which is what lets the caller print on change
+ * instead of on report.
+ *
+ * The touch points are printed whether or not anything is touching them. A line
+ * that only mentioned a finger when there was one would leave "the pad is not
+ * being touched" and "the decoder is reading the wrong bytes" looking exactly
+ * alike — and reading those bytes *is* what this line is for, until the offsets
+ * have argued with real hardware. `—` is the pad saying "no finger here", which
+ * is a fact, not a gap.
  */
 export function formatSample(sample: PadSample): string {
 	const { state } = sample;
@@ -191,11 +212,14 @@ export function formatSample(sample: PadSample): string {
 	const axis = (stick: { x: number; y: number }) => `${stick.x.toFixed(2)},${stick.y.toFixed(2)}`;
 	const battery = `battery ${state.battery.level}/${DS4_BATTERY_FULL}${state.battery.cable ? " (cable)" : ""}`;
 	const crc = sample.crcOk === undefined ? "" : ` · crc ${sample.crcOk ? "ok" : "bad"}`;
+	const at = (point: Ds4TouchPoint | undefined) => (point === undefined ? "—" : `${point.x},${point.y}`);
+	const touch = `touch 1 ${at(state.touch[0])} 2 ${at(state.touch[1])}`;
+	const gestures = sample.gestures === undefined ? "" : ` · gesture ${sample.gestures.join("+")}`;
 	return (
 		`${sample.transport} ${sample.bytes}B · ${held} · dpad ${state.dpad ?? "—"}` +
 		` · L ${axis(state.leftStick)} · R ${axis(state.rightStick)}` +
 		` · L2 ${state.leftTrigger.toFixed(2)} R2 ${state.rightTrigger.toFixed(2)}` +
-		` · ${battery}${crc}`
+		` · ${battery} · ${touch}${gestures}${crc}`
 	);
 }
 
@@ -295,7 +319,19 @@ export function padHeadline(status: PadServiceStatus): string {
  * reads when the pad is not doing what they expected, and "it says off while the
  * light is on" is the bug that would make them stop trusting it.
  */
-export function formatPadStatus(status: PadServiceStatus, config: PadConfig, service: PadService): string {
+export function formatPadStatus(
+	status: PadServiceStatus,
+	config: PadConfig,
+	service: PadService,
+	/**
+	 * The clock, passed in rather than read here — the same rule the mapper and the
+	 * feedback follow, and the reason a test can ask what the card says a minute
+	 * later without waiting for one. Required, because the age it prints is measured
+	 * against whatever clock stamped the pad's writes: a caller with a fake one must
+	 * not be handed the machine's by an omission.
+	 */
+	now: number,
+): string {
 	const lines: string[] = [padHeadline(status)];
 	if (status.transport)
 		lines.push(
@@ -309,6 +345,13 @@ export function formatPadStatus(status: PadServiceStatus, config: PadConfig, ser
 		const reading = status.transport === undefined ? "" : ` (reading ${status.transport})`;
 		lines.push(`  links: ${status.links.join(" + ")}${reading}`);
 	}
+	// The one state where "which controller is this" has an answer worth having:
+	// two links, one of them saying buttons the other has not heard of. Nothing
+	// can be picked automatically — nothing says which one the user means — so the
+	// way out is named instead.
+	if (status.linksDisagree) {
+		lines.push("  both links report — these may be two controllers (pin one with the device filter)");
+	}
 	if (status.device?.path) lines.push(`  path: ${status.device.path}`);
 	if (status.battery) {
 		lines.push(
@@ -318,15 +361,39 @@ export function formatPadStatus(status: PadServiceStatus, config: PadConfig, ser
 	if (status.detail) lines.push(`  detail: ${status.detail}`);
 
 	const stats = service.stats();
-	lines.push(`  reports: ${stats.reports}${stats.lastError ? ` · last error: ${stats.lastError}` : ""}`);
+	// The write age is the other half of "is the pad hearing me": reports say the
+	// pad is talking, and a write is the only proof anything went back. Never is a
+	// real answer, and the one worth seeing — it is what a pad that is connected
+	// but has been told nothing looks like. Long gaps are normal: idle is silent.
+	// (`formatElapsed` is what holds a negative age at `0s`; it already floors at
+	// zero, and a guard here would be a second, untested copy of that rule.)
+	const wrote = stats.lastWriteAt === undefined ? "never" : `${formatElapsed(now - stats.lastWriteAt)} ago`;
+	// The separator belongs to the phrase rather than to the line, so the whole thing
+	// is one template: a `+` here reads as arithmetic and renders as a stutter.
+	const lastError = stats.lastError ? ` · last error: ${stats.lastError}` : "";
+	lines.push(`  reports: ${stats.reports} · last write: ${wrote}${lastError}`);
 	lines.push(
 		`  approvals: ${config.allowApprove ? "on — ✕ may answer a permission dialog" : "off — the keyboard answers"}`,
 	);
+	// Only when one of them is off: both on is the documented default and needs no
+	// line. But "why is the controller silent" is exactly the question this card is
+	// read for, and the answer here is a setting three screens away from it.
+	if (!config.rumble || !config.lightbar) {
+		const off: string[] = [];
+		if (!config.lightbar) off.push("lightbar");
+		if (!config.rumble) off.push("rumble");
+		lines.push(`  feedback: ${off.join(" + ")} off (settings)`);
+	}
 	lines.push(`  device filter: ${config.device ?? "(any DualShock 4)"}`);
-	const total = Object.keys(config.bindings).length;
+	// Two families now, and the line names both. "25 controls" would be shorter and
+	// would hide the surface entirely — and someone reading this line because a
+	// gesture is not firing should be able to see that gestures are bound at all.
+	const bound = Object.keys(config.bindings);
+	const gestures = bound.filter((control) => isPadTouchId(control)).length;
 	const changed = changedBindings(config.bindings).length;
 	lines.push(
-		`  bindings: ${total} buttons${changed > 0 ? `, ${changed} changed from the default` : ""}` +
+		`  bindings: ${bound.length - gestures} buttons + ${gestures} touch gestures` +
+			`${changed > 0 ? `, ${changed} changed from the default` : ""}` +
 			`${config.problems.length > 0 ? `, ${config.problems.length} unreadable` : ""}`,
 	);
 	for (const problem of config.problems) lines.push(`    ${problem}`);
@@ -334,19 +401,32 @@ export function formatPadStatus(status: PadServiceStatus, config: PadConfig, ser
 }
 
 /**
- * Whether a button still does what it does out of the box.
+ * `DEFAULT_BINDINGS` read by name, for the callers whose key is a `string`.
+ *
+ * A `PadInputId` is the name of a row in that table, so looking one up is total —
+ * but the callers here start from `Object.entries`, which hands back string keys,
+ * and a string is not proof of membership. This is where that difference lives,
+ * so no other line has to pretend it does not exist: a name that is not in the
+ * table has no default, which is an answer ("this is not a control") and not a
+ * crash.
+ */
+const DEFAULTS_BY_NAME: Readonly<Record<string, PadBinding | undefined>> = DEFAULT_BINDINGS;
+
+/**
+ * Whether a control still does what it does out of the box.
  *
  * Compared as text — the same text the settings file writes — so "changed" means
  * "a line in the mapping table that would surprise the user", which is what both
  * `/gamepad` and `/doctor` are trying to show.
  */
-export function isDefaultBinding(button: string, binding: PadBinding): boolean {
-	return bindingText(binding) === bindingText(DEFAULT_BINDINGS[button as Ds4ButtonId]);
+export function isDefaultBinding(control: string, binding: PadBinding): boolean {
+	const fallback = DEFAULTS_BY_NAME[control];
+	return fallback !== undefined && bindingText(binding) === bindingText(fallback);
 }
 
-/** Which buttons the user moved, as `button → action` lines. */
+/** Which controls the user moved, as `control → action` lines. */
 export function changedBindings(bindings: PadBindingMap): string[] {
 	return Object.entries(bindings)
-		.filter(([button, binding]) => !isDefaultBinding(button, binding))
-		.map(([button, binding]) => `${button} → ${bindingText(binding)}`);
+		.filter(([control, binding]) => !isDefaultBinding(control, binding))
+		.map(([control, binding]) => `${control} → ${bindingText(binding)}`);
 }
