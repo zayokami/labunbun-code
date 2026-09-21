@@ -54,10 +54,12 @@ labunbun                                # interactive REPL
   theme files.
 - **DualShock 4** — drive the whole REPL from a controller: navigate lists and
   dialogs, confirm and cancel, approve or deny a permission, interrupt a turn,
-  open the command wheel, scroll the transcript, and type with an on-screen
-  keyboard without touching the keyboard. The lightbar follows the theme and what
-  the app is doing, rumble signals a finished turn or a refusal, and the battery
-  sits in the status line. Bindings are yours to change — see [Gamepad](#gamepad).
+  open the command wheel, scroll the transcript, tap and swipe the touchpad, and
+  type with an on-screen keyboard without touching the keyboard. The lightbar
+  follows the theme and what the app is doing, a small vocabulary of buzzes says
+  what changed without looking, and the battery sits in the status line. Bindings
+  are yours to change, and the motors and the light can each be switched off —
+  see [Gamepad](#gamepad).
 - **Headless output** — `--output-format text|json|stream-json`.
 - **Config import** — `labunbun migrate` maps an existing agent-tool setup
   (Claude Code, Codex, ZCode, `~/.agents`) onto labunbun's own config: settings,
@@ -218,12 +220,13 @@ needed to answer a permission, pick a model, or type a prompt.
 
 ```bash
 /gamepad on        # read a controller now, and remember it
-/gamepad status    # transport, battery, reports, which bindings you changed
+/gamepad status    # transport, battery, reports, last write, which bindings you changed
 /gamepad watch     # every change as a line: press a button, read its name
 /gamepad list      # every controller interface the OS reports
+/gamepad reset     # let go of it and look again, now — the rescue for a stuck pad
 /gamepad approve   # may ✕ answer a permission dialog? (on|off, no argument toggles)
 /gamepad rumble    # buzz once — the quickest check that writing works
-/gamepad           # the current button → action table
+/gamepad           # the current button and gesture → action table
 ```
 
 `--gamepad` turns it on for one run without writing anything; `--no-gamepad`
@@ -251,6 +254,69 @@ and the lightbar takes the theme's accent — brighter while a turn is running,
 flashing in the permission colour while a dialog is waiting, red when the
 battery is low.
 
+A waiting dialog also *blinks*: half a second on, half a second off, in the pad's
+own hardware. The software pulse only dims the bar, and a bar that dims is one
+you can miss from the sofa — which is the one thing a question must not be. It
+is the only state that asks for a blink: the battery warning already reaches
+black on its own, and two rhythms over one light is a flicker.
+
+The motors have a small vocabulary, and it is a sentence each rather than a
+volume:
+
+| Felt | Meaning |
+|------|---------|
+| One short tap | A controller was found |
+| A firmer tap | Work started |
+| A long, deep note | The turn finished |
+| Two quick taps | You stopped it yourself |
+| The faintest tap | A no from the pad: ○ on a dialog, or ✕ where it may not approve |
+| A hard kick, both motors | Something wants a decision |
+| Both motors, gently | The battery just crossed into the low band |
+
+Two of those are felt even if something else buzzed a moment earlier — a
+question, and the battery crossing — because each happens once, and the one that
+is dropped is the one that mattered. Everything else waits its turn: two buzzes
+a moment apart read as one stutter, not as two pieces of news.
+
+### The touch surface
+
+The touchpad is a second input and not a mouse: a finger on it is a position and
+a gesture, never a cursor.
+
+| Gesture | Action |
+|---------|--------|
+| Tap | Confirm, exactly like ✕ |
+| Drag | Move — one step per eighth of the surface, in the direction the finger goes |
+| Two-finger slide | Page back / forward in lists and the transcript |
+
+They are bindings like any other, under the names `/gamepad` prints:
+`touch-tap`, `touch-up`, `touch-down`, `touch-left`, `touch-right`,
+`touch-two-left`, `touch-two-right`.
+
+A tap confirms but never *holds*. The ✕-hold is a real thing — a permission
+dialog reads 600 ms of ✕ as "always allow" — and a gesture lasts exactly one
+report, so the only way one could ever reach that threshold is the reports
+stopping: a pad that went to sleep with a finger resting on it. A controller in
+a bag must not be able to answer a dialog on its own, so gestures are edges by
+construction and buttons keep the hold. `allowApprove` governs the tap in a
+permission dialog exactly as it governs ✕.
+
+Buttons keep the hold on the same principle, measured the same way: 600 ms of
+the pad *reporting* ✕ down, not 600 ms of wall clock. A controller that idles
+out mid-press and comes back with the button still under a thumb spent that
+time saying nothing, so the time is not credited — the press keeps its true age,
+which is what a dialog reads to ask whether it was aimed at it. Nothing is
+invented on the way back either: the button is neither pressed again nor
+released, the hold simply starts over. A silence here means a quarter of a
+second with nothing from the pad (`REPORT_GAP_MS` in
+`packages/gamepad/src/service.ts`) — dozens of reports at the rate a live DS4
+sends them, and an eighth of the two seconds after which the pad is declared
+gone and everything is forgotten.
+
+The thresholds — 250 ms and a few surface units for a tap, an eighth of the
+height for a step — are constants in `packages/gamepad/src/touch.ts`, named so
+that tuning the feel is editing one number.
+
 A controller that is plugged in *and* switched on is attached twice: the OS
 lists two collections of one pad, and nothing on either says they belong
 together. Both are opened and both are written to in their own shape — 32 bytes
@@ -268,6 +334,21 @@ non-event in both directions: pull it and the radio takes over mid-press without
 inventing a release; plug it in mid-session and the new link is picked up within
 a second and written to from the next frame.
 
+Two controllers switched on at once look exactly like this, because nothing on
+either collection says which device it belongs to: two links, one of them read
+and both of them written to. A ✕ on the pad in the bag then moves the session
+the moment the one in your hands stops reporting, and the bag's bar follows the
+screen. There is no identity to sort them by, so nothing is sorted — but a whole
+second of the two links reporting *different* buttons (one pad's links are a few
+milliseconds apart at an edge, never more) is worth saying out loud:
+
+```
+  both links report — these may be two controllers (pin one with the device filter)
+```
+
+The filter is the way out: `"device": "wireless"`, or a path from `/gamepad
+list`, leaves the other collection alone.
+
 Bindings, the device filter and the deadzone live in `settings.json`:
 
 ```json
@@ -276,16 +357,26 @@ Bindings, the device filter and the deadzone live in `settings.json`:
     "enabled": true,
     "deadzone": 0.25,
     "device": "wireless",
+    "rumble": true,
+    "lightbar": true,
     "bindings": { "cross": "confirm", "r2": "command:/status", "square": "none" },
     "phrases": ["explain what you just did", "run the tests"]
   }
 }
 ```
 
-`/gamepad` with no argument prints the button ids, which are the names this file
-writes. A binding that names a button, an action or a command that does not
-exist costs that one binding and is reported at startup and in `/doctor` — the
-rest of the file is unaffected.
+`rumble` and `lightbar` default to on, and either can be turned off for someone
+who does not want a controller that moves or glows on its own. Off is *silence
+and darkness* rather than less of them: a packet describes the whole pad, so a
+field left out is a field written as zero. The motors stay still, the bar goes
+dark, and `/gamepad status` says which of the two is off — as does
+`/gamepad rumble`, which is the one check that needs no screen and would
+otherwise buzz into the void.
+
+`/gamepad` with no argument prints the button ids and the surface's gestures,
+which are the names this file writes. A binding that names a button, a gesture,
+an action or a command that does not exist costs that one binding and is
+reported at startup and in `/doctor` — the rest of the file is unaffected.
 
 **Approving from the pad is off unless you say otherwise.** `allowApprove` is a
 user-tier setting: a project's `.labunbun/settings.json` cannot set `gamepad` at
@@ -327,6 +418,7 @@ pnpm test             # bun test — 2000+ tests, no network needed
 pnpm lint             # biome check
 bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
 bun run scripts/gamepad-probe.ts                     # a controller, without the app in the way
+bun run scripts/gamepad-probe.ts --touch             # measure the touchpad: decoded points + raw bytes
 pnpm bin:build        # standalone executable via bun build --compile
 ```
 
