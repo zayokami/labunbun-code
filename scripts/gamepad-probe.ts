@@ -2,12 +2,21 @@
 /**
  * The controller, on this machine, without the app in the way.
  *
- * Usage: bun run scripts/gamepad-probe.ts [--seconds 8] [--raw] [--light] [--rumble] [--dark] [--all]
+ * Usage: bun run scripts/gamepad-probe.ts [--seconds 8] [--raw] [--touch] [--light] [--rumble] [--dark] [--all]
  *
  * `/gamepad watch` answers "is my mapping right" — it shows the decoded state.
  * This answers the other questions, the ones the REPL cannot: does the optional
  * module load at all under this Bun, which of the pad's interfaces carries the
  * reports, what do the raw bytes look like, and can the pad be written to.
+ *
+ * `--touch` is the one mode with a question of its own: are the touchpad offsets
+ * right? They came out of another project's source, and the only thing that can
+ * settle them is a finger on real hardware — so this prints both the decoded
+ * points and the eight bytes they came from, quiet about everything else, and
+ * ends with the extremes it saw. A sweep from one corner to the other is then a
+ * measurement rather than an impression: the numbers should run to about
+ * (0, 0) and (1920, 943), and a run that never lands near them says the offsets,
+ * the packing or the panel size is wrong — with the bytes printed to say which.
  *
  * It opens the device through the same source the app uses, so a run that works
  * here is a run that works in the REPL, and a crash here is a crash the app
@@ -33,12 +42,16 @@ import { formatSample } from "../packages/coding-agent/src/gamepad-runtime.ts";
 import {
 	buildDs4Output,
 	createNodeHidSource,
+	type Ds4Touch,
+	type Ds4TouchPoint,
 	type Ds4Transport,
 	describePadDevice,
 	deviceTransport,
 	importNodeHid,
 	parseDs4Input,
 	pickDevice,
+	TOUCH_HEIGHT,
+	TOUCH_WIDTH,
 } from "../packages/gamepad/src/index.ts";
 
 const argv = process.argv.slice(2);
@@ -66,6 +79,26 @@ const RAW_SETTLE_MS = 300;
  * this is how long the answer is given to arrive.
  */
 const POST_WRITE_MS = 2_000;
+
+/**
+ * The touch block, in payload offsets: two counters with three bytes of position
+ * behind each. The same numbers `ds4.ts` decodes from, repeated here so the
+ * measurement can be read without opening the decoder — and so that a run which
+ * disagrees with the decoder says so at the point of disagreement.
+ */
+const TOUCH_FROM = 34;
+const TOUCH_TO = 41;
+
+/** Where a payload starts in the whole report: the transports differ by this alone. */
+function payloadAt(transport: Ds4Transport): number {
+	return transport === "bluetooth" ? 3 : 1;
+}
+
+/** `--touch`'s line: the two decoded points, then the bytes they came from. */
+function touchLine(touch: Ds4Touch, raw: string): string {
+	const point = (at: Ds4TouchPoint | undefined) => (at === undefined ? "—" : `#${at.id} ${at.x},${at.y}`);
+	return `touch 1 ${point(touch[0])} · 2 ${point(touch[1])} · raw ${TOUCH_FROM}..${TOUCH_TO}: ${raw}`;
+}
 
 console.log("Loading node-hid the way the app does…");
 const source = createNodeHidSource({ load: importNodeHid });
@@ -106,9 +139,27 @@ console.log(`Opening ${describePadDevice(device)} — a crash here is the runtim
 const handle = source.open(device);
 console.log("Opened. Listening…\n");
 
+if (flag("touch")) {
+	// The offsets, the packing and the panel, all on screen before the measurement:
+	// a person holding a finger on a corner is comparing these numbers with what
+	// comes out below, and having to remember them would make it an impression.
+	console.log(`Touch surface — payload ${TOUCH_FROM}..${TOUCH_TO}, the offsets ds4.ts reads:`);
+	console.log(
+		`  point 1 counter ${TOUCH_FROM}, data ${TOUCH_FROM + 1}/${TOUCH_FROM + 2}/${TOUCH_FROM + 3}` +
+			` · point 2 counter ${TOUCH_FROM + 4}, data ${TOUCH_FROM + 5}/${TOUCH_FROM + 6}/${TOUCH_FROM + 7}`,
+	);
+	console.log("  x = b35 | ((b36 & 0f) << 8) · y = (b36 >> 4) | (b37 << 4) · counter bit 7 set = no finger");
+	console.log(`  the corners should read about (0,0) and (${TOUCH_WIDTH},${TOUCH_HEIGHT})\n`);
+}
+
 let reports = 0;
 let badCrc = 0;
 let lastLine: string | undefined;
+/** `--touch`: the block as it was last printed, so a still surface stays quiet. */
+let lastTouch: string | undefined;
+/** `--touch`: the extremes a sweep reached, and the touch ids the pad handed out. */
+const reached = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+const touchIds = new Set<number>();
 let first: Uint8Array | undefined;
 /** Per index: the value it is holding, since when, and the last one printed. */
 const settled = new Map<number, { value: number; since: number; reported: number }>();
@@ -161,6 +212,27 @@ handle.onReport((bytes) => {
 	}
 	transports.add(report.transport);
 	if (report.crcOk === false) badCrc++;
+	if (flag("touch")) {
+		// Everything else is left unsaid here, which is the point of the mode: a
+		// person sweeping a finger across the surface while the battery, the sticks
+		// and the CRC print on every change has nothing to read.
+		const at = payloadAt(report.transport);
+		const raw = hex(bytes.subarray(at + TOUCH_FROM, at + TOUCH_TO + 1));
+		// Deduped on the block itself and not on the decoded line, so a stick being
+		// moved — which changes the sample but not the surface — prints nothing.
+		if (raw === lastTouch) return;
+		lastTouch = raw;
+		for (const point of report.state.touch) {
+			if (point === undefined) continue;
+			reached.minX = Math.min(reached.minX, point.x);
+			reached.maxX = Math.max(reached.maxX, point.x);
+			reached.minY = Math.min(reached.minY, point.y);
+			reached.maxY = Math.max(reached.maxY, point.y);
+			touchIds.add(point.id);
+		}
+		console.log(touchLine(report.state.touch, raw));
+		return;
+	}
 	// Same line `/gamepad watch` prints, so what is verified here is what will be
 	// read there; only printed when it changes, because a resting pad repeats.
 	const line = formatSample({
@@ -179,7 +251,11 @@ handle.onError((error) => {
 	console.error(`device error: ${error.message}`);
 });
 
-console.log(`Press every button, one at a time. ${seconds}s…`);
+console.log(
+	flag("touch")
+		? `Sweep the surface: top-left corner, then bottom-right, then a drag and a two-finger slide. ${seconds}s…`
+		: `Press every button, one at a time. ${seconds}s…`,
+);
 await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 
 const seen = [...transports];
@@ -187,6 +263,15 @@ console.log(
 	`\n${reports} report(s) in ${seconds}s · ${seen.join(", ") || "no transport identified"}` +
 		`${badCrc > 0 ? ` · ${badCrc} with a bad CRC` : ""}`,
 );
+
+if (flag("touch")) {
+	const ids = [...touchIds].sort((a, b) => a - b).join(", ");
+	console.log(
+		reached.maxX === -Infinity
+			? "No finger was seen at all — if one was on the surface, the offsets are wrong."
+			: `surface: x ${reached.minX}..${reached.maxX} · y ${reached.minY}..${reached.maxY} · touch id(s) ${ids}`,
+	);
+}
 
 if (flag("light") || flag("rumble") || flag("dark")) {
 	// A report beats the device's own description, and the device's own description
