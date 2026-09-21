@@ -52,6 +52,12 @@ labunbun                                # interactive REPL
   ctrl+O full-transcript browser, vim modal editing (`vimMode: true`),
   eight token-based themes with `auto` background detection and third-party
   theme files.
+- **DualShock 4** — drive the whole REPL from a controller: navigate lists and
+  dialogs, confirm and cancel, approve or deny a permission, interrupt a turn,
+  open the command wheel, scroll the transcript, and type with an on-screen
+  keyboard without touching the keyboard. The lightbar follows the theme and what
+  the app is doing, rumble signals a finished turn or a refusal, and the battery
+  sits in the status line. Bindings are yours to change — see [Gamepad](#gamepad).
 - **Headless output** — `--output-format text|json|stream-json`.
 - **Config import** — `labunbun migrate` maps an existing agent-tool setup
   (Claude Code, Codex, ZCode, `~/.agents`) onto labunbun's own config: settings,
@@ -205,6 +211,96 @@ A broken theme file never stops the REPL from starting; run `/doctor` to see
 which file failed and why — including misspelled token names, which otherwise
 just do nothing.
 
+## Gamepad
+
+A DualShock 4 (USB or Bluetooth) can drive the REPL on its own — no keyboard
+needed to answer a permission, pick a model, or type a prompt.
+
+```bash
+/gamepad on        # read a controller now, and remember it
+/gamepad status    # transport, battery, reports, which bindings you changed
+/gamepad watch     # every change as a line: press a button, read its name
+/gamepad list      # every controller interface the OS reports
+/gamepad approve   # may ✕ answer a permission dialog? (on|off, no argument toggles)
+/gamepad rumble    # buzz once — the quickest check that writing works
+/gamepad           # the current button → action table
+```
+
+`--gamepad` turns it on for one run without writing anything; `--no-gamepad`
+turns it off the same way.
+
+| Button | Action |
+|--------|--------|
+| D-pad, left stick | Move: lists, dialogs, the command wheel, the transcript |
+| Right stick (vertical) | Scroll the transcript, speed with the offset |
+| L2 / R2 | Modifiers, not rebindable: fine (160 ms) and fast (30 ms) repeats |
+| ✕ | Confirm — send, allow, choose. Held 600 ms in a permission dialog: *always* allow |
+| ○ | Cancel — close, deny, and interrupt a running turn |
+| □ | Clear the screen; backspace in the on-screen keyboard |
+| △ | Command wheel; shift in the on-screen keyboard |
+| L1 / R1 | Page back / forward in lists, the transcript, and the keyboard |
+| Options | Transcript browser |
+| Share | On-screen keyboard |
+| Touchpad press | `/status` |
+| L3 / R3 | Open `/model` / pick the permission mode |
+| PS | Nothing on purpose — the OS and Steam claim it |
+
+Movement repeats: 400 ms before the first repeat, then every 80 ms, or at the
+L2/R2 rates above. Battery appears in the status line while a pad is connected,
+and the lightbar takes the theme's accent — brighter while a turn is running,
+flashing in the permission colour while a dialog is waiting, red when the
+battery is low.
+
+A controller that is plugged in *and* switched on is attached twice: the OS
+lists two collections of one pad, and nothing on either says they belong
+together. Both are opened and both are written to in their own shape — 32 bytes
+over the wire, 78 with a CRC over the radio — so the bar and the motors work
+whichever link the pad is obeying. `/gamepad status` says so:
+
+```
+  transport: usb
+  links: usb + bluetooth (reading usb)
+```
+
+Buttons are read from one link at a time, the wire first, and the reading moves
+to the other link when that one goes quiet. That is what makes the cable a
+non-event in both directions: pull it and the radio takes over mid-press without
+inventing a release; plug it in mid-session and the new link is picked up within
+a second and written to from the next frame.
+
+Bindings, the device filter and the deadzone live in `settings.json`:
+
+```json
+{
+  "gamepad": {
+    "enabled": true,
+    "deadzone": 0.25,
+    "device": "wireless",
+    "bindings": { "cross": "confirm", "r2": "command:/status", "square": "none" },
+    "phrases": ["explain what you just did", "run the tests"]
+  }
+}
+```
+
+`/gamepad` with no argument prints the button ids, which are the names this file
+writes. A binding that names a button, an action or a command that does not
+exist costs that one binding and is reported at startup and in `/doctor` — the
+rest of the file is unaffected.
+
+**Approving from the pad is off unless you say otherwise.** `allowApprove` is a
+user-tier setting: a project's `.labunbun/settings.json` cannot set `gamepad` at
+all, because a button held down in a pocket is not a person deciding, and a
+cloned repository must not be able to hand its own tool calls to a controller
+lying in your lap. With it off, ✕ does nothing in a permission dialog and the
+keyboard answers; the pad still navigates.
+
+`node-hid` is an *optional* dependency. Without it the rest of labunbun is
+exactly as it was; `/gamepad on` reports which command installs it. When it *is*
+installed, `pnpm bin:build` carries it along: `bun build --compile` embeds the
+native prebuild, and the resulting executable reads a controller with no
+`node_modules` next to it. (Verified against node-hid 3.4.0 on Windows; nothing
+needs `--external`.)
+
 ## Project layout
 
 | Package | Purpose |
@@ -214,9 +310,12 @@ just do nothing.
 | `@labunbun/tools` | Built-in coding tools behind an FS/exec operations abstraction |
 | `@labunbun/mcp` | MCP client (stdio/HTTP), tool adaptation |
 | `@labunbun/tui` | React Ink REPL: store, message views, editor, dialogs, themes |
+| `@labunbun/gamepad` | DualShock 4: report parsing, button mapping, lightbar and rumble rules, the device source (`node-hid`, optional) |
 | `@labunbun/coding-agent` | CLI entry, settings hierarchy, commands, memory, hooks, subagents, skills |
 
 Dependency direction is strictly layered: `ai ← agent ← tools/mcp/tui ← coding-agent`.
+`gamepad` is a leaf with no runtime dependency at all — `tui` takes its types and
+pure functions, and `coding-agent` owns the single place `node-hid` is imported.
 The loop never imports provider adapters directly — they arrive via injected
 `StreamFn`, which is what makes the zero-network faux-provider test strategy work.
 
@@ -224,9 +323,10 @@ The loop never imports provider adapters directly — they arrive via injected
 
 ```bash
 pnpm typecheck        # tsc over all packages (source-mapped, no build step)
-pnpm test             # bun test — 400+ tests, no network needed
+pnpm test             # bun test — 2000+ tests, no network needed
 pnpm lint             # biome check
 bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
+bun run scripts/gamepad-probe.ts                     # a controller, without the app in the way
 pnpm bin:build        # standalone executable via bun build --compile
 ```
 
@@ -242,8 +342,8 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
   `rules/*.md`, `agents/`, `skills/`, `themes/`
 - Project and local settings are read as **repo-controlled**: they may not set
   `model`, `fallbackModels`, `permissionMode`, `env`, `providers`, `hooks`,
-  `mcpServers`, `pricing`, `trimOldToolResults`, `permissions.allow`, or
-  `permissions.additionalDirectories`.
+  `mcpServers`, `pricing`, `trimOldToolResults`, `gamepad`, `permissions.allow`,
+  or `permissions.additionalDirectories`.
   Those are honored from the user, policy (`managed-settings.json`), and
   `--settings` tiers only; anything dropped is listed at startup. `permissions.deny`
   is still honored from every tier — tightening is always allowed. Whether
