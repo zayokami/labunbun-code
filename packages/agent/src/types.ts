@@ -25,7 +25,17 @@ import type { SpillWriter } from "./output-limits.ts";
 // Permissions
 // ---------------------------------------------------------------------------
 
-export type PermissionMode = "default" | "plan" | "acceptEdits" | "dontAsk" | "bypassPermissions";
+/**
+ * Every mode there is, in the order they escalate.
+ *
+ * The type is derived from this list rather than written beside it, so a mode
+ * added here is a mode everywhere: the picker, the CLI's accepted values and the
+ * settings schema all read the same list, and none of them can quietly be the one
+ * that forgot.
+ */
+export const PERMISSION_MODES = ["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"] as const;
+
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
 export type PermissionResult =
 	| { behavior: "allow"; updatedInput?: unknown }
