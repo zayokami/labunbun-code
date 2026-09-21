@@ -73,9 +73,13 @@ describe("session branching", () => {
 		const lines = tree.split("\n");
 		// Active-path entries are marked with *, abandoned with space.
 		expect(lines.filter((l) => l.startsWith("*"))).toHaveLength(3);
-		expect(lines.some((l) => l.includes("b1"))).toBe(true);
-		expect(lines.filter((l) => l.includes("b1"))[0].startsWith("*")).toBe(false);
-		expect(lines.filter((l) => l.includes("b2"))[0].startsWith("*")).toBe(true);
+		// The leading space matters: a line is `marker id label`, and ids begin with
+		// `Date.now().toString(36)` — which spells "b1" for half an hour every few
+		// weeks, at which point a bare `includes("b1")` finds the first line of the
+		// tree instead of the message that was written to be found.
+		expect(lines.some((l) => l.includes(" b1"))).toBe(true);
+		expect(lines.filter((l) => l.includes(" b1"))[0].startsWith("*")).toBe(false);
+		expect(lines.filter((l) => l.includes(" b2"))[0].startsWith("*")).toBe(true);
 	});
 
 	test("branch rejects header entries and unknown ids", () => {
