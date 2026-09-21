@@ -3,5 +3,9 @@ dist/
 *.log
 .DS_Store
 
+# `bun build --compile` writes a hidden scratch file next to its output and
+# renames it into place; a run that is interrupted leaves a 120 MB one behind.
+*.bun-build
+
 # labunbun local state
 .labunbun/settings.local.json
