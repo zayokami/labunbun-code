@@ -1,5 +1,7 @@
+import type { PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput } from "ink";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { isAimedAt, usePadAction } from "../pad.ts";
 import { useTheme } from "../theme.ts";
 
 export interface PickerItem {
@@ -36,13 +38,29 @@ export interface ListPickerState {
 /** How many rows are visible before the list scrolls. */
 const VISIBLE_ROWS = 8;
 
+export interface ListPickerDialogProps extends ListPickerState {
+	/** The controller, when there is one. */
+	pad?: PadBridge;
+}
+
 /**
  * A scrollable pick-one dialog (session resume, model switch). Modeled on
  * QuestionDialog but for a single potentially long list: ↑/↓ move with
  * wrapping, the window scrolls to keep the selection visible, Enter resolves,
- * Esc cancels.
+ * Esc cancels. A pad moves and resolves the same way, through the same two
+ * helpers — the highlight a thumb moves and the highlight an arrow key moves are
+ * the same highlight, and a caller previewing it (the theme picker) must not be
+ * able to tell which one moved it.
  */
-export function ListPickerDialog({ title, items, initialIndex, resolve, onHighlight, onCancel }: ListPickerState) {
+export function ListPickerDialog({
+	title,
+	items,
+	initialIndex,
+	resolve,
+	onHighlight,
+	onCancel,
+	pad,
+}: ListPickerDialogProps) {
 	const theme = useTheme();
 	// A whole number first: a fraction highlights no row at all (`index === 1.9`
 	// is false for every row) and the caller is handed an index no item has to
@@ -57,11 +75,61 @@ export function ListPickerDialog({ title, items, initialIndex, resolve, onHighli
 		return Math.min(Math.max(whole, 0), Math.max(items.length - 1, 0));
 	});
 
+	const cancel = () => {
+		onCancel?.();
+		resolve(null);
+	};
+
+	/** Move the highlight, wrapping, and tell whoever is previewing it. */
+	const step = (delta: number): void => {
+		if (items.length === 0) return;
+		const next = (((selected + delta) % items.length) + items.length) % items.length;
+		setSelected(next);
+		onHighlight?.(next);
+	};
+
+	const openedAt = useRef(Date.now());
+	usePadAction(pad, (action) => {
+		// A release ends a press that was already answered, and a press that began
+		// before this list appeared was aimed at the screen before it — the mapper
+		// carries every press's age so this question has an answer.
+		if (action.phase === "release" || !isAimedAt(action, openedAt.current)) return false;
+		if (items.length === 0) {
+			// Nothing to choose from, so the only thing a pad can do is leave —
+			// the same two answers the keyboard has for an empty list.
+			if (action.kind === "cancel" || action.kind === "confirm") {
+				cancel();
+				return true;
+			}
+			return false;
+		}
+		switch (action.kind) {
+			case "up":
+			case "left":
+				step(-1);
+				return true;
+			case "down":
+			case "right":
+				step(1);
+				return true;
+			case "page-prev":
+				step(-VISIBLE_ROWS);
+				return true;
+			case "page-next":
+				step(VISIBLE_ROWS);
+				return true;
+			case "confirm":
+				resolve(selected);
+				return true;
+			case "cancel":
+				cancel();
+				return true;
+			default:
+				return false;
+		}
+	});
+
 	useInput((_input, key) => {
-		const cancel = () => {
-			onCancel?.();
-			resolve(null);
-		};
 		if (items.length === 0) {
 			if (key.escape || key.return) cancel();
 			return;
@@ -71,15 +139,11 @@ export function ListPickerDialog({ title, items, initialIndex, resolve, onHighli
 			return;
 		}
 		if (key.upArrow) {
-			const next = (selected + items.length - 1) % items.length;
-			setSelected(next);
-			onHighlight?.(next);
+			step(-1);
 			return;
 		}
 		if (key.downArrow) {
-			const next = (selected + 1) % items.length;
-			setSelected(next);
-			onHighlight?.(next);
+			step(1);
 			return;
 		}
 		if (key.return) resolve(selected);
@@ -120,7 +184,9 @@ export function ListPickerDialog({ title, items, initialIndex, resolve, onHighli
 				)}
 			</Box>
 			<Box marginTop={1}>
-				<Text dimColor>↑/↓ select · Enter choose · Esc cancel</Text>
+				{/* The pad's two answers, named next to the keyboard's: a picker opened
+				    by a controller is a picker a controller has to be able to leave. */}
+				<Text dimColor>↑/↓ select · Enter choose · Esc cancel{pad ? " · ✕ choose · ○ cancel" : ""}</Text>
 			</Box>
 		</Box>
 	);

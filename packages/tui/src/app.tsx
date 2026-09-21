@@ -4,6 +4,7 @@
  */
 
 import type { AgentSession, PermissionMode } from "@labunbun/agent";
+import type { PadBridge } from "@labunbun/gamepad";
 import { render } from "ink";
 import { sealCount } from "./components/MessageList.tsx";
 import {
@@ -60,6 +61,12 @@ export interface ReplAppOptions {
 	 * the user was looking at when they answered.
 	 */
 	onAlwaysAllow?: (toolName: string, input: unknown) => void;
+	/**
+	 * The controller, when the app layer built one. The TUI never builds one: it
+	 * is handed the bridge, which is what keeps node-hid and everything else a
+	 * device needs on the other side of a package boundary.
+	 */
+	pad?: PadBridge;
 }
 
 export interface ReplAppHandle {
@@ -201,6 +208,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				completeFiles={options.completeFiles}
 				dirName={options.dirName}
 				history={options.history}
+				pad={options.pad}
 			/>
 		</ThemedTree>,
 		{ exitOnCtrlC: false },

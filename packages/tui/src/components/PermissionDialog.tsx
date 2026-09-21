@@ -1,5 +1,7 @@
+import type { PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput } from "ink";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { isAimedAt, usePadAction } from "../pad.ts";
 import { type PermissionOption, permissionOptions } from "../permission-options.ts";
 import { useTheme } from "../theme.ts";
 
@@ -17,6 +19,12 @@ export interface PermissionDialogProps {
 	onResolve: (allow: boolean, alwaysAllow: boolean) => void;
 	/** Requests queued behind this one, including it (see PermissionDialogState). */
 	queueLength?: number;
+	/**
+	 * The controller, when there is one. It may answer this dialog only if the
+	 * user turned that on — see `PadBridge.allowApprove`, which is a user-tier
+	 * setting nothing below it can raise.
+	 */
+	pad?: PadBridge;
 }
 
 /**
@@ -27,6 +35,11 @@ export interface PermissionDialogProps {
  * The options are named for their consequences rather than for their position —
  * "don't ask again" used to grant the whole tool, so approving `git status` also
  * approved every later Bash call. Esc stays the safe answer.
+ *
+ * The pad's answers follow the same principle: ○ denies, ✕ takes the
+ * highlighted answer, and *holding* ✕ takes the standing one — "yes, and stop
+ * asking like this". A hold is deliberate in a way a tap is not, which is what
+ * makes it the right gesture for the grant that outlives the question.
  */
 export function PermissionDialog({
 	toolName,
@@ -35,12 +48,51 @@ export function PermissionDialog({
 	options,
 	onResolve,
 	queueLength,
+	pad,
 }: PermissionDialogProps) {
 	const theme = useTheme();
 	const [selected, setSelected] = useState(0);
 	const [expanded, setExpanded] = useState(false);
 	const answers = options ?? permissionOptions(toolName, undefined);
 	const body = expanded && inputFull ? inputFull : inputPreview;
+	/** The row a held ✕ takes — the one that stops the asking — or -1 for none. */
+	const standing = answers.findIndex((answer) => answer.alwaysAllow);
+
+	const openedAt = useRef(Date.now());
+	usePadAction(pad, (action) => {
+		if (action.phase === "release" || !isAimedAt(action, openedAt.current)) return false;
+		// Denying is always safe, and always the pad's to do: a controller that
+		// could only say yes would be worse than one that said nothing.
+		if (action.kind === "cancel") {
+			onResolve(false, false);
+			return true;
+		}
+		// The highlight moves the way the arrows move it. Without this the pad
+		// could say "yes, once" and — by holding ✕ — "yes, always", but a "no,
+		// and tell the model what to do differently" is a *different* no from
+		// ○'s, and one only a person reading the screen would pick.
+		if (action.kind === "up" || action.kind === "left") {
+			setSelected((s) => (s + answers.length - 1) % answers.length);
+			return true;
+		}
+		if (action.kind === "down" || action.kind === "right") {
+			setSelected((s) => (s + 1) % answers.length);
+			return true;
+		}
+		if (action.kind !== "confirm") return false;
+		// The gate the whole feature is built around. Approving is off unless the
+		// user turned it on, and a pad that is not allowed to answer says so out
+		// loud — a buzz, because the thumb that just pressed ✕ is the only
+		// evidence the press happened at all.
+		if (!pad?.allowApprove) {
+			pad?.buzz("refused");
+			return true;
+		}
+		const standing = answers.find((answer) => answer.alwaysAllow);
+		const answer = action.phase === "hold" && standing ? standing : answers[selected % answers.length];
+		onResolve(answer.allow, answer.alwaysAllow);
+		return true;
+	});
 
 	useInput((input, key) => {
 		if (key.upArrow) setSelected((s) => (s + answers.length - 1) % answers.length);
@@ -87,6 +139,21 @@ export function PermissionDialog({
 				<Text dimColor>
 					↑/↓ select · Enter confirm · Esc deny
 					{inputFull ? ` · Ctrl+A ${expanded ? "collapse" : "show full input"}` : ""}
+					{/* The pad's answers, named next to the keyboard's the way the wheel
+					    and the on-screen keyboard name them. The hold is the part that has
+					    to be said out loud: nobody holds a button by accident, so the one
+					    gesture that grants a standing allowance is the one no user finds
+					    by trying buttons. It points at the numbered row a hold would take
+					    rather than promising an "always" the list is not offering.
+					    A ✕ that does nothing reads as a broken controller, so the refusal
+					    says why — the setting is one the user chose, not one to guess — and
+					    ○ stays named, because a pad that can only refuse is still a pad
+					    that can answer the question. */}
+					{pad
+						? pad.allowApprove
+							? ` · ✕ confirm${standing >= 0 ? ` · hold ✕ row ${standing + 1}` : ""} · ○ deny`
+							: " · pad may not approve · ○ deny"
+						: ""}
 				</Text>
 			</Box>
 		</Box>

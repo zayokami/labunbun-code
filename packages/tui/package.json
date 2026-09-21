@@ -9,6 +9,7 @@
 	"dependencies": {
 		"@labunbun/agent": "workspace:*",
 		"@labunbun/ai": "workspace:*",
+		"@labunbun/gamepad": "workspace:*",
 		"ink": "^7.1.1",
 		"react": "^19.2.0",
 		"react-devtools-core": "^7.0.1"

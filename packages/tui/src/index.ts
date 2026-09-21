@@ -10,12 +10,23 @@ export {
 	// worth pinning down in a test, and no test mounts the whole app.
 	sameShells,
 } from "./app.tsx";
+export { type WheelEntry, wheelEntries, wheelMove, wheelStart } from "./command-wheel.ts";
+export { CommandWheel } from "./components/CommandWheel.tsx";
 export { MessageList, StreamingPreview } from "./components/MessageList.tsx";
+export { OnScreenKeyboard } from "./components/OnScreenKeyboard.tsx";
 export { PermissionDialog } from "./components/PermissionDialog.tsx";
 export { PromptInput } from "./components/PromptInput.tsx";
 export { QueuedMessages, queuedHint, queuedPreview } from "./components/QueuedMessages.tsx";
 export { connectSessionToStore, helpText, REPL, type ReplProps } from "./components/REPL.tsx";
-export { backgroundShellRow, StatusLine } from "./components/StatusLine.tsx";
+export {
+	BATTERY_CABLE,
+	BATTERY_CELLS,
+	BATTERY_EMPTY,
+	BATTERY_FULL,
+	backgroundShellRow,
+	batteryBar,
+	StatusLine,
+} from "./components/StatusLine.tsx";
 export {
 	type Appearance,
 	appearanceFromColorFgBg,
@@ -26,6 +37,27 @@ export {
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
 export { LIVE_OUTPUT_LINES, liveOutputLines, livePreviewTargets } from "./live-output.ts";
 export { type Block, type InlineSpan, parseBlocks, parseInline } from "./markdown.ts";
+export {
+	OSK_PAGES,
+	type OskCursor,
+	type OskKey,
+	type OskPage,
+	oskClamp,
+	oskKeyAt,
+	oskLabel,
+	oskMove,
+	oskPage,
+	oskTurn,
+	oskType,
+} from "./osk.ts";
+export {
+	isAimedAt,
+	type PadActionHandler,
+	type PadPromptHandle,
+	type PadPromptRef,
+	usePadAction,
+	usePadStatus,
+} from "./pad.ts";
 export { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "./paste.ts";
 export { alwaysAllowLabel, type PermissionOption, permissionOptions, ruleSpecifierFor } from "./permission-options.ts";
 export { applyFileCompletion, currentAtWord, filterFiles } from "./prompt-files.ts";

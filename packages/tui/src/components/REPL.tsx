@@ -1,12 +1,17 @@
 import type { AgentEvent, AgentSession } from "@labunbun/agent";
+import { type PadBridge, padPalette } from "@labunbun/gamepad";
 import { Box, Text, useInput, useStdout } from "ink";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { WHEEL_ROWS, wheelEntries, wheelMove } from "../command-wheel.ts";
 import { useTurnTimer } from "../hooks/useTurnTimer.ts";
 import { type LastNotification, type NotifyKind, notificationSequence, shouldNotify } from "../notify.ts";
+import { type PadPromptHandle, type PadPromptRef, usePadAction, usePadStatus } from "../pad.ts";
 import { shortcutGroups } from "../shortcuts.ts";
 import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
+import { useTheme } from "../theme.ts";
 import { type QueuedMessage, reduceEvent, type UiState } from "../ui-state.ts";
+import { CommandWheel } from "./CommandWheel.tsx";
 import { ListPickerDialog } from "./ListPickerDialog.tsx";
 import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
 import { PermissionDialog } from "./PermissionDialog.tsx";
@@ -68,6 +73,12 @@ export interface ReplProps {
 	history?: string[];
 	/** Basename of the session directory, for the terminal window title. */
 	dirName?: string;
+	/**
+	 * The controller, when there is one. Optional, and every pad-driven branch in
+	 * this component is behind it: without a pad the tree renders exactly as it
+	 * did before there was one.
+	 */
+	pad?: PadBridge;
 }
 
 const KEYS_HELP = `Keys:
@@ -131,6 +142,7 @@ export function REPL({
 	completeFiles,
 	history,
 	dirName = "",
+	pad,
 }: ReplProps) {
 	const entries = useStore(store, (s) => s.entries);
 	const streamingText = useStore(store, (s) => s.streamingText);
@@ -182,6 +194,13 @@ export function REPL({
 	const [ctrlCHint, setCtrlCHint] = useState(false);
 	/** Escape routing into the prompt editor — see the Esc branch below. */
 	const escapeRef = useRef<(() => boolean) | null>(null);
+	/** The same hand-off for the pad: the editor claims what it can use. */
+	const padRef: PadPromptRef = useRef<PadPromptHandle | null>(null);
+	const padStatus = usePadStatus(pad);
+	/** The command wheel: the app's commands and the user's phrases, one press away. */
+	const [wheelOpen, setWheelOpen] = useState(false);
+	const [wheelIndex, setWheelIndex] = useState(0);
+	const wheel = useMemo(() => wheelEntries(commandSuggestions ?? [], pad?.phrases ?? []), [commandSuggestions, pad]);
 
 	useEffect(
 		() => () => {
@@ -223,6 +242,32 @@ export function REPL({
 		if (dialog !== null && !wasBlockedRef.current) notify("action", `labunbun: approval needed for ${dialog.toolName}`);
 		wasBlockedRef.current = dialog !== null;
 	}, [statusPhase, dialog]);
+
+	/**
+	 * What the app is doing, in the user's hands: the lightbar's colour and the
+	 * buzz that follows it.
+	 *
+	 * Only the app's own two facts travel this way. The battery is the pad's to
+	 * know — the service reads it off the reports and puts it back into the same
+	 * signal — so a screen cannot tell the lightbar about a battery it has only
+	 * heard about second-hand.
+	 */
+	useEffect(() => {
+		pad?.setFeedback({ phase: busy ? "busy" : "idle", awaiting: awaitingUser });
+	}, [pad, busy, awaitingUser]);
+
+	/**
+	 * The same news for the lightbar's colours.
+	 *
+	 * A theme change repaints the screen, and the bar in the user's hand is part
+	 * of the screen: `/theme` from the couch would otherwise leave it glowing in
+	 * the palette they just left. The theme object is the dependency, so this
+	 * fires when the theme really changed and not on every render.
+	 */
+	const theme = useTheme();
+	useEffect(() => {
+		pad?.setPalette(padPalette({ accent: theme.accent, alert: theme.permission }));
+	}, [pad, theme]);
 
 	/**
 	 * Queue or steer a message into the running turn.
@@ -425,6 +470,152 @@ export function REPL({
 		}
 	});
 
+	/**
+	 * The window's share of the controller.
+	 *
+	 * Written as the key handler's twin, in the same order, because the two have
+	 * to agree about what is in front of what: the key list takes any button, a
+	 * dialog takes the pad itself (each listens on its own), the transcript takes
+	 * the movement keys, the wheel takes everything while it is up — and only what
+	 * is left over means what `/gamepad` says it means. The editor is asked before
+	 * any of it, the same hand-off Escape uses, so the on-screen keyboard and the
+	 * buffer keep their claim on the buttons they have a use for.
+	 */
+	usePadAction(pad, (action) => {
+		// The mapper reports a release for every press it recorded, and a release
+		// says one thing: the button came up. Whatever a button means here, it means
+		// it on the way down — acting on the release as well ran a press twice, so
+		// one tap of R3 ran `/mode` twice and one tap of the touchpad answered
+		// `/status` twice. The dialogs hear their own releases and decline them the
+		// same way; this is the same sentence, said once for everything below.
+		if (action.phase === "release") return true;
+		// Any button answers the key list, exactly as any key does.
+		if (shortcutsOpen) {
+			setShortcutsOpen(false);
+			return true;
+		}
+		// A dialog is the user deciding, and its own subscription already has this
+		// action. An ○ here must not abort the very turn the dialog is asking
+		// about — the same rule the Esc branch states above.
+		if (dialog || question || picker) return true;
+		if (transcriptMode) {
+			// The button that opened the transcript is the button that closes it, the
+			// way ctrl+o toggles both ways. ○ leaves as well, but a person who used
+			// Options to get here should not have to find a *different* button to get
+			// back — a screen you cannot leave the way you entered reads as one that
+			// interrupted you rather than one you asked for.
+			if (action.kind === "cancel" || action.kind === "transcript") {
+				setTranscriptMode(false);
+				setTranscriptOffset(0);
+			} else if (action.kind === "up" || action.kind === "page-next") {
+				setTranscriptOffset((offset) => Math.min(offset + TRANSCRIPT_PAGE, entries.length));
+			} else if (action.kind === "down" || action.kind === "page-prev") {
+				setTranscriptOffset((offset) => Math.max(0, offset - TRANSCRIPT_PAGE));
+			} else if (action.kind === "scroll" && action.value !== undefined) {
+				// A positive value means "toward the end of the transcript" in the
+				// mapper's terms, which is a smaller offset here: the sign was flipped
+				// once already, where the axis was read.
+				const value = action.value;
+				setTranscriptOffset((offset) =>
+					Math.max(0, Math.min(entries.length, Math.round(offset - value * TRANSCRIPT_PAGE))),
+				);
+			}
+			return true;
+		}
+		if (wheelOpen) {
+			switch (action.kind) {
+				case "cancel":
+					setWheelOpen(false);
+					return true;
+				case "wheel":
+					// Only a press can arrive here, so the tap that opened it closes it.
+					// (Releases are turned away at the top of this handler.)
+					setWheelOpen(false);
+					return true;
+				case "up":
+				case "left":
+					setWheelIndex((index) => wheelMove(wheel.length, index, -1));
+					return true;
+				case "down":
+				case "right":
+					setWheelIndex((index) => wheelMove(wheel.length, index, 1));
+					return true;
+				case "page-prev":
+					setWheelIndex((index) => wheelMove(wheel.length, index, -WHEEL_ROWS));
+					return true;
+				case "page-next":
+					setWheelIndex((index) => wheelMove(wheel.length, index, WHEEL_ROWS));
+					return true;
+				case "confirm": {
+					const entry = wheel[wheelIndex];
+					setWheelOpen(false);
+					if (entry) {
+						// A command runs; a phrase is put in the prompt. That difference is
+						// the whole reason phrases exist: "do this now" against "this is
+						// what I want to say", and the user gets to edit the second one.
+						if (entry.kind === "command") handleSubmit(entry.text);
+						else padRef.current?.fill(entry.text);
+					}
+					return true;
+				}
+				default:
+					// The wheel is in front of everything else on screen, so it takes
+					// the buttons the same way the key list does.
+					return true;
+			}
+		}
+		if (padRef.current?.action(action)) return true;
+		switch (action.kind) {
+			case "clear":
+				// □ is Ctrl+L, character for character — including the reason it goes
+				// through ink's writer rather than `process.stdout`.
+				if (stdout.isTTY) writeStdout(CLEAR_SCREEN);
+				store.set((s) => ({ ...s, paint: s.paint + 1 }));
+				return true;
+			case "cancel":
+			case "interrupt":
+				// Idle, ○ has nothing to cancel: the screen is already the answer.
+				if (getSession().isRunning) getSession().abort();
+				return true;
+			case "transcript":
+				setTranscriptMode((open) => !open);
+				setTranscriptOffset(0);
+				return true;
+			case "wheel":
+				// Opened where the user left off, clamped: the ring's length can change
+				// between two openings, since the phrases come from settings.
+				setWheelIndex((index) => (wheel.length === 0 ? 0 : Math.min(index, wheel.length - 1)));
+				setWheelOpen(true);
+				return true;
+			// Everything below is a command, and goes through the same door a typed
+			// one does: the app layer's registry answers both, and nothing here has
+			// to know what /status or /mode actually do.
+			case "status":
+				handleSubmit("/status");
+				return true;
+			case "model":
+				handleSubmit("/model");
+				return true;
+			case "mode":
+				handleSubmit("/mode");
+				return true;
+			case "theme-next":
+			case "theme-prev":
+				// The picker, not a step: a theme list lives upstream of this package,
+				// and the picker previews as it moves, so choosing by looking at the
+				// result stays possible from a couch.
+				handleSubmit("/theme");
+				return true;
+			case "command":
+				if (action.command !== undefined) handleSubmit(action.command);
+				return true;
+			default:
+				// Movement, scroll and paging with nothing open to move in: the honest
+				// answer is that the button means nothing here.
+				return false;
+		}
+	});
+
 	if (transcriptMode) {
 		const windowSize = Math.min(entries.length, 25);
 		const end = Math.max(windowSize, entries.length - transcriptOffset);
@@ -454,6 +645,7 @@ export function REPL({
 					elapsedMs={elapsedMs}
 					contextInfo={contextInfo}
 					outputEstimate={estimateOutputTokens(streamingText.length)}
+					pad={padStatus}
 				/>
 				{/* "Running tools…" for twenty seconds says nothing about what is
 				    running; the row underneath is what makes the wait legible. */}
@@ -478,9 +670,10 @@ export function REPL({
 					options={dialog.options}
 					queueLength={dialog.queueLength}
 					onResolve={(allow, alwaysAllow) => dialog.resolve(allow, alwaysAllow)}
+					pad={pad}
 				/>
 			) : null}
-			{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} /> : null}
+			{question ? <QuestionDialog questions={question.questions} resolve={question.resolve} pad={pad} /> : null}
 			{picker ? (
 				<ListPickerDialog
 					title={picker.title}
@@ -488,8 +681,10 @@ export function REPL({
 					resolve={picker.resolve}
 					onHighlight={picker.onHighlight}
 					onCancel={picker.onCancel}
+					pad={pad}
 				/>
 			) : null}
+			{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
 			{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ vim, commands: commandSuggestions })} />}
 			{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
 			<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
@@ -507,6 +702,8 @@ export function REPL({
 				onQueue={(text) => sendMidRun(text, "queue")}
 				onSteer={(text) => sendMidRun(text, "steer")}
 				onInterruptSend={interruptAndSend}
+				pad={pad}
+				padRef={padRef}
 			/>
 			<Text dimColor> </Text>
 		</Box>

@@ -1,11 +1,15 @@
+import type { PadAction, PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput, usePaste, useWindowSize } from "ink";
-import { type RefObject, useEffect, useRef, useState } from "react";
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { type HistorySearchState, historyMatches, searchSelection, searchSelectionIndex } from "../history-search.ts";
 import { useTextInput } from "../hooks/useTextInput.ts";
+import { type OskCursor, oskKeyAt, oskMove, oskPage, oskTurn, oskType } from "../osk.ts";
+import { type PadPromptRef, usePadAction } from "../pad.ts";
 import { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "../paste.ts";
 import { applyFileCompletion, currentAtWord, filterFiles } from "../prompt-files.ts";
 import { hintLine } from "../shortcuts.ts";
 import { useTheme } from "../theme.ts";
+import { OnScreenKeyboard } from "./OnScreenKeyboard.tsx";
 
 export interface PromptInputProps {
 	onSubmit: (text: string) => void;
@@ -65,6 +69,20 @@ export interface PromptInputProps {
 	 * the same reason `?` and Ctrl+R are.
 	 */
 	onInterruptSend?: (text: string) => void;
+	/** The controller, when there is one. */
+	pad?: PadBridge;
+	/**
+	 * Filled in here with the editor's pad handler, for the same reason
+	 * `escapeRef` exists: ink hands an action to every subscriber, so the window
+	 * has to ask before it acts. The editor's answer covers the on-screen
+	 * keyboard and the two things the prompt does with a pad (✕ sends, and
+	 * whatever the editor is showing has the first claim on the movement keys).
+	 *
+	 * Handing one over hands the controller over with it: an editor with a window
+	 * to ask it does not listen on its own, because the bridge would give it the
+	 * same press twice.
+	 */
+	padRef?: PadPromptRef;
 }
 
 /**
@@ -108,6 +126,8 @@ export function PromptInput({
 	onQueue,
 	onSteer,
 	onInterruptSend,
+	pad,
+	padRef,
 }: PromptInputProps) {
 	const theme = useTheme();
 	const { columns } = useWindowSize();
@@ -130,6 +150,151 @@ export function PromptInput({
 	// containing tokens can still be re-expanded.
 	const pasteMapRef = useRef(new Map<string, string>());
 	const pasteSeqRef = useRef(0);
+	/** The on-screen keyboard: closed, or where its cursor stands. */
+	const [osk, setOsk] = useState(false);
+	const [oskPageIndex, setOskPageIndex] = useState(0);
+	const [oskCursor, setOskCursor] = useState<OskCursor>({ row: 0, col: 0 });
+	const [oskShift, setOskShift] = useState(false);
+	const page = oskPage(oskPageIndex);
+
+	/**
+	 * Send what is in the buffer. One implementation for two senders — the Enter
+	 * key and the keyboard's ⏎ cell — because the two must not drift: a pad that
+	 * queued where a key would have steered (or the reverse) silently reorders
+	 * what the user said, and nothing on screen would say so.
+	 *
+	 * Placeholder tokens expand here, so the model and the transcript see the
+	 * real payload. History keeps the compact token form — recall and resubmit
+	 * expand through the still-live map. A partially deleted token no longer
+	 * matches and stays literal text (accepted limitation).
+	 */
+	const submitCurrent = useCallback(() => {
+		const raw = state.text;
+		const text = expandPasteTokens(raw, pasteMapRef.current);
+		if (!text.trim()) return;
+		pushHistory(raw);
+		actions.clear();
+		setSuggestionIndex(0);
+		setCompletionPrefix(null);
+		// Mid-run there is nothing to submit to. Enter means "as soon as this turn
+		// can take it" — into the turn when it can (tools are running, so another
+		// model call is coming), otherwise queued behind it. The two are told apart
+		// because a steer is delivered *before* the next model call and a queue
+		// after the whole turn: picking the wrong one would silently reorder what
+		// the user said.
+		if (busy && onQueue && !isHostCommand(text)) {
+			if (canSteer && onSteer) onSteer(text);
+			else onQueue(text);
+			return;
+		}
+		onSubmit(text);
+	}, [state.text, actions, pushHistory, busy, onQueue, canSteer, onSteer, onSubmit]);
+
+	/** Press the key under the keyboard's cursor. */
+	const pressOskKey = useCallback(() => {
+		const key = oskKeyAt(page, oskCursor);
+		if (key.command === "submit") submitCurrent();
+		else if (key.command === "shift") setOskShift((shift) => !shift);
+		else if (key.command === "backspace") actions.backspace();
+		else {
+			const character = oskType(key, oskShift);
+			if (character !== undefined) actions.insert(character);
+		}
+	}, [page, oskCursor, oskShift, submitCurrent, actions]);
+
+	/**
+	 * The editor's share of the pad.
+	 *
+	 * With the keyboard open it takes everything it can use and lets the rest
+	 * through — the transcript, `/status`, the theme picker are all still worth
+	 * having a button for while typing. With it closed it takes two things: the
+	 * key that opens the keyboard, and ✕, which sends. ✕ is the one button that
+	 * has to mean "send" *outside* the keyboard, because a person holding a
+	 * controller who has just watched words appear and wants to send them will
+	 * press the button that means yes. Inside the keyboard it presses the
+	 * highlighted cell instead, which is why sending there is a cell of its own.
+	 */
+	const padAction = useCallback(
+		(action: PadAction): boolean => {
+			if (!osk) {
+				if (action.kind === "osk" && action.phase !== "release") {
+					setOsk(true);
+					setOskCursor({ row: 0, col: 0 });
+					return true;
+				}
+				if (action.kind === "confirm" && action.phase === "press") {
+					submitCurrent();
+					return true;
+				}
+				return false;
+			}
+			// A release says nothing here: every key this keyboard has is a thing
+			// that happened when the button went down.
+			if (action.phase === "release") return true;
+			// The one place that judges by button rather than by kind. □ and △ mean
+			// something different *while the keyboard is up* — a backspace and shift
+			// — because "clear the screen" and "open the command wheel" are not
+			// things anyone does mid-word.
+			if (action.button === "square") {
+				actions.backspace();
+				return true;
+			}
+			if (action.button === "triangle") {
+				setOskShift((shift) => !shift);
+				return true;
+			}
+			switch (action.kind) {
+				case "up":
+				case "down":
+				case "left":
+				case "right":
+					setOskCursor((cursor) => oskMove(page, cursor, action.kind as "up" | "down" | "left" | "right"));
+					return true;
+				case "page-next":
+					setOskPageIndex((index) => oskTurn(index, 1));
+					return true;
+				case "page-prev":
+					setOskPageIndex((index) => oskTurn(index, -1));
+					return true;
+				case "confirm":
+					pressOskKey();
+					return true;
+				case "cancel":
+				case "osk":
+					setOsk(false);
+					return true;
+				default:
+					return false;
+			}
+		},
+		[osk, page, actions, submitCurrent, pressOskKey],
+	);
+
+	// The editor listens only when nobody is driving it. A window that holds the
+	// handle below asks it before it acts — the hand-off Escape uses — and the
+	// bridge hands every action to *every* subscriber, so an editor that both
+	// listened and was asked answered each press twice: one ✕ in the on-screen
+	// keyboard typed two letters, and one step of the d-pad moved the brackets two
+	// cells, which is a whole row of the keyboard gone past. Being asked is the
+	// more precise of the two arrangements, because the window is the only thing
+	// that knows what is in front of what; a window that stops asking is a window
+	// whose editor still works.
+	usePadAction(padRef ? undefined : pad, padAction);
+
+	// A layout effect, for the reason `usePadAction` gives: the window asks
+	// this ref before it acts, so a press arriving between a commit and a passive
+	// effect would be answered by the editor of the render before — with the
+	// keyboard closed that it had just opened, or the other way round.
+	useLayoutEffect(() => {
+		if (!padRef) return;
+		padRef.current = {
+			action: padAction,
+			fill: (text: string) => actions.setBuffer(text, text.length),
+		};
+		return () => {
+			padRef.current = null;
+		};
+	}, [padRef, padAction, actions]);
 
 	usePaste(
 		(text) => {
@@ -300,29 +465,7 @@ export function PromptInput({
 				return;
 			}
 			if (key.return && (input === "" || input === "\r")) {
-				// Placeholder tokens expand here, so the model and the transcript see
-				// the real payload. History keeps the compact token form — recall and
-				// resubmit expand through the still-live map. A partially deleted
-				// token no longer matches and stays literal text (accepted limitation).
-				const raw = state.text;
-				const text = expandPasteTokens(raw, pasteMapRef.current);
-				if (!text.trim()) return;
-				pushHistory(raw);
-				actions.clear();
-				setSuggestionIndex(0);
-				setCompletionPrefix(null);
-				// Mid-run there is nothing to submit to. Enter means "as soon as this
-				// turn can take it" — into the turn when it can (tools are running, so
-				// another model call is coming), otherwise queued behind it. The two
-				// are told apart because a steer is delivered *before* the next model
-				// call and a queue after the whole turn: picking the wrong one would
-				// silently reorder what the user said.
-				if (busy && onQueue && !isHostCommand(text)) {
-					if (canSteer && onSteer) onSteer(text);
-					else onQueue(text);
-					return;
-				}
-				onSubmit(text);
+				submitCurrent();
 				return;
 			}
 			// While a suggestion list is open the arrows move through it. Recalling
@@ -495,6 +638,9 @@ export function PromptInput({
 				</Box>
 			)}
 			{selected && state.text !== selected[0] && <Text dimColor> </Text>}
+			{/* Above the prompt, where the suggestion lists go: it is a thing to
+			    read and press while typing, not a modal standing over the app. */}
+			{osk && <OnScreenKeyboard pageIndex={oskPageIndex} cursor={oskCursor} shift={oskShift} />}
 			<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1}>
 				{state.text.length === 0 ? (
 					// The cursor has to be drawn here too. Falling through to the
