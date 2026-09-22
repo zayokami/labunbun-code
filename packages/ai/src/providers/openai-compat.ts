@@ -14,6 +14,14 @@
  * - finish_reason is the terminal signal: we emit toolcall_end for all open
  *   calls and map to our StopReason.
  */
+import {
+	type CachePolicy,
+	cacheCapability,
+	cachedTokensFrom,
+	promptCacheKeyFor,
+	resolvePromptCacheKey,
+	resolvePromptCacheRetention,
+} from "../cache.ts";
 import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
 import { type DiscoveredModel, resolveApiKey } from "../model.ts";
 import type { AssistantMessageEvent, Context, Model, StreamOptions, WireTool } from "../types.ts";
@@ -41,6 +49,14 @@ export interface OpenAIRawChunk {
 		completion_tokens?: number;
 		total_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number } | null;
+		/**
+		 * The same number under two more names. Moonshot reports Kimi's cache hits
+		 * at the top level, and DeepSeek states them twice — `prompt_cache_hit_tokens`
+		 * next to the nested copy. `cachedTokensFrom` reads all three; this type
+		 * lists them so a fixture can prove each spelling is understood.
+		 */
+		cached_tokens?: number;
+		prompt_cache_hit_tokens?: number;
 		completion_tokens_details?: { reasoning_tokens?: number } | null;
 	} | null;
 }
@@ -61,15 +77,39 @@ export interface OpenAIRequestParams {
 	tool_choice?: "auto";
 	reasoning_effort?: "low" | "medium" | "high";
 	temperature?: number;
+	/**
+	 * A routing hint, not a cache instruction: it asks the provider to send
+	 * requests that share this prefix to a machine that already holds it. A key on
+	 * its own produces no hits — the prefix still has to match byte for byte.
+	 */
+	prompt_cache_key?: string;
+	/** How long the provider should keep the entry, where it lets the caller say. */
+	prompt_cache_retention?: string;
 }
 
-export function buildOpenAIRequest(model: Model, context: Context, options?: StreamOptions): OpenAIRequestParams {
+export function buildOpenAIRequest(
+	model: Model,
+	context: Context,
+	options?: StreamOptions,
+	policy?: CachePolicy,
+): OpenAIRequestParams {
 	const params: OpenAIRequestParams = {
 		model: model.id,
 		messages: convertMessages(context),
 		stream: true,
 		stream_options: { include_usage: true },
 	};
+
+	// What this provider does about caching decides both fields below, and a
+	// provider with no row gets neither: an unknown endpoint that rejects an
+	// unknown field is a 400 on every request, and that is a worse outcome than
+	// caching nothing. See `cacheCapability`.
+	const capability = cacheCapability(model);
+	if (resolvePromptCacheKey(policy, capability)) {
+		params.prompt_cache_key = promptCacheKeyFor(model, context);
+	}
+	const retention = resolvePromptCacheRetention(policy, capability);
+	if (retention) params.prompt_cache_retention = retention;
 
 	if (options?.maxOutputTokens) {
 		// Newer OpenAI models want max_completion_tokens; most compat providers
@@ -195,7 +235,10 @@ export async function* mapOpenAIStream(
 		sawContent = true;
 		if (chunk.usage) {
 			const promptTotal = chunk.usage.prompt_tokens ?? builder.message.usage.promptTotal;
-			const cacheRead = chunk.usage.prompt_tokens_details?.cached_tokens ?? builder.message.usage.cacheRead;
+			// Not `prompt_tokens_details.cached_tokens` alone: Kimi and DeepSeek state
+			// the same number elsewhere, and reading one spelling recorded every one
+			// of their cache hits as a miss.
+			const cacheRead = cachedTokensFrom(chunk.usage) ?? builder.message.usage.cacheRead;
 			builder.message.usage = {
 				// `prompt_tokens` counts the cached prefix; `input` must not, or the
 				// cached tokens are billed once as input and again as cacheRead.
@@ -292,14 +335,19 @@ export interface OpenAIClientLike {
 	};
 }
 
-export function createOpenAIStreamFn(clientFactory?: () => OpenAIClientLike) {
+export interface OpenAIStreamFnOptions {
+	clientFactory?: () => OpenAIClientLike;
+	policy?: CachePolicy;
+}
+
+export function createOpenAIStreamFn(settings: OpenAIStreamFnOptions = {}) {
 	return async function* openAIStream(
 		model: Model,
 		context: Context,
 		options?: StreamOptions,
 	): AsyncGenerator<AssistantMessageEvent> {
-		const client = clientFactory ? clientFactory() : await defaultClient(model, options);
-		const params = buildOpenAIRequest(model, context, options);
+		const client = settings.clientFactory ? settings.clientFactory() : await defaultClient(model, options);
+		const params = buildOpenAIRequest(model, context, options, settings.policy);
 		const raw = (await client.chat.completions.create(params)) as unknown as AsyncIterable<OpenAIRawChunk>;
 		yield* mapOpenAIStream(raw, model.provider, model.id);
 	};

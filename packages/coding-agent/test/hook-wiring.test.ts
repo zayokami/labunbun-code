@@ -192,4 +192,21 @@ describe("hook event coverage", () => {
 			expect(combined).toContain(`hooksRuntime.run("${event}"`);
 		}
 	});
+
+	test("neither app rewrites the request context after the fact", () => {
+		// The seam that put hook context in the first request of a prompt and left
+		// it out of every later one. Context a hook contributes is composed into
+		// the user message as it is created (`composeUserMessage`), so the stored
+		// bytes and the sent bytes are the same bytes; a rewrite at request time is
+		// a prefix rewrite by construction, and the cache report would be right to
+		// call every one of them a bug.
+		//
+		// The agent's own hook is still there for embedders that need a view — this
+		// is about the two apps, which have a transcript to keep stable.
+		for (const file of ["interactive.ts", "headless.ts"]) {
+			const source = readFileSync(join(import.meta.dir, "..", "src", file), "utf8");
+			expect(source).not.toContain("transformContext");
+			expect(source).toContain("composeUserMessage");
+		}
+	});
 });

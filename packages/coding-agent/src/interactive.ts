@@ -24,7 +24,7 @@ import {
 } from "@labunbun/agent";
 import {
 	apiKeyEnvNames,
-	createDefaultStreamFn,
+	createTrackedStreamFn,
 	formatCatalogNotice,
 	listModels,
 	type Model,
@@ -68,6 +68,7 @@ import {
 	resolveShellId,
 	shellPickerItems,
 } from "./background-commands.ts";
+import { cacheStatusLine, formatCacheReport, rewriteCause } from "./cache-report.ts";
 import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
 import { contextRows, contextSummaryLine, isContextLow, lowContextWarning } from "./context-report.ts";
 import { CostTracker, formatCostReport } from "./cost-tracker.ts";
@@ -275,7 +276,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const memory = loadMemoryFiles(cwd, home);
 
 	// ---- model fallback chain ----
-	const baseStreamFn = createDefaultStreamFn();
+	// Tracked, so `/cache` can report what the provider actually did with each
+	// request. The tracker sees every request the app makes — the loop, the
+	// compaction summary, each subagent — because they all come through here.
+	const { streamFn: baseStreamFn, tracker: cacheTracker } = createTrackedStreamFn({ policy: settings.cache });
 	const fallbackChain = (settings.fallbackModels ?? [])
 		.map((ref) => resolveModel(ref))
 		.filter((m): m is NonNullable<typeof m> => Boolean(m));
@@ -340,9 +344,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 */
 	const sessionIdHolder: { current: string | undefined } = { current: store?.sessionId ?? undefined };
 
-	// Context contributed by hooks (SessionStart / UserPromptSubmit). Injected
-	// into the next user message alongside memory, so the cached system-prompt
-	// prefix stays byte-stable.
+	// Context contributed by hooks (SessionStart / UserPromptSubmit). Composed
+	// into the next user message at the moment that message is created, so the
+	// bytes the transcript holds are the bytes every later request sends.
 	const pendingHookContext: string[] = [];
 
 	// ---- SessionStart: runs before the REPL mounts, so its context is
@@ -464,6 +468,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					}
 				}
 				const decision = await compaction.check(context, options);
+				// Either action replaces part of the prefix, and the session adopts it
+				// itself one line later. Registering the cause here is what the cache
+				// report needs to tell a rewrite the app meant to make from one nothing
+				// declared — the two look identical from the wire, and only this knows
+				// which it was.
+				if (decision?.action === "compact" || decision?.action === "reduced") {
+					cacheTracker.note(rewriteCause(decision.action));
+				}
 				// The cheap rung is not a compaction, and saying so is the whole
 				// report: the user asked for nothing here, and the model is now
 				// working from previews of older results. Silence would make that
@@ -489,31 +501,21 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			}
 		},
 		hooks: {
-			transformContext: (context) => {
-				// Hook-contributed context drains whenever it has accumulated, and
-				// rides on the next user message so the cached system-prompt prefix
-				// stays stable. Memory is not here: it is a section of the system
-				// prompt, which is the only place that survives a compaction and
-				// the only place the cache breakpoint covers.
+			composeUserMessage: (text) => {
+				// Hook-contributed context drains on the message it belongs to, at the
+				// moment that message is created — so it is part of the stored
+				// transcript and every later request replays it identically. Attaching
+				// it to the request instead (which is what the app used to do) put it in
+				// the first request of a prompt and left it out of every later one: the
+				// prefix diverged at that message, and the whole tail after it was
+				// written once and never read.
+				//
+				// Memory is not here, and that is deliberate: memory is a section of
+				// the system prompt, which is the one place that survives a compaction
+				// and the one the cache breakpoint covers.
 				const hookContext = pendingHookContext.splice(0, pendingHookContext.length);
-				if (hookContext.length === 0) return context;
-
-				const prefix = hookContext.join("\n\n");
-				const messages = [...context.messages];
-				// Last user message, so hook context lands on the prompt it
-				// belongs to rather than on stale history.
-				for (let i = messages.length - 1; i >= 0; i--) {
-					const message = messages[i];
-					if (message.role === "user") {
-						const text = typeof message.content === "string" ? message.content : "";
-						messages[i] = {
-							...message,
-							content: `${prefix}\n\n---\n\n${text}`.trimEnd(),
-						};
-						break;
-					}
-				}
-				return { ...context, messages };
+				if (hookContext.length === 0) return text;
+				return `${hookContext.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
 			},
 			beforeToolCall: async (toolName, input) => {
 				// File checkpoint before mutations — powers /rewind.
@@ -682,6 +684,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// The incoming conversation brings its own spend; without this the new one
 		// would open carrying the totals of the session just left.
 		costTracker.beginSession(loaded.store.messages());
+		// Its cache history starts over with it. The prefix just loaded has nothing
+		// to do with the one being left, and holding on to the old one would report
+		// a rewind at message 0 of a conversation that never existed — while the
+		// numbers above it mixed two sessions' prompts into one ceiling.
+		cacheTracker.reset();
 		compaction = buildCompaction(next.model, loaded.store);
 		thresholdHolder.current = compactionThreshold({
 			contextWindow: next.model.contextWindow,
@@ -818,8 +825,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				handle,
 				outcome.errors.map((e) => `UserPromptSubmit hook failed: ${e}`),
 			);
-			// Context a hook attaches to this prompt rides along on the next
-			// model call via transformContext.
+			// Context a hook attaches to this prompt is composed into the user
+			// message the prompt creates, so it is part of the stored transcript
+			// rather than a decoration on one request.
 			pendingHookContext.push(...outcome.addedContext);
 			if (outcome.blocked) {
 				return { block: true, reason: outcome.reason ?? "Prompt blocked by UserPromptSubmit hook" };
@@ -842,6 +850,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				cwd,
 				home,
 				costTracker,
+				cache: {
+					report: () =>
+						formatCacheReport({
+							records: cacheTracker.records(),
+							model: sessionRef?.model,
+							notices: cacheTracker.notices(),
+						}),
+					statusLine: () => cacheStatusLine(cacheTracker.records(), sessionRef?.model),
+					note: (cause: string) => cacheTracker.note(cause),
+				},
 				baseRules,
 				sessionRules,
 				commands,
@@ -1073,6 +1091,26 @@ interface AppCommandContext {
 	/** Home directory for user-owned state (MCP approvals). Defaults to the real one. */
 	home?: string;
 	costTracker: CostTracker;
+	/**
+	 * Cache diagnostics, when this session tracks them.
+	 *
+	 * Optional because a context assembled by hand — a test, an embedder that
+	 * built its own stream function — has no tracker behind it, and `/cache` has
+	 * to answer rather than throw. It answers that there is nothing to report.
+	 */
+	cache?: {
+		report(): string;
+		statusLine(): string;
+		/**
+		 * Declare a prefix rewrite before making it.
+		 *
+		 * A command that replaces part of the transcript is doing it on purpose, and
+		 * the cache report has no other way to know that: a rewind the app meant and
+		 * a rewind nothing admitted to look the same from the wire, and only the
+		 * second is a bug.
+		 */
+		note?(cause: string): void;
+	};
 	baseRules: PermissionRule[];
 	sessionRules: PermissionRule[];
 	commands: Command[];
@@ -1124,6 +1162,9 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			pushInfo: (info) => pushInfo(ctx.handle, info),
 			dialog: ctx.handle ?? undefined,
 			refreshContext: () => ctx.refreshContextInfo(session),
+			// `/compact` and `/trim` both replace part of the transcript, and the
+			// cache report reads better naming them than flagging them.
+			noteCacheRewrite: (cause) => ctx.cache?.note?.(cause),
 		};
 		void Promise.resolve(command.call(localCtx, args))
 			.then((result) => {
@@ -1165,6 +1206,7 @@ const PERMISSION_MODE_HINTS: Record<PermissionMode, string> = {
  */
 export function appCommandTable(): Array<[string, string]> {
 	return [
+		["/cache", "Show prompt-cache hit rate, its ceiling, and any prefix rewinds"],
 		["/context", "Show what the context window is made of, and what is left"],
 		["/cost", "Show token usage and cost for this conversation, then for this project"],
 		["/doctor", "Check the environment, settings, and provider setup"],
@@ -1191,6 +1233,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 	const session = ctx.getSession();
 
 	switch (command) {
+		case "/cache": {
+			pushInfo(ctx.handle, ctx.cache ? ctx.cache.report() : "This session does not track the prompt cache.");
+			return true;
+		}
 		case "/cost": {
 			pushInfo(ctx.handle, formatCostReport(ctx.costTracker.sessionState, ctx.costTracker.state));
 			return true;
@@ -1281,6 +1327,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 						`$${ctx.costTracker.sessionState.totalCostUSD.toFixed(4)} this session · ` +
 							`$${ctx.costTracker.state.totalCostUSD.toFixed(4)} this project`,
 					],
+					// Beside the cost, because that is what it explains: a hit rate is
+					// the reason a bill is what it is, and the two are read together.
+					["Cache", ctx.cache?.statusLine() ?? "not tracked"],
 					["Theme", `${ctx.theme.theme.name} · Vim ${vim ? "on" : "off"}`],
 					[
 						"MCP",
@@ -1378,6 +1427,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					ctx.mcpConnections.push(connection);
 					const index = ctx.pendingMcpApprovals.indexOf(serverName);
 					if (index !== -1) ctx.pendingMcpApprovals.splice(index, 1);
+					// Tools sit above the system prompt and the transcript, and a
+					// provider keys its cache on them: one appended tool discards every
+					// tier below it. Registered, this reads as the deliberate change it
+					// is; unregistered, `/cache` would name it a bug.
+					ctx.cache?.note?.("mcp tools added");
 					ctx.getSession()?.setTools([...(ctx.getSession()?.tools ?? []), ...connection.tools]);
 					pushInfo(
 						ctx.handle,
@@ -1467,6 +1521,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// Rebuild in-memory transcript from the new branch. The branch point may
 			// sit above a compaction boundary, in which case the whole history from
 			// there is live again — and below one, in which case it is not.
+			//
+			// A different branch is a different prefix, so the next request is a
+			// genuine miss from the branch point down; the user asked for it, and the
+			// registration is what says so.
+			ctx.cache?.note?.("fork");
 			forkSession.messages = forkStore.contextMessages();
 			pushInfo(ctx.handle, `Branched from ${arg.slice(0, 8)}. New messages continue on this branch.`);
 			return true;

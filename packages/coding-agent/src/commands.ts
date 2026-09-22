@@ -41,6 +41,11 @@ export interface LocalCommandContext {
 	 * ran the command to change.
 	 */
 	refreshContext?(): void;
+	/**
+	 * Declare a prefix rewrite before making one, so the cache report names it
+	 * rather than flagging it as an unexplained change. See `/compact` and `/trim`.
+	 */
+	noteCacheRewrite?(cause: string): void;
 }
 
 export interface LocalCommand extends CommandBase {
@@ -91,6 +96,9 @@ export function builtInCommands(): Command[] {
 				const context = ctx.session.currentContext();
 				const before = estimateContextUsage(context);
 				const compacted = await ctx.compaction.compact(context, { trigger: "manual", focus: args });
+				// The summary replaces everything above the boundary, so the next
+				// request is a miss from there down. Declared, because the user asked.
+				ctx.noteCacheRewrite?.("compaction");
 				// Adopting the result is the whole command. Reporting success without
 				// it costs a full summarization call and changes nothing.
 				ctx.session.applyCompaction(compacted);
@@ -159,6 +167,10 @@ export function builtInCommands(): Command[] {
 				// the older results were already small, so cutting them would free
 				// nothing and lose what little they still said.
 				if (!trimmed) return "Nothing to trim: no old tool results are large enough to be worth previewing.";
+				// Only when it is actually adopted: a trim that returns nothing leaves
+				// the prefix alone, and a registered cause with no rewrite behind it
+				// would explain away the next genuine miss.
+				ctx.noteCacheRewrite?.("trim");
 				ctx.session.applyCompaction(trimmed.context);
 				ctx.refreshContext?.();
 				const after = estimateContextUsage(trimmed.context);

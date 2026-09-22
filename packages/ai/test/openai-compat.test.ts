@@ -1,5 +1,10 @@
-import { describe, expect, mock, test } from "bun:test";
-import { buildOpenAIRequest, convertMessages, mapOpenAIStream } from "../src/providers/openai-compat.ts";
+import { describe, expect, test } from "bun:test";
+import {
+	buildOpenAIRequest,
+	convertMessages,
+	createOpenAIStreamFn,
+	mapOpenAIStream,
+} from "../src/providers/openai-compat.ts";
 import type { Context, Model } from "../src/types.ts";
 import { assistantMessage, toolResultMessage, userMessage } from "../src/types.ts";
 
@@ -60,6 +65,56 @@ describe("buildOpenAIRequest", () => {
 		const reasoning = { ...MODEL, reasoning: true };
 		expect(buildOpenAIRequest(reasoning, ctx()).reasoning_effort).toBe("medium");
 		expect(buildOpenAIRequest(MODEL, ctx()).reasoning_effort).toBeUndefined();
+	});
+});
+
+describe("the cache routing fields", () => {
+	// The default fixture is DeepSeek, which documents no routing key, so most of
+	// these switch the provider rather than the request.
+	const gpt = { ...MODEL, id: "gpt-5.5", provider: "openai", baseUrl: "https://api.openai.com/v1" };
+
+	test("a provider that documents the key gets one, and it names the prefix", () => {
+		const params = buildOpenAIRequest(gpt, ctx());
+		expect(String(params.prompt_cache_key).startsWith("labunbun-")).toBe(true);
+		// Stable across calls with the same prefix, which is what routing needs.
+		expect(buildOpenAIRequest(gpt, ctx()).prompt_cache_key).toBe(params.prompt_cache_key);
+	});
+
+	test("a provider whose guide never mentions the field gets nothing", () => {
+		expect(buildOpenAIRequest(MODEL, ctx()).prompt_cache_key).toBeUndefined();
+		// The same is true of an endpoint nobody has measured: inventing a field for
+		// a gateway is how every request becomes a 400.
+		const gateway = { ...gpt, provider: "someone-elses-gateway" };
+		expect(buildOpenAIRequest(gateway, ctx()).prompt_cache_key).toBeUndefined();
+	});
+
+	test("the policy can force the key on and off", () => {
+		const gateway = { ...gpt, provider: "someone-elses-gateway" };
+		expect(buildOpenAIRequest(gateway, ctx(), undefined, { promptCacheKey: "on" }).prompt_cache_key).toBeDefined();
+		expect(buildOpenAIRequest(gpt, ctx(), undefined, { promptCacheKey: "off" }).prompt_cache_key).toBeUndefined();
+	});
+
+	test("a different prefix is a different key", () => {
+		const one = buildOpenAIRequest(gpt, ctx({ systemPrompt: "sys" }));
+		const two = buildOpenAIRequest(gpt, ctx({ systemPrompt: "other" }));
+		expect(two.prompt_cache_key).not.toBe(one.prompt_cache_key);
+	});
+
+	test("retention is sent only when asked and only where the field exists", () => {
+		expect(buildOpenAIRequest(gpt, ctx()).prompt_cache_retention).toBeUndefined();
+		expect(buildOpenAIRequest(gpt, ctx(), undefined, { promptCacheRetention: "24h" }).prompt_cache_retention).toBe(
+			"24h",
+		);
+		// The value asked for is the value that goes out, rather than a default the
+		// adapter keeps to itself: "in_memory" exists to make an entry shorter.
+		expect(
+			buildOpenAIRequest(gpt, ctx(), undefined, { promptCacheRetention: "in_memory" }).prompt_cache_retention,
+		).toBe("in_memory");
+		const gateway = { ...gpt, provider: "someone-elses-gateway" };
+		expect(
+			buildOpenAIRequest(gateway, ctx(), undefined, { promptCacheKey: "on", promptCacheRetention: "24h" })
+				.prompt_cache_retention,
+		).toBeUndefined();
 	});
 });
 
@@ -263,40 +318,75 @@ describe("mapOpenAIStream", () => {
 	});
 });
 
-describe("defaultClient signal threading", () => {
-	test("the caller's abort signal reaches fetch through the client factory", async () => {
-		let capturedOptions: Record<string, unknown> = {};
-		mock.module("openai", () => ({
-			default: class FakeOpenAI {
-				constructor(options: Record<string, unknown>) {
-					capturedOptions = options;
-				}
-				chat = { completions: { create: async () => raw([]) } };
-			},
-		}));
-		const { createOpenAIStreamFn } = await import("../src/providers/openai-compat.ts");
+describe("defaultClient", () => {
+	/** One complete response, as the SSE the SDK parses. */
+	const CHAT_SSE = [
+		'data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"deepseek-chat","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n',
+		'data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"deepseek-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}\n\n',
+		"data: [DONE]\n\n",
+	].join("");
 
-		const controller = new AbortController();
-		const iterator = createOpenAIStreamFn()(MODEL, ctx(), { signal: controller.signal });
-		await iterator.next();
-
-		expect(capturedOptions.maxRetries).toBe(0);
-		const customFetch = capturedOptions.fetch as (input: unknown, init?: RequestInit) => Promise<unknown>;
-		expect(typeof customFetch).toBe("function");
-
-		// The wrapper's whole job is injecting the signal into the init it
-		// forwards, so that is what is asserted — not just that a function exists.
-		let seenSignal: AbortSignal | null | undefined;
+	/**
+	 * Answer every request from `answer`, recording what each call carried.
+	 *
+	 * The OpenAI SDK reads `globalThis.fetch` when the client is constructed and
+	 * `defaultClient` constructs one per request, so overriding the global here
+	 * drives the real SDK with no network and no module mock. That distinction is
+	 * the point rather than a detail: `mock.module("openai", …)` is process-wide
+	 * in Bun, and Bun documents that `mock.restore()` does not undo it — there is
+	 * no API that does, the override lives as long as the process. A fake left in
+	 * place is therefore handed to every later test that builds a client, which is
+	 * exactly what happened here: the composed-transport test in the next file
+	 * quietly exercised a stub instead of the SDK. Where a module mock is the only
+	 * way in — `@labunbun/ai` is mocked in several coding-agent tests — the repo
+	 * runs it in a child process instead; this one does not need the ceremony.
+	 */
+	async function withFetch(
+		answer: () => Response,
+		body: (calls: Array<{ url: string; signal: AbortSignal | null | undefined }>) => Promise<void>,
+	): Promise<void> {
 		const realFetch = globalThis.fetch;
-		globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
-			seenSignal = init?.signal;
-			throw new Error("request must not actually be sent");
+		const calls: Array<{ url: string; signal: AbortSignal | null | undefined }> = [];
+		globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+			calls.push({ url: String(input), signal: init?.signal });
+			return answer();
 		}) as unknown as typeof fetch;
 		try {
-			await customFetch("http://localhost/v1", {}).catch(() => {});
+			await body(calls);
 		} finally {
 			globalThis.fetch = realFetch;
 		}
-		expect(seenSignal).toBe(controller.signal);
+	}
+
+	test("the caller's abort signal reaches fetch through the real client", async () => {
+		await withFetch(
+			() => new Response(CHAT_SSE, { headers: { "content-type": "text/event-stream" } }),
+			async (calls) => {
+				const controller = new AbortController();
+				await collect(createOpenAIStreamFn({})(MODEL, ctx(), { apiKey: "test-key", signal: controller.signal }));
+
+				// A real client built a real request from the model's baseUrl, and the
+				// wrapper's whole job — injecting the caller's signal into the init it
+				// forwards — is what is asserted, not merely that a function exists.
+				expect(calls[0]?.url).toContain("api.deepseek.com/v1/chat/completions");
+				expect(calls[0]?.signal).toBe(controller.signal);
+			},
+		);
+	});
+
+	test("the SDK is told not to retry, because the wrapper above owns retry policy", async () => {
+		// The setting has to be asserted behaviourally, because nothing outside the
+		// SDK can read it: a 500 that the SDK would otherwise attempt twice more.
+		await withFetch(
+			() =>
+				new Response(JSON.stringify({ error: { message: "boom" } }), {
+					status: 500,
+					headers: { "content-type": "application/json" },
+				}),
+			async (calls) => {
+				await expect(collect(createOpenAIStreamFn({})(MODEL, ctx(), { apiKey: "test-key" }))).rejects.toThrow();
+				expect(calls).toHaveLength(1);
+			},
+		);
 	});
 });

@@ -271,6 +271,23 @@ describe("repo-controlled settings (project + local tiers)", () => {
 		);
 	});
 
+	test("a repo cannot set the cache policy, and the user can", () => {
+		// The cache policy decides how the user's own conversation is billed and does
+		// nothing at all for the repository, so a checkout has no legitimate say in
+		// it: `ttl: "5m"` or no breakpoints at all would quietly tax every turn of a
+		// session run inside it. The second half is what makes this a tier rule
+		// rather than a schema one — the same block from the user's own file is
+		// honoured, so the key is not simply unwritable.
+		withSettingsTiers({ project: { cache: { explicitBreakpoints: false, ttl: "5m" } } }, (cwd) => {
+			const { settings, ignoredKeys } = loadSettings(cwd);
+			expect(settings.cache).toBeUndefined();
+			expect(ignoredKeys).toEqual([{ source: "project", key: "cache" }]);
+		});
+		withSettingsTiers({ user: { cache: { explicitBreakpoints: false, ttl: "5m" } } }, (cwd) => {
+			expect(loadSettings(cwd).settings.cache).toEqual({ explicitBreakpoints: false, ttl: "5m" });
+		});
+	});
+
 	test("ignoredKeys reports what was dropped, and the notice names it", () => {
 		withSettingsTiers({ project: { permissionMode: "bypassPermissions" }, local: { env: { A: "b" } } }, (cwd) => {
 			const { ignoredKeys } = loadSettings(cwd);

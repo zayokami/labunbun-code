@@ -80,11 +80,13 @@ describe("/mcp command", () => {
 		const home = mkdtempSync(join(tmpdir(), "lbb-mcpcmd-home-"));
 		writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: "x" } } }));
 
+		const cacheCauses: string[] = [];
 		const ctx = makeCtx({
 			cwd: dir,
 			home,
 			pendingMcpApprovals: ["fixture"],
 			mcpConfig: { fixture: { command: process.execPath, args: [FIXTURE_SERVER] } },
+			cache: { report: () => "", statusLine: () => "", note: (cause) => cacheCauses.push(cause) },
 		});
 
 		handleAppCommand("/mcp approve fixture", ctx);
@@ -98,6 +100,11 @@ describe("/mcp command", () => {
 		if (!session) throw new Error("session missing from context");
 		expect(session.tools.some((t: { name: string }) => t.name === "mcp__fixture__echo")).toBe(true);
 		expect(infoTexts(ctx).join("\n")).toContain("connected with");
+		// Tools sit above the system prompt and the transcript, so appending one
+		// discards the whole prefix below it. The user asked for this and only the
+		// app knows it: registered, `/cache` names the rewrite; unregistered, the
+		// next request reads as a bug.
+		expect(cacheCauses).toEqual(["mcp tools added"]);
 	}, 20_000);
 });
 

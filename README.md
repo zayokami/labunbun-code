@@ -32,6 +32,10 @@ labunbun                                # interactive REPL
   does the same ahead of the threshold), `/context` for what the window is made
   of, and a live indicator measured against the compaction point — system prompt
   and tool schemas included, so it reads as full when the session is.
+- **Prompt caching** — explicit breakpoints on Anthropic (tools, system, the
+  previous turn's tail, this turn's tail) and the routing and retention knobs on
+  OpenAI-compatible endpoints; `/cache` reports the hit rate, the ceiling this
+  conversation can reach, and any rewrite of the prefix nobody declared.
 - **Hooks** — user-configurable `PreToolUse` / `PostToolUse` / `Stop` /
   `SessionStart` … command hooks with a JSON stdin/stdout contract.
 - **MCP client** — stdio + StreamableHTTP servers from `.mcp.json`; tools merge
@@ -392,6 +396,71 @@ native prebuild, and the resulting executable reads a controller with no
 `node_modules` next to it. (Verified against node-hid 3.4.0 on Windows; nothing
 needs `--external`.)
 
+## Prompt caching
+
+Providers bill a prompt in two parts: what they can serve from a cache and what
+they have to read again. The cache is keyed on a **prefix**, so the only way to
+hit it is to send the same bytes in the same order as last time and to let the
+conversation grow by appending. `/cache` prints what that came to:
+
+```
+Prompt cache — anthropic/claude-opus-5
+  requests     241 request(s) (0 re-asked, 0 not answered)
+  tokens       2.87M read · 41.2k written (41.2k 5m · 0 1h) · 0 full price · 18.9k out
+  hit rate     98.6% read · ceiling 98.6% for this shape (100.0% of what is reachable)
+  prefix       1 extension · 1 cold start · 0 rewinds
+  capability   explicit breakpoints · min 512 tokens · TTL 5m or 1h
+```
+
+**Two numbers, not one.** The hit rate is `Σ cacheRead / Σ promptTotal` — the
+share of everything sent that was served from cache. The ceiling is
+`Σ P[t-1] / Σ P[t]`: a request can only read what an earlier request wrote, so
+the best any sequence of prompts can do is bounded by how fast the prompt grows.
+A conversation that ends at 200k tokens after a hundred turns has a ceiling
+around 98%, and no implementation can beat it — the last turn's prompt was never
+written by anyone. So the number to read is *both*: a session at its ceiling is
+doing everything the provider allows, and a session below it is losing tokens to
+something specific. The report prints them side by side for that reason, and
+`/cache` names the causes — a cold start, a TTL that expired, a rewrite the app
+made on purpose (compaction, `/trim`, `/fork`, an approved MCP server appending
+tools), or a **rewind nobody declared**, which is a bug in the shape of the
+prefix rather than a cost of the work.
+
+**What each provider gets.** Anthropic takes explicit `cache_control`
+breakpoints, and the adapter places up to four: the last tool definition, the
+system prompt, the message where the *previous* request ended, and the last
+message of this one. Each is only placed if its prefix clears the model's
+documented minimum (512 tokens on Opus, 1024 on Sonnet, 4096 on Haiku 4.5), so a
+short conversation is not littered with markers the provider would ignore. The
+breakpoint on the previous turn's tail is what carries a prefix across a turn
+that answers twelve tools at once — a vendor's own look-back reaches twenty
+blocks, and that turn puts twenty-four of them between two requests.
+OpenAI-compatible endpoints cache automatically and take no breakpoints;
+`prompt_cache_key` is sent only where the provider documents it (or where
+`cache.promptCacheKey` says `on`), derived from the stable prefix — system
+prompt, tools, model, wire format — so the same conversation resumes onto the
+same cache, and a key that moved per turn would route every turn somewhere else.
+
+**Settings** are user-tier only, because caching is not something a cloned
+repository should be able to change:
+
+```json
+{ "cache": { "enabled": true, "ttl": "auto", "promptCacheKey": "auto" } }
+```
+
+`ttl: "auto"` asks for the one-hour TTL and falls back down a ladder — 1h, then
+5m, then no `ttl` field at all — one failed request per rung, once per process,
+each downgrade named in `/cache`. Only the affected requests are retried; a 400
+that is not about cache settings propagates as the error it is.
+
+**What the hit rate does not promise.** The number `/cache` prints is what the
+provider reported, and nothing here can make a vendor's cache behave as its
+documentation claims. The end-to-end tests in `packages/agent/test/
+cache-hit-rate.test.ts` run the real adapters, the real client stack and the
+real agent loop against a local endpoint implementing the documented rules
+(`packages/ai/test/cache-stub-server.ts`) — that measures the machinery, not a
+vendor, and a real number comes from `/cache` after a real session.
+
 ## Project layout
 
 | Package | Purpose |
@@ -417,6 +486,7 @@ pnpm typecheck        # tsc over all packages (source-mapped, no build step)
 pnpm test             # bun test — 2000+ tests, no network needed
 pnpm lint             # biome check
 bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
+bun run packages/coding-agent/scripts/cache-check.ts anthropic/claude-opus-5 6   # live hit rate (costs money)
 bun run scripts/gamepad-probe.ts                     # a controller, without the app in the way
 bun run scripts/gamepad-probe.ts --touch             # measure the touchpad: decoded points + raw bytes
 pnpm bin:build        # standalone executable via bun build --compile

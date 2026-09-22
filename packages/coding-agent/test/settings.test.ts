@@ -54,6 +54,22 @@ describe("SettingsSchema", () => {
 		).toBe(false);
 	});
 
+	test("the cache policy's knobs are enumerated, not free-form", () => {
+		expect(
+			SettingsSchema.parse({
+				cache: { explicitBreakpoints: false, ttl: "5m", promptCacheKey: "on", promptCacheRetention: "24h" },
+			}).cache,
+		).toEqual({ explicitBreakpoints: false, ttl: "5m", promptCacheKey: "on", promptCacheRetention: "24h" });
+		expect(SettingsSchema.parse({ cache: { ttl: "auto" } }).cache).toEqual({ ttl: "auto" });
+		// A value nobody documents is a typo, and the adapter reads whatever survived
+		// the merge: accepting "2h" here would mean asking the provider for a TTL it
+		// has never heard of — a 400 at request time rather than a warning at load
+		// time. The same argument covers the two routing fields.
+		expect(SettingsSchema.safeParse({ cache: { ttl: "2h" } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ cache: { promptCacheKey: "yes" } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ cache: { promptCacheRetention: "1h" } }).success).toBe(false);
+	});
+
 	test("prices can be declared for a whole catalog, per provider or as an override", () => {
 		const parsed = SettingsSchema.parse({
 			providers: {

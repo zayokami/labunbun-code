@@ -144,6 +144,29 @@ export const SettingsSchema = z.object({
 	disableBypassPermissionsMode: z.boolean().optional(),
 	providers: z.object({ openaiCompatible: z.array(OpenAICompatibleProviderSchema).default([]) }).optional(),
 	/**
+	 * What the app asks every provider to do about its prompt cache.
+	 *
+	 * Not under `providers`, because none of it is a property of one: the same
+	 * policy applies to every model, and the adapters translate it into whatever
+	 * their own wire format calls the same idea.
+	 */
+	cache: z
+		.object({
+			/** Place explicit breakpoints on providers that need them. */
+			explicitBreakpoints: z.boolean().optional(),
+			/** How long a written entry should live; "auto" asks for the long one. */
+			ttl: z.enum(["auto", "5m", "1h"]).optional(),
+			/** Send the routing key: "auto" follows the provider's own guide. */
+			promptCacheKey: z.enum(["auto", "on", "off"]).optional(),
+			/**
+			 * How long the provider should keep an entry. Unset sends nothing, which
+			 * is usually right: on OpenAI an organization without zero-data-retention
+			 * already gets the long retention.
+			 */
+			promptCacheRetention: z.enum(["in_memory", "24h"]).optional(),
+		})
+		.optional(),
+	/**
 	 * What a model is billed at, in USD per million tokens, keyed by
 	 * "provider/model" — or by model id alone, which applies to every provider
 	 * serving it. Overrides the catalog's dated snapshot of list prices; that is
@@ -230,6 +253,11 @@ export interface LoadedSettings {
  *     are read only from the policy tier already; they are listed here so the
  *     merged settings can never carry a repo-supplied value even if a future
  *     reader forgets that rule.
+ *   - `cache` — it decides how the *user's* conversation is billed and how much
+ *     of it hits the cache, and it has no effect on the repository at all, so a
+ *     repo has no legitimate reason to set it. `ttl: "5m"` or
+ *     `explicitBreakpoints: false` would quietly tax every turn of a session run
+ *     inside that checkout, which is a strange thing for a checkout to want.
  */
 const PROJECT_TIER_DENIED_KEYS = [
 	"model",
@@ -240,6 +268,7 @@ const PROJECT_TIER_DENIED_KEYS = [
 	"hooks",
 	"mcpServers",
 	"pricing",
+	"cache",
 	"trimOldToolResults",
 	// Not a lockdown but the same rule: whether this startup asks the network a
 	// question is the user's decision, not the repository's.

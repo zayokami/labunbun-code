@@ -247,7 +247,7 @@ describe("formatCostState", () => {
 		expect(text).toContain("$0.5000");
 	});
 
-	test("one line per model, plus the total line", () => {
+	test("one line per model plus its cache channels, plus the total line", () => {
 		const text = formatCostState(
 			{
 				totalCostUSD: 0,
@@ -259,7 +259,31 @@ describe("formatCostState", () => {
 			},
 			"This project, all sessions",
 		);
-		expect(text.split("\n")).toHaveLength(3);
+		const lines = text.split("\n");
+		expect(lines).toHaveLength(5);
+		expect(lines[0]).toBe("This project, all sessions: $0.0000");
+		// The cache line belongs to the model directly above it: a reader who has to
+		// work out which model a number is about has been told nothing.
+		expect(lines[1]).toContain("p/a:");
+		expect(lines[2]).toBe("    cache: 0 read (0.0%) · 0 written · 1 full price");
+		expect(lines[3]).toContain("p/b:");
+		expect(lines[4]).toBe("    cache: 0 read (0.0%) · 0 written · 2 full price");
+	});
+
+	test("the cache line reports reads, writes and full-price tokens separately", () => {
+		// The summed token count cannot show whether the cache worked: these two
+		// models have very different bills and identical totals.
+		const text = formatCostState(
+			{
+				totalCostUSD: 0,
+				totalDurationMs: 0,
+				modelsUsage: {
+					"p/cached": { inputTokens: 100, outputTokens: 0, cacheReadTokens: 900, cacheWriteTokens: 0, costUSD: 0 },
+				},
+			},
+			"This session",
+		);
+		expect(text).toContain("cache: 900 read (90.0%) · 0 written · 100 full price");
 	});
 });
 

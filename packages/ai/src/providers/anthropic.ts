@@ -11,10 +11,26 @@
  * raw and parsed once at block end (avoids O(n²) partial-JSON parsing).
  */
 
-import { MessageBuilder } from "../message-builder.ts";
+import {
+	type CacheNotice,
+	type CachePolicy,
+	type CacheTtl,
+	cacheCapability,
+	prefixTierTokens,
+	resolveCacheTtl,
+} from "../cache.ts";
+import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
 import { type DiscoveredModel, resolveApiKey } from "../model.ts";
-import { looksLikeContextOverflow } from "../retry.ts";
-import type { AssistantMessageEvent, Context, Model, StreamOptions, ThinkingLevel, WireTool } from "../types.ts";
+import { looksLikeContextOverflow, statusCodeOf } from "../retry.ts";
+import type {
+	AgentMessage,
+	AssistantMessageEvent,
+	Context,
+	Model,
+	StreamOptions,
+	ThinkingLevel,
+	WireTool,
+} from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // Raw wire types (structural subset of the SDK's stream events, kept local so
@@ -31,6 +47,8 @@ export type AnthropicRawStreamEvent =
 					output_tokens?: number;
 					cache_read_input_tokens?: number;
 					cache_creation_input_tokens?: number;
+					/** Write tokens split by TTL bucket; null while a diagnosis is pending. */
+					cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } | null;
 				};
 			};
 	  }
@@ -76,19 +94,137 @@ export interface AnthropicRequestParams {
 	[key: string]: unknown;
 	model: string;
 	max_tokens: number;
-	system?: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }>;
+	system?: Array<{ type: "text"; text: string; cache_control?: AnthropicCacheControl }>;
 	messages: Array<Record<string, unknown>>;
-	tools?: Array<{ name: string; description: string; input_schema: unknown }>;
+	tools?: Array<{ name: string; description: string; input_schema: unknown; cache_control?: AnthropicCacheControl }>;
 	stream: true;
 	thinking?: { type: "enabled"; budget_tokens: number };
 	metadata?: { user_id?: string };
 }
 
-export function buildAnthropicRequest(model: Model, context: Context, options?: StreamOptions): AnthropicRequestParams {
+interface AnthropicCacheControl {
+	type: "ephemeral";
+	ttl?: CacheTtl;
+}
+
+/** What to ask for on this request: whether to mark, and how long for. */
+export interface AnthropicCacheRequest {
+	/** Place breakpoints at all. */
+	explicit: boolean;
+	/** The TTL to ask for; undefined leaves the field off entirely. */
+	ttl: CacheTtl | undefined;
+}
+
+function defaultCacheRequest(): AnthropicCacheRequest {
+	return { explicit: true, ttl: resolveCacheTtl() };
+}
+
+function cacheControl(request: AnthropicCacheRequest): AnthropicCacheControl {
+	return request.ttl === undefined ? { type: "ephemeral" } : { type: "ephemeral", ttl: request.ttl };
+}
+
+/**
+ * Which of the four breakpoint slots this request uses.
+ *
+ * Anthropic's tiers are ordered `tools → system → messages`, and a change at one
+ * level invalidates that level and everything below it. So the positions are
+ * chosen to be the longest prefixes that do not change between the requests of
+ * one conversation:
+ *
+ *   - `tools`     — the tool definitions, frozen when the session was built;
+ *   - `system`    — the same plus the system prompt, which changes only when the
+ *                   app rebuilds it (a resumed session, a different working
+ *                   directory). Keeping this separate from `tools` means a
+ *                   changed system prompt still reads the tools tier back.
+ *   - `previous`  — where the request before this one ended;
+ *   - `tail`      — where this one ends, written for the next one to read.
+ *
+ * `previous` is the one that needs justifying. A read is an exact hash match at
+ * a breakpoint; failing that the API walks backwards at most 20 positions. In an
+ * ordinary tool loop the previous request's tail is two or three positions back
+ * — an assistant turn and a run of tool results, which the API counts as one
+ * position each — so the walk finds it and the extra breakpoint changes nothing.
+ * It exists for the case where the tail moved further than the walk reaches,
+ * where having a breakpoint *on* the position rather than searching for it turns
+ * a full miss into a full read.
+ *
+ * All four slots are spent when all four positions clear their minimum, in the
+ * order the tiers require: `tools`, `system`, `previous`, `tail`. There is no
+ * reserve, so anything added later — a request-level automatic breakpoint, a
+ * marker an embedding app wants to place — has to take a slot from this list
+ * rather than be appended to it.
+ *
+ * Every position is checked against its own minimum: a breakpoint below the
+ * model's floor is not cached, and (unlike a breakpoint that is simply shorter)
+ * it tells us nothing in the response except that nothing happened.
+ */
+export interface AnthropicBreakpointPlan {
+	tools: boolean;
+	system: boolean;
+	previous: boolean;
+	tail: boolean;
+}
+
+const NO_BREAKPOINTS: AnthropicBreakpointPlan = { tools: false, system: false, previous: false, tail: false };
+
+/**
+ * Where the request before this one ended, and how long its prompt was.
+ *
+ * The prompt that produced the newest assistant message was everything before
+ * it, and a transcript only grows by appending — so the message immediately
+ * before that assistant message is exactly where that prompt ended. No state
+ * across requests is needed, which matters: this survives a process restart and
+ * a resumed session, where a remembered index would not.
+ *
+ * The token count comes from that message's own usage, because it *is* the
+ * prompt the provider billed and therefore exact. That doubles as the
+ * correctness condition: a message with no usage came from a request that never
+ * answered, so nothing is known to have been written at the position before it,
+ * and there is nothing worth pointing a breakpoint at.
+ */
+export function previousRequestTail(messages: readonly AgentMessage[]): { index: number; tokens: number } | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message?.role !== "assistant") continue;
+		if (i === 0) return undefined;
+		const usage = message.usage;
+		const tokens = usage.promptTotal ?? usage.input + usage.cacheRead + usage.cacheWrite;
+		return tokens > 0 ? { index: i - 1, tokens } : undefined;
+	}
+	return undefined;
+}
+
+export function planAnthropicBreakpoints(context: Context, minPrefixTokens: number): AnthropicBreakpointPlan {
+	const tiers = prefixTierTokens(context);
+	const previous = previousRequestTail(context.messages);
+	return {
+		tools: tiers.tools >= minPrefixTokens,
+		system: tiers.system >= minPrefixTokens,
+		previous: previous !== undefined && previous.tokens >= minPrefixTokens,
+		tail: tiers.messages >= minPrefixTokens,
+	};
+}
+
+export function buildAnthropicRequest(
+	model: Model,
+	context: Context,
+	options?: StreamOptions,
+	cache: AnthropicCacheRequest = defaultCacheRequest(),
+): AnthropicRequestParams {
+	const plan = cache.explicit
+		? planAnthropicBreakpoints(context, cacheCapability(model).minPrefixTokens)
+		: NO_BREAKPOINTS;
+	const previous = plan.previous ? previousRequestTail(context.messages) : undefined;
+	const marks = new Set<number>();
+	if (previous) marks.add(previous.index);
+	// The tail mark is added last so that, on a one-message request, the tail
+	// position wins: it is the one that writes the entry this turn will read.
+	if (plan.tail && context.messages.length > 0) marks.add(context.messages.length - 1);
+
 	const params: AnthropicRequestParams = {
 		model: model.id,
 		max_tokens: options?.maxOutputTokens ?? model.maxOutputTokens,
-		messages: convertMessages(context.messages),
+		messages: convertMessages(context.messages, marks, cache),
 		stream: true,
 	};
 
@@ -97,19 +233,18 @@ export function buildAnthropicRequest(model: Model, context: Context, options?: 
 			{
 				type: "text",
 				text: context.systemPrompt,
-				// Single cache breakpoint on the system prompt for now; the agent
-				// layer adds a transcript-prefix breakpoint once it knows the
-				// stable prefix (Phase 2+).
-				cache_control: { type: "ephemeral" },
+				...(plan.system ? { cache_control: cacheControl(cache) } : {}),
 			},
 		];
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = context.tools.map((tool: WireTool) => ({
+		const last = context.tools.length - 1;
+		params.tools = context.tools.map((tool: WireTool, index: number) => ({
 			name: tool.name,
 			description: tool.description,
 			input_schema: tool.parameters,
+			...(plan.tools && index === last ? { cache_control: cacheControl(cache) } : {}),
 		}));
 	}
 
@@ -132,40 +267,80 @@ export function buildAnthropicRequest(model: Model, context: Context, options?: 
  *   blocks (the API requires tool_use/result pairing inside user turns).
  * - Thinking blocks round-trip with their signature so extended thinking
  *   conversations stay valid.
+ * - A user message's text is sent as a block array even when it would fit in a
+ *   bare string. The two forms are the same prompt, but one message carries a
+ *   breakpoint on the turn it arrives and none on the turns after it, and a
+ *   breakpoint can only attach to a block — so sending blocks throughout means
+ *   the bytes of a message never depend on whether it happens to be the tail.
+ *   The exception is an empty message, which has no block to attach to and no
+ *   tokens to cache, and keeps its old form.
+ *
+ * `marks` are indices into the *neutral* array, not the wire array: the merge
+ * below means the two do not line up, and a rewind report that said "wire
+ * message 7" would be describing something the reader cannot find.
  */
-export function convertMessages(messages: Context["messages"]): Array<Record<string, unknown>> {
+export function convertMessages(
+	messages: Context["messages"],
+	marks?: ReadonlySet<number>,
+	cache: AnthropicCacheRequest = defaultCacheRequest(),
+): Array<Record<string, unknown>> {
 	const out: Array<Record<string, unknown>> = [];
+	const control = cacheControl(cache);
+	const mark = (block: Record<string, unknown>): Record<string, unknown> =>
+		cache.explicit ? { ...block, cache_control: control } : block;
 
-	const flushToolResults = (pending: Array<Record<string, unknown>>): void => {
-		if (pending.length > 0) out.push({ role: "user", content: pending });
+	/** One accumulated tool_result block, and the neutral index it came from. */
+	let toolResults: Array<{ index: number; block: Record<string, unknown> }> = [];
+	const flushToolResults = (): void => {
+		if (toolResults.length === 0) return;
+		out.push({
+			role: "user",
+			content: toolResults.map((entry) => (marks?.has(entry.index) ? mark(entry.block) : entry.block)),
+		});
+		toolResults = [];
 	};
 
-	let toolResults: Array<Record<string, unknown>> = [];
-	for (const message of messages) {
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (!message) continue;
 		if (message.role === "toolResult") {
 			const content = message.content.map((block) =>
 				block.type === "text" ? { type: "text", text: block.text } : imageBlock(block),
 			);
 			toolResults.push({
-				type: "tool_result",
-				tool_use_id: message.toolCallId,
-				content: content.length > 0 ? content : [{ type: "text", text: "" }],
-				...(message.isError ? { is_error: true } : {}),
+				index,
+				block: {
+					type: "tool_result",
+					tool_use_id: message.toolCallId,
+					content: content.length > 0 ? content : [{ type: "text", text: "" }],
+					...(message.isError ? { is_error: true } : {}),
+				},
 			});
 			continue;
 		}
-		flushToolResults(toolResults);
-		toolResults = [];
+		flushToolResults();
 
 		if (message.role === "user") {
+			const marked = marks?.has(index) ?? false;
+			if (typeof message.content === "string") {
+				// An empty message keeps the bare form: there is no block to hang a
+				// breakpoint on, an empty text block is not something the API accepts,
+				// and a message with no tokens in it costs nothing to leave alone.
+				if (message.content === "") {
+					out.push({ role: "user", content: "" });
+					continue;
+				}
+				const block: Record<string, unknown> = { type: "text", text: message.content };
+				out.push({ role: "user", content: [marked ? mark(block) : block] });
+				continue;
+			}
+			const blocks = message.content.map((block) =>
+				block.type === "text" ? { type: "text", text: block.text } : imageBlock(block),
+			);
+			const last = blocks.length - 1;
 			out.push({
 				role: "user",
-				content:
-					typeof message.content === "string"
-						? message.content
-						: message.content.map((block) =>
-								block.type === "text" ? { type: "text", text: block.text } : imageBlock(block),
-							),
+				content: blocks.map((block, i) => (marked && i === last ? mark(block) : block)),
 			});
 			continue;
 		}
@@ -178,12 +353,30 @@ export function convertMessages(messages: Context["messages"]): Array<Record<str
 			} else if (block.type === "thinking") {
 				content.push({ type: "thinking", thinking: block.thinking, signature: block.signature ?? "" });
 			} else {
-				content.push({ type: "tool_use", id: block.id, name: block.name, input: block.arguments });
+				// The API's schema wants an object here, and `ToolCall.arguments` is the
+				// model's JSON text — so it is parsed on the way out with the same
+				// function the dispatcher parses it with on the way in. Sending the
+				// string was accepted by the type system (the field is untyped in
+				// `AnthropicRequestParams`) and rejected by nothing we test against, so
+				// a transcript with a tool call could not be replayed at all.
+				content.push({
+					type: "tool_use",
+					id: block.id,
+					name: block.name,
+					input: parseToolArguments(block.arguments),
+				});
 			}
 		}
-		if (content.length > 0) out.push({ role: "assistant", content });
+		if (content.length > 0) {
+			const last = content.length - 1;
+			const marked = marks?.has(index) ?? false;
+			out.push({
+				role: "assistant",
+				content: content.map((block, i) => (marked && i === last ? mark(block) : block)),
+			});
+		}
 	}
-	flushToolResults(toolResults);
+	flushToolResults();
 	return out;
 }
 
@@ -229,11 +422,16 @@ export async function* mapAnthropicStream(
 				const usage = event.message?.usage;
 				const cacheRead = usage?.cache_read_input_tokens ?? 0;
 				const cacheWrite = usage?.cache_creation_input_tokens ?? 0;
+				const creation = usage?.cache_creation;
+				const breakdown = creation
+					? { "5m": creation.ephemeral_5m_input_tokens ?? 0, "1h": creation.ephemeral_1h_input_tokens ?? 0 }
+					: undefined;
 				builder.message.usage = {
 					input: usage?.input_tokens ?? 0,
 					output: usage?.output_tokens ?? 0,
 					cacheRead,
 					cacheWrite,
+					...(breakdown ? { cacheWriteTtl: breakdown } : {}),
 					promptTotal: (usage?.input_tokens ?? 0) + cacheRead + cacheWrite,
 				};
 				yield builder.start();
@@ -329,16 +527,88 @@ export interface AnthropicClientLike {
 	};
 }
 
-export function createAnthropicStreamFn(clientFactory?: () => AnthropicClientLike) {
+export interface AnthropicStreamFnOptions {
+	clientFactory?: () => AnthropicClientLike;
+	policy?: CachePolicy;
+	/** Told once when a TTL the policy asked for was refused and a fallback is in force. */
+	onCacheNotice?: (notice: CacheNotice) => void;
+}
+
+/**
+ * The TTLs to try, in order, each rung reached only because the one above it was
+ * refused.
+ *
+ * The first rung is what the policy asked for. Below it the short TTL, and below
+ * that no `ttl` field at all: a gateway that rejects the field outright rejects
+ * either value, and the point of a ladder is that the third rung is a request
+ * that any Anthropic-shaped endpoint will accept. Each rung costs one failed
+ * request, once per process, and then never again.
+ */
+function ttlLadder(policy?: CachePolicy): Array<CacheTtl | undefined> {
+	if (policy?.explicitBreakpoints === false) return [undefined];
+	return resolveCacheTtl(policy) === "1h" ? ["1h", "5m", undefined] : ["5m", undefined];
+}
+
+/**
+ * Whether a failure is the provider refusing our cache settings.
+ *
+ * A 400 that mentions none of this is a genuinely malformed request and must
+ * propagate: retrying it without a `ttl` would turn a real error into a silent
+ * one. The wording check is what separates the two, and it is deliberately
+ * narrow.
+ */
+function looksLikeCacheSettingRejection(error: unknown): boolean {
+	if (statusCodeOf(error) !== 400) return false;
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+	return /cache|ttl|ephemeral|beta/i.test(message);
+}
+
+export function createAnthropicStreamFn(options: AnthropicStreamFnOptions = {}) {
+	const ladder = ttlLadder(options.policy);
+	// Index into the ladder, advanced only by a refusal. Process-wide on purpose:
+	// a provider that does not take the long TTL will not take it for the next
+	// session either, and re-learning that on every request means paying a failed
+	// request to be told the same thing.
+	let rung = 0;
+
 	return async function* anthropicStream(
 		model: Model,
 		context: Context,
-		options?: StreamOptions,
+		streamOptions?: StreamOptions,
 	): AsyncGenerator<AssistantMessageEvent> {
-		const client = clientFactory ? clientFactory() : await defaultClient(model, options);
-		const params = buildAnthropicRequest(model, context, options);
-		const raw = (await client.messages.create(params)) as unknown as AsyncIterable<AnthropicRawStreamEvent>;
-		yield* mapAnthropicStream(raw, model.provider, model.id);
+		while (true) {
+			const ttl = ladder[Math.min(rung, ladder.length - 1)];
+			const cache: AnthropicCacheRequest = {
+				explicit: options.policy?.explicitBreakpoints ?? true,
+				ttl,
+			};
+			const client = options.clientFactory ? options.clientFactory() : await defaultClient(model, streamOptions);
+			const params = buildAnthropicRequest(model, context, streamOptions, cache);
+
+			let raw: AsyncIterable<AnthropicRawStreamEvent>;
+			try {
+				raw = (await client.messages.create(params)) as unknown as AsyncIterable<AnthropicRawStreamEvent>;
+			} catch (error) {
+				// The downgrade happens here, below `withRetry`, because a 400 is not a
+				// status that wrapper retries — it is right not to, and the consequence
+				// is that the one class of 400 we can fix ourselves has to be fixed
+				// before the first event is yielded, which is where this is.
+				if (rung + 1 < ladder.length && looksLikeCacheSettingRejection(error)) {
+					const next = ladder[rung + 1];
+					options.onCacheNotice?.({
+						kind: "ttl-downgrade",
+						from: ttl,
+						to: next,
+						reason: error instanceof Error ? error.message : String(error),
+					});
+					rung++;
+					continue;
+				}
+				throw error;
+			}
+			yield* mapAnthropicStream(raw, model.provider, model.id);
+			return;
+		}
 	};
 }
 

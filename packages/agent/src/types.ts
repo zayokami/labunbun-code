@@ -169,6 +169,35 @@ export interface LoopHooks {
 		input: unknown,
 		result: ToolResultMessage,
 	) => Promise<ToolResultMessage | undefined>;
+	/**
+	 * Compose the text of a user message, once, at the moment it is stored.
+	 *
+	 * Called for every user message the session appends — a prompt, a steered
+	 * message, a queued follow-up — before that message exists anywhere. What it
+	 * returns is what the transcript holds and therefore what every later request
+	 * sends, byte for byte, for the rest of the conversation.
+	 *
+	 * That timing is the whole reason this hook exists rather than a rewrite in
+	 * {@link transformContext}: context attached after the fact appears in one
+	 * request and not the next, and a provider caches a prefix — so the request
+	 * that carries the extra text writes an entry nothing will ever read again,
+	 * and every request after it is charged for the whole tail at full price.
+	 * Whatever belongs to a message has to be part of it from the start.
+	 *
+	 * Implementations should not throw: this runs before the user's own text is
+	 * anywhere, and a throw here loses the prompt.
+	 */
+	composeUserMessage?: (text: string) => string | Promise<string>;
+	/**
+	 * Rewrite the context one request is about to be sent with.
+	 *
+	 * Kept for embedders that need a view — a filtered transcript, an injected
+	 * instruction — because it is the only seam that can change a request without
+	 * changing the session. It is the wrong place to attach anything that varies
+	 * per turn: any change to the middle of the prefix invalidates the cache from
+	 * that point on, which is why the app layer uses `composeUserMessage` above
+	 * and registers the rewrites it does mean to make.
+	 */
 	transformContext?: (context: Context) => Context | Promise<Context>;
 }
 

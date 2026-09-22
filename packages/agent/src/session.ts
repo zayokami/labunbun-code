@@ -166,6 +166,20 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * The text a user message is stored with.
+	 *
+	 * One place, so a prompt, a steered message and a queued follow-up cannot
+	 * disagree about how a hook's contribution is attached — and so the composed
+	 * text is the only version that ever exists, which is what keeps a request
+	 * later in the same conversation byte-identical to the one before it. See
+	 * `LoopHooks.composeUserMessage` for why that timing is the point.
+	 */
+	async #userText(text: string): Promise<string> {
+		const compose = this.#deps.hooks?.composeUserMessage;
+		return compose ? await compose(text) : text;
+	}
+
 	abort(): void {
 		// Dropping queued follow-ups on explicit abort is the least surprising
 		// behavior — stale queued prompts should not fire after an interrupt.
@@ -218,7 +232,7 @@ export class AgentSession {
 		this.#interruptRequested = false;
 		this.#abortController = new AbortController();
 
-		const userMsg = userMessage(text);
+		const userMsg = userMessage(await this.#userText(text));
 		this.messages.push(userMsg);
 		this.#store?.appendMessage(userMsg);
 
@@ -264,7 +278,7 @@ export class AgentSession {
 				while (this.#steering.length > 0) {
 					const text = this.#steering.shift();
 					if (text === undefined) break;
-					const steerMsg = userMessage(text);
+					const steerMsg = userMessage(await this.#userText(text));
 					this.messages.push(steerMsg);
 					this.#store?.appendMessage(steerMsg);
 				}
@@ -395,7 +409,7 @@ export class AgentSession {
 					await this.#emit({ type: "turn_end", message: assistant, toolResults: [] });
 					const followUpText = this.#followUp.shift();
 					if (followUpText !== undefined) {
-						const followUpMsg = userMessage(followUpText);
+						const followUpMsg = userMessage(await this.#userText(followUpText));
 						this.messages.push(followUpMsg);
 						this.#store?.appendMessage(followUpMsg);
 						continue;

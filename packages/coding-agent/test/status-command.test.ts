@@ -75,12 +75,15 @@ describe("/status", () => {
 		expect(card?.permissions).toBe("default");
 		expect(card?.session).toBe("abcdef01");
 		expect(card?.context).toEqual({ usedTokens: 42_000, threshold: 200_000 });
-		expect(card?.details.map(([label]) => label)).toEqual(["Cost", "Theme", "MCP"]);
+		expect(card?.details.map(([label]) => label)).toEqual(["Cost", "Cache", "Theme", "MCP"]);
 		// Both totals on one row: a single number here would be read as whichever of
 		// the two the reader assumed, and the two differ by an order of magnitude.
 		expect(card?.details[0]?.[1]).toContain("$0.0567 this session");
 		expect(card?.details[0]?.[1]).toContain("$0.1234 this project");
-		expect(card?.details[1]?.[1]).toContain("nord");
+		// A context with no tracker behind it says so rather than showing a number
+		// nobody measured.
+		expect(card?.details[1]?.[1]).toBe("not tracked");
+		expect(card?.details[2]?.[1]).toContain("nord");
 	});
 
 	// The editor is the store's, not the settings file's: /vim may have flipped it
@@ -89,11 +92,11 @@ describe("/status", () => {
 	test("reports the vim mode the editor is actually in", () => {
 		const h = makeCtx();
 		handleAppCommand("/status", h.ctx);
-		expect(h.cards[0]?.details[1]?.[1]).toContain("Vim off");
+		expect(h.cards[0]?.details[2]?.[1]).toContain("Vim off");
 
 		h.store.set((s) => ({ ...s, vim: true }));
 		handleAppCommand("/status", h.ctx);
-		expect(h.cards[1]?.details[1]?.[1]).toContain("Vim on");
+		expect(h.cards[1]?.details[2]?.[1]).toContain("Vim on");
 	});
 
 	test("an unpersisted session says so instead of showing a blank id", () => {

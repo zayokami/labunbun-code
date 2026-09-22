@@ -8,7 +8,15 @@
  */
 import type { AgentEvent, PermissionMode } from "@labunbun/agent";
 import { AgentSession, evaluatePermissions, formatRetryNotice, SessionStore } from "@labunbun/agent";
-import { type AgentMessage, createDefaultStreamFn, resolveModel, type StreamFn } from "@labunbun/ai";
+import {
+	type AgentMessage,
+	type CacheTracker,
+	cacheTotals,
+	createTrackedStreamFn,
+	resolveModel,
+	type StreamFn,
+	totalsHitRate,
+} from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
@@ -49,6 +57,41 @@ interface JsonResult {
 	num_turns: number;
 	result: string;
 	session_id: string | null;
+	cache: CacheResult;
+}
+
+/**
+ * What the prompt cache did, in the machine-readable result.
+ *
+ * The three token channels sum to the whole prompt, so no separate total is
+ * reported — a fourth number that is the sum of the other three is a number
+ * that can drift away from them. `cache_hit_rate` is the read share of that
+ * sum, or null when the provider reported no prompt size at all, which is a
+ * different fact from zero.
+ *
+ * `cache_rewinds` needs the tracker, and a caller that injected its own
+ * transport has none: null says "not observed" where zero would claim something
+ * nobody checked. It counts every family, including summariser and subagent
+ * requests, because a rewind in any of them is a cache that was thrown away.
+ */
+interface CacheResult {
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	full_price_tokens: number;
+	cache_hit_rate: number | null;
+	cache_rewinds: number | null;
+}
+
+function cacheResult(messages: AgentMessage[], tracker?: CacheTracker): CacheResult {
+	const totals = cacheTotals(messages);
+	const rate = totalsHitRate(totals);
+	return {
+		cache_read_tokens: totals.read,
+		cache_write_tokens: totals.write,
+		full_price_tokens: totals.input,
+		cache_hit_rate: rate ?? null,
+		cache_rewinds: tracker ? tracker.records().filter((record) => record.kind === "rewind").length : null,
+	};
 }
 
 export async function runHeadless(options: HeadlessOptions): Promise<number> {
@@ -101,7 +144,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	for (const message of advisoryHookFailures("SessionStart", sessionStart)) {
 		console.error(`Warning: ${message}`);
 	}
-	let hookContextInjected = false;
+	/**
+	 * The transport, and what it can be asked about afterwards.
+	 *
+	 * The default is tracked so the JSON result can report what the cache did;
+	 * an injected transport (a test, an embedder) is used as it comes, and the
+	 * tracker-shaped fields in the result become null rather than invented.
+	 */
+	const transport: { streamFn: StreamFn; tracker?: CacheTracker } = options.streamFn
+		? { streamFn: options.streamFn }
+		: createTrackedStreamFn({ policy: settings.cache });
 	const session = new AgentSession({
 		model,
 		systemPrompt: buildSystemPrompt(tools, {
@@ -115,7 +167,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		maxTurns: options.maxTurns,
 		permissionMode: effectiveMode,
 		deps: {
-			streamFn: options.streamFn ?? createDefaultStreamFn(),
+			streamFn: transport.streamFn,
 			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
 			// Headless has no interactive dialog, so an unresolved "ask" fails
 			// closed rather than hanging — matches dontAsk's documented contract.
@@ -130,20 +182,20 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 				return decision;
 			},
 			hooks: {
-				transformContext: (context) => {
-					if (hookContextInjected || hookContext.length === 0) return context;
-					hookContextInjected = true;
-					const prefix = hookContext.join("\n\n");
-					const messages = [...context.messages];
-					for (let i = messages.length - 1; i >= 0; i--) {
-						const message = messages[i];
-						if (message.role === "user") {
-							const text = typeof message.content === "string" ? message.content : "";
-							messages[i] = { ...message, content: `${prefix}\n\n---\n\n${text}`.trimEnd() };
-							break;
-						}
-					}
-					return { ...context, messages };
+				composeUserMessage: (text) => {
+					// Hook context is composed into the user message as it is created, so
+					// the stored transcript is what every later request replays. The
+					// version of this that attached it to the first request only made the
+					// prompt the hook contributed to unrepeatable: the second request of a
+					// tool loop sent the same message without it, and every token after
+					// that message was charged at full price again.
+					//
+					// Drained rather than kept: a second prompt in the same run is a
+					// different message, and it gets whatever that prompt's own hooks
+					// contributed.
+					const context = hookContext.splice(0, hookContext.length);
+					if (context.length === 0) return text;
+					return `${context.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
 				},
 				beforeToolCall: async (toolName, input) => {
 					if (!hooksRuntime.has("PreToolUse")) return undefined;
@@ -259,6 +311,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			num_turns: turns,
 			result: finalText,
 			session_id: store?.sessionId ?? null,
+			cache: cacheResult(session.messages, transport.tracker),
 		};
 		process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 	} else if (format === "stream-json") {
@@ -267,6 +320,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			reason,
 			result: finalText,
 			usage,
+			cache: cacheResult(session.messages, transport.tracker),
 			duration_ms: Date.now() - startedAt,
 			session_id: store?.sessionId ?? null,
 		});

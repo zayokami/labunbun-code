@@ -64,6 +64,13 @@ export interface Usage {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	/**
+	 * Write tokens split by the TTL they were written under, where the provider
+	 * says. Anthropic does, and it is the only evidence that a one-hour TTL took
+	 * effect: a provider that quietly accepted the field and wrote a five-minute
+	 * entry anyway reports the same `cacheWrite` either way.
+	 */
+	cacheWriteTtl?: { "5m": number; "1h": number };
 	/** Reasoning tokens; a subset of `output`, reported separately when known. */
 	reasoning?: number;
 	/**

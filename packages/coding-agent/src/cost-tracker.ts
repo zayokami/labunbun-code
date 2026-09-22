@@ -142,6 +142,25 @@ const totalTokens = (usage: ModelUsage): number =>
 	usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
 
 /**
+ * The cache channels behind one model's token count.
+ *
+ * `/cost` has always summed four channels into a single number, and that single
+ * number cannot show whether the cache worked: a hundred thousand tokens read
+ * from cache and a hundred thousand tokens at full price are the same total.
+ * Splitting them, with the read share beside it, is the difference between
+ * seeing the bill and seeing what caused it.
+ */
+function cacheChannels(usage: ModelUsage): string {
+	const prompt = usage.cacheReadTokens + usage.cacheWriteTokens + usage.inputTokens;
+	if (prompt === 0) return "cache: no prompt tokens recorded";
+	const rate = usage.cacheReadTokens / prompt;
+	return (
+		`cache: ${usage.cacheReadTokens.toLocaleString()} read (${(rate * 100).toFixed(1)}%) · ` +
+		`${usage.cacheWriteTokens.toLocaleString()} written · ${usage.inputTokens.toLocaleString()} full price`
+	);
+}
+
+/**
  * One total, with the models under it. The label is required because "Total"
  * on its own is the ambiguity this module exists to remove: a number that could
  * be a conversation or a directory reads as whichever the user assumed.
@@ -150,6 +169,7 @@ export function formatCostState(state: CostState, label: string): string {
 	const lines = [`${label}: $${state.totalCostUSD.toFixed(4)}`];
 	for (const [key, usage] of Object.entries(state.modelsUsage)) {
 		lines.push(`  ${key}: ${totalTokens(usage)} tokens, $${usage.costUSD.toFixed(4)}`);
+		lines.push(`    ${cacheChannels(usage)}`);
 	}
 	return lines.join("\n");
 }
