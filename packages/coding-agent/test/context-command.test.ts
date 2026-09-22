@@ -11,7 +11,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentSession, type AnyTool, buildTool, CompactionManager, contextBreakdown } from "@labunbun/agent";
+import {
+	AgentSession,
+	type AnyTool,
+	buildTool,
+	CompactionManager,
+	contextBreakdown,
+	SessionStore,
+} from "@labunbun/agent";
 import { assistantMessage, FAUX_MODEL, fauxProvider, textContent, toolResultMessage, userMessage } from "@labunbun/ai";
 import { createStore, initialUiState, type StatusCardData, type UiState } from "@labunbun/tui";
 import { z } from "zod";
@@ -28,7 +35,7 @@ const READ_TOOL: AnyTool = buildTool({
 	call: async () => ({ content: [] }),
 });
 
-function makeCtx() {
+function makeCtx(options: { store?: SessionStore } = {}) {
 	const home = mkdtempSync(join(tmpdir(), "lbb-context-cmd-"));
 	const faux = fauxProvider([{ text: "n/a" }]);
 	const session = new AgentSession({
@@ -70,7 +77,7 @@ function makeCtx() {
 		mcpConnections: [],
 		mcpConfig: {},
 		pendingMcpApprovals: [],
-		sessionStore: () => undefined,
+		sessionStore: () => options.store,
 		theme: { theme: { name: "nord" }, available: ["dark", "nord"], problems: [] },
 		refreshContextInfo: () => {},
 		hotSwapSession: async () => {},
@@ -155,5 +162,43 @@ describe("/context", () => {
 		(h.ctx as unknown as { memory?: string }).memory = "";
 		handleAppCommand("/context", h.ctx);
 		expect(rowOf(h.cards[0], "Memory")).toBeUndefined();
+	});
+
+	test("counts the session's compactions, from the file rather than the chain", () => {
+		// The count is asked of the session file, because that is what survives a
+		// `/resume` — and it is counted over the whole file, because each compaction
+		// re-roots the chain and the view of it holds at most one. Two of them here,
+		// with the last one's reason and sizes.
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-context-store-")),
+			mkdtempSync(join(tmpdir(), "lbb-context-home-")),
+		);
+		for (let round = 0; round < 2; round++) {
+			const tail = [userMessage(`request ${round}`)];
+			for (const message of tail) store.appendMessage(message);
+			store.appendCompaction({
+				boundary: userMessage(`[boundary ${round}]`),
+				suffix: tail,
+				summary: "1. Request: something earlier",
+				preservedFiles: [],
+				preTokens: 90_000,
+				postTokens: 5_000,
+				model: "faux-1",
+				trigger: round === 1 ? "overflow" : "auto",
+			});
+		}
+		const h = makeCtx({ store });
+
+		handleAppCommand("/context", h.ctx);
+
+		expect(rowOf(h.cards[0], "Compactions")).toBe("2 this session");
+		expect(rowOf(h.cards[0], "Last compaction")).toBe("overflow · 90.0k → 5.0k");
+	});
+
+	test("a session with no file to read gets no compaction rows at all", () => {
+		const h = makeCtx();
+		handleAppCommand("/context", h.ctx);
+		expect(rowOf(h.cards[0], "Compactions")).toBeUndefined();
+		expect(rowOf(h.cards[0], "Last compaction")).toBeUndefined();
 	});
 });

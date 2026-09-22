@@ -105,6 +105,14 @@ export interface UiState {
 	picker: ListPickerState | null;
 	contextInfo?: { usedTokens: number; threshold: number };
 	/**
+	 * What the app is doing to the context while it does it — a summarization in
+	 * flight, which can take as long as a whole turn. Shown on the status row in
+	 * place of the turn's own phase, and set by the app layer rather than derived
+	 * from session events: a compaction is the loop working on its own history
+	 * and emits nothing while it runs.
+	 */
+	contextActivity?: string;
+	/**
 	 * The `/status` card, shown over the prompt until Esc or the next submit.
 	 * Not modal: it reports on the run, it does not block it.
 	 */

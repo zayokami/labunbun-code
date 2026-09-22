@@ -9,8 +9,7 @@ import { basename, dirname, join, sep } from "node:path";
 import {
 	type AgentDeps,
 	AgentSession,
-	COMPACTION_DISABLED_NOTICE,
-	CompactionManager,
+	type CompactionManager,
 	compactionThreshold,
 	contextBreakdown,
 	estimateContextUsage,
@@ -68,8 +67,16 @@ import {
 	resolveShellId,
 	shellPickerItems,
 } from "./background-commands.ts";
-import { cacheStatusLine, formatCacheReport, rewriteCause } from "./cache-report.ts";
-import { builtInCommands, type Command, completeCommands, findCommand, type LocalCommandContext } from "./commands.ts";
+import { cacheStatusLine, formatCacheReport } from "./cache-report.ts";
+import {
+	builtInCommands,
+	type Command,
+	completeCommands,
+	expandPromptCommand,
+	findCommand,
+	type LocalCommandContext,
+} from "./commands.ts";
+import { compactionPhaseText, createCompactionWiring } from "./compaction-wiring.ts";
 import { contextRows, contextSummaryLine, isContextLow, lowContextWarning } from "./context-report.ts";
 import { CostTracker, formatCostReport } from "./cost-tracker.ts";
 import { sessionToMarkdown } from "./export-session.ts";
@@ -89,6 +96,7 @@ import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
+import { approveProjectDefinitions, type DefinitionKind, describeWithheld } from "./project-trust.ts";
 import {
 	damagedSessionNotice,
 	exitSummaryLine,
@@ -110,8 +118,14 @@ import {
 	shadowedChoiceNotice,
 } from "./settings.ts";
 import { createShellPassthrough } from "./shell-passthrough.ts";
-import { loadSkills, skillsAsCommands } from "./skills.ts";
-import { createTaskTool, loadAgentDefinitions } from "./subagents.ts";
+import { loadSkills, type Skill, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
+import {
+	type AgentDefinition,
+	createTaskTool,
+	GENERAL_PURPOSE,
+	loadAgentDefinitions,
+	withheldProjectAgents,
+} from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { bindTaskStore, restoreTasks } from "./task-snapshot.ts";
 import {
@@ -285,32 +299,52 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		.filter((m): m is NonNullable<typeof m> => Boolean(m));
 	const streamFn = withModelFallback(baseStreamFn, () => fallbackChain);
 
-	// Compaction. Recreated on /resume or /model switch — the manager binds to
+	// Compaction, shared with the headless run and every subagent through the
+	// same wiring. Recreated on /resume or /model switch — the manager binds to
 	// one store and one model's window, so a swap must rebuild it.
-	const buildCompaction = (forModel: Model, forStore: SessionStore | undefined): CompactionManager =>
-		new CompactionManager(
-			{
-				contextWindow: forModel.contextWindow,
-				maxOutputTokens: forModel.maxOutputTokens,
-				microcompactFirst: settings.trimOldToolResults === true,
-			},
-			{
-				streamFn,
-				store: forStore,
-				summarizerModel: forModel,
-				readFile: (path) => {
-					try {
-						return readFileSync(path, "utf8");
-					} catch {
-						return null;
-					}
-				},
-			},
-		);
-	let compaction = buildCompaction(model, store);
-	// Whether the breaker's notice has been shown for the current trip. Edge-
-	// triggered off `isTripped` so a rebuild (which cannot be tripped) resets it.
-	let breakerWarned = false;
+	const compactionWiring = createCompactionWiring({
+		model,
+		store,
+		streamFn,
+		trimOldToolResults: settings.trimOldToolResults,
+		report: (text) => pushInfo(handle, text),
+		// A summary runs for as long as a turn does and used to say nothing at
+		// all: the screen sat on "Thinking…" while a full-prefix request was
+		// being paid for. The status row is the report while it is in flight; the
+		// transcript gets the line that outlives it. `/compact` is the exception
+		// to the second half — it prints its own summary of the same event, and
+		// two lines for one compaction is the app talking over itself.
+		onPhase: (phase) => {
+			// The store directly, the way `pushInfo` does: this is one field of the
+			// UI state with no behaviour of its own, and a handle method for it would
+			// be a second name for a `set`.
+			handle?.store.set((state) => ({
+				...state,
+				contextActivity: phase.kind === "start" ? compactionPhaseText(phase) : undefined,
+			}));
+			if (phase.kind !== "start" && phase.trigger !== "manual") pushInfo(handle, compactionPhaseText(phase));
+		},
+		readFile: (path) => {
+			try {
+				return readFileSync(path, "utf8");
+			} catch {
+				return null;
+			}
+		},
+		preCompact: async () => {
+			if (!hooksRuntime.has("PreCompact")) return { blocked: false };
+			const outcome = await hooksRuntime.run("PreCompact", {
+				session_id: sessionIdHolder.current,
+				cwd,
+			});
+			reportHookErrors(
+				handle,
+				outcome.errors.map((e) => `PreCompact hook failed: ${e}`),
+			);
+			return { blocked: outcome.blocked, reason: outcome.reason };
+		},
+		noteRewrite: (cause) => cacheTracker.note(cause),
+	});
 	// Read by the setContextInfo closure on every turn boundary.
 	const thresholdHolder = {
 		current: compactionThreshold({ contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens }),
@@ -377,25 +411,50 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const pendingMcpApprovals = [...projectMcpServerNames].filter((name) => !approvedProjectMcpServers.has(name));
 
 	// ---- subagents, skills, plan mode ----
+	/** The live session. Declared before the tools that read it through a getter. */
+	let sessionRef: AgentSession | null = null;
 	const agentDefinitions = loadAgentDefinitions(cwd);
 	const taskTool = createTaskTool({
 		streamFn,
-		model,
+		// Read through the session, not captured: /model swaps the model and
+		// /resume swaps the session a sidechain is written into, and a subagent
+		// spawned after either must follow the user's choice rather than the one
+		// that was in force when the REPL started.
+		model: () => sessionRef?.model ?? model,
+		resolveModel,
 		allTools: [...tools, ...mcpTools],
-		definitions: agentDefinitions,
-		store,
-		permissionMode: effectiveMode,
+		definitions: () => agentDefinitions,
+		store: () => store,
+		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
 		getPermissionRules: () => [...baseRules, ...sessionRules],
+		trimOldToolResults: settings.trimOldToolResults,
+		report: (text) => pushInfo(handle, text),
 	});
 	const skills = loadSkills(cwd);
+	// What the trust gate is withholding for this directory. Project-tier agent
+	// definitions and skills load only after one approval (`project-trust.ts`), and
+	// these two lists are what the startup notice and `/agents` speak for. The
+	// loaders above enforce the gate themselves, so a `-p` run — which has no
+	// dialog to approve anything with — fails closed through the same rule.
+	const withheldAgents = withheldProjectAgents(cwd, home);
+	const withheldSkills = withheldProjectSkills(cwd, home);
 	const planCallbacks: PlanModeCallbacks = createPlanModeCallbacks(
 		() => sessionRef,
-		() => handle,
+		// The approval dialog is built here rather than handed the handle whole so
+		// that it carries the abort race: Esc with the plan on screen ends the
+		// turn, and the tool call waiting behind the dialog has to end with it.
+		() => {
+			const app = handle;
+			return app
+				? {
+						requestPermission: (toolName, input, signal) => requestPermissionOrAbort(app, toolName, input, signal),
+					}
+				: null;
+		},
 	);
-	let sessionRef: AgentSession | null = null;
 	const planTools = createPlanModeTools(planCallbacks);
 	const askUserTool = createAskUserQuestionTool({
-		askUser: (questions) => (handle ? handle.askUser(questions) : Promise.resolve(null)),
+		askUser: (questions, signal) => (handle ? askUserOrAbort(handle, questions, signal) : Promise.resolve(null)),
 	});
 
 	const allTools = [...tools, ...mcpTools, taskTool, ...planTools, askUserTool];
@@ -429,6 +488,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if (ctx.mode === "dontAsk" || !handle) {
 				return { behavior: "deny", message: "Permission required (dontAsk mode denies unresolved prompts)" };
 			}
+			// ExitPlanMode does not need permission, it needs an answer: its own call
+			// puts the plan up for approve/reject and returns that. The dialog the
+			// default rules would raise here is the same question asked twice, and
+			// the second one is the real one. Deny rules and plan mode's own
+			// refusals are untouched — they decide above, not as an "ask".
+			if (toolName === "ExitPlanMode") {
+				return { behavior: "allow" };
+			}
 			// Notification: the session is about to block on a human. This is
 			// the hook users wire to desktop alerts, so it fires before the
 			// dialog appears rather than after it resolves.
@@ -445,61 +512,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			const allowed = await requestPermissionOrAbort(handle, toolName, input, ctx.signal);
 			return allowed ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
 		},
-		checkCompaction: async (context, options) => {
-			try {
-				if (hooksRuntime.has("PreCompact")) {
-					const outcome = await hooksRuntime.run("PreCompact", {
-						session_id: sessionIdHolder.current,
-						cwd,
-					});
-					reportHookErrors(
-						handle,
-						outcome.errors.map((e) => `PreCompact hook failed: ${e}`),
-					);
-					if (outcome.blocked) {
-						// A hook may veto this compaction pass; the threshold check
-						// runs again next turn, so this defers rather than disables.
-						pushInfo(handle, `Compaction skipped by PreCompact hook${outcome.reason ? `: ${outcome.reason}` : ""}`);
-						// A veto can defer a pass the estimate asked for. It cannot defer
-						// one the provider already refused: the next turn would send the
-						// same request and get the same refusal. End the run with what
-						// can actually be done about it instead.
-						return options?.force ? { action: "blocked", message: compaction.blockedMessage() } : null;
-					}
-				}
-				const decision = await compaction.check(context, options);
-				// Either action replaces part of the prefix, and the session adopts it
-				// itself one line later. Registering the cause here is what the cache
-				// report needs to tell a rewrite the app meant to make from one nothing
-				// declared — the two look identical from the wire, and only this knows
-				// which it was.
-				if (decision?.action === "compact" || decision?.action === "reduced") {
-					cacheTracker.note(rewriteCause(decision.action));
-				}
-				// The cheap rung is not a compaction, and saying so is the whole
-				// report: the user asked for nothing here, and the model is now
-				// working from previews of older results. Silence would make that
-				// indistinguishable from the transcript having been summarized.
-				if (decision?.action === "reduced") {
-					pushInfo(
-						handle,
-						`Context trimmed: ${decision.cleared.results} old tool result${decision.cleared.results === 1 ? "" : "s"} replaced by previews ` +
-							`(${decision.cleared.chars.toLocaleString()} characters freed, no summarization needed).`,
-					);
-				}
-				// The breaker has no other way to be seen. Silent, it looks like the
-				// session simply stopped managing its context — until the run ends with
-				// a request that cannot be sent, long after the failures that caused it.
-				const tripped = compaction.isTripped;
-				if (tripped !== breakerWarned) {
-					breakerWarned = tripped;
-					if (tripped) pushInfo(handle, COMPACTION_DISABLED_NOTICE);
-				}
-				return decision;
-			} catch {
-				return null; // circuit breaker handles repeated failures
-			}
-		},
+		// The whole decision — threshold, cheap rung, breaker, cache registration
+		// and what the user is told — lives in the wiring, shared with `-p` runs
+		// and subagents. What is left here is what only the interactive app has:
+		// the PreCompact hook, whose veto it reports, and the transcript.
+		checkCompaction: compactionWiring.checkCompaction,
 		hooks: {
 			composeUserMessage: (text) => {
 				// Hook-contributed context drains on the message it belongs to, at the
@@ -689,7 +706,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// a rewind at message 0 of a conversation that never existed — while the
 		// numbers above it mixed two sessions' prompts into one ceiling.
 		cacheTracker.reset();
-		compaction = buildCompaction(next.model, loaded.store);
+		compactionWiring.rebuild(next.model, loaded.store);
 		thresholdHolder.current = compactionThreshold({
 			contextWindow: next.model.contextWindow,
 			maxOutputTokens: next.model.maxOutputTokens,
@@ -718,7 +735,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			return false;
 		}
 		sessionRef?.setModel(next);
-		compaction = buildCompaction(next, store);
+		compactionWiring.rebuild(next, store);
 		thresholdHolder.current = compactionThreshold({
 			contextWindow: next.contextWindow,
 			maxOutputTokens: next.maxOutputTokens,
@@ -863,9 +880,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				baseRules,
 				sessionRules,
 				commands,
+				agentDefinitions,
+				withheldAgents,
+				withheldSkills,
 				pad,
 				padWatch,
-				compaction: () => compaction,
+				compaction: compactionWiring.manager,
 				mcpConnections,
 				mcpConfig,
 				pendingMcpApprovals,
@@ -878,6 +898,21 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				switchModel,
 			}),
 	});
+
+	// Said out loud, because a definition that was not loaded and a definition that
+	// never existed look identical from the prompt: without this line a repository's
+	// skill simply stops answering and nothing on screen says there was one. MCP has
+	// no equivalent line — a pending server is only visible under `/status` — which
+	// is a habit this starts rather than one it copies.
+	if (withheldAgents.length + withheldSkills.length > 0) {
+		pushInfo(
+			handle,
+			`This project's definitions are not loaded — ${describeWithheld({
+				agents: withheldAgents.length,
+				skills: withheldSkills.length,
+			})}. /agents to review.`,
+		);
+	}
 
 	// The controller, now that there is somewhere to say what happened. Started
 	// after the mount so the first line — including a failure — lands in a
@@ -1021,6 +1056,46 @@ async function requestPermissionOrAbort(
 	}
 }
 
+/**
+ * Ask the user a question, with the run's abort as a second way out.
+ *
+ * The same race as `requestPermissionOrAbort` and for the same reason: the tool
+ * batch awaits this call, so a question left on screen after the run was
+ * aborted holds the turn open behind a dialog that no longer means anything —
+ * and Ctrl+C does not check for one before aborting. Cancelling lands as
+ * "dismissed", which is what the tool tells the model, and the turn settles.
+ *
+ * No guard for a signal that is already aborted, unlike the permission twin
+ * above: this one is only ever reached from a tool body, and the pipeline
+ * rechecks the signal immediately before invoking the tool (stages 0, 2, 3 and
+ * again after the permission wait), with no await in between — so an abort
+ * cannot arrive while this call is being entered. The permission twin runs
+ * inside `canUseTool`, which awaits the Notification hook first, so it does
+ * need one: a listener added to an already-aborted signal never fires, and the
+ * race below would wait forever on an answer nobody can give.
+ */
+async function askUserOrAbort(
+	handle: ReplAppHandle,
+	questions: Parameters<ReplAppHandle["askUser"]>[0],
+	signal?: AbortSignal,
+): Promise<string[] | null> {
+	const answer = handle.askUser(questions);
+	if (!signal) return answer;
+
+	let onAbort: (() => void) | undefined;
+	const abort = new Promise<null>((resolve) => {
+		onAbort = () => resolve(null);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([answer, abort]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+		// Whatever is still on screen belongs to the aborted run.
+		if (signal.aborted) handle.clearQuestionRequest();
+	}
+}
+
 /** Surface hook failures in the transcript without interrupting the session. */
 function reportHookErrors(handle: ReplAppHandle | null, messages: string[]): void {
 	for (const message of messages) {
@@ -1115,6 +1190,19 @@ interface AppCommandContext {
 	sessionRules: PermissionRule[];
 	commands: Command[];
 	/**
+	 * The live definition lists, the same arrays the session's tools read:
+	 * the Task tool resolves a `subagent_type` against `agentDefinitions` at the
+	 * call, and `/agents approve` pushes into it and into `commands` so an
+	 * approval takes effect without a restart.
+	 *
+	 * `withheld*` are the project-tier lists the trust gate is holding back —
+	 * spliced empty by the approval that loads them, so a second `/agents approve`
+	 * has nothing to add and says so.
+	 */
+	agentDefinitions: AgentDefinition[];
+	withheldAgents: AgentDefinition[];
+	withheldSkills: Skill[];
+	/**
 	 * The controller, when this session has one. Null only for a caller that
 	 * builds a context without one — every interactive session has a runtime,
 	 * switched on or not, because `/gamepad on` has to be able to reach it.
@@ -1152,7 +1240,10 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 				...s,
 				entries: [...s.entries, { kind: "user", text }],
 			}));
-			void session.prompt(command.getPrompt(args));
+			// Expanded through the shared helper rather than `command.getPrompt`
+			// directly: a `-p` run sends the same expansion for the same typed line,
+			// and two call sites for one meaning is how they drift.
+			void session.prompt(expandPromptCommand(ctx.commands, text) ?? text);
 			return true;
 		}
 		const localCtx: LocalCommandContext = {
@@ -1206,6 +1297,7 @@ const PERMISSION_MODE_HINTS: Record<PermissionMode, string> = {
  */
 export function appCommandTable(): Array<[string, string]> {
 	return [
+		["/agents", "List agent definitions, and load this project's: /agents [approve]"],
 		["/cache", "Show prompt-cache hit rate, its ceiling, and any prefix rewinds"],
 		["/context", "Show what the context window is made of, and what is left"],
 		["/cost", "Show token usage and cost for this conversation, then for this project"],
@@ -1233,6 +1325,60 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 	const session = ctx.getSession();
 
 	switch (command) {
+		case "/agents": {
+			const [, sub] = text.split(/\s+/);
+			if (sub === "approve") {
+				// One decision covers both tiers. A repository that ships skills ships
+				// them for the same reason it ships agents, and the question the gate
+				// asks is "do I trust this checkout" — twice is once too many. What gets
+				// recorded is still per kind, so a tier added later is not trusted by a
+				// decision taken before it existed.
+				const kinds: DefinitionKind[] = [];
+				if (ctx.withheldAgents.length > 0) kinds.push("agents");
+				if (ctx.withheldSkills.length > 0) kinds.push("skills");
+				if (kinds.length === 0) {
+					pushInfo(ctx.handle, "Nothing pending: this project's definitions are already loaded.");
+					return true;
+				}
+				approveProjectDefinitions(ctx.cwd, kinds, ctx.home);
+				const agents = ctx.withheldAgents.splice(0, ctx.withheldAgents.length);
+				ctx.agentDefinitions.push(...agents);
+				// Pushed into the registry the dispatcher reads rather than rebuilt: that
+				// array is the one `findCommand` searches, so an approved skill answers
+				// the next line typed. Tab completion was built from a copy at mount and
+				// catches up on the next start — a restart is a smaller price than
+				// rebuilding the mounted screen for a once-per-repository decision.
+				const adopted = ctx.withheldSkills.splice(0, ctx.withheldSkills.length);
+				ctx.commands.push(...skillsAsCommands(adopted));
+				pushInfo(
+					ctx.handle,
+					`Approved this project's definitions — ${describeWithheld({
+						agents: agents.length,
+						skills: adopted.length,
+					})} now loaded.`,
+				);
+				return true;
+			}
+
+			const lines = [GENERAL_PURPOSE, ...ctx.agentDefinitions].map(
+				(definition) =>
+					`  ${definition.agentType} [${definition.source}]${definition.whenToUse ? ` — ${definition.whenToUse}` : ""}`,
+			);
+			for (const definition of ctx.withheldAgents) {
+				lines.push(`  ${definition.agentType} [project, not loaded — /agents approve]`);
+			}
+			// Skills are named only while they are part of a pending decision: this
+			// command is about agent definitions, and a skill that is already loaded
+			// has its own name to be typed by.
+			if (ctx.withheldSkills.length > 0) {
+				const names = ctx.withheldSkills.map((skill) => skill.name).join(", ");
+				lines.push(
+					`  ${ctx.withheldSkills.length} project skill${ctx.withheldSkills.length === 1 ? "" : "s"} not loaded: ${names} — /agents approve loads both`,
+				);
+			}
+			pushInfo(ctx.handle, `Agent definitions:\n${lines.join("\n")}`);
+			return true;
+		}
 		case "/cache": {
 			pushInfo(ctx.handle, ctx.cache ? ctx.cache.report() : "This session does not track the prompt cache.");
 			return true;
@@ -1571,10 +1717,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			if (!session) return true;
 			const breakdown = contextBreakdown(session.currentContext());
 			const limits = ctx.compaction().limits();
+			// Read from the store rather than the manager: the session file is where
+			// a compaction is recorded, and a resumed session's earlier ones happened
+			// before this manager was built.
+			const store = ctx.sessionStore();
 			ctx.handle?.setStatusCard({
 				title: "Context",
 				context: { usedTokens: breakdown.usedTokens, threshold: limits.threshold },
-				details: contextRows(breakdown, limits, { memoryChars: ctx.memory?.length ?? 0 }),
+				details: contextRows(breakdown, limits, {
+					memoryChars: ctx.memory?.length ?? 0,
+					compactions: store ? { count: store.compactionCount(), last: store.compactions().at(-1) } : undefined,
+				}),
 			});
 			pushInfo(ctx.handle, contextSummaryLine(breakdown, limits));
 			return true;

@@ -14,9 +14,9 @@
  * - Circuit breaker: 3 consecutive failures disable autocompact until the
  *   estimated context drops back under the threshold
  */
-import type { AgentMessage, AssistantMessage, Context, Model, StreamFn, Usage } from "@labunbun/ai";
+import type { AgentMessage, AssistantMessage, Context, Model, StreamFn, Usage, UserMessage } from "@labunbun/ai";
 import { textContent, userMessage } from "@labunbun/ai";
-import type { SessionStore } from "./session-store.ts";
+import type { CompactionTrigger, SessionStore } from "./session-store.ts";
 import type { CompactionCheck, TrimmedToolResults } from "./types.ts";
 
 export interface CompactionConfig {
@@ -26,11 +26,12 @@ export interface CompactionConfig {
 	/**
 	 * Whether the cheap rung runs on its own when the threshold is crossed.
 	 *
-	 * Off by default: replacing the older tool results with previews is a lossy
-	 * change to a conversation the model may still be reasoning from, and it is
-	 * not something that should start happening to a session because it got long.
-	 * Enabled, it answers first and full compaction runs only if the previews did
-	 * not free enough — and it is a no-op when nothing was large enough to cut.
+	 * The app turns this on, and the flag's own default is off for a reason worth
+	 * keeping: whether previews of old tool results are acceptable is a decision
+	 * about someone's conversation, so it is the caller's to make rather than
+	 * this module's. Enabled, the rung answers first and full compaction runs
+	 * only if the previews did not free enough — and it is a no-op when nothing
+	 * was large enough to cut.
 	 */
 	microcompactFirst?: boolean;
 }
@@ -43,6 +44,7 @@ Let me analyze the conversation chronologically to capture all essential context
 
 <summary>
 1. Primary Request and Intent:
+   [The user's ORIGINAL request, in their own words, before any later refinement — not the most recent thing they said]
 2. Key Technical Concepts:
 3. Files and Code Sections:
 4. Errors and Fixes:
@@ -63,6 +65,11 @@ const DEFAULT_RESERVE = 13_000;
 const MAX_CONSECUTIVE_FAILURES = 3;
 /** How much of the current turn survives a compaction verbatim. */
 const SUFFIX_TOKEN_BUDGET = 20_000;
+/** What one over-budget text in that turn is cut down to, head and tail kept. */
+const SUFFIX_ELISION_CHARS = 2_000;
+const SUFFIX_ELISION_MARKER = "\n[... elided to fit the context window ...]\n";
+/** How much of the user's own wording the boundary carries verbatim. */
+const RETAINED_REQUEST_TOKEN_BUDGET = 20_000;
 /** Tool results the summarizer keeps in full when its own request is too large. */
 const SUFFIX_KEEP_LAST_TOOL_RESULTS = 3;
 /** How many times the summarizer may drop a round and send again. */
@@ -231,19 +238,125 @@ function messageChars(message: AgentMessage): number {
  * a message list has to start with a user turn, and a tool result without the
  * call that asked for it is not a conversation.
  *
- * Past the budget, keep nothing. That is a turn which has grown larger than the
- * part of it worth carrying verbatim, and keeping it would leave the summary
- * replacing almost nothing — a full summarization call to free a few tokens.
+ * Past the budget the tail is made smaller instead of dropped. It used to be
+ * dropped, and one large tool result was enough to do it: the request being
+ * answered left the context that was supposed to continue it, so the model read
+ * a summary of work it could no longer see and answered around the user's
+ * question instead of to it. What comes out of here always starts with that last
+ * user message, and no message is ever removed from it — only replaced by a
+ * preview, or cut front and back around a marker, oldest first, until it fits.
  */
 export function keepSuffix(messages: AgentMessage[]): AgentMessage[] {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		if (messages[i]?.role === "user") {
 			const tail = messages.slice(i);
-			return estimateContextTokens(tail) <= SUFFIX_TOKEN_BUDGET ? tail : [];
+			return estimateContextTokens(tail) <= SUFFIX_TOKEN_BUDGET ? tail : shrinkTail(tail);
 		}
 	}
 	return [];
 }
+
+/**
+ * Make a tail fit its budget without losing a message from it.
+ *
+ * Two rungs, cheapest first: the previews the cheap rung already produces, then
+ * eliding the texts still too large to carry. Oldest first, because the newest
+ * messages are the ones the model is working from, and the request at index 0 is
+ * never touched — a request cut down to its first line is not the request.
+ *
+ * Nothing here guarantees the result fits: a turn can be large enough that every
+ * text in it was already cut and it is still over. That is handed back as it is,
+ * and the overflow path deals with it — a second refusal for size is a fact
+ * about the turn, and answering it by deleting the turn is how the request got
+ * lost in the first place.
+ */
+function shrinkTail(tail: AgentMessage[]): AgentMessage[] {
+	let messages = microcompact(tail);
+	if (estimateContextTokens(messages) <= SUFFIX_TOKEN_BUDGET) return messages;
+	for (let i = 1; i < messages.length; i++) {
+		const message = messages[i];
+		if (!message) continue;
+		const elided = elideMessage(message);
+		if (elided === message) continue;
+		messages = messages.map((current, index) => (index === i ? elided : current));
+		if (estimateContextTokens(messages) <= SUFFIX_TOKEN_BUDGET) break;
+	}
+	return messages;
+}
+
+/** One message with its over-budget texts cut down; itself when nothing needed cutting. */
+function elideMessage(message: AgentMessage): AgentMessage {
+	if (message.role === "user") {
+		if (typeof message.content === "string") {
+			const elided = elideText(message.content);
+			return elided === message.content ? message : { ...message, content: elided };
+		}
+		const content = elideBlocks(message.content);
+		return content === message.content ? message : { ...message, content };
+	}
+	if (message.role === "assistant") {
+		const content = elideBlocks(message.content);
+		return content === message.content ? message : { ...message, content };
+	}
+	const content = elideBlocks(message.content);
+	return content === message.content ? message : { ...message, content };
+}
+
+/**
+ * The text blocks of a content array, each cut down to a head and a tail.
+ *
+ * The array comes back by the same reference when none of its blocks was over
+ * budget, which is how a caller tells that this message had nothing to give.
+ */
+function elideBlocks<T extends { type: string; text?: string }>(blocks: T[]): T[] {
+	let changed = false;
+	const out = blocks.map((block) => {
+		if (block.type !== "text" || typeof block.text !== "string") return block;
+		const elided = elideText(block.text);
+		if (elided === block.text) return block;
+		changed = true;
+		return { ...block, text: elided };
+	});
+	return changed ? out : blocks;
+}
+
+/**
+ * One text, cut to its first and last halves around a marker.
+ *
+ * The marker says what happened and why, because a model that finds a text
+ * stopping mid-sentence with no explanation reads it as the whole file. Both
+ * ends are kept: a tool result says what it is at the top and what it found at
+ * the bottom, and a request says what it is about at the top and what it wants
+ * done at the bottom.
+ */
+function elideText(text: string, budget = SUFFIX_ELISION_CHARS): string {
+	if (text.length <= budget) return text;
+	const room = Math.max(0, budget - SUFFIX_ELISION_MARKER.length);
+	const head = Math.ceil(room / 2);
+	return `${text.slice(0, head)}${SUFFIX_ELISION_MARKER}${text.slice(text.length - (room - head))}`;
+}
+
+/**
+ * What every boundary message opens with.
+ *
+ * Named because two pieces of code have to agree on it: the boundary that is
+ * written, and the rule that decides what counts as a user's own request — a
+ * boundary is a summary wearing a user's clothes, and retaining one verbatim
+ * would put a summary inside a summary.
+ */
+const COMPACTION_BOUNDARY_LEAD =
+	"[Conversation compacted to stay within the context window. The summary below preserves everything important.]";
+
+/**
+ * The loop's own words after a response was cut off by the output limit.
+ *
+ * It is a user message on the wire and the user never typed it. It lives here,
+ * rather than at the one call site that sends it, so the retention rule above can
+ * recognize it: what it does is ask the model to carry on, and a boundary that
+ * quoted it back as one of the user's requests would be quoting the harness.
+ */
+export const LENGTH_RECOVERY_MESSAGE =
+	"Your previous response was cut off by the output limit. Continue exactly where you left off — do not repeat completed work.";
 
 /**
  * The user message that stands in for a summarized prefix. Its wording is the
@@ -253,10 +366,67 @@ export function keepSuffix(messages: AgentMessage[]): AgentMessage[] {
  */
 export function compactionBoundary(
 	summary: string,
-	options: { reinjected?: string; timestamp?: number } = {},
+	options: { reinjected?: string; retainedRequests?: string[]; timestamp?: number } = {},
 ): ReturnType<typeof userMessage> {
-	const text = `[Conversation compacted to stay within the context window. The summary below preserves everything important.]\n\n${summary}${options.reinjected ?? ""}`;
+	const retained = options.retainedRequests?.length
+		? `\n\nEarlier requests from the user, kept verbatim:\n\n${options.retainedRequests.join("\n\n---\n\n")}`
+		: "";
+	const text = `${COMPACTION_BOUNDARY_LEAD}\n\n${summary}${retained}${options.reinjected ?? ""}`;
 	return options.timestamp === undefined ? userMessage(text) : userMessage(text, options.timestamp);
+}
+
+/**
+ * The user's own requests from the part being summarized, verbatim.
+ *
+ * A summary is the model's account of a conversation, and its account of what
+ * was asked is the part that drifts: "be exhaustive" is said about the recent
+ * turns, and a stretch of work between the question and the summary is exactly
+ * what a retelling leaves out. So the newest requests are carried beside it as
+ * they were typed — newest first, to a budget, the one that does not fit
+ * truncated rather than dropped, which is the rule Codex's own compaction uses
+ * (`COMPACT_USER_MESSAGE_MAX_TOKENS`, newest-first accumulation, `truncate_text`
+ * on the message that overruns it, then stop).
+ *
+ * The budget is what keeps a boundary a summary with an appendix rather than a
+ * second copy of the transcript. What is not carried here is not lost: the
+ * summary above is what stands in for the rest, and the prompt asks it for the
+ * original request by name.
+ */
+export function retainedRequests(messages: AgentMessage[], budget = RETAINED_REQUEST_TOKEN_BUDGET): string[] {
+	const kept: string[] = [];
+	let remaining = budget;
+	for (let i = messages.length - 1; i >= 0 && remaining > 0; i--) {
+		const request = requestText(messages[i]);
+		if (request === null) continue;
+		const tokens = Math.ceil(request.length / CHARS_PER_TOKEN);
+		if (tokens <= remaining) {
+			kept.unshift(request);
+			remaining -= tokens;
+			continue;
+		}
+		// The one that overruns is the last one taken: it is older than everything
+		// kept so far, and a request cut down to fit still beats an absent one.
+		kept.unshift(elideText(request, remaining * CHARS_PER_TOKEN));
+		break;
+	}
+	return kept;
+}
+
+/** A user message's own words, or null for the messages that only look like them. */
+function requestText(message: AgentMessage | undefined): string | null {
+	if (message?.role !== "user") return null;
+	const text = userText(message).trim();
+	if (text.length === 0) return null;
+	if (text.startsWith(COMPACTION_BOUNDARY_LEAD) || text.startsWith(LENGTH_RECOVERY_MESSAGE)) return null;
+	return text;
+}
+
+function userText(message: UserMessage): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
 }
 
 /** Extract recently-touched file paths from tool calls/results, newest first. */
@@ -291,6 +461,26 @@ type CompactionPass =
 	| { kind: "compact"; context: Context }
 	| { kind: "reduced"; context: Context; cleared: TrimmedToolResults };
 
+/**
+ * A summarization in flight, and how it ended.
+ *
+ * A compaction is the one thing a session does that costs a full-price model
+ * call, takes as long as a whole turn, and leaves the transcript's shape
+ * changed — and until this existed, none of that reached whoever was watching
+ * the screen. The three kinds are a lifecycle rather than a log: every `start`
+ * ends, with a summary or without one, because a caller that paints a status
+ * while the work is in flight needs the second ending as much as the first or
+ * the status outlives the attempt.
+ *
+ * `failed` is not the breaker's news: the breaker counts to three and speaks
+ * long after, when the session is stuck. This is one attempt that did not
+ * happen, said while the user can still see what caused it.
+ */
+export type CompactionPhase =
+	| { kind: "start" }
+	| { kind: "done"; preTokens: number; postTokens: number; trigger: CompactionTrigger }
+	| { kind: "failed"; trigger: CompactionTrigger };
+
 export interface CompactionManagerDeps {
 	streamFn: StreamFn;
 	store?: SessionStore;
@@ -302,6 +492,8 @@ export interface CompactionManagerDeps {
 	 * and an empty `baseUrl`, which is a request that can never be sent.
 	 */
 	summarizerModel: Model;
+	/** Watch a summarization happen. Never consulted for a decision. */
+	onPhase?: (phase: CompactionPhase) => void;
 }
 
 export class CompactionManager {
@@ -314,6 +506,18 @@ export class CompactionManager {
 	constructor(config: CompactionConfig, deps: CompactionManagerDeps) {
 		this.#config = config;
 		this.#deps = deps;
+		// Anti-thrash has to outlive the manager, because the manager does not
+		// outlive much: `/resume`, `/model` and a restart each build a new one,
+		// while the session file is what persists. Without this, reopening a
+		// session that was just compacted pays for the same summary again — the
+		// transcript it starts from is the compacted one, which is still over the
+		// threshold by design. `postTokens` is the size the last pass left behind,
+		// and 0 (an imported compaction, which this session never measured) is inert
+		// here rather than guarded against: the only thing done with this number is
+		// compare it against the growth floor, and a context under that floor is
+		// under the threshold too, so it is turned away before the comparison.
+		const last = deps.store?.compactions().at(-1);
+		if (last) this.#lastPostTokens = last.postTokens;
 	}
 
 	get isTripped(): boolean {
@@ -335,17 +539,13 @@ export class CompactionManager {
 		};
 	}
 
-	/** Called by the loop each turn via deps.checkCompaction. */
-	async maybeCompact(context: Context, options: { force?: boolean } = {}): Promise<Context | null> {
-		return (await this.#pass(context, options))?.context ?? null;
-	}
-
 	/**
 	 * One decision about one context: nothing, a cheaper context, or a summary.
 	 *
-	 * `maybeCompact` is the same answer narrowed to the context alone, because
-	 * most callers only send it. The kind matters to the ones that report what
-	 * happened — a summary and a set of previews are not the same event.
+	 * The kind is part of the answer rather than narrowed away, because every
+	 * caller that acts on this also reports it: a summary and a set of previews
+	 * are not the same event to the user, the cache report or the session file.
+	 * `check()` is the only shape the loop asks for.
 	 */
 	async #pass(context: Context, options: { force?: boolean } = {}): Promise<CompactionPass | null> {
 		const tokens = estimateContextUsage(context);
@@ -386,7 +586,12 @@ export class CompactionManager {
 				return null;
 			}
 		}
-		return { kind: "compact", context: await this.compact(context) };
+		// `force` is the refusal, and only the refusal: the one production caller
+		// sets it from a provider that just answered `context_overflow`. So it is
+		// also the honest name for why this pass is happening, and it is recorded
+		// that way — a reader of the session file can tell a summary the threshold
+		// asked for from one a 400 forced.
+		return { kind: "compact", context: await this.compact(context, options.force ? { trigger: "overflow" } : {}) };
 	}
 
 	/**
@@ -447,13 +652,19 @@ export class CompactionManager {
 	}
 
 	/** Summarize and rebuild the context. Throws on failure (caller counts). */
-	async compact(context: Context, options: { trigger?: "auto" | "manual"; focus?: string } = {}): Promise<Context> {
+	async compact(context: Context, options: { trigger?: CompactionTrigger; focus?: string } = {}): Promise<Context> {
+		const trigger = options.trigger ?? "auto";
 		try {
 			const suffix = keepSuffix(context.messages);
 			const prefix = context.messages.slice(0, context.messages.length - suffix.length);
+			const preTokens = estimateContextUsage(context);
+			// Before the call, not after: this is the last moment at which the wait
+			// it announces has not started, and the wait is the whole point of saying
+			// it — a summary is a full-prefix request that can take half a minute.
+			this.#deps.onPhase?.({ kind: "start" });
 			const { summary, model } = await this.#summarize(prefix, options.focus);
 			const reinjected = this.#reinjectFiles(prefix);
-			const boundary = compactionBoundary(summary, { reinjected });
+			const boundary = compactionBoundary(summary, { reinjected, retainedRequests: retainedRequests(prefix) });
 			const messages = [boundary, ...suffix];
 
 			// A success clears the count, manual or automatic: the breaker is a
@@ -467,18 +678,22 @@ export class CompactionManager {
 				suffix,
 				summary,
 				preservedFiles: extractRecentFiles(context.messages),
-				preTokens: estimateContextUsage(context),
+				preTokens,
 				postTokens: this.#lastPostTokens,
 				// Which model actually wrote this. The stream may be fallback-wrapped,
 				// so the model we asked is not necessarily the one that answered, and
 				// a summary no one can attribute is a summary no one can trust.
 				model,
-				trigger: options.trigger ?? "auto",
+				trigger,
 			});
+			// After the record, so a listener that reads the store's compaction list
+			// on this news sees the one being reported rather than the previous one.
+			this.#deps.onPhase?.({ kind: "done", preTokens, postTokens: this.#lastPostTokens, trigger });
 
 			return { ...context, messages };
 		} catch (error) {
 			this.#consecutiveFailures++;
+			this.#deps.onPhase?.({ kind: "failed", trigger });
 			throw error;
 		}
 	}

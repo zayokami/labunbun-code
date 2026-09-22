@@ -55,9 +55,20 @@ export type SessionEntry =
 			postTokens: number;
 			/** Which model wrote the summary. */
 			model: string;
-			trigger: "auto" | "manual";
+			trigger: CompactionTrigger;
 	  }
 	| { id: string; parentId: string; type: "custom"; timestamp: number; kind: string; data: unknown };
+
+/**
+ * What set a compaction off.
+ *
+ * `auto` is the threshold; `manual` is `/compact`; `overflow` is the third
+ * caller — a request the provider has already refused for size, where the
+ * estimate is known to be wrong and "not yet" is not an available answer.
+ * Recorded rather than inferred, because a session read back weeks later has no
+ * other way to say why the transcript changed shape.
+ */
+export type CompactionTrigger = "auto" | "manual" | "overflow";
 
 /** What a compaction leaves behind. */
 export interface CompactionRecord {
@@ -70,11 +81,36 @@ export interface CompactionRecord {
 	preTokens: number;
 	postTokens: number;
 	model: string;
-	trigger: "auto" | "manual";
+	trigger: CompactionTrigger;
 }
 
 function isMessageEntry(entry: SessionEntry): entry is Extract<SessionEntry, { type: "message" }> {
 	return entry.type === "message";
+}
+
+/**
+ * Whether the live message is the one the file holds, as far as can be told.
+ *
+ * Identical is the normal answer. The exception is a tool result the cheap rung
+ * rewrote: the live list carries a preview where the file carries the full text,
+ * and the call it came from is what says it is the same message either way.
+ * Comparing the text would refuse the record exactly when the session had been
+ * running long enough to trim — and refusing it is not free: the file keeps the
+ * transcript the summary just replaced, so resuming replays it and pays for the
+ * same summary twice.
+ *
+ * Nothing else is allowed through. A user or assistant message that is not the
+ * same object is a live array that has diverged, and the caller gets null.
+ */
+function sameMessage(stored: AgentMessage | undefined, live: AgentMessage | undefined): boolean {
+	if (stored === live) return true;
+	return (
+		stored?.role === "toolResult" &&
+		live?.role === "toolResult" &&
+		stored.toolCallId === live.toolCallId &&
+		stored.toolName === live.toolName &&
+		stored.isError === live.isError
+	);
 }
 
 /** Sanitize a cwd into a filesystem-safe project directory name. */
@@ -340,6 +376,44 @@ export class SessionStore {
 	}
 
 	/**
+	 * Every compaction on the active path, oldest first — the session's own
+	 * record of what shaped the conversation in hand. Read back rather than
+	 * counted in memory, because the counter that would hold it
+	 * (`CompactionManager`) is rebuilt on every `/model` and `/resume`: what
+	 * survives those is the file.
+	 *
+	 * Only the active path: a compaction on an abandoned branch says nothing
+	 * about the conversation that replaced it. And because every compaction
+	 * re-roots the chain, "on the active path" is at most one — a reader who
+	 * wants how many summaries a session has paid for wants `compactionCount()`.
+	 */
+	compactions(): Extract<SessionEntry, { type: "compaction" }>[] {
+		return this.linearEntries().filter(
+			(e): e is Extract<SessionEntry, { type: "compaction" }> => e.type === "compaction",
+		);
+	}
+
+	/**
+	 * How many summaries this session has paid for, counted in the file rather
+	 * than along the active chain.
+	 *
+	 * The two questions are different and only one of them is about the branch in
+	 * view. `compactions()` answers "what shaped what I am looking at", and each
+	 * compaction re-roots the chain onto its own boundary, so the entries left
+	 * behind by earlier passes sit on branches the current one does not run
+	 * through. This answers "how much of this conversation has been rewritten" —
+	 * which is what decides whether another summary is still worth its cost, and
+	 * is a property of the session rather than of the leaf it happens to be on.
+	 * A resumed session reads its own history back: the answer does not restart
+	 * because a new manager was built.
+	 */
+	compactionCount(): number {
+		let count = 0;
+		for (const entry of this.entries) if (entry.type === "compaction") count++;
+		return count;
+	}
+
+	/**
 	 * What the model is sent when this session is resumed: the boundary of the
 	 * last compaction, then everything after it.
 	 *
@@ -389,7 +463,10 @@ export class SessionStore {
 		const messageEntries = linear.filter(isMessageEntry);
 		// `slice(-0)` is `slice(0)`, so an empty suffix needs its own path.
 		const kept = record.suffix.length > 0 ? messageEntries.slice(-record.suffix.length) : [];
-		if (kept.length !== record.suffix.length || !kept.every((entry, i) => entry.message === record.suffix[i])) {
+		if (
+			kept.length !== record.suffix.length ||
+			!kept.every((entry, i) => sameMessage(entry.message, record.suffix[i]))
+		) {
 			return null;
 		}
 

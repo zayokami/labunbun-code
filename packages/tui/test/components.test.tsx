@@ -144,6 +144,43 @@ describe("StatusLine", () => {
 		expect(lastFrame() ?? "").not.toContain("5s");
 	});
 
+	test("a compaction in flight takes the label and leaves the rest of the row", () => {
+		// The wait it names happens inside a turn, so the clock and the model are
+		// still the ones on screen — and Esc still ends the turn it is part of.
+		// Without the activity the row would say "Thinking…", which is true and is
+		// not what the half-minute is being spent on.
+		const { lastFrame, unmount } = render(
+			withTheme(
+				<StatusLine phase="thinking" modelName="test-model" elapsedMs={12_000} activity="Compacting context…" />,
+			),
+		);
+		const frame = flatFrame(lastFrame() ?? "");
+		expect(frame).toContain("Compacting context…");
+		expect(frame).not.toContain("Thinking…");
+		expect(frame).toContain("12s");
+		expect(frame).toContain("test-model");
+		expect(frame).toContain("esc to interrupt");
+		// Unmounted, unlike its neighbours: this row spins, and a live interval
+		// belongs to the whole test process — every later file shares it.
+		unmount();
+	});
+
+	test("and at an idle prompt it still spins, without promising Esc", () => {
+		// `/compact` typed at a prompt that is not running anything: the row would
+		// otherwise be the dim idle one, which says nothing while a summarization
+		// is being paid for. Esc is not offered because there is no run to end —
+		// the idle REPL does not read the key at all.
+		const { lastFrame, unmount } = render(
+			withTheme(<StatusLine phase="idle" modelName="test-model" elapsedMs={0} activity="Compacting context…" />),
+		);
+		const frame = flatFrame(lastFrame() ?? "");
+		expect(frame).toContain("Compacting context…");
+		expect(frame).not.toContain("esc to interrupt");
+		// No duration either: the clock measures turns, and this is not one.
+		expect(frame).not.toContain("0s");
+		unmount();
+	});
+
 	// Three parallel Bash calls listed as "Bash · Bash · Bash" make the reader do
 	// the counting; the row is there to be read at a glance.
 	test("repeated tools are counted instead of repeated", () => {

@@ -13,7 +13,7 @@ import { COMPACTION_DISABLED_NOTICE, CompactionManager } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { helpText } from "@labunbun/tui";
 import { builtInCommands, completeCommands } from "../src/commands.ts";
-import { lowContextWarning } from "../src/context-report.ts";
+import { COMPACTION_ACCURACY_NOTICE, lowContextWarning } from "../src/context-report.ts";
 import { appCommandTable } from "../src/interactive.ts";
 
 const INTERACTIVE_SOURCE = readFileSync(join(import.meta.dir, "..", "src", "interactive.ts"), "utf8");
@@ -106,8 +106,23 @@ describe("advice about a context that is full", () => {
 			{ contextWindow: 200_000, maxOutputTokens: 8_192 },
 			{ streamFn: fauxProvider([{ text: "unused" }]).streamFn, summarizerModel: FAUX_MODEL },
 		);
-		return [manager.blockedMessage(), COMPACTION_DISABLED_NOTICE, lowContextWarning(1_600, 2_000)];
+		return [
+			manager.blockedMessage(),
+			COMPACTION_DISABLED_NOTICE,
+			lowContextWarning(1_600, 2_000),
+			COMPACTION_ACCURACY_NOTICE,
+		];
 	}
+
+	test("the advice about repeated compaction suggests a session, not a command that is not one", () => {
+		// The reference implementation says "start a new thread", and this app has
+		// no command that does that: advice ending in "unknown command" is read at
+		// the one moment the user has no room to work out what to do instead. What
+		// it names instead is `/export`, which exists and is what makes walking away
+		// from a long session safe.
+		expect(COMPACTION_ACCURACY_NOTICE).not.toContain("/new");
+		expect(COMPACTION_ACCURACY_NOTICE).toContain("/export");
+	});
 
 	test("every command they name is a command that exists", () => {
 		const known = knownCommands();

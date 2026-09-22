@@ -27,11 +27,14 @@ labunbun                                # interactive REPL
 - **Sessions** — append-only JSONL tree per project (`~/.labunbun/projects/`),
   crash-safe resume with `--resume`, prompt history with ↑ recall.
 - **Context management** — automatic compaction at the context-window
-  threshold (structured summary + re-injected recent files), `/trim` to replace
-  old tool results with previews before paying for a summary (`trimOldToolResults`
-  does the same ahead of the threshold), `/context` for what the window is made
-  of, and a live indicator measured against the compaction point — system prompt
-  and tool schemas included, so it reads as full when the session is.
+  threshold (structured summary + re-injected recent files), with the cheap rung
+  running first: at the threshold the older tool results become previews (no
+  model call, full text still in the session file) and a summarization is only
+  paid for if that did not free enough — `trimOldToolResults: false` skips
+  straight to the summary, `/trim` does the same rewrite on request. `/context`
+  for what the window is made of, and a live indicator measured against the
+  compaction point — system prompt and tool schemas included, so it reads as full
+  when the session is.
 - **Prompt caching** — explicit breakpoints on Anthropic (tools, system, the
   previous turn's tail, this turn's tail) and the routing and retention knobs on
   OpenAI-compatible endpoints; `/cache` reports the hit rate, the ceiling this
@@ -499,7 +502,7 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
 
 - User: `~/.labunbun/` — `settings.json`, `.mcp.json`, `MEMORY.md`, `rules/*.md`,
   `agents/`, `skills/`, `themes/`, plus `projects/<cwd>/` for that project's
-  sessions and MCP approvals
+  sessions, MCP approvals, and the definition trust above
 - Project: `.labunbun/` — `settings.json`, `settings.local.json`,
   `rules/*.md`, `agents/`, `skills/`, `themes/`
 - Project and local settings are read as **repo-controlled**: they may not set
@@ -511,6 +514,12 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
   is still honored from every tier — tightening is always allowed. Whether
   `settings.local.json` is committed is up to you; labunbun writes no ignore
   rule for it.
+- A project's own `agents/` and `skills/` are read the same way, and load only
+  after one approval per directory (`/agents` lists them, `/agents approve`
+  loads them). The decision is remembered under `~/.labunbun/projects/<cwd>/`,
+  never in the repository, so a cloned repo cannot ship its own approval; a
+  `-p` run has no dialog, so an untrusted project's definitions are simply not
+  loaded and it says so on stderr.
 - Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
 - Base URLs are overridable per provider via `<PROVIDER>_BASE_URL`, e.g.
   `ANTHROPIC_BASE_URL` for a gateway or proxy

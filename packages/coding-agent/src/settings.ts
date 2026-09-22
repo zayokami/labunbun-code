@@ -68,8 +68,12 @@ export const SettingsSchema = z.object({
 	/**
 	 * Let the cheap rung run by itself when the context crosses the compaction
 	 * threshold: the older tool results become previews, and a summarization call
-	 * happens only if that did not free enough. Off by default — it is lossy, and
-	 * `/trim` does the same thing on request.
+	 * happens only if that did not free enough. On by default, because the rung
+	 * only ever runs where the alternative is a summarization: it is a rewrite of
+	 * text the model has already read, not a deletion of it (the full result is
+	 * still in the session file, and large outputs are on disk), and it costs no
+	 * model call. Set false to go straight to the summary, or use `/trim` to do
+	 * the same thing on request.
 	 */
 	trimOldToolResults: z.boolean().optional(),
 	/**

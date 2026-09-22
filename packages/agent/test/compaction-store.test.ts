@@ -10,7 +10,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@labunbun/ai";
-import { compactionBoundary } from "../src/compaction.ts";
+import { compactionBoundary, microcompact } from "../src/compaction.ts";
 import { SessionStore } from "../src/session-store.ts";
 
 function tmpHome(): string {
@@ -25,6 +25,15 @@ const assistant = (text: string): AgentMessage => ({
 	model: "faux-1",
 	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	stopReason: "stop",
+	timestamp: 1,
+});
+
+const toolResult = (id: string): AgentMessage => ({
+	role: "toolResult",
+	toolCallId: id,
+	toolName: "Bash",
+	content: [{ type: "text", text: "z".repeat(5_000) }],
+	isError: false,
 	timestamp: 1,
 });
 
@@ -106,6 +115,44 @@ describe("appendCompaction", () => {
 		expect(store.appendCompaction(RECORD(boundary, []))).not.toBeNull();
 		expect(store.contextMessages()).toEqual([boundary]);
 		expect(store.messages()).toEqual([]);
+	});
+
+	test("a tail the cheap rung rewrote is still the tail", () => {
+		// Trim first, summarize next turn: the live list holds previews of the older
+		// results while the file holds them whole. Identity is the wrong question to
+		// ask of those, and asking it refused the record — so the file kept the
+		// transcript the summary had just replaced, and resuming paid for the same
+		// summary again. The preview is what the session is running on, so it is what
+		// the file replays; the full text stays on the branch the compaction leaves.
+		const store = newStore();
+		const results = [1, 2, 3, 4].map((n) => toolResult(`c${n}`));
+		fill(store, [user("old request"), assistant("old answer"), ...results]);
+		const previewed = microcompact(results, 2);
+
+		const boundary = compactionBoundary("1. Primary Request: the old work");
+		expect(store.appendCompaction(RECORD(boundary, previewed))).not.toBeNull();
+		expect(store.contextMessages()).toHaveLength(1 + previewed.length);
+		expect(store.contextMessages()[1]).toBe(previewed[0]);
+	});
+
+	test("every pass re-roots the chain, so the count is not the chain's", () => {
+		// `compactions()` walks the active path, and each boundary hangs off the
+		// chain's root instead of off the transcript it replaced — so a session that
+		// has compacted three times still shows one there, and a count built on it
+		// could never reach two. What a warning about repeated compaction needs is
+		// the file's own count, which also has to survive a reload: a resumed
+		// session that has already been summarized four times must not need four
+		// more to be worth warning about.
+		const store = newStore();
+		for (let round = 0; round < 3; round++) {
+			const tail = [user(`request ${round}`)];
+			fill(store, tail);
+			expect(store.appendCompaction(RECORD(compactionBoundary("summary"), tail))).not.toBeNull();
+		}
+
+		expect(store.compactions()).toHaveLength(1);
+		expect(store.compactionCount()).toBe(3);
+		expect(SessionStore.load(store.path).compactionCount()).toBe(3);
 	});
 
 	test("an uncompacted session has one view, not two", () => {

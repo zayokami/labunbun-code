@@ -217,6 +217,33 @@ describe("plan mode full lifecycle", () => {
 		expect(results[1].isError).toBe(true);
 	});
 
+	test("an approval that lands after the abort does not lift plan mode", async () => {
+		// The race the signal is for: the user answers the dialog at the same moment
+		// the run is aborted — Enter and Ctrl+C a few milliseconds apart. The answer
+		// is real, and it is about a run that is over, so it must not count. This
+		// session is never `abort()`ed, which is what makes the check under test the
+		// signal's rather than the session's interrupt latch.
+		const entered = deferred<void>();
+		const release = deferred<boolean>();
+		const h = harness({
+			mode: "plan",
+			approval: () => {
+				entered.resolve();
+				return release.promise;
+			},
+		});
+		const controller = new AbortController();
+		h.callbacks.enterPlanMode();
+		const pending = h.callbacks.requestPlanApproval("proposal", controller.signal);
+		await entered.promise;
+
+		controller.abort();
+		release.resolve(true);
+
+		expect(await pending).toEqual({ approved: false, feedback: "Plan approval canceled" });
+		expect(h.session.permissionMode).toBe("plan");
+	});
+
 	test("pending approval cannot change a swapped or detached session", async () => {
 		for (const detach of [false, true]) {
 			const entered = deferred<void>();

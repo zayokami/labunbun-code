@@ -81,6 +81,53 @@ describe("contextRows", () => {
 	});
 });
 
+describe("what the rows say about compaction", () => {
+	test("no store, no row — and a store with nothing done says exactly that", () => {
+		// Absent without a session file, the way the memory row is absent without
+		// memory files: a row about something that does not exist would be invented.
+		// A session that has a file and has never compacted is a different answer,
+		// and "none yet" is it.
+		expect(rowOf(contextRows(BREAKDOWN, LIMITS), "Compactions")).toBeUndefined();
+		expect(rowOf(contextRows(BREAKDOWN, LIMITS, { compactions: { count: 0 } }), "Compactions")).toBe("none yet");
+	});
+
+	test("a count, and the reason and sizes of the one that shaped the context", () => {
+		const rows = contextRows(BREAKDOWN, LIMITS, {
+			compactions: { count: 3, last: { trigger: "overflow", preTokens: 118_000, postTokens: 6_200 } },
+		});
+		expect(rowOf(rows, "Compactions")).toBe("3 this session");
+		expect(rowOf(rows, "Last compaction")).toBe("overflow · 118.0k → 6.2k");
+	});
+
+	test("an imported compaction says its size was not recorded rather than reporting zero", () => {
+		// Migrated records carry no measured `postTokens`, and "50.0k → 0" would
+		// read as the most effective summary in the session's life.
+		const rows = contextRows(BREAKDOWN, LIMITS, {
+			compactions: { count: 1, last: { trigger: "manual", preTokens: 50_000, postTokens: 0 } },
+		});
+		expect(rowOf(rows, "Last compaction")).toBe("manual · size not recorded");
+	});
+
+	test("they sit with the numbers they are read against", () => {
+		// Below what the context is made of, above what is left: the count is what
+		// says whether the free rows are a number this session has already acted on.
+		const rows = contextRows(BREAKDOWN, LIMITS, {
+			memoryChars: 4_400,
+			compactions: { count: 1, last: { trigger: "auto", preTokens: 118_000, postTokens: 6_200 } },
+		});
+		expect(rows.map(([label]) => label)).toEqual([
+			"System prompt",
+			"Tool schemas",
+			"Messages",
+			"Memory",
+			"Compactions",
+			"Last compaction",
+			"Free before auto-compact",
+			"Reserved beyond that",
+		]);
+	});
+});
+
 describe("the low-context warning", () => {
 	test("fires at the warning line, and not below it", () => {
 		expect(isContextLow(800, 1_000)).toBe(true);

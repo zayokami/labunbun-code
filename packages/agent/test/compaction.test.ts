@@ -6,6 +6,7 @@ import type { AgentMessage, Context, Model, StreamFn } from "@labunbun/ai";
 import { assistantMessage, FAUX_MODEL, fauxProvider, textContent, toolResultMessage, userMessage } from "@labunbun/ai";
 import {
 	CompactionManager,
+	compactionBoundary,
 	compactionThreshold,
 	contextBreakdown,
 	dropOldestRound,
@@ -13,7 +14,10 @@ import {
 	estimateContextUsage,
 	extractRecentFiles,
 	hardContextLimit,
+	keepSuffix,
+	LENGTH_RECOVERY_MESSAGE,
 	microcompact,
+	retainedRequests,
 	SUMMARY_PROMPT,
 	stripAnalysis,
 } from "../src/compaction.ts";
@@ -23,6 +27,13 @@ const CONFIG = { contextWindow: 100_000, maxOutputTokens: 32_000 };
 
 /** Stands in for the session's model — a real registry entry with a credential. */
 const SUMMARIZER: Model = { ...FAUX_MODEL, id: "summarizer-1", apiKeyEnv: "FAUX_API_KEY" };
+
+/** The first text block of a message, for the tests that read what a cut left behind. */
+function firstText(message: AgentMessage | undefined): string {
+	if (message?.role !== "assistant") return "";
+	const block = message.content[0];
+	return block?.type === "text" ? block.text : "";
+}
 
 describe("thresholds", () => {
 	test("threshold formula: window − min(maxOut, 20k) − 13k", () => {
@@ -222,6 +233,174 @@ describe("microcompact", () => {
 	});
 });
 
+describe("keepSuffix", () => {
+	const result = (id: string, chars: number): AgentMessage =>
+		toolResultMessage(id, "Read", [{ type: "text", text: `${id}:${"z".repeat(chars)}` }]);
+	const textOf = (messages: AgentMessage[], id: string): string =>
+		(messages.find((m) => m.role === "toolResult" && m.toolCallId === id) as { content: { text: string }[] }).content[0]
+			?.text ?? "";
+
+	test("a turn too big to carry whole is cut down instead of dropped", () => {
+		// This used to keep nothing at all, and one large tool result was enough to
+		// trigger it: the request being answered left the context that was supposed
+		// to continue it, so the model answered around the question.
+		const messages: AgentMessage[] = [
+			userMessage("old request"),
+			assistantMessage({}),
+			userMessage("what does this file do?"),
+			assistantMessage({ usage: { input: 1_000, output: 10, cacheRead: 0, cacheWrite: 0 } }),
+			result("c1", 200_000), // ~50k tokens on its own
+		];
+		const tail = keepSuffix(messages);
+
+		expect(tail).toHaveLength(3);
+		expect(tail[0]).toBe(messages[2]); // the request, untouched
+		expect(textOf(tail, "c1")).toContain("elided to fit the context window");
+		expect(textOf(tail, "c1")).toContain("c1:");
+		expect(estimateContextTokens(tail)).toBeLessThanOrEqual(20_000);
+	});
+
+	test("the cheap rung runs before anything is elided", () => {
+		// Previews are the cheaper loss: the result keeps its shape and its first
+		// lines, and nothing has to be cut front-and-back to make room.
+		const messages: AgentMessage[] = [
+			userMessage("older"),
+			assistantMessage({}),
+			userMessage("what now?"),
+			result("c1", 20_000),
+			result("c2", 20_000),
+			result("c3", 20_000),
+			result("c4", 20_000),
+			result("c5", 20_000),
+			result("c6", 20_000),
+		];
+		const tail = keepSuffix(messages);
+
+		expect(tail).toHaveLength(7);
+		expect(textOf(tail, "c3")).toContain("truncated by microcompact"); // older than the last three
+		expect(textOf(tail, "c6")).toBe(textOf(messages, "c6")); // the newest are left alone
+		expect(textOf(tail, "c3")).not.toContain("elided");
+		expect(estimateContextTokens(tail)).toBeLessThan(20_000);
+	});
+
+	test("the request at the front is never cut, even when it is the whole problem", () => {
+		// Cutting it would free the most space and lose the turn: a request cut down
+		// to its first line is not the request. Handed back over budget, for the
+		// overflow path to deal with as what it is.
+		const messages: AgentMessage[] = [userMessage("ask:".concat("y".repeat(200_000))), assistantMessage({})];
+		const tail = keepSuffix(messages);
+
+		expect(tail).toHaveLength(2);
+		expect(tail[0]?.content).toBe(messages[0]?.content);
+		expect(estimateContextTokens(tail)).toBeGreaterThan(20_000);
+	});
+
+	test("a tail that fits comes back as it is", () => {
+		const messages: AgentMessage[] = [
+			userMessage("hi"),
+			assistantMessage({ content: [{ type: "text", text: "hello" }] }),
+		];
+		expect(keepSuffix(messages)).toEqual(messages);
+	});
+});
+
+describe("what a boundary keeps", () => {
+	const textOf = (message: AgentMessage): string =>
+		typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+
+	test("the user's own words ride along, verbatim", () => {
+		const boundary = compactionBoundary("1. Primary Request: to fix the parser", {
+			retainedRequests: ["the parser drops the last line", "now make it keep comments"],
+		});
+		const text = textOf(boundary);
+
+		expect(text).toContain("1. Primary Request: to fix the parser");
+		expect(text).toContain("the parser drops the last line");
+		expect(text).toContain("now make it keep comments");
+		// Oldest first, so the boundary reads chronologically.
+		expect(text.indexOf("drops the last line")).toBeLessThan(text.indexOf("keep comments"));
+	});
+
+	test("only requests are kept — not a summary, not the harness talking", () => {
+		// A boundary is a user message too, and the continuation nudge after a cut-off
+		// response is one as well. Quoting either back as something the user asked for
+		// puts a lie in the one part of the boundary that is supposed to be verbatim.
+		const messages: AgentMessage[] = [
+			userMessage("the first ask"),
+			assistantMessage({}),
+			userMessage("the second ask"),
+			compactionBoundary("an older summary"),
+			userMessage(LENGTH_RECOVERY_MESSAGE),
+			assistantMessage({}),
+		];
+		expect(retainedRequests(messages)).toEqual(["the first ask", "the second ask"]);
+	});
+
+	test("the one that does not fit is truncated, not skipped", () => {
+		// Codex's rule, and the reason for it: the budget stops the boundary from
+		// becoming a second transcript, and the message that overruns it is older
+		// than everything kept — a request cut down still beats an absent one.
+		const long = `ask:${"y".repeat(200_000)}`;
+		const kept = retainedRequests([userMessage(long), userMessage("the newest ask")], 1_000);
+
+		expect(kept).toHaveLength(2);
+		expect(kept[1]).toBe("the newest ask");
+		expect(kept[0]).toContain("ask:");
+		expect(kept[0]).toContain("elided to fit the context window");
+		expect(kept[0]?.length).toBeLessThanOrEqual(1_000 * 4);
+	});
+
+	test("a compaction hands the next one the words it kept", async () => {
+		// The chain that makes the original request survive: the second summary is
+		// taken over a history whose first item is the first boundary, so what that
+		// boundary kept verbatim is still in front of the model that writes the
+		// second one. Section 1 of the prompt is what carries it from there.
+		const faux = fauxProvider([
+			{ text: "<summary>a summary</summary>" },
+			{ text: "<summary>another summary</summary>" },
+		]);
+		const manager = new CompactionManager(CONFIG, { streamFn: faux.streamFn, summarizerModel: SUMMARIZER });
+		const context: Context = {
+			systemPrompt: "sys",
+			messages: [
+				userMessage("the original ask"),
+				assistantMessage({}),
+				userMessage("a later ask"),
+				assistantMessage({}),
+				userMessage("the current ask"),
+				assistantMessage({}),
+			],
+			tools: [],
+		};
+
+		const first = await manager.compact(context);
+		expect(textOf(first.messages[0] as AgentMessage)).toContain("the original ask");
+
+		const second = await manager.compact({
+			...first,
+			messages: [...first.messages, userMessage("one more ask"), assistantMessage({})],
+		});
+		const asked = JSON.stringify(faux.receivedContexts.at(-1)?.messages);
+		expect(asked).toContain("the original ask");
+		expect(asked).toContain("the current ask");
+		expect(textOf(second.messages[0] as AgentMessage)).toContain("the current ask");
+	});
+});
+
+describe("SUMMARY_PROMPT", () => {
+	test("asks for the user's original request by name", () => {
+		// The retention rule keeps the newest requests verbatim and says nothing
+		// about the first one; the prompt is the only thing that carries that. Its
+		// other instructions are weighted toward the recent turns — section 6 is
+		// where "be exhaustive" points — so a summary that is not asked for the
+		// original request describes the work without saying what it was for, and
+		// each further compaction leaves the question a little further behind.
+		const asked = SUMMARY_PROMPT.indexOf("ORIGINAL request");
+		expect(asked).toBeGreaterThan(-1);
+		expect(asked).toBeLessThan(SUMMARY_PROMPT.indexOf("2. Key Technical Concepts"));
+	});
+});
+
 describe("dropOldestRound", () => {
 	test("cuts on a user-turn boundary, keeping the list well-formed", () => {
 		// A tool result without the call that asked for it is not a conversation,
@@ -258,16 +437,34 @@ describe("CompactionManager", () => {
 		});
 	}
 
-	test("maybeCompact skips below threshold", async () => {
+	/**
+	 * The context a check produced, or null when it produced none.
+	 *
+	 * A manager used to expose this directly (`maybeCompact`), and production
+	 * never called it: the loop asks for the decision, because a summary and a
+	 * set of previews are not the same event. Tests that only read the messages
+	 * narrow the decision here instead of keeping a second entry point alive for
+	 * their sake — and "blocked" narrows to null, because nothing was sent.
+	 */
+	async function checked(
+		manager: CompactionManager,
+		context: Context,
+		options?: { force?: boolean },
+	): Promise<Context | null> {
+		const decision = await manager.check(context, options);
+		return decision && decision.action !== "blocked" ? decision.context : null;
+	}
+
+	test("check skips below threshold", async () => {
 		const manager = makeManager("summary");
 		const context = { systemPrompt: "", messages: [userMessage("short")] };
-		expect(await manager.maybeCompact(context)).toBeNull();
+		expect(await checked(manager, context)).toBeNull();
 	});
 
 	test("compacts when the system prompt alone crosses the threshold", async () => {
 		const manager = makeManager("<summary>1. Request: x</summary>");
 		const context = { systemPrompt: "s".repeat(300_000), messages: [userMessage("short")] };
-		expect(await manager.maybeCompact(context)).not.toBeNull();
+		expect(await checked(manager, context)).not.toBeNull();
 	});
 
 	test("compacts at threshold with summary + re-injected files", async () => {
@@ -285,7 +482,7 @@ describe("CompactionManager", () => {
 				content: [{ type: "toolCall", id: "1", name: "Bash", arguments: JSON.stringify({ command: "ls" }) }],
 			}),
 		];
-		const result = await manager.maybeCompact({ systemPrompt: "sys", messages });
+		const result = await checked(manager, { systemPrompt: "sys", messages });
 		expect(result).not.toBeNull();
 		if (!result) throw new Error("expected compaction result");
 		// The boundary stands in for everything up to the current turn, and the
@@ -323,20 +520,86 @@ describe("CompactionManager", () => {
 			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
 		];
 
-		const compacted = await manager.maybeCompact({ systemPrompt: "", messages });
+		const compacted = await checked(manager, { systemPrompt: "", messages });
 		expect(compacted).not.toBeNull();
 		expect(summaries).toBe(1);
 		if (!compacted) throw new Error("expected a compaction result");
 		// The session adopts this, so it is what the next check is consulted about.
 		expect(estimateContextUsage(compacted)).toBeGreaterThan(compactionThreshold(CONFIG));
 
-		expect(await manager.maybeCompact(compacted)).toBeNull();
+		expect(await checked(manager, compacted)).toBeNull();
 		expect(summaries).toBe(1);
 		// Growth is what makes it worth trying again — a turn the summary has not
 		// already accounted for.
 		const grown = { ...compacted, messages: [...compacted.messages, userMessage("y".repeat(40_000))] };
-		expect(await manager.maybeCompact(grown)).not.toBeNull();
+		expect(await checked(manager, grown)).not.toBeNull();
 		expect(summaries).toBe(2);
+	});
+
+	/** A store holding a conversation that was compacted once, with no suffix kept. */
+	function compactedStore(postTokens: number): SessionStore {
+		const home = mkdtempSync(join(tmpdir(), "lbb-compact-home-"));
+		const store = SessionStore.startNew(mkdtempSync(join(tmpdir(), "lbb-compact-")), home);
+		store.appendMessage(userMessage("the earlier request"));
+		store.appendCompaction({
+			boundary: userMessage("[Conversation compacted to stay within the context window.]"),
+			suffix: [],
+			summary: "1. Request: the earlier request",
+			preservedFiles: [],
+			preTokens: 90_000,
+			postTokens,
+			model: "summarizer-1",
+			trigger: "auto",
+		});
+		return store;
+	}
+
+	/** The transcript a session resumed onto that store starts from, plus one turn. */
+	function resumedContext(store: SessionStore, usedTokens: number): Context {
+		return {
+			systemPrompt: "",
+			messages: [
+				...store.contextMessages(),
+				assistantMessage({ usage: { input: usedTokens, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+				userMessage("and continue"),
+			],
+		};
+	}
+
+	test("a session resumed onto its own summary is not summarized again for the same transcript", async () => {
+		// Anti-thrash lived in memory, and `/resume` is exactly the event that
+		// throws that memory away. The transcript a resumed session starts from is
+		// the compacted one — still over the threshold, by design — so without
+		// reading the record back it pays for the same summary a second time.
+		const store = compactedStore(66_000);
+		let summaries = 0;
+		const counting: StreamFn = async function* (model, context, options) {
+			summaries++;
+			yield* fauxProvider([{ text: "<summary>1. Request: x</summary>" }]).streamFn(model, context, options);
+		};
+		const manager = new CompactionManager(CONFIG, { streamFn: counting, summarizerModel: SUMMARIZER, store });
+
+		// 68.1k is over the 67k threshold, and within the 5% of 66k that the last
+		// pass left behind: the same conversation, not a grown one.
+		expect(await checked(manager, resumedContext(store, 68_000))).toBeNull();
+		expect(summaries).toBe(0);
+	});
+
+	test("an imported compaction, which carries no measurement, suppresses nothing", async () => {
+		// `postTokens: 0` is what a compaction copied in from another tool is written
+		// with: no pass in this session measured it. What the record is for is the
+		// comparison against growth, and a zero must not make the first real pass
+		// look like a repeat of one that never happened here.
+		const store = compactedStore(0);
+		let summaries = 0;
+		const counting: StreamFn = async function* (model, context, options) {
+			summaries++;
+			yield* fauxProvider([{ text: "<summary>1. Request: x</summary>" }]).streamFn(model, context, options);
+		};
+		const manager = new CompactionManager(CONFIG, { streamFn: counting, summarizerModel: SUMMARIZER, store });
+
+		expect(await checked(manager, resumedContext(store, 90_000))).not.toBeNull();
+		expect(summaries).toBe(1);
 	});
 
 	test("a successful manual compaction clears the breaker", async () => {
@@ -359,9 +622,11 @@ describe("CompactionManager", () => {
 		expect(manager.isTripped).toBe(false);
 	});
 
-	test("a turn too large to carry verbatim is compacted away with the rest", async () => {
-		// Keeping it would leave the summary replacing almost nothing: a whole
-		// summarization call to free a few tokens.
+	test("a turn too large to carry verbatim is cut down, and the request kept", async () => {
+		// This used to be summarized away with the rest, on the argument that keeping
+		// it left the summary replacing almost nothing. The cost of that is the turn
+		// itself: the request being answered went into the summary, and the model
+		// then answered a description of the question instead of the question.
 		const manager = makeManager("<summary>1. Request: x</summary>");
 		const messages: AgentMessage[] = [
 			userMessage("old request"),
@@ -371,8 +636,11 @@ describe("CompactionManager", () => {
 				content: [{ type: "text", text: "x".repeat(200_000) }], // ~50k tokens
 			}),
 		];
-		const result = await manager.maybeCompact({ systemPrompt: "sys", messages });
-		expect(result?.messages).toHaveLength(1);
+		const result = await checked(manager, { systemPrompt: "sys", messages });
+
+		expect(result?.messages).toHaveLength(3);
+		expect(result?.messages[1]).toBe(messages[2]); // the request, untouched
+		expect(firstText(result?.messages[2])).toContain("elided to fit the context window");
 	});
 
 	test("force compacts below the threshold — the estimate does not get a vote after a refusal", async () => {
@@ -382,8 +650,8 @@ describe("CompactionManager", () => {
 		const manager = makeManager("<summary>1. Request: x</summary>");
 		const context = { systemPrompt: "", messages: [userMessage("short")] };
 
-		expect(await manager.maybeCompact(context)).toBeNull();
-		expect(await manager.maybeCompact(context, { force: true })).not.toBeNull();
+		expect(await checked(manager, context)).toBeNull();
+		expect(await checked(manager, context, { force: true })).not.toBeNull();
 	});
 
 	test("force is not stopped by the circuit breaker either", async () => {
@@ -403,8 +671,8 @@ describe("CompactionManager", () => {
 
 		for (let i = 0; i < 3; i++) await expect(manager.compact(context)).rejects.toThrow("provider down");
 		expect(manager.isTripped).toBe(true);
-		expect(await manager.maybeCompact(context)).toBeNull(); // over the threshold, refused by the breaker
-		expect(await manager.maybeCompact(context, { force: true })).not.toBeNull();
+		expect(await checked(manager, context)).toBeNull(); // over the threshold, refused by the breaker
+		expect(await checked(manager, context, { force: true })).not.toBeNull();
 	});
 
 	test("a forced check that cannot free space blocks the request instead of sending it", async () => {
@@ -462,10 +730,15 @@ describe("CompactionManager", () => {
 		const manager = new CompactionManager(CONFIG, { streamFn, summarizerModel: summarizer, store });
 
 		const messages: AgentMessage[] = [
+			userMessage("earlier"),
+			assistantMessage({ content: [{ type: "text", text: "ok" }] }),
 			userMessage("work"),
 			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
 		];
-		await manager.maybeCompact({ systemPrompt: "sys", messages });
+		// Through the store, as a real turn is: the record names the tail it stands
+		// in front of, and a tail the file has never seen is refused.
+		for (const message of messages) store.appendMessage(message);
+		await checked(manager, { systemPrompt: "sys", messages });
 
 		expect(seen).toEqual(["deepseek-chat DEEPSEEK_API_KEY https://api.deepseek.com/v1"]);
 		// And the record names the writer: a summary no one can attribute is a

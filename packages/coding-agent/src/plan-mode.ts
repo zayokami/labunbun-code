@@ -9,13 +9,20 @@ import { z } from "zod";
 
 export interface PlanModeCallbacks {
 	enterPlanMode(): void;
-	/** Present the plan; resolves when the user approves or rejects. */
-	requestPlanApproval(plan: string): Promise<{ approved: boolean; feedback?: string }>;
+	/**
+	 * Present the plan; resolves when the user approves or rejects.
+	 *
+	 * `signal` is the calling run's abort. The dialog is a wait on a human, and
+	 * the run can be aborted while it is up — without the signal the tool call
+	 * stays awaited by a turn that is already over, and the dialog outlives the
+	 * session it was asking about.
+	 */
+	requestPlanApproval(plan: string, signal?: AbortSignal): Promise<{ approved: boolean; feedback?: string }>;
 }
 
 export interface PlanApprovalUi {
 	/** Present a permission dialog; resolves to false when refused or canceled. */
-	requestPermission(toolName: string, input: unknown): Promise<boolean>;
+	requestPermission(toolName: string, input: unknown, signal?: AbortSignal): Promise<boolean>;
 }
 
 /**
@@ -40,7 +47,7 @@ export function createPlanModeCallbacks(
 			}
 			session.setPermissionMode("plan");
 		},
-		requestPlanApproval: async (plan) => {
+		requestPlanApproval: async (plan, signal) => {
 			// Capture everything before the await: the session that entered plan
 			// mode and the mode it had before. A swap must leave the newcomer's
 			// mode untouched.
@@ -53,7 +60,7 @@ export function createPlanModeCallbacks(
 				session.permissionMode === "plan" ? (previousModes.get(session) ?? "default") : session.permissionMode;
 			let approved: boolean;
 			try {
-				approved = await ui.requestPermission("ExitPlanMode", { plan });
+				approved = await ui.requestPermission("ExitPlanMode", { plan }, signal);
 			} catch {
 				return { approved: false, feedback: "Plan approval dialog failed" };
 			}
@@ -62,7 +69,10 @@ export function createPlanModeCallbacks(
 			}
 			// An interrupt that raced the dialog (Esc while it was up) counts as
 			// canceled, not approved: leave the plan-mode gate exactly as it was.
-			if (session.isInterrupted) {
+			// The signal is the same statement one level up, and it is checked here
+			// as well as at the UI: a dialog that answered "approved" without racing
+			// its own signal must still not lift plan mode for an aborted run.
+			if (session.isInterrupted || signal?.aborted) {
 				return { approved: false, feedback: "Plan approval canceled" };
 			}
 			if (getSession() !== session) {
@@ -111,8 +121,8 @@ export function createPlanModeTools(callbacks: PlanModeCallbacks): AnyTool[] {
 		}),
 		isReadOnly: () => true,
 		isConcurrencySafe: () => false,
-		call: async (input) => {
-			const decision = await callbacks.requestPlanApproval(input.plan);
+		call: async (input, toolCtx) => {
+			const decision = await callbacks.requestPlanApproval(input.plan, toolCtx.signal);
 			if (decision.approved) {
 				return {
 					content: [textContent("Plan approved. Plan mode restrictions lifted — you may now implement.")],

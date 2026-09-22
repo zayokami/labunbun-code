@@ -3,9 +3,10 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSession, type AnyTool, buildTool, type PermissionMode, SessionStore } from "@labunbun/agent";
-import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
+import { FAUX_MODEL, fauxProvider, type Model, type StreamFn } from "@labunbun/ai";
 import { z } from "zod";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanApprovalUi } from "../src/plan-mode.ts";
+import { approveProjectDefinitions } from "../src/project-trust.ts";
 import { loadSkills, skillsAsCommands } from "../src/skills.ts";
 import { agentSystemPrompt, createTaskTool, loadAgentDefinitions } from "../src/subagents.ts";
 
@@ -29,6 +30,12 @@ describe("agent definitions", () => {
 			"---\nname: researcher\ndescription: Deep research agent\ntools: Read, Grep\nmaxTurns: 5\n---\nSystem body.",
 		);
 		writeFileSync(join(cwd, ".labunbun", "agents", "deployer.md"), "---\ndescription: Deploys the app\n---\nBody.");
+
+		// The project tier sits behind a one-time trust gate now; this test is about
+		// what the reader does with the file once it is loaded, so it approves the
+		// directory first. The gate itself — before/after/rejected, and the ledger's
+		// location — is `project-trust.test.ts`.
+		approveProjectDefinitions(cwd, ["agents"], home);
 
 		const defs = loadAgentDefinitions(cwd, home);
 		const researcher = defs.find((d) => d.agentType === "researcher");
@@ -73,10 +80,10 @@ describe("Task tool (subagents)", () => {
 		const subFaux = fauxProvider(subScript);
 		const ctx = {
 			streamFn: subFaux.streamFn,
-			model: FAUX_MODEL,
+			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
-			definitions: [],
-			store,
+			definitions: () => [],
+			store: () => store,
 		};
 		return { taskTool: createTaskTool(ctx), ctx };
 	}
@@ -89,6 +96,38 @@ describe("Task tool (subagents)", () => {
 		);
 		expect(result.isError).toBeFalsy();
 		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
+	});
+
+	test("a subagent that runs out of room compacts its own context and keeps going", async () => {
+		// A subagent has a context window of its own, and the research task it is
+		// given is exactly the shape that fills one. Without its own compaction, a
+		// long subagent died on the provider's refusal and handed the parent that
+		// error as the tool result — the parent's own compaction cannot help a
+		// window that is not its own.
+		const subFaux = fauxProvider([
+			{ stopReason: "error", errorMessage: "prompt is too long: 250000 tokens", errorKind: "context_overflow" },
+			{ text: "<summary>1. Primary Request: do the thing</summary>" },
+			{ text: "SUBAGENT FINAL REPORT" },
+		]);
+		const taskTool = createTaskTool({
+			streamFn: subFaux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: () => [],
+		});
+
+		const result = await taskTool.call(
+			{ description: "run sub", prompt: "do the thing" },
+			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+		);
+
+		expect(result.isError).toBeFalsy();
+		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
+		// Three calls: the refused request, the summary it forced, and the request
+		// that carried it. The subagent's transcript is its own — no store, so
+		// nothing of this reaches the parent's session file.
+		expect(subFaux.receivedContexts).toHaveLength(3);
+		expect(JSON.stringify(subFaux.receivedContexts[2]?.messages)).toContain("Conversation compacted");
 	});
 
 	test("unknown agent type yields isError with available list", async () => {
@@ -126,10 +165,10 @@ describe("Task tool (subagents)", () => {
 		const subFaux = fauxProvider(subScript);
 		const ctx = {
 			streamFn: subFaux.streamFn,
-			model: FAUX_MODEL,
+			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
-			definitions: [],
-			permissionMode: "default" as const,
+			definitions: () => [],
+			permissionMode: () => "default" as const,
 			getPermissionRules: () => [],
 		};
 		const taskTool = createTaskTool(ctx);
@@ -150,10 +189,10 @@ describe("Task tool (subagents)", () => {
 		const subFaux = fauxProvider(subScript);
 		const ctx = {
 			streamFn: subFaux.streamFn,
-			model: FAUX_MODEL,
+			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
-			definitions: [],
-			permissionMode: "default" as const,
+			definitions: () => [],
+			permissionMode: () => "default" as const,
 			getPermissionRules: () => [{ toolName: "echo", behavior: "allow" as const, source: "session" as const }],
 		};
 		const taskTool = createTaskTool(ctx);
@@ -179,9 +218,9 @@ describe("Task tool (subagents)", () => {
 		const subFaux = fauxProvider([{ text: "done" }]);
 		const taskTool = createTaskTool({
 			streamFn: subFaux.streamFn,
-			model: FAUX_MODEL,
+			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
-			definitions: [
+			definitions: () => [
 				{ agentType: "scribe", whenToUse: "Writes things", source: "user", body: "You write terse commit messages." },
 			],
 		});
@@ -196,9 +235,9 @@ describe("Task tool (subagents)", () => {
 		const subFaux = fauxProvider([{ text: "done" }]);
 		const taskTool = createTaskTool({
 			streamFn: subFaux.streamFn,
-			model: FAUX_MODEL,
+			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
-			definitions: [{ agentType: "scribe", whenToUse: "Writes things", source: "user", body: "Body." }],
+			definitions: () => [{ agentType: "scribe", whenToUse: "Writes things", source: "user", body: "Body." }],
 			systemPromptFor: () => "OVERRIDE",
 		});
 		await taskTool.call(
@@ -248,9 +287,9 @@ describe("Task tool (subagents)", () => {
 			]);
 			const taskTool = createTaskTool({
 				streamFn: subFaux.streamFn,
-				model: FAUX_MODEL,
+				model: () => FAUX_MODEL,
 				allTools: [stallingTool(() => entered.resolve())],
-				definitions: [],
+				definitions: () => [],
 			});
 
 			const call = taskTool.call(
@@ -277,9 +316,9 @@ describe("Task tool (subagents)", () => {
 			const subFaux = fauxProvider([{ toolCalls: [{ id: "s1", name: "stall", arguments: {} }] }, { text: "sub done" }]);
 			const taskTool = createTaskTool({
 				streamFn: subFaux.streamFn,
-				model: FAUX_MODEL,
+				model: () => FAUX_MODEL,
 				allTools: [stallingTool(() => entered.resolve())],
-				definitions: [],
+				definitions: () => [],
 			});
 			const parentFaux = fauxProvider([
 				{
@@ -310,6 +349,161 @@ describe("Task tool (subagents)", () => {
 	});
 });
 
+/**
+ * What a subagent is built from, and when it is read.
+ *
+ * The Task tool outlives the state it used to capture at construction. `/model`
+ * swaps the model, `/resume` swaps the session a sidechain is written into, a
+ * mode change moves the parent's permission mode — and a subagent spawned after
+ * any of those has to be built from the session as it is now, not as it was when
+ * the REPL started. The failure is quiet in every case: the subagent runs, and
+ * answers, on the wrong model / into the wrong file / under the wrong rules.
+ */
+describe("what the Task tool reads at the call", () => {
+	const OTHER: Model = { ...FAUX_MODEL, id: "other-model" };
+
+	/** A stream function that records which model each request was made to. */
+	function recordedModels(provider: { streamFn: StreamFn }) {
+		const models: string[] = [];
+		const streamFn: StreamFn = async function* (model, context, options) {
+			models.push(model.id);
+			yield* provider.streamFn(model, context, options);
+		};
+		return { models, streamFn };
+	}
+
+	function callTool(tool: AnyTool, input: Record<string, unknown> = { description: "x", prompt: "do it" }) {
+		return tool.call(input, {
+			callId: "t1",
+			signal: new AbortController().signal,
+			cwd: process.cwd(),
+			onUpdate: () => {},
+		});
+	}
+
+	test("the model is the session's current one, not the one at construction", async () => {
+		// /model mid-session. The window the subagent compacts against is derived
+		// from this model too, so a stale one is not only spent wrongly — it fails
+		// to manage a context it should have summarized.
+		const subFaux = fauxProvider([{ text: "sub done" }]);
+		let current: Model = FAUX_MODEL;
+		const { models, streamFn } = recordedModels(subFaux);
+		const taskTool = createTaskTool({
+			streamFn,
+			model: () => current,
+			allTools: [echoTool()],
+			definitions: () => [],
+		});
+
+		current = OTHER;
+		await callTool(taskTool);
+
+		expect(models).toEqual([OTHER.id]);
+	});
+
+	test("a sidechain is written into the session that is live now", async () => {
+		// /resume mid-session: the entries belong to the conversation the subagent
+		// was spawned from, and the file it left behind must not grow them.
+		const subFaux = fauxProvider([{ text: "sub done" }]);
+		const before = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-side-a-")),
+			mkdtempSync(join(tmpdir(), "lbb-side-h-")),
+		);
+		const after = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-side-b-")),
+			mkdtempSync(join(tmpdir(), "lbb-side-h-")),
+		);
+		let store: SessionStore | undefined = before;
+		const taskTool = createTaskTool({
+			streamFn: subFaux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: () => [],
+			store: () => store,
+		});
+
+		store = after;
+		await callTool(taskTool);
+
+		const kinds = (s: SessionStore) =>
+			s
+				.linearEntries()
+				.filter((e) => e.type === "custom")
+				.map((e) => (e as { kind?: string }).kind);
+		expect(kinds(after)).toEqual(["subagent_start", "subagent_end"]);
+		expect(kinds(before)).toEqual([]);
+	});
+
+	test("the parent's permission mode is read now, not captured", async () => {
+		// EnterPlanMode mid-session: the subagent must inherit plan restrictions. A
+		// captured "default" would let it run the mutating tool while its parent is
+		// only allowed to read. The same call is made twice under the same allow-all
+		// rule — the mode is the only thing that changes, so the pair says what the
+		// mode is worth rather than what the fixture happens to allow.
+		const subFaux = fauxProvider([
+			{ toolCalls: [{ name: "echo", arguments: { text: "ran" } }] },
+			{ text: "done" },
+			{ toolCalls: [{ name: "echo", arguments: { text: "ran" } }] },
+			{ text: "done" },
+		]);
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-mode-")),
+			mkdtempSync(join(tmpdir(), "lbb-mode-home-")),
+		);
+		let mode: PermissionMode = "default";
+		const taskTool = createTaskTool({
+			streamFn: subFaux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: () => [],
+			store: () => store,
+			permissionMode: () => mode,
+			getPermissionRules: () => [{ toolName: "*", behavior: "allow", source: "session" }],
+		});
+
+		await callTool(taskTool);
+		mode = "plan";
+		await callTool(taskTool);
+
+		// The subagent's own record of what its tools did, in order.
+		const ends = store
+			.linearEntries()
+			.filter((e) => e.type === "custom" && (e as { kind?: string }).kind === "subagent_end")
+			.map((e) => (e as { data: { toolCalls: string[] } }).data.toolCalls);
+		expect(ends).toEqual([["echo: ok"], ["echo: error"]]);
+	});
+
+	test("a definition's own model is used, and an unknown one falls back out loud", async () => {
+		// `model:` in the frontmatter was parsed from the start and read by nothing,
+		// which is worse than not supporting it: the definition said how it should
+		// run and the app agreed with its eyes closed.
+		const subFaux = fauxProvider([{ text: "sub done" }]);
+		const { models, streamFn } = recordedModels(subFaux);
+		const reported: string[] = [];
+		const taskTool = createTaskTool({
+			streamFn,
+			model: () => FAUX_MODEL,
+			resolveModel: (ref) => (ref === "other-model" ? OTHER : undefined),
+			allTools: [echoTool()],
+			definitions: () => [
+				{ agentType: "quick", whenToUse: "Small jobs", source: "user", model: "other-model" },
+				{ agentType: "retired", whenToUse: "Old jobs", source: "user", model: "gone-model" },
+			],
+			report: (text) => reported.push(text),
+		});
+
+		await callTool(taskTool, { description: "x", prompt: "do it", subagent_type: "quick" });
+		expect(models).toEqual([OTHER.id]);
+		expect(reported).toEqual([]);
+
+		await callTool(taskTool, { description: "x", prompt: "do it", subagent_type: "retired" });
+		expect(models).toEqual([OTHER.id, FAUX_MODEL.id]);
+		// Said, not silent: a definition quietly running on a different model than
+		// it asks for reads as that model having a bad day.
+		expect(reported).toEqual(['[retired] Unknown model "gone-model" — running on the session model instead.']);
+	});
+});
+
 describe("skills", () => {
 	test("SKILL.md folders become prompt commands", () => {
 		const home = mkdtempSync(join(tmpdir(), "lbb-skill-home-"));
@@ -324,6 +518,10 @@ describe("skills", () => {
 			join(cwd, ".labunbun", "skills", "deploy", "SKILL.md"),
 			"---\nname: deploy\ndescription: Deploy steps\n---\nDeploy checklist body.",
 		);
+
+		// Same one-time trust as the agent definitions above: project skills are not
+		// loaded until the directory is approved, and this test is about the reader.
+		approveProjectDefinitions(cwd, ["skills"], home);
 
 		const skills = loadSkills(cwd, home);
 		expect(skills.map((s) => s.name).sort()).toEqual(["deploy", "review"]);

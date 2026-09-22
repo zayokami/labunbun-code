@@ -19,6 +19,8 @@ import {
 import type { Model, StreamFn } from "@labunbun/ai";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
+import { createCompactionWiring } from "./compaction-wiring.ts";
+import { isProjectTierTrusted } from "./project-trust.ts";
 
 export interface AgentDefinition {
 	agentType: string;
@@ -88,24 +90,70 @@ function loadDefinitionsFromDir(dir: string, source: "user" | "project"): AgentD
 	return out;
 }
 
+function projectAgentDefinitions(cwd: string): AgentDefinition[] {
+	return loadDefinitionsFromDir(join(cwd, ".labunbun", "agents"), "project");
+}
+
+/**
+ * The user tier always, the project tier only once this directory is trusted.
+ *
+ * An agent definition becomes the system prompt of every subagent spawned from
+ * it, so a repository that ships one is a repository that writes the agent's
+ * instructions — see `project-trust.ts` for why that needs one approval, and for
+ * why the ledger sits outside the working tree.
+ */
 export function loadAgentDefinitions(cwd: string, home = homedir()): AgentDefinition[] {
-	return [
-		...loadDefinitionsFromDir(join(home, ".labunbun", "agents"), "user"),
-		...loadDefinitionsFromDir(join(cwd, ".labunbun", "agents"), "project"),
-	];
+	const project = isProjectTierTrusted(cwd, "agents", home) ? projectAgentDefinitions(cwd) : [];
+	return [...loadDefinitionsFromDir(join(home, ".labunbun", "agents"), "user"), ...project];
+}
+
+/**
+ * The project definitions the trust gate is holding back, for a dialog to offer.
+ *
+ * Read through the same reader as the loader, so a listing and the thing a user
+ * then approves cannot disagree about what is there.
+ */
+export function withheldProjectAgents(cwd: string, home = homedir()): AgentDefinition[] {
+	if (isProjectTierTrusted(cwd, "agents", home)) return [];
+	return projectAgentDefinitions(cwd);
 }
 
 export interface TaskToolContext {
 	streamFn: StreamFn;
-	model: Model;
+	/**
+	 * The parent session's model, read at the call.
+	 *
+	 * A reader rather than a value because `/model` swaps it mid-session: a
+	 * subagent spawned afterwards has to run on the model the user chose. The
+	 * staleness would not be cosmetic — the subagent's own compaction threshold
+	 * is computed from this model's window, so a captured one compacts at the
+	 * window the session left behind.
+	 */
+	model: () => Model;
+	/**
+	 * Resolve an agent definition's `model:` frontmatter to a model, or undefined
+	 * when the name means nothing — a definition left in a directory after its
+	 * model was retired is a fallback, not a failed spawn.
+	 */
+	resolveModel?: (ref: string) => Model | undefined;
 	allTools: AnyTool[];
-	definitions: AgentDefinition[];
-	store?: SessionStore;
+	/** Read at the call: a definition approved mid-session joins the list. */
+	definitions: () => AgentDefinition[];
+	/** Read at the call: `/resume` swaps the session a sidechain is written into. */
+	store?: () => SessionStore | undefined;
 	systemPromptFor?: (agent: AgentDefinition) => string;
-	/** Permission mode inherited from the parent session (undefined → subagents run unrestricted, e.g. tests). */
-	permissionMode?: PermissionMode;
+	/** Read at the call: the parent's mode follows EnterPlanMode and `/resume`. */
+	permissionMode?: () => PermissionMode | undefined;
 	/** Resolved fresh per call so session-scoped allow rules added mid-conversation apply to new subagents. */
 	getPermissionRules?: () => PermissionRule[];
+	/**
+	 * Where a subagent's own context management is announced. A subagent that
+	 * summarizes its conversation does so out of sight of both the user and the
+	 * parent session — this is the only line that says it happened.
+	 */
+	report?: (text: string) => void;
+	/** `settings.trimOldToolResults`, passed through to the subagent's own manager. */
+	trimOldToolResults?: boolean;
 }
 
 export const GENERAL_PURPOSE: AgentDefinition = {
@@ -116,7 +164,6 @@ export const GENERAL_PURPOSE: AgentDefinition = {
 
 /** Create the Task tool: spawns a nested AgentSession per invocation. */
 export function createTaskTool(ctx: TaskToolContext): AnyTool {
-	const definitions = [GENERAL_PURPOSE, ...ctx.definitions];
 	return buildTool({
 		name: "Task",
 		description:
@@ -135,6 +182,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 			"- Multiple Task calls run concurrently when safe.",
 		isConcurrencySafe: () => true,
 		call: async (input, toolCtx) => {
+			const definitions = [GENERAL_PURPOSE, ...ctx.definitions()];
 			const requested = input.subagent_type ?? "general-purpose";
 			const definition = definitions.find((d) => d.agentType === requested);
 			if (!definition) {
@@ -146,19 +194,50 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 			}
 
 			const tools = definition.tools ? ctx.allTools.filter((t) => definition.tools?.includes(t.name)) : ctx.allTools;
+			const store = ctx.store?.();
+			const permissionMode = ctx.permissionMode?.();
+			// A definition may name its own model. One that no longer resolves falls
+			// back to the session's — said out loud, because a subagent quietly
+			// running on a different model than its definition asks for is the kind
+			// of thing that gets diagnosed as the model having a bad day.
+			const named = definition.model;
+			const resolved = named ? ctx.resolveModel?.(named) : undefined;
+			if (named && !resolved) {
+				ctx.report?.(`[${definition.agentType}] Unknown model "${named}" — running on the session model instead.`);
+			}
+			const model = resolved ?? ctx.model();
+
+			/** What the subagent did to its own context, to report with its end. */
+			const notes: string[] = [];
+			// A subagent has a context window of its own and can fill it: a research
+			// task that reads a repository is exactly the shape that does. It has no
+			// store — a subagent's transcript is kept as start/end entries, not as a
+			// conversation to resume — so its compactions are recorded nowhere and
+			// reported here instead.
+			const subagentWiring = createCompactionWiring({
+				model,
+				store: undefined,
+				streamFn: ctx.streamFn,
+				trimOldToolResults: ctx.trimOldToolResults,
+				report: (text) => {
+					notes.push(text);
+					ctx.report?.(`[${definition.agentType}] ${text}`);
+				},
+			});
 
 			const subSession = new AgentSession({
-				model: ctx.model,
+				model,
 				systemPrompt: ctx.systemPromptFor?.(definition) ?? agentSystemPrompt(definition),
 				tools,
 				maxTurns: input.max_turns ?? definition.maxTurns,
 				cwd: toolCtx.cwd,
-				permissionMode: ctx.permissionMode,
+				permissionMode,
 				deps: {
 					streamFn: ctx.streamFn,
+					checkCompaction: subagentWiring.checkCompaction,
 					// Subagents inherit the parent's rules but have no dialog of their
 					// own to resolve an "ask" — fail closed rather than hang or auto-allow.
-					canUseTool: ctx.permissionMode
+					canUseTool: permissionMode
 						? async (toolName, permInput, permCtx) => {
 								const decision = evaluatePermissions(toolName, permInput, {
 									mode: permCtx.mode,
@@ -180,7 +259,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 
 			// Sidechain persistence: record start + final transcript in the parent tree.
 			const sidechainId = `sidechain-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-			ctx.store?.appendCustom("subagent_start", { sidechainId, agentType: definition.agentType, prompt: input.prompt });
+			store?.appendCustom("subagent_start", { sidechainId, agentType: definition.agentType, prompt: input.prompt });
 
 			const events: string[] = [];
 			const unsubscribe = subSession.on((event) => {
@@ -211,11 +290,12 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 								.join("\n")
 						: "(no response)";
 
-				ctx.store?.appendCustom("subagent_end", {
+				store?.appendCustom("subagent_end", {
 					sidechainId,
 					reason,
 					toolCalls: events,
 					messages: subSession.messages.length,
+					notes,
 				});
 
 				// Interrupted subagents report the interruption, not a summary that

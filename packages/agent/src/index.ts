@@ -6,6 +6,7 @@ export {
 	type CompactionConfig,
 	CompactionManager,
 	type CompactionManagerDeps,
+	type CompactionPhase,
 	type ContextBreakdown,
 	compactionBoundary,
 	compactionThreshold,
@@ -51,6 +52,7 @@ export { AgentSession, type AgentSessionOptions } from "./session.ts";
 // Session persistence
 export {
 	type CompactionRecord,
+	type CompactionTrigger,
 	newEntryId,
 	type SessionEntry,
 	SessionStore,

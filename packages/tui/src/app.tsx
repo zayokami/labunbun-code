@@ -15,6 +15,7 @@ import {
 	REPL,
 } from "./components/REPL.tsx";
 import { createPermissionQueue } from "./permission-queue.ts";
+import { createQuestionSlot } from "./question-slot.ts";
 import { createStore, type Store, useStore } from "./store.ts";
 import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME, type Theme, ThemeContext } from "./theme.ts";
 import {
@@ -101,6 +102,12 @@ export interface ReplAppHandle {
 	 * awaiting them, so they must be settled rather than dropped.
 	 */
 	clearPermissionRequest: () => void;
+	/**
+	 * Dismiss the question dialog as canceled, if one is up. The same caller-side
+	 * need as `clearPermissionRequest` above and for the same reason: an aborted
+	 * run's question will never be answered, and its caller is still awaiting it.
+	 */
+	clearQuestionRequest: () => void;
 	setContextInfo(info: { usedTokens: number; threshold: number }): void;
 	/** Show the `/status` card over the prompt; null dismisses it. */
 	setStatusCard(card: StatusCardData | null): void;
@@ -222,6 +229,10 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		onAlwaysAllow: options.onAlwaysAllow,
 	});
 
+	const questionSlot = createQuestionSlot({
+		show: (question) => store.set((state) => ({ ...state, question })),
+	});
+
 	return {
 		store,
 		waitUntilExit: async () => {
@@ -284,20 +295,9 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		setModelName: (name) => {
 			store.set((s) => ({ ...s, modelName: name }));
 		},
-		askUser: (questions) =>
-			new Promise<string[] | null>((resolve) => {
-				store.set((s) => ({
-					...s,
-					question: {
-						questions,
-						resolve: (answers) => {
-							store.set((st) => ({ ...st, question: null }));
-							resolve(answers);
-						},
-					},
-				}));
-			}),
+		askUser: questionSlot.ask,
 		clearPermissionRequest: permissionQueue.clear,
+		clearQuestionRequest: questionSlot.clear,
 	};
 }
 

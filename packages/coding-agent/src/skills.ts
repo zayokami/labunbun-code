@@ -6,6 +6,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Command, PromptCommand } from "./commands.ts";
+import { isProjectTierTrusted } from "./project-trust.ts";
 
 export interface Skill {
 	name: string;
@@ -104,13 +105,32 @@ export function parseFrontmatter(content: string): { data: Record<string, string
 	return { data, body: content.slice(match[0].length) };
 }
 
+function projectSkills(cwd: string): Skill[] {
+	return loadSkillsFromDir(join(cwd, ".labunbun", "skills"));
+}
+
+/**
+ * The user tier always, the project tier only once this directory is trusted.
+ *
+ * A skill's body is sent to the model as the text the user typed, so a repository
+ * that ships one can write what reaches the prompt — see `project-trust.ts`. The
+ * gate is here and not at the call sites: a loader that could be called around it
+ * is a loader with two meanings, and the headless path, which has no dialog to
+ * approve anything with, calls this one.
+ */
 export function loadSkills(cwd: string, home = homedir()): Skill[] {
 	const user = loadSkillsFromDir(join(home, ".labunbun", "skills"));
-	const project = loadSkillsFromDir(join(cwd, ".labunbun", "skills"));
+	const project = isProjectTierTrusted(cwd, "skills", home) ? projectSkills(cwd) : [];
 	// Project skills override user skills with the same name.
 	const byName = new Map<string, Skill>();
 	for (const skill of [...user, ...project]) byName.set(skill.name, skill);
 	return [...byName.values()];
+}
+
+/** The project skills the trust gate is holding back, for a dialog to offer. */
+export function withheldProjectSkills(cwd: string, home = homedir()): Skill[] {
+	if (isProjectTierTrusted(cwd, "skills", home)) return [];
+	return projectSkills(cwd);
 }
 
 /**

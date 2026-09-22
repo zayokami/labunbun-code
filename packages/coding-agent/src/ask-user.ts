@@ -8,6 +8,14 @@ import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 
 export interface AskUserBridge {
+	/**
+	 * Show the questions and resolve with the answers, or null when the user
+	 * dismissed them.
+	 *
+	 * `signal` is the calling run's abort: the dialog is a wait on a human, and a
+	 * run aborted while it is up must settle this call rather than leave the turn
+	 * waiting on a question nobody is looking at.
+	 */
 	askUser(
 		questions: Array<{
 			question: string;
@@ -15,6 +23,7 @@ export interface AskUserBridge {
 			options: Array<{ label: string; description?: string }>;
 			multiSelect?: boolean;
 		}>,
+		signal?: AbortSignal,
 	): Promise<string[] | null>;
 }
 
@@ -53,7 +62,7 @@ export function createAskUserQuestionTool(bridge: AskUserBridge): AnyTool {
 			"- Put your recommended option first with its rationale in the description.",
 		isReadOnly: () => true,
 		isConcurrencySafe: () => false,
-		call: async (input) => {
+		call: async (input, toolCtx) => {
 			const answers = await bridge.askUser(
 				input.questions.map((q) => ({
 					question: q.question,
@@ -61,6 +70,7 @@ export function createAskUserQuestionTool(bridge: AskUserBridge): AnyTool {
 					options: q.options,
 					multiSelect: q.multiSelect,
 				})),
+				toolCtx.signal,
 			);
 			if (!answers) {
 				return {

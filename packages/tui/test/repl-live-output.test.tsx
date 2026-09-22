@@ -94,3 +94,26 @@ describe("the background shell row in the REPL", () => {
 		view.unmount();
 	});
 });
+
+describe("the compaction activity row in the REPL", () => {
+	// The app writes the field itself (a compaction emits nothing of its own while
+	// it runs, so there is no event to reduce), and how the row draws it is covered
+	// in components.test.tsx. What neither sees is a REPL that never reads the
+	// slice: the field would be set, the screen would say nothing, and every other
+	// test would still be green.
+	test("a summary in flight is on screen while it runs, and gone when it lands", async () => {
+		const store = createStore<UiState>({ ...initialUiState(), statusPhase: "idle" });
+		const view = render(<REPL getSession={() => idleSession} store={store} modelName="test" onExit={() => {}} />);
+
+		expect(view.lastFrame() ?? "").not.toContain("Compacting context");
+
+		store.set((s) => ({ ...s, contextActivity: "Compacting context…" }));
+		await delay(30);
+		expect(view.lastFrame() ?? "").toContain("Compacting context…");
+
+		store.set((s) => ({ ...s, contextActivity: undefined }));
+		await delay(30);
+		expect(view.lastFrame() ?? "").not.toContain("Compacting context");
+		view.unmount();
+	});
+});

@@ -96,6 +96,7 @@ export function StatusLine({
 	elapsedMs,
 	contextInfo,
 	outputEstimate,
+	activity,
 	pad,
 }: {
 	phase: StatusPhase;
@@ -104,17 +105,25 @@ export function StatusLine({
 	contextInfo?: { usedTokens: number; threshold: number };
 	/** Live output-token estimate for the in-flight response. */
 	outputEstimate?: number;
+	/**
+	 * What the app is doing to the context, when it is doing something. Takes the
+	 * label's place rather than the row's: the wait it names happens inside a
+	 * turn, so the time and the model are still the ones on the screen.
+	 */
+	activity?: string;
 	/** The controller's status, when there is a controller. */
 	pad?: PadServiceStatus;
 }) {
 	const theme = useTheme();
 	const [frame, setFrame] = useState(0);
 
+	// Spinning is for anything in flight, including one the turn is not: a
+	// `/compact` typed at an idle prompt spends the same silent half-minute.
 	useEffect(() => {
-		if (phase === "idle") return;
+		if (phase === "idle" && !activity) return;
 		const timer = setInterval(() => setFrame((f) => (f + 1) % FRAMES.length), SPINNER_INTERVAL_MS);
 		return () => clearInterval(timer);
-	}, [phase]);
+	}, [phase, activity]);
 
 	const contextPart = contextInfo
 		? ` · ctx ${formatTokens(contextInfo.usedTokens)}${
@@ -124,7 +133,7 @@ export function StatusLine({
 			}`
 		: "";
 
-	if (phase === "idle") {
+	if (phase === "idle" && !activity) {
 		const battery = <BatterySegment pad={pad} />;
 		if (!contextPart && !pad?.battery) return null;
 		return (
@@ -135,10 +144,23 @@ export function StatusLine({
 			</Text>
 		);
 	}
+	if (phase === "idle") {
+		// No duration: the clock measures turns, and this is not one. Esc is not
+		// offered either — there is nothing for it to interrupt but a command.
+		return (
+			<Text color={theme.accent}>
+				{FRAMES[frame]} {activity}{" "}
+				<Text dimColor>
+					({modelName}
+					{contextPart})
+				</Text>
+			</Text>
+		);
+	}
 	const outputPart = outputEstimate && outputEstimate > 0 ? ` · ~${formatTokens(outputEstimate)} out` : "";
 	return (
 		<Text color={theme.accent}>
-			{FRAMES[frame]} {PHASE_LABEL[phase]}{" "}
+			{FRAMES[frame]} {activity ?? PHASE_LABEL[phase]}{" "}
 			<Text dimColor>
 				({formatElapsed(elapsedMs)} · {modelName}
 				{outputPart}

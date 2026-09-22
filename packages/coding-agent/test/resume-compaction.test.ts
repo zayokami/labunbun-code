@@ -64,6 +64,19 @@ describe("resuming a compacted session", () => {
 		expect(resumed.messages).not.toContain(older[1]);
 	});
 
+	test("what the last pass left behind survives the reload", () => {
+		// The manager that decided to compact is gone — `/resume` builds a new one —
+		// and the size it left the context at is the only thing that stops the new
+		// one from paying for the same summary again. It has to be in the file,
+		// because the file is all there is.
+		const { home, cwd } = fixture();
+		const { store } = compactedSession(home, cwd);
+
+		expect(SessionStore.load(store.path).compactions()).toMatchObject([
+			{ preTokens: 150_000, postTokens: 2_000, trigger: "auto" },
+		]);
+	});
+
 	test("the store comes back positioned at the leaf, so the turn continues", () => {
 		const { home, cwd } = fixture();
 		const { store, boundary } = compactedSession(home, cwd);

@@ -6,6 +6,7 @@
  * - json: single JSON result object at the end
  * - stream-json: one JSON line per event, live
  */
+import { readFileSync } from "node:fs";
 import type { AgentEvent, PermissionMode } from "@labunbun/agent";
 import { AgentSession, evaluatePermissions, formatRetryNotice, SessionStore } from "@labunbun/agent";
 import {
@@ -18,8 +19,12 @@ import {
 	totalsHitRate,
 } from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
+import { builtInCommands, expandPromptCommand } from "./commands.ts";
+import { createCompactionWiring } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
+import { loadMemoryFiles } from "./memory.ts";
+import { describeWithheld } from "./project-trust.ts";
 import {
 	applyCatalogSettings,
 	applySettingsEnv,
@@ -28,6 +33,8 @@ import {
 	loadSettings,
 	resolvePermissionMode,
 } from "./settings.ts";
+import { loadSkills, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
+import { createTaskTool, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { pruneToolOutput, toolOutputRoot, writeToolOutput } from "./tool-output.ts";
 
@@ -154,20 +161,92 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const transport: { streamFn: StreamFn; tracker?: CacheTracker } = options.streamFn
 		? { streamFn: options.streamFn }
 		: createTrackedStreamFn({ policy: settings.cache });
+
+	// Everything the REPL has always put in front of the model and a `-p` run
+	// did not: the memory files, the skills, and the agents a Task call can spawn.
+	// A scripted run reads the same repository as an interactive one, so a
+	// LABUNBUN.md, a `/skill-x`, or an agent definition that works in the REPL and
+	// silently does nothing under `-p` made the same prompt behave differently in
+	// two modes — which is the kind of difference nobody notices until they trust
+	// a nightly job to do what they just did by hand.
+	const memory = loadMemoryFiles(cwd);
+	const skills = loadSkills(cwd);
+	const commands = [...builtInCommands(), ...skillsAsCommands(skills)];
+	const agentDefinitions = loadAgentDefinitions(cwd);
+	// A `-p` run has no dialog to approve a project's definitions with, so an
+	// untrusted one is not loaded at all — the gate is inside the loaders above.
+	// Said on stderr rather than passed over in silence: a scripted run whose
+	// skills quietly expand to nothing is the exact failure that is invisible
+	// until someone reads the transcript and wonders why the model ignored them.
+	const withheldAgents = withheldProjectAgents(cwd);
+	const withheldSkills = withheldProjectSkills(cwd);
+	if (withheldAgents.length + withheldSkills.length > 0) {
+		console.error(
+			`Warning: this project's definitions are not loaded — ${describeWithheld({
+				agents: withheldAgents.length,
+				skills: withheldSkills.length,
+			})}. Approve them in an interactive session (/agents approve).`,
+		);
+	}
+	// Read at the call, like the REPL's: the definition list is a getter because a
+	// definition approved mid-session joins it, and the store because a sidechain
+	// belongs to whichever session is live.
+	const taskTool = createTaskTool({
+		streamFn: transport.streamFn,
+		model: () => model,
+		resolveModel,
+		allTools: tools,
+		definitions: () => agentDefinitions,
+		store: () => store,
+		permissionMode: () => effectiveMode,
+		getPermissionRules: () => rules,
+		trimOldToolResults: settings.trimOldToolResults,
+		report: (text) => console.error(text),
+	});
+	// MCP servers are deliberately not connected here: `-p` has no dialog to
+	// approve a project-defined server with, and an unapproved one must not be
+	// reachable just because nobody was watching.
+	const allTools = [...tools, taskTool];
+
+	// A `-p` run is a session like any other, and one that runs out of room
+	// unattended has nobody to type `/compact`: before this it ended on the
+	// provider's own refusal, with the whole transcript still in the way. The
+	// same wiring the REPL uses, reporting to stderr because that is where a
+	// non-interactive run says things — and registering its rewrites with the
+	// tracker, or a `-p` run's own summary would be reported as a prefix rewrite
+	// nothing declared.
+	const compactionWiring = createCompactionWiring({
+		model,
+		store,
+		streamFn: transport.streamFn,
+		trimOldToolResults: settings.trimOldToolResults,
+		report: (text) => console.error(text),
+		readFile: (path) => {
+			try {
+				return readFileSync(path, "utf8");
+			} catch {
+				return null;
+			}
+		},
+		noteRewrite: (cause) => transport.tracker?.note(cause),
+	});
+
 	const session = new AgentSession({
 		model,
-		systemPrompt: buildSystemPrompt(tools, {
+		systemPrompt: buildSystemPrompt(allTools, {
 			cwd,
 			platform: process.platform,
 			isTTY: process.stdout.isTTY ?? false,
+			memory: memory.content,
 		}),
-		tools,
+		tools: allTools,
 		store,
 		cwd,
 		maxTurns: options.maxTurns,
 		permissionMode: effectiveMode,
 		deps: {
 			streamFn: transport.streamFn,
+			checkCompaction: compactionWiring.checkCompaction,
 			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
 			// Headless has no interactive dialog, so an unresolved "ask" fails
 			// closed rather than hanging — matches dontAsk's documented contract.
@@ -220,6 +299,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const startedAt = Date.now();
 	let lastAssistantText = "";
 	let turns = 0;
+	/**
+	 * The loop's own verdict on why the run ended.
+	 *
+	 * It knows things the transcript does not: a request that could not be sent
+	 * ends the run with a reason ("Automatic compaction could not free enough
+	 * space… Run /compact"), while the transcript's last error is whatever the
+	 * provider said when it refused — which is the symptom, not the explanation.
+	 */
+	let endErrorMessage: string | undefined;
 
 	const emitStreamJson = (payload: Record<string, unknown>): void => {
 		process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -227,6 +315,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 
 	session.on((event: AgentEvent) => {
 		if (event.type === "turn_start") turns++;
+		if (event.type === "agent_end") endErrorMessage = event.errorMessage;
 
 		// On stderr, not stdout: a `-p` run may be piped, and the wait for a retry
 		// is not part of the answer being piped. It is still said out loud — the
@@ -288,7 +377,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		}
 	}
 
-	const reason = await session.prompt(options.prompt);
+	// A typed line that names a prompt-command is expanded before it is sent, the
+	// same way the REPL expands it — `-p "/skill-x args"` is how a script reaches
+	// a skill. Anything else (a local or app-level command, or a prompt that just
+	// happens to start with a slash) is sent as typed; the hook above saw the
+	// typed text either way.
+	const reason = await session.prompt(expandPromptCommand(commands, options.prompt) ?? options.prompt);
 	const finalText = finalAssistantText(session.messages);
 	const usage = totalUsage(session.messages);
 
@@ -328,7 +422,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// text mode already streamed; close cleanly
 		process.stdout.write("\n");
 		if (reason !== "completed") {
-			const errorMessage = findLastError(session.messages);
+			// The loop's reason first, the transcript's last error second: only the
+			// first one can say what to do about a request that was never sent.
+			const errorMessage = endErrorMessage ?? findLastError(session.messages);
 			console.error(`[session ended: ${reason}${errorMessage ? ` — ${errorMessage}` : ""}]`);
 		}
 	}

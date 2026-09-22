@@ -66,6 +66,22 @@ export function findCommand(commands: Command[], name: string): Command | undefi
 	return commands.find((c) => c.name === normalized) ?? commands.find((c) => c.aliases?.includes(normalized));
 }
 
+/**
+ * The prompt a typed line expands to, or null when it names no prompt-command.
+ *
+ * The one place a prompt command's expansion is produced, so the REPL and a
+ * `-p` run cannot disagree about what `getPrompt` means: a skill sent as
+ * `/skill-x` in one mode and as the literal text `/skill-x` in the other is a
+ * difference nobody would think to test for. Local and app-level commands come
+ * back null — they exist to drive a REPL, and a headless run has none — which
+ * leaves the caller to send that text as typed rather than to guess.
+ */
+export function expandPromptCommand(commands: Command[], text: string): string | null {
+	const [rawName, ...rest] = text.split(/\s+/);
+	const command = findCommand(commands, rawName);
+	return command?.type === "prompt" ? command.getPrompt(rest.join(" ")) : null;
+}
+
 /** Prefix matches for autocomplete, ordered by name. */
 export function completeCommands(commands: Command[], prefix: string): Command[] {
 	const normalized = prefix.replace(/^\//, "").toLowerCase();

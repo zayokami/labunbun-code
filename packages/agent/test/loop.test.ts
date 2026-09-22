@@ -545,11 +545,13 @@ describe("context overflow", () => {
 		expect(session.messages[0]).toBe(boundary);
 	});
 
-	test("a refusal for size forces the next check, and the compaction clears it", async () => {
+	test("a refusal for size is answered in the same run: make room, then send again", async () => {
 		// The estimate said this session had room; the provider said otherwise. The
-		// estimate is now known to be wrong, so the next turn must not consult it —
-		// otherwise every later prompt fails exactly like the first, which is how a
-		// session gets bricked.
+		// estimate is now known to be wrong, so the next check does not get to
+		// consult it — and the turn it refused does not end here: the prompt is sent
+		// again, compacted. Ending the run instead meant the user had to type
+		// something before the session would make room, which is a `-p` run that
+		// dies on its own refusal with nobody to type it.
 		const forced: (boolean | undefined)[] = [];
 		const boundary = userMessage("[Conversation compacted] the summary so far");
 		const { session, sent } = sessionWith(
@@ -565,18 +567,44 @@ describe("context overflow", () => {
 			],
 		);
 
-		expect(await session.prompt("first")).toBe("error");
-		expect(session.contextOverflowed).toBe(true);
+		expect(await session.prompt("first")).toBe("completed");
+		// Two requests: the one the provider refused, and the compacted one it took.
+		expect(sent).toHaveLength(2);
 		// Unforced, this check would have answered null and the identical oversized
 		// request would have been sent again.
-		expect(await session.prompt("second")).toBe("completed");
 		expect(forced).toEqual([false, true]);
 		expect(sent[1]?.[0]).toBe(boundary);
 		// Room was made, so the flag does not outlive the compaction: the next turn
 		// gets to trust the estimate again.
 		expect(session.contextOverflowed).toBe(false);
-		expect(await session.prompt("third")).toBe("completed");
+		expect(await session.prompt("second")).toBe("completed");
 		expect(forced).toEqual([false, true, false]);
+		expect(sent).toHaveLength(3);
+	});
+
+	test("an overflow nothing can fix is retried once, then reported", async () => {
+		// The retry exists to make room and send again. Where no room can be made it
+		// must not become a loop: the same request refused twice is the provider's
+		// answer, and the second refusal is the one the user sees.
+		let checks = 0;
+		const overflow: FauxStep = {
+			stopReason: "error",
+			errorMessage: "prompt is too long: 250000 tokens",
+			errorKind: "context_overflow",
+		};
+		const { session, sent, events } = sessionWith(async () => {
+			checks++;
+			return null;
+		}, [overflow, overflow]);
+
+		expect(await session.prompt("go")).toBe("error");
+		expect(sent).toHaveLength(2);
+		expect(checks).toBe(2);
+		// Latched, so a later prompt still forces the check rather than trusting the
+		// estimate that was just contradicted.
+		expect(session.contextOverflowed).toBe(true);
+		const end = events.find((event) => event.type === "agent_end");
+		expect(end?.type === "agent_end" ? end.errorMessage : undefined).toBe("prompt is too long: 250000 tokens");
 	});
 });
 

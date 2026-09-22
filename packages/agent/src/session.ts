@@ -22,6 +22,7 @@ import type {
 	ToolResultMessage,
 } from "@labunbun/ai";
 import { textContent, toolResultMessage, userMessage } from "@labunbun/ai";
+import { LENGTH_RECOVERY_MESSAGE } from "./compaction.ts";
 import { DEFAULT_MAX_CONCURRENCY, partitionToolCalls, Semaphore } from "./concurrency.ts";
 import { capRoundResults } from "./output-limits.ts";
 import { runToolPipeline } from "./pipeline.ts";
@@ -70,6 +71,13 @@ export class AgentSession {
 	#interruptRequested = false;
 	#running = false;
 	#contextOverflowed = false;
+	/**
+	 * Whether this run has already answered one refusal for size by making room
+	 * and sending again. Once per run: a second refusal of the same request is
+	 * the provider's answer, and a run that kept retrying would be a loop that
+	 * pays for a summarization on every pass.
+	 */
+	#overflowRetried = false;
 
 	constructor(options: AgentSessionOptions) {
 		this.#model = options.model;
@@ -230,6 +238,7 @@ export class AgentSession {
 		if (this.#running) throw new Error("AgentSession is already running");
 		this.#running = true;
 		this.#interruptRequested = false;
+		this.#overflowRetried = false;
 		this.#abortController = new AbortController();
 
 		const userMsg = userMessage(await this.#userText(text));
@@ -367,9 +376,7 @@ export class AgentSession {
 					}
 					if (continueRetries < LENGTH_CONTINUE_RETRIES) {
 						continueRetries++;
-						const resume = userMessage(
-							"Your previous response was cut off by the output limit. Continue exactly where you left off — do not repeat completed work.",
-						);
+						const resume = userMessage(LENGTH_RECOVERY_MESSAGE);
 						this.messages.push(resume);
 						this.#store?.appendMessage(resume);
 						continue;
@@ -397,7 +404,20 @@ export class AgentSession {
 					// The provider is the ground truth on what fits. When it refuses for
 					// size, the estimate was wrong — so the next turn compacts without
 					// consulting it, and says so if it cannot.
-					if (assistant.errorKind === "context_overflow") this.#contextOverflowed = true;
+					if (assistant.errorKind === "context_overflow") {
+						this.#contextOverflowed = true;
+						// And the turn that was refused gets to be the next turn. Ending
+						// the run here meant the user had to type something before the
+						// session would make room — which an unattended `-p` run cannot
+						// do at all. The next iteration asks a forced check, which either
+						// compacts and sends, or blocks and ends the run with the reason:
+						// both are answers, and neither is this prompt being sent again
+						// unchanged.
+						if (this.#deps.checkCompaction && !this.#overflowRetried) {
+							this.#overflowRetried = true;
+							continue;
+						}
+					}
 					errorMessage = assistant.errorMessage ?? "Unknown provider error";
 					reason = "error";
 					break;

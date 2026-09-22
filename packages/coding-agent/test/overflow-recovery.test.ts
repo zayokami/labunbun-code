@@ -1,7 +1,7 @@
 /**
  * The end of the failure chain this batch exists to break: a provider refuses a
- * request for size, and the session recovers on the next turn instead of failing
- * identically forever.
+ * request for size, and the session makes room and sends it again instead of
+ * failing identically forever.
  *
  * Run through the real `runInteractive`, so what is asserted is the wiring the
  * app has — not a hand-built session that only resembles it. The default stream
@@ -39,6 +39,10 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 		const replies = [];
 		const counts = [];
 		let infos = [];
+		// The status row's word for a compaction in flight, recorded as the changes
+		// it went through: the store is written on every event the app reports, and
+		// only a *change* is a thing someone looking at the screen could have seen.
+		const activity = [];
 		const steps = ${steps};
 		let call = 0;
 		mock.module("@labunbun/ai", () => ({
@@ -71,9 +75,13 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 				// The app speaks to the user by pushing entries through the handle's
 				// store, so this is where a user-visible notice can be observed.
 				let state = { entries: [] };
+				let shown = state.contextActivity;
 				return {
 					setTasks() {}, setContextInfo() {}, setBackgroundShells() {},
-					store: { set(update) { state = typeof update === "function" ? update(state) : { ...state, ...update }; } },
+					store: { set(update) {
+						state = typeof update === "function" ? update(state) : { ...state, ...update };
+						if (state.contextActivity !== shown) { activity.push(state.contextActivity); shown = state.contextActivity; }
+					} },
 					waitUntilExit: async () => {
 						for (const text of ${JSON.stringify(options.prompts ?? ["new question", "and again"])}) {
 							replies.push(await session.prompt(text));
@@ -86,7 +94,7 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
 		const exitCode = await runInteractive(${JSON.stringify({ cwd, theme: "dark" })});
-		console.log(JSON.stringify({ exitCode, requests, written, replies, counts, infos }));
+		console.log(JSON.stringify({ exitCode, requests, written, replies, counts, infos, activity }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
@@ -108,14 +116,17 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 			replies: string[];
 			counts: number[];
 			infos: string[];
+			// "cleared" crosses the process boundary as null: the field is set back
+			// to undefined, which JSON has no word for.
+			activity: (string | null)[];
 		}),
 		stderr,
 	};
 }
 
 describe("recovering from a refusal for size", () => {
-	test("the next turn compacts and sends, instead of failing the same way again", async () => {
-		const { requests, replies, counts } = await run(
+	test("the refused prompt is compacted and sent again, without being asked twice", async () => {
+		const { requests, replies, counts, infos, activity } = await run(
 			JSON.stringify([
 				{ overflow: "prompt is too long: 250000 tokens > 200000 maximum" },
 				{ text: "<summary>1. Primary Request: keep going</summary>" },
@@ -124,27 +135,36 @@ describe("recovering from a refusal for size", () => {
 			]),
 		);
 
-		// The first prompt fails for size — with the provider's refusal, not a
-		// fabricated success — and it costs exactly one call: the retry policy
-		// recognizes the refusal instead of sending the request again.
-		expect(replies[0]).toBe("error");
-		// The second turn is the recovery, in two calls: a summarization of what
-		// cannot be sent, then the prompt carrying the compacted history. Without the
-		// forced check the second prompt would have been the same oversized request
-		// again, and every later prompt would fail identically.
-		expect(counts).toEqual([1, 3]);
+		// The prompt is refused for size — with the provider's refusal, not a
+		// fabricated success — and one prompt later it has been answered: the
+		// summarization the refusal forced, then the prompt carrying the compacted
+		// history. The refusal itself cost exactly one call: the retry policy
+		// recognizes it instead of sending the request again.
+		expect(replies[0]).toBe("completed");
 		expect(requests[1]?.messages.at(-1)?.content).toContain("You are summarizing");
 		const recovered = requests[2]?.messages ?? [];
 		expect(JSON.stringify(recovered)).toContain("Conversation compacted");
 		expect(JSON.stringify(recovered)).toContain("keep going");
+		// Both prompts are answered, three calls for the first and one for the rest.
 		expect(replies[1]).toBe("completed");
+		expect(counts).toEqual([3, 4]);
+
+		// The wait had a name while it lasted, and the transcript kept the line
+		// that outlives it: a summary is a full-prefix call the user is paying for
+		// and cannot otherwise see. The row is the app's, not the manager's — the
+		// phase is routed through the interactive handle's store — and it is set
+		// back the moment the summary lands.
+		expect(activity).toEqual(["Compacting context…", null]);
+		expect(
+			infos.filter((info) => /^Context compacted \(overflow\): [\d.]+k → [\d.]+k tokens\.$/.test(info)),
+		).toHaveLength(1);
 	});
 
 	test("a vetoing PreCompact hook cannot send the request it just refused", async () => {
 		// A hook may defer compaction the estimate asked for. It may not defer one
 		// the provider already refused: sending again changes nothing, and the
 		// session would fail identically on every later turn.
-		const { requests, replies } = await run(
+		const { requests, replies, activity } = await run(
 			JSON.stringify([{ overflow: "prompt is too long: 250000 tokens > 200000 maximum" }, { text: "unused" }]),
 			{
 				writeSettings: (home) => {
@@ -163,6 +183,9 @@ describe("recovering from a refusal for size", () => {
 		// summarization before it is sent, and the refused prompt is not sent again
 		// — sending it unchanged is the failure, not the recovery.
 		expect(requests).toHaveLength(1);
+		// And the status row never claimed a summary was running, because none was:
+		// the veto is answered before the manager is asked anything at all.
+		expect(activity).toEqual([]);
 	});
 
 	test("the breaker announces itself once, and only when it trips", async () => {
@@ -171,7 +194,7 @@ describe("recovering from a refusal for size", () => {
 		// long after the failures that caused it. The user gets one notice, at the
 		// moment it happens, and not again on every turn.
 		const failure = { overflow: "internal error while summarizing" };
-		const { infos, requests, replies } = await run(
+		const { infos, requests, replies, activity } = await run(
 			JSON.stringify([
 				// A reply big enough that the next turn's estimate crosses the
 				// compaction threshold (window 200k → threshold 178,808).
@@ -212,6 +235,12 @@ describe("recovering from a refusal for size", () => {
 		// Three attempts, three failures — the count the breaker counts to.
 		expect(summarized).toHaveLength(3);
 		expect(infos.filter((info) => info === COMPACTION_DISABLED_NOTICE)).toHaveLength(1);
+		// Every attempt said it had started and then said it had failed, in that
+		// order: a row that kept spinning after the failure would be the one lie
+		// this reporting must not tell, because the spinner is the only thing on
+		// screen while it is up.
+		expect(infos.filter((info) => info.startsWith("Compaction failed (auto):"))).toHaveLength(3);
+		expect(activity).toEqual(["Compacting context…", null, "Compacting context…", null, "Compacting context…", null]);
 		// The turns themselves still ran: a compaction that fails is a loss of
 		// headroom, not a broken session, as long as the request still fits.
 		expect(replies).toEqual(["completed", "completed", "completed", "completed", "completed"]);
