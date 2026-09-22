@@ -2783,7 +2783,7 @@ function planZcode(
 
 	// local_setting rows. Permission entries are recorded per project in ZCode,
 	// and a repo-controlled permission decision may not widen what the agent is
-	// allowed to do — the same boundary `PROJECT_TIER_DENIED_KEYS` draws for
+	// allowed to do — the same boundary `PROJECT_TIER_KEY_POLICY` draws for
 	// project-scope settings files.
 	for (const row of raw.settings) {
 		const label = `~/.zcode/cli/db/db.sqlite → ${row.namespace}/${row.key} (${row.scope})`;

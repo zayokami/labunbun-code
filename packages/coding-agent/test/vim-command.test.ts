@@ -38,7 +38,6 @@ function makeCtx(
 	const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
 	const ctx = {
 		getSession: () => session,
-		sessionRef: session,
 		handle: {
 			store,
 			setVimMode: (on: boolean) => store.set((s) => ({ ...s, vim: on })),

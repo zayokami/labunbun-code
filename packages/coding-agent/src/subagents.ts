@@ -162,6 +162,27 @@ export const GENERAL_PURPOSE: AgentDefinition = {
 	source: "builtin",
 };
 
+/**
+ * The agent types there are, as the model reads them to pick one.
+ *
+ * `subagent_type` used to be a bare string with nothing, anywhere, naming the
+ * types that exist: a definition's `whenToUse` was parsed, listed by `/agents`
+ * and then never shown to the one caller that has to choose between them, so a
+ * session shipping a `researcher` agent could only reach it by guessing the name
+ * and reading the error the guess earned. Built once, when the tool is built,
+ * because the wire tool list is frozen for the session to keep the prompt prefix
+ * cacheable (`session.ts`): a definition approved mid-session is reachable by
+ * name — the tool resolves it at the call — but is advertised from the next
+ * start.
+ */
+export function agentCatalogue(definitions: AgentDefinition[]): string {
+	return [GENERAL_PURPOSE, ...definitions]
+		.map((definition) =>
+			definition.whenToUse ? `- ${definition.agentType}: ${definition.whenToUse}` : `- ${definition.agentType}`,
+		)
+		.join("\n");
+}
+
 /** Create the Task tool: spawns a nested AgentSession per invocation. */
 export function createTaskTool(ctx: TaskToolContext): AnyTool {
 	return buildTool({
@@ -169,11 +190,12 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 		description:
 			"Launch a subagent to handle a self-contained task. The subagent has its own context window " +
 			"and returns its final report as the tool result. Use for parallel research or isolating " +
-			"context-heavy work from the main conversation.",
+			"context-heavy work from the main conversation.\n\nAgent types (pass the name as subagent_type):\n" +
+			agentCatalogue(ctx.definitions()),
 		inputSchema: z.object({
 			description: z.string().describe("A short (3-5 word) description of the task"),
 			prompt: z.string().describe("The complete task for the agent to perform"),
-			subagent_type: z.string().optional().describe("Agent type (default general-purpose)"),
+			subagent_type: z.string().optional().describe('One of the agent types listed above (default "general-purpose")'),
 			max_turns: z.number().int().positive().optional(),
 		}),
 		prompt:

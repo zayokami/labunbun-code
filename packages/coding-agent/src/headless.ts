@@ -24,7 +24,7 @@ import { createCompactionWiring } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
-import { describeWithheld } from "./project-trust.ts";
+import { withheldDefinitionNotice } from "./project-trust.ts";
 import {
 	applyCatalogSettings,
 	applySettingsEnv,
@@ -182,10 +182,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const withheldSkills = withheldProjectSkills(cwd);
 	if (withheldAgents.length + withheldSkills.length > 0) {
 		console.error(
-			`Warning: this project's definitions are not loaded — ${describeWithheld({
-				agents: withheldAgents.length,
-				skills: withheldSkills.length,
-			})}. Approve them in an interactive session (/agents approve).`,
+			withheldDefinitionNotice({ agents: withheldAgents.length, skills: withheldSkills.length }, "headless"),
 		);
 	}
 	// Read at the call, like the REPL's: the definition list is a getter because a

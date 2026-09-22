@@ -69,7 +69,6 @@ function makeCtx(
 	};
 	const store = createStore<UiState>({ ...initialUiState(false) });
 	return {
-		sessionRef: session,
 		getSession: () => session as AgentSession,
 		handle: { store },
 		backgroundShells: { list: () => [], output: () => "", kill: () => false },

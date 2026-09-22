@@ -22,7 +22,6 @@ function makeCtx(overrides: Partial<AppCommandContext> = {}): AppCommandContext 
 	const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
 	const store = createStore<{ entries: Array<{ kind: string; text: string }> }>({ entries: [] });
 	return {
-		sessionRef: session,
 		getSession: () => session,
 		handle: { store } as never,
 		// /ps and /stop are not exercised here; the stubs keep the context total.

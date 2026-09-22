@@ -95,7 +95,7 @@ export const SettingsSchema = z.object({
 	 * The DualShock 4: whether one is read, and what its buttons do.
 	 *
 	 * Every key here is honored from the user's own tiers only (see
-	 * {@link PROJECT_TIER_DENIED_KEYS}) — the whole block is denied rather than
+	 * {@link PROJECT_TIER_KEY_POLICY}) — the whole block is denied rather than
 	 * filtered key by key, because there is no harmless sub-key to keep: a cloned
 	 * repository that could write `allowApprove` would be handing a controller in
 	 * the user's lap the power to approve that repository's own tool calls.
@@ -262,28 +262,55 @@ export interface LoadedSettings {
  *     repo has no legitimate reason to set it. `ttl: "5m"` or
  *     `explicitBreakpoints: false` would quietly tax every turn of a session run
  *     inside that checkout, which is a strange thing for a checkout to want.
+ *
+ * Every key is classified, in a table rather than in an array of denied names.
+ * A list of names is a list that drifts, and this one decides what a cloned
+ * repository may hand itself — which model it runs, under which permission mode,
+ * where its data goes (`env`, `providers`), what runs on the user's machine
+ * (`hooks`), which servers it may reach (`mcpServers`), what its turns are
+ * reported to cost. Typed over `keyof Settings` on purpose: a key added to
+ * `SettingsSchema` and not classified here does not compile, so the default for
+ * a new field is a question someone answers rather than an omission nobody sees.
+ * `project-tier-keys.test.ts` asks the same thing at runtime, in both directions
+ * — an unclassified key, and a row for a key the schema no longer has.
  */
-const PROJECT_TIER_DENIED_KEYS = [
-	"model",
-	"fallbackModels",
-	"permissionMode",
-	"env",
-	"providers",
-	"hooks",
-	"mcpServers",
-	"pricing",
-	"cache",
-	"trimOldToolResults",
+export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> = {
+	model: "denied",
+	fallbackModels: "denied",
+	permissionMode: "denied",
+	env: "denied",
+	providers: "denied",
+	hooks: "denied",
+	mcpServers: "denied",
+	pricing: "denied",
+	cache: "denied",
+	trimOldToolResults: "denied",
 	// Not a lockdown but the same rule: whether this startup asks the network a
 	// question is the user's decision, not the repository's.
-	"modelDiscovery",
-	"gamepad",
-	"allowManagedPermissionRulesOnly",
-	"disableBypassPermissionsMode",
-] as const;
+	modelDiscovery: "denied",
+	gamepad: "denied",
+	allowManagedPermissionRulesOnly: "denied",
+	disableBypassPermissionsMode: "denied",
+	// Cosmetic, no reach beyond the user's own terminal.
+	theme: "repo",
+	vimMode: "repo",
+	// Merged field by field — see PROJECT_TIER_PERMISSION_KEY_POLICY below.
+	permissions: "repo",
+};
 
-/** Permission sub-keys denied from the same tiers. `deny` is intentionally absent. */
-const PROJECT_TIER_DENIED_PERMISSION_KEYS = ["allow", "additionalDirectories"] as const;
+/**
+ * The same question for `permissions`, which merges field by field.
+ *
+ * `deny` is absent on purpose: tightening is always safe, and a repository's own
+ * guardrails stay effective against the agent it just configured. `allow` and
+ * `additionalDirectories` both widen what the agent may do — the first by
+ * pre-approving calls, the second by declaring more of the disk a workspace.
+ */
+export const PROJECT_TIER_PERMISSION_KEY_POLICY: Record<keyof Settings["permissions"], "denied" | "repo"> = {
+	allow: "denied",
+	additionalDirectories: "denied",
+	deny: "repo",
+};
 
 /**
  * Remove repo-controlled keys from a project/local tier before it is merged, so
@@ -298,20 +325,18 @@ function stripUntrustedKeys(
 	if (typeof data !== "object" || data === null || Array.isArray(data)) return { data, ignored: [] };
 	const out: Record<string, unknown> = { ...(data as Record<string, unknown>) };
 	const ignored: IgnoredSettingsKey[] = [];
-	for (const key of PROJECT_TIER_DENIED_KEYS) {
-		if (key in out) {
-			delete out[key];
-			ignored.push({ source, key });
-		}
+	for (const [key, policy] of Object.entries(PROJECT_TIER_KEY_POLICY)) {
+		if (policy !== "denied" || !(key in out)) continue;
+		delete out[key];
+		ignored.push({ source, key });
 	}
 	const permissions = out.permissions;
 	if (typeof permissions === "object" && permissions !== null && !Array.isArray(permissions)) {
 		const kept: Record<string, unknown> = { ...(permissions as Record<string, unknown>) };
-		for (const key of PROJECT_TIER_DENIED_PERMISSION_KEYS) {
-			if (key in kept) {
-				delete kept[key];
-				ignored.push({ source, key: `permissions.${key}` });
-			}
+		for (const [key, policy] of Object.entries(PROJECT_TIER_PERMISSION_KEY_POLICY)) {
+			if (policy !== "denied" || !(key in kept)) continue;
+			delete kept[key];
+			ignored.push({ source, key: `permissions.${key}` });
 		}
 		out.permissions = kept;
 	}

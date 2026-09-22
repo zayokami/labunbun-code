@@ -91,7 +91,6 @@ function harness(options: { settings?: Record<string, unknown>; home?: string; d
 	const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
 	const ctx = {
 		getSession: () => session,
-		sessionRef: session,
 		handle: { store },
 		home,
 		cwd: process.cwd(),

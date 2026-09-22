@@ -39,6 +39,7 @@ export {
 	normalizePathSpec,
 	type PermissionEngineConfig,
 	type PermissionRule,
+	PLAN_MODE_READ_ONLY_TOOLS,
 	parseRuleList,
 	parseRuleText,
 	RULE_SOURCE_ORDER,

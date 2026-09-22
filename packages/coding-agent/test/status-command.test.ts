@@ -27,7 +27,6 @@ function makeCtx(options: { cwd?: string; sessionId?: string } = {}) {
 
 	const ctx = {
 		getSession: () => session,
-		sessionRef: session,
 		handle: {
 			store,
 			setStatusCard: (card: StatusCardData | null) => cards.push(card),

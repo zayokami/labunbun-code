@@ -130,6 +130,41 @@ describe("Task tool (subagents)", () => {
 		expect(JSON.stringify(subFaux.receivedContexts[2]?.messages)).toContain("Conversation compacted");
 	});
 
+	test("the description names the agent types the model may pass", () => {
+		// `subagent_type` is a free string, and the model's only way to know what
+		// to put in it is the tool description. It used to list nothing: a session
+		// shipping a `researcher` agent could be reached only by guessing the name
+		// and reading the error the guess earned.
+		const home = mkdtempSync(join(tmpdir(), "lbb-cat-home-"));
+		mkdirSync(join(home, ".labunbun", "agents"), { recursive: true });
+		writeFileSync(
+			join(home, ".labunbun", "agents", "researcher.md"),
+			"---\nname: researcher\ndescription: Deep research agent\n---\nYou dig.\n",
+		);
+		const definitions = loadAgentDefinitions(process.cwd(), home);
+		const taskTool = createTaskTool({
+			streamFn: fauxProvider([]).streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [],
+			definitions: () => definitions,
+		});
+
+		expect(taskTool.description).toContain("- researcher: Deep research agent");
+		// The built-in is not in any list on disk and is the default, so it has to
+		// be named too.
+		expect(taskTool.description).toContain("general-purpose");
+	});
+
+	test("a definition with no description is still listed by name", () => {
+		const taskTool = createTaskTool({
+			streamFn: fauxProvider([]).streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [],
+			definitions: () => [{ agentType: "bare", whenToUse: "", source: "user" }],
+		});
+		expect(taskTool.description).toContain("- bare");
+	});
+
 	test("unknown agent type yields isError with available list", async () => {
 		const { taskTool } = makeHarness();
 		const result = await taskTool.call(

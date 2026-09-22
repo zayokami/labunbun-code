@@ -12,14 +12,16 @@
  * disagreement, in both directions: a read-only tool the mode refuses, and a
  * mutating one it permits. A tool that wants plan mode to admit it has to say so
  * in its own declaration, and the name list in `permissions.ts` has to agree
- * with what the tools say.
+ * with what the tools say. A third check walks the list itself, because the rows
+ * here can only see names that answer to a tool: a name with nothing behind it
+ * is a mode admitting a capability that does not exist.
  *
  * The Task tool is deliberately not in the set: it is built from a live
  * session's context. It declares no `isReadOnly`, so it fails closed to
  * "mutating" and the mode denies it — which is what its own declaration says.
  */
 import { describe, expect, test } from "bun:test";
-import { type AnyTool, evaluatePermissions } from "@labunbun/agent";
+import { type AnyTool, evaluatePermissions, PLAN_MODE_READ_ONLY_TOOLS } from "@labunbun/agent";
 import { createAllTools, defaultOperations, TaskStore } from "@labunbun/tools";
 import { createAskUserQuestionTool } from "../src/ask-user.ts";
 import { createPlanModeTools, type PlanModeCallbacks } from "../src/plan-mode.ts";
@@ -74,6 +76,15 @@ describe("plan mode's allow-list against the tools' declarations", () => {
 		for (const name of ["Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "AskUserQuestion"]) {
 			expect(text).toContain(name);
 		}
+	});
+
+	test("every name the mode admits is a tool this build has", () => {
+		const built = new Set(TOOLS.map(([name]) => name));
+		// The rows above walk the tools; a name with no tool behind it is invisible
+		// to them. `TodoWrite` sat in the list long after the last build that had
+		// one, and a mode that admits a tool nothing offers reads as a capability
+		// the user has and does not.
+		expect(PLAN_MODE_READ_ONLY_TOOLS.filter((name) => !built.has(name))).toEqual([]);
 	});
 
 	test("covers the tools whose declarations the drift hit", () => {

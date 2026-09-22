@@ -153,7 +153,6 @@ describe("the /ps and /stop commands", () => {
 		let refreshes = 0;
 		const picked: Array<{ title: string; labels: string[] }> = [];
 		const ctx = {
-			sessionRef: undefined,
 			getSession: () => undefined,
 			handle: {
 				store,

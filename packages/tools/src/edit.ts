@@ -21,10 +21,6 @@ export function createEditTool(cwd: string, ops: Operations): AnyTool {
 			"- `old_string` must be unique in the file — include enough surrounding context.\n" +
 			"- Preserve the file's existing indentation style exactly.",
 		isConcurrencySafe: () => false,
-		checkPermissions: async (input, ctx) => {
-			if (ctx.mode === "acceptEdits") return { behavior: "allow" };
-			return { behavior: "ask", message: `Allow editing ${input.file_path}?` };
-		},
 		validateInput: async (input) => {
 			if (input.old_string === input.new_string) {
 				return "old_string and new_string are identical — nothing to change";

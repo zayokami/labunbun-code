@@ -19,10 +19,6 @@ export function createWriteTool(cwd: string, ops: Operations): AnyTool {
 			"- Write the COMPLETE intended content — this replaces the whole file.\n" +
 			"- Use absolute paths.",
 		isConcurrencySafe: () => false,
-		checkPermissions: async (input, ctx) => {
-			if (ctx.mode === "acceptEdits") return { behavior: "allow" };
-			return { behavior: "ask", message: `Allow writing ${input.file_path}?` };
-		},
 		call: async (input) => {
 			let path: string;
 			try {

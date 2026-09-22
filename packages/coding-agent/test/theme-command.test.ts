@@ -52,7 +52,6 @@ async function makeCtx(configured?: string, tiers: ReturnType<typeof settingsWit
 
 	const ctx = {
 		getSession: () => session,
-		sessionRef: session,
 		handle: {
 			store,
 			setTheme: (theme: Theme) => store.set((s) => ({ ...s, theme })),

@@ -60,7 +60,6 @@ function makeCtx(options: { store?: SessionStore } = {}) {
 	const store = createStore<UiState>({ ...initialUiState(false) });
 	const ctx = {
 		getSession: () => session,
-		sessionRef: session,
 		handle: {
 			store,
 			setStatusCard: (card: StatusCardData | null) => cards.push(card),

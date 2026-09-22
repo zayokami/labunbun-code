@@ -73,6 +73,27 @@ export function describeWithheld(kinds: { agents: number; skills: number }): str
 	return `${kinds.agents} agent definition${kinds.agents === 1 ? "" : "s"}, ${kinds.skills} skill${kinds.skills === 1 ? "" : "s"}`;
 }
 
+/**
+ * The line that says a project tier is being held back, phrased for where it is
+ * read.
+ *
+ * The counts were shared from the start; the sentence around them was written
+ * twice instead, and the sentence is the half that tells the user what to do —
+ * a `/agents` that had drifted to some other name would be read at the one
+ * moment the feature it is about is invisible, and nothing looked at it. Exported
+ * so `help-commands.test.ts` holds these two lines to the same rule as every
+ * other line of advice this app prints: the commands they name have to exist.
+ */
+export function withheldDefinitionNotice(
+	kinds: { agents: number; skills: number },
+	audience: "repl" | "headless",
+): string {
+	const counts = describeWithheld(kinds);
+	return audience === "repl"
+		? `This project's definitions are not loaded — ${counts}. /agents to review.`
+		: `Warning: this project's definitions are not loaded — ${counts}. Approve them in an interactive session (/agents approve).`;
+}
+
 /** Whether this directory's tier of `kind` may be loaded. */
 export function isProjectTierTrusted(cwd: string, kind: DefinitionKind, home: string = homedir()): boolean {
 	return loadTrustedDefinitionKinds(cwd, home).has(kind);

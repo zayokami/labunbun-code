@@ -182,7 +182,16 @@ function tokenizeShell(segment: string): string[] {
 	return tokens;
 }
 
-/** Tools whose file deny rules a Bash command should also be held to. */
+/**
+ * Tools whose file deny rules a Bash command should also be held to.
+ *
+ * The set is about *rules a user has written*, not about the tools this build
+ * ships: `NotebookEdit` is named because the importer reads settings written for
+ * another tool that had one, and a rule protecting a path has to protect it from
+ * the shell as well — dropping the name would quietly re-open the path for every
+ * such rule. A name here that matches no tool costs nothing; a name missing here
+ * costs the rule.
+ */
 const FILE_TOOL_NAMES = new Set(["Read", "Edit", "Write", "NotebookEdit"]);
 
 /**
@@ -357,7 +366,10 @@ function ruleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd
  * `Tool.isReadOnly` is the tools' own answer to the same question, and nothing
  * here can read it. So the two are kept in step by hand, and
  * `plan-mode-allowlist.test.ts` walks the tool set the app actually builds and
- * fails on any disagreement in either direction.
+ * fails on any disagreement in either direction — including the reverse one, a
+ * name here that no tool answers to (a `TodoWrite` entry outlived the tool it
+ * named, and a mode admitting a tool nothing offers reads as a capability the
+ * user has and does not).
  *
  * AskUserQuestion is here because asking changes nothing, and plan mode is
  * exactly where a guess would otherwise be made — a plan built on an assumed
@@ -365,23 +377,28 @@ function ruleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd
  * here for the same reason Read is: research that touches no file of the
  * workspace. Bash is not, and that is the mode's promise: no shell at all, not
  * even a read-only one.
+ *
+ * Exported for that test: the reverse direction cannot be checked through
+ * `evaluatePermissions`, which answers "deny" for a name it does not know and
+ * "deny" for a mutating tool the same way.
  */
+export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
+	"Read",
+	"Grep",
+	"Glob",
+	"LS",
+	"BashOutput",
+	"WebFetch",
+	"WebSearch",
+	"TaskList",
+	"TaskGet",
+	"AskUserQuestion",
+	"EnterPlanMode",
+	"ExitPlanMode",
+];
+
 function isReadOnlyTool(toolName: string): boolean {
-	return [
-		"Read",
-		"Grep",
-		"Glob",
-		"LS",
-		"BashOutput",
-		"WebFetch",
-		"WebSearch",
-		"TodoWrite",
-		"TaskList",
-		"TaskGet",
-		"AskUserQuestion",
-		"EnterPlanMode",
-		"ExitPlanMode",
-	].includes(toolName);
+	return PLAN_MODE_READ_ONLY_TOOLS.includes(toolName);
 }
 
 function isWorkspaceEdit(toolName: string, input: unknown, config: PermissionEngineConfig): boolean {

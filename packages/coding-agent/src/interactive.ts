@@ -96,7 +96,12 @@ import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
-import { approveProjectDefinitions, type DefinitionKind, describeWithheld } from "./project-trust.ts";
+import {
+	approveProjectDefinitions,
+	type DefinitionKind,
+	describeWithheld,
+	withheldDefinitionNotice,
+} from "./project-trust.ts";
 import {
 	damagedSessionNotice,
 	exitSummaryLine,
@@ -859,7 +864,6 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		},
 		onCommand: (text) =>
 			handleCommandDispatch(text, {
-				sessionRef,
 				getSession: () => sessionRef,
 				handle,
 				backgroundShells,
@@ -908,10 +912,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	if (withheldAgents.length + withheldSkills.length > 0) {
 		pushInfo(
 			handle,
-			`This project's definitions are not loaded — ${describeWithheld({
-				agents: withheldAgents.length,
-				skills: withheldSkills.length,
-			})}. /agents to review.`,
+			withheldDefinitionNotice({ agents: withheldAgents.length, skills: withheldSkills.length }, "repl"),
 		);
 	}
 
@@ -1149,7 +1150,6 @@ function listCheckpoints(store: SessionStore): CheckpointInfo[] {
 interface AppCommandContext {
 	/** The live session, read at dispatch time — /resume may have swapped it. */
 	getSession(): AgentSession | null;
-	sessionRef: AgentSession | null;
 	handle: ReplAppHandle | null;
 	/** The shells the Bash tool started; `/ps` and `/stop` act on these. */
 	backgroundShells: BackgroundShellAccess;

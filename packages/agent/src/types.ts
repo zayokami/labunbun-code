@@ -93,7 +93,18 @@ export interface ToolResult {
  * input and `z.toJSONSchema` produces the wire schema at registry build time.
  *
  * All optionals fail closed via `buildTool`:
- * isConcurrencySafe=false, isReadOnly=false, checkPermissions=allow.
+ * isConcurrencySafe=false, isReadOnly=false.
+ *
+ * There is deliberately no per-tool permission hook. A tool that decided its own
+ * permission would be a second source of truth beside `evaluatePermissions`,
+ * which is the only thing that sees the mode, the rules and the workspace roots
+ * at once — including the one arm a tool cannot see: `acceptEdits`' allowance
+ * for edits inside the workspace. One used to be declared here
+ * (`checkPermissions`, implemented by Edit and Write as "acceptEdits → allow,
+ * otherwise ask") and nothing ever called it. The engine already answered the
+ * same question, and wiring the tool's answer in would have allowed a write
+ * outside the workspace that the engine asks about, because the tool never
+ * learned where the workspace was. `tool-contract.test.ts` holds the line.
  */
 export interface Tool<TInput extends z.ZodType = z.ZodType> {
 	name: string;
@@ -104,7 +115,6 @@ export interface Tool<TInput extends z.ZodType = z.ZodType> {
 	isEnabled?: () => boolean;
 	isReadOnly?: (input: z.infer<TInput>) => boolean;
 	isConcurrencySafe?: (input: z.infer<TInput>) => boolean;
-	checkPermissions?: (input: z.infer<TInput>, ctx: PermissionContext) => Promise<PermissionResult>;
 	/** Semantic validation after schema parsing, before permissions. */
 	validateInput?: (input: z.infer<TInput>) => Promise<string | null>;
 	call: (input: z.infer<TInput>, ctx: ToolCallContext) => Promise<ToolResult>;
@@ -133,7 +143,6 @@ export function buildTool<TInput extends z.ZodType>(def: Tool<TInput>): Tool<TIn
 		isEnabled: () => true,
 		isReadOnly: () => false,
 		isConcurrencySafe: () => false,
-		checkPermissions: async () => allow(),
 		maxResultSizeChars: 30_000,
 		overflow: "truncate",
 		...def,

@@ -15,6 +15,7 @@ import { helpText } from "@labunbun/tui";
 import { builtInCommands, completeCommands } from "../src/commands.ts";
 import { COMPACTION_ACCURACY_NOTICE, lowContextWarning } from "../src/context-report.ts";
 import { appCommandTable } from "../src/interactive.ts";
+import { withheldDefinitionNotice } from "../src/project-trust.ts";
 
 const INTERACTIVE_SOURCE = readFileSync(join(import.meta.dir, "..", "src", "interactive.ts"), "utf8");
 
@@ -106,11 +107,17 @@ describe("advice about a context that is full", () => {
 			{ contextWindow: 200_000, maxOutputTokens: 8_192 },
 			{ streamFn: fauxProvider([{ text: "unused" }]).streamFn, summarizerModel: FAUX_MODEL },
 		);
+		const withheld = { agents: 1, skills: 2 };
 		return [
 			manager.blockedMessage(),
 			COMPACTION_DISABLED_NOTICE,
 			lowContextWarning(1_600, 2_000),
 			COMPACTION_ACCURACY_NOTICE,
+			// The two startup notices that say a project tier is being held back: the
+			// counts were shared from the start, the sentence around them was written
+			// twice, and only a test can say whether either still names a real command.
+			withheldDefinitionNotice(withheld, "repl"),
+			withheldDefinitionNotice(withheld, "headless"),
 		];
 	}
 

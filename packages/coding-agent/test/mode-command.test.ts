@@ -35,7 +35,6 @@ function makeCtx(mode?: PermissionMode) {
 	let settle: ((index: number | null) => void) | undefined;
 	const ctx = {
 		getSession: () => session,
-		sessionRef: session,
 		handle: {
 			store,
 			pickFromList: (title: string, items: Pick["items"], options?: Pick) => {
