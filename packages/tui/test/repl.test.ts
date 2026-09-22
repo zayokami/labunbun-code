@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { sameShells } from "../src/app.tsx";
 import { CTRL_C_EXIT_WINDOW_MS, ctrlCShouldExit, handleCommand } from "../src/components/REPL.tsx";
-import { createStore } from "../src/store.ts";
+import { createStore, type Store } from "../src/store.ts";
 import { LIGHT_THEME } from "../src/themes/index.ts";
 import { initialUiState, reduceEvent, type UiState } from "../src/ui-state.ts";
 
@@ -151,6 +151,43 @@ describe("/clear", () => {
 		);
 		expect(store.get().entries.map((e) => e.kind)).toEqual(["toolUse"]);
 		expect(store.get().pendingTools.map((p) => p.callId)).toEqual(["c2"]);
+	});
+});
+
+/**
+ * A slash and nothing after it. The user is reaching for the command list — the
+ * question `/help` answers — and `Unknown command: /` answers a different one.
+ */
+describe("a bare slash", () => {
+	function infoText(store: Store<UiState>): string {
+		return store
+			.get()
+			.entries.map((entry) => (entry.kind === "info" ? entry.text : ""))
+			.join("\n");
+	}
+
+	test("lists the commands instead of reporting an unknown one", () => {
+		const store = createStore<UiState>(initialUiState(true));
+		handleCommand("/", {
+			store,
+			modelName: "m",
+			onExit: () => {},
+			commandSuggestions: [["/model", "Switch model"]],
+		});
+
+		expect(infoText(store)).toContain("Commands:");
+		// The app's own commands are in it too, not only the built-in handful.
+		expect(infoText(store)).toContain("/model");
+		expect(infoText(store)).not.toContain("Unknown command");
+	});
+
+	test("a misspelled command still says so", () => {
+		// The bare slash is the only thing that changed: `/modle` is still a mistyped
+		// command, and quietly printing the list would hide that.
+		const store = createStore<UiState>(initialUiState(true));
+		handleCommand("/modle", { store, modelName: "m", onExit: () => {} });
+
+		expect(infoText(store)).toContain("Unknown command: /modle");
 	});
 });
 

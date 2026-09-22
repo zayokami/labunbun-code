@@ -349,10 +349,39 @@ function ruleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd
 	return inputMatchesSpecifier(toolName, rule.specifier, input, cwd);
 }
 
+/**
+ * What plan mode still permits: the tools that only look at the world, and the
+ * one that only asks about it.
+ *
+ * By name, because this package is handed tool names and never tool objects —
+ * `Tool.isReadOnly` is the tools' own answer to the same question, and nothing
+ * here can read it. So the two are kept in step by hand, and
+ * `plan-mode-allowlist.test.ts` walks the tool set the app actually builds and
+ * fails on any disagreement in either direction.
+ *
+ * AskUserQuestion is here because asking changes nothing, and plan mode is
+ * exactly where a guess would otherwise be made — a plan built on an assumed
+ * goal costs the user a whole approval cycle to reject. WebFetch/WebSearch are
+ * here for the same reason Read is: research that touches no file of the
+ * workspace. Bash is not, and that is the mode's promise: no shell at all, not
+ * even a read-only one.
+ */
 function isReadOnlyTool(toolName: string): boolean {
-	return ["Read", "Grep", "Glob", "LS", "TodoWrite", "TaskList", "TaskGet", "EnterPlanMode", "ExitPlanMode"].includes(
-		toolName,
-	);
+	return [
+		"Read",
+		"Grep",
+		"Glob",
+		"LS",
+		"BashOutput",
+		"WebFetch",
+		"WebSearch",
+		"TodoWrite",
+		"TaskList",
+		"TaskGet",
+		"AskUserQuestion",
+		"EnterPlanMode",
+		"ExitPlanMode",
+	].includes(toolName);
 }
 
 function isWorkspaceEdit(toolName: string, input: unknown, config: PermissionEngineConfig): boolean {

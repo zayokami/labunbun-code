@@ -488,12 +488,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if (ctx.mode === "dontAsk" || !handle) {
 				return { behavior: "deny", message: "Permission required (dontAsk mode denies unresolved prompts)" };
 			}
-			// ExitPlanMode does not need permission, it needs an answer: its own call
-			// puts the plan up for approve/reject and returns that. The dialog the
-			// default rules would raise here is the same question asked twice, and
-			// the second one is the real one. Deny rules and plan mode's own
-			// refusals are untouched — they decide above, not as an "ask".
-			if (toolName === "ExitPlanMode") {
+			// ExitPlanMode and AskUserQuestion do not need permission, they need an
+			// answer: each one's own call puts its dialog up and returns what the user
+			// said — the plan for approve/reject, the question for a choice. The
+			// dialog the default rules would raise here is the same question asked
+			// twice, and the second one is the real one. Deny rules and plan mode's
+			// own refusals are untouched — they decide above, not as an "ask".
+			if (toolName === "ExitPlanMode" || toolName === "AskUserQuestion") {
 				return { behavior: "allow" };
 			}
 			// Notification: the session is about to block on a human. This is

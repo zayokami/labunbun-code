@@ -753,6 +753,10 @@ export function handleCommand(
 	const [command] = text.split(/\s+/);
 
 	switch (command) {
+		// A bare slash asks the question /help answers: someone who typed it was
+		// reaching for the command list, and "Unknown command: /" is a refusal to a
+		// request they did not make.
+		case "/":
 		case "/help":
 			pushInfo(store, helpText(commandSuggestions, context.vim));
 			break;

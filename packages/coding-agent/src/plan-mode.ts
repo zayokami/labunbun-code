@@ -103,8 +103,9 @@ export function createPlanModeTools(callbacks: PlanModeCallbacks): AnyTool[] {
 			return {
 				content: [
 					textContent(
-						"Plan mode active. You may only use read-only tools (Read/Grep/Glob/LS). " +
-							"Design your approach, then call ExitPlanMode with the plan for approval.",
+						"Plan mode active. You may only use read-only tools (Read/Grep/Glob/LS, plus " +
+							"WebFetch/WebSearch for background), and AskUserQuestion when a decision is the " +
+							"user's. Design your approach, then call ExitPlanMode with the plan for approval.",
 					),
 				],
 			};

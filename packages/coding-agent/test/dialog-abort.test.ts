@@ -75,9 +75,15 @@ async function scene(options: {
 	abortWhenAsked?: boolean;
 	abortWhenPended?: boolean;
 	abortWhenHookUp?: boolean;
+	/** Start the session in this mode, the way `--permission-mode` does. */
+	permissionMode?: string;
+	/** Answer the question dialog, rather than leaving it up for the abort. */
+	answerWhenAsked?: boolean;
 }): Promise<Scene> {
 	const cwd = tempDir("lbb-dialog-cwd-");
 	const home = tempDir("lbb-dialog-home-");
+	const interactiveOptions: Record<string, unknown> = { cwd, home, theme: "dark" };
+	if (options.permissionMode) interactiveOptions.permissionMode = options.permissionMode;
 	const settings: Record<string, unknown> = {};
 	if (options.deny) settings.permissions = { deny: [options.deny] };
 	// The marker is what the scene synchronizes on: the hook writes it and then
@@ -159,8 +165,8 @@ async function scene(options: {
 						if (!pends) return true;
 						return new Promise((resolve) => { pendingPermission = resolve; });
 					},
-					// The dialog nobody answers: the promise the abort has to settle.
-					askUser: () => { asked++; return new Promise(() => {}); },
+					// Answered only when the scene asks for one, otherwise the dialog nobody answers.
+					askUser: () => { asked++; return ${options.answerWhenAsked === true} ? Promise.resolve(["a"]) : new Promise(() => {}); },
 					clearPermissionRequest() {
 						permissionCleared++;
 						if (pendingPermission) {
@@ -209,7 +215,7 @@ async function scene(options: {
 			}
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
-		await runInteractive(${JSON.stringify({ cwd, home: home, theme: "dark" })});
+		await runInteractive(${JSON.stringify(interactiveOptions)});
 		console.log(JSON.stringify({ prompt, asked, cleared, permissionCleared, dialogs, results }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
@@ -322,5 +328,48 @@ describe("a dialog and an abort", () => {
 		// but only one of them says the user's interrupt decided it.
 		expect(outcome.results[0]?.isError).toBe(true);
 		expect(outcome.results[0]?.text).toContain("denied");
+	}, 20_000);
+});
+
+/**
+ * One question, one dialog.
+ *
+ * Two lists decide whether the model gets to ask it: the mode's, which permits a
+ * tool by name, and the rules', which send everything unmatched to the
+ * permission dialog. Both got it wrong in the same direction — plan mode refused
+ * the question outright because its name list had drifted from the tools' own
+ * `isReadOnly`, and the default mode raised a permission prompt ahead of it, so
+ * the user had to clear the same question twice. A session showed what the first
+ * cost: the model, told to plan a task whose goal had never been stated, tried
+ * to ask which task and was told the question was not allowed, so it planned a
+ * guess and the user had to reject a whole plan to correct the premise.
+ */
+describe("a question the model asks", () => {
+	test("from plan mode it reaches the dialog instead of being refused by the mode", async () => {
+		const outcome = await scene({
+			permissionMode: "plan",
+			answerWhenAsked: true,
+			steps: [ASK, { text: "done" }],
+		});
+
+		expect(outcome.prompt).toBe("completed");
+		// The dialog was raised at all: before the list was fixed the call was denied
+		// by the mode and the question never reached the person it was for.
+		expect(outcome.asked).toBe(1);
+		// And the answer came back as an answer, not as a refusal.
+		expect(outcome.results[0]?.isError).toBe(false);
+		expect(outcome.results[0]?.text).toContain("→ a");
+		expect(outcome.results[0]?.text).not.toContain("Plan mode");
+		// One dialog, the question itself: a permission prompt ahead of it is the same
+		// question twice, and the user has to clear the meaningless one first.
+		expect(outcome.dialogs).toEqual([]);
+	}, 20_000);
+
+	test("in the default mode it is asked once, not gated first", async () => {
+		const outcome = await scene({ answerWhenAsked: true, steps: [ASK, { text: "done" }] });
+
+		expect(outcome.dialogs).toEqual([]);
+		expect(outcome.asked).toBe(1);
+		expect(outcome.results[0]?.text).toContain("→ a");
 	}, 20_000);
 });
