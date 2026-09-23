@@ -306,10 +306,36 @@ describe("mapping", () => {
 		});
 	});
 
+	test("the user's global memory document is imported as a rule too", () => {
+		withHome({ ".claude/settings.json": "{}", ".claude/CLAUDE.md": "Always answer in Chinese.\n" }, (home) => {
+			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const write = plan.writes.find((w) => w.path.includes("imported-claude-code.md"));
+			expect(write?.content).toBe("Always answer in Chinese.\n");
+			const item = plannedItem(plan, "~/.claude/CLAUDE.md");
+			expect(item?.action).toBe("map");
+			expect(item?.to).toContain("imported-claude-code.md");
+			// The user's own MEMORY.md is not a destination for an import.
+			expect(plan.writes.some((w) => w.path.endsWith("MEMORY.md"))).toBe(false);
+		});
+	});
+
+	test("a source with no memory document says nothing about one", () => {
+		withHome({ ".claude/settings.json": "{}" }, (home) => {
+			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			expect(plan.writes.some((w) => w.path.includes("imported-claude-code.md"))).toBe(false);
+			// Silence is the failure mode this import is full of lines to avoid: no
+			// document, no claim that one came across.
+			expect(plan.items.some((i) => i.from.includes("CLAUDE.md"))).toBe(false);
+		});
+	});
+
 	test.each([
 		["effortLevel", "reasoning-effort"],
 		["enabledPlugins", "plugin system"],
-		["projects", "usage statistics"],
+		// Named change: `projects` used to be reported as "usage statistics …
+		// not configuration" beside the telemetry keys. It holds each project's
+		// local-scope MCP servers, so it is bookkeeping *and* configuration now.
+		["projects", "none of it configuration this build reads"],
 		["tipsHistory", "usage statistics"],
 	])("%s is skipped with a stated reason", (key, reason) => {
 		withHome(FULL_TREE, (home) => {
@@ -317,6 +343,55 @@ describe("mapping", () => {
 			const item = plan.items.find((i) => i.from.includes(key));
 			expect(item?.action).toBe("skip");
 			expect(item?.detail).toContain(reason);
+		});
+	});
+
+	test("a local-scope MCP server keeps its project's name and is not carried", () => {
+		const state = JSON.stringify({
+			mcpServers: { docs: { type: "http", url: "https://mcp.example/docs" } },
+			projects: {
+				"/some/project": {
+					mcpServers: { scratchpad: { type: "stdio", command: "node", args: ["pad.js"] } },
+					lastCost: 0.42,
+				},
+			},
+		});
+		withHome({ ".claude/settings.json": "{}", ".claude.json": state }, (home) => {
+			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const local = plannedItem(plan, 'projects["/some/project"].mcpServers.scratchpad');
+			expect(local?.action).toBe("skip");
+			expect(local?.detail).toContain("local-scope server");
+			expect(local?.detail).toContain("<cwd>/.mcp.json");
+			// The user-scope server in the same file still comes across: this names
+			// the scope with no counterpart here, it does not turn the file away.
+			expect(plannedItem(plan, "~/.claude.json → mcpServers.docs")?.to).toBe(".mcp.json → mcpServers.docs");
+			// The map itself, exactly: `includes` would find the server line above.
+			// One line about it, and not the telemetry sentence it used to carry.
+			const map = plan.items.filter((i) => i.from === "~/.claude.json → projects");
+			expect(map.length).toBe(1);
+			expect(map[0]?.detail).toContain("bookkeeping");
+		});
+	});
+
+	test("the plugin line names what is enabled instead of claiming coverage", () => {
+		const settings = JSON.stringify({ enabledPlugins: { "some-plugin": true, "off-plugin": false } });
+		withHome({ ".claude/settings.json": settings }, (home) => {
+			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const item = plannedItem(plan, "enabledPlugins");
+			expect(item?.action).toBe("skip");
+			expect(item?.detail).toContain("some-plugin");
+			expect(item?.detail).not.toContain("off-plugin");
+			// The sentence that used to be here said skills and MCP servers covered
+			// the same ground, which is exactly what a plugin is made of.
+			expect(item?.detail).not.toContain("cover the same ground");
+		});
+	});
+
+	test("a plugin list with nothing enabled says that, rather than naming nobody", () => {
+		const settings = JSON.stringify({ enabledPlugins: { "off-plugin": false } });
+		withHome({ ".claude/settings.json": settings }, (home) => {
+			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			expect(plannedItem(plan, "enabledPlugins")?.detail).toContain("none of them is enabled in the source");
 		});
 	});
 
@@ -638,14 +713,46 @@ function planHooks(hooks: unknown, existing: Record<string, unknown> = {}): Migr
 }
 
 describe("claude code hooks", () => {
+	// Named change: this test pinned `timeout: 5000` coming across unchanged, which
+	// is 5000 seconds read as 5000 milliseconds — the unit bug itself, held in
+	// place by an assertion. The wait is thirty seconds, and thirty seconds is
+	// what the target gets.
 	test("a command handler for a known event is rewritten as-is", () => {
 		const planned = planHooks({
-			PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "./check.sh", timeout: 5000 }] }],
+			PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "./check.sh", timeout: 30 }] }],
 		});
 		expect(writtenSettings(planned).hooks).toEqual({
-			PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "./check.sh", timeout: 5000 }] }],
+			PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "./check.sh", timeout: 30_000 }] }],
 		});
 		expect(plannedItem(planned, "hooks")?.action).toBe("map");
+	});
+
+	test("a handler's timeout is seconds in the source and milliseconds here", () => {
+		const planned = planHooks({ Stop: [{ hooks: [{ type: "command", command: "wait.sh", timeout: 45 }] }] });
+		expect(writtenSettings(planned).hooks).toEqual({
+			Stop: [{ hooks: [{ type: "command", command: "wait.sh", timeout: 45_000 }] }],
+		});
+		const detail = plannedItem(planned, "→ hooks")?.detail ?? "";
+		expect(detail).toContain("converted from the seconds");
+		// Converting the unit is not a loss: the wait is the one the source asked for.
+		expect(plannedItem(planned, "→ hooks")?.action).toBe("map");
+	});
+
+	test("a timeout longer than this build waits is clamped to it, and counted", () => {
+		const planned = planHooks({ Stop: [{ hooks: [{ type: "command", command: "wait.sh", timeout: 900 }] }] });
+		expect(writtenSettings(planned).hooks).toEqual({
+			Stop: [{ hooks: [{ type: "command", command: "wait.sh", timeout: 600_000 }] }],
+		});
+		// An oversized value would fail the schema and take every hook with it, so
+		// the entry still exists — and the report does not call that a map.
+		expect(plannedItem(planned, "→ hooks")?.action).toBe("downgrade");
+		expect(plannedItem(planned, "→ hooks")?.detail).toContain("clamped");
+	});
+
+	test("a handler with no timeout keeps none, and the shorter default is said out loud", () => {
+		const planned = planHooks({ Stop: [{ hooks: [{ type: "command", command: "quick.sh" }] }] });
+		expect(writtenSettings(planned).hooks).toEqual({ Stop: [{ hooks: [{ type: "command", command: "quick.sh" }] }] });
+		expect(plannedItem(planned, "→ hooks")?.detail).toContain("where the source allowed 10 minutes");
 	});
 
 	test("an event this build has no hook for is dropped and counted", () => {

@@ -191,6 +191,11 @@ export interface RawClaudeCode {
 	settings: Record<string, unknown>;
 	/** ~/.claude.json — mostly runtime state; only a few keys are migratable. */
 	state: Record<string, unknown>;
+	/**
+	 * `~/.claude/CLAUDE.md` — the user's own global instructions, read by Claude
+	 * Code on every project (`utils/claudemd.ts`, the "user memory" entry).
+	 */
+	memory: string | null;
 	skills: RawFile[];
 	rules: RawFile[];
 	agents: RawFile[];
@@ -526,6 +531,7 @@ export function readClaudeCode(home: string): RawClaudeCode {
 	return {
 		settings: readJson(join(root, "settings.json")),
 		state: readJson(join(home, ".claude.json")),
+		memory: readText(join(root, "CLAUDE.md")),
 		skills: readSkillDirs(join(root, "skills")),
 		rules: readMarkdownDir(join(root, "rules")),
 		agents: readAgentFiles(join(root, "agents")),
@@ -983,8 +989,16 @@ export function resolveModelReference(value: string): string | undefined {
 	return undefined;
 }
 
-/** Keys in the source state file that are telemetry or runtime bookkeeping. */
-const STATE_TELEMETRY_KEYS = new Set(["projects", "tipsHistory", "promptQueueUseCount", "cachedChangelog"]);
+/**
+ * Keys in the source state file that are telemetry or runtime bookkeeping.
+ *
+ * `projects` is deliberately not among them: each entry under it holds that
+ * project's local-scope MCP servers (`services/mcp/config.ts` reads them for
+ * scope `local`), and those are configuration. They are named one by one in
+ * `planClaudeCode` — calling the whole map "not configuration" was a claim the
+ * file itself contradicts.
+ */
+const STATE_TELEMETRY_KEYS = new Set(["tipsHistory", "promptQueueUseCount", "cachedChangelog"]);
 
 /**
  * Keys of `~/.claude/settings.json` that either get imported or get a note of
@@ -1001,7 +1015,7 @@ const CLAUDE_SETTINGS_HANDLED = new Set([
 ]);
 
 /** Keys of `~/.claude.json` that are accounted for above; the rest is state. */
-const CLAUDE_STATE_HANDLED = new Set(["env", "model", "mcpServers", ...STATE_TELEMETRY_KEYS]);
+const CLAUDE_STATE_HANDLED = new Set(["env", "model", "mcpServers", "projects", ...STATE_TELEMETRY_KEYS]);
 
 function targetSettingsPath(home: string): string {
 	return join(home, ".labunbun", "settings.json");
@@ -1272,6 +1286,21 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				raw.home,
 			);
 			planCommands("claude-code", raw.claudeCode.commands, "~/.claude/commands", raw.home, force, items, writes);
+			// The user's global memory document. Every other source that has one
+			// imports it; this source did not, which left the most widely used
+			// instructions of the six on disk with the report saying nothing at all.
+			if (raw.claudeCode.memory?.trim()) {
+				planMemoryAsRule(
+					"claude-code",
+					"~/.claude/CLAUDE.md",
+					raw.home,
+					raw.claudeCode.memory,
+					"imported-claude-code.md",
+					force,
+					items,
+					writes,
+				);
+			}
 		}
 	}
 
@@ -1519,9 +1548,32 @@ export interface NormalizedHooks {
 	splitMatchers: string[];
 	/** Handlers that carried no usable command, or entries that were not objects. */
 	malformed: number;
+	/** Handlers whose timeout came across, converted from the source's seconds. */
+	convertedTimeouts: number;
+	/** Of those, how many asked for longer than this build waits and were clamped. */
+	clampedTimeouts: number;
+	/** Handlers that name no timeout, so the target's own default applies. */
+	untimedHandlers: number;
 }
 
-/** One handler in the target's shape, or nothing plus a count of why not. */
+/**
+ * The longest timeout the target's hook schema accepts, in milliseconds, and
+ * what a handler that names none runs for there (`hooks.ts`).
+ */
+const MAX_HOOK_TIMEOUT_MS = 600_000;
+const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
+
+/**
+ * One handler in the target's shape, or nothing plus a count of why not.
+ *
+ * The timeout is the one field whose *value* has to change on the way across:
+ * the source counts it in seconds — "Timeout in seconds for this specific
+ * command", `schemas/hooks.ts` — and runs a handler that names none for ten
+ * minutes (`utils/hooks.ts`, `TOOL_HOOK_EXECUTION_TIMEOUT_MS`), where this build
+ * counts milliseconds and waits a minute. A copy that keeps the number is the
+ * one thing that makes `timeout: 30` mean thirty milliseconds, so the
+ * conversion happens here and both counts are reported.
+ */
 function normalizeClaudeHandler(handler: unknown, counts: NormalizedHooks): NormalizedHookEntry["hooks"] {
 	if (!isRecord(handler)) {
 		counts.malformed += 1;
@@ -1535,13 +1587,23 @@ function normalizeClaudeHandler(handler: unknown, counts: NormalizedHooks): Norm
 		counts.malformed += 1;
 		return [];
 	}
-	const timeout = handler.timeout;
-	const usableTimeout =
-		typeof timeout === "number" && Number.isInteger(timeout) && timeout > 0 && timeout <= 600_000 ? timeout : undefined;
+	const seconds = handler.timeout;
+	let timeout: number | undefined;
+	if (typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0) {
+		// Clamped rather than dropped: the schema would reject an oversized value
+		// and take every hook in the file down with it, so the longest wait this
+		// build has is what a longer one becomes — and the report says how many.
+		const millis = Math.round(seconds * 1000);
+		timeout = Math.min(Math.max(millis, 1), MAX_HOOK_TIMEOUT_MS);
+		counts.convertedTimeouts += 1;
+		if (millis > MAX_HOOK_TIMEOUT_MS) counts.clampedTimeouts += 1;
+	} else {
+		counts.untimedHandlers += 1;
+	}
 	return [
-		usableTimeout === undefined
+		timeout === undefined
 			? { type: "command", command: handler.command }
-			: { type: "command", command: handler.command, timeout: usableTimeout },
+			: { type: "command", command: handler.command, timeout },
 	];
 }
 
@@ -1562,6 +1624,9 @@ export function normalizeClaudeHooks(raw: unknown): NormalizedHooks {
 		droppedMatchers: [],
 		splitMatchers: [],
 		malformed: 0,
+		convertedTimeouts: 0,
+		clampedTimeouts: 0,
+		untimedHandlers: 0,
 	};
 	if (!isRecord(raw)) {
 		if (raw !== undefined) result.malformed += 1;
@@ -1973,6 +2038,11 @@ function planClaudeHooks(
 		losses.push(`${normalized.droppedMatchers.length} matcher(s) using pattern characters this build escapes`);
 	}
 	if (normalized.malformed > 0) losses.push(`${normalized.malformed} entr(ies) not in the hook shape`);
+	if (normalized.clampedTimeouts > 0) {
+		losses.push(
+			`${normalized.clampedTimeouts} timeout(s) longer than the ${MAX_HOOK_TIMEOUT_MS / 1000} s this build waits, clamped to it`,
+		);
+	}
 
 	const events = Object.keys(normalized.config);
 	if (events.length === 0) {
@@ -2017,12 +2087,26 @@ function planClaudeHooks(
 		normalized.splitMatchers.length > 0
 			? `; ${summarizeNames(normalized.splitMatchers)} written as A|B, split into one entry per name`
 			: "";
+	// Converting a timeout is not a loss — the wait is the one the source asked
+	// for — so it belongs beside the rewrite, not in the "not carried" list. The
+	// default does have to be said out loud: the source's ten minutes become this
+	// build's sixty seconds for every handler that named no timeout of its own.
+	const timeouts = [
+		normalized.convertedTimeouts > 0
+			? `${normalized.convertedTimeouts} timeout(s) converted from the seconds the source writes to milliseconds here`
+			: "",
+		normalized.untimedHandlers > 0
+			? `a handler that names no timeout runs for ${DEFAULT_HOOK_TIMEOUT_MS / 1000} s here, where the source allowed 10 minutes`
+			: "",
+	]
+		.filter(Boolean)
+		.join("; ");
 	items.push({
 		source: "claude-code",
 		from,
 		to: "settings.json → hooks",
 		action: losses.length > 0 ? "downgrade" : "map",
-		detail: `${entries} matcher entr(ies) over ${events.length} event(s) rewritten${split}${losses.length > 0 ? `; not carried: ${losses.join("; ")}` : ""}`,
+		detail: `${entries} matcher entr(ies) over ${events.length} event(s) rewritten${split}${timeouts ? `; ${timeouts}` : ""}${losses.length > 0 ? `; not carried: ${losses.join("; ")}` : ""}`,
 		containsSecret: false,
 	});
 }
@@ -2132,6 +2216,42 @@ function planClaudeCode(
 		}
 	}
 
+	// Each `projects` entry holds that project's local-scope MCP servers —
+	// `services/mcp/config.ts` reads them for scope `local`. This build has no
+	// local scope: its servers live in `<cwd>/.mcp.json`, which is the
+	// repository's file, or in `~/.labunbun/.mcp.json`, which serves every
+	// project. A local server fits neither — carrying it into the second runs it
+	// everywhere — so each one is named, with both doors spelled out.
+	const projects = raw.state.projects;
+	if (isRecord(projects)) {
+		for (const [project, entry] of Object.entries(projects)) {
+			const local = isRecord(entry) && isRecord(entry.mcpServers) ? Object.keys(entry.mcpServers) : [];
+			for (const name of local) {
+				items.push({
+					source: "claude-code",
+					from: `~/.claude.json → projects["${project}"].mcpServers.${name}`,
+					to: "—",
+					action: "skip",
+					detail:
+						"local-scope server: the source holds it for this one project and there is no local scope here — " +
+						"copy it into <cwd>/.mcp.json to keep it to this project (that file belongs to the repository), or " +
+						"into ~/.labunbun/.mcp.json to have it everywhere",
+					containsSecret: false,
+				});
+			}
+		}
+		items.push({
+			source: "claude-code",
+			from: "~/.claude.json → projects",
+			to: "—",
+			action: "skip",
+			detail:
+				"per-project bookkeeping — run history and onboarding flags, none of it configuration this build reads; " +
+				"the local-scope MCP servers it also holds are named one by one when there are any",
+			containsSecret: false,
+		});
+	}
+
 	// fallback model: the source names one, the target keeps a list.
 	const fallback = typeof raw.settings.fallbackModel === "string" ? raw.settings.fallbackModel : undefined;
 	if (fallback?.trim()) {
@@ -2171,12 +2291,30 @@ function planClaudeCode(
 		});
 	}
 	if (raw.settings.enabledPlugins !== undefined) {
+		// The old wording claimed skills and MCP servers covered the same ground.
+		// They do not: a plugin is where all of those live at once — its skills,
+		// agents, commands, hooks and MCP servers — and nothing under a plugin's
+		// directory is read by this import. Naming the enabled ones at least says
+		// what is on the other side of the gap.
+		const enabled = isRecord(raw.settings.enabledPlugins)
+			? Object.entries(raw.settings.enabledPlugins)
+					.filter(([, on]) => on === true)
+					.map(([id]) => id)
+			: null;
+		const names =
+			enabled === null
+				? ""
+				: enabled.length > 0
+					? `; enabled in the source: ${summarizeNames(enabled)}`
+					: "; none of them is enabled in the source";
 		items.push({
 			source: "claude-code",
 			from: "~/.claude/settings.json → enabledPlugins",
 			to: "—",
 			action: "skip",
-			detail: "no plugin system here; skills and MCP servers cover the same ground",
+			detail:
+				"no plugin system here, and nothing under a plugin's own directory is read — a plugin carries skills, " +
+				`agents, commands, hooks and MCP servers, none of which this import takes from it${names}`,
 			containsSecret: false,
 		});
 	}

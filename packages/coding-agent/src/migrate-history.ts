@@ -522,12 +522,25 @@ function claudeAssistant(message: Record<string, unknown>, timestamp: number): A
 	});
 }
 
+/**
+ * `projects/<slug>/memory/` — the auto-memory Claude Code keeps per project: a
+ * `MEMORY.md` and the notes written beside it (`memdir/paths.ts`, `AUTO_MEM_DIRNAME`).
+ *
+ * It sits in the same directory as the transcripts, so the walk below used to
+ * count it as one more sidechain directory and the report called it a subagent
+ * transcript — a curated memory document described as a conversation nobody
+ * needed. Named for what it is now, and not imported: this build keeps one
+ * memory file for the user, so one project's notes would apply to every project.
+ */
+const AUTO_MEMORY_DIRNAME = "memory";
+
 function listClaudeCodeHistory(home: string): HistoryListing {
 	const root = join(home, ".claude", "projects");
 	const candidates: HistoryCandidate[] = [];
 	const notes: HistoryNote[] = [];
 	let subagents = 0;
 	let skippedDirs = 0;
+	let memories = 0;
 	let unreadable = 0;
 	try {
 		if (!existsSync(root)) return { candidates, notes };
@@ -535,6 +548,11 @@ function listClaudeCodeHistory(home: string): HistoryListing {
 			if (!project.isDirectory()) continue;
 			const projectDir = join(root, project.name);
 			for (const entry of readdirSync(projectDir, { withFileTypes: true })) {
+				// `<project>/memory/` is not a session directory at all.
+				if (entry.isDirectory() && entry.name === AUTO_MEMORY_DIRNAME) {
+					memories += 1;
+					continue;
+				}
 				// `<project>/<sessionId>/subagents/*.jsonl` — a sidechain that never
 				// belonged to the parent conversation.
 				if (entry.isDirectory()) {
@@ -588,6 +606,14 @@ function listClaudeCodeHistory(home: string): HistoryListing {
 		notes.push({
 			reason: "subagent transcript (kept out of the parent conversation)",
 			count: Math.max(subagents, skippedDirs),
+		});
+	}
+	if (memories > 0) {
+		notes.push({
+			reason:
+				"auto-memory directory (MEMORY.md and the notes beside it) — one project's memory, and this build keeps one " +
+				"memory file for the whole user, so importing it would apply that project's notes everywhere",
+			count: memories,
 		});
 	}
 	if (unreadable > 0) notes.push({ reason: "session file with no working directory", count: unreadable });

@@ -222,6 +222,30 @@ describe("migrate: history from Claude Code", () => {
 		});
 	});
 
+	test("a project's auto-memory directory is named, not called a subagent transcript", () => {
+		withHome({}, (home) => {
+			writeJsonl(claudePath(home, "aaaa-8888"), claudeRows(CWD));
+			const memoryDir = join(home, ".claude", "projects", "-tmp-proj", "memory");
+			mkdirSync(join(memoryDir, "logs", "2026", "01"), { recursive: true });
+			writeFileSync(join(memoryDir, "MEMORY.md"), "# notes\n\nMEMORY-CANARY\n");
+			writeFileSync(join(memoryDir, "logs", "2026", "01", "03.md"), "log\n");
+
+			const result = runHistory(home, { apply: true });
+			const notes = details(result);
+			expect(notes.some((detail) => detail.includes("auto-memory directory") && detail.includes("1 turned away"))).toBe(
+				true,
+			);
+			// One project's notes, one user-wide memory file: named to be copied by
+			// hand if the user wants them, not imported and not read out.
+			expect(result.report).not.toContain("MEMORY-CANARY");
+			// What it used to be called, and the reason this test exists.
+			expect(notes.some((detail) => detail.includes("subagent transcript (kept out of the parent conversation)"))).toBe(
+				false,
+			);
+			expect(result.plan.writes.length).toBe(1);
+		});
+	});
+
 	test("a session whose project directory is gone is skipped", () => {
 		withHome({}, (home) => {
 			writeJsonl(claudePath(home, "aaaa-5555"), claudeRows(join(home, "deleted-project")));
