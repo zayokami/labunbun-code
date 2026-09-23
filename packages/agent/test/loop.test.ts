@@ -314,6 +314,51 @@ describe("AgentSession loop", () => {
 		expect((results[0].content[0] as any).text).toContain("interrupted");
 	});
 
+	test("a refusal ends the run visibly instead of looking like a finished turn", async () => {
+		// A refusal arrives with no content and no tool calls, so without a branch
+		// for it the loop takes the "no tool calls" path and reports a completed
+		// turn that happened to say nothing. The user gets an empty reply and the
+		// run keeps going as if nothing had happened.
+		const { session, events, reason } = await runHarness([
+			{ text: "", stopReason: "refusal", errorMessage: "This request crosses a line I cannot cross." },
+		]);
+
+		expect(reason).toBe("error");
+		const end = events.at(-1) as any;
+		expect(end.type).toBe("agent_end");
+		expect(end.reason).toBe("error");
+		expect(end.errorMessage).toBe("This request crosses a line I cannot cross.");
+		// Recorded, not discarded: the turn happened and the transcript says so.
+		const assistants = session.messages.filter((m) => m.role === "assistant") as any[];
+		expect(assistants).toHaveLength(1);
+		expect(assistants[0].stopReason).toBe("refusal");
+	});
+
+	test("a refusal with no explanation still says something", async () => {
+		const { events, reason } = await runHarness([{ text: "", stopReason: "refusal" }]);
+		expect(reason).toBe("error");
+		expect((events.at(-1) as any).errorMessage).toBe("The model declined this request");
+	});
+
+	test("a refusal after tool calls still pairs the orphans", async () => {
+		// The turn can refuse partway through a batch, leaving tool calls the model
+		// asked for and never got results for. The transcript has to stay replayable.
+		//
+		// `maxTurns: 2` is a bound, not a scenario: the branch this test is about
+		// breaks on the first turn, so the limit is unreachable while it works. With
+		// the branch gone the turn's tool calls get dispatched for real, the scripted
+		// provider answers the same way again, and the loop spins — a hang reports as
+		// nothing at all, where a bounded failure reports as a failure.
+		const { session, events } = await runHarness(
+			[{ toolCalls: [{ name: "echo", arguments: { text: "orphan" } }], stopReason: "refusal" }],
+			{ tools: [echoTool()], maxTurns: 2 },
+		);
+		expect(events.at(-1)?.type).toBe("agent_end");
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0].isError).toBe(true);
+	});
+
 	test("length ladder: escalate once then continue-retries inject resume message", async () => {
 		const steps = [
 			{ text: "part one", stopReason: "length" as const },

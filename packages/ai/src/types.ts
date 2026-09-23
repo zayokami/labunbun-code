@@ -50,7 +50,13 @@ export type ToolResultContent = TextContent | ImageContent;
 // Messages
 // ---------------------------------------------------------------------------
 
-export type StopReason = "pending" | "stop" | "toolUse" | "length" | "error" | "aborted";
+/**
+ * How a turn ended. "refusal" is the model declining on policy grounds — a
+ * deliberate answer, not a failure of the request, but one the caller has to
+ * see: it arrives with no content and no tool calls, so folding it into "stop"
+ * makes a refusal indistinguishable from a model that simply said nothing.
+ */
+export type StopReason = "pending" | "stop" | "toolUse" | "length" | "error" | "aborted" | "refusal";
 
 export interface Usage {
 	/**
@@ -192,6 +198,26 @@ export interface Model<Api extends ApiId = ApiId> {
 	contextWindow: number;
 	maxOutputTokens: number;
 	reasoning: boolean;
+	/**
+	 * Which thinking shape the model accepts, where the vendor offers a choice
+	 * or has retired one of them. `"adaptive"` means the model decides for
+	 * itself and depth comes from a separate effort control; `"extended"` means
+	 * the caller names a token budget. Sending the wrong one is a 400 on the
+	 * first request, not a degraded answer.
+	 *
+	 * Absent means the adapter has nothing to say on the subject — for models
+	 * with a single documented shape that is the same thing as naming it.
+	 */
+	thinkingMode?: "adaptive" | "extended";
+	/**
+	 * Whether the provider validates that a replayed thinking block came from
+	 * the conversation it is being replayed into. Only a few models run that
+	 * check, and only they can be told what to do when it fails; the adapter
+	 * reads this to opt those models into dropping the block instead of failing
+	 * the whole request. Flagging a model that runs no check would send it a
+	 * parameter it does not know.
+	 */
+	thinkingBlockBinding?: boolean;
 	input: ("text" | "image")[];
 	pricing?: ModelPricing;
 }

@@ -25,6 +25,7 @@ afterEach(() => {
 /** The catalog as shipped. Named rather than read off `listModels()`, which also
  * carries whatever custom providers other test files registered. */
 const BUILT_IN_REFS = [
+	"anthropic/claude-opus-5-5",
 	"anthropic/claude-fable-5-1",
 	"anthropic/claude-mythos-5-1",
 	"anthropic/claude-fable-5",
@@ -64,6 +65,15 @@ describe("the built-in catalog", () => {
 	});
 
 	test("Anthropic prices are the published list rates", () => {
+		// Opus 5.5 is the third cache-read regime and the reason the multiplier is
+		// a parameter: this one reads at 0.05x, between the 0.025x pair below and
+		// the tenth everywhere else. Its write rate is the standard 1.25x input.
+		expect(resolveModel("anthropic/claude-opus-5-5")?.pricing).toEqual({
+			input: 4,
+			output: 20,
+			cacheRead: 0.2,
+			cacheWrite: 5,
+		});
 		// Fable 5.1 is the current Fable, and one of the two models in the catalog
 		// whose cache reads are billed at 0.025x input rather than 0.1x.
 		expect(resolveModel("anthropic/claude-fable-5-1")?.pricing).toEqual({
@@ -128,10 +138,47 @@ describe("the built-in catalog", () => {
 		});
 	});
 
+	test("every Anthropic row states which thinking shape it takes", () => {
+		// The one capability no row can inherit, because a wrong guess is a 400 on
+		// the first request rather than a worse answer: from 4.7 on these models
+		// refuse `enabled` + `budget_tokens` outright, and Haiku 4.5 is the reverse
+		// — it refuses `adaptive`. The rows are listed rather than counted so that a
+		// new model shows up here as a missing line instead of silently taking
+		// whatever the adapter defaults to.
+		const regimes = BUILT_IN_REFS.filter((ref) => ref.startsWith("anthropic/")).map((ref) => [
+			ref,
+			resolveModel(ref)?.thinkingMode,
+		]);
+		expect(regimes).toEqual([
+			["anthropic/claude-opus-5-5", "adaptive"],
+			["anthropic/claude-fable-5-1", "adaptive"],
+			["anthropic/claude-mythos-5-1", "adaptive"],
+			["anthropic/claude-fable-5", "adaptive"],
+			["anthropic/claude-mythos-5", "adaptive"],
+			["anthropic/claude-opus-5", "adaptive"],
+			["anthropic/claude-opus-4-8", "adaptive"],
+			["anthropic/claude-opus-4-7", "adaptive"],
+			["anthropic/claude-opus-4-6", "adaptive"],
+			["anthropic/claude-sonnet-5", "adaptive"],
+			["anthropic/claude-sonnet-4-6", "adaptive"],
+			["anthropic/claude-haiku-4-5", "extended"],
+		]);
+	});
+
+	test("the models that check thinking-block binding are named one by one", () => {
+		// The parameter the adapter sends on their behalf is one the API rejects on
+		// a model that runs no such check, so this flag is not a tier: Mythos 5.1
+		// records the same signatures as Fable 5.1 and runs no check, and is
+		// deliberately absent.
+		const flagged = BUILT_IN_REFS.filter((ref) => resolveModel(ref)?.thinkingBlockBinding);
+		expect(flagged).toEqual(["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1"]);
+	});
+
 	test("a cache read is a tenth of input, except on the models that say otherwise", () => {
 		// The multiplier is the rule; if a rate changes the read rate has to move
 		// with it, and a hand-typed table is exactly where that goes wrong.
 		const offTheRule = new Map([
+			["anthropic/claude-opus-5-5", 0.05],
 			["anthropic/claude-fable-5-1", 0.025],
 			["anthropic/claude-mythos-5-1", 0.025],
 		]);
@@ -194,6 +241,7 @@ describe("the built-in catalog", () => {
 				return [ref, model?.contextWindow, model?.maxOutputTokens];
 			}),
 		).toEqual([
+			["anthropic/claude-opus-5-5", 1_000_000, 128_000],
 			["anthropic/claude-fable-5-1", 1_000_000, 128_000],
 			["anthropic/claude-mythos-5-1", 1_000_000, 128_000],
 			["anthropic/claude-fable-5", 1_000_000, 128_000],

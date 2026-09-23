@@ -399,6 +399,19 @@ export class AgentSession {
 					reason = "aborted";
 					break;
 				}
+				if (assistant.stopReason === "refusal") {
+					// The model declined and said so. There is no tool call to run and
+					// no partial answer to keep, so the turn would otherwise end here
+					// looking exactly like a finished one that produced nothing — and
+					// the run would carry on to the next prompt as if nothing had
+					// happened. Asking again is not a remedy either: the same
+					// conversation tends to get the same answer, so the run ends with
+					// the explanation in front of the user.
+					this.#synthesizeOrphanResults(assistant);
+					errorMessage = assistant.errorMessage ?? "The model declined this request";
+					reason = "error";
+					break;
+				}
 				if (assistant.stopReason === "error") {
 					this.#synthesizeOrphanResults(assistant);
 					// The provider is the ground truth on what fits. When it refuses for

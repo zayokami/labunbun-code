@@ -27,6 +27,7 @@ import type {
 	AssistantMessageEvent,
 	Context,
 	Model,
+	StopReason,
 	StreamOptions,
 	ThinkingLevel,
 	WireTool,
@@ -73,11 +74,24 @@ export type AnthropicRawStreamEvent =
 	| { type: "content_block_stop"; index?: number }
 	| {
 			type: "message_delta";
-			delta?: { stop_reason?: string | null };
+			delta?: { stop_reason?: string | null; stop_details?: AnthropicStopDetails | null };
 			usage?: { output_tokens?: number };
 	  }
 	| { type: "message_stop" }
 	| { type: "error"; error?: { type?: string; message?: string } };
+
+/**
+ * Why a refusal happened, exactly as far as the API will say.
+ *
+ * Both fields are nullable and either can arrive alone: `category` is the
+ * machine-readable half and `explanation` the prose. On a beta endpoint there
+ * are more categories and more fields; this reader takes the GA shape and
+ * ignores additions rather than guessing at them.
+ */
+export interface AnthropicStopDetails {
+	category?: string | null;
+	explanation?: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // Request building
@@ -90,6 +104,60 @@ const THINKING_BUDGETS: Record<Exclude<ThinkingLevel, "off">, number> = {
 	high: 32768,
 };
 
+/**
+ * The depth dial for the models that think adaptively — what replaced the
+ * budget. There the model paces itself and effort is the only say the caller
+ * has left.
+ *
+ * `off` lands on the lowest rung rather than on nothing at all, because on
+ * these models there is nothing to switch off: thinking is not optional, and
+ * the vendor's guidance for a request that used to ask for a small budget is
+ * the lowest effort. `minimal` joins `low` for the same reason — the scale has
+ * no rung below it.
+ *
+ * The two rungs above `high` are deliberately unreachable here: this codebase
+ * has no UI for choosing a thinking level beyond these four, so mapping a level
+ * onto them would be inventing a setting nobody asked for.
+ */
+const THINKING_EFFORT: Record<ThinkingLevel, "low" | "medium" | "high"> = {
+	off: "low",
+	minimal: "low",
+	low: "low",
+	medium: "medium",
+	high: "high",
+};
+
+/** The effort rungs the wire accepts, all five of them. */
+type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** What the API should do when a replayed thinking block fails its prefix check. */
+interface AnthropicBlockBinding {
+	prefix_mismatch_behavior: "drop_block";
+}
+
+/**
+ * Opts a request into the beta that lets a thinking block be dropped instead of
+ * failing the whole request.
+ *
+ * Two halves that only work together: the beta header lives on the client call,
+ * and `thinking.block_binding` lives in the body. Sending the field without the
+ * header is itself a 400, and sending the header to a model that runs no prefix
+ * check asks it to honour a parameter it does not know — so both travel
+ * together, and only to the models flagged `thinkingBlockBinding`.
+ */
+export const THINKING_BLOCK_BINDING_BETA = "thinking-binding-controls-2026-08-01";
+
+/**
+ * Beta headers this model needs on every request, or nothing.
+ *
+ * Exported because the headers ride on the client call rather than in the
+ * request body, and `buildAnthropicRequest` — the piece that is pure and
+ * therefore the one the tests drive — cannot see them.
+ */
+export function anthropicBetaHeaders(model: Model): Record<string, string> {
+	return model.thinkingBlockBinding ? { "anthropic-beta": THINKING_BLOCK_BINDING_BETA } : {};
+}
+
 export interface AnthropicRequestParams {
 	[key: string]: unknown;
 	model: string;
@@ -98,7 +166,17 @@ export interface AnthropicRequestParams {
 	messages: Array<Record<string, unknown>>;
 	tools?: Array<{ name: string; description: string; input_schema: unknown; cache_control?: AnthropicCacheControl }>;
 	stream: true;
-	thinking?: { type: "enabled"; budget_tokens: number };
+	thinking?:
+		| { type: "enabled"; budget_tokens: number }
+		| { type: "adaptive"; display?: "summarized" | "omitted"; block_binding?: AnthropicBlockBinding };
+	/**
+	 * How deep the model thinks, on the models that decide for themselves.
+	 *
+	 * Spelled out even though the index signature above would let any key
+	 * through: that signature is exactly why an omission here is invisible to
+	 * the compiler, and this field is what the whole adaptive path hangs on.
+	 */
+	output_config?: { effort: AnthropicEffort };
 	metadata?: { user_id?: string };
 }
 
@@ -248,8 +326,27 @@ export function buildAnthropicRequest(
 		}));
 	}
 
+	// Two shapes, and a model takes exactly one of them: `enabled` with a budget
+	// on the oldest row, `adaptive` with an effort on everything from 4.7 on.
+	// The wrong one is a 400 on the first request, which is why the choice is a
+	// per-model capability rather than a default with an exception.
 	const thinking = options?.thinkingLevel ?? (model.reasoning ? "medium" : "off");
-	if (thinking !== "off") {
+	if (model.thinkingMode === "adaptive") {
+		params.thinking = {
+			type: "adaptive",
+			// Left off, these models return thinking blocks whose text is empty:
+			// the panel goes blank and so does the narration between tool calls,
+			// on every turn, without an error to explain it. `updates` is the
+			// richer beta value and is not what we ask for.
+			display: "summarized",
+			...(model.thinkingBlockBinding ? { block_binding: { prefix_mismatch_behavior: "drop_block" } } : {}),
+		};
+		// Sent even for the levels that would once have meant "think less":
+		// measuring the effort against the default and skipping the field would
+		// save nothing, because the resolved setting is rendered into the prompt
+		// either way.
+		params.output_config = { effort: THINKING_EFFORT[thinking] };
+	} else if (thinking !== "off") {
 		const budget = Math.min(THINKING_BUDGETS[thinking], params.max_tokens - 1);
 		if (budget >= 1024) {
 			params.thinking = { type: "enabled", budget_tokens: budget };
@@ -265,8 +362,13 @@ export function buildAnthropicRequest(
  * Key rules:
  * - Consecutive ToolResultMessages merge into ONE user message of tool_result
  *   blocks (the API requires tool_use/result pairing inside user turns).
- * - Thinking blocks round-trip with their signature so extended thinking
- *   conversations stay valid.
+ * - Thinking blocks round-trip with their signature, which is what the API
+ *   requires before it will take them back at all. That is not the same as
+ *   their being honoured: on the models that check a block against the
+ *   conversation that produced it, editing the history in place — which is
+ *   what compaction does — leaves a signature that no longer matches. The
+ *   `drop_block` opt-in keeps that a dropped block rather than a 400 on the
+ *   next request.
  * - A user message's text is sent as a block array even when it would fit in a
  *   bare string. The two forms are the same prompt, but one message carries a
  *   breakpoint on the turn it arrives and none on the turns after it, and a
@@ -391,13 +493,33 @@ function imageBlock(block: { type: "image"; mimeType: string; data: string }): R
 // Stream mapping
 // ---------------------------------------------------------------------------
 
-const STOP_REASON_MAP: Record<string, "stop" | "toolUse" | "length"> = {
+const STOP_REASON_MAP: Record<string, StopReason> = {
 	end_turn: "stop",
 	stop_sequence: "stop",
 	tool_use: "toolUse",
 	max_tokens: "length",
-	refusal: "stop",
+	// The server handed the turn back mid-flight and would take it again with
+	// the same messages. Nothing here continues a paused turn, so it ends the
+	// way an ordinary stop does — but it is named rather than left to the
+	// fallback, because "we do not continue these" is a decision.
+	pause_turn: "stop",
+	// "refusal" and "model_context_window_exceeded" are handled where they are
+	// read, not here: each needs more than a one-word translation.
 };
+
+/**
+ * The explanation to show for a refusal, or nothing when the API gave none.
+ *
+ * Returning undefined rather than inventing a sentence keeps the wording a user
+ * reads in the one place that has to say something regardless of what the wire
+ * carried.
+ */
+function refusalMessage(details: AnthropicStopDetails | null | undefined): string | undefined {
+	const explanation = details?.explanation?.trim();
+	if (explanation) return explanation;
+	const category = details?.category?.trim();
+	return category ? `Claude declined this request (${category})` : undefined;
+}
 
 /**
  * Transform a raw Anthropic event stream into our uniform protocol.
@@ -412,8 +534,8 @@ export async function* mapAnthropicStream(
 	const builder = new MessageBuilder(provider, modelId);
 	const blockTypes = new Map<number, string>();
 	// signature_delta arrives as its own delta event before block stop; buffer
-	// per index and attach when the thinking block closes. Without it, extended
-	// thinking blocks can't round-trip on the next request.
+	// per index and attach when the thinking block closes. Without it the block
+	// comes back unsigned, and an unsigned block cannot be replayed.
 	const signatures = new Map<number, string>();
 
 	for await (const event of rawEvents) {
@@ -489,7 +611,36 @@ export async function* mapAnthropicStream(
 					builder.message.usage.output = event.usage.output_tokens;
 				}
 				if (typeof stopReason === "string") {
-					builder.message.stopReason = STOP_REASON_MAP[stopReason] ?? "stop";
+					if (stopReason === "refusal") {
+						// A refusal is an answer, and an empty one: no content, no tool
+						// calls, and the same stop_reason a turn that finished normally
+						// would send. Folding it into "stop" files it as a successful
+						// turn that happened to say nothing, which is how a user ends up
+						// staring at an empty reply with nothing to act on.
+						builder.message.stopReason = "refusal";
+						builder.message.errorMessage = refusalMessage(event.delta?.stop_details);
+					} else if (stopReason === "model_context_window_exceeded") {
+						// The turn ran out of room, and unlike a max_tokens stop no
+						// continuation fixes it: the request itself is at the window.
+						// Reported as the same error the thrown form of this produces, so
+						// callers reach for the one remedy that works — sending less.
+						builder.message.stopReason = "error";
+						builder.message.errorKind = "context_overflow";
+						builder.message.errorMessage = "The model's context window was exceeded";
+					} else {
+						const mapped = STOP_REASON_MAP[stopReason];
+						if (mapped) {
+							builder.message.stopReason = mapped;
+						} else {
+							// A stop reason this adapter has never seen is not a normal
+							// finish. Defaulting to "stop" is how a refusal went unnoticed
+							// for as long as it did, and the failure it hides — an empty turn
+							// filed as a successful one — is invisible by construction. Naming
+							// the value is the difference between a bug report and a mystery.
+							builder.message.stopReason = "error";
+							builder.message.errorMessage = `Unrecognized stop reason: ${stopReason}`;
+						}
+					}
 				}
 				break;
 			}
@@ -523,7 +674,10 @@ export async function* mapAnthropicStream(
 
 export interface AnthropicClientLike {
 	messages: {
-		create(params: Record<string, unknown>): Promise<{ [Symbol.asyncIterator](): AsyncIterator<unknown> }>;
+		create(
+			params: Record<string, unknown>,
+			options?: { headers?: Record<string, string> },
+		): Promise<{ [Symbol.asyncIterator](): AsyncIterator<unknown> }>;
 	};
 }
 
@@ -584,10 +738,16 @@ export function createAnthropicStreamFn(options: AnthropicStreamFnOptions = {}) 
 			};
 			const client = options.clientFactory ? options.clientFactory() : await defaultClient(model, streamOptions);
 			const params = buildAnthropicRequest(model, context, streamOptions, cache);
+			// Per request rather than on the client, so that a model without the
+			// flag is not carrying a header meant for another one.
+			const betaHeaders = anthropicBetaHeaders(model);
 
 			let raw: AsyncIterable<AnthropicRawStreamEvent>;
 			try {
-				raw = (await client.messages.create(params)) as unknown as AsyncIterable<AnthropicRawStreamEvent>;
+				raw = (await client.messages.create(
+					params,
+					Object.keys(betaHeaders).length > 0 ? { headers: betaHeaders } : undefined,
+				)) as unknown as AsyncIterable<AnthropicRawStreamEvent>;
 			} catch (error) {
 				// The downgrade happens here, below `withRetry`, because a 400 is not a
 				// status that wrapper retries — it is right not to, and the consequence

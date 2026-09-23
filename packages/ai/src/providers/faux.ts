@@ -6,7 +6,7 @@
  */
 
 import { MessageBuilder } from "../message-builder.ts";
-import type { AssistantMessageEvent, Context, Model, StreamFn, ToolCall } from "../types.ts";
+import type { AssistantMessageEvent, Context, Model, StopReason, StreamFn, ToolCall } from "../types.ts";
 
 export const FAUX_MODEL: Model = {
 	id: "faux-1",
@@ -37,9 +37,13 @@ export interface FauxStep {
 	thinking?: string;
 	/** Full control: raw events emitted verbatim after `start`. */
 	events?: AssistantMessageEvent[];
-	/** Terminal stopReason override (e.g. "length", "error"). */
-	stopReason?: "stop" | "toolUse" | "length" | "error" | "aborted";
-	/** Error message when stopReason is "error"/"aborted". */
+	/**
+	 * Terminal stopReason override (e.g. "length", "error"). Every reason a real
+	 * adapter can end a turn with, minus the one that means "not ended yet" — a
+	 * double that cannot express a reason cannot test what the loop does with it.
+	 */
+	stopReason?: Exclude<StopReason, "pending">;
+	/** Error message when stopReason is "error"/"aborted", or a refusal's explanation. */
 	errorMessage?: string;
 	/** Classification for a scripted error, e.g. "context_overflow". */
 	errorKind?: "context_overflow";
@@ -141,6 +145,10 @@ export function fauxProvider(steps: FauxStep[]): FauxProvider {
 				});
 			}
 		} else {
+			// A refusal explains itself on the message, beside the stop reason,
+			// rather than through a separate error event — which is how the real
+			// adapters deliver one, and the loop reads it from there.
+			if (stop === "refusal" && step.errorMessage) builder.message.errorMessage = step.errorMessage;
 			yield builder.done(stop, step.usage);
 		}
 		callIndex++;

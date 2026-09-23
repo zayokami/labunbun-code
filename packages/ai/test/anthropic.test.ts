@@ -2,14 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { cacheCapability } from "../src/cache.ts";
 import {
 	type AnthropicClientLike,
+	anthropicBetaHeaders,
 	buildAnthropicRequest,
 	convertMessages,
 	createAnthropicStreamFn,
 	mapAnthropicStream,
 	planAnthropicBreakpoints,
 	previousRequestTail,
+	THINKING_BLOCK_BINDING_BETA,
 } from "../src/providers/anthropic.ts";
-import type { Context, Model, Usage, UserContent } from "../src/types.ts";
+import type { Context, Model, ThinkingLevel, Usage, UserContent } from "../src/types.ts";
 import { assistantMessage, toolResultMessage, userMessage } from "../src/types.ts";
 
 /** A usage record with only the fields a test cares about spelled out. */
@@ -27,8 +29,27 @@ const MODEL: Model = {
 	contextWindow: 200_000,
 	maxOutputTokens: 64_000,
 	reasoning: true,
+	// Added with the adaptive-thinking work: the registry row for this id is
+	// adaptive, so a fixture that left the field off would be pinning the shape
+	// the real model rejects.
+	thinkingMode: "adaptive",
 	input: ["text", "image"],
 };
+
+/**
+ * The one Anthropic row on the other regime — the last model that takes a
+ * thinking budget, and the only one that refuses `adaptive`. Naming it as a
+ * variant of `MODEL` keeps the two branches side by side.
+ */
+const HAIKU: Model = {
+	...MODEL,
+	id: "claude-haiku-4-5",
+	name: "Claude Haiku 4.5",
+	thinkingMode: "extended",
+};
+
+/** The two models whose thinking blocks are checked against their conversation. */
+const BINDING_MODEL: Model = { ...MODEL, id: "claude-opus-5-5", thinkingBlockBinding: true };
 
 function ctx(overrides: Partial<Context> = {}): Context {
 	return { systemPrompt: "You are helpful.", messages: [], tools: undefined, ...overrides };
@@ -63,17 +84,110 @@ describe("buildAnthropicRequest", () => {
 		]);
 	});
 
-	test("thinking budget derived from level and capped by max_tokens", () => {
+	// Named change: this test was "thinking budget derived from level and capped by
+	// max_tokens", and it pinned `{type:"enabled", budget_tokens}` for the model
+	// whose id is `claude-sonnet-5` — a shape that model rejects, so the assertion
+	// was holding the 400 in place. The budget half moved verbatim to the row where
+	// it is true; the shape this model takes is asserted here.
+	test("thinking: an adaptive row asks for adaptive thinking and carries no budget", () => {
 		const params = buildAnthropicRequest(MODEL, ctx(), { thinkingLevel: "medium" });
+		expect(params.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(params.output_config).toEqual({ effort: "medium" });
+		// Not merely omitted: there is nowhere to put a budget, and sending one is
+		// the 400 this whole path exists to avoid.
+		expect(params.thinking).not.toHaveProperty("budget_tokens");
+
+		// No level named still resolves to the midpoint rather than to silence.
+		expect(buildAnthropicRequest(MODEL, ctx()).output_config).toEqual({ effort: "medium" });
+	});
+
+	test("thinking: there is no off switch, so the lowest level is the lowest effort", () => {
+		// These models think whether or not anyone asks. What used to be "turn it
+		// off and save the tokens" is now the bottom rung of the effort scale, and
+		// the vendor's guidance is exactly that substitution.
+		const off = buildAnthropicRequest(MODEL, ctx(), { thinkingLevel: "off" });
+		expect(off.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(off.output_config).toEqual({ effort: "low" });
+	});
+
+	test("thinking: every level maps to an effort, and the scale has no rung below low", () => {
+		const effort = (level: ThinkingLevel) =>
+			buildAnthropicRequest(MODEL, ctx(), { thinkingLevel: level }).output_config?.effort;
+		expect((["off", "minimal", "low"] as ThinkingLevel[]).map(effort)).toEqual(["low", "low", "low"]);
+		expect(effort("medium")).toBe("medium");
+		expect(effort("high")).toBe("high");
+	});
+
+	test("thinking: a budget row is unchanged, down to the max_tokens cap", () => {
+		const params = buildAnthropicRequest(HAIKU, ctx(), { thinkingLevel: "medium" });
 		expect(params.thinking).toEqual({ type: "enabled", budget_tokens: 16_384 });
+		// And no effort dial: this model has no `output_config` to accept one.
+		expect(params.output_config).toBeUndefined();
 
 		// budget_tokens must stay below max_tokens
-		const capped = buildAnthropicRequest(MODEL, ctx(), { thinkingLevel: "high", maxOutputTokens: 2000 });
+		const capped = buildAnthropicRequest(HAIKU, ctx(), { thinkingLevel: "high", maxOutputTokens: 2000 });
 		expect(capped.thinking).toEqual({ type: "enabled", budget_tokens: 1999 });
 
 		// below the 1024 minimum, thinking is dropped entirely
-		const tiny = buildAnthropicRequest(MODEL, ctx(), { thinkingLevel: "low", maxOutputTokens: 1024 });
+		const tiny = buildAnthropicRequest(HAIKU, ctx(), { thinkingLevel: "low", maxOutputTokens: 1024 });
 		expect(tiny.thinking).toBeUndefined();
+	});
+
+	test("thinking: display is asked for, or the blocks come back empty", () => {
+		// The default on these models is "omitted": no error, no warning, just a
+		// blank thinking panel and no narration between tool calls.
+		for (const level of ["off", "medium"] as ThinkingLevel[]) {
+			const params = buildAnthropicRequest(MODEL, ctx(), { thinkingLevel: level });
+			expect(params.thinking).toMatchObject({ display: "summarized" });
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Thinking-block binding
+// ---------------------------------------------------------------------------
+
+describe("thinking-block binding", () => {
+	test("the beta header goes to the two models that run the check, and no others", () => {
+		// Spelled out rather than compared to itself: a wrong beta name is a 400,
+		// and the tests below use the constant on both sides.
+		expect(THINKING_BLOCK_BINDING_BETA).toBe("thinking-binding-controls-2026-08-01");
+		expect(anthropicBetaHeaders(BINDING_MODEL)).toEqual({ "anthropic-beta": THINKING_BLOCK_BINDING_BETA });
+		// Mythos 5.1 records the same signatures and runs no check; asking it to
+		// honour a parameter it does not know is the other way to get a 400.
+		expect(anthropicBetaHeaders({ ...MODEL, id: "claude-mythos-5-1" })).toEqual({});
+		expect(anthropicBetaHeaders(MODEL)).toEqual({});
+	});
+
+	test("the body carries drop_block exactly when the header does", () => {
+		// The field without the header is itself a 400, so they are one decision
+		// with two halves.
+		const bound = buildAnthropicRequest(BINDING_MODEL, ctx(), { thinkingLevel: "medium" });
+		expect(bound.thinking).toEqual({
+			type: "adaptive",
+			display: "summarized",
+			block_binding: { prefix_mismatch_behavior: "drop_block" },
+		});
+		const unbound = buildAnthropicRequest(MODEL, ctx(), { thinkingLevel: "medium" });
+		expect(unbound.thinking).not.toHaveProperty("block_binding");
+	});
+
+	test("the header rides on the request, and only for the models that need it", async () => {
+		// The builder is pure and cannot see the headers, so this is the seam where
+		// the two halves of the opt-in are wired together.
+		const seen: Array<{ headers?: Record<string, string> } | undefined> = [];
+		const client = (): AnthropicClientLike => ({
+			messages: {
+				create: async (_params, options) => {
+					seen.push(options);
+					return okStream();
+				},
+			},
+		});
+		const streamFn = createAnthropicStreamFn({ clientFactory: client });
+		await collect(streamFn(BINDING_MODEL, longCtx()));
+		await collect(streamFn(MODEL, longCtx()));
+		expect(seen).toEqual([{ headers: { "anthropic-beta": THINKING_BLOCK_BINDING_BETA } }, undefined]);
 	});
 });
 
@@ -543,6 +657,129 @@ describe("mapAnthropicStream", () => {
 			),
 		);
 		expect((ordinary.at(-1) as any).message.errorKind).toBeUndefined();
+	});
+
+	test("a refusal keeps its own stop reason and the explanation that came with it", async () => {
+		// A refusal arrives with no content and no tool calls, shaped exactly like a
+		// turn that finished and said nothing. Folding it into "stop" is how a user
+		// ends up staring at an empty reply with nothing to act on.
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{
+						type: "message_delta",
+						delta: {
+							stop_reason: "refusal",
+							stop_details: { category: "cyber", explanation: "This request crosses a line I cannot cross." },
+						},
+					},
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-opus-5-5",
+			),
+		);
+		const done = events.at(-1) as any;
+		expect(done.type).toBe("done");
+		expect(done.message.stopReason).toBe("refusal");
+		expect(done.message.errorMessage).toBe("This request crosses a line I cannot cross.");
+	});
+
+	test("a refusal with only a category still says something", async () => {
+		// Both fields are nullable and either can stand alone; the category is the
+		// machine-readable half and is worth showing when there is no prose.
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{ type: "message_delta", delta: { stop_reason: "refusal", stop_details: { category: "bio" } } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-opus-5-5",
+			),
+		);
+		expect((events.at(-1) as any).message.errorMessage).toBe("Claude declined this request (bio)");
+	});
+
+	test("a refusal with nothing attached leaves the wording to the caller", async () => {
+		// Nothing is invented here on purpose: the sentence a user reads is written
+		// once, where it is rendered.
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{ type: "message_delta", delta: { stop_reason: "refusal" } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-opus-5-5",
+			),
+		);
+		const done = events.at(-1) as any;
+		expect(done.message.stopReason).toBe("refusal");
+		expect(done.message.errorMessage).toBeUndefined();
+	});
+
+	test("a paused turn ends the turn rather than the run", async () => {
+		// `pause_turn` means the server handed the turn back and would take it again
+		// with the same messages. Nothing here continues one, so it stops like an
+		// ordinary turn — named rather than left to the fallback, because declining
+		// to continue is a decision and not a translation.
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{ type: "message_delta", delta: { stop_reason: "pause_turn" } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-opus-5-5",
+			),
+		);
+		expect((events.at(-1) as any).message.stopReason).toBe("stop");
+	});
+
+	test("a stop reason nobody has seen yet is not filed as a normal finish", async () => {
+		// The fallback is the difference between this whole family of defects and a
+		// mystery: an unrecognized reason handled as "stop" produces a turn with no
+		// content and no error to explain it.
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{ type: "message_delta", delta: { stop_reason: "some_future_reason" } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-opus-5-5",
+			),
+		);
+		const done = events.at(-1) as any;
+		expect(done.message.stopReason).toBe("error");
+		expect(done.message.errorMessage).toBe("Unrecognized stop reason: some_future_reason");
+	});
+
+	test("hitting the context window is reported as the overflow it is", async () => {
+		// Unlike a max_tokens stop, no continuation fixes this one: the request
+		// itself is at the window. Tagged the same way the thrown form is, so the
+		// caller reaches for the one remedy that works.
+		const events = await collect(
+			mapAnthropicStream(
+				raw([
+					{ type: "message_start", message: {} },
+					{ type: "message_delta", delta: { stop_reason: "model_context_window_exceeded" } },
+					{ type: "message_stop" },
+				]),
+				"anthropic",
+				"claude-opus-5-5",
+			),
+		);
+		const done = events.at(-1) as any;
+		expect(done.message.stopReason).toBe("error");
+		expect(done.message.errorKind).toBe("context_overflow");
+		expect(done.message.errorMessage).toBe("The model's context window was exceeded");
 	});
 
 	test("signature_delta attaches to the thinking block at close (extended thinking round-trip)", async () => {

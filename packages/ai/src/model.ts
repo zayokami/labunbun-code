@@ -28,9 +28,10 @@ function roundPrice(usd: number): number {
  * 1.25x. Derived here so a rate change moves all three numbers together instead
  * of leaving two of them behind.
  *
- * The read multiplier is a parameter because two models are priced at 0.025x
- * instead: Fable 5.1 and Mythos 5.1, the two ".1" releases, which is exactly why
- * the pair is where a copy-paste error would hide.
+ * The read multiplier is a parameter because two rows are priced at 0.025x
+ * instead — Fable 5.1 and Mythos 5.1, the two ".1" releases, which is exactly why
+ * the pair is where a copy-paste error would hide — and a third at 0.05x, Opus
+ * 5.5. Three regimes, and the vendor's pricing page footnotes each one by name.
  */
 function anthropicPricing(input: number, output: number, cacheReadMultiplier = 0.1): ModelPricing {
 	return {
@@ -65,6 +66,8 @@ function anthropicModel(
 		maxOutputTokens: number;
 		reasoning?: boolean;
 		images?: boolean;
+		thinkingMode?: "adaptive" | "extended";
+		thinkingBlockBinding?: boolean;
 		pricing: ModelPricing;
 	},
 ): Model {
@@ -82,6 +85,8 @@ function anthropicModel(
 		maxOutputTokens: opts.maxOutputTokens,
 		reasoning: opts.reasoning ?? true,
 		input: opts.images === false ? ["text"] : ["text", "image"],
+		...(opts.thinkingMode ? { thinkingMode: opts.thinkingMode } : {}),
+		...(opts.thinkingBlockBinding ? { thinkingBlockBinding: true } : {}),
 		pricing: opts.pricing,
 	};
 }
@@ -151,31 +156,58 @@ function openAICompatModel(
 const BUILT_IN_MODELS: Model[] = [
 	// Anthropic. Every model from the 4.6 generation on carries the full 1M-token
 	// window at standard pricing, so there is no long-context premium to model.
+	//
+	// `thinkingMode` is the capability the rows disagree on, and every row states
+	// it rather than inheriting a default: from 4.7 on — and, on the vendor's
+	// recommendation, for the 4.6 pair as well — the only shape these models take
+	// is adaptive thinking, with `output_config.effort` setting the depth and
+	// `enabled` + `budget_tokens` refused outright. Haiku 4.5 is the reverse and
+	// rejects `adaptive`. The wrong shape for a row is a 400 on the first request,
+	// which is why a row that guesses is worse than one that says nothing.
+	anthropicModel("claude-opus-5-5", "Claude Opus 5.5", {
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
+		// One of the two models whose thinking blocks are checked against the
+		// conversation that produced them; see `thinkingBlockBinding`.
+		thinkingBlockBinding: true,
+		// The 0.05x cache-read regime, between the 0.025x pair below and the
+		// standard tenth everywhere else.
+		pricing: anthropicPricing(4, 20, 0.05),
+	}),
 	anthropicModel("claude-fable-5-1", "Claude Fable 5.1", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
+		// The other. Mythos 5.1 records the same signatures but runs no such check,
+		// so it is deliberately not flagged.
+		thinkingBlockBinding: true,
 		// One of the two rows whose cache reads are not a tenth of input.
 		pricing: anthropicPricing(10, 50, 0.025),
 	}),
 	anthropicModel("claude-mythos-5-1", "Claude Mythos 5.1", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(10, 50, 0.025),
 	}),
 	// Fable 5 is legacy — still served, and still what a settings file may name.
 	anthropicModel("claude-fable-5", "Claude Fable 5", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(10, 50),
 	}),
 	anthropicModel("claude-mythos-5", "Claude Mythos 5", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(10, 50),
 	}),
 	anthropicModel("claude-opus-5", "Claude Opus 5", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(5, 25),
 	}),
 	// The 4.6-generation rows: legacy, still served, and what a settings file
@@ -184,31 +216,41 @@ const BUILT_IN_MODELS: Model[] = [
 	anthropicModel("claude-opus-4-8", "Claude Opus 4.8", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(5, 25),
 	}),
 	anthropicModel("claude-opus-4-7", "Claude Opus 4.7", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(5, 25),
 	}),
+	// The 4.6 pair is the one place the regime is a choice: both shapes are
+	// accepted, `enabled` is deprecated, and the vendor's guidance is adaptive.
 	anthropicModel("claude-opus-4-6", "Claude Opus 4.6", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(5, 25),
 	}),
 	anthropicModel("claude-sonnet-5", "Claude Sonnet 5", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(2, 10),
 	}),
 	anthropicModel("claude-sonnet-4-6", "Claude Sonnet 4.6", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
 		pricing: anthropicPricing(3, 15),
 	}),
+	// The only row on the other regime: Haiku 4.5 rejects `adaptive` and is the
+	// last model with a user-set thinking budget.
 	anthropicModel("claude-haiku-4-5", "Claude Haiku 4.5", {
 		contextWindow: 200_000,
 		maxOutputTokens: 64_000,
+		thinkingMode: "extended",
 		pricing: anthropicPricing(1, 5),
 	}),
 	// The OpenAI-compatible half of the table.
