@@ -5,11 +5,17 @@
  *
  * NORMAL supports:
  *   motions   h l 0 ^ $ w W b B e E f{c} F{c} t{c} T{c} ; , gg G j k
- *   operators d c y — doubled (dd/cc/yy) is linewise; cw keeps trailing
- *             whitespace (the classic cw/ce quirk); dgg/dG/dj/dk are linewise,
- *             and a delete leaves the caret on the first non-blank of the line
- *             it collapses onto
- *   counts    [n] prefixes multiply (2w, d3j, 2dd); operator+motion counts
+ *             (<Home> is `0` and <End> is `$`, wanted column and all — though a
+ *             count in front of either is still taken and dropped: `2<End>` is
+ *             not yet `$` two lines down)
+ *   operators d c y — doubled (dd/cc/yy) is linewise; cw stops at the end of the
+ *             word the caret is on (the classic cw/ce quirk: the whitespace after
+ *             it stays, and on that word's last character only that character is
+ *             changed, where ce walks on to the next word; a count is a plain Ne
+ *             again); dgg/dG/dj/dk are linewise, and a delete leaves the caret on
+ *             the first non-blank of the line it collapses onto, a change the
+ *             insert at the point it cut from
+ *   counts    [n] prefixes multiply (2w, d3j, 2dd, 2p); operator+motion counts
  *             multiply too (2d3w deletes 6 words)
  *   shifts    >> << and their motion (>{motion}) and visual (V> / V<) forms
  *   edits     x X D C S Y s r{c} ~ J p P i I a A o O u ctrl+r v V
@@ -18,14 +24,45 @@
  *             two keys, claimed here so they cannot fall through to the host and
  *             edit the buffer from NORMAL mode.
  *
+ * VISUAL is vim's charwise selection, reach and all: an end that reaches past the
+ * last character of its line takes that line's break (`v$d` and `vld` at a line
+ * end join the lines, a `vl` that merely arrived on the last character does not,
+ * and a motion-less `vd` on an empty line takes the break it stands on, which is
+ * what makes it join them). `$`, a `|` past the end of the line and an `l` that
+ * had nowhere left to go are what reach; `j`/`k`/arrows carry the reach onto the
+ * line they land on, and arm one there whenever the wanted column is past that
+ * line's last character (so `v$j` onto a shorter line reaches, and so does a `j`
+ * after a wrapping `<BS>`, which leaves its virtual column behind); `0`/`^`/`G`
+ * and a word motion clear it, and a backward `h` spends it first — the caret does
+ * not move, the end comes back onto the line's last character, and only the next
+ * `h` steps (`'>` goes from column len+1 to column len, as read off `'<`/`'>` on
+ * vim 9.1). The last line spends it the same way, break or no break; a caret
+ * standing on a line break cannot spend at all — on an empty line the break *is*
+ * the line, so `<BS>` and `<Space>` there wrap like anywhere else.
+ *
+ * `v<BS>` and `v<Space>` are those wrapping motions too, `whichwrap`'s `b` and `s`
+ * halves: `<BS>` moves left and off the front of the line (its end lands one
+ * column past the line above's last character, so the break goes with the delete
+ * — `v<BS>d` at a line start joins the two lines), and `<Space>` moves like `l`
+ * and wraps off the end of it (a blocked one arms the reach, exactly as a blocked
+ * `l` does, and from an armed end or an empty line's break it wraps onto the next
+ * line's first character). A step of an already-armed end is spent on the reach
+ * before it moves, and only a step that crossed the break arms a new one: that is
+ * why `v<BS><BS>d` takes one character more than `v<BS>d`, and not two.
+ *
  * Deliberate simplifications: f/t/F/T are line-scoped (as in vim); marks,
- * registers beyond the unnamed one, and `:` ex-commands are out of scope;
+ * registers beyond the unnamed one, and `:` ex-commands are out of scope — but
+ * the keys that would open them are still taken, so the keys after them cannot
+ * be read as commands instead: `m`/`"`/`'`/`` ` `` read the name that follows,
+ * `z`/`Z`/`q`/`@` read the command or the register that follows, and `/`/`?`/`:`
+ * take their input line up to Enter or Escape and drop it.
  * j/k delegate to prompt-history recall when the buffer has no newline (the
  * common single-line REPL case).
  *
  * Contracts the host relies on:
  *   - Enter is never consumed: it submits the prompt, abandoning any half-typed
- *     command rather than swallowing the send.
+ *     command rather than swallowing the send — a dropped `/` line or an
+ *     unfinished `m`/`"` name included.
  *   - Escape is consumed only when it has something to cancel. An idle Escape
  *     in NORMAL mode returns false, because ink hands the same keypress to every
  *     `useInput` listener with no stop-propagation: the REPL's own Escape
@@ -306,28 +343,54 @@ export function motionForwardWord(text: string, pos: number, big = false): numbe
 	let i = pos;
 	const startCls = charClass(text[i], big);
 	if (startCls !== 0) {
-		while (i < n && charClass(text[i], big) === startCls) i++;
+		while (i < n && charClass(text[i], big) === startCls) i = nextChar(text, i);
 	}
-	while (i < n && charClass(text[i], big) === 0) i++;
+	while (i < n && charClass(text[i], big) === 0) i = nextChar(text, i);
 	return i;
 }
 
 export function motionBackWord(text: string, pos: number, big = false): number {
 	if (pos <= 0) return 0;
-	let i = pos - 1;
-	while (i > 0 && charClass(text[i], big) === 0) i--;
+	let i = prevChar(text, pos);
+	while (i > 0 && charClass(text[i], big) === 0) i = prevChar(text, i);
 	const c = charClass(text[i], big);
-	while (i > 0 && charClass(text[i - 1], big) === c) i--;
+	while (i > 0 && charClass(text[prevChar(text, i)], big) === c) i = prevChar(text, i);
 	return i;
 }
 
 export function motionWordEnd(text: string, pos: number, big = false): number {
 	const n = text.length;
-	if (pos >= n - 1) return Math.max(0, n - 1);
-	let i = pos + 1;
-	while (i < n && charClass(text[i], big) === 0) i++;
-	while (i + 1 < n && charClass(text[i + 1], big) !== 0 && charClass(text[i + 1], big) === charClass(text[i], big)) {
-		i++;
+	// `e` needs a character after the caret to move onto, so on the buffer's last
+	// character it stays where it is — on that character, not on the second half of
+	// a surrogate pair.
+	if (pos >= n || nextChar(text, pos) >= n) return Math.max(0, lineLastChar(text, pos));
+	let i = nextChar(text, pos);
+	while (i < n && charClass(text[i], big) === 0) i = nextChar(text, i);
+	while (i < n) {
+		const next = nextChar(text, i);
+		if (next >= n || charClass(text[next], big) === 0 || charClass(text[next], big) !== charClass(text[i], big)) break;
+		i = next;
+	}
+	return i;
+}
+
+/**
+ * The last character of the run of same-class characters the caret stands in —
+ * the run's end, not the next word's. `e` steps on to the following word when
+ * the caret already stands on a word's last character; `cw` does not, and this
+ * is the motion that tells the two apart (`ce` keeps the plain `e`).
+ */
+export function motionWordEndHere(text: string, pos: number, big = false): number {
+	const n = text.length;
+	if (pos >= n) return Math.max(0, lineLastChar(text, pos));
+	const cls = charClass(text[pos], big);
+	let i = pos;
+	for (;;) {
+		const next = nextChar(text, i);
+		// A line break belongs to no run: `cw` at the end of a word changes the word,
+		// never the break after it.
+		if (next >= n || text[next] === "\n" || charClass(text[next], big) !== cls) break;
+		i = next;
 	}
 	return i;
 }
@@ -405,6 +468,20 @@ export class VimEngine {
 	#pendingG: { operator: Operator | null; count: number; explicit: boolean } | null = null;
 	/** Visual mode has one `g` command (`gJ`), so it needs its own latch. */
 	#visualPendingG = false;
+	/**
+	 * `m`, `"`, `'` and `` ` `` take one more key. Marks and named registers are out
+	 * of scope (see the header), so that key is read and dropped — read, because a
+	 * dropped prefix leaves the keys after it to be read as commands again: `ma`
+	 * meant "swallow `m`, then append", and `"ayy` typed "ayy" into the prompt.
+	 */
+	#prefixPending = false;
+	/**
+	 * `/`, `?` and `:` open vim's own input line, which this engine does not have
+	 * (no search, no ex-commands). The keys go there and are dropped, until Enter
+	 * (which still submits) or Escape (which cancels the line): `/foo` used to arm a
+	 * find with its first `o` and open a line with its second.
+	 */
+	#inputPending = false;
 	#countBuffer = "";
 	/** Whether the count `#takeCount` last returned was typed or the implicit 1. */
 	#countExplicit = false;
@@ -418,6 +495,15 @@ export class VimEngine {
 	#curswant: number | null = null;
 	#lastFind: { char: string; forward: boolean; till: boolean } | null = null;
 	#register: { text: string; linewise: boolean } = { text: "", linewise: false };
+	/**
+	 * Whether the caret's end of the visual selection reaches past the last
+	 * character of its line, so the line break is part of the selection. Only a
+	 * command that ran inside the selection arms it — `$`, a `|` past the line end,
+	 * or an `l` that ran out of characters: `$vd` deletes one character where `v$d`
+	 * takes the line break with it (probed on vim 9.1), and `ved` keeps the break
+	 * where `v2ld` at the end of a two-character line takes it.
+	 */
+	#visualPastEnd = false;
 
 	constructor(ops: VimOps) {
 		this.#ops = ops;
@@ -452,12 +538,36 @@ export class VimEngine {
 
 		if (key.meta) return false;
 		if (key.ctrl) {
+			// A ctrl combo belongs to the host, and it abandons a half-typed command
+			// the way Ctrl+C leaves vim's own command line.
+			this.#prefixPending = false;
+			this.#inputPending = false;
 			if (input === "r") {
 				this.#ops.redo();
 				this.#forgetCurswant(); // the restored caret is the new wanted column
 				return true;
 			}
 			return false; // host shortcuts (ctrl+c, ctrl+o, …)
+		}
+
+		// The one key `m`/`"`/`'` asked for: read it and drop it.
+		if (this.#prefixPending) {
+			this.#prefixPending = false;
+			if (key.return) return false; // the host still submits
+			return true; // the name, or the Escape that cancels it, is consumed
+		}
+
+		// vim's `/`, `?` and `:` input line: it holds every key up to Enter or Escape.
+		if (this.#inputPending) {
+			if (key.escape) {
+				this.#inputPending = false;
+				return true;
+			}
+			if (key.return) {
+				this.#inputPending = false;
+				return false; // Enter is the host's: the line is dropped, the send is not
+			}
+			return true; // the key belongs to the input line, and is dropped with it
 		}
 
 		if (this.mode === "visual" || this.mode === "visual-line") {
@@ -483,6 +593,8 @@ export class VimEngine {
 		this.#pendingCharCount = 1;
 		this.#pendingG = null;
 		this.#visualPendingG = false;
+		this.#prefixPending = false;
+		this.#inputPending = false;
 		this.#countBuffer = "";
 	}
 
@@ -662,6 +774,33 @@ export class VimEngine {
 				this.#pendingCharWithOp = true;
 				return true;
 			}
+			if (input === '"' || input === "m" || input === "'" || input === "`") {
+				// `d"a…` names the register to delete into — vim takes one after an
+				// operator as well as before it — and `dm…` names a mark. Neither exists
+				// here; the name is read and dropped with the operator, so what follows
+				// is still read as commands of its own (`d"ayy` used to leave `a` to
+				// enter insert and type the rest).
+				this.#resetPending();
+				this.#prefixPending = true;
+				return true;
+			}
+			if (input === "z" || input === "Z" || input === "q" || input === "@") {
+				// `dz…` cancels the operator like any other key that is no motion, but
+				// the `z` command that is left still waits for its own key: `2dzx`
+				// changes nothing, it does not delete a character with the `x`.
+				this.#resetPending();
+				this.#prefixPending = true;
+				return true;
+			}
+			if (input === "/" || input === "?" || input === ":") {
+				// `d/foo` deletes up to the next match. There is no search here, so the
+				// motion cannot land and the operator goes with it — and the input that
+				// follows goes where vim's command line is, not into the buffer
+				// (`d/foo` used to end in an `o`, opening a line).
+				this.#resetPending();
+				this.#inputPending = true;
+				return true;
+			}
 			// Unknown key under an operator: cancel and swallow (vim behavior).
 			this.#resetPending();
 			return true;
@@ -763,10 +902,16 @@ export class VimEngine {
 			return true;
 		}
 		if (key.home) {
+			// vim's <Home> is `0`: a move, so it discards a pending `$` (nv_beginline
+			// runs the same curswant bookkeeping).
 			this.#ops.setCursor(lineStart(this.#ops.getText(), this.#ops.getCursor()));
+			this.#wantHere();
 			return true;
 		}
 		if (key.end) {
+			// vim's <End> is `$` (nv_dollar): it arms MAXCOL, so a `j` onto a longer
+			// line comes back to that line's end rather than to this one's.
+			this.#curswant = MAXCOL;
 			this.#ops.setCursor(lineLastChar(this.#ops.getText(), this.#ops.getCursor()));
 			return true;
 		}
@@ -908,7 +1053,7 @@ export class VimEngine {
 			case "a":
 				// After the character, pair and all — `pos + 1` would land inside an
 				// emoji and the text typed next would split it.
-				this.#enterInsertAt(nextChar(this.#ops.getText(), this.#ops.getCursor()));
+				this.#enterInsertAt(this.#afterCaret(this.#ops.getText(), this.#ops.getCursor()));
 				return true;
 			case "A":
 				this.#enterInsertAt(lineEndExclusive(this.#ops.getText(), this.#ops.getCursor()));
@@ -925,6 +1070,28 @@ export class VimEngine {
 			case "V":
 				this.#startVisual("visual-line");
 				return true;
+			case "m":
+			case '"':
+			case "'":
+			case "`":
+			case "z":
+			case "Z":
+			case "q":
+			case "@":
+				// A mark, a named register, a `z`/`Z` screen command or a macro: out of
+				// scope, but its argument is still taken (see #prefixPending), and a
+				// half-typed `g` or count does not survive into the keys that follow it.
+				this.#resetPending();
+				this.#prefixPending = true;
+				return true;
+			case "/":
+			case "?":
+			case ":":
+				// vim's command line opens here. This engine has none, so the input is
+				// taken and dropped (see #inputPending).
+				this.#resetPending();
+				this.#inputPending = true;
+				return true;
 			case "u":
 				// `3u` is three undos, as in vim — and an undo discards a pending
 				// `$`: the restored caret is where the wanted column starts over.
@@ -939,7 +1106,7 @@ export class VimEngine {
 
 	// -- movement -------------------------------------------------------------
 
-	#moveHorizontal(delta: number): void {
+	#moveHorizontal(delta: number): boolean {
 		const text = this.#ops.getText();
 		const from = this.#ops.getCursor();
 		// The cursor stays on a character of its own line: `l` at a line end stays
@@ -947,9 +1114,13 @@ export class VimEngine {
 		// `x` from silently joining two lines.
 		const last = lineLastChar(text, from);
 		let pos = from;
+		let blocked = false;
 		for (let i = 0; i < Math.abs(delta); i++) {
 			if (delta > 0) {
-				if (pos >= last) break;
+				if (pos >= last) {
+					blocked = true;
+					break;
+				}
 				pos = nextChar(text, pos);
 			} else {
 				if (pos <= lineStart(text, pos)) break;
@@ -958,6 +1129,7 @@ export class VimEngine {
 		}
 		this.#ops.setCursor(pos);
 		this.#wantHereIfMoved(from);
+		return blocked;
 	}
 
 	/**
@@ -1212,21 +1384,31 @@ export class VimEngine {
 			// Where the pasted line itself begins once the block is in — the break
 			// added in front of a trailing paste comes before it.
 			let anchor: number;
-			let block = this.#register.text;
-			if (!block.endsWith("\n")) block += "\n";
+			// `[count]p` pastes the register count times, the whole block each time
+			// rather than just its first line (vim's op_paste loops). A register that
+			// already ends in a break repeats as it stands; one that does not gets its
+			// copies joined by the breaks its lines are missing.
+			const raw = this.#register.text;
+			let block = raw.endsWith("\n") ? raw.repeat(count) : Array.from({ length: count }, () => raw).join("\n");
 			if (targetLine < lineCount(text)) {
 				insertAt = nthLineStart(text, targetLine);
 				anchor = insertAt;
+				// A linewise paste is whole lines: a register whose last line had no
+				// break (the end of a buffer that has none) gets one back here.
+				if (!block.endsWith("\n")) block += "\n";
 			} else {
 				insertAt = text.length;
 				anchor = insertAt;
 				if (text.length > 0 && !text.endsWith("\n")) {
+					// The paste brings its own break in front, and does not invent one
+					// after the last line it holds.
 					block = `\n${block.replace(/\n$/, "")}`;
 					anchor = insertAt + 1;
-				} else if (text.length === 0) {
-					block = this.#register.text;
-					anchor = 0;
+				} else if (text.length > 0 && !block.endsWith("\n")) {
+					block += "\n";
 				}
+				// An empty buffer takes the block exactly as it stands: there is no line
+				// edge for an extra break to belong to.
 			}
 			const out = text.slice(0, insertAt) + block + text.slice(insertAt);
 			// On the first non-blank of the line just pasted (vim), not on the break.
@@ -1237,7 +1419,7 @@ export class VimEngine {
 
 		// Charwise `p` goes after the character under the caret — the whole of it, or
 		// the paste lands between the halves of an emoji's surrogate pair.
-		const insertAt = before ? pos : Math.min(text.length, nextChar(text, pos));
+		const insertAt = before ? pos : this.#afterCaret(text, pos);
 		let out = text.slice(0, insertAt);
 		for (let i = 0; i < count; i++) out += this.#register.text;
 		out += text.slice(insertAt);
@@ -1260,6 +1442,18 @@ export class VimEngine {
 	#enterInsertAt(pos: number): void {
 		this.#ops.setCursor(this.#clamp(pos));
 		this.#enterInsert();
+	}
+
+	/**
+	 * The insertion point just past the character under the caret — where `a` and a
+	 * charwise `p` put their text. It stops at the line break rather than stepping
+	 * over it: on an empty line the caret sits *on* the break, and `nextChar` walks
+	 * that like any other character, which would land the text on the line below
+	 * (vim stays put — `a` on an empty line is `i`, and a paste goes to the start of
+	 * the empty line it is on).
+	 */
+	#afterCaret(text: string, pos: number): number {
+		return Math.min(lineEndExclusive(text, pos), nextChar(text, pos));
 	}
 
 	#enterInsert(): void {
@@ -1291,12 +1485,21 @@ export class VimEngine {
 
 		let range = this.#motionRange(motion, count, findChar);
 		if (!range) return;
-		// cw quirk: on a non-blank char, cw acts like ce (keeps trailing
-		// whitespace). Plain dw still eats the trailing spaces. `cW` is the same
-		// command on WORDs and gets the same treatment.
-		if (operator === "c" && (motion === "w" || motion === "W") && !/\s/.test(text[this.#ops.getCursor()] ?? " ")) {
-			const endRange = this.#motionRange(motion === "W" ? "E" : "e", count);
-			if (endRange) range = endRange;
+		// cw quirk: on a non-blank char, cw stops at the end of the word the caret is
+		// on (keeps the trailing whitespace, and does not step on to the next word
+		// when the caret already stands on a word's last character). A count is a
+		// plain `Ne` instead — `c2w` on the only word of a line takes the next one
+		// too, as `2e` would. Plain `dw` still eats the trailing spaces, and `cW` is
+		// the same command on WORDs.
+		const at = this.#ops.getCursor();
+		if (operator === "c" && (motion === "w" || motion === "W") && !/\s/.test(text[at] ?? " ")) {
+			if (count === 1) {
+				const stop = motionWordEndHere(text, at, motion === "W");
+				range = { start: at, end: nextChar(text, stop), inclusive: true };
+			} else {
+				const endRange = this.#motionRange(motion === "W" ? "E" : "e", count);
+				if (endRange) range = endRange;
+			}
 		}
 		this.#runOperator(operator, range.start, range.end, range.inclusive);
 	}
@@ -1549,7 +1752,12 @@ export class VimEngine {
 			return;
 		}
 		const out = text.slice(0, start) + text.slice(cutEnd);
-		if (out !== text) this.#ops.setAll(out, settleCursor(out, start));
+		// A change leaves the insert standing where the text was cut out — the cut
+		// point itself, which is one past the end when the cut ran to the buffer end
+		// (`cw` on "foo bar" leaves "foo " with the caret after the space, column 5).
+		// A delete settles onto a real character instead, where NORMAL mode can hold
+		// the caret.
+		if (out !== text) this.#ops.setAll(out, operator === "c" ? start : settleCursor(out, start));
 		if (operator === "c") this.#enterInsert();
 		else this.#wantHere();
 	}
@@ -1616,7 +1824,9 @@ export class VimEngine {
 		this.#register = { text: text.slice(start, end), linewise: false };
 		if (end > start) {
 			const out = text.slice(0, start) + text.slice(end);
-			this.#ops.setAll(out, settleCursor(out, start));
+			// The insert stands at the cut point, as it does for every other change
+			// (see #runOperator).
+			this.#ops.setAll(out, operator === "c" ? start : settleCursor(out, start));
 		}
 		if (operator === "c") this.#enterInsert();
 	}
@@ -1635,7 +1845,13 @@ export class VimEngine {
 		// The other one only switches flavour (v ↔ V) and keeps the anchor: vim
 		// turns the same selection charwise or linewise instead of starting a new
 		// one at the cursor.
-		if (this.mode !== "visual" && this.mode !== "visual-line") this.#anchor = this.#ops.getCursor();
+		if (this.mode !== "visual" && this.mode !== "visual-line") {
+			this.#anchor = this.#ops.getCursor();
+			// Starting a selection settles the wanted column on the caret again: a `$`
+			// armed in NORMAL mode is not read as "past the line end" by the selection
+			// it begins (`$vd` deletes one character, `v$d` takes the line break).
+			this.#visualPastEnd = false;
+		}
 		this.mode = mode;
 		this.#syncSelection();
 	}
@@ -1649,15 +1865,75 @@ export class VimEngine {
 			const end = lineEndExclusive(text, Math.max(a, c));
 			this.selection = { start, end: Math.min(text.length, end + 1) };
 		} else {
-			// A charwise selection is made of characters. When the cursor sits on the
-			// newline of an empty line there is no character under it, so the
-			// selection is empty — `d` must not take the line break with it.
-			const head = Math.max(a, c);
-			// The selection covers whole characters, so `v` over an emoji cannot
-			// leave half of it behind for `d` to write into the buffer.
-			const end = head < text.length && text[head] === "\n" ? head : nextChar(text, head);
-			this.selection = { start: Math.min(a, c), end: Math.min(text.length, end) };
+			// A charwise selection covers whole characters, so `v` over an emoji
+			// cannot leave half of it behind for `d` to write into the buffer. Each
+			// end contributes the character it stands on — or, when it stands past
+			// the line's last character, the line break after it. The two ranges are
+			// unioned, which is what makes `vl` at a line end (`[last, break)`, the
+			// anchor still contributing its own character) join two lines.
+			const from = this.#endpoint(a, false);
+			const to = this.#endpoint(c, true);
+			this.selection = {
+				start: Math.min(from.lo, to.lo),
+				end: Math.min(text.length, Math.max(from.hi, to.hi)),
+			};
 		}
+	}
+
+	/**
+	 * The half-open range one end of a charwise selection covers: the character it
+	 * stands on, or the line break after it when it stands past the line's last
+	 * character. `moving` marks the end a motion drove — the wanted column, and with
+	 * it the reach past the line, belongs to that end alone. The anchor is a plain
+	 * position, which is why `vld` on a line's last character takes the break (the
+	 * caret's range is `[break, break + 1)` and the anchor still contributes the
+	 * character it stands on) while a motion-less `vd` there does not.
+	 */
+	#endpoint(pos: number, moving: boolean): { lo: number; hi: number } {
+		const text = this.#ops.getText();
+		if (this.#pastLineEnd(pos, moving)) {
+			const lo = lineEndExclusive(text, pos);
+			return { lo, hi: lo + 1 };
+		}
+		return { lo: pos, hi: nextChar(text, pos) };
+	}
+
+	/**
+	 * Whether the caret at `pos` is past the end of the characters on its line — the
+	 * position vim's `w_virtcol` reports when a motion asks for a column the line
+	 * cannot fill. The caret itself stays on a character (NORMAL mode has nowhere to
+	 * stand on a line break), which is why this has to be a question about the
+	 * wanted column rather than about the caret alone.
+	 */
+	#pastLineEnd(pos: number, moving: boolean): boolean {
+		const text = this.#ops.getText();
+		// A caret standing on a line break has no character of its own there. That is
+		// geometry, not a wanted column: an empty line, where the break is the line.
+		if (text[pos] === "\n") return true;
+		if (!moving || !this.#visualPastEnd) return false;
+		// Only the line's last character can have a column past it, and only a line
+		// with a break after it can give that break up.
+		return pos === lineLastChar(text, pos) && lineEndExclusive(text, pos) < text.length;
+	}
+
+	/**
+	 * Whether the selection's end stands one column past its line's last character
+	 * — the state `$`, a `|` past the line and a blocked `l` leave behind, and the
+	 * one thing a backward step spends before it moves (`v$h` puts the end back on
+	 * that character without moving the caret).
+	 *
+	 * The last line is included: there is no break to give up, but the wanted
+	 * column is still one past the last character, so `v$h` there spends the reach
+	 * exactly as it does on any other line (the selection keeps covering the whole
+	 * line). A caret standing on a line break is not this state — on an empty line
+	 * the break *is* the line, and `<BS>` there wraps like anywhere else.
+	 */
+	#reachArmed(pos: number): boolean {
+		const text = this.#ops.getText();
+		// A caret standing on a line break is not this state: an empty line's break
+		// *is* the line, and `<BS>` there wraps like anywhere else (`v$<BS>` on an
+		// empty line takes the break above it, it does not spend one).
+		return this.#visualPastEnd && text[pos] !== "\n" && pos === lineLastChar(text, pos);
 	}
 
 	#handleVisual(input: string, key: VimKey): boolean {
@@ -1693,20 +1969,15 @@ export class VimEngine {
 		const text = this.#ops.getText();
 
 		if (key.upArrow || key.downArrow) {
-			this.#vertical(key.upArrow ? -count : count);
-			this.#syncSelection();
+			this.#moveVisualVertical(key.upArrow ? -1 : 1, count);
 			return true;
 		}
 		if (key.leftArrow || key.rightArrow) {
-			this.#moveHorizontal(key.rightArrow ? count : -count);
-			this.#syncSelection();
+			this.#moveVisualHorizontal(key.rightArrow ? count : -count);
 			return true;
 		}
 		if (key.backspace) {
-			// Plain `h`: vim cancels the wrap here, so a selection never grows
-			// backwards across a line break by accident.
-			this.#moveHorizontal(-count);
-			this.#syncSelection();
+			this.#moveVisualBackspace(count);
 			return true;
 		}
 		if (key.delete) {
@@ -1717,19 +1988,18 @@ export class VimEngine {
 
 		switch (input) {
 			case "h":
-				this.#moveHorizontal(-count);
-				this.#syncSelection();
+				this.#moveVisualHorizontal(-count);
 				return true;
 			case "l":
-				this.#moveHorizontal(count);
-				this.#syncSelection();
+				this.#moveVisualHorizontal(count);
+				return true;
+			case " ":
+				this.#moveVisualSpace(count);
 				return true;
 			case "j":
-			case "k": {
-				for (let i = 0; i < count; i++) this.#vertical(input === "j" ? 1 : -1);
-				this.#syncSelection();
+			case "k":
+				this.#moveVisualVertical(input === "j" ? 1 : -1, count);
 				return true;
-			}
 			case "w":
 				this.#moveVisualByWord("w", false, count);
 				return true;
@@ -1749,28 +2019,37 @@ export class VimEngine {
 				this.#moveVisualByWord("e", true, count);
 				return true;
 			case "0":
+				this.#visualPastEnd = false;
 				this.#ops.setCursor(lineStart(text, this.#ops.getCursor()));
 				this.#syncSelection();
 				this.#wantHere();
 				return true;
 			case "^":
+				this.#visualPastEnd = false;
 				this.#ops.setCursor(motionFirstNonBlank(text, this.#ops.getCursor()));
 				this.#syncSelection();
 				this.#wantHere();
 				return true;
-			case "|":
+			case "|": {
 				// The same column command as in NORMAL: the caret lands on it (or on
 				// the line's last character) and the wanted column keeps the request.
+				// A column the line cannot fill is a column past its end — `v9|d` takes
+				// the line break, `v2|d` on a two-character line does not.
+				const start = lineStart(text, this.#ops.getCursor());
 				this.#curswant = count - 1;
+				this.#visualPastEnd = count - 1 >= lineEndExclusive(text, start) - start;
 				this.#ops.setCursor(this.#columnOn(lineOf(text, this.#ops.getCursor()), count - 1));
 				this.#syncSelection();
 				return true;
+			}
 			case "$":
+				this.#curswant = MAXCOL; // `v$j` comes back to the end of line 2
+				this.#visualPastEnd = true;
 				this.#ops.setCursor(lineLastChar(text, this.#ops.getCursor()));
 				this.#syncSelection();
-				this.#curswant = MAXCOL; // `v$j` comes back to the end of line 2
 				return true;
 			case "G":
+				this.#visualPastEnd = false;
 				this.#ops.setCursor(motionFirstNonBlank(text, nthLineStart(text, lineCount(text) - 1)));
 				this.#syncSelection();
 				this.#wantHere();
@@ -1868,7 +2147,119 @@ export class VimEngine {
 		this.#exitVisual(this.#ops.getCursor());
 	}
 
+	/**
+	 * A horizontal move inside a selection, and the one thing it decides for it: an
+	 * `l` that ran out of characters reaches a column past the line's last one, so
+	 * the selection takes the line break (`vld` at a line end joins the two lines,
+	 * while a `vl` that merely arrived on that character does not). A backward step
+	 * spends that reach first — `v$h` puts the selection's end back on the line's
+	 * last character without moving the caret, so a second `h` is the one that steps
+	 * (`'>` moves from column len+1 to column len, the caret stays; probed on 9.1).
+	 */
+	/**
+	 * A `j`/`k` (or an arrow) inside a selection: the wanted column decides the
+	 * reach as well as the landing. A column the landed line can fill is a plain
+	 * position, so it clears whatever reach an earlier motion armed; a column past
+	 * that line's last character leaves the end one column past it (`v$j` onto a
+	 * shorter line takes its break), and it carries — `v<BS>` wraps with the wanted
+	 * column one past the line above, so the `j` after it arms the reach again even
+	 * though the `<BS>` before it had spent one.
+	 */
+	#moveVisualVertical(deltaLines: number, count: number): void {
+		for (let i = 0; i < count; i++) this.#vertical(deltaLines);
+		const text = this.#ops.getText();
+		const start = lineStart(text, this.#ops.getCursor());
+		this.#visualPastEnd = this.#wantColumn() >= lineEndExclusive(text, start) - start;
+		this.#syncSelection();
+	}
+
+	#moveVisualHorizontal(delta: number): void {
+		const from = this.#ops.getCursor();
+		let steps = delta;
+		if (delta < 0 && this.#reachArmed(from)) {
+			steps = delta + 1; // the first step back is spent on the reach
+			this.#visualPastEnd = false;
+		}
+		// The move runs first: `delta > 0 && …` would short-circuit a backward step
+		// away entirely, and `h` inside a selection has to move like any other `h`.
+		const blocked = steps === 0 ? false : this.#moveHorizontal(steps);
+		if (delta > 0) this.#visualPastEnd = blocked;
+		this.#syncSelection();
+	}
+
+	/**
+	 * A `<BS>` inside a selection: vim's own binding, `whichwrap`'s `b` half — a
+	 * plain Backspace is `h` with the wrap, and visual mode is no exception (batch A
+	 * read it as `h` here and left a comment claiming vim cancels the wrap; vim 9.1
+	 * takes it, and the end that lands on the line above takes that line's break).
+	 *
+	 * Count steps, one at a time, because the reach sits between them: a step of an
+	 * armed end is spent on the reach (`v<BS><BS>` on the second line of `"one
+	 * two\nthird"` deletes `o\nt`, not `wo\nt` — the first step wraps, the second
+	 * spends, and only the third would step off the last character), a step that
+	 * has a character to step onto takes it and clears the reach, and a step that
+	 * crosses a line break arms it — the wrap lands on the line above's last
+	 * character with its column one past the end, exactly what `$` arms.
+	 */
+	#moveVisualBackspace(count: number): void {
+		const text = this.#ops.getText();
+		let want: number | null = null;
+		for (let i = 0; i < count; i++) {
+			const from = this.#ops.getCursor();
+			if (this.#reachArmed(from)) {
+				this.#visualPastEnd = false; // spent: the caret does not move, and the
+				continue; // wanted column it was standing at is kept
+			}
+			const next = settleCursor(text, snapToChar(text, backspaceBoundary(text, from)));
+			const wrapped = lineOf(text, next) < lineOf(text, from);
+			this.#visualPastEnd = wrapped;
+			this.#ops.setCursor(next);
+			// A step that crossed the break leaves the end one column past the line's
+			// last character, and that virtual column is what a following `j` aims at:
+			// `v<BS>jj` on "one two"/"third"/"a long line here" lands on column 8 of
+			// the third line, one past where the caret's own column would put it.
+			want = wrapped ? lineEndExclusive(text, next) - lineStart(text, next) : next - lineStart(text, next);
+		}
+		if (want !== null) this.#curswant = want;
+		this.#syncSelection();
+	}
+
+	/**
+	 * A `<Space>` inside a selection: the forward twin, `whichwrap`'s `s` half. It
+	 * moves like `l` while there is a character to step onto; once the end stands
+	 * past the line's last character it wraps onto the next line's first character
+	 * instead of staying put (`v$<Space>` — the wanted column has nowhere left to go
+	 * on this line); and a step that ran out of characters without wrapping arms the
+	 * reach, exactly as a blocked `l` does (`v<Space>d` at a line end joins the
+	 * lines). On the last line there is nothing to wrap onto, so the caret stays.
+	 *
+	 * A caret standing on a line break — an empty line, where the break is the
+	 * line — has no character to step onto either, so it wraps straight away
+	 * (`v<Space>` on an empty line joins it onto the line below).
+	 */
+	#moveVisualSpace(count: number): void {
+		const text = this.#ops.getText();
+		const started = this.#ops.getCursor();
+		for (let i = 0; i < count; i++) {
+			const from = this.#ops.getCursor();
+			if (this.#reachArmed(from) || text[from] === "\n") {
+				this.#visualPastEnd = false;
+				this.#ops.setCursor(snapToChar(text, spaceBoundary(text, from)));
+				continue;
+			}
+			this.#visualPastEnd = this.#moveHorizontal(1);
+		}
+		this.#wantHereIfMoved(started);
+		this.#syncSelection();
+	}
+
+	/**
+	 * A word motion inside a selection. `w`/`b`/`e` stop on a character rather than
+	 * aiming at a column, so they never reach past the line: `vw` onto the last
+	 * character of a line keeps the selection inside that line (probed on vim 9.1).
+	 */
 	#moveVisualByWord(kind: "w" | "b" | "e", big: boolean, count: number): void {
+		this.#visualPastEnd = false;
 		this.#moveByWord(kind, big, count);
 		this.#syncSelection();
 	}
@@ -1890,8 +2281,9 @@ export class VimEngine {
 		const text = this.#ops.getText();
 		const { start, end } = this.selection;
 		if (end <= start) {
-			// Nothing selected (an empty line): an edit that changes nothing must not
-			// cost the host an undo step.
+			// An empty selection: the last line of the buffer when it is empty has no
+			// break after it to give up, so there is nothing to cut. An edit that
+			// changes nothing must not cost the host an undo step.
 			this.#exitVisual(start);
 			return;
 		}
@@ -1956,8 +2348,10 @@ export class VimEngine {
 		this.#register = { text: text.slice(start, end), linewise: false };
 		if (end > start) {
 			const out = text.slice(0, start) + text.slice(end);
-			this.#ops.setAll(out, settleCursor(out, start));
-			this.#exitVisual(settleCursor(out, start));
+			// The insert stands at the cut point, exactly as it does for the operator
+			// forms (see #runOperator) — even when that point is the buffer end.
+			this.#ops.setAll(out, start);
+			this.#exitVisual(start);
 		} else {
 			this.#exitVisual(start);
 		}

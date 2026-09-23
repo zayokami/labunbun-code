@@ -10,6 +10,7 @@ import {
 	motionBackWord,
 	motionForwardWord,
 	motionWordEnd,
+	motionWordEndHere,
 	VimEngine,
 	type VimKey,
 } from "../src/vim.ts";
@@ -84,6 +85,17 @@ describe("pure motion helpers", () => {
 		expect(motionBackWord(text, 8)).toBe(7); // baz → '-'
 		expect(motionWordEnd(text, 0)).toBe(2); // fo|o
 		expect(motionBackWord(text, 0)).toBe(0); // clamp
+	});
+
+	test("motionWordEndHere is the end of the run the caret is in", () => {
+		const text = "one.two three";
+		expect(motionWordEndHere(text, 0)).toBe(2); // the "one" run
+		expect(motionWordEndHere(text, 2)).toBe(2); // already on it: `e` would walk on
+		expect(motionWordEndHere(text, 3)).toBe(3); // the "." run
+		expect(motionWordEndHere(text, 4)).toBe(6); // inside "two"
+		expect(motionWordEndHere(text, 4, true)).toBe(6); // WORDs agree here
+		expect(motionWordEndHere("ab\ncd", 1)).toBe(1); // a break ends no run
+		expect(motionWordEndHere("ab\ncd", 3)).toBe(4); // the "cd" run
 	});
 });
 
@@ -221,6 +233,31 @@ describe("operators and edits", () => {
 		up.engine.handleKey("y", up.key());
 		up.engine.handleKey("P", up.key());
 		expect(up.state.text).toBe("one\ntwo\ntwo");
+	});
+
+	test("a count pastes the whole line block again", () => {
+		// `[count]p` pastes the register that many times (vim's op_paste loop), the
+		// whole block each time rather than just its first line. vim 9.1: `yy2p` on
+		// "a\nb\n" is "a\na\na\nb", `yy3P` is "a\na\na\na\nb", and `2yy2p` on three
+		// lines repeats both lines of the register.
+		const below = editor("a\nb\n", 0);
+		for (const k of ["y", "y", "2", "p"]) below.engine.handleKey(k, below.key());
+		expect(below.state.text).toBe("a\na\na\nb\n");
+
+		const above = editor("a\nb\n", 0);
+		for (const k of ["y", "y", "3", "P"]) above.engine.handleKey(k, above.key());
+		expect(above.state.text).toBe("a\na\na\na\nb\n");
+
+		const block = editor("a\nb\nc\n", 0);
+		for (const k of ["2", "y", "y", "2", "p"]) block.engine.handleKey(k, block.key());
+		expect(block.state.text).toBe("a\na\nb\na\nb\nb\nc\n");
+
+		// The last line has no break to paste after, so the copies bring their own
+		// and the caret lands on the first of them (vim: 3:1).
+		const last = editor("a\nb", 2);
+		for (const k of ["y", "y", "2", "p"]) last.engine.handleKey(k, last.key());
+		expect(last.state.text).toBe("a\nb\nb\nb");
+		expect(last.state.cursor).toBe(4);
 	});
 
 	test("charwise yank + p inserts after the cursor", () => {
@@ -779,6 +816,167 @@ describe("a half-typed command never stands in the way", () => {
 	});
 });
 
+describe("the prefixes whose argument the engine reads and drops", () => {
+	// Marks, named registers, searches and ex-commands are out of scope, but the
+	// keys that open them are still taken. A dropped prefix used to leave the keys
+	// after it to be read as commands of their own: `ma` meant "swallow `m`, then
+	// append", and `"ayy` typed "ayy" into the prompt it was meant to yank from.
+	test("m, \" and ' read one name and leave the mode alone", () => {
+		const named = (prefix: string, name: string) => {
+			const e = editor("abc def", 0);
+			expect(e.engine.handleKey(prefix, e.key())).toBe(true);
+			expect(e.engine.handleKey(name, e.key())).toBe(true); // the name, not append
+			expect(e.engine.mode).toBe("normal");
+			expect(e.state.text).toBe("abc def");
+			// The name was the prefix's, not a command: the next key is its own again.
+			e.engine.handleKey("w", e.key());
+			expect(e.state.cursor).toBe(4);
+		};
+		named("m", "a");
+		named('"', "a");
+		named("'", "a");
+		named("`", "a");
+
+		// Escape is a name too: `m` then <Esc> sets no mark and leaves nothing behind.
+		const esc = editor("abc def", 0);
+		esc.engine.handleKey("m", esc.key());
+		expect(esc.engine.handleKey("", esc.key({ escape: true }))).toBe(true);
+		esc.engine.handleKey("w", esc.key());
+		expect(esc.state.cursor).toBe(4);
+	});
+
+	test("z, Z, q and @ read one key and leave the mode alone", () => {
+		// The same rule for the commands this engine does not implement: `zz`, `ZZ`,
+		// `qa` and `@a` are not here, but the keys that open them are taken. Without
+		// that, `zx` deleted a character and `qa` appended.
+		for (const prefix of ["z", "Z", "q", "@"]) {
+			const e = editor("abc def", 0);
+			expect(e.engine.handleKey(prefix, e.key())).toBe(true);
+			expect(e.engine.handleKey("x", e.key())).toBe(true); // an argument, not a command
+			expect(e.state.text).toBe("abc def");
+			expect(e.engine.mode).toBe("normal");
+			e.engine.handleKey("w", e.key());
+			expect(e.state.cursor).toBe(4); // the next key is its own again
+		}
+
+		// And with an operator in front, the operator goes with it: `2dzx` changes
+		// nothing (vim: `dz` waits for a motion, and this engine has none for it).
+		const op = editor("abc def", 0);
+		op.engine.handleKey("2", op.key());
+		op.engine.handleKey("d", op.key());
+		op.engine.handleKey("z", op.key());
+		expect(op.engine.handleKey("x", op.key())).toBe(true);
+		expect(op.state.text).toBe("abc def");
+		expect(op.writes()).toBe(0);
+		op.engine.handleKey("w", op.key());
+		expect(op.state.cursor).toBe(4);
+	});
+
+	test("a named yank is still a yank", () => {
+		const e = editor("one\ntwo", 4);
+		for (const k of ['"', "a", "y", "y"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe("one\ntwo");
+		e.engine.handleKey("p", e.key());
+		expect(e.state.text).toBe("one\ntwo\ntwo"); // "a" was read, the yank happened
+	});
+
+	test("/ and : hold their input line and drop it", () => {
+		// `/foo` used to arm a find with its `f`, take the first `o` as the target and
+		// open a line with the second.
+		const slash = editor("foo bar\n", 0);
+		for (const k of ["/", "f", "o", "o"]) expect(slash.engine.handleKey(k, slash.key())).toBe(true);
+		expect(slash.state.text).toBe("foo bar\n");
+		expect(slash.engine.mode).toBe("normal");
+		// The line is still open, so the next key belongs to it instead of moving:
+		expect(slash.engine.handleKey("w", slash.key())).toBe(true);
+		expect(slash.state.cursor).toBe(0);
+		// Escape drops it — vim's typed <Esc> abandons the command line, where a macro
+		// <Esc> would run it (c_<Esc>) — and then `w` is a motion again.
+		expect(slash.engine.handleKey("", slash.key({ escape: true }))).toBe(true);
+		slash.engine.handleKey("w", slash.key());
+		expect(slash.state.cursor).toBe(4);
+
+		// `?` is the same line backwards (the `f` must not become a find).
+		const back = editor("foo bar\n", 0);
+		for (const k of ["?", "f", "o", "o"]) expect(back.engine.handleKey(k, back.key())).toBe(true);
+		expect(back.state.text).toBe("foo bar\n");
+		expect(back.engine.handleKey("w", back.key())).toBe(true); // still the line's
+		expect(back.state.cursor).toBe(0);
+		expect(back.engine.handleKey("", back.key({ escape: true }))).toBe(true);
+		back.engine.handleKey("w", back.key());
+		expect(back.state.cursor).toBe(4);
+
+		// `:s/x/` used to delete a character (`:`, then `s`) and type the rest.
+		const colon = editor("abc def\n", 0);
+		for (const k of [":", "s", "/", "x", "/"]) expect(colon.engine.handleKey(k, colon.key())).toBe(true);
+		expect(colon.state.text).toBe("abc def\n");
+		expect(colon.engine.mode).toBe("normal");
+		expect(colon.engine.handleKey("", colon.key({ escape: true }))).toBe(true);
+		colon.engine.handleKey("w", colon.key());
+		expect(colon.state.cursor).toBe(4); // the ex line is gone with it
+	});
+
+	test("an operator in front of one is dropped with it", () => {
+		// `d/foo` deletes up to the next match; with no search the motion cannot land.
+		const e = editor("foo bar bar\n", 0);
+		e.engine.handleKey("d", e.key());
+		for (const k of ["/", "b", "a", "r"]) expect(e.engine.handleKey(k, e.key())).toBe(true);
+		expect(e.state.text).toBe("foo bar bar\n"); // nothing was deleted
+		expect(e.engine.handleKey("", e.key({ escape: true }))).toBe(true); // the line is dropped
+		e.engine.handleKey("w", e.key());
+		expect(e.state.cursor).toBe(4); // and neither the line nor the operator was left
+
+		// `d"ayy` names the register to delete into; the name is read, and `a` does
+		// not fall through to append (which typed "yy" into the buffer).
+		const named = editor("abc\ndef\n", 0);
+		named.engine.handleKey("d", named.key());
+		for (const k of ['"', "a", "y", "y"]) named.engine.handleKey(k, named.key());
+		expect(named.engine.mode).toBe("normal");
+		expect(named.state.text).toBe("abc\ndef\n");
+	});
+
+	test("Enter still submits from one, and Escape still cancels it", () => {
+		const submit = editor("abc def\n", 0);
+		submit.engine.handleKey("/", submit.key());
+		submit.engine.handleKey("f", submit.key());
+		expect(submit.engine.handleKey("", submit.key({ return: true }))).toBe(false);
+		expect(submit.state.text).toBe("abc def\n"); // the half-typed search went with it
+		submit.engine.handleKey("w", submit.key());
+		expect(submit.state.cursor).toBe(4);
+
+		const name = editor("abc def\n", 0);
+		name.engine.handleKey("m", name.key());
+		expect(name.engine.handleKey("", name.key({ return: true }))).toBe(false);
+		name.engine.handleKey("a", name.key()); // the `m` is gone: this is append again
+		expect(name.engine.mode).toBe("insert");
+
+		const cancel = editor("abc def\n", 0);
+		cancel.engine.handleKey(":", cancel.key());
+		expect(cancel.engine.handleKey("", cancel.key({ escape: true }))).toBe(true); // cancelled
+		expect(cancel.engine.handleKey("", cancel.key({ escape: true }))).toBe(false); // host's again
+		cancel.engine.handleKey("w", cancel.key());
+		expect(cancel.state.cursor).toBe(4);
+	});
+
+	test("a ctrl combo abandons a half-typed line", () => {
+		// ctrl+c is the host's interrupt and hands the prompt back: the line must not
+		// stay armed, or the keys typed into the prompt the host just took over would
+		// be eaten by it.
+		const line = editor("abc def\n", 0);
+		line.engine.handleKey("/", line.key());
+		line.engine.handleKey("f", line.key());
+		expect(line.engine.handleKey("c", line.key({ ctrl: true }))).toBe(false);
+		line.engine.handleKey("w", line.key());
+		expect(line.state.cursor).toBe(4);
+
+		const name = editor("abc def\n", 0);
+		name.engine.handleKey("m", name.key());
+		expect(name.engine.handleKey("c", name.key({ ctrl: true }))).toBe(false);
+		name.engine.handleKey("w", name.key());
+		expect(name.state.cursor).toBe(4);
+	});
+});
+
 describe("line edges", () => {
 	test("dw stops at the line end; a newline is not a word", () => {
 		const e = editor("one two\nthree", 4);
@@ -795,7 +993,7 @@ describe("line edges", () => {
 		expect(e.engine.mode).toBe("insert");
 	});
 
-	test("d$ on an empty line deletes nothing rather than a newline", () => {
+	test("d$ on an empty line deletes nothing, but v$d there takes the break", () => {
 		const text = "aa\n\nbb";
 		const e = editor(text, 3); // the empty line
 		e.engine.handleKey("d", e.key());
@@ -803,14 +1001,15 @@ describe("line edges", () => {
 		expect(e.state.text).toBe(text);
 		expect(e.writes()).toBe(0);
 
-		// The same in visual mode: an empty line has no character to select.
+		// Visual mode differs, and the probe on vim 9.1 says so: what an empty line
+		// has to select is its break, so `v$d` there joins the two lines
+		// (`2Gv$d` on "aa\n\nbb" leaves "aa\nbb", while `2Gd$` is still a no-op).
 		const v = editor(text, 3);
 		v.engine.handleKey("v", v.key());
 		v.engine.handleKey("$", v.key());
-		expect(v.engine.selection).toEqual({ start: 3, end: 3 });
+		expect(v.engine.selection).toEqual({ start: 3, end: 4 }); // the break itself
 		v.engine.handleKey("d", v.key());
-		expect(v.state.text).toBe(text);
-		expect(v.writes()).toBe(0);
+		expect(v.state.text).toBe("aa\nbb");
 		expect(v.engine.mode).toBe("normal");
 	});
 
@@ -832,6 +1031,43 @@ describe("line edges", () => {
 		expect(e.state.cursor).toBe(4); // the empty line's own position
 		e.type("X");
 		expect(e.state.text).toBe("one\nX"); // typed on that line, not over it
+	});
+});
+
+describe("an empty line is a line of its own", () => {
+	// `nextChar` steps over a line break like any other character, which is what a
+	// motion wants and what an insertion point must not do: on an empty line the
+	// caret sits *on* the break, and vim keeps the text on that line rather than
+	// dropping it onto the one below (`jaX<Esc>` on "x\n\ny\n" gives "x\nX\ny\n",
+	// and `yl2Gp` gives "x\nx\ny\n" — vim 9.1, differential probe).
+	test("a types on the empty line it is on, not on the one below", () => {
+		const e = editor("x\n\ny\n", 0);
+		e.engine.handleKey("j", e.key());
+		expect(e.state.cursor).toBe(2); // the empty line's own break
+		e.engine.handleKey("a", e.key());
+		expect(e.state.cursor).toBe(2); // `a` on an empty line is `i`
+		e.type("X");
+		e.engine.handleKey("", e.key({ escape: true }));
+		expect(e.state.text).toBe("x\nX\ny\n");
+	});
+
+	test("a charwise p pastes onto that line too, and P always did", () => {
+		const e = editor("x\n\ny\n", 0);
+		e.engine.handleKey("y", e.key());
+		e.engine.handleKey("l", e.key()); // yank "x"
+		e.engine.handleKey("j", e.key()); // onto the empty line
+		e.engine.handleKey("p", e.key());
+		expect(e.state.text).toBe("x\nx\ny\n");
+		expect(e.state.cursor).toBe(2); // on the character it pasted
+
+		// `P` inserts before the caret and never had to step over the break.
+		const before = editor("x\n\ny\n", 0);
+		before.engine.handleKey("y", before.key());
+		before.engine.handleKey("l", before.key());
+		before.engine.handleKey("j", before.key());
+		before.engine.handleKey("P", before.key());
+		expect(before.state.text).toBe("x\nx\ny\n");
+		expect(before.state.cursor).toBe(2);
 	});
 });
 
@@ -860,6 +1096,16 @@ describe("a code point is one character", () => {
 		const word = editor("x😀 y", 0);
 		word.engine.handleKey("e", word.key());
 		expect(word.state.cursor).toBe(1); // the pair's lead unit, never its tail
+	});
+
+	test("e from the pair the caret stands on walks on past it", () => {
+		// The step off the caret is a character too, not a unit: `pos + 1` lands on
+		// the tail, which the landing snap puts back on the pair's lead — so `e`
+		// would stay on the emoji instead of moving on. vim 9.1, `e` at the start of
+		// "😀 b", leaves the caret in column 6 — the `b`.
+		const e = editor("😀 b", 0);
+		e.engine.handleKey("e", e.key());
+		expect(e.state.cursor).toBe(3);
 	});
 
 	test("r replaces the whole pair; ~ leaves an uncased one alone", () => {
@@ -952,6 +1198,152 @@ describe("visual mode polish", () => {
 		e.engine.handleKey("p", e.key());
 		expect(e.state.text).toBe("abcd efghabcd");
 		expect(e.state.cursor).toBe(12); // 'd' of the pasted run
+	});
+});
+
+/**
+ * A visual selection can end *past* the line's last character, and then it takes
+ * the line break: `vld` at a line end joins the two lines, while a `vl` that
+ * merely arrived on that character does not. What arms that reach — `$`, a `|`
+ * whose column is past the line, and an `l` that had nowhere left to go — and
+ * what clears it, is vim's own behaviour, read off `'<`/`'>` after Esc on vim
+ * 9.1 (see the differential cases in the batch's notes).
+ */
+describe("a selection's reach past a line's end", () => {
+	test("a blocked l takes the break; arriving on the character does not", () => {
+		const blocked = editor("aa\nbb", 0);
+		blocked.engine.handleKey("v", blocked.key());
+		blocked.engine.handleKey("l", blocked.key());
+		blocked.engine.handleKey("l", blocked.key()); // nowhere left to go
+		blocked.engine.handleKey("d", blocked.key());
+		expect(blocked.state.text).toBe("bb"); // "aa\n" — the lines joined
+
+		const arrived = editor("aa\nbb", 0);
+		arrived.engine.handleKey("v", arrived.key());
+		arrived.engine.handleKey("l", arrived.key()); // onto the last character
+		arrived.engine.handleKey("d", arrived.key());
+		expect(arrived.state.text).toBe("\nbb"); // the same characters, but not the break
+	});
+
+	test("$ reaches past the line it aims at", () => {
+		const e = editor("aa\nbb", 0);
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("$", e.key());
+		expect(e.engine.selection).toEqual({ start: 0, end: 3 }); // "aa" and the break
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("bb");
+	});
+
+	test("| past the line's length reaches, up to it does not", () => {
+		const past = editor("ab\ncd", 1);
+		past.engine.handleKey("v", past.key());
+		past.engine.handleKey("9", past.key());
+		past.engine.handleKey("|", past.key());
+		past.engine.handleKey("d", past.key());
+		expect(past.state.text).toBe("acd"); // "b\n" — the reach took the break
+
+		const within = editor("ab\ncd", 1);
+		within.engine.handleKey("v", within.key());
+		within.engine.handleKey("2", within.key());
+		within.engine.handleKey("|", within.key()); // column 2 is the last character
+		within.engine.handleKey("d", within.key());
+		expect(within.state.text).toBe("a\ncd");
+	});
+
+	test("h spends the reach before it moves the caret", () => {
+		const e = editor("aa\nbb", 0);
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("$", e.key());
+		expect(e.engine.selection).toEqual({ start: 0, end: 3 });
+
+		// The first `h` puts the end back on the line's last character; the caret
+		// does not move (vim: `'>` goes from column len+1 to column len).
+		e.engine.handleKey("h", e.key());
+		expect(e.engine.selection).toEqual({ start: 0, end: 2 });
+		e.engine.handleKey("h", e.key());
+		expect(e.engine.selection).toEqual({ start: 0, end: 1 });
+
+		const counted = editor("aa\nbb", 0);
+		counted.engine.handleKey("v", counted.key());
+		counted.engine.handleKey("$", counted.key());
+		counted.engine.handleKey("2", counted.key());
+		counted.engine.handleKey("h", counted.key()); // one step spent, one taken
+		expect(counted.engine.selection).toEqual({ start: 0, end: 1 });
+	});
+
+	test("h and l move inside a selection", () => {
+		// `h` is a motion like `l`: a short-circuit in the reach bookkeeping used to
+		// leave the caret where it was, so `vehd` deleted one character too many.
+		const e = editor("ab\ncd", 1);
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("e", e.key());
+		expect(e.engine.selection).toEqual({ start: 1, end: 5 }); // "b\ncd"
+		e.engine.handleKey("h", e.key());
+		expect(e.engine.selection).toEqual({ start: 1, end: 4 }); // "b\nc"
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("ad");
+	});
+
+	test("j and k carry the reach onto the line they land on", () => {
+		const e = editor("aa\nbb", 3);
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("$", e.key());
+		e.engine.handleKey("k", e.key());
+		expect(e.engine.selection).toEqual({ start: 2, end: 4 }); // up onto "aa", reach and all
+
+		// `h` spends the reach of the line it moved up onto.
+		e.engine.handleKey("h", e.key());
+		expect(e.engine.selection).toEqual({ start: 1, end: 4 });
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("ab");
+	});
+});
+
+/**
+ * `cw` is not `dw` with a `c`: on a non-blank it stops at the end of the word
+ * the caret is on, keeping the whitespace after it — and at that word's last
+ * character it changes just that character, where `ce` walks on to the next
+ * word. A count is a plain `Ne` again, so `c2w` takes the next word too. All of
+ * it probed on vim 9.1.
+ */
+describe("cw stops at the end of the word the caret is on", () => {
+	test("cw at a word's last character changes one character", () => {
+		const e = editor("one two three", 6); // the 'o' of "two"
+		e.engine.handleKey("c", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("one tw three");
+		expect(e.engine.mode).toBe("insert");
+		expect(e.state.cursor).toBe(6); // the cut point is where the insert opens
+	});
+
+	test("ce keeps the plain e motion and walks on", () => {
+		const e = editor("one two three", 6);
+		e.engine.handleKey("c", e.key());
+		e.engine.handleKey("e", e.key());
+		expect(e.state.text).toBe("one tw");
+	});
+
+	test("a count is a plain Ne", () => {
+		const e = editor("one two three", 6);
+		e.engine.handleKey("c", e.key());
+		e.engine.handleKey("2", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("one tw");
+	});
+
+	test("cW stops at the end of the WORD", () => {
+		const e = editor("one.two", 2); // the "one" of the single WORD "one.two"
+		e.engine.handleKey("c", e.key());
+		e.engine.handleKey("W", e.key());
+		expect(e.state.text).toBe("on");
+	});
+
+	test("cw never takes the break after the word", () => {
+		const e = editor("ab\ncd", 1); // the last character of the line
+		e.engine.handleKey("c", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("a\ncd"); // not "a" — the lines stay apart
+		expect(e.state.cursor).toBe(1);
 	});
 });
 
@@ -1065,7 +1457,7 @@ describe("Backspace and Delete in NORMAL mode", () => {
 });
 
 describe("Backspace and Delete in visual mode", () => {
-	test("Backspace moves the head without wrapping", () => {
+	test("Backspace steps the head one character along the line", () => {
 		const e = editor("ab\ncdef\ngh", 4);
 		e.engine.handleKey("v", e.key());
 		e.engine.handleKey("", e.key({ backspace: true }));
@@ -1074,12 +1466,16 @@ describe("Backspace and Delete in visual mode", () => {
 		expect(e.state.text).toBe("ab\nef\ngh");
 	});
 
-	test("visual Backspace at a line start does not grow the selection", () => {
-		// A plain `h` there: the selection stays on the character under the caret.
+	test("visual Backspace at a line start wraps and takes the break", () => {
+		// Not a plain `h` there: vim's default whichwrap carries the end onto the
+		// line above, one column past its last character, so the delete takes the
+		// break with it — `v<BS>d` at a line start joins the two lines.
 		const e = editor("ab\ncdef\ngh", 3);
 		e.engine.handleKey("v", e.key());
 		e.engine.handleKey("", e.key({ backspace: true }));
-		expect(e.engine.selection).toEqual({ start: 3, end: 4 });
+		expect(e.engine.selection).toEqual({ start: 2, end: 4 });
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("abdef\ngh");
 	});
 
 	test("Delete cuts the selection outright", () => {
@@ -1088,6 +1484,257 @@ describe("Backspace and Delete in visual mode", () => {
 		e.engine.handleKey("", e.key({ delete: true }));
 		expect(e.state.text).toBe("ab\ncef\ngh");
 		expect(e.engine.mode).toBe("normal");
+	});
+});
+
+/**
+ * The wrapping pair inside a selection, read off vim 9.1 key by key (the same
+ * differential harness that feeds the other cases: one `feedkeys(..., 'x')` call
+ * per command, `-u NONE -N`, `whichwrap` at its default `b,s`).
+ *
+ * `<BS>` is vim's own binding, not `h`: it wraps off the front of the line, and
+ * the end it lands on stands one column past the line above's last character —
+ * the reach `$` arms — so `v<BS>d` at a line start takes the break with it. A
+ * step of an already-armed end is spent on that reach instead: the end comes back
+ * onto the character without the caret moving, which is why `v<BS><BS>d` deletes
+ * one character more than `v<BS>d` and not two.
+ *
+ * `<Space>` is the forward twin. It moves like `l`; it does *not* type a space
+ * into the buffer, and it is *not* a no-op: at the line's last character it stops
+ * there and arms the reach (the break then goes with the delete), and from an
+ * armed end — or from an empty line's break — it wraps onto the next line.
+ */
+describe("visual <BS> and <Space> wrap like vim's whichwrap", () => {
+	/** "one two\nthird" with the caret on line 2, column 1 (buffer index 8). */
+	const second = () => editor("one two\nthird", 8);
+
+	test("v<BS>d takes the break above: one character and the line join", () => {
+		const e = second();
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("", e.key({ backspace: true }));
+		expect(e.engine.selection).toEqual({ start: 7, end: 9 });
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("one twohird"); // "\nt", not just "t"
+		expect(e.state.cursor).toBe(7);
+	});
+
+	test("a second <BS> spends the reach before it steps: v<BS><BS>d", () => {
+		const e = second();
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("", e.key({ backspace: true }));
+		e.engine.handleKey("", e.key({ backspace: true }));
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("one twhird"); // "o\nt": one character more
+		expect(e.state.cursor).toBe(6);
+	});
+
+	test("the count form is the same command: v2<BS>d", () => {
+		const e = second();
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("2", e.key());
+		e.engine.handleKey("", e.key({ backspace: true }));
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("one twhird");
+		expect(e.state.cursor).toBe(6);
+	});
+
+	test("h spends the reach the <BS> left armed, and does not move", () => {
+		const e = second();
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("", e.key({ backspace: true }));
+		e.engine.handleKey("h", e.key());
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("one twhird");
+	});
+
+	test("l at the armed end is blocked, so the break stays: v<BS>l d", () => {
+		// The end stands past the last character; `l` has nowhere to go, and a
+		// blocked `l` leaves the reach armed and the caret where it was.
+		const e = second();
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("", e.key({ backspace: true }));
+		e.engine.handleKey("l", e.key());
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("one twohird");
+		expect(e.state.cursor).toBe(7);
+	});
+
+	test("<Space> moves like l inside a line, and wraps from the armed end", () => {
+		const moved = second();
+		moved.engine.handleKey("v", moved.key());
+		moved.engine.handleKey(" ", moved.key());
+		expect(moved.engine.selection).toEqual({ start: 8, end: 10 });
+		moved.engine.handleKey("d", moved.key());
+		expect(moved.state.text).toBe("one two\nird"); // "th", not "t"
+
+		const twice = second();
+		twice.engine.handleKey("v", twice.key());
+		twice.engine.handleKey(" ", twice.key());
+		twice.engine.handleKey(" ", twice.key());
+		twice.engine.handleKey("d", twice.key());
+		expect(twice.state.text).toBe("one two\nrd");
+
+		// After the wrapping <BS> the end is armed, so the next <Space> wraps back
+		// down onto line 2 — the caret does not stay put on the line above.
+		const wrapped = second();
+		wrapped.engine.handleKey("v", wrapped.key());
+		wrapped.engine.handleKey("", wrapped.key({ backspace: true }));
+		wrapped.engine.handleKey(" ", wrapped.key());
+		wrapped.engine.handleKey("d", wrapped.key());
+		expect(wrapped.state.text).toBe("one two\nhird");
+	});
+
+	test("<Space> at a line end arms the reach rather than wrapping", () => {
+		const e = editor("aa\nbb", 1);
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey(" ", e.key());
+		expect(e.engine.selection).toEqual({ start: 1, end: 3 });
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("abb");
+	});
+
+	test("V<BS>d takes the line above with the current one", () => {
+		const e = second();
+		e.engine.handleKey("V", e.key());
+		e.engine.handleKey("", e.key({ backspace: true }));
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("");
+	});
+
+	test("at the buffer start the <BS> is blocked and takes one character", () => {
+		// There is no character behind the caret and no line above it, so the step
+		// is blocked — and a step that took the caret nowhere does not arm the
+		// reach the way a blocked `l` does: the selection stays on the character
+		// under the caret, and the break after it is left alone.
+		const e = editor("o\nthird", 2);
+		e.engine.handleKey("g", e.key());
+		e.engine.handleKey("g", e.key());
+		e.engine.handleKey("v", e.key());
+		e.engine.handleKey("", e.key({ backspace: true }));
+		expect(e.engine.selection).toEqual({ start: 0, end: 1 });
+		e.engine.handleKey("d", e.key());
+		expect(e.state.text).toBe("\nthird");
+	});
+
+	test("three lines: each <BS> spends, steps, or wraps in turn", () => {
+		// "aa\nbb\ncc" with the caret on line 3: the first <BS> wraps (deleting
+		// "c" and the break), the second spends (deleting "b" as well), the third
+		// steps off "b" (deleting the whole second line), the fourth wraps once
+		// more — which is why 4<BS> reaches one character further than 3<BS>.
+		const three = (backspaces: number) => {
+			const e = editor("aa\nbb\ncc", 6);
+			e.engine.handleKey("v", e.key());
+			for (let i = 0; i < backspaces; i++) e.engine.handleKey("", e.key({ backspace: true }));
+			e.engine.handleKey("d", e.key());
+			return e.state.text;
+		};
+		expect(three(1)).toBe("aa\nbbc");
+		expect(three(2)).toBe("aa\nbc");
+		expect(three(3)).toBe("aa\nc");
+		expect(three(4)).toBe("aac");
+
+		const counted = editor("aa\nbb\ncc", 6);
+		counted.engine.handleKey("v", counted.key());
+		counted.engine.handleKey("4", counted.key());
+		counted.engine.handleKey("", counted.key({ backspace: true }));
+		counted.engine.handleKey("d", counted.key());
+		expect(counted.state.text).toBe("aac");
+
+		const linewise = editor("aa\nbb\ncc", 3); // line 2, linewise
+		linewise.engine.handleKey("V", linewise.key());
+		linewise.engine.handleKey("", linewise.key({ backspace: true }));
+		linewise.engine.handleKey("d", linewise.key());
+		expect(linewise.state.text).toBe("cc");
+	});
+
+	test("an empty line's break is stepped over, not spent", () => {
+		// The break *is* the empty line, so there is no character standing past it
+		// to give back: <BS> wraps onto the line above like anywhere else (and a
+		// `<BS>` after a `$` there still wraps — the armed column has no character
+		// under it to spend).
+		const wrapped = editor("aa\n\nbb", 3);
+		wrapped.engine.handleKey("v", wrapped.key());
+		wrapped.engine.handleKey("", wrapped.key({ backspace: true }));
+		wrapped.engine.handleKey("d", wrapped.key());
+		expect(wrapped.state.text).toBe("aabb");
+
+		const twice = editor("aa\n\nbb", 3);
+		twice.engine.handleKey("v", twice.key());
+		twice.engine.handleKey("", twice.key({ backspace: true }));
+		twice.engine.handleKey("", twice.key({ backspace: true }));
+		twice.engine.handleKey("d", twice.key());
+		expect(twice.state.text).toBe("abb");
+
+		const thenL = editor("aa\n\nbb", 3);
+		thenL.engine.handleKey("v", thenL.key());
+		thenL.engine.handleKey("", thenL.key({ backspace: true }));
+		thenL.engine.handleKey("l", thenL.key());
+		thenL.engine.handleKey("d", thenL.key());
+		expect(thenL.state.text).toBe("aabb");
+
+		const armed = editor("aa\n\nbb", 3);
+		armed.engine.handleKey("v", armed.key());
+		armed.engine.handleKey("$", armed.key());
+		armed.engine.handleKey("", armed.key({ backspace: true }));
+		armed.engine.handleKey("d", armed.key());
+		expect(armed.state.text).toBe("aabb");
+
+		// <Space> from the same break wraps onto the line below instead.
+		const down = editor("aa\n\nbb", 3);
+		down.engine.handleKey("v", down.key());
+		down.engine.handleKey(" ", down.key());
+		expect(down.engine.selection).toEqual({ start: 3, end: 5 });
+		down.engine.handleKey("d", down.key());
+		expect(down.state.text).toBe("aa\nb");
+	});
+
+	test("the last line has no break to give up, but still spends the reach", () => {
+		// `v$h` on the last line puts the end back on the last character without
+		// moving the caret: the whole line stays selected (`v$hd` takes it), where
+		// on a line with a break below it the same `h` is what keeps the break out.
+		const last = editor("aa\nbb", 3);
+		last.engine.handleKey("v", last.key());
+		last.engine.handleKey("$", last.key());
+		last.engine.handleKey("h", last.key());
+		last.engine.handleKey("d", last.key());
+		expect(last.state.text).toBe("aa\n");
+
+		const only = editor("aa", 0);
+		only.engine.handleKey("v", only.key());
+		only.engine.handleKey("$", only.key());
+		only.engine.handleKey("h", only.key());
+		only.engine.handleKey("d", only.key());
+		expect(only.state.text).toBe("");
+	});
+
+	test("a j carries the wanted column, and arms the reach when it cannot fill it", () => {
+		// The wrapping <BS> leaves the wanted column one past the line it landed
+		// on, so a following `j` arms the reach again on a shorter line (the break
+		// goes with the delete) and lands one column further right on a wider one.
+		const arming = editor("one two\nthird\na long line here", 8);
+		arming.engine.handleKey("v", arming.key());
+		arming.engine.handleKey("", arming.key({ backspace: true }));
+		arming.engine.handleKey("", arming.key({ backspace: true }));
+		arming.engine.handleKey("j", arming.key());
+		arming.engine.handleKey("d", arming.key());
+		expect(arming.state.text).toBe("one two\na long line here");
+
+		const wide = editor("one two\nthird\na long line here", 8);
+		wide.engine.handleKey("v", wide.key());
+		wide.engine.handleKey("", wide.key({ backspace: true }));
+		wide.engine.handleKey("j", wide.key());
+		wide.engine.handleKey("j", wide.key());
+		wide.engine.handleKey("d", wide.key());
+		expect(wide.state.text).toBe("one two\nine here");
+
+		// A `j` of its own onto a line whose last character is left of the caret
+		// arms it too: `vjd` from column 6 of the line above takes both the `f` and
+		// the whole short line, not just the `f`.
+		const plain = editor("abcdef\naa", 5);
+		plain.engine.handleKey("v", plain.key());
+		plain.engine.handleKey("j", plain.key());
+		plain.engine.handleKey("d", plain.key());
+		expect(plain.state.text).toBe("abcde");
 	});
 });
 
@@ -1909,6 +2556,24 @@ describe("the wanted column a j or k comes back to", () => {
 		expect(run(LINES, 0, "$", "j")).toEqual({ text: LINES, cursor: 8 }); // clamped to "gh"
 		expect(run(LINES, 0, "$", "j", "j")).toEqual({ text: LINES, cursor: 13 });
 		expect(run(LINES, 0, "$", "j", "k")).toEqual({ text: LINES, cursor: 5 }); // back at the `$` column
+	});
+
+	test("Home is 0 and End is $: both move the wanted column", () => {
+		// vim's <Home> runs nv_beginline's bookkeeping, so it discards a pending `$`
+		// (`$` <Home> `j` lands on line 2's first character, 2:1); <End> is
+		// nv_dollar, which arms MAXCOL (`l` <End> `j` on "gh\nabcdef" lands on the
+		// last character of "abcdef", 2:6, not on the second one). Both vim 9.1.
+		const home = editor(LINES, 0);
+		home.engine.handleKey("$", home.key());
+		home.engine.handleKey("", home.key({ home: true }));
+		home.engine.handleKey("j", home.key());
+		expect(home.state.cursor).toBe(7); // 2:1
+
+		const end = editor("gh\nabcdef\n", 0);
+		end.engine.handleKey("l", end.key());
+		end.engine.handleKey("", end.key({ end: true }));
+		end.engine.handleKey("j", end.key());
+		expect(end.state.cursor).toBe(8); // 2:6
 	});
 
 	test("a column taken on a long line outlives the short one it crossed", () => {
