@@ -30,6 +30,7 @@ import {
 	userMessage,
 } from "@labunbun/ai";
 import { caseInsensitivePaths } from "@labunbun/tools";
+import { codexRoot } from "./codex-home.ts";
 import { dshRoot } from "./dsh-home.ts";
 import { listDshSessions, readDshLog } from "./dsh-session.ts";
 import type { MigrationSourceId } from "./migrate.ts";
@@ -58,6 +59,13 @@ export interface HistoryCandidate {
 	startedAt: number;
 	/** Where the source keeps it, so the read phase need not derive the path again. */
 	path: string;
+	/**
+	 * The source had filed this session away rather than leaving it in the
+	 * ordinary place, and a reader of the report deserves to know the transcript
+	 * came from there. Only Codex has the distinction so far: it moves a rollout
+	 * into `archived_sessions/` when the user archives the session.
+	 */
+	archived?: boolean;
 }
 
 /** Something the importer chose not to carry over, and how often it happened. */
@@ -78,6 +86,8 @@ export interface HistorySession {
 	title: string;
 	startedAt: number;
 	entries: HistoryEntry[];
+	/** Carried from the candidate: see {@link HistoryCandidate.archived}. */
+	archived?: boolean;
 }
 
 /** What a source offers for import, narrowed to the requested scope. */
@@ -194,17 +204,22 @@ function parseArguments(raw: string): unknown {
  */
 function readHeadLines(path: string, maxBytes = 65_536): string[] {
 	try {
-		const out: string[] = [];
-		let used = 0;
-		for (const line of readFileSync(path, "utf8").split("\n")) {
-			if (out.length > 0 && used + line.length > maxBytes) break;
-			out.push(line);
-			used += line.length;
-		}
-		return out;
+		return headLinesOf(readFileSync(path, "utf8"), maxBytes);
 	} catch {
 		return [];
 	}
+}
+
+/** The head window itself, over text that has already been read. */
+function headLinesOf(text: string, maxBytes: number): string[] {
+	const out: string[] = [];
+	let used = 0;
+	for (const line of text.split("\n")) {
+		if (out.length > 0 && used + line.length > maxBytes) break;
+		out.push(line);
+		used += line.length;
+	}
+	return out;
 }
 
 /**
@@ -261,9 +276,69 @@ function firstText(value: string, max = 60): string {
 	return single.length > max ? `${single.slice(0, max - 1)}…` : single;
 }
 
-/** `rollout-*.jsonl` under `~/.codex/sessions/YYYY/MM/DD/`, newest first. */
-function listRolloutFiles(root: string): Array<{ name: string; path: string; mtimeMs: number }> {
-	const out: Array<{ name: string; path: string; mtimeMs: number }> = [];
+/** The suffix Codex compresses a rollout with once it is a week old. */
+const COMPRESSED_SUFFIX = ".zst";
+
+/**
+ * The canonical `.jsonl` name of a rollout file, or `null` when the name is not
+ * a rollout's.
+ *
+ * Both spellings Codex writes are accepted — `rollout-*.jsonl`, and the
+ * `rollout-*.jsonl.zst` it recompresses an old rollout into — because the id and
+ * the timestamp are parsed from this name rather than from the file's, and the
+ * compressed spelling would otherwise fail the `rollout-`/`.jsonl` test on its
+ * trailing `.zst` alone.
+ */
+function plainRolloutName(name: string): string | null {
+	const plain = name.endsWith(COMPRESSED_SUFFIX) ? name.slice(0, -COMPRESSED_SUFFIX.length) : name;
+	return plain.startsWith("rollout-") && plain.endsWith(".jsonl") ? plain : null;
+}
+
+/**
+ * A rollout's text, compressed or not.
+ *
+ * A `.jsonl.zst` is decompressed whole, which is a cost worth naming: the
+ * listing walks every rollout and reads a bounded head of each, and for a
+ * compressed one that window is now paid for with a full decode of the file.
+ * Codex itself avoids this with a seekable decoder, but a stream here would be a
+ * second reader with its own copy of the head-window rules — including the rule
+ * that keeps an oversized first line — and one file, one reader is worth more
+ * than the time on a path a user walks once. The frame carries its source size
+ * (Codex pledges it on write, `encode_zstd_to_writer`), which is what lets a
+ * one-shot decompressor size its output.
+ */
+function readRolloutText(path: string): string | null {
+	try {
+		const bytes = readFileSync(path);
+		return (path.endsWith(COMPRESSED_SUFFIX) ? Bun.zstdDecompressSync(bytes) : bytes).toString("utf8");
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * A rollout's lines, decompressed on the way in.
+ *
+ * A rollout that cannot be opened throws, so the caller counts it as a session
+ * that produced nothing — an unreadable file must not be presented as a
+ * transcript that happened to be empty.
+ */
+function rolloutLines(path: string): string[] {
+	const text = readRolloutText(path);
+	if (text === null) throw new Error(`rollout is unreadable: ${path}`);
+	return text.split("\n");
+}
+
+/**
+ * `rollout-*.jsonl` under a Codex session root, newest first.
+ *
+ * A compressed rollout is skipped when its plain sibling is still there, which
+ * is Codex's own rule (`should_skip_compressed_sibling`): in that state the plain
+ * file is the one Codex reads, and listing both would put one session in the
+ * picker twice — once under a name that has no second copy behind it.
+ */
+function listRolloutFiles(root: string): Array<{ plainName: string; path: string; mtimeMs: number }> {
+	const out: Array<{ plainName: string; path: string; mtimeMs: number }> = [];
 	const walk = (dir: string, depth: number): void => {
 		if (depth > 4) return;
 		try {
@@ -273,8 +348,11 @@ function listRolloutFiles(root: string): Array<{ name: string; path: string; mti
 					walk(path, depth + 1);
 					continue;
 				}
-				if (!entry.isFile() || !entry.name.startsWith("rollout-") || !entry.name.endsWith(".jsonl")) continue;
-				out.push({ name: entry.name, path, mtimeMs: mtimeOf(path) });
+				if (!entry.isFile()) continue;
+				const plainName = plainRolloutName(entry.name);
+				if (plainName === null) continue;
+				if (entry.name.endsWith(COMPRESSED_SUFFIX) && existsSync(join(dir, plainName))) continue;
+				out.push({ plainName, path, mtimeMs: mtimeOf(path) });
 			}
 		} catch {
 			// An unreadable level contributes nothing; the rest of the walk stands.
@@ -564,9 +642,9 @@ function readClaudeCodeSession(
 // Codex
 // ---------------------------------------------------------------------------
 
-function readCodexMeta(path: string): { cwd: string; sessionId: string; child: boolean; startedAt: number } | null {
+function readCodexMeta(text: string): { cwd: string; sessionId: string; child: boolean; startedAt: number } | null {
 	let startedAt = 0;
-	for (const line of readHeadLines(path, 16_384)) {
+	for (const line of headLinesOf(text, 16_384)) {
 		const parsed = parseJsonLine(line);
 		if (!parsed) continue;
 		if (!startedAt && typeof parsed.timestamp === "string") {
@@ -586,30 +664,48 @@ function readCodexMeta(path: string): { cwd: string; sessionId: string; child: b
 	return null;
 }
 
+/**
+ * `$CODEX_HOME/sessions/` and `$CODEX_HOME/archived_sessions/`.
+ *
+ * The archived directory is the same kind of session — Codex moves a rollout
+ * there when the user archives the session, and its own thread listing reads
+ * that directory under the same rules when asked for archived threads. Reading
+ * only `sessions/` would leave every archived session out of the picker while
+ * the report claimed to have found the source's history, so the walk covers both
+ * and each session carries which one it came from.
+ */
 function listCodexHistory(home: string): HistoryListing {
+	const root = codexRoot(home);
 	const candidates: HistoryCandidate[] = [];
 	let children = 0;
 	let unreadable = 0;
-	for (const file of listRolloutFiles(join(home, ".codex", "sessions"))) {
-		const meta = readCodexMeta(file.path);
-		if (!meta) {
-			unreadable += 1;
-			continue;
+	for (const [name, archived] of [
+		["sessions", false],
+		["archived_sessions", true],
+	] as const) {
+		for (const file of listRolloutFiles(join(root, name))) {
+			const text = readRolloutText(file.path);
+			const meta = text === null ? null : readCodexMeta(text);
+			if (!meta) {
+				unreadable += 1;
+				continue;
+			}
+			// A subagent thread is a conversation of its own that never belonged to
+			// the session that spawned it.
+			if (meta.child) {
+				children += 1;
+				continue;
+			}
+			candidates.push({
+				source: "codex",
+				sourceId: meta.sessionId || file.plainName.replace(/^rollout-/, "").replace(/\.jsonl$/, ""),
+				cwd: meta.cwd,
+				title: "",
+				startedAt: meta.startedAt || file.mtimeMs,
+				path: file.path,
+				archived: archived || undefined,
+			});
 		}
-		// A subagent thread is a conversation of its own that never belonged to
-		// the session that spawned it.
-		if (meta.child) {
-			children += 1;
-			continue;
-		}
-		candidates.push({
-			source: "codex",
-			sourceId: meta.sessionId || file.name.replace(/^rollout-/, "").replace(/\.jsonl$/, ""),
-			cwd: meta.cwd,
-			title: "",
-			startedAt: meta.startedAt || file.mtimeMs,
-			path: file.path,
-		});
 	}
 	const notes: HistoryNote[] = [];
 	if (children > 0) notes.push({ reason: "subagent thread", count: children });
@@ -647,7 +743,7 @@ function readCodexSession(
 		pendingAssistant = null;
 	};
 
-	for (const line of readFileSync(path, "utf8").split("\n")) {
+	for (const line of rolloutLines(path)) {
 		if (!line.trim()) continue;
 		const row = parseJsonLine(line);
 		if (!row) {
@@ -1065,26 +1161,29 @@ function readClaudePromptHistory(
 }
 
 /**
- * `~/.codex/history.jsonl`: `{session_id, text, ts}`.
+ * `<CODEX_HOME>/history.jsonl`: `{session_id, text, ts}`.
  *
  * It names the session, not the directory, so the directory comes from the
- * rollout of that session — the same metadata the session listing reads. A
- * prompt whose session has no rollout left on disk cannot be located to a
- * project, and an entry that no directory can recall is not worth writing.
+ * rollout of that session — the same metadata the session listing reads, and the
+ * same listing that knows about `archived_sessions/`: a prompt answered in a
+ * session the user later archived must still find its project. A prompt whose
+ * session has no rollout left on disk cannot be located to a project, and an
+ * entry that no directory can recall is not worth writing.
  */
 function readCodexPromptHistory(
 	home: string,
 	options: { cwd: string; scope: HistoryScope; limit: number },
 ): PromptHistoryInput {
 	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
+	const historyFile = join(codexRoot(home), "history.jsonl");
 	// Before the rollout scan, not after: locating each prompt costs a head-read
 	// per rollout, and a home with no prompt history has nothing to locate.
-	if (!existsSync(join(home, ".codex", "history.jsonl"))) return selectPrompts(scan, options);
+	if (!existsSync(historyFile)) return selectPrompts(scan, options);
 	const directories = new Map<string, string>();
 	for (const candidate of listCodexHistory(home).candidates) {
 		if (candidate.cwd) directories.set(candidate.sourceId, candidate.cwd);
 	}
-	const tail = readTailLines(join(home, ".codex", "history.jsonl"), PROMPT_HISTORY_BYTES);
+	const tail = readTailLines(historyFile, PROMPT_HISTORY_BYTES);
 	scan.truncated = tail.truncated;
 	for (const line of tail.lines) {
 		if (!line.trim()) continue;
@@ -1229,6 +1328,7 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 			title: candidate.title,
 			startedAt: candidate.startedAt,
 			entries: converted.entries,
+			archived: candidate.archived,
 		});
 	}
 	if (failed > 0) notes.push({ reason: "session with nothing to import", count: failed });

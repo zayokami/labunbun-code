@@ -4,7 +4,9 @@
  * Five source layouts are recognised, all user-scope only:
  *   claude-code  ~/.claude/settings.json, ~/.claude.json, ~/.claude/skills,
  *                ~/.claude/rules
- *   codex        ~/.codex/config.toml, ~/.codex/AGENTS.md, ~/.codex/skills
+ *   codex        $CODEX_HOME when set, else ~/.codex — config.toml, AGENTS.md
+ *                (AGENTS.override.md first when both are there), skills, agents,
+ *                prompts, rules, sessions and archived_sessions, history.jsonl
  *   zcode        ~/.zcode/v2/config.json, ~/.zcode/cli/config.json,
  *                ~/.zcode/cli/db/db.sqlite, ~/.zcode/AGENTS.md, ~/.zcode/skills
  *   agents       ~/.agents/AGENTS.md, ~/.agents/skills, ~/.agents/agents
@@ -29,6 +31,7 @@ import { dirname, join } from "node:path";
 import { parseRuleText } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
 import { McpServerConfigSchema } from "@labunbun/mcp";
+import { codexRoot } from "./codex-home.ts";
 import { type DshMcpRead, type DshMcpServer, readDshMcpServers } from "./dsh-cordis.ts";
 import { DSH_DEFAULT_DIR, dshRoot } from "./dsh-home.ts";
 import { historyFilePath, readHistoryFile } from "./history.ts";
@@ -81,7 +84,14 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	"deepseek-harness": "DeepSeek Harness",
 };
 
-/** Directory that marks a source as present, relative to home. */
+/**
+ * Directory that marks a source as present, relative to home.
+ *
+ * Only for the sources whose tree really is under `~`. dsh and codex both let
+ * an environment variable put theirs anywhere, so their entries here are the
+ * *default* spelling, used to render a label rather than to find the tree — see
+ * {@link sourceRoot}, which is what detection and the readers call.
+ */
 const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	"claude-code": ".claude",
 	codex: ".codex",
@@ -89,6 +99,22 @@ const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	agents: ".agents",
 	"deepseek-harness": DSH_DEFAULT_DIR,
 };
+
+/**
+ * Where a source's tree actually is.
+ *
+ * Most roots are home-relative. Two are not: `$DSH_HOME` and `$CODEX_HOME` can
+ * each put their tree anywhere, and a reader that consulted
+ * `~/` anyway would call the source absent while the importer went on to import
+ * from it — or, worse here, detection would find it while the label named a path
+ * nobody read. One function rather than a condition inside `detectSources`, so
+ * the detection and the readers cannot disagree about which tree a source is.
+ */
+function sourceRoot(id: MigrationSourceId, home: string): string {
+	if (id === "deepseek-harness") return dshRoot(home);
+	if (id === "codex") return codexRoot(home);
+	return join(home, SOURCE_ROOTS[id]);
+}
 
 /**
  * Detect a source by what is in it, not by whether its directory exists.
@@ -108,12 +134,7 @@ function sourceHasContent(root: string): boolean {
 }
 
 export function detectSources(home: string): MigrationSourceId[] {
-	// Every root is home-relative except dsh's: `$DSH_HOME` can put that tree
-	// anywhere, and detection that consulted `~/` anyway would call the source
-	// absent while the reader imports from it.
-	return MIGRATION_SOURCE_IDS.filter((id) =>
-		sourceHasContent(id === "deepseek-harness" ? dshRoot(home) : join(home, SOURCE_ROOTS[id])),
-	);
+	return MIGRATION_SOURCE_IDS.filter((id) => sourceHasContent(sourceRoot(id, home)));
 }
 
 // ---------------------------------------------------------------------------
@@ -186,10 +207,19 @@ export interface RawRuleFile {
 }
 
 export interface RawCodex {
-	/** Parsed ~/.codex/config.toml */
+	/** The resolved Codex home (`$CODEX_HOME`, else `~/.codex`). */
+	root: string;
+	/** Parsed <codex home>/config.toml */
 	config: Record<string, unknown>;
-	/** ~/.codex/AGENTS.md, when it exists. */
+	/** The instruction document Codex reads: `AGENTS.override.md`, else `AGENTS.md`. */
 	memory: string | null;
+	/** Which of the two names supplied {@link memory}; null when neither holds anything. */
+	memoryFile: string | null;
+	/**
+	 * The other name, when it holds a document of its own. Codex reads one of the
+	 * two and this is the one it does not — a file the user may believe is in force.
+	 */
+	memoryShadowed: string | null;
 	skills: RawFile[];
 	agents: RawFile[];
 	/**
@@ -204,6 +234,8 @@ export interface RawCodex {
 	hooksPresent: boolean;
 	/** Definition files under ~/.codex/agents that are not markdown — counted, never parsed. */
 	agentTomlCount: number;
+	/** Profile names under `<codex home>/*.config.toml` — named, never merged. */
+	profileArchives: string[];
 	present: boolean;
 }
 
@@ -468,16 +500,22 @@ function readMarkdownDir(dir: string): RawFile[] {
 
 /**
  * Agent definition files (`agents/*.md`), annotated when the frontmatter asks
- * for a model. The importer copies such a file verbatim, but labunbun runs
- * every subagent on the session's own model, so the note belongs in the report
- * rather than in a silent mismatch between file and behaviour.
+ * for a model.
+ *
+ * The model name is resolved when a subagent starts, against the models this
+ * build knows (`subagents.ts`). A name that resolves is used; one that does not
+ * falls back to the session's model and says so at the spawn. The note here is
+ * therefore about which of those two the user should expect, not about a field
+ * being ignored — it used to read "is not honoured", which stopped being true
+ * when that resolution landed, and a report that describes behaviour the build
+ * does not have is the same defect as a silent mismatch.
  */
 function readAgentFiles(dir: string): RawFile[] {
 	const files = readMarkdownDir(dir);
 	for (const file of files) {
 		const { data } = parseFrontmatter(file.content);
 		if (data.model) {
-			file.detail = `agent copied verbatim; its "model: ${data.model}" frontmatter is not honoured — subagents run on the session model`;
+			file.detail = `agent copied verbatim; its "model: ${data.model}" frontmatter is resolved when a subagent starts — a name that no longer resolves falls back to the session model and says so`;
 		}
 	}
 	return files;
@@ -497,7 +535,7 @@ export function readClaudeCode(home: string): RawClaudeCode {
 }
 
 export function readCodex(home: string): RawCodex {
-	const root = join(home, ".codex");
+	const root = codexRoot(home);
 	const configText = readText(join(root, "config.toml"));
 	let config: Record<string, unknown> = {};
 	if (configText !== null) {
@@ -509,16 +547,66 @@ export function readCodex(home: string): RawCodex {
 		}
 	}
 	return {
+		root,
 		config,
-		memory: readText(join(root, "AGENTS.md")),
+		...readCodexInstructions(root),
 		skills: readSkillDirs(join(root, "skills")),
 		agents: readAgentFiles(join(root, "agents")),
 		prompts: readCommandFiles(join(root, "prompts")),
 		execpolicy: readRuleFiles(join(root, "rules")),
 		hooksPresent: existsSync(join(root, "hooks.json")),
 		agentTomlCount: countFilesWithExtension(join(root, "agents"), ".toml"),
+		profileArchives: readCodexProfileArchives(root),
 		present: existsSync(root),
 	};
+}
+
+/**
+ * The global instruction document, and which of the two names supplied it.
+ *
+ * `AGENTS.override.md` wins over `AGENTS.md` when both are there
+ * (`codex-home/src/instructions/mod.rs:47-79`, and the core copy of the same
+ * rule), and the loser is not read at all — this is a preference, not a merge,
+ * unlike the six names grok joins. Reading `AGENTS.md` unconditionally, as this
+ * reader used to, imports the file the user left behind when they wrote the
+ * override: a document Codex does not read, presented as the user's memory.
+ *
+ * "Wins" is decided the way Codex decides it: the first name that exists as a
+ * file *and* holds something other than whitespace. A present-but-empty
+ * override falls through to `AGENTS.md` in Codex, so it does here too.
+ */
+function readCodexInstructions(root: string): Pick<RawCodex, "memory" | "memoryFile" | "memoryShadowed"> {
+	const documents: Array<[name: string, text: string | null]> = [
+		["AGENTS.override.md", readText(join(root, "AGENTS.override.md"))],
+		["AGENTS.md", readText(join(root, "AGENTS.md"))],
+	];
+	const decided = documents.find(([, text]) => text !== null && text.trim() !== "");
+	if (decided === undefined) return { memory: null, memoryFile: null, memoryShadowed: null };
+	// The other name is recorded only when it holds something: an empty file next
+	// to the one in force is not a document the user is losing.
+	const shadowed = documents.find(([name, text]) => name !== decided[0] && text !== null && text.trim() !== "");
+	return { memory: decided[1], memoryFile: decided[0], memoryShadowed: shadowed === undefined ? null : shadowed[0] };
+}
+
+/**
+ * `<CODEX_HOME>/<name>.config.toml` — the profile files `--profile <name>` loads.
+ *
+ * Named rather than read: each one is a whole second `config.toml` whose keys
+ * override the base file, and merging two configs into one report is a decision
+ * the user has to make with the profile name in hand — the base file here is
+ * imported as the configuration, and a profile's overrides are not in force
+ * unless Codex was started with that switch.
+ */
+function readCodexProfileArchives(root: string): string[] {
+	try {
+		return readdirSync(root)
+			.filter((name) => name.endsWith(".config.toml"))
+			.map((name) => name.slice(0, -".config.toml".length))
+			.filter((name) => name !== "")
+			.sort((a, b) => a.localeCompare(b));
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -1188,9 +1276,17 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 	}
 
 	if (only.includes("codex") && raw.codex.present) {
+		/**
+		 * A path under the resolved Codex home, rendered the way the report renders
+		 * paths. `$CODEX_HOME` can put the tree anywhere, and a label that said
+		 * `~/.codex/config.toml` for a tree that is not there would point the user at
+		 * a file nobody read.
+		 */
+		const codexAt = (name: string): string => tildePath(raw.home, join(raw.codex.root, name));
 		if (wants("settings")) {
 			planCodex(
 				raw.codex,
+				codexAt,
 				items,
 				claimScalar,
 				mcpServers,
@@ -1202,7 +1298,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				existingMcpServers,
 				force,
 			);
-			planCodexRules(raw.codex, items, addPermissionRules);
+			planCodexRules(raw.codex, codexAt, items, addPermissionRules);
 		}
 		if (wants("assets")) {
 			collectFileWrites(
@@ -1225,11 +1321,11 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				writes,
 				raw.home,
 			);
-			planCommands("codex", raw.codex.prompts, "~/.codex/prompts", raw.home, force, items, writes);
+			planCommands("codex", raw.codex.prompts, codexAt("prompts"), raw.home, force, items, writes);
 			if (raw.codex.memory?.trim()) {
 				planMemoryAsRule(
 					"codex",
-					"~/.codex/AGENTS.md",
+					codexAt(raw.codex.memoryFile ?? "AGENTS.md"),
 					raw.home,
 					raw.codex.memory,
 					"imported-codex.md",
@@ -1237,6 +1333,19 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 					items,
 					writes,
 				);
+			}
+			if (raw.codex.memoryShadowed !== null) {
+				// Codex reads one of the two names and the other is not in force. A user
+				// who wrote both is about to keep the one they believed was overridden —
+				// or to lose the one they forgot was being read.
+				items.push({
+					source: "codex",
+					from: codexAt(raw.codex.memoryShadowed),
+					to: "—",
+					action: "skip",
+					detail: `Codex reads ${raw.codex.memoryFile} and not this file, so its instructions are not the ones in force — the one that is was imported`,
+					containsSecret: false,
+				});
 			}
 		}
 	}
@@ -1650,10 +1759,15 @@ function codexPatternToSpecifier(tokens: string[]): { specifier: string } | { re
  * says so on every rule it adds. Rules are added, never replaced — the target's
  * own rules and the other source's rules have to survive the import.
  */
-function planCodexRules(raw: RawCodex, items: MigrationItem[], addPermissionRules: AddPermissionRules): void {
+function planCodexRules(
+	raw: RawCodex,
+	at: (name: string) => string,
+	items: MigrationItem[],
+	addPermissionRules: AddPermissionRules,
+): void {
 	for (const file of raw.execpolicy) {
 		const { calls, unparsed } = ruleCalls(file.content);
-		const from = `~/.codex/rules/${file.name}`;
+		const from = at(`rules/${file.name}`);
 		const allow: string[] = [];
 		const deny: string[] = [];
 		const skipped: string[] = [];
@@ -2087,6 +2201,7 @@ function planClaudeCode(
 
 function planCodex(
 	raw: RawCodex,
+	at: (name: string) => string,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
 	mcpServers: Record<string, unknown>,
@@ -2096,6 +2211,8 @@ function planCodex(
 	existingMcpServers: Record<string, unknown>,
 	force: boolean,
 ): void {
+	/** The base config, as the report names it: the tree `$CODEX_HOME` decides. */
+	const configAt = at("config.toml");
 	// Providers. `base_url` maps directly; the wire protocol may not.
 	const providers = raw.config.model_providers;
 	const openaiCompatible: Array<Record<string, unknown>> = [];
@@ -2120,7 +2237,7 @@ function planCodex(
 			if (!baseUrl) {
 				items.push({
 					source: "codex",
-					from: `~/.codex/config.toml → model_providers.${name}`,
+					from: `${configAt} → model_providers.${name}`,
 					to: "—",
 					action: "skip",
 					detail: "no base_url to point a provider at",
@@ -2156,7 +2273,7 @@ function planCodex(
 			if (wireApi && wireApi !== "chat" && wireApi !== "completions") {
 				items.push({
 					source: "codex",
-					from: `~/.codex/config.toml → model_providers.${name} (wire_api="${wireApi}")`,
+					from: `${configAt} → model_providers.${name} (wire_api="${wireApi}")`,
 					to: `settings.json → providers.openaiCompatible[${name}]`,
 					action: "downgrade",
 					detail:
@@ -2167,7 +2284,7 @@ function planCodex(
 			} else {
 				items.push({
 					source: "codex",
-					from: `~/.codex/config.toml → model_providers.${name}`,
+					from: `${configAt} → model_providers.${name}`,
 					to: `settings.json → providers.openaiCompatible[${name}]`,
 					action: "map",
 					detail: `base_url carried over; ${credentialNote}`,
@@ -2177,7 +2294,7 @@ function planCodex(
 			if (isRecord(spec.http_headers)) {
 				items.push({
 					source: "codex",
-					from: `~/.codex/config.toml → model_providers.${name}.http_headers`,
+					from: `${configAt} → model_providers.${name}.http_headers`,
 					to: "—",
 					action: "skip",
 					detail:
@@ -2191,7 +2308,7 @@ function planCodex(
 	mergeProviderSpecs(
 		"codex",
 		openaiCompatible,
-		(id) => `~/.codex/config.toml → model_providers.${id}`,
+		(id) => `${configAt} → model_providers.${id}`,
 		items,
 		settingsPatch,
 		existing,
@@ -2215,7 +2332,7 @@ function planCodex(
 				"codex",
 				"model",
 				reference,
-				`~/.codex/config.toml → model ("${modelName}")`,
+				`${configAt} → model ("${modelName}")`,
 				`registered under the "${providerName}" provider with the ${modelContextWindow}-token context window the source records — the protocol is spoken as chat-completions`,
 			);
 		} else {
@@ -2228,13 +2345,7 @@ function planCodex(
 			const scopedElsewhere =
 				resolvedProvider !== undefined && providerName !== undefined && resolvedProvider !== providerName;
 			if (resolved && !scopedElsewhere) {
-				claimScalar(
-					"codex",
-					"model",
-					resolved,
-					`~/.codex/config.toml → model ("${modelName}")`,
-					`resolved to ${resolved}`,
-				);
+				claimScalar("codex", "model", resolved, `${configAt} → model ("${modelName}")`, `resolved to ${resolved}`);
 			} else {
 				const providerKeptItsOwn =
 					providerName !== undefined && modelContextWindow !== undefined
@@ -2246,7 +2357,7 @@ function planCodex(
 					`context window, then set model to "${providerName}/${modelName}"`;
 				items.push({
 					source: "codex",
-					from: `~/.codex/config.toml → model ("${modelName}")`,
+					from: `${configAt} → model ("${modelName}")`,
 					to: "—",
 					action: "skip",
 					detail:
@@ -2264,7 +2375,7 @@ function planCodex(
 	if (raw.config.model_context_window !== undefined && modelContextWindow === undefined) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/config.toml → model_context_window",
+			from: `${configAt} → model_context_window`,
 			to: "—",
 			action: "skip",
 			detail: "not a positive number of tokens, so no model entry could be built from it",
@@ -2274,7 +2385,7 @@ function planCodex(
 	if (raw.config.model_auto_compact_token_limit !== undefined) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/config.toml → model_auto_compact_token_limit",
+			from: `${configAt} → model_auto_compact_token_limit`,
 			to: "—",
 			action: "skip",
 			detail:
@@ -2286,7 +2397,7 @@ function planCodex(
 	if (raw.config.disable_response_storage !== undefined) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/config.toml → disable_response_storage",
+			from: `${configAt} → disable_response_storage`,
 			to: "—",
 			action: "skip",
 			detail: "server-side response storage is a request field of that API; nothing here sends it either way",
@@ -2301,7 +2412,7 @@ function planCodex(
 	const servers = raw.config.mcp_servers;
 	if (isRecord(servers)) {
 		for (const [name, value] of Object.entries(servers)) {
-			const label = `~/.codex/config.toml → mcp_servers.${name}`;
+			const label = `${configAt} → mcp_servers.${name}`;
 			if (!isRecord(value)) continue;
 			if (value.enabled === false) {
 				items.push({
@@ -2359,7 +2470,7 @@ function planCodex(
 	if (raw.config.model_reasoning_effort !== undefined) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/config.toml → model_reasoning_effort",
+			from: `${configAt} → model_reasoning_effort`,
 			to: "—",
 			action: "skip",
 			detail: "no reasoning-effort setting exists here; thinking level is chosen per request",
@@ -2369,7 +2480,7 @@ function planCodex(
 	if (raw.config.projects !== undefined) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/config.toml → projects.*.trust_level",
+			from: `${configAt} → projects.*.trust_level`,
 			to: "—",
 			action: "skip",
 			detail:
@@ -2381,7 +2492,7 @@ function planCodex(
 	if (raw.config.windows !== undefined) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/config.toml → windows.sandbox",
+			from: `${configAt} → windows.sandbox`,
 			to: "—",
 			action: "skip",
 			detail: "no OS-level sandbox setting; tool access is governed by permission rules",
@@ -2391,10 +2502,138 @@ function planCodex(
 	if (raw.config.tui !== undefined) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/config.toml → tui",
+			from: `${configAt} → tui`,
 			to: "—",
 			action: "skip",
 			detail: "interface state, not configuration",
+			containsSecret: false,
+		});
+	}
+	// ── the posture that decides what may run, and the prose this build has no
+	// slot for ──────────────────────────────────────────────────────────────
+	// Each of these is one decision in the source and a silent change in what the
+	// agent may do here, so each gets a sentence of its own rather than the
+	// catch-all line at the end: a user who set `sandbox_mode` is entitled to know
+	// which of the two builds is the permissive one.
+	if (
+		raw.config.approval_policy !== undefined ||
+		raw.config.sandbox_mode !== undefined ||
+		raw.config.sandbox_workspace_write !== undefined
+	) {
+		items.push({
+			source: "codex",
+			from: `${configAt} → approval_policy, sandbox_mode, sandbox_workspace_write`,
+			to: "—",
+			action: "skip",
+			detail:
+				"how Codex decides whether a command runs, asks first or is refused, and the sandbox it runs under — " +
+				"this build has no OS-level sandbox and no per-command policy: a tool call is allowed or denied by permission " +
+				"rules, which decide per tool rather than per command, so the rules here are what decides",
+			containsSecret: false,
+		});
+	}
+	if (raw.config.default_permissions !== undefined || raw.config.permissions !== undefined) {
+		items.push({
+			source: "codex",
+			from: `${configAt} → default_permissions, permissions`,
+			to: "—",
+			action: "skip",
+			detail:
+				"named permission profiles — filesystem and network policy, workspace roots, and which profile is applied by " +
+				"default — permission rules here are one flat list of allow/deny per tool, with neither profiles nor a " +
+				"network policy to put them in",
+			containsSecret: false,
+		});
+	}
+	if (
+		raw.config.instructions !== undefined ||
+		raw.config.developer_instructions !== undefined ||
+		raw.config.model_instructions_file !== undefined
+	) {
+		items.push({
+			source: "codex",
+			from: `${configAt} → instructions, developer_instructions, model_instructions_file`,
+			to: "—",
+			action: "skip",
+			detail:
+				"text Codex puts into the model's system prompt — the system prompt here is not configurable from settings; " +
+				"the memory documents and ~/.labunbun/rules/*.md are what reaches the model in your own words",
+			containsSecret: false,
+		});
+	}
+	if (raw.config.hooks !== undefined) {
+		const hookTable = isRecord(raw.config.hooks) ? raw.config.hooks : undefined;
+		const hookEvents = hookTable === undefined ? [] : Object.keys(hookTable).filter((key) => key !== "state");
+		const unmatchedEvents = hookEvents.filter((event) => !HOOK_EVENTS.includes(event as HookEventName));
+		items.push({
+			source: "codex",
+			from: `${configAt} → hooks`,
+			to: "—",
+			action: "skip",
+			detail:
+				hookTable === undefined
+					? "not a table, so Codex reads no hooks here and neither does this importer"
+					: `${hookEvents.length} hook event(s) declared in this file` +
+						(unmatchedEvents.length > 0 ? `, and ${summarizeNames(unmatchedEvents)} of them have no event here` : "") +
+						" — hooks here are command hooks written by hand in settings.json → hooks, and these handlers were not " +
+						"translated; a timeout on one of them is seconds there against milliseconds here",
+			containsSecret: false,
+		});
+	}
+	if (raw.config.skills !== undefined) {
+		items.push({
+			source: "codex",
+			from: `${configAt} → skills`,
+			to: "—",
+			action: "skip",
+			detail:
+				"the skill entries and the catalog around them — an entry can switch one skill off with enabled = false, and " +
+				"that switch is not applied here, so a skill turned off in Codex arrives as one this build loads; the catalog " +
+				"settings beside them (bundled skills, the instructions block, its token budget) have no counterpart here, " +
+				"where every skill under ~/.labunbun/skills is offered",
+			containsSecret: false,
+		});
+	}
+	if (raw.config.memories !== undefined) {
+		items.push({
+			source: "codex",
+			from: `${configAt} → memories`,
+			to: "—",
+			action: "skip",
+			detail:
+				"Codex's own memory pipeline — which memory version it runs, how far back it reads threads and which model " +
+				"summarises them; nothing here generates memories in the background, memory being the documents it reads " +
+				"plus rules",
+			containsSecret: false,
+		});
+	}
+	if (raw.config.profile !== undefined) {
+		items.push({
+			source: "codex",
+			from:
+				typeof raw.config.profile === "string"
+					? `${configAt} → profile ("${raw.config.profile.trim()}")`
+					: `${configAt} → profile`,
+			to: "—",
+			action: "skip",
+			detail:
+				"a key Codex itself now rejects: a config that sets it does not load, its error pointing at --profile <name> " +
+				"with <name>.config.toml instead — so this file was never in force there, and the overlay it names is not " +
+				"what the source was running",
+			containsSecret: false,
+		});
+	}
+	if (raw.profileArchives.length > 0) {
+		items.push({
+			source: "codex",
+			from: at("*.config.toml"),
+			to: "—",
+			action: "skip",
+			detail:
+				`${raw.profileArchives.length} profile file(s) (${summarizeNames(raw.profileArchives)}): each is a whole ` +
+				"config.toml layered over the base file when Codex is started with --profile <name>, and only in those " +
+				"sessions — this import reads the base file, so a key that lives only in one of these is not among the " +
+				"settings written here",
 			containsSecret: false,
 		});
 	}
@@ -2402,17 +2641,21 @@ function planCodex(
 		if (raw.config[key] === undefined) continue;
 		items.push({
 			source: "codex",
-			from: `~/.codex/config.toml → ${key}`,
+			from: `${configAt} → ${key}`,
 			to: "—",
 			action: "skip",
 			detail: reason,
 			containsSecret: false,
 		});
 	}
+	// Whatever is left, by name. Codex's config grows a key at a time and this
+	// importer knows a fixed set of them; the rest are the user's own settings,
+	// and a report that simply omits them reads as if they had never been set.
+	reportUnhandledKeys("codex", raw.config, CODEX_CONFIG_HANDLED, configAt, items);
 	if (raw.hooksPresent) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/hooks.json",
+			from: at("hooks.json"),
 			to: "—",
 			action: "skip",
 			detail:
@@ -2424,7 +2667,7 @@ function planCodex(
 	if (raw.agentTomlCount > 0) {
 		items.push({
 			source: "codex",
-			from: "~/.codex/agents/*.toml",
+			from: at("agents/*.toml"),
 			to: "—",
 			action: "skip",
 			detail: `${raw.agentTomlCount} agent definition(s) in Codex's TOML shape; agents here are markdown files with frontmatter`,
@@ -2457,6 +2700,42 @@ const UNMIGRATED_CODEX_KEYS: Array<[key: string, reason: string]> = [
 	["agents", "per-agent overrides for Codex's built-in agents"],
 	["oss_provider", "which provider Codex's local OSS model would use"],
 ];
+
+/**
+ * Keys of `config.toml` that are either imported above or named by a line of
+ * their own — the ones a report about this file may pass over in silence.
+ *
+ * Everything else reaches the report through {@link reportUnhandledKeys}. Codex
+ * reads around sixty top-level keys, and the half of them this importer knows
+ * nothing about (`web_search`, `tools`, `features`, `otel`, `apps`, the realtime
+ * block) are exactly the ones a user is most likely to have set by hand.
+ */
+const CODEX_CONFIG_HANDLED = new Set<string>([
+	"model",
+	"model_provider",
+	"model_providers",
+	"model_context_window",
+	"model_auto_compact_token_limit",
+	"disable_response_storage",
+	"mcp_servers",
+	"model_reasoning_effort",
+	"projects",
+	"windows",
+	"tui",
+	"approval_policy",
+	"sandbox_mode",
+	"sandbox_workspace_write",
+	"default_permissions",
+	"permissions",
+	"instructions",
+	"developer_instructions",
+	"model_instructions_file",
+	"profile",
+	"hooks",
+	"skills",
+	"memories",
+	...UNMIGRATED_CODEX_KEYS.map(([key]) => key),
+]);
 
 /**
  * Rewrite one Codex `[mcp_servers.<name>]` entry into labunbun's config shape.
@@ -4190,7 +4469,13 @@ function planHistory(
 		const label = MIGRATION_SOURCE_LABELS[source];
 		for (const session of input.sessions) {
 			const path = historyPath(session, home);
-			const from = `${label} session ${session.sourceId}${session.title ? ` — ${session.title}` : ""}`;
+			// A session the source had filed away says so in the label rather than in
+			// a footnote: the transcript is the same kind of thing either way, but a
+			// reader who archived it there may well have forgotten it exists, and the
+			// report is where they find out it came across too.
+			const from = `${label} session ${session.sourceId}${session.title ? ` — ${session.title}` : ""}${
+				session.archived ? " (archived)" : ""
+			}`;
 			if (writes.some((write) => write.path === path) || (existsSync(path) && !force)) {
 				items.push({
 					source,
@@ -4208,7 +4493,9 @@ function planHistory(
 				from,
 				to: tildePath(home, path),
 				action: "map",
-				detail: `transcript with ${session.entries.length} entries — resumable with --continue`,
+				detail: `transcript with ${session.entries.length} entries — resumable with --continue${
+					session.archived ? "; the source had archived it, and this build keeps every session in one place" : ""
+				}`,
 				containsSecret: false,
 			});
 		}

@@ -401,7 +401,7 @@ describe("migrate: ZCode source", () => {
 				const agent = result.plan.items.find((i) => i.from.endsWith("agents/reviewer.md"));
 				expect(agent?.action).toBe("map");
 				expect(agent?.detail).toContain('"model: GLM-5.2"');
-				expect(agent?.detail).toContain("not honoured");
+				expect(agent?.detail).toContain("resolved when a subagent starts");
 			},
 		);
 	});

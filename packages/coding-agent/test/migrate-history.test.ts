@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
@@ -14,11 +14,18 @@ type SourceTree = Record<string, string>;
 
 function withHome(tree: SourceTree, body: (home: string) => void): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-history-"));
-	const prevHome = process.env.USERPROFILE;
-	const prevPosixHome = process.env.HOME;
+	// `$CODEX_HOME` is part of the answer to "where does Codex keep this", so a
+	// test must not inherit the value the developer's shell happens to hold: the
+	// borrow covers it and the body starts from unset, the way a machine without
+	// it behaves. A test that wants the variable sets it itself, and this restores
+	// whatever was there before.
+	const borrowed = new Map<string, string | undefined>(
+		["USERPROFILE", "HOME", "CODEX_HOME"].map((name) => [name, process.env[name]]),
+	);
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
+		delete process.env.CODEX_HOME;
 		for (const [path, content] of Object.entries(tree)) {
 			const full = join(home, path);
 			mkdirSync(join(full, ".."), { recursive: true });
@@ -26,10 +33,10 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 		}
 		body(home);
 	} finally {
-		if (prevHome === undefined) delete process.env.USERPROFILE;
-		else process.env.USERPROFILE = prevHome;
-		if (prevPosixHome === undefined) delete process.env.HOME;
-		else process.env.HOME = prevPosixHome;
+		for (const [name, value] of borrowed) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
 		rmSync(home, { recursive: true, force: true });
 	}
 }
@@ -38,6 +45,13 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 function writeJsonl(path: string, rows: Array<Record<string, unknown> | string>): void {
 	mkdirSync(join(path, ".."), { recursive: true });
 	writeFileSync(path, `${rows.map((row) => (typeof row === "string" ? row : JSON.stringify(row))).join("\n")}\n`);
+}
+
+/** Write JSONL as Codex's compressed rollout: a zstd frame of the same text. */
+function writeCompressedJsonl(path: string, rows: Array<Record<string, unknown> | string>): void {
+	mkdirSync(join(path, ".."), { recursive: true });
+	const text = `${rows.map((row) => (typeof row === "string" ? row : JSON.stringify(row))).join("\n")}\n`;
+	writeFileSync(path, Bun.zstdCompressSync(text));
 }
 
 const T0 = Date.parse("2026-01-01T00:00:00.000Z");
@@ -440,6 +454,110 @@ describe("migrate: history from Codex", () => {
 			const result = runHistory(home, { apply: true });
 			expect(result.plan.writes).toEqual([]);
 			expect(details(result).some((detail) => detail.includes("subagent thread — 1"))).toBe(true);
+		});
+	});
+
+	/** The same tree, with every `cwd` filled in, as a rollout of `session`. */
+	function rolloutRows(session: string, text: string): Array<Record<string, unknown>> {
+		return [
+			{ timestamp: at(0), type: "session_meta", payload: { cwd: CWD, session_id: session } },
+			{
+				timestamp: at(1),
+				type: "response_item",
+				payload: { role: "user", type: "message", content: [{ type: "input_text", text }] },
+			},
+			{
+				timestamp: at(2),
+				type: "response_item",
+				payload: { role: "assistant", type: "message", content: [{ type: "output_text", text: "ok" }] },
+			},
+		];
+	}
+
+	test("a rollout Codex has compressed is read like any other", () => {
+		withHome({}, (home) => {
+			// Codex recompresses a rollout in place once it is a week old, and after
+			// that the `.jsonl` is gone: the session exists only as the `.zst`. A
+			// reader that knows only one spelling reports the source's older history
+			// as empty, which reads exactly like a machine that never used it.
+			writeCompressedJsonl(`${codexPath(home, "sess-1")}.zst`, rolloutRows("sess-1", "from the compressed rollout"));
+			const result = runHistory(home, { apply: true });
+			expect(result.error).toBeUndefined();
+			expect(result.plan.writes.length).toBe(1);
+			const messages = SessionStore.load(result.plan.writes[0].path).messages();
+			expect(messages[0].role === "user" && messages[0].content).toBe("from the compressed rollout");
+			expect(details(result).some((detail) => detail.includes("rollout without session metadata"))).toBe(false);
+		});
+	});
+
+	test("a plain rollout wins over its compressed sibling, so one session is read once", () => {
+		withHome({}, (home) => {
+			// Both files name one session, and Codex reads the plain one — its rule,
+			// and the reason the walk here does not simply take everything it finds.
+			// The compressed copy is given the newer mtime so that the pairing, rather
+			// than the sort order, is what decides which text is imported.
+			const plain = codexPath(home, "sess-1");
+			writeCompressedJsonl(`${plain}.zst`, rolloutRows("sess-1", "from the compressed copy"));
+			writeJsonl(plain, rolloutRows("sess-1", "from the plain copy"));
+			// Both mtimes are set rather than just the compressed one: the walk is
+			// newest-first, and leaving the plain copy's own mtime (today) in place
+			// would let the sort order, rather than the pairing, decide which text
+			// the test reads — a mutant that lists both files would still pass.
+			utimesSync(`${plain}.zst`, new Date(T0 + 600_000), new Date(T0 + 600_000));
+			utimesSync(plain, new Date(T0), new Date(T0));
+			const result = runHistory(home, { apply: true });
+			expect(result.plan.writes.length).toBe(1);
+			const messages = SessionStore.load(result.plan.writes[0].path).messages();
+			expect(messages[0].role === "user" && messages[0].content).toBe("from the plain copy");
+		});
+	});
+
+	test("a session the user archived is imported, and the plan says where it came from", () => {
+		withHome({}, (home) => {
+			// Archiving a thread moves its rollout to `archived_sessions/`, which the
+			// source reads back under the same rules when asked for archived threads.
+			writeJsonl(
+				join(home, ".codex", "archived_sessions", "rollout-2026-01-02T00-00-00-sess-1.jsonl"),
+				rolloutRows("sess-1", "from the archive"),
+			);
+			const result = runHistory(home, { apply: true });
+			expect(result.plan.writes.length).toBe(1);
+			const item = result.plan.items.find((entry) => entry.action === "map");
+			expect(item?.from).toContain("sess-1");
+			expect(item?.from).toContain("(archived)");
+			expect(item?.detail).toContain("archived");
+		});
+	});
+
+	test("$CODEX_HOME moves the history too, not just the settings", () => {
+		withHome({}, (home) => {
+			// The same variable the settings reader consults decides where the
+			// transcripts are. A user who set it would otherwise get their config
+			// migrated and their history reported as absent.
+			const alt = join(home, "codex-alt");
+			process.env.CODEX_HOME = alt;
+			writeJsonl(
+				join(alt, "archived_sessions", "rollout-2026-01-02T00-00-00-sess-1.jsonl"),
+				rolloutRows("sess-1", "from the alternate home"),
+			);
+			writeJsonl(join(alt, "history.jsonl"), [
+				{ session_id: "sess-1", text: "typed under $CODEX_HOME", ts: (T0 + 1000) / 1000 },
+			]);
+			const result = runHistory(home, { apply: true });
+			expect(result.plan.writes.length).toBe(2);
+			const transcript = result.plan.writes.find((write) => write.kind === "history");
+			const messages = SessionStore.load(transcript?.path ?? "").messages();
+			expect(messages[0].role === "user" && messages[0].content).toBe("from the alternate home");
+			// The prompt's directory comes from the rollout, archived or not — a
+			// prompt answered in a session the user later archived must still find
+			// its project rather than being counted as one with no rollout on disk.
+			const prompts = result.plan.writes.find((write) => write.kind === "prompt-history");
+			expect(JSON.parse((prompts?.content ?? "").split("\n").filter(Boolean)[0] ?? "{}")).toEqual({
+				text: "typed under $CODEX_HOME",
+				cwd: CWD,
+				timestamp: T0 + 1000,
+			});
+			expect(details(result).some((detail) => detail.includes("no rollout on disk"))).toBe(false);
 		});
 	});
 });

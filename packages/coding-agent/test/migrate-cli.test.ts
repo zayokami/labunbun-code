@@ -11,15 +11,23 @@ function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-cli-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
+	// One source keeps its root in the environment rather than under the home —
+	// `$DSH_HOME` — so a developer whose shell exports it
+	// would have the CLI read *their* tree instead of the fake home's, and the
+	// report would name files this test never wrote.
+	const prevDsh = process.env.DSH_HOME;
 	const restore = (): void => {
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
 		else process.env.HOME = prevPosixHome;
+		if (prevDsh === undefined) delete process.env.DSH_HOME;
+		else process.env.DSH_HOME = prevDsh;
 		rmSync(home, { recursive: true, force: true });
 	};
 	process.env.USERPROFILE = home;
 	process.env.HOME = home;
+	delete process.env.DSH_HOME;
 	for (const [path, content] of Object.entries(tree)) {
 		const full = join(home, path);
 		mkdirSync(join(full, ".."), { recursive: true });
