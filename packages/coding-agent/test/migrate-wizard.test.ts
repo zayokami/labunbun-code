@@ -786,15 +786,45 @@ describe("migrate command: when the wizard is not the right shape", () => {
 		};
 	}
 
-	function migrateCommand(): LocalCommand {
-		const command = findCommand(builtInCommands(), "migrate");
-		if (command?.type !== "local") throw new Error("/migrate should be a local command");
+	/**
+	 * The command the way the REPL resolves it — `findCommand` strips a leading
+	 * slash and lowercases, so this is the same lookup a typed `/yoshi` goes
+	 * through. The name is a parameter so the former spelling can be resolved
+	 * through the very same path rather than beside it.
+	 */
+	function yoshiCommand(name = "yoshi"): LocalCommand {
+		const command = findCommand(builtInCommands(), name);
+		if (command?.type !== "local") throw new Error(`/${name} should be a local command`);
 		return command;
 	}
 
+	test("the command is named yoshi, and the name it used to have still finds it", () => {
+		const commands = builtInCommands();
+		const canonical = findCommand(commands, "yoshi");
+		expect(canonical?.name).toBe("yoshi");
+		expect(canonical?.aliases).toContain("migrate");
+		// Identity, not a second command that happens to behave the same way: if the
+		// old spelling ever resolved to a copy, every other test here would still
+		// pass while a user's `/migrate` silently ran something else.
+		expect(findCommand(commands, "migrate")).toBe(canonical);
+		// The leading slash a user actually types is stripped before the lookup, so
+		// the old spelling keeps working in the form it was typed in.
+		expect(findCommand(commands, "/migrate")).toBe(canonical);
+	});
+
+	test("the old spelling reaches the same call, not a lookalike", async () => {
+		await withHome(twoSources(), async (home) => {
+			const byName = await yoshiCommand().call(commandContext(), "");
+			const byOldName = await yoshiCommand("migrate").call(commandContext(), "");
+			expect(byOldName).toBe(byName);
+			expect(byOldName).toContain("Dry run — nothing written.");
+			expect(existsSync(join(home, ".labunbun"))).toBe(false);
+		});
+	});
+
 	test("arguments take the flag path, never the dialog", async () => {
 		await withHome(twoSources(), async (home) => {
-			const command = migrateCommand();
+			const command = yoshiCommand();
 			const refuse: MigrationDialogBridge = {
 				askUser: async () => {
 					throw new Error("the dialog must not be opened when flags are given");
@@ -811,7 +841,7 @@ describe("migrate command: when the wizard is not the right shape", () => {
 
 	test("without a dialog the bare command is still the non-interactive report", async () => {
 		await withHome(twoSources(), async (home) => {
-			const command = migrateCommand();
+			const command = yoshiCommand();
 			const result = await command.call(commandContext(), "");
 			expect(result).toContain("Dry run — nothing written.");
 			expect(result).toContain("~/.labunbun/settings.json");

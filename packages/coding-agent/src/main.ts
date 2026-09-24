@@ -5,8 +5,19 @@ import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
 import { DEFAULT_HISTORY_LIMIT, MIGRATION_SOURCE_IDS, runMigration } from "./migrate.ts";
 
-/** Subcommands, recognised only as the first argument. */
-const SUBCOMMANDS = new Set(["migrate"]);
+/**
+ * Subcommands, recognised only as the first argument, each spelling mapped to
+ * the one canonical name.
+ *
+ * A map rather than a set so that a second spelling of a subcommand is a second
+ * entry here instead of a second condition at the dispatch site — the place a
+ * third alias would be forgotten. `migrate` is the former name of `yoshi` and
+ * still works, so the old scripts and the muscle memory keep running.
+ */
+const SUBCOMMANDS = new Map([
+	["yoshi", "yoshi"],
+	["migrate", "yoshi"],
+]);
 
 interface CliArgs {
 	subcommand: string | null;
@@ -57,10 +68,12 @@ function parseArgs(argv: string[]): CliArgs {
 		historyLimit: null,
 	};
 	// A leading bare word is a subcommand. Only the first argument is eligible,
-	// so a stray word later in the line is still the error it was before.
+	// so a stray word later in the line is still the error it was before. The
+	// canonical name is what lands in `args`, so everything downstream reads one
+	// spelling rather than testing which one the user happened to type.
 	let rest = argv;
 	if (argv.length > 0 && !argv[0].startsWith("-") && SUBCOMMANDS.has(argv[0])) {
-		args.subcommand = argv[0];
+		args.subcommand = SUBCOMMANDS.get(argv[0]) ?? null;
 		rest = argv.slice(1);
 	}
 	for (let i = 0; i < rest.length; i++) {
@@ -115,11 +128,13 @@ function parseArgs(argv: string[]): CliArgs {
 			case "--from":
 				args.from = rest[++i] ?? null;
 				break;
+			case "--yoshi":
 			case "--migrate":
 				// Alias for the subcommand, handled here so it too runs before the
 				// API-key check — importing a configuration is what someone does
-				// when they have no working configuration yet.
-				args.subcommand = "migrate";
+				// when they have no working configuration yet. `--migrate` is the
+				// spelling this command had before it was renamed.
+				args.subcommand = "yoshi";
 				break;
 			case "--only":
 				args.only = rest[++i] ?? null;
@@ -144,7 +159,7 @@ function printHelp(): void {
 Usage:
   labunbun                     Interactive REPL
   labunbun -p "<prompt>"       Headless: run one prompt and print the result
-  labunbun migrate             Import settings from another agent tool
+  labunbun yoshi               Import settings from another agent tool
   labunbun --version           Show version
 
 Options:
@@ -159,7 +174,7 @@ Options:
       --gamepad                Read a DualShock 4 this run (or --no-gamepad)
   -h, --help                   Show this help
 
-migrate options:
+yoshi options:
       --from <sources>         ${MIGRATION_SOURCE_IDS.join(" | ")} | all (default all)
       --only <categories>      settings | assets | history | all (default all)
       --history-scope <s>      cwd | all | none (default cwd)
@@ -167,7 +182,8 @@ migrate options:
       --apply                  Write the changes (default is a dry run)
       --force                  Overwrite values and files that already exist
 
-  --migrate is an alias for the migrate subcommand.`);
+  Both \`yoshi\` and \`--yoshi\` run this; \`migrate\` and \`--migrate\` are the
+  spellings this command had before it was renamed, and still work.`);
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
@@ -185,7 +201,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 	// Subcommands run before model resolution and the API-key check: importing a
 	// configuration is exactly what someone does when they have no working
 	// configuration yet, so it must not require one.
-	if (args.subcommand === "migrate") {
+	if (args.subcommand === "yoshi") {
 		const result = runMigration({
 			from: args.from ?? undefined,
 			apply: args.apply,

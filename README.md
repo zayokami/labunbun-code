@@ -68,11 +68,11 @@ labunbun                                # interactive REPL
   are yours to change, and the motors and the light can each be switched off —
   see [Gamepad](#gamepad).
 - **Headless output** — `--output-format text|json|stream-json`.
-- **Config import** — `labunbun migrate` maps an existing agent-tool setup
+- **Config import** — `labunbun yoshi` maps an existing agent-tool setup
   (Claude Code, Codex, ZCode, DeepSeek Harness, Grok Build, Kimi Code,
   MiniMax Code, Step Code, `~/.agents`) onto
   labunbun's own config: settings, skills, rules, slash commands, past
-  conversations and the prompts ↑ recalls. Dry run by default, and a `/migrate`
+  conversations and the prompts ↑ recalls. Dry run by default, and a `/yoshi`
   wizard that asks what to take — or takes everything after one question.
 
 ## Quick start
@@ -124,11 +124,11 @@ free.
 Already configured another agent tool? Copy over what has an equivalent:
 
 ```bash
-bun run dev migrate                    # dry run: report only, writes nothing
-bun run dev migrate --from codex       # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | all
-bun run dev migrate --only settings    # categories: settings | assets | history | all
-bun run dev migrate --apply            # write it
-bun run dev migrate --apply --force    # also overwrite values that exist
+bun run dev yoshi                      # dry run: report only, writes nothing
+bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | all
+bun run dev yoshi --only settings      # categories: settings | assets | history | all
+bun run dev yoshi --apply              # write it
+bun run dev yoshi --apply --force      # also overwrite values that exist
 ```
 
 Sources are only read, never modified. Model names, `env`, MCP servers,
@@ -157,11 +157,13 @@ a separate cap for prompts. A tool call whose other half is missing is dropped
 on the way in: a transcript the messages API would reject is worse than a
 shorter one.
 
-`/migrate` in the REPL asks rather than assumes. The first question offers
+`/yoshi` in the REPL asks rather than assumes. The first question offers
 `Import everything` — every source found, every category — or `Choose…` for the
 step-by-step questions; either way it asks once about history, prints the same
-dry-run report, and writes only after you confirm. `--migrate` is the same
+dry-run report, and writes only after you confirm. `--yoshi` is the same
 command as the subcommand, for when the flag is easier to type than the word.
+The command was called `migrate` until it was renamed; that spelling still
+works, as `/migrate`, `--migrate` and the `migrate` subcommand.
 
 ## Themes
 

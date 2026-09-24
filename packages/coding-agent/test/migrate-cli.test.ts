@@ -107,6 +107,34 @@ describe("migrate CLI", () => {
 		});
 	});
 
+	test("yoshi is the subcommand, and every older spelling is the same run", async () => {
+		await withHome(CLAUDE_TREE, async () => {
+			const yoshi = await run(["yoshi"]);
+			expect(yoshi.code).toBe(0);
+			expect(yoshi.err).toBe("");
+			// Compared as whole runs rather than exit codes: a spelling that parsed
+			// but took a different path would still exit 0.
+			for (const spelling of [["migrate"], ["--yoshi"], ["--migrate"]]) {
+				const other = await run(spelling);
+				expect(other.code).toBe(yoshi.code);
+				expect(other.out).toBe(yoshi.out);
+				expect(other.err).toBe(yoshi.err);
+			}
+			// All four are dry runs, so none of them wrote anything.
+			expect(yoshi.out).toContain("Dry run — nothing written.");
+		});
+	});
+
+	test("--help names yoshi and says the old spelling still works", async () => {
+		await withHome({}, async () => {
+			const { code, out } = await run(["--help"]);
+			expect(code).toBe(0);
+			expect(out).toContain("labunbun yoshi");
+			expect(out).toContain("yoshi options:");
+			expect(out).toContain("and still work");
+		});
+	});
+
 	test("an unknown source is a usage error, not a crash", async () => {
 		await withHome({}, async () => {
 			const { code, err } = await run(["migrate", "--from", "nope"]);

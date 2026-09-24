@@ -132,12 +132,13 @@ export function builtInCommands(): Command[] {
 				`Explain ${args || "the most recently discussed code"}. Cover what it does, why it is written this way, and any gotchas. Reference specific files and line numbers.`,
 		},
 		{
-			name: "migrate",
-			description: "Import from another agent tool: /migrate asks, or pass [--from <sources>] [--apply] [--force]",
+			name: "yoshi",
+			aliases: ["migrate"],
+			description: "Import from another agent tool: /yoshi asks, or pass [--from <sources>] [--apply] [--force]",
 			type: "local",
 			call: async (ctx, args) => {
 				const tokens = args.split(/\s+/).filter(Boolean);
-				// Bare `/migrate` in a REPL asks the same questions the flags below
+				// Bare `/yoshi` in a REPL asks the same questions the flags below
 				// spell out, and ends in the same runMigration call.
 				if (tokens.length === 0 && ctx.dialog) {
 					return runMigrationWizard({
