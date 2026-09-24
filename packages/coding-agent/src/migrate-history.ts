@@ -38,7 +38,7 @@ import { listGrokSessions, readGrokSession } from "./grok-session.ts";
 
 import { kimiInputHistoryDir, kimiInputHistoryFile, kimiRoot } from "./kimi-home.ts";
 import { listKimiSessions, readKimiSession } from "./kimi-session.ts";
-import type { MigrationSourceId } from "./migrate.ts";
+import type { MigrationSourceId } from "./migrate-types.ts";
 import { minimaxRoot } from "./minimax-home.ts";
 import { listMinimaxSessions, readMinimaxSession } from "./minimax-session.ts";
 import { listStepSessions, readStepSession } from "./step-session.ts";
