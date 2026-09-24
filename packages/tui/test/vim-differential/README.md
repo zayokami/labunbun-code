@@ -134,3 +134,26 @@ fails is not a case, it is a bug report:
 - `>2w` shifts one line; vim shifts two.
 - `>gg` and `>2gg` from below the first line do nothing at all, and leave the
   caret where it was.
+
+## The one thing the engine knows that vim does not
+
+A paste of more than 500 characters, or of anything at all that spans lines, is
+folded into a literal ASCII token in the buffer: `[Pasted 800 chars #1]`
+(`packages/tui/src/paste.ts`). It is expanded back into the real payload at
+submit, and **the payload is gone from the buffer** — so a command that takes one
+of the token's characters leaves a string nothing matches, and the model receives
+the remains of a placeholder.
+
+The Vim engine therefore treats a token as one indivisible character: a motion
+steps over it, `x` takes all of it, `r` refuses, a find cannot stop in its
+interior, a wanted column that aims inside it is snapped onto its `[`.
+
+**No case for this belongs in `regress.mjs`, `fuzz.mjs` or `class.mjs`**, and
+that is a decision rather than an oversight. Real vim has no paste token, so
+every such case mismatches by construction and a comparison that cannot be won
+is not evidence — a harness full of known-red cases trains you to ignore it.
+The evidence for this batch is `packages/tui/test/vim-engine.test.ts` and
+`packages/tui/test/editing.test.ts` instead, held in place by the mutants
+`W1`–`W8` and `X1`–`X3` in `driver-vim-b.ts`. The end-to-end assertion is the
+one that matters: a yank, a delete and a paste put the token back byte for byte,
+and `expandPasteTokens` still finds the payload inside it.

@@ -180,8 +180,10 @@ export function PromptInput({
 	 *
 	 * Placeholder tokens expand here, so the model and the transcript see the
 	 * real payload. History keeps the compact token form — recall and resubmit
-	 * expand through the still-live map. A partially deleted token no longer
-	 * matches and stays literal text (accepted limitation).
+	 * expand through the still-live map. Vim mode treats a token as one
+	 * character, so an edit cannot leave a half-token that no longer matches (see
+	 * `pasteTokenAt`); outside vim mode a stray keystroke in the host's own
+	 * editing can still, and such a token is then submitted literally.
 	 */
 	const submitCurrent = useCallback(() => {
 		const raw = state.text;

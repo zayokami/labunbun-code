@@ -11,7 +11,9 @@ import {
 	makePasteToken,
 	normalizePaste,
 	PASTE_PLACEHOLDER_THRESHOLD,
+	PASTE_TOKEN_CHARACTERS,
 	PASTE_TOKEN_RE,
+	pasteTokenAt,
 	shouldPlaceholderize,
 } from "../src/paste.ts";
 
@@ -130,6 +132,44 @@ describe("paste placeholders", () => {
 			expect(PASTE_TOKEN_RE.test(makePasteToken(seq, 1))).toBe(true);
 			PASTE_TOKEN_RE.lastIndex = 0;
 		}
+	});
+
+	test("the scanner's fast reject knows every character a token is made of", () => {
+		// A character missing from that set is one `pasteTokenAt` cannot see past,
+		// and a token the scanner cannot find is a token the editor will edit one
+		// character at a time — which is the whole failure this scanner prevents.
+		for (const token of [makePasteToken(1, 1), makePasteToken(7, 987654321), makePasteToken(42, 0)]) {
+			for (const ch of token) {
+				expect(PASTE_TOKEN_CHARACTERS.has(ch)).toBe(true);
+			}
+		}
+	});
+
+	test("the scanner finds a token from any position inside it, and only inside it", () => {
+		const token = makePasteToken(1, 800);
+		const text = `see ${token} here`;
+		const start = 4;
+		const end = start + token.length;
+		// The `[` counts: it is the one position a caret may stand on.
+		expect(pasteTokenAt(text, start)).toEqual({ start, end });
+		expect(pasteTokenAt(text, end - 1)).toEqual({ start, end });
+		expect(pasteTokenAt(text, text.length)).toBeNull();
+		expect(pasteTokenAt(text, start - 1)).toBeNull();
+		expect(pasteTokenAt(text, end)).toBeNull();
+		expect(pasteTokenAt(text, -1)).toBeNull();
+		expect(pasteTokenAt("no token here", 4)).toBeNull();
+	});
+
+	test("the scanner stops at the first bracket rather than an earlier one", () => {
+		// A stray `[` in front of a real token cannot hide it: the scan asks about
+		// the nearest bracket, and a token's own interior holds none.
+		const token = makePasteToken(2, 12);
+		const text = `[${token}`;
+		expect(pasteTokenAt(text, 1)).toEqual({ start: 1, end: 1 + token.length });
+		// And a bracket that does not open a token means no earlier one does: a
+		// token cannot contain the bracket that would hide its own start.
+		expect(pasteTokenAt("[Pasted nope", 9)).toBeNull();
+		expect(pasteTokenAt("[Pasted 1 chars #", 15)).toBeNull();
 	});
 
 	test("normalizePaste folds CRLF and lone CR into LF", () => {

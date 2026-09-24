@@ -5,9 +5,8 @@
  *
  * NORMAL supports:
  *   motions   h l 0 ^ $ w W b B e E f{c} F{c} t{c} T{c} ; , gg G j k
- *             (<Home> is `0` and <End> is `$`, wanted column and all — though a
- *             count in front of either is still taken and dropped: `2<End>` is
- *             not yet `$` two lines down)
+ *             (<Home> is `0` and <End> is `$`, wanted column and count alike —
+ *             vim binds `K_END` to `nv_dollar` itself, so `2<End>` is `2$`)
  *   operators d c y — doubled (dd/cc/yy) is linewise; cw stops at the end of the
  *             word the caret is on (the classic cw/ce quirk: the whitespace after
  *             it stays, and on that word's last character only that character is
@@ -50,6 +49,20 @@
  * before it moves, and only a step that crossed the break arms a new one: that is
  * why `v<BS><BS>d` takes one character more than `v<BS>d`, and not two.
  *
+ * A paste token — the `[Pasted 800 chars #1]` a large paste is folded into (see
+ * paste.ts) — is **one character** here, and that is the one rule in this engine
+ * that vim has no opinion on, because vim has no such token. It has to be one:
+ * the token is literal ASCII in a buffer the user can edit, so any command that
+ * took one of its characters would leave a string `expandPasteTokens` no longer
+ * matches, and the payload would go to the model as the remains of a placeholder
+ * — a prompt that looks entirely normal and says something else. So motions step
+ * over it (`l` from its `[` lands past its `]`, `b` from after it comes back to
+ * the `[`), `x`/`X`/`d{motion}` and a selection take all of it, a word motion
+ * treats it as the one punctuation-class word it is, `a` inserts after it and `i`
+ * before it, and the two commands that rewrite a character without choosing where
+ * to cut — `r` and the case commands — leave it alone rather than spell it wrong.
+ * See {@link pasteTokenAt}, {@link splitsPasteToken}.
+ *
  * Deliberate simplifications: f/t/F/T are line-scoped (as in vim); marks,
  * registers beyond the unnamed one, and `:` ex-commands are out of scope — but
  * the keys that would open them are still taken, so the keys after them cannot
@@ -81,6 +94,8 @@
  * undo-recording setState. Cursor-only moves use `ops.setCursor` and are not
  * undoable (vim separates cursor motion from the undo tree the same way).
  */
+
+import { pasteTokenAt } from "./paste.ts";
 
 export type VimMode = "normal" | "insert" | "visual" | "visual-line";
 
@@ -513,8 +528,16 @@ function markWidthAt(text: string, pos: number): number {
  * `pos + 1` would land inside it and every slice from there would corrupt it.
  * Combining marks are not characters either: `é` written as `e` + U+0301 is one
  * position in vim, base and mark together.
+ *
+ * A paste token is one character too, for the reason its own module gives: it is
+ * literal ASCII, so anything that stepped through it one unit at a time could
+ * stop between its brackets and leave a string `expandPasteTokens` no longer
+ * matches. Every position this engine reaches runs through here, which is why one
+ * check here is the whole of it.
  */
 export function nextChar(text: string, pos: number): number {
+	const token = pasteTokenAt(text, pos);
+	if (token) return token.end;
 	const pair = isHighSurrogate(text.charCodeAt(pos)) && isLowSurrogate(text.charCodeAt(pos + 1)) ? 2 : 1;
 	let end = pos + pair;
 	for (let width = markWidthAt(text, end); width > 0; width = markWidthAt(text, end)) end += width;
@@ -524,6 +547,11 @@ export function nextChar(text: string, pos: number): number {
 /** The character boundary before `pos`, stepping over a whole pair or cluster. */
 export function prevChar(text: string, pos: number): number {
 	if (pos <= 0) return 0;
+	// The mirror of `nextChar`: from just past a token, or from inside one, the
+	// character before is the token's `[`. `pos - 1` rather than `pos` because a
+	// position that is itself a token's start has a character in front of it.
+	const token = pasteTokenAt(text, pos - 1);
+	if (token) return token.start;
 	let end = pos;
 	for (;;) {
 		if (markWidthAt(text, end - 2) === 2) {
@@ -576,15 +604,21 @@ function charEndingAt(text: string, end: number, lineBegin: number): string {
 	return end <= lineBegin ? "" : text.slice(prevChar(text, end), end);
 }
 
-/** Snap an index that landed inside a pair back onto the character it is part of. */
+/**
+ * Snap an index that landed inside a character back onto the character it is part
+ * of — the low half of a surrogate pair, or the interior of a paste token.
+ *
+ * The token case is not hypothetical: a `j` aims at a *column*, and a column
+ * inside a token is a real column of the line. Without the snap the caret stands
+ * between the token's `P` and `a`, and the very next `x` cuts the payload in half.
+ */
 export function snapToChar(text: string, pos: number): number {
-	if (
-		pos > 0 &&
-		pos < text.length &&
-		isLowSurrogate(text.charCodeAt(pos)) &&
-		isHighSurrogate(text.charCodeAt(pos - 1))
-	) {
-		return pos - 1;
+	if (pos > 0 && pos < text.length) {
+		const token = pasteTokenAt(text, pos);
+		if (token !== null && pos > token.start) return token.start;
+		if (isLowSurrogate(text.charCodeAt(pos)) && isHighSurrogate(text.charCodeAt(pos - 1))) {
+			return pos - 1;
+		}
 	}
 	return pos;
 }
@@ -704,6 +738,61 @@ export function lineCount(text: string): number {
  */
 export function onLastLine(text: string, pos: number): boolean {
 	return text.indexOf("\n", Math.max(0, pos)) === -1;
+}
+
+/**
+ * Whether cutting `[start, end)` out of `text` would leave part of a paste token
+ * behind — the one way an edit can lose a payload while looking like it worked.
+ *
+ * Exported and tested on its own because it is an invariant rather than a
+ * behaviour. Every motion here lands on a position the engine can step to, and
+ * `nextChar` steps over a whole token, so no command reaches the guard that asks
+ * it; an invariant nothing can falsify is worth nothing unless it is stated as a
+ * function and held against examples, which `vim-engine.test.ts` does. Refusing
+ * the range is the smaller harm anyway: a `d` that changed nothing is a nuisance,
+ * a silently lost paste is the bug this whole arrangement exists to prevent.
+ */
+export function splitsPasteToken(text: string, start: number, end: number): boolean {
+	// Cut into a token at the front of the range.
+	const atStart = pasteTokenAt(text, start);
+	if (atStart !== null && start > atStart.start) return true;
+	// Or leave the tail of one that begins inside it. Every `[` in the range is
+	// asked about, because a stray bracket before a real token is not one.
+	for (let i = text.indexOf("[", start); i >= 0 && i < end; i = text.indexOf("[", i + 1)) {
+		const token = pasteTokenAt(text, i);
+		if (token !== null) return token.end > end;
+	}
+	return false;
+}
+
+/**
+ * `fn` applied to every run of `[from, to)` that is not inside a paste token, the
+ * tokens themselves copied across untouched.
+ *
+ * For the case commands, which are the only edits here that rewrite a character
+ * without choosing where to cut. A token has to keep its exact spelling to be
+ * recognized at submit time, and `~` on `[Pasted 800 chars #1]` would give
+ * `[pASTED 800 CHARS #1]` — a buffer that looks the same and submits as a
+ * twenty-character gibberish in place of what the user pasted.
+ */
+function mapOutsidePasteTokens(text: string, from: number, to: number, fn: (run: string) => string): string {
+	let out = "";
+	let i = from;
+	while (i < to) {
+		const token = pasteTokenAt(text, i);
+		if (token !== null) {
+			out += text.slice(i, Math.min(to, token.end));
+			i = Math.min(to, token.end);
+			continue;
+		}
+		// A plain run ends at the next bracket, which may be a stray one — then the
+		// next turn of this loop takes it as the head of another plain run.
+		const bracket = text.indexOf("[", i);
+		const stop = bracket < 0 || bracket >= to ? to : bracket;
+		out += fn(text.slice(i, stop));
+		i = stop;
+	}
+	return out;
 }
 
 export function motionForwardWord(text: string, pos: number, big = false): number {
@@ -1620,9 +1709,15 @@ export class VimEngine {
 			let i = pos + 1;
 			let remaining = count;
 			while (i < end) {
-				if (text[i] === char && --remaining === 0) {
-					found = i;
-					break;
+				if (text[i] === char) {
+					// A match inside a paste token is not a position: the token is one
+					// character whose `[` is the only part a caret can stand on, so
+					// `f[` finds it and `t]` cannot find the bracket that ends it.
+					const token = pasteTokenAt(text, i);
+					if ((token === null || i === token.start) && --remaining === 0) {
+						found = i;
+						break;
+					}
 				}
 				i++;
 			}
@@ -1685,6 +1780,13 @@ export class VimEngine {
 		const text = this.#ops.getText();
 		const pos = this.#ops.getCursor();
 		if (char.length === 0 || pos >= text.length || text[pos] === "\n") return;
+		// `r` refuses on a paste token instead of writing over its first
+		// character. The replacement is one character wide and the token is
+		// twenty-odd, so what would be left matches nothing in the paste map and
+		// the payload goes with it — for a key whose whole point is that the
+		// character under the caret is what changes. `x` is how a token is removed,
+		// and that one the user can see happen.
+		if (pasteTokenAt(text, pos) !== null) return;
 		// `3rX` replaces three characters, and each of them may be two units wide.
 		const lineEnd = lineEndExclusive(text, pos);
 		let end = pos;
@@ -1704,6 +1806,16 @@ export class VimEngine {
 		let changed = false;
 		for (let i = 0; i < count && pos < out.length; i++) {
 			if (out[pos] === "\n") break;
+			// A paste token is one character with no case of its own: the letters in
+			// it spell its own format, and swapping any of them stops it matching
+			// (see mapOutsidePasteTokens). `~` steps over it as a unit, exactly as it
+			// steps over a digit — the caret still advances, and an edit that changed
+			// nothing does not record an undo step.
+			const token = pasteTokenAt(out, pos);
+			if (token !== null) {
+				pos = token.end;
+				continue;
+			}
 			const end = nextChar(out, pos);
 			const c = out.slice(pos, end);
 			const swapped = c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase();
@@ -2150,6 +2262,10 @@ export class VimEngine {
 		// NOTE: #motionRange already folds `inclusive` into `end`; do not add again.
 		const text = this.#ops.getText();
 		const cutEnd = Math.min(text.length, Math.max(start, end));
+		// The range cannot split a paste token, because no motion returns one that
+		// does — see splitsPasteToken, which is asked here rather than assumed, and
+		// which `vim-engine.test.ts` holds against examples of its own.
+		if (splitsPasteToken(text, Math.min(start, cutEnd), cutEnd)) return;
 		this.#register = { text: text.slice(start, cutEnd), linewise: false };
 		if (operator === "y") {
 			// The caret goes to the start of the yanked text — which is a line break
@@ -2773,8 +2889,12 @@ export class VimEngine {
 		const text = this.#ops.getText();
 		const { start, end } = this.selection;
 		const segment = text.slice(start, end);
-		const swapped =
-			kind === "upper" ? segment.toUpperCase() : kind === "lower" ? segment.toLowerCase() : swapCase(segment);
+		// A paste token inside the selection keeps its spelling: a token's own
+		// letters are its format, and uppercasing any of them makes the payload
+		// behind it unreachable at submit.
+		const swapped = mapOutsidePasteTokens(text, start, end, (run) =>
+			kind === "upper" ? run.toUpperCase() : kind === "lower" ? run.toLowerCase() : swapCase(run),
+		);
 		// A selection with no cased characters changes nothing: exit visual without
 		// recording an edit that did not happen.
 		if (swapped !== segment) this.#ops.setAll(text.slice(0, start) + swapped + text.slice(end), start);

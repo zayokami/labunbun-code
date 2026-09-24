@@ -3,6 +3,7 @@
  * Each editor is an in-memory string+cursor pair driven through handleKey.
  */
 import { describe, expect, test } from "bun:test";
+import { expandPasteTokens, makePasteToken } from "../src/paste.ts";
 import {
 	lineCount,
 	lineOf,
@@ -11,9 +12,13 @@ import {
 	motionForwardWord,
 	motionWordEnd,
 	motionWordEndHere,
+	splitsPasteToken,
 	VimEngine,
 	type VimKey,
 } from "../src/vim.ts";
+
+/** What a large paste folds itself into, and what every case below is about. */
+const PASTE_TOKEN = makePasteToken(1, 800);
 
 function editor(text: string, cursor = 0) {
 	const recalled: Array<"up" | "down"> = [];
@@ -2552,6 +2557,17 @@ describe("~ toggles case", () => {
 		expect(e.state.cursor).toBe(3);
 	});
 
+	test("a paste token is the same kind of character: stepped over, spelling kept", () => {
+		// The letters in `[Pasted 800 chars #1]` are the token's format, so
+		// swapping any of them makes the payload behind it unreachable at submit.
+		const e = editor(`b ${PASTE_TOKEN} c`, 0);
+		e.engine.handleKey("3", e.key());
+		e.engine.handleKey("~", e.key());
+		expect(e.state.text).toBe(`B ${PASTE_TOKEN} c`);
+		expect(e.state.cursor).toBe(PASTE_TOKEN.length + 2);
+		expect(e.writes()).toBe(1);
+	});
+
 	test("an empty line has nothing to toggle", () => {
 		const e = editor("\nab", 0);
 		e.engine.handleKey("~", e.key());
@@ -3089,5 +3105,139 @@ describe("a visual-line delete on the last line", () => {
 
 	test("a middle line keeps the break in front of it", () => {
 		expect(run(D, 2, "V", "d")).toEqual({ text: "a\ndef", cursor: 2, mode: "normal" });
+	});
+});
+
+describe("a paste token is one character", () => {
+	// Every case here is about the same failure: the token is literal ASCII in a
+	// buffer the user can edit, and a string that no longer matches
+	// `PASTE_TOKEN_RE` submits as the remains of a placeholder in place of the
+	// payload — a prompt that looks normal and says something else. The token is
+	// 21 units long in every one of these buffers: `[` + `Pasted 800 chars #1]`.
+	const TEXT = `a ${PASTE_TOKEN} b`;
+	/** Where the token starts in TEXT, and where the space after it is. */
+	const AT = 2;
+	const PAST = AT + PASTE_TOKEN.length;
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) e.engine.handleKey(k, e.key());
+		return e;
+	};
+
+	test("x takes the whole token, and nothing else", () => {
+		const e = run(TEXT, AT, "x");
+		expect(e.state.text).toBe("a  b");
+		expect(e.state.cursor).toBe(AT);
+		expect(e.writes()).toBe(1);
+	});
+
+	test("l and h step over the token as one character", () => {
+		expect(run(TEXT, AT, "l").state.cursor).toBe(PAST);
+		expect(run(TEXT, PAST, "h").state.cursor).toBe(AT);
+	});
+
+	test("X after the token takes the whole of it", () => {
+		expect(run(TEXT, PAST, "X").state.text).toBe("a  b");
+	});
+
+	test("b from after the token comes back to its `[`, never inside it", () => {
+		// The interior is not a position: without the token-aware step, `b` lands
+		// on the `1` before the `]` and the next `x` cuts the payload in half.
+		expect(run(TEXT, PAST, "b").state.cursor).toBe(AT);
+		expect(run(TEXT, PAST + 1, "b").state.cursor).toBe(AT);
+	});
+
+	test("a word motion takes the token as the one punctuation word it is", () => {
+		// `dw` on `a . b` at the dot takes the dot and the blanks after it, and
+		// this is the same case with twenty-one characters of placeholder instead
+		// of one.
+		expect(run(TEXT, AT, "d", "w").state.text).toBe("a b");
+	});
+
+	test("cw on a token cuts all of it and opens insert", () => {
+		const e = run(TEXT, AT, "c", "w");
+		expect(e.state.text).toBe("a  b");
+		expect(e.state.cursor).toBe(AT);
+		expect(e.engine.mode).toBe("insert");
+	});
+
+	test("a selection over a token takes all of it", () => {
+		const e = run(TEXT, AT, "v", "d");
+		expect(e.state.text).toBe("a  b");
+		expect(e.state.cursor).toBe(AT);
+		expect(e.engine.mode).toBe("normal");
+	});
+
+	test("r refuses on a token rather than respelling it", () => {
+		const e = run(TEXT, AT, "r", "Z");
+		expect(e.state.text).toBe(TEXT);
+		expect(e.state.cursor).toBe(AT);
+		expect(e.writes()).toBe(0);
+	});
+
+	test("a inserts after the token, i before it", () => {
+		const after = run(TEXT, AT, "a");
+		expect(after.state.cursor).toBe(PAST);
+		after.type("Q");
+		expect(after.state.text).toBe(`a ${PASTE_TOKEN}Q b`);
+		const before = run(TEXT, AT, "i");
+		before.type("Q");
+		expect(before.state.text).toBe(`a Q${PASTE_TOKEN} b`);
+	});
+
+	test("a wanted column inside a token lands on the token's `[`", () => {
+		// `j` aims at a *column*, and a column inside a token is a real column of
+		// the line. Line 2 puts the token at 9, so a `5|` from line 1 aims at 11,
+		// which is between the token's `P` and `a`.
+		const e = run("abcdef\nx [Pasted 800 chars #1] y", 0, "5", "|", "j");
+		expect(e.state.cursor).toBe(9);
+		// Which is the difference between `x` removing the payload and cutting it.
+		e.engine.handleKey("x", e.key());
+		expect(e.state.text).toBe("abcdef\nx  y");
+	});
+
+	test("a token pastes back byte for byte, so it still expands at submit", () => {
+		const payload = "a long pasted payload\nwith a line break";
+		const map = new Map([[PASTE_TOKEN, payload]]);
+		const e = run(TEXT, AT, "y", "l", "x", "P");
+		expect(e.state.text).toBe(TEXT);
+		expect(expandPasteTokens(e.state.text, map)).toBe(`a ${payload} b`);
+	});
+
+	test("a paste leaves the caret on the pasted token's `[`, not its `]`", () => {
+		const e = run(TEXT, AT, "y", "l", "p");
+		expect(e.state.text).toBe(`a ${PASTE_TOKEN}${PASTE_TOKEN} b`);
+		// The caret comes back to the character vim's `p` leaves it on — the last
+		// character it pasted, which is the token's `[` and not its `]`.
+		expect(e.state.cursor).toBe(PAST);
+	});
+
+	test("a find cannot stop inside a token, but can stop on its `[`", () => {
+		// The token is one character whose one addressable position is its `[`, so
+		// `f[` finds it and `t]` cannot find the bracket that ends it.
+		expect(run(TEXT, 0, "f", "]").state.cursor).toBe(0);
+		expect(run(TEXT, 0, "f", "[").state.cursor).toBe(AT);
+	});
+
+	test("the visual case commands leave a token's spelling alone", () => {
+		expect(run(`AB ${PASTE_TOKEN} cd`, 0, "V", "u").state.text).toBe(`ab ${PASTE_TOKEN} cd`);
+		expect(run(`AB ${PASTE_TOKEN} cd`, 0, "V", "~").state.text).toBe(`ab ${PASTE_TOKEN} CD`);
+	});
+
+	test("splitsPasteToken is the invariant, held against examples", () => {
+		// No motion reaches the guard that asks this — every range is cut between
+		// characters — so the invariant is stated as a function and pinned here
+		// rather than trusted to hold on its own.
+		expect(splitsPasteToken(TEXT, AT, PAST)).toBe(false); // exactly the token
+		expect(splitsPasteToken(TEXT, 0, PAST)).toBe(false); // the line up to its end
+		expect(splitsPasteToken(TEXT, 0, TEXT.length)).toBe(false);
+		expect(splitsPasteToken(TEXT, 0, AT)).toBe(false); // stops before it
+		expect(splitsPasteToken(TEXT, PAST, TEXT.length)).toBe(false); // starts after it
+		expect(splitsPasteToken(TEXT, AT + 1, PAST)).toBe(true); // cuts into its front
+		expect(splitsPasteToken(TEXT, 0, AT + 4)).toBe(true); // cuts into its tail
+		expect(splitsPasteToken(TEXT, AT + 1, AT + 4)).toBe(true); // both ends inside
+		expect(splitsPasteToken("no token at all", 1, 4)).toBe(false);
+		// A stray bracket in front of a real token is not one, and must not hide it.
+		expect(splitsPasteToken(`[a ${PASTE_TOKEN} b`, 0, 5)).toBe(true);
 	});
 });
