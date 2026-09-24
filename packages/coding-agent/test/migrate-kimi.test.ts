@@ -401,6 +401,71 @@ describe("the permission posture", () => {
 });
 
 describe("hooks", () => {
+	test("two sources' hooks are one configuration, not the last one to be read", () => {
+		// `labunbun yoshi` with no `--from` reads every source present, and a
+		// `Stop` hook from one tool and a `PreToolUse` from the other describe a
+		// single settings file. Each source writing the key itself meant the
+		// second one erased the first while both report lines still said their
+		// hooks were written — a silent loss the report called a success.
+		const { home } = kimiHome({
+			"config.toml": ["[[hooks]]", 'event = "PreToolUse"', 'command = "echo kimi"', ""].join("\n"),
+		});
+		writeFileAt(
+			join(home, ".claude", "settings.json"),
+			JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo claude" }] }] } }),
+		);
+		const planned = planMigration(readSources(home), {}, { only: ["claude-code", "kimi-code"] });
+		const hooks = settingsWritten(planned).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+		expect(Object.keys(hooks).sort()).toEqual(["PreToolUse", "Stop"]);
+		expect(hooks.Stop[0].hooks[0].command).toBe("echo claude");
+		expect(hooks.PreToolUse[0].hooks[0].command).toBe("echo kimi");
+		expect(planned.items.filter((item) => item.to === "settings.json → hooks").map((item) => item.source)).toEqual([
+			"claude-code",
+			"kimi-code",
+		]);
+	});
+
+	test("two sources claiming the same event both keep their entries", () => {
+		// The union is per event, not per file: a second `Stop` hook is a second
+		// hook, and dropping it would be the same loss one level down.
+		const { home } = kimiHome({
+			"config.toml": ["[[hooks]]", 'event = "Stop"', 'command = "echo kimi"', ""].join("\n"),
+		});
+		writeFileAt(
+			join(home, ".claude", "settings.json"),
+			JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo claude" }] }] } }),
+		);
+		const planned = planMigration(readSources(home), {}, { only: ["claude-code", "kimi-code"] });
+		const hooks = settingsWritten(planned).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+		expect(hooks.Stop.map((entry) => entry.hooks[0].command)).toEqual(["echo claude", "echo kimi"]);
+	});
+
+	test("a target that already has hooks keeps them for both sources unless --force", () => {
+		const existing = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo mine" }] }] } });
+		const { home } = kimiHome({
+			"config.toml": ["[[hooks]]", 'event = "Stop"', 'command = "echo kimi"', ""].join("\n"),
+		});
+		writeFileAt(
+			join(home, ".claude", "settings.json"),
+			JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo claude" }] }] } }),
+		);
+		const kept = planMigration(readSources(home), JSON.parse(existing), { only: ["claude-code", "kimi-code"] });
+		// Nothing is written at all: the target's file is the one on disk and the
+		// two sources each say why they left it alone, rather than one of them
+		// rewriting it with a hook the other had also declined to import.
+		expect(kept.writes.find((candidate) => candidate.kind === "settings")).toBeUndefined();
+		expect(kept.items.filter((item) => item.action === "skip" && item.detail.includes("--force")).length).toBe(2);
+
+		const forced = planMigration(readSources(home), JSON.parse(existing), {
+			only: ["claude-code", "kimi-code"],
+			force: true,
+		});
+		const forcedHooks = settingsWritten(forced).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+		// `--force` replaces: neither source's own hook survives the other, and
+		// the target's is gone, which is what the flag says it does.
+		expect(forcedHooks.Stop.map((entry) => entry.hooks[0].command)).toEqual(["echo claude", "echo kimi"]);
+	});
+
 	test("seconds become milliseconds, and an untimed hook gets a longer wait here", () => {
 		const { home } = kimiHome({
 			"config.toml": [

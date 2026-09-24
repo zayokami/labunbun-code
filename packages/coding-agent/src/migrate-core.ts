@@ -15,6 +15,8 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { HookEventName } from "./hooks.ts";
+import { HOOK_EVENTS } from "./hooks.ts";
 import type {
 	MigrationItem,
 	MigrationSourceId,
@@ -399,6 +401,80 @@ export function normalizeClaudeHandler(handler: unknown, counts: NormalizedHooks
 }
 
 /**
+ * Rewrite source hooks as the target's hook config.
+ *
+ * The two shapes look alike enough that copying the block reads as faithful and
+ * is not: the target runs a fixed set of events, only shell-command handlers,
+ * and a matcher where `*` is the only wildcard. Counting each difference here
+ * lets the report say what did not come across, rather than writing a hook that
+ * never fires.
+ */
+export function normalizeClaudeHooks(raw: unknown): NormalizedHooks {
+	const result: NormalizedHooks = {
+		config: {},
+		droppedEvents: [],
+		droppedHandlers: 0,
+		droppedMatchers: [],
+		splitMatchers: [],
+		malformed: 0,
+		convertedTimeouts: 0,
+		clampedTimeouts: 0,
+		untimedHandlers: 0,
+	};
+	if (!isRecord(raw)) {
+		if (raw !== undefined) result.malformed += 1;
+		return result;
+	}
+	for (const [event, entries] of Object.entries(raw)) {
+		if (!HOOK_EVENTS.includes(event as HookEventName)) {
+			result.droppedEvents.push(event);
+			continue;
+		}
+		if (!Array.isArray(entries)) {
+			result.malformed += 1;
+			continue;
+		}
+		const kept: NormalizedHookEntry[] = [];
+		for (const entry of entries) {
+			if (!isRecord(entry) || !Array.isArray(entry.hooks)) {
+				result.malformed += 1;
+				continue;
+			}
+			const hooks = entry.hooks.flatMap((handler) => normalizeClaudeHandler(handler, result));
+			if (hooks.length === 0) continue;
+			const matcher = typeof entry.matcher === "string" ? entry.matcher.trim() : "";
+			if (matcher === "") {
+				kept.push({ hooks });
+				continue;
+			}
+			// `A|B` is an alternation in the source and a literal here — `|` is one
+			// of the characters `matchesPattern` escapes — so the source matcher
+			// would import as one that can never match. One entry per name is what
+			// it meant, and it is not a widening: those are the tools it named.
+			const parts = matcher.split("|");
+			if (parts.length > 1) {
+				if (!parts.every((part) => HOOK_MATCHER_NAME.test(part))) {
+					// An alternation with something in it this build cannot express;
+					// splitting it would guess at what the source meant.
+					result.droppedMatchers.push(matcher);
+					continue;
+				}
+				result.splitMatchers.push(matcher);
+				for (const part of parts) kept.push({ matcher: part, hooks });
+				continue;
+			}
+			if (HOOK_MATCHER_METACHARACTERS.test(matcher)) {
+				result.droppedMatchers.push(matcher);
+				continue;
+			}
+			kept.push({ matcher, hooks });
+		}
+		if (kept.length > 0) result.config[event] = kept;
+	}
+	return result;
+}
+
+/**
  * One line naming the keys that were neither imported nor explained.
  *
  * Silence is the one thing a migration report may not do: a key the user set is
@@ -483,7 +559,7 @@ export function positiveInteger(value: unknown): number | undefined {
 
 export function planAssetTrees(
 	source: MigrationSourceId,
-	raw: { skills: RawFile[]; agents: RawFile[]; memory: string | null },
+	raw: { skills: RawFile[]; agents: RawFile[]; memory: string | null; commands?: RawCommands },
 	home: string,
 	force: boolean,
 	items: MigrationItem[],
@@ -521,10 +597,25 @@ export function planAssetTrees(
 			writes,
 		);
 	}
+	// Only the sources whose reader found a `commands/` tree set this. A source
+	// with no command directory has nothing to import and nothing to say, so the
+	// key is optional rather than an empty pair of lists every caller must build.
+	if (raw.commands) {
+		planCommands(source, raw.commands, `~/${SOURCE_ROOTS[source]}/commands`, home, force, items, writes);
+	}
 }
 
-/** Command frontmatter keys that do nothing once the file is a skill here. */
-const UNHONORED_COMMAND_KEYS = ["allowed-tools", "model", "argument-hint"];
+/**
+ * Command frontmatter keys that do nothing once the file is a skill here.
+ *
+ * The last two are ZCode's: `SAFE_FRONTMATTER_KEYS` in
+ * `adapters/src/commands/index.ts` names six keys a command may declare, and
+ * this build reads neither `disable-noninteractive` nor `skills` from a skill's
+ * header. A key ZCode honours and this build silently ignores is the one a user
+ * is most likely to believe is still in force, so it is named rather than
+ * dropped.
+ */
+const UNHONORED_COMMAND_KEYS = ["allowed-tools", "model", "argument-hint", "disable-noninteractive", "skills"];
 
 /**
  * Rewrite a source command file as a skill.

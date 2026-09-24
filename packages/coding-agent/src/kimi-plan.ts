@@ -29,6 +29,7 @@ import {
 	tildePath,
 } from "./migrate-core.ts";
 import type {
+	ClaimHooks,
 	ClaimScalar,
 	MigrationItem,
 	NormalizedHookEntry,
@@ -352,7 +353,7 @@ function planKimiHooks(
 	raw: RawKimiCode,
 	home: string,
 	items: MigrationItem[],
-	settingsPatch: Record<string, unknown>,
+	claimHooks: ClaimHooks,
 	existing: RawSettingsInput,
 	force: boolean,
 ): void {
@@ -428,7 +429,6 @@ function planKimiHooks(
 		});
 		return;
 	}
-	settingsPatch.hooks = normalized.config;
 	const entries = events.reduce((count, event) => count + normalized.config[event].length, 0);
 	const split =
 		normalized.splitMatchers.length > 0
@@ -446,18 +446,16 @@ function planKimiHooks(
 			? `${normalized.untimedHandlers} hook(s) named no timeout: kimi waits ${KIMI_DEFAULT_HOOK_TIMEOUT_SECONDS} s, this build ${DEFAULT_HOOK_TIMEOUT_MS / 1000} s`
 			: "",
 	].filter((part) => part !== "");
-	items.push({
-		source: "kimi-code",
+	claimHooks(
+		"kimi-code",
+		normalized.config,
 		from,
-		to: "settings.json → hooks",
-		action: losses.length > 0 ? "downgrade" : "map",
-		detail:
-			`${entries} hook entr(ies) across ${events.length} event(s)` +
+		`${entries} hook entr(ies) across ${events.length} event(s)` +
 			(timeouts.length > 0 ? `; ${timeouts.join("; ")}` : "") +
 			split +
 			(losses.length > 0 ? `; left behind: ${losses.join("; ")}` : ""),
-		containsSecret: false,
-	});
+		losses.length > 0 ? "downgrade" : "map",
+	);
 }
 
 /**
@@ -578,9 +576,9 @@ export function planKimiCode(
 	home: string,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
+	claimHooks: ClaimHooks,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
-	settingsPatch: Record<string, unknown>,
 	existing: RawSettingsInput,
 	existingMcpServers: Record<string, unknown>,
 	force: boolean,
@@ -642,7 +640,7 @@ export function planKimiCode(
 
 	planKimiPermissionMode(raw, home, items, claimScalar);
 	planKimiPermissions(raw, home, items);
-	planKimiHooks(raw, home, items, settingsPatch, existing, force);
+	planKimiHooks(raw, home, items, claimHooks, existing, force);
 
 	// ── [models] / [providers] ───────────────────────────────────────────────
 	// Named by key, never by value: an entry may carry an inline `apiKey`, and the

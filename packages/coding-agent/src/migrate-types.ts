@@ -19,6 +19,7 @@ import { GROK_DEFAULT_DIR, grokRoot } from "./grok-home.ts";
 import { KIMI_CODE_DEFAULT_DIR, kimiRoot } from "./kimi-home.ts";
 import { MINIMAX_DATA_DIR_BASENAME, minimaxRoot } from "./minimax-home.ts";
 import { STEPCODE_DEFAULT_DIR, stepRoot } from "./step-home.ts";
+import { ZCODE_DEFAULT_DIR, zcodeRoot } from "./zcode-home.ts";
 
 // ---------------------------------------------------------------------------
 // Sources
@@ -76,7 +77,7 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	"claude-code": ".claude",
 	codex: ".codex",
-	zcode: ".zcode",
+	zcode: ZCODE_DEFAULT_DIR,
 	agents: ".agents",
 	"deepseek-harness": DSH_DEFAULT_DIR,
 	"grok-build": GROK_DEFAULT_DIR,
@@ -88,18 +89,26 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 /**
  * Where a source's tree actually is.
  *
- * Most roots are home-relative. Six are not: `$DSH_HOME`, `$GROK_HOME`,
- * `$CODEX_HOME`, `$KIMI_CODE_HOME`, MiniMax's pair of variables and Step's two
- * can each put their tree anywhere, and a reader that consulted `~/` anyway
- * would call the source absent while the importer went on to import from it —
- * or, worse here, detection would find it while the label named a path nobody
- * read. One function rather than a condition inside `detectSources`, so the
- * detection and the readers cannot disagree about which tree a source is.
+ * Most roots are home-relative. Seven are not: `$DSH_HOME`, `$GROK_HOME`,
+ * `$CODEX_HOME`, `$KIMI_CODE_HOME`, MiniMax's pair of variables, Step's two and
+ * `$ZCODE_DATA_BASE_DIR` can each put their tree anywhere, and a reader that
+ * consulted `~/` anyway would call the source absent while the importer went on
+ * to import from it — or, worse here, detection would find it while the label
+ * named a path nobody read. One function rather than a condition inside
+ * `detectSources`, so the detection and the readers cannot disagree about which
+ * tree a source is.
  *
  * Step's entry is `stepRoot`, which is also the only one that is *not* a single
  * expression: the directory name itself is a setting (`$STEPCODE_CONFIG_DIR`),
  * an agent-directory override moves the tree out of the home entirely, and the
  * pre-rename `.step-harness` tree is read when the canonical one holds nothing.
+ *
+ * ZCode's is the one whose *default* is also a variable: the desktop half of its
+ * tree is `$ZCODE_DATA_BASE_DIR/.zcode`, so this function is where the data
+ * directory name stops being a constant. Its CLI half is a second root with a
+ * second variable and is resolved in `zcode-read.ts`; detection deliberately
+ * looks only at the data root, because that is the half a fresh install always
+ * has.
  */
 function sourceRoot(id: MigrationSourceId, home: string): string {
 	if (id === "deepseek-harness") return dshRoot(home);
@@ -108,6 +117,7 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	if (id === "kimi-code") return kimiRoot(home);
 	if (id === "minimax-code") return minimaxRoot(home).root;
 	if (id === "step-code") return stepRoot(home);
+	if (id === "zcode") return zcodeRoot(home);
 	return join(home, SOURCE_ROOTS[id]);
 }
 
@@ -385,6 +395,13 @@ export type ClaimPermissionList = (
 	rules: string[],
 	from: string,
 	detail: string,
+	/**
+	 * How the report should score the claim. `map` when the rules arrive intact,
+	 * `downgrade` when the source's form had to be rewritten on the way — a
+	 * permission list that arrived in another shape is not a faithful copy, and
+	 * the tally is where a user notices.
+	 */
+	action?: MigrationAction,
 ) => void;
 
 export type ClaimScalar = (
@@ -393,4 +410,22 @@ export type ClaimScalar = (
 	value: ClaimedScalarValue,
 	from: string,
 	detail: string,
+) => void;
+
+/**
+ * One source's share of the target's hook config, claimed rather than written.
+ *
+ * Two sources can each hold hooks — a `Stop` hook from one and a `PreToolUse`
+ * from the other is one configuration, not two competing ones — so entries are
+ * unioned per event and the key is written once at the end. Writing straight
+ * into the patch would let the last source reached erase the first while both
+ * report lines saying their hooks were written.
+ */
+export type ClaimHooks = (
+	source: MigrationSourceId,
+	config: Record<string, NormalizedHookEntry[]>,
+	from: string,
+	detail: string,
+	/** `downgrade` when something of the source's hook block did not come across. */
+	action?: MigrationAction,
 ) => void;

@@ -11,27 +11,20 @@
 
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { RawClaudeCode } from "./claude-read.ts";
-import type { HookEventName } from "./hooks.ts";
-import { HOOK_EVENTS, HooksConfigSchema } from "./hooks.ts";
+import { HooksConfigSchema } from "./hooks.ts";
 import {
 	DEFAULT_HOOK_TIMEOUT_MS,
-	HOOK_MATCHER_METACHARACTERS,
-	HOOK_MATCHER_NAME,
 	isRecord,
 	MAX_HOOK_TIMEOUT_MS,
-	normalizeClaudeHandler,
+	normalizeClaudeHooks,
 	placeholderNote,
 	reportUnhandledKeys,
 	summarizeNames,
 } from "./migrate-core.ts";
-import type {
-	ClaimEnv,
-	ClaimPermissionList,
-	ClaimScalar,
-	MigrationItem,
-	NormalizedHookEntry,
-	NormalizedHooks,
-} from "./migrate-types.ts";
+import type { ClaimEnv, ClaimHooks, ClaimPermissionList, ClaimScalar, MigrationItem } from "./migrate-types.ts";
+
+export { normalizeClaudeHooks } from "./migrate-core.ts";
+
 import {
 	CLAUDE_SETTINGS_HANDLED,
 	CLAUDE_STATE_HANDLED,
@@ -56,80 +49,6 @@ const CLAUDE_PERMISSION_MODES: Record<string, string> = {
 	acceptEdits: "acceptEdits",
 	bypassPermissions: "bypassPermissions",
 };
-
-/**
- * Rewrite source hooks as the target's hook config.
- *
- * The two shapes look alike enough that copying the block reads as faithful and
- * is not: the target runs a fixed set of events, only shell-command handlers,
- * and a matcher where `*` is the only wildcard. Counting each difference here
- * lets the report say what did not come across, rather than writing a hook that
- * never fires.
- */
-export function normalizeClaudeHooks(raw: unknown): NormalizedHooks {
-	const result: NormalizedHooks = {
-		config: {},
-		droppedEvents: [],
-		droppedHandlers: 0,
-		droppedMatchers: [],
-		splitMatchers: [],
-		malformed: 0,
-		convertedTimeouts: 0,
-		clampedTimeouts: 0,
-		untimedHandlers: 0,
-	};
-	if (!isRecord(raw)) {
-		if (raw !== undefined) result.malformed += 1;
-		return result;
-	}
-	for (const [event, entries] of Object.entries(raw)) {
-		if (!HOOK_EVENTS.includes(event as HookEventName)) {
-			result.droppedEvents.push(event);
-			continue;
-		}
-		if (!Array.isArray(entries)) {
-			result.malformed += 1;
-			continue;
-		}
-		const kept: NormalizedHookEntry[] = [];
-		for (const entry of entries) {
-			if (!isRecord(entry) || !Array.isArray(entry.hooks)) {
-				result.malformed += 1;
-				continue;
-			}
-			const hooks = entry.hooks.flatMap((handler) => normalizeClaudeHandler(handler, result));
-			if (hooks.length === 0) continue;
-			const matcher = typeof entry.matcher === "string" ? entry.matcher.trim() : "";
-			if (matcher === "") {
-				kept.push({ hooks });
-				continue;
-			}
-			// `A|B` is an alternation in the source and a literal here — `|` is one
-			// of the characters `matchesPattern` escapes — so the source matcher
-			// would import as one that can never match. One entry per name is what
-			// it meant, and it is not a widening: those are the tools it named.
-			const parts = matcher.split("|");
-			if (parts.length > 1) {
-				if (!parts.every((part) => HOOK_MATCHER_NAME.test(part))) {
-					// An alternation with something in it this build cannot express;
-					// splitting it would guess at what the source meant.
-					result.droppedMatchers.push(matcher);
-					continue;
-				}
-				result.splitMatchers.push(matcher);
-				for (const part of parts) kept.push({ matcher: part, hooks });
-				continue;
-			}
-			if (HOOK_MATCHER_METACHARACTERS.test(matcher)) {
-				result.droppedMatchers.push(matcher);
-				continue;
-			}
-			kept.push({ matcher, hooks });
-		}
-		if (kept.length > 0) result.config[event] = kept;
-	}
-	return result;
-}
 
 /** Map Claude Code's `permissions` block onto this build's, sub-key by sub-key. */
 function planClaudePermissions(
@@ -221,7 +140,7 @@ function planClaudePermissions(
 function planClaudeHooks(
 	settings: Record<string, unknown>,
 	items: MigrationItem[],
-	settingsPatch: Record<string, unknown>,
+	claimHooks: ClaimHooks,
 	existing: RawSettingsInput,
 	force: boolean,
 ): void {
@@ -285,7 +204,6 @@ function planClaudeHooks(
 		});
 		return;
 	}
-	settingsPatch.hooks = normalized.config;
 	const entries = events.reduce((count, event) => count + normalized.config[event].length, 0);
 	const split =
 		normalized.splitMatchers.length > 0
@@ -305,14 +223,13 @@ function planClaudeHooks(
 	]
 		.filter(Boolean)
 		.join("; ");
-	items.push({
-		source: "claude-code",
+	claimHooks(
+		"claude-code",
+		normalized.config,
 		from,
-		to: "settings.json → hooks",
-		action: losses.length > 0 ? "downgrade" : "map",
-		detail: `${entries} matcher entr(ies) over ${events.length} event(s) rewritten${split}${timeouts ? `; ${timeouts}` : ""}${losses.length > 0 ? `; not carried: ${losses.join("; ")}` : ""}`,
-		containsSecret: false,
-	});
+		`${entries} matcher entr(ies) over ${events.length} event(s) rewritten${split}${timeouts ? `; ${timeouts}` : ""}${losses.length > 0 ? `; not carried: ${losses.join("; ")}` : ""}`,
+		losses.length > 0 ? "downgrade" : "map",
+	);
 }
 
 export function planClaudeCode(
@@ -321,9 +238,9 @@ export function planClaudeCode(
 	claimEnv: ClaimEnv,
 	claimScalar: ClaimScalar,
 	claimPermissionList: ClaimPermissionList,
+	claimHooks: ClaimHooks,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
-	settingsPatch: Record<string, unknown>,
 	existing: RawSettingsInput,
 	existingMcpServers: Record<string, unknown>,
 	force: boolean,
@@ -474,7 +391,7 @@ export function planClaudeCode(
 	}
 
 	planClaudePermissions(raw.settings, items, claimScalar, claimPermissionList);
-	planClaudeHooks(raw.settings, items, settingsPatch, existing, force);
+	planClaudeHooks(raw.settings, items, claimHooks, existing, force);
 
 	if (raw.settings.effortLevel !== undefined) {
 		items.push({

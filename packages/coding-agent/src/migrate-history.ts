@@ -43,6 +43,7 @@ import { minimaxRoot } from "./minimax-home.ts";
 import { listMinimaxSessions, readMinimaxSession } from "./minimax-session.ts";
 import { listStepSessions, readStepSession } from "./step-session.ts";
 import { readZcodeConversation, readZcodeSessions, type ZcodePartRow } from "./zcode-db.ts";
+import { zcodeDbPathFor } from "./zcode-read.ts";
 
 // ---------------------------------------------------------------------------
 // Shapes
@@ -877,7 +878,11 @@ function readCodexSession(
 function listZcodeHistory(home: string): HistoryListing {
 	const candidates: HistoryCandidate[] = [];
 	let children = 0;
-	for (const session of readZcodeSessions(join(home, ".zcode", "cli", "db", "db.sqlite"))) {
+	// Resolved once: the path depends on a variable and on a setting inside the
+	// config file it leads to, and three copies of that rule is how a user whose
+	// CLI tree moved ends up with their transcripts reported as none.
+	const dbPath = zcodeDbPathFor(home);
+	for (const session of readZcodeSessions(dbPath)) {
 		if (session.parentId) {
 			children += 1;
 			continue;
@@ -888,7 +893,7 @@ function listZcodeHistory(home: string): HistoryListing {
 			cwd: session.directory,
 			title: session.title,
 			startedAt: session.timeCreated,
-			path: join(home, ".zcode", "cli", "db", "db.sqlite"),
+			path: dbPath,
 		});
 	}
 	const notes: HistoryNote[] = [];
@@ -906,7 +911,7 @@ function zcodeCompactionSummary(part: Record<string, unknown>, partsByMessage: M
 }
 
 function readZcodeSession(sourceId: string, home: string): { entries: HistoryEntry[]; notes: HistoryNote[] } {
-	const { messages, parts } = readZcodeConversation(join(home, ".zcode", "cli", "db", "db.sqlite"), sourceId);
+	const { messages, parts } = readZcodeConversation(zcodeDbPathFor(home), sourceId);
 	const notes: HistoryNote[] = [];
 	let synthetic = 0;
 	let ignored = 0;

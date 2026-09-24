@@ -81,11 +81,13 @@ import {
 import type {
 	ClaimableScalarKey,
 	ClaimedScalarValue,
+	ClaimHooks,
 	MigrationAction,
 	MigrationCategory,
 	MigrationItem,
 	MigrationPlan,
 	MigrationSourceId,
+	NormalizedHookEntry,
 	PlannedWrite,
 } from "./migrate-types.ts";
 import {
@@ -104,7 +106,7 @@ import { mergeSettings, type RawSettingsInput } from "./settings.ts";
 import { planStepAssets, planStepCode } from "./step-plan.ts";
 import type { RawStepCode } from "./step-read.ts";
 import { readStepCode } from "./step-read.ts";
-import { planZcode } from "./zcode-plan.ts";
+import { planZcode, planZcodeAssets } from "./zcode-plan.ts";
 import type { RawZcode } from "./zcode-read.ts";
 import { readZcode } from "./zcode-read.ts";
 
@@ -261,6 +263,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		rules: string[],
 		from: string,
 		detail: string,
+		action: MigrationAction = "map",
 	): void => {
 		// A rule the target cannot parse is not a rule. Dropping it in silence is
 		// how a deny rule disappears from a migration report.
@@ -292,16 +295,48 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 			});
 			return;
 		}
-		permissionRules[behavior] = usable;
+		// Union, not assignment: the object above exists so that a later source
+		// adds to what an earlier one claimed, and a second claimant replacing the
+		// list would drop the first source's rules while its report item still said
+		// they were written.
+		permissionRules[behavior] = [...new Set([...permissionRules[behavior], ...usable])];
 		permissionsTouched = true;
 		items.push({
 			source,
 			from,
 			to: `settings.json → permissions.${behavior}`,
-			action: "map",
+			action,
 			detail,
 			containsSecret: false,
 		});
+	};
+
+	/**
+	 * Hooks claimed across sources, written once at the end.
+	 *
+	 * A hook is keyed by event, and two sources holding a `Stop` hook each are
+	 * describing one configuration rather than two rival ones. This exists
+	 * because writing the key from each source meant the last one reached erased
+	 * the first while both report lines still said their hooks were written.
+	 */
+	const hookConfig: Record<string, NormalizedHookEntry[]> = {};
+	let hooksTouched = false;
+	// Whether `--force` claimed to replace the target's hooks rather than add to
+	// them. The write is a recursive merge, so a forced `hooks` comes back with
+	// the target's own events folded into it unless it is assigned after the
+	// merge — see the write below.
+	let hooksReplaced = false;
+
+	/**
+	 * Claim a whole hook config. The caller has already established that the
+	 * target has none (or that `--force` says so); what happens here is the union.
+	 */
+	const claimHooks: ClaimHooks = (source, config, from, detail, action = "map") => {
+		for (const [event, entries] of Object.entries(config)) {
+			hookConfig[event] = [...(hookConfig[event] ?? []), ...entries];
+		}
+		hooksTouched = true;
+		items.push({ source, from, to: "settings.json → hooks", action, detail, containsSecret: false });
 	};
 
 	/** Add rules beside whatever is already claimed. Adding a rule never removes one. */
@@ -382,11 +417,11 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				claimEnv,
 				claimScalar,
 				claimPermissionList,
+				claimHooks,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
 				},
-				settingsPatch,
 				existing,
 				existingMcpServers,
 				force,
@@ -524,6 +559,9 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				raw.zcode,
 				items,
 				claimEnv,
+				claimPermissionList,
+				claimScalar,
+				claimHooks,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
@@ -535,7 +573,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 			);
 		}
 		if (wants("assets")) {
-			planAssetTrees("zcode", raw.zcode, raw.home, force, items, writes);
+			planZcodeAssets(raw.zcode, raw.home, force, items, writes);
 		}
 	}
 
@@ -591,11 +629,11 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				raw.home,
 				items,
 				claimScalar,
+				claimHooks,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
 				},
-				settingsPatch,
 				existing,
 				existingMcpServers,
 				force,
@@ -679,8 +717,26 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		settingsPatch.permissions = merged;
 	}
 
+	// Hooks, for the same reason: written once from every source that claimed
+	// some. `--force` replaces the target's outright; without it a source that
+	// found hooks already there never claimed, so there is nothing to merge and
+	// the existing ones are carried in only so the recursive merge below cannot
+	// drop one through a shallow overwrite.
+	if (hooksTouched) {
+		const targetHooks = (existing.hooks as Record<string, NormalizedHookEntry[]> | undefined) ?? {};
+		settingsPatch.hooks = force ? hookConfig : { ...targetHooks, ...hookConfig };
+		hooksReplaced = force;
+	}
+
 	if (Object.keys(settingsPatch).length > 0) {
-		const merged = mergeSettings(existing as Record<string, unknown>, settingsPatch);
+		const merged = mergeSettings(existing as Record<string, unknown>, settingsPatch) as Record<string, unknown>;
+		// `--force` has to mean one thing for the whole key. `mergeSettings` merges
+		// objects key by key, so a forced `hooks` would keep every event the target
+		// already had and the skip line that told the user to run `--force` would be
+		// describing a merge. Assigning it after the merge is what makes the flag
+		// do what it says, and it touches nothing else: only the forced case, only
+		// this key.
+		if (hooksReplaced) merged.hooks = hookConfig;
 		writes.push({
 			path: targetSettingsPath(raw.home),
 			kind: "settings",
@@ -1230,7 +1286,6 @@ export function runMigration(options: RunMigrationOptions = {}): RunMigrationRes
 }
 export type { RawAgents } from "./agents-read.ts";
 export { readAgents } from "./agents-read.ts";
-export { normalizeClaudeHooks } from "./claude-plan.ts";
 export type { RawClaudeCode } from "./claude-read.ts";
 export { readClaudeCode } from "./claude-read.ts";
 export type { RawCodex, RawRuleFile } from "./codex-read.ts";
@@ -1242,7 +1297,7 @@ export { readGrokBuild } from "./grok-read.ts";
 export { normalizeKimiHooks } from "./kimi-plan.ts";
 export type { RawKimiCode } from "./kimi-read.ts";
 export { readKimiCode } from "./kimi-read.ts";
-export { ASSUMED_MAX_OUTPUT_TOKENS, requoteNumericKeyPaths } from "./migrate-core.ts";
+export { ASSUMED_MAX_OUTPUT_TOKENS, normalizeClaudeHooks, requoteNumericKeyPaths } from "./migrate-core.ts";
 export type {
 	ClaimableScalarKey,
 	ClaimedScalarValue,

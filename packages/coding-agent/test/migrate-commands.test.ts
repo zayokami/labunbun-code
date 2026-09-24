@@ -214,6 +214,22 @@ describe("slash commands become skills", () => {
 			},
 		);
 	});
+
+	test("the shared `~/.agents/commands` tree is imported once, by the source that owns it", () => {
+		// ZCode reads `~/.agents/commands` beside its own, and so do the other tools
+		// that adopted the convention. One directory imported by two sources is two
+		// writes to one path, and the second would be reported as a collision the
+		// user never had — so the shared home's own source takes it.
+		withHome({ ".agents/commands/ship.md": "---\ndescription: Ship it\n---\nShip $ARGUMENTS.\n" }, (home) => {
+			const planned = planMigration(readSources(home), {}, { only: ["zcode", "agents"] });
+			const skills = planned.writes.filter((w) => w.path.endsWith(join("skills", "ship", "SKILL.md")));
+			expect(skills.length).toBe(1);
+			expect(skills[0]?.content).toBe("---\nname: ship\ndescription: Ship it\n---\nShip $ARGUMENTS.\n");
+			expect(planned.items.filter((i) => i.from.includes(".agents/commands/ship.md")).map((i) => i.source)).toEqual([
+				"agents",
+			]);
+		});
+	});
 });
 
 describe("$ARGUMENTS in a skill body", () => {

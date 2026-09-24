@@ -18,14 +18,21 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 	// test must not inherit the value the developer's shell happens to hold: the
 	// borrow covers it and the body starts from unset, the way a machine without
 	// it behaves. A test that wants the variable sets it itself, and this restores
-	// whatever was there before.
+	// whatever was there before. ZCode's two roots are borrowed for the same
+	// reason — `$ZCODE_STORAGE_DIR` alone would move the database out from under
+	// the three ZCode history tests.
 	const borrowed = new Map<string, string | undefined>(
-		["USERPROFILE", "HOME", "CODEX_HOME"].map((name) => [name, process.env[name]]),
+		["USERPROFILE", "HOME", "CODEX_HOME", "ZCODE_DATA_BASE_DIR", "ZCODE_STORAGE_DIR"].map((name) => [
+			name,
+			process.env[name],
+		]),
 	);
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
 		delete process.env.CODEX_HOME;
+		delete process.env.ZCODE_DATA_BASE_DIR;
+		delete process.env.ZCODE_STORAGE_DIR;
 		for (const [path, content] of Object.entries(tree)) {
 			const full = join(home, path);
 			mkdirSync(join(full, ".."), { recursive: true });

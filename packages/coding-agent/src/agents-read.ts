@@ -11,8 +11,8 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { readAgentFiles, readSkillDirs, readText } from "./migrate-core.ts";
-import type { RawFile } from "./migrate-types.ts";
+import { readAgentFiles, readCommandFiles, readSkillDirs, readText } from "./migrate-core.ts";
+import type { RawCommands, RawFile } from "./migrate-types.ts";
 
 /** The shared `~/.agents` home some tools read agent/skill definitions from. */
 export interface RawAgents {
@@ -20,6 +20,13 @@ export interface RawAgents {
 	memory: string | null;
 	skills: RawFile[];
 	agents: RawFile[];
+	/**
+	 * ~/.agents/commands — the tree ZCode and the other tools that adopted it read
+	 * for slash commands. It is imported here rather than by each of those tools,
+	 * because it is one directory: a second source writing the same command would
+	 * report a name collision the user never had.
+	 */
+	commands: RawCommands;
 	present: boolean;
 }
 
@@ -29,6 +36,7 @@ export function readAgents(home: string): RawAgents {
 		memory: readText(join(root, "AGENTS.md")),
 		skills: readSkillDirs(join(root, "skills")),
 		agents: readAgentFiles(join(root, "agents")),
+		commands: readCommandFiles(join(root, "commands")),
 		present: existsSync(root),
 	};
 }
