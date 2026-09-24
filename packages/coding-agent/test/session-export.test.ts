@@ -4,7 +4,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
@@ -31,15 +31,27 @@ describe("resolveContinueTarget", () => {
 		expect(resolveContinueTarget(cwd, home)).toBeNull();
 	});
 
-	test("picks the most recently touched session", async () => {
+	test("picks the most recently touched session", () => {
 		const oldStore = SessionStore.startNew(cwd, home);
 		oldStore.appendMessage(userMessage("oldest session"));
-		// Ensure a measurable mtime gap rather than sleeping.
 		const newStore = SessionStore.startNew(cwd, home);
 		newStore.appendMessage(userMessage("newest session"));
 
-		// startNew writes the header; touch the second file again so its mtime
-		// is at least as new as the first's even on coarse filesystem clocks.
+		// The two files are written back to back, and the sort that picks the
+		// newest is a plain `b.mtimeMs - a.mtimeMs` — so on a filesystem whose
+		// clock does not tick between the two writes they tie, and a stable sort
+		// hands the decision to `readdirSync`, whose order is not specified. That
+		// made this a coin flip rather than a test. Pin the mtimes so the ordering
+		// the assertion is about is the ordering that is actually there. (The
+		// assertion itself is unchanged; only the fixture it reads is.)
+		//
+		// The tie itself is deliberately not pinned: whichever file the directory
+		// happens to enumerate first wins it, and a test that recorded that would
+		// be recording the filesystem rather than the program.
+		const now = Date.now() / 1000;
+		utimesSync(oldStore.path, now - 120, now - 120);
+		utimesSync(newStore.path, now, now);
+
 		const target = resolveContinueTarget(cwd, home);
 		if (!target) throw new Error("expected a continue target");
 		expect(target.firstUserText).toBe("newest session");
