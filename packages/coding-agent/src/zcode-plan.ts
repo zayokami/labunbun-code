@@ -227,7 +227,18 @@ export function planZcode(
 				continue;
 			}
 			const normalized = normalizeZcodeMcp(value);
-			if (normalized === null || !McpServerConfigSchema.safeParse(normalized.config).success) {
+			if (!normalized.ok) {
+				items.push({
+					source: "zcode",
+					from: label,
+					to: "—",
+					action: "skip",
+					detail: normalized.reason,
+					containsSecret: false,
+				});
+				continue;
+			}
+			if (!McpServerConfigSchema.safeParse(normalized.config).success) {
 				items.push({
 					source: "zcode",
 					from: label,
@@ -260,13 +271,18 @@ export function planZcode(
 				from: label,
 				to: `.mcp.json → mcpServers.${name}`,
 				action: "map",
-				detail: secret
-					? normalized.renamed
-						? "copied verbatim, including credential headers (http_headers renamed to headers)"
-						: "copied verbatim, including credential headers"
-					: normalized.renamed
-						? "copied verbatim (http_headers renamed to headers)"
-						: "copied verbatim",
+				// "copied verbatim" is a claim about the whole record, so anything
+				// the source carried and this build cannot is named in the same
+				// breath rather than left for the user to find at connect time. The
+				// two clauses that already existed keep their exact wording.
+				detail:
+					`copied verbatim${secret ? ", including credential headers" : ""}` +
+					`${normalized.renamed.length > 0 ? ` (${normalized.renamed.join(", ")})` : ""}` +
+					`${
+						normalized.dropped.length > 0
+							? ` — not carried over: ${normalized.dropped.join(", ")} (this build has no field for it)`
+							: ""
+					}`,
 				containsSecret: secret,
 			});
 		}
@@ -1260,39 +1276,85 @@ const ZCODE_HOOK_ROOT_HANDLED = new Set<string>(["enabled", "timeoutMs", "maxOut
  * credential headers fails at connect time with an auth error instead of
  * saying what changed.
  */
+/**
+ * ZCode's MCP server shape → this build's, following ZCode's own
+ * `normalizeMcpServerConfigInput` (`schema.ts:331-384`) key for key rather than
+ * by guesswork. Where the two disagree, the source wins and the disagreement is
+ * named:
+ *
+ * - `environment` becomes `env` when `env` is absent, and `environment` is
+ *   dropped either way. A legacy stdio server that used the old spelling
+ *   otherwise arrives with no environment at all, and fails to start on a
+ *   variable it plainly had.
+ * - `type: "remote"` becomes `http`, and a missing `type` is inferred from
+ *   `command` then `url` — which is what the `url`-first order below already
+ *   does, so that spelling needs no branch of its own.
+ * - `timeout` and `startup_timeout_sec` are accepted and then discarded by
+ *   ZCode itself ("ZCode does not migrate those values"), so dropping them here
+ *   matches; `oauth`, `protocolVersion` and `timeoutMs` have no field in this
+ *   build's schema at all. All five are named in the report rather than dropped
+ *   in silence, because the item says the record was copied verbatim.
+ * - `enabled` is not in this build's schema and a server with no field to carry
+ *   it is one this build will start, so a disabled server is skipped by the
+ *   caller rather than migrated-and-running.
+ */
 function normalizeZcodeMcp(
 	entry: Record<string, unknown>,
-): { config: Record<string, unknown>; renamed: boolean } | null {
+): { ok: true; config: Record<string, unknown>; renamed: string[]; dropped: string[] } | { ok: false; reason: string } {
+	const dropped = ["oauth", "protocolVersion", "timeoutMs", "timeout", "startup_timeout_sec"].filter(
+		(key) => entry[key] !== undefined,
+	);
+	const renamed: string[] = [];
+	// `env` wins when both spellings are present — the source's own rule
+	// (`if (!("env" in server) && "environment" in server)`), because a config
+	// that names the same variable twice is a config whose author already chose.
+	const env = isRecord(entry.env) ? entry.env : isRecord(entry.environment) ? entry.environment : undefined;
+	if (env !== undefined && !isRecord(entry.env)) renamed.push("environment renamed to env");
+	if (entry.type === "sse") {
+		// The two transports are different protocols, not two spellings of one:
+		// a StreamableHTTP client against an SSE endpoint connects and then
+		// fails every call. ZCode runs both; this build runs one, so the honest
+		// outcome is a named skip rather than a server that cannot work.
+		return {
+			ok: false,
+			reason:
+				"SSE transport — this build speaks stdio and Streamable HTTP only, and the two are different protocols rather than two spellings of one",
+		};
+	}
 	const headers = isRecord(entry.http_headers) ? entry.http_headers : undefined;
-	const url = typeof entry.url === "string" ? entry.url : undefined;
+	const url = typeof entry.url === "string" && entry.url.trim() ? entry.url : undefined;
 	if (url) {
 		const out: Record<string, unknown> = { type: "http", url };
 		const merged = headers ?? (isRecord(entry.headers) ? entry.headers : undefined);
 		if (merged) out.headers = merged;
-		return { config: out, renamed: headers !== undefined && entry.headers === undefined };
+		if (headers !== undefined && entry.headers === undefined) renamed.unshift("http_headers renamed to headers");
+		return { ok: true, config: out, renamed, dropped };
 	}
+	// The source infers stdio from a command that is not blank, and the trim is
+	// its own: a whitespace-only command is not a command, and a server keyed on
+	// one produces a spawn error rather than a connection error.
 	const command = entry.command;
-	if (typeof command === "string" && command) {
+	if (typeof command === "string" && command.trim()) {
 		const out: Record<string, unknown> = {
 			type: "stdio",
 			command,
 			args: Array.isArray(entry.args) ? entry.args.filter((a): a is string => typeof a === "string") : [],
 		};
-		if (isRecord(entry.env)) out.env = entry.env;
+		if (env) out.env = env;
 		if (typeof entry.cwd === "string") out.cwd = entry.cwd;
-		return { config: out, renamed: false };
+		return { ok: true, config: out, renamed, dropped };
 	}
-	if (Array.isArray(command) && typeof command[0] === "string") {
+	if (Array.isArray(command) && typeof command[0] === "string" && command[0].trim()) {
 		const out: Record<string, unknown> = {
 			type: "stdio",
 			command: command[0],
 			args: command.slice(1).filter((a): a is string => typeof a === "string"),
 		};
-		if (isRecord(entry.env)) out.env = entry.env;
+		if (env) out.env = env;
 		if (typeof entry.cwd === "string") out.cwd = entry.cwd;
-		return { config: out, renamed: false };
+		return { ok: true, config: out, renamed, dropped };
 	}
-	return null;
+	return { ok: false, reason: "server definition does not match the supported stdio/http shapes" };
 }
 
 /** ZCode's `{version, allow: [{toolName, ruleContent}]}` → this build's rule strings. */

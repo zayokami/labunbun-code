@@ -297,6 +297,114 @@ describe("migrate: ZCode source", () => {
 		});
 	});
 
+	// ZCode normalizes these spellings itself, in `normalizeMcpServerConfigInput`
+	// (`schema.ts:331-384`), and the source is the authority rather than a guess:
+	// each of these loses something real when the old spelling is read as a key
+	// this build does not have.
+	describe("MCP legacy spellings, read the way ZCode reads them", () => {
+		const withServers = (servers: Record<string, unknown>, run: (home: string) => void): void => {
+			withHome({ ".zcode/cli/config.json": JSON.stringify({ mcp: { servers } }) }, run);
+		};
+		const serversIn = (result: ReturnType<typeof runMigration>): Record<string, Record<string, unknown>> => {
+			const write = result.plan.writes.find((w) => w.path.endsWith(".mcp.json"));
+			return (
+				(JSON.parse(write?.content ?? "{}") as { mcpServers?: Record<string, Record<string, unknown>> }).mcpServers ??
+				{}
+			);
+		};
+
+		test("a stdio server's `environment` arrives as `env`", () => {
+			// The old spelling is the one `http_headers` used to be, and it is why
+			// that rename was already here: read as an unknown key, a legacy server
+			// migrates with no environment at all and dies on the first variable it
+			// plainly had.
+			withServers({ legacy: { type: "stdio", command: "npx", environment: { CACHE_DIR: "/tmp" } } }, (home) => {
+				const result = runMigration({ home });
+				expect(serversIn(result).legacy?.env).toEqual({ CACHE_DIR: "/tmp" });
+				expect(JSON.stringify(serversIn(result).legacy)).not.toContain("environment");
+				const item = result.plan.items.find((i) => i.from.endsWith("mcp.servers.legacy"));
+				expect(item?.detail).toContain("environment renamed to env");
+			});
+		});
+
+		test("a server naming both spellings keeps `env`", () => {
+			// The source's rule is `if (!("env" in server) && "environment" in server)`:
+			// a config that names the same variable twice is one whose author has
+			// already chosen, and this build's key is the one it chose last.
+			withServers({ both: { type: "stdio", command: "npx", env: { A: "1" }, environment: { A: "2" } } }, (home) => {
+				const result = runMigration({ home });
+				expect(serversIn(result).both?.env).toEqual({ A: "1" });
+				const item = result.plan.items.find((i) => i.from.endsWith("mcp.servers.both"));
+				expect(item?.detail).not.toContain("environment renamed");
+			});
+		});
+
+		test("an SSE server is named and skipped, not rewritten as an HTTP one", () => {
+			// The two are different protocols, not two spellings of one, so a
+			// StreamableHTTP client against an SSE endpoint connects and then fails
+			// every call. ZCode runs both; this build runs one.
+			withServers({ evt: { type: "sse", url: "https://events.example/mcp" } }, (home) => {
+				const result = runMigration({ home });
+				const item = result.plan.items.find((i) => i.from.endsWith("mcp.servers.evt"));
+				expect(item?.action).toBe("skip");
+				expect(item?.detail).toContain("SSE");
+				expect(serversIn(result).evt).toBeUndefined();
+			});
+		});
+
+		test("keys ZCode accepts and this build has no field for are named", () => {
+			withServers(
+				{
+					rich: {
+						type: "http",
+						url: "https://mcp.example/mcp",
+						timeout: 30,
+						startup_timeout_sec: 5,
+						protocolVersion: "2026-07-28",
+						timeoutMs: 1000,
+						oauth: { type: "client_credentials", clientId: "id", clientSecret: "shh" },
+					},
+				},
+				(home) => {
+					const result = runMigration({ home });
+					const item = result.plan.items.find((i) => i.from.endsWith("mcp.servers.rich"));
+					// `timeout`/`startup_timeout_sec` are ones ZCode itself accepts and
+					// then discards; the other three have no field in this build's
+					// schema. All five are named rather than dropped under a "copied
+					// verbatim" that would no longer be true.
+					expect(item?.detail).toContain(
+						"not carried over: oauth, protocolVersion, timeoutMs, timeout, startup_timeout_sec",
+					);
+					const written = JSON.stringify(serversIn(result).rich);
+					for (const key of ["timeout", "startup_timeout_sec", "protocolVersion", "timeoutMs", "oauth"]) {
+						expect(written).not.toContain(key);
+					}
+				},
+			);
+		});
+
+		test("a server whose command is blank is not migrated into a spawn error", () => {
+			// The source's own inference trims before deciding (`command.trim()`), so
+			// a whitespace-only command is not a command there either.
+			withServers({ blank: { type: "stdio", command: "   " } }, (home) => {
+				const result = runMigration({ home });
+				const item = result.plan.items.find((i) => i.from.endsWith("mcp.servers.blank"));
+				expect(item?.action).toBe("skip");
+				expect(serversIn(result).blank).toBeUndefined();
+			});
+		});
+
+		test("a server with nothing renamed and nothing dropped still reads `copied verbatim`", () => {
+			// The clause is a claim about the record, so the plain case has to stay
+			// plain — otherwise every honest server grows a caveat it does not have.
+			withServers({ plain: { type: "stdio", command: "npx" } }, (home) => {
+				const result = runMigration({ home });
+				const item = result.plan.items.find((i) => i.from.endsWith("mcp.servers.plain"));
+				expect(item?.detail).toBe("copied verbatim");
+			});
+		});
+	});
+
 	test("an MCP server the target already defines is kept unless forced", () => {
 		withHome(
 			{
