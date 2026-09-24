@@ -1131,6 +1131,134 @@ describe("a code point is one character", () => {
 	});
 });
 
+/**
+ * What a word motion is a word *of*.
+ *
+ * Every expectation here is one real vim, measured in
+ * `test/vim-differential/regress.mjs` — which also holds the class table itself
+ * against vim's own `charclass()` over all 1,114,112 code points
+ * (`vim-differential/class.mjs`), so these are the motions over that table
+ * rather than a second opinion about the table.
+ */
+describe("a word is a word outside ASCII too", () => {
+	test("Latin-1 letters are letters: iskeyword's 192-255 range", () => {
+		// `dw` used to stop after three characters of `café` — `é` was punctuation
+		// to a `/\w/` test — and leave `é Ünïcödé` behind.
+		const e = editor("café naïve wörd", 0);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("naïve wörd");
+
+		const mid = editor("café naïve wörd", 2);
+		mid.engine.handleKey("e", mid.key());
+		expect(mid.state.cursor).toBe(3); // on the accented letter, not before it
+	});
+
+	test("the @ filter adds µ below 192 and nothing else there", () => {
+		// `µ` has a case mapping in Greek, so `MB_ISLOWER` accepts it. `ª` and `º`
+		// have none in either direction and are punctuation — which is why this
+		// pair has to be adjacent: with a space between them every one of them is
+		// its own word whichever class it gets.
+		const e = editor("µª x", 0);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("ª x");
+
+		const back = editor("ªµ x", 0);
+		back.engine.handleKey("d", back.key());
+		back.engine.handleKey("w", back.key());
+		expect(back.state.text).toBe("µ x");
+	});
+
+	test("a script is a class: hiragana, katakana and hanzi are three words", () => {
+		const e = editor("かなカナ漢字", 0);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("カナ漢字");
+
+		// …and a run of hanzi has no transition in it, which is why Chinese was
+		// never wrong here and Japanese was.
+		const zh = editor("你好世界 abc", 0);
+		zh.engine.handleKey("d", zh.key());
+		zh.engine.handleKey("w", zh.key());
+		expect(zh.state.text).toBe("abc");
+	});
+
+	test("W folds all three scripts into one WORD", () => {
+		const e = editor("かなカナ漢字", 0);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("W", e.key());
+		expect(e.state.text).toBe("");
+	});
+
+	test("an emoji is a class of its own, ahead of the class table", () => {
+		// `€` at U+20AC and `\u{1f44d}` at U+1F44D both sit inside the same
+		// punctuation interval, so without the table that is asked first they would
+		// be one run and `dw` would take both.
+		const e = editor("€\u{1f44d} x", 0);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("\u{1f44d} x");
+	});
+
+	test("a code point no interval lists is a word character", () => {
+		// The last line of `utf_class_buf`: "most other characters are 'word'
+		// characters". `ß`, `ж` and `λ` are all in it, and each is one word with
+		// the ASCII letters beside it.
+		const e = editor("жabc x", 0);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("x");
+	});
+
+	test("a combining mark rides on the letter before it", () => {
+		// The same word as the precomposed `école` above, written `e` + U+0301.
+		// Vim counts the mark as its own character, so a motion that called it
+		// punctuation would stop between the letter and its accent.
+		const e = editor("école x", 0);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("x");
+	});
+
+	test("a no-break space is white space to w and to W alike", () => {
+		const w = editor("a b c", 0);
+		w.engine.handleKey("d", w.key());
+		w.engine.handleKey("w", w.key());
+		expect(w.state.text).toBe("b c");
+
+		const W = editor("a b c", 0);
+		W.engine.handleKey("d", W.key());
+		W.engine.handleKey("W", W.key());
+		expect(W.state.text).toBe("b c");
+	});
+
+	test("a line break is white space, though vim has no character to ask about", () => {
+		// The one code point this table parts company with `charclass()` on, and
+		// for a reason that is about this engine rather than about the table: a
+		// vim buffer has no line-break character, while this one's buffer is a
+		// single string with `\n` in it. Called punctuation, `w` would stop on the
+		// last character of a line instead of crossing to the next one.
+		const e = editor("ab\ncd", 1);
+		e.engine.handleKey("w", e.key());
+		expect(e.state.cursor).toBe(3); // the `c`, having crossed the break
+
+		const d = editor("ab\ncd", 0);
+		d.engine.handleKey("d", d.key());
+		d.engine.handleKey("w", d.key());
+		expect(d.state.text).toBe("\ncd");
+	});
+
+	test("a carriage return and a form feed are punctuation, like vim's", () => {
+		// `VIM_ISWHITE` is spelled space or tab and nothing else, so unlike a
+		// line break these two do not get the exemption above.
+		const e = editor("a\rb c", 0);
+		e.engine.handleKey("d", e.key());
+		e.engine.handleKey("w", e.key());
+		expect(e.state.text).toBe("\rb c");
+	});
+});
+
 describe("one command is one undo step", () => {
 	test("cc and 3J write once, not once per line", () => {
 		const cc = editor("aa\nbb\ncc", 4);
@@ -2011,6 +2139,152 @@ describe("$ with a count, and lines ending in an emoji", () => {
 		e.engine.handleKey("$", e.key());
 		expect(e.state.text).toBe("abcdef");
 		expect(e.state.cursor).toBe(0);
+	});
+
+	// The four tests below are the one-line-buffer case above generalized. `2$` on
+	// "abcdef" is a no-op because the caret is on the last line, not because the
+	// buffer is short, and until this was fixed the engine read it as a count with
+	// nowhere to go and clamped instead — which is a different answer, not a
+	// different spelling of the same one. Measured in `regress.mjs`; the reason is
+	// `cursor_down` in `edit.c:3087`.
+
+	test("a count on $ from the last line is refused, not clamped onto it", () => {
+		const e = editor("ab\ncdef", 4);
+		e.engine.handleKey("3", e.key());
+		e.engine.handleKey("$", e.key());
+		expect(e.state.cursor).toBe(4); // on "d", where it started
+
+		// The wanted column the refusal armed is still armed, so a move that *can*
+		// land somewhere comes back to a line end rather than to this column.
+		e.engine.handleKey("k", e.key());
+		expect(e.state.cursor).toBe(1); // "ab", at its end
+
+		// …and the other end of the same rule, measured on the same buffer: a count
+		// asked for from above the end is not a refusal, it clamps.
+		const up = editor("ab\ncdef", 0);
+		up.engine.handleKey("3", up.key());
+		up.engine.handleKey("$", up.key());
+		expect(up.state.cursor).toBe(6); // "cdef", at its end
+	});
+
+	test("d2$ from the last line changes nothing; from the first it takes two lines", () => {
+		const last = editor("ab\ncdef", 4);
+		last.engine.handleKey("d", last.key());
+		last.engine.handleKey("2", last.key());
+		last.engine.handleKey("$", last.key());
+		expect(last.state.text).toBe("ab\ncdef");
+		expect(last.state.cursor).toBe(4);
+
+		const first = editor("ab\ncdef\nghi", 0);
+		first.engine.handleKey("d", first.key());
+		first.engine.handleKey("2", first.key());
+		first.engine.handleKey("$", first.key());
+		expect(first.state.text).toBe("ghi");
+		expect(first.state.cursor).toBe(0);
+	});
+
+	test("a j that cannot move leaves the wanted column unapplied too", () => {
+		// `cursor_down` returns FAIL before it touches the line *or* the column, so a
+		// `j` on the last line changes nothing at all. The engine used to clamp the
+		// line and then apply the column, which after the `$` fix above meant a
+		// refused `2$` followed by `j` jumped the caret to the end of the line it had
+		// just refused to move within.
+		const e = editor("ab\ncdef", 4);
+		e.engine.handleKey("2", e.key());
+		e.engine.handleKey("$", e.key());
+		e.engine.handleKey("j", e.key());
+		expect(e.state.cursor).toBe(4);
+
+		// `k` on the first line is the same refusal (`cursor_up`, `edit.c`), and is
+		// written for the same reason even though the wanted column it would skip is
+		// not reachable there today: MAXCOL is the only one that can disagree with
+		// the caret, and only a refused count arms it off the end of a line.
+		const up = editor("ab\ncdef", 1);
+		up.engine.handleKey("k", up.key());
+		expect(up.state.cursor).toBe(1);
+	});
+
+	test("a trailing line break is a line here, though a file's would not be", () => {
+		// The one buffer shape the differential cannot judge, and it is a modelling
+		// difference rather than a motion: read as a file, `"ab\n"` is a single line,
+		// because the trailing break terminates that line and opens none after it —
+		// so real vim has no second line for `G` to go to. This engine's buffer is
+		// one string, and the offset just past the break is a position the caret can
+		// stand on, which is also where a textarea leaves it. `regress.mjs` says so
+		// where someone looking for the missing case will find it.
+		const e = editor("ab\n", 0);
+		e.engine.handleKey("G", e.key());
+		expect(e.state.cursor).toBe(3); // the empty line after the break
+	});
+
+	test("End is $ with its count: 2<End> reaches the line below", () => {
+		// vim binds K_END to nv_dollar itself, so the count is part of it. This ran
+		// `$`'s movement without `$`'s count: `2<End>` stopped at the end of the
+		// current line, and on the last line it did the one thing vim refuses to do.
+		const e = editor("ab\ncdef\nghi", 0);
+		e.engine.handleKey("2", e.key());
+		expect(e.engine.handleKey("", e.key({ end: true }))).toBe(true);
+		expect(e.state.cursor).toBe(6); // "cdef", not "ab"
+
+		const last = editor("ab\ncdef", 4);
+		last.engine.handleKey("2", last.key());
+		last.engine.handleKey("", last.key({ end: true }));
+		expect(last.state.cursor).toBe(4);
+	});
+
+	test("after an operator the arrow keys are the motions vim binds them to", () => {
+		// vim binds the terminal movement keys to the same normal-mode commands, so
+		// after an operator they are motions: `d<Right>` is `dl` and `d<Left>` is
+		// `dh`. The engine read them as movements instead, and an empty `input` is no
+		// motion at all to the character path an operator reads — so the operator was
+		// dropped and `d<Right>` left the buffer untouched.
+		const right = editor("abcdef", 2);
+		right.engine.handleKey("d", right.key());
+		expect(right.engine.handleKey("", right.key({ rightArrow: true }))).toBe(true);
+		expect(right.state.text).toBe("abdef");
+		expect(right.state.cursor).toBe(2);
+
+		const left = editor("abcdef", 2);
+		left.engine.handleKey("d", left.key());
+		left.engine.handleKey("", left.key({ leftArrow: true }));
+		expect(left.state.text).toBe("acdef");
+		expect(left.state.cursor).toBe(1);
+
+		// Linewise where the letter is linewise (`dj`), and refused where there is
+		// no line to step to rather than falling back to the caret's own line.
+		const down = editor("ab\ncd", 0);
+		down.engine.handleKey("d", down.key());
+		down.engine.handleKey("", down.key({ downArrow: true }));
+		expect(down.state.text).toBe("");
+
+		const nowhere = editor("abcdef", 0);
+		nowhere.engine.handleKey("d", nowhere.key());
+		nowhere.engine.handleKey("", nowhere.key({ upArrow: true }));
+		expect(nowhere.state.text).toBe("abcdef");
+		expect(nowhere.state.cursor).toBe(0);
+
+		// The count lands where vim's does, on either side of the operator.
+		const counted = editor("ab\ncdef\nghi", 0);
+		counted.engine.handleKey("d", counted.key());
+		counted.engine.handleKey("2", counted.key());
+		counted.engine.handleKey("", counted.key({ end: true }));
+		expect(counted.state.text).toBe("ghi");
+
+		const before = editor("ab\ncdef", 0);
+		before.engine.handleKey("2", before.key());
+		before.engine.handleKey("d", before.key());
+		before.engine.handleKey("", before.key({ rightArrow: true }));
+		expect(before.state.text).toBe("\ncdef");
+
+		// `c<End>` is `c$`: the same cut, and then insert mode where the typing
+		// goes. (What is typed is the host's business, not this test's — the
+		// differential list covers the whole `c<End>Z<Esc>` run.)
+		const change = editor("abcdef", 2);
+		change.engine.handleKey("c", change.key());
+		change.engine.handleKey("", change.key({ end: true }));
+		expect(change.state.text).toBe("ab");
+		expect(change.state.cursor).toBe(2);
+		expect(change.engine.mode).toBe("insert");
 	});
 
 	test("d$ at a line ending in an emoji deletes the whole emoji", () => {

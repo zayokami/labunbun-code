@@ -119,17 +119,372 @@ export interface VimKey {
 // Pure text helpers (exported for unit tests)
 // ---------------------------------------------------------------------------
 
-type CharClass = 0 | 1 | 2; // 0 blank, 1 word, 2 punctuation
+const BLANK = 0;
+const PUNCT = 1;
+const WORD = 2;
+const EMOJI = 3;
+const SUPERSCRIPT = 4;
+const SUBSCRIPT = 5;
+const BRAILLE = 6;
+const HIRAGANA = 7;
+const KATAKANA = 8;
+const CJK = 9;
+const HANGUL = 10;
+
+type CharClass = number;
+
+/**
+ * Vim's character classes, the way `mb_get_class` computes them.
+ *
+ * Three classes — blank, punctuation, word — are what a word motion needs in
+ * ASCII, and they are all it used to get everywhere, which is the whole of the
+ * bug. `utf_class_buf` in vim's `mbyte.c` does two different things above
+ * U+00FF. Inside Latin-1 it defers to `iskeyword`, whose default is
+ * `@,48-57,_,192-255` — so `é` and `Ü` are letters (JavaScript's `\w` is
+ * `[A-Za-z0-9_]`, and `dw` in `café` stopped after three characters) and so is
+ * `×`, while `¡` at U+00A1 stays punctuation because it is below 192.
+ *
+ * Above that it stops asking about words and asks about *scripts*, with each one
+ * its own class: kanji, hiragana, katakana and hangul are four, so `dw` in a
+ * Japanese sentence stops at every transition between them. In Chinese there is
+ * no transition to stop at, which is why a run of hanzi is a single word to both
+ * this and vim — and why a fix aimed at "CJK" that only widened the word class
+ * would have changed nothing a Chinese user could see while breaking Japanese.
+ *
+ * The intervals below are transcribed from that function's `classes[]`, searched
+ * the same way. Vim stores a script's first character as its class value and
+ * only ever compares classes for equality, so they are renumbered to 4..10.
+ * Anything the table does not list is a word character, which is the last line of
+ * vim's function and the most surprising thing in it: `→` and `€` are punctuation
+ * only because they fall inside a listed interval, and `ß`, `ж` and `λ` are words
+ * because nothing lists them.
+ *
+ * {@link EMOJI} is checked *before* that search, not inside it, which is why it
+ * is a table of its own: an emoji in a punctuation block would be punctuation
+ * without it, and `dw` on `€👍` would take the pair as one word instead of
+ * stopping between them. It is the one class that is not named after a script.
+ */
+const CLASS_INTERVALS: ReadonlyArray<readonly [number, number, CharClass]> = [
+	[0x037e, 0x037e, PUNCT],
+	[0x0387, 0x0387, PUNCT],
+	[0x055a, 0x055f, PUNCT],
+	[0x0589, 0x0589, PUNCT],
+	[0x05be, 0x05be, PUNCT],
+	[0x05c0, 0x05c0, PUNCT],
+	[0x05c3, 0x05c3, PUNCT],
+	[0x05f3, 0x05f4, PUNCT],
+	[0x060c, 0x060c, PUNCT],
+	[0x061b, 0x061b, PUNCT],
+	[0x061f, 0x061f, PUNCT],
+	[0x066a, 0x066d, PUNCT],
+	[0x06d4, 0x06d4, PUNCT],
+	[0x0700, 0x070d, PUNCT],
+	[0x0964, 0x0965, PUNCT],
+	[0x0970, 0x0970, PUNCT],
+	[0x0df4, 0x0df4, PUNCT],
+	[0x0e4f, 0x0e4f, PUNCT],
+	[0x0e5a, 0x0e5b, PUNCT],
+	[0x0f04, 0x0f12, PUNCT],
+	[0x0f3a, 0x0f3d, PUNCT],
+	[0x0f85, 0x0f85, PUNCT],
+	[0x104a, 0x104f, PUNCT],
+	[0x10fb, 0x10fb, PUNCT],
+	[0x1361, 0x1368, PUNCT],
+	[0x166d, 0x166e, PUNCT],
+	[0x1680, 0x1680, BLANK],
+	[0x169b, 0x169c, PUNCT],
+	[0x16eb, 0x16ed, PUNCT],
+	[0x1735, 0x1736, PUNCT],
+	[0x17d4, 0x17dc, PUNCT],
+	[0x1800, 0x180a, PUNCT],
+	[0x2000, 0x200b, BLANK],
+	[0x200c, 0x2027, PUNCT],
+	[0x2028, 0x2029, BLANK],
+	[0x202a, 0x202e, PUNCT],
+	[0x202f, 0x202f, BLANK],
+	[0x2030, 0x205e, PUNCT],
+	[0x205f, 0x205f, BLANK],
+	[0x2060, 0x206f, PUNCT],
+	[0x2070, 0x207f, SUPERSCRIPT],
+	[0x2080, 0x2094, SUBSCRIPT],
+	[0x20a0, 0x27ff, PUNCT],
+	[0x2800, 0x28ff, BRAILLE],
+	[0x2900, 0x2998, PUNCT],
+	[0x29d8, 0x29db, PUNCT],
+	[0x29fc, 0x29fd, PUNCT],
+	[0x2e00, 0x2e7f, PUNCT],
+	[0x3000, 0x3000, BLANK],
+	[0x3001, 0x3020, PUNCT],
+	[0x3030, 0x3030, PUNCT],
+	[0x303d, 0x303d, PUNCT],
+	[0x3040, 0x309f, HIRAGANA],
+	[0x30a0, 0x30ff, KATAKANA],
+	[0x3300, 0x9fff, CJK],
+	[0xac00, 0xd7a3, HANGUL],
+	[0xf900, 0xfaff, CJK],
+	[0xfd3e, 0xfd3f, PUNCT],
+	[0xfe30, 0xfe6b, PUNCT],
+	[0xff00, 0xff0f, PUNCT],
+	[0xff1a, 0xff20, PUNCT],
+	[0xff3b, 0xff40, PUNCT],
+	[0xff5b, 0xff65, PUNCT],
+	[0x1d000, 0x1d24f, PUNCT],
+	[0x1d400, 0x1d7ff, PUNCT],
+	[0x1f000, 0x1f2ff, PUNCT],
+	[0x1f300, 0x1f9ff, PUNCT],
+	[0x20000, 0x2a6df, CJK],
+	[0x2a700, 0x2b73f, CJK],
+	[0x2b740, 0x2b81f, CJK],
+	[0x2f800, 0x2fa1f, CJK],
+];
+
+/** `emoji_all`, verbatim: 146 intervals. */
+const EMOJI_ALL: ReadonlyArray<readonly [number, number]> = [
+	[0x203c, 0x203c],
+	[0x2049, 0x2049],
+	[0x2122, 0x2122],
+	[0x2139, 0x2139],
+	[0x2194, 0x2199],
+	[0x21a9, 0x21aa],
+	[0x231a, 0x231b],
+	[0x2328, 0x2328],
+	[0x23cf, 0x23cf],
+	[0x23e9, 0x23f3],
+	[0x23f8, 0x23fa],
+	[0x24c2, 0x24c2],
+	[0x25aa, 0x25ab],
+	[0x25b6, 0x25b6],
+	[0x25c0, 0x25c0],
+	[0x25fb, 0x25fe],
+	[0x2600, 0x2604],
+	[0x260e, 0x260e],
+	[0x2611, 0x2611],
+	[0x2614, 0x2615],
+	[0x2618, 0x2618],
+	[0x261d, 0x261d],
+	[0x2620, 0x2620],
+	[0x2622, 0x2623],
+	[0x2626, 0x2626],
+	[0x262a, 0x262a],
+	[0x262e, 0x262f],
+	[0x2638, 0x263a],
+	[0x2640, 0x2640],
+	[0x2642, 0x2642],
+	[0x2648, 0x2653],
+	[0x265f, 0x2660],
+	[0x2663, 0x2663],
+	[0x2665, 0x2666],
+	[0x2668, 0x2668],
+	[0x267b, 0x267b],
+	[0x267e, 0x267f],
+	[0x2692, 0x2697],
+	[0x2699, 0x2699],
+	[0x269b, 0x269c],
+	[0x26a0, 0x26a1],
+	[0x26a7, 0x26a7],
+	[0x26aa, 0x26ab],
+	[0x26b0, 0x26b1],
+	[0x26bd, 0x26be],
+	[0x26c4, 0x26c5],
+	[0x26c8, 0x26c8],
+	[0x26ce, 0x26cf],
+	[0x26d1, 0x26d1],
+	[0x26d3, 0x26d4],
+	[0x26e9, 0x26ea],
+	[0x26f0, 0x26f5],
+	[0x26f7, 0x26fa],
+	[0x26fd, 0x26fd],
+	[0x2702, 0x2702],
+	[0x2705, 0x2705],
+	[0x2708, 0x270d],
+	[0x270f, 0x270f],
+	[0x2712, 0x2712],
+	[0x2714, 0x2714],
+	[0x2716, 0x2716],
+	[0x271d, 0x271d],
+	[0x2721, 0x2721],
+	[0x2728, 0x2728],
+	[0x2733, 0x2734],
+	[0x2744, 0x2744],
+	[0x2747, 0x2747],
+	[0x274c, 0x274c],
+	[0x274e, 0x274e],
+	[0x2753, 0x2755],
+	[0x2757, 0x2757],
+	[0x2763, 0x2764],
+	[0x2795, 0x2797],
+	[0x27a1, 0x27a1],
+	[0x27b0, 0x27b0],
+	[0x27bf, 0x27bf],
+	[0x2934, 0x2935],
+	[0x2b05, 0x2b07],
+	[0x2b1b, 0x2b1c],
+	[0x2b50, 0x2b50],
+	[0x2b55, 0x2b55],
+	[0x3030, 0x3030],
+	[0x303d, 0x303d],
+	[0x3297, 0x3297],
+	[0x3299, 0x3299],
+	[0x1f004, 0x1f004],
+	[0x1f0cf, 0x1f0cf],
+	[0x1f170, 0x1f171],
+	[0x1f17e, 0x1f17f],
+	[0x1f18e, 0x1f18e],
+	[0x1f191, 0x1f19a],
+	[0x1f1e6, 0x1f1ff],
+	[0x1f201, 0x1f202],
+	[0x1f21a, 0x1f21a],
+	[0x1f22f, 0x1f22f],
+	[0x1f232, 0x1f23a],
+	[0x1f250, 0x1f251],
+	[0x1f300, 0x1f321],
+	[0x1f324, 0x1f393],
+	[0x1f396, 0x1f397],
+	[0x1f399, 0x1f39b],
+	[0x1f39e, 0x1f3f0],
+	[0x1f3f3, 0x1f3f5],
+	[0x1f3f7, 0x1f4fd],
+	[0x1f4ff, 0x1f53d],
+	[0x1f549, 0x1f54e],
+	[0x1f550, 0x1f567],
+	[0x1f56f, 0x1f570],
+	[0x1f573, 0x1f57a],
+	[0x1f587, 0x1f587],
+	[0x1f58a, 0x1f58d],
+	[0x1f590, 0x1f590],
+	[0x1f595, 0x1f596],
+	[0x1f5a4, 0x1f5a5],
+	[0x1f5a8, 0x1f5a8],
+	[0x1f5b1, 0x1f5b2],
+	[0x1f5bc, 0x1f5bc],
+	[0x1f5c2, 0x1f5c4],
+	[0x1f5d1, 0x1f5d3],
+	[0x1f5dc, 0x1f5de],
+	[0x1f5e1, 0x1f5e1],
+	[0x1f5e3, 0x1f5e3],
+	[0x1f5e8, 0x1f5e8],
+	[0x1f5ef, 0x1f5ef],
+	[0x1f5f3, 0x1f5f3],
+	[0x1f5fa, 0x1f64f],
+	[0x1f680, 0x1f6c5],
+	[0x1f6cb, 0x1f6d2],
+	[0x1f6d5, 0x1f6d7],
+	[0x1f6dc, 0x1f6e5],
+	[0x1f6e9, 0x1f6e9],
+	[0x1f6eb, 0x1f6ec],
+	[0x1f6f0, 0x1f6f0],
+	[0x1f6f3, 0x1f6fc],
+	[0x1f7e0, 0x1f7eb],
+	[0x1f7f0, 0x1f7f0],
+	[0x1f90c, 0x1f93a],
+	[0x1f93c, 0x1f945],
+	[0x1f947, 0x1f9ff],
+	[0x1fa70, 0x1fa7c],
+	[0x1fa80, 0x1fa88],
+	[0x1fa90, 0x1fabd],
+	[0x1fabf, 0x1fac5],
+	[0x1face, 0x1fadb],
+	[0x1fae0, 0x1fae8],
+	[0x1faf0, 0x1faf8],
+];
 
 const COMBINING_MARK = /\p{M}/u;
 
-function charClass(c: string, big = false): CharClass {
-	if (/\s/.test(c)) return 0;
-	if (big) return 1;
+/**
+ * The class of the code point `code`, with no notion of a buffer or of `big`.
+ *
+ * Exported so `../vim-differential/class.mjs` can hold it against real vim's own
+ * `charclass()` over the whole code space — a table of 200-odd transcribed
+ * intervals is not something a handful of word motions can vouch for.
+ */
+export function codePointClass(code: number): CharClass {
+	if (code < 0x100) {
+		// `iskeyword` decides this range, and its default `@,48-57,_,192-255`
+		// leaves `¡` (U+00A1) and `¿` (U+00BF) out: they are punctuation in
+		// Latin-1, and 192 is where the letters start.
+		//
+		// What comes first is `VIM_ISWHITE`, which is narrower than it sounds:
+		// `macros.h` spells it as space or tab and nothing else, so a carriage
+		// return, a form feed and U+0085 are all punctuation to vim. U+0000 is
+		// blank for a separate reason — `mb_get_class_buf` answers it before the
+		// keyword table is consulted.
+		//
+		// The one addition is U+000A, and it is not a transcription of anything.
+		// A vim buffer has no line-break character to classify — `fwd_word` steps
+		// over the break with `inc()` and asks the class of the *next* line's
+		// first character instead — whereas this engine's buffer is one string
+		// with `\n` in it, and a word motion that called `\n` punctuation would
+		// stop on the last character of a line instead of crossing to the first
+		// character of the next one. So `\n` is white space here because this
+		// engine spells a line break that way, and it is the single place the
+		// class table knowingly parts company with `charclass()`.
+		if (code === 0x00 || code === 0x09 || code === 0x0a || code === 0x20 || code === 0xa0) return BLANK;
+		if ((code >= 0x30 && code <= 0x39) || code === 0x5f) return WORD;
+		if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)) return WORD;
+		if (code >= 0xc0 && code <= 0xff) return WORD;
+		// `@` is the one entry of `iskeyword` that is a filter rather than a
+		// range: `parse_isopt` expands it to 1-255 and sets the flag only where
+		// `MB_ISLOWER` or `MB_ISUPPER` says letter. Both go through vim's own
+		// `toUpper`/`toLower` interval tables rather than the C library, because
+		// `'casemap'` defaults to `internal` — so this is a fixed answer and not
+		// one that changes with the machine's locale. Below 192 it adds exactly
+		// one character: `µ`, which has an upper case form in Greek and so is
+		// lower case. `ª` and `º` have no case mapping in either table and are
+		// punctuation, which is the kind of thing only asking vim could tell you.
+		if (code === 0xb5) return WORD;
+		return PUNCT;
+	}
+	// The emoji table is asked before the class table, and outranks it: `✿` at
+	// U+273F is inside a punctuation interval and is an emoji here all the same.
+	if (inIntervals(EMOJI_ALL, code)) return EMOJI;
+	let bot = 0;
+	let top = CLASS_INTERVALS.length - 1;
+	while (top >= bot) {
+		const mid = (bot + top) >> 1;
+		const [first, last, cls] = CLASS_INTERVALS[mid] as readonly [number, number, CharClass];
+		if (last < code) bot = mid + 1;
+		else if (first > code) top = mid - 1;
+		else return cls;
+	}
+	// "most other characters are 'word' characters" — the last line of
+	// `utf_class_buf`, and the one that makes `ß` and `λ` words.
+	return WORD;
+}
+
+/** Whether `code` falls inside any of the sorted, non-overlapping `table`. */
+function inIntervals(table: ReadonlyArray<readonly [number, number]>, code: number): boolean {
+	let bot = 0;
+	let top = table.length - 1;
+	while (top >= bot) {
+		const mid = (bot + top) >> 1;
+		const [first, last] = table[mid] as readonly [number, number];
+		if (last < code) bot = mid + 1;
+		else if (first > code) top = mid - 1;
+		else return true;
+	}
+	return false;
+}
+
+/**
+ * The class of the character at `pos` — the whole character, so a surrogate pair
+ * is one character and not two halves of one. Every word motion asks this of
+ * every position it walks, which is why the class is a number looked up in a
+ * table rather than a regular expression run per character.
+ */
+function charClass(text: string, pos: number, big = false): CharClass {
+	const code = text.codePointAt(pos);
+	if (code === undefined) return BLANK;
 	// A combining mark rides on the character before it, so a word motion walks
 	// through it rather than stopping between the base letter and its accent.
-	if (/[\w]/.test(c) || COMBINING_MARK.test(c)) return 1;
-	return 2;
+	// Above U+00FF this falls out of the table anyway — a mark is unlisted and so
+	// is a word — but the Latin-1 ones are inside the `192-255` range as their own
+	// code points, and those have to be asked about.
+	if (code < 0x300 && COMBINING_MARK.test(text[pos] as string)) return WORD;
+	const cls = codePointClass(code);
+	// `W` and `B` report every non-blank as one class, so the only question left
+	// is whether vim calls it white space — which is the whole of `cls()`'s
+	// bigword branch, and the same answer this table already has.
+	return big && cls !== BLANK ? WORD : cls;
 }
 
 function isHighSurrogate(code: number): boolean {
@@ -337,24 +692,38 @@ export function lineCount(text: string): number {
 	return count;
 }
 
+/**
+ * Whether `pos` sits on the last line of the buffer — there is no line break after it.
+ *
+ * Worth its own name because `cursor_down` has two ways to say no and only this is
+ * one of them: the other (`edit.c:3087`) also needs `CPO_MINUS` in `'cpoptions'`,
+ * which the default `aABceFs` does not contain. A motion that fails this way leaves
+ * the caret exactly where it was, where one that runs out of lines short of its
+ * target clamps onto the last one instead — so a counted `$` has to tell the two
+ * apart rather than treat "no line there" as one answer.
+ */
+export function onLastLine(text: string, pos: number): boolean {
+	return text.indexOf("\n", Math.max(0, pos)) === -1;
+}
+
 export function motionForwardWord(text: string, pos: number, big = false): number {
 	const n = text.length;
 	if (pos >= n) return n;
 	let i = pos;
-	const startCls = charClass(text[i], big);
+	const startCls = charClass(text, i, big);
 	if (startCls !== 0) {
-		while (i < n && charClass(text[i], big) === startCls) i = nextChar(text, i);
+		while (i < n && charClass(text, i, big) === startCls) i = nextChar(text, i);
 	}
-	while (i < n && charClass(text[i], big) === 0) i = nextChar(text, i);
+	while (i < n && charClass(text, i, big) === 0) i = nextChar(text, i);
 	return i;
 }
 
 export function motionBackWord(text: string, pos: number, big = false): number {
 	if (pos <= 0) return 0;
 	let i = prevChar(text, pos);
-	while (i > 0 && charClass(text[i], big) === 0) i = prevChar(text, i);
-	const c = charClass(text[i], big);
-	while (i > 0 && charClass(text[prevChar(text, i)], big) === c) i = prevChar(text, i);
+	while (i > 0 && charClass(text, i, big) === 0) i = prevChar(text, i);
+	const c = charClass(text, i, big);
+	while (i > 0 && charClass(text, prevChar(text, i), big) === c) i = prevChar(text, i);
 	return i;
 }
 
@@ -365,10 +734,10 @@ export function motionWordEnd(text: string, pos: number, big = false): number {
 	// a surrogate pair.
 	if (pos >= n || nextChar(text, pos) >= n) return Math.max(0, lineLastChar(text, pos));
 	let i = nextChar(text, pos);
-	while (i < n && charClass(text[i], big) === 0) i = nextChar(text, i);
+	while (i < n && charClass(text, i, big) === 0) i = nextChar(text, i);
 	while (i < n) {
 		const next = nextChar(text, i);
-		if (next >= n || charClass(text[next], big) === 0 || charClass(text[next], big) !== charClass(text[i], big)) break;
+		if (next >= n || charClass(text, next, big) === 0 || charClass(text, next, big) !== charClass(text, i, big)) break;
 		i = next;
 	}
 	return i;
@@ -383,13 +752,13 @@ export function motionWordEnd(text: string, pos: number, big = false): number {
 export function motionWordEndHere(text: string, pos: number, big = false): number {
 	const n = text.length;
 	if (pos >= n) return Math.max(0, lineLastChar(text, pos));
-	const cls = charClass(text[pos], big);
+	const cls = charClass(text, pos, big);
 	let i = pos;
 	for (;;) {
 		const next = nextChar(text, i);
 		// A line break belongs to no run: `cw` at the end of a word changes the word,
 		// never the break after it.
-		if (next >= n || text[next] === "\n" || charClass(text[next], big) !== cls) break;
+		if (next >= n || text[next] === "\n" || charClass(text, next, big) !== cls) break;
 		i = next;
 	}
 	return i;
@@ -732,6 +1101,28 @@ export class VimEngine {
 				this.#resetPending();
 				return true;
 			}
+			// The terminal movement keys are vim's own motions, so after an operator
+			// they are the ones their letters name: `d<Left>` is `dh`, `d<Down>` is the
+			// linewise `dj`, `d<End>` is `d$` — each with the count, as `2d<Right>` and
+			// `d2<Right>` both show. They have to be named here rather than left to
+			// fall through to the character path below, where an empty `input` is no
+			// motion at all and the operator is silently dropped.
+			const terminalMotion = key.leftArrow
+				? "h"
+				: key.rightArrow
+					? "l"
+					: key.upArrow
+						? "k"
+						: key.downArrow
+							? "j"
+							: key.end
+								? "$"
+								: null;
+			if (terminalMotion !== null) {
+				this.#pending = null;
+				this.#applyOperator(operator, terminalMotion, count * this.#takeCount());
+				return true;
+			}
 			if (input === operator) {
 				this.#pending = null;
 				const effective = count * this.#takeCount();
@@ -909,10 +1300,9 @@ export class VimEngine {
 			return true;
 		}
 		if (key.end) {
-			// vim's <End> is `$` (nv_dollar): it arms MAXCOL, so a `j` onto a longer
-			// line comes back to that line's end rather than to this one's.
-			this.#curswant = MAXCOL;
-			this.#ops.setCursor(lineLastChar(this.#ops.getText(), this.#ops.getCursor()));
+			// vim binds `K_END` to `nv_dollar` itself, so `<End>` is `$` with the
+			// count intact: `2<End>` reaches the end of the line below.
+			this.#dollar(count);
 			return true;
 		}
 		if (key.tab) return false;
@@ -967,19 +1357,9 @@ export class VimEngine {
 			case "^":
 				this.#ops.setCursor(motionFirstNonBlank(this.#ops.getText(), this.#ops.getCursor()));
 				return true;
-			case "$": {
-				// `[count]$` is the end of the line count-1 further down, and the count
-				// fails outright on a buffer with no line to step to (vim's own
-				// `2$` on a single line leaves the caret alone).
-				const text = this.#ops.getText();
-				// nv_dollar arms MAXCOL before the move, failing or not: the next `j`
-				// comes back to the end of whatever line it lands on, however short.
-				this.#curswant = MAXCOL;
-				if (count > 1 && lineCount(text) === 1) return true;
-				const line = Math.min(lineOf(text, this.#ops.getCursor()) + count - 1, lineCount(text) - 1);
-				this.#ops.setCursor(lineLastChar(text, nthLineStart(text, line)));
+			case "$":
+				this.#dollar(count);
 				return true;
-			}
 			case "|": {
 				// nv_pipe: column [count], and a bare `|` is column 0. The caret is
 				// clamped to the last character of the line but the request keeps its
@@ -1179,6 +1559,27 @@ export class VimEngine {
 		this.#wantHereIfMoved(from);
 	}
 
+	/**
+	 * `$`, and the `<End>` key with it — vim binds `K_END` to `nv_dollar` itself,
+	 * count and all, so `2<End>` is `2$` and reaches the end of the line below.
+	 *
+	 * The count is `cursor_down(count1 - 1)`, and that has two ways to say no where
+	 * only one of them is reached: the caret already on the last line is a refusal
+	 * and leaves the caret alone, while a count that merely runs past the end is not
+	 * one — `cursor_down_inner` clamps the line and `coladvance` still runs. That is
+	 * the whole difference between `3$` on the last line and `3$` on the one above
+	 * it, so the two answers cannot be one. See {@link onLastLine}.
+	 */
+	#dollar(count: number): void {
+		const text = this.#ops.getText();
+		// nv_dollar arms MAXCOL before the move, failing or not: the next `j` comes
+		// back to the end of whatever line it lands on, however short.
+		this.#curswant = MAXCOL;
+		if (count > 1 && onLastLine(text, this.#ops.getCursor())) return;
+		const line = Math.min(lineOf(text, this.#ops.getCursor()) + count - 1, lineCount(text) - 1);
+		this.#ops.setCursor(lineLastChar(text, nthLineStart(text, line)));
+	}
+
 	#vertical(deltaLines: number): boolean {
 		const text = this.#ops.getText();
 		if (!text.includes("\n")) {
@@ -1191,11 +1592,18 @@ export class VimEngine {
 			return true;
 		}
 		const pos = this.#ops.getCursor();
+		const from = lineOf(text, pos);
+		// `j` on the last line and `k` on the first are refused outright: `cursor_down`
+		// and `cursor_up` both return FAIL before they touch the line *or* the column,
+		// so a wanted column armed by an earlier `$` is not applied either. A count
+		// that merely overshoots is a different thing — `cursor_down_inner` clamps the
+		// line and `coladvance` still runs, which is the case below.
+		if ((deltaLines > 0 && from === lineCount(text) - 1) || (deltaLines < 0 && from === 0)) return true;
 		// The *wanted* column, not the caret's own: `$` arms it for the end of
 		// whatever line the move lands on, an unreachable column is only clamped
 		// for now and comes back on a longer line, and an empty line takes the
 		// caret to its own start (`j`/`k` themselves never write it back).
-		const line = Math.max(0, Math.min(lineOf(text, pos) + deltaLines, lineCount(text) - 1));
+		const line = Math.max(0, Math.min(from + deltaLines, lineCount(text) - 1));
 		this.#ops.setCursor(this.#columnOn(line, this.#wantColumn()));
 		return true;
 	}
@@ -1704,10 +2112,11 @@ export class VimEngine {
 				break;
 			case "$": {
 				// `[count]$` aims at the end of the line count-1 further down. The steps
-				// in between clamp the way `j` does, but a count that needs a line the
-				// one-line buffer does not have fails the motion, and a failed motion
-				// makes the whole operator a no-op (`d2$` on "abcdef" changes nothing).
-				if (count > 1 && lineCount(text) === 1) return null;
+				// in between clamp the way `j` does, but a count asked for from the last
+				// line fails the motion, and a failed motion makes the whole operator a
+				// no-op (`d2$` on the last of three lines changes nothing, while `d2$` on
+				// the first of them takes two lines). See {@link onLastLine}.
+				if (count > 1 && onLastLine(text, from)) return null;
 				const line = Math.min(lineOf(text, from) + count - 1, lineCount(text) - 1);
 				const lineBegin = nthLineStart(text, line);
 				const lineEnd = lineEndExclusive(text, lineBegin);
