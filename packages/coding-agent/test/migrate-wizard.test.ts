@@ -16,20 +16,55 @@ import { type MigrationDialogBridge, type MigrationDialogItem, runMigrationWizar
 
 type SourceTree = Record<string, string>;
 
+/**
+ * Every variable that moves a source's tree.
+ *
+ * Five of the nine sources let an environment variable put their tree anywhere —
+ * sometimes the whole tree (`$CODEX_HOME`, `$DSH_HOME`, `$GROK_HOME`,
+ * `$KIMI_CODE_HOME`, MiniMax's pair, Step's two), sometimes a part of it
+ * (`$KIMI_SHARE_DIR` names Kimi's predecessor tree, `$STEP_CODING_AGENT_SESSION_DIR`
+ * its session directory; Step's session override is a per-process question the
+ * planner answers from a temporary home's environment without it meaning a
+ * different tree, so the test makes that meaning true). A developer whose shell
+ * exports one would have the wizard detect (or miss) a source by a directory the
+ * test never wrote, and the questions it asks would name files that are not
+ * there. The same discipline `migrate-cli.test.ts` documents for its own fake
+ * home, applied to the wizard's.
+ */
+const TREE_ENV_VARS = [
+	"CODEX_HOME",
+	"DSH_HOME",
+	"GROK_HOME",
+	"KIMI_CODE_HOME",
+	"KIMI_SHARE_DIR",
+	"MINIMAX_DATA_DIR",
+	"MAVIS_DATA_DIR",
+	"STEPCODE_CONFIG_DIR",
+	"STEPCODE_STORAGE_ROOT_DIR",
+	"STEP_CODING_AGENT_DIR",
+	"STEP_CODING_AGENT_SESSION_DIR",
+] as const;
+
 /** The fake home, both in the environment and in the caller's hands. */
 function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void): Promise<void> | void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-wizard-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
+	const borrowed = TREE_ENV_VARS.map((name) => [name, process.env[name]] as const);
 	const restore = (): void => {
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
 		else process.env.HOME = prevPosixHome;
+		for (const [name, value] of borrowed) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
 		rmSync(home, { recursive: true, force: true });
 	};
 	process.env.USERPROFILE = home;
 	process.env.HOME = home;
+	for (const name of TREE_ENV_VARS) delete process.env[name];
 	for (const [path, content] of Object.entries(tree)) {
 		const full = join(home, path);
 		mkdirSync(join(full, ".."), { recursive: true });
@@ -141,23 +176,35 @@ function scriptedDialog(options: { answers?: Array<string[] | null>; picks?: Arr
 /**
  * Run the wizard against a fake home, collecting what it pushed to the user.
  *
- * Detection reads the environment as well as the home, and `$DSH_HOME` — not the
- * fake home's `~/.dsh` — decides where the harness root is when it is set, so the
- * run clears it the way `withHome` fixes `HOME`. A developer whose own shell
- * exports `$DSH_HOME` must not change which sources these tests are asked about.
+ * Detection reads the environment as well as the home, and `$DSH_HOME`,
+ * `$GROK_HOME` and `$KIMI_CODE_HOME` — not the fake home's `~/.dsh`, `~/.grok`
+ * and `~/.kimi-code` — decide where those three roots are when they are set, so
+ * the run clears them the way `withHome` fixes `HOME`. A developer whose own shell
+ * exports one of them must not change which sources these tests are asked about.
+ * `$KIMI_SHARE_DIR` decides nothing about *which* sources are detected, but it
+ * decides where the tree kimi-cli left behind is said to be, so it is cleared too.
  */
 async function wizard(
 	home: string,
 	dialog: MigrationDialogBridge,
 ): Promise<{ result: string | undefined; reported: string[] }> {
 	const prevDsh = process.env.DSH_HOME;
+	const prevGrok = process.env.GROK_HOME;
+	const prevKimi = process.env.KIMI_CODE_HOME;
+	const prevKimiShare = process.env.KIMI_SHARE_DIR;
 	const reported: string[] = [];
 	try {
 		delete process.env.DSH_HOME;
+		delete process.env.GROK_HOME;
+		delete process.env.KIMI_CODE_HOME;
+		delete process.env.KIMI_SHARE_DIR;
 		const result = await runMigrationWizard({ dialog, home, cwd: CWD, report: (text) => reported.push(text) });
 		return { result, reported };
 	} finally {
 		if (prevDsh !== undefined) process.env.DSH_HOME = prevDsh;
+		if (prevGrok !== undefined) process.env.GROK_HOME = prevGrok;
+		if (prevKimi !== undefined) process.env.KIMI_CODE_HOME = prevKimi;
+		if (prevKimiShare !== undefined) process.env.KIMI_SHARE_DIR = prevKimiShare;
 	}
 }
 
@@ -226,6 +273,123 @@ describe("migrate wizard: sources", () => {
 					"Import from Claude Code?",
 					"Import from Codex?",
 					"Import from DeepSeek Harness?",
+				]);
+				expect(result).toBe("No source selected — nothing to import.");
+			},
+		);
+	});
+
+	test("the grok source is asked about after the harness, and its label is not the raw id", async () => {
+		await withHome(
+			{
+				...twoSources(),
+				".dsh/settings.yaml": "agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-pro\n",
+				".grok/config.toml": '[models]\ndefault = "grok-4.6"\n',
+			},
+			async (home) => {
+				// One answer per detected source, and the last two are new: the two
+				// environment-first roots come after the four original ones, in the
+				// order their ids were appended.
+				const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], ["No", "No", "No", "No"]] });
+				const { result } = await wizard(home, bridge);
+				expect(asked.map((question) => question.question)).toEqual([
+					"Import your existing setup?",
+					"Import from Claude Code?",
+					"Import from Codex?",
+					"Import from DeepSeek Harness?",
+					"Import from Grok Build?",
+				]);
+				expect(result).toBe("No source selected — nothing to import.");
+			},
+		);
+	});
+
+	test("the kimi source is asked about after grok, and its label is not the raw id", async () => {
+		await withHome(
+			{
+				...twoSources(),
+				".dsh/settings.yaml": "agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-pro\n",
+				".grok/config.toml": '[models]\ndefault = "grok-4.6"\n',
+				".kimi-code/config.toml": 'default_model = "kimi-k3"\n',
+			},
+			async (home) => {
+				// One answer per detected source, and the fifth is the newest: the three
+				// environment-first roots come after the four original ones, in the order
+				// their ids were appended.
+				const { bridge, asked } = scriptedDialog({ answers: [["Choose…"], ["No", "No", "No", "No", "No"]] });
+				const { result } = await wizard(home, bridge);
+				expect(asked.map((question) => question.question)).toEqual([
+					"Import your existing setup?",
+					"Import from Claude Code?",
+					"Import from Codex?",
+					"Import from DeepSeek Harness?",
+					"Import from Grok Build?",
+					"Import from Kimi Code?",
+				]);
+				expect(result).toBe("No source selected — nothing to import.");
+			},
+		);
+	});
+
+	test("the minimax source is asked about after kimi, and its label is not the raw id", async () => {
+		await withHome(
+			{
+				...twoSources(),
+				".dsh/settings.yaml": "agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-pro\n",
+				".grok/config.toml": '[models]\ndefault = "grok-4.6"\n',
+				".kimi-code/config.toml": 'default_model = "kimi-k3"\n',
+				".minimax/config.yaml": "model: minimax-m2.5\n",
+			},
+			async (home) => {
+				// One answer per detected source, and the seventh is the newest: the
+				// two sources after the three environment-first roots, in the order
+				// their ids were appended. MiniMax's root is home-relative by default,
+				// so the home alone decides whether it is offered.
+				const { bridge, asked } = scriptedDialog({
+					answers: [["Choose…"], ["No", "No", "No", "No", "No", "No"]],
+				});
+				const { result } = await wizard(home, bridge);
+				expect(asked.map((question) => question.question)).toEqual([
+					"Import your existing setup?",
+					"Import from Claude Code?",
+					"Import from Codex?",
+					"Import from DeepSeek Harness?",
+					"Import from Grok Build?",
+					"Import from Kimi Code?",
+					"Import from MiniMax Code?",
+				]);
+				expect(result).toBe("No source selected — nothing to import.");
+			},
+		);
+	});
+
+	test("the step source is asked about after minimax, and its label is not the raw id", async () => {
+		await withHome(
+			{
+				...twoSources(),
+				".dsh/settings.yaml": "agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-pro\n",
+				".grok/config.toml": '[models]\ndefault = "grok-4.6"\n',
+				".kimi-code/config.toml": 'default_model = "kimi-k3"\n',
+				".minimax/config.yaml": "model: minimax-m2.5\n",
+				".stepcode/config.toml": 'defaultModel = "step-3"\n',
+			},
+			async (home) => {
+				// The eighth and last question, and the label is the product's name
+				// rather than the id — the picker is the only place a user meets the id
+				// at all.
+				const { bridge, asked } = scriptedDialog({
+					answers: [["Choose…"], ["No", "No", "No", "No", "No", "No", "No"]],
+				});
+				const { result } = await wizard(home, bridge);
+				expect(asked.map((question) => question.question)).toEqual([
+					"Import your existing setup?",
+					"Import from Claude Code?",
+					"Import from Codex?",
+					"Import from DeepSeek Harness?",
+					"Import from Grok Build?",
+					"Import from Kimi Code?",
+					"Import from MiniMax Code?",
+					"Import from Step Code?",
 				]);
 				expect(result).toBe("No source selected — nothing to import.");
 			},

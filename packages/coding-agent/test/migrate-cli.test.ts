@@ -11,11 +11,16 @@ function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-cli-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
-	// One source keeps its root in the environment rather than under the home —
-	// `$DSH_HOME` — so a developer whose shell exports it
-	// would have the CLI read *their* tree instead of the fake home's, and the
-	// report would name files this test never wrote.
+	// Three sources keep their root in the environment rather than under the home —
+	// `$DSH_HOME`, `$GROK_HOME` and `$KIMI_CODE_HOME` — so a developer whose shell
+	// exports one of them would have the CLI read *their* tree instead of the fake
+	// home's, and the report would name files this test never wrote. Kimi Code's
+	// predecessor tree comes from a fourth (`$KIMI_SHARE_DIR`), which would put an
+	// extra line in the report of a home that never held one.
 	const prevDsh = process.env.DSH_HOME;
+	const prevGrok = process.env.GROK_HOME;
+	const prevKimi = process.env.KIMI_CODE_HOME;
+	const prevKimiShare = process.env.KIMI_SHARE_DIR;
 	const restore = (): void => {
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
@@ -23,11 +28,20 @@ function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void
 		else process.env.HOME = prevPosixHome;
 		if (prevDsh === undefined) delete process.env.DSH_HOME;
 		else process.env.DSH_HOME = prevDsh;
+		if (prevGrok === undefined) delete process.env.GROK_HOME;
+		else process.env.GROK_HOME = prevGrok;
+		if (prevKimi === undefined) delete process.env.KIMI_CODE_HOME;
+		else process.env.KIMI_CODE_HOME = prevKimi;
+		if (prevKimiShare === undefined) delete process.env.KIMI_SHARE_DIR;
+		else process.env.KIMI_SHARE_DIR = prevKimiShare;
 		rmSync(home, { recursive: true, force: true });
 	};
 	process.env.USERPROFILE = home;
 	process.env.HOME = home;
 	delete process.env.DSH_HOME;
+	delete process.env.GROK_HOME;
+	delete process.env.KIMI_CODE_HOME;
+	delete process.env.KIMI_SHARE_DIR;
 	for (const [path, content] of Object.entries(tree)) {
 		const full = join(home, path);
 		mkdirSync(join(full, ".."), { recursive: true });
@@ -98,7 +112,44 @@ describe("migrate CLI", () => {
 			const { code, err } = await run(["migrate", "--from", "nope"]);
 			expect(code).toBe(2);
 			expect(err).toContain("Unknown migration source: nope");
-			expect(err).toContain("claude-code, codex, zcode, agents, deepseek-harness, all");
+			expect(err).toContain(
+				"claude-code, codex, zcode, agents, deepseek-harness, grok-build, kimi-code, minimax-code, step-code, all",
+			);
+		});
+	});
+
+	test("--from grok-build is a source the CLI knows, and reads that tree", async () => {
+		const tree: SourceTree = {
+			".grok/config.toml": '[models]\ndefault = "grok-4.6"\n',
+			".grok/skills/pdf/SKILL.md": "---\nname: pdf\n---\nfill forms\n",
+		};
+		await withHome(tree, async () => {
+			const { code, out, err } = await run(["migrate", "--from", "grok-build"]);
+			expect(err).toBe("");
+			expect(code).toBe(0);
+			// The plan is built out of the grok tree, and the default model the source
+			// pins is a skip with a reason rather than a model reference written blind.
+			expect(out).toContain("~/.labunbun/skills/pdf/SKILL.md");
+			expect(out).toContain("no model here answers to that name");
+			expect(out).toContain("Dry run — nothing written.");
+		});
+	});
+
+	test("--from kimi-code reads kimi's tree, in the spelling kimi writes it", async () => {
+		// `default_model` is the snake spelling kimi's own writer produces; the model
+		// it names is not one this build knows, which is a skip with a reason rather
+		// than a model reference written blind.
+		const tree: SourceTree = {
+			".kimi-code/config.toml": 'default_model = "kimi-k9-unreleased"\n',
+			".kimi-code/skills/pdf/SKILL.md": "---\nname: pdf\n---\nfill forms\n",
+		};
+		await withHome(tree, async () => {
+			const { code, out, err } = await run(["migrate", "--from", "kimi-code"]);
+			expect(err).toBe("");
+			expect(code).toBe(0);
+			expect(out).toContain("~/.kimi-code/skills/pdf/SKILL.md");
+			expect(out).toContain("no model of that name exists here");
+			expect(out).toContain("Dry run — nothing written.");
 		});
 	});
 
@@ -166,7 +217,9 @@ describe("migrate CLI", () => {
 	test("--help lists the new sources and flags", async () => {
 		const { code, out } = await run(["--help"]);
 		expect(code).toBe(0);
-		expect(out).toContain("claude-code | codex | zcode | agents | deepseek-harness | all");
+		expect(out).toContain(
+			"claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | all",
+		);
 		expect(out).toContain("--only <categories>");
 		expect(out).toContain("--history-scope <s>");
 		expect(out).toContain("--history-limit <n>");

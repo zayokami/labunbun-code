@@ -33,7 +33,15 @@ import { caseInsensitivePaths } from "@labunbun/tools";
 import { codexRoot } from "./codex-home.ts";
 import { dshRoot } from "./dsh-home.ts";
 import { listDshSessions, readDshLog } from "./dsh-session.ts";
+import { decodeGrokCwdDir, grokRoot, grokSessionsRoot } from "./grok-home.ts";
+import { listGrokSessions, readGrokSession } from "./grok-session.ts";
+
+import { kimiInputHistoryDir, kimiInputHistoryFile, kimiRoot } from "./kimi-home.ts";
+import { listKimiSessions, readKimiSession } from "./kimi-session.ts";
 import type { MigrationSourceId } from "./migrate.ts";
+import { minimaxRoot } from "./minimax-home.ts";
+import { listMinimaxSessions, readMinimaxSession } from "./minimax-session.ts";
+import { listStepSessions, readStepSession } from "./step-session.ts";
 import { readZcodeConversation, readZcodeSessions, type ZcodePartRow } from "./zcode-db.ts";
 
 // ---------------------------------------------------------------------------
@@ -1043,6 +1051,228 @@ function listDshHistory(home: string): HistoryListing {
 }
 
 // ---------------------------------------------------------------------------
+// Grok Build
+// ---------------------------------------------------------------------------
+
+function listGrokHistory(home: string): HistoryListing {
+	const listed = listGrokSessions(grokRoot(home));
+	return {
+		candidates: listed.sessions.map((session) => ({
+			source: "grok-build",
+			sourceId: session.sessionId,
+			cwd: session.cwd,
+			title: session.title,
+			startedAt: session.startedAt,
+			path: session.path,
+		})),
+		notes: listed.notes,
+	};
+}
+
+/**
+ * Read one chosen grok session.
+ *
+ * The candidate carries the transcript's path and nothing else, while the reader
+ * takes the session the listing built: its directory, where the compaction
+ * segments are, and its kind and parent, which the report needs to say that a
+ * fork's inherited prefix came along. Widening `HistoryCandidate` for one
+ * source's vocabulary would put grok's fields in every other source's way, so
+ * the session is looked up again instead — and one that went away between the
+ * listing and the read is reported rather than reconstructed from a path.
+ */
+function readGrokHistory(home: string, candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const session = listGrokSessions(grokRoot(home)).sessions.find((found) => found.path === candidate.path);
+	if (!session) return { entries: [], notes: [{ reason: "session is no longer on disk", count: 1 }] };
+	const read = readGrokSession(session);
+	if ("error" in read) return { entries: [], notes: [{ reason: read.error, count: 1 }] };
+	return { entries: read.entries, notes: read.notes };
+}
+
+// ---------------------------------------------------------------------------
+// Kimi Code
+// ---------------------------------------------------------------------------
+
+function listKimiHistory(home: string): HistoryListing {
+	const listed = listKimiSessions(kimiRoot(home));
+	return {
+		candidates: listed.sessions.map((session) => ({
+			source: "kimi-code",
+			sourceId: session.sessionId,
+			cwd: session.cwd,
+			title: session.title,
+			startedAt: session.startedAt,
+			path: session.path,
+			// Kimi filed this one away rather than leaving it in its list. That is a fact
+			// about where the transcript came from, which the report says, not a reason
+			// to drop it — the same call the codex source makes for `archived_sessions/`.
+			archived: session.archived || undefined,
+		})),
+		notes: listed.notes,
+	};
+}
+
+/**
+ * Read one chosen kimi session.
+ *
+ * The candidate carries a path and the reader wants the session the listing
+ * built, so it is looked up again rather than rebuilt from the path — and one
+ * that went away between the listing and the read is reported, not reconstructed.
+ * The reader's own vocabulary is this module's: `KimiEntry` is `HistoryEntry`
+ * written out — a message, or a compaction summary with the token count it
+ * replaced — so entries cross over as they are rather than through a translation
+ * that could disagree with either side.
+ */
+function readKimiHistory(home: string, candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const session = listKimiSessions(kimiRoot(home)).sessions.find((found) => found.path === candidate.path);
+	if (!session) return { entries: [], notes: [{ reason: "session is no longer on disk", count: 1 }] };
+	const read = readKimiSession(session);
+	if ("error" in read) return { entries: [], notes: [{ reason: read.error, count: 1 }] };
+	return { entries: read.entries, notes: read.notes };
+}
+
+// ---------------------------------------------------------------------------
+// MiniMax Code
+// ---------------------------------------------------------------------------
+
+/**
+ * Every session MiniMax's own walk would find, as candidates.
+ *
+ * The archived flag travels as a fact about where the transcript came from — the
+ * same call the codex source makes for `archived_sessions/` and kimi for the
+ * sessions it filed away — because archived is a place a session was put, not a
+ * reason it is worth less. A session the tool hides or files under an internal
+ * kind never reaches here: the listing counts it and says why.
+ */
+function listMinimaxHistory(home: string): HistoryListing {
+	const listed = listMinimaxSessions(minimaxRoot(home).root);
+	return {
+		candidates: listed.sessions.map((session) => ({
+			source: "minimax-code",
+			sourceId: session.sessionId,
+			cwd: session.cwd,
+			title: session.title,
+			startedAt: session.startedAt,
+			path: session.path,
+			archived: session.archived || undefined,
+		})),
+		notes: listed.notes,
+	};
+}
+
+/**
+ * Read one chosen MiniMax session.
+ *
+ * The candidate carries a path and the reader wants the session the listing
+ * built — its directory, which writer left the transcript, and the kind and
+ * parent the report needs — so the session is looked up again rather than
+ * rebuilt from the path. One that went away between the listing and the read is
+ * reported, not reconstructed.
+ */
+function readMinimaxHistory(
+	home: string,
+	candidate: HistoryCandidate,
+): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const session = listMinimaxSessions(minimaxRoot(home).root).sessions.find((found) => found.path === candidate.path);
+	if (!session) return { entries: [], notes: [{ reason: "session is no longer on disk", count: 1 }] };
+	const read = readMinimaxSession(session);
+	if ("error" in read) return { entries: [], notes: [{ reason: read.error, count: 1 }] };
+	return { entries: read.entries, notes: read.notes };
+}
+
+/** `<root>/user-history` — one JSONL file per working directory. */
+function countKimiHistoryFiles(root: string): number {
+	try {
+		return readdirSync(kimiInputHistoryDir(root)).filter((name) => name.endsWith(".jsonl")).length;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * `<root>/user-history/<md5(cwd)>.jsonl`, one `{"content": "…"}` per line.
+ *
+ * Two things about this file decide the shape of the reader.
+ *
+ * The name is a hash of the working directory, so it is one-way: the only list
+ * this reader can find by itself is the current project's. Scope `all` asks for
+ * every project, and the way back to the others is the sessions — each records
+ * the directory it ran in, so hashing that finds its file. A project whose
+ * sessions are all gone keeps its prompts out of reach, and that is counted
+ * rather than passed over, because the format cannot tell this reader which
+ * directory an unreachable file belongs to.
+ *
+ * And a line carries its text and nothing else: no timestamp, no directory. The
+ * directory is the file's, and time is what the format does not have — the file
+ * is append-only, so its order is the only ordering there is. These entries
+ * therefore arrive newest-first with epoch 0, which is what keeps the per-source
+ * limit taking the newest end: the selection sorts by that timestamp and is
+ * stable, so equal keys keep the order they were read in.
+ */
+function readKimiPromptHistory(
+	home: string,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
+	const root = kimiRoot(home);
+	// The current project first, so the file a user is most likely asking about is
+	// the one that is read even when nothing else can be found.
+	const cwds = [options.cwd];
+	if (options.scope === "all") {
+		const known = new Set(cwds.map((cwd) => projectKey(cwd)));
+		for (const session of listKimiSessions(root).sessions) {
+			if (session.cwd === "" || known.has(projectKey(session.cwd))) continue;
+			known.add(projectKey(session.cwd));
+			cwds.push(session.cwd);
+		}
+		const files = countKimiHistoryFiles(root);
+		if (files > cwds.length) {
+			bump(scan.counts, "prompt history whose project has no session left to name it", files - cwds.length);
+		}
+	}
+	for (const cwd of cwds) readKimiPromptLines(kimiInputHistoryFile(root, cwd), cwd, scan);
+	return selectPrompts(scan, options);
+}
+
+/** Fold one project's remembered prompts into the scan. */
+function readKimiPromptLines(path: string, cwd: string, scan: PromptScan): void {
+	if (!existsSync(path)) return;
+	const tail = readTailLines(path, PROMPT_HISTORY_BYTES);
+	scan.truncated = scan.truncated || tail.truncated;
+	for (const line of tail.lines.reverse()) {
+		if (!line.trim()) continue;
+		const parsed = parseJsonLine(line);
+		if (!parsed) {
+			bump(scan.counts, "line not in the history shape");
+			continue;
+		}
+		scan.seen += 1;
+		const text = asText(parsed.content).trim();
+		if (!text) {
+			bump(scan.counts, "empty prompt");
+			continue;
+		}
+		// Kimi stores a shell line with the `!` its own recall strips off again, so the
+		// marker is the source's and not a guess: recalling one here would offer `!ls`
+		// as a prompt and send the shell line as a message.
+		if (text.startsWith("!")) {
+			bump(scan.counts, "`!` command");
+			continue;
+		}
+		// This build's recall list is a list of prompts, and a slash command it offered
+		// would be sent as one. A command the palette consumed never reached kimi's
+		// recorder at all, so a line that starts with a slash is text that does.
+		if (text.startsWith("/")) {
+			bump(scan.counts, "slash command");
+			continue;
+		}
+		if (PASTE_PLACEHOLDER.test(text)) {
+			bump(scan.counts, "prompt whose text was a pasted block, stored without its body");
+			continue;
+		}
+		scan.candidates.push({ text, cwd, timestamp: 0 });
+	}
+}
+// ---------------------------------------------------------------------------
 // Dispatch and output
 // ---------------------------------------------------------------------------
 
@@ -1079,6 +1309,16 @@ export interface PromptHistoryInput {
 	overLimit: number;
 	/** The file was larger than this reads, so only its newest end was considered. */
 	truncated: boolean;
+	/**
+	 * Set when this source has no prompt list anywhere, with the reason to report.
+	 *
+	 * A source with an empty list and a source with no list look the same from
+	 * `seen`, and the difference is the whole point for a reader wondering why their
+	 * prompts did not appear: one means "nothing was typed", the other "nothing is
+	 * kept". Only sources whose tree was actually walked set this, so the line means
+	 * a list was looked for and there is none — not that a directory was missing.
+	 */
+	absent?: string;
 }
 
 export type PromptHistoryImport = Partial<Record<MigrationSourceId, PromptHistoryInput>>;
@@ -1238,6 +1478,143 @@ function readCodexPromptHistory(
 	return selectPrompts(scan, options);
 }
 
+/**
+ * `$GROK_HOME/sessions/<cwd-dir>/prompt_history.jsonl`: `{timestamp, session_id,
+ * prompt, is_bash}`.
+ *
+ * The file is per working directory rather than per home — grok keeps one beside
+ * each project's sessions, which is what its own ↑ filters on — so the directory
+ * comes from where the file sits (a line does not name one) and the scope decides
+ * which files are worth opening at all. Under `cwd` that is the one file for the
+ * project being migrated; under `all` it is every project's.
+ *
+ * A directory whose name decodes to no path and which has no `.cwd` sidecar is
+ * skipped with a count: prompts written into the wrong project's recall list are
+ * worse than prompts left behind, and recall is filtered by directory.
+ */
+function readGrokPromptHistory(
+	home: string,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
+	const root = grokSessionsRoot(grokRoot(home));
+	let names: string[];
+	try {
+		names = readdirSync(root, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name);
+	} catch {
+		return selectPrompts(scan, options);
+	}
+	for (const name of names) {
+		const dir = join(root, name);
+		const cwd = decodeGrokCwdDir(dir);
+		if (cwd === null || (options.scope === "cwd" && !sameProject(cwd, options.cwd))) {
+			if (cwd === null && existsSync(join(dir, "prompt_history.jsonl"))) {
+				bump(scan.counts, "prompt history with no working directory recorded");
+			}
+			continue;
+		}
+		readGrokPromptLines(join(dir, "prompt_history.jsonl"), cwd, scan);
+	}
+	return selectPrompts(scan, options);
+}
+
+/** Fold one project's remembered prompts into the scan. */
+function readGrokPromptLines(path: string, cwd: string, scan: PromptScan): void {
+	if (!existsSync(path)) return;
+	const tail = readTailLines(path, PROMPT_HISTORY_BYTES);
+	// One truncated file makes the whole import partial, and the note is about the
+	// import rather than about a file, so the flag is the source's and not this
+	// file's.
+	scan.truncated = scan.truncated || tail.truncated;
+	for (const line of tail.lines) {
+		if (!line.trim()) continue;
+		const parsed = parseJsonLine(line);
+		if (!parsed) {
+			bump(scan.counts, "line not in the history shape");
+			continue;
+		}
+		scan.seen += 1;
+		const text = asText(parsed.prompt).trim();
+		if (!text) {
+			bump(scan.counts, "empty prompt");
+			continue;
+		}
+		// A `!` command is a shell line grok remembered, not words that were sent
+		// to a model. Recalling it here would offer `! ls` as a prompt, and picking
+		// it would send the shell line as a message.
+		if (parsed.is_bash === true) {
+			bump(scan.counts, "`!` command");
+			continue;
+		}
+		if (text.startsWith("/")) {
+			bump(scan.counts, "slash command");
+			continue;
+		}
+		if (PASTE_PLACEHOLDER.test(text)) {
+			bump(scan.counts, "prompt whose text was a pasted block, stored without its body");
+			continue;
+		}
+		scan.candidates.push({ text, cwd, timestamp: toEpochMs(grokStamp(parsed.timestamp)) });
+	}
+}
+
+/** The recall list is filtered and sorted by time, and grok writes RFC 3339. */
+function grokStamp(value: unknown): unknown {
+	return typeof value === "string" ? Date.parse(value) : value;
+}
+
+// ---------------------------------------------------------------------------
+// Step Code
+// ---------------------------------------------------------------------------
+
+/**
+ * Every session Step's own session list would show, as candidates.
+ *
+ * The walk behind `listStepSessions` is `stepSessionScan`'s: the canonical tree
+ * and the pre-rename one, the configured session directory read in either
+ * layout, and a file that appears in more than one of them taken once. A file
+ * the scan passed over arrives as a note with the reason it could not become a
+ * session, folded the way kimi's and MiniMax's listings fold theirs.
+ */
+function listStepHistory(home: string): HistoryListing {
+	const listed = listStepSessions(home);
+	const counts = new Map<string, number>();
+	for (const skip of listed.skipped) counts.set(skip.reason, (counts.get(skip.reason) ?? 0) + 1);
+	return {
+		candidates: listed.sessions.map((session) => ({
+			source: "step-code",
+			sourceId: session.id,
+			// A session that states no working directory is listed with an empty
+			// one, as kimi and MiniMax do with a header that names none: a scope
+			// filter is a question about a directory, and `""` is not one.
+			cwd: session.cwd ?? "",
+			title: session.title ?? "",
+			startedAt: session.startedAt,
+			path: session.path,
+		})),
+		notes: [...counts].map(([reason, count]) => ({ reason, count })),
+	};
+}
+
+/**
+ * Read one chosen Step session.
+ *
+ * The listing reads a bounded head of each file to find its name; the session
+ * this returns is the one the listing built, looked up again rather than rebuilt
+ * from the path — a file that went away between the two is reported, not
+ * reconstructed. `StepEntry` is `HistoryEntry` written out, so entries cross
+ * over as they are.
+ */
+function readStepHistory(home: string, candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const session = listStepSessions(home).sessions.find((found) => found.path === candidate.path);
+	if (!session) return { entries: [], notes: [{ reason: "session is no longer on disk", count: 1 }] };
+	const read = readStepSession(session);
+	if ("error" in read) return { entries: [], notes: [{ reason: read.error, count: 1 }] };
+	return { entries: read.entries, notes: read.notes };
+}
+
 /** Prompts a source remembers, ready to be merged into the recall list. */
 export function readPromptHistory(
 	source: MigrationSourceId,
@@ -1247,6 +1624,53 @@ export function readPromptHistory(
 	if (options.scope === "none") return { seen: 0, entries: [], notes: [], overLimit: 0, truncated: false };
 	if (source === "claude-code") return readClaudePromptHistory(home, options);
 	if (source === "codex") return readCodexPromptHistory(home, options);
+	if (source === "grok-build") return readGrokPromptHistory(home, options);
+
+	if (source === "kimi-code") return readKimiPromptHistory(home, options);
+
+	// MiniMax has no prompt list, and the reason is specific enough to be worth a
+	// line rather than the usual silence. Three things on its disk could be mistaken
+	// for one, and it writes none of them as one: the composer's unsent drafts are
+	// text the user never sent (`v2/mcode/drafts`), the sessions hold the prompts
+	// themselves — those are imported as transcripts — and the shell's own history
+	// is a file MiniMax protects rather than reads (`.bash_history` / `.zsh_history`
+	// appear in its sensitive-file list, `agent-modules/permission/src/tools/fs-permission.ts:53-54`).
+	// So the ↑ list gets nothing from this source while the prompts it does know
+	// about come across inside their sessions, and a reader who asked for MiniMax
+	// history is owed that distinction.
+	if (source === "minimax-code") {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"MiniMax keeps no cross-session prompt list — its sessions hold the prompts themselves, its drafts hold text " +
+				"you never sent, and shell history is a file it protects rather than reads — so nothing was added to the ↑ " +
+				"recall list, and the prompts you sent come across with their sessions",
+		};
+	}
+
+	// Step's recall list is not on disk at all, which is a stronger statement than
+	// MiniMax's and worth making in its own words: the editor keeps it in memory,
+	// capped at 100 entries (`packages/tui/src/components/editor.ts:318-408`), and
+	// writes it nowhere. A home with no such file is not a home whose list was
+	// empty — the list does not outlive the process, and no reader could have
+	// found it however it was written.
+	if (source === "step-code") {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"Step keeps its ↑ recall list in memory only — the editor holds the last 100 prompts and never writes them " +
+				"to a file — so there is nothing to read here for any home, and the prompts you sent come across with " +
+				"their sessions",
+		};
+	}
 	return { seen: 0, entries: [], notes: [], overLimit: 0, truncated: false };
 }
 
@@ -1266,7 +1690,15 @@ export function listHistory(
 					? listZcodeHistory(home)
 					: source === "deepseek-harness"
 						? listDshHistory(home)
-						: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
+						: source === "grok-build"
+							? listGrokHistory(home)
+							: source === "kimi-code"
+								? listKimiHistory(home)
+								: source === "minimax-code"
+									? listMinimaxHistory(home)
+									: source === "step-code"
+										? listStepHistory(home)
+										: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
 	return narrowCandidates(listed, options);
 }
 
@@ -1337,6 +1769,54 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 					continue;
 				}
 				converted = { entries: read.entries, notes: read.notes };
+			} else if (source === "grok-build") {
+				const read = readGrokHistory(home, candidate);
+				// A session that could not be read — or one whose every line was a tool
+				// call — is reported by why it came to nothing rather than counted as a
+				// session that was empty. "Nothing to import" is a claim about the user's
+				// conversation, and this reader is in no position to make it when the
+				// reason it holds nothing is that it could not open the file.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "kimi-code") {
+				const read = readKimiHistory(home, candidate);
+				// Same rule as grok: a session that could not be read is reported by why,
+				// rather than counted as a session that was empty. "Nothing to import" is a
+				// claim about the user's conversation, and this reader is in no position to
+				// make it when the reason it holds nothing is that it could not open the file.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "minimax-code") {
+				const read = readMinimaxHistory(home, candidate);
+				// Same rule as grok and kimi: a session that could not be read is reported
+				// by why, rather than counted as a session that was empty. "Nothing to
+				// import" is a claim about the user's conversation, and this reader is in no
+				// position to make it when the reason it holds nothing is that it could not
+				// open the file.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "step-code") {
+				const read = readStepHistory(home, candidate);
+				// Same rule as its three neighbours: a session that could not be read is
+				// reported by why, rather than counted as a session that was empty.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
 			} else continue;
 		} catch {
 			failed += 1;

@@ -1,9 +1,11 @@
 /**
  * Read-only access to ZCode's sqlite database (`~/.zcode/cli/db/db.sqlite`).
  *
- * The only module in the repository that imports `bun:sqlite`, and it is
- * deliberately careful about how it opens the file. `new Database(path)`
- * *creates* a missing database, so a migration run on a machine without ZCode
+ * One of two modules in the repository that import `bun:sqlite` — the other is
+ * `minimax-session.ts`, reading MiniMax's `runtime-state.sqlite` under the same
+ * rules — and it is deliberately careful about how it opens the file.
+ * `new Database(path)` *creates* a missing database, so a migration run on a
+ * machine without ZCode
  * would leave a brand-new file inside the source tool's own directory — writing
  * to a source the migration promised only to read, and doing it before the user
  * has seen a single line of the report. Every entry point therefore checks the

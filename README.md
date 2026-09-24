@@ -69,7 +69,8 @@ labunbun                                # interactive REPL
   see [Gamepad](#gamepad).
 - **Headless output** — `--output-format text|json|stream-json`.
 - **Config import** — `labunbun migrate` maps an existing agent-tool setup
-  (Claude Code, Codex, ZCode, DeepSeek Harness, `~/.agents`) onto
+  (Claude Code, Codex, ZCode, DeepSeek Harness, Grok Build, Kimi Code,
+  MiniMax Code, Step Code, `~/.agents`) onto
   labunbun's own config: settings, skills, rules, slash commands, past
   conversations and the prompts ↑ recalls. Dry run by default, and a `/migrate`
   wizard that asks what to take — or takes everything after one question.
@@ -124,7 +125,7 @@ Already configured another agent tool? Copy over what has an equivalent:
 
 ```bash
 bun run dev migrate                    # dry run: report only, writes nothing
-bun run dev migrate --from codex       # one source: claude-code | codex | zcode | agents | deepseek-harness | all
+bun run dev migrate --from codex       # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | all
 bun run dev migrate --only settings    # categories: settings | assets | history | all
 bun run dev migrate --apply            # write it
 bun run dev migrate --apply --force    # also overwrite values that exist
