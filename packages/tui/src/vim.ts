@@ -1257,6 +1257,314 @@ export function motionWordEndHere(text: string, pos: number, big = false): numbe
 }
 
 /**
+ * `incl()`: the position one character along, which is the *next line's* first
+ * character when `pos` is a line's last one, and -1 when the buffer has no
+ * further character. That -1 is what makes `current_word` give up instead of
+ * wrapping (textobject.c:764), and it is the only FAIL in the word objects'
+ * whole walk — worth having as one function rather than open-coded twice.
+ */
+function inclPos(text: string, pos: number): number {
+	const next = nextChar(text, pos);
+	if (next >= text.length) return -1;
+	// A line break is not a character to stand on, so the step over it is the
+	// step onto the next line's first character — two units in a flat buffer.
+	// `incl` is `inc` twice when `inc` answers 1 or 2 (misc2.c), which is what
+	// makes the step off a line's last character land on the next line rather
+	// than in the space between the two.
+	return text[next] === "\n" ? nextChar(text, next) : next;
+}
+
+/**
+ * `decl()` at a line's first column: the last character of the line above,
+ * stepping over however many empty lines are in between, or -1 when there is no
+ * line above to step onto.
+ */
+function declPos(text: string, pos: number): number {
+	let i = prevChar(text, pos);
+	while (i > 0 && text[i] === "\n") i = prevChar(text, i);
+	return i < 0 ? -1 : i;
+}
+
+/**
+ * `oneleft()`: one character back, or -1 where vim's fails — at a line's first
+ * column, and at the start of the buffer. It does *not* cross the break; that is
+ * `decl()`, and `current_word` reaches for it by name (textobject.c:736-737).
+ *
+ * The one position that is neither a character nor a line's first column is the
+ * offset just past the buffer's end, which is where `inc()`'s answer of 2 leaves
+ * the cursor: the last character is the one before it.
+ */
+function oneLeft(text: string, pos: number): number {
+	if (pos <= 0) return -1;
+	if (pos >= text.length) return prevChar(text, pos);
+	if (lineStart(text, pos) === pos) return -1;
+	return prevChar(text, pos);
+}
+
+/**
+ * `fwd_word(1, bigword, eol=TRUE)` (textobject.c:361-421) — one step, to the
+ * first character of the next word.
+ *
+ * `eol` is what makes this an operator's walk and not a motion's: it stops *on*
+ * the next line rather than carrying on into it, and `crossed` is that case,
+ * which `current_word` answers by stepping back onto the line it left
+ * (textobject.c:736-737). A blank line stops it the same way, so the two need
+ * not be told apart — the step back lands on the same character either way.
+ *
+ * `failed` is vim's FAIL, and it has exactly one cause: the step off the caret
+ * answers `i >= 1` on the buffer's last line (textobject.c:387-391), which is the
+ * caret standing on the buffer's last character. Every other step past a line's
+ * end answers 2 and is kept, leaving the walk one past the last character — so
+ * `at` is allowed to be `text.length` here, and the caller's `oneleft()` is what
+ * brings it back onto a character. A failed walk leaves the caret in the same
+ * place, which is why it is a flag and not a `null`: the first block of
+ * `current_word` ignores the return value entirely (textobject.c:736) and only
+ * the counted loop above it checks for FAIL.
+ */
+function fwdWordOnce(text: string, pos: number, big: boolean): { at: number; crossed: boolean; failed: boolean } {
+	const n = text.length;
+	const first = nextChar(text, pos);
+	if (first >= n) return { at: n, crossed: false, failed: true };
+	if (text[first] === "\n") return { at: nextChar(text, first), crossed: true, failed: false };
+	let i = first;
+	const sclass = charClass(text, pos, big);
+	// "Go one char past end of current word (if any)".
+	if (sclass !== 0) {
+		while (charClass(text, i, big) === sclass) {
+			const next = nextChar(text, i);
+			if (next >= n) return { at: n, crossed: false, failed: false };
+			if (text[next] === "\n") return { at: next + 1, crossed: true, failed: false };
+			i = next;
+		}
+	}
+	// "Go to next non-white".
+	while (charClass(text, i, big) === 0) {
+		const next = nextChar(text, i);
+		if (next >= n) return { at: n, crossed: false, failed: false };
+		if (text[next] === "\n") return { at: next + 1, crossed: true, failed: false };
+		i = next;
+	}
+	return { at: i, crossed: false, failed: false };
+}
+
+/**
+ * `end_word(1, bigword, stop=TRUE, empty=TRUE)` (textobject.c:490-563) — the
+ * last character of a word: the current one when the caret is inside it, the
+ * next one when the caret is on the white space in front of it.
+ *
+ * `stop=TRUE` is why it does not step on when the caret already stands on a
+ * word's last character, which is the difference between `e` and `cw` that
+ * {@link motionWordEndHere} already draws. `empty=TRUE` is why a blank line
+ * ends the white walk instead of being stepped over.
+ *
+ * `null` is vim's FAIL: the white walk reaching the end of the buffer
+ * (textobject.c:551) or the run reaching it (`:545`).
+ */
+function endWordOnce(text: string, pos: number, big: boolean): number | null {
+	const n = text.length;
+	const sclass = charClass(text, pos, big);
+	let i = nextChar(text, pos);
+	// Off the end of the buffer `inc` answers 2 and the character there is white,
+	// so a word in progress ends where it started and a white walk runs into the
+	// end of the file (textobject.c:545, :551). A line break is that same position
+	// in a flat buffer — past this line's end, class white — and that is what stops
+	// a word at the end of a line: `end_word` has no `eol`, so nothing carries it
+	// onto the next line, and the class test below is the whole mechanism.
+	if (i >= n) return sclass === 0 ? null : pos;
+	if (sclass !== 0) {
+		if (charClass(text, i, big) !== sclass) {
+			// Already on a word's last character, or on the space after it: `stop=TRUE`
+			// skips both of vim's moves and the trailing `dec_cursor` puts the caret
+			// back where it was.
+			return pos;
+		}
+		// In the middle of a word, so just move to the end of it. The loop tests the
+		// character *after* `i`, which is how it stops on the last one rather than
+		// one past — the whole difference between `e` and the object. Running out of
+		// line or of buffer is not a failure here: `inc` answers 2 rather than -1
+		// past a line's end, the character there is white, and `skip_chars` stops on
+		// it so `end_word`'s `dec_cursor` brings the caret back (textobject.c:532-535).
+		for (;;) {
+			const next = nextChar(text, i);
+			if (next >= n || text[next] === "\n") return i;
+			if (charClass(text, next, big) !== sclass) return i;
+			i = next;
+		}
+	}
+	// From white: skip it, then finish the word it introduces. The blank-line stop
+	// is `i` being a line's first column, where `empty=TRUE` leaves the walk on the
+	// empty line rather than crossing it.
+	while (i < n && charClass(text, i, big) === 0) {
+		if (lineStart(text, i) === i) return i;
+		const next = nextChar(text, i);
+		if (next >= n) return null;
+		i = text[next] === "\n" ? nextChar(text, next) : next;
+	}
+	// `skip_chars(cls(), FORWARD)` reads the class once, on the character the
+	// white walk landed on, and then only ever compares against that one value
+	// (textobject.c:139-155). Re-reading it each round instead is what carries a
+	// word on through the punctuation behind it: on "a, b; c" from the space
+	// before `b`, vim's object is " b" and the naive walk makes it " b;".
+	const c = charClass(text, i, big);
+	for (;;) {
+		const next = nextChar(text, i);
+		if (next >= n || charClass(text, next, big) !== c) return i;
+		i = next;
+	}
+}
+
+/**
+ * `back_in_line()` (textobject.c:711-718) — the first character of the run of
+ * same-class characters `pos` stands in, never past its own line's start. That
+ * last part is the whole reason the indent in front of a word is not part of
+ * `aw`: the fixup that reaches left for white space stops at the line's edge.
+ */
+function backInLine(text: string, pos: number, big: boolean): number {
+	const cls = charClass(text, pos, big);
+	const begin = lineStart(text, pos);
+	let i = pos;
+	while (i > begin) {
+		const back = prevChar(text, i);
+		if (charClass(text, back, big) !== cls) break;
+		i = back;
+	}
+	return i;
+}
+
+/**
+ * The `[count]`-th `iw` / `aw` object around `pos`, as the half-open range an
+ * operator cuts — vim's `current_word` (textobject.c:683-853), which is a walk
+ * and not a formula.
+ *
+ * The walk alternates: from a word's last character the next step lands on the
+ * last character of the white space before the following word, and from there the
+ * step after lands on that word's last character. `[N]iw` therefore ends on a
+ * word for odd N and on white space for even N, and `[N]aw` — one white space
+ * further along each time — makes `2iw` and `1aw` the same object, which is the
+ * equivalence vim's own `:help iw` states and this reproduces rather than assumes
+ * (measured: `y2iw` and `yaw` both read back `"one "` on `"one two"`).
+ *
+ * `landing` is where the walk left the caret, which is what a *failed* object
+ * shows: `y4iw` on the second line of `"aa bb\ncc dd"` changes nothing and
+ * leaves the caret on the last character, the position `incl()` had reached.
+ * `ok` is vim's FAIL — the operator is dropped, the text untouched, the caret
+ * moved to the landing.
+ */
+export function wordObject(
+	text: string,
+	pos: number,
+	count: number,
+	include: boolean,
+	big = false,
+): { start: number; end: number; landing: number; ok: boolean } {
+	// The first object is the run of the caret's own class, widened to the whole
+	// word or the whole white run. `iw` finishes it at the run's last character;
+	// `aw` carries on over the white space that follows it.
+	const n = text.length;
+	const start = backInLine(text, pos, big);
+	let at = pos;
+	let includeWhite = false;
+	if ((charClass(text, start, big) === 0) === include) {
+		const end = endWordOnce(text, start, big);
+		if (end === null) return { start, end: start, landing: n, ok: false };
+		at = end;
+	} else {
+		// The first block does not check `fwd_word`'s answer (textobject.c:736) — a
+		// failed walk leaves the caret past the end of the line and `oneleft()`
+		// brings it back onto the last character, which is a perfectly good end for
+		// the object. `daw` on the last word of the last line is the case that shows
+		// it: the word is the object, and only the white space in front of it was
+		// wanted, which the `include_white` fixup below finds.
+		const step = fwdWordOnce(text, start, big);
+		const moved = step.crossed ? declPos(text, step.at) : oneLeft(text, step.at);
+		if (moved < 0) return { start, end: start, landing: start, ok: false };
+		at = moved;
+		if (include) includeWhite = true;
+	}
+	// A count past the first is that many more steps of the walk, and `incl()`
+	// running out of buffer is the one way the whole thing fails.
+	let remaining = count - 1;
+	let inclusive = true;
+	while (remaining > 0) {
+		inclusive = true;
+		const step = inclPos(text, at);
+		if (step < 0) return { start, end: nextChar(text, at), landing: n, ok: false };
+		at = step;
+		if (include !== (charClass(text, at, big) === 0)) {
+			const fwd = fwdWordOnce(text, at, big);
+			// A FAIL is only fatal while steps remain: vim lets the last one stand
+			// (`&& count > 1`, textobject.c:797), which is how `2iw` at the end of the
+			// buffer still selects something. Either way the `oneleft()` below still
+			// runs, so the walk's landing is the same and only `ok` differs.
+			if (fwd.failed && remaining > 1) return { start, end: nextChar(text, at), landing: fwd.at, ok: false };
+			const moved = fwd.crossed ? declPos(text, fwd.at) : oneLeft(text, fwd.at);
+			// `oneleft()` FAILing is not an error: the object ends one character
+			// short, exclusive (textobject.c:800-802).
+			if (moved < 0) {
+				inclusive = false;
+				break;
+			}
+			at = moved;
+		} else {
+			const end = endWordOnce(text, at, big);
+			if (end === null) return { start, end: nextChar(text, at), landing: n, ok: false };
+			at = end;
+		}
+		remaining--;
+	}
+	let from = start;
+	// `include_white` (textobject.c:813-838): `aw` with nothing after the word —
+	// it ends a line, or the buffer — reaches *left* for the white space instead,
+	// which is what makes `daw` on the last word of a sentence take the space in
+	// front of it. Never at the line's first column, or indentation would go too.
+	if (includeWhite && (charClass(text, at, big) !== 0 || (lineStart(text, at) === at && !inclusive))) {
+		const back = oneLeft(text, start);
+		if (back >= 0) {
+			const begin = backInLine(text, back, big);
+			if (charClass(text, begin, big) === 0 && begin !== lineStart(text, begin)) from = begin;
+		}
+	}
+	return { start: from, end: nextChar(text, at), landing: at, ok: true };
+}
+
+/**
+ * Whether a multi-line charwise *delete* of `[start, end)` is linewise after
+ * all — the "strange Vi behaviour" of ops.c:810-825, which is still vim's
+ * behaviour because `'cpoptions'` has kept its `z` (CPO_WORD) since 7.4.
+ *
+ * All five conditions are load-bearing and each one is observable:
+ *   - more than one line (`line_count > 1`);
+ *   - nothing but blanks behind the object on its last line, so the deletion
+ *     would leave that line empty (`skipwhite` reaching the NUL);
+ *   - the object starts at or before the first non-blank of its own line
+ *     (`inindent(0)`, which the cursor is inside: ops.c:4078 leaves it at
+ *     `oap->start`);
+ *   - a delete and not a change or a yank, so `c2iw` and `y2iw` keep the
+ *     characterwise region and `p` pastes it back as text;
+ *   - and no visual or block selection, which is what a text object never is.
+ *
+ * Dropping `z` from `'cpoptions'` in a real vim turns the promotion off, which
+ * is how the gate was confirmed to be this rule and not the arithmetic below
+ * it: `d2iw` on `"a\nb\nc"` leaves one line `c` by default and two lines
+ * (`""`, `c`) with `set cpo-=z`.
+ */
+function deleteGoesLinewise(text: string, start: number, end: number): boolean {
+	const lastLine = lineOf(text, Math.max(start, end - 1));
+	if (lineOf(text, start) === lastLine) return false;
+	// What is left of the last line the object touches, once the object is gone.
+	const rest = lineEndExclusive(text, Math.max(start, end - 1));
+	for (let i = end; i < rest; i++) {
+		if (text[i] !== " " && text[i] !== "\t") return false;
+	}
+	// `inindent(0)` counts the blanks in front of the start and asks whether the
+	// cursor has not passed them.
+	for (let i = lineStart(text, start); i < start; i++) {
+		if (text[i] !== " " && text[i] !== "\t") return false;
+	}
+	return true;
+}
+
+/**
  * The first non-blank of the line containing `pos` — where `I` inserts, and
  * where a linewise paste leaves the caret.
  *
@@ -1414,6 +1722,14 @@ export class VimEngine {
 	/** The count that arrived with f/F/t/T/r, spent when the second key lands. */
 	#pendingCharCount = 1;
 	#pendingG: { operator: Operator | null; count: number; explicit: boolean } | null = null;
+	/**
+	 * `d` `i` — the operator is chosen and the *text object* is the second half,
+	 * which is a key of its own (`diw`, `ci(`, `yap`). It is a latch rather than a
+	 * branch because the key after `i` names the object and must not also be read
+	 * as a command: `diwg` deletes a word and then types `g`, where a latch that
+	 * fell through would have deleted to the next `g`.
+	 */
+	#pendingObject: { operator: Operator; count: number; include: boolean; explicit: boolean } | null = null;
 	/** Visual mode has one `g` command (`gJ`), so it needs its own latch. */
 	#visualPendingG = false;
 	/**
@@ -1681,6 +1997,7 @@ export class VimEngine {
 		this.#pendingCharWithOp = false;
 		this.#pendingCharCount = 1;
 		this.#pendingG = null;
+		this.#pendingObject = null;
 		this.#visualPendingG = false;
 		this.#visualPendingR = false;
 		this.#prefixPending = false;
@@ -1782,7 +2099,7 @@ export class VimEngine {
 		// unconsumed, because the host's Escape (interrupt) is a separate listener
 		// that "consumed" cannot stop.
 		if (key.escape) {
-			if (this.#pending || this.#pendingChar || this.#pendingG || this.#countBuffer) {
+			if (this.#pending || this.#pendingChar || this.#pendingG || this.#pendingObject || this.#countBuffer) {
 				this.#resetPending();
 				return true;
 			}
@@ -1907,6 +2224,22 @@ export class VimEngine {
 				};
 				return true;
 			}
+			// `i` and `a` name a text object, whose second half is a key of its own:
+			// `diw`, `daw`, `d2iW`. Measured — an object character that is not one
+			// (`diZ`) drops the whole operator and swallows itself, and the `d` after
+			// it is armed again (`diZdw` deletes), so this cannot fall through to the
+			// swallow below without re-arming anything. `w` and `W` are the only
+			// objects named so far; the rest of the family gets its own latch here.
+			if (input === "i" || input === "a") {
+				this.#pending = null;
+				this.#pendingObject = {
+					operator,
+					count: count * this.#takeCount(),
+					include: input === "a",
+					explicit: preCountExplicit || this.#countExplicit,
+				};
+				return true;
+			}
 			if (FIND_MOTIONS.has(input)) {
 				// df{c} / dt{c}: keep the operator alive until the char arrives.
 				this.#pendingChar = input as "f" | "F" | "t" | "T";
@@ -1947,6 +2280,14 @@ export class VimEngine {
 			}
 			// Unknown key under an operator: cancel and swallow (vim behavior).
 			this.#resetPending();
+			return true;
+		}
+
+		// 2b. Name the text object: `diw`, `ci(`, `yap`, `2daw`.
+		if (this.#pendingObject) {
+			const { operator, count, include } = this.#pendingObject;
+			this.#pendingObject = null;
+			this.#applyTextObject(operator, include, input, count);
 			return true;
 		}
 
@@ -2883,6 +3224,59 @@ export class VimEngine {
 
 	// -- operators ------------------------------------------------------------
 
+	/**
+	 * Run the operator over a text object rather than a motion: the second half of
+	 * `diw` / `daw` / `d2iW`, and the first of the daily three the plan file names.
+	 * Only the word objects are wired up — `wordObject` is the whole implementation,
+	 * and the `object` key is checked rather than switched on, so a key that names
+	 * none spends the operator instead of falling through to a motion.
+	 *
+	 * A character that names no object drops the operator and changes nothing, and
+	 * so does a walk that gives up — but the two leave the caret in different
+	 * places, and that is the difference between them. The first never calls
+	 * `current_word`, so the caret stays where it was; the second has already walked
+	 * it (`y4iw` on the second line of `"aa bb\ncc dd"` reads back on the buffer's
+	 * last character, where the walk stopped).
+	 */
+	#applyTextObject(operator: Operator, include: boolean, object: string, count: number): void {
+		const text = this.#ops.getText();
+		const at = this.#ops.getCursor();
+		if (object !== "w" && object !== "W") return;
+		const found = wordObject(text, at, count, include, object === "W");
+		if (!found.ok) {
+			// A walk that gave up leaves the caret where it stopped, which is often
+			// one past the end of the line or of the buffer. Vim's own readback of a
+			// caret there clamps it back onto a character, and `settleCursor` is this
+			// engine's name for that.
+			this.#ops.setCursor(settleCursor(text, found.landing));
+			this.#wantHere();
+			return;
+		}
+		if (operator === ">" || operator === "<") {
+			// A text object is a motion `>` and `<` take as much as `d` and `c` do
+			// (measured: `>iw` on "one two" indents it, `>2iw` on "a\nb\nc" indents
+			// the first two lines and not the third). What they shift is the linewise
+			// span the object lands on, which is the same span `#shiftByMotion` works
+			// out from a motion's two ends — here they are already known.
+			const firstLine = lineOf(text, found.start);
+			const lastLine = lineOf(text, Math.max(found.start, found.end - 1));
+			this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine));
+			return;
+		}
+		if (operator === "d" && deleteGoesLinewise(text, found.start, found.end)) {
+			// Linewise, which also makes the register linewise — `d2iwp` pastes two
+			// lines back, not the two characters the object held.
+			const { start, end, removeFrom } = lineRange(
+				text,
+				lineOf(text, found.start),
+				lineOf(text, Math.max(found.start, found.end - 1)),
+			);
+			this.#runLinewise(operator, start, end, removeFrom);
+			return;
+		}
+		this.#runOperator(operator, found.start, found.end, true);
+	}
+
 	#applyOperator(operator: Operator, motion: string, count: number, findChar?: string, countExplicit = false): void {
 		const text = this.#ops.getText();
 
@@ -3293,6 +3687,7 @@ export class VimEngine {
 			this.#pending !== null ||
 			this.#pendingChar !== null ||
 			this.#pendingG !== null ||
+			this.#pendingObject !== null ||
 			this.#visualPendingG ||
 			this.#visualPendingR ||
 			this.#prefixPending ||

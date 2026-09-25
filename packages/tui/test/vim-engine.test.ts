@@ -2146,6 +2146,202 @@ describe("cw stops at the end of the word the caret is on", () => {
 });
 
 /**
+ * `iw aw` and the WORD forms of both.
+ *
+ * `current_word` (textobject.c:683-853) is a walk and not a formula, so the
+ * region is a number of *groups* — a word end, then a white end, then a word end
+ * — which is why `[N]iw` and `[N-1]aw` are one region spelled two ways. Every
+ * expected value below was measured against vim 9.2 on this machine through
+ * `packages/tui/test/vim-differential/regress.mjs`, which carries the same
+ * cases measured live; these are here so `bun test` can hold them without a
+ * vim, and so each rule has one assertion a named mutant can redden.
+ */
+describe("word text objects", () => {
+	const FOUR = "one two three four";
+	/** One word and one separator per line: a word ends *before* the punctuation. */
+	const PUNCT = "a, b; c";
+	/** Three one-character lines, so an object that crosses one spans whole lines. */
+	const LINES = "a\nb\nc";
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) e.engine.handleKey(k, e.key());
+		return e;
+	};
+
+	test("iw is the run the caret stands in, and the white run when it is on white", () => {
+		expect(run(FOUR, 0, "d", "i", "w").state.text).toBe(" two three four");
+		// From the middle of a word: the whole run, not the rest of it.
+		expect(run(FOUR, 1, "d", "i", "w").state.text).toBe(" two three four");
+		// From the space between them: `iw` on white is the white, not a word.
+		expect(run(FOUR, 3, "d", "i", "w").state.text).toBe("onetwo three four");
+		// …and from the first letter of the next word, that word — and only that
+		// word, so the white in front of it is left behind as a second blank.
+		expect(run(FOUR, 4, "d", "i", "w").state.text).toBe("one  three four");
+		expect(run("solo", 3, "d", "i", "w").state.text).toBe("");
+	});
+
+	test("aw is the word and the white behind it", () => {
+		expect(run(FOUR, 0, "d", "a", "w").state.text).toBe("two three four");
+		expect(run(FOUR, 4, "d", "a", "w").state.text).toBe("one three four");
+		// A run of white is one object however long it is, not one character.
+		expect(run("one   two", 0, "d", "a", "w").state.text).toBe("two");
+	});
+
+	test("aw with nothing behind the word reaches left for the white instead", () => {
+		// `include_white` (textobject.c:813-838). The walk ended with the word and
+		// there is nothing after it, so the space in front is what `aw` wanted —
+		// which is why this leaves "one" and not "one ", the same answer as from
+		// the end of the buffer.
+		expect(run("one two", 4, "d", "a", "w").state.text).toBe("one");
+		expect(run("one two", 7, "d", "a", "w").state.text).toBe("one");
+	});
+
+	test("the white aw reaches for in front never eats the indentation", () => {
+		// The guard is `begin != lineStart` (textobject.c:830-834): without it this
+		// takes the two blanks in front of "one" as well.
+		expect(run("  one", 4, "d", "a", "w").state.text).toBe("  ");
+		expect(run("  one", 2, "d", "a", "w").state.text).toBe("  ");
+	});
+
+	test("a count is a number of groups, so [N]iw is [N-1]aw", () => {
+		const two = run(FOUR, 0, "d", "2", "i", "w").state.text;
+		expect(two).toBe("two three four");
+		// The same region, spelled the other way: this is the equivalence, and it
+		// is what makes a count a count of groups rather than of characters.
+		expect(run(FOUR, 0, "d", "1", "a", "w").state.text).toBe(two);
+		expect(run(FOUR, 0, "d", "3", "i", "w").state.text).toBe(" three four");
+		expect(run(FOUR, 0, "d", "2", "a", "w").state.text).toBe("three four");
+		// A count past the end of the buffer takes what there is.
+		expect(run(FOUR, 0, "d", "6", "i", "w").state.text).toBe("four");
+	});
+
+	test("a word stops at the punctuation behind it", () => {
+		// The class the walk lands on is the class it then tests against
+		// (`skip_chars`, textobject.c:139-155). Re-reading it instead carries the
+		// word on through the `;`, and this answer becomes "a, c".
+		expect(run(PUNCT, 2, "d", "a", "w").state.text).toBe("a,; c");
+		expect(run(PUNCT, 4, "d", "i", "w").state.text).toBe("a, b c");
+		expect(run(PUNCT, 2, "d", "i", "w").state.text).toBe("a,b; c");
+	});
+
+	test("W is one object up to the next blank, punctuation and all", () => {
+		expect(run(PUNCT, 0, "d", "i", "W").state.text).toBe(" b; c");
+		expect(run(PUNCT, 0, "d", "a", "W").state.text).toBe("b; c");
+		// …and a count is still a count of groups, here of WORDs.
+		expect(run(PUNCT, 0, "d", "2", "i", "W").state.text).toBe("b; c");
+		expect(run(PUNCT, 0, "d", "3", "i", "W").state.text).toBe(" c");
+		expect(run(PUNCT, 4, "d", "a", "W").state.text).toBe("a, c");
+	});
+
+	test("the object half is a key of its own, and a key that names none is a cancellation", () => {
+		// `diZ` is not `d` + a motion called Z. Nothing happens, and the operator
+		// is gone rather than waiting for another key.
+		const z = run(FOUR, 0, "d", "i", "Z");
+		expect(z.state.text).toBe(FOUR);
+		expect(z.writes()).toBe(0);
+		// The next `d` is an operator of its own, so the `w` after it is a motion.
+		expect(run(FOUR, 0, "d", "i", "Z", "d", "w").state.text).toBe("two three four");
+		// A motion is not an object either, and Escape abandons the pair.
+		expect(run(FOUR, 0, "d", "i", "g", "g").state.text).toBe(FOUR);
+		const esc = editor(FOUR, 0);
+		esc.engine.handleKey("d", esc.key());
+		esc.engine.handleKey("i", esc.key());
+		esc.engine.handleKey("", esc.key({ escape: true }));
+		expect(esc.state.text).toBe(FOUR);
+		// Having spent the `i`, a `w` is a motion and the `i` after it is insert.
+		const i = run(FOUR, 0, "d", "i", "w", "i");
+		expect(i.state.text).toBe(" two three four");
+		expect(i.engine.mode).toBe("insert");
+	});
+
+	test("a multi-line object deleted with d is deleted linewise", () => {
+		// ops.c:810-825, the "strange Vi behaviour", still vim's behaviour because
+		// `'cpoptions'` has kept its `z` (CPO_WORD). A charwise cut of "a\nb" out
+		// of "a\nb\nc" would leave an empty first line; vim leaves one line, "c".
+		expect(run(LINES, 0, "d", "2", "i", "w").state.text).toBe("c");
+		expect(run(LINES, 0, "d", "2", "a", "w").state.text).toBe("c");
+		expect(run("a\nb   ", 0, "d", "2", "i", "w").state.text).toBe("");
+		expect(run("a\nb\t", 0, "d", "2", "i", "w").state.text).toBe("");
+	});
+
+	test("the register a promoted delete leaves is linewise too", () => {
+		// A buffer readback cannot see this: `p` pastes two *lines* back, after the
+		// line the delete collapsed onto, and not the two characters the object held.
+		expect(run(LINES, 0, "d", "2", "i", "w", "p").state.text).toBe("c\na\nb");
+	});
+
+	test("only a delete is promoted, and a change is not", () => {
+		// The rule names `OP_DELETE`. `c2iw` cuts the same two lines characterwise
+		// and leaves the empty one, and `y` is not promoted at all.
+		const c = run(LINES, 0, "c", "2", "i", "w");
+		c.engine.handleKey("", c.key({ escape: true }));
+		expect(c.state.text).toBe("\nc");
+		expect(run("a\nb   ", 0, "c", "2", "i", "w").state.text).toBe("   ");
+		const y = run(LINES, 0, "y", "2", "i", "w");
+		expect(y.state.text).toBe(LINES);
+	});
+
+	test("the promotion needs the last line left empty behind the object", () => {
+		// Same two-line object, one character of difference on the last line.
+		expect(run("a\nb cc", 0, "d", "2", "i", "w").state.text).toBe(" cc");
+		expect(run("a\nb cc\nd", 0, "d", "2", "i", "w").state.text).toBe(" cc\nd");
+		// A region that never crosses a line is not promoted whatever is behind it.
+		expect(run(FOUR, 0, "d", "2", "i", "w").state.text).toBe("two three four");
+	});
+
+	test("a walk that runs off the end leaves the caret on a character", () => {
+		// `incl()` answering -1 is the one failure that gives the whole command
+		// away, and vim's own readback of a caret past the last character clamps it
+		// back onto that character. Here: the last one, column 6.
+		const e = run("one two", 4, "d", "2", "a", "w");
+		expect(e.state.text).toBe("one two");
+		expect(e.writes()).toBe(0);
+		expect(e.state.cursor).toBe(6);
+	});
+
+	test("a yank leaves the caret at the start of the object, not where the walk stopped", () => {
+		const e = run("aa bb\ncc dd", 6, "y", "2", "i", "w");
+		expect(e.state.text).toBe("aa bb\ncc dd");
+		expect(e.state.cursor).toBe(6);
+	});
+
+	test("a text object is a motion > and < take as well, over the lines it lands on", () => {
+		// A text object is not `d`/`c`/`y` only. `>iw` indents the line, and the
+		// span that moves is the one the object lands on — one line here, two there.
+		expect(run("one two", 0, ">", "i", "w").state.text).toBe("\tone two");
+		expect(run("one two", 0, ">", "a", "w").state.text).toBe("\tone two");
+		expect(run(LINES, 0, ">", "i", "w").state.text).toBe("\ta\nb\nc");
+		expect(run(LINES, 0, ">", "2", "i", "w").state.text).toBe("\ta\n\tb\nc");
+		// `<<` with nothing to take changes no text and still lands the caret on
+		// the first non-blank, which for an unindented line is column 0.
+		const left = run("one two", 0, "<", "i", "w");
+		expect(left.state.text).toBe("one two");
+		expect(left.writes()).toBe(0);
+		expect(left.state.cursor).toBe(0);
+		// And it does take the indent when there is one.
+		expect(run("  one", 4, "<", "i", "w").state.text).toBe("one");
+	});
+
+	test("a word object never splits a paste token", () => {
+		// The token is literal ASCII, so a class-run walk would happily stop in the
+		// middle of it. `#runOperator` asks `splitsPasteToken` first and refuses the
+		// whole command rather than leave a placeholder that no longer submits.
+		const text = `a ${PASTE_TOKEN} b`;
+		const inside = 2 + PASTE_TOKEN.length - 4;
+		for (const object of [
+			["i", "w"],
+			["a", "w"],
+			["i", "W"],
+			["a", "W"],
+		]) {
+			const e = run(text, inside, "d", ...object);
+			expect(e.state.text).toBe(text);
+			expect(e.writes()).toBe(0);
+		}
+	});
+});
+
+/**
  * The two editing keys vim also binds. They used to reach the host from NORMAL
  * mode, where Backspace erased the character behind the caret — an edit no modal
  * editor makes from a movement key. Expected values here come from vim 9.1

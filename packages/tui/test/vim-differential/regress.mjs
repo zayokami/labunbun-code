@@ -120,6 +120,13 @@ const SIXTEEN = "abcdefghijklmnop";
 // wrong form (the end's column instead of the width) would still look right on
 // a single line and only miss over a re-selection onto a *different* line.
 const SHORT_LINES = "ab\ncd\nef\ngh";
+// One word and one separator per line, punctuation and all. A word ends before
+// the `,` and before the `;`, so a buffer written with spaces between every word
+// cannot tell a word from the punctuation behind it.
+const PUNCT = "a, b; c";
+// Three one-character lines, so a multi-line word object spans whole lines and
+// whether the last of them is left empty is the whole question.
+const THREE_LINES = "a\nb\nc";
 // The first line longer than the last, which is the case the short lines above
 // cannot make: a selection ending on line 1 redoes by its *width*, and only a
 // shorter line to land on shows that.
@@ -320,6 +327,115 @@ const CASES = [
 	[["b"], CJK_MIX, 4],
 	[["d", "w"], "ab\ncd", 0],
 	[["d", "b"], "ab\ncd", 3],
+	// Word text objects. `current_word` (textobject.c:683-853) is a walk and not a
+	// formula, so the region is a number of *groups* — a word end, then a white
+	// end, then a word end — which is why `[N]iw` and `[N-1]aw` are the same
+	// region spelled two ways, and why `aw` is a word plus the white behind it
+	// rather than "one more character". Four rules here each have one plausible
+	// wrong answer: which of the two the caret is standing in, what `aw` reaches
+	// for when there is nothing behind the word, where punctuation stops a word,
+	// and where the caret ends up afterwards.
+	[["d", "i", "w"], FOUR_WORDS, 0],
+	[["d", "i", "w"], FOUR_WORDS, 1],
+	[["d", "i", "w"], FOUR_WORDS, 3],
+	[["d", "a", "w"], FOUR_WORDS, 0],
+	[["d", "a", "w"], FOUR_WORDS, 4],
+	[["d", "i", "w"], "solo", 3],
+	[["d", "a", "w"], "solo", 3],
+	[["d", "2", "i", "w"], FOUR_WORDS, 0],
+	[["d", "1", "a", "w"], FOUR_WORDS, 0],
+	[["d", "2", "a", "w"], FOUR_WORDS, 0],
+	[["d", "3", "i", "w"], FOUR_WORDS, 0],
+	// A count that runs out of buffer takes what there is, and the caret is left
+	// where the walk stopped rather than where a motion would have landed it.
+	[["d", "6", "i", "w"], FOUR_WORDS, 0],
+	[["d", "3", "i", "w"], "one two", 4],
+	[["y", "2", "i", "w"], "one two", 4],
+	// A line break is white, and a blank line is where the walk stops rather than
+	// something it steps over: `2iw` on "one\n\ntwo" takes "one" and the empty
+	// line with it, which is the linewise delete further down.
+	[["d", "i", "w"], "one\ntwo", 0],
+	[["d", "a", "w"], "one\ntwo three", 0],
+	[["d", "2", "i", "w"], "one\n\ntwo", 0],
+	[["d", "a", "w"], "one\n\ntwo", 0],
+	[["d", "i", "w"], "  one", 0],
+	[["d", "a", "w"], "  one two", 0],
+	[["d", "i", "w"], "  one two", 1],
+	[["d", "2", "i", "w"], "  one two", 2],
+	[["d", "i", "w"], "  \n  x", 1],
+	// A run of white is one object however long it is, from either end of it.
+	[["d", "a", "w"], "one   two", 0],
+	[["d", "i", "w"], "one   two", 4],
+	[["d", "i", "w"], "one   two", 5],
+	// Punctuation ends a word, and the walk pins the class it landed on instead of
+	// re-reading it — on "a, b; c" from the space, `aw` is " b" and not " b;". `W`
+	// treats the same buffer as two objects with the punctuation inside them.
+	[["d", "a", "w"], PUNCT, 2],
+	[["d", "i", "w"], PUNCT, 2],
+	[["d", "i", "w"], PUNCT, 4],
+	[["d", "a", "w"], PUNCT, 4],
+	[["d", "i", "W"], PUNCT, 0],
+	[["d", "i", "W"], PUNCT, 3],
+	[["d", "2", "i", "W"], PUNCT, 0],
+	[["d", "a", "W"], PUNCT, 0],
+	[["d", "2", "a", "W"], PUNCT, 0],
+	// The object uses the same character classes `w` does, which is what makes
+	// `diw` take a whole hanzi run and not one of its words.
+	[["d", "i", "w"], CHINESE, 0],
+	[["d", "a", "w"], CHINESE, 0],
+	// The caret after a yank is the start of the region, not where the walk
+	// stopped, and a multi-line object's start is a real position on a line above
+	// — which `ggP` then shows in the paste.
+	[["y", "i", "w", "g", "g", "P"], "aa bb\ncc dd", 6],
+	[["y", "2", "i", "w", "g", "g", "P"], "aa bb\ncc dd", 6],
+	[["y", "2", "a", "w", "g", "g", "P"], FOUR_WORDS, 0],
+	// The object half is a key of its own: case matters, `W` is an object in its
+	// own right, and a key that names none abandons the whole operator instead of
+	// letting the next key through as a motion.
+	[["d", "i", "Z"], FOUR_WORDS, 0],
+	[["d", "i", "Z", "d", "w"], FOUR_WORDS, 0],
+	[["d", "i", "g", "g"], FOUR_WORDS, 0],
+	[["d", "i", "\x1b"], FOUR_WORDS, 0],
+	[["d", "i", "W"], FOUR_WORDS, 0],
+	[["d", "i", "w", "i"], FOUR_WORDS, 0],
+	// A multi-line word object deleted with `d` is deleted linewise — the "strange
+	// Vi behaviour" of ops.c:810-825, still vim's behaviour because `'cpoptions'`
+	// has kept its `z`. A change is never promoted (that rule names OP_DELETE), so
+	// `c2iw` leaves the lines it cut, and `y` cannot be promoted at all.
+	[["d", "2", "i", "w"], THREE_LINES, 0],
+	[["d", "2", "a", "w"], THREE_LINES, 0],
+	[["c", "2", "i", "w", "\x1b"], THREE_LINES, 0],
+	[["y", "2", "i", "w"], THREE_LINES, 0],
+	// The register is linewise too, which a buffer readback on its own cannot see:
+	// `p` pastes two lines back, not the two characters the object held.
+	[["d", "2", "i", "w", "p"], THREE_LINES, 0],
+	// …and the promotion does not fire when something is left behind on the last
+	// line the object touches. These four regions differ only in that, and the
+	// last two never cross a line at all.
+	[["d", "2", "i", "w"], "a\nb cc", 0],
+	[["d", "2", "i", "w"], "a\nb cc\nd", 0],
+	[["d", "2", "i", "w"], "aa bb\ncc dd", 0],
+	[["d", "2", "i", "w"], "aa bb\ncc dd", 6],
+	// Only blanks behind it is the same object, so both of these are promoted —
+	// and the change form of the second one still is not.
+	[["d", "2", "i", "w"], "a\nb   ", 0],
+	[["d", "2", "i", "w"], "a\nb\t", 0],
+	[["c", "2", "i", "w", "\x1b"], "a\nb   ", 0],
+	[["d", "2", "i", "w"], "a\nb\ncc", 0],
+	[["d", "2", "i", "w"], "  a\nb\nc", 2],
+	[["d", "2", "i", "w"], "a\nb   \nc", 0],
+	// A text object is a motion `>` and `<` take as much as `d` and `c` do. What
+	// gets shifted is the linewise span the object lands on — one line for `iw` on
+	// the first of three, two for `2iw` — and a `<<` with nothing to take is a
+	// caret move to the first non-blank and not a change, which is what the two
+	// unindented cases below are for.
+	[[">", "i", "w"], "one two", 0],
+	[[">", "a", "w"], "one two", 0],
+	[["<", "i", "w"], "one two", 0],
+	[[">", "i", "w"], "  one", 4],
+	[["<", "i", "w"], "  one", 4],
+	[[">", "i", "w"], THREE_LINES, 0],
+	[[">", "2", "i", "w"], THREE_LINES, 0],
 	// Search. Every case here is a rule that has one plausible wrong answer:
 	// whether a match at the caret counts, whether a count wraps once or round and
 	// round, whether a search that matched nothing is still the last search, and
