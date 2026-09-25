@@ -27,11 +27,11 @@ engine. **A pending operator** is not compared either: a sequence ending on `d`
 leaves the two editors in different internal states that identical text and cursor
 cannot distinguish, so those sequences are dropped rather than compared.
 
-## Four places the instrument will lie to you
+## Five places the instrument will lie to you
 
-All four of these produced a clean, confident, wrong answer first — a green run
+All five of these produced a clean, confident, wrong answer first — a green run
 that was reporting the harness's own bug as the engine's. They are written down
-because the next person will reach for the same four shortcuts.
+because the next person will reach for the same five shortcuts.
 
 **`|` is a screen column, not a character offset.** It counts a double-width
 character twice and puts the caret between the two halves of a narrow multibyte
@@ -68,7 +68,32 @@ compares in every one of these, which is the part worth a case — so a `c` case
 that ends in Escape checks the change, and a case that does not end in insert at
 all checks the caret too.
 
-## Two buffers the comparison cannot judge
+**A `-s` script never syncs the undo between its keys.** `may_sync_undo()`
+(`getchar.c:1481`) is the one thing that closes an undo block and opens the next,
+and it returns without calling `u_sync()` while a script file is being read — the
+source says so in its own comment, "*Do not sync: … While reading a script file*".
+So two changes in one case are **one** undo block, where a person at a keyboard
+would get two. Measured, on `"ab\ncd"`:
+
+| keys | vim | engine |
+|---|---|---|
+| `x` `u` | `"ab\ncd"`@0 | `"ab\ncd"`@0 |
+| `x` `j` `x` `u` | `"ab\ncd"`@0 | `"b\ncd"`@2 |
+| `x` `j` `x` `u` `u` | `"ab\ncd"`@0 | `"ab\ncd"`@0 |
+
+Read the middle row and the last one together, because the last one is the trap.
+`x j x u` disagrees, which is the lie; `x j x u u` **agrees**, because vim's second
+`u` has nothing left to undo and the engine's second step lands where vim's first
+did. So the obvious workaround — give the case a second `u` — makes it green for
+the wrong reason, and a case written that way is worse than no case. The rule is
+simply: **one change in front of a `u`, never two.** All six `u` cases in `CASES`
+have exactly one, which was checked by reading them rather than by a script, and
+this is the reason the redo cases that need an undo (`vrX` `u` `.`) are written
+with the `.` on the spot rather than moved off it: the script's undo grouping is
+the same in both, so a comparison there is still meaningful, but only because
+there is one change to undo.
+
+## Three buffers the comparison cannot judge
 
 **The caret on a `\n`.** Vim has no line-break character to put a caret on;
 `cursor(1, 3)` clamps onto the last character of the line. This engine's buffer
@@ -189,6 +214,93 @@ step-back) hold the pair.
 made it visible, because a line of blanks is the first buffer anybody thought to
 run them on.
 
+## The redo, `.`
+
+`.` repeats the **last change the buffer went through**, and there is no flag and
+no arming step: every change replaces the entry and the commands that change no
+text do not touch it. Three things have to be kept to repeat one.
+
+- **The keys.** Split into the count and the rest, so `2x` repeats two deletions.
+- **The text a change typed.** A `c`/`s`/`C`/`S` ends in insert mode, where the
+  *host* types into the buffer and the engine never sees a character — so the text
+  is diffed at the Escape and written back on the replay (`S46`, `S47`).
+- **The size of a selection, not the motions that made it.** A Visual operator is
+  redone at the same width: `redo_VIsual` (`ops.c:3890`), with the size recorded
+  in one of three forms at `ops.c:4136` — `w_curswant == MAXCOL` (asked first),
+  the width for a selection on one line, and the end's own column on its own line
+  for one over several. `S43`–`S45` and `S50`–`S52` hold the three forms and the
+  two ways to tell `MAXCOL` from the reach it is not.
+
+The measured rule that replaced a wrong one is the short version: **a Visual `r`
+is the redo like any other change.** The first model here said a Visual `r`
+emptied the redo slot, and the three cases written to hold it all put the `.` on
+the line the `VrX` had just written — where running and not running look the
+same, so all three passed against a flag that was wrong. The matrix that settled
+it is 14 cases in `CASES` (`xvrXj.`, `dwvrXj.`, `VrXj.`, `vrxj.`, `vlrxj.`,
+`xvrxj.`, `VrXGvl.`, `xVrXGvl.`, `vrXu.`, `drX.`, …) and the rule that came out
+of it is three sentences:
+
+- a Visual `r` is the redo **with or without** a change before it, linewise or
+  charwise, and **even when it wrote the character that was already there** —
+  `vrxj.` on `"xx\nyy"` writes an `x` over the `y`, and the buffer reads the same
+  before and after;
+- an **undo** neither takes the redo away nor re-points it: `vrX` `u` `.` writes
+  the `X` again, which is the entry the `vrX` left;
+- the only thing that blocks a `.` is a **selection being open**: `VrXGvl.`
+  writes nothing, and the `VrX` is still the redo afterwards.
+
+So a redo case has one obligation beyond the usual: **move the caret off the
+change before pressing `.`.** `S61` (the size dropped, so the redo re-types
+`vrX`) and `S62` (a `.` in a selection runs the redo) are the two halves of that
+rule, and they are the two that a case with the `.` in the wrong place would not
+have caught. The reason the re-point is not modelled is worth one sentence: the
+undo belongs to the host's stack, which does not say which of several undone
+changes this was, so there is nothing to re-point at — and since an undo does not
+change the entry anyway, nothing is lost.
+
+## `r`: the character *after* the operator
+
+`r` is the one operator whose second key is a character, and both modes read it
+from the same place, so the three rules below are all about the same key.
+
+**A count in front of a NORMAL `r` the line cannot supply is a refusal.** Vim
+aborts the command (`normal.c:4900-4906`, "Abort if not enough characters to
+replace") rather than replacing the characters that are there, and the test has
+two halves: `ml_get_cursor_len()` is the **bytes** left on the line and
+`mb_charlen(ml_get_cursor())` is the **characters**; the second is the stronger of
+the two, so the engine counts characters and stops at the end of the line rather
+than the end of the text. That is why `2r+` on `"你好"` writes two `+` — two
+characters, however wide — where a unit count would refuse it, and why `3r+` on
+the same line writes nothing at all. This is a **pre-existing** defect the
+fuzzer found by itself: with `r` newly in the key set, one draw in three thousand
+was `3 r +` on `"abc\ndef"` at 2, where the engine wrote one `+` and vim writes
+none. `S65`, `S66` and `S67` take the three halves apart, because a refusal
+counted in units would be a second bug wearing the first one's coat.
+
+**A Visual `r` writes the character over every character of the selection** — and
+the selection's own line breaks are not characters it writes over, which is what
+makes `VrX` on `"ab"` answer `"XX"` and not `"XXXXXX"`. A count in front of the
+`r` is **not** the `r`'s own (`vl3rX` is `vlrX`, and `vlr2` writes a `2`), and a
+digit is as good a character as a letter. A half-typed character that never
+arrives is cancelled by Escape and by every key that is not a character — the
+arrows, `<End>`, backspace and delete all beep and change nothing — because vim
+reads that key with `plain_vgetc` and bails when it comes back special
+(`normal.c:4857-4863`), while a key taken as the character would write the empty
+string over the selection and **delete** it. `<CR>` is the exception and is a
+named gap below. A pasted token inside the selection keeps its spelling, the same
+rule every other command that rewrites a selection follows.
+
+**A count in front of `v`/`V` is spent on the command itself.** `nv_visual`
+decrements it once and runs `nv_right`/`nv_down` with what is left
+(`normal.c:5609-5615`), so `2v` is two characters wide, `2V` is two lines, and a
+count typed *inside* adds to it rather than replacing it (`2v3l` is five
+characters, `2v3ll` six). The step it takes is a step **past** the end of the
+line — inside a selection `nv_right` counts the line break
+(`normal.c:5822-5828`) and stops with the caret one character past the last one,
+a position this engine cannot stand in. The wanted column is what carries it
+(`S60`): without it a `j` after `vl` lands a line short, which is a pre-existing
+defect the count work exposed rather than one it created.
+
 ## What the fuzzer refuses to compare
 
 `fuzz.mjs` draws 1–3 keys from `KEYS` and drops two classes of sequence by name,
@@ -224,6 +336,41 @@ fails is not a case, it is a bug report:
 - `>2w` shifts one line; vim shifts two.
 - `>gg` and `>2gg` from below the first line do nothing at all, and leave the
   caret where it was.
+
+### `r` and `<CR>`, measured and left
+
+Not a disagreement this harness cannot judge — both answers are readable, and the
+reason the gap is here rather than in `CASES` is only that a case in `CASES` has
+to be green. The two modes do **different** things with the key, which is what
+made this worth writing down rather than summarising as "a line break":
+
+- **NORMAL.** `r<CR>` does not go through the operator. It deletes the characters
+  the count covered and then runs an insert that breaks the line once —
+  `normal.c:4925-4939`, "*Strange vi behaviour: Only one newline is inserted*" —
+  so `3r<CR>` would remove three characters and leave one break. Measured at
+  column 2 of `"abcdef"`: `"ab\ndef"` with the caret at 3, which is the first
+  character of the new line.
+- **Visual.** A Visual `r` goes to `nv_operator` (`normal.c:4866-4880`), which
+  writes the character over each selected one, and a CR is a character there — a
+  literal `\r` *inside* the line, not a break. Measured: `vlr<CR>` on
+  `"abcdef"` reads back as `"\r\rcdef"`, two CRs and no new line.
+
+The engine cancels in both, so `fuzz.mjs` drops a `CR` straight after an `r` by
+name (a guaranteed mismatch otherwise) and `vim-engine.test.ts` pins what the
+engine does instead. Both halves also want a redo form — vim's is an insert-mode
+edit rather than a `r`, which is why `invoke_edit` is called with the `r` — so
+this is a small feature with a sharp edge in it, and it is the first thing on the
+list after the text objects rather than something to bolt onto this round.
+
+### Visual `gU` and `gu`, measured and left
+
+`gU` in NORMAL mode with no motion does nothing in both editors, and neither
+implements the Visual form. Measured: `vjgU` on `"ab\ncd"` gives `"AB\nCd"` in
+vim — characterwise, and the caret leaves Visual — where the engine is still in
+Visual with the buffer untouched. `vlgu` on `"ABCdef"` gives `"abCdef"`. A
+selection is the only place the two halves of `gU` differ, because the NORMAL form
+is a motion-plus-operator and the Visual form is the operator alone, so this is
+one missing branch rather than a missing command.
 
 ### Search, measured and left
 

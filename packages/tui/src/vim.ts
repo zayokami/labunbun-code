@@ -1339,6 +1339,64 @@ type Operator = "d" | "c" | "y" | ">" | "<";
  */
 const MAX_COUNT = 10000;
 
+/**
+ * One change, kept so `.` can make it again.
+ *
+ * `keys` is the command as it was typed with the count off the front, `text` the
+ * insert-mode typing that followed it, and `geometry` the shape of a Visual
+ * selection when one was operated on. Vim keeps the same three things in three
+ * places: a key string (`prep_redo_cmd`, `normal.c:1461`), the typed text in the
+ * redo buffer's own insert half, and `redo_VIsual` (`ops.c:3890`) for the size
+ * of a Visual area. The size is not the motions that made it — measured on vim
+ * 9.1, `v$d` then `.` takes the line break with it on a shorter line, where
+ * re-typing `v$d` there does not — so it is kept as its own field.
+ */
+interface RedoEntry {
+	keys: string[];
+	count: number;
+	text: string;
+	geometry: RedoGeometry | null;
+}
+
+/**
+ * A Visual selection's shape: how many lines it touched, and where its end stood
+ * in two forms, because `ops.c:4136` picks between them — a selection on one line
+ * is re-taken by its **width** (columns, from wherever the caret now is) and one
+ * over several by the end's **column** on its own line (the start of the line
+ * below it is not a column the redo could use). Both are measured from the
+ * selection's own start, which is not where the redo starts from.
+ *
+ * `toLineEnd` is the third form, and it is not a shape at all: it is vim's
+ * `w_curswant == MAXCOL`, checked *before* the two above, so a selection that
+ * ended on `$` or `<End>` is re-taken to the end of whatever line the caret is on
+ * now. It is wanted-column state rather than selection state, which is the only
+ * thing that tells it from {@link #visualPastEnd}: after `v$h` the selection still
+ * reaches past the line's last character, but the `h` moved the caret and dropped
+ * the MAXCOL, and the redo takes the width instead (measured: `v$hd` then `.`
+ * takes four columns where `v$d` then `.` takes the rest of the line).
+ */
+interface RedoGeometry {
+	linewise: boolean;
+	lines: number;
+	/** Columns the selection covers, for a selection on one line. */
+	width: number;
+	/** The end's column on the line it ended on, for one over several. */
+	endCol: number;
+	toLineEnd: boolean;
+}
+
+/**
+ * The count off the front of a recorded key string, and the keys without it. The
+ * count is the one part of a command a new one *replaces*: `3x` then `2.` deletes
+ * two characters, not six (measured on vim 9.1).
+ */
+function splitCount(keys: string[]): { count: number; keys: string[] } {
+	let digits = 0;
+	while (digits < keys.length && keys[digits] >= "0" && keys[digits] <= "9") digits++;
+	if (digits === 0) return { count: 1, keys };
+	return { count: Math.min(Number(keys.slice(0, digits).join("")), MAX_COUNT), keys: keys.slice(digits) };
+}
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
@@ -1358,6 +1416,14 @@ export class VimEngine {
 	#pendingG: { operator: Operator | null; count: number; explicit: boolean } | null = null;
 	/** Visual mode has one `g` command (`gJ`), so it needs its own latch. */
 	#visualPendingG = false;
+	/**
+	 * Visual `r` takes the character to write over the selection with, and the latch
+	 * has to be its own: `#pendingChar` is read in NORMAL only, so a `r` typed with
+	 * a selection open left the next key to be read as a command of its own — and the
+	 * commands that follow a `r` are the ones that throw the buffer away (`vrX` ran
+	 * the linewise `X` and `vrd` deleted the selection).
+	 */
+	#visualPendingR = false;
 	/**
 	 * `m`, `"`, `'` and `` ` `` take one more key. Marks and named registers are out
 	 * of scope (see the header), so that key is read and dropped — read, because a
@@ -1426,9 +1492,52 @@ export class VimEngine {
 	 */
 	#visualPastEnd = false;
 
+	/**
+	 * The keys of the command being typed, and whether it has changed the buffer
+	 * yet. A command opens the log on its first key and closes it when it is
+	 * finished — the key that runs it, or the Escape that leaves the insert mode it
+	 * entered — and what is kept is the *change*, not the command: a yank, a
+	 * motion, a search and a failed operator all close the log with nothing to
+	 * promote, which is why `.` after `yy` repeats the change before it (measured
+	 * on vim 9.1: `yyj.p` pastes what was yanked first).
+	 */
+	#keyLog: string[] | null = null;
+	/** Whether the command in the log has written to the buffer. */
+	#logDirty = false;
+	/**
+	 * The last change, as `.` repeats it. Every change replaces it and none of the
+	 * commands that change no text do, so it is whatever the buffer last went
+	 * through — including a change whose text came out the way it went in: on vim
+	 * 9.1 a Visual `r` that writes the character already there (`vrx` over an `x`)
+	 * is still the redo, and `.` writes it again somewhere else.
+	 */
+	#redo: RedoEntry | null = null;
+	/** The insert-mode typing since the command entered insert, read at its Escape. */
+	#typedText = "";
+	/** Where that typing began: the caret `#enterInsert` handed the host. */
+	#typedFrom: number | null = null;
+	/** The text at that moment, so a change made by typing alone still counts. */
+	#typedFromText = "";
+	/** A Visual command's shape and the operator that ran it, held for the redo. */
+	#pendingVisual: { op: string; geometry: RedoGeometry | null; more?: string[] } | null = null;
+	/** Inside a `.` replay: nothing it does may become the redo that follows. */
+	#replaying = false;
+	/** Whether that replay wrote to the buffer, which is what updates its count. */
+	#replayWrote = false;
+
 	constructor(ops: VimOps) {
-		this.#ops = ops;
 		this.mode = "normal";
+		// `setAll` is where every structural change goes (the header says so, and all
+		// eighteen call sites do), so wrapping it is what lets a command be recognised
+		// as a *change* without each of them having to say so.
+		this.#ops = {
+			...ops,
+			setAll: (text, cursor) => {
+				if (this.#replaying) this.#replayWrote = true;
+				else this.#logDirty = true;
+				ops.setAll(text, cursor);
+			},
+		};
 	}
 
 	// -- main entry -----------------------------------------------------------
@@ -1441,6 +1550,24 @@ export class VimEngine {
 	 * with nothing left to cancel.
 	 */
 	handleKey(input: string, key: VimKey): boolean {
+		if (!this.#replaying) {
+			// The log is the command, and it opens on the first key of one. What is
+			// typed in insert mode is not part of it: that text is recorded as itself
+			// when the Escape arrives, the way vim keeps it in the redo buffer's insert
+			// half rather than among the command keys — and the engine never sees it
+			// anyway, because the host is the one inserting.
+			if (this.#keyLog === null && this.mode !== "insert") this.#keyLog = [];
+			if (this.#keyLog !== null && this.mode !== "insert") {
+				const token = this.#logToken(input, key);
+				if (token !== null) this.#keyLog.push(token);
+			}
+		}
+		const consumed = this.#dispatchKey(input, key);
+		this.#finishKeyLog();
+		return consumed;
+	}
+
+	#dispatchKey(input: string, key: VimKey): boolean {
 		if (this.mode === "insert") {
 			if (key.escape) {
 				// Leaving insert steps back onto the character just typed (vim), which
@@ -1448,6 +1575,16 @@ export class VimEngine {
 				// past the end, where the next `x` would silently do nothing.
 				const text = this.#ops.getText();
 				const pos = this.#ops.getCursor();
+				// The text typed since the command entered insert mode, read off the
+				// buffer rather than accumulated: the host did the typing, and a <BS>
+				// or a paste in the middle of it is a change this engine was never told
+				// about. What stands between the caret and where that command put it is
+				// what was inserted there, however it got typed.
+				if (this.#typedFrom !== null) {
+					this.#typedText = text.slice(this.#typedFrom, pos);
+					if (text !== this.#typedFromText) this.#logDirty = true;
+					this.#typedFrom = null;
+				}
 				if (pos > 0 && text[pos - 1] !== "\n") this.#ops.setCursor(prevChar(text, pos));
 				this.mode = "normal";
 				this.#ops.toNormal();
@@ -1545,6 +1682,7 @@ export class VimEngine {
 		this.#pendingCharCount = 1;
 		this.#pendingG = null;
 		this.#visualPendingG = false;
+		this.#visualPendingR = false;
 		this.#prefixPending = false;
 		this.#inputPending = false;
 		this.#search = null;
@@ -2083,10 +2221,10 @@ export class VimEngine {
 				this.#openLine(true);
 				return true;
 			case "v":
-				this.#startVisual("visual");
+				this.#startVisual("visual", count);
 				return true;
 			case "V":
-				this.#startVisual("visual-line");
+				this.#startVisual("visual-line", count);
 				return true;
 			case "m":
 			case '"':
@@ -2142,7 +2280,15 @@ export class VimEngine {
 				// `3u` is three undos, as in vim — and an undo discards a pending
 				// `$`: the restored caret is where the wanted column starts over.
 				for (let i = 0; i < count; i++) this.#ops.undo();
+				// The redo is left alone, which is what vim does too (measured:
+				// `vrX` then `u` then `.` writes the `X` over the selection again,
+				// and so does `x` then `u` then `.` — the entry is not re-pointed at
+				// whichever of several undone changes this was, because the undo is
+				// the host's and it does not say which).
 				this.#forgetCurswant();
+				return true;
+			case ".":
+				this.#runRedo(count, explicitCount);
 				return true;
 			default:
 				this.#resetPending();
@@ -2518,8 +2664,18 @@ export class VimEngine {
 		if (pasteTokenAt(text, pos) !== null) return;
 		// `3rX` replaces three characters, and each of them may be two units wide.
 		const lineEnd = lineEndExclusive(text, pos);
+		// …and vim refuses the command outright when the line has fewer than the count
+		// asks for, rather than replacing the ones that are there (normal.c:4900-4906,
+		// "Abort if not enough characters to replace"; the byte count is the first
+		// half of that test and the character count the second, so the characters are
+		// what is counted here — a line of two hanzi is two characters however wide
+		// each one is). Measured on 9.1: `3r+` on the last character of `"abc"`
+		// changes nothing, where clamping writes one `+`.
+		let available = 0;
+		for (let p = pos; p < lineEnd; p = nextChar(text, p)) available++;
+		if (available < count) return;
 		let end = pos;
-		for (let i = 0; i < count && end < lineEnd; i++) end = nextChar(text, end);
+		for (let i = 0; i < count; i++) end = nextChar(text, end);
 		let replacement = "";
 		for (let p = pos; p < end; p = nextChar(text, p)) replacement += char;
 		const out = text.slice(0, pos) + replacement + text.slice(end);
@@ -2673,9 +2829,14 @@ export class VimEngine {
 		for (let i = 0; i < count; i++) out += this.#register.text;
 		out += text.slice(insertAt);
 		// Charwise paste leaves the caret on the last character it pasted (vim), so
-		// `.`-style follow-ups and a second `p` land where the eye expects.
+		// `.`-style follow-ups and a second `p` land where the eye expects. A
+		// register with a line break in it is the exception: it is pasted as more
+		// than one line, and vim leaves the caret on the *first* of them — `vjyp`
+		// on "ab\ncd" lands at 4, where the paste began, and not on the last
+		// character of the second (measured on vim 9.1).
 		const pastedEnd = insertAt + this.#register.text.length * count;
-		this.#ops.setAll(out, snapToChar(out, Math.max(insertAt, pastedEnd - 1)));
+		const landing = this.#register.text.includes("\n") ? insertAt : Math.max(insertAt, pastedEnd - 1);
+		this.#ops.setAll(out, snapToChar(out, landing));
 		finish();
 	}
 
@@ -2711,6 +2872,12 @@ export class VimEngine {
 		// Typing moves the caret behind the engine's back; the wanted column is read
 		// back off it when insert mode ends.
 		this.#forgetCurswant();
+		// The command that got here is not finished — it is finished when the Escape
+		// arrives, and what was typed in between is part of what `.` has to repeat.
+		// Both are read off the buffer at that point, so nothing has to be told.
+		this.#typedFrom = this.#ops.getCursor();
+		this.#typedFromText = this.#ops.getText();
+		this.#typedText = "";
 		this.#ops.enterInsert();
 	}
 
@@ -3104,9 +3271,258 @@ export class VimEngine {
 		if (operator === "c") this.#enterInsert();
 	}
 
+	// -- redo -----------------------------------------------------------------
+
+	/**
+	 * Close the command in the log and keep it, if it was a change.
+	 *
+	 * A command is finished when nothing is waiting for another key and the engine
+	 * is not sitting in insert mode with the user typing into it — which is the
+	 * whole test, and it is why this runs after *every* key rather than at the end
+	 * of the commands that change something: `i` is not finished on the `i`.
+	 */
+	#finishKeyLog(): void {
+		if (this.#replaying) {
+			this.#clearKeyLog();
+			return;
+		}
+		const log = this.#keyLog;
+		if (log === null) return;
+		if (
+			this.mode === "insert" ||
+			this.#pending !== null ||
+			this.#pendingChar !== null ||
+			this.#pendingG !== null ||
+			this.#visualPendingG ||
+			this.#visualPendingR ||
+			this.#prefixPending ||
+			this.#inputPending ||
+			this.#search !== null ||
+			this.#countBuffer !== ""
+		) {
+			return; // half-typed: the log stays open for the keys still to come
+		}
+		this.#keyLog = null;
+		const visual = this.#pendingVisual;
+		// A yank changes no text, so it is not a change and is not kept. Neither is
+		// a motion, a search, or an operator that found nothing to take — the redo
+		// is whatever changed the buffer last, and a command that changed nothing
+		// leaves it alone (`xu.` redoes the `x`, not the `u`).
+		if (!this.#logDirty) {
+			this.#clearKeyLog();
+			return;
+		}
+		// A Visual command is kept as its operator and the selection's size, never as
+		// the motions that made that selection: see RedoGeometry for why. A `r` also
+		// keeps the character it wrote, which is a key of the command and not text
+		// anyone typed — the host types the text of a change, but the `r` reads its
+		// character off the same key stream.
+		if (visual !== null && visual.geometry !== null) {
+			this.#redo = {
+				keys: [visual.op, ...(visual.more ?? [])],
+				count: 1,
+				text: this.#typedText,
+				geometry: visual.geometry,
+			};
+		} else {
+			const { count, keys } = splitCount(log);
+			this.#redo = { count, keys, text: this.#typedText, geometry: null };
+		}
+		this.#clearKeyLog();
+	}
+
+	#clearKeyLog(): void {
+		this.#keyLog = null;
+		this.#logDirty = false;
+		this.#pendingVisual = null;
+		this.#typedText = "";
+		this.#typedFrom = null;
+	}
+
+	/**
+	 * The key to record for this event, or null for a key that is not part of a
+	 * command. The terminal keys are recorded as the vim command each one *is*
+	 * (`<Del>` is `x`, `d<Left>` is `dh`), because a redo that dropped them would
+	 * silently be a different command; a key the engine hands back to the host, or
+	 * one that abandons the command it was part of, is not recorded at all.
+	 */
+	#logToken(input: string, key: VimKey): string | null {
+		if (key.escape || key.ctrl || key.meta || key.tab || key.return) return null;
+		if (key.backspace) return "h"; // in NORMAL and in visual, vim's <BS> is `h`
+		if (key.delete) return "x";
+		if (key.upArrow) return "k";
+		if (key.downArrow) return "j";
+		if (key.leftArrow) return "h";
+		if (key.rightArrow) return "l";
+		if (key.home) return "0";
+		if (key.end) return "$";
+		return input.length === 1 ? input : null;
+	}
+
+	/**
+	 * Run the change `.` names, with `count` in front of it.
+	 *
+	 * `explicit` says the count was typed now, and then it is the redo's count
+	 * rather than the one the command was recorded with: `3x` then `2.` deletes
+	 * two characters, where the recorded count of three would make six.
+	 */
+	#runRedo(count: number, explicit: boolean): void {
+		const entry = this.#redo;
+		// Nothing has changed yet, so there is no change to repeat. A `.` pressed
+		// while a selection is open is not here at all — it is a Visual-mode key,
+		// and vim leaves the redo where it is (measured: `VrX` then `Gvl.` then `.`
+		// writes nothing).
+		if (entry === null) return;
+		const use = explicit ? count : entry.count;
+		this.#replaying = true;
+		this.#replayWrote = false;
+		try {
+			if (entry.geometry !== null) this.#reselectForRedo(entry.geometry);
+			for (const token of use > 1 ? [String(use), ...entry.keys] : entry.keys) {
+				this.handleKey(token, {});
+			}
+			// A change command ends in insert mode, and the host is the one who types
+			// there — so the text it recorded is put in here, by the engine, or the
+			// replay would stop with the caret in the same empty spot the original
+			// command opened.
+			if (this.mode === "insert" && entry.text !== "") {
+				const text = this.#ops.getText();
+				const at = this.#ops.getCursor();
+				this.#ops.setAll(text.slice(0, at) + entry.text + text.slice(at), at + entry.text.length);
+			}
+			if (this.mode === "insert") this.handleKey("", { escape: true });
+		} finally {
+			this.#replaying = false;
+			// The redo keeps the count it just used, so a bare `.` after `3.` repeats
+			// three: vim's redo buffer is the command with its count (`prep_redo`), and
+			// `check_redo` only overwrites that count when one is typed (measured:
+			// `x3..` on sixteen characters removes seven of them). A redo that changed
+			// nothing is not a change, and a count nothing was repeated with is not
+			// kept.
+			if (this.#replayWrote) {
+				this.#redo = { ...entry, count: use };
+			}
+			this.#replayWrote = false;
+			this.#clearKeyLog();
+		}
+	}
+
+	/**
+	 * The size of the current selection, for the redo of a Visual command.
+	 *
+	 * The last character of the selection is the one the column is read off, and
+	 * `end - 1` is it: `selection.end` is exclusive, and for a selection that took
+	 * a line break with it the exclusive end is one past that break, which would
+	 * read as a column on the *next* line.
+	 */
+	#selectionGeometry(): RedoGeometry | null {
+		if (this.selection === null) return null;
+		const text = this.#ops.getText();
+		const { start, end } = this.selection;
+		const first = lineOf(text, start);
+		const lastChar = Math.max(start, end - 1);
+		const last = lineOf(text, lastChar);
+		// Read before the command runs: `ops.c:4130` reads `w_curswant` before the
+		// operator has touched anything, and a Visual command's own moves are gone by
+		// the time the next key arrives.
+		//
+		// The two conditions are vim's one condition. vim reads `w_curswant ==
+		// MAXCOL` alone, but its `oneleft` moves the caret and clears the flag even
+		// when the Visual reach is what absorbs the step, so `v$h` reaches the
+		// operator with a plain column wanted. This engine spends the reach as "the
+		// caret did not move" (see #moveVisualHorizontal), and #wantHereIfMoved leaves
+		// the MAXCOL standing in that case — so the reach has to be cleared as well
+		// to land on the same answer. Measured: `v$d` then `.` takes the rest of the
+		// line, `v$hd` then `.` takes the width the selection had.
+		const toLineEnd = this.#curswant === MAXCOL && this.#visualPastEnd;
+		if (this.mode === "visual-line") {
+			return { linewise: true, lines: last - first + 1, width: 0, endCol: 0, toLineEnd };
+		}
+		return {
+			linewise: false,
+			lines: last - first + 1,
+			// The whole selection when it is on one line, and its last line's column
+			// when it is not — see RedoGeometry.
+			width: lastChar - start + 1,
+			endCol: lastChar - lineStart(text, lastChar),
+			toLineEnd,
+		};
+	}
+
+	/**
+	 * Put the selection back, at the same size, where the caret now is — vim's
+	 * `redo_VIsual` (`ops.c:3997`), which is what a `.` after a Visual command
+	 * redoes.
+	 *
+	 * The size is anchored on the caret and measured forwards, which is where the
+	 * original selection is *not* always measured from: `vjd` then `.` takes two
+	 * lines from wherever the caret is, and `v$` then `.` takes as many columns as
+	 * `v$` did, which on a shorter line runs past its last character — and then
+	 * vim's end lands on the line break, so the break goes with it (measured: `v$d`
+	 * on "abcdef" then `.` on a three-character line removes "xyz\n").
+	 */
+	#reselectForRedo(geometry: RedoGeometry): void {
+		const text = this.#ops.getText();
+		const at = this.#ops.getCursor();
+		// More lines than are below the caret: the span stops on the last line
+		// (`ops.c:4002` clamps the line and keeps the width).
+		const endLine = Math.min(lineOf(text, at) + geometry.lines - 1, lineCount(text) - 1);
+		this.#anchor = at;
+		// The end is computed as a position here, so the reach-past-the-line state
+		// `$` leaves behind is not wanted: what that state would add is already in
+		// the position.
+		this.#visualPastEnd = false;
+		if (geometry.linewise) {
+			this.mode = "visual-line";
+			this.#ops.setCursor(nthLineStart(text, endLine));
+			this.#syncSelection();
+			return;
+		}
+		const end = nthLineStart(text, endLine);
+		// The end is placed the way the selection was measured: from the caret it is
+		// being made at, by the width for one line and by the end's own column for
+		// several — or at the end of the line the redo lands on, for a selection that
+		// ended on MAXCOL, which is what `v$` arms and `v$h` drops.
+		const startCol = at - lineStart(text, at);
+		// One *past* the last character for the MAXCOL form, not on it:
+		// `coladvance2` computes `idx = len - 1 + one_more` and `one_more` is
+		// true whenever Visual mode is active (misc2.c:139-142), so in a Visual
+		// command MAXCOL lands on the line's NUL. That is what makes the break go
+		// with it: `do_pending_operator` moves an end that is on a NUL to the next
+		// line's column 0 and counts it (ops.c:4218-4231). The `pastLine` branch
+		// below is that rule.
+		const endCol = geometry.toLineEnd
+			? lineEndExclusive(text, end) - end
+			: geometry.lines === 1
+				? startCol + geometry.width - 1
+				: startCol + geometry.endCol;
+		const pastLine = endCol + 1 > lineEndExclusive(text, end) - end;
+		this.mode = "visual";
+		// The end offset is exclusive and `#syncSelection` reads a position, so the
+		// caret goes on the last character the selection covers. Past the line it
+		// goes on the break itself, which `#endpoint` reads as the break.
+		const stop = pastLine
+			? endLine < lineCount(text) - 1
+				? nthLineStart(text, endLine + 1)
+				: text.length
+			: end + endCol + 1;
+		this.#ops.setCursor(Math.max(at, stop - 1));
+		this.#syncSelection();
+	}
+
+	/**
+	 * Run a command that operates on the selection, keeping the selection's size for
+	 * the redo. Every operator in {@link #handleVisual} goes through here, because
+	 * the size has to be read *before* the command changes the buffer.
+	 */
+	#overSelection(op: string, run: () => void): void {
+		this.#pendingVisual = { op, geometry: this.#selectionGeometry() };
+		run();
+	}
+
 	// -- visual mode ----------------------------------------------------------
 
-	#startVisual(mode: "visual" | "visual-line"): void {
+	#startVisual(mode: "visual" | "visual-line", count = 1): void {
 		// The same command again stops visual mode: nv_visual ends it when the
 		// command equals `VIsual_mode`. Unlike Esc it leaves the wanted column
 		// alone, so a MAXCOL armed by `$` survives the toggle (`$vvj` still lands
@@ -3127,6 +3543,16 @@ export class VimEngine {
 		}
 		this.mode = mode;
 		this.#syncSelection();
+		// A count in front of `v`/`V` is spent on the command itself, not handed to
+		// the motion that follows: nv_visual decrements the count once and runs
+		// nv_right / nv_down with what is left (normal.c:5609-5615), so `2v` selects
+		// two characters and `2V` two lines. Measured: `2vld` and `2v3ld` on ten
+		// characters take three and five, and `2Vjd` on six lines takes three lines.
+		// A count of one moves nothing, which is why this is not a call with 0.
+		if (count > 1) {
+			if (mode === "visual") this.#moveVisualHorizontal(count - 1);
+			else this.#moveVisualVertical(1, count - 1);
+		}
 	}
 
 	#syncSelection(): void {
@@ -3213,6 +3639,43 @@ export class VimEngine {
 		// Same top-of-command materialization as NORMAL: `V` then `j` uses the
 		// wanted column the same way, and a stale one is read off the caret here.
 		if (this.#curswant === null) this.#wantHere();
+		// `r` reads the character to write before the Escape below gets a look:
+		// an Escape cancels the replacement and leaves the selection open, which is
+		// vim's own answer (`vr<Esc>` changes nothing and stays in Visual).
+		if (this.#visualPendingR) {
+			this.#visualPendingR = false;
+			// Only a key that *is* a character can be the one to write. vim reads it
+			// with plain_vgetc and beeps without a change when it comes back as a
+			// special key (an arrow, `<End>`, a function key), and Escape and the two
+			// delete keys abandon the command outright. Taken as the character, an
+			// empty one would write nothing over every character of the selection —
+			// `vr<Right>` would delete it, measured against vim, which changes nothing.
+			//
+			// `<CR>` is the one key vim carries out here and this engine does not, and
+			// the two modes do *different* things with it, so it is worth writing the
+			// shape down rather than the summary. A Visual `r` goes to `nv_operator`
+			// (normal.c:4866-4880), which writes the character over each selected one —
+			// and a CR is a character there, a literal `\r` inside the line: `vlr<CR>`
+			// on `"abcdef"` reads back as `"\r\rcdef"`. A NORMAL `r<CR>` does not go
+			// through the operator at all; it deletes the characters and runs an insert
+			// that breaks the line once (normal.c:4925-4939, "Strange vi behaviour: Only
+			// one newline is inserted"), so it reads back as `"ab\ndef"` with the caret
+			// at 3. Both are comparable — the harness reads the first back as a `\r`
+			// and the second as a `\n` because that is what each of them *is* — and
+			// neither is implemented. So this is a feature gap wearing a disagreement's
+			// clothes, and it is named as one in the differential README's Known gaps
+			// with the two measurements, rather than here as something the instrument
+			// cannot judge.
+			if (key.escape || key.backspace || key.delete || input.length === 0) return true;
+			// The operator is recorded before the change runs, the way every other
+			// visual operator's size is: what #finishKeyLog does with a `r` is the
+			// other half of the answer, and it reads that field. The character typed
+			// is the second key of the command, so it rides along — without it the
+			// redo would be a `r` waiting for a character that never comes.
+			this.#pendingVisual = { op: "r", geometry: this.#selectionGeometry(), more: [input] };
+			this.#replaceSelection(input);
+			return true;
+		}
 		if (key.escape) {
 			// Esc keeps the caret where the last motion left it; the anchor is only
 			// remembered as the `'<` mark (end_visual_mode moves nothing).
@@ -3224,7 +3687,7 @@ export class VimEngine {
 		// `g` in visual mode waits for the one command it has here, `gJ`.
 		if (this.#visualPendingG) {
 			this.#visualPendingG = false;
-			if (input === "J") this.#joinSelection(true);
+			if (input === "J") this.#overSelection("gJ", () => this.#joinSelection(true));
 			return true;
 		}
 
@@ -3255,7 +3718,7 @@ export class VimEngine {
 		}
 		if (key.delete) {
 			// The Delete key is `x` in visual mode: it cuts the selection outright.
-			this.#deleteSelection();
+			this.#overSelection("d", () => this.#deleteSelection());
 			return true;
 		}
 
@@ -3337,47 +3800,56 @@ export class VimEngine {
 			case "J":
 				// vim's visual `J` is the operator form of the join: every selected
 				// line becomes one, with the same spaces a `NJ` would insert.
-				this.#joinSelection(false);
+				this.#overSelection("J", () => this.#joinSelection(false));
 				return true;
 			case ">":
 			case "<":
-				this.#shiftSelection(input === ">", count);
+				this.#overSelection(input, () => this.#shiftSelection(input === ">", count));
 				return true;
 			case "g":
 				this.#visualPendingG = true;
 				return true;
+			case "r":
+				// v_visop's replace: one character, written over the whole selection.
+				// The character itself is the next key, and a count in front of the
+				// `r` is not its own — `vl3rX` is `vlrX` (measured).
+				this.#visualPendingR = true;
+				return true;
 			case "d":
 			case "x":
-				this.#deleteSelection();
+				this.#overSelection("d", () => this.#deleteSelection());
 				return true;
 			case "y":
-				this.#yankSelection();
+				this.#overSelection("y", () => this.#yankSelection());
 				return true;
 			case "c":
 			case "s":
-				this.#changeSelection();
+				this.#overSelection("c", () => this.#changeSelection());
 				return true;
 			// v_visop: an uppercase form is the same command over the *lines* the
 			// selection touches — "Uppercase means linewise" — so `v2lD` removes the
-			// whole first line where `v2ld` removes three characters.
+			// whole first line where `v2ld` removes three characters. The size is
+			// recorded after that, so the redo is a linewise one as well.
 			case "C":
 			case "S":
 			case "D":
 			case "X":
 			case "Y":
 				this.#forceLinewise();
-				if (input === "Y") this.#yankSelection();
-				else if (input === "C" || input === "S") this.#changeSelection();
-				else this.#deleteSelection();
+				this.#overSelection(input === "Y" ? "y" : input === "C" || input === "S" ? "c" : "d", () => {
+					if (input === "Y") this.#yankSelection();
+					else if (input === "C" || input === "S") this.#changeSelection();
+					else this.#deleteSelection();
+				});
 				return true;
 			case "u":
-				this.#caseSelection("lower");
+				this.#overSelection("u", () => this.#caseSelection("lower"));
 				return true;
 			case "U":
-				this.#caseSelection("upper");
+				this.#overSelection("U", () => this.#caseSelection("upper"));
 				return true;
 			case "~":
-				this.#caseSelection("toggle");
+				this.#overSelection("~", () => this.#caseSelection("toggle"));
 				return true;
 			case "v":
 				this.#startVisual("visual");
@@ -3447,6 +3919,7 @@ export class VimEngine {
 	}
 
 	#moveVisualHorizontal(delta: number): void {
+		const text = this.#ops.getText();
 		const from = this.#ops.getCursor();
 		let steps = delta;
 		if (delta < 0 && this.#reachArmed(from)) {
@@ -3456,7 +3929,19 @@ export class VimEngine {
 		// The move runs first: `delta > 0 && …` would short-circuit a backward step
 		// away entirely, and `h` inside a selection has to move like any other `h`.
 		const blocked = steps === 0 ? false : this.#moveHorizontal(steps);
-		if (delta > 0) this.#visualPastEnd = blocked;
+		if (delta > 0) {
+			this.#visualPastEnd = blocked;
+			// A step that ran off the end of the line still moves vim's column: inside
+			// a selection `nv_right` counts the line break as a step and stops with the
+			// caret one past the last character (normal.c:5822-5828, the `past_line`
+			// branch). The engine cannot stand there and keeps the caret on the last
+			// character with the reach armed in its place, so the wanted column is what
+			// carries the step onward — without it a `j` after `vl` lands a line short
+			// (`vljd` on six one-character lines takes two lines in vim and one here).
+			// One step is all vim ever records past the end: `nv_right` breaks out of
+			// its loop on the first failure, however large the count was.
+			if (blocked) this.#curswant = from - lineStart(text, from) + (this.#ops.getCursor() - from) + 1;
+		}
 		this.#syncSelection();
 	}
 
@@ -3629,6 +4114,38 @@ export class VimEngine {
 			this.#exitVisual(start);
 		}
 		this.#enterInsert();
+	}
+
+	/**
+	 * Visual `r`: write one character over every character the selection covers.
+	 *
+	 * Measured on vim 9.1: the width does not change (a wide character becomes the
+	 * replacement, it is not padded), a count in front of the `r` is not its own
+	 * (`vl3rX` is `vlrX`), and a line break inside the selection stays a line break
+	 * — `VrX` on `"ab"` is `"XX"` and not the `"XXXXXX"` that treating the selection
+	 * as one flat run would give. So the replacement is per character and a `\n` is
+	 * left alone, which also covers a charwise selection that took breaks with it
+	 * (`vjrX` on four lines leaves them four lines).
+	 *
+	 * A paste token inside the selection keeps its spelling, the same rule `u`/`U`/
+	 * `~` and normal-mode `r` use: a token's own letters are its format, and
+	 * overwriting one makes the payload behind it unreachable at submit.
+	 */
+	#replaceSelection(char: string): void {
+		if (!this.selection) return;
+		const { start, end } = this.selection;
+		const text = this.#ops.getText();
+		const written = mapOutsidePasteTokens(text, start, end, (run) =>
+			Array.from(run, (one) => (one === "\n" ? one : char)).join(""),
+		);
+		// The write is unconditional, even where it changes nothing: on vim 9.1 a
+		// Visual `r` that writes the character already there is still the change
+		// `.` repeats (`vrx` over an `x`, then `j`, then `.` writes an `x` over the
+		// next line). The token rule above is what keeps a pasted payload intact,
+		// and it needs no guard of its own: a selection that is one token writes the
+		// token back unchanged and is a change all the same.
+		this.#ops.setAll(text.slice(0, start) + written + text.slice(end), start);
+		this.#exitVisual(start);
 	}
 
 	/** Visual `u`/`U`/`~`: lowercase, uppercase, or swap the case of the selection. */

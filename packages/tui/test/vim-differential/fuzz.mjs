@@ -13,11 +13,12 @@
  * buffer-and-cursor comparison cannot see — a difference there is a limitation of
  * what is compared, not a bug in either.
  *
- * Two more classes are dropped by name in `uncomparable()`, both about a command
- * line the fuzzer opens but cannot see: an Enter that is not closing a `/` or `?`
- * (vim calls it `+`; the engine hands it to the host so a newline submits), and a
- * backspace or delete that *is* on one (vim edits the command line, the engine
- * does not read that key there). The README says why with the measurements.
+ * Three more classes are dropped by name in `uncomparable()`: an Enter that is not
+ * closing a `/` or `?` (vim calls it `+`; the engine hands it to the host so a
+ * newline submits), a backspace or delete that *is* on one (vim edits the command
+ * line, the engine does not read that key there), and an Enter straight after an
+ * `r` (vim carries it out, the engine cancels — a named feature gap). The README
+ * says why with the measurements.
  *
  *   bun run packages/tui/test/vim-differential/fuzz.mjs [iterations]
  *
@@ -72,6 +73,25 @@ const KEYS = {
 	j: ["j", {}],
 	k: ["k", {}],
 	x: ["x", {}],
+	// `.`, the redo. It is complete in one key — nothing half-typed about it — and
+	// every key above can be what it repeats: `x`, a `d` and its motion, the delete
+	// key. Three drawn keys is enough for the pair that matters (`x` then `.`), and
+	// enough for a count to be wrong (`2` `x` `.`), which is the rule the engine
+	// got wrong first. No key in this set opens insert mode, so no sequence drawn
+	// from it can end as one — which is what would make a `.` replay unmeasurable
+	// (the README's fourth lie) and is why that exclusion is not needed here.
+	".": [".", {}],
+	// `r`, the replace, in NORMAL and in a selection. It is the one operator in
+	// the set whose character is *the next key*, so it is here for the same reason
+	// the terminal keys are: a key the fuzzer cannot send is a key nothing is
+	// checking. It has earned its place twice over — the selection half is a
+	// command that reads a key of its own and a Visual mode that had no answer for
+	// it, which no `regress.mjs` case was asking about, and putting `r` in the set
+	// is what turned up the count refusal below. Two exclusions come with it, both
+	// named in `uncomparable()`: a half-typed `r` at the end (below), and `r` `<CR>`,
+	// which vim carries out and the engine cancels (a named gap, not a key this
+	// instrument cannot send).
+	r: ["r", {}],
 	d: ["d", {}],
 	y: ["y", {}],
 	2: ["2", {}],
@@ -129,7 +149,7 @@ function intoLatch(seq, i) {
 }
 
 /**
- * The two sequences that answer a different question in the two editors, named so
+ * The three sequences that answer a different question in the two editors, named so
  * that a mismatch which is neither can be told apart from one that is.
  *
  *  - A `CR` with no latch open. Vim binds it to `nv_down` + `beginline`, which is
@@ -142,11 +162,20 @@ function intoLatch(seq, i) {
  *    command line — `BS` cancels it outright, `DEL` erases under the cursor — and
  *    neither is a command the engine reads on that path. Without a latch the same
  *    two keys are ordinary motions and stay in the set.
+ *  - A `CR` right after an `r`. Vim's `r` reads that key as the character to write
+ *    and does two different things with it: in NORMAL it breaks the line once
+ *    (`normal.c:4925-4939`), in Visual it writes a literal `\r` over each selected
+ *    character (`normal.c:4866-4880`). The engine cancels instead. Both answers are
+ *    readable — this is a named feature gap, not something the instrument cannot
+ *    measure — and a sequence carrying it is a guaranteed mismatch, so it is dropped
+ *    by name with the measurements in the README's Known gaps. The engine's own
+ *    side of it is in `vim-engine.test.ts`.
  */
 function uncomparable(seq) {
 	for (let i = 0; i < seq.length; i++) {
 		if (seq[i] === "CR" && !intoLatch(seq, i)) return true;
 		if ((seq[i] === "BS" || seq[i] === "DEL") && intoLatch(seq, i)) return true;
+		if (seq[i] === "CR" && seq[i - 1] === "r") return true;
 	}
 	return false;
 }
@@ -163,8 +192,9 @@ for (let i = 0; i < ITERATIONS; i++) {
 	const length = 1 + Math.floor(rand() * 3);
 	const seq = [];
 	for (let k = 0; k < length; k++) seq.push(ALPHABET[Math.floor(rand() * ALPHABET.length)]);
-	// No half-typed operator or count at the end — see the file comment.
-	if (["d", "y", "2", "3"].includes(seq[seq.length - 1])) continue;
+	// No half-typed operator or count at the end — see the file comment. An `r` is
+	// one too: both editors would be waiting for the character to write.
+	if (["d", "y", "2", "3", "r"].includes(seq[seq.length - 1])) continue;
 	// Two named exclusions, both about a command line the fuzzer opens but cannot
 	// see. A `/` or `?` puts both editors on a different side of a latch: vim's is
 	// a real command line that the next key is typed into, and the engine's is a

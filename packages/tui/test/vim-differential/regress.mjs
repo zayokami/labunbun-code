@@ -106,6 +106,24 @@ const FOUR_LINES = "  aa\n\n  bb\ncc";
 // The same two-line shape with tabs, because `beginline`'s first non-blank is
 // the first character `cls()` calls a blank, and a tab is one.
 const TABBED = "\taa\n\tbb";
+// For `.`: one line of four words, so `dw`, `cw` and a count have somewhere to
+// go and the landing after each of them is a different column.
+const FOUR_WORDS = "one two three four";
+const TEN = "abcdefghij";
+/** One character per line: a horizontal step inside a selection runs off the end. */
+const SOLO_LINES = "1\n2\n3\n4";
+// Sixteen letters in a row, so `3x` and `2.` remove different numbers of them
+// and the total is still enough to see which count won.
+const SIXTEEN = "abcdefghijklmnop";
+// Short equal-width lines, the shape a Visual selection's geometry is only
+// readable against: every line is two wide, so a re-selection that used the
+// wrong form (the end's column instead of the width) would still look right on
+// a single line and only miss over a re-selection onto a *different* line.
+const SHORT_LINES = "ab\ncd\nef\ngh";
+// The first line longer than the last, which is the case the short lines above
+// cannot make: a selection ending on line 1 redoes by its *width*, and only a
+// shorter line to land on shows that.
+const WIDE_NARROW = "abcdef\nxyz\npq";
 
 const CASES = [
 	// wanted column: MAXCOL and short lines
@@ -597,6 +615,201 @@ const CASES = [
 	[["-", "j"], "a\nb\nc", 4],
 	[["^", "j", "j"], "a\nb\nc", 0],
 	[["^", "$"], "abc\ndef", 1],
+	// `.` — the redo. The engine had none, so this group is a new instrument as
+	// much as a new feature. What it repeats is the last change to the buffer
+	// *and nothing else*: a motion, a yank, a search, an undo and an abandoned
+	// operator are all invisible to it, which is the whole of the "what is not
+	// the redo" block below.
+	[["x", "j", "."], FOUR_WORDS, 0],
+	[["d", "w", "w", "."], FOUR_WORDS, 0],
+	[["d", "2", "w", "j", "."], FOUR_WORDS, 0],
+	[["d", "d", "j", "."], FOUR_WORDS, 0],
+	[["D", "j", "."], FOUR_WORDS, 0],
+	[["r", "z", "j", "."], FOUR_WORDS, 0],
+	[["~", "j", "."], FOUR_WORDS, 0],
+	[["J", "j", "."], "a\nb\nc", 0],
+	[["x", "j", ".", "j", "."], FOUR_WORDS, 0],
+	[["p", "j", "p", "."], FOUR_WORDS, 0],
+	// The count on a `.` *replaces* the count the change was made with
+	// (`check_redo` only writes one over `old), and a redo that itself changed
+	// the buffer becomes the new redo carrying the count it used — which is what
+	// makes `x` `3.` `.` remove three and not one. The `0` case is the same rule
+	// at its end: a count of zero is a count.
+	[["x", "j", "3", ".", "j", "."], SIXTEEN, 0],
+	[["3", "x", "2", "."], SIXTEEN, 0],
+	[["x", "3", ".", "1", "."], SIXTEEN, 0],
+	[["2", "x", "j", "4", "."], SIXTEEN, 0],
+	[["x", "j", "0", ".", "j", "."], SIXTEEN, 0],
+	// What is *not* the redo: with no change yet, and then the four ways a
+	// buffer can be touched without being changed. Each ends in `.` on a buffer
+	// where the right answer and the wrong one differ, so a `.` that guessed
+	// "the last command" would be caught here.
+	[["."], FOUR_WORDS, 0],
+	[["w", "."], FOUR_WORDS, 0],
+	[["x", "u", "."], FOUR_WORDS, 0],
+	[["y", "y", "j", ".", "p"], FOUR_WORDS, 0],
+	[["d", "\x1b", "x", "j", "."], FOUR_WORDS, 0],
+	[["x", "w", "j", "."], FOUR_WORDS, 0],
+	[["x", "n", "j", "."], THREE_AS, 0],
+	// The changes that end in insert mode repeat the text as well as the keys,
+	// and each case ends with the Escape that leaves it — the caret in insert
+	// mode is the insertion point here and the last character typed in vim, so
+	// there is nothing to compare until both are out (the README's fourth lie).
+	[["s", "\x1b", "j", ".", "\x1b"], FOUR_WORDS, 0],
+	[["S", "\x1b", "\x1b", "j", ".", "\x1b"], "a\nb\nc", 2],
+	[["C", "\x1b", "j", ".", "\x1b"], FOUR_WORDS, 4],
+	[["c", "c", "\x1b", "\x1b", "j", ".", "\x1b"], "a\nb\nc", 2],
+	[["c", "w", "Z", "\x1b", "w", ".", "\x1b"], FOUR_WORDS, 0],
+	[["i", "X", "\x1b", "l", ".", "\x1b"], FOUR_WORDS, 4],
+	[["a", "X", "\x1b", "l", ".", "\x1b"], FOUR_WORDS, 0],
+	[["A", "X", "\x1b", "j", ".", "\x1b"], FOUR_WORDS, 0],
+	[["I", "X", "\x1b", "j", ".", "\x1b"], "  ab", 0],
+	[["o", "X", "\x1b", "\x1b", "j", ".", "\x1b"], "a\nb", 0],
+	[["O", "X", "\x1b", "\x1b", "j", ".", "\x1b"], "a\nb", 2],
+	// A Visual operator's redo is not the selection typed again: it is a size
+	// (`redo_VIsual`, ops.c:3890), re-taken from wherever the caret is now. The
+	// two forms it can be recorded in are told apart by where it lands
+	// (`ops.c:4136`): a selection on one line is re-taken by its width and one
+	// over several by the end's own column on its own line, which is why the
+	// width case needs a line narrower than the one it was made on.
+	[["v", "j", "d", "0", "."], SHORT_LINES, 0],
+	[["v", "j", "d", "j", "."], SHORT_LINES, 0],
+	[["v", "l", "d", "l", "."], "abcdef", 0],
+	[["v", "$", "d", "0", "."], WIDE_NARROW, 0],
+	[["V", "j", "d", "0", "."], SHORT_LINES, 0],
+	[["v", "j", "2", "l", "d", "0", "."], SHORT_LINES, 0],
+	[["v", ">", "j", "."], "ab\ncd", 0],
+	[["v", "<", "j", "."], "ab\ncd", 0],
+	[["v", "c", "X", "\x1b", "j", ".", "\x1b"], SHORT_LINES, 0],
+	[["V", "c", "X", "\x1b", "\x1b", "j", ".", "\x1b"], SHORT_LINES, 0],
+	// A third form, read before the other two: `w_curswant == MAXCOL`
+	// (`ops.c:4136`). A selection that ended on `$` is re-taken to the end of
+	// whatever line the caret is on — which is only visible when the selection
+	// did *not* start at column 0, because from column 0 the width and the end
+	// column and MAXCOL all name the same place. The `h` after `$` spends the
+	// reach, and with it the MAXCOL, so that pair is the same buffer with the
+	// other form.
+	[["l", "l", "v", "$", "d", "j", "0", "."], "abcdef\nuvwxyz", 0],
+	[["l", "l", "v", "$", "h", "d", "j", "0", "."], "abcdef\nuvwxyz", 0],
+	[["v", "j", "$", "d", "G", "."], "ab\ncd\nefgh", 0],
+	// …and the two column forms over several lines, where the line the redo
+	// lands on has a different length from the one it was measured on.
+	[["v", "j", "d", "G", "."], "ab\ncd\nefgh", 0],
+	[["v", "j", "h", "d", "0", "."], "ab\ncd\nefghij", 0],
+	// A redo that ends a command in insert mode comes back out of it by itself,
+	// so these three need no Escape of their own — the original command's Escape
+	// is part of what is repeated. They are comparable, which the cases above
+	// with a trailing one are not until that one is typed.
+	[["c", "w", "Z", "\x1b", "w", "."], FOUR_WORDS, 0],
+	[["i", "X", "\x1b", "l", "."], FOUR_WORDS, 4],
+	[["o", "X", "\x1b", "\x1b", "j", "."], "a\nb", 0],
+	// A charwise register that spans a line break leaves the caret on its last
+	// character, not on the insertion point, and the two pastes differ from there
+	// — the visual yank is the one register that holds such a register.
+	[["v", "j", "y", "j", "p"], "ab\ncd", 0],
+	[["v", "j", "y", "j", "P"], "ab\ncd", 0],
+	// Visual `r` writes one character over the selection, and the selection's own
+	// line breaks are not characters it writes over: `VrX` on `"ab"` is `"XX"`, not
+	// the `"XXXXXX"` a flat run would give. A count in front of the `r` is not the
+	// `r`'s own (`vl3rX` is `vlrX`), and a digit is as good a character as a letter.
+	[["v", "r", "X"], "abcdef", 0],
+	[["v", "l", "l", "r", "X"], "abcdef", 0],
+	[["v", "j", "r", "X"], SHORT_LINES, 0],
+	[["v", "2", "j", "r", "X"], SHORT_LINES, 0],
+	[["V", "r", "X"], SHORT_LINES, 0],
+	[["V", "j", "r", "X"], SHORT_LINES, 0],
+	[["v", "$", "r", "X"], "abcdef", 0],
+	[["v", "l", "3", "r", "X"], "abcdef", 0],
+	[["v", "r", "2"], "abcdef", 0],
+	[["v", "l", "r", "2"], "abcdef", 0],
+	// Escape cancels the half-typed character and leaves the selection open, and so
+	// does every other key that is not a character: vim reads that key with
+	// plain_vgetc and beeps without a change when it comes back as a special key,
+	// while a key taken as the character to write would write nothing over the
+	// selection and delete it. (`<CR>` is the exception and is in Known gaps.)
+	[["v", "l", "r", "\x1b"], "abcdef", 0],
+	[["v", "l", "r", "\x1b[C"], "abcdef", 0],
+	[["v", "l", "r", "\x1b[B"], "abcdef", 0],
+	[["v", "l", "r", "\x1b[4~"], "abcdef", 0],
+	[["v", "l", "r", "\x7f"], "abcdef", 0],
+	[["v", "l", "r", "\x1b[3~"], "abcdef", 0],
+	[["v", "r", "\x1b[C"], "abcdef", 0],
+	// …and the count in front of a NORMAL `r` that the line cannot supply is a
+	// refusal, not a clamp: vim aborts the whole command (normal.c:4900-4906, "Abort
+	// if not enough characters to replace") where clamping writes over the ones that
+	// are there. The count is in characters, not units, so the two wide ones answer
+	// the same as the two narrow ones and the third character is still too many.
+	[["3", "r", "+"], "abc\ndef", 2],
+	[["9", "r", "+"], "abc\ndef", 2],
+	[["2", "r", "+"], "abcd", 2],
+	[["3", "r", "+"], "abcdef", 3],
+	[["2", "r", "+"], "你好", 0],
+	[["3", "r", "+"], "你好", 0],
+	[["2", "r", "+"], "👍👍", 0],
+	[["3", "r", "+"], "👍👍", 0],
+	[["d", "3", "r", "X"], "abcdef", 0],
+	// A Visual `r` is a change like any other, and `.` reaches it — a redo that
+	// repeats a `d` must not quietly refuse a `r` (`do_pending_operator` writes
+	// the redo buffer for every operator it runs, `r` among them). Each `.` below
+	// is on another line, because a `.` over the character just written looks the
+	// same whether it ran or not. What it repeats is the *r*, not the change
+	// before it: `x` then `vrX` then `.` writes an `X`, where a redo that still
+	// held the `x` would delete a character.
+	[["v", "r", "X", "j", "."], "abcdefgh\nij", 0],
+	[["x", "v", "r", "X", "j", "."], "abcdefgh\nij", 0],
+	[["d", "w", "v", "r", "X", "j", "."], "abcdefgh\nij", 0],
+	[["V", "r", "X", "j", "."], "abcdefgh\nij\nkl", 0],
+	[["x", "V", "r", "X", "j", "."], "abcdefgh\nij\nkl", 0],
+	[["x", "v", "r", "X", ".", "."], "abcdefgh\nij\nkl", 0],
+	// …even where it changed nothing. The character written is the one that was
+	// there, so the buffer reads the same before and after — and the change is
+	// still the one `.` repeats, which is only visible off the spot.
+	[["v", "r", "x", "j", "."], "xx\nyy", 0],
+	[["v", "l", "r", "x", "j", "."], "xx\nyy", 0],
+	[["x", "v", "r", "x", "j", "."], "xx\nyy", 0],
+	// A `.` pressed with a selection open is not a redo at all, and the change
+	// the `r` made is still the redo afterwards. The `Gvl` is what makes that
+	// measurable: it writes an `X` over the last line were the redo to run.
+	[["V", "r", "X", "G", "v", "l", "."], "ab\ncd\nef", 0],
+	[["x", "V", "r", "X", "G", "v", "l", "."], "ab\ncd\nef", 0],
+	// An undo does not take the redo away, and it does not re-point it either:
+	// `vrX` `u` `.` writes the `X` again, which is the entry the `vrX` left.
+	[["v", "r", "X", "u", "."], "abcdefgh", 0],
+	// An operator that never ran leaves the redo alone. `drX` is a `d` with a
+	// motion that is not one, and both editors abandon the whole thing instead of
+	// falling through to the `rX` behind it — so with nothing before, the `.` has
+	// nothing to repeat. (What the redo slot *holds* after a command that aborted
+	// is not observable here: re-running the aborted command would abort again
+	// and print the same buffer, which is the fourth lie's cousin.)
+	[["d", "r", "X", "."], "abcdef", 0],
+	[["d", "r", "X", "j", "."], "ab\ncd", 0],
+	// A count in front of `v`/`V` is spent on the command itself: nv_visual
+	// decrements it once and runs nv_right / nv_down with what is left
+	// (normal.c:5609-5615), so `2v` selects two characters, `2V` two lines, and a
+	// count typed inside adds to it rather than replacing it (`2v3l` is five
+	// characters wide, `2v3ll` six).
+	[["2", "v", "l", "d"], TEN, 0],
+	[["3", "v", "l", "d"], TEN, 0],
+	[["2", "v", "3", "l", "d"], TEN, 0],
+	[["3", "v", "2", "l", "d"], TEN, 0],
+	[["v", "3", "l", "d"], TEN, 0],
+	[["2", "v", "d"], "ab\ncd", 0],
+	[["4", "v", "h", "d"], TEN, 0],
+	[["2", "V", "j", "d"], "aa\nbb\ncc\ndd", 0],
+	[["3", "V", "d"], "aa\nbb\ncc\ndd", 0],
+	[["2", "V", "j", "j", "d"], "aa\nbb\ncc\ndd", 0],
+	// …and the step it takes is a step *past* the end of the line, which is the
+	// part the wanted column has to carry: inside a selection `nv_right` counts the
+	// line break (normal.c:5822-5828) and stops with the caret one character past
+	// the last one. The engine cannot stand there and keeps the reach armed in its
+	// place, so without the column a `j` after `vl` lands a line short.
+	[["v", "l", "j", "d"], SOLO_LINES, 0],
+	[["v", "l", "j", "j", "d"], SOLO_LINES, 0],
+	[["v", "4", "l", "j", "d"], SOLO_LINES, 0],
+	[["2", "v", "j", "d"], SOLO_LINES, 0],
+	[["2", "v", "j", "j", "d"], SOLO_LINES, 0],
+	[["v", "l", "j", "d"], "ab\nc\ndef", 0],
+	[["v", "l", "j", "d"], "abcdef\ngh", 1],
 	// Not here: anything with the caret on the `\n` of `"ab\ncd"`. Vim has no
 	// line-break character to put a caret on — `cursor(1, 3)` clamps onto the
 	// last character of the line — so the two editors would be answering a

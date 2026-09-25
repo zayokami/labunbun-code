@@ -309,6 +309,27 @@ describe("operators and edits", () => {
 		expect(e.state.text).toBe("Xbc");
 	});
 
+	test("a count the line cannot supply is refused, not clamped onto it", () => {
+		// vim aborts the whole command (normal.c:4900-4906) where clamping replaces
+		// the characters that are there — measured: `3r+` on the last character of
+		// "abc" changes nothing. The count is in characters, not units, which is what
+		// makes the two wide ones below answer like the narrow ones.
+		const typed = (text: string, cursor: number, ...keys: string[]) => {
+			const e = editor(text, cursor);
+			for (const k of keys) e.engine.handleKey(k, e.key());
+			return { text: e.state.text, writes: e.writes() };
+		};
+		expect(typed("abc\ndef", 2, "3", "r", "+")).toEqual({ text: "abc\ndef", writes: 0 });
+		expect(typed("abc\ndef", 2, "9", "r", "+")).toEqual({ text: "abc\ndef", writes: 0 });
+		expect(typed("abcd", 2, "2", "r", "+")).toEqual({ text: "ab++", writes: 1 });
+		expect(typed("abcdef", 3, "3", "r", "+")).toEqual({ text: "abc+++", writes: 1 });
+		expect(typed("你好", 0, "2", "r", "+")).toEqual({ text: "++", writes: 1 });
+		expect(typed("你好", 0, "3", "r", "+")).toEqual({ text: "你好", writes: 0 });
+		expect(typed("👍👍", 0, "3", "r", "+")).toEqual({ text: "👍👍", writes: 0 });
+		// The count still goes to the end of the line, not onto the next one.
+		expect(typed("abc\ndef", 2, "9", "r", "X")).toEqual({ text: "abc\ndef", writes: 0 });
+	});
+
 	test("~ toggles case and advances (a→A, B→b)", () => {
 		const e = editor("aBc", 0);
 		e.engine.handleKey("~", e.key());
@@ -3883,5 +3904,392 @@ describe("a paste token is one character", () => {
 		expect(splitsPasteToken("no token at all", 1, 4)).toBe(false);
 		// A stray bracket in front of a real token is not one, and must not hide it.
 		expect(splitsPasteToken(`[a ${PASTE_TOKEN} b`, 0, 5)).toBe(true);
+	});
+});
+
+describe("`.` repeats the last change", () => {
+	// The Escape is spelled as an override rather than as the byte, because that
+	// is how the host sends it: `handleKey("", { escape: true })`. Every case that
+	// enters insert mode has to leave it again, or it measures the insert caret.
+	// A key the engine does not consume while it is in insert mode is the user's
+	// next character — that is the REPL's contract (see `useTextInput.ts`), and a
+	// `.` that repeats a change has to be able to repeat typed text, so `run` has
+	// to be a host and not just a key pusher.
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) {
+			if (k === "\x1b") {
+				e.engine.handleKey("", e.key({ escape: true }));
+				continue;
+			}
+			if (e.engine.handleKey(k, e.key())) continue;
+			if (e.engine.mode === "insert" && k.length === 1 && k >= " ") {
+				e.state.text = e.state.text.slice(0, e.state.cursor) + k + e.state.text.slice(e.state.cursor);
+				e.state.cursor += 1;
+			}
+		}
+		return { text: e.state.text, cursor: e.state.cursor, writes: e.writes(), mode: e.engine.mode };
+	};
+	const W = "one two three four";
+	const S16 = "abcdefghijklmnop";
+	/** The four short lines a Visual selection's shape is readable against. */
+	const SHORT = "ab\ncd\nef\ngh";
+
+	test("it repeats the last change, once", () => {
+		// `j` is in the sequence and changes nothing: `W` is one line, so there is
+		// nowhere to go. The redo is the `x`, wherever the caret is.
+		expect(run(W, 0, "x", "j", ".")).toEqual({
+			text: "e two three four",
+			cursor: 0,
+			writes: 2,
+			mode: "normal",
+		});
+	});
+
+	test("the replay becomes the change it repeated, so `.` is a fixed point", () => {
+		expect(run(W, 0, "x", "j", ".", "j", ".")).toMatchObject({ text: " two three four", cursor: 0 });
+		// Three characters gone in three presses, and each one its own undo step —
+		// the host records undo on `setAll`, so a redo that cost nothing would be a
+		// change the user cannot take back.
+		expect(run(W, 0, "x", "j", ".", "j", ".").writes).toBe(3);
+	});
+
+	test("a count on a redo replaces the count the change was made with", () => {
+		expect(run(S16, 0, "3", "x", "2", ".")).toMatchObject({ text: "fghijklmnop", cursor: 0 });
+		expect(run(S16, 0, "2", "x", "j", "4", ".")).toMatchObject({ text: "ghijklmnop", cursor: 0 });
+		// And the count it used is what the *next* redo carries, which is why
+		// `x 3. .` removes three and not one.
+		expect(run(S16, 0, "x", "j", "3", ".", "j", ".")).toMatchObject({ text: "hijklmnop", cursor: 0 });
+		expect(run(S16, 0, "x", "0", ".", "j", ".")).toMatchObject({ text: "defghijklmnop", cursor: 0 });
+	});
+
+	test("with nothing changed yet there is nothing to repeat", () => {
+		expect(run(W, 0, ".")).toMatchObject({ text: W, cursor: 0, writes: 0 });
+		// A change that changed nothing — the last character of the only line —
+		// is not recorded, and the buffer being empty leaves no redo either.
+		expect(run("a", 0, "x", ".")).toMatchObject({ text: "", cursor: 0, writes: 1 });
+		expect(run("", 0, ".")).toMatchObject({ text: "", cursor: 0, writes: 0 });
+	});
+
+	test("a motion, a yank or a search is not a change", () => {
+		expect(run(W, 0, "x", "w", "j", ".")).toMatchObject({ text: "ne wo three four", cursor: 3 });
+		// The yank is between the change and the redo, and the redo is still the
+		// `x`: the buffer after `x` `yy` is what `.` acts on, and `p` pastes the
+		// line the yank took, which is the line *before* the redo.
+		expect(run(W, 0, "x", "y", "y", "j", ".", "p")).toMatchObject({ text: "en two three four", cursor: 1 });
+		expect(run("aa bb aa", 0, "x", "n", ".")).toMatchObject({ text: " bb aa", cursor: 0 });
+	});
+
+	test("an undo is not a change, and does not become the redo", () => {
+		expect(run(W, 0, "x", "u", ".")).toMatchObject({ text: "ne two three four", cursor: 0 });
+	});
+
+	test("an operator that was abandoned is not a change", () => {
+		expect(run(W, 0, "d", "\x1b", "x", "j", ".")).toMatchObject({ text: "e two three four", cursor: 0 });
+	});
+
+	test("the last change is the redo, whichever it was", () => {
+		// `x` then `dd`: the second is newer, and a redo that remembered the
+		// *first* key it ever saw would leave a character behind.
+		expect(run("ab\ncd", 0, "x", "d", "d", "j", ".")).toMatchObject({ text: "", cursor: 0 });
+	});
+
+	test("a change made in insert mode repeats its text too", () => {
+		expect(run(W, 0, "c", "w", "Z", "\x1b", "w", ".", "\x1b")).toMatchObject({
+			text: "Z Z three four",
+			cursor: 2,
+			mode: "normal",
+		});
+		// Two writes for the replay: the operator's delete and the insertion the
+		// replay typed. The original cost one more, and the text the user typed was
+		// the host's to insert, not a `setAll`.
+		expect(run(W, 0, "c", "w", "Z", "\x1b", "w", ".", "\x1b").writes).toBe(3);
+	});
+
+	test("each of the insert-mode forms repeats, and the replay leaves insert again", () => {
+		for (const [label, seq, want] of [
+			["s", ["s", "\x1b", "j", ".", "\x1b"], { text: "e two three four", cursor: 0 }],
+			["S", ["S", "\x1b", "\x1b", "j", ".", "\x1b"], { text: "a\n\n", cursor: 3 }],
+			["i", ["i", "X", "\x1b", "l", ".", "\x1b"], { text: "one XXtwo three four", cursor: 5 }],
+			["o", ["o", "X", "\x1b", "\x1b", "j", ".", "\x1b"], { text: "a\nX\nb\nX", cursor: 6 }],
+		] as const) {
+			const start = label === "S" ? 2 : label === "i" ? 4 : 0;
+			const text = label === "S" ? "a\nb\nc" : label === "o" ? "a\nb" : W;
+			const got = run(text, start, ...seq);
+			expect(`${label}: ${got.text}@${got.cursor} ${got.mode}`).toBe(`${label}: ${want.text}@${want.cursor} normal`);
+		}
+	});
+
+	test("a Visual delete repeats its size, not the keys that made it", () => {
+		// `vjd` took "ab\ncd"; a redo that re-typed the motions would take the same
+		// two lines again and one `x` would not — this is `redo_VIsual` (ops.c:3890).
+		expect(run(SHORT, 0, "v", "j", "d", "j", ".")).toMatchObject({ text: "d\nh", cursor: 2 });
+		expect(run("abcdef", 0, "v", "l", "d", "l", ".")).toMatchObject({ text: "cf", cursor: 1 });
+	});
+
+	test("a selection on one line is re-taken by its width", () => {
+		// `v$` took six characters; redoing it on a two-character line takes two,
+		// which is the width (`ops.c:4136`) and not the end column it was made at.
+		expect(run("abcdef\nxyz\npq", 0, "v", "$", "d", "0", ".")).toMatchObject({ text: "pq", cursor: 0 });
+		// From column 0 all three forms name the same place, so the width and the
+		// end column are only told apart by a selection that started elsewhere —
+		// `llv3ld` took three columns from column 2, and four are redone at the top.
+		expect(run("abcdef\nuvwxyz", 0, "l", "l", "v", "3", "l", "d", "j", "0", ".")).toMatchObject({
+			text: "ab\nyz",
+			cursor: 3,
+		});
+	});
+
+	test("a selection that ended on $ is re-taken to the end of the line", () => {
+		// `w_curswant == MAXCOL` is checked before the two forms above, so a
+		// selection ending on `$` goes to the end of whatever line the caret is on
+		// now — and takes the break with it, which is the NUL rule at ops.c:4218.
+		expect(run("abcdef\nuvwxyz", 0, "l", "l", "v", "$", "d", "j", "0", ".")).toMatchObject({
+			text: "",
+			cursor: 0,
+		});
+		expect(run("ab\ncd\nefgh", 0, "v", "j", "$", "d", "G", ".")).toMatchObject({ text: "", cursor: 0 });
+	});
+
+	test("an h after $ spends the reach, and with it the to-the-end-of-the-line form", () => {
+		// The same buffer and the same four keys as the case above, with one `h`:
+		// the backward step is spent on the reach rather than moving the caret, so
+		// the selection is still four wide and the redo takes the width. vim reads
+		// `w_curswant` alone here, but its `oneleft` clears the MAXCOL even when the
+		// reach absorbs the step — which is what the reach flag stands in for.
+		expect(run("abcdef\nuvwxyz", 0, "l", "l", "v", "$", "h", "d", "j", "0", ".")).toMatchObject({
+			text: "ab\nyz",
+			cursor: 3,
+		});
+	});
+
+	test("a selection over several lines is re-taken by the end's own column", () => {
+		expect(run(SHORT, 0, "v", "j", "d", "0", ".")).toMatchObject({ text: "f\ngh", cursor: 0 });
+		expect(run(SHORT, 0, "v", "j", "2", "l", "d", "0", ".")).toMatchObject({ text: "", cursor: 0 });
+		// Three lines wide, the last of them an `h` short of its end, redone from
+		// the top: the end is column 5 of the third line, wherever that lands.
+		expect(run("ab\ncd\nefghij", 0, "v", "j", "h", "d", "0", ".")).toMatchObject({
+			text: "fghij",
+			cursor: 0,
+		});
+	});
+
+	test("the replay comes back out of insert mode on its own", () => {
+		// No Escape after the `.`: the original command's Escape is part of what the
+		// redo repeats, and a replay left in insert mode would stop with the caret
+		// on the insertion point — a position no NORMAL motion can be read against,
+		// and one the user has to notice to get out of.
+		const got = run(W, 0, "c", "w", "Z", "\x1b", "w", ".");
+		expect(got).toMatchObject({ text: "Z Z three four", cursor: 2, mode: "normal" });
+		expect(run(W, 4, "i", "X", "\x1b", "l", ".")).toMatchObject({
+			text: "one XXtwo three four",
+			cursor: 5,
+			mode: "normal",
+		});
+		expect(run("a\nb", 0, "o", "X", "\x1b", "\x1b", "j", ".")).toMatchObject({
+			text: "a\nX\nb\nX",
+			cursor: 6,
+			mode: "normal",
+		});
+	});
+
+	test("a linewise Visual delete repeats the same number of lines", () => {
+		expect(run(SHORT, 0, "V", "j", "d", "0", ".")).toMatchObject({ text: "", cursor: 0 });
+	});
+
+	test("the other Visual operators repeat as well", () => {
+		expect(run("ab\ncd", 0, "v", ">", "j", ".")).toMatchObject({ text: "\tab\n\tcd", cursor: 5 });
+		expect(run("ab\ncd", 0, "v", "<", "j", ".")).toMatchObject({ text: "ab\ncd", cursor: 3 });
+		expect(run(SHORT, 0, "v", "c", "X", "\x1b", "j", ".", "\x1b")).toMatchObject({
+			text: "Xb\nXd\nef\ngh",
+			cursor: 3,
+		});
+		expect(run(SHORT, 0, "V", "c", "X", "\x1b", "\x1b", "j", ".", "\x1b")).toMatchObject({
+			text: "X\nX\nef\ngh",
+			cursor: 2,
+		});
+	});
+
+	test("a charwise register across a line break lands the caret on its last character", () => {
+		// `vjy` holds "b\nc" — the only register in this engine that can hold a
+		// line break — and the two pastes differ from there: `p` before it, `P`
+		// before the first character of the line above.
+		expect(run("ab\ncd", 0, "v", "j", "y", "j", "p")).toMatchObject({ text: "ab\ncab\ncd", cursor: 4 });
+		expect(run("ab\ncd", 0, "v", "j", "y", "j", "P")).toMatchObject({ text: "ab\nab\nccd", cursor: 3 });
+	});
+});
+
+describe("Visual `r` writes over the selection", () => {
+	// Every answer here was measured against vim 9.1 through the differential
+	// harness; the same sequences are in `regress.mjs` so the two stay together.
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) {
+			if (k === "\x1b") {
+				e.engine.handleKey("", e.key({ escape: true }));
+				continue;
+			}
+			e.engine.handleKey(k, e.key());
+		}
+		return { text: e.state.text, cursor: e.state.cursor, writes: e.writes(), mode: e.engine.mode };
+	};
+	const SHORT = "ab\ncd\nef\ngh";
+	/** One character per line: a step inside a selection runs off the end. */
+	const SOLO = "1\n2\n3\n4";
+
+	test("it writes one character over the selection and leaves normal mode", () => {
+		expect(run("abcdef", 0, "v", "r", "X")).toEqual({ text: "Xbcdef", cursor: 0, writes: 1, mode: "normal" });
+		expect(run("abcdef", 0, "v", "l", "l", "r", "X")).toMatchObject({ text: "XXXdef", cursor: 0 });
+		expect(run("abcdef", 0, "v", "$", "r", "X")).toMatchObject({ text: "XXXXXX", cursor: 0 });
+	});
+
+	test("a line break inside the selection stays a line break", () => {
+		// The width is not a run of characters: `VrX` on "ab" is "XX", and the flat
+		// answer "XXXXXX" is what a linewise selection read as text would give.
+		expect(run(SHORT, 0, "V", "r", "X")).toMatchObject({ text: "XX\ncd\nef\ngh", cursor: 0 });
+		expect(run(SHORT, 0, "V", "j", "r", "X")).toMatchObject({ text: "XX\nXX\nef\ngh", cursor: 0 });
+		// Charwise, the break the selection took with it is kept the same way.
+		expect(run(SHORT, 0, "v", "j", "r", "X")).toMatchObject({ text: "XX\nXd\nef\ngh", cursor: 0 });
+		expect(run(SHORT, 0, "v", "2", "j", "r", "X")).toMatchObject({ text: "XX\nXX\nXf\ngh", cursor: 0 });
+	});
+
+	test("a count in front of the `r` is not its own, and a digit is a character", () => {
+		expect(run("abcdef", 0, "v", "l", "3", "r", "X")).toMatchObject({ text: "XXcdef", cursor: 0 });
+		expect(run("abcdef", 0, "v", "r", "2")).toMatchObject({ text: "2bcdef", cursor: 0 });
+		expect(run("abcdef", 0, "v", "l", "r", "2")).toMatchObject({ text: "22cdef", cursor: 0 });
+	});
+
+	test("Escape cancels the half-typed character and keeps the selection", () => {
+		expect(run("abcdef", 0, "v", "l", "r", "\x1b")).toEqual({ text: "abcdef", cursor: 1, writes: 0, mode: "visual" });
+	});
+
+	test("a key that is not a character cancels it too", () => {
+		// Taken as the character to write, an empty one would write nothing over
+		// every character of the selection and delete it. vim beeps and changes
+		// nothing (measured on 9.1), which is what a cancel does here.
+		for (const over of [
+			{ rightArrow: true },
+			{ downArrow: true },
+			{ end: true },
+			{ backspace: true },
+			{ delete: true },
+		]) {
+			const e = editor("abcdef", 0);
+			for (const k of ["v", "l", "r"]) e.engine.handleKey(k, e.key());
+			e.engine.handleKey("", e.key(over));
+			expect({ text: e.state.text, writes: e.writes(), mode: e.engine.mode }).toEqual({
+				text: "abcdef",
+				writes: 0,
+				mode: "visual",
+			});
+		}
+	});
+
+	test("`<CR>` cancels it as well, where vim would write a carriage return", () => {
+		// Not a line break: a Visual `r` goes to the operator, which writes the
+		// character over each selected one, and a CR is a character there — measured
+		// on 9.1, `vlr<CR>` on `"abcdef"` reads back as `"\r\rcdef"`, two literal CRs
+		// in one line. (The NORMAL form is the one that breaks the line, and by only
+		// one break however many characters the count covered; it is a second named
+		// gap and `vim.ts` says so where the guard is.) Both are in the differential
+		// README's Known gaps with the two measurements: this is a feature that is
+		// not implemented, not a difference the instrument cannot see.
+		const e = editor("abcdef", 0);
+		for (const k of ["v", "l", "r"]) e.engine.handleKey(k, e.key());
+		e.engine.handleKey("", e.key({ return: true }));
+		expect({ text: e.state.text, writes: e.writes(), mode: e.engine.mode }).toEqual({
+			text: "abcdef",
+			writes: 0,
+			mode: "visual",
+		});
+	});
+
+	test("a pasted token inside the selection keeps its spelling", () => {
+		// The rule every other command that rewrites a selection follows: a token's
+		// own letters are its format, and overwriting one of them leaves a string
+		// `PASTE_TOKEN_RE` no longer matches, so the payload is unreachable at submit.
+		const text = `a ${PASTE_TOKEN} b`;
+		const e = editor(text, 2);
+		for (const k of ["v", "l", "r", "X"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe(`a ${PASTE_TOKEN}Xb`);
+		expect(e.state.cursor).toBe(2);
+		// A selection that is the token and nothing else writes the token back
+		// unchanged — and is a change all the same, which is what the write count
+		// says. Vim has no token, so this half is the engine's own rule; the other
+		// half of it (a change that wrote nothing is still the redo) is measured.
+		const only = editor(text, 2);
+		for (const k of ["v", "r", "X"]) only.engine.handleKey(k, only.key());
+		expect({ text: only.state.text, cursor: only.state.cursor, writes: only.writes() }).toEqual({
+			text,
+			cursor: 2,
+			writes: 1,
+		});
+	});
+
+	test("`.` reaches it, and what it repeats is the `r` and not the change before it", () => {
+		// Every `.` here is on another line: a `.` over the character the `r` just
+		// wrote looks the same whether it ran or not, which is how a redo that
+		// refuses a Visual `r` passes a case meant to catch it.
+		expect(run("abcdefgh\nij", 0, "v", "r", "X", "j", ".")).toMatchObject({ text: "Xbcdefgh\nXj", cursor: 9 });
+		// The `x` is gone as the redo: a `.` that still held it would delete a
+		// character rather than write one.
+		expect(run("abcdefgh\nij", 0, "x", "v", "r", "X", "j", ".")).toMatchObject({ text: "Xcdefgh\nXj", cursor: 8 });
+		expect(run("abcdefgh\nij", 0, "d", "w", "v", "r", "X", "j", ".")).toMatchObject({ text: "\nXj", cursor: 1 });
+		// Linewise it is the whole line, twice over.
+		expect(run("abcdefgh\nij\nkl", 0, "V", "r", "X", "j", ".")).toMatchObject({ text: "XXXXXXXX\nXX\nkl", cursor: 9 });
+	});
+
+	test("a replace that wrote the character already there is still the redo", () => {
+		// The buffer reads the same before and after, so `writes` is what says a
+		// change happened at all — and the `.` off the spot is what says it counts.
+		expect(run("xx\nyy", 0, "v", "r", "x")).toEqual({ text: "xx\nyy", cursor: 0, writes: 1, mode: "normal" });
+		expect(run("xx\nyy", 0, "v", "r", "x", "j", ".")).toMatchObject({ text: "xx\nxy", cursor: 3 });
+		expect(run("xx\nyy", 0, "v", "l", "r", "x", "j", ".")).toMatchObject({ text: "xx\nxx", cursor: 3 });
+	});
+
+	test("a `.` pressed with a selection open is not a redo at all", () => {
+		// Were the redo to run, the `Gvl` selection would take an `X`; it does not,
+		// and the change the `r` made is still the redo afterwards.
+		expect(run("ab\ncd\nef", 0, "V", "r", "X", "G", "v", "l", ".")).toMatchObject({ text: "XX\ncd\nef", cursor: 7 });
+		expect(run("ab\ncd\nef", 0, "x", "V", "r", "X", "G", "v", "l", ".")).toMatchObject({
+			text: "X\ncd\nef",
+			cursor: 6,
+		});
+	});
+
+	test("an undo leaves the redo where it was", () => {
+		expect(run("abcdefgh", 0, "v", "r", "X", "u", ".")).toMatchObject({ text: "Xbcdefgh", cursor: 0 });
+	});
+
+	test("a count in front of `v`/`V` is spent on the command itself", () => {
+		// nv_visual decrements the count once and runs nv_right / nv_down with what
+		// is left (normal.c:5609-5615), so `2v` is two characters wide and a count
+		// typed inside adds to it: `2v3l` is five, `v3l` is four.
+		expect(run("abcdefghij", 0, "2", "v", "l", "d")).toMatchObject({ text: "defghij", cursor: 0 });
+		expect(run("abcdefghij", 0, "3", "v", "l", "d")).toMatchObject({ text: "efghij", cursor: 0 });
+		expect(run("abcdefghij", 0, "2", "v", "3", "l", "d")).toMatchObject({ text: "fghij", cursor: 0 });
+		expect(run("abcdefghij", 0, "3", "v", "2", "l", "d")).toMatchObject({ text: "fghij", cursor: 0 });
+		expect(run("abcdefghij", 0, "v", "3", "l", "d")).toMatchObject({ text: "efghij", cursor: 0 });
+		expect(run("ab\ncd", 0, "2", "v", "d")).toMatchObject({ text: "\ncd", cursor: 0 });
+		expect(run("abcdefghij", 0, "4", "v", "h", "d")).toMatchObject({ text: "defghij", cursor: 0 });
+		// Linewise the same count is that many lines.
+		expect(run("aa\nbb\ncc\ndd", 0, "2", "V", "j", "d")).toMatchObject({ text: "dd", cursor: 0 });
+		expect(run("aa\nbb\ncc\ndd", 0, "2", "V", "j", "j", "d")).toMatchObject({ text: "", cursor: 0 });
+	});
+
+	test("a step past the end of the line carries the wanted column", () => {
+		// Inside a selection `nv_right` counts the line break and stops with the
+		// caret one character past the last one (normal.c:5822-5828). The engine
+		// cannot stand there, so the wanted column is what carries the step: without
+		// it the `j` after `vl` lands a line short and takes one line instead of two.
+		expect(run(SOLO, 0, "v", "l", "j", "d")).toMatchObject({ text: "3\n4", cursor: 0 });
+		expect(run(SOLO, 0, "v", "l", "j", "j", "d")).toMatchObject({ text: "4", cursor: 0 });
+		// One step is all vim ever records past the end, however large the count.
+		expect(run(SOLO, 0, "v", "4", "l", "j", "d")).toMatchObject({ text: "3\n4", cursor: 0 });
+		expect(run(SOLO, 0, "2", "v", "j", "d")).toMatchObject({ text: "3\n4", cursor: 0 });
+		expect(run(SOLO, 0, "2", "v", "j", "j", "d")).toMatchObject({ text: "4", cursor: 0 });
+		// The same step onto a line that can fill the column is an ordinary move.
+		expect(run("ab\nc\ndef", 0, "v", "l", "j", "d")).toMatchObject({ text: "def", cursor: 0 });
+		expect(run("abcdef\ngh", 1, "v", "l", "j", "d")).toMatchObject({ text: "a", cursor: 0 });
 	});
 });
