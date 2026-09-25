@@ -885,7 +885,7 @@ describe("the prefixes whose argument the engine reads and drops", () => {
 		expect(e.state.text).toBe("one\ntwo\ntwo"); // "a" was read, the yank happened
 	});
 
-	test("/ and : hold their input line and drop it", () => {
+	test("/ and : hold their input line until Escape drops it", () => {
 		// `/foo` used to arm a find with its `f`, take the first `o` as the target and
 		// open a line with the second.
 		const slash = editor("foo bar\n", 0);
@@ -940,14 +940,18 @@ describe("the prefixes whose argument the engine reads and drops", () => {
 		expect(named.state.text).toBe("abc\ndef\n");
 	});
 
-	test("Enter still submits from one, and Escape still cancels it", () => {
-		const submit = editor("abc def\n", 0);
-		submit.engine.handleKey("/", submit.key());
-		submit.engine.handleKey("f", submit.key());
-		expect(submit.engine.handleKey("", submit.key({ return: true }))).toBe(false);
-		expect(submit.state.text).toBe("abc def\n"); // the half-typed search went with it
-		submit.engine.handleKey("w", submit.key());
-		expect(submit.state.cursor).toBe(4);
+	test("Enter submits from a : or m line and runs the search from a / line", () => {
+		// The `/` half of this used to assert that Enter submitted and dropped the
+		// half-typed search — which is what it did when a search line was read and
+		// thrown away. It is not what it does now, and it is not what vim does: Enter
+		// is the key that runs a search, and the host never sees it. So the `false`
+		// here is a `true`, and the line is a pattern rather than a discard.
+		const search = editor("abc def\n", 0);
+		search.engine.handleKey("/", search.key());
+		search.engine.handleKey("f", search.key());
+		expect(search.engine.handleKey("", search.key({ return: true }))).toBe(true);
+		expect(search.state.text).toBe("abc def\n");
+		expect(search.state.cursor).toBe(6); // it searched, and the `f` was the pattern
 
 		const name = editor("abc def\n", 0);
 		name.engine.handleKey("m", name.key());
@@ -979,6 +983,646 @@ describe("the prefixes whose argument the engine reads and drops", () => {
 		expect(name.engine.handleKey("c", name.key({ ctrl: true }))).toBe(false);
 		name.engine.handleKey("w", name.key());
 		expect(name.state.cursor).toBe(4);
+	});
+});
+
+/**
+ * `/`, `?`, `n`, `N`, `*` and `#`.
+ *
+ * Every number below is a real vim's answer, taken through
+ * `test/vim-differential/harness.mjs` on the machine that wrote this — which is why
+ * a case here can be a sentence about vim rather than about this engine. The
+ * differential list holds the same cases as comparisons that re-measure; these
+ * hold them as values, so a regression is a failing test rather than a diff at the
+ * bottom of a log.
+ */
+describe("search", () => {
+	/** Type a `/` or `?` line and press Enter, the way the terminal sends it. */
+	const search = (e: ReturnType<typeof editor>, keys: string) => {
+		expect(e.engine.handleKey(keys.slice(0, 1), e.key())).toBe(true);
+		for (const ch of keys.slice(1)) expect(e.engine.handleKey(ch, e.key())).toBe(true);
+		return e.engine.handleKey("", e.key({ return: true }));
+	};
+	const press = (e: ReturnType<typeof editor>, keys: string) => {
+		for (const ch of keys) e.engine.handleKey(ch, e.key());
+	};
+
+	test("a pattern searches from strictly past the caret", () => {
+		// A match under the caret is not a match ahead of it, which is the difference
+		// between landing on the second `abc` and standing still.
+		const here = editor("abcabc", 0);
+		expect(search(here, "/abc")).toBe(true); // Enter is the search's, not the host's
+		expect(here.state.cursor).toBe(3);
+		const next = editor("a a a", 0);
+		search(next, "/a");
+		expect(next.state.cursor).toBe(2);
+		// And it does not stop at the end of a line: the `b` of the second line is a
+		// match like any other.
+		const down = editor("a\nb", 0);
+		search(down, "/b");
+		expect(down.state.cursor).toBe(2);
+	});
+
+	test("a count steps over matches and wraps round them", () => {
+		// Three matches and a count of 3 or 4 is the whole of the modulo: 2, 0, 2 for
+		// counts 2, 3, 4. A list of the matches ahead plus the ones behind, indexed
+		// once, answers 0 and 4 instead.
+		const three = editor("a a a", 0);
+		search(three, "3/a");
+		expect(three.state.cursor).toBe(0);
+		const four = editor("a a a", 0);
+		search(four, "4/a");
+		expect(four.state.cursor).toBe(2);
+		// The same arithmetic on a repeat, where the count is on the `n`.
+		const six = editor("a a a a a a", 0);
+		search(six, "/a");
+		press(six, "n");
+		expect(six.state.cursor).toBe(4);
+		press(six, "2n");
+		expect(six.state.cursor).toBe(8);
+		press(six, "2N");
+		expect(six.state.cursor).toBe(4); // backward two from 8 is 4, not a wrap to 0
+	});
+
+	test("n follows the last search and N reverses without changing it", () => {
+		// Two `N` in a row go the same way, because neither of them rewrites which
+		// direction the last search ran in.
+		const back = editor("a a a a", 0);
+		search(back, "?a");
+		expect(back.state.cursor).toBe(6);
+		press(back, "N");
+		expect(back.state.cursor).toBe(0);
+		press(back, "N");
+		expect(back.state.cursor).toBe(2);
+		// A word search is a last search too, and `*` runs forward.
+		const word = editor("foo foo foo", 0);
+		press(word, "*");
+		expect(word.state.cursor).toBe(4);
+		press(word, "n");
+		expect(word.state.cursor).toBe(8);
+		press(word, "N");
+		expect(word.state.cursor).toBe(4);
+		press(word, "N");
+		expect(word.state.cursor).toBe(0);
+		// And a following `n` goes forward again, which is the only case that can tell
+		// "N reverses the next match" from "N rewrites which way the last search ran".
+		const again = editor("foo foo foo", 0);
+		press(again, "*Nn");
+		expect(again.state.cursor).toBe(4);
+	});
+
+	test("a search that found nothing is still the last search", () => {
+		// So `n` goes on failing rather than falling back on the pattern that used to
+		// work — and a pattern that does not compile replaces it the same way, which is
+		// what makes keeping the text the right shape for the field.
+		const none = editor("a b a", 0);
+		search(none, "/a");
+		expect(none.state.cursor).toBe(4);
+		search(none, "/zzz");
+		press(none, "n");
+		expect(none.state.cursor).toBe(4);
+		const broken = editor("a b a", 0);
+		search(broken, "/a");
+		search(broken, "/(");
+		press(broken, "n");
+		expect(broken.state.cursor).toBe(4);
+	});
+
+	test("Escape keeps the last search, and an empty line repeats it", () => {
+		const kept = editor("a b a b", 0);
+		search(kept, "/a");
+		expect(kept.engine.handleKey("/", kept.key())).toBe(true);
+		press(kept, "b");
+		expect(kept.engine.handleKey("", kept.key({ escape: true }))).toBe(true);
+		press(kept, "n");
+		expect(kept.state.cursor).toBe(0); // back round, which is where `a` goes from 4
+		// An empty pattern, a doubled separator and a trailing one are all the repeat.
+		for (const line of ["", "/", "a/"]) {
+			const e = editor("a b a b", 0);
+			search(e, "/a");
+			search(e, `/${line}`);
+			expect(e.state.cursor).toBe(0);
+		}
+	});
+
+	test("with no last search to repeat, nothing moves", () => {
+		const e = editor("a b a", 0);
+		search(e, "/");
+		expect(e.state.cursor).toBe(0);
+		// Consumed, not handed back: vim says E35 and a host that took the key as its
+		// own would type the user's next prompt character instead.
+		expect(e.engine.handleKey("n", e.key())).toBe(true);
+		expect(e.state.cursor).toBe(0);
+		expect(e.engine.handleKey("N", e.key())).toBe(true);
+		expect(e.state.cursor).toBe(0);
+	});
+
+	test("^ and $ are line anchors, and the search crosses lines", () => {
+		const start = editor("a b\na b", 2);
+		search(start, "/^a");
+		expect(start.state.cursor).toBe(4); // the `a` that begins the second line
+		const end = editor("a b\na b", 0);
+		search(end, "/b$");
+		expect(end.state.cursor).toBe(2); // the `b` that ends the first line
+	});
+
+	test("the offset is a letter after a separator, and nothing else", () => {
+		const toEnd = editor("a a a", 0);
+		search(toEnd, "/a/e");
+		expect(toEnd.state.cursor).toBe(2);
+		press(toEnd, "n");
+		expect(toEnd.state.cursor).toBe(4); // the last character of the next match
+		const here = editor("a a a", 0);
+		search(here, "/a/c");
+		expect(here.state.cursor).toBe(2);
+		const literal = editor("a a a", 0);
+		search(literal, "/ae"); // no separator, so the `e` is part of the pattern
+		expect(literal.state.cursor).toBe(0);
+	});
+
+	test("an offset searches for the position it lands on", () => {
+		// Every offset case above is a one-character match, where the position it
+		// lands on and the position it starts at are the same offset. These are not,
+		// and they are the whole of what the rule is: the search is about where the
+		// caret ends up, so `/ab/e` on `ab ab` at 0 answers the 1 — the match the
+		// caret is inside, reached because that match *ends* past it — where a search
+		// that compared the starts would skip to the 3.
+		const under = editor("ab ab", 0);
+		search(under, "/ab/e");
+		expect(under.state.cursor).toBe(1);
+		// One character on, the first landing past the caret is the 4.
+		const oneOn = editor("ab ab", 1);
+		search(oneOn, "/ab/e");
+		expect(oneOn.state.cursor).toBe(4);
+		// And the count is counted from there: two landings on from 1 is the 7.
+		const counted = editor("ab ab ab", 1);
+		search(counted, "2/ab/e");
+		expect(counted.state.cursor).toBe(7);
+		// `n` re-applies the stored offset, so it lands on the other match's end
+		// rather than on its start.
+		const repeated = editor("ab ab ab", 0);
+		search(repeated, "/ab/e");
+		press(repeated, "n");
+		expect(repeated.state.cursor).toBe(4);
+		// Backward is the same comparison rather than a case of its own: from 3 the
+		// last landing before the caret is the 1, and from 1 there is none at all, so
+		// it wraps to the far end.
+		const back = editor("abcabc", 3);
+		search(back, "?ab?e");
+		expect(back.state.cursor).toBe(1);
+		const wrapped = editor("abcabc", 1);
+		search(wrapped, "?ab?e");
+		expect(wrapped.state.cursor).toBe(4);
+		const backAgain = editor("ab ab ab", 5);
+		search(backAgain, "?ab?e");
+		press(backAgain, "n");
+		expect(backAgain.state.cursor).toBe(1);
+	});
+
+	test("only \\< and \\> are translated, and a bare angle bracket is a bracket", () => {
+		// The translation is the two word boundaries and nothing else, so each of
+		// them has to be pinned where an untranslated one gives a different answer:
+		// a JavaScript `\<` is an identity escape, which is a literal `<`, and a
+		// pattern that is a literal `<f` finds nothing in `foo foo` at all.
+		const start = editor("foo foo", 0);
+		search(start, "/\\<f");
+		expect(start.state.cursor).toBe(4);
+		// The same for `\>`: as a literal `>` it matches nothing here, where the
+		// boundary version skips the `foo` under the caret and finds the next one.
+		const both = editor("foo foo", 0);
+		search(both, "/\\<foo\\>");
+		expect(both.state.cursor).toBe(4);
+		// And a `<` with no backslash in front of it is itself, so a buffer full of
+		// them is searchable — measured, and the reason the translation cannot be a
+		// blanket removal of the character.
+		const literal = editor("<foo <foo", 0);
+		search(literal, "/<f");
+		expect(literal.state.cursor).toBe(5);
+	});
+
+	test("a bare separator line takes the direction it was typed with", () => {
+		// Not the direction the last search ran in, and it is remembered: `#` lands on
+		// the middle `foo`, `/<CR>` then goes forward to the one it came from, and an
+		// `n` after that carries on forward.
+		const fwd = editor("foo a foo b foo", 12);
+		press(fwd, "#");
+		expect(fwd.state.cursor).toBe(6);
+		search(fwd, "/");
+		expect(fwd.state.cursor).toBe(12);
+		press(fwd, "n");
+		expect(fwd.state.cursor).toBe(0);
+		// The other way round, from a backward `?` search.
+		const back = editor("foo a foo b foo", 0);
+		search(back, "/foo");
+		expect(back.state.cursor).toBe(6);
+		search(back, "?");
+		expect(back.state.cursor).toBe(0);
+		press(back, "n");
+		expect(back.state.cursor).toBe(12);
+	});
+
+	test("a word run reaches left of the caret", () => {
+		// A caret in the middle of a word searches for that word and starts from its
+		// first character. An engine that took the scan position as the start would
+		// skip its own match, and would visit every second run when counting them.
+		const mid = editor("foo foo foo", 1);
+		press(mid, "*");
+		expect(mid.state.cursor).toBe(4);
+		const alsoMid = editor("foo foo foo", 5);
+		press(alsoMid, "*");
+		expect(alsoMid.state.cursor).toBe(8);
+		const backMid = editor("foo foo foo", 6);
+		press(backMid, "#");
+		expect(backMid.state.cursor).toBe(0);
+		// The same rule from a space in front of a run: the search starts at the run's
+		// own first character, which is the match it wraps back onto, and not at the
+		// caret — from which it would step forward onto the very next run.
+		const ahead = editor("foo foo foo", 7);
+		press(ahead, "*");
+		expect(ahead.state.cursor).toBe(0);
+	});
+
+	test("a word is a run of one character class, and is matched whole", () => {
+		// Chinese is one run, so a JavaScript `\b` — which knows nothing of it — is
+		// not what a word search is.
+		const cjk = editor("中文 中文", 1);
+		press(cjk, "*");
+		expect(cjk.state.cursor).toBe(3);
+		// A currency sign is punctuation and is stepped over; the `x` after it is the
+		// first thing on the line that is a word at all.
+		const euro = editor("€€ €€ x", 0);
+		press(euro, "*");
+		expect(euro.state.cursor).toBe(6);
+		// Matched whole, so a longer run of the same class beside it is not a match
+		// and the search wraps back onto the one it started from.
+		const longer = editor("👍👍👍 👍👍 x", 0);
+		press(longer, "*");
+		expect(longer.state.cursor).toBe(0);
+		// And from the short run beside it, which is where a search that only compared
+		// as far as the word's own length would find the long one.
+		const shorter = editor("👍👍👍 👍👍 x", 7);
+		press(shorter, "*");
+		expect(shorter.state.cursor).toBe(7);
+		// One class, so a script change breaks the run even though nothing about the
+		// characters is blank or punctuation: from `字` the run is `漢字` and from `ナ`
+		// it is `カナ`. A run that reached over everything non-blank would search for
+		// the whole word instead and wrap onto itself.
+		const kana = editor("かなカナ漢字", 5);
+		press(kana, "*");
+		expect(kana.state.cursor).toBe(4);
+		const katakana = editor("かなカナ漢字", 3);
+		press(katakana, "#");
+		expect(katakana.state.cursor).toBe(2);
+		// The same between two Latin letters, where the boundary is a class change
+		// rather than a script change.
+		const mixed = editor("ab漢cd", 2);
+		press(mixed, "*");
+		expect(mixed.state.cursor).toBe(2);
+	});
+
+	test("a pattern that can match nothing still searches", () => {
+		// `x*` matches empty beside every character, so the matches are one per
+		// character and the answer is the first one *after* the caret. A scan that
+		// advanced a UTF-16 unit would report the position between the halves of the
+		// first emoji, which is not a position a caret can stand at.
+		const e = editor("👍👍👍 👍👍 x", 0);
+		search(e, "/x*");
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("the word lookup stops at the end of the caret's line", () => {
+		// The word on the next line is not looked at, so `*` moves nothing at all
+		// rather than finding it.
+		const blank = editor("  \nfoo", 1);
+		press(blank, "*");
+		expect(blank.state.cursor).toBe(1);
+		const tail = editor("foo  \nbar", 4);
+		press(tail, "*");
+		expect(tail.state.cursor).toBe(4);
+		// A pattern search has no such limit.
+		const pat = editor("  \nfoo", 1);
+		search(pat, "/foo");
+		expect(pat.state.cursor).toBe(3);
+	});
+
+	test("with no identifier left on the line, the run is searched as a pattern", () => {
+		// Punctuation is the run, and the search becomes a literal one for it: from
+		// either dot the run is both of them, so the caret lands on the first.
+		const dots = editor("a..", 2);
+		press(dots, "*");
+		expect(dots.state.cursor).toBe(1);
+		const back = editor("a..", 1);
+		press(back, "#");
+		expect(back.state.cursor).toBe(1);
+		// And with nothing but dots on the line the run under the caret is skipped like
+		// any other match, so the second pair is where `*` goes and `n` wraps from.
+		const pairs = editor(".. ..", 0);
+		press(pairs, "*");
+		expect(pairs.state.cursor).toBe(3);
+		press(pairs, "n");
+		expect(pairs.state.cursor).toBe(0);
+		const fours = editor(".... ....", 1);
+		press(fours, "*");
+		expect(fours.state.cursor).toBe(5);
+		press(fours, "n");
+		expect(fours.state.cursor).toBe(0);
+	});
+
+	test("on punctuation both commands look forward for the word", () => {
+		// The part that looks wrong and is measured: `#` on a comma lands on the word
+		// after it, and it can only do that by having found it forward. The two
+		// commands differ in the direction the search runs afterwards.
+		const comma = editor("foo, bar, baz", 3);
+		press(comma, "#");
+		expect(comma.state.cursor).toBe(5);
+		const none = editor("foo,", 3);
+		press(none, "*"); // no keyword at or after the caret
+		expect(none.state.cursor).toBe(3);
+	});
+
+	test("the runs a word search walks are collected one line at a time", () => {
+		// A run does not reach over a line break — there is nothing on the far side of
+		// one to be the same word as — so the two `foo`s here are two matches, and the
+		// search crosses to the one below rather than answering the one it started
+		// from. That is the line structure showing up in a search at all, which a
+		// buffer of one line cannot say.
+		const twoLines = editor("foo\nfoo", 0);
+		press(twoLines, "*");
+		expect(twoLines.state.cursor).toBe(4);
+		// And from the second one, where nothing is ahead of it, it wraps to the first.
+		const fromSecond = editor("foo\nfoo", 4);
+		press(fromSecond, "*");
+		expect(fromSecond.state.cursor).toBe(0);
+		const repeat = editor("foo\nfoo", 0);
+		press(repeat, "*n");
+		expect(repeat.state.cursor).toBe(0);
+		// A count of two over two runs lands back on the one it started from, which a
+		// collection that had read the buffer as one word would not do.
+		const counted = editor("foo\nfoo", 0);
+		press(counted, "2*");
+		expect(counted.state.cursor).toBe(0);
+	});
+
+	test("a count steps a word search too", () => {
+		// The same cyclic arithmetic as a pattern, over the runs rather than the
+		// matches: three `foo`s, and counts of 2 and 3 answer 12 and 0.
+		const two = editor("foo a foo b foo", 0);
+		press(two, "2*");
+		expect(two.state.cursor).toBe(12);
+		const three = editor("foo a foo b foo", 0);
+		press(three, "3*");
+		expect(three.state.cursor).toBe(0);
+		const mid = editor("foo a foo b foo", 6);
+		press(mid, "2*");
+		expect(mid.state.cursor).toBe(0);
+		const back = editor("foo a foo b foo", 12);
+		press(back, "2#");
+		expect(back.state.cursor).toBe(0);
+	});
+
+	test("a search arms the wanted column where it lands", () => {
+		// The `j` comes back to the column the search stopped in, not to the one the
+		// caret started from.
+		const e = editor("a a\na a", 0);
+		search(e, "/a");
+		expect(e.state.cursor).toBe(2);
+		press(e, "j");
+		expect(e.state.cursor).toBe(6);
+	});
+
+	test("an operator takes the range between the caret and the word search's landing", () => {
+		// `nv_ident` hands the same pattern to `normal_search` whether or not an
+		// operator is waiting, so `d*` searches exactly what `*` searches and the
+		// operator's range is the landing and the caret, open at the far end. Three
+		// copies of the word, because with two the two directions coincide mod
+		// wrapping and the test would pass either way round.
+		const before = (cursor: number, keys: string) => {
+			const e = editor("aa bb aa bb aa", cursor);
+			press(e, keys);
+			return e.state;
+		};
+		expect(before(0, "d*")).toMatchObject({ text: "aa bb aa", cursor: 0 });
+		expect(before(0, "d#")).toMatchObject({ text: "aa", cursor: 0 });
+		expect(before(6, "d*")).toMatchObject({ text: "aa bb aa", cursor: 6 });
+		expect(before(6, "d#")).toMatchObject({ text: "aa bb aa", cursor: 0 });
+		expect(before(12, "d*")).toMatchObject({ text: "aa", cursor: 0 });
+		expect(before(12, "d#")).toMatchObject({ text: "aa bb aa", cursor: 6 });
+		// `add_to_history(HIST_SEARCH, …)` is above the point where the search runs,
+		// with no test of `op_pending` in between: the operator's search is remembered
+		// like any other, and `n` after it searches the same word.
+		const e = editor("foo bar foo", 0);
+		press(e, "y*");
+		press(e, "n");
+		expect(e.state.cursor).toBe(8);
+	});
+
+	test("g* and g# are the same search, and dg* the same range", () => {
+		// `nv_ident` reads `cap->cmdchar == 'g'` only to decide on the anchor
+		// (`if (!g_cmd && vim_iswordp(ptr))`), and that anchor is redundant: the
+		// pattern is already the whole maximal run, and a run that does not begin
+		// with a word character — the punctuation `*` searches for as itself — gets
+		// no anchor under `*` either. The glued runs are the two positions the two
+		// spellings are documented to separate; they agree.
+		const land = (cursor: number, keys: string) => {
+			const e = editor("aa bb aa bb aa", cursor);
+			press(e, keys);
+			return e.state.cursor;
+		};
+		expect(land(0, "g*")).toBe(6);
+		expect(land(0, "g#")).toBe(12);
+		expect(land(6, "g*")).toBe(12);
+		expect(land(6, "g#")).toBe(0);
+		expect(land(0, "2g*")).toBe(12);
+		const glued = editor("foofoo foo", 3);
+		press(glued, "g*");
+		expect(glued.state.cursor).toBe(0);
+		const inside = editor("foobar foo", 1);
+		press(inside, "g#");
+		expect(inside.state.cursor).toBe(0);
+		// And the range, not just the landing: `dg*` deletes what `d*` deletes.
+		const e = editor("aa bb aa bb aa", 0);
+		press(e, "dg*");
+		expect(e.state).toMatchObject({ text: "aa bb aa", cursor: 0 });
+	});
+
+	test("a caret one past the last character is not a place a command can use", () => {
+		// vim's `check_cursor_col_win` (`misc2.c:560`): the caret is on a character,
+		// and a column at the end of the line steps back onto the last one. The host
+		// is free to hand us that column — it is where a paste at the end leaves it —
+		// and without the step `x`, `r` and `*` all read nothing at the caret and do
+		// nothing at all.
+		const x = editor("aa bb", 5);
+		x.engine.handleKey("x", x.key());
+		expect(x.state).toMatchObject({ text: "aa b", cursor: 3 });
+		const h = editor("aa bb", 5);
+		h.engine.handleKey("h", h.key());
+		expect(h.state.cursor).toBe(3); // one step back from the last character, not from past it
+		const r = editor("aa bb", 5);
+		press(r, "rz");
+		expect(r.state.text).toBe("aa bz");
+		// Only a trailing line break keeps the position: it opens an empty last line,
+		// and the offset just past it already is a character position of its own — a
+		// `h` there has nowhere to go, which is the whole of "keeps". The engine's
+		// side of that modelling difference is pinned by the line-edge tests.
+		const brk = editor("ab\n", 3);
+		brk.engine.handleKey("h", brk.key());
+		expect(brk.state.cursor).toBe(3);
+	});
+});
+
+describe("+ and - are a line move with beginline after it", () => {
+	// `nv_cmds.h:155` binds `+` to `nv_down` and `-` to `nv_up`, each with
+	// `beginline(BL_WHITE | BL_FIX)` run after it. So the two halves are separate:
+	// `nv_down` refuses when there is no line that way and leaves the caret alone
+	// (measured: `+` on the last line does not even move to that line's first
+	// non-blank), while a count that merely overshoots clamps, as `j`'s does.
+	const B = "  aa\n\n  bb\ncc";
+	const press = (e: ReturnType<typeof editor>, keys: string) => {
+		for (const ch of keys) e.engine.handleKey(ch, e.key());
+	};
+	const land = (cursor: number, keys: string) => {
+		const e = editor(B, cursor);
+		press(e, keys);
+		return e.state.cursor;
+	};
+
+	test("+ goes down a line and lands on its first non-blank", () => {
+		// Line 2 of the buffer is empty, so its "first non-blank" is its own start.
+		expect(land(0, "+")).toBe(5);
+		expect(land(2, "+")).toBe(5);
+		expect(land(3, "+")).toBe(5);
+		// And from there, the next `+` is a plain line move.
+		expect(land(5, "+")).toBe(8);
+		expect(land(7, "+")).toBe(11);
+		// A tab counts as blank, and the answer is the tab that opens the line.
+		const tab = editor("\taa\n\tbb", 0);
+		press(tab, "+");
+		expect(tab.state.cursor).toBe(5);
+	});
+
+	test("- goes up a line and lands the same way", () => {
+		expect(land(5, "-")).toBe(2);
+		expect(land(7, "-")).toBe(5);
+		expect(land(9, "-")).toBe(5);
+		expect(land(12, "-")).toBe(8);
+	});
+
+	test("no line that way is not a move, and does not take the line's own spot", () => {
+		// The refusal is `nv_down`'s own, before `beginline` runs: a `+` that stepped
+		// back onto the last character instead would have answered 10 here.
+		expect(land(11, "+")).toBe(11);
+		expect(land(12, "+")).toBe(12);
+		expect(land(0, "-")).toBe(0);
+		// A count that overshoots is a different thing and clamps.
+		expect(land(8, "2+")).toBe(11);
+		expect(land(12, "2-")).toBe(5);
+		// A one-line buffer has no line to move to either way.
+		const one = editor("abc", 1);
+		press(one, "+");
+		expect(one.state.cursor).toBe(1);
+		press(one, "-");
+		expect(one.state.cursor).toBe(1);
+	});
+
+	test("d+ and d- are linewise, and take the span they crossed", () => {
+		const down = editor(B, 0);
+		press(down, "d+");
+		expect(down.state).toMatchObject({ text: "  bb\ncc", cursor: 2 });
+		const up = editor(B, 12);
+		press(up, "d-");
+		expect(up.state).toMatchObject({ text: "  aa\n", cursor: 5 });
+		// From the empty line, where the span is two blank lines and nothing else.
+		const fromBlank = editor(B, 5);
+		press(fromBlank, "d-");
+		expect(fromBlank.state).toMatchObject({ text: "  bb\ncc", cursor: 2 });
+		// The refusal is the operator's too: `d+` on the last line deletes nothing.
+		const stuck = editor(B, 11);
+		press(stuck, "d+");
+		expect(stuck.state).toMatchObject({ text: B, cursor: 11 });
+		// A count of lines, and a change that ends in insert mode.
+		const two = editor(B, 0);
+		press(two, "2d+");
+		expect(two.state.text).toBe("cc");
+		const change = editor(B, 5);
+		press(change, "c+");
+		expect(change.state).toMatchObject({ text: "  aa\n\ncc", cursor: 5 });
+	});
+
+	test("a yank's caret follows the landing only when the motion went backwards", () => {
+		// `do_pending_operator` pulls the cursor back only when the motion left it
+		// before the operator's own start, so `y+` keeps the caret where it was and
+		// `y-` takes it to the `beginline` of the line it reached — the last
+		// non-blank step, not the column `k` would have wanted (which is column 0,
+		// and a blank).
+		const down = editor(B, 0);
+		press(down, "y+");
+		expect(down.state).toMatchObject({ text: B, cursor: 0 });
+		const up = editor(B, 12);
+		press(up, "y-");
+		expect(up.state).toMatchObject({ text: B, cursor: 8 });
+		// The shift operators take the same span.
+		const shift = editor(B, 0);
+		press(shift, ">+");
+		expect(shift.state.text).toBe("\t  aa\n\n  bb\ncc");
+	});
+
+	test("on a line of nothing but blanks, the caret is a character and not the break", () => {
+		// `BL_FIX` is the flag that makes `beginline` stop at the end of a blank line,
+		// and `check_cursor_col_win` then steps the column back onto the last
+		// character it has. The engine's own end-of-line offset is one past that, and
+		// a caret there is a position no command can use.
+		const blank = editor("  \nfoo", 3);
+		press(blank, "-");
+		expect(blank.state.cursor).toBe(1);
+		const gg = editor("  \nfoo", 3);
+		press(gg, "gg");
+		expect(gg.state.cursor).toBe(1);
+		const go = editor("foo\n  ", 0);
+		press(go, "G");
+		expect(go.state.cursor).toBe(5);
+		// `I` is the other half of the same question and gets the other answer: it
+		// types at the end of the blanks, where a line break is a real position.
+		const insert = editor("  \nfoo", 0);
+		press(insert, "I");
+		insert.type("x");
+		expect(insert.state.text).toBe("  x\nfoo");
+		// And a linewise paste lands on the last character of a blank line it just
+		// wrote, for the same reason the gotos do.
+		const paste = editor("  \nfoo", 0);
+		press(paste, "yyGp");
+		expect(paste.state.cursor).toBe(8);
+		// An empty line has no character at all, so it stands on its own break —
+		// the one position the engine allows and vim does not.
+		const empty = editor("\nfoo", 1);
+		press(empty, "-");
+		expect(empty.state.cursor).toBe(0);
+	});
+
+	test("^ discards the wanted column, as 0, gg and G do", () => {
+		// The wanted column is what a `j` returns to, and `^` moves the caret to
+		// column 0 — so it has to move the wanted column with it, or `^j` lands on
+		// the column the caret was in before the `^`. Measured: vim 9.1 answers 4
+		// where a `j` that kept column 1 answers 5, and answers 4 from column 2 as
+		// well, where the stale column would say 6.
+		const down = editor("abc\ndef", 1);
+		press(down, "^j");
+		expect(down.state.cursor).toBe(4);
+		const fromTwo = editor("abc\ndef", 2);
+		press(fromTwo, "^j");
+		expect(fromTwo.state.cursor).toBe(4);
+		// Upwards is the same rule: the wanted column is not "the column below".
+		const up = editor("def\nabc", 5);
+		press(up, "^k");
+		expect(up.state.cursor).toBe(0);
+		// And from the other end — a `$` arms a wanted column past the end of the
+		// line, which `^` throws away and `j` then never returns to.
+		const armed = editor("abc\ndef", 0);
+		press(armed, "$^j");
+		expect(armed.state.cursor).toBe(4);
+		// `^$` still ends on the last character: `$` arms after the `^`, not before.
+		const both = editor("abc\ndef", 1);
+		press(both, "^$");
+		expect(both.state.cursor).toBe(2);
 	});
 });
 

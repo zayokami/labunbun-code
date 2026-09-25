@@ -63,19 +63,59 @@
  * to cut — `r` and the case commands — leave it alone rather than spell it wrong.
  * See {@link pasteTokenAt}, {@link splitsPasteToken}.
  *
+ * Search is `/` and `?` forward and backward, `n`/`N` to repeat, `*`/`#` for the
+ * keyword at or after the caret. The pattern is a JavaScript regular expression
+ * with the `m` flag (vim's `^` and `$` are line anchors, and `/^a` on `a b\na b`
+ * at 2 lands on the `a` that opens the second line — measured) plus `\<` and `\>`
+ * as `\b`; what that dialect cannot say is named in the differential README rather
+ * than translated into something right for one spelling and wrong for the next.
+ * Six things about the search are measured against vim 9.1 rather than assumed,
+ * and each of them is a trap:
+ *   - a forward match must **start after** the caret, so a match the caret is
+ *     standing on is skipped — `abcabc` at 0 searching `abc` lands on the second
+ *     one at 3, not the first at 0;
+ *   - backward is not the mirror: a match *containing* the caret is found, because
+ *     what is compared is where the match starts, so `?ab` at 7 in `ab ab ab`
+ *     lands on that match's start at 6;
+ *   - a count is the number of matches to step over and it wraps **round and
+ *     round**, not once: `3/a` on `a a a` at 0 lands back on the `a` at 0 and `4/a`
+ *     on the one at 2. A list of the matches ahead plus the ones behind, indexed
+ *     once and clamped at the end, answers 0 and 4 instead, so the count is a
+ *     modulo over the matches rather than a position in that list;
+ *   - the search **wraps** — the whole buffer, for `/`, `?`, `n` and `N` alike,
+ *     which is vim's default `wrapscan`. A failed search moves nothing, and
+ *     because a REPL has no message area to say `E486` in, a pattern that matches
+ *     nothing looks exactly like a pattern that was never typed;
+ *   - a search that failed is still the last search, and so is one whose pattern
+ *     did not compile: after `/a<CR>/(<CR>` `n` finds nothing, because the broken
+ *     pattern is the one that replaced the working one. Escape abandons the line
+ *     and keeps the last search; a new one replaces it;
+ *   - `*` and `#` both look **forward** for the keyword — on the comma of
+ *     `foo, bar` at 3 they both land on the `bar` at 5 — and differ only in the
+ *     direction the search then runs, from the keyword's own first character. That
+ *     last part is why `#` from the middle of a word skips that word instead of
+ *     landing on it, and it is why `*` on a Chinese word works here at all: vim's
+ *     `\<word\>` cannot express one through a JavaScript `\b`, and a keyword run
+ *     compared as a string can.
+ *
  * Deliberate simplifications: f/t/F/T are line-scoped (as in vim); marks,
  * registers beyond the unnamed one, and `:` ex-commands are out of scope — but
  * the keys that would open them are still taken, so the keys after them cannot
- * be read as commands instead: `m`/`"`/`'`/`` ` `` read the name that follows,
- * `z`/`Z`/`q`/`@` read the command or the register that follows, and `/`/`?`/`:`
- * take their input line up to Enter or Escape and drop it.
+ * be read as commands instead: `m`/`"`/`'`/`` ` `` read the name that follows and
+ * `z`/`Z`/`q`/`@` the command or the register that follows, and `:` takes its
+ * input line up to Enter or Escape and drops it. A search as an operator's motion
+ * needs the operator to wait for a pattern that has not been typed yet, which is a
+ * second latch open at once; so the operator is dropped and the search runs, and
+ * `d/pat` moves the caret and deletes nothing.
  * j/k delegate to prompt-history recall when the buffer has no newline (the
  * common single-line REPL case).
  *
  * Contracts the host relies on:
- *   - Enter is never consumed: it submits the prompt, abandoning any half-typed
- *     command rather than swallowing the send — a dropped `/` line or an
- *     unfinished `m`/`"` name included.
+ *   - Enter is consumed by a `/` or `?` line, because Enter is what runs the
+ *     search: submitting the prompt as well would send it, which is not a thing
+ *     a user who pressed `/` meant. Every other half-typed command still lets
+ *     Enter through, because there it does mean "send this" — an abandoned `:`
+ *     line or an unfinished `m`/`"` name included.
  *   - Escape is consumed only when it has something to cancel. An idle Escape
  *     in NORMAL mode returns false, because ink hands the same keypress to every
  *     `useInput` listener with no stop-propagation: the REPL's own Escape
@@ -766,6 +806,369 @@ export function splitsPasteToken(text: string, start: number, end: number): bool
 }
 
 /**
+ * The longest a typed search pattern may be.
+ *
+ * A pattern is a regular expression, and a regular expression can be written to
+ * take more time than a person is willing to wait: `/^(a+)+$/` is eight
+ * characters. vim has the same exposure and the same answer, which is that the
+ * user typed it; this is a prompt in a terminal rather than a file being edited,
+ * and a hang here freezes a session with unsaved work in it, so the length is
+ * bounded. That bounds how much a pattern can *say*, not how long one can take —
+ * the cap is a guard against a pasted paragraph, not against backtracking.
+ */
+const MAX_SEARCH_PATTERN = 256;
+
+/**
+ * `\<` and `\>` as JavaScript spells them.
+ *
+ * JS's `\b` is the same boundary for every ASCII word character, which is what
+ * vim's is for everything this build's {@link codePointClass} calls a word below
+ * 192. It is not the same above: `\b` knows nothing of CJK, so `\<` in front of a
+ * Chinese word finds nothing while the same pattern without the anchors works.
+ * That is a gap, and it is named in the differential README rather than papered
+ * over with a translation that is right for one script and wrong for the next.
+ */
+function translateSearchPattern(pattern: string): string {
+	return pattern.replaceAll(/\\([<>])/g, "\\b");
+}
+
+/**
+ * A typed `/` or `?` line, split into the pattern and the offset flag after it.
+ *
+ * A trailing separator is a delimiter and not part of the pattern, which is what
+ * makes `//` the repeat vim treats it as rather than a search for a slash —
+ * measured, `/a<CR>` and then `//<CR>` moving to the next `a` rather than standing
+ * still. An empty pattern is therefore a repeat, and the caller is what turns that
+ * into the last search; the split itself only has to not mangle it.
+ *
+ * The offset is one of `c`, `e`, `E` or `^` **after** a separator, and nothing
+ * else: `/ae` is a search for `ae` (measured: it finds nothing in `a a a`, where
+ * stripping the `e` would have found the `a` at 2), and `/a/2` is a search for
+ * `a/2` because vim counts the match *before* the slash, as `2/a`. The letters
+ * that place the caret on another line — `b`, `s`, `W`, `n`, `i`, `-`, `+` — are
+ * not here, and the README says so.
+ */
+export function parseSearchLine(line: string, separator: "/" | "?"): { pattern: string; toEnd: boolean } {
+	const offset = new RegExp(`^(.*)\\${separator}([cEe^])$`).exec(line);
+	if (offset !== null) {
+		const flag = offset[2] ?? "";
+		return { pattern: offset[1] ?? "", toEnd: flag === "e" || flag === "E" };
+	}
+	if (line.endsWith(separator)) return { pattern: line.slice(0, -1), toEnd: false };
+	return { pattern: line, toEnd: false };
+}
+
+/**
+ * The pattern as an expression, or null when it is not one.
+ *
+ * `m` because vim's `^` and `$` are line anchors, not string anchors. `u` because
+ * the buffer is indexed in UTF-16 code units, where a lone surrogate is not a
+ * character at all; it also turns a pattern that JavaScript would read as one
+ * thing into a throw rather than a match against something the user did not write.
+ *
+ * `g` is load-bearing and not about matching: without it `exec` ignores
+ * `lastIndex` and answers with the first match every time, so
+ * {@link collectSearchMatches} — a plain `exec` loop — asks the same question
+ * forever and the engine hangs on the first Enter.
+ *
+ * A throw is caught rather than propagated because the alternative is a REPL that
+ * cannot be used after one bad pattern: the caret does not move, and there is no
+ * message area to say `E54` in.
+ */
+function compileSearchPattern(pattern: string): RegExp | null {
+	try {
+		return new RegExp(translateSearchPattern(pattern), "gmu");
+	} catch {
+		return null;
+	}
+}
+
+/** One match: the half-open range of `text` it covers. */
+interface SearchMatch {
+	start: number;
+	end: number;
+}
+
+/**
+ * What the last search was, in the three shapes it can take.
+ *
+ * A word search is not a pattern spelled `\<word\>` even though that is how vim
+ * writes it down; {@link collectWordRuns} says why, and the short of it is that a
+ * JavaScript `\b` cannot find a CJK word where vim's can. A text search is the
+ * other kind vim's `*` can produce, where the run was punctuation and became a
+ * pattern instead — already escaped, so it is stored ready to compile.
+ */
+type LastSearch =
+	| { kind: "pattern"; pattern: string; forward: boolean; toEnd: boolean }
+	| { kind: "word"; word: string; forward: boolean }
+	| { kind: "text"; text: string; forward: boolean };
+
+/**
+ * Every match of `re` in `text`, in the order they start.
+ *
+ * A pattern that can match the empty string would otherwise match at every
+ * position forever, so a zero-width match steps the scan forward by one unit. It
+ * is a real answer — `/\` and `/a*` are patterns a user can type — and it is the
+ * only one that terminates. The step is {@link nextChar} rather than one code
+ * unit, so it is a whole character on an astral one and a whole paste token on a
+ * token, which is the same indivisibility every other motion here gives one.
+ */
+function collectSearchMatches(text: string, re: RegExp): SearchMatch[] {
+	const out: SearchMatch[] = [];
+	re.lastIndex = 0;
+	for (let hit = re.exec(text); hit !== null; hit = re.exec(text)) {
+		out.push({ start: hit.index, end: hit.index + hit[0].length });
+		if (hit[0].length === 0) {
+			const step = nextChar(text, re.lastIndex);
+			// A zero-width match on the last character of a token the step ran to
+			// the end of would answer the same position again; the end of the text
+			// is the only place left to stop.
+			if (step <= re.lastIndex) break;
+			re.lastIndex = step;
+		}
+	}
+	return out;
+}
+
+/**
+ * Where the caret stands once it has landed on `hit`.
+ *
+ * With a search offset that is the match's last character, and the `Math.max` is
+ * what a pattern that matched nothing at all gives — a `c` offset on text with no
+ * `c` leaves an empty match, which has no last character, so the match's own start
+ * is the only place left to stand.
+ */
+function searchLanding(hit: SearchMatch, toEnd: boolean): number {
+	return toEnd ? Math.max(hit.start, hit.end - 1) : hit.start;
+}
+
+/**
+ * The `nth` match from `from`, in `forward` order, counting round the buffer.
+ *
+ * A forward match has to *start* after the caret, which is what makes `abcabc` at
+ * 0 land on the second `abc` rather than the one under the caret; a backward match
+ * has to start before it, and that is also what makes a match *containing* the
+ * caret be found — `?ab` at 7 in `ab ab ab` lands on that match's start at 6,
+ * where a mirror of the forward rule would have skipped it.
+ *
+ * With an offset the comparison is on {@link searchLanding} rather than on the
+ * start, and that is the whole of the difference between `/ab` and `/ab/e`: the
+ * search is about the position the caret ends up at, so `ab ab` at 0 with `/ab/e`
+ * lands on the 1 — the match *under* the caret, reached because its landing is
+ * past the caret — where `/ab` skips to the 3. Measured over fourteen forward and
+ * eight backward cases, one rule covers all of them; the two readings agree
+ * everywhere the match is one character long, which is why the offset was
+ * implemented for that case and measured to be wrong for the rest. Reading the
+ * start instead is the same bug the backward `from - 1` was papering over, and
+ * deleting that fixes the two directions with one change.
+ *
+ * The count is the number of matches to step over and it wraps round and round
+ * rather than once, so the answer is an index taken modulo the number of matches.
+ * That is not a detail: `3/a` on `a a a` at 0 lands back on the `a` at 0 and `4/a`
+ * on the one at 2, and a list of the matches ahead plus the ones behind — indexed
+ * once, clamped at the end of it — answers 0 and 4 instead of 0 and 2. The two
+ * misses are the ones the modulo has to carry: a forward search with nothing ahead
+ * of the caret starts at the first match, a backward one with nothing behind it
+ * starts at the last.
+ */
+export function nthSearchMatch(
+	matches: SearchMatch[],
+	from: number,
+	forward: boolean,
+	nth: number,
+	toEnd = false,
+): SearchMatch | null {
+	const total = matches.length;
+	if (total === 0) return null;
+	// The nearest one in the direction of travel, which for a sorted list is the
+	// first one ahead and the last one behind. Written as two loops rather than one
+	// with a direction test because the one-loop version keeps walking past the
+	// answer and keeps the *last* match ahead instead of the first, which sends
+	// `/a` on `a a a` to the end of the line.
+	let at = -1;
+	if (forward) {
+		for (let i = 0; i < total; i++) {
+			const hit = matches[i];
+			if (hit !== undefined && searchLanding(hit, toEnd) > from) {
+				at = i;
+				break;
+			}
+		}
+	} else {
+		for (let i = total - 1; i >= 0; i--) {
+			const hit = matches[i];
+			if (hit !== undefined && searchLanding(hit, toEnd) < from) {
+				at = i;
+				break;
+			}
+		}
+	}
+	// Nothing in that direction: the search wraps round, so it starts at the far end
+	// — the first match for a forward search, the last for a backward one.
+	if (at < 0) at = forward ? total : -1;
+	const index = (((at + (forward ? nth - 1 : 1 - nth)) % total) + total) % total;
+	return matches[index] ?? null;
+}
+
+/**
+ * The identifier run at or after `pos`, never reaching past `stop`.
+ *
+ * "Identifier" is vim's `FIND_IDENT` pass and it is stricter than "a word
+ * character" — that is what the class table is for. It skips forward over blanks
+ * and punctuation to the first character of any *other* class, then reaches left
+ * and right over that one class and no other, so a Japanese sentence breaks at
+ * every script change and a hanzi run does not break at all (measured: `*` on the
+ * first `な` of `かなカナ漢字` lands on 0, the first `カ` on 2 and the first `漢` on
+ * 4, and none of the three moves to another script's word).
+ *
+ * The classes that count are everything except blank and punctuation, which is why
+ * an emoji is an identifier (`*` on `👍👍 👍👍` lands on the second one) while a euro
+ * sign is not (`*` on `€€ €€` skips to the `x` after them). It is also why
+ * `a×b` is one run — U+00D7 is inside the `192-255` range `iskeyword` covers.
+ *
+ * Reaches left past `pos`, and that is the whole of what the caller is given the
+ * start for: a caret in the middle of `foo` searches for that same `foo` and
+ * starts from its first character. Reporting the scan position instead makes the
+ * search skip its own match, and makes {@link collectWordRuns} visit every second
+ * run.
+ */
+function identifierRunAt(text: string, pos: number, stop: number): { word: string; start: number; end: number } | null {
+	const clsAt = (at: number): CharClass => (at < stop ? charClass(text, at) : BLANK);
+	let first = -1;
+	for (let at = pos; at < stop; at = nextChar(text, at)) {
+		const cls = clsAt(at);
+		if (cls !== BLANK && cls !== PUNCT) {
+			first = at;
+			break;
+		}
+	}
+	if (first < 0) return null;
+	const cls = clsAt(first);
+	let start = first;
+	const begin = lineStart(text, first);
+	while (start > begin) {
+		const back = prevChar(text, start);
+		if (clsAt(back) !== cls) break;
+		start = back;
+	}
+	let end = nextChar(text, first);
+	while (end < stop && clsAt(end) === cls) end = nextChar(text, end);
+	return { word: text.slice(start, end), start, end };
+}
+
+/**
+ * What `*` and `#` search for, as `nv_ident` finds it.
+ *
+ * `anchored` false is vim's `FIND_STRING` pass and it is a different kind of
+ * search, not a second guess at the first: the text becomes a pattern rather than
+ * a word, so it matches inside a longer run instead of against one of exactly its
+ * own length. Measured on `a.. a..`, where `*` on the `.` at 1 finds the `a` at 4
+ * and wraps to 0 — the identifier pass, because the rest of the line has a
+ * letter in it — against `a..` with nothing but punctuation left, where the run
+ * is the two dots themselves and the search looks for that literal.
+ */
+interface WordRun {
+	word: string;
+	start: number;
+	end: number;
+	anchored: boolean;
+}
+
+/**
+ * The run at or after `pos` that `*` and `#` take, or null when there is none.
+ *
+ * Both passes stop at the end of the caret's line, which is vim reading
+ * `ml_get_buf` rather than the whole buffer and is the reason `*` on the second
+ * blank of `  \nfoo` moves nothing: there is no `foo` on that line to look at,
+ * and the one on the next line is not considered. Measured, and the difference is
+ * the whole behaviour — a buffer-wide scan finds it and lands on 3.
+ *
+ * On punctuation or whitespace the identifier pass does not refuse, it skips to
+ * the next run: `*` on the comma of `foo, bar` at 3 lands on the `bar` at 5. It
+ * skips for `#` too, which is the part that looks wrong and is measured: `#` on
+ * that same comma also lands on the `bar` at 5, and it can only do that by having
+ * found it forward. The two commands differ in the direction the search runs
+ * afterwards, not in which keyword they take.
+ */
+function wordRunAt(text: string, pos: number): WordRun | null {
+	const stop = lineEndExclusive(text, pos);
+	const identifier = identifierRunAt(text, pos, stop);
+	if (identifier !== null) return { ...identifier, anchored: true };
+	// No identifier on the rest of the line, so any non-blank text will do — which
+	// on a line of nothing but dots means the dots. It reaches left over its own
+	// class only and right over everything non-blank, so the run in `a..` from
+	// either dot is both of them (measured: `*` at 1 and at 2 both land on 1).
+	let first = -1;
+	for (let at = pos; at < stop; at = nextChar(text, at)) {
+		if (charClass(text, at) !== BLANK) {
+			first = at;
+			break;
+		}
+	}
+	if (first < 0) return null;
+	const cls = charClass(text, first);
+	const begin = lineStart(text, first);
+	let start = first;
+	while (start > begin) {
+		const back = prevChar(text, start);
+		if (charClass(text, back) !== cls) break;
+		start = back;
+	}
+	let end = nextChar(text, first);
+	while (end < stop && charClass(text, end) !== BLANK) end = nextChar(text, end);
+	return { word: text.slice(start, end), start, end, anchored: false };
+}
+
+/**
+ * The characters `*` and `#` put a backslash in front of, and the `?` one only a
+ * `#` needs.
+ *
+ * Transcribed from `nv_ident` (`normal.c:3594`): the pattern is not escaped into
+ * being literal, so `*` on a run holding `(` builds a pattern that does not
+ * compile and the search fails — which is what happens here too, since
+ * {@link compileSearchPattern} catches the throw.
+ */
+const STAR_WORD_SPECIALS = "/.*~[^$\\";
+
+function escapeStarWord(word: string, forPound: boolean): string {
+	const specials = forPound ? `${STAR_WORD_SPECIALS}?` : STAR_WORD_SPECIALS;
+	let out = "";
+	for (const ch of word) out += specials.includes(ch) ? `\\${ch}` : ch;
+	return out;
+}
+
+/**
+ * Every run of `word` in the buffer, as the half-open range it covers.
+ *
+ * The runs come from {@link identifierRunAt}, so they are the words the `w`/`b`/`e`
+ * motions step over and `*` searches for the word a Chinese motion would step
+ * over, rather than a `\b`-anchored pattern that cannot name one. Compared as
+ * strings, which also keeps a keyword out of the regex metacharacter problem: a
+ * run is made of one class of character, so there is nothing in one for a `.` or
+ * a `(` to mean — and matching the whole string rather than a prefix is what
+ * makes `*` on `👍👍👍` find nothing beside it (measured: the two-emoji run after it
+ * is not a match, and the caret stays put).
+ *
+ * The whole buffer, not one line: a search steps over lines even though the run
+ * `*` looked at does not.
+ *
+ * Stepping by `run.end` only visits each run once because that is the run's real
+ * end: the run reaches left of wherever the scan started, so the offset handed to
+ * the next call is always off the word rather than inside it.
+ */
+function collectWordRuns(text: string, word: string): SearchMatch[] {
+	const out: SearchMatch[] = [];
+	let at = 0;
+	while (at < text.length) {
+		const run = identifierRunAt(text, at, text.length);
+		if (run === null) break;
+		if (run.word === word) out.push({ start: run.start, end: run.end });
+		at = run.end;
+	}
+	return out;
+}
+
+/**
  * `fn` applied to every run of `[from, to)` that is not inside a paste token, the
  * tokens themselves copied across untouched.
  *
@@ -853,12 +1256,41 @@ export function motionWordEndHere(text: string, pos: number, big = false): numbe
 	return i;
 }
 
+/**
+ * The first non-blank of the line containing `pos` — where `I` inserts, and
+ * where a linewise paste leaves the caret.
+ *
+ * A line that is nothing but blanks has no first non-blank, and the honest
+ * answer is the line's own end: in this engine that is the break, which is
+ * exactly where `I` types on a line of blanks. Callers that need a *character*
+ * there rather than a position are `motionBeginline` below.
+ */
 export function motionFirstNonBlank(text: string, pos: number): number {
 	const start = lineStart(text, pos);
 	const end = lineEndExclusive(text, pos);
 	let i = start;
 	while (i < end && (text[i] === " " || text[i] === "\t")) i++;
 	return i;
+}
+
+/**
+ * `motionFirstNonBlank`, but never past the last character of the line.
+ *
+ * This is vim's `beginline(BL_WHITE | BL_FIX)` — what every goto runs after
+ * itself, `^` (`nv_beginline`) and `gg`/`G`/`+`/`-` (`nv_goto` and `nv_cmds.h:155`)
+ * among them. `BL_FIX` is the flag that makes `beginline` stop at the end of a
+ * blank-only line, and `check_cursor_col_win` (`misc2.c:560`) then steps the
+ * column back onto the last character it has, so `"  "` puts the caret on its
+ * second space and not on the break. An empty line has no character at all and
+ * stands on its own break, which is the one position in a line this engine
+ * allows and vim does not.
+ *
+ * The two differ, and measuring says so: on a blank-only line `I` types at the
+ * end of the blanks while `-` lands on the last one.
+ */
+function motionBeginline(text: string, pos: number): number {
+	const first = motionFirstNonBlank(text, pos);
+	return first === lineEndExclusive(text, pos) ? lineLastChar(text, pos) : first;
 }
 
 /**
@@ -894,7 +1326,7 @@ const MAXCOL = Number.MAX_SAFE_INTEGER;
 
 const WORD_MOTIONS = new Set(["w", "W", "b", "B", "e", "E"]);
 const FIND_MOTIONS = new Set(["f", "F", "t", "T"]);
-const LINEWISE_MOTIONS = new Set(["gg", "G", "j", "k"]);
+const LINEWISE_MOTIONS = new Set(["gg", "G", "j", "k", "+", "-"]);
 
 /** `d`, `c`, `y` — and `>`/`<`, whose doubled form shifts instead of editing. */
 type Operator = "d" | "c" | "y" | ">" | "<";
@@ -934,12 +1366,43 @@ export class VimEngine {
 	 */
 	#prefixPending = false;
 	/**
-	 * `/`, `?` and `:` open vim's own input line, which this engine does not have
-	 * (no search, no ex-commands). The keys go there and are dropped, until Enter
-	 * (which still submits) or Escape (which cancels the line): `/foo` used to arm a
-	 * find with its first `o` and open a line with its second.
+	 * `:` opens vim's ex command line, which this engine does not have. The keys go
+	 * there and are dropped, until Enter (which still submits) or Escape (which
+	 * cancels the line): `:s/x/` used to delete a character and type the rest.
+	 *
+	 * `/` and `?` have their own latch, {@link #search}, because their line does
+	 * something on Enter rather than nothing.
 	 */
 	#inputPending = false;
+	/**
+	 * The `/` or `?` line being typed: which way it searches, the count that came
+	 * before the separator (`2/pat` is the second match), and the pattern so far.
+	 *
+	 * A latch of its own rather than a mode on {@link #inputPending}, because the
+	 * two lines end differently — one of them runs a search and the other is
+	 * dropped — and because this one has to accumulate a string, which no other
+	 * latch here does.
+	 */
+	#search: { forward: boolean; count: number; line: string } | null = null;
+	/**
+	 * The last search, for `n` and `N` and for a `/` line left empty.
+	 *
+	 * Written whether or not the search found anything, and whether or not the
+	 * pattern even compiled, which is the whole reason it is a field and not a
+	 * derived value: after `/a<CR>/zzz<CR>` the caret stands where `/a` left it and
+	 * `n` finds nothing, and after `/a<CR>/(<CR>` `n` finds nothing either, because
+	 * the broken pattern is the one that replaced the working one (both measured on
+	 * vim 9.1). Recording only the searches that worked would make `n` resume `a`
+	 * in the first case; keeping the text rather than a compiled expression is what
+	 * makes the second one fall out, since `n` recompiles, the compile fails, and
+	 * nothing moves.
+	 *
+	 * The word search is a kind of its own rather than a `\<word\>` pattern, for
+	 * the reason the header gives: `\<` is a JavaScript `\b`, which knows nothing
+	 * of CJK, so the pattern vim uses here would find nothing where vim finds the
+	 * next `中文`.
+	 */
+	#lastSearch: LastSearch | null = null;
 	#countBuffer = "";
 	/** Whether the count `#takeCount` last returned was typed or the implicit 1. */
 	#countExplicit = false;
@@ -1000,6 +1463,7 @@ export class VimEngine {
 			// the way Ctrl+C leaves vim's own command line.
 			this.#prefixPending = false;
 			this.#inputPending = false;
+			this.#search = null;
 			if (input === "r") {
 				this.#ops.redo();
 				this.#forgetCurswant(); // the restored caret is the new wanted column
@@ -1015,7 +1479,35 @@ export class VimEngine {
 			return true; // the name, or the Escape that cancels it, is consumed
 		}
 
-		// vim's `/`, `?` and `:` input line: it holds every key up to Enter or Escape.
+		// vim's `/` and `?` line: it holds every key up to Enter or Escape, and Enter
+		// is the one that runs the search.
+		if (this.#search !== null) {
+			if (key.escape) {
+				this.#search = null;
+				return true;
+			}
+			if (key.return) {
+				const pending = this.#search;
+				this.#search = null;
+				this.#runSearchLine(pending);
+				return true; // Enter is the search's, not the host's (see the header)
+			}
+			if (key.backspace) {
+				// vim edits the pattern with <BS>, one character at a time — a code
+				// point, so a surrogate pair or an accent goes as one.
+				const line = this.#search.line;
+				if (line !== "") this.#search.line = line.slice(0, prevChar(line, line.length));
+				return true;
+			}
+			// Everything else belongs to the line. `<Del>` and the arrows land here
+			// and change nothing, which is what they do on vim's command line: the
+			// caret is at the end of the line as it is typed, so there is no
+			// character after it to delete.
+			if (this.#search.line.length < MAX_SEARCH_PATTERN) this.#search.line += input;
+			return true;
+		}
+
+		// vim's `:` input line: it holds every key up to Enter or Escape.
 		if (this.#inputPending) {
 			if (key.escape) {
 				this.#inputPending = false;
@@ -1029,8 +1521,10 @@ export class VimEngine {
 		}
 
 		if (this.mode === "visual" || this.mode === "visual-line") {
+			this.#onCharacter();
 			return this.#handleVisual(input, key);
 		}
+		this.#onCharacter();
 		return this.#handleNormal(input, key);
 	}
 
@@ -1053,11 +1547,35 @@ export class VimEngine {
 		this.#visualPendingG = false;
 		this.#prefixPending = false;
 		this.#inputPending = false;
+		this.#search = null;
 		this.#countBuffer = "";
 	}
 
 	#clamp(pos: number): number {
 		return Math.max(0, Math.min(pos, this.#ops.getText().length));
+	}
+
+	/**
+	 * vim's `check_cursor_col_win` (`misc2.c:560`): in NORMAL — and in Visual
+	 * with the default `'selection'` of `old` — the caret is on a character, and a
+	 * column at or past the end of the line steps back onto the last one. Only
+	 * Insert, Select and `'virtualedit'` are allowed to sit there.
+	 *
+	 * The host hands us that column freely (it is where a text field puts a caret,
+	 * and it is where a paste at the end leaves it), and nothing downstream
+	 * expects it: `x`, `r`, `d`, `c` and `*` all read a word or a character at the
+	 * caret and would silently do nothing. The `w` motion already refuses to park
+	 * there for the same reason (`snapToChar`); this is the one place the position
+	 * can arrive from outside.
+	 */
+	#onCharacter(): void {
+		const text = this.#ops.getText();
+		if (this.#ops.getCursor() < text.length) return;
+		// An empty buffer, or a trailing newline that opens an empty last line,
+		// keeps the caret where it is: that position already is a real character
+		// position, a line with no character of its own to stand on.
+		this.#ops.setCursor(settleCursor(text, this.#ops.getCursor()));
+		this.#wantHere();
 	}
 
 	/**
@@ -1220,7 +1738,10 @@ export class VimEngine {
 				else this.#applyLinewise(operator, effective);
 				return true;
 			}
-			if (WORD_MOTIONS.has(input) || ["0", "^", "$", "|", "G", "j", "k", "h", "l", " "].includes(input)) {
+			if (
+				WORD_MOTIONS.has(input) ||
+				["0", "^", "$", "|", "G", "j", "k", "h", "l", " ", "*", "#", "+", "-"].includes(input)
+			) {
 				this.#pending = null;
 				const effective = count * this.#takeCount();
 				// `d<Space>` is `dl` — Space is `l` with 'whichwrap' letting it wrap,
@@ -1273,12 +1794,17 @@ export class VimEngine {
 				return true;
 			}
 			if (input === "/" || input === "?" || input === ":") {
-				// `d/foo` deletes up to the next match. There is no search here, so the
-				// motion cannot land and the operator goes with it — and the input that
-				// follows goes where vim's command line is, not into the buffer
-				// (`d/foo` used to end in an `o`, opening a line).
+				// `d/foo` deletes up to the next match. The operator would have to wait
+				// for a pattern that has not been typed yet — a second latch open at
+				// once — so it is dropped and the search runs on its own: the caret
+				// moves, nothing is deleted. (The input that follows goes where vim's
+				// command line is, not into the buffer: `d/foo` used to end in an `o`,
+				// opening a line.)
 				this.#resetPending();
-				this.#inputPending = true;
+				if (input === ":") this.#inputPending = true;
+				// The count stays the operator's own: `2d/foo` is two deletions, not the
+				// second match, and the deletion is not happening anyway.
+				else this.#search = { forward: input === "/", count: 1, line: "" };
 				return true;
 			}
 			// Unknown key under an operator: cancel and swallow (vim behavior).
@@ -1297,12 +1823,27 @@ export class VimEngine {
 					// `2gg` is line 2, on its first non-blank — the count is a line
 					// number, not a repetition.
 					const text = this.#ops.getText();
-					this.#ops.setCursor(motionFirstNonBlank(text, nthLineStart(text, Math.min(count, lineCount(text)) - 1)));
+					this.#ops.setCursor(motionBeginline(text, nthLineStart(text, Math.min(count, lineCount(text)) - 1)));
 					this.#wantHere(); // beginline is a move: it discards a pending `$`
 				}
 			} else if (input === "J" && !operator) {
 				// `gJ`: join without the space, and keep the next line's indent.
 				this.#joinLines(count, true);
+			} else if (input === "*" || input === "#") {
+				// `g*` and `g#` are the same search as `*` and `#`, and `dg*` is the
+				// same range as `d*` — `nv_ident` reads `cap->cmdchar == 'g'` only to
+				// decide on the anchor and never asks whether an operator is waiting.
+				//
+				// The anchor is what the two spellings differ by, and it is redundant
+				// either way: `if (!g_cmd && vim_iswordp(ptr))` adds a leading `\<` to
+				// a pattern that is already the whole maximal run, and when the run
+				// does not start with a word character — the punctuation `*` searches
+				// for as itself — `*` gets no anchor either. Measured on 25 positions
+				// over nine buffers, `g*` answered where `*` answered every time,
+				// `foobar` at 1 and `foofoo` at 3 among them, which are the cases the
+				// two spellings are documented to separate.
+				if (operator) this.#applyOperator(operator, input, count, undefined, explicit);
+				else this.#identCommand(input, count);
 			}
 			return true; // any non-g key after g is swallowed
 		}
@@ -1444,7 +1985,11 @@ export class VimEngine {
 				this.#wantHere(); // beginline is a move: it discards a pending `$`
 				return true;
 			case "^":
-				this.#ops.setCursor(motionFirstNonBlank(this.#ops.getText(), this.#ops.getCursor()));
+				this.#ops.setCursor(motionBeginline(this.#ops.getText(), this.#ops.getCursor()));
+				// `beginline` is a move of its own, and it discards a pending wanted
+				// column the way `0`, `gg` and `G` do: without this `^j` keeps the
+				// column the caret had before the `^` and lands beside it.
+				this.#wantHere();
 				return true;
 			case "$":
 				this.#dollar(count);
@@ -1464,7 +2009,7 @@ export class VimEngine {
 				// that same spot on line n. Either way the cursor lands on a
 				// character, so `Gx` deletes one instead of doing nothing.
 				const line = explicitCount ? Math.min(count, lineCount(text)) - 1 : lineCount(text) - 1;
-				this.#ops.setCursor(motionFirstNonBlank(text, nthLineStart(text, line)));
+				this.#ops.setCursor(motionBeginline(text, nthLineStart(text, line)));
 				// `beginline` is a move of its own: it discards a pending MAXCOL.
 				this.#wantHere();
 				return true;
@@ -1474,6 +2019,10 @@ export class VimEngine {
 				return true;
 			case "k":
 				this.#vertical(-count);
+				return true;
+			case "+":
+			case "-":
+				this.#beginlineDown(input === "+" ? count : -count);
 				return true;
 			case "x":
 				this.#deleteChars(count);
@@ -1555,8 +2104,36 @@ export class VimEngine {
 				return true;
 			case "/":
 			case "?":
+				// The search line, which Enter runs. A count in front of the separator is
+				// the number of matches to step over rather than a repetition, and it
+				// wraps: `2/a` on `a a a` at 0 lands on the `a` at 4, and `3/a` back on
+				// the one at 0 (measured).
+				this.#resetPending();
+				this.#search = { forward: input === "/", count, line: "" };
+				return true;
+			case "n":
+			case "N": {
+				// vim has no message area to say E35 in, so with no last search `n` and
+				// `N` are a no-op rather than an error the user can see.
+				if (this.#lastSearch === null) return true;
+				// `n` repeats in the direction the last search ran, `N` in the other
+				// one, and neither of them changes which that was — a second `N` goes
+				// the same way the first did.
+				this.#runSearch(
+					this.#lastSearch,
+					input === "n" ? this.#lastSearch.forward : !this.#lastSearch.forward,
+					count,
+					this.#ops.getCursor(),
+				);
+				return true;
+			}
+			case "*":
+			case "#": {
+				this.#identCommand(input, count);
+				return true;
+			}
 			case ":":
-				// vim's command line opens here. This engine has none, so the input is
+				// vim's ex command line opens here. This engine has none, so the input is
 				// taken and dropped (see #inputPending).
 				this.#resetPending();
 				this.#inputPending = true;
@@ -1697,6 +2274,28 @@ export class VimEngine {
 		return true;
 	}
 
+	/**
+	 * `+` and `-`: vim binds them to `nv_down` and `nv_up` (`nv_cmds.h:155`) and
+	 * then `beginline(BL_WHITE | BL_FIX)`, so it is a line down — or up, or a count
+	 * of them — followed by the first non-blank of the line landed on. `nv_down`
+	 * refuses before touching anything when there is no line that way, which is why
+	 * `+` on the last line leaves the caret on the last character rather than
+	 * taking the line's first non-blank; a count that merely overshoots is a
+	 * different thing and clamps, as `j` does.
+	 *
+	 * Not `#vertical`, which recalls history when the buffer holds no line break:
+	 * `+` is not a history key in vim, and a single-line buffer here must not
+	 * answer `+` with the user's earlier prompt.
+	 */
+	#beginlineDown(deltaLines: number): void {
+		const text = this.#ops.getText();
+		const from = lineOf(text, this.#ops.getCursor());
+		const target = Math.max(0, Math.min(lineCount(text) - 1, from + deltaLines));
+		if (target === from) return;
+		this.#ops.setCursor(motionBeginline(text, nthLineStart(text, target)));
+		this.#wantHere();
+	}
+
 	/** Raw position of the [count]'th occurrence of `char` on the current line, or null. */
 	#findOnLine(char: string, forward: boolean, count: number): number | null {
 		const text = this.#ops.getText();
@@ -1745,6 +2344,136 @@ export class VimEngine {
 		if (found === null) return;
 		// t/T land one short of the match; f/F land on it.
 		this.#ops.setCursor(snapToChar(text, till ? found + (forward ? -1 : 1) : found));
+		this.#wantHere();
+	}
+
+	/**
+	 * Run the search a `/` or `?` line describes, and remember it.
+	 *
+	 * An empty pattern is not a search for nothing: vim repeats the last one, in the
+	 * direction the *separator* names rather than the direction it ran in. Measured:
+	 * `#` on the last `foo` of `foo a foo b foo` lands on the middle one, and `/<CR>`
+	 * then goes forward to the one it came from; `?<CR>` instead goes back to the
+	 * first. So the separator is the direction, and it is remembered — an `n` after
+	 * `/<CR>` goes on forward from there, and an `N` goes back.
+	 *
+	 * With no last search to repeat, this moves nothing, which is all that can be
+	 * done about vim's E35 here.
+	 */
+	#runSearchLine(line: { forward: boolean; count: number; line: string }): void {
+		const parsed = parseSearchLine(line.line, line.forward ? "/" : "?");
+		if (parsed.pattern === "") {
+			if (this.#lastSearch === null) return;
+			this.#lastSearch = { ...this.#lastSearch, forward: line.forward };
+			this.#runSearch(this.#lastSearch, line.forward, line.count, this.#ops.getCursor());
+			return;
+		}
+		const search = {
+			kind: "pattern",
+			pattern: parsed.pattern,
+			forward: line.forward,
+			toEnd: parsed.toEnd,
+		} as const;
+		// Written before the search runs and whether or not it finds anything: a
+		// search that matched nothing is still the last search, and `n` has to fail
+		// rather than fall back on the pattern that used to work.
+		this.#lastSearch = search;
+		this.#runSearch(search, line.forward, line.count, this.#ops.getCursor());
+	}
+
+	/**
+	 * The search `*` or `#` runs from `from`, and where it starts, or `null` when
+	 * there is no run under the caret to search for.
+	 *
+	 * One function for the command and the motion, because vim's is one: `nv_ident`
+	 * builds the pattern and hands it to `normal_search` without asking whether an
+	 * operator is pending, so `d*` searches exactly what `*` searches and the
+	 * operator's range is the landing and the caret. Measured on `aa bb aa bb aa`,
+	 * where the two directions part company: from 0, `*` lands on 6 and takes the
+	 * first six characters, `#` lands on 12 and takes twelve.
+	 *
+	 * The last search is stored here, in both callers. vim stores it in both too —
+	 * `add_to_history(HIST_SEARCH, ...)` is above the point where the search runs,
+	 * with no test of `op_pending` in between — which is what makes `n` after a
+	 * `d*` search for the same word (measured: `y*` then `n` on `foo bar foo` lands
+	 * on the 8).
+	 */
+	/**
+	 * The bare `*`/`#` command, and the `g*`/`g#` spellings with it.
+	 *
+	 * Nothing to search for: vim says E348 and moves nothing, and with nothing to
+	 * say it, moving nothing is the whole of it — measured on the trailing comma of
+	 * `foo,`, and on a line whose rest is blank with a word on the next one.
+	 */
+	#identCommand(input: string, count: number): void {
+		const id = this.#identSearch(input === "*", this.#ops.getCursor());
+		if (id === null) return;
+		// From the run's own first character rather than the caret, which is
+		// `nv_ident`'s `curwin->w_cursor.col = ptr - ml_get_curline()` and the reason
+		// `*` on the space at 7 of `foo bar foo` comes back round to the `foo` at 0
+		// instead of stopping on the one at 8 the caret is a character from.
+		this.#runSearch(id.search, input === "*", count, id.from);
+	}
+
+	#identSearch(forward: boolean, from: number): { search: LastSearch; from: number } | null {
+		const run = wordRunAt(this.#ops.getText(), from);
+		if (run === null) return null;
+		// A punctuation run is a pattern rather than a word, so it is escaped the way
+		// vim escapes it and searched for as written rather than against a run of its
+		// own length. `#` escapes the other way round, which is `nv_ident`'s
+		// `"/?.*~[^$\\"`.
+		const search: LastSearch = run.anchored
+			? { kind: "word", word: run.word, forward }
+			: { kind: "text", text: escapeStarWord(run.word, !forward), forward };
+		this.#lastSearch = search;
+		return { search, from: run.start };
+	}
+
+	/**
+	 * Where the `count`th match of `search` from `from` puts the caret, or `null`
+	 * when it finds nothing.
+	 *
+	 * `from` is the caret for everything that came from typing a pattern, and the
+	 * keyword's own first character for `*` and `#`. The offset moves the caret to
+	 * the match's last character, and it is that position the search compares, in
+	 * both directions — see {@link nthSearchMatch}, which is where the measurement
+	 * is written down.
+	 *
+	 * Split out of {@link #runSearch} so a motion can ask the same question without
+	 * moving anything, which is all an operator needs: `d*` is the bare `*`'s
+	 * landing and the caret, as a range.
+	 */
+	#searchLanding(search: LastSearch, forward: boolean, count: number, from: number): number | null {
+		const text = this.#ops.getText();
+		let matches: SearchMatch[];
+		if (search.kind === "word") {
+			matches = collectWordRuns(text, search.word);
+		} else {
+			// A text search is already a pattern — `escapeStarWord` did the escaping — so
+			// it goes through the same door, and a `*` on a run holding an unbalanced
+			// `(` fails to compile and moves nothing here as it does in vim.
+			const re = compileSearchPattern(search.kind === "text" ? search.text : search.pattern);
+			// A pattern that does not compile and one that matches nothing are the same
+			// thing here: there is no position to land on. vim says E54 and E486 for the
+			// two, and there is nowhere here to say either.
+			if (re === null) return null;
+			matches = collectSearchMatches(text, re);
+		}
+		const toEnd = search.kind === "pattern" ? search.toEnd : false;
+		const hit = nthSearchMatch(matches, from, forward, count, toEnd);
+		return hit === null ? null : snapToChar(text, searchLanding(hit, toEnd));
+	}
+
+	/**
+	 * Land on the `count`th match of `search` from `from`, or move nothing.
+	 *
+	 * A search that found nothing is a failed motion: the wanted column is left
+	 * alone, so a `$j/fz j` still comes back to the end of the line.
+	 */
+	#runSearch(search: LastSearch, forward: boolean, count: number, from: number): void {
+		const landing = this.#searchLanding(search, forward, count, from);
+		if (landing === null) return;
+		this.#ops.setCursor(landing);
 		this.#wantHere();
 	}
 
@@ -1932,7 +2661,7 @@ export class VimEngine {
 			}
 			const out = text.slice(0, insertAt) + block + text.slice(insertAt);
 			// On the first non-blank of the line just pasted (vim), not on the break.
-			this.#ops.setAll(out, motionFirstNonBlank(out, anchor));
+			this.#ops.setAll(out, motionBeginline(out, anchor));
 			finish();
 			return;
 		}
@@ -2053,12 +2782,12 @@ export class VimEngine {
 			firstLine = targetLine === -1 ? 0 : targetLine;
 			// `gg` and `G` are nv_goto: both land on the first non-blank of the line
 			// they name, whether that is above or below the caret.
-			landing = motionFirstNonBlank(text, nthLineStart(text, firstLine));
+			landing = motionBeginline(text, nthLineStart(text, firstLine));
 		} else if (motion === "G") {
 			lastLine = targetLine === -1 ? lineCount(text) - 1 : targetLine;
-			landing = motionFirstNonBlank(text, nthLineStart(text, lastLine));
+			landing = motionBeginline(text, nthLineStart(text, lastLine));
 		} else {
-			const delta = motion === "j" ? count : -count;
+			const delta = motion === "j" || motion === "+" ? count : -count;
 			// A count past the end of the buffer clamps, as a bare `j`/`k` does:
 			// `5dj` from the top line takes every line under it. A motion that
 			// cannot move at all (`dj` on the last line, `dk` on the first) is
@@ -2071,7 +2800,12 @@ export class VimEngine {
 				lastLine = cursorLine;
 			}
 			// `j`/`k` land on the line they reach, at the column the caret wants.
-			landing = this.#columnOn(target, this.#wantColumn());
+			// `+`/`-` are the same move with `beginline` after it (nv_cmds.h:155),
+			// so they land on the first non-blank of the line they reach.
+			landing =
+				motion === "+" || motion === "-"
+					? motionBeginline(text, nthLineStart(text, target))
+					: this.#columnOn(target, this.#wantColumn());
 		}
 		// A counted `G`/`gg` can name a line on either side of the caret.
 		return { firstLine: Math.min(firstLine, lastLine), lastLine: Math.max(firstLine, lastLine), landing };
@@ -2196,6 +2930,20 @@ export class VimEngine {
 			return { start: Math.min(from, target), end: Math.max(from, target), inclusive: false };
 		}
 
+		// `d*`/`y*` and `d#`/`y#` are the bare command's own search, used as a range
+		// between where it lands and the caret — see {@link #identSearch}, which
+		// carries the measurement. The range is open at the far end in both
+		// directions, so `d*` from 0 on `aa bb aa bb aa` takes `aa bb ` and leaves the
+		// caret on the 0, and `d#` from 0 takes the twelve characters up to the 12.
+		// No run under the caret is E348, which is no range at all.
+		if (motion === "*" || motion === "#") {
+			const id = this.#identSearch(motion === "*", from);
+			if (id === null) return null;
+			const target = this.#searchLanding(id.search, motion === "*", count, id.from);
+			if (target === null) return null;
+			return { start: Math.min(from, target), end: Math.max(from, target), inclusive: false };
+		}
+
 		let target = from;
 		let inclusive = false;
 		switch (motion) {
@@ -2220,7 +2968,7 @@ export class VimEngine {
 				target = lineStart(text, from);
 				break;
 			case "^":
-				target = motionFirstNonBlank(text, from);
+				target = motionBeginline(text, from);
 				break;
 			case "$": {
 				// `[count]$` aims at the end of the line count-1 further down. The steps
@@ -2551,7 +3299,7 @@ export class VimEngine {
 				return true;
 			case "^":
 				this.#visualPastEnd = false;
-				this.#ops.setCursor(motionFirstNonBlank(text, this.#ops.getCursor()));
+				this.#ops.setCursor(motionBeginline(text, this.#ops.getCursor()));
 				this.#syncSelection();
 				this.#wantHere();
 				return true;
@@ -2575,7 +3323,7 @@ export class VimEngine {
 				return true;
 			case "G":
 				this.#visualPastEnd = false;
-				this.#ops.setCursor(motionFirstNonBlank(text, nthLineStart(text, lineCount(text) - 1)));
+				this.#ops.setCursor(motionBeginline(text, nthLineStart(text, lineCount(text) - 1)));
 				this.#syncSelection();
 				this.#wantHere();
 				return true;

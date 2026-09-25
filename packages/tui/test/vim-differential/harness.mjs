@@ -131,6 +131,7 @@ export function runVim(text, cursor, kseq) {
  * two different key sequences.
  */
 const TERMINAL_KEYS = {
+	"\r": { return: true },
 	"\x7f": { backspace: true },
 	"\x1b[3~": { delete: true },
 	"\x1b[4~": { end: true },
