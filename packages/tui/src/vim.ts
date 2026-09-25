@@ -1680,12 +1680,346 @@ function paragraphObject(
 }
 
 /**
- * Whether a multi-line charwise *delete* of `[start, end)` is linewise after
- * all — the "strange Vi behaviour" of ops.c:810-825, which is still vim's
- * behaviour because `'cpoptions'` has kept its `z` (CPO_WORD) since 7.4.
+ * The bracket pairs `i(`/`a(` and their siblings name, keyed by *both*
+ * spellings of each: `i)` is `i(` and `a]` is `a[`. Vim's `'matchpairs'`
+ * default is `(:),[:],{:},<:>`, and `current_block` looks for the pair it is
+ * given with `ccheck`/`ccommand` (textobject.c), so a bracket of any *other*
+ * kind is an ordinary character to the scan: `di[` inside `f(a)[b]` reaches
+ * the `[b]` and steps over the parentheses without noticing them.
+ *
+ * `b` and `B` are the remaining two spellings, and only here. `nv_object`
+ * (normal.c:7238, :7243) falls through `case 'b': case '(': case ')'` to the
+ * same `current_block` call, so `dib` is `di(` — which is a *different* code
+ * path from the `b` motion `db`, and so the two coexist rather than collide.
+ * `dib` on `x{a{b}c}` fails for want of a `()` just as `diB` does.
+ */
+const BLOCK_PAIRS: Record<string, readonly [string, string]> = {
+	"(": ["(", ")"],
+	")": ["(", ")"],
+	b: ["(", ")"],
+	"[": ["[", "]"],
+	"]": ["[", "]"],
+	"{": ["{", "}"],
+	"}": ["{", "}"],
+	B: ["{", "}"],
+	"<": ["<", ">"],
+	">": ["<", ">"],
+};
+
+/**
+ * The opening bracket of the innermost pair that reaches `pos`, scanning left
+ * over the pair's own nesting: a `close` steps one level in, an `open` either
+ * steps back out or, at level zero, is the one being looked for. `pos` itself
+ * is scanned as an ordinary character — the caller decides what to make of a
+ * caret that is standing on a bracket.
+ */
+function enclosingOpen(text: string, pos: number, open: string, close: string): number {
+	let depth = 0;
+	for (let i = Math.min(pos, text.length - 1); i >= 0; i--) {
+		const ch = text[i];
+		if (ch === close) depth++;
+		else if (ch === open) {
+			if (depth === 0) return i;
+			depth--;
+		}
+	}
+	return -1;
+}
+
+/** The `close` that matches the `open` at `open`, or -1 when it has none. */
+function matchingClose(text: string, open: number, pair: readonly [string, string]): number {
+	const [o, c] = pair;
+	let depth = 0;
+	for (let i = open; i < text.length; i++) {
+		if (text[i] === o) depth++;
+		else if (text[i] === c && --depth === 0) return i;
+	}
+	return -1;
+}
+
+/**
+ * `i(`/`a(` and the other three pairs — `current_block` (textobject.c), which
+ * is a bracket scan and nothing more: it does not know about strings, so `di(`
+ * inside `"f(a)"` takes the parentheses *in the string*, which is what vim
+ * does and what this measures.
+ *
+ * The object is the innermost pair that *reaches* the caret, brackets
+ * included: a caret standing on either bracket of a pair is inside that pair,
+ * which is what makes `di(` on the `(` of `foo(bar)` take `bar` rather than
+ * the pair around it. When no pair reaches the caret the search runs forward
+ * instead, and takes the next opening bracket that is not already inside a
+ * block and that has a mate — so `di(` typed before a call reaches it, `di[`
+ * typed inside `f(a)[b]` reaches the `[b]`, and `di(` typed in front of a
+ * stray `)` reaches nothing at all, which is a FAIL. See {@link nextOpen}.
+ *
+ * A count is a number of levels *outward* from the innermost pair, and a count
+ * with nothing left to grow into fails the whole object rather than keeping the
+ * one that was found: `d2i(` on the outermost pair changes nothing, while
+ * `2iw` at the end of a line still selects a word (`2iw` is a count of units,
+ * not of nesting levels, and the two are not the same rule).
+ *
+ * Half-open `[start, end)`, brackets included or not, or `null` when there is
+ * no block. The range is the one {@link blockRange} computes, which is not
+ * always a span: an object can come back linewise, and one shape comes back
+ * with its end behind its start.
+ */
+function blockObject(
+	text: string,
+	pos: number,
+	count: number,
+	include: boolean,
+	pair: readonly [string, string],
+): BlockRange | null {
+	const [open, close] = pair;
+	// A caret on a bracket belongs to the pair that bracket is part of, so the
+	// scan starts beside it rather than on it — walking left over a `)` would
+	// step a level in and find the pair *around* this one.
+	let o = -1;
+	// Which way the search went decides what a count means, and the two are
+	// opposite. `current_block` re-runs the *same* search `count` times from
+	// wherever the last one landed (textobject.c:1091-1108), so a backward search
+	// walks outward to the enclosing pair while a forward one walks inward to the
+	// nested one: `d2i(` from outside `x(a(b(c)d)e)y` deletes `b(c)d`. A forward
+	// search therefore has to find that nesting to spend a count on — `d2i(` on
+	// `x = "f(a)"; g(b)` fails, because the second sweep comes back with nothing:
+	// the `)` after `a` leaves the count one level deep, and the `(g)` that
+	// follows only steps back down to it. See {@link nextOpen}.
+	let forward = false;
+	if (pos < text.length && text[pos] === open) o = pos;
+	else {
+		const from = pos < text.length && text[pos] === close ? pos - 1 : pos;
+		o = enclosingOpen(text, from, open, close);
+		if (o < 0) {
+			o = nextOpen(text, pos + 1, pair);
+			if (o < 0) return null;
+			forward = true;
+		}
+	}
+	// The mate is looked up *after* the count, and only then. That ordering is
+	// the whole of `d2i(` on `f(a b(c)d`: the first search lands on the `(` at
+	// 1, which nothing closes, so the object is a FAIL — while the second search
+	// steps inside it and lands on `(c)`, which closes, and the command works.
+	// `di(` on the same text does nothing at all.
+	let c = matchingClose(text, o, pair);
+	for (let level = 1; level < count; level++) {
+		const next = forward
+			? nextOpen(text, o + 1, pair)
+			: enclosingOpen(text, o - 1, open, close);
+		if (next < 0) return null;
+		o = next;
+		c = matchingClose(text, o, pair);
+	}
+	if (c < 0) return null;
+	return blockRange(text, o, c, include);
+}
+
+/**
+ * The next opening bracket a *forward* `findmatch` sweep can come back with —
+ * `findmatchlimit(NULL, what, FM_FORWARD, 0)` (search.c:2175-2240 for the setup,
+ * 2810-2820 for the count).
+ *
+ * `FM_FORWARD` overrides the direction `find_mps_values` picked, and what is left
+ * is a sweep that counts a `close` *up* and hands back an `open` at count zero.
+ * That is not a scan for the first `(`: the count is what makes it walk into a
+ * block rather than over it, and it is the whole of two measured failures.
+ *
+ *   - `di(` on `a) b(c)` and on `a)\nb(c)` fails, for the same reason: the `)` at
+ *     1 puts the sweep one level deep, and the `(` behind it is not an answer —
+ *     on one line or across two, which is the level surviving a line break.
+ *     Taking it anyway invents a block vim never had. `di(` on `f(a)b)(c)` at 0
+ *     is the contrast that shows the count is doing the work: the sweep sees the
+ *     `)` at 2 *and* the `(` at 5, so it is back at zero when it reaches the `(`
+ *     at 1, and that one is an answer.
+ *   - `d2i(` on `f(x)((y)` takes `(y)`. The second sweep starts just past the `(`
+ *     the first one found and runs to the end of the buffer, past the close of
+ *     that bracket: the level is back to zero at the second `(` and that is the
+ *     one it returns. Bounding the sweep at the bracket's own close — which is
+ *     what it used to do — stops one character short and fails the object.
+ *
+ * `from` is the position to start *after*: the sweep moves before it examines
+ * anything, so the character under the cursor is never counted.
+ */
+function nextOpen(text: string, from: number, pair: readonly [string, string]): number {
+	const [open, close] = pair;
+	let level = 0;
+	for (let i = Math.max(0, from); i < text.length; i++) {
+		const ch = text[i];
+		if (ch === close) level++;
+		else if (ch === open) {
+			if (level === 0) return i;
+			level--;
+		}
+	}
+	return -1;
+}
+
+/**
+ * The object `current_block` hands the operator, as a range in the buffer.
+ *
+ * `end` is exclusive and `linewise` says whether the two are whole lines.
+ * Neither is enough on its own: `current_block` deals in *positions*, and three
+ * separate pieces of `do_pending_operator` turn one into a range before any
+ * operator runs. See {@link blockRange}.
+ */
+interface BlockRange {
+	start: number;
+	end: number;
+	/** Whether the character under the end position is part of the range. */
+	inclusive: boolean;
+	linewise: boolean;
+	firstLine: number;
+	lastLine: number;
+	/** `current_block` found nothing between the brackets to operate on. */
+	empty: boolean;
+}
+
+/**
+ * One `decl()` step (misc2.c:448), and the flag the walk in `current_block`
+ * tests to decide whether to go on.
+ *
+ * `decl` is `dec`, and a second `dec` when the first crossed a line *and* landed
+ * on a real column. `dec` at column zero moves to the line above and puts the
+ * column at that line's length — which is a position past its last character,
+ * so `decl`'s second step is what pulls it back onto one. A line holding
+ * nothing has length zero, there is no character to pull back onto, and `decl`
+ * stops with the cursor on the empty line itself. Its return value is 1 in both
+ * of those cases, which is what `current_block`'s `if (decl(...) != 0) break;`
+ * is reading, and at the start of the file it is -1.
+ */
+function declStep(text: string, p: number): { pos: number; stop: boolean } {
+	if (p > lineStart(text, p)) return { pos: p - 1, stop: false };
+	if (p === 0) return { pos: 0, stop: true };
+	// The line above ends at the break in front of `p`, so it starts after the
+	// break before *that* one — which is what tells an empty line from a full
+	// one, since an empty line's start and its own break are the same offset.
+	const aboveStart = text.lastIndexOf("\n", p - 2) + 1;
+	if (p - 1 === aboveStart) return { pos: aboveStart, stop: true };
+	return { pos: p - 2, stop: false };
+}
+
+/**
+ * `inindent` (indent.c:1101-1112): how far the current line's leading blanks
+ * reach, measured against the column. `extra` is the argument and the two calls
+ * differ on it — `inindent(0)` is true *on* the first non-blank, `inindent(1)`
+ * only strictly before it — which is the whole difference between an empty line
+ * (true at 0, false at 1) and a line of nothing but blanks (true at either).
+ */
+function inIndent(text: string, p: number, extra: number): boolean {
+	const ls = lineStart(text, p);
+	let col = 0;
+	while (text[ls + col] === " " || text[ls + col] === "\t") col++;
+	return col >= p - ls + extra;
+}
+
+/**
+ * The span of an *inner* object, in `current_block`'s own arithmetic
+ * (textobject.c:1128-1204).
+ *
+ * The loop body is `while (!include)`, so an `a` object skips all of it and is
+ * `[open, close + 1)`. An `i` object does four things in order, and each is
+ * observable:
+ *
+ *   - `incl(&start_pos)` steps over the opening bracket, and over the break
+ *     behind it when the bracket ends its line — so the object can begin on a
+ *     line of its own, which is what makes the rest come out differently.
+ *   - `sol` is the closing bracket standing at column zero, and the walk below
+ *     sets it too.
+ *   - `decl` puts the end on the character before the closing bracket, and
+ *     `while (inindent(1))` keeps stepping left over the indent in front of it.
+ *     A line of nothing but blanks is all indent and the walk crosses it; an
+ *     empty line is not, so the walk stops there.
+ *   - the emit has three arms (textobject.c:1190-1204): `sol` steps the end one
+ *     position on and leaves it non-inclusive, an end at or past the start takes
+ *     the character under it and is inclusive, and an end *behind* the start is
+ *     nothing at all — `curwin->w_cursor = start_pos`, which is where the caret
+ *     goes. `di(` on `a(\n)` changes no text and lands on the closing bracket,
+ *     because that is where the text would have begun.
+ *
+ * Then ops.c:4307-4329 has the last word, before any operator runs: a
+ * characterwise range whose end is at column zero of its line and which spans
+ * more than one line loses that line, and becomes *linewise* outright if it
+ * began on or before the first non-blank of its own line. That is why `di(`
+ * and `ci(` on `f(\n  a\n)` are the same edit with different tails, and why the
+ * `d`/`c` difference is not in the operator at all.
+ */
+function blockRange(text: string, open: number, close: number, include: boolean): BlockRange {
+	const firstLine = lineOf(text, open);
+	const lastLine = lineOf(text, close);
+	if (include) {
+		return { start: open, end: close + 1, inclusive: false, linewise: false, firstLine, lastLine, empty: false };
+	}
+	// Neither `incl` can fail here: a closing bracket stands after the opening
+	// one, so there is always a character past both.
+	const start = inclPos(text, open);
+	let sol = close === lineStart(text, close);
+	let cursor = declStep(text, close).pos;
+	for (;;) {
+		if (!inIndent(text, cursor, 1)) break;
+		sol = true;
+		const next = declStep(text, cursor);
+		cursor = next.pos;
+		if (next.stop) break;
+	}
+	// `else if (LTOREQ_POS(start_pos, curwin->w_cursor)) oap->inclusive = TRUE`
+	// — the third arm, an end *behind* the start, is the one the comment calls
+	// "no text in between <>, []", and it is reached the same way as a `sol`
+	// object whose break lands it back on the opening bracket: both leave the
+	// range with no length. ops.c:4277-4282 reads that as `oap->empty`, which
+	// `op_delete` returns on (ops.c:790) and `op_change` walks past into insert.
+	// It is read *before* the promotion below, so a range the promotion folds
+	// onto its own start is not empty.
+	const endPos = sol ? inclPos(text, cursor) : cursor;
+	if (endPos + (sol ? 0 : 1) <= start) {
+		return { start, end: start, inclusive: false, linewise: false, firstLine, lastLine, empty: true };
+	}
+	return promoteEnd(text, start, endPos, !sol);
+}
+
+/**
+ * ops.c:4307-4329, the adjustment every operator passes through on its way to
+ * `op_delete`/`op_yank`/`op_change`, and the reason a bracket object is
+ * linewise more often than its span suggests.
+ *
+ * `endPos` is a *position* the way vim's is, not an offset of the range's end:
+ * a non-inclusive end at column zero stops short of that line's first
+ * character while still covering the break in front of it, which is why
+ * `yi(` on `f(a\n\n)` reads back `a` and the break behind it.
+ */
+function promoteEnd(text: string, start: number, endPos: number, inclusive: boolean): BlockRange {
+	const firstLine = lineOf(text, start);
+	const lastLine = lineOf(text, Math.max(start, endPos));
+	const end = endPos + (inclusive ? 1 : 0);
+	if (inclusive || endPos !== lineStart(text, endPos) || lastLine === firstLine) {
+		return { start, end, inclusive, linewise: false, firstLine, lastLine, empty: false };
+	}
+	// The end was at the head of its own line, so the line goes back to the one
+	// above, and the range is linewise if it began in its own line's indent.
+	const above = lastLine - 1;
+	if (inIndent(text, start, 0)) {
+		return { start, end, inclusive, linewise: true, firstLine, lastLine: above, empty: false };
+	}
+	const aboveStart = nthLineStart(text, above);
+	// `oap->end.col = ml_get_len(oap->end.lnum); if (oap->end.col) { --oap->end.col;
+	// oap->inclusive = TRUE; }` — a line above holding nothing has no last
+	// character to move onto, so the end stays at its column zero and stays
+	// non-inclusive, and the range keeps the break in front of that line.
+	const lastChar = lineEndExclusive(text, aboveStart) - 1;
+	if (lastChar < aboveStart) {
+		return { start, end: aboveStart, inclusive: false, linewise: false, firstLine, lastLine: above, empty: false };
+	}
+	return { start, end: lastChar + 1, inclusive: true, linewise: false, firstLine, lastLine: above, empty: false };
+}
+
+/**
+ * Whether a multi-line charwise *delete* is linewise after all — the "strange
+ * Vi behaviour" of ops.c:810-829, which is still vim's behaviour because
+ * `'cpoptions'` has kept its `z` (CPO_WORD) since 7.4.
  *
  * All five conditions are load-bearing and each one is observable:
- *   - more than one line (`line_count > 1`);
+ *   - more than one line (`line_count > 1`), which vim counts from the end
+ *     *position* rather than from the last character the range covers, so a
+ *     non-inclusive end sitting at a line's first column still counts the line
+ *     it is on;
  *   - nothing but blanks behind the object on its last line, so the deletion
  *     would leave that line empty (`skipwhite` reaching the NUL);
  *   - the object starts at or before the first non-blank of its own line
@@ -1699,15 +2033,17 @@ function paragraphObject(
  * is how the gate was confirmed to be this rule and not the arithmetic below
  * it: `d2iw` on `"a\nb\nc"` leaves one line `c` by default and two lines
  * (`""`, `c`) with `set cpo-=z`.
+ *
+ * `endPos` is a position and `inclusive` says whether the character under it is
+ * in the range, because ops.c:823-825 reads it that way: the end's own column
+ * plus, when the end is not already the line's NUL, its inclusiveness.
  */
-function deleteGoesLinewise(text: string, start: number, end: number): boolean {
-	const lastLine = lineOf(text, Math.max(start, end - 1));
-	if (lineOf(text, start) === lastLine) return false;
-	// What is left of the last line the object touches, once the object is gone.
-	const rest = lineEndExclusive(text, Math.max(start, end - 1));
-	for (let i = end; i < rest; i++) {
-		if (text[i] !== " " && text[i] !== "\t") return false;
-	}
+function deleteGoesLinewise(text: string, start: number, endPos: number, inclusive: boolean): boolean {
+	if (lineOf(text, endPos) === lineOf(text, start)) return false;
+	const rest = lineEndExclusive(text, endPos);
+	let at = endPos < rest ? endPos + (inclusive ? 1 : 0) : endPos;
+	while (at < rest && (text[at] === " " || text[at] === "\t")) at++;
+	if (at < rest) return false;
 	// `inindent(0)` counts the blanks in front of the start and asks whether the
 	// cursor has not passed them.
 	for (let i = lineStart(text, start); i < start; i++) {
@@ -3424,6 +3760,85 @@ export class VimEngine {
 			this.#wantHere();
 			return;
 		}
+		const pair = BLOCK_PAIRS[object];
+		if (pair) {
+			const block = blockObject(text, at, count, include, pair);
+			if (!block) {
+				// No block is a FAIL, the same as a paragraph that runs off the end:
+				// the operator is already spent and the caret does not walk anywhere.
+				this.#wantHere();
+				return;
+			}
+			if (operator === ">" || operator === "<") {
+				// A shift takes the lines the object's own text is on, and `>i(` is
+				// the daily use of it. The object starts wherever `incl` put it, which
+				// is the line *after* the one holding the bracket: `>i(` on `f(\n  a\n)`
+				// indents the `  a` and leaves the `f(` line alone, while `>i(` on
+				// `f(a\n  b\n)` takes both lines because the object starts on the `f(`
+				// one. A linewise object already knows which lines it is.
+				// An object with nothing in it is still a one-line range for `>` and
+				// `<`: the operator sees `start == end` and `line_count == 1`, so
+				// `op_shift` indents the line the start is on. `>i(` on `())` puts a
+				// tab in front of the `(` that holds the empty pair.
+				if (block.empty) {
+					this.#shiftLines(1, operator === ">", 1, nthLineStart(text, lineOf(text, block.start)));
+					return;
+				}
+				const firstLine = block.linewise ? block.firstLine : lineOf(text, block.start);
+				const lastLine = block.linewise
+					? block.lastLine
+					: lineOf(text, Math.max(block.start, block.end - 1));
+				this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine));
+				return;
+			}
+			// A pair with nothing left inside it is not a FAIL. `decl` walks the end
+			// back behind the start, `current_block` notices and hands back an empty
+			// range *and* moves the caret (textobject.c:1200-1203) to `start_pos` —
+			// where the text would have begun, which for `a(\n)` is the closing
+			// bracket. `di(` there changes no text and `ci(` still enters insert.
+			if (block.empty) {
+				this.#ops.setCursor(block.start);
+				if (operator === "c") this.#enterInsert();
+				else {
+					// …and a yank of nothing is still a yank. `oap->empty` is read by
+					// `op_delete`, which returns on it (ops.c:790), and by `op_change`,
+					// which walks past it into insert; `OP_YANK` bails only on
+					// `empty_region_error`, which is 'E' in 'cpoptions' (ops.c:4285,
+					// :4372), and this engine has no 'cpo' to be Vi-compatible about.
+					// So the register is replaced by an empty one, and what that is
+					// worth is the *next* command: a `p` pastes nothing, where a yank
+					// that skipped the write would paste whatever was there before.
+					// The linewise promotion does not reach it — it needs
+					// `yanklines > 1` (register.c:1380) and an empty object is one
+					// line, so the register is a characterwise one holding no
+					// characters rather than a linewise one holding a break.
+					if (operator === "y") this.#register = { text: "", linewise: false };
+					this.#wantHere();
+				}
+				return;
+			}
+			// A linewise object goes through the line machinery whole, and the
+			// register it leaves is linewise too — `yi(` on `f(\n  a\n)` pastes the
+			// `  a` back as a line, not as text.
+			if (block.linewise) {
+				const { start, end, removeFrom } = lineRange(text, block.firstLine, block.lastLine);
+				this.#runLinewise(operator, start, end, removeFrom);
+				if (operator === "y") this.#ops.setCursor(nthLineStart(text, block.firstLine));
+				return;
+			}
+			// ops.c:810-829, the other linewise promotion, and unlike the one above
+			// it is a delete's alone: a multi-line characterwise range whose tail is
+			// nothing but blanks and which began in its own line's indent is deleted
+			// as lines. `ci(` and `yi(` on the same shape keep the span.
+			const endPos = block.end - (block.inclusive ? 1 : 0);
+			if (operator === "d" && deleteGoesLinewise(text, block.start, endPos, block.inclusive)) {
+				const { start, end, removeFrom } = lineRange(text, lineOf(text, block.start), lineOf(text, endPos));
+				this.#runLinewise(operator, start, end, removeFrom);
+				return;
+			}
+			this.#runOperator(operator, block.start, block.end, block.inclusive);
+			return;
+		}
 		if (object !== "w" && object !== "W") return;
 		const found = wordObject(text, at, count, include, object === "W");
 		if (!found.ok) {
@@ -3446,7 +3861,7 @@ export class VimEngine {
 			this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine));
 			return;
 		}
-		if (operator === "d" && deleteGoesLinewise(text, found.start, found.end)) {
+		if (operator === "d" && deleteGoesLinewise(text, found.start, found.end - 1, true)) {
 			// Linewise, which also makes the register linewise — `d2iwp` pastes two
 			// lines back, not the two characters the object held.
 			const { start, end, removeFrom } = lineRange(
@@ -3810,7 +4225,13 @@ export class VimEngine {
 		// The insert caret stands on that empty line: its newline, or the buffer end
 		// when nothing follows it.
 		const insertCaret = Math.min(out.length, out.length > removeFrom + 1 ? removeFrom : removeFrom + 1);
-		if (out !== text) this.#ops.setAll(out, operator === "c" ? insertCaret : linewiseLanding(out, removeFrom));
+		// A change always writes, even when the text it assembles is byte for byte
+		// the text it was given: replacing a line that held nothing with an empty
+		// line changes no characters and still has to leave the caret standing
+		// where the typing goes, which is `ci(` on `f(\n\n)`.
+		if (out !== text || operator === "c") {
+			this.#ops.setAll(out, operator === "c" ? insertCaret : linewiseLanding(out, removeFrom));
+		}
 		if (operator === "c") this.#enterInsert();
 		else this.#wantHere();
 	}

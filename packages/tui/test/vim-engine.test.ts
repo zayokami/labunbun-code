@@ -4716,3 +4716,409 @@ describe("Visual `r` writes over the selection", () => {
 		expect(run("abcdef\ngh", 1, "v", "l", "j", "d")).toMatchObject({ text: "a", cursor: 0 });
 	});
 });
+
+/**
+ * The bracket text objects: `i(`/`a(` and their siblings.
+ *
+ * `current_block` (textobject.c:1039-1207) reaches a block by asking
+ * `findmatch`/`findmatchlimit` for the mate of the bracket kind, and
+ * `nv_object` (normal.c:7213-7292) force-sets `'matchpairs'` to
+ * `"(:),{:},[:],<:>"` and routes `b`/`B` to the same call, so `i(`/`i)`/`i{`/
+ * `i}`/`i[`/`i]`/`i<`/`i>`/`ib`/`iB` are ten spellings of four pairs. Every
+ * expected value below is what vim 9.1 does, read back through the
+ * differential harness (`vim-differential/regress.mjs`).
+ */
+describe("bracket text objects", () => {
+	// `run` is a host and not just a key pusher: `ci(` and `ca(` leave the engine in
+	// insert mode, where the next single character is the user's, and the Escape that
+	// ends it arrives as `{ escape: true }` rather than as a byte.
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) {
+			if (k === "\x1b") {
+				e.engine.handleKey("", e.key({ escape: true }));
+				continue;
+			}
+			if (e.engine.handleKey(k, e.key())) continue;
+			if (e.engine.mode === "insert" && k.length === 1 && k >= " ") {
+				e.state.text = `${e.state.text.slice(0, e.state.cursor)}${k}${e.state.text.slice(e.state.cursor)}`;
+				e.state.cursor += 1;
+			}
+		}
+		return { text: e.state.text, cursor: e.state.cursor, mode: e.engine.mode };
+	};
+
+	test("a pair with its mate takes the inside, and `a` takes the brackets too", () => {
+		expect(run("f(a)g", 2, "d", "i", "(")).toMatchObject({ text: "f()g", cursor: 2 });
+		expect(run("f(a)g", 2, "d", "a", "(")).toMatchObject({ text: "fg", cursor: 1 });
+		expect(run("f(a)g", 2, "d", "i", ")")).toMatchObject({ text: "f()g", cursor: 2 });
+		// The other three pairs, and `a` on each.
+		expect(run("f{a}g", 2, "d", "i", "{")).toMatchObject({ text: "f{}g", cursor: 2 });
+		expect(run("f{a}g", 2, "d", "i", "}")).toMatchObject({ text: "f{}g", cursor: 2 });
+		expect(run("f[a]g", 2, "d", "i", "[")).toMatchObject({ text: "f[]g", cursor: 2 });
+		expect(run("f[a]g", 2, "d", "i", "]")).toMatchObject({ text: "f[]g", cursor: 2 });
+		expect(run("f<a>g", 2, "d", "i", "<")).toMatchObject({ text: "f<>g", cursor: 2 });
+		expect(run("f<a>g", 2, "d", "i", ">")).toMatchObject({ text: "f<>g", cursor: 2 });
+		expect(run("f{a}g", 2, "d", "a", "{")).toMatchObject({ text: "fg", cursor: 1 });
+	});
+
+	test("`b` and `B` are the two remaining spellings, and only here", () => {
+		// `nv_object` falls through `case 'b': case '(': case ')'` to
+		// `current_block`, so `dib` is `di(`. It is a different code path from the
+		// `db` *motion*, which is why the two coexist instead of colliding.
+		expect(run("f(a)g", 2, "d", "i", "b")).toMatchObject({ text: "f()g", cursor: 2 });
+		expect(run("f(a)g", 2, "d", "a", "b")).toMatchObject({ text: "fg", cursor: 1 });
+		expect(run("f{a}g", 2, "d", "i", "B")).toMatchObject({ text: "f{}g", cursor: 2 });
+		expect(run("f{a}g", 2, "d", "a", "B")).toMatchObject({ text: "fg", cursor: 1 });
+		// `dib` on a pair it cannot find fails the same way `diB` does.
+		expect(run("x{a{b}c}", 3, "d", "i", "b")).toMatchObject({ text: "x{a{b}c}", cursor: 3 });
+	});
+
+	test("a bracket of another kind is an ordinary character to the scan", () => {
+		// `current_block` looks for the pair it is given with `ccheck`/`ccommand`,
+		// so `di[` inside `f(a)[b]` reaches the `[b]` and steps over the
+		// parentheses without noticing them — and the caret lands where the
+		// brackets used to be, not where the `b` was.
+		expect(run("f(a)[b]", 6, "d", "i", "[")).toMatchObject({ text: "f(a)[]", cursor: 5 });
+		expect(run("f[a](b)", 6, "d", "i", "(")).toMatchObject({ text: "f[a]()", cursor: 5 });
+	});
+
+	test("a caret on a bracket belongs to the pair that bracket is part of", () => {
+		// Walking left over the `)` would step a level in and find the pair *around*
+		// this one. `di(` on the inner `)` of `x(())y` is the inner pair — which
+		// holds nothing, so it changes no text and leaves the caret on the bracket.
+		expect(run("x(())y", 3, "d", "i", "(")).toMatchObject({ text: "x(())y", cursor: 3 });
+		expect(run("x(())y", 2, "d", "i", "(")).toMatchObject({ text: "x(())y", cursor: 3 });
+		// The outer pair from the outside, from on its bracket, and from the inner
+		// `)` asked for a level deeper: three ways in, one way out.
+		expect(run("x(())y", 0, "d", "i", "(")).toMatchObject({ text: "x()y", cursor: 2 });
+		expect(run("x(())y", 1, "d", "i", "(")).toMatchObject({ text: "x()y", cursor: 2 });
+		expect(run("x(())y", 4, "d", "i", "(")).toMatchObject({ text: "x()y", cursor: 2 });
+	});
+
+	test("an opener with no mate fails the object rather than being stepped over", () => {
+		const QUOTED = 'x = "f(a)"; g(b)';
+		expect(run(QUOTED, 0, "d", "i", "(")).toMatchObject({ text: 'x = "f()"; g(b)', cursor: 7 });
+		// `findmatch`'s forward half looks for a mate *after* the bracket it is
+		// handed, so a bracket that never closes is vim's FAIL (textobject.c:1115-
+		// 1119) and not a stepping stone: the `(` of `f(a b(c)d` does not step over
+		// to reach the one of `(c)`, the whole object fails, and the caret stays put.
+		expect(run("f(a b(c)d", 0, "d", "i", "(")).toMatchObject({ text: "f(a b(c)d", cursor: 0 });
+		expect(run("f(a", 0, "d", "i", "(")).toMatchObject({ text: "f(a", cursor: 0 });
+		// Which is not the same as "no pair nearby" — a second press is a second
+		// `findmatch` from where the first landed, and that one succeeds:
+		// `d2i(` on the same shape reaches `(c)` and `d2a(` the brackets with it.
+		expect(run("f(a b(c)d", 0, "d", "2", "i", "(")).toMatchObject({ text: "f(a b()d", cursor: 6 });
+		expect(run("f(a b(c)d", 0, "d", "2", "a", "(")).toMatchObject({ text: "f(a bd", cursor: 5 });
+		expect(run("f(a (b) c", 0, "d", "2", "i", "(")).toMatchObject({ text: "f(a () c", cursor: 5 });
+		expect(run("f(a (b) c", 0, "d", "2", "a", "(")).toMatchObject({ text: "f(a  c", cursor: 4 });
+		// A shift is the same object, so a failed object shifts nothing — while the
+		// count that *does* find a pair shifts its one line.
+		expect(run("f(a b(c)d", 0, ">", "i", "(")).toMatchObject({ text: "f(a b(c)d", cursor: 0 });
+		expect(run("f(a b(c)d", 0, ">", "2", "i", "(")).toMatchObject({ text: "\tf(a b(c)d", cursor: 1 });
+		// And from inside, stepping *out* to a level that does not close fails the
+		// same way, leaving the caret on the character the inner delete left.
+		expect(run("f(a b(c)d", 6, "d", "i", "(")).toMatchObject({ text: "f(a b()d", cursor: 6 });
+		expect(run("f(a b(c)d", 6, "d", "2", "i", "(")).toMatchObject({ text: "f(a b(c)d", cursor: 6 });
+	});
+
+	test("a count moves one level per press, whichever side it starts from", () => {
+		// `current_block` re-runs the *same* `findmatch` `count` times from
+		// wherever the last one landed (textobject.c:1100-1112). The pairs of
+		// `x(a(b(c)d)e)y` are (1,11), (3,9) and (5,7), so from the innermost
+		// bracket two presses come back out to (3,9) and three to (1,11) — and
+		// from the outside two presses drill inward to the same (3,9).
+		expect(run("x(a(b(c)d)e)y", 7, "d", "2", "i", "(")).toMatchObject({ text: "x(a()e)y", cursor: 4 });
+		expect(run("x(a(b(c)d)e)y", 7, "d", "3", "i", "(")).toMatchObject({ text: "x()y", cursor: 2 });
+		expect(run("x(a(b(c)d)e)y", 0, "d", "2", "i", "(")).toMatchObject({ text: "x(a()e)y", cursor: 4 });
+		expect(run("x((a))y", 0, "d", "2", "i", "(")).toMatchObject({ text: "x(())y", cursor: 3 });
+		expect(run("x((a))y", 4, "d", "2", "i", "(")).toMatchObject({ text: "x()y", cursor: 2 });
+		// Which is why a level has to exist: from the outside `f(a)b(c)d` the second
+		// landing would have to step sideways onto the second pair rather than
+		// inward, and so the count fails — from before the first pair and from
+		// after the second one alike.
+		const SIBLINGS = "f(a)b(c)d";
+		expect(run(SIBLINGS, 0, "d", "2", "i", "(")).toMatchObject({ text: SIBLINGS, cursor: 0 });
+		expect(run(SIBLINGS, 8, "d", "2", "i", "(")).toMatchObject({ text: SIBLINGS, cursor: 8 });
+		expect(run('x = "f(a)"; g(b)', 0, "d", "2", "i", "(")).toMatchObject({
+			text: 'x = "f(a)"; g(b)',
+			cursor: 0,
+		});
+		// One press is the pair the caret is in, whatever kind of bracket it holds.
+		expect(run("x(a(b)c)y", 3, "d", "i", "(")).toMatchObject({ text: "x(a()c)y", cursor: 4 });
+		expect(run("x(a(b)c)y", 3, "d", "a", "(")).toMatchObject({ text: "x(ac)y", cursor: 3 });
+	});
+
+	test("a pair holding nothing changes no text and lands on the close", () => {
+		// `decl` walks the end back onto the opening bracket, `current_block`
+		// notices the end is no longer past the start and hands back an empty span
+		// *and* moves the caret (textobject.c:1200-1203) — to the closing bracket,
+		// which is the only one of the two the walk can be holding.
+		expect(run("x(())y", 2, "d", "i", "(")).toMatchObject({ text: "x(())y", cursor: 3 });
+		// A pair holding nothing but a line break lands on the outer bracket.
+		expect(run("a(\n)", 0, "d", "i", "(")).toMatchObject({ text: "a(\n)", cursor: 3 });
+		expect(run("(\n)", 0, "d", "i", "(")).toMatchObject({ text: "(\n)", cursor: 2 });
+		// `ci(` there still enters insert, and the caret goes to the line the text
+		// *would* have begun on — which for a body that could only have been a break
+		// is the line after it, not the closing bracket's own line.
+		expect(run("a(\n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "a(\nZ)", cursor: 3 });
+		expect(run("(\n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "(\nZ)", cursor: 2 });
+		// An empty object is a no-op for the buffer but not for the caret, and that
+		// holds for a body of one blank too: `f(\n \n)`'s object is the blank, and
+		// the walk stops on it, so there is nothing to take.
+		expect(run("f(\n \n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n \n)", cursor: 3 });
+		expect(run("f(\n \n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "f(\nZ \n)", cursor: 3 });
+		// And a shift still shifts, an empty object or not: it works on the line the
+		// empty span sits on rather than on a range of characters, which is why it
+		// can move text that `di(` there would not touch.
+		expect(run("()", 0, ">", "i", "(")).toMatchObject({ text: "\t()", cursor: 1 });
+		expect(run("a(\n)", 0, ">", "i", "(")).toMatchObject({ text: "a(\n\t)", cursor: 4 });
+		expect(run("f(\n \n)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\t \n)", cursor: 4 });
+		expect(run("f(\n \n)", 0, "<", "i", "(")).toMatchObject({ text: "f(\n\n)", cursor: 3 });
+		// The inner pair of `x(())y` reached from the outside is the other empty one.
+		expect(run("x(())y", 1, ">", "i", "(")).toMatchObject({ text: "\tx(())y", cursor: 1 });
+		expect(run("x(())y", 3, "d", "i", "(")).toMatchObject({ text: "x(())y", cursor: 3 });
+	});
+
+	test("a body that starts on the opener's line gives up the break behind the close", () => {
+		// `current_block` hands the operator a *position*, and a non-inclusive end
+		// standing at a line's first column covers everything up to the break in
+		// front of that line and stops short of the line itself (ops.c:4307-4329).
+		// So the close's own line keeps its break: `yi(` on `f(a\n  b\n)` reads back
+		// `a`, the break, and the indent — and no break behind it.
+		expect(run("f(a\n  b\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 1 });
+		expect(run("f(a\nb\nc\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 1 });
+		// Trailing spaces on the body line are part of it.
+		expect(run("f(a \n  b \n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 1 });
+		// A blank sitting mid-line is not: a line with a non-blank on it has no
+		// indent there, so `di(` on `x( )y` takes the space.
+		expect(run("x( )y", 2, "d", "i", "(")).toMatchObject({ text: "x()y", cursor: 2 });
+	});
+
+	test("a line of pure indent is walked over, an empty one is where the end lands", () => {
+		// The walk steps left over blanks (`while (inindent(1))`), and a line that
+		// holds nothing but blanks is all indent — so the walk crosses `f(a\n   \n)`
+		// as if that line were not there, the end is the character before the close,
+		// and the object is the single `a`. The crossed line is not *given up*:
+		// nothing puts it back in.
+		expect(run("f(a\n   \n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n   \n)", cursor: 1 });
+		// An empty line's indent is zero wide, so `inindent(1)` is false on it and
+		// the walk stops there instead. Its first column and the break in front of
+		// it are the same offset, so a non-inclusive end there covers the break and
+		// the empty line reads as given up: `yi(` hands back `a` and a break.
+		expect(run("f(a\n\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 1 });
+		// Tabs count as indent here just as spaces do.
+		expect(run("f(a\n\t\t\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n\t\t\n)", cursor: 1 });
+	});
+
+	test("a body that starts on a line of its own reaches the closing bracket", () => {
+		// `incl` on the opener steps over the break behind it, so the object starts
+		// on the body's line — and a range that starts there and ends at a line head
+		// is *linewise* whatever the operator (ops.c:4307-4329), so `yi(` on
+		// `f(\n  a\n)` reads back a whole line, `  a` and its break. `di(` is
+		// `f(\n)`, not `f(\n\n)`: the break behind the body goes with it.
+		expect(run("f(\n  a\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 3 });
+		expect(run("f(\na\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 3 });
+		// Any number of lines reads the same way.
+		expect(run("f(\na\nb\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 3 });
+		expect(run("f(\na\nb\nc\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 3 });
+		// A trailing line of pure indent is crossed by the walk and so drops out of
+		// the object entirely, leaving the one line that has text on it — and with
+		// it the caret comes back to that line, not to where the object began.
+		expect(run("f(\na\n   \n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n   \n)", cursor: 5 });
+	});
+
+	test("a linewise body is measured in lines, so trailing blanks and tabs come along", () => {
+		// The promotion that made the object linewise is the reason the ends of the
+		// body cannot be trimmed: it is `start`'s indent, not its characters, that
+		// decided it. A line of trailing blanks after the body is a different line
+		// and stays out, and what is left of the buffer is re-read from there.
+		expect(run("f(\n  a\n  \n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n  \n)", cursor: 4 });
+		expect(run("f(\n  a\n  \n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "f(\nZ\n  \n)", cursor: 3 });
+		// The close sharing its line with the last line of the body makes no
+		// difference to any of it — the linewise range is the body's lines either way.
+		expect(run("f(\n  a\n  )", 0, "d", "i", "(")).toMatchObject({ text: "f(\n  )", cursor: 5 });
+		expect(run("f(\n  a\n  )", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "f(\nZ\n  )", cursor: 3 });
+		// An empty line inside the body is one of its lines, and goes with it.
+		expect(run("f(\na\n\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 3 });
+		// Tabs are indent for `inindent` exactly as spaces are, so a tab-indented
+		// body is measured the same way — down to the trailing tab-only line, which
+		// the walk steps over and which therefore drops out just as it did above.
+		expect(run("f(\n\ta\n\t\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n\t\n)", cursor: 3 });
+		// A shift moves the same lines it read, which is how the promoted range is
+		// visible from the keyboard: one line in, one line out, whatever indents it.
+		expect(run("f(\n  a\n  \n)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\t  a\n  \n)", cursor: 6 });
+		expect(run("f(\n  a\n  \n)", 0, "<", "i", "(")).toMatchObject({ text: "f(\na\n  \n)", cursor: 3 });
+		expect(run("f(\na\n\n)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\ta\n\n)", cursor: 4 });
+		expect(run("f(\n\ta\n\t\n)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\t\ta\n\t\n)", cursor: 5 });
+		expect(run("f(\n\ta\n\t\n)", 0, "<", "i", "(")).toMatchObject({ text: "f(\na\n\t\n)", cursor: 3 });
+		// A body that starts on the opener's line never got promoted, so it is still
+		// the characterwise span and a shift still reads it as characters: both of
+		// its lines move, blanks and all.
+		expect(run("f( a \n  b \n )", 0, "d", "i", "(")).toMatchObject({ text: "f(\n )", cursor: 1 });
+		expect(run("f( a \n  b \n )", 0, ">", "i", "(")).toMatchObject({ text: "\tf( a \n\t  b \n )", cursor: 1 });
+		expect(run("f( a \n  b \n )", 0, "<", "i", "(")).toMatchObject({ text: "f( a \nb \n )", cursor: 0 });
+	});
+
+	test("a change on a linewise object empties the line rather than the break before it", () => {
+		// The object is linewise, and `op_change` on a linewise range opens a fresh
+		// line for the typing — so the break in front of the closing bracket is not
+		// what a change eats here, the whole line is, and `di(` on the same shape is
+		// the same edit without the typing.
+		expect(run("f(\n  a\n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "f(\nZ\n)", cursor: 3 });
+		expect(run("f(\na\nb\n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "f(\nZ\n)", cursor: 3 });
+		// Two lines become one, so the empty one in the middle is taken with them.
+		expect(run("f(\na\n\n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "f(\nZ\n)", cursor: 3 });
+		// It does not reach an `a` object, whose range already starts on the
+		// opening bracket, nor one that ended on the opener's line.
+		expect(run("f(\n  a\n)", 0, "c", "a", "(", "Z", "\x1b")).toMatchObject({ text: "fZ", cursor: 1 });
+		expect(run("f(a\n  b\n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "f(Z\n)", cursor: 2 });
+		// The same shape on each of the other three pairs.
+		expect(run("f{\n  a\n}", 0, "c", "i", "{", "Z", "\x1b")).toMatchObject({ text: "f{\nZ\n}", cursor: 3 });
+		expect(run("f[\n  a\n]", 0, "c", "i", "[", "Z", "\x1b")).toMatchObject({ text: "f[\nZ\n]", cursor: 3 });
+		expect(run("f<\n  a\n>", 0, "c", "i", "<", "Z", "\x1b")).toMatchObject({ text: "f<\nZ\n>", cursor: 3 });
+	});
+
+	test("a shift takes the lines the object's own text is on", () => {
+		// `>i(` is the daily use of the whole thing: the object starts where the
+		// object's text is, so the line holding only the bracket is left alone and
+		// one that also holds text is not. The caret goes to the first of the lines
+		// the shift touched, which for a body of its own is not the first line.
+		expect(run("f(a\n  b\n)", 0, ">", "i", "(")).toMatchObject({ text: "\tf(a\n\t  b\n)", cursor: 1 });
+		expect(run("f(\n  a\n)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\t  a\n)", cursor: 6 });
+		expect(run("f(\n  a\n  b\n)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\t  a\n\t  b\n)", cursor: 6 });
+		// `<i(` takes the indent back off.
+		expect(run("f(a\n  b\n)", 0, "<", "i", "(")).toMatchObject({ text: "f(a\nb\n)", cursor: 0 });
+		expect(run("f(a\n  b\n)", 0, "<", "i", ")")).toMatchObject({ text: "f(a\nb\n)", cursor: 0 });
+		// A yank is a yank: it changes nothing, and `ggP` puts the text back. A
+		// body over more than one line is yanked *linewise* — the register holds
+		// whole lines, so the paste lands above the buffer as lines.
+		expect(run("x(a(b)c)y", 3, "y", "i", "(", "g", "g", "P")).toMatchObject({ text: "bx(a(b)c)y", cursor: 0 });
+		expect(run("f(a\n  b\n)", 0, "y", "i", "(", "g", "g", "P")).toMatchObject({
+			text: "a\n  bf(a\n  b\n)",
+			cursor: 0,
+		});
+		expect(run("f(a\n  b\n)", 0, "y", "a", "(", "g", "g", "P")).toMatchObject({
+			text: "(a\n  b\n)f(a\n  b\n)",
+			cursor: 0,
+		});
+	});
+
+	test("a close the caret is behind is a level the forward sweep has to climb", () => {
+		// `FM_FORWARD` overrides the direction `find_mps_values` picked, and the
+		// sweep that is left counts a `close` *up* and hands back an `open` at count
+		// zero (search.c:2800-2832). So the `)` in front of the `(` in `x)(\n\n)` puts
+		// the sweep one level deep, the `(` behind it is not an answer, and the `)`
+		// at the end raises the level again with nothing left to find: the object is
+		// a FAIL — and a FAIL is a FAIL for every operator, caret included.
+		const STRAY = "x)(\n\n)";
+		expect(run(STRAY, 0, "d", "i", "(")).toMatchObject({ text: STRAY, cursor: 0 });
+		expect(run(STRAY, 0, "y", "i", "(")).toMatchObject({ text: STRAY, cursor: 0 });
+		expect(run(STRAY, 0, "d", "a", "(")).toMatchObject({ text: STRAY, cursor: 0 });
+		expect(run(STRAY, 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: STRAY, cursor: 0 });
+		expect(run(STRAY, 0, ">", "i", "(")).toMatchObject({ text: STRAY, cursor: 0 });
+		expect(run(STRAY, 0, "<", "i", "(")).toMatchObject({ text: STRAY, cursor: 0 });
+		// It is a level and not a veto. A `(` that pays for a `)` leaves the count
+		// back at zero, so the same sweep on `f(a)b)(c)` reaches the `(` of `(a)` —
+		// two closes and two opens ahead of the caret, the second pair never seen.
+		expect(run("f(a)b)(c)", 0, "d", "i", "(")).toMatchObject({ text: "f()b)(c)", cursor: 2 });
+		// And the count is at zero the moment the sweep hands back an answer, so a
+		// close *behind* the bracket it found is never counted at all: the object
+		// here is the `)`, not the `{` that closes the second block.
+		expect(run("f{)}{}", 0, "d", "i", "{")).toMatchObject({ text: "f{}{}", cursor: 2 });
+		// Without a `(` to pay for it the level never comes back down, which is the
+		// whole of these three — and the same holds for the other two pairs, whose
+		// sweeps are handed the same count and know nothing about each other.
+		expect(run("a) b(c)", 0, "d", "i", "(")).toMatchObject({ text: "a) b(c)", cursor: 0 });
+		expect(run("a) (b)", 0, "d", "i", "(")).toMatchObject({ text: "a) (b)", cursor: 0 });
+		expect(run("a) (b", 0, "d", "i", "(")).toMatchObject({ text: "a) (b", cursor: 0 });
+		expect(run("x}{}{", 0, "d", "i", "{")).toMatchObject({ text: "x}{}{", cursor: 0 });
+		expect(run("a} b{c}", 0, "d", "i", "{")).toMatchObject({ text: "a} b{c}", cursor: 0 });
+		expect(run("x][][", 0, "d", "i", "[")).toMatchObject({ text: "x][][", cursor: 0 });
+		expect(run("a] b[c]", 0, "d", "i", "[")).toMatchObject({ text: "a] b[c]", cursor: 0 });
+		// The level is not per line: a `)` on one line and the `(` that pays for it
+		// on the next are one count, and a sweep that forgot the first line would
+		// come back with the `(` of `(c)` here.
+		expect(run("a)\nb(c)", 0, "d", "i", "(")).toMatchObject({ text: "a)\nb(c)", cursor: 0 });
+		// Which is also the proof that the pairs do not share the count: the same
+		// shape read as a brace is a different bracket altogether.
+		expect(run("a)\nb{c}", 0, "d", "i", "{")).toMatchObject({ text: "a)\nb{}", cursor: 5 });
+	});
+
+	test("a second press is a second sweep, and it runs to the end of the buffer", () => {
+		// `current_block` re-runs the same search `count` times from wherever the
+		// last one landed, and the forward sweep it re-runs has no bound of its own
+		// (`findmatchlimit(NULL, what, FM_FORWARD, 0)`, maxtravel 0) — it goes past
+		// the close of the bracket the first one found. On `f(x)((y)` the count is
+		// back at zero at the second `(`, so that is where a second press lands; a
+		// sweep stopped at the pair's own close would come back with nothing and
+		// fail the object instead.
+		expect(run("f(x)((y)", 0, "d", "2", "i", "(")).toMatchObject({ text: "f(x)(()", cursor: 6 });
+		expect(run("f(x)((y)", 0, "y", "2", "i", "(")).toMatchObject({ text: "f(x)((y)", cursor: 6 });
+		expect(run("f(x)((y)", 0, "d", "2", "a", "(")).toMatchObject({ text: "f(x)(", cursor: 4 });
+		// A third press has nothing left to climb to.
+		expect(run("f(x)((y)", 0, "d", "3", "i", "(")).toMatchObject({ text: "f(x)((y)", cursor: 0 });
+		expect(run("f((a)(b))", 0, "d", "2", "i", "(")).toMatchObject({ text: "f(()(b))", cursor: 3 });
+		expect(run("f((a)(b))", 0, "d", "3", "i", "(")).toMatchObject({ text: "f((a)(b))", cursor: 0 });
+		// Which is the rule the siblings were already pinned by, seen from the other
+		// end: a pair that is not *inside* the last one is not a step inward.
+		expect(run("x(y)(z)", 0, "d", "2", "i", "(")).toMatchObject({ text: "x(y)(z)", cursor: 0 });
+	});
+
+	test("a shift takes the line the object starts on, even when that line is empty", () => {
+		// The object starts wherever `incl` put it — the line *after* the one holding
+		// the bracket — and `op_shift` indents from `oap->start.lnum` to
+		// `oap->end.lnum` and then runs `beginline(BL_SOL | BL_FIX)` on the first of
+		// them (ops.c:176-180). An empty line has no first non-blank to walk down to,
+		// so the caret stays on it rather than stepping to one with text on it; and
+		// an empty line is not shifted either, having no indent to shift.
+		expect(run("f(\n\na)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\n\ta)", cursor: 3 });
+		expect(run("f(\n\na)", 0, "<", "i", "(")).toMatchObject({ text: "f(\n\na)", cursor: 3 });
+		expect(run("f(\n\na\nb)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\n\ta\n\tb)", cursor: 3 });
+		// Two empty lines shift nothing at all and still land on the first of them.
+		expect(run("f(\n\n\n)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\n\n)", cursor: 3 });
+		// A first line holding blanks rather than nothing is not empty: the caret
+		// goes to its first non-blank, and `BL_FIX` is what stops that one character
+		// short of the break.
+		expect(run("f(\n \na)", 0, ">", "i", "(")).toMatchObject({ text: "f(\n\t \n\ta)", cursor: 4 });
+		// The object itself, for the same two empty lines: it is one linewise object,
+		// and a change on it empties that line instead of the break in front of it.
+		expect(run("f(\n\n)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 3 });
+		expect(run("f(\n\n)", 1, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 3 });
+		expect(run("f(\n\n)", 0, "c", "i", "(", "Z", "\x1b")).toMatchObject({ text: "f(\nZ\n)", cursor: 3 });
+		// A change always writes, so a change that reassembles the text it was given
+		// still moves the caret where the change put it.
+		expect(run("f(\n\n)", 0, "c", "i", "(", "\x1b")).toMatchObject({ text: "f(\n\n)", cursor: 3 });
+		// An empty line *inside* the body is a different thing: the object is
+		// characterwise there, its register is `a` and the break behind it, and the
+		// delete takes those two and no more.
+		expect(run("f(\n\na)", 0, "d", "i", "(")).toMatchObject({ text: "f(\n)", cursor: 3 });
+	});
+
+	test("a yank of an empty pair still writes the register", () => {
+		// `OP_YANK` bails only on `empty_region_error`, which is 'E' in 'cpoptions'
+		// — and nothing here has a 'cpo'. So the register is replaced by an empty
+		// one, and what that is worth is the *next* command: a `p` pastes nothing,
+		// where a yank that skipped the write would paste the pair from before.
+		expect(run("f(a)()", 0, "y", "a", "(", "l", "l", "l", "y", "i", "(", "g", "g", "P")).toMatchObject({
+			text: "f(a)()",
+			cursor: 0,
+		});
+		// The same yank on a pair with something in it does leave a register, so the
+		// two are told apart by what follows rather than by the yank itself.
+		expect(run("f(a)()", 0, "y", "a", "(", "g", "g", "P")).toMatchObject({ text: "(a)f(a)()", cursor: 2 });
+		// A delete on the same empty object leaves the register alone instead —
+		// `op_delete` really does return on `oap->empty` — so the three operators
+		// come apart here and nowhere else in this block.
+		expect(run("f(a)()", 0, "y", "a", "(", "l", "l", "l", "d", "i", "(", "g", "g", "P")).toMatchObject({
+			text: "(a)f(a)()",
+			cursor: 2,
+		});
+		// And a change walks past it into insert, so what a later `p` finds is the
+		// text that was typed.
+		expect(run("f(a)()", 0, "y", "a", "(", "l", "l", "l", "c", "i", "(", "Z", "\x1b", "g", "g", "P")).toMatchObject({
+			text: "(a)f(a)(Z)",
+			cursor: 2,
+		});
+	});
+});

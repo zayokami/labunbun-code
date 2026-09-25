@@ -377,6 +377,152 @@ on top of the 1053-case word-object grid that found `V1`–`V9`. Both grids skip
 two classes in **Three buffers the comparison cannot judge**, which is why
 `CASES` carries no case with the caret on a `\n` and none whose text ends in one.
 
+## Text objects: the bracket pairs
+
+`nv_object` (`normal.c:7213-7295`) force-sets `'matchpairs'` to `"(:),{:},[:],<:>"`
+for the length of the object, and `case 'b'` falls through to `case '('`, so
+`i(` `i)` `i{` `i}` `i[` `i[` `i<` `i>` `ib` `iB` are ten spellings of four
+pairs. The override matters only because `current_block` calls `findmatch`, which
+honours it — a word object never reads the option at all.
+
+The reason this batch needed seventeen falsification checks and not two is that
+**`current_block` does not return a span.** It returns two `pos_T`s and writes
+`oap->start` (`textobject.c:1128-1204`), and three separate pieces of
+`do_pending_operator` turn that into a range before any operator runs. A model
+that reads the walk and calls the two positions a span gets the *common* shapes
+right — `f(a)`, `f(a b)` — and the multi-line ones wrong, which is most of what a
+bracket object is for. The three, in the order they run:
+
+1. **The end position is moved onto the start** (`ops.c:4079-4101`), so every
+   `inindent` afterwards is asked about `oap->start` and not about wherever the
+   walk landed.
+2. **`oap->empty` is computed** (`ops.c:4275-4282`) — and *read* there, before the
+   promotion below, which is why a range the promotion folds onto its own start is
+   not empty. It is `op_delete`'s early return (`ops.c:786-791`) and `op_change`
+   walks past it into insert (`ops.c:1907-1937`).
+3. **The promotion** (`ops.c:4302-4329`): a characterwise, non-inclusive,
+   non-Visual, non-block range whose end sits at column zero of a line more than
+   one below the start loses that line, and becomes **linewise outright** if it
+   began on or before the first non-blank of its own line. That last test is
+   `inindent(0)`, which is true *on* the first non-blank — `inindent(1)` is only
+   true strictly before it (`C8`).
+
+What the walk itself does (`misc2.c:344-455`, `indent.c:1095-1111`) is short and
+has one genuine subtlety, which is the one worth writing down:
+
+- `incl(&start_pos)` steps over the opening bracket, and over the break behind it
+  when the bracket ends its line. **A body on lines of its own therefore starts on
+  its own line**, which is what makes it reach the promotion at all.
+- `sol` is the closing bracket standing at column zero — the same offset as the
+  head of its line, which is the whole of `C6`.
+- `decl` puts the end on the character before the close, and `while (inindent(1))`
+  steps left over the indent in front of it. **A line of nothing but blanks is all
+  indent and the walk crosses it; an empty line is not, and the walk stops there.**
+  Those two come apart in the answer as well as in the rule: on `f(a\n   \n)` the
+  crossed line drops out and the object is the single `a` (`yi(` reads back `a`,
+  charwise), while on `f(a\n\n)` the end lands *on* the empty line, whose first
+  column and the break in front of it are the same offset, so the object is `a`
+  and a break (`C2`, `C3`).
+  - One thing about that stop is dead by accident and worth writing down before it
+    is noticed the hard way. `declStep` reads the line above with
+    `text.lastIndexOf("\n", p - 2)`, and at `p === 1` on a buffer whose first
+    character is a break, `lastIndexOf` clamps its `fromIndex` to 0, finds that
+    break, and hands back `1` — so the test `p - 1 === aboveStart` is `0 === 1`,
+    fails, and the function returns `{ pos: -1, stop: false }`. The walk then runs
+    away through negative offsets, because `inIndent(text, p, 1)` is
+    `col >= p - lineStart + 1` and any negative `p` satisfies it for any indent, so
+    the loop never breaks and the engine hangs. It is unreachable because to *be*
+    at a line start the walk has to have passed `inIndent` on every position down to
+    it, and `inIndent` is only true inside a line's leading blanks — a line starting
+    at 1 would have to be all blanks, with no room for the opening bracket
+    `current_block` found. The fix, if a future caller ever needs it, is one line
+    beside the `p === 0` arm: `if (p < 2) return { pos: 0, stop: true };`.
+- The emit has three arms (`textobject.c:1190-1204`): `sol` steps the end one
+  position on and leaves it non-inclusive, an end at or past the start takes the
+  character under it and is inclusive, and an end *behind* the start is nothing at
+  all — `curwin->w_cursor = start_pos`, which is also where the caret goes.
+  `di(` on `a(\n)` changes no text and lands on the closing bracket (`C4`).
+
+Two consequences that read like bugs and are not, both of which cost a
+measurement to believe:
+
+- **`di(` and `ci(` on `f(\n  a\n)` are the same edit with different tails.** The
+  object is linewise — `yi(` reads back `  a` and a break, register type `V` — so
+  the delete takes the line and the change empties it and types on the new one.
+  The `d`/`c` difference is not in the operator; it is that a change always writes,
+  even when the text it assembles is byte for byte the text it was given (`C14`).
+- **An empty object is not a FAIL.** `a(\n)`, `(\n)`, `()`, `[]` and the inner pair
+  of `x(())y` all change no text, land the caret where the text would have begun,
+  and `ci(` still enters insert. `>` and `<` still shift, because `op_shift` counts
+  lines and an empty object is `line_count == 1` on the line its start is on
+  (`C12`, `C13`).
+- **A yank of an empty object still writes the register.** This one is invisible in
+  the text and visible only in the *next* command, which is why it took a register
+  readback to find: `OP_YANK` bails only on `'E'` in `'cpoptions'`
+  (`ops.c:4285`, `:4372`) and this engine has no `'cpo'` to be Vi-compatible
+  about, so the register is replaced by an empty one. What that is worth shows up
+  as `p` pasting nothing where a yank that skipped the write would paste whatever
+  was there before: on `f(a)()`, `ya(` then `lll` then `yi(` then `ggP` leaves the
+  buffer alone, and dropping the `lll` `yi(` entirely pastes the `(a)` (`C17`). The
+  linewise promotion does not reach it — that needs `yanklines > 1`
+  (`register.c:1380`) and an empty object is one line — so the register is a
+  characterwise one holding no characters, not a linewise one holding a break.
+- **A shift takes the line the object starts on, even when that line is empty.**
+  `op_shift` counts lines from `oap->start.lnum` and then `beginline(BL_SOL | BL_FIX)`
+  on the first (`ops.c:176-180`), and a line with no characters in it gets no tab
+  from that — what it still decides is where the *range* begins, and the caret is
+  placed relative to that first line. `>i(` on `f(\n\na)` tabs the `a` and lands on
+  the tab at 3; a version that stepped forward over the empty line to the first one
+  with a character in it produced the same text and left the caret at 5, on the
+  `a` instead of the tab (`C16`). `f(\n \na)` tabs both lines, and `f(\n\n\n)` tabs
+  none, which is the same rule from the other end.
+
+The count walk is the last piece, and its ordering is the whole of `d2i(` on
+`f(a b(c)d` (`C10`, `C11`): `current_block` re-runs the **same** search `count`
+times from wherever the last one landed, and only then looks for the mate. The
+search returns the **first** opening bracket at level zero and does not step over
+the one it lands on to reach a later pair, so count 1 lands on the `(` at 1, whose
+mate does not exist, and the command does nothing at all. Count 2 runs the search
+again from there and that is what reaches the `(` at 5, which is closed.
+
+The forward half is the opposite story, and the source says why in two places that
+have to be read together. `current_block` looks backward `count` times and, if that
+came up empty, forward `count` times (`textobject.c:1089-1108`) — but
+`find_mps_values(..., switchit=TRUE)` **swaps** the two brackets it was handed
+(`search.c:2059-2150`), so `initc` becomes the *closing* bracket and it is that one
+which counts up, and the forward scan then overrides the direction with
+`FM_FORWARD` (`search.c:2240-2242`). Two consequences, both load-bearing and both
+measured:
+
+- **The count is a level, not a fence.** The rule is
+  `if (c == initc) count++; else { if (count == 0) return &pos; count--; }`
+  (`search.c:2810-2820`) — a closing bracket raises the level, and an opening one at
+  level zero is the answer. The level survives line breaks. So from a caret sitting
+  behind a stray close, `di(` walks *over* it to reach the next opener, and a
+  bracket at depth one is not an answer: on `a)\nb(c)` the `)` at 1 puts the sweep
+  one level deep, the `(` at 4 only steps back down to it, and the command does
+  nothing at all, where a sweep that ignored the closes it walked over would take
+  that `(` and delete the `c` behind it (`C15`). The same level rule is what lets the
+  *second* sweep of a count pass the closing bracket of the pair it just landed on:
+  `d2i(` on `f(x)((y)` deletes the second `y`, which is only reachable by climbing
+  the `)` at 3 and coming back down at the `(` at 4. A sweep bounded by that close
+  makes the command a no-op (`C11`).
+- **The scan moves before it examines** (`search.c:2489-2516`), so the caret's own
+  character is never a candidate. That is why the forward sweep starts at `pos + 1`
+  and not at `pos`, and it is the whole of the difference between a `)` the caret
+  sits on and one it does not.
+
+The evidence for the round is 272 cases in `CASES` (608 → 880), every one measured
+against a real vim and every one a match, plus a 11472-case and a 9450-case sweep
+over 66 and 48 shapes at every caret, plus — for the five checks no case in `CASES`
+can redden — an exhaustive space of every text of length 4 to 6 over
+`{ (, ), a, \n, space }` holding one `(` before one `)`: 4,838 texts, 94,724 answers
+at every non-break caret, four sequences each. Five mutations were measured over
+that space rather than argued about, and the reachability of each site was measured
+separately by throwing at it (1,344 cases reach `declStep`'s empty-line arm, 384
+reach `promoteEnd`'s, 8,173 the shift of an empty object), which is what
+distinguishes a site nothing reaches from a site whose value nothing reads.
+
 ## What the fuzzer refuses to compare
 
 `fuzz.mjs` draws 1–3 keys from `KEYS` and drops two classes of sequence by name,

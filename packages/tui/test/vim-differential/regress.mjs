@@ -138,6 +138,106 @@ const PARA = "a\n\nb";
 // blank run is one counting unit however many lines it is.
 const PARA2 = "a\n\n\nb";
 
+// Bracket objects. `current_block` (textobject.c) is a bracket scan and not a
+// parser, so what the object is comes down to four things, each with a plausible
+// wrong answer: what the line the body ends on holds, whether there is a body at
+// all, whether the pair the scan lands on has a mate, and which way a count
+// walks out of it. The shapes are grouped by which of the four they are about.
+// None of them ends in `\n`, and no case below puts the caret on one, for the
+// reasons this list's own last block gives.
+/** A body on a line of its own — the one shape where the object is not a span. */
+const B_MULTI = "f(\n  a\n)";
+/** …and the same with nothing to indent, so the caret's column is not what
+ *  brings the range back linewise. */
+const B_MULTI_FLAT = "f(a\nb\n)";
+/** The body ending on an empty line and on a line of blanks: to `inindent` those
+ *  are two different things, and the walk in `current_block` crosses one and
+ *  stops at the other. */
+const B_BLANK_END = "f(a\n\n)";
+const B_SPACE_END = "f(a\n   \n)";
+/** No body at all, and a body of a single space. */
+const B_ALL_BLANK = "f(\n\n)";
+const B_ONE_BLANK = "f(\n \n)";
+/** A body with an empty line behind it, and with a line of blanks behind it. */
+const B_BLANK_TAIL = "f(\na\n\n)";
+const B_SPACE_TAIL = "f(\na\n   \n)";
+/** …with a tab where the others have spaces, because `beginline`'s first
+ *  non-blank is the first character `cls()` calls a blank and a tab is one. */
+const B_TABBED = "f(\n\ta\n\t\n)";
+/** The line the object ends on is blank, and is the bracket behind an indent —
+ *  so the object and the line it is on are two different spans. */
+const B_TRAIL_BLANK = "f(\n  a\n  \n)";
+const B_CLOSE_INDENT = "f(\n  a\n  )";
+/** White on both sides of the body, and white on the closing bracket's own line. */
+const B_PADDED = "f( a \n  b \n )";
+/** A `(` that nothing closes. The first forward search takes it and the whole
+ *  object is a FAIL; the second search steps *inside* it and finds a pair that
+ *  does close. The two shapes put the unclosed bracket first and second, and the
+ *  counts split the other way from the one the forward search takes. */
+const B_UNCLOSED_OUTER = "f(a b(c)d";
+const B_UNCLOSED_FIRST = "f(a (b) c";
+/** Two pairs, the first spanning a line break and the first not. */
+const B_BRACE_AFTER = "f(a\n)b(c)";
+const B_TWO_PAIRS = "f(a)b(c)";
+/** `current_block` does not know about strings, so the pair *inside* the quotes
+ *  is the object — and the pair beside it is a sibling, which is what a count
+ *  must not step sideways onto. */
+const B_IN_STRING = 'x = "f(a)"; g(b)';
+/** One pair inside another: the only shape where a count has somewhere to go. */
+const B_NESTED = "x(a(b)c)y";
+/** The empty object — nothing between the brackets, over a break or not. */
+const B_A_MULTI = "a(\n)";
+const B_LONE_MULTI = "(\n)";
+const B_EMPTY_PARENS = "()";
+const B_EMPTY_SQUARE = "[]";
+const B_EMPTY_ANGLE = "<>";
+/** A `(` that nothing closes, with something in front of it and with the whole
+ *  buffer. */
+const B_UNCLOSED_CALL = "a(";
+const B_LONE_OPEN = "(";
+/** The other three pairs, and two of them nested so their count has a level to
+ *  grow into as well. */
+const B_BRACES = "f{a}b";
+const B_BRACES_NEST = "x{a{b}c}";
+/** One pair of each of the other three kinds, so the four spellings are the same
+ *  object four times over. */
+const B_SQUARE = "f[a]b";
+const B_ANGLE = "f<a>b";
+const B_SQUARE_NEST = "f[a[b]c]";
+const B_ANGLE_NEST = "f<a<b>c>d";
+/** A pair of one kind inside a pair of another: whichever kind is asked for, the
+ *  other is an ordinary character the scan steps over without noticing. */
+const B_SQUARE_IN_PAREN = "f(a[b]c)";
+const B_PAREN_IN_SQUARE = "f[a(b)c]";
+/** A close the caret is behind, with nothing in the buffer to pay for it. The
+ *  forward sweep counts closes up, so it goes one level deep and stays there —
+ *  and the `(` behind the `)` only steps back down to the level it is already
+ *  at. Nothing is found, for any of the operators. */
+const B_STRAY_CLOSE = "x)(\n\n)";
+const B_STRAY_BRACE = "x}{}{";
+const B_STRAY_SQUARE = "x][][";
+/** Two closes and two opens ahead of the caret, so the level is back at zero
+ *  where the second `(` is — the first pair is what the sweep answers with. */
+const B_CLOSE_PAID = "f(a)b)(c)";
+/** Two opens whose first is already closed: a second sweep has to run past that
+ *  close to reach the second, and a third has nothing left. */
+const B_TWO_OPEN = "f(x)((y)";
+/** A close on one line and the `(` that would pay for it on the next, so the
+ *  count has to survive a break to be a count at all. */
+const B_CLOSE_ACROSS_LINES = "a)\nb(c)";
+const B_CLOSE_ACROSS_LINES_OTHER = "a)\nb{c}";
+/** An empty line inside the body: the object is characterwise and its first line
+ *  is the empty one, which `incl` landed on. */
+const B_EMPTY_IN_BODY = "f(\n\na)";
+/** Two empty lines, which are one linewise object, and the first line of the
+ *  body holding blanks rather than nothing. */
+const B_TWO_EMPTY = "f(\n\n)";
+const B_BLANK_FIRST = "f(\n \na)";
+/** A pair with something in it, then one with nothing in it: the register has to
+ *  hold something before the second is asked for, or "the empty yank cleared it"
+ *  and "the empty yank never wrote" read the same. */
+const B_PAIR_THEN_EMPTY = "f(a)()";
+
 const CASES = [
 	// wanted column: MAXCOL and short lines
 	[["$", "j"], A, 0],
@@ -1057,6 +1157,396 @@ const CASES = [
 	// The empty buffer: `ip` is its one empty line, `ap` has nothing to take.
 	[["y", "i", "p", "g", "g", "P"], "", 0],
 	[["y", "a", "p", "g", "g", "P"], "", 0],
+
+	// -- `i(` / `a(` and the other three pairs --------------------------------
+	//
+	// A bracket scan and not a parser, so the object is whatever lies between a
+	// matching pair — strings are not strings to it, a bracket of another kind is
+	// not a bracket, and a pair that nothing closes is not a pair. The carets are
+	// the three positions the scan reads differently: before the pair, on the
+	// opening bracket (which belongs to the pair rather than to what is around
+	// it), and inside the body.
+
+	// A body on a line of its own comes back *linewise* (ops.c:4307-4329, which
+	// runs before any operator does), so `di(` and `ci(` are the same edit with
+	// different tails and `>`/`<` shift the one line the range is on. Only the
+	// `p` can tell that yank from a yank of the two characters in it.
+	[["d", "i", "("], B_MULTI, 0],
+	[["d", "a", "("], B_MULTI, 0],
+	[["c", "i", "(", "\x1b"], B_MULTI, 0],
+	[["c", "a", "(", "\x1b"], B_MULTI, 0],
+	[["y", "i", "(", "p"], B_MULTI, 0],
+	[["y", "a", "(", "p"], B_MULTI, 0],
+	[[">", "i", "("], B_MULTI, 0],
+	[["<", "i", "("], B_MULTI, 0],
+	// The same three carets say the same thing, which is the point of having all
+	// three: a rule that only answers from outside the pair is not the rule.
+	[["d", "i", "("], B_MULTI, 1],
+	[["c", "i", "(", "\x1b"], B_MULTI, 1],
+	[["y", "i", "(", "p"], B_MULTI, 1],
+	[["d", "i", "("], B_MULTI, 5],
+	[["d", "a", "("], B_MULTI, 5],
+	[["c", "i", "(", "\x1b"], B_MULTI, 5],
+	[["c", "a", "(", "\x1b"], B_MULTI, 5],
+	[["y", "i", "(", "p"], B_MULTI, 5],
+	[["y", "a", "(", "p"], B_MULTI, 5],
+	[[">", "i", "("], B_MULTI, 5],
+	[["<", "i", "("], B_MULTI, 5],
+	// With nothing to indent there is still a line of its own, and still a
+	// linewise object — the indent is not what decides it.
+	[["d", "i", "("], B_MULTI_FLAT, 0],
+	[["d", "a", "("], B_MULTI_FLAT, 0],
+	[["c", "i", "(", "\x1b"], B_MULTI_FLAT, 0],
+	[["y", "i", "(", "p"], B_MULTI_FLAT, 0],
+	[["d", "i", "("], B_MULTI_FLAT, 1],
+	[["c", "a", "(", "\x1b"], B_MULTI_FLAT, 1],
+	[["d", "i", "("], B_MULTI_FLAT, 4],
+	[["d", "a", "("], B_MULTI_FLAT, 4],
+	[[">", "i", "("], B_MULTI_FLAT, 4],
+	[["y", "a", "(", "p"], B_MULTI_FLAT, 4],
+	// What the body *ends* on is the other half of the linewise rule, and the
+	// walk that builds the range stops differently over an empty line than over a
+	// line of blanks: `inindent` (indent.c:1101-1112) crosses the second and not
+	// the first. These are the two shapes that tell it apart.
+	[["d", "i", "("], B_BLANK_END, 0],
+	[["c", "i", "(", "\x1b"], B_BLANK_END, 0],
+	[["d", "i", "("], B_BLANK_END, 1],
+	[["d", "i", "("], B_BLANK_END, 2],
+	[["d", "a", "("], B_BLANK_END, 2],
+	[["y", "i", "(", "p"], B_BLANK_END, 2],
+	[["d", "i", "("], B_SPACE_END, 0],
+	[["c", "i", "(", "\x1b"], B_SPACE_END, 0],
+	[["d", "i", "("], B_SPACE_END, 2],
+	[["d", "a", "("], B_SPACE_END, 2],
+	[["y", "i", "(", "p"], B_SPACE_END, 2],
+	// No body at all, and a body of one space: the object is empty and the
+	// operator has nothing to spend itself on.
+	[["d", "i", "("], B_ALL_BLANK, 0],
+	[["d", "a", "("], B_ALL_BLANK, 0],
+	[["c", "i", "(", "\x1b"], B_ALL_BLANK, 0],
+	[["d", "i", "("], B_ALL_BLANK, 1],
+	[["d", "i", "("], B_ONE_BLANK, 0],
+	[["d", "a", "("], B_ONE_BLANK, 0],
+	[["c", "i", "(", "\x1b"], B_ONE_BLANK, 1],
+	[["d", "i", "("], B_ONE_BLANK, 3],
+	// A body, and then a line behind it that is empty or all blanks. The two
+	// differ only in the line the range ends on, which is what decides whether
+	// that line goes with it.
+	[["d", "i", "("], B_BLANK_TAIL, 0],
+	[["d", "a", "("], B_BLANK_TAIL, 0],
+	[["y", "i", "(", "p"], B_BLANK_TAIL, 0],
+	[["d", "i", "("], B_BLANK_TAIL, 1],
+	[["d", "i", "("], B_BLANK_TAIL, 3],
+	[["c", "i", "(", "\x1b"], B_BLANK_TAIL, 3],
+	[["d", "i", "("], B_SPACE_TAIL, 0],
+	[["d", "a", "("], B_SPACE_TAIL, 0],
+	[["d", "i", "("], B_SPACE_TAIL, 3],
+	[["c", "i", "(", "\x1b"], B_SPACE_TAIL, 3],
+	// A tab is as blank as a space to every rule above, so this is the same
+	// object as the one two groups back with different characters.
+	[["d", "i", "("], B_TABBED, 0],
+	[["d", "a", "("], B_TABBED, 0],
+	[["c", "i", "(", "\x1b"], B_TABBED, 0],
+	[["d", "i", "("], B_TABBED, 1],
+	[["d", "i", "("], B_TABBED, 4],
+	// The line the object ends on is blank rather than the bracket, and is the
+	// bracket behind an indent. The second of those is where the closing bracket
+	// is at a column other than zero, which is what `sol` asks about.
+	[["d", "i", "("], B_TRAIL_BLANK, 0],
+	[["d", "a", "("], B_TRAIL_BLANK, 0],
+	[["y", "i", "(", "p"], B_TRAIL_BLANK, 0],
+	[["d", "i", "("], B_TRAIL_BLANK, 1],
+	[["d", "i", "("], B_TRAIL_BLANK, 5],
+	[["c", "i", "(", "\x1b"], B_TRAIL_BLANK, 5],
+	[["d", "i", "("], B_CLOSE_INDENT, 0],
+	[["d", "a", "("], B_CLOSE_INDENT, 0],
+	[["c", "i", "(", "\x1b"], B_CLOSE_INDENT, 0],
+	[["y", "i", "(", "p"], B_CLOSE_INDENT, 0],
+	[["d", "i", "("], B_CLOSE_INDENT, 1],
+	[["d", "i", "("], B_CLOSE_INDENT, 5],
+	[[">", "i", "("], B_CLOSE_INDENT, 5],
+	// White on both sides of the body and on the bracket's own line, so neither
+	// end of the range is at column zero and the walk has indent to cross.
+	[["d", "i", "("], B_PADDED, 0],
+	[["d", "a", "("], B_PADDED, 0],
+	[["d", "i", "("], B_PADDED, 1],
+	[["d", "i", "("], B_PADDED, 3],
+	[["c", "i", "(", "\x1b"], B_PADDED, 3],
+	[["d", "i", "("], B_PADDED, 8],
+
+	// The empty object. The three arms of the emit (textobject.c:1190-1204) give
+	// this its three answers: nothing is deleted, `c` still opens an insert, and
+	// the caret goes to where the text *would have* begun — which for a body that
+	// starts on its own empty line is the line below, and so is the closing
+	// bracket. `>` and `<` still shift, because the range is the line it is on.
+	[["d", "i", "("], B_A_MULTI, 0],
+	[["d", "a", "("], B_A_MULTI, 0],
+	[["c", "i", "(", "\x1b"], B_A_MULTI, 0],
+	[["c", "a", "(", "\x1b"], B_A_MULTI, 0],
+	[[">", "i", "("], B_A_MULTI, 0],
+	[["d", "i", "("], B_A_MULTI, 1],
+	[["d", "i", "("], B_LONE_MULTI, 0],
+	[["c", "i", "(", "\x1b"], B_LONE_MULTI, 0],
+	[[">", "i", "("], B_LONE_MULTI, 0],
+	[["d", "i", "("], B_LONE_MULTI, 2],
+	// The same object on one line, for each of the three spellings of the pair:
+	// the empty `a` object takes the brackets themselves, so `da(` is the only
+	// one of the four that changes the text.
+	[["d", "i", "("], B_EMPTY_PARENS, 0],
+	[["d", "a", "("], B_EMPTY_PARENS, 0],
+	[["c", "i", "(", "\x1b"], B_EMPTY_PARENS, 0],
+	[[">", "i", "("], B_EMPTY_PARENS, 0],
+	[["<", "i", "("], B_EMPTY_PARENS, 0],
+	[["d", "i", "("], B_EMPTY_PARENS, 1],
+	[["c", "i", "(", "\x1b"], B_EMPTY_PARENS, 1],
+	[["d", "i", "["], B_EMPTY_SQUARE, 0],
+	[["d", "a", "["], B_EMPTY_SQUARE, 0],
+	[["c", "i", "[", "\x1b"], B_EMPTY_SQUARE, 0],
+	[[">", "i", "["], B_EMPTY_SQUARE, 0],
+	[["d", "i", "["], B_EMPTY_SQUARE, 1],
+	[["d", "i", "<"], B_EMPTY_ANGLE, 0],
+	[["d", "a", "<"], B_EMPTY_ANGLE, 0],
+	[["c", "i", "<", "\x1b"], B_EMPTY_ANGLE, 0],
+	[[">", "i", "<"], B_EMPTY_ANGLE, 0],
+	[["d", "i", "<"], B_EMPTY_ANGLE, 1],
+
+	// A `(` that nothing closes. The mate is looked up *after* the count, and
+	// that ordering is the whole of this block (textobject.c:1091-1108): one
+	// forward search takes the unclosed bracket and the object is a FAIL, while
+	// the second search steps inside it and lands on a pair that does close. So
+	// `di(` and `d2i(` disagree on the same text and at the same caret, and the
+	// case that changes nothing at all is the assertion.
+	[["d", "i", "("], B_UNCLOSED_OUTER, 0],
+	[["d", "a", "("], B_UNCLOSED_OUTER, 0],
+	[["c", "i", "(", "\x1b"], B_UNCLOSED_OUTER, 0],
+	[["d", "2", "i", "("], B_UNCLOSED_OUTER, 0],
+	[["c", "2", "i", "(", "\x1b"], B_UNCLOSED_OUTER, 0],
+	[["y", "i", "(", "p"], B_UNCLOSED_OUTER, 0],
+	[["d", "i", "("], B_UNCLOSED_OUTER, 1],
+	[["d", "2", "i", "("], B_UNCLOSED_OUTER, 1],
+	// Inside the pair the split is the other way round: a count now has to walk
+	// *outward* to a pair that closes, and the enclosing one does not — so `di(`
+	// works here and `d2i(` does not, which is the same rule from the other end.
+	[["d", "i", "("], B_UNCLOSED_OUTER, 5],
+	[["d", "2", "i", "("], B_UNCLOSED_OUTER, 5],
+	[["d", "3", "i", "("], B_UNCLOSED_OUTER, 5],
+	[["d", "i", "("], B_UNCLOSED_OUTER, 6],
+	[["d", "2", "i", "("], B_UNCLOSED_OUTER, 6],
+	[["d", "i", "("], B_UNCLOSED_FIRST, 0],
+	[["d", "2", "i", "("], B_UNCLOSED_FIRST, 0],
+	[["y", "i", "(", "p"], B_UNCLOSED_FIRST, 0],
+	[["d", "i", "("], B_UNCLOSED_FIRST, 1],
+	[["d", "2", "i", "("], B_UNCLOSED_FIRST, 1],
+	[["d", "i", "("], B_UNCLOSED_FIRST, 4],
+	[["d", "2", "i", "("], B_UNCLOSED_FIRST, 4],
+	// The same with nothing to step into: an unclosed bracket and no second
+	// search that could find a pair inside it, so the count fails for the same
+	// reason rather than for want of one.
+	[["d", "i", "("], B_UNCLOSED_CALL, 0],
+	[["d", "a", "("], B_UNCLOSED_CALL, 0],
+	[["d", "2", "i", "("], B_UNCLOSED_CALL, 0],
+	[["d", "i", "("], B_UNCLOSED_CALL, 1],
+	[["d", "i", "("], B_LONE_OPEN, 0],
+	[["c", "i", "(", "\x1b"], B_LONE_OPEN, 0],
+	[["d", "2", "i", "("], B_LONE_OPEN, 0],
+	// A count is a number of levels outward, and a count with nothing left to
+	// grow into fails the whole object rather than keeping the one that was
+	// found — which is the opposite of `2iw`, where a count is a number of units.
+	[["d", "2", "i", "("], B_MULTI, 0],
+	[["d", "3", "i", "("], B_MULTI, 5],
+	[["c", "2", "i", "(", "\x1b"], B_MULTI, 0],
+	[["d", "2", "i", "{"], B_BRACES, 0],
+
+	// Nesting. A backward search walks outward and a forward one walks inward, so
+	// the same count means opposite things depending on which search ran — and
+	// from in front of both pairs `d2i(` takes the *inner* one, not the whole.
+	[["d", "i", "("], B_NESTED, 0],
+	[["d", "2", "i", "("], B_NESTED, 0],
+	[["d", "3", "i", "("], B_NESTED, 0],
+	[["c", "i", "(", "\x1b"], B_NESTED, 0],
+	[["c", "2", "i", "(", "\x1b"], B_NESTED, 0],
+	[["y", "a", "(", "p"], B_NESTED, 0],
+	[["d", "i", "("], B_NESTED, 1],
+	[["d", "2", "i", "("], B_NESTED, 1],
+	// …and the same buffer from the other three carets is the three different
+	// objects a count can land on.
+	[["d", "i", "("], B_NESTED, 3],
+	[["d", "2", "i", "("], B_NESTED, 3],
+	[["d", "3", "i", "("], B_NESTED, 3],
+	[["d", "i", "("], B_NESTED, 4],
+	// Two pairs side by side: a count must not step sideways from the first onto
+	// the second, so from either of them `d2i(` has nothing to grow into. The
+	// forward search is bounded by the close it last landed on, which is what
+	// stops it, and the first pair spanning a line break does not change that.
+	[["d", "i", "("], B_TWO_PAIRS, 0],
+	[["d", "2", "i", "("], B_TWO_PAIRS, 0],
+	[["d", "3", "i", "("], B_TWO_PAIRS, 0],
+	[["d", "i", "("], B_TWO_PAIRS, 1],
+	[["d", "2", "i", "("], B_TWO_PAIRS, 1],
+	[["d", "i", "("], B_TWO_PAIRS, 2],
+	[["d", "2", "i", "("], B_TWO_PAIRS, 2],
+	[["d", "i", "("], B_TWO_PAIRS, 5],
+	[["d", "2", "i", "("], B_TWO_PAIRS, 5],
+	[["d", "i", "("], B_TWO_PAIRS, 6],
+	[["d", "2", "i", "("], B_TWO_PAIRS, 6],
+	[["d", "i", "("], B_BRACE_AFTER, 0],
+	[["d", "2", "i", "("], B_BRACE_AFTER, 0],
+	[["d", "i", "("], B_BRACE_AFTER, 1],
+	[["c", "i", "(", "\x1b"], B_BRACE_AFTER, 1],
+	[["d", "i", "("], B_BRACE_AFTER, 6],
+	[["d", "2", "i", "("], B_BRACE_AFTER, 6],
+	[["d", "i", "("], B_BRACE_AFTER, 7],
+	// The string is not a string to this scan. The pair inside the quotes is the
+	// object, and the one in the call beside it is a sibling rather than a level
+	// to grow into — so `di(` and `d2i(` split here too, in a buffer that a
+	// parser reading would answer differently.
+	[["d", "i", "("], B_IN_STRING, 0],
+	[["d", "2", "i", "("], B_IN_STRING, 0],
+	[["d", "a", "("], B_IN_STRING, 0],
+	[["d", "i", "("], B_IN_STRING, 6],
+	[["d", "2", "i", "("], B_IN_STRING, 6],
+	[["c", "i", "(", "\x1b"], B_IN_STRING, 6],
+	[["d", "i", "("], B_IN_STRING, 7],
+	[["d", "i", "("], B_IN_STRING, 13],
+	[["d", "2", "i", "("], B_IN_STRING, 13],
+
+	// The other three pairs. `'matchpairs'` is `(:),[:],{:},<:>` and nothing
+	// here reads a different one, so the four are the same object four times —
+	// which is what makes the two spellings below worth measuring separately.
+	[["d", "i", "{"], B_BRACES, 0],
+	[["d", "a", "{"], B_BRACES, 0],
+	[["d", "2", "i", "{"], B_BRACES, 0],
+	[["d", "i", "B"], B_BRACES, 0],
+	[["d", "i", "{"], B_BRACES, 1],
+	[["c", "i", "{", "\x1b"], B_BRACES, 1],
+	[["y", "i", "{", "p"], B_BRACES, 1],
+	[["d", "i", "{"], B_BRACES, 2],
+	[["d", "a", "{"], B_BRACES, 2],
+	[["c", "a", "{", "\x1b"], B_BRACES, 2],
+	[[">", "i", "{"], B_BRACES, 2],
+	[["d", "i", "{"], B_BRACES_NEST, 0],
+	[["d", "2", "i", "{"], B_BRACES_NEST, 0],
+	[["d", "i", "{"], B_BRACES_NEST, 3],
+	[["d", "2", "i", "{"], B_BRACES_NEST, 3],
+	[["d", "i", "["], B_SQUARE, 0],
+	[["d", "a", "["], B_SQUARE, 0],
+	[["d", "2", "i", "["], B_SQUARE, 0],
+	[["d", "i", "["], B_SQUARE, 1],
+	[["c", "i", "[", "\x1b"], B_SQUARE, 1],
+	[["d", "i", "["], B_SQUARE, 2],
+	[["c", "a", "[", "\x1b"], B_SQUARE, 2],
+	[[">", "i", "["], B_SQUARE, 2],
+	[["d", "i", "<"], B_ANGLE, 0],
+	[["d", "a", "<"], B_ANGLE, 0],
+	[["d", "2", "i", "<"], B_ANGLE, 0],
+	[["d", "i", "<"], B_ANGLE, 1],
+	[["c", "i", "<", "\x1b"], B_ANGLE, 1],
+	[["d", "i", "<"], B_ANGLE, 2],
+	[["c", "a", "<", "\x1b"], B_ANGLE, 2],
+	[[">", "i", "<"], B_ANGLE, 2],
+	// A count on the other three pairs, with the nesting to spend it on.
+	[["d", "2", "i", "}"], B_BRACES_NEST, 4],
+	[["d", "2", "i", "}"], B_BRACES_NEST, 0],
+	[["d", "2", "i", "]"], B_SQUARE_NEST, 4],
+	[["d", "2", "i", "]"], B_SQUARE_NEST, 0],
+	[["d", "2", "i", ">"], B_ANGLE_NEST, 4],
+	[["d", "2", "i", ">"], B_ANGLE_NEST, 0],
+
+	// The two spellings of each pair, and they are not aliases. `b` is `(` and
+	// `B` is `{` (normal.c:7238, :7243), so `dib` on braces fails for want of a
+	// `()` exactly as `diB` on parentheses does — and `dib` is a different code
+	// path from the `b` motion `db`, so the two do not collide.
+	[["d", "i", "b"], B_NESTED, 0],
+	[["d", "2", "i", "b"], B_NESTED, 0],
+	[["d", "3", "i", "b"], B_NESTED, 0],
+	[["d", "2", "i", "b"], B_NESTED, 4],
+	[["d", "i", "B"], B_NESTED, 0],
+	[["d", "i", "B"], B_BRACES_NEST, 0],
+	[["d", "i", "b"], B_BRACES_NEST, 0],
+	// A closing bracket is the other spelling of the pair it belongs to, and a
+	// caret standing on it is inside that pair rather than beside it.
+	[["d", "i", ")"], B_TWO_PAIRS, 1],
+	[["d", "i", ")"], B_TWO_PAIRS, 3],
+	[["d", "a", ")"], B_TWO_PAIRS, 3],
+	[["c", "i", ")", "\x1b"], B_TWO_PAIRS, 3],
+	[["d", "i", ")"], B_TWO_PAIRS, 5],
+	[["d", "i", ")"], B_TWO_PAIRS, 7],
+	[["d", "2", "i", ")"], B_TWO_PAIRS, 7],
+	[["d", "3", "i", ")"], B_TWO_PAIRS, 7],
+	[["c", "a", ")", "\x1b"], B_TWO_PAIRS, 7],
+	[["d", "2", "i", ")"], B_NESTED, 4],
+	[["d", "2", "i", ")"], B_NESTED, 0],
+	[["d", "i", "}"], B_BRACES, 3],
+	[["d", "a", "}"], B_BRACES, 3],
+	[["d", "i", "]"], B_SQUARE, 3],
+	[["d", "a", "]"], B_SQUARE, 3],
+	[["d", "i", ">"], B_ANGLE, 3],
+	[["d", "a", ">"], B_ANGLE, 3],
+
+	// A bracket of another kind is an ordinary character to the scan, which
+	// `ccheck`/`ccommand` (textobject.c) decide on the pair that was asked for
+	// and nothing else. So the `[`/`]` inside these are stepped over by `di(`
+	// rather than counted, and `di[` from in front reaches the pair in front of
+	// the caret without ever noticing the parentheses around it.
+	[["d", "i", "("], B_SQUARE_IN_PAREN, 4],
+	[["d", "i", "["], B_SQUARE_IN_PAREN, 0],
+	[["d", "i", "("], B_PAREN_IN_SQUARE, 0],
+	[["d", "i", "b"], B_PAREN_IN_SQUARE, 0],
+	[["y", "a", "(", "P"], B_MULTI, 0],
+	[["c", "2", "i", "(", "\x1b"], B_NESTED, 4],
+
+	// A close the caret is behind is a level the forward sweep has to climb, not
+	// a character to step over: `findmatchlimit`'s count is at zero only when it
+	// hands back an answer, and it counts the closing bracket up. So the object on
+	// these is a FAIL, and a FAIL is a FAIL for every operator.
+	[["d", "i", "("], B_STRAY_CLOSE, 0],
+	[["y", "i", "("], B_STRAY_CLOSE, 0],
+	[["d", "a", "("], B_STRAY_CLOSE, 0],
+	[["c", "i", "(", "Z", "\x1b"], B_STRAY_CLOSE, 0],
+	[[">", "i", "("], B_STRAY_CLOSE, 0],
+	[["<", "i", "("], B_STRAY_CLOSE, 0],
+	[["d", "i", "{"], B_STRAY_BRACE, 0],
+	[["d", "i", "["], B_STRAY_SQUARE, 0],
+	// …and a `(` that does pay for the close puts the level back where it was, so
+	// the same sweep on this one reaches a pair two closes and two opens ahead.
+	[["d", "i", "("], B_CLOSE_PAID, 0],
+	// The level is not per line, and the pairs do not share it: a close on one
+	// line is paid for by a `(` on the next when the object asked for is that
+	// kind, and is not paid for at all when it is the other kind.
+	[["d", "i", "("], B_CLOSE_ACROSS_LINES, 0],
+	[["d", "i", "{"], B_CLOSE_ACROSS_LINES_OTHER, 0],
+	// A second press is a second sweep from where the last one landed, and that
+	// sweep has no bound of its own: it runs past the close of the pair the first
+	// one found, which is the only way `2i(` has anything to reach here.
+	[["d", "2", "i", "("], B_TWO_OPEN, 0],
+	[["y", "2", "i", "("], B_TWO_OPEN, 0],
+	[["d", "2", "a", "("], B_TWO_OPEN, 0],
+	[["d", "3", "i", "("], B_TWO_OPEN, 0],
+
+	// An empty line inside the body. The object starts where `incl` put it —
+	// the line *after* the one holding the bracket — and `op_shift` works on the
+	// lines `oap` names and then runs `beginline(BL_SOL | BL_FIX)` on the first
+	// of them, so a first line with nothing on it is both shifted nothing and
+	// where the caret stays.
+	[["d", "i", "("], B_EMPTY_IN_BODY, 0],
+	[[">", "i", "("], B_EMPTY_IN_BODY, 0],
+	[["<", "i", "("], B_EMPTY_IN_BODY, 0],
+	[["d", "i", "("], B_TWO_EMPTY, 0],
+	[["c", "i", "(", "Z", "\x1b"], B_TWO_EMPTY, 0],
+	[["c", "i", "(", "\x1b"], B_TWO_EMPTY, 0],
+	[[">", "i", "("], B_BLANK_FIRST, 0],
+
+	// What an empty object leaves in the register, read back by the next command.
+	// `oap->empty` is `op_delete`'s early return and something `op_change` walks
+	// past, and `OP_YANK` bails only on 'E' in 'cpoptions' — so a yank of nothing
+	// replaces the register with an empty one, and a delete on the same object
+	// leaves it alone. The harness has no register accessor on its side, which is
+	// why this is a paste rather than a comparison of register contents.
+	[["y", "a", "(", "l", "l", "l", "y", "i", "(", "g", "g", "P"], B_PAIR_THEN_EMPTY, 0],
+	[["y", "a", "(", "g", "g", "P"], B_PAIR_THEN_EMPTY, 0],
+	[["y", "a", "(", "l", "l", "l", "d", "i", "(", "g", "g", "P"], B_PAIR_THEN_EMPTY, 0],
+	[["y", "a", "(", "l", "l", "l", "c", "i", "(", "Z", "\x1b", "g", "g", "P"], B_PAIR_THEN_EMPTY, 0],
+
 	// Not here: anything with the caret on the `\n` of `"ab\ncd"`. Vim has no
 	// line-break character to put a caret on — `cursor(1, 3)` clamps onto the
 	// last character of the line — so the two editors would be answering a
