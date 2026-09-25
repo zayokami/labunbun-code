@@ -301,6 +301,82 @@ a position this engine cannot stand in. The wanted column is what carries it
 (`S60`): without it a `j` after `vl` lands a line short, which is a pre-existing
 defect the count work exposed rather than one it created.
 
+## Text objects: `iw` `aw`, then `ip` `ap`
+
+An operator followed by `i` or `a` opens a latch for **one** key, and the key is
+an object name rather than a motion. Three things have to be true for that to be
+an object and not a silent `diw`, and all three were defects first:
+
+- **A name the engine does not know is a cancellation, not a word** (`V6`).
+  `diZ` used to cut a word, because the latch spent whatever arrived. It now
+  spends the operator, and the buffer is untouched.
+- **The walk is by character class, and it re-reads it once** (`V4`, `V5`).
+  `endWordOnce` finished its loop by asking the class of each character again
+  instead of the once `skip_chars` reads (`textobject.c:139-155`), so a word ran
+  on through the punctuation behind it: `daw` on `"a, b; c"` at 2 cut `"a, c"`
+  where vim cuts `"a,; c"`. `W` walks the big classes and is not `w` with the
+  rules loosened.
+- **A multi-line charwise delete may become linewise** (`V7a`–`V7c`). A delete
+  that leaves a blank line behind the object is promoted — register included —
+  by the "strange Vi behaviour" of `ops.c:810-825`, which survives because
+  `'cpoptions'` has kept its `z` (`CPO_WORD`) since 7.4. A `c` and a `y` are not
+  promoted, and the promotion looks *behind* the object, not at its own length.
+
+`aw` has one asymmetry worth stating because it looks like a bug and is not: it
+reaches for the white **behind** the word (`V2a`), and the white it reaches for
+does not take the indentation with it (`V2b`).
+
+### `ip` and `ap` are linewise from the moment they are found
+
+A paragraph object sets `oap->motion_type = MLINE` (`textobject.c:1500-1672`) and
+never writes `oap->inclusive`, so it is not a characterwise object that happens to
+span lines. In this engine that means it goes to `#runLinewise` and never reaches
+`#runOperator` or `deleteGoesLinewise` at all — which is also why `V23`, routing a
+paragraph through the characterwise path, is red on the very first case.
+
+What the source settles, each of which cost a measurement to believe:
+
+- **A blank line is one that holds nothing but space and tab** (`V14`).
+  `linewhite` (`search.c:3183`) is `skipwhite(line) == NUL`, so `"   "` separates
+  paragraphs and indentation never does.
+- **A paragraph also begins at a form feed or an nroff macro** (`V15`–`V17`).
+  `startPS` takes a form feed or `.` plus `inmacro`, and `inmacro`
+  (`textobject.c:252-273`) slides a **two**-character window at even offsets
+  across the whole option string — the space is a *position in a window*, not a
+  separator, which is why the list's lowercase `.bp` is in it and `.BP` is not.
+  Three letters do not split: `.ABC` is a paragraph of its own only by accident.
+- **`ap` takes the blank run after the paragraph** (`V18`), or **reaches back for
+  the blanks in front** when there is nothing after (`V19`).
+- **From a blank, `ap` is the run plus the paragraph below it — and stops there**
+  (`V20`). The blanks *after* that second paragraph are somebody else's; the
+  source breaks out of the loop before the walk to the end of the white lines.
+  `dap` on the blank of `"a\n\nb\n\nc"` leaves `"a\n\nc"`, not `"a\nc"`.
+- **A count is a number of units, and a blank run is one unit** (`V21`) — one
+  fewer when the caret is already inside that run, which is the whole difference
+  between `2ip` and `2ap` there.
+- **A count past the end is a FAIL, not a clamp** (`V22`). `current_par` returns
+  `FAIL` when `end_lnum == line_count`, and a FAIL spends the operator rather
+  than taking what is left. This one is worth flagging because a hand-written
+  expectation got it wrong first: `2dip` on the blank of `"a\n\nb"` is not a
+  no-op, it is `"a"` — the run plus the paragraph below — while `2ap` from the
+  same place gives up. The engine was right and the expectation was rewritten.
+- **A FAIL rings the bell and walks nowhere** (`V27`): `clearopbeep` drops the
+  operator, so the caret is exactly where it was.
+- **`>` and `<` take the span the object lands on** (`V24`), not one line — the
+  same rule `V12` holds for `iw`.
+
+One fix in this round was not about paragraphs at all. An **empty linewise
+register is a thing worth pasting**: `yip` on an empty buffer yanks one empty
+line, and `ggP` pastes it as a line break, where an empty characterwise register
+(`y$` on an empty line) pastes no characters at all. `#paste` conflated the two
+and pasted nothing (`V26`). The object made the path reachable; the defect was
+already there.
+
+The evidence for the round is 47 cases in `CASES` and a 780-case `ip`/`ap` grid,
+on top of the 1053-case word-object grid that found `V1`–`V9`. Both grids skip the
+two classes in **Three buffers the comparison cannot judge**, which is why
+`CASES` carries no case with the caret on a `\n` and none whose text ends in one.
+
 ## What the fuzzer refuses to compare
 
 `fuzz.mjs` draws 1–3 keys from `KEYS` and drops two classes of sequence by name,
@@ -471,3 +547,14 @@ original bytes, so it is a machine-local instrument rather than something the
 repository can hold. The end-to-end assertion is the one that matters: a yank, a
 delete and a paste put the token back byte for byte, and `expandPasteTokens` still
 finds the payload inside it.
+
+Every mutant name in this file belongs to that driver, and a name is a pointer
+rather than a promise: the driver has been renumbered twice, and a rewrite of it
+once dropped the whole `S`/`W`/`X` scheme — 78 checks — without saying so, which
+left this section citing mutants that no runner was executing. The assertions were
+never lost, and every anchor still resolved against the source, so carrying the
+checks back was bookkeeping rather than re-derivation. But the coupling is real
+and the failure mode is quiet: a name in a README cannot go red. **The evidence
+in this repository is the test file; the mutants only tell you which assertion is
+load-bearing.** `ANCHORS_ONLY=1` on the driver is the command that finds a dead
+one, and it is worth running whenever a batch renames anything.

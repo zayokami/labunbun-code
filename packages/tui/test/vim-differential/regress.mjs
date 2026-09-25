@@ -131,6 +131,12 @@ const THREE_LINES = "a\nb\nc";
 // cannot make: a selection ending on line 1 redoes by its *width*, and only a
 // shorter line to land on shows that.
 const WIDE_NARROW = "abcdef\nxyz\npq";
+// `a`, a blank, `b`. Offset 2 is the blank line; 3 is the `b` — the two carets
+// that answer differently, and the pair a paragraph object has to tell apart.
+const PARA = "a\n\nb";
+// A paragraph, a two-line blank run, another paragraph: the shape that shows a
+// blank run is one counting unit however many lines it is.
+const PARA2 = "a\n\n\nb";
 
 const CASES = [
 	// wanted column: MAXCOL and short lines
@@ -260,6 +266,23 @@ const CASES = [
 	[["V", "c", "x", "\x1b"], "a\nbc", 2],
 	[["V", "c", "x", "\x1b"], "abc", 0],
 	[["c", "c", "x", "\x1b"], D, 2],
+	// `cc` when the block it removes ran to the end of the buffer, so the break
+	// in front of the first removed line goes with it. On an empty first line
+	// that break is all that was holding the two apart, and the insert opens on
+	// the line it emptied rather than on one that no longer exists.
+	[["c", "c", "x", "\x1b"], "\na", 1],
+	[["c", "c", "x", "\x1b"], "\n ", 1],
+	[["c", "c", "x", "\x1b"], "\n\na", 2],
+	[["c", "c", "x", "\x1b"], " \na", 2],
+	[["c", "c", "x", "\x1b"], "one\ntwo", 4],
+	// A count that runs off the end spends the operator without typing, and the
+	// empty first line is not what makes that so.
+	[["c", "2", "c", "x", "\x1b"], "\na", 1],
+	[["c", "2", "c", "x", "\x1b"], "one\ntwo", 4],
+	// The same landing through a paragraph object.
+	[["c", "i", "p", "x", "\x1b"], "\na\na", 3],
+	[["c", "a", "p", "x", "\x1b"], "\na\na", 3],
+	[["c", "i", "p", "x", "\x1b"], "\n\na", 2],
 	[["V", "c", "x", "\x1b", "j"], D, 2],
 	[["V", "2", "j", "c", "x", "\x1b"], "a\nbc\ndef\ngh", 2],
 	[["V", "c", "\x1b"], D, 2],
@@ -926,6 +949,114 @@ const CASES = [
 	[["2", "v", "j", "j", "d"], SOLO_LINES, 0],
 	[["v", "l", "j", "d"], "ab\nc\ndef", 0],
 	[["v", "l", "j", "d"], "abcdef\ngh", 1],
+
+	// -- `ip` / `ap` ----------------------------------------------------------
+	//
+	// A paragraph is a run of non-blank lines, and a run of blank lines is a
+	// unit of its own. Every one of these was measured against vim before it was
+	// written; the two that would be wrong are the ones the model cannot judge,
+	// and they are excluded for the reasons spelled out below.
+
+	// The shape everyone gets wrong first: three lines is one paragraph.
+	[["d", "i", "p"], "a\nb\nc", 0],
+	[["d", "i", "p"], "a\nb\nc", 2],
+	[["d", "i", "p"], "a\nb\nc", 4],
+	[["d", "a", "p"], "a\nb\nc", 0],
+	// Indentation is not a boundary — `linewhite` asks `skipwhite` and the NUL.
+	[["d", "i", "p"], "  a\n  b\n  c", 0],
+	[["d", "i", "p"], "one\n  two\nthree", 0],
+	[["d", "a", "p"], "one\n  two\nthree", 4],
+	// `ip` on a blank line is the whole run of blanks; a line of spaces or a
+	// tab is as blank as an empty one.
+	[["d", "i", "p"], PARA2, 2],
+	[["d", "i", "p"], PARA2, 3],
+	[["d", "i", "p"], "a\n   \nb", 2],
+	[["d", "i", "p"], "a\n\t\nb", 2],
+	// `ap` takes the blanks that follow…
+	[["d", "a", "p"], PARA, 0],
+	[["d", "a", "p"], "a\nb\n\nc", 0],
+	[["d", "a", "p"], PARA2, 0],
+	// …and on the last paragraph, where there are none, the ones in front.
+	[["d", "i", "p"], PARA, 3],
+	[["d", "a", "p"], PARA, 3],
+	[["d", "a", "p"], PARA2, 7],
+	[["d", "a", "p"], "x\n\n\ny", 7],
+	// On a blank line `ap` is the run plus the paragraph below it.
+	[["d", "a", "p"], PARA, 2],
+	[["d", "a", "p"], PARA2, 2],
+	// A count is a number of units, and a blank run is one unit.
+	[["d", "2", "i", "p"], PARA2, 0],
+	[["d", "3", "i", "p"], PARA2, 0],
+	[["d", "2", "i", "p"], PARA, 2],
+	[["d", "2", "a", "p"], PARA2, 0],
+	[["d", "2", "a", "p"], "a\n\nb\n\nc", 0],
+	[["d", "3", "a", "p"], "a\n\nb\n\nc", 0],
+	// A count that runs off the end is a no-op rather than a clamp. Both of
+	// these change nothing at all, which is the assertion: a clamp would take
+	// the rest of the buffer.
+	[["d", "2", "i", "p"], PARA, 3],
+	[["d", "2", "a", "p"], PARA, 3],
+	[["d", "3", "a", "p"], "a\n\nb\n\nc\n\nd", 3],
+	// The register is linewise, so `P` puts whole lines back.
+	[["y", "i", "p", "g", "g", "P"], PARA, 0],
+	[["y", "a", "p", "g", "g", "P"], PARA, 3],
+	[["y", "i", "p", "g", "g", "P"], "a\nb\nc", 2],
+	// …and `current_par` reports its start as `{start_lnum, 0}`, so a paragraph
+	// yank leaves the caret on the first byte of the object's first line even
+	// though nothing moved. `yy` on the same buffer and the same line does *not*
+	// move, which is what makes this the text object's rule rather than a rule
+	// about yanking. The last paragraph is the one that shows it: `ap` there
+	// grew upward over the blank run, so it starts a line above where `ip` does.
+	[["y", "i", "p"], "alpha\n\nbetagamma", 14],
+	[["y", "a", "p"], "alpha\n\nbetagamma", 14],
+	[["y", "y"], "alpha\n\nbetagamma", 14],
+	[["y", "i", "p"], "a\n\nbbcd", 6],
+	[["y", "a", "p"], "a\n\nbbcd", 6],
+	[["y", "y"], "a\n\nbbcd", 6],
+	[["y", "a", "p"], "a\n\nbbcd", 2],
+	// `startPS`: a `.` and two characters of `'paragraphs'`, or a form feed in
+	// the first column. `.IP` and `.PP` split; `.XX` and the three-letter
+	// `.ABC` do not; the window slides over the whole option in steps of two,
+	// so the lowercase `.bp` at the end of it is in the list and `.BP` is not.
+	[["d", "i", "p"], ".IP one\ntwo\nthree\n.PP\nfour", 0],
+	[["d", "i", "p"], ".IP one\ntwo\nthree\n.PP\nfour", 8],
+	[["d", "a", "p"], ".IP one\ntwo\nthree\n.PP\nfour", 4],
+	// The walk up stops at a paragraph start *including the cursor's own line*,
+	// so a caret on `.PP` takes that line and nothing above it — where a caret
+	// one line up reaches over `.IP` and takes three lines instead.
+	[["d", "i", "p"], ".IP one\ntwo\nthree\n.PP\nfour", 17],
+	[["d", "a", "p"], ".IP one\ntwo\nthree\n.PP\nfour", 18],
+	[["d", "i", "p"], "a\n.XX b\nc", 0],
+	[["d", "i", "p"], "a\n.ABC b\nc", 0],
+	[["d", "i", "p"], "a\n.bp x\nc", 0],
+	[["d", "i", "p"], "a\n.BP x\nc", 0],
+	[["d", "i", "p"], "a\n\fb\nc", 0],
+	// A macro name that *ends* at the line end is compared against a NUL, and
+	// `"P "` is the one window in `'paragraphs'` whose second character is a
+	// space, so a bare `.P` is a macro. Reading the name across the break sees
+	// `"P\n"` instead and finds nothing, which costs the `.P` line its own
+	// paragraph: the line above it goes with it.
+	[["d", "i", "p"], "alpha\n.P\nbeta", 0],
+	[["d", "a", "p"], "alpha\n.P\nbeta", 0],
+	[["d", "i", "p"], "one\n.P\ntwo\nthree", 0],
+	// The NUL is a character, not a wildcard. `.I` would need the window `"I "`
+	// and `.PX` would need a space where its `X` is, so both are ordinary text
+	// and the paragraph runs on through them.
+	[["d", "i", "p"], "alpha\n.I\nbeta", 0],
+	[["d", "i", "p"], "alpha\n.PX\nbeta", 0],
+	// The third character is never read, so `.PPP` is `"PP"` plus a letter.
+	[["d", "i", "p"], "alpha\n.PPP\nbeta", 0],
+	// No window begins with a NUL or a space, so a line that is a bare `.`, or a
+	// `.` and a space, is not a macro either.
+	[["d", "i", "p"], "alpha\n.\nbeta", 0],
+	[["d", "i", "p"], "alpha\n. \nbeta", 0],
+	// A paragraph is a motion `>` and `<` take as well.
+	[[">", "i", "p"], "a\nb\nc", 0],
+	[[">", "a", "p"], PARA, 0],
+	[["<", "i", "p"], "  a\n  b", 0],
+	// The empty buffer: `ip` is its one empty line, `ap` has nothing to take.
+	[["y", "i", "p", "g", "g", "P"], "", 0],
+	[["y", "a", "p", "g", "g", "P"], "", 0],
 	// Not here: anything with the caret on the `\n` of `"ab\ncd"`. Vim has no
 	// line-break character to put a caret on — `cursor(1, 3)` clamps onto the
 	// last character of the line — so the two editors would be answering a

@@ -1702,6 +1702,36 @@ describe("line edges", () => {
 		e.type("X");
 		expect(e.state.text).toBe("one\nX"); // typed on that line, not over it
 	});
+
+	test("cc reaches back over the break in front of the first line it removes", () => {
+		// The removal range reaches the end of the buffer, so the break that joined
+		// the last line to the one before it goes with the block — and on an empty
+		// first line that break is the only thing separating the two, so asking
+		// "is there anything left?" the wrong way eats it. `cc` on "one\ntwo"
+		// lands on the line it emptied, not on the line that took its place.
+		const whole = editor("\na", 1);
+		whole.engine.handleKey("c", whole.key());
+		whole.engine.handleKey("c", whole.key());
+		expect(whole.state.text).toBe("\n");
+		expect(whole.state.cursor).toBe(1);
+		whole.type("X");
+		expect(whole.state.text).toBe("\nX"); // and the typing goes there
+		// A first line of spaces is the same case: what matters is that it is
+		// empty of words, not that it has no characters.
+		const blank = editor("\n ", 1);
+		blank.engine.handleKey("c", blank.key());
+		blank.engine.handleKey("c", blank.key());
+		expect(blank.state.text).toBe("\n");
+		expect(blank.state.cursor).toBe(1);
+		// With a first line that has text on it there is a break left over to
+		// keep, so this path never runs — measured, and the reason the guard asks
+		// about the start rather than about what is left of the buffer.
+		const kept = editor("one\ntwo", 4);
+		kept.engine.handleKey("c", kept.key());
+		kept.engine.handleKey("c", kept.key());
+		expect(kept.state.text).toBe("one\n");
+		expect(kept.state.cursor).toBe(4);
+	});
 });
 
 describe("an empty line is a line of its own", () => {
@@ -2338,6 +2368,203 @@ describe("word text objects", () => {
 			expect(e.state.text).toBe(text);
 			expect(e.writes()).toBe(0);
 		}
+	});
+});
+
+describe("paragraph text objects", () => {
+	/** `a`, a blank, `b`. The offset 2 is the blank line, 3 the `b`. */
+	const PARA = "a\n\nb";
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) e.engine.handleKey(k, e.key());
+		return e;
+	};
+
+	test("a paragraph is every line down to the next blank, not the one line", () => {
+		// The most wrong assumption available here is that a paragraph is a line.
+		// `"a\nb\nc"` is one paragraph, so `dip` on any of it empties the buffer.
+		for (const cursor of [0, 2, 4]) {
+			expect(run("a\nb\nc", cursor, "d", "i", "p").state.text).toBe("");
+			expect(run("a\nb\nc", cursor, "d", "a", "p").state.text).toBe("");
+		}
+		// One line into a paragraph is the whole of it, not the rest of it.
+		expect(run("a\nb\nc", 2, "d", "i", "p").state.text).toBe("");
+	});
+
+	test("indentation never splits a paragraph", () => {
+		// `linewhite` asks `skipwhite` and the NUL, so where the text sits in the
+		// line is not part of the question — only whether anything but space and
+		// tab is there.
+		expect(run("  a\n  b\n  c", 0, "d", "i", "p").state.text).toBe("");
+		expect(run("one\n  two\nthree", 0, "d", "i", "p").state.text).toBe("");
+	});
+
+	test("ip on a blank line is the whole run of blanks it is in", () => {
+		expect(run("a\n\n\nb", 2, "d", "i", "p").state.text).toBe("a\nb");
+		expect(run("a\n\n\nb", 3, "d", "i", "p").state.text).toBe("a\nb");
+		// A line of spaces is as blank as an empty one, and a tab too.
+		expect(run("a\n   \nb", 2, "d", "i", "p").state.text).toBe("a\nb");
+		expect(run("a\n\t\nb", 2, "d", "i", "p").state.text).toBe("a\nb");
+	});
+
+	test("ap takes the blank run that follows the paragraph", () => {
+		// Forward wins: `a` has a blank after it, so that is what `ap` takes even
+		// though there is a paragraph above it as well.
+		expect(run(PARA, 0, "d", "a", "p").state.text).toBe("b");
+		expect(run("a\nb\n\nc", 0, "d", "a", "p").state.text).toBe("c");
+		// The whole run, however long.
+		expect(run("a\n\n\nb", 0, "d", "a", "p").state.text).toBe("b");
+	});
+
+	test("ap on the last paragraph reaches back for the blanks in front", () => {
+		// `ip` leaves the blank line alone here and `ap` does not: there was nothing
+		// after the paragraph to take, so it grew upward over the run instead.
+		expect(run(PARA, 3, "d", "i", "p").state.text).toBe("a\n");
+		expect(run(PARA, 3, "d", "a", "p").state.text).toBe("a");
+		expect(run("a\n\n\nb", 7, "d", "a", "p").state.text).toBe("a");
+	});
+
+	test("ap on a blank line is the run and the paragraph below it", () => {
+		expect(run(PARA, 2, "d", "a", "p").state.text).toBe("a");
+		expect(run("a\n\n\nb", 2, "d", "a", "p").state.text).toBe("a");
+		// ...and it stops at the end of that paragraph. The blanks *after* it are
+		// somebody else's: `current_par` breaks out of the loop before the walk to
+		// the end of the white lines, so a second `c` in the buffer stays put.
+		expect(run("a\n\nb\n\nc", 2, "d", "a", "p").state.text).toBe("a\n\nc");
+	});
+
+	test("a count is a number of units and a blank run is one unit", () => {
+		// On `"a\n\n\nb"` the units are `a` / the two blanks / `b`. So `2ip` is
+		// three lines — the paragraph and the run as a single unit — while a bare
+		// `ip` on a blank is the same two lines on their own.
+		expect(run("a\n\n\nb", 0, "d", "2", "i", "p").state.text).toBe("b");
+		expect(run("a\n\n\nb", 0, "d", "3", "i", "p").state.text).toBe("");
+		expect(run("a\n\n\nb", 2, "d", "i", "p").state.text).toBe("a\nb");
+		// `2ip` from a blank is the run plus the paragraph below it, because the
+		// count is one less when the caret is already inside the run.
+		expect(run(PARA, 2, "d", "2", "i", "p").state.text).toBe("a");
+		// `2ap` from a blank stops after one step, which is what makes it differ.
+		expect(run(PARA, 2, "d", "2", "a", "p").state.text).toBe(PARA);
+	});
+
+	test("a count that runs off the end is a no-op, not a clamp", () => {
+		// The FAIL in `current_par` is `end_lnum == line_count`, and a FAIL spends
+		// the operator rather than taking what is left. From the last paragraph
+		// there is nothing below it to reach, so both counts give up.
+		const e = run(PARA, 3, "d", "2", "i", "p");
+		expect(e.state.text).toBe(PARA);
+		expect(e.writes()).toBe(0);
+		const a = run(PARA, 3, "d", "2", "a", "p");
+		expect(a.state.text).toBe(PARA);
+		expect(a.writes()).toBe(0);
+		// A third unit is past the end from here as well.
+		const three = run(PARA, 3, "d", "3", "a", "p");
+		expect(three.state.text).toBe(PARA);
+		expect(three.writes()).toBe(0);
+		// And the count that does fit still works from the same place.
+		expect(run(PARA, 3, "d", "a", "p").state.text).toBe("a");
+	});
+
+	test("a FAIL leaves the caret exactly where it was", () => {
+		// `clearopbeep` drops the operator and rings the bell; it walks nowhere.
+		const e = run(PARA, 3, "d", "2", "i", "p");
+		expect(e.state.cursor).toBe(3);
+	});
+
+	test("the object is linewise, and so is the register it leaves", () => {
+		// A linewise yank pastes back as whole lines, which is the difference
+		// between `P` restoring the paragraph and splicing its text inline.
+		expect(run(PARA, 0, "y", "i", "p", "g", "g", "P").state.text).toBe("a\na\n\nb");
+		expect(run(PARA, 3, "y", "a", "p", "g", "g", "P").state.text).toBe("\nb\na\n\nb");
+	});
+
+	test("a paragraph yank leaves the caret at the start of the object, not where it was", () => {
+		// `current_par` ends by writing `oap->start = {start_lnum, 0}` — a text
+		// object, so the column is part of the contract and the caret homes to the
+		// first byte of the first line. `yy` on the same line is not a text object
+		// and does not move, which is what says this is the object's rule and not
+		// "every yank goes home".
+		const e = run("alpha\n\nbetagamma", 14, "y", "i", "p");
+		expect(e.state.cursor).toBe(7);
+		expect(run("alpha\n\nbetagamma", 14, "y", "y").state.cursor).toBe(14);
+		// `ap` on the last paragraph grew upward over the blank run, so the object
+		// it reports starts a line earlier than `ip`'s does — and `dap` on the same
+		// place is the linewise landing of that same start.
+		expect(run("alpha\n\nbetagamma", 14, "y", "a", "p").state.cursor).toBe(6);
+		expect(run("a\n\nbbcd", 6, "y", "i", "p").state.cursor).toBe(3);
+		expect(run("a\n\nbbcd", 6, "y", "a", "p").state.cursor).toBe(2);
+		expect(run("a\n\nbbcd", 6, "y", "y").state.cursor).toBe(6);
+		// The buffer is untouched — a yank still only reads.
+		expect(run("alpha\n\nbetagamma", 14, "y", "i", "p").writes()).toBe(0);
+	});
+
+	test("an nroff macro begins a paragraph", () => {
+		// `startPS` (textobject.c:280-292) is the other thing that ends a paragraph
+		// besides a blank line, and `inmacro` looks at exactly two characters — so
+		// `.IP` and `.PP` split and a three-letter `.ABC` does not.
+		expect(run(".IP one\ntwo\nthree\n.PP\nfour", 0, "d", "i", "p").state.text).toBe(".PP\nfour");
+		expect(run("a\n.XX b\nc", 0, "d", "i", "p").state.text).toBe("");
+		expect(run("a\n.ABC b\nc", 0, "d", "i", "p").state.text).toBe("");
+		// The window slides over the whole option string in steps of two, so the
+		// separating space is a position in a pair rather than a break, and the
+		// list's lowercase `.bp` is in it. Case matters: `.BP` is not.
+		expect(run("a\n.bp x\nc", 0, "d", "i", "p").state.text).toBe(".bp x\nc");
+		expect(run("a\n.BP x\nc", 0, "d", "i", "p").state.text).toBe("");
+		// The walk up to the paragraph start asks whether the caret's *own* line
+		// begins one, not the line above it — the macro splits the paragraph from
+		// both sides, so `dip` from inside the second one takes the second one.
+		expect(run(".IP one\ntwo\nthree\n.PP\nfour", 8, "d", "i", "p").state.text).toBe(".PP\nfour");
+		expect(run(".IP one\ntwo\nthree\n.PP\nfour", 18, "d", "i", "p").state.text).toBe(".IP one\ntwo\nthree");
+	});
+
+	test("a macro whose name ends at the line end is read against a NUL, not the break", () => {
+		// `"P "` is the one window in `'paragraphs'` whose second character is a
+		// space, and `inmacro` lets a space or a NUL match a line that has run out
+		// — so a bare `.P` is a macro. Reading the name out of the buffer rather
+		// than out of the line crosses the break and sees `"P\n"`, which matches
+		// nothing: `dip` then swallows the `.P` line along with the paragraph above.
+		expect(run("alpha\n.P\nbeta", 0, "d", "i", "p").state.text).toBe(".P\nbeta");
+		expect(run("alpha\n.P\nbeta", 0, "d", "a", "p").state.text).toBe(".P\nbeta");
+		expect(run("one\n.P\ntwo\nthree", 0, "d", "i", "p").state.text).toBe(".P\ntwo\nthree");
+		// The NUL is a character of the comparison, not a wildcard: only a window
+		// ending in a space can match a one-character name, so `.I` — which would
+		// need `"I "` — and `.PX` are ordinary text, and the paragraph runs on
+		// through them to the end of the buffer.
+		expect(run("alpha\n.I\nbeta", 0, "d", "i", "p").state.text).toBe("");
+		expect(run("alpha\n.PX\nbeta", 0, "d", "i", "p").state.text).toBe("");
+		// `.PPP` is still `"PP"` with a third character the window never reads.
+		expect(run("alpha\n.PPP\nbeta", 0, "d", "i", "p").state.text).toBe(".PPP\nbeta");
+		// And no window starts with a NUL, so a line that is nothing but a `.`,
+		// or a `.` and a space, is not a macro either.
+		expect(run("alpha\n.\nbeta", 0, "d", "i", "p").state.text).toBe("");
+		expect(run("alpha\n. \nbeta", 0, "d", "i", "p").state.text).toBe("");
+	});
+
+	test("a form feed in the first column begins a paragraph", () => {
+		expect(run("a\n\fb\nc", 0, "d", "i", "p").state.text).toBe("\fb\nc");
+	});
+
+	test("a paragraph is a motion > and < take as well", () => {
+		expect(run("a\nb\nc", 0, ">", "i", "p").state.text).toBe("\ta\n\tb\n\tc");
+		expect(run(PARA, 0, ">", "a", "p").state.text).toBe("\ta\n\nb");
+		expect(run("  a\n  b", 0, "<", "i", "p").state.text).toBe("a\nb");
+	});
+
+	test("an empty buffer has one empty paragraph and nothing around it", () => {
+		// Measured, and the asymmetry is real: `ip` yanks the one empty line and
+		// `ap` has nothing to take at all, so it is a no-op.
+		expect(run("", 0, "y", "i", "p", "g", "g", "P").state.text).toBe("\n");
+		const a = run("", 0, "y", "a", "p", "g", "g", "P");
+		expect(a.state.text).toBe("");
+		expect(a.writes()).toBe(0);
+	});
+
+	test("an empty linewise register pastes as a line", () => {
+		// `#paste` used to drop any register with no characters in it, which is
+		// right for a characterwise one and wrong here: a linewise register holding
+		// an empty line is a line.
+		const e = run("", 0, "y", "i", "p", "g", "g", "P");
+		expect(e.state.text).toBe("\n");
 	});
 });
 

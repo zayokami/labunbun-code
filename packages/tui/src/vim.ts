@@ -1528,6 +1528,158 @@ export function wordObject(
 }
 
 /**
+ * `'paragraphs'`' default (optiondefs.h:1940): the nroff macros that begin a
+ * paragraph. This engine has none of vim's option storage, so the default is
+ * all there is — and it is the default the differential harness runs under, so
+ * nothing is lost by having no way to read a user's.
+ *
+ * Kept whole rather than cut into pairs, because `inmacro()` slides a *window*
+ * of two over it in steps of two and a window's second character is allowed to
+ * be a space — so the pairs cannot be enumerated on their own. `"P "` is the
+ * one window in this default whose second character is a space, and it is the
+ * reason a bare `.P` is a paragraph start while a bare `.I` is not.
+ */
+const NROFF_PARAGRAPH_MACROS = "IPLPPPQPP TPHPLIPpLpItpplpipbp";
+
+/**
+ * `inmacro(opt, s)` (textobject.c:252-273) — is `s`, the text after a `.`, a
+ * macro name in the `'paragraphs'` option?
+ *
+ * The window is two characters and it advances by two, and the line's end is a
+ * NUL rather than a character: a window's NUL *or* space matches when `s` has
+ * ended, which is what lets `"P "` match a one-character `s`. Reading `s` out of
+ * the whole buffer instead of out of the line is how a bare `.P` came to be
+ * missed — the read crossed the break and saw `"P\n"`, two characters, neither
+ * of which is in anything.
+ */
+function inmacro(line: string, at: number): boolean {
+	const s0 = at < line.length ? line[at] : null;
+	const s1 = at + 1 < line.length ? line[at + 1] : null;
+	for (let m = 0; m + 1 < NROFF_PARAGRAPH_MACROS.length; m += 2) {
+		const w0 = NROFF_PARAGRAPH_MACROS[m];
+		const w1 = NROFF_PARAGRAPH_MACROS[m + 1];
+		const first = w0 === s0 || (w0 === " " && (s0 === null || s0 === " "));
+		const second = w1 === s1 || ((w1 === null || w1 === " ") && (s0 === null || s1 === null || s1 === " "));
+		if (first && second) return true;
+	}
+	return false;
+}
+
+/**
+ * `linewhite(lnum)` (search.c:3183) — `skipwhite()` the line and ask whether
+ * what is left is the NUL. `skipwhite` steps over spaces and tabs and nothing
+ * else, so a line of `"  \t "` is as blank as an empty one and a line holding a
+ * form feed is not.
+ */
+function isBlankLine(text: string, line: number): boolean {
+	const begin = nthLineStart(text, line);
+	for (let i = begin; i < text.length && text[i] !== "\n"; i++) {
+		if (text[i] !== " " && text[i] !== "\t") return false;
+	}
+	return true;
+}
+
+/**
+ * `startPS(lnum, 0, 0)` (textobject.c:280-292) — the other thing that ends a
+ * paragraph besides a blank line, and the only part of `current_par` that
+ * reads the buffer's text. A form feed in the first column, or a `.` followed
+ * by an nroff macro from `'paragraphs'`: two characters, not the whole word,
+ * which is why `.IP` splits and `.ABC` does not. `inmacro()` compares
+ * case-sensitively, so the list's lowercase `.bp` splits and an upper-case
+ * `.BP` does not.
+ *
+ * Asked only about a line already known not to be blank, which is what every
+ * caller in `paragraphObject` does. That matters because `startPS` would answer
+ * TRUE for a blank one — with `para` at 0 it compares the line's first
+ * character against the NUL an empty line has — and here it does not.
+ */
+function startsParagraph(text: string, line: number): boolean {
+	const begin = nthLineStart(text, line);
+	if (text[begin] === "\f") return true;
+	if (text[begin] !== ".") return false;
+	// The macro is read out of the *line*, so that a name ending at the break
+	// hands `inmacro` the NUL it is allowed to match and not the `\n` that
+	// happens to follow it in the buffer.
+	return inmacro(text.slice(begin, lineEndExclusive(text, begin)), 1);
+}
+
+/**
+ * The whole lines `ip` / `ap` select, as `current_par` (textobject.c:1500-1672)
+ * works them out, or `null` for the FAIL it can return — which a count running
+ * off the end of the buffer always is, and which is a no-op rather than a clamp.
+ * Measured: `2dip` on the only paragraph of `"a\nb"` changes nothing, while
+ * `dip` empties it.
+ *
+ * A paragraph is a run of non-blank lines, and a run of blank lines counts as
+ * a unit of its own: `ip` on a blank line takes the whole run, `2ip` on a
+ * paragraph takes the paragraph plus the next *unit* below it. So on
+ * `"a\n\n\nb"` the units are `a` / the two blanks / `b`, and `2ip` is three
+ * lines while a bare `ip` on a blank is two.
+ *
+ * `ap` differs in three places, and all three are about the blank lines: it
+ * takes the blanks that follow, it stops early when it starts on blanks, and
+ * when there is nothing after the paragraph it takes the blanks in front of it
+ * instead. That last one is why `dap` on the last paragraph of `"a\n\nb"`
+ * removes the blank line too, where `dip` does not.
+ *
+ * The answer is always whole lines. `current_par` ends by setting
+ * `oap->motion_type = MLINE` and never writes `oap->inclusive`, so a caller
+ * must not treat this as a characterwise span — there is no `diw` promotion
+ * question here, because linewise is what the object already is.
+ */
+function paragraphObject(
+	text: string,
+	pos: number,
+	count: number,
+	include: boolean,
+): { firstLine: number; lastLine: number } | null {
+	const last = lineCount(text) - 1;
+	let firstLine = lineOf(text, pos);
+	const blankInFront = isBlankLine(text, firstLine);
+	// Up to the top of the unit. Sitting on blanks, the walk stops at the first
+	// line with anything in it; otherwise it stops at a blank line, or at a line
+	// that begins a paragraph — the cursor's own line included, which is what
+	// makes `dip` on `.PP` take that line and nothing above it.
+	while (firstLine > 0) {
+		const above = isBlankLine(text, firstLine - 1);
+		if (blankInFront ? !above : above || startsParagraph(text, firstLine)) break;
+		firstLine--;
+	}
+	// A blank line takes the whole run of blanks it belongs to; anything else
+	// starts one line short of its own end and the loop below moves forward.
+	let lastLine = firstLine;
+	while (lastLine <= last && isBlankLine(text, lastLine)) lastLine++;
+	lastLine--;
+	// `i = count`, one less when the cursor is already inside a blank run and the
+	// object does not want the blanks — `ip` there is just the run, and `2ip`
+	// reaches the paragraph below it.
+	let remaining = include || !blankInFront ? count : count - 1;
+	while (remaining-- > 0) {
+		if (lastLine === last) return null;
+		// The next unit is a run of blanks only when blanks come directly after
+		// this one. `ip` steps over such a run to the paragraph past it; `ap`
+		// takes it and this is where it stops when it started on blanks.
+		const nextIsBlank = isBlankLine(text, lastLine + 1);
+		if (include || !nextIsBlank) {
+			lastLine++;
+			while (lastLine < last && !isBlankLine(text, lastLine + 1) && !startsParagraph(text, lastLine + 1)) {
+				lastLine++;
+			}
+		}
+		if (remaining === 0 && blankInFront && include) break;
+		if (include || nextIsBlank) {
+			while (lastLine < last && isBlankLine(text, lastLine + 1)) lastLine++;
+		}
+	}
+	// The one place `ap` reaches *back*: there was no blank run after the
+	// paragraph to take, so it grows upward over the one in front instead.
+	if (!blankInFront && !isBlankLine(text, lastLine) && include) {
+		while (firstLine > 0 && isBlankLine(text, firstLine - 1)) firstLine--;
+	}
+	return { firstLine, lastLine };
+}
+
+/**
  * Whether a multi-line charwise *delete* of `[start, end)` is linewise after
  * all — the "strange Vi behaviour" of ops.c:810-825, which is still vim's
  * behaviour because `'cpoptions'` has kept its `z` (CPO_WORD) since 7.4.
@@ -3114,7 +3266,11 @@ export class VimEngine {
 	}
 
 	#paste(count: number, before: boolean): void {
-		if (!this.#register.text) return;
+		// An empty register pastes nothing — unless it is linewise, where an empty
+		// *line* is a thing worth pasting. `yip` on an empty buffer yanks one empty
+		// line and `ggP` pastes it as a line break, while an empty characterwise
+		// register (`y$` on an empty line) pastes no characters at all.
+		if (!this.#register.text && !this.#register.linewise) return;
 		const text = this.#ops.getText();
 		const pos = this.#ops.getCursor();
 		// `p` materializes the wanted column only when it changed the text: an empty
@@ -3241,6 +3397,33 @@ export class VimEngine {
 	#applyTextObject(operator: Operator, include: boolean, object: string, count: number): void {
 		const text = this.#ops.getText();
 		const at = this.#ops.getCursor();
+		if (object === "p") {
+			// A paragraph is linewise from the moment it is found, so it goes to
+			// `#runLinewise` and never sees `#runOperator` or `deleteGoesLinewise`.
+			// A FAIL leaves the caret exactly where it was: vim's `clearopbeep`
+			// drops the operator and rings the bell, it does not walk anywhere.
+			const span = paragraphObject(text, at, count, include);
+			if (!span) {
+				this.#wantHere();
+				return;
+			}
+			if (operator === ">" || operator === "<") {
+				this.#shiftLines(span.lastLine - span.firstLine + 1, operator === ">", 1, nthLineStart(text, span.firstLine));
+				return;
+			}
+			const { start, end, removeFrom } = lineRange(text, span.firstLine, span.lastLine);
+			this.#runLinewise(operator, start, end, removeFrom);
+			// A linewise *yank* through a text object parks the caret on the object's
+			// first line, in column 0. That is the object's own doing, not a linewise
+			// rule: `current_par` writes `oap->start = {start_lnum, 0}` (the column
+			// with it), and the yank restores the caret there. `yy` leaves
+			// `oap->start.col` alone, so `yy` on the same line does not move — which
+			// is why this cannot live in `#runLinewise` and is the reason the two
+			// look like they should agree.
+			if (operator === "y") this.#ops.setCursor(nthLineStart(text, span.firstLine));
+			this.#wantHere();
+			return;
+		}
 		if (object !== "w" && object !== "W") return;
 		const found = wordObject(text, at, count, include, object === "W");
 		if (!found.ok) {
@@ -3615,7 +3798,15 @@ export class VimEngine {
 		// write so the whole command is one undo step, not two. A buffer that was
 		// nothing but this line has no line left to break: `cc` on "abc" leaves an
 		// empty buffer, not an empty first line.
-		if (operator === "c" && out !== "") out = `${out.slice(0, removeFrom)}\n${out.slice(removeFrom)}`;
+		//
+		// "Nothing but this line" is not the same as `out === ""`. When the range ran
+		// to the end of the buffer, `lineRange` reaches back over the break *before*
+		// the first removed line, so a buffer whose first line was empty loses it too
+		// and leaves `out === ""` with `start > 0`. Vim keeps that empty line and
+		// opens the new one below it: `cc` on the "a" of "\na" is "\nX", not "X".
+		if (operator === "c" && (out !== "" || start > 0)) {
+			out = `${out.slice(0, removeFrom)}\n${out.slice(removeFrom)}`;
+		}
 		// The insert caret stands on that empty line: its newline, or the buffer end
 		// when nothing follows it.
 		const insertCaret = Math.min(out.length, out.length > removeFrom + 1 ? removeFrom : removeFrom + 1);
