@@ -523,12 +523,184 @@ separately by throwing at it (1,344 cases reach `declStep`'s empty-line arm, 384
 reach `promoteEnd`'s, 8,173 the shift of an empty object), which is what
 distinguishes a site nothing reaches from a site whose value nothing reads.
 
+## Text objects: the quotes
+
+`nv_object` dispatches `i"` `a"` `i'` `a'` `` i` `` `` a` `` as **three `case` labels
+over one arm** (`normal.c:7274-7279`), and it hands `cap->nchar` to `current_quote`
+untranslated — no `matchpairs` override, no bracket list, no swap. The three are the
+same object spelled three ways, so `cap->nchar` is the only difference between them
+and a case for each is the same case with another letter in it.
+
+The whole object is 290 lines of C and nearly all of it is one decision: `current_quote`
+reads `ml_get_curline()` and nothing else (`textobject.c:1753`, and `motion.txt:692`
+says so in prose), so **the object cannot cross a line break**. A quote with no mate
+on its own line is a FAIL, and that is why `Q_TWO_LINES` and `Q_OPEN_ACROSS` are in
+`CASES` — not to pin a string that runs on into the next line, but to pin the
+*refusal*. `a "b` and `a 'b\nc' d` are the two shapes where a model that scans the
+whole buffer gets a plausible answer and vim does nothing.
+
+Which quote is the opening one depends on where the caret is, and the two branches
+disagree in a way that is worth writing down because a paraphrase of "find the
+nearest quote pair" does not have it:
+
+- **Caret not on a quote** (`1912-1929`): step **left** with `find_prev_quote`, which
+  is escape-aware, and if what is found is not a quote, step **right** from the same
+  column with `find_next_quote` and the escape check **off**. The opener is found
+  backward with escapes and forward without them, which sounds like a bug and is the
+  measured behaviour. Which of the two runs is a narrower question than it looks,
+  because `find_prev_quote` reports "nothing found" as the line's **first column**
+  rather than `-1` (`1738-1740`), so the fallback runs only when there is no quote at
+  all to the left of the caret — not merely when the nearest one is hidden. The
+  engine's first case for this (`Q_ONLY_ESCAPED`, caret on the backslash of
+  `x "\"b" y`) is **not** that shape: the escape is to the *right* of the quote at 2,
+  the leftward scan finds it unhidden, and the fallback is never reached. The shape
+  that does reach it is `Q_FALLBACK` (`a \"b"`, caret before the escape), where the
+  leftward scan steps over the quote and the forward one — escapes off — takes it.
+  § *A case written for a branch that the branch does not answer for* below is how
+  that was found.
+- **Caret on a quote** (`1891-1910`): throw the caret away and re-scan the whole line
+  from column zero — opener escape-off, closer escape-on — and take the first pair
+  that *contains* the caret, with `<=` on both bounds. This is why `di"` on `ab"cd"ef`
+  at the caret on the opening quote takes the pair from the start of the line rather
+  than the pair to its right (`Q_ADJACENT`), and why the same keys at the closing
+  quote also take that pair rather than the next one.
+
+The two scans disagree about escapes in the same way in both directions, and neither
+is what a parity argument would suggest. `find_next_quote` treats a backslash as
+**consume the next character** — one backslash hides one quote, two in a row leave the
+second one visible (`Q_ESCAPED` against `Q_ESCAPED_EVEN`). `find_prev_quote` counts
+the run and tests `n & 1` (`1729-1734`), which is the same answer for the cases a
+consumer can reach, and is a *different program* for the one it cannot: the run is
+never examined at index zero, so an odd run at the very start of a line cannot hide
+anything, and a scan that reached column zero returns **0, not -1**, so a caller that
+tested for -1 would be reading a real position as a failure. The engine's
+`findPrevQuote` returns `start` for the same reason, and `Q_BARE_QUOTE` is the case
+that would catch a `-1`.
+
+The white space an `a` object adds is a **choice between the two sides, not both**
+(`1933-1941`):
+
+```c
+if (VIM_ISWHITE(line[col_end + 1]))
+    while (VIM_ISWHITE(line[col_end + 1])) ++col_end;
+else
+    while (col_start > 0 && VIM_ISWHITE(line[col_start - 1])) --col_start;
+```
+
+Trailing run if there is one, otherwise the leading run, never both, and never a
+mixture. So `da"` on `  'ab'  ` takes both spaces and no tab, on `x "ab"\ty` takes the
+tab (`VIM_ISWHITE` is a space and a tab and nothing else, `macros.h:39` — not `\s`),
+and on `x'ab'y`, which has white space on neither side, it takes nothing and is the
+same command as `di"`. A version that added both runs would agree with vim on
+`Q_INDENTED` and on `Q_TRAILING_BLANKS` — the two obvious cases — and disagree on
+every buffer where there is white space on one side only, which is most of them.
+
+### The rule this batch got wrong by reading, and what the source actually says
+
+The closing quote is in the range exactly when the object is an `a` or carries a
+count. The source says that as a flag, and read as a flag it is not what happens:
+
+```c
+curwin->w_cursor.col = col_end;                    // 1972
+if ((include || count > 1
+            || (!vis_empty && inside_quotes)
+   ) && inc_cursor() == 2)
+    inclusive = TRUE;                               // 1973-1978
+...
+oap->inclusive = inclusive;                         // 2007-2009
+```
+
+and then, in the **caller**, `oap->end = curwin->w_cursor;` (`ops.c:4094`). The
+non-Visual branch of `current_quote` never assigns `oap->end` itself — it leaves the
+cursor sitting on `col_end`, and `do_pending_operator` copies the cursor into the
+range afterwards. So `inc_cursor()` is not a test, it is a **move**, and when the
+condition holds the cursor advances one past the closing quote before the caller reads
+it. The `== 2` only says whether the move landed on another character or on the end of
+the line, which makes no difference to whether the close is inside the range: the
+`inclusive` flag is set either way, and with it the range is the same.
+
+Implemented from the flag's shape — `inclusive = (include || count > 1) && col_end + 1
+=== endOfLine` — **ten of the `a` cases and four of the counted ones were wrong**, and
+36 of 56 probe answers came back red. The correct reading is the outer condition
+alone: `include || count > 1`. This is the third time in this engine that a vim flag
+has turned out to be a *description* of a decision made somewhere else, and the
+second time (`C6`/`sol`, and the promotion in `do_pending_operator`) that the
+description sits in the callee while the decision is in the caller.
+
+The count itself is the smallest thing in the object: `count` appears in exactly two
+places (`1945` and `1973`), so **any count of 2 or more is the same command**, and
+`d2i"` on `"a" "b" "c"` does what `d3i"` does. That is not a degenerate reading — a
+count is a walk, and this object has no walk in it.
+
+### The two things the object shares with the bracket pairs
+
+- **An empty pair is not a FAIL.** `di"` on `x "" y` changes no text, `ci"` enters
+  insert where the string would have begun, and `>` and `<` still shift, because a
+  quote object is one line of text by construction and `op_shift` counts lines from
+  `oap->start`. The route is shared with the bracket path, which is why it is one
+  method — `#emptyObject` — rather than two copies of the same four lines, and a
+  yank of an empty pair writes an **empty characterwise register** for the same
+  reason as `C17` (`OP_YANK` bails only on a `'cpo'` flag, `ops.c:4285`): `yi"` on
+  `x "" y` then `ggP` pastes nothing, and dropping the yank pastes whatever was in the
+  register before.
+- **A shift takes exactly one line.** `>i"` is one tab on the line the pair is on, and
+  `>2i"` is the same tab — `op_shift`'s `amount` is `cap->count1` only in Visual
+  (`ops.c:139-198`), so an operator shifts by one whatever the count said.
+
+### Enter in insert mode, measured and left
+
+The one measurement in this batch that is **not** a quote result. `ci"` and then
+Enter should break the line; this engine hands Enter to the host, because in a REPL
+a newline submits. Measured across every object, and the disagreement is identical
+and engine-wide: `ci(Z<CR>` on `f(ab)`, `ciwZ<CR>`, `cipZ<CR>`, `i<CR>`, `a<CR>` and
+`o<CR>` all mismatch, 1 of 8. So this is a **product decision** about Enter, not a
+defect in any text object, and the cases in `CASES` for a change through an object are
+all ESC-terminated (`c` `i` `"` `Z` `<Esc>`) rather than Enter-terminated, which is the
+one honest way to pin the range a `c` object assembles without asserting what Enter
+should do about it.
+
+### A case written for a branch that the branch does not answer for
+
+The falsification driver (`%TEMP%\driver-vim-b.ts`, not in version control) mutates
+`findNextQuote`'s escape flag at the fallback call site, so the escaped quote there is
+skipped, the scan lands on the *closing* quote instead, and the object fails. It went
+**green** through the first version of this group: 12 other mutants went red, the tree
+came back byte-exact, and this one changed no answer.
+
+The reason is worth more than the fix. The case written for it — `Q_ONLY_ESCAPED` — is
+a shape the fallback never sees, because `find_prev_quote` reaches the quote going
+left; the case *passed*, and passed for the right reason on a real vim, so nothing in
+the differential could see the mistake. A mutant that goes green is the instrument
+reporting that a check does not judge what it claims to judge, which is a different
+kind of finding from a red one and the only kind this driver cannot produce on its
+own. Three things came out of chasing it:
+
+- `ANCHORS_ONLY=1` reported the D4 anchor resolving **twice** while I was looking —
+  the two `findNextQuote(..., false)` call sites are written identically, three tabs
+  and all, so anchoring on the call alone would have made the driver skip the check as
+  ambiguous. It is now anchored with the `if` above it, and the `→` branch it belongs
+  to is named in the check's comment.
+- The engine was right. Both readings of the source produce the same answers on every
+  shape the fallback can reach; the escape flag on that call is a *reachable
+  difference only on `Q_FALLBACK`*, which is now in `CASES` five times over and in
+  `vim-engine.test.ts`.
+- The unit test that claimed to cover the fallback had the same wrong shape in it,
+  with a comment that explained the branch by a case the branch does not answer. Both
+  are corrected, and the test now carries the wrong one as a **control**: the same
+  answer from a shape that the backward scan answers, so a future reader can see that
+  the two cases differ in reach and not in result.
+
+The evidence for the round is 67 cases in `CASES` (880 → 947), every one measured
+against a real vim and every one a match, plus a 3000-iteration sweep in which 164 of
+the checked sequences carry a text object and none differs.
+
 ## What the fuzzer refuses to compare
 
-`fuzz.mjs` draws 1–3 keys from `KEYS` and drops two classes of sequence by name,
-in `uncomparable()`. Both are about a **command line the fuzzer opens but cannot
-see**: a `/` or `?` puts the two editors on different sides of a latch — vim's is
-a real command line the next key is typed into, the engine's is a one-key read.
+`fuzz.mjs` draws 1–3 keys from `KEYS` and drops three classes of sequence by name,
+in `uncomparable()`. Two of the three are about a **command line the fuzzer opens
+but cannot see**: a `/` or `?` puts the two editors on different sides of a latch —
+vim's is a real command line the next key is typed into, the engine's is a one-key
+read.
 
 - **A `CR` with no latch open.** Vim binds Enter to `nv_down` + `beginline`, which
   is this engine's `+`; the engine hands Enter to the host, because in a REPL a
@@ -540,6 +712,46 @@ a real command line the next key is typed into, the engine's is a one-key read.
   command line — `BS` cancels it outright, `DEL` erases under the cursor — and
   neither is a command the engine reads on that path. Without a latch they are
   ordinary motions and stay in the set.
+- **A `CR` straight after an `r`.** Both answers are readable and they differ; this
+  is a named feature gap rather than a limit of the instrument, and it is written
+  up under Known gaps below. It is dropped here only because a sequence carrying it
+  is a guaranteed mismatch.
+
+A fourth rule, `textObjectOk()`, came with the text-object draw and is the same kind
+of thing: **an `i` or an `a` that is not naming a range starts typing instead**, and
+this engine hands what follows to the host rather than the buffer, so a sequence
+carrying one is measuring the two editors on different sides of a mode change. Three
+more keys are dropped for the same reason — away from an `i`/`a`, a `"` names a
+register and a `'` and a `` ` `` name a mark, and all three read the key after them.
+
+That rule was wrong in its first version and the fuzzer found it on the **first run**
+of the new draw, which is the argument for having written it as a parser rather than
+as a pattern: it treated an operator as pending until an `i` or an `a` turned up, so
+`y` `d` `i` `}` read as *a `y` waiting, then a `d` waiting, then a text object*. `yd`
+is one command — a yank to end of line — and the `i` after it opens insert mode. Both
+editors agreed on the buffer (`café Ü}nïcödé`, the `}` typed in) and the only
+difference was the caret sitting one to the right of the character it went in at,
+which is the insert-mode answer rather than a text-object one. An operator is now
+spent by whatever key comes next, which is what a count between the two is for.
+
+### Why the text objects are not in `KEYS`
+
+They were, and the measurement said so. Adding `i`, `a` and the three quote
+characters to the table kept **557 sequences instead of 709 and contained not one
+text-object sequence**: `di"` is three keys out of thirty-six and the draw is one to
+three, so it lands about 0.06 times per run, and `di"` followed by a `.` or a count
+is four keys and never lands at all. Adding the keys made the instrument weaker,
+which no comment in the file would have revealed.
+
+So the alphabet is left alone and **one draw in four is built instead**, by
+`textObjectSeq()`: an operator (with a count in front of it, either order), an `i` or
+an `a`, one of the twelve characters the engine's `#applyTextObject` names a range
+with, and up to one ordinary key on either side. The keys on either side are the
+point — `di"j` for where the caret lands, `yi"g g P` for what a range yank leaves in
+the register, `2di"` for whether the count reaches the object, `di".` for whether the
+redo replays it. **164 of the 583 checked sequences now carry a text object**, against
+0 before, and the summary line reports that number so the draw can be judged on what
+it actually produced rather than on what it was meant to.
 
 Everything else the fuzzer finds is compared, and it earned its keep on its first
 run in this round: `^ j` on `"abc\ndef"` at 1, out of 900 drawn sequences, was the

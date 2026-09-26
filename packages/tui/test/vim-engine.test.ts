@@ -5122,3 +5122,209 @@ describe("bracket text objects", () => {
 		});
 	});
 });
+
+// `nv_object` dispatches `i"` `a"` `i'` `a'` `` i` `` `` a` `` as three `case` labels
+// over one arm (normal.c:7274-7279) and hands `cap->nchar` to `current_quote`
+// untranslated, so the three are one object spelled three ways. Every value below
+// was measured against real vim through `packages/tui/test/vim-differential/`, and
+// the shapes are the ones `regress.mjs` pins as cases.
+describe("quote text objects", () => {
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) {
+			if (k === "\x1b") {
+				e.engine.handleKey("", e.key({ escape: true }));
+				continue;
+			}
+			if (e.engine.handleKey(k, e.key())) continue;
+			if (e.engine.mode === "insert" && k.length === 1 && k >= " ") {
+				e.state.text = `${e.state.text.slice(0, e.state.cursor)}${k}${e.state.text.slice(e.state.cursor)}`;
+				e.state.cursor += 1;
+			}
+		}
+		return { text: e.state.text, cursor: e.state.cursor, mode: e.engine.mode };
+	};
+
+	test("a pair takes its inside, and `a` takes the quotes too", () => {
+		expect(run("x 'ab' y", 3, "d", "i", "'")).toMatchObject({ text: "x '' y", cursor: 3 });
+		// The three spellings are the same command with another letter in it.
+		expect(run('x "ab" y', 3, "d", "i", '"')).toMatchObject({ text: 'x "" y', cursor: 3 });
+		expect(run("a `b` c", 4, "d", "i", "`")).toMatchObject({ text: "a `` c", cursor: 3 });
+		// `a` puts the closing quote in the range, and that is the whole difference
+		// between the two spellings.
+		expect(run("x 'ab' y", 3, "d", "a", "'")).toMatchObject({ text: "x y", cursor: 2 });
+		expect(run("x'ab'y", 2, "d", "a", "'")).toMatchObject({ text: "xy", cursor: 1 });
+	});
+
+	test("the closing quote is in the range for an `a` object and for a count", () => {
+		// The source writes this as a flag — `if ((include || count > 1 || …) &&
+		// inc_cursor() == 2) inclusive = TRUE;` (textobject.c:1973-1978) — and read as a
+		// flag it is the wrong shape. `inc_cursor()` *moves* the cursor
+		// (misc2.c:343-365) and `oap->end` is read off the cursor by the caller
+		// afterwards (ops.c:4094), because the non-Visual branch of `current_quote`
+		// never assigns `oap->end` itself. So the outer condition alone decides whether
+		// the close is inside the range, and the `== 2` only says whether the move
+		// landed on another character. Implemented from the flag's shape, ten of the
+		// `a` cases and four of the counted ones were wrong.
+		expect(run("x 'ab' y", 3, "d", "a", "'")).toMatchObject({ text: "x y", cursor: 2 });
+		// The other reading, in which the close is in only when the move had somewhere
+		// to land, drops the close of every pair that does not end its line.
+		expect(run('"a" "b" "c"', 1, "d", "2", "i", '"')).toMatchObject({ text: ' "b" "c"', cursor: 0 });
+		// `count` appears twice in `current_quote` (1945, 1973) and both are
+		// comparisons against 2, so any count of two or more is the same command and
+		// there is no walk here to repeat.
+		expect(run('"a" "b" "c"', 1, "d", "3", "i", '"')).toMatchObject({ text: ' "b" "c"', cursor: 0 });
+		expect(run('"a" "b" "c"', 2, "d", "2", "i", '"')).toMatchObject({ text: ' "b" "c"', cursor: 0 });
+		// With no count the opening quote is dropped and the closing one is not: that
+		// pair is what the two comparisons together are for.
+		expect(run('"a" "b" "c"', 1, "d", "i", '"')).toMatchObject({ text: '"" "b" "c"', cursor: 1 });
+		expect(run("'a' 'b'", 1, "d", "2", "i", "'")).toMatchObject({ text: " 'b'", cursor: 0 });
+	});
+
+	test("an escaped quote is hidden by the scan that finds a mate", () => {
+		// `find_next_quote` does not count a run of escape characters: it steps over
+		// *one* without examining it (textobject.c:1691-1696), so the quote behind the
+		// backslash is skipped and the one after it is the closer.
+		expect(run('x "a\\"b" y', 5, "d", "i", '"')).toMatchObject({ text: 'x "" y', cursor: 3 });
+		// `find_prev_quote` reaches the same verdict by a *different* program — an
+		// explicit `n & 1` on the run to the left (1734-1735) — so a run of two is
+		// visible again, and from the caret on the `b` behind the pair the quote at 6
+		// is the opener.
+		expect(run('x "a\\\\"b" y', 7, "d", "i", '"')).toMatchObject({ text: 'x "a\\\\"" y', cursor: 7 });
+		expect(run('x "a\\\\"b" y', 6, "d", "i", '"')).toMatchObject({ text: 'x ""b" y', cursor: 3 });
+	});
+
+	test("the fallback that finds the opener is the scan that ignores escapes", () => {
+		// `findPrevQuote` returns the line's *first column* when it finds nothing
+		// rather than -1 (textobject.c:1738-1740), so the caller asks whether the
+		// character it got back is the quote — and the fallback runs only when there is
+		// no quote to the left of the caret at all. That is a narrower shape than it
+		// looks, and the one below is the narrowest of them: the only quote in front
+		// of the caret is behind a backslash, and the forward scan finds it because
+		// its escape check is **off** (1912-1917). Honouring the escape there steps
+		// over the backslash, reaches the close at 4, reads that as the opener, finds
+		// nothing behind it, and fails the object.
+		expect(run('a \\"b"', 0, "d", "i", '"')).toMatchObject({ text: 'a \\""', cursor: 4 });
+		expect(run('a \\"b"', 1, "d", "i", '"')).toMatchObject({ text: 'a \\""', cursor: 4 });
+		expect(run('a \\"b"', 1, "d", "a", '"')).toMatchObject({ text: "a \\", cursor: 2 });
+		// An escape that hides a *non-quote* makes no difference to either reading, and
+		// that is the control: the two scans differ only about a quote.
+		expect(run('ab\\ "cd"', 0, "d", "i", '"')).toMatchObject({ text: 'ab\\ ""', cursor: 5 });
+		// The same shape with no escape, where the backward scan answers instead: the
+		// quote at 2 is found going left, so the fallback is never reached and the
+		// answer is the same as the escaped one above. Written down because the first
+		// version of this test used *this* case for the fallback and D4 — the mutant
+		// that honours the escape in the fallback — stayed green through it.
+		expect(run('x "\\"b" y', 3, "d", "i", '"')).toMatchObject({ text: 'x "" y', cursor: 3 });
+		// And the leftward scan's own half of the rule: it does honour the escape, so
+		// a caret behind an escaped quote reads the *first* quote on the line as the
+		// opener rather than the escaped one.
+		expect(run('x "a\\"b" y', 6, "d", "i", '"')).toMatchObject({ text: 'x "" y', cursor: 3 });
+	});
+
+	test("a caret standing on a quote belongs to that quote's string", () => {
+		// Not the pair to its right, and not a FAIL: the whole line is re-scanned from
+		// column zero and the first pair that *contains* the caret is taken, with `<=`
+		// on both bounds (textobject.c:1907).
+		expect(run('ab"cd"ef', 2, "d", "i", '"')).toMatchObject({ text: 'ab""ef', cursor: 3 });
+		expect(run('ab"cd"ef', 5, "d", "i", '"')).toMatchObject({ text: 'ab""ef', cursor: 3 });
+		// A quote of another kind is an ordinary character here, so this reaches the
+		// *outer* pair and takes all of it.
+		expect(run("he said \"it's a 'test'\" ok", 14, "d", "i", '"')).toMatchObject({ text: 'he said "" ok', cursor: 9 });
+		expect(run("he said \"it's a 'test'\" ok", 12, "d", "i", "'")).toMatchObject({
+			text: "he said \"it''test'\" ok",
+			cursor: 12,
+		});
+	});
+
+	test("a quote with no mate on its own line is a FAIL", () => {
+		// `current_quote` reads `ml_get_curline()` and nothing else
+		// (textobject.c:1753, motion.txt:692), so the object cannot cross a break: an
+		// opener in front of the caret with nothing behind it is `clearopbeep`, which
+		// drops the operator, leaves the text alone and does not walk the caret.
+		expect(run('a " b', 2, "d", "i", '"')).toMatchObject({ text: 'a " b', cursor: 2 });
+		expect(run("a ' b", 2, "d", "i", "'")).toMatchObject({ text: "a ' b", cursor: 2 });
+		// The same reason a contraction fails: the only apostrophe is the one in it.
+		expect(run("it's a test", 3, "d", "i", "'")).toMatchObject({ text: "it's a test", cursor: 3 });
+		expect(run("don't stop", 2, "d", "i", "'")).toMatchObject({ text: "don't stop", cursor: 2 });
+		// The line before is not searched either. This is the one shape that tells
+		// "the backward scan found nothing" apart from "it found a position": the
+		// quotes are on the line above, and a scan that started at the buffer's
+		// beginning rather than at this line's first column would take the `a` between
+		// them.
+		expect(run('"a" x\nb c', 7, "d", "i", '"')).toMatchObject({ text: '"a" x\nb c', cursor: 7 });
+		// A pair split across the break is not a pair.
+		expect(run('"one\ntwo"', 1, "d", "i", '"')).toMatchObject({ text: '"one\ntwo"', cursor: 1 });
+	});
+
+	test("`a` takes one run of white space, never both", () => {
+		// The run behind the closing quote when there is one, and *only* when there is
+		// none does the run in front of the opening one grow (textobject.c:1933-1941) —
+		// the two are alternatives, and taking both is the mistake this pair of
+		// assertions is here for.
+		expect(run("  'ab'  ", 3, "d", "a", "'")).toMatchObject({ text: "  ", cursor: 1 });
+		expect(run("  'ab'  ", 2, "d", "a", "'")).toMatchObject({ text: "  ", cursor: 1 });
+		// A closing quote that ends its line has no white space behind it, so the
+		// *leading* run is what grows — and a line break is not white space, which is
+		// the whole of `VIM_ISWHITE` (macros.h:39: a space and a tab, nothing else).
+		expect(run("x 'ab'", 3, "d", "a", "'")).toMatchObject({ text: "x", cursor: 0 });
+		expect(run('  "ab"\n  y', 3, "d", "a", '"')).toMatchObject({ text: "\n  y", cursor: 0 });
+		expect(run('x "ab"\ny', 3, "d", "a", '"')).toMatchObject({ text: "x\ny", cursor: 0 });
+		// A tab is white space, so this one grows behind the close.
+		expect(run('x "ab"\ty', 3, "d", "a", '"')).toMatchObject({ text: "x y", cursor: 2 });
+		// The pair of runs the first two of these are for, with the lengths made
+		// unequal: three in front and one behind, and the answer keeps the three.
+		// A reading that took both would leave nothing, and one that always grew the
+		// leading run would leave the one.
+		expect(run("   'ab' ", 4, "d", "a", "'")).toMatchObject({ text: "   ", cursor: 2 });
+		expect(run("   'ab' ", 3, "d", "a", "'")).toMatchObject({ text: "   ", cursor: 2 });
+		// Two tabs in front and one behind, to say the two kinds of white space are
+		// one kind here.
+		expect(run("\t\t'ab'\t", 3, "d", "a", "'")).toMatchObject({ text: "\t\t", cursor: 1 });
+		// Neither side has any, so there is nothing for the else branch to grow and
+		// `a` takes the quotes and stops.
+		expect(run("x'ab'y", 2, "d", "a", "'")).toMatchObject({ text: "xy", cursor: 1 });
+		// The caret standing on the opening quote, where the run in front of it is
+		// still there to be taken — with `i` as the control, which takes it not at all.
+		expect(run("  'ab'  ", 2, "d", "a", "'")).toMatchObject({ text: "  ", cursor: 1 });
+		expect(run("  'ab'  ", 2, "d", "i", "'")).toMatchObject({ text: "  ''  ", cursor: 3 });
+	});
+
+	test("an empty pair is not a FAIL, and it empties the register as the brackets do", () => {
+		// A range of no width, which ops.c:4275-4282 reads as `oap->empty` — the same
+		// route the bracket object takes, which is why it is one `#emptyObject` method
+		// and not two copies of the same four lines.
+		expect(run('x "" y', 1, "d", "i", '"')).toMatchObject({ text: 'x "" y', cursor: 3 });
+		expect(run('x "" y', 1, "c", "i", '"', "Z", "\x1b")).toMatchObject({ text: 'x "Z" y', cursor: 3 });
+		// `OP_YANK` bails only on `'E'` in `'cpoptions'` (ops.c:4285, :4372) and this
+		// engine has none, so the register is replaced by an *empty* one — and what
+		// that is worth is the next command: a `p` pastes nothing, where a yank that
+		// skipped the write would paste the string from before.
+		expect(run('x "" y', 1, "y", "a", '"', "y", "i", '"', "g", "g", "P")).toMatchObject({
+			text: 'x "" y',
+			cursor: 0,
+		});
+		// The control, on the same buffer: a yank with something in it does leave a
+		// register, so the two are told apart by what follows and not by the yank.
+		expect(run('x "" y', 1, "y", "a", '"', "g", "g", "P")).toMatchObject({ text: '"" x "" y', cursor: 2 });
+		// And a change on the empty pair leaves the typed text in the register.
+		expect(run('x "" y', 1, "y", "a", '"', "c", "i", '"', "Z", "\x1b", "g", "g", "P")).toMatchObject({
+			text: '"" x "Z" y',
+			cursor: 2,
+		});
+		// The other two spellings reach the same route.
+		expect(run("x '' y", 1, "d", "i", "'")).toMatchObject({ text: "x '' y", cursor: 3 });
+		expect(run("x `` y", 1, "d", "i", "`")).toMatchObject({ text: "x `` y", cursor: 3 });
+	});
+
+	test("a shift takes one line whatever the count says", () => {
+		// `op_shift` counts lines from `oap->start.lnum` and its `amount` is
+		// `cap->count1` only in Visual (ops.c:139-198), so an operator shifts by one
+		// whatever the count was — and a quote object is one line of text by
+		// construction, so there is nothing else it could take.
+		expect(run("  'ab'  ", 3, ">", "i", "'")).toMatchObject({ text: "\t  'ab'  ", cursor: 3 });
+		expect(run("a 'b'\nc 'd'", 2, ">", "2", "i", "'")).toMatchObject({ text: "\ta 'b'\nc 'd'", cursor: 1 });
+		// And an empty pair still shifts the line it stands on.
+		expect(run('x "" y', 1, ">", "i", '"')).toMatchObject({ text: '\tx "" y', cursor: 1 });
+	});
+});

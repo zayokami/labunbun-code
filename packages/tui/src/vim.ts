@@ -1802,9 +1802,7 @@ function blockObject(
 	// `di(` on the same text does nothing at all.
 	let c = matchingClose(text, o, pair);
 	for (let level = 1; level < count; level++) {
-		const next = forward
-			? nextOpen(text, o + 1, pair)
-			: enclosingOpen(text, o - 1, open, close);
+		const next = forward ? nextOpen(text, o + 1, pair) : enclosingOpen(text, o - 1, open, close);
 		if (next < 0) return null;
 		o = next;
 		c = matchingClose(text, o, pair);
@@ -2008,6 +2006,185 @@ function promoteEnd(text: string, start: number, endPos: number, inclusive: bool
 		return { start, end: aboveStart, inclusive: false, linewise: false, firstLine, lastLine: above, empty: false };
 	}
 	return { start, end: lastChar + 1, inclusive: true, linewise: false, firstLine, lastLine: above, empty: false };
+}
+
+/**
+ * `'quoteescape'` (optiondefs.h:2161-2163), the one option `current_quote` reads.
+ * It is a global string, not a buffer-local one, and its default is a backslash
+ * alone — a character that is only ever tested for membership, never counted.
+ */
+const QUOTE_ESCAPE = "\\";
+
+/** `VIM_ISWHITE` (macros.h:39), which is a space and a tab and nothing else. */
+function isSpaceOrTab(ch: string | undefined): boolean {
+	return ch === " " || ch === "\t";
+}
+
+/**
+ * `find_next_quote` (textobject.c:1680-1708), over `[0, end)` of the buffer rather
+ * than over a `char_u *`.
+ *
+ * The escape test is not a parity test. It asks whether the character under the
+ * scan is a member of `'quoteescape'` and, if so, steps over *the next one*
+ * without examining it — so `a\"b` hides its quote and `a\\"b` shows it, and no
+ * number of backslashes is ever taken. `find_prev_quote` reaches the same verdict
+ * by a different route (an explicit `n & 1`), which is worth knowing: the two
+ * scans are not two spellings of one loop.
+ *
+ * The advance is a whole character, so a scan crosses accented letters and CJK
+ * without stopping in the middle of one. An escape character as the line's last
+ * is `-1`, not a quote.
+ */
+function findNextQuote(text: string, from: number, end: number, quote: string, escapeAware: boolean): number {
+	let p = Math.max(0, from);
+	while (p < end) {
+		const ch = text[p];
+		if (escapeAware && ch === QUOTE_ESCAPE) {
+			p = nextChar(text, p);
+			if (p >= end) return -1;
+		} else if (ch === quote) {
+			return p;
+		}
+		p = nextChar(text, p);
+	}
+	return -1;
+}
+
+/**
+ * `find_prev_quote` (textobject.c:1716-1740), and the two things it does that the
+ * forward scan does not.
+ *
+ * It steps *left of* the position it is handed, so a quote the caret is standing
+ * on is not found by this call — and it returns the line's first column rather
+ * than `-1` when it finds nothing, which is why every caller asks whether the
+ * character it got back is the quote rather than whether the position is negative.
+ *
+ * The escape rule here is the parity test: the maximal run of escape characters
+ * immediately to the left is counted, and an odd run hides the candidate
+ * (`if (n & 1) col_start -= n`, textobject.c:1734-1735). The run is never
+ * examined at the line's first column — the guard is `col_start - n > 0`, so the
+ * lowest index read is 1 — which is why a backslash in the first column of a line
+ * does not escape the quote behind it.
+ */
+function findPrevQuote(text: string, from: number, start: number, quote: string, escapeAware: boolean): number {
+	let p = Math.min(from, text.length);
+	while (p > start) {
+		p--;
+		// `mb_head_off`: a step back can land on a trailing half of a pair, and
+		// the scan counts columns, so it goes back onto the character.
+		if (p > start && isLowSurrogate(text.charCodeAt(p))) p--;
+		let run = 0;
+		if (escapeAware) {
+			while (p - run > start && text[p - run - 1] === QUOTE_ESCAPE) run++;
+		}
+		if (run & 1) p -= run;
+		else if (text[p] === quote) return p;
+	}
+	return start;
+}
+
+interface QuoteRange {
+	start: number;
+	end: number;
+	/** Whether the character under `end` is part of the range. */
+	inclusive: boolean;
+	/** `current_quote` gave up: the operator is dropped and the caret does not move. */
+	ok: boolean;
+}
+
+/**
+ * `current_quote` (textobject.c:1742-2029) for `i"` `a"` `i'` `a'` `` i` `` `` a` ``.
+ * The three characters are three `case` labels over one arm of `nv_object`
+ * (normal.c:7274-7279) with `cap->nchar` handed through untranslated, so they are
+ * one object spelled three ways.
+ *
+ * The whole function runs on `ml_get_curline()` (textobject.c:1753) and the
+ * manual says so too (motion.txt:692): a quote object never crosses a line break,
+ * so a line whose quote has no mate *on that line* is a FAIL, not a string that
+ * runs on into the next one. This buffer is one string, so every scan below is
+ * bounded by `[lineStart, lineEndExclusive)` — the thing that makes the rule
+ * expressible at all here.
+ *
+ * Which of the two quotes under the caret is the opening one is not guessed.
+ * There are two branches, and the one that runs is decided by whether the caret
+ * is standing on a quote at all:
+ *
+ *   - Not on one (textobject.c:1912-1929): step left for the opener, escape-aware,
+ *     and if there is none step *right from the start of the line* — with escapes
+ *     switched **off**. That asymmetry is real and is the reason `\` in front of
+ *     a quote does not always hide it: a line whose only quote is escaped has its
+ *     quote found by the fallback, which cannot see the escape. The closer is
+ *     then found from just past the opener, escape-aware.
+ *   - On one (textobject.c:1891-1910): re-scan the *whole line* from column zero,
+ *     pairing quotes left to right — opener with escapes off, closer with them on
+ *     — and take the first pair that contains the caret, both bounds inclusive.
+ *     So the caret on the opening quote of `ab"cd"ef` belongs to that string and
+ *     not to its neighbour, and the caret on a closing quote belongs to the string
+ *     it closes.
+ *
+ * `a` then adds white space, and the two sides are alternatives rather than a pair
+ * (the `else` at textobject.c:1938, and motion.txt:695-696): all of the run after
+ * the closing quote, or — only when there is none — all of the run in front of the
+ * opening one. A closing quote that ends its line has no white space after it, so
+ * it is the leading run that grows, and a string starting at column zero never
+ * grows one at all.
+ *
+ * A count is not a number of strings. `current_quote` mentions it twice
+ * (textobject.c:1945, :1973) and both are comparisons against 2, so `d3i"` is
+ * `d2i"`: the quotes are in and the white space is not (motion.txt:704-706).
+ */
+function quoteObject(text: string, pos: number, count: number, include: boolean, quote: string): QuoteRange {
+	const start = lineStart(text, pos);
+	const end = lineEndExclusive(text, pos);
+	let open: number;
+	let close: number;
+	if (text[pos] === quote) {
+		open = start;
+		for (;;) {
+			open = findNextQuote(text, open, end, quote, false);
+			if (open < 0 || open > pos) return { start: pos, end: pos, inclusive: false, ok: false };
+			close = findNextQuote(text, open + 1, end, quote, true);
+			if (close < 0) return { start: pos, end: pos, inclusive: false, ok: false };
+			if (open <= pos && pos <= close) break;
+			open = close + 1;
+		}
+	} else {
+		open = findPrevQuote(text, pos, start, quote, true);
+		if (text[open] !== quote) {
+			open = findNextQuote(text, open, end, quote, false);
+			if (open < 0) return { start: pos, end: pos, inclusive: false, ok: false };
+		}
+		close = findNextQuote(text, open + 1, end, quote, true);
+		if (close < 0) return { start: pos, end: pos, inclusive: false, ok: false };
+	}
+	let from = open;
+	if (include) {
+		if (isSpaceOrTab(text[close + 1])) {
+			while (isSpaceOrTab(text[close + 1])) close++;
+		} else {
+			// Only when the line ends at the closing quote, and only back to
+			// column zero: the guard is `col_start > 0`.
+			while (from > start && isSpaceOrTab(text[from - 1])) from--;
+		}
+	}
+	// `if (!include && count < 2 && (vis_empty || !inside_quotes)) ++col_start;`
+	// — with an operator pending there is no Visual area, so `vis_empty` holds and
+	// the test is the count alone.
+	if (!include && count < 2) from++;
+	// Whether the closing quote is in the range. The source decides it with
+	// `if ((include || count > 1 …) && inc_cursor() == 2) inclusive = TRUE;`
+	// (textobject.c:1972-1976), and read as a flag that is the wrong shape: the
+	// test that matters is the *outer* one, because `inc_cursor()` moves the cursor
+	// (misc2.c:343-365) and `oap->end` is read off the cursor afterwards. A call
+	// therefore leaves the end one past the closing quote, and the operator's
+	// exclusive range takes it in; no call leaves the end *on* the closing quote
+	// and the range stops short of it. The `== 2` is only about not stepping off
+	// the end of the line, and it makes no difference here — measured, `da"` on
+	// `x "ab"` and on `x "ab"   ` behave the same on both sides of it, and so does
+	// `da"` on `x "ab" y` where the extended end is nowhere near the last character.
+	// So `i"` stops before the closing quote, `a"` and any counted object take it.
+	const inclusive = include || count > 1;
+	return { start: from, end: close, inclusive, ok: true };
 }
 
 /**
@@ -3760,6 +3937,42 @@ export class VimEngine {
 			this.#wantHere();
 			return;
 		}
+		// `i"` `a"` `i'` `a'` `` i` `` `` a` `` are one arm of `nv_object` over three
+		// characters (normal.c:7274-7279), and they are reached before the register
+		// name would be: `d"a…` reads a register, but the `i` has already put the
+		// object latch up by the time a `"` arrives after it.
+		if (object === '"' || object === "'" || object === "`") {
+			const quote = quoteObject(text, at, count, include, object);
+			if (!quote.ok) {
+				// No string is a FAIL: the operator is dropped, the text is untouched
+				// and the caret does not walk, which is what `clearopbeep` leaves
+				// behind (normal.c:7291-7292). A quote with no mate on its own line
+				// is the case that gets here most, since the object cannot cross a
+				// line break.
+				this.#wantHere();
+				return;
+			}
+			if (operator === ">" || operator === "<") {
+				// A quote object is one line of text by construction — `current_quote`
+				// only ever saw `ml_get_curline()` — so the span is that line whatever
+				// the range is, and an empty pair shifts the line it stands on rather
+				// than the one before it.
+				this.#shiftLines(1, operator === ">", 1, nthLineStart(text, lineOf(text, quote.start)));
+				return;
+			}
+			// A pair with nothing between the quotes is a range of no width, which
+			// ops.c:4275-4282 reads as `oap->empty` — the same thing the bracket
+			// object above reports, reached here by a zero-width range instead of by
+			// `current_block` saying so. `di"` on `""` changes no text, `ci"` enters
+			// insert at the position the text would have begun, and `yi"` replaces the
+			// register with an empty one for the reason spelled out there.
+			if (quote.start === quote.end && !quote.inclusive) {
+				this.#emptyObject(operator, quote.start);
+				return;
+			}
+			this.#runOperator(operator, quote.start, quote.end + (quote.inclusive ? 1 : 0), quote.inclusive);
+			return;
+		}
 		const pair = BLOCK_PAIRS[object];
 		if (pair) {
 			const block = blockObject(text, at, count, include, pair);
@@ -3785,9 +3998,7 @@ export class VimEngine {
 					return;
 				}
 				const firstLine = block.linewise ? block.firstLine : lineOf(text, block.start);
-				const lastLine = block.linewise
-					? block.lastLine
-					: lineOf(text, Math.max(block.start, block.end - 1));
+				const lastLine = block.linewise ? block.lastLine : lineOf(text, Math.max(block.start, block.end - 1));
 				this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine));
 				return;
 			}
@@ -3797,24 +4008,7 @@ export class VimEngine {
 			// where the text would have begun, which for `a(\n)` is the closing
 			// bracket. `di(` there changes no text and `ci(` still enters insert.
 			if (block.empty) {
-				this.#ops.setCursor(block.start);
-				if (operator === "c") this.#enterInsert();
-				else {
-					// …and a yank of nothing is still a yank. `oap->empty` is read by
-					// `op_delete`, which returns on it (ops.c:790), and by `op_change`,
-					// which walks past it into insert; `OP_YANK` bails only on
-					// `empty_region_error`, which is 'E' in 'cpoptions' (ops.c:4285,
-					// :4372), and this engine has no 'cpo' to be Vi-compatible about.
-					// So the register is replaced by an empty one, and what that is
-					// worth is the *next* command: a `p` pastes nothing, where a yank
-					// that skipped the write would paste whatever was there before.
-					// The linewise promotion does not reach it — it needs
-					// `yanklines > 1` (register.c:1380) and an empty object is one
-					// line, so the register is a characterwise one holding no
-					// characters rather than a linewise one holding a break.
-					if (operator === "y") this.#register = { text: "", linewise: false };
-					this.#wantHere();
-				}
+				this.#emptyObject(operator, block.start);
 				return;
 			}
 			// A linewise object goes through the line machinery whole, and the
@@ -4163,6 +4357,37 @@ export class VimEngine {
 		// emoji leaves half a surrogate pair behind.
 		if (inclusive && target >= from) end = nextChar(text, target);
 		return { start, end: Math.min(end, text.length), inclusive };
+	}
+
+	/**
+	 * `oap->empty` (ops.c:4275-4282): a range with no characters in it, which two
+	 * of the three text objects can reach. `current_block` reports it for a pair
+	 * with nothing between the brackets, and a quote object gets there by being
+	 * zero-width — `di"` on `""` steps past the opening quote and lands on the
+	 * closing one, which is where the text would have begun.
+	 *
+	 * It is not a FAIL: the operator has been spent and the caret moves to where
+	 * the text would have started, `d` changes nothing and `c` enters insert.
+	 *
+	 * A yank of nothing is still a yank. `oap->empty` is read by `op_delete`, which
+	 * returns on it (ops.c:790), and by `op_change`, which walks past it into
+	 * insert; `OP_YANK` bails only on `empty_region_error`, which is 'E' in
+	 * 'cpoptions' (ops.c:4285, :4372), and this engine has no 'cpo' to be
+	 * Vi-compatible about. So the register is replaced by an empty one, and what
+	 * that is worth is the *next* command: a `p` pastes nothing, where a yank that
+	 * skipped the write would paste whatever was there before. The linewise
+	 * promotion does not reach it — it needs `yanklines > 1` (register.c:1380) and
+	 * an empty object is one line, so the register is a characterwise one holding
+	 * no characters rather than a linewise one holding a break.
+	 */
+	#emptyObject(operator: Operator, at: number): void {
+		this.#ops.setCursor(at);
+		if (operator === "c") {
+			this.#enterInsert();
+			return;
+		}
+		if (operator === "y") this.#register = { text: "", linewise: false };
+		this.#wantHere();
 	}
 
 	#runOperator(operator: "d" | "c" | "y", start: number, end: number, _inclusive: boolean): void {

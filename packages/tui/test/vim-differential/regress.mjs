@@ -238,6 +238,58 @@ const B_BLANK_FIRST = "f(\n \na)";
  *  and "the empty yank never wrote" read the same. */
 const B_PAIR_THEN_EMPTY = "f(a)()";
 
+// The quote objects. `current_quote` works on `ml_get_curline()` and nothing else
+// (textobject.c:1753, motion.txt:692), so the two shapes with a break in them
+// below are here to pin the *refusal*, not a string that runs on into the next
+// line: a quote with no mate on its own line is a FAIL.
+const Q_UNBALANCED = 'a " b';
+const Q_UNBALANCED_APOS = "a ' b";
+/** A word that opens with a contraction: the only quote has no mate on the line. */
+const Q_CONTRACTION = "don't stop";
+const Q_APOS = "it's a test";
+const Q_PAIR = "x 'ab' y";
+/** No white space on either side, so the `a` object cannot grow either run. */
+const Q_HUGGED = "x'ab'y";
+/** The pair is the whole line, so there is no white space *after* the close. */
+const Q_BARE = "'ab'";
+const Q_INDENTED = "  'ab'  ";
+const Q_TAIL = "x 'ab'";
+const Q_INDENT_TAIL = "  'ab'";
+const Q_TRAILING_BLANKS = 'x "ab"   ';
+const Q_NO_TRAILING = 'x "ab"';
+const Q_TWO_LINES = "a 'b\nc' d";
+const Q_OPEN_ACROSS = '"one\ntwo"';
+/** An odd number of backslashes hides the quote, an even number does not. */
+const Q_ESCAPED = 'x "a\\"b" y';
+const Q_ESCAPED_EVEN = 'x "a\\\\"b" y';
+/** The only quote on the line is escaped, and the opener is found going *left*,
+ *  where the escape does not hide it — `x "<bs>"b" y`, caret on the backslash. */
+const Q_ONLY_ESCAPED = 'x "\\"b" y';
+/** …and the shape that actually reaches the forward fallback: the only quote in
+ *  front of the caret is escaped, so `find_prev_quote` steps over it and comes back
+ *  with the line's first column, and the scan that goes the other way has its escape
+ *  check off. Without it the object fails instead of cutting `b`. */
+const Q_FALLBACK = 'a \\"b"';
+/** The control for the one above: the escape hides a *space*, not a quote, so both
+ *  readings of the forward scan agree and the case says nothing about which it is. */
+const Q_ESCAPE_BLANK = 'ab\\ "cd"';
+const Q_ESCAPED_UNCLOSED = 'a \\" b';
+const Q_UNCLOSED_ESCAPED = 'a "\\"b';
+const Q_EMPTY = 'x "" y';
+const Q_EMPTY_APOS = "x '' y";
+const Q_EMPTY_TICK = "x `` y";
+const Q_TWO_PAIRS = '"a" "b"';
+const Q_THREE_PAIRS = '"a" "b" "c"';
+const Q_NESTED = `he said "it's a 'test'" ok`;
+const Q_TICK = "a `b` c";
+/** Two strings with nothing between them, for the caret on a quote. */
+const Q_ADJACENT = 'ab"cd"ef';
+const Q_BARE_QUOTE = '"ab';
+const Q_CLOSE_ONLY = 'ab"';
+/** A tab counts as white space to `VIM_ISWHITE`, which is a space and a tab. */
+const Q_TAB_AFTER = 'x "ab"\ty';
+const Q_SHIFT = "a 'b'\nc 'd'";
+
 const CASES = [
 	// wanted column: MAXCOL and short lines
 	[["$", "j"], A, 0],
@@ -1546,6 +1598,96 @@ const CASES = [
 	[["y", "a", "(", "g", "g", "P"], B_PAIR_THEN_EMPTY, 0],
 	[["y", "a", "(", "l", "l", "l", "d", "i", "(", "g", "g", "P"], B_PAIR_THEN_EMPTY, 0],
 	[["y", "a", "(", "l", "l", "l", "c", "i", "(", "Z", "\x1b", "g", "g", "P"], B_PAIR_THEN_EMPTY, 0],
+
+	// The quote objects: `i"` `a"` `i'` `a'` `` i` `` `` a` ``. One arm of
+	// `nv_object` over three characters (normal.c:7274-7279) with `cap->nchar`
+	// handed through untranslated, so the three are the same object spelled three
+	// ways and a case each is the same case with another letter in it.
+	//
+	// Three rules are load-bearing and each has a case that would fail without it:
+	// the scan is escape-aware going *left* for the opener and — in the fallback
+	// that runs when there is no quote to the left at all — not escape-aware going
+	// *right* for it, so an escaped quote is found anyway; the white space an `a`
+	// object adds is a choice between the two sides and not both; and the closing
+	// quote is in the range exactly when the object is an `a` or carries a count.
+	[["d", "i", "'"], Q_UNBALANCED, 2],
+	[["d", "i", '"'], Q_UNBALANCED, 2],
+	[["d", "i", "'"], Q_UNBALANCED_APOS, 2],
+	[["c", "i", "'", "Z", "\x1b"], Q_UNBALANCED, 2],
+	[["y", "i", '"', "g", "g", "P"], Q_UNBALANCED, 2],
+	[["d", "i", "'"], Q_CONTRACTION, 1],
+	[["d", "i", "'"], Q_CONTRACTION, 2],
+	[["d", "i", "'"], Q_APOS, 1],
+	[["d", "i", "'"], Q_APOS, 3],
+	[["d", "i", "'"], Q_APOS, 5],
+	[["d", "i", "'"], Q_PAIR, 3],
+	[["d", "i", "'"], Q_PAIR, 4],
+	[["d", "a", "'"], Q_PAIR, 3],
+	[["d", "a", "'"], Q_PAIR, 4],
+	[["y", "a", "'", "g", "g", "P"], Q_PAIR, 3],
+	[["d", "i", "'"], Q_HUGGED, 2],
+	[["d", "i", "'"], Q_HUGGED, 3],
+	[["d", "a", "'"], Q_HUGGED, 2],
+	[["d", "i", "'"], Q_BARE, 1],
+	[["d", "i", "'"], Q_BARE, 0],
+	[["d", "a", "'"], Q_BARE, 1],
+	[["d", "a", "'"], Q_INDENTED, 3],
+	[["d", "a", "'"], Q_TAIL, 3],
+	[["d", "a", "'"], Q_INDENT_TAIL, 3],
+	[["d", "i", '"'], Q_NO_TRAILING, 3],
+	[["d", "a", '"'], Q_NO_TRAILING, 3],
+	[["d", "a", '"'], Q_TRAILING_BLANKS, 3],
+	[["d", "a", '"'], Q_TAB_AFTER, 3],
+	[["d", "i", "'"], Q_TWO_LINES, 3],
+	[["d", "i", '"'], Q_OPEN_ACROSS, 1],
+	[["d", "i", '"'], Q_ESCAPED, 5],
+	[["c", "i", '"', "Z", "\x1b"], Q_ESCAPED, 5],
+	[["d", "i", '"'], Q_ESCAPED_EVEN, 6],
+	[["d", "i", '"'], Q_ONLY_ESCAPED, 3],
+	// The forward fallback, which the case above is *not*: there the quote at 2 is
+	// found going left, and here the only quote in front of the caret is behind a
+	// backslash. The object is written twice because the shape is the one the whole
+	// rule is about and the `ANCHORS_ONLY` check caught the driver assuming
+	// otherwise — D4, the mutant that honours the escape in the fallback, stayed
+	// green through the first version of this group.
+	[["d", "i", '"'], Q_FALLBACK, 0],
+	[["d", "i", '"'], Q_FALLBACK, 1],
+	[["d", "a", '"'], Q_FALLBACK, 1],
+	[["c", "i", '"', "Z", "\x1b"], Q_FALLBACK, 1],
+	[["d", "i", '"'], Q_ESCAPE_BLANK, 0],
+	[["d", "i", '"'], Q_ESCAPED_UNCLOSED, 6],
+	[["d", "i", '"'], Q_UNCLOSED_ESCAPED, 3],
+	[["d", "i", '"'], Q_EMPTY, 1],
+	[["d", "i", '"'], Q_EMPTY, 2],
+	[["c", "i", '"', "Z", "\x1b"], Q_EMPTY, 1],
+	[["y", "i", '"', "g", "g", "P"], Q_EMPTY, 1],
+	[["d", "i", "'"], Q_EMPTY_APOS, 1],
+	[["d", "i", "`"], Q_EMPTY_TICK, 1],
+	[["d", "2", "i", '"'], Q_THREE_PAIRS, 1],
+	[["d", "3", "i", '"'], Q_THREE_PAIRS, 1],
+	[["d", "2", "i", '"'], Q_THREE_PAIRS, 2],
+	[["y", "2", "i", '"', "g", "g", "P"], Q_TWO_PAIRS, 1],
+	[["d", "2", "i", "'"], Q_TWO_PAIRS, 1],
+	[["d", "i", '"'], Q_NESTED, 14],
+	[["c", "i", "'", "Z", "\x1b"], Q_NESTED, 12],
+	[["d", "i", "'"], Q_NESTED, 12],
+	[["d", "i", "`"], Q_TICK, 3],
+	[["d", "i", "`"], Q_TICK, 2],
+	[["d", "a", "`"], Q_TICK, 3],
+	[["d", "i", '"'], Q_ADJACENT, 2],
+	[["d", "i", '"'], Q_ADJACENT, 5],
+	[["d", "i", '"'], Q_BARE_QUOTE, 0],
+	[["d", "i", '"'], Q_CLOSE_ONLY, 2],
+	// The shift cases want a line that is *not* already flush left, or the
+	// indent they add is a no-op and the case measures nothing — and the quote
+	// character has to be the one the buffer actually holds, or the object is a
+	// FAIL and the case passes by changing nothing for the wrong reason. Both
+	// mistakes were in the first draft of this group.
+	[[">", "i", "'"], Q_INDENTED, 3],
+	[[">", "i", '"'], Q_EMPTY, 1],
+	[[">", "a", "'"], Q_INDENTED, 3],
+	[[">", "i", "'"], Q_HUGGED, 2],
+	[[">", "2", "i", "'"], Q_SHIFT, 2],
 
 	// Not here: anything with the caret on the `\n` of `"ab\ncd"`. Vim has no
 	// line-break character to put a caret on — `cursor(1, 3)` clamps onto the
