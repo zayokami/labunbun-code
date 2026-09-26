@@ -34,6 +34,15 @@ export {
 	detectAppearance,
 	parseBackgroundLuminance,
 } from "./detect-appearance.ts";
+export {
+	describeEditor,
+	type EditingMode,
+	type EditingModeInput,
+	type EditorKind,
+	editorShadowNotice,
+	opposingEditorKey,
+	resolveEditingMode,
+} from "./editing-mode.ts";
 export { formatElapsed } from "./elapsed.ts";
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
 export { LIVE_OUTPUT_LINES, liveOutputLines, livePreviewTargets } from "./live-output.ts";

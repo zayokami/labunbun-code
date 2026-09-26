@@ -164,6 +164,14 @@ export interface UiState {
 	 */
 	vim: boolean;
 	/**
+	 * Modeless emacs editing in the prompt, and the second of an exclusive pair
+	 * with {@link vim}. Stored beside it rather than as one three-valued field so
+	 * that every existing reader of `vim` keeps meaning what it meant; the one
+	 * place that has to have a single answer is `resolveEditingMode`, and the
+	 * commands are what keep the two from both being on.
+	 */
+	emacs: boolean;
+	/**
 	 * Asked-for repaints of the transcript. `<Static>` prints its children once
 	 * and only prints them again when the list remounts, so anything that wipes
 	 * the terminal underneath a sealed transcript (Ctrl+L) has to ask for one.
@@ -218,7 +226,7 @@ export interface QuestionDialogState {
  */
 export const RESULT_TEXT_CAP = 16_000;
 
-export function initialUiState(vim = false): UiState {
+export function initialUiState(vim = false, emacs = false): UiState {
 	return {
 		entries: [],
 		streamingText: "",
@@ -236,6 +244,7 @@ export function initialUiState(vim = false): UiState {
 		theme: DEFAULT_THEME,
 		modelName: "",
 		vim,
+		emacs,
 		paint: 0,
 	};
 }

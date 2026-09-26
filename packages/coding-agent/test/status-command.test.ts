@@ -85,17 +85,37 @@ describe("/status", () => {
 		expect(card?.details[2]?.[1]).toContain("nord");
 	});
 
-	// The editor is the store's, not the settings file's: /vim may have flipped it
-	// during the session, and a card that reports the startup value is lying about
-	// the app the user is looking at.
-	test("reports the vim mode the editor is actually in", () => {
+	// The editor is the store's, not the settings file's: /vim and /emacs may have
+	// flipped it during the session, and a card that reports the startup value is
+	// lying about the app the user is looking at.
+	//
+	// The wording is "the editor" and not "Vim on/off", which is the second of two
+	// named changes to this test. Listing a flag cannot describe a third state, and
+	// the third state is the one Emacs adds: with both off the card now says "no
+	// editor" rather than "Vim off", which named one of the two settings and said
+	// nothing about the prompt.
+	test("reports the editor the prompt is actually in", () => {
 		const h = makeCtx();
 		handleAppCommand("/status", h.ctx);
-		expect(h.cards[0]?.details[2]?.[1]).toContain("Vim off");
+		expect(h.cards[0]?.details[2]?.[1]).toContain("no editor");
 
 		h.store.set((s) => ({ ...s, vim: true }));
 		handleAppCommand("/status", h.ctx);
-		expect(h.cards[1]?.details[2]?.[1]).toContain("Vim on");
+		expect(h.cards[1]?.details[2]?.[1]).toContain("Vim");
+
+		h.store.set((s) => ({ ...s, vim: false, emacs: true }));
+		handleAppCommand("/status", h.ctx);
+		expect(h.cards[2]?.details[2]?.[1]).toContain("Emacs");
+	});
+
+	// Reachable only by hand-editing a settings file, since the commands clear the
+	// other key — and worth naming there, because a file that says both is not
+	// wrong, it is overridden, and the card is the only place that says so.
+	test("names the shadowed key when a hand-edited file has both editors on", () => {
+		const h = makeCtx();
+		h.store.set((s) => ({ ...s, vim: true, emacs: true }));
+		handleAppCommand("/status", h.ctx);
+		expect(h.cards[0]?.details[2]?.[1]).toContain("Emacs (vimMode also set)");
 	});
 
 	test("an unpersisted session says so instead of showing a blank id", () => {

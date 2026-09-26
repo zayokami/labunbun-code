@@ -231,7 +231,7 @@ describe("helpText", () => {
 		// The key list promised "Esc interrupt" even where the editor takes the
 		// key first. The plain list stays byte-identical for everyone else.
 		const plain = helpText(suggestions());
-		const vim = helpText(suggestions(), true);
+		const vim = helpText(suggestions(), "vim");
 		expect(vim.startsWith(plain)).toBe(true);
 		expect(vim).toContain("Esc leave insert");
 
@@ -241,5 +241,31 @@ describe("helpText", () => {
 			.filter((line) => line.trim() !== "");
 		expect(added).toHaveLength(1);
 		expect(added[0]).toContain("vim:");
+	});
+
+	// Same shape for emacs, and the line must not claim Escape does something
+	// different: `EmacsEngine` declines the key, so the interrupt the plain list
+	// already promises is what still happens.
+	test("with emacs on it adds one line and does not touch the escape promise", () => {
+		const plain = helpText(suggestions());
+		const emacs = helpText(suggestions(), "emacs");
+		expect(emacs.startsWith(plain)).toBe(true);
+		expect(emacs).toContain("Esc interrupt");
+		expect(emacs).not.toContain("Esc leave insert");
+
+		const added = emacs
+			.slice(plain.length)
+			.split("\n")
+			.filter((line) => line.trim() !== "");
+		expect(added).toHaveLength(1);
+		expect(added[0]).toContain("emacs:");
+	});
+
+	// Only one editor's line, ever. A `/help` that listed both would be telling
+	// the user about a mode they are not in.
+	test("one editor's line at a time, never both", () => {
+		expect(helpText(suggestions(), "vim")).not.toContain("emacs:");
+		expect(helpText(suggestions(), "emacs")).not.toContain("vim:");
+		expect(helpText(suggestions())).not.toContain("vim:");
 	});
 });

@@ -1,6 +1,7 @@
 import type { PadAction, PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput, usePaste, useWindowSize } from "ink";
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { resolveEditingMode } from "../editing-mode.ts";
 import { type HistorySearchState, historyMatches, searchSelection, searchSelectionIndex } from "../history-search.ts";
 import { useTextInput } from "../hooks/useTextInput.ts";
 import { type OskCursor, oskKeyAt, oskMove, oskPage, oskTurn, oskType } from "../osk.ts";
@@ -25,6 +26,13 @@ export interface PromptInputProps {
 	completeFiles?: (query: string) => Promise<string[]>;
 	/** Modal vim editing (normal/insert). */
 	vim?: boolean;
+	/**
+	 * Modeless emacs editing. A separate prop beside `vim` rather than one
+	 * `editor` for both, because only the vim half reaches the engine: the two
+	 * settings are exclusive and the app layer keeps them that way, so a caller
+	 * passing both has made a mistake the app layer would have refused to make.
+	 */
+	emacs?: boolean;
 	/**
 	 * Prompts from earlier sessions, oldest first, for ↑ recall. Without this the
 	 * buffer starts empty and ↑ only reaches prompts typed in this session.
@@ -132,6 +140,7 @@ export function PromptInput({
 	commandSuggestions = [],
 	completeFiles,
 	vim = false,
+	emacs = false,
 	history = [],
 	escapeRef,
 	onToggleHelp,
@@ -146,8 +155,12 @@ export function PromptInput({
 }: PromptInputProps) {
 	const theme = useTheme();
 	const { columns } = useWindowSize();
-	const { state, actions, historyUp, historyDown, pushHistory, getHistory, vimMode, handleVimKey, selection } =
-		useTextInput(history, vim);
+	// What the two flags add up to, for the two things that have to describe the
+	// editor rather than implement it: the badge and the hint. The engine still
+	// takes `vim` alone, because the Emacs engine is not constructed from here.
+	const editor = resolveEditingMode({ vimMode: vim, emacsMode: emacs });
+	const { state, actions, historyUp, historyDown, pushHistory, getHistory, vimMode, handleEditorKey, selection } =
+		useTextInput(history, editor.mode);
 	const [suggestionIndex, setSuggestionIndex] = useState(0);
 	/** Ctrl+R state; null when the search is closed. */
 	const [search, setSearch] = useState<HistorySearchState | null>(null);
@@ -389,7 +402,7 @@ export function PromptInput({
 				return true;
 			}
 			// True only when vim had something to cancel; an idle Esc is the host's.
-			if (handleVimKey("", { escape: true })) return true;
+			if (handleEditorKey("", { escape: true })) return true;
 			// Escape during a run with something typed means "stop, and send this":
 			// the alternative — throwing away the run *and* the text — reads as a
 			// lost keystroke. An empty buffer still falls through, so a bare Escape
@@ -413,7 +426,7 @@ export function PromptInput({
 	}, [
 		escapeRef,
 		fileSuggestions,
-		handleVimKey,
+		handleEditorKey,
 		search,
 		busy,
 		vim,
@@ -435,7 +448,7 @@ export function PromptInput({
 				setSearch(null);
 				return;
 			}
-			if (handleVimKey(input, key)) return;
+			if (handleEditorKey(input, key)) return;
 			if (search) {
 				// Everything else is the query while a search is open. The vim engine
 				// has already had its say above, which is what keeps Ctrl+R as redo in
@@ -617,7 +630,11 @@ export function PromptInput({
 	const lines = state.text.split("\n");
 	const cursorLine = state.text.slice(0, state.cursor).split("\n").length - 1;
 	const selected = suggestions.length > 0 ? suggestions[suggestionIndex % suggestions.length] : null;
-	const sel = vimMode.startsWith("visual") ? selection : null;
+	// Emacs keeps no mode, so `vimMode` reads "insert" and this gate used to hide
+	// every emacs region — the highlight the plan promises, switched off by the one
+	// editor that has no visual mode to be in. Vim's half is unchanged: outside
+	// visual there is no selection to draw.
+	const sel = editor.mode === "emacs" || vimMode.startsWith("visual") ? selection : null;
 
 	const MODE_LABEL: Record<string, string> = {
 		normal: "NORMAL",
@@ -701,8 +718,11 @@ export function PromptInput({
 					))
 				)}
 				<Text dimColor>
-					{vim ? `[${MODE_LABEL[vimMode] ?? "NORMAL"}] ` : ""}
-					{hintLine(columns, { vim, vimMode })}
+					{/* The badge is vim's alone. Emacs has no mode to name, and a line
+					    saying `[EMACS]` on a modeless prompt would be the one place the
+					    screen lied about it. */}
+					{editor.mode === "vim" ? `[${MODE_LABEL[vimMode] ?? "NORMAL"}] ` : ""}
+					{hintLine(columns, { editor: editor.mode, vimMode })}
 				</Text>
 			</Box>
 		</Box>

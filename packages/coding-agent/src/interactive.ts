@@ -62,7 +62,17 @@ import {
 	type Operations,
 	TaskStore,
 } from "@labunbun/tools";
-import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle, resolveBuiltInTheme, ruleSpecifierFor } from "@labunbun/tui";
+import {
+	AUTO_THEME_NAME,
+	describeEditor,
+	editorShadowNotice,
+	mountRepl,
+	opposingEditorKey,
+	type ReplAppHandle,
+	resolveBuiltInTheme,
+	resolveEditingMode,
+	ruleSpecifierFor,
+} from "@labunbun/tui";
 import { activitySummaryLine } from "./activity-report.ts";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import {
@@ -806,6 +816,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		modelName: `${model.provider}/${model.id}`,
 		theme: resolvedTheme.theme,
 		vimMode: settings.vimMode,
+		emacsMode: settings.emacsMode,
 		// Both the registry commands and the app-level ones, so /help and Tab
 		// completion cover everything that actually dispatches.
 		commandSuggestions: [
@@ -1308,6 +1319,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/context", "Show what the context window is made of, and what is left"],
 		["/cost", "Show token usage and cost for this conversation, then for this project"],
 		["/doctor", "Check the environment, settings, and provider setup"],
+		["/emacs", "Turn modeless emacs editing in the prompt on or off: /emacs [on|off]"],
 		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
 		["/gamepad", "Control the session from a DualShock 4: /gamepad [on|off|status|watch|list|reset|approve|rumble]"],
@@ -1485,8 +1497,15 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			const store = ctx.handle?.store;
 			const info = store?.get().contextInfo;
 			const storeId = ctx.sessionStore()?.sessionId;
-			// The live editor, not the startup flag: `/vim` may have changed it since.
-			const vim = store?.get().vim ?? ctx.settings.vimMode === true;
+			// The live editor, not the startup flag: `/vim` and `/emacs` may have
+			// changed it since. Resolved from both keys rather than read off one,
+			// because the two are exclusive and a card that named a flag could not
+			// describe the third state — the one with neither set.
+			const live = store?.get();
+			const editor = resolveEditingMode({
+				vimMode: live?.vim ?? ctx.settings.vimMode === true,
+				emacsMode: live?.emacs ?? ctx.settings.emacsMode === true,
+			});
 			ctx.handle?.setStatusCard({
 				model: `${session.model.provider}/${session.model.id}`,
 				directory: shortenHome(ctx.cwd, ctx.home),
@@ -1502,7 +1521,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					// Beside the cost, because that is what it explains: a hit rate is
 					// the reason a bill is what it is, and the two are read together.
 					["Cache", ctx.cache?.statusLine() ?? "not tracked"],
-					["Theme", `${ctx.theme.theme.name} · Vim ${vim ? "on" : "off"}`],
+					["Theme", `${ctx.theme.theme.name} · ${describeEditor(editor)}`],
 					[
 						"MCP",
 						`${ctx.mcpConnections.length} connected${
@@ -1996,33 +2015,79 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					return true;
 			}
 		}
-		case "/vim": {
-			const arg = text.split(/\s+/)[1]?.toLowerCase();
-			if (arg && arg !== "on" && arg !== "off") {
-				pushInfo(ctx.handle, "Usage: /vim [on|off] — with no argument it toggles");
-				return true;
-			}
-			// Toggled from what is actually on, not from the settings file: /vim on
-			// after a session that started in vim mode means off, and reading the
-			// saved value would give the same answer every time.
-			const next = arg ? arg === "on" : !(ctx.handle?.store.get().vim ?? false);
-			ctx.handle?.setVimMode(next);
-			const shadowed = shadowedChoiceNotice(ctx.loadedSettings, "vimMode", (path) => shortenHome(path, ctx.home));
-			try {
-				writeUserSettingsPatch({ vimMode: next }, ctx.home);
-				pushInfo(ctx.handle, `Vim mode ${next ? "on" : "off"}${shadowed ? ` (${shadowed})` : ""}`);
-			} catch (error) {
-				// Already in effect; only the write failed.
-				pushInfo(
-					ctx.handle,
-					`Vim mode ${next ? "on" : "off"} (not saved: ${error instanceof Error ? error.message : String(error)})`,
-				);
-			}
-			return true;
-		}
+		case "/vim":
+			return applyEditorCommand(ctx, text, "vimMode");
+		case "/emacs":
+			return applyEditorCommand(ctx, text, "emacsMode");
 		default:
 			return false;
 	}
+}
+
+/**
+ * `/vim` and `/emacs`, which are one operation on an exclusive pair.
+ *
+ * Written once rather than twice on purpose. What is interesting about these two
+ * commands is not the flag they set — it is the *other* flag they have to clear,
+ * in the store and in the file, and the fact that they have to say so. A second
+ * copy of that logic is a second thing to forget, and the failure it produces is
+ * silent: a prompt that is both modal and modeless answers `C-f` according to
+ * whichever engine was built last, and nothing in the UI mentions it.
+ *
+ * The store side of the exclusivity belongs to the handle — `setVimMode` and
+ * `setEmacsMode` each clear the other — so that every route into the store gets
+ * it, not just this one. What lives here is the file and the sentence. A store
+ * that changed while the file did not is a run that ends in one editor and a next
+ * run that opens in the other, which reads as the setting having been ignored.
+ */
+function applyEditorCommand(ctx: AppCommandContext, text: string, kind: "vimMode" | "emacsMode"): boolean {
+	const label = kind === "vimMode" ? "Vim" : "Emacs";
+	const arg = text.split(/\s+/)[1]?.toLowerCase();
+	if (arg && arg !== "on" && arg !== "off") {
+		pushInfo(ctx.handle, `Usage: /${kind === "vimMode" ? "vim" : "emacs"} [on|off] — with no argument it toggles`);
+		return true;
+	}
+	const live = ctx.handle?.store.get();
+	const on = kind === "vimMode" ? live?.vim === true : live?.emacs === true;
+	// Toggled from what is actually on, not from the settings file: `/emacs` in a
+	// session that started in emacs mode means off, and reading the saved value
+	// would give the same answer every time.
+	const next = arg ? arg === "on" : !on;
+	if (kind === "vimMode") ctx.handle?.setVimMode(next);
+	else ctx.handle?.setEmacsMode(next);
+
+	const other = opposingEditorKey(kind);
+	// Read live rather than off the file, because the sentence is about what just
+	// changed and the file can be stale — a session that started before the last
+	// edit, or a hand-edited file the store never saw.
+	const otherOn = other === "vimMode" ? live?.vim === true : live?.emacs === true;
+	const reasons: string[] = [];
+	const cleared = editorShadowNotice({ [other]: otherOn }, kind, next);
+	if (cleared) reasons.push(cleared);
+	else {
+		const shadowed = shadowedChoiceNotice(ctx.loadedSettings, kind, (path) => shortenHome(path, ctx.home));
+		if (shadowed) reasons.push(shadowed);
+	}
+	// Turning one *on* writes the other's `false` next to it, which is the only
+	// way to express "these are exclusive" with two independent booleans. Turning
+	// one off writes only its own key, so `/emacs off` cannot quietly un-set a
+	// vimMode the user set in the file and was never asked about.
+	const patch = next ? { [kind]: true, [other]: false } : { [kind]: false };
+	const said = `${label} mode ${next ? "on" : "off"}${reasons.length ? ` (${reasons.join("; ")})` : ""}`;
+	try {
+		writeUserSettingsPatch(patch, ctx.home);
+		pushInfo(ctx.handle, said);
+	} catch (error) {
+		// Already in effect; only the write failed. Said in the same shape as every
+		// other settings write in this file, so the reason reads as a reason and
+		// not as a second thing that happened.
+		const why = error instanceof Error ? error.message : String(error);
+		pushInfo(
+			ctx.handle,
+			`${label} mode ${next ? "on" : "off"}${reasons.length ? ` (${reasons.join("; ")}; ` : " ("}not saved: ${why})`,
+		);
+	}
+	return true;
 }
 
 /**

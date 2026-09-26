@@ -41,6 +41,12 @@ export interface WizardAnswers {
 	reasoning: boolean;
 	theme: string;
 	vimMode: boolean;
+	/**
+	 * The other half of an exclusive pair with {@link vimMode}. Both are always
+	 * written, even when both are false, so the file states what was chosen rather
+	 * than leaving a reader to infer it from the absence of a key.
+	 */
+	emacsMode: boolean;
 }
 
 /** Pure translation of answers into a schema-valid settings object. */
@@ -49,6 +55,7 @@ export function buildWizardSettings(a: WizardAnswers): Record<string, unknown> {
 		model: a.provider === "anthropic" ? "anthropic/claude-sonnet-5" : `custom/${a.modelId}`,
 		theme: a.theme,
 		vimMode: a.vimMode,
+		emacsMode: a.emacsMode,
 	};
 
 	if (a.provider === "anthropic") {
@@ -88,6 +95,13 @@ export function buildWizardSettings(a: WizardAnswers): Record<string, unknown> {
  */
 export const WIZARD_THEME_CHOICES: readonly string[] = [...BUILT_IN_THEME_NAMES, AUTO_THEME_NAME];
 export const WIZARD_THEME_DEFAULT: string = DEFAULT_THEME.name;
+
+/**
+ * The editing models the wizard offers, in the order they read best: nothing
+ * first, because it is the answer most people want and a bare Enter must be the
+ * one that needs no thought.
+ */
+export const WIZARD_EDITOR_CHOICES: readonly string[] = ["none", "vim", "emacs"];
 
 type Ask = (question: string) => Promise<string>;
 
@@ -204,7 +218,10 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		// is not a theme used to be rewritten to "auto" without a word, so the
 		// setting the user then found in settings.json was one they never chose.
 		const theme = await askChoice(ask, "Theme", WIZARD_THEME_CHOICES, WIZARD_THEME_DEFAULT, "dark/light… or auto");
-		const vimMode = (await askChoice(ask, "Vim modal editing", ["y", "n"], "n")).startsWith("y");
+		// One question with three answers rather than two yes/no ones. Two questions
+		// can both be answered "yes" and the file would then hold two settings that
+		// exclude each other, discovered the first time a key did the wrong thing.
+		const editing = await askChoice(ask, "Editing model", WIZARD_EDITOR_CHOICES, "none", "vim, emacs, or none");
 
 		const settings = buildWizardSettings({
 			provider: providerAnswer === "anthropic" ? "anthropic" : "openai-compatible",
@@ -216,7 +233,8 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			maxOutputTokens,
 			reasoning,
 			theme,
-			vimMode,
+			vimMode: editing === "vim",
+			emacsMode: editing === "emacs",
 		});
 
 		const path = userSettingsPath(home);

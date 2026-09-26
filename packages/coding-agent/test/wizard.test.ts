@@ -97,8 +97,13 @@ describe("buildWizardSettings", () => {
 			reasoning: false,
 			theme: "dark",
 			vimMode: false,
+			emacsMode: false,
 		});
-		expect(settings).toEqual({ model: "anthropic/claude-sonnet-5", theme: "dark", vimMode: false });
+		// `emacsMode: false` is the named change here: the wizard now states both
+		// halves of the exclusive pair rather than leaving the unchosen one absent,
+		// so a reader of the file is told what "no editor" meant instead of inferring
+		// it from a missing key.
+		expect(settings).toEqual({ model: "anthropic/claude-sonnet-5", theme: "dark", vimMode: false, emacsMode: false });
 		expect("env" in settings).toBe(false);
 	});
 
@@ -114,6 +119,7 @@ describe("buildWizardSettings", () => {
 			reasoning: false,
 			theme: "auto",
 			vimMode: true,
+			emacsMode: false,
 		});
 		expect(settings.env).toEqual({ ANTHROPIC_API_KEY: "sk-test-123" });
 		expect("providers" in settings).toBe(false);
@@ -132,6 +138,7 @@ describe("buildWizardSettings", () => {
 			reasoning: true,
 			theme: "dark",
 			vimMode: false,
+			emacsMode: false,
 		});
 		expect(settings.model).toBe("custom/big-model");
 		const providers = settings.providers as { openaiCompatible: Array<Record<string, unknown>> };
@@ -156,6 +163,7 @@ describe("buildWizardSettings", () => {
 			reasoning: false,
 			theme: "dark",
 			vimMode: false,
+			emacsMode: false,
 		});
 		expect(settings.env).toBeUndefined();
 	});

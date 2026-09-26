@@ -301,7 +301,7 @@ describe("StatusCard", () => {
 });
 
 describe("ShortcutOverlay", () => {
-	const groups = () => shortcutGroups({ vim: false, commands: [["/status", "Show status"]] });
+	const groups = () => shortcutGroups({ editor: "none", commands: [["/status", "Show status"]] });
 
 	test("lists the keys and what they do, commands included", () => {
 		const { lastFrame } = render(withTheme(<ShortcutOverlay groups={groups()} columns={100} />));
@@ -332,7 +332,7 @@ describe("ShortcutOverlay", () => {
 	test("keys that appear twice in one group both keep their own description", () => {
 		const frame =
 			render(
-				withTheme(<ShortcutOverlay groups={shortcutGroups({ vim: true, vimMode: "normal" })} columns={100} />),
+				withTheme(<ShortcutOverlay groups={shortcutGroups({ editor: "vim", vimMode: "normal" })} columns={100} />),
 			).lastFrame() ?? "";
 		expect(frame).toContain("leave insert");
 		expect(frame).toContain("cancel selection");

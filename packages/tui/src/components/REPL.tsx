@@ -3,6 +3,7 @@ import { type PadBridge, padPalette } from "@labunbun/gamepad";
 import { Box, Text, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WHEEL_ROWS, wheelEntries, wheelMove } from "../command-wheel.ts";
+import { type EditorKind, resolveEditingMode } from "../editing-mode.ts";
 import { useTurnTimer } from "../hooks/useTurnTimer.ts";
 import { type LastNotification, type NotifyKind, notificationSequence, shouldNotify } from "../notify.ts";
 import { type PadPromptHandle, type PadPromptRef, usePadAction, usePadStatus } from "../pad.ts";
@@ -92,6 +93,17 @@ const KEYS_HELP = `Keys:
  */
 const VIM_KEYS_HELP = `  vim: i a insert · Esc leave insert · v/V Esc cancel selection · Esc interrupt when idle`;
 
+/**
+ * The same promise for modeless editing. Unlike vim this one does not change what
+ * Escape does: `EmacsEngine` declines the key, because there is no mode to leave,
+ * so the interrupt stands — and the list says so rather than implying otherwise.
+ *
+ * Only keys the engine actually handles are listed. The overlay test walks every
+ * advertised key against the engine, so a row here for a command that has not
+ * landed is a failing test rather than a lie that ships.
+ */
+const EMACS_KEYS_HELP = `  emacs: Ctrl-A/E line ends · Ctrl-F/B char · Alt-F/B word · Ctrl-K kill line · Ctrl-W kill word`;
+
 /** Clear screen, clear scrollback, home cursor — the full terminal wipe. */
 export const CLEAR_SCREEN = "\x1b[2J\x1b[3J\x1b[H";
 
@@ -121,13 +133,21 @@ const BUILT_IN_HELP: Array<[string, string]> = [
  * Help text built from the command table the REPL was given, so a command added
  * to the registry cannot go missing from `/help`.
  */
-export function helpText(commandSuggestions?: Array<[string, string]>, vim = false): string {
+export function helpText(commandSuggestions?: Array<[string, string]>, editor: EditorKind = "none"): string {
 	const byName = new Map<string, string>(BUILT_IN_HELP);
 	for (const [name, description] of commandSuggestions ?? []) byName.set(name, description);
 	const rows = [...byName].sort(([a], [b]) => a.localeCompare(b));
 	const width = Math.max(...rows.map(([name]) => name.length));
 	const lines = rows.map(([name, description]) => `  ${name.padEnd(width)}  ${description}`);
-	const keys = vim ? `${KEYS_HELP}\n${VIM_KEYS_HELP}` : KEYS_HELP;
+	// One line per editor, never both, and none at all when there is no editor:
+	// the plain list stays byte-identical for everyone not in one, which is what
+	// the test pins.
+	const keys =
+		editor === "vim"
+			? `${KEYS_HELP}\n${VIM_KEYS_HELP}`
+			: editor === "emacs"
+				? `${KEYS_HELP}\n${EMACS_KEYS_HELP}`
+				: KEYS_HELP;
 	return `Commands:\n${lines.join("\n")}\n\n${keys}`;
 }
 
@@ -164,7 +184,13 @@ export function REPL({
 	const queued = useStore(store, (s) => s.queued);
 	// From the store, not a prop: `/vim` flips it while the app is running, and
 	// the editor, `/help` and the key-list overlay all have to agree.
+	// Selected as primitives and combined here, not selected as the combined
+	// answer: `useStore` compares by identity, and `resolveEditingMode` returns a
+	// fresh object, so a selector returning it would re-render on every write to
+	// the store rather than only on a change of editor.
 	const vim = useStore(store, (s) => s.vim);
+	const emacs = useStore(store, (s) => s.emacs);
+	const editor = resolveEditingMode({ vimMode: vim, emacsMode: emacs });
 	// Ctrl+L wipes the screen the sealed transcript was printed onto; this is the
 	// stamp that says so, and it rides along in the list's key.
 	const paint = useStore(store, (s) => s.paint);
@@ -342,7 +368,7 @@ export function REPL({
 			store.set((s) => (s.statusCard ? { ...s, statusCard: null } : s));
 			if (trimmed.startsWith("/")) {
 				if (onCommand?.(trimmed)) return;
-				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions, vim });
+				handleCommand(trimmed, { store, modelName, onExit, commandSuggestions, editor: editor.mode });
 				return;
 			}
 			if (trimmed.startsWith("#")) {
@@ -383,7 +409,18 @@ export function REPL({
 				void session.prompt(text);
 			})();
 		},
-		[getSession, store, modelName, onExit, onCommand, onSubmitText, onMemoryShortcut, commandSuggestions, vim, enqueue],
+		[
+			getSession,
+			store,
+			modelName,
+			onExit,
+			onCommand,
+			onSubmitText,
+			onMemoryShortcut,
+			commandSuggestions,
+			editor.mode,
+			enqueue,
+		],
 	);
 
 	const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -724,7 +761,9 @@ export function REPL({
 						/>
 					) : null}
 					{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
-					{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ vim, commands: commandSuggestions })} />}
+					{shortcutsOpen && (
+						<ShortcutOverlay groups={shortcutGroups({ editor: editor.mode, commands: commandSuggestions })} />
+					)}
 					{activity && (
 						<ActivityPanel
 							home={activity.home}
@@ -778,8 +817,12 @@ export function handleCommand(
 		modelName: string;
 		onExit: () => void;
 		commandSuggestions?: Array<[string, string]>;
-		/** Modal editing is on, so the key list says what Escape does there. */
-		vim?: boolean;
+		/**
+		 * Which editor the prompt is in, so the key list says what Escape does there.
+		 * The kind rather than a flag: a boolean cannot say "modeless", and the
+		 * answer would then be whichever flag happened to be on.
+		 */
+		editor?: EditorKind;
 	},
 ): void {
 	const { store, onExit, commandSuggestions } = context;
@@ -791,7 +834,7 @@ export function handleCommand(
 		// request they did not make.
 		case "/":
 		case "/help":
-			pushInfo(store, helpText(commandSuggestions, context.vim));
+			pushInfo(store, helpText(commandSuggestions, context.editor));
 			break;
 		case "/clear":
 			// Display-only: the persisted session and the model context survive.

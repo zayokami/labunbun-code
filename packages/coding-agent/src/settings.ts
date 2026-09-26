@@ -66,6 +66,14 @@ export const SettingsSchema = z.object({
 	theme: z.string().optional(),
 	vimMode: z.boolean().optional(),
 	/**
+	 * Emacs key bindings in the prompt. Separate from `vimMode` rather than a
+	 * second value of it: the two are different models, not different bindings,
+	 * and a repository that turned on the wrong one would have to be trusted
+	 * with both. `resolveEditingMode` is the one place that decides which of them
+	 * is actually in effect, so setting both is reportable rather than ambiguous.
+	 */
+	emacsMode: z.boolean().optional(),
+	/**
 	 * Let the cheap rung run by itself when the context crosses the compaction
 	 * threshold: the older tool results become previews, and a summarization call
 	 * happens only if that did not free enough. On by default, because the rung
@@ -242,7 +250,8 @@ export interface LoadedSettings {
  * Deliberately not denied:
  *   - `permissions.deny` — tightening is always safe, and a repo's own
  *     guardrails stay effective against the agent it just configured.
- *   - `theme` / `vimMode` — cosmetic, no reach beyond the user's own terminal.
+ *   - `theme` / `vimMode` / `emacsMode` — cosmetic, no reach beyond the user's
+ *     own terminal.
  *   - `trimOldToolResults` is denied for the opposite reason: it decides how much
  *     of the user's own conversation the model keeps, and a cloned repository
  *     should not get to make the agent forget on the user's behalf.
@@ -294,6 +303,7 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	// Cosmetic, no reach beyond the user's own terminal.
 	theme: "repo",
 	vimMode: "repo",
+	emacsMode: "repo",
 	// Merged field by field — see PROJECT_TIER_PERMISSION_KEY_POLICY below.
 	permissions: "repo",
 };
@@ -354,7 +364,7 @@ export function formatIgnoredKeysNotice(ignored: IgnoredSettingsKey[]): string |
 }
 
 /** The settings a command persists for the user, which another tier can override. */
-export type UserChoiceKey = "theme" | "model" | "vimMode" | "gamepad";
+export type UserChoiceKey = "theme" | "model" | "vimMode" | "emacsMode" | "gamepad";
 
 /** Tiers that outrank the user's own file, highest first. */
 const OVERRIDING_TIERS = ["flag", "policy", "local", "project"] as const;

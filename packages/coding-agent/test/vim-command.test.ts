@@ -107,7 +107,11 @@ describe("/vim command", () => {
 		writeUserSettingsPatch({ theme: "nord" }, home);
 		handleAppCommand("/vim on", ctx);
 
-		expect(savedSettings(home)).toEqual({ theme: "nord", vimMode: true });
+		// `emacsMode: false` alongside it is new, and it is the point: the two
+		// editors are exclusive, so turning one on has to clear the other *in the
+		// file* as well as in the store. A file that kept saying `emacsMode: true`
+		// would reopen in emacs tomorrow, with nothing on screen to explain it.
+		expect(savedSettings(home)).toEqual({ theme: "nord", vimMode: true, emacsMode: false });
 		expect(store.get().vim).toBe(true);
 	});
 

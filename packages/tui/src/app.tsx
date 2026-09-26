@@ -37,6 +37,8 @@ export interface ReplAppOptions {
 	theme?: Theme;
 	/** Modal vim editing in the prompt. */
 	vimMode?: boolean;
+	/** Modeless emacs editing in the prompt. Exclusive with {@link vimMode}. */
+	emacsMode?: boolean;
 	/** App-level slash-command handler; false falls through to built-ins. */
 	onCommand?: (text: string) => boolean;
 	/**
@@ -133,6 +135,8 @@ export interface ReplAppHandle {
 	setTheme(theme: Theme): void;
 	/** Turn modal vim editing in the prompt on or off (`/vim`). */
 	setVimMode(on: boolean): void;
+	/** Turn modeless emacs editing in the prompt on or off (`/emacs`). */
+	setEmacsMode(on: boolean): void;
 	/**
 	 * Hot-swap the running REPL onto a different AgentSession (in-app /resume):
 	 * rebinds event subscription, clears transient transcript state, and keeps
@@ -193,7 +197,7 @@ function ThemedTree({ store, children }: { store: Store<UiState>; children: Reac
  */
 export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	const store = createStore<UiState>({
-		...initialUiState(options.vimMode ?? false),
+		...initialUiState(options.vimMode ?? false, options.emacsMode ?? false),
 		theme: options.theme ?? DEFAULT_THEME,
 		modelName: options.modelName,
 	});
@@ -265,7 +269,15 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 			store.set((s) => (sameShells(s.backgroundShells, shells) ? s : { ...s, backgroundShells: shells }));
 		},
 		setVimMode: (on) => {
-			store.set((s) => ({ ...s, vim: on }));
+			// Turning one on clears the other here rather than in the command, so
+			// that every route into the store — `/vim`, a settings reload, a test
+			// calling the handle directly — gets the same answer. A prompt that is
+			// both modal and modeless is a prompt whose `C-f` depends on which
+			// engine was constructed last.
+			store.set((s) => (on ? { ...s, vim: true, emacs: false } : { ...s, vim: false }));
+		},
+		setEmacsMode: (on) => {
+			store.set((s) => (on ? { ...s, emacs: true, vim: false } : { ...s, emacs: false }));
 		},
 		setTasks: (tasks) => {
 			store.set((s) => ({ ...s, tasks }));

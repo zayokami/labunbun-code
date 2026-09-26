@@ -6,6 +6,7 @@
  * overlay test walks every advertised key. A shortcut list that lies is worse
  * than no list.
  */
+import type { EditorKind } from "./editing-mode.ts";
 import type { VimMode } from "./vim.ts";
 
 export interface ShortcutGroup {
@@ -24,9 +25,14 @@ export const SHORTCUT_TWO_COLUMN_MIN_COLUMNS = 72;
  * What Escape does right now. With vim it depends on the mode: leaving insert or
  * cancelling a selection never reaches the session's interrupt, so one fixed
  * "Esc interrupt" was wrong half the time.
+ *
+ * Emacs is the case that looks like it should differ and does not. There is no
+ * mode to leave, so `EmacsEngine` declines the key and the REPL's own interrupt
+ * stands — the same answer the no-editor case gives, reached for a different
+ * reason.
  */
-export function escapeHint(vim: boolean, vimMode: VimMode): string {
-	if (!vim) return "Esc interrupt";
+export function escapeHint(editor: EditorKind, vimMode: VimMode): string {
+	if (editor !== "vim") return "Esc interrupt";
 	if (vimMode === "insert") return "Esc normal";
 	if (vimMode.startsWith("visual")) return "Esc cancel";
 	return "Esc interrupt";
@@ -37,8 +43,8 @@ export function escapeHint(vim: boolean, vimMode: VimMode): string {
  * a hint that spills onto a second line pushes the prompt up and down as the
  * user resizes, and the terminal is the one place it cannot be reflowed later.
  */
-export function hintLine(columns: number, opts: { vim: boolean; vimMode: VimMode }): string {
-	const esc = escapeHint(opts.vim, opts.vimMode);
+export function hintLine(columns: number, opts: { editor: EditorKind; vimMode: VimMode }): string {
+	const esc = escapeHint(opts.editor, opts.vimMode);
 	if (columns >= HINT_FULL_MIN_COLUMNS) {
 		return `Enter send · Shift+Enter newline · ↑↓ history · ctrl+r search · ${esc} · /help`;
 	}
@@ -52,10 +58,11 @@ export function hintLine(columns: number, opts: { vim: boolean; vimMode: VimMode
  * cannot disagree about what a command is called.
  */
 export function shortcutGroups(opts: {
-	vim: boolean;
+	editor: EditorKind;
 	vimMode?: VimMode;
 	commands?: Array<[string, string]>;
 }): ShortcutGroup[] {
+	const vim = opts.editor === "vim";
 	const groups: ShortcutGroup[] = [
 		{
 			title: "Prompt",
@@ -63,16 +70,19 @@ export function shortcutGroups(opts: {
 				["Enter", "send"],
 				["Shift+Enter", "newline"],
 				["↑ / ↓", "history"],
-				["Ctrl+R", opts.vim ? "search history (redo in vim normal)" : "search history"],
-				["Esc", escapeHint(opts.vim, opts.vimMode ?? "insert")],
-				["Tab", opts.vim ? "complete (insert mode)" : "complete command or file"],
+				["Ctrl+R", vim ? "search history (redo in vim normal)" : "search history"],
+				["Esc", escapeHint(opts.editor, opts.vimMode ?? "insert")],
+				// "insert mode" was the mode name when there was one editor and
+				// nothing else could be true; under Emacs the parenthetical would
+				// be false, so it is a fact about vim and stays under vim.
+				["Tab", vim ? "complete (insert mode)" : "complete command or file"],
 				["Ctrl+O", "transcript"],
 				["Ctrl+L", "clear screen"],
 				["Ctrl+C", "exit (twice when idle)"],
 			],
 		},
 	];
-	if (opts.vim) {
+	if (vim) {
 		groups.push({
 			title: "Vim",
 			rows: [

@@ -19,9 +19,9 @@ import {
 
 describe("hintLine", () => {
 	test("drops clauses as the terminal narrows, never wrapping", () => {
-		const wide = hintLine(120, { vim: false, vimMode: "insert" });
-		const medium = hintLine(70, { vim: false, vimMode: "insert" });
-		const narrow = hintLine(HINT_SHORT_MIN_COLUMNS - 20, { vim: false, vimMode: "insert" });
+		const wide = hintLine(120, { editor: "none", vimMode: "insert" });
+		const medium = hintLine(70, { editor: "none", vimMode: "insert" });
+		const narrow = hintLine(HINT_SHORT_MIN_COLUMNS - 20, { editor: "none", vimMode: "insert" });
 		expect(wide.length).toBeGreaterThan(medium.length);
 		expect(medium.length).toBeGreaterThan(narrow.length);
 		expect(narrow).toContain("Enter send");
@@ -29,26 +29,39 @@ describe("hintLine", () => {
 	});
 
 	test("always says what Escape is about to do", () => {
-		expect(hintLine(120, { vim: true, vimMode: "normal" })).toContain("Esc interrupt");
-		expect(hintLine(120, { vim: true, vimMode: "insert" })).toContain("Esc normal");
-		expect(hintLine(120, { vim: true, vimMode: "visual" })).toContain("Esc cancel");
+		expect(hintLine(120, { editor: "vim", vimMode: "normal" })).toContain("Esc interrupt");
+		expect(hintLine(120, { editor: "vim", vimMode: "insert" })).toContain("Esc normal");
+		expect(hintLine(120, { editor: "vim", vimMode: "visual" })).toContain("Esc cancel");
 	});
 });
 
 describe("escapeHint", () => {
 	test("follows the vim mode, and ignores it when vim is off", () => {
-		expect(escapeHint(false, "normal")).toBe("Esc interrupt");
-		expect(escapeHint(true, "insert")).toBe("Esc normal");
-		expect(escapeHint(true, "visual")).toBe("Esc cancel");
-		expect(escapeHint(true, "visual-line")).toBe("Esc cancel");
-		expect(escapeHint(true, "normal")).toBe("Esc interrupt");
+		expect(escapeHint("none", "normal")).toBe("Esc interrupt");
+		expect(escapeHint("vim", "insert")).toBe("Esc normal");
+		expect(escapeHint("vim", "visual")).toBe("Esc cancel");
+		expect(escapeHint("vim", "visual-line")).toBe("Esc cancel");
+		expect(escapeHint("vim", "normal")).toBe("Esc interrupt");
+	});
+
+	// The case that looks like it needs its own answer and does not. `EmacsEngine`
+	// declines a lone Escape — there is no mode to leave — so the key reaches the
+	// REPL's interrupt exactly as it does with no editor at all. Pinned across
+	// every mode value so a future "the vim mode is stale under emacs" shortcut
+	// cannot leak in through this branch.
+	test("is the interrupt under emacs, whatever the stale vim mode says", () => {
+		for (const mode of ["normal", "insert", "visual", "visual-line"] as const) {
+			expect(escapeHint("emacs", mode)).toBe("Esc interrupt");
+		}
 	});
 });
 
 describe("shortcutGroups", () => {
 	test("every row names a key and what it does", () => {
-		for (const vim of [false, true]) {
-			for (const group of shortcutGroups({ vim, vimMode: "normal" })) {
+		// All three kinds, not the two that existed when this was written: an editor
+		// whose group nobody checked is exactly the group that ships a blank cell.
+		for (const editor of ["none", "vim", "emacs"] as const) {
+			for (const group of shortcutGroups({ editor, vimMode: "normal" })) {
 				expect(group.title.length).toBeGreaterThan(0);
 				expect(group.rows.length).toBeGreaterThan(0);
 				for (const [keys, what] of group.rows) {
@@ -59,10 +72,24 @@ describe("shortcutGroups", () => {
 		}
 	});
 
+	// Each editor's group describes that editor. A vim group shown to an emacs
+	// user would not be a formatting slip: `i a insert` and `Esc leave insert`
+	// are instructions for a mode they are not in, and the file's own header says
+	// a list that lies is worse than no list. Emacs has no group of its own yet —
+	// the engine is the only thing that can say which keys it handles, and the
+	// rows go in when it does.
+	test("shows the group for the editor that is up, and no other", () => {
+		const titles = (editor: "none" | "vim" | "emacs") =>
+			shortcutGroups({ editor, vimMode: "normal" }).map((group) => group.title);
+		expect(titles("none")).toEqual(["Prompt"]);
+		expect(titles("vim")).toEqual(["Prompt", "Vim"]);
+		expect(titles("emacs")).toEqual(["Prompt"]);
+	});
+
 	test("vim mode adds a group that admits Ctrl+R is redo there", () => {
-		const plain = shortcutGroups({ vim: false });
+		const plain = shortcutGroups({ editor: "none" });
 		expect(plain.some((g) => g.title === "Vim")).toBe(false);
-		const withVim = shortcutGroups({ vim: true, vimMode: "normal" });
+		const withVim = shortcutGroups({ editor: "vim", vimMode: "normal" });
 		const vim = withVim.find((g) => g.title === "Vim");
 		expect(vim?.rows.some(([keys]) => keys === "Ctrl+R")).toBe(true);
 		const prompt = withVim.find((g) => g.title === "Prompt");
@@ -71,9 +98,9 @@ describe("shortcutGroups", () => {
 
 	test("the command table is carried through verbatim", () => {
 		const commands: Array<[string, string]> = [["/status", "Show status"]];
-		const groups = shortcutGroups({ vim: false, commands });
+		const groups = shortcutGroups({ editor: "none", commands });
 		expect(groups.find((g) => g.title === "Commands")?.rows).toEqual(commands);
-		expect(shortcutGroups({ vim: false, commands: [] }).some((g) => g.title === "Commands")).toBe(false);
+		expect(shortcutGroups({ editor: "none", commands: [] }).some((g) => g.title === "Commands")).toBe(false);
 	});
 
 	// A key may legitimately appear twice in one group (with vim, Esc leaves
@@ -83,7 +110,7 @@ describe("shortcutGroups", () => {
 	// one and the reader is told a key does the same thing twice.
 	test("no group repeats a row, so keying by the row stays unique", () => {
 		const groups = shortcutGroups({
-			vim: true,
+			editor: "vim",
 			vimMode: "normal",
 			commands: [
 				["/help", "Show this help"],
@@ -100,7 +127,7 @@ describe("shortcutGroups", () => {
 describe("splitShortcutGroups", () => {
 	test("keeps every group whole and none of them loses a row", () => {
 		const groups = shortcutGroups({
-			vim: true,
+			editor: "vim",
 			vimMode: "normal",
 			commands: [
 				["/help", "Show this help"],
@@ -118,7 +145,7 @@ describe("splitShortcutGroups", () => {
 	});
 
 	test("a single group lands in the first column, not spread across both", () => {
-		const [left, right] = splitShortcutGroups(shortcutGroups({ vim: false }));
+		const [left, right] = splitShortcutGroups(shortcutGroups({ editor: "none" }));
 		expect(left).toHaveLength(1);
 		expect(right).toHaveLength(0);
 	});
