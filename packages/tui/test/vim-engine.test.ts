@@ -5328,3 +5328,128 @@ describe("quote text objects", () => {
 		expect(run('x "" y', 1, ">", "i", '"')).toMatchObject({ text: '\tx "" y', cursor: 1 });
 	});
 });
+
+// `fwd_word`'s third argument is `eol`, and the only caller that passes it TRUE is
+// `nv_wordcmd` with `cap->oap->op_type != OP_NOP` (normal.c:6707) — an operator is
+// pending. The loop is `while (--count >= 0)` (textobject.c:372) and all three `eol`
+// guards (:390, :400, :416) carry `count == 0`, so the line end binds the *last*
+// repetition only. Everything below was measured against real vim; the shapes are
+// the ones `regress.mjs` pins.
+describe("a counted `w` under an operator stops at the end of its own line", () => {
+	const run = (text: string, cursor: number, ...keys: string[]) => {
+		const e = editor(text, cursor);
+		for (const k of keys) e.engine.handleKey(k, e.key());
+		return { text: e.state.text, cursor: e.state.cursor, mode: e.engine.mode };
+	};
+
+	test("the steps before the last one cross into the next line", () => {
+		// Three steps over two words on the first line: the first two cross and the
+		// third is the last, so it stops on the line it is on by then. The answer is
+		// the `dd\nee` of the third line — a clamp on every step would have stopped
+		// at the end of line one and cut `cc` with them.
+		expect(run("aa bb\ncc dd\nee", 0, "d", "3", "w")).toMatchObject({ text: "dd\nee", cursor: 0 });
+		expect(run("aa bb\ncc dd\nee", 1, "d", "3", "w")).toMatchObject({ text: "add\nee", cursor: 1 });
+		expect(run("aa bb\ncc dd\nee", 2, "d", "3", "w")).toMatchObject({ text: "aadd\nee", cursor: 2 });
+		// The same three steps as a yank, so the register is measured too.
+		expect(run("aa bb\ncc dd", 0, "y", "3", "w", "g", "g", "P")).toMatchObject({
+			text: "aa bb\ncc aa bb\ncc dd",
+			cursor: 0,
+		});
+		// And with a count of two, where the second step is the last one and the
+		// crossing happened on the first — this is `d2w` in
+		// testdir/test_cpoptions.vim:911-951, where the crossing step is repetition
+		// one and the assertion is the buffer it leaves.
+		expect(run("aa bb\ncc dd\nee", 3, "d", "2", "w")).toMatchObject({ text: "aa dd\nee", cursor: 3 });
+		expect(run("aa bb\ncc dd\nee", 4, "d", "2", "w")).toMatchObject({ text: "aa bdd\nee", cursor: 4 });
+		// A buffer with the same two lines and no third: a count of two is the whole
+		// thing, a count of three is the first `dd` — which is the line it stopped on.
+		expect(run("aa bb\ncc dd", 0, "y", "2", "w", "g", "g", "P")).toMatchObject({
+			text: "aa bbaa bb\ncc dd",
+			cursor: 4,
+		});
+		expect(run("aa bb\ncc dd", 0, "y", "3", "w", "g", "g", "P")).toMatchObject({
+			text: "aa bb\ncc aa bb\ncc dd",
+			cursor: 0,
+		});
+	});
+
+	test("the last step stops at the end of the line it is on, not the one it started on", () => {
+		// The two answers that differ by one space: from 3 the last step runs out of
+		// line one and takes its two blanks, from 4 it starts one further along and
+		// takes the one. Nothing about where the command started can tell these apart.
+		expect(run("aa bb\ncc dd\nee", 3, "d", "3", "w")).toMatchObject({ text: "aa \nee", cursor: 2 });
+		expect(run("aa bb\ncc dd\nee", 4, "d", "3", "w")).toMatchObject({ text: "aa b\nee", cursor: 3 });
+		// The buffer with three words on the first line, where the second step ends on
+		// line one and the third is free of it.
+		expect(run("  aa bb\n  cc dd", 2, "y", "2", "w", "g", "g", "P")).toMatchObject({
+			text: "  aa bbaa bb\n  cc dd",
+			cursor: 6,
+		});
+		expect(run("one two\nthree four", 4, "y", "2", "w", "g", "g", "P")).toMatchObject({
+			text: "two\nthree one two\nthree four",
+			cursor: 0,
+		});
+		// The cpo test's four lines, caret on the `b` of `bar` where its `fb` leaves
+		// it. The delete keeps the five leading blanks of line two and the four of
+		// line three, which is the `cpo-=z` assertion word for word.
+		expect(run("one \n     bar\n    e\t        \nzwei", 5, "d", "2", "w")).toMatchObject({
+			text: "one \n\n    e\t        \nzwei",
+			cursor: 5,
+		});
+		expect(run("one \n     bar\n    e\t        \nzwei", 5, "y", "2", "w", "g", "g", "P")).toMatchObject({
+			text: "     barone \n     bar\n    e\t        \nzwei",
+			cursor: 7,
+		});
+	});
+
+	test("`W` takes the same rule, and the white space it steps over does not change it", () => {
+		// Punctuation between the words, so `w` and `W` land on different characters
+		// and the two are told apart by the answer rather than by the letters.
+		expect(run("a.b c;\nd e.f", 0, "d", "2", "w")).toMatchObject({ text: "b c;\nd e.f", cursor: 0 });
+		expect(run("a.b c;\nd e.f", 0, "d", "3", "w")).toMatchObject({ text: "c;\nd e.f", cursor: 0 });
+		expect(run("a.b c;\nd e.f", 0, "d", "2", "W")).toMatchObject({ text: "\nd e.f", cursor: 0 });
+		expect(run("a.b c;\nd e.f", 0, "d", "3", "W")).toMatchObject({ text: "e.f", cursor: 0 });
+		// Leading blanks on the next line are stepped over, because `w` stops on an
+		// *empty* line and not on an indented one — so the crossing step lands past
+		// them and the third step is the last one, on that line.
+		expect(run("aa bb\n  cc dd", 0, "d", "2", "w")).toMatchObject({ text: "\n  cc dd", cursor: 0 });
+		expect(run("aa bb\n  cc dd", 0, "d", "3", "w")).toMatchObject({ text: "dd", cursor: 0 });
+		// A tab is white space to `cls()` and so is the NUL that ends a line, which
+		// is what lets the white loop cross at all.
+		expect(run("aa\tbb\ncc dd", 0, "d", "2", "w")).toMatchObject({ text: "\ncc dd", cursor: 0 });
+		expect(run("aa\tbb\ncc dd", 0, "d", "3", "w")).toMatchObject({ text: "dd", cursor: 0 });
+	});
+
+	test("a count of one is the last one, and a bare `w` has no operator at all", () => {
+		// With one repetition the first *is* the last, so the clamp applies from the
+		// start — the two answers a clamp on every step would also give, which is
+		// what makes them the control for the cases above rather than a case of
+		// their own.
+		expect(run("aa bb\ncc dd\nee", 0, "d", "w")).toMatchObject({ text: "bb\ncc dd\nee", cursor: 0 });
+		expect(run("aa bb\ncc dd\nee", 3, "d", "w")).toMatchObject({ text: "aa \ncc dd\nee", cursor: 2 });
+		expect(run("aa bb\ncc dd\nee", 0, "d", "2", "w")).toMatchObject({ text: "\ncc dd\nee", cursor: 0 });
+		expect(run("aa bb\ncc dd\nee", 0, "d", "2", "W")).toMatchObject({ text: "\ncc dd\nee", cursor: 0 });
+		// A bare `w` passes `eol == FALSE` — nothing is pending — so it never clamps
+		// and all three of these cross.
+		expect(run("aa bb\ncc dd\nee", 0, "w")).toMatchObject({ text: "aa bb\ncc dd\nee", cursor: 3 });
+		expect(run("aa bb\ncc dd\nee", 0, "2", "w")).toMatchObject({ text: "aa bb\ncc dd\nee", cursor: 6 });
+		expect(run("aa bb\ncc dd\nee", 0, "3", "w")).toMatchObject({ text: "aa bb\ncc dd\nee", cursor: 9 });
+		// A Visual `w` has no operator pending either (nv_cmds.h:231 carries no
+		// Visual flag), so the selection crosses lines the same way.
+		expect(run("aa bb\ncc dd\nee", 0, "v", "w", "d")).toMatchObject({ text: "b\ncc dd\nee", cursor: 0 });
+		expect(run("aa bb\ncc dd\nee", 0, "v", "2", "w", "d")).toMatchObject({ text: "c dd\nee", cursor: 0 });
+	});
+
+	test("a count in front of the operator multiplies, and a count past the line takes the rest", () => {
+		// normal.c:300-318: `3d2w` is six word steps, and the six words are the ones
+		// the tenth-word line has — which is testdir/test_normal.vim:3213.
+		expect(run("one two three four five six seven eight nine ten", 0, "d", "3", "2", "w")).toMatchObject({
+			text: "",
+			cursor: 0,
+		});
+		// Asking for more steps than the line has words: the last one stops at the
+		// line end and the delete takes what is left, with no beep and no refusal.
+		expect(run("one two three four", 0, "d", "4", "w")).toMatchObject({ text: "", cursor: 0 });
+		expect(run("one two three four", 0, "d", "5", "w")).toMatchObject({ text: "", cursor: 0 });
+	});
+});

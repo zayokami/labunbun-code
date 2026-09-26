@@ -4302,11 +4302,21 @@ export class VimEngine {
 		switch (motion) {
 			case "w":
 			case "W":
-				for (let i = 0; i < count; i++) target = motionForwardWord(text, target, motion === "W");
 				// `dw` stops at the end of the line: it deletes words, and a newline
 				// is line structure. `de`/`d$` keep their own rules; the plain `w`
 				// motion still crosses lines, as vim's does.
-				target = Math.min(target, lineEndExclusive(text, from));
+				//
+				// The line end binds the *last* repetition and no other. `fwd_word`'s
+				// third argument is `eol`, and every caller under an operator passes
+				// `oap->op_type != OP_NOP` (normal.c:6707) — which stops the walk at the
+				// end of the line it is on, on the final step, when the move would
+				// otherwise leave that line. The steps before it have no such limit,
+				// so `d3w` from the first word of `aa bb\ncc dd` reaches the `d` of
+				// `dd` and a clamp applied to every step would never leave line one.
+				for (let i = 0; i < count; i++) {
+					const next = motionForwardWord(text, target, motion === "W");
+					target = i === count - 1 ? Math.min(next, lineEndExclusive(text, target)) : next;
+				}
 				break;
 			case "b":
 			case "B":

@@ -290,6 +290,25 @@ const Q_CLOSE_ONLY = 'ab"';
 const Q_TAB_AFTER = 'x "ab"\ty';
 const Q_SHIFT = "a 'b'\nc 'd'";
 
+// `w` and `W` under an operator. `fwd_word`'s third argument is `eol`, and the only
+// caller that ever passes it TRUE is `nv_wordcmd` with
+// `cap->oap->op_type != OP_NOP` (normal.c:6707) — an operator is pending. The loop is
+// `while (--count >= 0)` (textobject.c:372) and every one of the three `eol` guards
+// (:390, :400, :416) carries `count == 0`, so the line end binds the **last**
+// repetition and the ones before it cross into the next line like a bare `w`. These
+// are the buffers where that is visible, and the last one is the shape of the
+// in-tree `d2w` in testdir/test_cpoptions.vim:911-951, which is the proof.
+const EOL_TWO = "aa bb\ncc dd";
+const EOL_THREE = "aa bb\ncc dd\nee";
+const EOL_INDENT = "  aa bb\n  cc dd";
+const EOL_SENTENCE = "one two\nthree four";
+/** Punctuation between the words, so `w` and `W` land differently. */
+const EOL_PUNCT = "a.b c;\nd e.f";
+const EOL_TAB = "aa\tbb\ncc dd";
+const EOL_LEADING = "aa bb\n  cc dd";
+/** The cpo test's four lines, and the caret `fb` leaves on the `b` of `bar`. */
+const EOL_CPO = `one \n     bar\n    e\t        \nzwei`;
+
 const CASES = [
 	// wanted column: MAXCOL and short lines
 	[["$", "j"], A, 0],
@@ -1688,6 +1707,61 @@ const CASES = [
 	[[">", "a", "'"], Q_INDENTED, 3],
 	[[">", "i", "'"], Q_HUGGED, 2],
 	[[">", "2", "i", "'"], Q_SHIFT, 2],
+
+	// `w` and `W` under an operator: the line end binds the last repetition only.
+	// A clamp applied to every step is wrong by one whole line the moment a count
+	// asks for a step that crosses — and the four buffers below are the ones where
+	// a count does.
+	[["y", "2", "w", "g", "g", "P"], EOL_TWO, 0],
+	[["y", "3", "w", "g", "g", "P"], EOL_TWO, 0],
+	[["y", "2", "w", "g", "g", "P"], EOL_INDENT, 2],
+	[["y", "2", "w", "g", "g", "P"], EOL_SENTENCE, 4],
+	// The last step still stops at the end of *its* line, which for a count above
+	// one is not the line the command started on — `d3w` at 3 leaves two spaces and
+	// a break, and the same keys at 4 leave one.
+	[["d", "2", "w"], EOL_THREE, 3],
+	[["d", "2", "w"], EOL_THREE, 4],
+	[["d", "3", "w"], EOL_THREE, 0],
+	[["d", "3", "w"], EOL_THREE, 1],
+	[["d", "3", "w"], EOL_THREE, 2],
+	[["d", "3", "w"], EOL_THREE, 3],
+	[["d", "3", "w"], EOL_THREE, 4],
+	// `W` takes the same rule, and a line whose punctuation makes the difference
+	// between `w` and `W` visible.
+	[["d", "2", "w"], EOL_PUNCT, 0],
+	[["d", "3", "w"], EOL_PUNCT, 0],
+	[["d", "2", "W"], EOL_PUNCT, 0],
+	[["d", "3", "W"], EOL_PUNCT, 0],
+	// Leading blanks on the next line: `w` steps over them, because the white loop
+	// stops on an *empty* line and not on an indented one (textobject.c:407-413).
+	[["d", "2", "w"], EOL_LEADING, 0],
+	[["d", "3", "w"], EOL_LEADING, 0],
+	// A tab is white space to `cls()` and so is the NUL that ends a line, which is
+	// what lets the white loop cross at all.
+	[["d", "2", "w"], EOL_TAB, 0],
+	[["d", "3", "w"], EOL_TAB, 0],
+	// The cpo test's shape and its caret: this is `d2w` from test_cpoptions.vim with
+	// `cpo-=z`, and the crossing step is repetition one.
+	[["d", "2", "w"], EOL_CPO, 5],
+	[["y", "2", "w", "g", "g", "P"], EOL_CPO, 5],
+	// The single-step controls, which the fix must not have moved at all: a count of
+	// one makes the first repetition the last one, and a bare `w` is `eol == FALSE`.
+	[["d", "w"], EOL_THREE, 0],
+	[["d", "w"], EOL_THREE, 3],
+	[["d", "2", "w"], EOL_THREE, 0],
+	[["d", "2", "W"], EOL_THREE, 0],
+	[["w"], EOL_THREE, 0],
+	[["2", "w"], EOL_THREE, 0],
+	[["3", "w"], EOL_THREE, 0],
+	// Visual `w` has no operator pending, so `eol` is FALSE there too (nv_cmds.h:231
+	// has no Visual flag) and the selection crosses lines.
+	[["v", "w", "d"], EOL_THREE, 0],
+	[["v", "2", "w", "d"], EOL_THREE, 0],
+	// A count in front of the operator multiplies (normal.c:300-318), so `3d2w` is
+	// six word steps — the number testdir/test_normal.vim:3213 asserts.
+	[["d", "3", "2", "w"], "one two three four five six seven eight nine ten", 0],
+	[["d", "4", "w"], "one two three four", 0],
+	[["d", "5", "w"], "one two three four", 0],
 
 	// Not here: anything with the caret on the `\n` of `"ab\ncd"`. Vim has no
 	// line-break character to put a caret on — `cursor(1, 3)` clamps onto the

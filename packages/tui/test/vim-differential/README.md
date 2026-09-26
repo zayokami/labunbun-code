@@ -694,6 +694,80 @@ The evidence for the round is 67 cases in `CASES` (880 → 947), every one measu
 against a real vim and every one a match, plus a 3000-iteration sweep in which 164 of
 the checked sequences carry a text object and none differs.
 
+## The line end under an operator: `fwd_word`'s `eol`
+
+`dw` stops at the end of the line. It always has — a newline is line structure, and
+an operator that swallowed it would join two lines on a word count the user never
+asked for. This engine implemented that as a clamp on the **landing position**, taken
+against the end of the line the caret started on:
+
+```ts
+for (let i = 0; i < count; i++) target = motionForwardWord(text, target, motion === "W");
+target = Math.min(target, lineEndExclusive(text, from));
+```
+
+Vim's rule is narrower, and the source says so in one place. `fwd_word`'s third
+argument is `eol` — "If eol is TRUE, last word stops at end of line (for operators)"
+(`textobject.c:354-364`) — and the loop is
+
+```c
+    while (--count >= 0)                                            // textobject.c:372
+    {
+        ...
+        if (i >= 1 && eol && count == 0)  return OK;                // :390
+        ...
+            if (i == -1 || (i >= 1 && eol && count == 0)) return OK; // :400
+        ...
+            if (i == -1 || (i >= 1 && eol && count == 0)) return OK; // :416
+```
+
+`--count` makes `count == 0` mean "this is the last repetition", and all three
+guards carry it. So the line end binds **the last step only**; the first N−1 step
+across a line boundary exactly as a bare `w` does. The only caller that ever passes
+TRUE is `nv_wordcmd` with `cap->oap->op_type != OP_NOP` (`normal.c:6707`) — an
+operator is pending — and Visual mode has no separate `w` path (`nv_cmds.h:231`
+carries no Visual flag), so a Visual `w` crosses lines too.
+
+The measured difference, on `aa bb\ncc dd\nee` with `d3w`:
+
+| caret | vim | the clamp on every step |
+|---|---|---|
+| 0 | `dd\nee` | `cc dd\nee` |
+| 3 | `aa \nee` | `aa \ncc dd\nee` |
+| 4 | `aa b\nee` | `aa b\ncc dd\nee` |
+
+and the in-tree proof that the *first* step crosses is `testdir/test_cpoptions.vim:911-951`,
+where `d2w` from the `b` of `bar` reaches line three and keeps only the five leading
+blanks of line two. `EOL_CPO` in `regress.mjs` is that test's shape, caret included.
+
+The fix moves the clamp inside the loop and measures it against `target` — the line
+the *last step* is on, which for a count above one is usually not the line the
+command started on. A count of one is unchanged, because the first step is the last
+one; that is why the `d2w` and `dw` cases in `CASES` are the **controls** for this
+group rather than cases of it.
+
+Four things in the shape space are *not* this rule and are left for their own round,
+each named here because the grid found them and this section is where the numbers
+live. A 15-buffer × 8-caret × 20-key sweep (1920 comparisons) went from 242
+disagreements to 48, and the 48 are all of:
+
+- **`w` stops *on* an empty line** (`textobject.c:407-413`: the white loop breaks on
+  `col == 0 && *ml_get_curline() == NUL`) and that empty line **spends one
+  repetition** of the count. `motionForwardWord` has no such rule — it treats the
+  break as ordinary class-0 and steps over it. Every `d2w` on `a\nb\nc\nd` is
+  affected.
+- **`b` stops on an empty line too** (`:449-462`, `LINEEMPTY`) and walks straight
+  through a line that is only blanks. `motionBackWord` has the same gap, which is why
+  `b`/`B` show up in the 48 as well.
+- **A delete that reaches the end of the buffer's last line takes the break in front
+  of it**: `d3w` on `aa bb\ncc dd\nee` at 6 gives `aa bb` in vim and `aa bb\n` here.
+
+The evidence for the round is 33 cases in `CASES` (947 → 980), five unit tests, and
+four new mutants (E1–E4) — one for each shape the rule can take: the clamp on every
+step, on no step, on the starting line, and on the first step. No case in `CASES` was
+changed: 947 were green before this round and 947 were green after it, which says
+the old behaviour was not pinned anywhere.
+
 ## What the fuzzer refuses to compare
 
 `fuzz.mjs` draws 1–3 keys from `KEYS` and drops three classes of sequence by name,
