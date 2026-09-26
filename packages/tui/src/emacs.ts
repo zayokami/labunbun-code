@@ -2257,7 +2257,14 @@ export class EmacsEngine {
 		const pos = this.#ops.getCursor();
 		const mark = this.mark ?? pos;
 		const before = pos < mark;
-		const pasted = this.#currentKill(n === 0 ? 1 : n);
+		// `(unless arg (setq arg 1))` (`simple.el:6380`) fires on `nil` and on nothing else.
+		// The `nil` case is already handled upstream — `emacsPrefixValue(null)` is 1 — so this
+		// passes `n` straight through, and the reason to write it down is the trap it avoids:
+		// in Lisp `0` is truthy, so `C-0 M-y` rotates **zero** and re-pastes the entry it is
+		// already showing. Written the way the lisp reads — `n || 1` — JavaScript's falsy `0`
+		// would turn that into a rotation of one and `C-0 M-y` would move a kill the user
+		// explicitly asked it to leave alone.
+		const pasted = this.#currentKill(n);
 		if (pasted === null) return;
 		// The previous yank's stretch is the region between point and mark, and it goes before
 		// the new text goes in. Both arguments of `delete-region` are usable in either order.

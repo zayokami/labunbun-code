@@ -63,6 +63,7 @@ export function shortcutGroups(opts: {
 	commands?: Array<[string, string]>;
 }): ShortcutGroup[] {
 	const vim = opts.editor === "vim";
+	const emacs = opts.editor === "emacs";
 	const groups: ShortcutGroup[] = [
 		{
 			title: "Prompt",
@@ -70,7 +71,20 @@ export function shortcutGroups(opts: {
 				["Enter", "send"],
 				["Shift+Enter", "newline"],
 				["↑ / ↓", "history"],
-				["Ctrl+R", vim ? "search history (redo in vim normal)" : "search history"],
+				// Three editors, three different answers, and the third is the one this
+				// row used to get wrong. `EmacsEngine` *claims* `C-r` — it is in its
+				// reserved table, so isearch is swallowed rather than passed through — which
+				// means "search history" is false under emacs, not merely unavailable. A row
+				// that names a command the key cannot reach is the failure this file's header
+				// is about.
+				[
+					"Ctrl+R",
+					vim
+						? "search history (redo in vim normal)"
+						: emacs
+							? "taken — incremental search is not in this build"
+							: "search history",
+				],
 				["Esc", escapeHint(opts.editor, opts.vimMode ?? "insert")],
 				// "insert mode" was the mode name when there was one editor and
 				// nothing else could be true; under Emacs the parenthetical would
@@ -91,6 +105,36 @@ export function shortcutGroups(opts: {
 				["v / V", "character / line selection"],
 				["Esc", "cancel selection"],
 				["Ctrl+R", "redo"],
+			],
+		});
+	}
+	if (emacs) {
+		// Only what the engine *runs*. It also claims `C-t`, `M-u`, `M-z`, `C-o` and the rest
+		// of its reserved table, consuming them so they cannot fall through as stray
+		// characters — so naming them here as if they worked would be the same lie in a new
+		// place, and they are left out rather than listed as pending.
+		groups.push({
+			title: "Emacs",
+			rows: [
+				["C-a / C-e", "start / end of line"],
+				["C-f / C-b", "character forward / back"],
+				["C-n / C-p", "line down / up"],
+				["M-f / M-b", "word forward / back"],
+				["C-k", "kill to end of line"],
+				["C-w", "kill region"],
+				["M-w", "copy region as kill"],
+				["M-C-w", "make the next kill append"],
+				["C-d / C-h", "delete forward / back"],
+				["C-y / M-y", "yank / rotate the kill ring"],
+				["C-u", "count prefix (×4 per press)"],
+				["M-1..9 / M--", "digit prefix / negative"],
+				["C-SPC", "set mark; twice toggles the region"],
+				["C-x C-x", "exchange point and mark"],
+				// Listed with the caveat rather than left out, because it is Emacs's `dd`
+				// and a reader coming from Emacs will look for it — but `EmacsKey` has to be
+				// told to set `ctrlShiftBackspace`, and no terminal sends the combination,
+				// so a user pressing it here may get nothing at all. Saying so is the point.
+				["C-S-BS", "kill whole line (most terminals never send it)"],
 			],
 		});
 	}

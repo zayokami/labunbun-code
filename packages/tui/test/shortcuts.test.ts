@@ -75,15 +75,44 @@ describe("shortcutGroups", () => {
 	// Each editor's group describes that editor. A vim group shown to an emacs
 	// user would not be a formatting slip: `i a insert` and `Esc leave insert`
 	// are instructions for a mode they are not in, and the file's own header says
-	// a list that lies is worse than no list. Emacs has no group of its own yet —
-	// the engine is the only thing that can say which keys it handles, and the
-	// rows go in when it does.
+	// a list that lies is worse than no list.
+	//
+	// Emacs gained its own group with the engine, so the third row changed: it used to
+	// assert that emacs had **no** editor group, which was true only while there was an
+	// engine with no host-visible key list. The assertion it makes now is the stronger
+	// one — emacs has a group, and it is not vim's.
 	test("shows the group for the editor that is up, and no other", () => {
 		const titles = (editor: "none" | "vim" | "emacs") =>
 			shortcutGroups({ editor, vimMode: "normal" }).map((group) => group.title);
 		expect(titles("none")).toEqual(["Prompt"]);
 		expect(titles("vim")).toEqual(["Prompt", "Vim"]);
-		expect(titles("emacs")).toEqual(["Prompt"]);
+		expect(titles("emacs")).toEqual(["Prompt", "Emacs"]);
+	});
+
+	test("the emacs group names keys the engine runs, and the Prompt row admits C-r is eaten", () => {
+		const groups = shortcutGroups({ editor: "emacs", vimMode: "normal" });
+		const emacs = groups.find((g) => g.title === "Emacs");
+		const keys = emacs?.rows.map(([k]) => k) ?? [];
+		// The engine's implemented surface, spot-checked at both ends.
+		expect(keys).toContain("C-k");
+		expect(keys).toContain("C-y / M-y");
+		expect(keys).toContain("C-S-BS");
+		// Bound-but-unimplemented keys are claimed and consumed, so advertising them as
+		// working would be a lie in a new place. They must not appear.
+		expect(keys).not.toContain("C-t");
+		expect(keys).not.toContain("M-u");
+		expect(keys).not.toContain("M-z");
+		expect(keys).not.toContain("C-s");
+		// And the Prompt row cannot still promise history search: `EmacsEngine` claims
+		// `C-r` as reserved isearch, so the host never sees it. The other two editors keep
+		// the wording they had.
+		const ctrlR = (editor: "none" | "vim" | "emacs") =>
+			shortcutGroups({ editor, vimMode: "normal" })
+				.find((g) => g.title === "Prompt")
+				?.rows.find(([k]) => k === "Ctrl+R")?.[1];
+		expect(ctrlR("emacs")).toContain("taken");
+		expect(ctrlR("vim")).toContain("redo");
+		expect(ctrlR("none")).toBe("search history");
 	});
 
 	test("vim mode adds a group that admits Ctrl+R is redo there", () => {

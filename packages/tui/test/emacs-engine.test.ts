@@ -631,6 +631,37 @@ describe("emacs: yank rotation", () => {
 		expect(reversed.engine.mark).toBe(5);
 	});
 
+	test("C-0 M-y rotates nothing, because 0 is a count and not an absence", () => {
+		// Two entries in the ring, so a rotation of one and a rotation of zero differ. The
+		// recipe is the one the bare-`C-y` test above uses, so a change to either shows up
+		// in both rather than in one of them.
+		const build = () => {
+			const e = editor("aaaa\nbb", 0);
+			e.press("k", C);
+			e.press("f", C);
+			e.press("k", C);
+			expect(e.engine.killRing).toEqual(["bb", "aaaa"]);
+			e.press("y", C);
+			return e;
+		};
+
+		// The control: a plain M-y does move.
+		const control = build();
+		expect(control.engine.yankPointer).toBe(0);
+		expect(control.press("y", M)).toBe(true);
+		expect(control.engine.yankPointer).toBe(1);
+
+		// And C-0 M-y does not. `(unless arg (setq arg 1))` is on `nil`, and `C-0` supplies
+		// a *number* — in Lisp 0 is truthy, so the guard does not fire and the rotation is
+		// zero. Ported as `n || 1`, JavaScript's falsy `0` would move the pointer instead,
+		// which is exactly what this test exists to hold shut.
+		const zero = build();
+		expect(zero.press("0", C)).toBe(true);
+		expect(zero.press("y", M)).toBe(true);
+		expect(zero.engine.yankPointer).toBe(0);
+		expect(zero.state.text).toBe("\nbb");
+	});
+
 	test("M-y after anything but a yank is taken and does nothing", () => {
 		const e = editor("abc", 0);
 		e.press("k", C);

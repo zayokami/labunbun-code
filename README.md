@@ -63,9 +63,23 @@ labunbun                                # interactive REPL
   rather than counting them as free. `-p --output-format json` reports the same
   arithmetic as `cost_usd`.
 - **Terminal UX** — virtualized transcript (sealed history + live tail),
-  ctrl+O full-transcript browser, vim modal editing (`vimMode: true`),
-  eight token-based themes with `auto` background detection and third-party
-  theme files.
+  ctrl+O full-transcript browser, vim modal editing (`vimMode: true`) or
+  emacs modeless editing (`emacsMode: true`), eight token-based themes with
+  `auto` background detection and third-party theme files.
+- **Emacs editing** — `/emacs [on|off]`, or `emacsMode: true`. Modeless, so
+  there is no mode line to read: `C-a`/`C-e`, `C-f`/`C-b`, `C-n`/`C-p`,
+  `M-f`/`M-b`, `C-k`, `C-w`, `C-d`/`C-h`, `C-y`/`M-y`, `C-SPC`, `C-x C-x`,
+  and a real kill ring with the parts that are easy to get wrong — `C-k C-k`
+  joins, a backward `C-k` *prepends*, `M-C-w` bridges two kills that were not
+  consecutive, and a count turns a delete into a kill (`C-u C-d` fills the ring,
+  a bare `C-d` does not). `C-u` is `(4)` and multiplies by 4 per press, `M-1..9`
+  and `M--` build a number, and the goal column survives a run of `C-n`/`C-p` but
+  nothing else. Word motions use Emacs's own rule — a boundary is a change of
+  *script* — so `M-f` stops inside CJK text and `foo-bar` is three words. `?`
+  lists what the engine runs. It also *claims* the keys Emacs binds and this
+  build does not implement (`C-t`, `M-u`, `M-z`, `C-s`, `C-r`, …), consuming
+  them rather than letting them fall through as stray characters, so
+  `C-r` is history search everywhere except here.
 - **DualShock 4** — drive the whole REPL from a controller: navigate lists and
   dialogs, confirm and cancel, approve or deny a permission, interrupt a turn,
   open the command wheel, scroll the transcript, tap and swipe the touchpad, and
