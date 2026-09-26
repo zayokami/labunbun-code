@@ -102,7 +102,7 @@ const VIM_KEYS_HELP = `  vim: i a insert · Esc leave insert · v/V Esc cancel s
  * advertised key against the engine, so a row here for a command that has not
  * landed is a failing test rather than a lie that ships.
  */
-const EMACS_KEYS_HELP = `  emacs: Ctrl-A/E line ends · Ctrl-F/B char · Alt-F/B word · Ctrl-K kill line · Ctrl-W kill word`;
+const EMACS_KEYS_HELP = `  emacs: Ctrl-A/E line ends · Ctrl-F/B char · Alt-F/B word · Ctrl-K kill line · Ctrl-W kill region · Ctrl-X U undo`;
 
 /** Clear screen, clear scrollback, home cursor — the full terminal wipe. */
 export const CLEAR_SCREEN = "\x1b[2J\x1b[3J\x1b[H";

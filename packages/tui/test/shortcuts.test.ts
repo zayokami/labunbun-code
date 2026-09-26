@@ -8,6 +8,7 @@
  * fewer columns, strictly less text, never a wrapped second line.
  */
 import { describe, expect, test } from "bun:test";
+import { RESERVED_KEYS } from "../src/emacs.ts";
 import {
 	escapeHint,
 	HINT_SHORT_MIN_COLUMNS,
@@ -93,10 +94,15 @@ describe("shortcutGroups", () => {
 		const groups = shortcutGroups({ editor: "emacs", vimMode: "normal" });
 		const emacs = groups.find((g) => g.title === "Emacs");
 		const keys = emacs?.rows.map(([k]) => k) ?? [];
-		// The engine's implemented surface, spot-checked at both ends.
+		// The engine's implemented surface, spot-checked at both ends, and now at the two
+		// `ctl-x-map` members as well: `C-x C-x` has been listed since the mark batch and `C-x u`
+		// since the undo one, and a list that lagged behind by one key would be the same
+		// failure the `Ctrl+R` row below had.
 		expect(keys).toContain("C-k");
 		expect(keys).toContain("C-y / M-y");
 		expect(keys).toContain("C-S-BS");
+		expect(keys).toContain("C-x C-x");
+		expect(keys).toContain("C-x u");
 		// Bound-but-unimplemented keys are claimed and consumed, so advertising them as
 		// working would be a lie in a new place. They must not appear.
 		expect(keys).not.toContain("C-t");
@@ -113,6 +119,24 @@ describe("shortcutGroups", () => {
 		expect(ctrlR("emacs")).toContain("taken");
 		expect(ctrlR("vim")).toContain("redo");
 		expect(ctrlR("none")).toBe("search history");
+	});
+
+	test("the Ctrl+O row admits the transcript is unreachable under emacs", () => {
+		// The second instance of the `Ctrl+R` failure, ten lines apart in `shortcuts.ts`, and the
+		// reason it is worth a test of its own: the file's own header says a shortcut list that
+		// lies is worse than none, and both rows said a key did something the engine eats. Under
+		// emacs `C-o` is reserved `open-line` (`emacs.ts`, `RESERVED_KEYS`), so the host never
+		// sees it and the transcript cannot be opened at all — "unavailable" would understate it.
+		const ctrlO = (editor: "none" | "vim" | "emacs") =>
+			shortcutGroups({ editor, vimMode: "normal" })
+				.find((g) => g.title === "Prompt")
+				?.rows.find(([k]) => k === "Ctrl+O")?.[1];
+		expect(ctrlO("emacs")).toContain("taken");
+		expect(ctrlO("none")).toBe("transcript");
+		expect(ctrlO("vim")).toBe("transcript");
+		// The claim is checkable one layer down rather than taken on trust: the row says the key
+		// is eaten, and `RESERVED_KEYS` is where that is decided.
+		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-o");
 	});
 
 	test("vim mode adds a group that admits Ctrl+R is redo there", () => {

@@ -1,5 +1,6 @@
 /**
- * Emacs editing engine — batch E-2: motion, kill ring, prefix argument, vertical motion.
+ * Emacs editing engine — batches E-2 (motion, kill ring, prefix argument, vertical motion) and
+ * E-3 (undo).
  *
  * Emacs is **modeless**, and that is the whole contract. `VimEngine` consumes a printable
  * character in NORMAL because NORMAL is not for typing; here the default answer to a key
@@ -25,7 +26,7 @@
  *     `[C-S-backspace]` (`bindings.el:1407`).
  *   - **The basic key table is not in `bindings.el`.** `global-map` is built in
  *     `subr.el:1759-1779` — it has to exist before `bindings.el` loads — and `esc-map` is
- *     `subr.el:1715-1724`. `subr.el:1771` walks `#o040` to `#o0177` binding
+ *     `subr.el:1716-1725`. `subr.el:1771` walks `#o040` to `#o0177` binding
  *     `self-insert-command` to every one of them, which is exactly why this engine hands
  *     plain characters straight back.
  *   - **`C-h` is not bound in `global-map` at all.** The only `C-h` in the tree is
@@ -65,11 +66,39 @@
  *   - **Cursor-only moves use `EmacsOps.setCursor` and are not undoable**, exactly as in
  *     `VimEngine`.
  *
- * Out of scope for this batch, deliberately: `.`/redo (Emacs has an undo stack and no redo
- * command, and this engine has neither yet), rectangle mode, `M-z` / `M-h`, the case commands
+ * Out of scope for this batch, deliberately: rectangle mode, `M-z` / `M-h`, the case commands
  * `M-u M-l M-c`, transpose, `C-o`, incremental search, `C-q`, and the rest of `ctl-x-map`.
  * Their keys are listed in {@link RESERVED_KEYS} and consumed without effect, so that they are
  * *this engine's* and cannot fall through to the host as something else.
+ *
+ *   - **What `undo` does not do here**, in four places, each with the citation that says what
+ *     Emacs does instead. None of them is a decision taken for convenience; two of them are one
+ *     byte being asked to be two commands, and two are the host's behaviour that the engine is
+ *     not in a position to change.
+ *
+ *     1. **`C-/` is not bound.** It is `undo` in Emacs (`bindings.el:1249`) and it is the
+ *        primary spelling in the manual (`doc/emacs/fixit.texi:46`), which then gives the reason
+ *        its other two spellings exist: "typing `C-/` on some text terminals actually enters
+ *        `C-_`" (`:57-61`). So the byte a terminal sends for `C-/` is the byte this engine gives
+ *        to `negative-argument` — one byte, and the manual's own footnote says the two are not
+ *        reliably distinguishable. `C-x u` is the spelling a terminal can send unambiguously.
+ *     2. **`C-_` is `negative-argument`, not `undo`.** Emacs binds it to `undo`
+ *        (`bindings.el:1250`), and this engine does not, for the same reason it does not bind
+ *        `M--` any other way: a terminal sends `M--` as `C-_` when it has no meta prefix to send,
+ *        and `M--` is `negative-argument` (`bindings.el:1303`, `:1309`, `:1315`). Choosing `undo`
+ *        for that byte would take away a live command in exchange for one `C-x u` now provides.
+ *     3. **Consecutive typing is not one undo record.** The manual says it is: "Consecutive
+ *        character insertion commands are usually grouped together into a single undo record, to
+ *        make undoing less tedious" (`doc/emacs/fixit.texi:41-42`). Here every keystroke is a
+ *        separate host write and a separate entry in the host's stack. The engine is not the
+ *        writer — `useTextInput` is — and the marker that would let it merge them
+ *        ({@link EmacsEngine} re-reads the buffer) carries no record of which writes were one
+ *        gesture. So this is stated rather than fixed.
+ *     4. **A cursor move does not break the undo sequence.** "Any command other than an undo
+ *        command breaks the sequence of undo commands" (`doc/emacs/fixit.texi:70-72`), and
+ *        `C-a` is a command. The host's undo is a plain stack of snapshots, so a move between
+ *        two `C-x u` presses does not stop the second one. Host-level, and shared with the vim
+ *        engine rather than specific to this one.
  */
 
 import { lineCount, lineEndExclusive, lineOf, lineStart, nthLineStart } from "./vim.ts";
@@ -84,10 +113,17 @@ import { lineCount, lineEndExclusive, lineOf, lineStart, nthLineStart } from "./
  *
  * `VimOps` also carries `enterInsert` / `toNormal` (there is no mode to enter or leave),
  * `recallHistory` (Emacs's `C-n`/`C-p` are line motions; letting them double as prompt history
- * is a host decision, not an engine one) and `undo` / `redo` (`redo` has no command in Emacs at
- * all; `undo` is a later batch). Importing the wider interface would have made the host pass
- * five no-ops to express "I do not know what you mean", and would have let a caller wire
- * `recallHistory` into a command that does not exist.
+ * is a host decision, not an engine one) and `redo`. **Not** `undo`, which is here — and the
+ * asymmetry is the point, because `redo` is not. There is no `redo` command in the Emacs tree:
+ * `grep -rn "defun redo-only" --include=*.el --include=*.c` over `emacs-master` returns nothing,
+ * the one place `bindings.el` names it is commented out (`;; (define-key ctl-x-map "U"
+ * 'undo-only)`, `bindings.el:1253`), and the keys a summary usually reaches for are somebody
+ * else's: `C-x r` is `ctl-x-r-map` (`bindings.el:1703`), which holds registers and rectangles
+ * (`bindings.el:1678-1702`). The manual's redo is a *mode of `undo`*, not a separate command —
+ * undo a second time to go forward (`doc/emacs/fixit.texi:70-76`) — and the host's stack already
+ * does that, since `useTextInput`'s `redo` is one line of it. Importing `VimOps` wholesale would
+ * have made the host pass four no-ops to express "I do not know what you mean", and would have
+ * wired a redo command into a build whose reference implementation has none.
  */
 export interface EmacsOps {
 	getText(): string;
@@ -95,6 +131,17 @@ export interface EmacsOps {
 	setCursor(pos: number): void;
 	/** Every structural change. The host makes it one undo step. */
 	setAll(text: string, cursor: number): void;
+	/**
+	 * Undo the host's last change, restoring the buffer **and** the cursor.
+	 *
+	 * Both halves, because `undo` "undoes the most recent change in the buffer, and moves point
+	 * back to where it was before that change" (`doc/emacs/fixit.texi:61-62`) — an undo that left
+	 * point where it was would be a rewind the user then has to find their way back out of.
+	 *
+	 * The engine keeps no undo stack of its own. Each `setAll` is one entry in the host's, which
+	 * is where the buffer lives, and a second stack here could only disagree with that one.
+	 */
+	undo(): void;
 }
 
 export interface EmacsKey {
@@ -172,6 +219,7 @@ const CMD = {
 	beginningOfBuffer: "beginning-of-buffer",
 	endOfBuffer: "end-of-buffer",
 	deleteChar: "delete-char",
+	undo: "undo",
 } as const;
 
 /** Any command symbol. The ones this engine compares on are the {@link CMD} constants. */
@@ -686,11 +734,11 @@ export const RESERVED_KEYS: ReadonlyArray<readonly [string, string]> = [
 	["M-z", "zap-to-char (bindings.el:1236)"],
 	["M-h", "mark-paragraph (bindings.el:1710)"],
 	["M-@", "mark-word (bindings.el:1609)"],
-	["M-u", "upcase-word (subr.el:1717)"],
-	["M-l", "downcase-word (subr.el:1718)"],
-	["M-c", "capitalize-word (subr.el:1719)"],
-	["M-x", "execute-extended-command (subr.el:1720)"],
-	["M-X", "execute-extended-command-for-buffer (subr.el:1721)"],
+	["M-u", "upcase-word (subr.el:1718)"],
+	["M-l", "downcase-word (subr.el:1719)"],
+	["M-c", "capitalize-word (subr.el:1720)"],
+	["M-x", "execute-extended-command (subr.el:1721)"],
+	["M-X", "execute-extended-command-for-buffer (subr.el:1722)"],
 	["M-\\", "delete-horizontal-space (bindings.el:1618)"],
 	["M-{", "backward-paragraph (bindings.el:1708)"],
 	["M-}", "forward-paragraph (bindings.el:1709)"],
@@ -699,8 +747,14 @@ export const RESERVED_KEYS: ReadonlyArray<readonly [string, string]> = [
 	["M-e", "forward-sentence (bindings.el:1712)"],
 	["C-s", "isearch-forward (isearch.el:1000)"],
 	["C-r", "isearch-backward (isearch.el:1002)"],
-	["M-C-s", "isearch-forward-regexp (isearch.el:1001)"],
-	["M-C-r", "isearch-backward-regexp (isearch.el:1003)"],
+	// Spelled `C-M-`, not `M-C-`, because that is the order {@link emacsKeyToken} produces and
+	// the table is matched against tokens, not against Emacs's prose. `C-M-t` two rows up was
+	// already right and these two were not, which is the shape of a table edited by hand one row
+	// at a time: the mismatch was invisible because a reserved key that matches nothing is
+	// silently *not* reserved, and the key then falls through and types its own letter into the
+	// prompt. The parametrised table test in `emacs-engine.test.ts` is what found it.
+	["C-M-s", "isearch-forward-regexp (isearch.el:1001)"],
+	["C-M-r", "isearch-backward-regexp (isearch.el:1003)"],
 	["M-s", "search-map (bindings.el:1383)"],
 	["M-=", "count-words-region (bindings.el:1237)"],
 ];
@@ -720,7 +774,11 @@ export const CTL_X_RESERVED: ReadonlyArray<readonly [string, string]> = [
 	["C-SPC", "pop-global-mark (bindings.el:1341)"],
 	[" ", "rectangle-mark-mode (bindings.el:1340)"],
 	["n", "set-goal-column (bindings.el:1345)"],
-	["g", "unset-goal-column (bindings.el:1344)"],
+	// `C-x g` is *not* here, and the citation guard (`emacs-engine.test.ts`) is what says so. It
+	// used to be listed as `unset-goal-column`, which is a row from a manual older than this tree:
+	// `unset-goal-column` appears nowhere under `lisp/` here, `ctl-x-map` binds no `"g"` in any
+	// file, and `M-g` is `goto-line` (`bindings.el:1363`). A reserved row for a key that is not
+	// bound is the same lie `shortcuts.ts` just stopped telling, one layer down.
 	["h", "mark-whole-buffer (bindings.el:1617)"],
 	["=", "what-cursor-position (bindings.el:1238)"],
 	["o", "delete-blank-lines (bindings.el:1234)"],
@@ -799,7 +857,7 @@ export class EmacsEngine {
 	#prefixArgLive = false;
 	/** `universal-argument-map` is open — `set-transient-map` in `universal-argument--mode`. */
 	#prefixPending = false;
-	/** `ctl-x-map` is open. Only `C-x C-x` is implemented; the rest is read and dropped. */
+	/** `ctl-x-map` is open. `C-x C-x` and `C-x u` are implemented; the rest is read and dropped. */
 	#ctlXPending = false;
 	/** `temporary-goal-column`: the column the current run of vertical motion returns to. */
 	#temporaryGoalColumn = 0;
@@ -903,20 +961,29 @@ export class EmacsEngine {
 		}
 
 		if (this.#ctlXPending) {
-			// `C-x C-x` is `exchange-point-and-mark` (`bindings.el:1338`) and the only
-			// implemented member. Anything else in the map is *read and dropped*: the key is
-			// consumed so the user is not typing into the prompt, and no command runs — which
-			// is what `this_command` = `Qnil` means (`src/keyboard.c:1416`), and `last-command`
-			// becomes `nil`, breaking a kill chain and re-seeding the goal column exactly as any
-			// other non-kill command would.
+			// Two implemented members: `C-x C-x` is `exchange-point-and-mark`
+			// (`bindings.el:1338`) and `C-x u` is `undo` (`bindings.el:1246`). Anything else in
+			// the map is *read and dropped*: the key is consumed so the user is not typing into
+			// the prompt, and no command runs — which is what `this_command` = `Qnil` means
+			// (`src/keyboard.c:1416`), and `last-command` becomes `nil`, breaking a kill chain
+			// and re-seeding the goal column exactly as any other non-kill command would.
 			this.#ctlXPending = false;
 			if (key.ctrl && input === "x") return this.#exchangePointAndMark();
+			if (key.ctrl && input === "u") return this.#undo();
 			this.#commit = true;
 			return true;
 		}
 		if (key.ctrl && input === "x") {
 			// `global-map` maps `C-x` to `Control-X-prefix` (`subr.el:1762`), a prefix key: the
 			// sequence is not finished, so no command has run.
+			//
+			// `#prefixArgLive` is re-armed here, and that is the whole of what a prefix key is: a
+			// prefix argument belongs to the next *command*, and `C-x` is not one. Without the
+			// re-arm, `handleKey`'s once-per-key reset spends the liveness on the `C-x` itself
+			// and the member arrives with nothing — so `C-u C-x u` undid exactly one change
+			// where Emacs does four. The falsification driver is what found it, by asking for
+			// the prefixed count and being told otherwise.
+			this.#prefixArgLive = true;
 			this.#ctlXPending = true;
 			this.#commit = false;
 			return true;
@@ -1597,6 +1664,58 @@ export class EmacsEngine {
 		return true;
 	}
 
+	/**
+	 * `undo` (`bindings.el:1246`), the second implemented member of `ctl-x-map`.
+	 *
+	 * Four things happen, and the four are the whole of what undo means here. Which of them are
+	 * *not* the host's business is the reason this is not three lines.
+	 *
+	 *   1. **The buffer and point go back**, by `EmacsOps.undo` — one entry, or `arg` of them for
+	 *      a prefixed `C-x u`, which is what `(4 C-x u)` does in Emacs.
+	 *   2. **The kill chain breaks.** `this-command` is `undo`, which is not a kill command, so
+	 *      the tail of `handleKey` leaves `last-command` as `undo` and the next kill starts a new
+	 *      ring entry. This is Emacs's behaviour, not a policy: a chain is consecutive *kills*, and
+	 *      an undo is not one.
+	 *   3. **The region goes away and the mark keeps its number.** `undo` modifies the buffer, and
+	 *      the modification layer deactivates the mark (`src/insdel.c:2189`); the mark's *value* is
+	 *      a marker into text that has since changed, and Emacs keeps such a mark rather than
+	 *      dropping it, so the same offset is kept. Clearing it here would be inventing a rule
+	 *      with no citation behind it.
+	 *   4. **The typed marker is already gone, and does not need dropping here.** `#typedFrom`
+	 *      says "the host is about to write here", armed by a character the engine declined; an
+	 *      undo in between would make its position wrong in a way `#reconcileTyped` cannot detect,
+	 *      charging the undo to `self-insert-command` and re-opening a chain the undo just closed.
+	 *      It does not happen, and the reason is the **order** rather than a reset: `handleKey`
+	 *      calls `#reconcileTyped` *before* it dispatches, so by the time this runs the marker has
+	 *      been consumed and the self-insert has been recorded as the command *before* the one now
+	 *      running. `#beginCommand` on the first line overwrites what that recorded. The driver
+	 *      proved it the other way round: deleting an explicit reset here changed nothing at all.
+	 *
+	 * What it deliberately does **not** do is touch the kill ring: "When you use `C-/` (`undo`) to
+	 * undo a kill command, that brings the killed text back into the buffer, but does not remove it
+	 * from the kill ring" (`doc/emacs/killing.texi:44-46`). So a `C-k`, `C-x u`, `C-y` round trip
+	 * still yields the killed text, which is the behaviour a user relies on to look at what they
+	 * cut without having committed to it.
+	 *
+	 * An empty stack is not an error. Emacs signals one — "If all the recorded changes have already
+	 * been undone, the undo command signals an error" (`doc/emacs/fixit.texi:64-65`) — and
+	 * `EmacsOps.undo` returns nothing to say whether it undid anything, so this cannot reproduce
+	 * that without widening the interface for one message. The key is still consumed.
+	 */
+	#undo(): boolean {
+		this.#beginCommand(CMD.undo);
+		// A bare `C-x u` reads the raw prefix, so `C-u C-x u` is `(4)` and undoes four. The
+		// count cannot be asked for twice: one `C-u` then `C-u` is sixteen, not four, and that is
+		// `emacsPrefixValue`'s whole job.
+		const count = emacsPrefixValue(this.#prefixArg);
+		for (let i = 0; i < count; i++) this.#ops.undo();
+		// The only line with no counterpart in `handleKey`'s own path, and reachable for one
+		// reason only: a *popping* undo arrives with the region already deactivated by the edit
+		// that pushed the snapshot, so this is what covers an undo that undid nothing.
+		this.markActive = false;
+		return true;
+	}
+
 	// -- the kill ring -------------------------------------------------------
 
 	/**
@@ -1714,7 +1833,7 @@ export class EmacsEngine {
 	 *   - **`string` is never nil for any caller in this batch.** The `nil` case the comment
 	 *     describes is the `unix-word` / `emacs-word` region types, which reach this engine only
 	 *     from Lisp. Both other branches go through `filter-buffer-substring`
-	 *     (`simple.el:5630-5649`) or `region-extract-function`, and those return `""` for an
+	 *     (`simple.el:5630-5645`) or `region-extract-function`, and those return `""` for an
 	 *     empty range, not `nil`. So **an empty kill still pushes an empty entry** and still
 	 *     sets `this-command` to `kill-region`: killing nothing is not the same as not being
 	 *     between kills.
@@ -1724,8 +1843,8 @@ export class EmacsEngine {
 	 * `(save-excursion (delete-and-extract-region beg end) …)` and point is relocated as if it
 	 * were a marker (`src/insdel.c:1802-1810`), so a point inside the deleted range collapses to
 	 * the start. Both `beg` and `end` are usable in either order — "The order of BEG and END does
-	 * not matter" (`simple.el:5634`) — which is what lets a reversed region still delete the right
-	 * span.
+	 * not matter" (`simple.el:5632-5633`) — which is what lets a reversed region still delete the
+	 * right span.
 	 */
 	#killRegion(beg: number, end: number): void {
 		const from = this.#clamp(Math.min(beg, end));

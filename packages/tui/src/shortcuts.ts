@@ -90,7 +90,12 @@ export function shortcutGroups(opts: {
 				// nothing else could be true; under Emacs the parenthetical would
 				// be false, so it is a fact about vim and stays under vim.
 				["Tab", vim ? "complete (insert mode)" : "complete command or file"],
-				["Ctrl+O", "transcript"],
+				// The same failure as the `Ctrl+R` row above, and the same fix: `EmacsEngine`
+				// claims `C-o` as reserved `open-line` (`emacs.ts`, `RESERVED_KEYS`), so under
+				// emacs the key is eaten and the transcript is unreachable — not merely
+				// unavailable. Two rows in one file got this wrong the same way before either
+				// was fixed, so the wording is the honest one for both.
+				["Ctrl+O", emacs ? "taken — open-line is not in this build" : "transcript"],
 				["Ctrl+L", "clear screen"],
 				["Ctrl+C", "exit (twice when idle)"],
 			],
@@ -130,6 +135,11 @@ export function shortcutGroups(opts: {
 				["M-1..9 / M--", "digit prefix / negative"],
 				["C-SPC", "set mark; twice toggles the region"],
 				["C-x C-x", "exchange point and mark"],
+				// The second implemented member of `ctl-x-map`. Its two aliases are the ones
+				// this build cannot have: `C-/` is not a byte most terminals send, and `C-_`
+				// is the byte a terminal sends for `M--`, which is `negative-argument` here.
+				// `emacs.ts` says so where the two decisions are made.
+				["C-x u", "undo"],
 				// Listed with the caveat rather than left out, because it is Emacs's `dd`
 				// and a reader coming from Emacs will look for it — but `EmacsKey` has to be
 				// told to set `ctrlShiftBackspace`, and no terminal sends the combination,

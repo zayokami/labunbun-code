@@ -311,12 +311,14 @@ export function useTextInput(initialHistory: string[] = [], editor: EditorKind =
 			setAll: (text: string, cursor: number) => commitWithUndo(() => ({ text, cursor })),
 		};
 		if (kind === "emacs") {
-			// Emacs takes the four buffer operations and nothing else. It has no
-			// modes to enter or leave, and no `j`/`k` history gesture of its own —
+			// Emacs takes the buffer operations and `undo`, and nothing else. It has
+			// no modes to enter or leave, and no `j`/`k` history gesture of its own —
 			// a wider interface here would mean passing no-ops to express "this
 			// engine does not have that", which is how a caller ends up wiring a
-			// handler into a command that does not exist.
-			return { kind, engine: new EmacsEngine(ops) };
+			// handler into a command that does not exist. `redo` is the one that
+			// would be exactly that: the Emacs tree has no `redo` command at all, so
+			// `EmacsEngine`'s interface has no slot for it.
+			return { kind, engine: new EmacsEngine({ ...ops, undo: () => actions.undo() }) };
 		}
 		return {
 			kind,

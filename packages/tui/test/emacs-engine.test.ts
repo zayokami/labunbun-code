@@ -1,26 +1,51 @@
 import { describe, expect, test } from "bun:test";
-import { EmacsEngine, type EmacsKey, emacsPrefixMinus } from "../src/emacs.ts";
+import { existsSync, readFileSync } from "node:fs";
+import {
+	CTL_X_RESERVED,
+	EmacsEngine,
+	type EmacsKey,
+	emacsIsWordChar,
+	emacsKeyToken,
+	emacsPrefixCar,
+	emacsPrefixForwardChars,
+	emacsPrefixMinus,
+	emacsPrefixValue,
+	emacsScriptOf,
+	emacsWordBackward,
+	emacsWordForward,
+	RESERVED_KEYS,
+} from "../src/emacs.ts";
 
 /**
  * Unit tests for the Emacs engine.
  *
- * Two things about how these are written:
+ * Two things about how these are written, and both of them needed qualifying as the batches went
+ * on:
  *
- *   - **No source line numbers.** They rot, and a test that cites a line ends up asserting a
- *     comment. Every `file:line` citation lives in the implementation, next to the code it
- *     justifies.
- *   - **Nothing reads the Emacs tree.** These run in a bare checkout. The reference tree is
+ *   - **No source line numbers in an assertion.** They rot, and a test that cites a line ends up
+ *     asserting a comment. Every `file:line` citation lives in the implementation, next to the code
+ *     it justifies. The one test that *does* read a citation ({@link EmacsEngine}'s) is the
+ *     exception that proves the rule is about assertions and not about numbers: it checks the
+ *     implementation's citations against the reference tree, so a citation that has drifted is
+ *     caught where it is written instead of being copied into a test that would go on passing.
+ *   - **Nothing here requires the Emacs tree.** These run in a bare checkout. The reference tree is
  *     `G:\Bunttta\emacs-master\`, and a test that only passes with it present fails on CI for a
- *     reason that has nothing to do with the engine.
+ *     reason that has nothing to do with the engine. The citation guard is `existsSync`-gated for
+ *     the same reason: present, it checks; absent, it skips and says so.
  *
- * The `editor` fixture is the shape used by `vim-engine.test.ts`, reduced to the four operations
+ * The `editor` fixture is the shape used by `vim-engine.test.ts`, reduced to the operations
  * {@link EmacsEngine} asks of a host. `type` is the one thing that makes this modeless: it inserts
  * the character the engine declined, exactly as a real host would, so the engine's read-back of
  * "what did the host do with the key I returned `false` for" is exercised by every test that types.
+ *
+ * The fixture keeps a **real undo stack** rather than a counter. `EmacsEngine` has no stack of its
+ * own — every change is one `setAll`, and undo is the host's — so a fixture that faked `undo` with
+ * a toggle would let an engine that did nothing at all pass the undo tests.
  */
 function editor(text: string, cursor = 0) {
 	const state = { text, cursor };
 	const writes: Array<{ text: string; cursor: number }> = [];
+	const undoStack: Array<{ text: string; cursor: number }> = [];
 	const engine = new EmacsEngine({
 		getText: () => state.text,
 		getCursor: () => state.cursor,
@@ -29,8 +54,15 @@ function editor(text: string, cursor = 0) {
 		},
 		setAll: (t, c) => {
 			writes.push({ text: state.text, cursor: state.cursor });
+			undoStack.push({ text: state.text, cursor: state.cursor });
 			state.text = t;
 			state.cursor = Math.max(0, Math.min(c, t.length));
+		},
+		undo: () => {
+			const prev = undoStack.pop();
+			if (!prev) return;
+			state.text = prev.text;
+			state.cursor = Math.max(0, Math.min(prev.cursor, state.text.length));
 		},
 	});
 	/** Feed one key and report whether the engine claimed it. */
@@ -47,12 +79,43 @@ function editor(text: string, cursor = 0) {
 			state.cursor += 1;
 		}
 	};
-	return { engine, state, writes, press, repeat, type };
+	/** How deep the host's undo stack is, which is what a `C-u 4 C-x u` reads. */
+	const undoDepth = () => undoStack.length;
+	return { engine, state, writes, press, repeat, type, undoDepth };
 }
 
 const C = { ctrl: true } as const;
 const M = { meta: true } as const;
 const CM = { ctrl: true, meta: true } as const;
+
+/**
+ * The keypress a token in either reserved table is.
+ *
+ * The split on `-` is the whole of it, with one exception: `emacsKeyToken` spells ctrl+space as
+ * `C-SPC`, so pressing the literal string `"SPC"` would test a key no terminal sends.
+ */
+function pressToken(e: ReturnType<typeof editor>, token: string): boolean {
+	const parts = token.split("-");
+	const last = parts.pop() ?? "";
+	const key: EmacsKey = {};
+	if (parts.includes("C")) key.ctrl = true;
+	if (parts.includes("M")) key.meta = true;
+	return e.press(last === "SPC" ? " " : last, key);
+}
+
+/**
+ * `C-x` then a member of `ctl-x-map`, which is how every `C-x` command is reached.
+ *
+ * The member is spelled the way {@link CTL_X_RESERVED} spells it — a *raw* key spelling, because
+ * that is what the dispatch compares — so `C-x u` is `pressCtlX(e, "C-u")` and not `"u"`. The two
+ * reserved tables do not agree on spelling: `RESERVED_KEYS` is keyed by `emacsKeyToken`, so a
+ * ctrl+meta key there is `C-M-t`, while `CTL_X_RESERVED` holds `t` and `C-@` as themselves. One
+ * of the two spellings was already wrong in `emacs.ts` for the same reason.
+ */
+function pressCtlX(e: ReturnType<typeof editor>, member: string): boolean {
+	e.press("x", C);
+	return pressToken(e, member);
+}
 
 describe("emacs: motion", () => {
 	test("C-f and C-b step one code point, not one grapheme cluster", () => {
@@ -878,5 +941,543 @@ describe("emacs: vertical motion", () => {
 		expect(e.press("p", C)).toBe(true);
 		expect(e.state.cursor).toBe(0);
 		expect(e.engine.lastCommand).toBe("move-beginning-of-line");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Undo
+// ---------------------------------------------------------------------------
+
+describe("emacs: undo", () => {
+	test("C-x u puts the text and the cursor back, and the cursor is the half that matters", () => {
+		// The manual's own words, and the reason the ops interface takes one call rather than
+		// two: "This undoes the most recent change in the buffer, and moves point back to where
+		// it was before that change" (`doc/emacs/fixit.texi:61-62`). An undo that restored the
+		// text and left the cursor where it was would be a rewind the user then has to find
+		// their way out of.
+		// `C-k` kills to the end of the *line*, so the cursor is on line one and what goes is
+		// the second one — the join is the point, so the restored buffer is not the buffer a
+		// `C-k` from the end would have produced.
+		const e = editor("abc\ndefgh", 3);
+		e.press("k", C);
+		expect(e.state.text).toBe("abcdefgh");
+		e.press("x", C);
+		expect(e.press("u", C)).toBe(true);
+		expect(e.state.text).toBe("abc\ndefgh");
+		expect(e.state.cursor).toBe(3);
+		// One entry gone from the host's stack, which is the only stack there is.
+		expect(e.undoDepth()).toBe(0);
+	});
+
+	test("C-x u is a command, so it breaks the kill chain the way any non-kill does", () => {
+		// `this-command` is `undo` afterwards, and an undo is not a kill — so the next `C-k`
+		// must open a new ring entry rather than appending to the killed text the undo just put
+		// back. The second kill is made a *different* one, so the two readings cannot both
+		// produce the same ring: a broken chain gives two entries, an unbroken one gives
+		// `"cdab"`.
+		const e = editor("ab\ncd", 0);
+		e.press("k", C);
+		expect(e.engine.killRing).toEqual(["ab"]);
+		e.press("x", C);
+		e.press("u", C);
+		expect(e.engine.lastCommand).toBe("undo");
+		// Onto the second line, whose text the first kill left alone.
+		e.repeat(3, "f", C);
+		e.press("k", C);
+		expect(e.state.text).toBe("ab\n");
+		expect(e.engine.killRing).toEqual(["cd", "ab"]);
+	});
+
+	test("undoing a kill leaves it on the ring, so C-y still yields the killed text", () => {
+		// "When you use C-/ (undo) to undo a kill command, that brings the killed text back into
+		// the buffer, but does not remove it from the kill ring" (`doc/emacs/killing.texi:44-46`)
+		// — which is the behaviour a user relies on to look at what they cut without having
+		// committed to it.
+		const e = editor("ab\ncd", 0);
+		e.press("k", C);
+		e.press("x", C);
+		e.press("u", C);
+		expect(e.state.text).toBe("ab\ncd");
+		e.press("y", C);
+		expect(e.state.text).toBe("abab\ncd");
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("the region goes away and the mark keeps its number, because undo modifies the buffer", () => {
+		// The modification layer deactivates the mark for *any* change (`src/insdel.c:2189`), and
+		// undo is a change. The mark's value is a marker into text that has since moved, and
+		// Emacs keeps such a mark rather than dropping it, so the same offset stays — clearing
+		// it would be a rule with no citation behind it.
+		//
+		// The undo here has an **empty** stack on purpose, and that is not a convenience. Every
+		// edit deactivates the region on its way through, so by the time a *popping* undo runs
+		// the region is already gone and the assertion below would hold whatever `#undo` did.
+		// An undo that undoes nothing is the one shape where the line in `#undo` is the only
+		// thing that can turn the region off, and the falsification driver is what said so: it
+		// deleted that line and nothing went red.
+		const e = editor("abcdef", 0);
+		e.press(" ", C);
+		expect(e.press("f", C)).toBe(true);
+		expect(e.engine.mark).toBe(0);
+		expect(e.engine.markActive).toBe(true);
+		expect(e.undoDepth()).toBe(0);
+		e.press("x", C);
+		e.press("u", C);
+		expect(e.state.text).toBe("abcdef");
+		// The mark's *number* survives; the region does not come back with it.
+		expect(e.engine.mark).toBe(0);
+		expect(e.engine.markActive).toBe(false);
+	});
+
+	test("a typed character before the undo is not charged to the undo", () => {
+		// A character the engine declined is not a command yet: `lastCommand` stays null and the
+		// engine holds a marker instead, to be read back on the next key. An undo in between has
+		// to beat that read-back, because it cannot tell the undo from the typing — the text
+		// moved either way. What beats it is the *order*: `handleKey` reconciles before it
+		// dispatches, and `#undo` names its command after that, so the self-insert is recorded
+		// as the command before rather than as the one running. There is no marker reset in
+		// `#undo` to do it, because `#reconcileTyped` already cleared the marker before
+		// `#undo` was reached.
+		const e = editor("ab\ncd", 0);
+		e.type("z");
+		expect(e.state.text).toBe("zab\ncd");
+		expect(e.engine.lastCommand).toBeNull();
+		e.press("x", C);
+		e.press("u", C);
+		expect(e.engine.lastCommand).toBe("undo");
+		// And the key after is read on its own evidence: the next real edit is recorded as
+		// itself rather than continuing a self-insert the undo already closed.
+		e.repeat(2, "f", C);
+		e.press("k", C);
+		expect(e.state.text).toBe("zabcd");
+		expect(e.engine.lastCommand).toBe("kill-region");
+	});
+
+	test("C-u C-x u undoes four, and C-u C-u C-x u undoes sixteen", () => {
+		// `(4 C-x u)` undoes four entries in Emacs, so the raw prefix is read here. The count is
+		// the prefix argument's own multiplication: one `C-u` is four and two are sixteen. Five
+		// edits is less than both, so the *stack* is what bounds the walk — the count does not
+		// have to divide into it.
+		//
+		// The prefix has to survive the `C-x`, which is a prefix key and runs no command. It did
+		// not: `handleKey` spends the prefix's liveness once per key, so `C-x` was spending it
+		// and the member arrived with nothing. The driver found that by asking for four and
+		// being given one, and `emacs.ts` says so where the re-arm is.
+		const e = editor("abcdefghij", 0);
+		for (let i = 0; i < 5; i++) e.press("d", C);
+		expect(e.state.text).toBe("fghij");
+		expect(e.undoDepth()).toBe(5);
+		e.press("u", C);
+		expect(e.engine.prefixArg).toEqual({ car: 4, cdr: [] });
+		e.press("x", C);
+		e.press("u", C);
+		expect(e.state.text).toBe("bcdefghij");
+		expect(e.undoDepth()).toBe(1);
+		// Sixteen, with one entry left to undo: the count is honoured and the stack stops it.
+		e.press("u", C);
+		e.press("u", C);
+		expect(e.engine.prefixArg).toEqual({ car: 16, cdr: [] });
+		e.press("x", C);
+		e.press("u", C);
+		expect(e.state.text).toBe("abcdefghij");
+		expect(e.undoDepth()).toBe(0);
+	});
+
+	test("an empty stack is a consumed key and a command, not a crash and not a fall-through", () => {
+		// Emacs "signals an error" (`doc/emacs/fixit.texi:64-65`) and `EmacsOps.undo` returns
+		// nothing to say whether it undid anything, so this cannot reproduce that without
+		// widening the interface for one message. What it must still do is consume the key — a
+		// `C-x u` that fell through would type a `u` into the prompt.
+		const e = editor("abc", 0);
+		expect(e.press("x", C)).toBe(true);
+		expect(e.press("u", C)).toBe(true);
+		expect(e.state.text).toBe("abc");
+		expect(e.engine.lastCommand).toBe("undo");
+	});
+
+	test("a cursor move is not an undo step, so moving and then undoing still reaches the text", () => {
+		// The host's snapshot is pushed by `setAll` only, which is what "cursor-only moves are
+		// not undoable" means in practice — and it is also why the divergence the header names,
+		// that a move does not break the undo sequence, is the host's and not this engine's.
+		const e = editor("abc", 0);
+		e.press("d", C);
+		expect(e.state.text).toBe("bc");
+		expect(e.undoDepth()).toBe(1);
+		// Three motions, and the stack is still one deep: none of them pushed a snapshot. The
+		// third is the one past the end, which signals and stands — two is where it ends up.
+		e.repeat(3, "f", C);
+		expect(e.state.cursor).toBe(2);
+		expect(e.undoDepth()).toBe(1);
+		e.press("x", C);
+		e.press("u", C);
+		expect(e.state.text).toBe("abc");
+		expect(e.state.cursor).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The reserved tables, run as tables
+// ---------------------------------------------------------------------------
+
+/**
+ * Every row of {@link RESERVED_KEYS} and {@link CTL_X_RESERVED}, parametrised.
+ *
+ * Before this, six of the twenty-seven were pinned by hand and the other twenty-one were not
+ * pinned at all — so a key could be deleted from a table, or a table could gain a key the
+ * dispatch no longer claims, and nothing would have said so. Parametrising over the tables
+ * rather than over a hand-copied list is the part that matters: a *new* reserved key now has to
+ * come with a test or the run goes red, which is the only way the "next batch is a list edit"
+ * promise in `emacs.ts` stays true.
+ */
+describe("emacs: the reserved tables", () => {
+	test.each(RESERVED_KEYS.map(([token]) => token))("%s is consumed, changes nothing, and runs no command", (token) => {
+		const e = editor("abc", 1);
+		expect(pressToken(e, token)).toBe(true);
+		expect(e.state.text).toBe("abc");
+		// A reserved key runs no command, so it is not a motion either: point does not move.
+		expect(e.state.cursor).toBe(1);
+		// `this-command` is nil for a sequence that ran no command
+		// (`src/keyboard.c:1416-1417`), so the tail of the loop leaves `last-command` nil —
+		// which is what breaks a kill chain, and the reason a reserved key costs nothing.
+		expect(e.engine.lastCommand).toBeNull();
+	});
+
+	test.each(CTL_X_RESERVED.map(([member]) => member))(
+		"C-x %s is consumed, changes nothing, and runs no command",
+		(member) => {
+			const e = editor("abc", 1);
+			// A `C-x` on its own runs no command either, so the sequence is two keys and one of
+			// them is the map.
+			expect(e.press("x", C)).toBe(true);
+			expect(e.engine.lastCommand).toBeNull();
+			expect(pressToken(e, member)).toBe(true);
+			expect(e.state.text).toBe("abc");
+			expect(e.state.cursor).toBe(1);
+			expect(e.engine.lastCommand).toBeNull();
+		},
+	);
+
+	test("both tables are the ones the header names, key for key", () => {
+		// The one test in this file that is a **copy**, and it has to be. `test.each` over a
+		// table proves every row *present* is claimed; it says nothing about a row that was
+		// *removed*, because removing a row removes its test too. A reserved key can therefore
+		// disappear from `emacs.ts` and take its coverage with it, in silence — which is the
+		// opposite of the promise `emacs.ts` makes about the next batch being a list edit.
+		//
+		// So the key lists are written out here. The cost is the obvious one: adding a key means
+		// touching two places, and this test is where the second place gets remembered. That is
+		// cheaper than a table that can lose rows unnoticed, and unlike a line number this copy
+		// is a *claim* — it says what the reserved surface is, which is worth pinning.
+		//
+		// Note the two tables' spellings differ, and the difference is load-bearing rather than
+		// cosmetic: `RESERVED_KEYS` is matched by `emacsKeyToken`, which names meta before ctrl,
+		// so a ctrl+meta key is `C-M-` there. `C-M-s` and `C-M-r` were spelled `M-C-`, matched
+		// nothing, and let the key fall through to type its own letter into the prompt. This test
+		// is the second thing that would have caught it; the parametrised rows above were the
+		// first.
+		expect(RESERVED_KEYS.map(([token]) => token)).toEqual([
+			"C-t",
+			"M-t",
+			"C-M-t",
+			"C-q",
+			"C-o",
+			"M-o",
+			"C-g",
+			"M-z",
+			"M-h",
+			"M-@",
+			"M-u",
+			"M-l",
+			"M-c",
+			"M-x",
+			"M-X",
+			"M-\\",
+			"M-{",
+			"M-}",
+			"M-q",
+			"M-a",
+			"M-e",
+			"C-s",
+			"C-r",
+			"C-M-s",
+			"C-M-r",
+			"M-s",
+			"M-=",
+		]);
+		expect(CTL_X_RESERVED.map(([member]) => member)).toEqual(["t", "C-@", "C-SPC", " ", "n", "h", "=", "o", "r"]);
+	});
+
+	test("a reserved key is claimed by the table, and leaves no prefix argument behind", () => {
+		// The control for the row above: `M-u` is in the reserved table *and* a spelling the
+		// meta dispatch could plausibly have claimed. A case command would have moved the
+		// prefix argument, so a `C-u` typed next would multiply something. Nothing is the
+		// assertion — and it is the shape a table that had quietly stopped claiming a key
+		// would fail, because a case command *does* leave a count.
+		const e = editor("abc", 0);
+		expect(pressToken(e, "M-u")).toBe(true);
+		expect(e.engine.prefixArg).toBeNull();
+	});
+
+	test("an implemented command is in neither reserved table, so the tables cannot drift into lying", () => {
+		// `C-x C-x` and `C-x u` are the two implemented members of `ctl-x-map`, and neither is
+		// listed. The tables' own docstring says an implemented member must be deleted from them
+		// rather than left behind, so this is the assertion that keeps the promise checkable.
+		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("u");
+		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("x");
+		// `C-o` is the row `shortcuts.ts` reads to decide the transcript is unreachable under
+		// emacs, so it belongs in *this* table and saying so here is what keeps the two files
+		// from disagreeing: a reader of the shortcut list can check the claim one layer down.
+		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-o");
+		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-o");
+		// The control for all of it: the two keys that *are* implemented still work through the
+		// same `C-x` prefix, so "not in the table" is not "not claimed". A table that had quietly
+		// stopped claiming `C-x` would leave every assertion above looking fine. The member of
+		// `C-x C-x` is spelled `C-x` because it *is* a second ctrl key, and a fixture that
+		// pressed a bare `x` here would be testing a key the engine does not implement.
+		const e = editor("abc", 0);
+		e.press("d", C);
+		expect(e.state.text).toBe("bc");
+		expect(pressCtlX(e, "C-x")).toBe(true);
+		expect(e.state.cursor).toBe(0);
+		expect(e.state.text).toBe("bc");
+		// `C-u`, not `u`: the two tables spell their keys differently and a helper that took one
+		// spelling for both would type a literal `u` into the prompt instead of undoing. The
+		// reserved table holds *raw* key spellings (`t`, `C-@`, ` `) because that is what
+		// `#handleCtlX` compares; the implemented members are named the way the key is written.
+		expect(pressCtlX(e, "C-u")).toBe(true);
+		expect(e.state.text).toBe("abc");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The exports nothing else names
+// ---------------------------------------------------------------------------
+
+/**
+ * Every function `emacs.ts` exports that no other module and no other test named.
+ *
+ * They are all live inside the engine, which is the point: an export with no caller and no test
+ * is a function whose only proof of working is that the engine happens to call it. These are the
+ * pure ones, so a direct test is the whole of their contract.
+ */
+describe("emacs: the exported helpers, directly", () => {
+	test("emacsPrefixValue is prefix-numeric-value over all four states", () => {
+		// `p` is `Fprefix_numeric_value` (`callint.c:651-655`): the raw cons is *converted*, not
+		// handed over. So the number a `"p"` command sees is the same whether the user typed
+		// `C-u 4` or `M-4`.
+		expect(emacsPrefixValue(null)).toBe(1);
+		expect(emacsPrefixValue(7)).toBe(7);
+		expect(emacsPrefixValue("-")).toBe(-1);
+		expect(emacsPrefixValue({ car: 16, cdr: [] })).toBe(16);
+	});
+
+	test("emacsPrefixMinus negates a cons without growing it", () => {
+		// `(- '(4))` is a **one-element cons holding -4**, not a two-element list — and from the
+		// keyboard nothing ever builds it, because `backward-word`'s `"^p"` hands its body a
+		// plain number. Both facts are asserted, because the second is what makes the first a
+		// guard rather than a shape.
+		expect(emacsPrefixMinus(null)).toBeNull();
+		expect(emacsPrefixMinus(4)).toBe(-4);
+		expect(emacsPrefixMinus("-")).toBe(-1);
+		expect(emacsPrefixMinus({ car: 4, cdr: [] })).toEqual({ car: -4, cdr: [] });
+	});
+
+	test("emacsPrefixCar is the car of a cons and null for everything else", () => {
+		// `kill-forward-chars`' first line (`simple.el:6665`), and the reading of `"p\nP"` that
+		// makes a prefix raw on the second channel: a *number* has no car, and that is the whole
+		// difference between the two channels.
+		expect(emacsPrefixCar({ car: 4, cdr: [] })).toBe(4);
+		expect(emacsPrefixCar(null)).toBeNull();
+		expect(emacsPrefixCar(4)).toBeNull();
+		expect(emacsPrefixCar("-")).toBeNull();
+	});
+
+	test("emacsPrefixForwardChars collapses a cons and turns the symbol into -1", () => {
+		// `kill-forward-chars` (`simple.el:6663-6667`) in full. `delete-char`'s kill path hands
+		// it a number (`src/cmds.c:258`), so for `C-d` this is the identity — but the prefix a
+		// user typed arrives raw, so both clauses still matter.
+		expect(emacsPrefixForwardChars({ car: 4, cdr: [] })).toBe(4);
+		expect(emacsPrefixForwardChars("-")).toBe(-1);
+		expect(emacsPrefixForwardChars(3)).toBe(3);
+		expect(emacsPrefixForwardChars(null)).toBe(1);
+	});
+
+	test("emacsIsWordChar is the standard syntax table, where $ and % are words", () => {
+		// Transcribed from `init_syntax_once` (`src/syntax.c:3664-3744`). The two that surprise:
+		// `$` and `%` are `Sword` (`syntax.c:3699-3708`) and `_` is `Ssymbol`
+		// (`syntax.c:3727-3732`), so `foo_bar` is two words and `foo$bar` is one.
+		expect(emacsIsWordChar(0x61)).toBe(true);
+		expect(emacsIsWordChar(0x30)).toBe(true);
+		expect(emacsIsWordChar(0x24)).toBe(true);
+		expect(emacsIsWordChar(0x25)).toBe(true);
+		expect(emacsIsWordChar(0x5f)).toBe(false);
+		expect(emacsIsWordChar(0x2e)).toBe(false);
+		expect(emacsIsWordChar(0x20)).toBe(false);
+		// "All multibyte characters have syntax `word' by default" (`syntax.c:3741-3743`).
+		expect(emacsIsWordChar(0x4e2d)).toBe(true);
+	});
+
+	test("emacsScriptOf is generated from Unicode blocks, and four of its rows are load-bearing", () => {
+		// `char-script-table`, which is what `word_boundary_p` compares (`src/category.c:383-384`).
+		// Not built from `Scripts.txt` — `admin/unidata/blocks.awk` writes it at build time.
+		// The C1 controls are unassigned because of the generator's own fix (`blocks.awk:77`),
+		// and everything from Latin-1 Supplement on is Latin.
+		expect(emacsScriptOf(0x0080)).toBe(0);
+		expect(emacsScriptOf(0x009f)).toBe(0);
+		expect(emacsScriptOf(0x00a0)).toBe(1);
+		expect(emacsScriptOf(0x61)).toBe(1);
+		// Hiragana and Katakana are one script here, not two: `name2alias` sends both to `kana`
+		// (`blocks.awk:111`) and the adjacent blocks are merged (`blocks.awk:187-192`), which
+		// `word-separating-categories` says in as many words (`src/category.c:481-482`). So `M-f`
+		// in `あア` does not stop between them.
+		expect(emacsScriptOf(0x3042)).toBe(emacsScriptOf(0x30a2));
+		// The `0370` split (`blocks.awk:195-206`): Greek and Coptic interleaved in one block.
+		expect(emacsScriptOf(0x03e1)).not.toBe(emacsScriptOf(0x03e2));
+		// A fullwidth Latin letter is a different script from an ASCII one, so `M-f` stops
+		// between `a` and `ａ` (`blocks.awk:219-234`).
+		expect(emacsScriptOf(0xff41)).not.toBe(emacsScriptOf(0x61));
+	});
+
+	test("emacsWordForward and emacsWordBackward are inverses at the two word boundaries", () => {
+		// There are two boundaries and they come from different places, so both have to appear
+		// here or the test only covers one. The syntax one: `_` is a symbol and therefore a
+		// boundary, `$` is a word and therefore not.
+		expect(emacsWordForward("foo_bar", 0)).toBe(3);
+		expect(emacsWordBackward("foo_bar", 7)).toBe(4);
+		expect(emacsWordForward("foo$bar", 0)).toBe(7);
+		expect(emacsWordBackward("foo$bar", 7)).toBe(0);
+		// The script one, which is a *different function* (`emacsWordBoundary`) and the reason a
+		// test written only in ASCII would still pass with the script rule deleted. `あ` is Han
+		// and `a` is Latin, so they are two words.
+		expect(emacsWordForward("あa", 0)).toBe(1);
+		expect(emacsWordBackward("aあ", 2)).toBe(1);
+		// And the case that is neither: `あ` and `ア` are the *same* script in the generated
+		// table (`blocks.awk:111`), so they are one word. Deleting the script comparison would
+		// leave both of the two rows above red and this one unchanged, which is the whole reason
+		// it is here.
+		expect(emacsWordForward("あア", 0)).toBe(2);
+		// Digits are words, so `a1b` is one.
+		expect(emacsWordForward("a1b", 0)).toBe(3);
+		// And at the ends of the buffer they stop rather than run off it.
+		expect(emacsWordForward("foo", 3)).toBe(3);
+		expect(emacsWordBackward("foo", 0)).toBe(0);
+	});
+
+	test("emacsKeyToken names meta before ctrl, so C-M-t keeps its own name", () => {
+		// Testing `ctrl` first would collapse `C-M-t` onto `C-t`, and the two are different
+		// commands in the reserved table — `transpose-sexps` and `transpose-chars`.
+		expect(emacsKeyToken("t", C)).toBe("C-t");
+		expect(emacsKeyToken("t", M)).toBe("M-t");
+		expect(emacsKeyToken("t", CM)).toBe("C-M-t");
+		// The two space spellings, which are the ones a naive `C-${input}` gets wrong.
+		expect(emacsKeyToken(" ", C)).toBe("C-SPC");
+		expect(emacsKeyToken("@", C)).toBe("C-@");
+		expect(emacsKeyToken("x", {})).toBe("x");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The citations, where the tree is
+// ---------------------------------------------------------------------------
+
+/**
+ * The reference tree, and the reason nothing above depends on it.
+ *
+ * `G:\Bunttta\emacs-master\` is this checkout's read-only copy of the Emacs sources. It is
+ * *not* a test fixture: the guard below is `existsSync`-gated so that a clone without it skips
+ * rather than fails, because a test that only passes on a machine with a second source tree
+ * checkout is a test that fails CI for a reason that has nothing to do with the engine.
+ *
+ * The same gate is the reason these assertions are allowed to carry line numbers at all — they
+ * are the one place in this file that does, because a *copy* of a citation in a test would be
+ * the rot the header is about. The citations are read out of `emacs.ts` itself, so there is
+ * exactly one copy and this test is what checks it.
+ */
+const EMACS_TREE = "G:/Bunttta/emacs-master";
+const treePresent = existsSync(EMACS_TREE);
+
+/** Read one file of the tree, given the spelling `emacs.ts` uses in its citations. */
+function readCited(spelling: string): string[] | null {
+	// `emacs.ts` cites `bindings.el` for a file that is at `lisp/bindings.el`, and `cmds.c` for one
+	// at `src/cmds.c` — the citations are named as the source names them, not as paths. The
+	// prefixes are the four directories those names live in, tried in order; `""` is for the
+	// citations that already spell the directory.
+	for (const prefix of ["", "lisp/", "src/", "lisp/progmodes/", "admin/unidata/"]) {
+		const path = `${EMACS_TREE}/${prefix}${spelling}`;
+		if (existsSync(path)) return readFileSync(path, "utf8").split(/\r?\n/);
+	}
+	return null;
+}
+
+/** The `file:line` and optional `file:line-line` a `file:line-NNN` match stands for. */
+function citedSpan(first: string, last: string | undefined): { start: number; end: number } {
+	return { start: Number(first), end: last ? Number(last) : Number(first) };
+}
+
+describe("emacs: the citations, where the tree is", () => {
+	test.skipIf(!treePresent)("every file:line in emacs.ts names a line in the tree", () => {
+		// The mechanical half, over *every* citation — the ~300 of them, not just the tables.
+		// What it catches is the cheap class of rot: a path that does not exist, a line past the
+		// end, a blank where there was text. What it cannot catch is a citation that now points at
+		// the *wrong* line, because nothing in the citation says what the line should contain —
+		// which is what the test below is for.
+		const source = readFileSync(new URL("../src/emacs.ts", import.meta.url), "utf8");
+		const cite = /([A-Za-z0-9_./-]+\.(?:el|c|texi|h|awk)):(\d+)(?:-(\d+))?/g;
+		const unresolved: string[] = [];
+		const outOfRange: string[] = [];
+		const blank: string[] = [];
+		let count = 0;
+		for (const m of source.matchAll(cite)) {
+			count++;
+			const lines = readCited(m[1]);
+			if (!lines) {
+				unresolved.push(m[0]);
+				continue;
+			}
+			const { start, end } = citedSpan(m[2], m[3]);
+			if (start < 1 || end > lines.length) outOfRange.push(`${m[0]} in a file of ${lines.length} lines`);
+			else if (lines.slice(start - 1, end).every((line) => line.trim() === "")) blank.push(m[0]);
+		}
+		expect(unresolved).toEqual([]);
+		expect(outOfRange).toEqual([]);
+		expect(blank).toEqual([]);
+		// The non-vacuity floor. This is a count of the file's own text, so a parser change that
+		// quietly stopped matching would show up here rather than as a green run over nothing.
+		expect(count).toBeGreaterThan(250);
+	});
+
+	test.skipIf(!treePresent)("every row of both reserved tables cites the line that defines its command", () => {
+		// The load-bearing half. Both tables are written as `["key", "command (file:line)"]`, and
+		// every row carries that shape — so this covers the tables completely, with nothing
+		// skipped for being in an awkward format. The check is that the cited line actually
+		// *mentions* the command the row names, which is what an off-by-one fails: a citation one
+		// line high lands on the `defvar` above the bindings, and one line low lands on the
+		// `(define-key global-map "\C-n" 'next-line)` that follows them.
+		//
+		// It is a *name* check, not an equality check, because the source's own line carries a
+		// key description (`"\C-t"`) the table spells differently. A renamed command or a moved
+		// line both make it red, and both are the failure this guard exists for.
+		const source = readFileSync(new URL("../src/emacs.ts", import.meta.url), "utf8");
+		const row =
+			/\["([^"]+)",\s*"([a-z][a-z0-9+*-]*(?:-[a-z0-9+*]+)+) \(([A-Za-z0-9_./-]+\.[a-z]+):(\d+)(?:-(\d+))?\)"\]/g;
+		const checked: string[] = [];
+		const wrong: string[] = [];
+		for (const m of source.matchAll(row)) {
+			const [, key, command, file, first, last] = m;
+			checked.push(key);
+			const lines = readCited(file);
+			if (!lines) {
+				wrong.push(`${key}: no ${file} in the tree`);
+				continue;
+			}
+			const { start, end } = citedSpan(first, last);
+			if (!lines.slice(start - 1, end).some((line) => line.includes(command))) {
+				wrong.push(`${key} -> ${command}, cited ${file}:${first}${last ? `-${last}` : ""}`);
+			}
+		}
+		expect(wrong).toEqual([]);
+		// Every row of both tables, not "the ones that happened to parse": if a row lost its
+		// citation this would drop below the sum of the two tables and go red.
+		expect(checked).toHaveLength(RESERVED_KEYS.length + CTL_X_RESERVED.length);
 	});
 });
