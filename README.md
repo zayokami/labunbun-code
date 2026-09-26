@@ -26,6 +26,13 @@ labunbun                                # interactive REPL
   "don't ask again" session rules.
 - **Sessions** — append-only JSONL tree per project (`~/.labunbun/projects/`),
   crash-safe resume with `--resume`, prompt history with ↑ recall.
+- **Activity** — `/activity` draws the days you used this as a heatmap, with
+  the current and longest streak over them. `r` widens the window
+  (`7d` / `30d` / all), Esc puts it away. Two channels, in two shades: a day a
+  session *started* on, and a day an older session was still being written to.
+  Both count toward a streak — a day you picked up yesterday's thread is a day
+  you used this — but they are not the same weight, so the picture does not claim
+  they are. Days are local, not UTC: a session begun at 23:30 is on that day.
 - **Context management** — automatic compaction at the context-window
   threshold (structured summary + re-injected recent files), with the cheap rung
   running first: at the threshold the older tool results become previews (no

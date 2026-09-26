@@ -1,5 +1,21 @@
 export const AGENT_PACKAGE_VERSION = "0.1.0";
 
+// Activity heatmap and streaks, aggregated from the session files on disk
+export {
+	type ActivityDay,
+	type ActivityRange,
+	type ActivityReport,
+	type ActivityTotals,
+	activityLevel,
+	civilDayNumber,
+	collectActivity,
+	type IntensityThresholds,
+	intensityThresholds,
+	localDayKey,
+	type Streaks,
+	startOfLocalDay,
+	windowStartFor,
+} from "./activity.ts";
 // Compaction
 export {
 	COMPACTION_DISABLED_NOTICE,

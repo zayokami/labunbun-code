@@ -3,7 +3,7 @@
  * permission dialog bridge), renders the Ink app, and returns an exit code.
  */
 
-import type { AgentSession, PermissionMode } from "@labunbun/agent";
+import type { ActivityRange, AgentSession, PermissionMode } from "@labunbun/agent";
 import type { PadBridge } from "@labunbun/gamepad";
 import { render } from "ink";
 import { sealCount } from "./components/MessageList.tsx";
@@ -111,6 +111,15 @@ export interface ReplAppHandle {
 	setContextInfo(info: { usedTokens: number; threshold: number }): void;
 	/** Show the `/status` card over the prompt; null dismisses it. */
 	setStatusCard(card: StatusCardData | null): void;
+	/**
+	 * Open the activity heatmap over the prompt (`/activity`). It is handed the
+	 * home directory and a range rather than a finished report, because the panel
+	 * re-collects when `r` changes the range and a report frozen here would make
+	 * every wider window cost a walk of the whole session tree.
+	 */
+	showActivity(home: string | undefined, range?: ActivityRange): void;
+	/** Put the heatmap away — what Esc does, and what reopening never has to ask. */
+	clearActivity(): void;
 	/**
 	 * Long-running shells for the status row. Called on a poll, so an unchanged
 	 * list must keep the same array identity — otherwise every tick rerenders the
@@ -245,6 +254,12 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		},
 		setStatusCard: (card) => {
 			store.set((s) => ({ ...s, statusCard: card }));
+		},
+		showActivity: (home, range) => {
+			store.set((s) => ({ ...s, activity: { home, range: range ?? "30d" } }));
+		},
+		clearActivity: () => {
+			store.set((s) => (s.activity ? { ...s, activity: null } : s));
 		},
 		setBackgroundShells: (shells) => {
 			store.set((s) => (sameShells(s.backgroundShells, shells) ? s : { ...s, backgroundShells: shells }));

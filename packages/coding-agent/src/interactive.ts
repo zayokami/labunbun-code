@@ -7,9 +7,11 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { homedir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import {
+	type ActivityRange,
 	type AgentDeps,
 	AgentSession,
 	type CompactionManager,
+	collectActivity,
 	compactionThreshold,
 	contextBreakdown,
 	estimateContextUsage,
@@ -20,6 +22,7 @@ import {
 	type PermissionRule,
 	type SessionEntry,
 	SessionStore,
+	windowStartFor,
 } from "@labunbun/agent";
 import {
 	apiKeyEnvNames,
@@ -60,6 +63,7 @@ import {
 	TaskStore,
 } from "@labunbun/tools";
 import { AUTO_THEME_NAME, mountRepl, type ReplAppHandle, resolveBuiltInTheme, ruleSpecifierFor } from "@labunbun/tui";
+import { activitySummaryLine } from "./activity-report.ts";
 import { createAskUserQuestionTool } from "./ask-user.ts";
 import {
 	BACKGROUND_SHELL_POLL_MS,
@@ -1298,6 +1302,7 @@ const PERMISSION_MODE_HINTS: Record<PermissionMode, string> = {
  */
 export function appCommandTable(): Array<[string, string]> {
 	return [
+		["/activity", "Show a heatmap of the days you used this, and the streak: /activity [7d|30d|all]"],
 		["/agents", "List agent definitions, and load this project's: /agents [approve]"],
 		["/cache", "Show prompt-cache hit rate, its ceiling, and any prefix rewinds"],
 		["/context", "Show what the context window is made of, and what is left"],
@@ -1326,6 +1331,26 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 	const session = ctx.getSession();
 
 	switch (command) {
+		case "/activity": {
+			const arg = text.split(/\s+/)[1]?.toLowerCase();
+			const range: ActivityRange | undefined = arg === "7d" || arg === "30d" || arg === "all" ? arg : undefined;
+			if (arg && !range) {
+				pushInfo(ctx.handle, "Usage: /activity [7d|30d|all] — with no argument it opens on a month");
+				return true;
+			}
+			const handle = ctx.handle;
+			if (!handle) return true;
+			// A month first, because a month is the shortest window in which a
+			// streak is a thing you can have. The panel re-collects for itself when
+			// `r` widens the window; this walk is for the transcript line, which a
+			// picture that scrolls away cannot leave behind.
+			handle.showActivity(ctx.home, range);
+			void (async () => {
+				const report = collectActivity(ctx.home, { windowStart: windowStartFor(range ?? "30d", Date.now()) });
+				pushInfo(handle, activitySummaryLine(report, range ?? "30d"));
+			})();
+			return true;
+		}
 		case "/agents": {
 			const [, sub] = text.split(/\s+/);
 			if (sub === "approve") {

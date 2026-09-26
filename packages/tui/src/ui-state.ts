@@ -2,7 +2,7 @@
  * UI state model: AgentSession events reduce into a flat transcript of
  * renderable entries plus transient streaming/status slices.
  */
-import type { AgentEvent } from "@labunbun/agent";
+import type { ActivityRange, AgentEvent } from "@labunbun/agent";
 import type { ListPickerState } from "./components/ListPickerDialog.tsx";
 import type { PermissionOption } from "./permission-options.ts";
 import { DEFAULT_THEME } from "./themes/index.ts";
@@ -86,6 +86,19 @@ export interface StatusCardData {
 	details: Array<[label: string, value: string]>;
 }
 
+/**
+ * What `/activity` opens.
+ *
+ * The panel is a view over the session files on disk, so it is told where they
+ * are and how wide a window it wants — not given a finished report. `range`
+ * starts at a week because a month is the first range that shows a streak, and
+ * a year is one nobody waits for.
+ */
+export interface ActivityView {
+	home: string | undefined;
+	range: ActivityRange;
+}
+
 export interface UiState {
 	entries: UiEntry[];
 	streamingText: string;
@@ -117,6 +130,13 @@ export interface UiState {
 	 * Not modal: it reports on the run, it does not block it.
 	 */
 	statusCard: StatusCardData | null;
+	/**
+	 * The activity heatmap, open over the prompt. It carries the home directory
+	 * rather than a report because the panel re-collects whenever `r` changes the
+	 * range, and handing it the path is what lets that happen without the app layer
+	 * re-walking the session tree for every range it cycles through.
+	 */
+	activity: ActivityView | null;
 	/**
 	 * Long-running shells started by the Bash tool. In the store because the app
 	 * layer only learns about them by polling the manager, and a dev server that
@@ -210,6 +230,7 @@ export function initialUiState(vim = false): UiState {
 		question: null,
 		picker: null,
 		statusCard: null,
+		activity: null,
 		backgroundShells: [],
 		queued: [],
 		theme: DEFAULT_THEME,

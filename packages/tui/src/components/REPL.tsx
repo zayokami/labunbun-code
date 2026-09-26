@@ -11,6 +11,7 @@ import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
 import { useTheme } from "../theme.ts";
 import { type QueuedMessage, reduceEvent, type UiState } from "../ui-state.ts";
+import { ActivityPanel } from "./ActivityPanel.tsx";
 import { CommandWheel } from "./CommandWheel.tsx";
 import { ListPickerDialog } from "./ListPickerDialog.tsx";
 import { MessageList, StreamingPreview, VirtualMessageList } from "./MessageList.tsx";
@@ -154,6 +155,7 @@ export function REPL({
 	const contextInfo = useStore(store, (s) => s.contextInfo);
 	const contextActivity = useStore(store, (s) => s.contextActivity);
 	const statusCard = useStore(store, (s) => s.statusCard);
+	const activity = useStore(store, (s) => s.activity);
 	const backgroundShells = useStore(store, (s) => s.backgroundShells);
 	const shellRow = backgroundShellRow(backgroundShells);
 	const tasks = useStore(store, (s) => s.tasks);
@@ -402,6 +404,29 @@ export function REPL({
 		// modal — the prompt still works, and typing over it dismisses it.
 		if (statusCard && key.escape) {
 			store.set((s) => ({ ...s, statusCard: null }));
+			return;
+		}
+		// The heatmap takes Esc for itself even though it is not asking anything.
+		// Left to the branch below it would fall through to `session.abort()` on a
+		// running turn, so dismissing a picture of the last month would kill the
+		// work in progress — the one thing a glance at your own history must not
+		// do. The panel also answers Esc itself, so either subscription reaching
+		// the key closes it and the two cannot disagree about what it means.
+		//
+		// Named, not fixed: `Ctrl+O` still switches to the transcript while the
+		// panel is up, and the panel is rendered in the *non*-transcript branch, so
+		// that switch leaves the prompt disabled (`disabled` reads `activity`, which
+		// is still set) with nothing on screen to explain it. One Esc clears it,
+		// because this branch is above the transcript branch and takes the key
+		// first — so it is a confusing state, not a lock. The `?` overlay has the
+		// identical interaction and shipped with it, so refusing the key here would
+		// be half of one rule; the rule that wants writing is "a modal screen owns
+		// the view-switch key", and it belongs in both places at once. Left alone
+		// because there is no REPL-level input harness to falsify a change with
+		// (the panel's own tests mount the panel, not the REPL), and an untested
+		// change to shipped key handling is a worse trade than a recorded one.
+		if (activity && key.escape) {
+			store.set((s) => (s.activity ? { ...s, activity: null } : s));
 			return;
 		}
 		if (key.ctrl && input === "o") {
@@ -700,6 +725,14 @@ export function REPL({
 					) : null}
 					{wheelOpen && <CommandWheel entries={wheel} index={wheelIndex} />}
 					{shortcutsOpen && <ShortcutOverlay groups={shortcutGroups({ vim, commands: commandSuggestions })} />}
+					{activity && (
+						<ActivityPanel
+							home={activity.home}
+							range={activity.range}
+							onRange={(range) => store.set((s) => (s.activity ? { ...s, activity: { ...s.activity, range } } : s))}
+							onClose={() => store.set((s) => (s.activity ? { ...s, activity: null } : s))}
+						/>
+					)}
 					{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
 					<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
 				</>
@@ -715,7 +748,7 @@ export function REPL({
 			<Box display={transcriptMode ? "none" : "flex"} flexDirection="column">
 				<PromptInput
 					onSubmit={handleSubmit}
-					disabled={dialog !== null || question !== null || picker !== null || shortcutsOpen}
+					disabled={dialog !== null || question !== null || picker !== null || shortcutsOpen || activity !== null}
 					onToggleHelp={() => setShortcutsOpen(true)}
 					commandSuggestions={commandSuggestions}
 					completeFiles={completeFiles}

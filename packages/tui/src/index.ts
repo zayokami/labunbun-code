@@ -88,6 +88,7 @@ export {
 	useTheme,
 } from "./theme.ts";
 export {
+	type ActivityView,
 	INPUT_FULL_MAX,
 	initialUiState,
 	type PendingTool,
