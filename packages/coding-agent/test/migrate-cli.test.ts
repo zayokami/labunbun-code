@@ -3,45 +3,62 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/main.ts";
+import { MIGRATION_SOURCE_IDS } from "../src/migrate-types.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
 type SourceTree = Record<string, string>;
+
+/**
+ * Every variable that moves a source's tree out from under the fake home.
+ *
+ * Kept as one list rather than one `delete` per variable because a source added
+ * later brings its variables with it, and a per-variable list is where the next
+ * one gets forgotten — the same reason `migrate-wizard.test.ts` keeps its copy.
+ */
+const TREE_ENV_VARS = [
+	"DSH_HOME",
+	"GROK_HOME",
+	"KIMI_CODE_HOME",
+	"KIMI_SHARE_DIR",
+	"MINIMAX_DATA_DIR",
+	"MAVIS_DATA_DIR",
+	"STEPCODE_CONFIG_DIR",
+	"STEPCODE_STORAGE_ROOT_DIR",
+	"STEP_CODING_AGENT_DIR",
+	"STEP_CODING_AGENT_SESSION_DIR",
+	"OPENCODE_CONFIG_DIR",
+	"XDG_CONFIG_HOME",
+	"XDG_DATA_HOME",
+	"XDG_STATE_HOME",
+] as const;
 
 function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void): Promise<void> | void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-cli-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
-	// Three sources keep their root in the environment rather than under the home —
-	// `$DSH_HOME`, `$GROK_HOME` and `$KIMI_CODE_HOME` — so a developer whose shell
-	// exports one of them would have the CLI read *their* tree instead of the fake
-	// home's, and the report would name files this test never wrote. Kimi Code's
-	// predecessor tree comes from a fourth (`$KIMI_SHARE_DIR`), which would put an
-	// extra line in the report of a home that never held one.
-	const prevDsh = process.env.DSH_HOME;
-	const prevGrok = process.env.GROK_HOME;
-	const prevKimi = process.env.KIMI_CODE_HOME;
-	const prevKimiShare = process.env.KIMI_SHARE_DIR;
+	// Several sources keep their root in the environment rather than under the home
+	// — `$DSH_HOME`, `$GROK_HOME`, `$KIMI_CODE_HOME`, the MiniMax and Step pairs —
+	// so a developer whose shell exports one of them would have the CLI read
+	// *their* tree instead of the fake home's, and the report would name files this
+	// test never wrote. Kimi Code's predecessor tree comes from `$KIMI_SHARE_DIR`,
+	// which would put an extra line in the report of a home that never held one, and
+	// OpenCode's three roots all sit behind XDG variables — a developer who exports
+	// `XDG_CONFIG_HOME` has a real OpenCode tree this test never wrote.
+	const borrowed = TREE_ENV_VARS.map((name) => [name, process.env[name]] as const);
 	const restore = (): void => {
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
 		else process.env.HOME = prevPosixHome;
-		if (prevDsh === undefined) delete process.env.DSH_HOME;
-		else process.env.DSH_HOME = prevDsh;
-		if (prevGrok === undefined) delete process.env.GROK_HOME;
-		else process.env.GROK_HOME = prevGrok;
-		if (prevKimi === undefined) delete process.env.KIMI_CODE_HOME;
-		else process.env.KIMI_CODE_HOME = prevKimi;
-		if (prevKimiShare === undefined) delete process.env.KIMI_SHARE_DIR;
-		else process.env.KIMI_SHARE_DIR = prevKimiShare;
+		for (const [name, value] of borrowed) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
 		rmSync(home, { recursive: true, force: true });
 	};
 	process.env.USERPROFILE = home;
 	process.env.HOME = home;
-	delete process.env.DSH_HOME;
-	delete process.env.GROK_HOME;
-	delete process.env.KIMI_CODE_HOME;
-	delete process.env.KIMI_SHARE_DIR;
+	for (const name of TREE_ENV_VARS) delete process.env[name];
 	for (const [path, content] of Object.entries(tree)) {
 		const full = join(home, path);
 		mkdirSync(join(full, ".."), { recursive: true });
@@ -140,9 +157,7 @@ describe("migrate CLI", () => {
 			const { code, err } = await run(["migrate", "--from", "nope"]);
 			expect(code).toBe(2);
 			expect(err).toContain("Unknown migration source: nope");
-			expect(err).toContain(
-				"claude-code, codex, zcode, agents, deepseek-harness, grok-build, kimi-code, minimax-code, step-code, all",
-			);
+			expect(err).toContain(`${MIGRATION_SOURCE_IDS.join(", ")}, all`);
 		});
 	});
 
@@ -245,9 +260,10 @@ describe("migrate CLI", () => {
 	test("--help lists the new sources and flags", async () => {
 		const { code, out } = await run(["--help"]);
 		expect(code).toBe(0);
-		expect(out).toContain(
-			"claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | all",
-		);
+		// Built from the source list rather than written out, so a source added
+		// later is in the expected string the day it is registered instead of the
+		// day somebody remembers to touch this assertion.
+		expect(out).toContain(`${MIGRATION_SOURCE_IDS.join(" | ")} | all`);
 		expect(out).toContain("--only <categories>");
 		expect(out).toContain("--history-scope <s>");
 		expect(out).toContain("--history-limit <n>");

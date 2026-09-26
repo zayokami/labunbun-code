@@ -41,6 +41,8 @@ import { listKimiSessions, readKimiSession } from "./kimi-session.ts";
 import type { MigrationSourceId } from "./migrate-types.ts";
 import { minimaxRoot } from "./minimax-home.ts";
 import { listMinimaxSessions, readMinimaxSession } from "./minimax-session.ts";
+import { type OpencodePartRow, readOpencodeConversation, readOpencodeSessions } from "./opencode-db.ts";
+import { opencodeDatabasePath, opencodePromptHistoryFile, opencodeRoots } from "./opencode-home.ts";
 import { listStepSessions, readStepSession } from "./step-session.ts";
 import { readZcodeConversation, readZcodeSessions, type ZcodePartRow } from "./zcode-db.ts";
 import { zcodeDbPathFor } from "./zcode-read.ts";
@@ -71,8 +73,9 @@ export interface HistoryCandidate {
 	/**
 	 * The source had filed this session away rather than leaving it in the
 	 * ordinary place, and a reader of the report deserves to know the transcript
-	 * came from there. Only Codex has the distinction so far: it moves a rollout
-	 * into `archived_sessions/` when the user archives the session.
+	 * came from there. Codex moves a rollout into `archived_sessions/` when the
+	 * user archives it; OpenCode keeps a nullable `time_archived` on the row
+	 * instead, which is the same statement written in a different storage engine.
 	 */
 	archived?: boolean;
 }
@@ -1037,6 +1040,250 @@ function readZcodeSession(sourceId: string, home: string): { entries: HistoryEnt
 }
 
 // ---------------------------------------------------------------------------
+// OpenCode
+// ---------------------------------------------------------------------------
+
+/**
+ * What a compaction marker says when the transcript holds the trigger but not the
+ * summary. OpenCode's own reader only accepts a completed pair
+ * (`session/compaction.ts:108` — a summary that also has to be finished and
+ * unerrored), so a compaction recorded by a build that was interrupted leaves
+ * exactly this case; saying so beats dropping the marker, which would import a
+ * transcript that silently claims never to have been summarized.
+ */
+const OPENCODE_MISSING_SUMMARY = "(compaction recorded by OpenCode; its summary is not in this database)";
+
+/** The database this install reads, resolved the way the reader resolves it. */
+function opencodeDbPathFor(home: string): string | null {
+	return opencodeDatabasePath(opencodeRoots(home).data);
+}
+
+/**
+ * OpenCode's sessions, as history candidates.
+ *
+ * A subagent session (`parent_id` set) is counted and skipped for the same reason
+ * ZCode's are: it is a task the primary ran, not a conversation the user had, and
+ * importing it would replay the subagent's turns as though the user had typed
+ * them. An archived session is imported with the flag rather than skipped, which
+ * is what Codex's `archived_sessions/` already does — it is a real conversation
+ * the user chose to put away, and "archived" is a property the target records too.
+ */
+function listOpencodeHistory(home: string): HistoryListing {
+	const candidates: HistoryCandidate[] = [];
+	let children = 0;
+	// Resolved once, for the same reason `listZcodeHistory` does it: the name of
+	// the file depends on a variable and on which channel this build was installed
+	// from, and a listing that disagreed with the reader would report a source as
+	// holding transcripts that the read phase then finds nowhere.
+	const dbPath = opencodeDbPathFor(home);
+	if (dbPath === null) return { candidates, notes: [] };
+	for (const session of readOpencodeSessions(dbPath)) {
+		if (session.parentId) {
+			children += 1;
+			continue;
+		}
+		candidates.push({
+			source: "opencode",
+			sourceId: session.id,
+			cwd: session.directory,
+			title: session.title,
+			startedAt: session.timeCreated,
+			path: dbPath,
+			...(session.timeArchived > 0 ? { archived: true } : {}),
+		});
+	}
+	const notes: HistoryNote[] = [];
+	if (children > 0) notes.push({ reason: "subagent session", count: children });
+	return { candidates, notes };
+}
+
+/**
+ * A compaction's summary text, the way `summaryText` assembles it
+ * (`session/compaction.ts:87-95`): text parts alone, each trimmed, blanks dropped,
+ * joined by a blank line, and the whole trimmed again.
+ */
+function opencodeSummaryText(parts: OpencodePartRow[]): string {
+	return parts
+		.filter((part) => part.type === "text")
+		.map((part) => asText(part.data.text).trim())
+		.filter(Boolean)
+		.join("\n\n")
+		.trim();
+}
+
+function readOpencodeSession(sourceId: string, home: string): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const dbPath = opencodeDbPathFor(home);
+	if (dbPath === null) return { entries: [], notes: [] };
+	const { messages, parts } = readOpencodeConversation(dbPath, sourceId);
+	const notes: HistoryNote[] = [];
+	let synthetic = 0;
+	let ignored = 0;
+	let emptyOutputs = 0;
+	let summaries = 0;
+
+	const partsByMessage = new Map<string, OpencodePartRow[]>();
+	for (const part of parts) {
+		const list = partsByMessage.get(part.messageId);
+		if (list) list.push(part);
+		else partsByMessage.set(part.messageId, [part]);
+	}
+
+	// Which user messages triggered a compaction, and what each one summarized.
+	//
+	// OpenCode splits a compaction across **two** messages and joins them with a
+	// link rather than with their order: the user's own message gains a
+	// `compaction` part (`CompactionPart`, `packages/schema/src/v1/session.ts:195-201`),
+	// and a separate assistant message carries `summary: true` and names the user
+	// message in its `parentID` — which is the only field on the pair, since
+	// `messageBase` is just `{ id, sessionID }` (`session.ts:327-330`) and
+	// `Assistant.parentID` is required (`session.ts:461`). OpenCode's own reader
+	// finds the pair the same way, indexing the users that hold a compaction part
+	// and reaching them from the assistant through `msg.info.parentID`
+	// (`session/compaction.ts:96-112`). Matching on adjacency instead would pair
+	// the summary with whichever user message happened to be written before it,
+	// which is a different message whenever anything landed in between.
+	const compactionHeads = new Set<string>();
+	const summaryByHead = new Map<string, string>();
+	for (const message of messages) {
+		const role = asText(message.data.role);
+		const own = partsByMessage.get(message.id) ?? [];
+		if (role === "user") {
+			if (own.some((part) => part.type === "compaction")) compactionHeads.add(message.id);
+			continue;
+		}
+		// `summary` is `true` on an assistant and an *object* (`{ title, body,
+		// diffs }`, `session.ts:339-345`) on a user, so the comparison below is
+		// also what keeps a user's own session summary from being read as one.
+		if (role === "assistant" && message.data.summary === true) {
+			const parent = asText(message.data.parentID);
+			if (parent) summaryByHead.set(parent, opencodeSummaryText(own));
+		}
+	}
+
+	const collected: AgentMessage[] = [];
+	// A marker belongs right after the message that triggered it. Its position is
+	// kept as an index into the message stream; if the repair pass drops something,
+	// the markers move to the end rather than land mid-stream.
+	const markers: Array<{ after: number; entry: HistoryEntry }> = [];
+	for (const message of messages) {
+		const role = asText(message.data.role);
+		const created = asRecord(message.data.time)?.created;
+		const timestamp = typeof created === "number" ? created : message.timeCreated;
+		const own = [...(partsByMessage.get(message.id) ?? [])].sort((a, b) => a.timeCreated - b.timeCreated);
+
+		if (role === "user") {
+			const texts: string[] = [];
+			for (const part of own) {
+				if (part.type === "text") {
+					// Injected by the tool itself (file contents, reminders) rather
+					// than typed by the user.
+					if (part.data.synthetic === true) {
+						synthetic += 1;
+						continue;
+					}
+					const text = asText(part.data.text);
+					if (text) texts.push(text);
+					continue;
+				}
+				if (part.type === "compaction") continue;
+				if (part.type !== "step-start" && part.type !== "step-finish") ignored += 1;
+			}
+			if (texts.length > 0) collected.push(userMessage(texts.join("\n\n"), timestamp));
+			if (compactionHeads.has(message.id)) {
+				summaries += 1;
+				markers.push({
+					after: collected.length,
+					entry: {
+						kind: "compaction",
+						summary: summaryByHead.get(message.id) || OPENCODE_MISSING_SUMMARY,
+						// `CompactionPart` records no token count, and neither does a
+						// guess: zero reads as "not recorded", where an estimate would
+						// read as a measurement this importer never took.
+						preTokens: 0,
+					},
+				});
+			}
+			continue;
+		}
+		if (role !== "assistant") {
+			ignored += own.length;
+			continue;
+		}
+		// The assistant half of a compaction: the summary text is already in the
+		// marker, so emitting the message would put it in the transcript twice.
+		if (message.data.summary === true) continue;
+
+		const content: AssistantContent[] = [];
+		const results: AgentMessage[] = [];
+		for (const part of own) {
+			if (part.type === "text") {
+				const text = asText(part.data.text);
+				if (text) content.push(textContent(text));
+				continue;
+			}
+			if (part.type === "reasoning") {
+				const thinking = asText(part.data.text);
+				if (thinking) content.push({ type: "thinking", thinking });
+				continue;
+			}
+			if (part.type === "tool") {
+				// `state` is a four-way union discriminated on `status`
+				// (`session.ts:304-310`), and which field holds the answer depends
+				// on the arm: `output` once completed, `error` once it failed, and
+				// neither while pending or running. `input` is a record on all four
+				// arms, so it is stringified rather than parsed.
+				const state = asRecord(part.data.state) ?? {};
+				const callId = asText(part.data.callID);
+				if (!callId) {
+					ignored += 1;
+					continue;
+				}
+				const name = asText(part.data.tool) || UNKNOWN_TOOL_NAME;
+				const status = asText(state.status);
+				content.push({
+					type: "toolCall",
+					id: callId,
+					name,
+					arguments: JSON.stringify(asRecord(state.input) ?? {}),
+				});
+				const output = asText(state.output) || asText(state.error);
+				if (!output) emptyOutputs += 1;
+				results.push(toolResultMessage(callId, name, resultContent(output), status === "error", timestamp));
+				continue;
+			}
+			if (part.type !== "step-start" && part.type !== "step-finish") ignored += 1;
+		}
+		if (content.length > 0) {
+			const calls = content.some((block) => block.type === "toolCall");
+			collected.push(assistantMessage({ content, timestamp, stopReason: calls ? "toolUse" : "stop" }));
+			collected.push(...results);
+		} else if (results.length > 0) {
+			// Results without their call cannot be replayed, and the repair pass
+			// below would drop them anyway; counting them is more honest.
+			ignored += results.length;
+		}
+	}
+
+	const repaired = repairToolPairing(collected);
+	let entries: HistoryEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
+	if (markers.length > 0) {
+		if (repaired.dropped === 0) {
+			for (const marker of [...markers].sort((a, b) => b.after - a.after)) {
+				entries.splice(Math.min(marker.after, entries.length), 0, marker.entry);
+			}
+		} else {
+			entries = [...entries, ...markers.map((marker) => marker.entry)];
+		}
+	}
+	if (synthetic > 0) notes.push({ reason: "tool-injected text part", count: synthetic });
+	if (ignored > 0) notes.push({ reason: "unsupported part", count: ignored });
+	if (emptyOutputs > 0) notes.push({ reason: "tool call with no recorded output", count: emptyOutputs });
+	if (summaries > 0) notes.push({ reason: "compaction summary", count: summaries });
+	if (repaired.dropped > 0) notes.push({ reason: "unpaired tool call or result", count: repaired.dropped });
+	return { entries, notes };
+}
+
+// ---------------------------------------------------------------------------
 // DeepSeek Harness
 // ---------------------------------------------------------------------------
 
@@ -1620,6 +1867,60 @@ function readStepHistory(home: string, candidate: HistoryCandidate): { entries: 
 	return { entries: read.entries, notes: read.notes };
 }
 
+/**
+ * OpenCode's ↑ recall list, which is on disk and cannot come across.
+ *
+ * `<state>/prompt-history.jsonl` is the last 50 entries, one JSON `PromptInfo` per
+ * line — `{ input, mode?, parts }` (`packages/tui/src/prompt/history.tsx:14-27`).
+ * Two things keep it out of the recall list, and the second is the one that
+ * decides it:
+ *
+ * 1. `mode: "shell"` is a shell line, the same distinction grok records as
+ *    `is_bash`. Both append sites pass the mode through
+ *    (`prompt/index.tsx:1122-1124` and `:1274-1277`), and recalling a shell line
+ *    as a prompt would offer it as the next thing to send to a model.
+ * 2. **Nothing in an entry says where it was typed.** `PromptInfo` has no session
+ *    id, no directory and no timestamp, and both call sites append exactly
+ *    `{...store.prompt, mode}` — so the session that owns a prompt cannot even be
+ *    looked up afterwards in the database. A `PromptEntry` here is
+ *    `{ text, cwd, timestamp }`, and `loadHistory` drops every line whose `cwd` is
+ *    not the project being opened (`history.ts:82`), which makes an entry filed
+ *    under no directory one that ↑ will never offer, in this project or any other.
+ *
+ * So the list is reported rather than imported, and the count is the part that
+ * earns its keep: fifty remembered prompts is a fact about what the user is about
+ * to leave behind, and silence would read as "you never typed anything here".
+ */
+function readOpencodePromptHistory(
+	home: string,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
+	const path = opencodePromptHistoryFile(opencodeRoots(home).state);
+	if (!existsSync(path)) return selectPrompts(scan, options);
+	const tail = readTailLines(path, PROMPT_HISTORY_BYTES);
+	scan.truncated = tail.truncated;
+	for (const line of tail.lines) {
+		if (!line.trim()) continue;
+		const parsed = parseJsonLine(line);
+		if (!parsed) {
+			bump(scan.counts, "line not in the history shape");
+			continue;
+		}
+		scan.seen += 1;
+		if (asText(parsed.mode) === "shell") {
+			bump(scan.counts, "line typed in shell mode — a shell command, not a prompt to a model");
+			continue;
+		}
+		bump(
+			scan.counts,
+			"prompt whose entry records no working directory or session — this build's recall is filtered by " +
+				"project, so it would be filed under none and ↑ would never offer it",
+		);
+	}
+	return selectPrompts(scan, options);
+}
+
 /** Prompts a source remembers, ready to be merged into the recall list. */
 export function readPromptHistory(
 	source: MigrationSourceId,
@@ -1632,6 +1933,7 @@ export function readPromptHistory(
 	if (source === "grok-build") return readGrokPromptHistory(home, options);
 
 	if (source === "kimi-code") return readKimiPromptHistory(home, options);
+	if (source === "opencode") return readOpencodePromptHistory(home, options);
 
 	// MiniMax has no prompt list, and the reason is specific enough to be worth a
 	// line rather than the usual silence. Three things on its disk could be mistaken
@@ -1703,7 +2005,9 @@ export function listHistory(
 									? listMinimaxHistory(home)
 									: source === "step-code"
 										? listStepHistory(home)
-										: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
+										: source === "opencode"
+											? listOpencodeHistory(home)
+											: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
 	return narrowCandidates(listed, options);
 }
 
@@ -1764,6 +2068,7 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 			if (source === "claude-code") converted = readClaudeCodeSession(candidate.path, candidate);
 			else if (source === "codex") converted = readCodexSession(candidate.path, candidate);
 			else if (source === "zcode") converted = readZcodeSession(candidate.sourceId, home);
+			else if (source === "opencode") converted = readOpencodeSession(candidate.sourceId, home);
 			else if (source === "deepseek-harness") {
 				const read = readDshLog(candidate.path);
 				// A log this build must not reconstruct (an event type it does not know)
@@ -1828,6 +2133,13 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 			continue;
 		}
 		if (converted.entries.length === 0) {
+			// The reader's own reasons are pushed first, for the reason the step and
+			// deepseek branches give inline: a session whose every turn was a shape
+			// this build cannot carry has been *explained*, and dropping the
+			// explanation leaves the user with a bare count and a wrong conclusion
+			// ("those sessions were empty" rather than "those sessions were made of
+			// images and tool output").
+			if (converted.notes.length > 0) notes.push(...converted.notes);
 			failed += 1;
 			continue;
 		}

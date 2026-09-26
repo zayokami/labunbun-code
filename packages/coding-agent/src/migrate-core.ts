@@ -55,6 +55,137 @@ export function readText(path: string): string | null {
 	}
 }
 
+/**
+ * A JSON document that may carry comments and trailing commas.
+ *
+ * Written for OpenCode, which parses **every** one of its three settings files
+ * with `ConfigParse.jsonc` (`opencode/src/config/config.ts:240`) — not just the
+ * one named `.jsonc`. So `// my provider` above a block in `opencode.json` is a
+ * legal line in a file whose extension promises plain JSON, and handing that
+ * file to {@link readJson} throws it away in total: the catch there returns
+ * `{}`, and the report then says nothing about a file the user can see is full
+ * of settings. The failure is silent in the worst direction.
+ *
+ * The stripping is a scanner rather than a regex, and the reason is the whole
+ * point of the function. `text.replace(/\/\/.*$/gm, "")` mangles `"baseURL":
+ * "https://api.example.com"` — it cuts the value at the `//` — and a Windows
+ * path in a `"command"` array loses everything after its separator. So this
+ * tracks whether it is inside a string, and honours `\` as an escape inside one,
+ * which is what keeps a URL's `//` and a Windows path's `\\` intact.
+ *
+ * Trailing commas are removed by the same pass for the same reason: they cannot
+ * be a regex over the whole document without also matching a comma inside a
+ * string value.
+ *
+ * It is not a general JSONC implementation. A string containing a literal
+ * newline (illegal in JSON) is not repaired, and a `//` inside a *block* comment
+ * is handled because the scanner is a small state machine rather than a
+ * substitution — but anything the vendor's `jsonc-parser` accepts and this does
+ * not costs one settings file, which is reported rather than lost quietly.
+ */
+export function parseJsonc(text: string): Record<string, unknown> {
+	const parsed: unknown = JSON.parse(stripJsonc(text));
+	return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+		? (parsed as Record<string, unknown>)
+		: {};
+}
+
+/** {@link parseJsonc} over a file, with {@link readJson}'s "migrate nothing" failure. */
+export function readJsonc(path: string): Record<string, unknown> {
+	try {
+		if (!existsSync(path)) return {};
+		return parseJsonc(readFileSync(path, "utf8"));
+	} catch {
+		// The same trade {@link readJson} makes, and for the same reason: the other
+		// sources are still worth importing.
+		return {};
+	}
+}
+
+/** Comments and trailing commas removed, with strings left byte-for-byte intact. */
+function stripJsonc(text: string): string {
+	let out = "";
+	let inString = false;
+	let escaped = false;
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i];
+		// Inside a string nothing is a comment and nothing is a comma to remove;
+		// the escape flag is what tells a `\"` from a closing quote.
+		if (inString) {
+			out += char;
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			out += char;
+			continue;
+		}
+		if (char === "/" && text[i + 1] === "/") {
+			while (i < text.length && text[i] !== "\n") i++;
+			out += "\n";
+			continue;
+		}
+		if (char === "/" && text[i + 1] === "*") {
+			i += 2;
+			while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) {
+				// A block comment's newlines are kept: dropping them would join two
+				// lines and move every column number a parse error reports.
+				if (text[i] === "\n") out += "\n";
+				i++;
+			}
+			i++;
+			continue;
+		}
+		// A comma is dropped only when the next character that is neither space nor
+		// comment closes an object or an array. This test lives here rather than in a
+		// `replace(/,(\s*[}\]])/g, "$1")` over the finished text for the same reason
+		// the comment tests do: a regex cannot see string boundaries, so it would eat
+		// the comma out of a value like `"a, }"` and silently rewrite it.
+		//
+		// The lookahead skips comments as well as space, which is not a nicety: a
+		// comment after the last entry is the most common place a hand-edited
+		// `.jsonc` file has one, so looking only past whitespace left the comma in
+		// front of `/* … */\n}` and `JSON.parse` rejected the whole document — the
+		// exact silent loss this function exists to prevent, arriving by the other
+		// door.
+		if (char === ",") {
+			const ahead = skipJsonTrivia(text, i + 1);
+			if (text[ahead] === "}" || text[ahead] === "]") continue;
+		}
+		out += char;
+	}
+	return out;
+}
+
+/**
+ * The index of the next character that carries meaning: past whitespace and past
+ * both comment forms, without copying or removing anything.
+ */
+function skipJsonTrivia(text: string, from: number): number {
+	let i = from;
+	while (i < text.length) {
+		if (/\s/.test(text[i])) {
+			i += 1;
+			continue;
+		}
+		if (text[i] === "/" && text[i + 1] === "/") {
+			while (i < text.length && text[i] !== "\n") i += 1;
+			continue;
+		}
+		if (text[i] === "/" && text[i + 1] === "*") {
+			i += 2;
+			while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i += 1;
+			i += 2;
+			continue;
+		}
+		return i;
+	}
+	return i;
+}
+
 /** Directories inside a skill that hold somebody else's files, not the skill's. */
 const SKILL_EXCLUDED_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv"]);
 

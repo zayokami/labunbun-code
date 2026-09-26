@@ -102,6 +102,9 @@ import {
 import { planMinimaxAssets, planMinimaxCode } from "./minimax-plan.ts";
 import type { RawMinimaxCode } from "./minimax-read.ts";
 import { readMinimaxCode } from "./minimax-read.ts";
+import { planOpencode, planOpencodeAssets } from "./opencode-plan.ts";
+import type { RawOpencode } from "./opencode-read.ts";
+import { readOpencode } from "./opencode-read.ts";
 import { mergeSettings, type RawSettingsInput } from "./settings.ts";
 import { planStepAssets, planStepCode } from "./step-plan.ts";
 import type { RawStepCode } from "./step-read.ts";
@@ -121,6 +124,7 @@ export interface RawSources {
 	kimiCode: RawKimiCode;
 	minimaxCode: RawMinimaxCode;
 	stepCode: RawStepCode;
+	opencode: RawOpencode;
 }
 
 export function readSources(home: string): RawSources {
@@ -135,6 +139,7 @@ export function readSources(home: string): RawSources {
 		kimiCode: readKimiCode(home),
 		minimaxCode: readMinimaxCode(home),
 		stepCode: readStepCode(home),
+		opencode: readOpencode(home),
 	};
 }
 
@@ -683,6 +688,28 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		if (wants("assets")) planStepAssets(raw.stepCode, raw.home, force, items, writes);
 	}
 
+	if (only.includes("opencode") && raw.opencode.present) {
+		if (wants("settings")) {
+			planOpencode(
+				raw.opencode,
+				raw.home,
+				items,
+				writes,
+				claimScalar,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				settingsPatch,
+				existing,
+				existingMcpServers,
+				force,
+				addPermissionRules,
+			);
+		}
+		if (wants("assets")) planOpencodeAssets(raw.opencode, raw.home, force, items, writes);
+	}
+
 	if (options.historyScope === "none" && wants("history")) {
 		items.push({
 			source: only[0] ?? "claude-code",
@@ -1172,6 +1199,12 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	// has no other reason to make: unlike its three neighbours, Step keeps no
 	// prompt list on disk, so there is nothing the walk could rescue.
 	if (source === "step-code") return raw.stepCode.present;
+
+	// OpenCode's prompt list is not a file this importer reads: its sessions live
+	// in a sqlite database, and the count that would answer the deep question is
+	// guarded behind a database opened read-only, if at all. So the shallow
+	// question is the same one its four neighbours answer.
+	if (source === "opencode") return raw.opencode.present;
 	return raw.agents.present;
 }
 

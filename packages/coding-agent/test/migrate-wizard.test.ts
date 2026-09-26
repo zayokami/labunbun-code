@@ -43,6 +43,13 @@ const TREE_ENV_VARS = [
 	"STEPCODE_STORAGE_ROOT_DIR",
 	"STEP_CODING_AGENT_DIR",
 	"STEP_CODING_AGENT_SESSION_DIR",
+	// OpenCode's three roots, all of which the XDG bases can move. A developer
+	// who exports `XDG_CONFIG_HOME` has a real OpenCode tree somewhere this test
+	// never wrote, and detection would offer it as a source.
+	"OPENCODE_CONFIG_DIR",
+	"XDG_CONFIG_HOME",
+	"XDG_DATA_HOME",
+	"XDG_STATE_HOME",
 ] as const;
 
 /** The fake home, both in the environment and in the caller's hands. */

@@ -18,6 +18,7 @@ import { DSH_DEFAULT_DIR, dshRoot } from "./dsh-home.ts";
 import { GROK_DEFAULT_DIR, grokRoot } from "./grok-home.ts";
 import { KIMI_CODE_DEFAULT_DIR, kimiRoot } from "./kimi-home.ts";
 import { MINIMAX_DATA_DIR_BASENAME, minimaxRoot } from "./minimax-home.ts";
+import { opencodeRoots } from "./opencode-home.ts";
 import { STEPCODE_DEFAULT_DIR, stepRoot } from "./step-home.ts";
 import { ZCODE_DEFAULT_DIR, zcodeRoot } from "./zcode-home.ts";
 
@@ -34,7 +35,8 @@ export type MigrationSourceId =
 	| "grok-build"
 	| "kimi-code"
 	| "minimax-code"
-	| "step-code";
+	| "step-code"
+	| "opencode";
 
 /**
  * Ordered as the picker and `--from` list them. New sources are appended: the
@@ -51,6 +53,7 @@ export const MIGRATION_SOURCE_IDS: MigrationSourceId[] = [
 	"kimi-code",
 	"minimax-code",
 	"step-code",
+	"opencode",
 ];
 
 /** Display names for the picker; the ids themselves are the CLI switches. */
@@ -64,6 +67,7 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	"kimi-code": "Kimi Code",
 	"minimax-code": "MiniMax Code",
 	"step-code": "Step Code",
+	opencode: "OpenCode",
 };
 
 /**
@@ -84,6 +88,12 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	"kimi-code": KIMI_CODE_DEFAULT_DIR,
 	"minimax-code": MINIMAX_DATA_DIR_BASENAME,
 	"step-code": STEPCODE_DEFAULT_DIR,
+	// Not a single segment, and the only entry here that is two directories deep:
+	// OpenCode puts its tree under the XDG bases, and `xdg-basedir@5.1.0` has no
+	// Windows branch, so on Windows this is `~/.config/opencode` and not
+	// `%APPDATA%`. The path exists to render a label — see `sourceRoot`, which is
+	// what actually finds the tree.
+	opencode: ".config/opencode",
 };
 
 /**
@@ -117,6 +127,11 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	if (id === "kimi-code") return kimiRoot(home);
 	if (id === "minimax-code") return minimaxRoot(home).root;
 	if (id === "step-code") return stepRoot(home);
+	// OpenCode's three roots are three different XDG bases, and this is the config
+	// one; detection looks at the config and data roots together, in
+	// `detectionRoots`. See `opencodeRoots`, which is what the reader uses for all
+	// three.
+	if (id === "opencode") return opencodeRoots(home).config;
 	if (id === "zcode") return zcodeRoot(home);
 	return join(home, SOURCE_ROOTS[id]);
 }
@@ -139,7 +154,33 @@ function sourceHasContent(root: string): boolean {
 }
 
 export function detectSources(home: string): MigrationSourceId[] {
-	return MIGRATION_SOURCE_IDS.filter((id) => sourceHasContent(sourceRoot(id, home)));
+	return MIGRATION_SOURCE_IDS.filter((id) => detectionRoots(id, home).some(sourceHasContent));
+}
+
+/**
+ * The trees whose being non-empty means "this source is here".
+ *
+ * One for every source except OpenCode, which needs two. `core/src/global.ts:34-42`
+ * creates the config root at import time, before the user has written a setting,
+ * so on a stock install the config root exists and is *empty* — and
+ * {@link sourceHasContent} counts an empty directory as absent, which is right for
+ * a directory other tools create and wrong for this one. A user who has run
+ * OpenCode, talked to it, and never touched a setting has settings to import from
+ * nowhere and sessions to import from `<data>`; detection that looked only at the
+ * config root would offer them a source with nothing in it and hide the one with
+ * everything.
+ *
+ * The `OPENCODE_CONFIG_DIR` case is the sharp one: the override replaces
+ * `Global.Path.config` (`core/src/global.ts:64`), so a user who sets it has a tree
+ * at an arbitrary path that only comes into being when something is written there,
+ * while every session sits in the untouched default data root.
+ */
+function detectionRoots(id: MigrationSourceId, home: string): string[] {
+	if (id === "opencode") {
+		const roots = opencodeRoots(home);
+		return [roots.config, roots.data];
+	}
+	return [sourceRoot(id, home)];
 }
 
 // ---------------------------------------------------------------------------
