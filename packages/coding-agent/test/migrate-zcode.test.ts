@@ -17,6 +17,7 @@ import {
 	zcodeStorageDir,
 } from "../src/zcode-home.ts";
 import { zcodeReachableCommands } from "../src/zcode-plan.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
 type SourceTree = Record<string, string>;
@@ -33,14 +34,16 @@ function withHome(tree: SourceTree, body: (home: string) => void, seed?: (home: 
 	// tree under `~/.zcode`, and a set `ZCODE_DATA_BASE_DIR` or `ZCODE_STORAGE_DIR`
 	// would move that tree out from under the whole file. A test that wants one
 	// sets it itself, and this restores whatever was there before.
-	const borrowed = new Map<string, string | undefined>(
-		["USERPROFILE", "HOME", "ZCODE_DATA_BASE_DIR", "ZCODE_STORAGE_DIR"].map((name) => [name, process.env[name]]),
-	);
+	//
+	// The borrow covers the other ten sources too, not only this one: a file that
+	// tests one source still runs `readSources` over all twelve, so borrowing only
+	// its own would leave the others reading the developer's machine — which is
+	// not a hypothetical, since `APPDATA` put a real Cursor install into a
+	// "ZCode is not installed here" assertion on the machine this was written on.
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
-		delete process.env.ZCODE_DATA_BASE_DIR;
-		delete process.env.ZCODE_STORAGE_DIR;
 		for (const [path, content] of Object.entries(tree)) {
 			const full = join(home, path);
 			mkdirSync(join(full, ".."), { recursive: true });
@@ -49,10 +52,7 @@ function withHome(tree: SourceTree, body: (home: string) => void, seed?: (home: 
 		seed?.(home);
 		body(home);
 	} finally {
-		for (const [name, value] of borrowed) {
-			if (value === undefined) delete process.env[name];
-			else process.env[name] = value;
-		}
+		releaseSourceEnv();
 		rmSync(home, { recursive: true, force: true });
 	}
 }

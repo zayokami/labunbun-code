@@ -14,12 +14,14 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { resolveModel } from "@labunbun/ai";
 import { codexRoot } from "./codex-home.ts";
+import { cursorDetectionRoots, cursorUserRoot } from "./cursor-home.ts";
 import { DSH_DEFAULT_DIR, dshRoot } from "./dsh-home.ts";
 import { GROK_DEFAULT_DIR, grokRoot } from "./grok-home.ts";
 import { KIMI_CODE_DEFAULT_DIR, kimiRoot } from "./kimi-home.ts";
 import { MINIMAX_DATA_DIR_BASENAME, minimaxRoot } from "./minimax-home.ts";
 import { opencodeRoots } from "./opencode-home.ts";
 import { STEPCODE_DEFAULT_DIR, stepRoot } from "./step-home.ts";
+import { traeDetectionRoots, traeEdition, traeGlobalRulesDir } from "./trae-home.ts";
 import { ZCODE_DEFAULT_DIR, zcodeRoot } from "./zcode-home.ts";
 
 // ---------------------------------------------------------------------------
@@ -36,7 +38,9 @@ export type MigrationSourceId =
 	| "kimi-code"
 	| "minimax-code"
 	| "step-code"
-	| "opencode";
+	| "opencode"
+	| "cursor"
+	| "trae";
 
 /**
  * Ordered as the picker and `--from` list them. New sources are appended: the
@@ -54,6 +58,8 @@ export const MIGRATION_SOURCE_IDS: MigrationSourceId[] = [
 	"minimax-code",
 	"step-code",
 	"opencode",
+	"cursor",
+	"trae",
 ];
 
 /** Display names for the picker; the ids themselves are the CLI switches. */
@@ -68,6 +74,8 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	"minimax-code": "MiniMax Code",
 	"step-code": "Step Code",
 	opencode: "OpenCode",
+	cursor: "Cursor",
+	trae: "Trae",
 };
 
 /**
@@ -94,6 +102,14 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	// `%APPDATA%`. The path exists to render a label — see `sourceRoot`, which is
 	// what actually finds the tree.
 	opencode: ".config/opencode",
+	// Both of these are *also* not the whole story, and for a reason the other nine
+	// do not have: an IDE that has been opened and used keeps its state in a
+	// profile directory outside the home, so the home-relative spelling is the CLI
+	// half only. `cursor` is the CLI's home; `trae` is the international global
+	// home, and the China build's is `.trae-cn`. Both exist to render a label —
+	// `detectionRoots` is what finds the trees.
+	cursor: ".cursor",
+	trae: ".trae",
 };
 
 /**
@@ -132,6 +148,21 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	// `detectionRoots`. See `opencodeRoots`, which is what the reader uses for all
 	// three.
 	if (id === "opencode") return opencodeRoots(home).config;
+	// Neither of these is a home-relative join. Both are VS Code forks whose state
+	// lives outside the home, and both have a first-class path derivation worth
+	// calling rather than spelling out again here.
+	//
+	// **These two branches are unreachable today, and no test covers them.**
+	// `detectionRoots` answers both ids before it ever gets here, because a VS Code
+	// fork is detected by more than one root. They are kept because they are the
+	// right answer — `~/.trae` would be *wrong* for Trae, whose global rules live in
+	// `~/.trae/user_rules` — and a future caller deserves the correct one. The
+	// alternative, deleting them, leaves `return join(home, SOURCE_ROOTS[id])` as the
+	// fallthrough for a source whose root is not a home-relative join, with nothing
+	// to catch it. Said here rather than left for a reader to assume a branch that
+	// runs on every import.
+	if (id === "cursor") return cursorUserRoot(home);
+	if (id === "trae") return traeGlobalRulesDir(home, traeEdition(home));
 	if (id === "zcode") return zcodeRoot(home);
 	return join(home, SOURCE_ROOTS[id]);
 }
@@ -180,6 +211,15 @@ function detectionRoots(id: MigrationSourceId, home: string): string[] {
 		const roots = opencodeRoots(home);
 		return [roots.config, roots.data];
 	}
+	// The two IDE sources, and the same mistake avoided in both. A user who has
+	// opened the editor and never run its CLI has no home-relative directory at
+	// all, and a user who has run the CLI and never opened the editor has no
+	// profile directory. Looking at one of each would call the source absent on
+	// half the machines that have it — and the import would then find the other's
+	// contents, which is the worse of the two failures: a source that was offered
+	// as empty and then imported from anyway.
+	if (id === "cursor") return cursorDetectionRoots(home);
+	if (id === "trae") return traeDetectionRoots(home);
 	return [sourceRoot(id, home)];
 }
 

@@ -22,6 +22,15 @@
  *   minimax-code $MINIMAX_DATA_DIR, else $MAVIS_DATA_DIR, else ~/.minimax —
  *                config.yaml, permission.json, mcp.json, AGENTS.md, skills,
  *                agents, plans, v2/sessions
+ *   step-code    $STEPCODE_CONFIG_DIR, else ~/.step-code — config.toml, mcp.json,
+ *                AGENTS.md, skills, agents, sessions
+ *   opencode     $OPENCODE_CONFIG_DIR, else <XDG config>/opencode — config.json /
+ *                opencode.json / opencode.jsonc (merged in that order, all JSONC),
+ *                providers, MCP, AGENTS.md, asset trees, opencode.db
+ *   cursor       ~/.cursor (cli-config.json, hooks.json, mcp.json),
+ *                <project>/.cursor/rules, ~/.config/cursor/prompt_history.json
+ *   trae         ~/.trae/user_rules, <project>/.trae/rules, <editor profile>/
+ *                User/mcp.json
  *
  * Structure: read (I/O) → plan (pure) → apply (I/O). The planning step is where
  * every mapping decision lives, so the decisions are testable without touching
@@ -46,6 +55,9 @@ import { readClaudeCode } from "./claude-read.ts";
 import { planCodex, planCodexRules } from "./codex-plan.ts";
 import type { RawCodex } from "./codex-read.ts";
 import { readCodex } from "./codex-read.ts";
+import { planCursor } from "./cursor-plan.ts";
+import type { RawCursor } from "./cursor-read.ts";
+import { readCursor } from "./cursor-read.ts";
 import { planDeepSeekAssets, planDeepSeekHarness } from "./dsh-plan.ts";
 import type { RawDeepSeekHarness } from "./dsh-read.ts";
 import { readDeepSeekHarness } from "./dsh-read.ts";
@@ -109,6 +121,9 @@ import { mergeSettings, type RawSettingsInput } from "./settings.ts";
 import { planStepAssets, planStepCode } from "./step-plan.ts";
 import type { RawStepCode } from "./step-read.ts";
 import { readStepCode } from "./step-read.ts";
+import { planTrae } from "./trae-plan.ts";
+import type { RawTrae } from "./trae-read.ts";
+import { readTrae } from "./trae-read.ts";
 import { planZcode, planZcodeAssets } from "./zcode-plan.ts";
 import type { RawZcode } from "./zcode-read.ts";
 import { readZcode } from "./zcode-read.ts";
@@ -125,9 +140,28 @@ export interface RawSources {
 	minimaxCode: RawMinimaxCode;
 	stepCode: RawStepCode;
 	opencode: RawOpencode;
+	cursor: RawCursor;
+	trae: RawTrae;
 }
 
-export function readSources(home: string): RawSources {
+/**
+ * Read every source tree.
+ *
+ * `cwd` is required and not defaulted, and that is the one design decision in
+ * this file worth arguing for. Eleven sources read only from `home`; Cursor and
+ * Trae also read a *project* half — `<project>/.cursor/rules`,
+ * `<project>/.trae/rules` — and a project directory is not something a reader may
+ * pick for itself. With a default of `process.cwd()`, a caller that forgot the
+ * argument would silently read whatever directory the process happened to be in,
+ * and a test suite would import from the repository it runs in: an "empty home
+ * yields an empty plan" assertion that quietly depends on the checkout it runs
+ * from, which is the shape of a failure nobody can reproduce.
+ *
+ * So the compiler makes every call site say which project it means. There are
+ * fifty of them and each is a one-word change, which is the trade this module
+ * makes everywhere else too.
+ */
+export function readSources(home: string, cwd: string): RawSources {
 	return {
 		home,
 		claudeCode: readClaudeCode(home),
@@ -140,6 +174,8 @@ export function readSources(home: string): RawSources {
 		minimaxCode: readMinimaxCode(home),
 		stepCode: readStepCode(home),
 		opencode: readOpencode(home),
+		cursor: readCursor(home, cwd),
+		trae: readTrae(home, cwd),
 	};
 }
 
@@ -710,6 +746,44 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		if (wants("assets")) planOpencodeAssets(raw.opencode, raw.home, force, items, writes);
 	}
 
+	// The two IDE sources, together because they are the same shape of problem:
+	// rules, MCP and a report of the rest, with nothing portable underneath.
+	if (only.includes("cursor") && raw.cursor.present) {
+		if (wants("settings")) {
+			planCursor(
+				raw.cursor,
+				raw.home,
+				items,
+				writes,
+				claimScalar,
+				claimPermissionList,
+				claimHooks,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				force,
+			);
+		}
+	}
+	if (only.includes("trae") && raw.trae.present) {
+		if (wants("settings")) {
+			planTrae(
+				raw.trae,
+				raw.home,
+				items,
+				writes,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				force,
+			);
+		}
+	}
+
 	if (options.historyScope === "none" && wants("history")) {
 		items.push({
 			source: only[0] ?? "claude-code",
@@ -845,14 +919,22 @@ function planPromptHistory(
 			? "; the source file is larger than this reads, so only its newest end was considered"
 			: "";
 		if (taken > 0) {
+			// Where ↑ will offer these is a claim about the entries, and the two cases
+			// are different claims. Every source whose list records a directory gets the
+			// sentence that is true of it; a source whose list records none and whose
+			// entries were filed under the current project gets the other one, because
+			// the first would be false for them — and a report that describes behaviour
+			// the written file does not have is the defect this line exists to avoid.
+			const where =
+				input.cwdSubstitute === undefined
+					? " — ↑ offers them in the directory each was typed in"
+					: ` — filed under ${tildePath(home, input.cwdSubstitute)}, because the source records no directory for any of them, so ↑ will offer them in every project and not only this one`;
 			items.push({
 				source,
 				from,
 				to: tildePath(home, historyFilePath(home)),
-				action: "map",
-				detail:
-					`${taken} prompt(s) added to the recall history${already > 0 ? `, ${already} already there` : ""}` +
-					` — ↑ offers them in the directory each was typed in${loss}`,
+				action: input.cwdSubstitute === undefined ? "map" : "downgrade",
+				detail: `${taken} prompt(s) added to the recall history${already > 0 ? `, ${already} already there` : ""}${where}${loss}`,
 				containsSecret: false,
 			});
 		} else if (already > 0) {
@@ -1082,6 +1164,16 @@ export interface RunMigrationOptions {
 	apply?: boolean;
 	force?: boolean;
 	home?: string;
+	/**
+	 * The project directory the run is in; defaults to the process's own.
+	 *
+	 * Exists for the same reason `readSources` takes its `cwd` as a required
+	 * argument: it is an input a caller may need to state rather than inherit.
+	 * A test running against a fake home is the case that needs it — without it
+	 * the project half of Cursor and Trae is read out of the checkout the test
+	 * suite happens to be in.
+	 */
+	cwd?: string;
 	/** Existing user-scope settings; read from disk when omitted. */
 	existing?: RawSettingsInput;
 	/**
@@ -1205,6 +1297,8 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	// guarded behind a database opened read-only, if at all. So the shallow
 	// question is the same one its four neighbours answer.
 	if (source === "opencode") return raw.opencode.present;
+	if (source === "cursor") return raw.cursor.present;
+	if (source === "trae") return raw.trae.present;
 	return raw.agents.present;
 }
 
@@ -1287,7 +1381,8 @@ export function runMigration(options: RunMigrationOptions = {}): RunMigrationRes
 		return { report: historyScope.error, plan, error: historyScope.error };
 	}
 
-	const raw = readSources(home);
+	const cwd = options.cwd ?? process.cwd();
+	const raw = readSources(home, cwd);
 	const existing = options.existing ?? (readJson(targetSettingsPath(home)) as RawSettingsInput);
 	// Transcripts are read here rather than inside the planner: they are the one
 	// input whose reading is expensive, and the planner is meant to be a pure
@@ -1300,7 +1395,7 @@ export function runMigration(options: RunMigrationOptions = {}): RunMigrationRes
 			selected: options.historySelected,
 		});
 	const promptHistory =
-		options.promptHistory ?? readPromptHistoryFor(raw, only, categories, { scope: historyScope, cwd: process.cwd() });
+		options.promptHistory ?? readPromptHistoryFor(raw, only, categories, { scope: historyScope, cwd });
 	const plan = planMigration(raw, existing, {
 		only,
 		force: options.force,

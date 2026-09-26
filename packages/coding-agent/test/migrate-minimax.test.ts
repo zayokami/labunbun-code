@@ -125,7 +125,7 @@ function minimaxHome(tree: Record<string, string> = {}): { home: string; root: s
 }
 
 function plan(home: string, existing: RawSettingsInput = {}, force = false): MigrationPlan {
-	return planMigration(readSources(home), existing, { only: ["minimax-code"], force });
+	return planMigration(readSources(home, home), existing, { only: ["minimax-code"], force });
 }
 
 function itemsOf(planned: MigrationPlan): MigrationItem[] {

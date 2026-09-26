@@ -133,7 +133,7 @@ function legacyHome(tree: Record<string, string> = {}): { home: string; root: st
  * carries — the tests below match on detail or `from`, so they never count them.
  */
 function plan(home: string, force = false): MigrationPlan {
-	return planMigration(readSources(home), {}, { only: ["minimax-code"], categories: ["assets"], force });
+	return planMigration(readSources(home, home), {}, { only: ["minimax-code"], categories: ["assets"], force });
 }
 
 function itemsOf(planned: MigrationPlan): MigrationItem[] {
@@ -206,7 +206,11 @@ describe("the tree this planner is asked about", () => {
 		// still has to say so — and it is the planning that is gated, not the read, so
 		// the reader's own work is unchanged by the flag.
 		expect(pathsWritten(plan(home))).toContain(join(home, ".labunbun", "skills", "demo", "SKILL.md"));
-		const settingsOnly = planMigration(readSources(home), {}, { only: ["minimax-code"], categories: ["settings"] });
+		const settingsOnly = planMigration(
+			readSources(home, home),
+			{},
+			{ only: ["minimax-code"], categories: ["settings"] },
+		);
 		expect(settingsOnly.writes.some((write) => write.kind === "skill")).toBe(false);
 		expect(fromsMatching(settingsOnly, /^every source → assets$/)).toHaveLength(1);
 		// Two: the assets and the history. One line each, because the two omissions are

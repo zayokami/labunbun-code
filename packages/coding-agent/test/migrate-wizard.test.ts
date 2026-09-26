@@ -13,65 +13,33 @@ import { join } from "node:path";
 import { builtInCommands, findCommand, type LocalCommand, type LocalCommandContext } from "../src/commands.ts";
 import { importedSessionId } from "../src/migrate-history.ts";
 import { type MigrationDialogBridge, type MigrationDialogItem, runMigrationWizard } from "../src/migrate-wizard.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 type SourceTree = Record<string, string>;
 
 /**
- * Every variable that moves a source's tree.
+ * The fake home, both in the environment and in the caller's hands.
  *
- * Five of the nine sources let an environment variable put their tree anywhere —
- * sometimes the whole tree (`$CODEX_HOME`, `$DSH_HOME`, `$GROK_HOME`,
- * `$KIMI_CODE_HOME`, MiniMax's pair, Step's two), sometimes a part of it
- * (`$KIMI_SHARE_DIR` names Kimi's predecessor tree, `$STEP_CODING_AGENT_SESSION_DIR`
- * its session directory; Step's session override is a per-process question the
- * planner answers from a temporary home's environment without it meaning a
- * different tree, so the test makes that meaning true). A developer whose shell
- * exports one would have the wizard detect (or miss) a source by a directory the
- * test never wrote, and the questions it asks would name files that are not
- * there. The same discipline `migrate-cli.test.ts` documents for its own fake
- * home, applied to the wizard's.
+ * The variables a source's tree can be moved by are borrowed from
+ * `source-env.ts`, which keeps the list and the reason it has to be complete:
+ * a wizard that detects a source from a directory the fixture never wrote asks
+ * about files that are not there.
  */
-const TREE_ENV_VARS = [
-	"CODEX_HOME",
-	"DSH_HOME",
-	"GROK_HOME",
-	"KIMI_CODE_HOME",
-	"KIMI_SHARE_DIR",
-	"MINIMAX_DATA_DIR",
-	"MAVIS_DATA_DIR",
-	"STEPCODE_CONFIG_DIR",
-	"STEPCODE_STORAGE_ROOT_DIR",
-	"STEP_CODING_AGENT_DIR",
-	"STEP_CODING_AGENT_SESSION_DIR",
-	// OpenCode's three roots, all of which the XDG bases can move. A developer
-	// who exports `XDG_CONFIG_HOME` has a real OpenCode tree somewhere this test
-	// never wrote, and detection would offer it as a source.
-	"OPENCODE_CONFIG_DIR",
-	"XDG_CONFIG_HOME",
-	"XDG_DATA_HOME",
-	"XDG_STATE_HOME",
-] as const;
-
-/** The fake home, both in the environment and in the caller's hands. */
 function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void): Promise<void> | void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-wizard-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
-	const borrowed = TREE_ENV_VARS.map((name) => [name, process.env[name]] as const);
+	const releaseSourceEnv = borrowSourceEnv();
 	const restore = (): void => {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
 		else process.env.HOME = prevPosixHome;
-		for (const [name, value] of borrowed) {
-			if (value === undefined) delete process.env[name];
-			else process.env[name] = value;
-		}
 		rmSync(home, { recursive: true, force: true });
 	};
 	process.env.USERPROFILE = home;
 	process.env.HOME = home;
-	for (const name of TREE_ENV_VARS) delete process.env[name];
 	for (const [path, content] of Object.entries(tree)) {
 		const full = join(home, path);
 		mkdirSync(join(full, ".."), { recursive: true });

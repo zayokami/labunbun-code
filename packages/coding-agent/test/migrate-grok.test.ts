@@ -919,7 +919,7 @@ function plan(tree: Record<string, string>, existing: RawSettingsInput = {}, for
 	setEnv("HOME", home);
 	setEnv("GROK_HOME", undefined);
 	writeTree(join(home, GROK_DEFAULT_DIR), tree);
-	return planMigration(readSources(home), existing, { only: ["grok-build"], force });
+	return planMigration(readSources(home, home), existing, { only: ["grok-build"], force });
 }
 
 /** The settings document the plan would write, or an empty one when it writes none. */

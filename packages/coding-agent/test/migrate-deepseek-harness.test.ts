@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveModel } from "@labunbun/ai";
 import { detectSources, runMigration } from "../src/migrate.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 type Result = ReturnType<typeof runMigration>;
 
@@ -47,6 +48,10 @@ function withHome(tree: SourceTree, body: (home: string) => void, dshEnv?: strin
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
 	const prevDsh = process.env.DSH_HOME;
+	// `$DSH_HOME` is this source's own variable and is set below; every other
+	// source's relocation variable is borrowed by the shared helper, because this
+	// file asserts about a home that holds nothing else.
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
@@ -55,6 +60,7 @@ function withHome(tree: SourceTree, body: (home: string) => void, dshEnv?: strin
 		writeTree(home, tree);
 		body(home);
 	} finally {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
@@ -83,6 +89,7 @@ function withMovedRoot(
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
 	const prevDsh = process.env.DSH_HOME;
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
@@ -91,6 +98,7 @@ function withMovedRoot(
 		writeTree(root, rootTree);
 		body({ home, root });
 	} finally {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;

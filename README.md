@@ -91,7 +91,7 @@ labunbun                                # interactive REPL
 - **Headless output** — `--output-format text|json|stream-json`.
 - **Config import** — `labunbun yoshi` maps an existing agent-tool setup
   (Claude Code, Codex, ZCode, DeepSeek Harness, Grok Build, Kimi Code,
-  MiniMax Code, Step Code, OpenCode, `~/.agents`) onto
+  MiniMax Code, Step Code, OpenCode, Cursor, Trae, `~/.agents`) onto
   labunbun's own config: settings, skills, rules, slash commands, past
   conversations and the prompts ↑ recalls. Dry run by default, and a `/yoshi`
   wizard that asks what to take — or takes everything after one question.
@@ -146,7 +146,7 @@ Already configured another agent tool? Copy over what has an equivalent:
 
 ```bash
 bun run dev yoshi                      # dry run: report only, writes nothing
-bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | opencode | all
+bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | opencode | cursor | trae | all
 bun run dev yoshi --only settings      # categories: settings | assets | history | all
 bun run dev yoshi --apply              # write it
 bun run dev yoshi --apply --force      # also overwrite values that exist

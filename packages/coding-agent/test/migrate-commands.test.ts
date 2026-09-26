@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type MigrationPlan, planMigration, readSources, runMigration } from "../src/migrate.ts";
 import { loadSkills, skillsAsCommands } from "../src/skills.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 type SourceTree = Record<string, string>;
 
@@ -25,6 +26,7 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-commands-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
@@ -35,6 +37,7 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 		}
 		body(home);
 	} finally {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
@@ -46,7 +49,7 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 function plan(tree: SourceTree, only: "claude-code" | "codex" = "claude-code"): MigrationPlan {
 	let planned: MigrationPlan | undefined;
 	withHome(tree, (home) => {
-		planned = planMigration(readSources(home), {}, { only: [only] });
+		planned = planMigration(readSources(home, home), {}, { only: [only] });
 	});
 	if (!planned) throw new Error("the fake home did not survive");
 	return planned;
@@ -159,7 +162,7 @@ describe("slash commands become skills", () => {
 				".labunbun/skills/mine/SKILL.md": "OLD BODY\n",
 			},
 			(home) => {
-				const planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+				const planned = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 				expect(planned.writes.some((w) => w.kind === "skill")).toBe(false);
 				expect(commandItem(planned, "commands/mine.md")?.detail).toContain("already exists");
 			},
@@ -180,7 +183,7 @@ describe("slash commands become skills", () => {
 	test("commands belong to the assets category, like any other file", () => {
 		let planned: MigrationPlan | undefined;
 		withHome({ ".claude/commands/one.md": "Body.\n" }, (home) => {
-			planned = planMigration(readSources(home), {}, { only: ["claude-code"], categories: ["settings"] });
+			planned = planMigration(readSources(home, home), {}, { only: ["claude-code"], categories: ["settings"] });
 		});
 		expect(planned?.writes.some((w) => w.kind === "skill")).toBe(false);
 	});
@@ -221,7 +224,7 @@ describe("slash commands become skills", () => {
 		// writes to one path, and the second would be reported as a collision the
 		// user never had — so the shared home's own source takes it.
 		withHome({ ".agents/commands/ship.md": "---\ndescription: Ship it\n---\nShip $ARGUMENTS.\n" }, (home) => {
-			const planned = planMigration(readSources(home), {}, { only: ["zcode", "agents"] });
+			const planned = planMigration(readSources(home, home), {}, { only: ["zcode", "agents"] });
 			const skills = planned.writes.filter((w) => w.path.endsWith(join("skills", "ship", "SKILL.md")));
 			expect(skills.length).toBe(1);
 			expect(skills[0]?.content).toBe("---\nname: ship\ndescription: Ship it\n---\nShip $ARGUMENTS.\n");

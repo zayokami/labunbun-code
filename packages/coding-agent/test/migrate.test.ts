@@ -22,6 +22,7 @@ import {
 	runMigration,
 } from "../src/migrate.ts";
 import { loadSettings } from "../src/settings.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
 type SourceTree = Record<string, string>;
@@ -34,6 +35,13 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
+	// Every source's relocation variable, borrowed: this file asserts things
+	// about a home that holds *only* what the fixture wrote, and `readSources`
+	// reads all twelve sources whatever the test is about. `APPDATA` alone was
+	// enough to break that here — it is always set on Windows and holds a live
+	// `Cursor\User`, and "an empty home yields an empty plan" failed over 24 of
+	// its state databases.
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
@@ -44,6 +52,7 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 		}
 		body(home);
 	} finally {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
@@ -211,7 +220,7 @@ describe("model references", () => {
 
 	test("an unresolvable model is reported as a skip, not dropped", () => {
 		withHome({ ".codex/config.toml": CODEX_CONFIG }, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["codex"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["codex"] });
 			const item = plan.items.find((i) => i.from.includes("model ("));
 			expect(item?.action).toBe("skip");
 			expect(item?.detail).toContain("packyprov");
@@ -222,7 +231,7 @@ describe("model references", () => {
 describe("mapping", () => {
 	test("env, model, and MCP servers carry over", () => {
 		withHome(FULL_TREE, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			const settings = plan.writes.find((w) => w.kind === "settings");
 			const parsed = JSON.parse(settings?.content ?? "{}");
 			expect(parsed.model).toBe("anthropic/claude-opus-5");
@@ -238,7 +247,7 @@ describe("mapping", () => {
 
 	test("credentials are flagged so the report can name their target files", () => {
 		withHome(FULL_TREE, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			const tokenItem = plan.items.find((i) => i.from.includes("ANTHROPIC_AUTH_TOKEN"));
 			expect(tokenItem?.containsSecret).toBe(true);
 			// A plain endpoint is configuration, not a credential.
@@ -262,7 +271,7 @@ describe("mapping", () => {
 
 	test("skills and rules become files at their labunbun locations", () => {
 		withHome(FULL_TREE, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			const paths = plan.writes.map((w) => w.path.replace(/\\/g, "/"));
 			expect(paths).toContain(join(home, ".labunbun/skills/demo-skill/SKILL.md").replace(/\\/g, "/"));
 			expect(paths).toContain(join(home, ".labunbun/rules/house-style.md").replace(/\\/g, "/"));
@@ -271,7 +280,7 @@ describe("mapping", () => {
 
 	test("the report shows paths home-relative on both sides of the arrow", () => {
 		withHome(FULL_TREE, (home) => {
-			const report = formatMigrationReport(planMigration(readSources(home), {}, { only: ["claude-code"] }));
+			const report = formatMigrationReport(planMigration(readSources(home, home), {}, { only: ["claude-code"] }));
 			expect(report).toContain("~/.claude/skills/demo-skill/SKILL.md → ~/.labunbun/skills/demo-skill/SKILL.md");
 			// The home prefix itself never appears, so the output stays readable
 			// and does not depend on where home happens to be.
@@ -281,7 +290,7 @@ describe("mapping", () => {
 
 	test("an unsupported provider protocol downgrades with an explanation", () => {
 		withHome({ ".codex/config.toml": CODEX_CONFIG }, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["codex"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["codex"] });
 			const item = plan.items.find((i) => i.from.includes("model_providers.packyprov"));
 			expect(item?.action).toBe("downgrade");
 			expect(item?.detail).toContain("chat-completions");
@@ -298,7 +307,7 @@ describe("mapping", () => {
 
 	test("source memory becomes a rule file so it merges with existing memory", () => {
 		withHome(FULL_TREE, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["codex"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["codex"] });
 			const write = plan.writes.find((w) => w.path.includes("imported-codex.md"));
 			expect(write?.content).toBe("Codex memory content.\n");
 			// MEMORY.md is user-curated; the import must not land on top of it.
@@ -308,7 +317,7 @@ describe("mapping", () => {
 
 	test("the user's global memory document is imported as a rule too", () => {
 		withHome({ ".claude/settings.json": "{}", ".claude/CLAUDE.md": "Always answer in Chinese.\n" }, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			const write = plan.writes.find((w) => w.path.includes("imported-claude-code.md"));
 			expect(write?.content).toBe("Always answer in Chinese.\n");
 			const item = plannedItem(plan, "~/.claude/CLAUDE.md");
@@ -321,7 +330,7 @@ describe("mapping", () => {
 
 	test("a source with no memory document says nothing about one", () => {
 		withHome({ ".claude/settings.json": "{}" }, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			expect(plan.writes.some((w) => w.path.includes("imported-claude-code.md"))).toBe(false);
 			// Silence is the failure mode this import is full of lines to avoid: no
 			// document, no claim that one came across.
@@ -339,7 +348,7 @@ describe("mapping", () => {
 		["tipsHistory", "usage statistics"],
 	])("%s is skipped with a stated reason", (key, reason) => {
 		withHome(FULL_TREE, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			const item = plan.items.find((i) => i.from.includes(key));
 			expect(item?.action).toBe("skip");
 			expect(item?.detail).toContain(reason);
@@ -357,7 +366,7 @@ describe("mapping", () => {
 			},
 		});
 		withHome({ ".claude/settings.json": "{}", ".claude.json": state }, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			const local = plannedItem(plan, 'projects["/some/project"].mcpServers.scratchpad');
 			expect(local?.action).toBe("skip");
 			expect(local?.detail).toContain("local-scope server");
@@ -376,7 +385,7 @@ describe("mapping", () => {
 	test("the plugin line names what is enabled instead of claiming coverage", () => {
 		const settings = JSON.stringify({ enabledPlugins: { "some-plugin": true, "off-plugin": false } });
 		withHome({ ".claude/settings.json": settings }, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			const item = plannedItem(plan, "enabledPlugins");
 			expect(item?.action).toBe("skip");
 			expect(item?.detail).toContain("some-plugin");
@@ -390,7 +399,7 @@ describe("mapping", () => {
 	test("a plugin list with nothing enabled says that, rather than naming nobody", () => {
 		const settings = JSON.stringify({ enabledPlugins: { "off-plugin": false } });
 		withHome({ ".claude/settings.json": settings }, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			expect(plannedItem(plan, "enabledPlugins")?.detail).toContain("none of them is enabled in the source");
 		});
 	});
@@ -401,7 +410,7 @@ describe("mapping", () => {
 		["windows.sandbox", "sandbox"],
 	])("codex %s is skipped with a stated reason", (key, reason) => {
 		withHome(FULL_TREE, (home) => {
-			const plan = planMigration(readSources(home), {}, { only: ["codex"] });
+			const plan = planMigration(readSources(home, home), {}, { only: ["codex"] });
 			const item = plan.items.find((i) => i.from.includes(key));
 			expect(item?.action).toBe("skip");
 			expect(item?.detail).toContain(reason);
@@ -594,7 +603,7 @@ describe("apply", () => {
 function planPermissions(permissions: Record<string, unknown>): MigrationPlan {
 	let planned: MigrationPlan | undefined;
 	withHome({ ".claude/settings.json": JSON.stringify({ permissions }) }, (home) => {
-		planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+		planned = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 	});
 	if (!planned) throw new Error("the fake home did not survive");
 	return planned;
@@ -684,7 +693,7 @@ describe("claude code permissions", () => {
 				".labunbun/settings.json": JSON.stringify(existing),
 			},
 			(home) => {
-				planned = planMigration(readSources(home), existing, { only: ["claude-code"] });
+				planned = planMigration(readSources(home, home), existing, { only: ["claude-code"] });
 			},
 		);
 		if (!planned) throw new Error("the fake home did not survive");
@@ -705,7 +714,7 @@ function planHooks(hooks: unknown, existing: Record<string, unknown> = {}): Migr
 	withHome(
 		{ ".claude/settings.json": JSON.stringify({ hooks }), ".labunbun/settings.json": JSON.stringify(existing) },
 		(home) => {
-			planned = planMigration(readSources(home), existing, { only: ["claude-code"] });
+			planned = planMigration(readSources(home, home), existing, { only: ["claude-code"] });
 		},
 	);
 	if (!planned) throw new Error("the fake home did not survive");
@@ -838,7 +847,7 @@ describe("keys with no mapping", () => {
 				".claude.json": JSON.stringify({ oauthAccount: { emailAddress: "NOT-THIS-EITHER" }, model: "opus" }),
 			},
 			(home) => {
-				planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+				planned = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			},
 		);
 		if (!planned) throw new Error("the fake home did not survive");
@@ -864,7 +873,7 @@ describe("fallbackModel", () => {
 	test("resolves like the primary model", () => {
 		let planned: MigrationPlan | undefined;
 		withHome({ ".claude/settings.json": JSON.stringify({ fallbackModel: "sonnet" }) }, (home) => {
-			planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			planned = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 		});
 		if (!planned) throw new Error("the fake home did not survive");
 		expect(writtenSettings(planned).fallbackModels).toEqual(["anthropic/claude-sonnet-5"]);
@@ -873,7 +882,7 @@ describe("fallbackModel", () => {
 	test("an unresolvable fallback is reported, not written as a broken reference", () => {
 		let planned: MigrationPlan | undefined;
 		withHome({ ".claude/settings.json": JSON.stringify({ fallbackModel: "gpt-9-ultra" }) }, (home) => {
-			planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+			planned = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 		});
 		if (!planned) throw new Error("the fake home did not survive");
 		expect(writtenSettings(planned).fallbackModels).toBeUndefined();
@@ -963,7 +972,7 @@ describe("MCP values that hold a variable placeholder", () => {
 				}),
 			},
 			(home) => {
-				withPlaceholder = planMigration(readSources(home), {}, { only: ["claude-code"] });
+				withPlaceholder = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			},
 		);
 		if (!withPlaceholder) throw new Error("the fake home did not survive");
@@ -984,7 +993,7 @@ describe("MCP values that hold a variable placeholder", () => {
 				".claude.json": JSON.stringify({ mcpServers: { plain: { type: "stdio", command: "node", args: ["x.js"] } } }),
 			},
 			(home) => {
-				planned = planMigration(readSources(home), {}, { only: ["claude-code"] });
+				planned = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 			},
 		);
 		if (!planned) throw new Error("the fake home did not survive");

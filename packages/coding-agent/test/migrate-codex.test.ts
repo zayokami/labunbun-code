@@ -24,32 +24,27 @@ import {
 	runMigration,
 } from "../src/migrate.ts";
 import type { RawSettingsInput } from "../src/settings.ts";
+import { borrowSourceEnv, releaseEnv, rememberEnv } from "./source-env.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
 type SourceTree = Record<string, string>;
 
 /**
- * Environment variables a test borrowed, restored after it.
+ * Set a variable for the duration of a test, restored after it.
  *
  * `$CODEX_HOME` is read at every call rather than snapshotted, so a developer
  * machine that has one set would otherwise decide what these tests read — the
  * fixtures live in a temp home, and the variable has to be out of the way for
- * that to be true.
+ * that to be true. `rememberEnv` is the shared registry `withHome`'s borrow also
+ * writes to, so the two cannot each remember a different original for one name.
  */
-const borrowed = new Map<string, string | undefined>();
-afterEach(() => {
-	for (const [name, value] of borrowed) {
-		if (value === undefined) delete process.env[name];
-		else process.env[name] = value;
-	}
-	borrowed.clear();
-});
-
 function setEnv(name: string, value: string | undefined): void {
-	if (!borrowed.has(name)) borrowed.set(name, process.env[name]);
+	rememberEnv(name);
 	if (value === undefined) delete process.env[name];
 	else process.env[name] = value;
 }
+
+afterEach(releaseEnv);
 
 /** Temp directories, swept with the test that asked for them. */
 const tempDirs: string[] = [];
@@ -67,11 +62,12 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-codex-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
-	const prevCodexHome = process.env.CODEX_HOME;
+	// `$CODEX_HOME` and every other source's relocation variable are borrowed
+	// here, so a fixture in a temp home is the only thing these tests can see.
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
-		delete process.env.CODEX_HOME;
 		for (const [path, content] of Object.entries(tree)) {
 			const full = join(home, path);
 			mkdirSync(join(full, ".."), { recursive: true });
@@ -79,12 +75,11 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 		}
 		body(home);
 	} finally {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
 		else process.env.HOME = prevPosixHome;
-		if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
-		else process.env.CODEX_HOME = prevCodexHome;
 		rmSync(home, { recursive: true, force: true });
 	}
 }
@@ -107,7 +102,7 @@ function codexConfig(options: { top?: string[]; provider?: string[]; tail?: stri
 
 /** The plan for one codex config, with no target settings unless one is passed. */
 function plan(home: string, existing: RawSettingsInput = {}, force = false): MigrationPlan {
-	return planMigration(readSources(home), existing, { only: ["codex"], force });
+	return planMigration(readSources(home, home), existing, { only: ["codex"], force });
 }
 
 /** Plan a config on its own, without a tree to lay out. */

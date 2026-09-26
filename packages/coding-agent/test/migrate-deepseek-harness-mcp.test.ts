@@ -24,6 +24,7 @@ import { basename, join } from "node:path";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import { readDshMcpServers } from "../src/dsh-cordis.ts";
 import { runMigration } from "../src/migrate.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 /** Files a harness home should contain, keyed by path relative to the root. */
 type SourceTree = Record<string, string>;
@@ -53,6 +54,7 @@ function withHarnessHome(tree: SourceTree, body: (home: string) => void): void {
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
 	const prevDsh = process.env.DSH_HOME;
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
@@ -60,6 +62,7 @@ function withHarnessHome(tree: SourceTree, body: (home: string) => void): void {
 		writeTree(join(home, ".dsh"), tree);
 		body(home);
 	} finally {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;

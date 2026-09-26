@@ -8,31 +8,21 @@ import type { AgentMessage } from "@labunbun/ai";
 import { loadHistory } from "../src/history.ts";
 import { type RunMigrationResult, runMigration } from "../src/migrate.ts";
 import { importedSessionId, parseHistoryScope, readPromptHistory, repairToolPairing } from "../src/migrate-history.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
 type SourceTree = Record<string, string>;
 
 function withHome(tree: SourceTree, body: (home: string) => void): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-history-"));
-	// `$CODEX_HOME` is part of the answer to "where does Codex keep this", so a
-	// test must not inherit the value the developer's shell happens to hold: the
-	// borrow covers it and the body starts from unset, the way a machine without
-	// it behaves. A test that wants the variable sets it itself, and this restores
-	// whatever was there before. ZCode's two roots are borrowed for the same
-	// reason — `$ZCODE_STORAGE_DIR` alone would move the database out from under
-	// the three ZCode history tests.
-	const borrowed = new Map<string, string | undefined>(
-		["USERPROFILE", "HOME", "CODEX_HOME", "ZCODE_DATA_BASE_DIR", "ZCODE_STORAGE_DIR"].map((name) => [
-			name,
-			process.env[name],
-		]),
-	);
+	// `$CODEX_HOME` is part of the answer to "where does Codex keep this", and
+	// `$ZCODE_STORAGE_DIR` alone would move the database out from under the three
+	// ZCode history tests, so a test must not inherit either — or any other
+	// source's relocation variable. The shared borrow covers all of them.
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
-		delete process.env.CODEX_HOME;
-		delete process.env.ZCODE_DATA_BASE_DIR;
-		delete process.env.ZCODE_STORAGE_DIR;
 		for (const [path, content] of Object.entries(tree)) {
 			const full = join(home, path);
 			mkdirSync(join(full, ".."), { recursive: true });
@@ -40,10 +30,7 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 		}
 		body(home);
 	} finally {
-		for (const [name, value] of borrowed) {
-			if (value === undefined) delete process.env[name];
-			else process.env[name] = value;
-		}
+		releaseSourceEnv();
 		rmSync(home, { recursive: true, force: true });
 	}
 }

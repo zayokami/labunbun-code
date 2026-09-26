@@ -29,6 +29,7 @@ import {
 	readSources,
 } from "../src/migrate.ts";
 import type { RawSettingsInput } from "../src/settings.ts";
+import { borrowSourceEnv, releaseEnv, rememberEnv } from "./source-env.ts";
 
 type SourceTree = Record<string, string>;
 
@@ -38,19 +39,12 @@ afterEach(() => {
 	for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** Environment variables a test borrowed, restored after it. */
-const borrowed = new Map<string, string | undefined>();
-afterEach(() => {
-	for (const [name, value] of borrowed) {
-		if (value === undefined) delete process.env[name];
-		else process.env[name] = value;
-	}
-	borrowed.clear();
-});
+/** Environment variables a test set, restored after it. */
+afterEach(releaseEnv);
 
 /** Borrow an environment variable for the rest of the test. */
 function setEnv(name: string, value: string | undefined): void {
-	if (!borrowed.has(name)) borrowed.set(name, process.env[name]);
+	rememberEnv(name);
 	if (value === undefined) delete process.env[name];
 	else process.env[name] = value;
 }
@@ -76,24 +70,18 @@ interface PlanOptions {
 function withHome(grok: SourceTree, labunbun: SourceTree, body: (home: string) => void): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-grok-assets-"));
 	made.push(home);
-	const borrowedNames = ["USERPROFILE", "HOME", "GROK_HOME"];
-	for (const name of borrowedNames) {
-		if (!borrowed.has(name)) borrowed.set(name, process.env[name]);
-	}
+	// The machine's own `$GROK_HOME`, if any, must not win over the fixture, and
+	// neither must any other source's relocation variable — this file's fixtures
+	// only count as "just Grok" while the rest cannot be read.
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
-		// The machine's own `$GROK_HOME`, if any, must not win over the fixture.
-		delete process.env.GROK_HOME;
 		writeFiles(join(home, ".grok"), grok);
 		writeFiles(join(home, ".labunbun"), labunbun);
 		body(home);
 	} finally {
-		for (const [name, value] of borrowed) {
-			if (value === undefined) delete process.env[name];
-			else process.env[name] = value;
-		}
-		borrowed.clear();
+		releaseSourceEnv();
 	}
 }
 
@@ -109,7 +97,7 @@ function writeFiles(base: string, tree: SourceTree): void {
 function plan(tree: SourceTree, options: PlanOptions = {}): MigrationPlan {
 	let planned: MigrationPlan | undefined;
 	withHome(tree, options.labunbun ?? {}, (home) => {
-		planned = planMigration(readSources(home), options.existing ?? {}, {
+		planned = planMigration(readSources(home, home), options.existing ?? {}, {
 			only: ["grok-build"],
 			force: options.force,
 			categories: options.categories,
@@ -381,7 +369,7 @@ describe("grok assets", () => {
 		// fixture needs a tree that is only ever named by the planner: the skip lines
 		// are where a guessed `~/.grok` would show up.
 		writeFiles(elsewhere, { "rules/style.md": "# style\n", "lsp.json": "{}\n", "personas/p.toml": "name = 'p'\n" });
-		const planned = planMigration(readSources(home), {}, { only: ["grok-build"] });
+		const planned = planMigration(readSources(home, home), {}, { only: ["grok-build"] });
 		const root = elsewhere.replace(/\\/g, "/");
 		expect(line(planned, `${root}/rules/style.md`)?.to).toContain("~/.labunbun/rules/style.md");
 		expect(line(planned, `${root}/lsp.json`)?.action).toBe("skip");

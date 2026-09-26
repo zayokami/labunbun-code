@@ -28,6 +28,7 @@ import {
 	requoteNumericKeyPaths,
 } from "../src/migrate.ts";
 import type { RawSettingsInput } from "../src/settings.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 type SourceTree = Record<string, string>;
 
@@ -37,6 +38,7 @@ function withGrokHome(tree: SourceTree, body: (home: string) => void): void {
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
 	const prevGrokHome = process.env.GROK_HOME;
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
@@ -49,6 +51,7 @@ function withGrokHome(tree: SourceTree, body: (home: string) => void): void {
 		}
 		body(home);
 	} finally {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
@@ -62,7 +65,7 @@ function withGrokHome(tree: SourceTree, body: (home: string) => void): void {
 function plan(tree: SourceTree, existing: RawSettingsInput = {}, force = false): MigrationPlan {
 	let planned: MigrationPlan | undefined;
 	withGrokHome(tree, (home) => {
-		planned = planMigration(readSources(home), existing, { only: ["grok-build"], force });
+		planned = planMigration(readSources(home, home), existing, { only: ["grok-build"], force });
 	});
 	if (!planned) throw new Error("the fake home did not survive");
 	return planned;

@@ -4,33 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/main.ts";
 import { MIGRATION_SOURCE_IDS } from "../src/migrate-types.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
 type SourceTree = Record<string, string>;
-
-/**
- * Every variable that moves a source's tree out from under the fake home.
- *
- * Kept as one list rather than one `delete` per variable because a source added
- * later brings its variables with it, and a per-variable list is where the next
- * one gets forgotten — the same reason `migrate-wizard.test.ts` keeps its copy.
- */
-const TREE_ENV_VARS = [
-	"DSH_HOME",
-	"GROK_HOME",
-	"KIMI_CODE_HOME",
-	"KIMI_SHARE_DIR",
-	"MINIMAX_DATA_DIR",
-	"MAVIS_DATA_DIR",
-	"STEPCODE_CONFIG_DIR",
-	"STEPCODE_STORAGE_ROOT_DIR",
-	"STEP_CODING_AGENT_DIR",
-	"STEP_CODING_AGENT_SESSION_DIR",
-	"OPENCODE_CONFIG_DIR",
-	"XDG_CONFIG_HOME",
-	"XDG_DATA_HOME",
-	"XDG_STATE_HOME",
-] as const;
 
 function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void): Promise<void> | void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-cli-"));
@@ -40,25 +17,21 @@ function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void
 	// — `$DSH_HOME`, `$GROK_HOME`, `$KIMI_CODE_HOME`, the MiniMax and Step pairs —
 	// so a developer whose shell exports one of them would have the CLI read
 	// *their* tree instead of the fake home's, and the report would name files this
-	// test never wrote. Kimi Code's predecessor tree comes from `$KIMI_SHARE_DIR`,
-	// which would put an extra line in the report of a home that never held one, and
-	// OpenCode's three roots all sit behind XDG variables — a developer who exports
-	// `XDG_CONFIG_HOME` has a real OpenCode tree this test never wrote.
-	const borrowed = TREE_ENV_VARS.map((name) => [name, process.env[name]] as const);
+	// test never wrote. `source-env.ts` holds the whole list and the reason it has
+	// to be complete: a per-variable list here is where the next source's variable
+	// gets forgotten, and on Windows `APPDATA` alone puts a real Cursor or Trae
+	// profile directory in reach.
+	const releaseSourceEnv = borrowSourceEnv();
 	const restore = (): void => {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
 		else process.env.HOME = prevPosixHome;
-		for (const [name, value] of borrowed) {
-			if (value === undefined) delete process.env[name];
-			else process.env[name] = value;
-		}
 		rmSync(home, { recursive: true, force: true });
 	};
 	process.env.USERPROFILE = home;
 	process.env.HOME = home;
-	for (const name of TREE_ENV_VARS) delete process.env[name];
 	for (const [path, content] of Object.entries(tree)) {
 		const full = join(home, path);
 		mkdirSync(join(full, ".."), { recursive: true });
@@ -192,6 +165,50 @@ describe("migrate CLI", () => {
 			expect(code).toBe(0);
 			expect(out).toContain("~/.kimi-code/skills/pdf/SKILL.md");
 			expect(out).toContain("no model of that name exists here");
+			expect(out).toContain("Dry run — nothing written.");
+		});
+	});
+
+	test("--from cursor reads the CLI's home, which is not where the editor keeps its state", async () => {
+		// The two halves of Cursor keep different things in different places, and
+		// the CLI's home is the one the CLI creates — a user who has only opened the
+		// editor has no `~/.cursor` at all. So the fixture plants a rule and a config
+		// in the CLI's half and nothing in the profile, and the assertion is that
+		// both are read from the tree a `--from cursor` names.
+		const tree: SourceTree = {
+			".cursor/rules/style.mdc": "---\ndescription: One\nalwaysApply: true\n---\n\nDo the thing.\n",
+			".cursor/cli-config.json": JSON.stringify({ model: "cursor-model-that-does-not-exist" }),
+		};
+		await withHome(tree, async () => {
+			const { code, out, err } = await run(["migrate", "--from", "cursor"]);
+			expect(err).toBe("");
+			expect(code).toBe(0);
+			expect(out).toContain("~/.labunbun/rules/style.md");
+			expect(out).toContain("no model in the registry matches this name");
+			expect(out).toContain("Dry run — nothing written.");
+		});
+	});
+
+	test("--from trae reads the rules directory, and the China home when that is the one there", async () => {
+		// The asymmetric pair: a project rule and a global one, with the global one
+		// in `~/.trae-cn` so a reader that guessed `~/.trae` would import the project
+		// rule and drop the global one without a line about it. The stray sits at the
+		// level *above* `user_rules` on purpose: the walk recurses, so planting the
+		// global rule inside the directory would pass just as well against a reader
+		// that scanned `~/.trae-cn/` flat. Asserted on the write path, which is the
+		// only part of the report where a carried rule and a named file differ — the
+		// name itself also appears in the sentence about the files nothing reads.
+		const tree: SourceTree = {
+			".trae-cn/user_rules/preferences.md": "---\nalwaysApply: true\n---\n\nDo the thing.\n",
+			".trae-cn/stray.md": "---\nalwaysApply: true\n---\n\nDo the other thing.\n",
+		};
+		await withHome(tree, async () => {
+			const { code, out, err } = await run(["migrate", "--from", "trae"]);
+			expect(err).toBe("");
+			expect(code).toBe(0);
+			expect(out).toContain("~/.labunbun/rules/preferences.md");
+			expect(out).toContain("your user rules");
+			expect(out).not.toContain("~/.labunbun/rules/stray.md");
 			expect(out).toContain("Dry run — nothing written.");
 		});
 	});

@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type MigrationItem, type MigrationPlan, planMigration, readSources, runMigration } from "../src/migrate.ts";
 import type { RawSettingsInput } from "../src/settings.ts";
+import { borrowSourceEnv } from "./source-env.ts";
 
 type SourceTree = Record<string, string>;
 
@@ -24,6 +25,7 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-rules-"));
 	const prevHome = process.env.USERPROFILE;
 	const prevPosixHome = process.env.HOME;
+	const releaseSourceEnv = borrowSourceEnv();
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
@@ -34,6 +36,7 @@ function withHome(tree: SourceTree, body: (home: string) => void): void {
 		}
 		body(home);
 	} finally {
+		releaseSourceEnv();
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
 		if (prevPosixHome === undefined) delete process.env.HOME;
@@ -50,7 +53,7 @@ function rulesTree(content: string): SourceTree {
 function plan(rules: string, existing: RawSettingsInput = {}): MigrationPlan {
 	let planned: MigrationPlan | undefined;
 	withHome(rulesTree(rules), (home) => {
-		planned = planMigration(readSources(home), existing, { only: ["codex"] });
+		planned = planMigration(readSources(home, home), existing, { only: ["codex"] });
 	});
 	if (!planned) throw new Error("the fake home did not survive");
 	return planned;
@@ -221,7 +224,7 @@ describe("codex rules meet the target's own rules", () => {
 				".codex/rules/extra.rules": 'prefix_rule(pattern = ["cargo", "test"], decision = "allow")',
 			},
 			(home) => {
-				planned = planMigration(readSources(home), {}, { only: ["codex"] });
+				planned = planMigration(readSources(home, home), {}, { only: ["codex"] });
 			},
 		);
 		if (!planned) throw new Error("the fake home did not survive");

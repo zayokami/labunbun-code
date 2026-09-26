@@ -75,11 +75,15 @@ function withHome(
 ): void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-opencode-"));
 	const borrowed = new Map<string, string | undefined>(
-		["USERPROFILE", "HOME", ...OPENCODE_ENV_VARS].map((name) => [name, process.env[name]]),
+		["USERPROFILE", "HOME", "APPDATA", ...OPENCODE_ENV_VARS].map((name) => [name, process.env[name]]),
 	);
 	try {
 		process.env.USERPROFILE = home;
 		process.env.HOME = home;
+		// `APPDATA` is not an OpenCode variable — it is the Cursor and Trae profile
+		// directory, always set on Windows, and a real `Cursor\User` or `Trae\User`
+		// there is read by `readSources` on every call this file makes.
+		delete process.env.APPDATA;
 		for (const name of OPENCODE_ENV_VARS) delete process.env[name];
 		for (const [path, content] of Object.entries(tree)) {
 			const full = join(home, path);

@@ -31,13 +31,14 @@ import {
 } from "@labunbun/ai";
 import { caseInsensitivePaths } from "@labunbun/tools";
 import { codexRoot } from "./codex-home.ts";
+import { cursorPromptHistoryFile } from "./cursor-home.ts";
 import { dshRoot } from "./dsh-home.ts";
 import { listDshSessions, readDshLog } from "./dsh-session.ts";
 import { decodeGrokCwdDir, grokRoot, grokSessionsRoot } from "./grok-home.ts";
 import { listGrokSessions, readGrokSession } from "./grok-session.ts";
-
 import { kimiInputHistoryDir, kimiInputHistoryFile, kimiRoot } from "./kimi-home.ts";
 import { listKimiSessions, readKimiSession } from "./kimi-session.ts";
+import { readText, tildePath } from "./migrate-core.ts";
 import type { MigrationSourceId } from "./migrate-types.ts";
 import { minimaxRoot } from "./minimax-home.ts";
 import { listMinimaxSessions, readMinimaxSession } from "./minimax-session.ts";
@@ -1571,6 +1572,21 @@ export interface PromptHistoryInput {
 	 * a list was looked for and there is none — not that a directory was missing.
 	 */
 	absent?: string;
+	/**
+	 * Set when the source's list records no directory and every entry was therefore
+	 * filed under the directory this run is in.
+	 *
+	 * A `PromptEntry` is `{ text, cwd, timestamp }` and `loadHistory` drops every
+	 * line whose `cwd` is not the project being opened, so an entry filed under no
+	 * directory is one ↑ will never offer — which is why sources whose list records
+	 * none are normally reported rather than imported. Where a source's list is
+	 * worth importing anyway (it is a list the user typed, it simply is not scoped),
+	 * the entries are filed under the current project and this field is set, so the
+	 * report can say that instead of the sentence it would otherwise print. The
+	 * sentence is a claim about where ↑ will offer the prompts, and printing it for
+	 * entries whose directory is a guess is the same defect as a silent mismatch.
+	 */
+	cwdSubstitute?: string;
 }
 
 export type PromptHistoryImport = Partial<Record<MigrationSourceId, PromptHistoryInput>>;
@@ -1921,6 +1937,130 @@ function readOpencodePromptHistory(
 	return selectPrompts(scan, options);
 }
 
+/**
+ * Cursor CLI's ↑ recall list, imported with the directory named as a substitute.
+ *
+ * `~/.config/cursor/prompt_history.json` is a **flat JSON array of bare strings** —
+ * not the JSONL of every other source here, which is why it gets its own reader
+ * rather than a shared line parser. Three properties of it decide the treatment,
+ * and the first is the reason this is the one list in the repo that is imported
+ * despite recording no directory.
+ *
+ * **No directory, and no timestamp either.** The entries are strings: there is
+ * nowhere in the format to record either, so unlike OpenCode's list — which
+ * records a mode and is dropped for the same missing directory — there is nothing
+ * here to recover and nothing that could be misread. A prompt the user typed is
+ * worth having back, so the entries are filed under the directory this run is in
+ * and the report says so: ↑ will offer them in every project, not only this one.
+ * That is a real widening and it is stated as one, which is what
+ * {@link PromptHistoryInput.cwdSubstitute} exists for.
+ *
+ * Consequently `--history-scope` cannot filter this list, and the choice is
+ * reported rather than left to look like it worked: the filter compares an entry's
+ * directory against the current project, and every entry's directory is the
+ * current project by construction.
+ *
+ * **The ordering is the file's, because the format has no other.** As in the Kimi
+ * case: the file is append-only, so the entries arrive newest-first and every
+ * timestamp is 0, which is what keeps the per-source limit taking the newest end —
+ * the selection sorts by that timestamp and is stable, so equal keys keep the order
+ * they were read in. The array is reversed on the way in for exactly that reason,
+ * and an unsorted middle (an array the CLI rewrote rather than appended to) would
+ * defeat it; a list this short is not worth sorting defensively for.
+ *
+ * **Two spellings, and this is the one Cursor path with no official citation.**
+ * `cursorPromptHistoryFile` tries `$XDG_CONFIG_HOME/cursor/` and then
+ * `~/.config/cursor/`, and returns the first that is there; when neither is, the
+ * source is reported as having no list, which is a different statement from having
+ * an empty one.
+ */
+function readCursorPromptHistory(
+	home: string,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
+	const located = cursorPromptHistoryFile(home);
+	if (!located) {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"no prompt list at either spelling cursor is reported to use (${XDG_CONFIG_HOME}/cursor/prompt_history.json and ~/.config/cursor/prompt_history.json) — a list is looked for and there is none",
+		};
+	}
+	const text = readText(located.path);
+	if (text === null) {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent: `the prompt list at ${tildePath(home, located.path)} could not be read — it is named in the report rather than skipped silently`,
+		};
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent: `the prompt list at ${tildePath(home, located.path)} is not JSON, so no entry could be read out of it`,
+		};
+	}
+	if (!Array.isArray(parsed)) {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent: `the prompt list at ${tildePath(home, located.path)} is a JSON ${parsed === null ? "null" : typeof parsed} rather than an array of prompts`,
+		};
+	}
+	// Newest first, so the stable sort in `selectPrompts` keeps read order and the
+	// per-source limit takes the newest end. See the module comment.
+	for (const entry of [...parsed].reverse()) {
+		if (typeof entry !== "string") {
+			bump(scan.counts, "entry that is not a string, so not a prompt");
+			continue;
+		}
+		const prompt = entry.trim();
+		if (!prompt) {
+			bump(scan.counts, "empty prompt");
+			continue;
+		}
+		scan.seen += 1;
+		if (PASTE_PLACEHOLDER.test(prompt)) {
+			bump(scan.counts, "prompt whose text was a pasted block, stored without its body");
+			continue;
+		}
+		// The same reasoning Kimi's reader uses, and for the same reason: this build's
+		// recall list is a list of prompts, and a slash command it offered would be
+		// sent as one. Cursor's CLI has a slash command surface, so unlike Kimi this
+		// is a filter on the text rather than a certainty about what was typed.
+		if (prompt.startsWith("/")) {
+			bump(scan.counts, "line starting with a slash, which is a command in cursor rather than a prompt to a model");
+			continue;
+		}
+		scan.candidates.push({ text: prompt, cwd: options.cwd, timestamp: 0 });
+	}
+	if (options.scope === "cwd" && scan.candidates.length > 0) {
+		bump(
+			scan.counts,
+			"prompt from a directory the list does not record — --history-scope cwd cannot narrow this source, because every entry is filed under the current project",
+		);
+	}
+	return { ...selectPrompts(scan, options), cwdSubstitute: options.cwd };
+}
+
 /** Prompts a source remembers, ready to be merged into the recall list. */
 export function readPromptHistory(
 	source: MigrationSourceId,
@@ -1934,6 +2074,7 @@ export function readPromptHistory(
 
 	if (source === "kimi-code") return readKimiPromptHistory(home, options);
 	if (source === "opencode") return readOpencodePromptHistory(home, options);
+	if (source === "cursor") return readCursorPromptHistory(home, options);
 
 	// MiniMax has no prompt list, and the reason is specific enough to be worth a
 	// line rather than the usual silence. Three things on its disk could be mistaken

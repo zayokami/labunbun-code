@@ -122,7 +122,7 @@ function stepHome(tree: Record<string, string> = {}): { home: string; root: stri
 }
 
 function plan(home: string, existing: RawSettingsInput = {}, force = false): MigrationPlan {
-	return planMigration(readSources(home), existing, { only: ["step-code"], force });
+	return planMigration(readSources(home, home), existing, { only: ["step-code"], force });
 }
 
 function itemsOf(planned: MigrationPlan): MigrationItem[] {

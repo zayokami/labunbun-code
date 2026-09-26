@@ -120,7 +120,7 @@ function kimiHome(tree: Record<string, string> = {}): { home: string; root: stri
 }
 
 function plan(home: string, existing: RawSettingsInput = {}, force = false): MigrationPlan {
-	return planMigration(readSources(home), existing, { only: ["kimi-code"], force });
+	return planMigration(readSources(home, home), existing, { only: ["kimi-code"], force });
 }
 
 function itemsOf(planned: MigrationPlan): MigrationItem[] {
@@ -257,7 +257,7 @@ describe("the category filter", () => {
 		// settings planner runs and claims `model`, so a run the user scoped to assets
 		// would write settings.json anyway.
 		const { home } = both();
-		const planned = planMigration(readSources(home), {}, { only: ["kimi-code"], categories: ["assets"] });
+		const planned = planMigration(readSources(home, home), {}, { only: ["kimi-code"], categories: ["assets"] });
 		expect(planned.categories).toEqual(["assets"]);
 		expect(planned.writes.some((write) => write.kind === "settings")).toBe(false);
 		expect(planned.writes.map((write) => write.path)).toContain(join(home, ".labunbun", "skills", "demo", "SKILL.md"));
@@ -265,7 +265,7 @@ describe("the category filter", () => {
 
 	test("--only settings leaves the asset side unplanned", () => {
 		const { home } = both();
-		const planned = planMigration(readSources(home), {}, { only: ["kimi-code"], categories: ["settings"] });
+		const planned = planMigration(readSources(home, home), {}, { only: ["kimi-code"], categories: ["settings"] });
 		expect(planned.writes.some((write) => write.kind === "settings")).toBe(true);
 		expect(planned.writes.map((write) => write.path)).not.toContain(
 			join(home, ".labunbun", "skills", "demo", "SKILL.md"),
@@ -414,7 +414,7 @@ describe("hooks", () => {
 			join(home, ".claude", "settings.json"),
 			JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo claude" }] }] } }),
 		);
-		const planned = planMigration(readSources(home), {}, { only: ["claude-code", "kimi-code"] });
+		const planned = planMigration(readSources(home, home), {}, { only: ["claude-code", "kimi-code"] });
 		const hooks = settingsWritten(planned).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
 		expect(Object.keys(hooks).sort()).toEqual(["PreToolUse", "Stop"]);
 		expect(hooks.Stop[0].hooks[0].command).toBe("echo claude");
@@ -435,7 +435,7 @@ describe("hooks", () => {
 			join(home, ".claude", "settings.json"),
 			JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo claude" }] }] } }),
 		);
-		const planned = planMigration(readSources(home), {}, { only: ["claude-code", "kimi-code"] });
+		const planned = planMigration(readSources(home, home), {}, { only: ["claude-code", "kimi-code"] });
 		const hooks = settingsWritten(planned).hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
 		expect(hooks.Stop.map((entry) => entry.hooks[0].command)).toEqual(["echo claude", "echo kimi"]);
 	});
@@ -449,14 +449,14 @@ describe("hooks", () => {
 			join(home, ".claude", "settings.json"),
 			JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo claude" }] }] } }),
 		);
-		const kept = planMigration(readSources(home), JSON.parse(existing), { only: ["claude-code", "kimi-code"] });
+		const kept = planMigration(readSources(home, home), JSON.parse(existing), { only: ["claude-code", "kimi-code"] });
 		// Nothing is written at all: the target's file is the one on disk and the
 		// two sources each say why they left it alone, rather than one of them
 		// rewriting it with a hook the other had also declined to import.
 		expect(kept.writes.find((candidate) => candidate.kind === "settings")).toBeUndefined();
 		expect(kept.items.filter((item) => item.action === "skip" && item.detail.includes("--force")).length).toBe(2);
 
-		const forced = planMigration(readSources(home), JSON.parse(existing), {
+		const forced = planMigration(readSources(home, home), JSON.parse(existing), {
 			only: ["claude-code", "kimi-code"],
 			force: true,
 		});
