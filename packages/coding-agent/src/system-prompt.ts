@@ -3,7 +3,7 @@
  * a DYNAMIC_BOUNDARY marker separates per-session dynamic content (P5 adds
  * git status etc.). Tool prompt contributions are appended by the caller.
  */
-import type { AnyTool } from "@labunbun/agent";
+import { type AnyTool, localDayKey } from "@labunbun/agent";
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "SYSTEM_PROMPT_DYNAMIC_BOUNDARY";
 
@@ -23,6 +23,19 @@ export interface SystemPromptContext {
 	 * present on the first request of a session and on none after it.
 	 */
 	memory?: string;
+	/**
+	 * The instant "Today's date" is read from. Defaults to now.
+	 *
+	 * Handed in rather than read from the ambient clock for two reasons, and the
+	 * second is the one that keeps the first honest. A test that can pin the
+	 * instant is the only kind worth writing here: the difference between the
+	 * local civil day and the UTC day is zero for eight hours out of every
+	 * twenty-four, so a test that asserts "the prompt carries the local date"
+	 * *without* pinning the clock passes on a machine running UTC and fails on
+	 * the same code four hours later — a test whose result is a function of the
+	 * hour it runs. The default keeps both production call sites unchanged.
+	 */
+	now?: number;
 }
 
 export function buildSystemPrompt(tools: AnyTool[], ctx: SystemPromptContext): string {
@@ -49,7 +62,7 @@ You MUST answer the user's question directly, without padding, and to the point.
 - Working directory: ${ctx.cwd}
 - Platform: ${ctx.platform}
 - Is interactive terminal: ${ctx.isTTY}
-- Today's date: ${new Date().toISOString().slice(0, 10)}`);
+- Today's date: ${localDayKey(ctx.now ?? Date.now())}`);
 
 	sections.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
 
