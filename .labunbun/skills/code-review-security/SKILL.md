@@ -1,6 +1,6 @@
 ---
 name: code-review-security
-description: Check a diff against labunbun's actual security boundaries — permission rule evaluation, path containment, MCP secret handling, and hook trust — rather than generic security advice.
+description: Check a diff against labunbun's actual security boundaries — permission rule evaluation, path containment, MCP secret handling, repo-tier settings policy, and the migrator's never-open-a-credential rule — rather than generic security advice.
 ---
 
 Check the diff against labunbun's real security boundaries, not a generic vulnerability checklist:
@@ -11,6 +11,25 @@ Check the diff against labunbun's real security boundaries, not a generic vulner
 - **Hook payloads** (`packages/coding-agent/src/hooks.ts`): hook commands are user-configured shell commands; tool inputs and prompts reach them only as JSON on stdin, never interpolated into the command string itself. A change that builds the hook's command line by concatenating tool input/prompt text would turn a config file into a command-injection vector.
 - **Policy-layer privilege** (`allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode` in `packages/coding-agent/src/settings.ts`): a new rule source or mode must still be checked against `loaded.perSource.policy` where relevant — a new code path that reads merged settings without consulting the policy tier silently lets project/user settings override a lockdown the policy file was meant to enforce.
 - **MCP server trust** (`loadProjectMcpServerNames`, `loadApprovedMcpServers` in client.ts): project-shipped `.mcp.json` servers require explicit approval recorded outside the working tree (`~/.labunbun/projects/<cwd>/mcp-approved.json`), precisely because a cloned repo is attacker-controlled and shouldn't be able to self-approve its own servers. Flag any new path that auto-approves or auto-connects a project-scoped server, and any new approval record written anywhere a repo can commit it — a ledger inside the tree is a pre-approval, not a gate.
-- **Repo-controlled settings** (`stripUntrustedKeys` in `packages/coding-agent/src/settings.ts`): the `project` and `local` tiers are files inside the working tree, so they may not decide what the agent is allowed to do or where it sends data — no `permissionMode`, `permissions.allow`, `permissions.additionalDirectories`, `env`, `providers`, `hooks`, or `mcpServers` from those tiers. A new settings key that grants capability, widens reach, or redirects a credential belongs in `PROJECT_TIER_DENIED_KEYS`; one that only tightens (like `permissions.deny`) does not. `local` is *not* a trust boundary — nothing writes an ignore rule for it.
+
+## Repo-tier settings are a typed table, not a list to remember
+
+`stripUntrustedKeys` (`packages/coding-agent/src/settings.ts`) drops repo-controlled keys before they are merged, and what it consults is **not** a hand-maintained array of denied names. It is two tables keyed by the type they govern:
+
+- `PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo">` for top-level keys
+- `PROJECT_TIER_PERMISSION_KEY_POLICY: Record<keyof Settings["permissions"], "denied" | "repo">` for `permissions`, which merges field by field rather than as one block
+
+The consequence worth checking is stronger than "did someone remember to add the key": a field added to `SettingsSchema` and **not** classified here does not compile, so the default for a new setting is a question someone answers rather than an omission nobody sees. So the review is not "is the new key on the list" — it is **is the classification right, and does it still compile**. A key that grants capability, widens reach, or redirects a credential is `"denied"`; one that only tightens is `"repo"` (`permissions.deny` is the standing example — a repository's own guardrails stay effective against the agent it just configured). `local` is *not* a trust boundary; nothing writes an ignore rule for it. `project-tier-keys.test.ts` asks the same question at runtime in both directions, including the reverse one — a row for a key the schema no longer has.
+
+## The migrator names credentials; it does not open them
+
+Migration reads other agents' homes, several of which keep tokens next to their settings. The rule is that a credential is **reported by name and never opened**, and it is worth knowing that this one is **convention plus a test, not a compiler** — `readText`/`readJson` in `packages/coding-agent/src/migrate-core.ts` will happily open anything, so a reviewer is applying a rule nothing enforces in code. What the rule looks like when it is being followed:
+
+- Each source recognises credential-shaped entries by **name** and stats them: `KIMI_CREDENTIAL_NAME` (`kimi-read.ts`), `MINIMAX_CREDENTIAL_NAME` (`minimax-read.ts`), `STEP_CREDENTIAL_NAME` (`step-read.ts`), and explicit per-file booleans where the path is fixed (`credentialsPresent`/`envFilePresent` in `dsh-read.ts`, `authPresent`/`mcpCredentialsPresent` in `grok-read.ts`). Existence is the whole of the contact — the report may say the name and nothing else: no size, no mtime, no content.
+- The report line says so in words, and the phrasing is load-bearing because the tests match on it: `"credential-shaped entries reported by name and never opened — no value in them was read, and none is carried"` (`kimi-plan.ts`, `minimax-plan.ts`, `step-plan.ts`), `"the account's tokens — named, never opened"` (`grok-plan.ts`). The item is a skip, not a mapping.
+- The outgoing direction is marked, not filtered: `claimEnv` flags a write as secret-bearing and `looksLikeSecretName` (`migrate-types.ts`, over `SECRET_ENV_MARKERS`) tells the closing notice which files now hold secrets. Credentials that legitimately must cross — ZCode's env block is the standing example — are carried whole and named, never echoed.
+- **The test convention is the strongest evidence available.** Each source has a sentinel test — write a canary value into the credential file, assert it appears nowhere in the reader's return value, the plan, or the rendered report, and assert the file was actually there so the assertion cannot pass by absence. `migrate-grok.test.ts`, `migrate-kimi.test.ts`, `migrate-step.test.ts` and `migrate-deepseek-harness.test.ts` all have one; a new source without one is the finding.
+
+Two asymmetries a reviewer should know rather than assume away: not every source uses the name-regex shape (grok, codex, dsh and zcode hard-code their filenames, and **zcode has no credential-file skip at all** — it relies entirely on the write-side marking), and nothing stops a new `*-plan.ts` from calling `readText()` on one of these paths. That is exactly why this is worth a look on every migration diff: the boundary is a habit, and habits are what a diff erodes.
 
 For each hit, name the surface, the concrete input that triggers it, and whether it's exploitable now or only under a specific configuration (e.g. `acceptEdits` mode, a permissive allowlist).

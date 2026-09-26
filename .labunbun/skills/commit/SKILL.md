@@ -17,9 +17,14 @@ Group the changed files by the concern they serve. Two hunks belong in the same 
 
 ## Matching this repo's commit style
 
-Run `git log --oneline -10` before writing anything. labunbun's actual history is plain descriptive imperative-mood summaries (`Add example skills: code review orchestration, PR body, skill writing`, `Close permission bypasses and activate dead configuration`) — it does not use Conventional Commit type prefixes like `feat:`/`fix:`. Match what the log actually shows over a generic external convention: one summary line describing the change, a body only when the why isn't obvious from the diff or summary alone.
+Run `git log --oneline -15` before writing anything, and match what it shows. The history has two shapes and it moved between them, so a description of "the style" that doesn't say which is current will send you the wrong way:
 
-What carries over from Conventional Commits here is the discipline behind it, not the prefix syntax: one logical change per commit, described unambiguously. That discipline is exactly what the scope-judging step above already enforces.
+- **Older commits** (roughly 70 of the last 200) are a plain imperative summary with no prefix at all: `Stop trusting repo-controlled settings tiers`, `Teach the Vim engine vim's character classes and terminal motions`.
+- **Recent commits** — every batch since the migration work — lead with a scope and a colon: `vim: the quote text objects`, `emacs: modeless editing in the prompt, alongside vim`, `zcode: read the MCP legacy spellings the way ZCode reads them`, `/activity: session heatmap with current and longest streak`, `test: pin the mtimes the newest-session test asserts on`. The scope is a feature, module, or batch name, and the summary after the colon starts lowercase.
+
+What is *not* the convention is Conventional Commits' `feat:`/`fix:`/`chore:` type vocabulary, and it is worth being explicit about the difference: a scope names **which part of the product** a commit touches, a type names **what kind of change** it is. Use the first.
+
+A body is now the norm rather than the exception, and the recent ones earn their length. They typically open with why the change was made — including the reason it was wrong before, when there was one — and often close with a short verification list naming the tests, cases, or counts that back it up. "Ran the linter" is not verification; "33 differential cases (947 -> 980), 980/980 against a real vim" is. What carries over from Conventional Commits here is the discipline behind it, not the prefix syntax: one logical change per commit, described unambiguously. That discipline is exactly what the scope-judging step above already enforces.
 
 ## Showing it and waiting for confirmation
 
@@ -27,4 +32,8 @@ Print the exact message and the exact paths about to be staged before touching t
 
 ## Committing
 
-Stage only the specific paths identified above — never `git add -A` or `git add .` when the working tree has anything outside the current scope. Commit with the confirmed message via a heredoc so a multi-line body survives shell quoting intact. Never push as part of this skill; that is a separate action requiring its own confirmation.
+Stage only the specific paths identified above — never `git add -A` or `git add .` when the working tree has anything outside the current scope. Commit with the confirmed message via a heredoc so a multi-line body survives shell quoting intact.
+
+End the message with the `Co-Authored-By: Claude <noreply@anthropic.com>` trailer, after the body and separated by a blank line. Most of the recent history carries one (74 of the last 200 commits), so a commit without it is the odd one out. Show it in the preview above, since it is part of the message the user is approving.
+
+Never push as part of this skill; that is a separate action requiring its own confirmation.

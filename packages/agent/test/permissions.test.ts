@@ -139,6 +139,36 @@ describe("evaluatePermissions", () => {
 		expect(evaluatePermissions("Bash", { command: "git push origin main" }, config).behavior).toBe("deny");
 	});
 
+	/**
+	 * The cross-tool case, which is a different mechanism from the one above and
+	 * was the actual bypass this guards: a rule written for one tool has to reach
+	 * a shell command that reads the same file, because otherwise `Read(...)`
+	 * deny is no more than a request to be polite. `extractBashFilePaths` is the
+	 * whole of that mechanism.
+	 *
+	 * The control matters as much as the assertion. Without it, "deny every
+	 * Bash call" would satisfy this test, so the second case pins that a command
+	 * touching a *different* path is untouched — that is what distinguishes the
+	 * extension from a blanket denial.
+	 */
+	test("a file deny rule reaches the shell that reads the same file", () => {
+		const config = { mode: "default" as const, rules: rules([["Read(secret/**)", "deny"]]), cwd: CWD };
+
+		// The same file, through each tool that can read it.
+		expect(evaluatePermissions("Read", { file_path: "G:\\work\\proj\\secret\\key" }, config).behavior).toBe("deny");
+		expect(evaluatePermissions("Bash", { command: "cat secret/key" }, config).behavior).toBe("deny");
+		expect(evaluatePermissions("Bash", { command: "head -n1 secret/key" }, config).behavior).toBe("deny");
+		// Hidden behind a pipe, which is the shape that made this worth extracting
+		// a tokenizer for: the deny has to be found in the second segment.
+		expect(evaluatePermissions("Bash", { command: "echo hi | cat secret/key" }, config).behavior).toBe("deny");
+
+		// Controls: a different file is not denied, and a non-reading command is
+		// not turned into a denial by association with the word `cat`.
+		expect(evaluatePermissions("Bash", { command: "cat public/key" }, config).behavior).toBe("ask");
+		expect(evaluatePermissions("Bash", { command: "echo secret/key" }, config).behavior).toBe("ask");
+		expect(evaluatePermissions("Bash", { command: "git status" }, config).behavior).toBe("ask");
+	});
+
 	test("bare deny blocks the whole tool before the model sees matching input", () => {
 		const config = { mode: "default" as const, rules: rules([["WebFetch", "deny"]]), cwd: CWD };
 		expect(evaluatePermissions("WebFetch", { url: "https://x" }, config).behavior).toBe("deny");
