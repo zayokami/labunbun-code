@@ -688,6 +688,7 @@ describe("opencode: providers, MCP and permissions", () => {
 				".config/opencode/opencode.json": JSON.stringify({
 					provider: {
 						gw: {
+							// biome-ignore lint/suspicious/noTemplateCurlyInString: REAL_TOKEN between the two is the control, so the refs must stay literal
 							env: ["${file:./key.txt}", "REAL_TOKEN", "${file:./other.txt}"],
 							options: { baseURL: "https://gw.example.invalid/v1" },
 							models: { m: { limit: { context: 1000 } } },

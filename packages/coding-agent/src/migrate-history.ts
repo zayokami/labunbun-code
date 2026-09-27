@@ -1988,6 +1988,7 @@ function readCursorPromptHistory(
 			overLimit: 0,
 			truncated: false,
 			absent:
+				// biome-ignore lint/suspicious/noTemplateCurlyInString: the sentence quotes a variable name, so the text is the point
 				"no prompt list at either spelling cursor is reported to use (${XDG_CONFIG_HOME}/cursor/prompt_history.json and ~/.config/cursor/prompt_history.json) — a list is looked for and there is none",
 		};
 	}

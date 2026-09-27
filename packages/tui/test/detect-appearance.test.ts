@@ -479,7 +479,14 @@ describe("detectAppearance sharing stdin with the REPL", () => {
 		pushReply(stdin, `${ESC}]11;rgb:ffff/ffff/ffff${ESC}\\${ESC}[?61;c`, 5);
 		const started = performance.now();
 		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 5000 })).toBe("light");
-		expect(performance.now() - started).toBeLessThan(60);
+		// The number this bound has to exclude is 5000: a run that sat out the
+		// timeout. It is not a number that has to be matched — the reply lands on
+		// a 5 ms timer and the release is synchronous in that tick, so the real
+		// cost is one tick. Asserting 60 ms measured that tick against a 2-vCPU
+		// shared runner's scheduler, which is a claim about the machine rather
+		// than about the code. 1000 keeps the 5x gap to the failure it names
+		// while leaving room for a GC pause to land inside it.
+		expect(performance.now() - started).toBeLessThan(1000);
 	});
 
 	test("the stream is the reader's again once the probe releases it", async () => {

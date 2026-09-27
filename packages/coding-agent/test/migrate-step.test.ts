@@ -637,7 +637,9 @@ describe("models.json → providers", () => {
 		).toHaveLength(1);
 	});
 
+	// biome-ignore lint/suspicious/noTemplateCurlyInString: the test is named after the spelling it covers
 	test("the ${VAR} spelling names the same variable as $VAR", () => {
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: the fixture's value is a shell reference, not a template
 		const { home } = stepHome({ "models.json": modelsJson({ gw: { apiKey: "${GW_KEY}", models: [model("m1")] } }) });
 		expect(providersWritten(plan(home))[0].apiKeyEnv).toBe("GW_KEY");
 	});

@@ -18,7 +18,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { McpServerConfigSchema } from "@labunbun/mcp";
@@ -587,13 +587,23 @@ describe("migrate: DeepSeek Harness MCP reader, the flow guard", () => {
 		);
 	});
 
+	// The DeepSeek Harness checkout this file reads its ground truth from, and
+	// the reason the one test below is `existsSync`-gated. Same reasoning as the
+	// emacs citation guard: without this tree the glob finds nothing and the
+	// count assertion fails, so a clone on a second machine goes red for a reason
+	// that has nothing to do with the reader. The gate means the coverage is
+	// genuinely lost where the tree is absent — it is not a fixture, and writing
+	// one "to suit it" would destroy the only property this test has.
+	const HARNESS_TREE = "G:/Bunttta/deepseek-harness-master";
+	const harnessPresent = existsSync(HARNESS_TREE);
+
 	// 16.
-	test("every Cordis file the harness ships is read, not refused", () => {
+	test.skipIf(!harnessPresent)("every Cordis file the harness ships is read, not refused", () => {
 		// The guard's precision, against real files rather than fixtures written to
 		// suit it: the harness's own bundles and overlays. A guard that fired on one
 		// of these would refuse a composition the harness loads — and since it would
 		// refuse it silently, as a note in a report, only a sweep notices.
-		const harness = "G:/Bunttta/deepseek-harness-master";
+		const harness = HARNESS_TREE;
 		const files: string[] = [];
 		for (const pattern of [
 			`${harness}/packages/bundle/**/cordis.patch.yml`,

@@ -17,7 +17,14 @@ import {
 	formatCatalogNotice,
 	refreshModelCatalog,
 } from "../src/discovery.ts";
-import { clearCustomModels, clearDiscovery, listModels, resolveModel, setProviderCatalogue } from "../src/model.ts";
+import {
+	apiKeyEnvNames,
+	clearCustomModels,
+	clearDiscovery,
+	listModels,
+	resolveModel,
+	setProviderCatalogue,
+} from "../src/model.ts";
 import { listAnthropicModels } from "../src/providers/anthropic.ts";
 import { listOpenAIModels } from "../src/providers/openai-compat.ts";
 import type { Model } from "../src/types.ts";
@@ -40,6 +47,7 @@ const KEY_VARS = [
 	"DEEPSEEK_API_KEY",
 	"KIMI_API_KEY",
 	"MOONSHOT_API_KEY",
+	"MINIMAX_API_KEY",
 	"GLM_API_KEY",
 	"OPENAI_API_KEY",
 	"GEMINI_API_KEY",
@@ -87,6 +95,27 @@ function answering(listing: DiscoveredListing): { probe: CatalogProbe; asked: st
 		},
 	};
 }
+
+/**
+ * The list above is hand-written, and a name the registry has outgrown is not a
+ * lint error: it is a test that quietly means "no provider has a key" while
+ * meaning "every provider except the one whose variable nobody cleared". On a
+ * machine that holds that variable the assertion fails for a reason that has
+ * nothing to do with discovery; on a clean machine it never fails at all, which
+ * is the same shape as no test. So the list is checked against the registry
+ * here, where a new provider fails on every machine instead of on one.
+ *
+ * The registry is the source of truth, not the other way round: this asserts
+ * coverage, and would rather a caller widen KEY_VARS than narrow the catalog.
+ */
+test("every variable the registry names is one this file takes away", () => {
+	// A catalogue left by a neighbouring test would filter the list down to that
+	// provider and make this vacuously true.
+	clearDiscovery();
+	const named = new Set<string>();
+	for (const model of listModels()) for (const name of apiKeyEnvNames(model)) named.add(name);
+	expect([...named].filter((name) => !KEY_VARS.includes(name)).sort()).toEqual([]);
+});
 
 describe("asking the providers", () => {
 	test("a provider with no key is not asked at all", async () => {

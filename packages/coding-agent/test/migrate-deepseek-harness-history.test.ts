@@ -13,6 +13,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
 	copyFileSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -859,8 +860,16 @@ describe("migrate: history from DeepSeek Harness snapshot logs", () => {
 	 *
 	 * These are the harness writer's output, so they are the strongest ground truth
 	 * for the format available here; nothing under that tree is ever written to.
+	 *
+	 * The tree is a read-only checkout on the maintainer's machine, not a fixture,
+	 * so every test in this block is `existsSync`-gated: `copySnapshot` copies out
+	 * of a path that does not exist elsewhere, and without the gate that is a hard
+	 * throw rather than a skip. The cost is that the ground truth is not exercised
+	 * at all where the tree is absent — which is a real loss of coverage, and is
+	 * the reason these tests read the writer's output rather than a copy of it.
 	 */
 	const HARNESS_SNAPSHOTS = "G:/Bunttta/deepseek-harness-master/snapshots/session";
+	const snapshotsPresent = existsSync(HARNESS_SNAPSHOTS);
 
 	/** Copy one snapshot's live generation into a fake harness root. */
 	function copySnapshot(root: string, name: string): string {
@@ -871,7 +880,7 @@ describe("migrate: history from DeepSeek Harness snapshot logs", () => {
 		return path;
 	}
 
-	test("the writer's own logs list and convert without refusal", () => {
+	test.skipIf(!snapshotsPresent)("the writer's own logs list and convert without refusal", () => {
 		withHome({}, (home) => {
 			const root = harnessRoot(home);
 			const copied = ["bash-tool-turn", "fs-policy-reject", "compaction-recovery"].map((name) =>
@@ -899,7 +908,7 @@ describe("migrate: history from DeepSeek Harness snapshot logs", () => {
 		});
 	});
 
-	test("a real failed tool call keeps its error", () => {
+	test.skipIf(!snapshotsPresent)("a real failed tool call keeps its error", () => {
 		withHome({}, (home) => {
 			const path = copySnapshot(harnessRoot(home), "fs-policy-reject");
 			const results = messagesOf(logRead(path).entries).filter((message) => message.role === "toolResult");
@@ -910,7 +919,7 @@ describe("migrate: history from DeepSeek Harness snapshot logs", () => {
 		});
 	});
 
-	test("a real compaction replacement drops what the harness dropped", () => {
+	test.skipIf(!snapshotsPresent)("a real compaction replacement drops what the harness dropped", () => {
 		withHome({}, (home) => {
 			const path = copySnapshot(harnessRoot(home), "compaction-recovery");
 			const read = logRead(path);

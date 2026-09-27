@@ -593,11 +593,13 @@ describe("cursor mcp", () => {
 	test("an environment reference in the colon spelling is named, not passed through as text", () => {
 		const planned = plan({
 			".cursor/mcp.json": JSON.stringify({
+				// biome-ignore lint/suspicious/noTemplateCurlyInString: the fixture writes VSCode's own spelling into the file
 				mcpServers: { files: { type: "stdio", command: "node", env: { ROOT: "${env:PROJECT_ROOT}" } } },
 			}),
 		});
 		const item = line(planned, "mcpServers.files");
 		expect(item?.action).toBe("downgrade");
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: the assertion is that this text survives unexpanded
 		expect(item?.detail).toContain("${env:PROJECT_ROOT}");
 		expect(item?.detail).toContain("is not expanded here");
 	});

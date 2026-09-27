@@ -47,10 +47,14 @@ describe("inputMatchesSpecifier", () => {
 		expect(inputMatchesSpecifier("Edit", "src/**", { file_path: "G:/work/proj/src/deep/b.ts" }, CWD)).toBe(true);
 		expect(inputMatchesSpecifier("Edit", "src/**", { file_path: "G:\\other\\src\\a.ts" }, CWD)).toBe(false);
 
+		// The same lookup the source does, so the value does not matter — what is
+		// under test is that `~` expands at all. That is only true if there *is* a
+		// home to expand, so the emptiness is asserted rather than branched on: a
+		// guard like `if (home)` turns a machine that happens to set neither
+		// variable into a test that checks nothing and reports green.
 		const home = (process.env.USERPROFILE ?? process.env.HOME ?? "").replace(/\\/g, "/");
-		if (home) {
-			expect(inputMatchesSpecifier("Read", "~/.ssh/*", { file_path: `${home}/.ssh/id_rsa` }, "G:\\x")).toBe(true);
-		}
+		expect(home).not.toBe("");
+		expect(inputMatchesSpecifier("Read", "~/.ssh/*", { file_path: `${home}/.ssh/id_rsa` }, "G:\\x")).toBe(true);
 	});
 
 	test("mcp rules match by server or server__tool", () => {

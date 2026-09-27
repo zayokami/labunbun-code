@@ -23,8 +23,11 @@ const BOM = String.fromCharCode(0xfeff);
 
 /**
  * Run `body` against a throwaway home + project dir, with settings files
- * written per tier. Restores USERPROFILE afterwards — loadSettings resolves the
- * user and policy tiers through it.
+ * written per tier. Restores both home variables afterwards — loadSettings
+ * resolves the user and policy tiers through os.homedir(), which reads
+ * USERPROFILE on Windows and HOME everywhere else. Setting one leaves the
+ * user tier reading the real home on the other two platforms, which is
+ * exactly the kind of failure that only shows up on a second machine.
  */
 function withSettingsTiers(
 	tiers: { user?: unknown; project?: unknown; local?: unknown; policy?: unknown },
@@ -33,8 +36,10 @@ function withSettingsTiers(
 	const fakeHome = mkdtempSync(join(tmpRoot(), "lbb-home-"));
 	const cwd = mkdtempSync(join(tmpRoot(), "lbb-proj-"));
 	const prevHome = process.env.USERPROFILE;
+	const prevPosix = process.env.HOME;
 	try {
 		process.env.USERPROFILE = fakeHome;
+		process.env.HOME = fakeHome;
 		mkdirSync(join(fakeHome, ".labunbun"), { recursive: true });
 		mkdirSync(join(cwd, ".labunbun"), { recursive: true });
 		if (tiers.user) writeFileSync(join(fakeHome, ".labunbun", "settings.json"), JSON.stringify(tiers.user));
@@ -45,6 +50,8 @@ function withSettingsTiers(
 	} finally {
 		if (prevHome === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevHome;
+		if (prevPosix === undefined) delete process.env.HOME;
+		else process.env.HOME = prevPosix;
 		rmSync(fakeHome, { recursive: true, force: true });
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -55,8 +62,10 @@ describe("loadSettings hierarchy", () => {
 		const fakeHome = mkdtempSync(join(tmpRoot(), "lbb-home-"));
 		const cwd = mkdtempSync(join(tmpRoot(), "lbb-proj-"));
 		const prevHome = process.env.USERPROFILE;
+		const prevPosix = process.env.HOME;
 		try {
 			process.env.USERPROFILE = fakeHome;
+			process.env.HOME = fakeHome;
 
 			mkdirSync(join(fakeHome, ".labunbun"), { recursive: true });
 			mkdirSync(join(cwd, ".labunbun"), { recursive: true });
@@ -79,6 +88,8 @@ describe("loadSettings hierarchy", () => {
 		} finally {
 			if (prevHome === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = prevHome;
+			if (prevPosix === undefined) delete process.env.HOME;
+			else process.env.HOME = prevPosix;
 			rmSync(fakeHome, { recursive: true, force: true });
 			rmSync(cwd, { recursive: true, force: true });
 		}
@@ -109,8 +120,10 @@ describe("loadSettings hierarchy", () => {
 		const cwd = mkdtempSync(join(tmpRoot(), "lbb-bom-"));
 		const home = mkdtempSync(join(tmpRoot(), "lbb-bom-home-"));
 		const prevHome = process.env.USERPROFILE;
+		const prevPosix = process.env.HOME;
 		try {
 			process.env.USERPROFILE = home;
+			process.env.HOME = home;
 			mkdirSync(join(home, ".labunbun"), { recursive: true });
 			writeFileSync(
 				join(home, ".labunbun", "settings.json"),
@@ -122,6 +135,8 @@ describe("loadSettings hierarchy", () => {
 		} finally {
 			if (prevHome === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = prevHome;
+			if (prevPosix === undefined) delete process.env.HOME;
+			else process.env.HOME = prevPosix;
 			rmSync(home, { recursive: true, force: true });
 			rmSync(cwd, { recursive: true, force: true });
 		}
@@ -130,8 +145,10 @@ describe("loadSettings hierarchy", () => {
 	test("corrupt settings file is skipped with a warning, not a crash", () => {
 		const cwd = mkdtempSync(join(tmpRoot(), "lbb-corrupt-"));
 		const prevHome = process.env.USERPROFILE;
+		const prevPosix = process.env.HOME;
 		try {
 			process.env.USERPROFILE = cwd;
+			process.env.HOME = cwd;
 			mkdirSync(join(cwd, ".labunbun"), { recursive: true });
 			writeFileSync(join(cwd, ".labunbun", "settings.json"), "{not json");
 			const { settings } = loadSettings(cwd);
@@ -139,6 +156,8 @@ describe("loadSettings hierarchy", () => {
 		} finally {
 			if (prevHome === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = prevHome;
+			if (prevPosix === undefined) delete process.env.HOME;
+			else process.env.HOME = prevPosix;
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
