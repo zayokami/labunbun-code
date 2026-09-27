@@ -102,6 +102,14 @@ function openAICompatModel(
 		maxOutputTokens: number;
 		reasoning?: boolean;
 		apiKeyEnvFallbacks?: string[];
+		/**
+		 * Omitted rather than defaulted, for the reason `reasoning` cannot carry:
+		 * absent says "this model never said", which is a different claim from "this
+		 * model takes whatever the session asked for". A row that guesses the second
+		 * about the first sends a `reasoning_effort` that costs the request its
+		 * tools. See {@link Model.toolReasoningEffort}.
+		 */
+		toolReasoningEffort?: "low" | "medium" | "high" | "none";
 		pricing: ModelPricing;
 	},
 ): Model {
@@ -115,6 +123,7 @@ function openAICompatModel(
 		// Omitted rather than empty when there is none, so "no other variable works"
 		// and "this model never said" stay distinguishable.
 		...(opts.apiKeyEnvFallbacks ? { apiKeyEnvFallbacks: opts.apiKeyEnvFallbacks } : {}),
+		...(opts.toolReasoningEffort ? { toolReasoningEffort: opts.toolReasoningEffort } : {}),
 		contextWindow: opts.contextWindow,
 		maxOutputTokens: opts.maxOutputTokens,
 		reasoning: opts.reasoning ?? false,
@@ -126,7 +135,14 @@ function openAICompatModel(
 /**
  * Where the money numbers come from.
  *
- * Every row was checked against the vendor's own page on 2026-09-20. Anthropic's
+ * Every row was checked against the vendor's own page, last swept on 2026-09-27 —
+ * a date on this line means "as of", not "covers every row below it". Rows added
+ * between sweeps name a later date in their own comment: `claude-opus-5-5`
+ * (2026-09-23), `gpt-6-sol` / `gpt-6-luna` and `glm-5.3-flashx` (2026-09-27). The
+ * 09-27 sweep changed prices on no row; it added the three and re-confirmed the
+ * rest, including the DeepSeek v4-pro and Kimi K2.6 rows that third-party
+ * aggregators were reporting as changed.
+ * Anthropic's
  * and DeepSeek's are the vendors' USD figures; the cache channel is derived by
  * the documented multipliers rather than copied, because a hand-copied third
  * number is where a table like this goes stale first (Sonnet 5 is $2/$10 — the
@@ -258,11 +274,15 @@ const BUILT_IN_MODELS: Model[] = [
 	// `reasoning` decides what the adapter asks for by default: true sends
 	// `reasoning_effort: "medium"`, false sends nothing and lets the model's own
 	// default stand. Only the rows where "medium" is a documented value are true —
-	// OpenAI's four and Gemini 3.8 Flash. It is false for every model that always
+	// OpenAI's six and Gemini 3.8 Flash. It is false for every model that always
 	// thinks, which reads backwards until you see the failure it avoids: K3's
 	// effort set is low/high/max and Z.AI's 5.3 takes max/high/low, so asking
 	// either for "medium" is asking for a depth it has no word for. DeepSeek
 	// documents the mapping medium → high, which is why its rows stay true.
+	//
+	// On a row that also carries `toolReasoningEffort` this default governs
+	// tool-less requests only, and the tool-less request is the one the flag is
+	// even about.
 	//
 	// DeepSeek — peak rates; the rest of the week is half of these. Each id answers
 	// in thinking or non-thinking mode (thinking by default), so the chat/reasoner
@@ -328,6 +348,16 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 131_072,
 		pricing: { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
 	}),
+	// The 5.3 generation's answer to the 4.7 tier's FlashX, on the same 1M window the
+	// rest of the 5.3 family carries. Where the 4.7 pair leaves a wide gap between
+	// its tiers (4.7 at $0.60, 4.7-FlashX at $0.07), the 5.3 gap is narrow: 2.5x down
+	// to the FlashX, against 9.3x down to the Flash. The cached rate holds the whole
+	// family at about a fifth of input (0.075/0.37, next to 0.03/0.15 and 0.26/1.4).
+	openAICompatModel("glm", GLM_BASE, "GLM_API_KEY", "glm-5.3-flashx", "GLM-5.3-FlashX", {
+		contextWindow: 1_000_000,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0.37, output: 1.25, cacheRead: 0.075, cacheWrite: 0 },
+	}),
 	openAICompatModel("glm", GLM_BASE, "GLM_API_KEY", "glm-4.7", "GLM-4.7", {
 		contextWindow: 200_000,
 		maxOutputTokens: 131_072,
@@ -352,6 +382,35 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 128_000,
 		reasoning: true,
 		pricing: openAIPricing(10, 50, 1),
+	}),
+	// Sol and Luna are the 6-generation's answer to the 5.6 tier, and they arrived
+	// as a price cut rather than a new family. Sol is exactly half of 5.6 Sol on all
+	// three channels ($4/$0.40/$20 → $2/$0.20/$10); Luna halves its input and cache
+	// read ($0.20/$0.02 → $0.10/$0.01) and takes its output down harder, $1.20 to
+	// $0.50. The 5.6 ids are still served at what they always cost, so those rows
+	// stay rather than being forwarded.
+	//
+	// Both carry `toolReasoningEffort`, and neither carries it lightly. Their model
+	// pages say function calling over Chat Completions — the wire this file speaks —
+	// is available *only* at `reasoning_effort: "none"`, and name `medium` as the
+	// server-side default. `reasoning: true` would send `medium` and `reasoning:
+	// false` would send nothing, and both land on the same default. Neither returns
+	// an error: the turn comes back with no `tool_calls` in it. Astra's page does
+	// not carry that constraint, which is why the field is a row's and not a
+	// provider's.
+	openAICompatModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-6-sol", "GPT-6 Sol", {
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		reasoning: true,
+		toolReasoningEffort: "none",
+		pricing: openAIPricing(2, 10, 0.2),
+	}),
+	openAICompatModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-6-luna", "GPT-6 Luna", {
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		reasoning: true,
+		toolReasoningEffort: "none",
+		pricing: openAIPricing(0.1, 0.5, 0.01),
 	}),
 	openAICompatModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-5.6-sol", "GPT-5.6 Sol", {
 		contextWindow: 1_050_000,

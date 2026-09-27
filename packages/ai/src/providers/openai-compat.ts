@@ -75,7 +75,7 @@ export interface OpenAIRequestParams {
 	max_completion_tokens?: number;
 	tools?: Array<{ type: "function"; function: { name: string; description: string; parameters: unknown } }>;
 	tool_choice?: "auto";
-	reasoning_effort?: "low" | "medium" | "high";
+	reasoning_effort?: "low" | "medium" | "high" | "none";
 	temperature?: number;
 	/**
 	 * A routing hint, not a cache instruction: it asks the provider to send
@@ -133,7 +133,13 @@ export function buildOpenAIRequest(
 	// Reasoning effort for providers that support it (OpenAI o-series, etc.).
 	// DeepSeek-style providers ignore it. Never send temperature alongside.
 	const thinking = options?.thinkingLevel ?? (model.reasoning ? "medium" : "off");
-	if (thinking === "low" || thinking === "medium" || thinking === "high") {
+	if (model.toolReasoningEffort !== undefined && context.tools && context.tools.length > 0) {
+		// The session's level is not negotiable with the wire: some models publish
+		// function calling as available only at one effort, and the request still
+		// goes out with `tools` on it either way. Answering at the level asked for
+		// there does not degrade the turn, it removes the tools from it.
+		params.reasoning_effort = model.toolReasoningEffort;
+	} else if (thinking === "low" || thinking === "medium" || thinking === "high") {
 		params.reasoning_effort = thinking;
 	}
 

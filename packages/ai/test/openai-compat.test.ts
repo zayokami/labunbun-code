@@ -68,6 +68,55 @@ describe("buildOpenAIRequest", () => {
 	});
 });
 
+describe("a model that needs an effort of its own to keep its tools", () => {
+	// `gpt-6-sol` / `gpt-6-luna` as the table declares them. Shaped like the real
+	// rows so the wire behaviour is what a shipped row gets, with a DeepSeek base
+	// URL so nothing here can reach a network by accident.
+	const SOL: Model = {
+		...MODEL,
+		id: "gpt-6-sol",
+		provider: "openai",
+		reasoning: true,
+		toolReasoningEffort: "none",
+	};
+	const TOOLS = [{ name: "read", description: "d", parameters: { type: "object" as const, properties: {} } }];
+
+	test("the level the session asked for does not go out, the model's does", () => {
+		// The failure this field exists for is not an error. The turn comes back
+		// with no `tool_calls` in it, so the agent stops acting and the run reads as
+		// a model that ignored its tools — with nothing in the response to say so.
+		// "high" and "medium" are the two settings that lose them: one is a depth
+		// the model has tools at, the other is its own default.
+		for (const level of ["low", "medium", "high"] as const) {
+			const params = buildOpenAIRequest(SOL, ctx({ tools: TOOLS }), { thinkingLevel: level });
+			expect(params.reasoning_effort).toBe("none");
+			// The tools still go out, which is what makes this worth protecting.
+			expect(params.tools).toHaveLength(1);
+			expect(params.tool_choice).toBe("auto");
+		}
+	});
+
+	test("with no tools on the request, the level asked for is what goes out", () => {
+		// The guard is `context.tools`, not "the model has tools available". A
+		// tool-less request has nothing to protect, and pinning "none" there would
+		// throw away the depth the session bought for a turn that could carry it.
+		expect(buildOpenAIRequest(SOL, ctx(), { thinkingLevel: "high" }).reasoning_effort).toBe("high");
+		expect(buildOpenAIRequest(SOL, ctx(), { thinkingLevel: "off" }).reasoning_effort).toBeUndefined();
+		// An empty array is not a request with tools: it goes out as no tools.
+		expect(buildOpenAIRequest(SOL, ctx({ tools: [] }), { thinkingLevel: "high" }).reasoning_effort).toBe("high");
+	});
+
+	test("a model that names no effort keeps the level it was given", () => {
+		// The control, and it is why this is a row's field rather than a provider's.
+		// `gpt-6-astra` is the same tier and the same generation; its page does not
+		// publish the constraint, and "none" is not one of its efforts at all — so a
+		// default applied by provider would send it a value it rejects.
+		const astra = { ...SOL, toolReasoningEffort: undefined };
+		expect(buildOpenAIRequest(astra, ctx({ tools: TOOLS }), { thinkingLevel: "high" }).reasoning_effort).toBe("high");
+		expect(buildOpenAIRequest(astra, ctx({ tools: TOOLS })).reasoning_effort).toBe("medium");
+	});
+});
+
 describe("the cache routing fields", () => {
 	// The default fixture is DeepSeek, which documents no routing key, so most of
 	// these switch the provider rather than the request.

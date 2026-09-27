@@ -45,10 +45,13 @@ const BUILT_IN_REFS = [
 	"kimi/kimi-k2.6",
 	"glm/glm-5.3",
 	"glm/glm-5.3-flash",
+	"glm/glm-5.3-flashx",
 	"glm/glm-4.7",
 	"glm/glm-4.7-flashx",
 	"glm/glm-4.6",
 	"openai/gpt-6-astra",
+	"openai/gpt-6-sol",
+	"openai/gpt-6-luna",
 	"openai/gpt-5.6-sol",
 	"openai/gpt-5.6-terra",
 	"openai/gpt-5.6-luna",
@@ -174,6 +177,26 @@ describe("the built-in catalog", () => {
 		expect(flagged).toEqual(["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1"]);
 	});
 
+	test("the models that need an effort of their own when tools are on are named", () => {
+		// `reasoning: true` sends "medium" and `false` sends nothing, and on these
+		// two rows neither is right: their pages publish function calling as
+		// available only at "none" while naming "medium" as the server default, so
+		// both settings of the flag lose the tools. Naming the rows is the only way
+		// a fourth OpenAI model arriving next month has to decide whether to join
+		// them, rather than inheriting whatever the last one did.
+		//
+		// Astra is the control and the reason this is a row and not a provider: it
+		// is the same price tier and the same 6-generation, and its page does not
+		// carry the constraint — "none" is not one of its efforts at all.
+		const flagged = BUILT_IN_REFS.filter((ref) => resolveModel(ref)?.toolReasoningEffort);
+		expect(flagged).toEqual(["openai/gpt-6-sol", "openai/gpt-6-luna"]);
+		expect(resolveModel("openai/gpt-6-sol")?.toolReasoningEffort).toBe("none");
+		expect(resolveModel("openai/gpt-6-astra")?.toolReasoningEffort).toBeUndefined();
+		// They still claim the default for a request with no tools on it, which is
+		// the one request where the flag is the whole story.
+		expect(resolveModel("openai/gpt-6-luna")?.reasoning).toBe(true);
+	});
+
 	test("a cache read is a tenth of input, except on the models that say otherwise", () => {
 		// The multiplier is the rule; if a rate changes the read rate has to move
 		// with it, and a hand-typed table is exactly where that goes wrong.
@@ -217,12 +240,22 @@ describe("the built-in catalog", () => {
 			["kimi/kimi-k2.6", 0.95, 4, 0.16, 0],
 			["glm/glm-5.3", 1.4, 4.4, 0.26, 0],
 			["glm/glm-5.3-flash", 0.15, 0.5, 0.03, 0],
+			// FlashX's cached rate is its own published figure, not a fifth of input
+			// worked out here — it happens to land on 0.203x, and the two rows above
+			// it sit at 0.2x and 0.186x, so a derived number would have been close
+			// enough to pass review while billing a cached session at the wrong rate.
+			["glm/glm-5.3-flashx", 0.37, 1.25, 0.075, 0],
 			["glm/glm-4.7", 0.6, 2.2, 0.11, 0],
 			["glm/glm-4.7-flashx", 0.07, 0.4, 0.01, 0],
 			["glm/glm-4.6", 0.6, 2.2, 0.11, 0],
 			// The current regime's rates: Flash doubles on 2027-01-01, and the Pro
 			// row's figures are its ≤200k tier.
 			["openai/gpt-6-astra", 10, 50, 1, 12.5],
+			// Sol is half of 5.6 Sol on all three channels. Luna is not: its output
+			// comes down harder than its input ($1.20 → $0.50 against $0.20 → $0.10),
+			// so "half the 5.6 Luna" is wrong in the channel that costs the most.
+			["openai/gpt-6-sol", 2, 10, 0.2, 2.5],
+			["openai/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
 			["openai/gpt-5.6-sol", 4, 20, 0.4, 5],
 			["openai/gpt-5.6-terra", 2, 12, 0.2, 2.5],
 			["openai/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
@@ -262,10 +295,13 @@ describe("the built-in catalog", () => {
 			["kimi/kimi-k2.6", 262_144, 32_768],
 			["glm/glm-5.3", 1_000_000, 131_072],
 			["glm/glm-5.3-flash", 1_000_000, 131_072],
+			["glm/glm-5.3-flashx", 1_000_000, 131_072],
 			["glm/glm-4.7", 200_000, 131_072],
 			["glm/glm-4.7-flashx", 200_000, 131_072],
 			["glm/glm-4.6", 200_000, 131_072],
 			["openai/gpt-6-astra", 1_050_000, 128_000],
+			["openai/gpt-6-sol", 1_050_000, 128_000],
+			["openai/gpt-6-luna", 1_050_000, 128_000],
 			["openai/gpt-5.6-sol", 1_050_000, 128_000],
 			["openai/gpt-5.6-terra", 1_050_000, 128_000],
 			["openai/gpt-5.6-luna", 1_050_000, 128_000],
@@ -277,7 +313,7 @@ describe("the built-in catalog", () => {
 	test("the models that always think do not claim a medium effort", () => {
 		// `reasoning: true` makes the adapters ask for "medium" when the caller
 		// states no level, which is only safe where "medium" is a value the vendor
-		// takes. Every Anthropic row claims it and so do the four OpenAI ones, the
+		// takes. Every Anthropic row claims it and so do the six OpenAI ones, the
 		// two DeepSeek ones (medium maps to high) and Gemini 3.8 Flash. What is
 		// listed here is the opposite decision, and it is the interesting one: K3's
 		// effort set is low/high/max and GLM-5.3's is max/high/low, so asking either
@@ -295,6 +331,7 @@ describe("the built-in catalog", () => {
 			"kimi/kimi-k2.6",
 			"glm/glm-5.3",
 			"glm/glm-5.3-flash",
+			"glm/glm-5.3-flashx",
 			"glm/glm-4.7",
 			"glm/glm-4.7-flashx",
 			"glm/glm-4.6",

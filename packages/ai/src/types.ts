@@ -218,6 +218,22 @@ export interface Model<Api extends ApiId = ApiId> {
 	 * parameter it does not know.
 	 */
 	thinkingBlockBinding?: boolean;
+	/**
+	 * The `reasoning_effort` this model needs on the OpenAI-compatibility wire when
+	 * the request carries tools, where that is not the effort the session asked for.
+	 *
+	 * `reasoning` is a two-state flag and cannot express this: on Chat Completions
+	 * `gpt-6-sol` and `gpt-6-luna` make function calling available *only* at `none`,
+	 * and their own default is `medium` — so the flag's `true` sends a value that
+	 * costs the tools and its `false` sends nothing, which is the same default. The
+	 * failure is not an error. The turn comes back with no `tool_calls` in it and the
+	 * agent simply stops acting, which reads as the model ignoring the tools.
+	 *
+	 * Applies only to a request that has tools: without them there is nothing to
+	 * protect, and forcing `none` would drop the reasoning depth the session asked
+	 * for on a request that could have carried it.
+	 */
+	toolReasoningEffort?: "low" | "medium" | "high" | "none";
 	input: ("text" | "image")[];
 	pricing?: ModelPricing;
 }
