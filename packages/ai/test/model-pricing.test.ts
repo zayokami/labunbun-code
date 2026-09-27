@@ -22,6 +22,52 @@ afterEach(() => {
 	clearPricingOverrides();
 });
 
+/**
+ * `<PROVIDER>_BASE_URL` redirects a model at resolve time, so a developer who runs
+ * the app through a gateway has the whole catalog answering somewhere else. The
+ * host test below reads resolved models, so every one of these is borrowed for
+ * the duration — this file otherwise asserts the shipped table, and inheriting
+ * the machine's configuration would make a developer's proxy a test failure. All
+ * seven, not just the one that happened to be set: the point is that no machine
+ * can change the answer.
+ *
+ * The `finally` is the whole restore path, and deliberately not an `afterEach`
+ * alongside the two lines above: `restoreEnv` only puts back what this function
+ * borrowed, and this function always empties the map, so a hook calling it would
+ * run against an empty map every time — a second mechanism that can only ever be
+ * a no-op, which is one more thing to believe is load-bearing.
+ */
+const BASE_URL_VARS = [
+	"ANTHROPIC_BASE_URL",
+	"DEEPSEEK_BASE_URL",
+	"KIMI_BASE_URL",
+	"GLM_BASE_URL",
+	"OPENAI_BASE_URL",
+	"GOOGLE_BASE_URL",
+	"MINIMAX_BASE_URL",
+];
+const savedEnv = new Map<string, string | undefined>();
+
+function restoreEnv(): void {
+	for (const [name, original] of savedEnv) {
+		if (original === undefined) delete process.env[name];
+		else process.env[name] = original;
+	}
+	savedEnv.clear();
+}
+
+function withoutBaseUrlOverrides<T>(body: () => T): T {
+	for (const name of BASE_URL_VARS) {
+		if (!savedEnv.has(name)) savedEnv.set(name, process.env[name]);
+		delete process.env[name];
+	}
+	try {
+		return body();
+	} finally {
+		restoreEnv();
+	}
+}
+
 /** The catalog as shipped. Named rather than read off `listModels()`, which also
  * carries whatever custom providers other test files registered. */
 const BUILT_IN_REFS = [
@@ -57,6 +103,11 @@ const BUILT_IN_REFS = [
 	"openai/gpt-5.6-luna",
 	"google/gemini-3.8-flash",
 	"google/gemini-3.1-pro-preview",
+	"minimax/minimax-m3",
+	"minimax/minimax-m2.7",
+	"minimax/minimax-m2.7-highspeed",
+	"minimax/minimax-m2.5",
+	"minimax/minimax-m2.5-highspeed",
 ];
 
 describe("the built-in catalog", () => {
@@ -261,6 +312,17 @@ describe("the built-in catalog", () => {
 			["openai/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
 			["google/gemini-3.8-flash", 0.75, 3.75, 0.075, 0],
 			["google/gemini-3.1-pro-preview", 2, 12, 0.2, 0],
+			// A fourth rate regime, and the only vendor here that states a cache
+			// write: M3's row is a real zero because its table lists no write rate,
+			// while every M2.x row states $0.375. M3's own figures are the standard
+			// tier at 512k input or under, promoted to half the struck-through list.
+			["minimax/minimax-m3", 0.3, 1.2, 0.06, 0],
+			["minimax/minimax-m2.7", 0.3, 1.2, 0.06, 0.375],
+			// The highspeed twins are not a like-for-like swap: input and output
+			// double, the cached read does not.
+			["minimax/minimax-m2.7-highspeed", 0.6, 2.4, 0.06, 0.375],
+			["minimax/minimax-m2.5", 0.3, 1.2, 0.03, 0.375],
+			["minimax/minimax-m2.5-highspeed", 0.6, 2.4, 0.03, 0.375],
 		]);
 	});
 
@@ -307,6 +369,16 @@ describe("the built-in catalog", () => {
 			["openai/gpt-5.6-luna", 1_050_000, 128_000],
 			["google/gemini-3.8-flash", 1_048_576, 65_536],
 			["google/gemini-3.1-pro-preview", 1_048_576, 65_536],
+			// MiniMax publishes a window per model and no output cap for any of
+			// them, so the third column is the window itself rather than a
+			// published limit. Both consumers clamp it (20k for the compaction
+			// reserve, 64k for escalation), which is what makes a row that says
+			// "not an output cap" safe to carry at all.
+			["minimax/minimax-m3", 1_000_000, 1_000_000],
+			["minimax/minimax-m2.7", 204_800, 204_800],
+			["minimax/minimax-m2.7-highspeed", 204_800, 204_800],
+			["minimax/minimax-m2.5", 204_800, 204_800],
+			["minimax/minimax-m2.5-highspeed", 204_800, 204_800],
 		]);
 	});
 
@@ -336,7 +408,78 @@ describe("the built-in catalog", () => {
 			"glm/glm-4.7-flashx",
 			"glm/glm-4.6",
 			"google/gemini-3.1-pro-preview",
+			// MiniMax: M3 states that its thinking is off unless a request asks,
+			// which is what sending nothing gets, and the M2.x line documents no
+			// effort control on the OpenAI wire at all. So every one of them is
+			// right here by asking for nothing.
+			"minimax/minimax-m3",
+			"minimax/minimax-m2.7",
+			"minimax/minimax-m2.7-highspeed",
+			"minimax/minimax-m2.5",
+			"minimax/minimax-m2.5-highspeed",
 		]);
+	});
+
+	test("every vendor is reached at the host its API actually lives on", () => {
+		// A mistyped host fails every request for that vendor and nothing else:
+		// no table above lists a URL, so before this one existed a wrong base was
+		// invisible to the suite in a way a wrong price never is. One host per
+		// provider rather than per row, so a vendor that moves gets one edit.
+		withoutBaseUrlOverrides(() => {
+			const host = (ref: string) => resolveModel(ref)?.baseUrl;
+			expect([
+				host("anthropic/claude-opus-5-5"),
+				host("deepseek/deepseek-flash"),
+				host("kimi/kimi-k3"),
+				host("glm/glm-5.3"),
+				host("openai/gpt-6-sol"),
+				host("google/gemini-3.8-flash"),
+				host("minimax/minimax-m3"),
+			]).toEqual([
+				"https://api.anthropic.com",
+				"https://api.deepseek.com/v1",
+				// The international host, and the reason it is not the China one: the
+				// two serve the same ids priced in CNY, and the keys are not
+				// interchangeable.
+				"https://api.moonshot.ai/v1",
+				"https://api.z.ai/api/paas/v4",
+				"https://api.openai.com/v1",
+				"https://generativelanguage.googleapis.com/v1beta/openai/",
+				"https://api.minimax.io/v1",
+			]);
+			// One host each, not one per row: a provider that serves several of the
+			// rows above under different URLs is a shape this table does not have.
+			const perProvider = new Map<string, Set<string>>();
+			for (const ref of BUILT_IN_REFS) {
+				const model = resolveModel(ref);
+				if (!model) continue;
+				if (!perProvider.has(model.provider)) perProvider.set(model.provider, new Set());
+				perProvider.get(model.provider)?.add(model.baseUrl);
+			}
+			const split = [...perProvider].filter(([, urls]) => urls.size > 1).map(([p]) => p);
+			expect(split).toEqual([]);
+		});
+	});
+
+	test("a row that carries the window as its output budget says so mechanically", () => {
+		// MiniMax publishes no per-model output limit and no default for one, so
+		// these rows carry the window — the only bound the vendor states, that the
+		// maximum token count is input plus output together. Asserting the equality
+		// is what keeps the comment honest: a row that later gets a real published
+		// cap breaks this, which is the point, because that is the day the two
+		// numbers stop being the same claim.
+		const minimax = BUILT_IN_REFS.filter((ref) => ref.startsWith("minimax/"));
+		expect(minimax.length).toBeGreaterThan(0);
+		for (const ref of minimax) {
+			const model = resolveModel(ref);
+			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
+		}
+		// And no other vendor is in that situation, so the rule stays a fact about
+		// MiniMax rather than a description of the whole table.
+		const others = BUILT_IN_REFS.filter((ref) => !ref.startsWith("minimax/")).filter(
+			(ref) => resolveModel(ref)?.maxOutputTokens === resolveModel(ref)?.contextWindow,
+		);
+		expect(others).toEqual([]);
 	});
 
 	test("a provider that does not bill cached input separately says so with a zero", () => {

@@ -16,6 +16,8 @@ const OPENAI_BASE = "https://api.openai.com/v1";
 const GLM_BASE = "https://api.z.ai/api/paas/v4";
 /** DeepSeek's OpenAI-compatible host. */
 const DEEPSEEK_BASE = "https://api.deepseek.com/v1";
+/** MiniMax's international host; `/chat/completions` on it is OpenAI's wire. */
+const MINIMAX_BASE = "https://api.minimax.io/v1";
 
 /** 10 * 1.25 is 1.25, but 0.1 * 3 leaves floating-point dust in a price table. */
 function roundPrice(usd: number): number {
@@ -138,10 +140,10 @@ function openAICompatModel(
  * Every row was checked against the vendor's own page, last swept on 2026-09-27 —
  * a date on this line means "as of", not "covers every row below it". Rows added
  * between sweeps name a later date in their own comment: `claude-opus-5-5`
- * (2026-09-23), `gpt-6-sol` / `gpt-6-luna` and `glm-5.3-flashx` (2026-09-27). The
- * 09-27 sweep changed prices on no row; it added the three and re-confirmed the
- * rest, including the DeepSeek v4-pro and Kimi K2.6 rows that third-party
- * aggregators were reporting as changed.
+ * (2026-09-23); `gpt-6-sol` / `gpt-6-luna`, `glm-5.3-flashx` and the five
+ * MiniMax rows (2026-09-27). The 09-27 sweep changed prices on no existing row;
+ * it added those eight and re-confirmed the rest, including the DeepSeek v4-pro
+ * and Kimi K2.6 rows that third-party aggregators were reporting as changed.
  * Anthropic's
  * and DeepSeek's are the vendors' USD figures; the cache channel is derived by
  * the documented multipliers rather than copied, because a hand-copied third
@@ -157,14 +159,18 @@ function openAICompatModel(
  * its vendor says: nothing for DeepSeek and the Kimi K2 series, whose caches are
  * populated at ordinary input rates; nothing today for Z.AI, whose pricing page
  * calls cache storage "limited-time free" rather than free; 1.25x input for
- * OpenAI; K3's own stated write price; and for Google, nothing — it meters cache
- * *storage* by the hour instead, a charge this table cannot express, which makes
- * a Gemini row a floor rather than a ceiling.
+ * OpenAI; K3's own stated write price; nothing for MiniMax M3, the one row on
+ * its vendor's table with no write rate at all while its M2.x rows state one;
+ * and for Google, nothing — it meters cache *storage* by the hour instead, a
+ * charge this table cannot express, which makes a Gemini row a floor rather
+ * than a ceiling.
  *
  * Two published regimes are time-boxed, and the table carries the current one:
  * Google's Flash prices roughly double on 2027-01-01, and OpenAI bills 2x input
  * and 1.5x output across a whole request over 272K input tokens. The second is a
- * premium no per-token table can express at all.
+ * premium no per-token table can express at all. MiniMax is a third shape of the
+ * same kind: M3's rates double over 512k input and its `priority` service tier
+ * is 1.5x on top, so its row carries the standard rate at 512k or under.
  *
  * When a price matters — a proxy, a negotiated rate, a newer model — declare it
  * in `pricing` in settings.json, which overrides this table.
@@ -446,6 +452,65 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 65_536,
 		pricing: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
 	}),
+	// MiniMax. Five rows because the vendor sells five, and the two highspeed
+	// twins are not a like-for-like swap: each costs twice the input and twice the
+	// output of the row it shadows, and the *same* cached read. Nothing here is
+	// derived — every figure is off the vendor's own pages. What the vendor does
+	// not publish is called out below rather than filled in.
+	//
+	// `maxOutputTokens` is the one number here that is not an output cap, because
+	// MiniMax publishes no per-model output limit and no default for one. The only
+	// bound it states is that the maximum token count is the *total* of input and
+	// output, so output cannot exceed the window — which is what this carries, and
+	// it is why the Kimi rows above use a documented default instead and this one
+	// cannot. Two things keep the value from being taken at face value: the
+	// compaction reserve is `min(maxOutputTokens, 20k)` and the escalation ceiling
+	// `min(maxOutputTokens * 2, 64k)`, so both consumers clamp it and no number
+	// above 32k behaves differently from any other; and on the OpenAI wire this
+	// adapter only sends `max_tokens` when a caller passes one.
+	//
+	// `reasoning` is false throughout, which for M3 is a stated default rather
+	// than an absence: its thinking control is off unless the request asks. The
+	// control lives on MiniMax's Anthropic endpoint, not on the one these rows
+	// speak, so nothing here sends it.
+	//
+	// M3's rates are the standard tier at 512k input or under, and they are a
+	// promotional halving of the struck-through list prices ($0.60/$0.12/$2.40):
+	// over 512k input they double, and the `priority` service tier is 1.5x on top.
+	// That is a four-regime table the way OpenAI's >272k premium is, and it is
+	// carried the same way — one rate, with the rest named here.
+	//
+	// Its cache-write channel is a real zero, not a missing one: M3's rows are the
+	// only ones on the pricing page with no write rate at all, while every M2.x
+	// row states $0.375.
+	openAICompatModel("minimax", MINIMAX_BASE, "MINIMAX_API_KEY", "minimax-m3", "minimax-M3", {
+		contextWindow: 1_000_000,
+		maxOutputTokens: 1_000_000,
+		pricing: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+	}),
+	openAICompatModel("minimax", MINIMAX_BASE, "MINIMAX_API_KEY", "minimax-m2.7", "minimax-M2.7", {
+		contextWindow: 204_800,
+		maxOutputTokens: 204_800,
+		pricing: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
+	}),
+	openAICompatModel("minimax", MINIMAX_BASE, "MINIMAX_API_KEY", "minimax-m2.7-highspeed", "minimax-M2.7-highspeed", {
+		contextWindow: 204_800,
+		maxOutputTokens: 204_800,
+		pricing: { input: 0.6, output: 2.4, cacheRead: 0.06, cacheWrite: 0.375 },
+	}),
+	openAICompatModel("minimax", MINIMAX_BASE, "MINIMAX_API_KEY", "minimax-m2.5", "minimax-M2.5", {
+		contextWindow: 204_800,
+		maxOutputTokens: 204_800,
+		pricing: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0.375 },
+	}),
+	openAICompatModel("minimax", MINIMAX_BASE, "MINIMAX_API_KEY", "minimax-m2.5-highspeed", "minimax-M2.5-highspeed", {
+		contextWindow: 204_800,
+		maxOutputTokens: 204_800,
+		pricing: { input: 0.6, output: 2.4, cacheRead: 0.03, cacheWrite: 0.375 },
+	}),
+	// M2.1 and M2 are absent on purpose: both are two generations behind, and
+	// M2 is the one row on the vendor's model list that states an output cap
+	// (128k, counting CoT) — which is not a number that transfers to a successor.
 ];
 
 /**
