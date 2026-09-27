@@ -1,5 +1,7 @@
 # LaBunbun Code 🐰
 
+[![CI](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml/badge.svg)](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml)
+
 A terminal-native AI coding agent built with **Bun** and **pnpm**.
 
 ```
@@ -510,7 +512,7 @@ The loop never imports provider adapters directly — they arrive via injected
 
 ```bash
 pnpm typecheck        # tsc over all packages (source-mapped, no build step)
-pnpm test             # bun test — 2000+ tests, no network needed
+pnpm test             # bun test — 3818 tests, no network needed
 pnpm lint             # biome check
 bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
 bun run packages/coding-agent/scripts/cache-check.ts anthropic/claude-opus-5 6   # live hit rate (costs money)
@@ -518,6 +520,24 @@ bun run scripts/gamepad-probe.ts                     # a controller, without the
 bun run scripts/gamepad-probe.ts --touch             # measure the touchpad: decoded points + raw bytes
 pnpm bin:build        # standalone executable via bun build --compile
 ```
+
+Every one of those gates runs in CI on ubuntu, windows and macos for each pull
+request and each push to `main`, and all of them are required. The workflow
+calls the same three scripts rather than a paraphrase of them, and adds a
+`bun build --compile` on all three platforms. That last one is why the script
+above is not the one CI runs: `pnpm bin:build` hardcodes
+`dist/labunbun-x64.exe`, which is the Windows path and would write a `.exe` on
+Linux and macOS, so CI calls `bun build` directly and names the artifact per
+runner. No secrets are configured, on purpose — the suite is meant to need no
+network and no key, and a repository secret would quietly turn that into an
+assumption.
+
+Three things CI structurally does not check, so a green run is not read as more
+than it is: the `vim-differential` harness needs a real `vim` and is not part of
+`bun test`; the emacs citation guard and the deepseek-harness flow guard skip
+where their local source checkouts are absent, which is a real loss of coverage
+rather than a formality; and `tsconfig.check.json` does not cover
+`packages/coding-agent/bin/`.
 
 TypeScript runs in erasable-syntax-only mode and packages export their `src/`
 directly — Bun executes TS natively, so there is no build step in the dev loop.

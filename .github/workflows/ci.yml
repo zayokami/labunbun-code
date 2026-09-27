@@ -1,0 +1,159 @@
+name: CI
+
+# The three gates package.json declares, run on every push and every pull
+# request, plus a compile on all three platforms. `pnpm lint` is
+# `biome check --error-on-warnings .`, `pnpm typecheck` is `tsc -p
+# tsconfig.check.json`, `pnpm test` is `bun test` — the same three commands a
+# developer runs, not a paraphrase of them.
+#
+# No secrets, deliberately. The suite claims in README that it needs no network
+# and no key, and a repository secret would turn that from a property into an
+# assumption: the day a test starts needing a key it should fail loudly rather
+# than quietly depend on something the workflow supplies.
+#
+# What this will not check, stated here rather than left to be discovered by
+# assuming coverage:
+#   - `packages/tui/test/vim-differential/` is `.mjs` and outside `bun test`. It
+#     needs a real `vim` on the machine, and its exit code 77 means "did not
+#     compare" — a run that could not compare has not earned a pass.
+#   - The emacs citation guard skips: it reads a local source tree and is
+#     `existsSync`-gated, so the ~300 `file:line` citations are unverified here.
+#   - The deepseek-harness flow guard and the three snapshot-log tests are gated
+#     the same way, for the same reason. Their coverage is genuinely lost.
+#   - The mutation drivers live in %TEMP% and are not in version control, so no
+#     clone can re-run them.
+#   - `tsconfig.check.json` does not include `packages/coding-agent/bin/`, which
+#     is the entry point for both bins.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One shell everywhere. Two reasons: the compile command is then byte-identical
+# across the matrix, so only the outfile string differs; and on Windows it
+# sidesteps the pwsh ExecutionPolicy failure on pnpm's .ps1 shim, which is the
+# most common way a Windows leg breaks for a reason that is not the code.
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  # The pull_request number is null on a push, so this falls through to the ref:
+  # a PR run groups by PR and cancels its own superseded run, while every push
+  # to main gets its own group and is never cancelled by a PR.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # lint and typecheck are ubuntu-only. Neither branches on the platform, and
+  # biome reads the working tree rather than the machine, so three copies buy
+  # no signal. If either of these ever does need a second platform, the honest
+  # way to find out is a test that fails on one, not a runner matrix.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # No `version`: the action reads packageManager from package.json, which
+      # keeps one source of truth. Pinning it here too would let the two drift
+      # silently — pnpm 10.33 and 10.99 both read lockfileVersion 9.0, so a
+      # stale pin would keep passing --frozen-lockfile after a real bump.
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned, unlike pnpm: there is no exact bun version in the repo to
+          # derive from (packageManager is pnpm, engines.bun is a range), so
+          # omitting this would resolve to whatever is newest on the day. A
+          # floating Bun means a red run with no commit to blame.
+          bun-version: 1.3.5
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+
+  # The only place three platforms earn their keep: the suite has 16 explicit
+  # process.platform gates, path-normalization cases, and the homedir() split
+  # between USERPROFILE and HOME that this repo has already been bitten by.
+  # fail-fast is off because a matrix that cancels its siblings on the first
+  # red is the opposite of diagnosable.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+
+  # All three, because "this compiles into a standalone binary on each of them"
+  # is a claim the repo has only ever verified on Windows: README says the
+  # node-hid prebuild embed was checked there and says nothing about the other
+  # two. packages/gamepad/src/sources/node-hid.ts imports it through a literal
+  # specifier that a test exists to keep statically analyzable, which is a
+  # bundler-resolution property worth proving per host.
+  #
+  # No `needs`. `needs` delays rather than gates, and on a first run that is
+  # expected to be red, a red lint would suppress the entire build matrix —
+  # which is the one thing this job is here to find out.
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # A literal per-OS outfile, so the compile command below is identical on
+        # every leg. No arch component on purpose: whether macos-latest is
+        # currently arm64 or x64 moves under us, and a wrong guess in the
+        # filename is a false claim about a real artifact.
+        include:
+          - { os: ubuntu-latest, outfile: dist/labunbun-Linux }
+          - { os: windows-latest, outfile: dist/labunbun-Windows.exe }
+          - { os: macos-latest, outfile: dist/labunbun-macOS }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - run: pnpm install --frozen-lockfile
+      # Not `pnpm bin:build`: that script hardcodes dist/labunbun-x64.exe,
+      # which is the Windows path README documents and would produce a .exe on
+      # Linux and macOS. Calling bun directly is the only way to name the
+      # artifact per runner without changing a script meant for local Windows.
+      - run: mkdir -p dist
+      - run: bun build --compile packages/coding-agent/src/main.ts --outfile ${{ matrix.outfile }}
+      # --compile proves the bundle resolved and linked; this proves there is
+      # actually a file where the command claimed to put one.
+      - run: test -s "${{ matrix.outfile }}" && ls -l "${{ matrix.outfile }}"
