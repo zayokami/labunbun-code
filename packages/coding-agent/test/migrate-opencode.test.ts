@@ -38,6 +38,7 @@ import {
 	describeOpencodeRoot,
 	mergeOpencodeConfig,
 	OPENCODE_CREDENTIAL_TABLES,
+	OPENCODE_KEY_SPELLINGS,
 	OPENCODE_UNREAD_FILES,
 	readOpencode,
 } from "../src/opencode-read.ts";
@@ -909,6 +910,413 @@ describe("opencode: providers, MCP and permissions", () => {
 			expect(item?.action).toBe("skip");
 			expect(item?.detail).toContain("no mapping for");
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The v2 config surface
+// ---------------------------------------------------------------------------
+
+/**
+ * The same three settings written both ways: the ones that produce **writes**.
+ *
+ * Only `provider`, `mcp` and `permission` are here, and the omission is the point
+ * rather than an oversight — the other five renamed keys produce report lines and
+ * no file, so a comparison of writes cannot see them and they are pinned by their
+ * own tests below. What this pair is for is the one question a v2 user cares
+ * about: does the same config import the same thing under either spelling.
+ */
+function v1WrittenConfig(): Record<string, unknown> {
+	return {
+		provider: {
+			gw: { options: { baseURL: "https://gw.example.invalid/v1" }, models: { m: { limit: { context: 1000 } } } },
+		},
+		mcp: {
+			files: { type: "local", command: ["run-me", "--flag"] },
+			far: { type: "remote", url: "https://m.invalid/mcp" },
+		},
+		permission: { bash: { "git push *": "allow" }, read: "deny" },
+	};
+}
+
+function v2WrittenConfig(): Record<string, unknown> {
+	return {
+		providers: v1WrittenConfig().provider,
+		mcp: { servers: v1WrittenConfig().mcp },
+		permissions: [
+			{ action: "bash", resource: "git push *", effect: "allow" },
+			{ action: "read", resource: "*", effect: "deny" },
+		],
+	};
+}
+
+/** What the migration actually produced, with the report's own spelling left out. */
+function planOutput(result: ReturnType<typeof runMigration>): { settings: unknown; mcp: unknown } {
+	return {
+		settings: JSON.parse(result.plan.writes.find((w) => w.path.endsWith("settings.json"))?.content ?? "{}"),
+		mcp: JSON.parse(result.plan.writes.find((w) => w.path.endsWith(".mcp.json"))?.content ?? "{}"),
+	};
+}
+
+function runWithConfig(config: Record<string, unknown>): ReturnType<typeof runMigration> {
+	let out: ReturnType<typeof runMigration> | undefined;
+	withHome({ ".config/opencode/opencode.json": JSON.stringify(config) }, (home) => {
+		out = runMigration({ home });
+	});
+	if (out === undefined) throw new Error("withHome did not run the body");
+	return out;
+}
+
+describe("opencode: the v2 config surface", () => {
+	/**
+	 * The load-bearing test of this block: the same settings, spelled both ways,
+	 * import the same thing.
+	 *
+	 * A reader that ignored a v2 key entirely would also produce identical writes
+	 * for the two documents — so this is only a real check because the v1 arm is
+	 * known to import, which the assertions below pin separately. Read together
+	 * they say "v2 imports what v1 imports" rather than "both import nothing".
+	 */
+	test("the same settings under v2's spellings import exactly what v1's spellings do", () => {
+		const v1 = runWithConfig(v1WrittenConfig());
+		const v2 = runWithConfig(v2WrittenConfig());
+		expect(planOutput(v2)).toEqual(planOutput(v1));
+		// …and the v1 arm is not vacuous. Without this the test is satisfied by both
+		// documents importing nothing, which is the one outcome it must not accept.
+		const settings = planOutput(v1).settings as {
+			providers: { openaiCompatible: Array<{ id: string }> };
+			permissions: { allow: string[]; deny: string[]; additionalDirectories: string[] };
+		};
+		expect(settings.providers.openaiCompatible.map((p) => p.id)).toEqual(["gw"]);
+		// `additionalDirectories` is always written alongside the two lists
+		// (`migrate.ts:808-817`), so it is part of the expected value rather than
+		// something to leave out and call equal.
+		expect(settings.permissions).toEqual({
+			allow: ["Bash(git push *)"],
+			deny: ["Read"],
+			additionalDirectories: [],
+		});
+		const servers = (planOutput(v1).mcp as { mcpServers: Record<string, unknown> }).mcpServers;
+		expect(Object.keys(servers).sort()).toEqual(["far", "files"]);
+	});
+
+	/**
+	 * The eight renamed keys, checked as a set.
+	 *
+	 * `test.each` over the table above would pass if a row were deleted from it, so
+	 * the list is written out here as well: a table that loses a row and a test that
+	 * loses a row are the same edit, and only one of them is visible.
+	 */
+	test("all eight renamed keys are the ones this importer claims to read", () => {
+		expect(Object.values(OPENCODE_KEY_SPELLINGS).flat().sort()).toEqual([
+			"agent",
+			"agents",
+			"attachment",
+			"attachments",
+			"command",
+			"commands",
+			"permission",
+			"permissions",
+			"plugin",
+			"plugins",
+			"provider",
+			"providers",
+			"reference",
+			"references",
+			"snapshot",
+			"snapshots",
+		]);
+	});
+
+	/**
+	 * A document holding **every** spelling of **every** renamed key, and the one
+	 * thing that must not happen: any of them reported as a key with no mapping.
+	 *
+	 * The value is derived from the table, so a ninth pair added to it is covered
+	 * the moment it is added — the failure this guards against is a pair that gets
+	 * read but not registered, which is what produced seven false alarms.
+	 */
+	test("no spelling of a renamed key is ever reported as a key with no mapping", () => {
+		const config: Record<string, unknown> = {};
+		for (const spellings of Object.values(OPENCODE_KEY_SPELLINGS)) {
+			for (const spelling of spellings) config[spelling] = {};
+		}
+		const result = runWithConfig(config);
+		expect(result.plan.items.filter((i) => i.detail.includes("no mapping for"))).toEqual([]);
+	});
+
+	/**
+	 * A line has to name a key that is in the file the user is looking at.
+	 *
+	 * Every one of these says the v2 name in a document that has the v2 name, and
+	 * the v1 name in a document that has the v1 name. A report that named `provider`
+	 * at a v2 user is not lying about anything load-bearing — but it is pointing at
+	 * a key they cannot find, which is the same defect as the credentials one.
+	 */
+	test.each([
+		["attachments", "attachment"],
+		["snapshots", "snapshot"],
+		["references", "reference"],
+	])("%s is named by the spelling the document used", (v2Name, v1Name) => {
+		const v2 = runWithConfig({ [v2Name]: {} });
+		const v1 = runWithConfig({ [v1Name]: {} });
+		expect(v2.plan.items.some((i) => i.from.endsWith(`→ ${v2Name}`))).toBe(true);
+		expect(v1.plan.items.some((i) => i.from.endsWith(`→ ${v1Name}`))).toBe(true);
+		// And the v2 line says the thing that is true about a v2 name, not the
+		// comfortable one: opencode's own migration drops keys it does not know.
+		const line = v2.plan.items.find((i) => i.from.endsWith(`→ ${v2Name}`));
+		expect(line?.detail).toContain("drops this one");
+		const v1Line = v1.plan.items.find((i) => i.from.endsWith(`→ ${v1Name}`));
+		expect(v1Line?.detail).toContain("which is where opencode reads it from");
+	});
+
+	/**
+	 * The v1 half of that sentence, from the other direction: a v1-only key keeps
+	 * it, because for a v1 name it is true.
+	 */
+	test("a v1 name still says opencode reads it from its own file", () => {
+		const result = runWithConfig({ snapshot: true, autoupdate: true });
+		for (const key of ["snapshot", "autoupdate"]) {
+			const line = result.plan.items.find((i) => i.from.endsWith(`→ ${key}`));
+			expect(line?.detail).toContain("which is where opencode reads it from");
+			expect(line?.detail).not.toContain("drops this one");
+		}
+	});
+
+	/**
+	 * A key with a reason of its own is reported once, not twice.
+	 *
+	 * `username_mode` is in the list of keys that get a written reason and was not
+	 * in the set of handled keys, so a document containing it produced two lines:
+	 * one explaining it and one from the unhandled sweep saying there is no
+	 * mapping. The unhandled set is now derived, so a key cannot be in one list and
+	 * missing from the other.
+	 */
+	test("a key that has a reason of its own is not also reported as unmapped", () => {
+		const result = runWithConfig({ username_mode: "x" });
+		const lines = result.plan.items.filter((i) => i.from.endsWith("→ username_mode"));
+		expect(lines).toHaveLength(1);
+		expect(lines[0].detail).toContain("retired spelling of username");
+	});
+
+	// ── MCP ────────────────────────────────────────────────────────────────
+
+	/**
+	 * The false positive, and the reason it is the first thing in this block.
+	 *
+	 * A v2 `mcp` is an envelope, so reading it as the server table named two
+	 * servers that do not exist — `timeout` and `servers` — and reported each with a
+	 * line about a transport it has none of. The assertion is that the two names are
+	 * **absent** from the report, which is the shape of the old bug and nothing
+	 * else.
+	 */
+	test("a v2 mcp envelope produces its servers and not the envelope's own keys", () => {
+		const result = runWithConfig({
+			mcp: { timeout: { request: 30000 }, servers: { files: { type: "local", command: ["run-me"] } } },
+		});
+		const servers = (planOutput(result).mcp as { mcpServers: Record<string, unknown> }).mcpServers;
+		expect(Object.keys(servers)).toEqual(["files"]);
+		// The bug's exact shape: a line about a server called `servers`, which the
+		// envelope's own key used to produce. `endsWith` rather than `includes`,
+		// because `mcp.servers.files` is a real line and must not be caught by this.
+		expect(result.plan.items.some((i) => i.from.endsWith("→ mcp.servers"))).toBe(false);
+		// The envelope's timeout is a real setting and is named as one, rather than
+		// turned into a server.
+		const line = result.plan.items.find((i) => i.from.endsWith("mcp.timeout"));
+		expect(line?.action).toBe("skip");
+		expect(line?.detail).toContain("request timeout for every server");
+	});
+
+	test("a v1 flat mcp table is still read as a table of servers", () => {
+		const result = runWithConfig({ mcp: { files: { type: "local", command: ["run-me"] } } });
+		const servers = (planOutput(result).mcp as { mcpServers: Record<string, unknown> }).mcpServers;
+		expect(Object.keys(servers)).toEqual(["files"]);
+	});
+
+	/**
+	 * v2 spells a server's own timeout as `{startup?, request?}` and a v1 one as a
+	 * number. `positiveInteger({request: 30000})` is `undefined`, so the object form
+	 * matched no branch and — because `timeout` is a key the reader expects — the
+	 * uncarried-key check stayed quiet too. A setting that reaches no report line
+	 * from either direction.
+	 */
+	test("a v2 server timeout object is named rather than dropped", () => {
+		const result = runWithConfig({
+			mcp: {
+				servers: {
+					files: { type: "remote", url: "https://m.invalid/mcp", timeout: { startup: 5000, request: 30000 } },
+				},
+			},
+		});
+		const line = result.plan.items.find((i) => i.from.includes("mcp.servers.files"));
+		expect(line?.action).toBe("downgrade");
+		expect(line?.detail).toContain("startup and request timeout");
+	});
+
+	test("a v2 server switched off with `disabled` is named", () => {
+		const result = runWithConfig({
+			mcp: { servers: { files: { type: "local", command: ["run-me"], disabled: true } } },
+		});
+		const line = result.plan.items.find((i) => i.from.includes("mcp.servers.files"));
+		expect(line?.detail).toContain("switched off");
+		// …and not by the generic "no field for" path, which is what a new key used
+		// to fall into.
+		expect(line?.detail).not.toContain("no field for");
+	});
+
+	// ── permissions ────────────────────────────────────────────────────────
+
+	/**
+	 * v2's array is the flattened form of v1's object, so reading it back is the
+	 * reverse of `migrate.ts:82-89` and needs no judgement — with one exception,
+	 * `resource: "*"`, which is how a whole-tool rule is written. Turning it into
+	 * `Tool(*)` would ask about a literal asterisk, so the bare form is pinned here
+	 * separately from the patterned one.
+	 */
+	test("a v2 permission ruleset writes the same rules the v1 object would", () => {
+		const fromArray = runWithConfig({
+			permissions: [
+				{ action: "bash", resource: "git push *", effect: "allow" },
+				{ action: "read", resource: "*", effect: "deny" },
+			],
+		});
+		const fromObject = runWithConfig({ permission: { bash: { "git push *": "allow" }, read: "deny" } });
+		const rules = (r: ReturnType<typeof runMigration>) =>
+			(planOutput(r).settings as { permissions: { allow: string[]; deny: string[] } }).permissions;
+		expect(rules(fromArray)).toEqual(rules(fromObject));
+		expect(rules(fromArray).allow).toEqual(["Bash(git push *)"]);
+		// `Read`, not `Read(*)`: the asterisk is the whole-tool spelling, not a pattern.
+		expect(rules(fromArray).deny).toEqual(["Read"]);
+	});
+
+	test("a v2 rule whose effect is ask is counted and written into neither list", () => {
+		const result = runWithConfig({ permissions: [{ action: "bash", resource: "rm *", effect: "ask" }] });
+		const rules = (planOutput(result).settings as { permissions?: { allow: string[]; deny: string[] } }).permissions;
+		expect(rules?.allow ?? []).toEqual([]);
+		expect(rules?.deny ?? []).toEqual([]);
+		const line = result.plan.items.find((i) => i.detail.includes("would stop and ask about"));
+		expect(line?.action).toBe("skip");
+		expect(line?.detail).toContain("no ask tier here");
+	});
+
+	/**
+	 * `action` is a free string in v2's schema, so an unknown one is a user's own
+	 * tool rather than a typo — and v1's tables are the right tables for it, because
+	 * v1's keys became v2's `action` values unchanged.
+	 */
+	test("a v2 rule for a tool this build has no name for is named with what it governed", () => {
+		const result = runWithConfig({
+			permissions: [
+				{ action: "external_directory", resource: "/etc", effect: "deny" },
+				{ action: "some_user_tool", resource: "*", effect: "allow" },
+			],
+		});
+		expect(
+			result.plan.items.some((i) => i.from.includes("external_directory") && i.detail.includes("outside the working")),
+		).toBe(true);
+		expect(result.plan.items.some((i) => i.from.includes("some_user_tool") && i.detail.includes("no tool for"))).toBe(
+			true,
+		);
+	});
+
+	test("a v2 rule missing an action or a resource is named, not guessed at", () => {
+		const result = runWithConfig({
+			permissions: [
+				{ resource: "*", effect: "deny" },
+				{ action: "bash", effect: "deny" },
+				{ action: "bash", resource: "*", effect: "sometimes" },
+				"not a rule at all",
+			],
+		});
+		const items = result.plan.items.filter((i) => i.from.includes("permissions["));
+		expect(items).toHaveLength(4);
+		expect(items[0].detail).toContain("does not name both an action and a resource");
+		expect(items[1].detail).toContain("does not name both an action and a resource");
+		expect(items[2].detail).toContain("not one of opencode's three answers");
+		expect(items[3].detail).toContain("not a rule entry");
+	});
+
+	// ── skills ─────────────────────────────────────────────────────────────
+
+	/**
+	 * v2's `skills` is one flat list with nothing marking which entries are paths
+	 * and which are URLs, so the split is made by v2's own test
+	 * (`config/plugin/skill.ts:35`: `URL.canParse` and an `http:`/`https:`
+	 * protocol) and the report says it was made. A path that is really a path
+	 * imports; a URL is named and never fetched.
+	 */
+	test("a v2 skills list is split into paths and URLs by opencode's own test", () => {
+		withHome(
+			{
+				".config/opencode/opencode.json": JSON.stringify({
+					// `~/` and not `./`: opencode expands `~/` against the global home
+					// (`skill.ts:39`) and resolves a relative path against the workspace
+					// directory (`:43`), which a migration reading one user's home has no
+					// equivalent of. Only the first form is a directory this run can find.
+					skills: ["https://example.invalid/skills/", "~/extra-skills", "git+ssh://git@host/repo"],
+				}),
+				// A real directory, because the path arm's whole claim is that its
+				// skills turn up in the import — a path that resolved to nothing would
+				// pass the same assertion.
+				"extra-skills/alpha/SKILL.md": "---\nname: alpha\ndescription: an alpha skill\n---\n\nbody\n",
+			},
+			(home) => {
+				const result = runMigration({ home });
+				const raw = readOpencode(home);
+				expect(raw.skillsSpelling).toBe("list");
+				expect(raw.skillUrls).toEqual(["https://example.invalid/skills/"]);
+				// `git+ssh://` parses as a URL and is not http, so it is a directory —
+				// which is what opencode does with it too (`skill.ts:35`).
+				// `~/` is reported already expanded, because that is the path the
+				// skill was read from.
+				expect(raw.extraSkillPaths).toEqual([join(home, "extra-skills"), "git+ssh://git@host/repo"]);
+				expect(raw.skills.map((s) => s.name)).toContain("alpha");
+				// The line says the list was split, so a wrong call is checkable
+				// rather than silent.
+				const line = result.plan.items.find((i) => i.detail.includes("one flat list in v2"));
+				expect(line?.detail).toContain("https://example.invalid/skills/");
+			},
+		);
+	});
+
+	test("a v1 skills object is read as the two named fields it is", () => {
+		const raw = (() => {
+			let out: ReturnType<typeof readOpencode> | undefined;
+			withHome(
+				{
+					".config/opencode/opencode.json": JSON.stringify({
+						skills: { paths: ["./extra-skills"], urls: ["https://example.invalid/skills/"] },
+					}),
+					"extra-skills/alpha/SKILL.md": "---\nname: alpha\ndescription: an alpha skill\n---\n\nbody\n",
+				},
+				(home) => {
+					out = readOpencode(home);
+				},
+			);
+			if (out === undefined) throw new Error("withHome did not run the body");
+			return out;
+		})();
+		expect(raw.skillsSpelling).toBe("object");
+		expect(raw.skillUrls).toEqual(["https://example.invalid/skills/"]);
+		expect(raw.extraSkillPaths).toEqual(["./extra-skills"]);
+	});
+
+	test("a v2 skills list labels its lines `skills`, not the v1 fields", () => {
+		let report = "";
+		withHome(
+			{
+				".config/opencode/opencode.json": JSON.stringify({
+					skills: ["https://example.invalid/skills/", "./extra-skills"],
+				}),
+				"extra-skills/alpha/SKILL.md": "---\nname: alpha\ndescription: an alpha skill\n---\n\nbody\n",
+			},
+			(home) => {
+				report = runMigration({ home }).report;
+			},
+		);
+		expect(report).toContain("→ skills ");
+		expect(report).not.toContain("skills.urls");
+		expect(report).not.toContain("skills.paths");
 	});
 });
 

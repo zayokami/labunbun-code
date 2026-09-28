@@ -26,7 +26,13 @@ import type { AddPermissionRules, ClaimScalar, MigrationItem, PlannedWrite } fro
 import { looksLikeSecretName, resolveModelReference } from "./migrate-types.ts";
 import { OPENCODE_CONFIG_FILES, opencodeLegacyStorageDir, opencodeLegacyTomlPath } from "./opencode-home.ts";
 import type { RawOpencode } from "./opencode-read.ts";
-import { OPENCODE_CREDENTIAL_TABLES, OPENCODE_UNREAD_FILES } from "./opencode-read.ts";
+import {
+	OPENCODE_CREDENTIAL_TABLES,
+	OPENCODE_KEY_SPELLINGS,
+	OPENCODE_UNREAD_FILES,
+	opencodeConfigKey,
+	opencodeConfigValue,
+} from "./opencode-read.ts";
 import type { RawSettingsInput } from "./settings.ts";
 import { OpenAICompatibleProviderSchema } from "./settings.ts";
 
@@ -38,46 +44,49 @@ import { OpenAICompatibleProviderSchema } from "./settings.ts";
  * Keys of the merged settings this importer either reads or names, so that
  * anything else can be reported as unhandled rather than dropped.
  *
- * The list is the schema's own key set (`core/src/v1/config/config.ts:30-183`,
- * which is what the `awk` over that `Info` struct yields) minus the keys that are
- * about OpenCode's own runtime rather than about the user's agent — its TUI, its
- * updater, its share prompt, its terminal and diff-snapshot settings. Each of
- * those gets its own line below with the reason it is not a migration, so
- * nothing here is a silent discard.
+ * The list is the v1 schema's own key set (`core/src/v1/config/config.ts:30-183`)
+ * plus **both spellings of the eight keys v2 renamed** and the v2-only keys that
+ * have no v1 counterpart, so a v2 document is not told this importer has no
+ * mapping for a key it has just read.
+ *
+ * What is left out of the v1 list is the keys about OpenCode's own runtime rather
+ * than about the user's agent — its TUI, its updater, its share prompt, its
+ * terminal and diff-snapshot settings. Each of those gets its own line below with
+ * the reason it is not a migration, so nothing here is a silent discard.
  */
 const OPENCODE_HANDLED = new Set([
-	"provider",
+	// Every spelling of the eight renamed keys. Derived rather than written out, so
+	// adding one to the table above cannot leave a spelling unhandled here — which
+	// is the whole failure mode: a key this importer reads, reported as one it has
+	// no mapping for.
+	...Object.values(OPENCODE_KEY_SPELLINGS).flat(),
 	"model",
 	"small_model",
 	"mcp",
-	"permission",
 	"instructions",
-	"agent",
 	"skills",
-	"plugin",
-	"command",
 	"enabled_providers",
 	"disabled_providers",
 	"default_agent",
 	"mode",
 	"tools",
-	// Named below, never imported: OpenCode's own runtime.
+	// Named below, never imported: OpenCode's own runtime. Listed here as well as
+	// in `OPENCODE_RUNTIME_KEYS` because a key with a reason of its own must not
+	// also be collected by `reportUnhandledKeys` — that printed the same key twice,
+	// once explained and once not.
 	"$schema",
 	"shell",
 	"server",
-	"references",
-	"reference",
 	"watcher",
-	"snapshot",
 	"share",
 	"autoshare",
 	"autoupdate",
 	"username",
+	"username_mode",
 	"subagent_depth",
 	"formatter",
 	"lsp",
 	"layout",
-	"attachment",
 	"compaction",
 	"enterprise",
 	"experimental",
@@ -227,6 +236,78 @@ function planOpencodePermissions(
 				containsSecret: false,
 			});
 		}
+	} else if (Array.isArray(block)) {
+		// v2's shape, and it is the **flattened** form of v1's object: v1
+		// `{bash: {"git push *": "ask"}}` is lowered to
+		// `{action: "bash", resource: "git push *", effect: "ask"}` and v1's bare
+		// `{bash: "ask"}` to `{action: "bash", resource: "*", effect: "ask"}`
+		// (`core/src/v1/config/migrate.ts:82-89`) — so reading it back needs no
+		// judgement at all, only the grouping the reverse of that does.
+		//
+		// `resource: "*"` is the one spelling that has to be recognised, because it is
+		// how a whole-tool rule is written and turning it into `Tool(*)` would ask
+		// about a literal asterisk.
+		for (const [index, rule] of block.entries()) {
+			const at = `${label}[${index}]`;
+			if (!isRecord(rule)) {
+				items.push({
+					source: "opencode",
+					from: at,
+					to: "—",
+					action: "skip",
+					detail: "not a rule entry, so there was nothing in it to read",
+					containsSecret: false,
+				});
+				continue;
+			}
+			const action_ = typeof rule.action === "string" ? rule.action : "";
+			const resource = typeof rule.resource === "string" ? rule.resource : "";
+			const effect = rule.effect;
+			if (action_ === "" || resource === "") {
+				items.push({
+					source: "opencode",
+					from: at,
+					to: "—",
+					action: "skip",
+					detail:
+						"it does not name both an action and a resource, which a v2 rule has to, so no rule was written for it",
+					containsSecret: false,
+				});
+				continue;
+			}
+			const verdict = action(effect);
+			if (verdict === null) {
+				items.push({
+					source: "opencode",
+					from: at,
+					to: "—",
+					action: "skip",
+					detail: `not one of opencode's three answers (ask, allow, deny), so no rule was written for it`,
+					containsSecret: false,
+				});
+				continue;
+			}
+			// `action` is a free string in the schema
+			// (`schema/src/permission.ts:58`), so an unknown one is a user's own tool
+			// rather than a typo to correct — and the v1 tables are the same tables,
+			// because v1's keys became v2's `action` values unchanged.
+			const tool = OPENCODE_PERMISSION_TOOL[action_];
+			if (tool === undefined) {
+				const why = OPENCODE_PERMISSION_UNMAPPED[action_];
+				items.push({
+					source: "opencode",
+					from: `${at} → ${action_}`,
+					to: "—",
+					action: "skip",
+					detail: why
+						? `${why} — there is no rule here that means the same thing`
+						: `a permission action this build has no tool for, so there is nothing to write a rule about`,
+					containsSecret: false,
+				});
+				continue;
+			}
+			take(tool, resource, verdict, resource === "*" ? action_ : `${action_}(${resource})`);
+		}
 	} else {
 		items.push({
 			source: "opencode",
@@ -238,7 +319,6 @@ function planOpencodePermissions(
 		});
 		return;
 	}
-
 	if (ask.length > 0) {
 		items.push({
 			source: "opencode",
@@ -278,11 +358,42 @@ const OPENCODE_MCP_CARRIED = new Set([
 	"cwd",
 	"environment",
 	"enabled",
+	"disabled",
 	"url",
 	"headers",
 	"oauth",
 	"timeout",
 ]);
+
+/**
+ * What to say about an `mcp` timeout, in either of the two things that is one.
+ *
+ * v2's is `{startup?, request?}` (`core/src/config/mcp.ts:6-13`) and v1's is a
+ * single number of milliseconds per server. The number is already named in
+ * `normalizeOpencodeMcp`; what it misses is the object, because
+ * `positiveInteger({request: 30000})` is `undefined` — so a v2 server's timeout
+ * was dropped with no line at all, and `timeout` being in
+ * {@link OPENCODE_MCP_CARRIED} kept the uncarried-key check from naming it
+ * either. Two spellings, one of which was invisible.
+ */
+function opencodeMcpTimeoutNote(timeout: unknown): string {
+	if (!isRecord(timeout)) {
+		return "it is given a per-request timeout, and this build has one connect timeout for every server and no per-call one";
+	}
+	const named = [
+		positiveInteger(timeout.startup) === undefined ? "" : "startup",
+		positiveInteger(timeout.request) === undefined ? "" : "request",
+	]
+		.filter(Boolean)
+		.join(" and ");
+	if (named === "") {
+		return "it carries a timeout whose shape this build could not read, so none of it came across";
+	}
+	return (
+		`it sets a ${named} timeout for every server; this build has one connect timeout for every server and no per-call one, so a ` +
+		"slow server here gets the one number rather than the pair"
+	);
+}
 
 /**
  * Keys the entry holds that {@link OPENCODE_MCP_CARRIED} does not account for.
@@ -337,10 +448,14 @@ function normalizeOpencodeMcp(
 		if (entry.enabled === false) {
 			downgrades.push("opencode keeps this definition while it is switched off");
 		}
-		if (positiveInteger(entry.timeout) !== undefined) {
-			downgrades.push(
-				`it is given ${entry.timeout}ms per request, and this build has one connect timeout for every server and no per-call one`,
-			);
+		// v2 spells the same thing `disabled` (`migrateMcp`, `:139`: `!info.enabled`)
+		// and reads it as its own field, so a v2 server switched off is one whose
+		// definition came across silently.
+		if (entry.disabled === true) {
+			downgrades.push("opencode keeps this definition while it is switched off");
+		}
+		if (entry.timeout !== undefined) {
+			downgrades.push(opencodeMcpTimeoutNote(entry.timeout));
 		}
 		const placeholder = placeholderNote(out);
 		if (placeholder) downgrades.push(placeholder);
@@ -366,10 +481,11 @@ function normalizeOpencodeMcp(
 		if (entry.enabled === false) {
 			downgrades.push("opencode keeps this definition while it is switched off");
 		}
-		if (positiveInteger(entry.timeout) !== undefined) {
-			downgrades.push(
-				`it is given ${entry.timeout}ms per request, and this build has one connect timeout for every server and no per-call one`,
-			);
+		if (entry.disabled === true) {
+			downgrades.push("opencode keeps this definition while it is switched off");
+		}
+		if (entry.timeout !== undefined) {
+			downgrades.push(opencodeMcpTimeoutNote(entry.timeout));
 		}
 		const placeholder = placeholderNote(out);
 		if (placeholder) downgrades.push(placeholder);
@@ -553,7 +669,10 @@ export function planOpencode(
 	}
 
 	// ── providers ────────────────────────────────────────────────────────────
-	const providerFrom = `${configFrom} → provider`;
+	// The label carries the spelling the file used, because every line below it is
+	// `${providerFrom}.<id>` and a v2 user's file says `providers`.
+	const providerKey = opencodeConfigKey(config, "providers");
+	const providerFrom = `${configFrom} → ${providerKey?.spelling ?? "provider"}`;
 	const specs: Array<Record<string, unknown>> = [];
 	const registered = new Map<string, number>();
 	for (const [id, value] of Object.entries(raw.providers)) {
@@ -702,9 +821,36 @@ export function planOpencode(
 	}
 
 	// ── MCP ──────────────────────────────────────────────────────────────────
-	if (isRecord(config.mcp)) {
-		for (const [name, entry] of Object.entries(config.mcp)) {
-			const label = `${configFrom} → mcp.${name}`;
+	// v1's `mcp` is the server table; v2's is an envelope with the table inside it
+	// (`{timeout?, servers?}`, `core/src/config/mcp.ts:45-48`) and v1's migration
+	// produces exactly that shape (`core/src/v1/config/migrate.ts:128-134`). Reading
+	// a v2 envelope as a table named the envelope's own two keys as servers, and
+	// reported two servers that do not exist.
+	//
+	// The discriminator is the presence of a `servers` table, not the presence of
+	// `timeout`: a v1 server called `timeout` is absurd, a v1 file with a
+	// `servers` key that is not a table of server entries is not a v2 envelope
+	// either, and requiring the second condition as well means the one case that
+	// would be read wrongly is one that cannot happen.
+	const mcpConfig = opencodeConfigValue(config, "mcp");
+	if (isRecord(mcpConfig)) {
+		const envelope = isRecord(mcpConfig.servers);
+		const servers: Record<string, unknown> = envelope ? (mcpConfig.servers as Record<string, unknown>) : mcpConfig;
+		if (envelope && mcpConfig.timeout !== undefined) {
+			// `{startup?, request?}` (`core/src/config/mcp.ts:6-13`), which v1 spells
+			// as one number per server. Named rather than dropped: it is a real
+			// setting a user has a reason to have written.
+			items.push({
+				source: "opencode",
+				from: `${configFrom} → mcp.timeout`,
+				to: "—",
+				action: "skip",
+				detail: opencodeMcpTimeoutNote(mcpConfig.timeout),
+				containsSecret: false,
+			});
+		}
+		for (const [name, entry] of Object.entries(servers)) {
+			const label = `${configFrom} → mcp.${envelope ? "servers." : ""}${name}`;
 			if (!isRecord(entry)) {
 				items.push({
 					source: "opencode",
@@ -761,8 +907,16 @@ export function planOpencode(
 	}
 
 	// ── permissions ──────────────────────────────────────────────────────────
-	if (config.permission !== undefined) {
-		planOpencodePermissions(config.permission, `${configFrom} → permission`, items, addPermissionRules);
+	// v1's object and v2's array are the same rules in two spellings, and the label
+	// says which one the file used so the per-rule lines point at keys that exist.
+	const permissionKey = opencodeConfigKey(config, "permissions");
+	if (permissionKey !== null) {
+		planOpencodePermissions(
+			permissionKey.value,
+			`${configFrom} → ${permissionKey.spelling}`,
+			items,
+			addPermissionRules,
+		);
 	}
 
 	// ── instructions ─────────────────────────────────────────────────────────
@@ -787,27 +941,31 @@ export function planOpencode(
 	}
 
 	// ── inline agents and commands ───────────────────────────────────────────
-	if (isRecord(config.agent) && Object.keys(config.agent).length > 0) {
+	// Both keys were renamed in v2, and the labels carry the spelling so the line
+	// names a key that is in the file rather than one that is not.
+	const agentsKey = opencodeConfigKey(config, "agents");
+	if (agentsKey !== null && isRecord(agentsKey.value) && Object.keys(agentsKey.value).length > 0) {
 		items.push({
 			source: "opencode",
-			from: `${configFrom} → agent`,
+			from: `${configFrom} → ${agentsKey.spelling}`,
 			to: "—",
 			action: "skip",
 			detail:
-				`${summarizeNames(Object.keys(config.agent), 6)} are opencode's own built-in agent definitions (plan, build, ` +
+				`${summarizeNames(Object.keys(agentsKey.value), 6)} are opencode's own built-in agent definitions (plan, build, ` +
 				"explore and the rest), overridden inline in the config; this build's own agents are its own, and a copied " +
 				"definition would describe opencode's tool names rather than this one's",
 			containsSecret: false,
 		});
 	}
-	if (isRecord(config.command) && Object.keys(config.command).length > 0) {
+	const commandsKey = opencodeConfigKey(config, "commands");
+	if (commandsKey !== null && isRecord(commandsKey.value) && Object.keys(commandsKey.value).length > 0) {
 		items.push({
 			source: "opencode",
-			from: `${configFrom} → command`,
+			from: `${configFrom} → ${commandsKey.spelling}`,
 			to: "—",
 			action: "skip",
 			detail:
-				`${summarizeNames(Object.keys(config.command), 6)} are command templates written inline in the config, which opencode ` +
+				`${summarizeNames(Object.keys(commandsKey.value), 6)} are command templates written inline in the config, which opencode ` +
 				"resolves against its own model and agent names; the markdown command files in its directory are imported below",
 			containsSecret: false,
 		});
@@ -815,13 +973,27 @@ export function planOpencode(
 
 	// ── keys with nowhere to go ──────────────────────────────────────────────
 	for (const [key, reason] of OPENCODE_RUNTIME_KEYS) {
-		if (config[key] === undefined) continue;
+		// Under whichever spelling the document used, and the line names that one:
+		// a reason attached to `attachment` used to be dead text on a v2 file,
+		// where the key is `attachments` and the v1 name appears nowhere.
+		const found = opencodeConfigKey(config, key);
+		if (found === null) continue;
+		// "…which is where opencode reads it from" is true of a v1 name and false
+		// of a v2 one left in an old file: v2's own v1→v2 migration returns a
+		// literal object of twenty-five keys (`core/src/v1/config/migrate.ts:36-72`)
+		// and every name not on it is dropped without a word. So for a v2-only key
+		// the honest sentence is the opposite one, and saying the comfortable thing
+		// here is how a user ends up believing a value OpenCode is about to delete
+		// is safe where it sits.
+		const tail = found.v2Only
+			? "opencode's own migration to v2 rebuilds this file from a fixed key list and drops this one, so copy it across before it runs"
+			: "it stays in opencode's file, which is where opencode reads it from";
 		items.push({
 			source: "opencode",
-			from: `${configFrom} → ${key}`,
+			from: `${configFrom} → ${found.spelling}`,
 			to: "—",
 			action: "skip",
-			detail: `${reason} — it stays in opencode's file, which is where opencode reads it from`,
+			detail: `${reason} — ${tail}`,
 			containsSecret: false,
 		});
 	}
@@ -942,24 +1114,45 @@ export function planOpencodeAssets(
 		writes,
 		home,
 	);
-	planCommands("opencode", raw.commands, `${at(raw.roots.config)} → command`, home, force, items, writes);
+	// Every label below names the key as the user's file spells it, because a line
+	// reading `opencode.json → plugin` is pointing at a key a v2 file does not have.
+	const config = raw.merge.config;
+	const pluginsKey = opencodeConfigKey(config, "plugins");
+	const commandsKey = opencodeConfigKey(config, "commands");
+	planCommands(
+		"opencode",
+		raw.commands,
+		`${at(raw.roots.config)} → ${commandsKey?.spelling ?? "command"}`,
+		home,
+		force,
+		items,
+		writes,
+	);
+
+	// A v2 `skills` is one list of paths and URLs with nothing marking which is
+	// which, so the two lines below name `skills` and say the list was split —
+	// rather than naming `skills.urls` and `skills.paths`, which are keys that
+	// exist only in the v1 shape.
+	const skillLabel = raw.skillsSpelling === "list" ? "skills" : "skills.urls";
+	const skillSplit =
+		raw.skillsSpelling === "list" ? " (one flat list in v2, split here the way opencode splits it)" : "";
 
 	if (raw.skillUrls.length > 0) {
 		items.push({
 			source: "opencode",
-			from: `${at(raw.roots.config)} → skills.urls`,
+			from: `${at(raw.roots.config)} → ${skillLabel}`,
 			to: "—",
 			action: "skip",
 			detail:
-				`${summarizeNames(raw.skillUrls, 4)} are fetched over the network by opencode, so a migration could only import them ` +
-				"by making the same outbound request; copy them across by hand if you want them here",
+				`${summarizeNames(raw.skillUrls, 4)} are fetched over the network by opencode${skillSplit}, so a migration could only ` +
+				"import them by making the same outbound request; copy them across by hand if you want them here",
 			containsSecret: false,
 		});
 	}
-	if (raw.plugins.length > 0) {
+	if (pluginsKey !== null && raw.plugins.length > 0) {
 		items.push({
 			source: "opencode",
-			from: `${at(raw.roots.config)} → plugin`,
+			from: `${at(raw.roots.config)} → ${pluginsKey.spelling}`,
 			to: "—",
 			action: "skip",
 			detail:
@@ -971,10 +1164,10 @@ export function planOpencodeAssets(
 	if (raw.extraSkillPaths.length > 0) {
 		items.push({
 			source: "opencode",
-			from: `${at(raw.roots.config)} → skills.paths`,
+			from: `${at(raw.roots.config)} → ${raw.skillsSpelling === "list" ? "skills" : "skills.paths"}`,
 			to: "—",
 			action: "map",
-			detail: `${summarizeNames(raw.extraSkillPaths, 4)} read as skill directories, and their skills are in the list above`,
+			detail: `${summarizeNames(raw.extraSkillPaths, 4)} read as skill directories${skillSplit}, and their skills are in the list above`,
 			containsSecret: false,
 		});
 	}

@@ -40,6 +40,76 @@ import {
 const OPENCODE_CREDENTIAL_NAME = /(credential|secret|token|auth|\.env$)/i;
 
 /**
+ * The config keys that changed spelling between v1 and v2, v2's name first.
+ *
+ * Eight of them, and they are eight of the same edit: v1 had a singular name for
+ * most of what became a table in v2, and v2 made the plural the real one —
+ * `provider` → `providers`, `permission` → `permissions`, `agent` → `agents`,
+ * `command` → `commands`, `plugin` → `plugins`, `snapshot` → `snapshots`,
+ * `attachment` → `attachments`, and `reference` → `references`. Nothing was
+ * renamed in the other direction: `isV1` (`core/src/v1/config/migrate.ts:31-33`)
+ * decides a document is v1 by looking for a **v1** key, so a file holding only
+ * v2 names is not v1 at all and goes to the v2 engine unlowered.
+ *
+ * Both spellings are read, v2 first, so a file OpenCode has already migrated and
+ * a file it has not both import. The spelling actually used travels to the
+ * report, because a line reading `opencode.json → provider.gw` is pointing at a
+ * key that is not in the file the user is looking at.
+ */
+export const OPENCODE_KEY_SPELLINGS = {
+	providers: ["providers", "provider"],
+	permissions: ["permissions", "permission"],
+	agents: ["agents", "agent"],
+	commands: ["commands", "command"],
+	plugins: ["plugins", "plugin"],
+	snapshots: ["snapshots", "snapshot"],
+	attachments: ["attachments", "attachment"],
+	references: ["references", "reference"],
+} as const satisfies Readonly<Record<string, readonly string[]>>;
+
+/** Every spelling of `key`, whichever of the two names it is written under. */
+export function opencodeConfigSpellings(key: string): readonly string[] {
+	for (const spellings of Object.values(OPENCODE_KEY_SPELLINGS)) {
+		if ((spellings as readonly string[]).includes(key)) return spellings;
+	}
+	return [key];
+}
+
+/**
+ * Where a key was found, and whether only the v2 engine reads it there.
+ *
+ * `v2Only` is the answer to a question a report line has to get right: whether
+ * "it stays in opencode's file, which is where opencode reads it from" is true.
+ * For a v1 name it is. For a v2 name in a v1-shaped file it is **not** — v2's
+ * own migration rebuilds the document from a literal key list
+ * (`core/src/v1/config/migrate.ts:36-72`) and every name not on it is dropped, so
+ * a v2-only key left in an old file is a value OpenCode is about to delete.
+ */
+export interface OpencodeConfigKey {
+	/** The spelling the merged document actually used. */
+	spelling: string;
+	/** Whether that spelling is one only the v2 engine reads. */
+	v2Only: boolean;
+	/** The value under it. */
+	value: unknown;
+}
+
+/** The key as the user's file spells it, or `null` when the document has neither. */
+export function opencodeConfigKey(config: Record<string, unknown>, key: string): OpencodeConfigKey | null {
+	const spellings = opencodeConfigSpellings(key);
+	for (const [index, spelling] of spellings.entries()) {
+		if (config[spelling] === undefined) continue;
+		return { spelling, v2Only: index < spellings.length - 1, value: config[spelling] };
+	}
+	return null;
+}
+
+/** The value under whichever spelling is present, without the rest of the answer. */
+export function opencodeConfigValue(config: Record<string, unknown>, key: string): unknown {
+	return opencodeConfigKey(config, key)?.value;
+}
+
+/**
  * The files OpenCode writes credentials into, by the root each one sits in.
  *
  * **The data root, not the config root** — which is where a reader looks first,
@@ -154,6 +224,15 @@ export interface RawOpencode {
 	extraSkillPaths: string[];
 	/** `skills.urls` — skills OpenCode fetches over the network. Named; never fetched. */
 	skillUrls: string[];
+	/**
+	 * Which `skills` shape the file had: v1's `{paths, urls}` or v2's one list.
+	 *
+	 * The two produce different report lines — `skills.paths` and `skills.urls` name
+	 * keys that do not exist in a v2 file — and a v2 list was split here by the same
+	 * test v2 uses, so this says the split happened rather than leaving the reader to
+	 * assume the file named two fields.
+	 */
+	skillsSpelling: "object" | "list";
 	/** `plugin` — plugin specifiers. Named; never installed or run. */
 	plugins: string[];
 	/** `instructions` — extra instruction files, resolved the way OpenCode resolves them. */
@@ -370,7 +449,8 @@ export function readOpencode(home: string): RawOpencode {
 		new Set([...OPENCODE_ASSET_DIRS.skills, ...OPENCODE_ASSET_DIRS.agents, ...OPENCODE_ASSET_DIRS.commands]),
 	);
 	const credentialFiles = root.files.filter((name) => OPENCODE_CREDENTIAL_NAME.test(name));
-	const extraSkillPaths = opencodeSkillPaths(config);
+	const skillEntries = opencodeSkillEntries(config);
+	const extraSkillPaths = skillEntries.paths;
 	const skills = [
 		...opencodeAssetDirs(roots.config, "skills").flatMap((dir) => readSkillDirs(dir)),
 		...extraSkillPaths.flatMap((path) => readSkillDirs(path)),
@@ -386,12 +466,18 @@ export function readOpencode(home: string): RawOpencode {
 		configOrigin: describeOpencodeRoot(roots.configOrigin),
 		merge,
 		instructions: readText(join(roots.config, "AGENTS.md")),
-		providers: isRecord(config.provider) ? (config.provider as Record<string, unknown>) : {},
+		providers: isRecord(opencodeConfigValue(config, "providers"))
+			? (opencodeConfigValue(config, "providers") as Record<string, unknown>)
+			: {},
 		enabledProviders: opencodeStringList(config.enabled_providers),
 		disabledProviders: opencodeStringList(config.disabled_providers),
 		extraSkillPaths,
-		skillUrls: opencodeStringList(isRecord(config.skills) ? config.skills.urls : undefined),
-		plugins: opencodeStringList(config.plugin),
+		skillUrls: skillEntries.urls,
+		// Which of the two `skills` shapes the file had, because the two produce
+		// report lines that name different keys and a v2 list was split here rather
+		// than read as two named fields.
+		skillsSpelling: Array.isArray(opencodeConfigValue(config, "skills")) ? "list" : "object",
+		plugins: opencodeStringList(opencodeConfigValue(config, "plugins")),
 		instructionPaths: opencodeInstructionPaths(config, home),
 		skills: allowedSkills,
 		agents: opencodeAssetDirs(roots.config, "agents").flatMap((dir) => readAgentFiles(dir)),
@@ -449,16 +535,51 @@ export function describeOpencodeRoot(origin: string): string {
 }
 
 /** `skills.paths` entries that are directories, `~` expanded the way OpenCode expands them. */
-function opencodeSkillPaths(config: Record<string, unknown>): string[] {
-	if (!isRecord(config.skills)) return [];
-	const paths = Array.isArray(config.skills.paths) ? config.skills.paths : [];
-	return paths
-		.filter((entry): entry is string => typeof entry === "string" && entry !== "")
-		.map((entry) => {
-			if (entry === "~") return homeDir();
-			if (entry.startsWith("~/")) return join(homeDir(), entry.slice(2));
-			return entry;
-		});
+/**
+ * `skills` under both shapes: v1's `{paths, urls}` and v2's one flat list.
+ *
+ * **v2 drops the distinction**, and the way it drops it is
+ * `[...(info.skills.paths ?? []), ...(info.skills.urls ?? [])]`
+ * (`core/src/v1/config/migrate.ts:62`) — paths first, then URLs, with nothing at
+ * the boundary to say which is which. So the split is made the way v2 itself makes
+ * it reading the list back (`config/plugin/skill.ts:35`): an entry is a URL when
+ * `URL.canParse` holds **and** its protocol is `http:` or `https:`, and a
+ * directory otherwise. A `git+ssh://` or `github:` entry is therefore a directory
+ * here as it is there, and the report says the list was split, so a wrong call is
+ * a sentence the user can check rather than a skill that silently did not import.
+ *
+ * The other two things v2 does with the same entries, and does not do here: a
+ * relative path resolves against the workspace directory rather than the working
+ * one (`config/plugin/skill.ts:43`), and `~/` expands against `global.home` (`:39`).
+ * The expansion matches; the workspace-relative resolution has no equivalent in a
+ * migration that reads one user's home, so those entries are reported as paths
+ * that resolved to nothing.
+ */
+function opencodeSkillEntries(config: Record<string, unknown>): { paths: string[]; urls: string[] } {
+	const value = opencodeConfigValue(config, "skills");
+	const expand = (entry: string): string => {
+		if (entry === "~") return homeDir();
+		if (entry.startsWith("~/")) return join(homeDir(), entry.slice(2));
+		return entry;
+	};
+	if (Array.isArray(value)) {
+		const paths: string[] = [];
+		const urls: string[] = [];
+		for (const entry of opencodeStringList(value)) {
+			let remote = false;
+			try {
+				remote = URL.canParse(entry) && /^(https?:)$/.test(new URL(entry).protocol);
+			} catch {
+				// `URL.canParse` already rejected it; this only catches a parser that
+				// disagrees with itself, and a directory is the safe reading.
+				remote = false;
+			}
+			(remote ? urls : paths).push(remote ? entry : expand(entry));
+		}
+		return { paths, urls };
+	}
+	if (!isRecord(value)) return { paths: [], urls: [] };
+	return { paths: opencodeStringList(value.paths).map(expand), urls: opencodeStringList(value.urls) };
 }
 
 /** `instructions` entries, with the same `~` handling `skills.paths` gets. */
