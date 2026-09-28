@@ -31,7 +31,7 @@ import {
 } from "@labunbun/ai";
 import { caseInsensitivePaths } from "@labunbun/tools";
 import { codexRoot } from "./codex-home.ts";
-import { cursorPromptHistoryFile } from "./cursor-home.ts";
+import { cursorPromptHistoryFile, cursorPromptHistoryPath } from "./cursor-home.ts";
 import { dshRoot } from "./dsh-home.ts";
 import { listDshSessions, readDshLog } from "./dsh-session.ts";
 import { decodeGrokCwdDir, grokRoot, grokSessionsRoot } from "./grok-home.ts";
@@ -2157,11 +2157,11 @@ function readOpencodePromptHistory(
 /**
  * Cursor CLI's ↑ recall list, imported with the directory named as a substitute.
  *
- * `~/.config/cursor/prompt_history.json` is a **flat JSON array of bare strings** —
- * not the JSONL of every other source here, which is why it gets its own reader
- * rather than a shared line parser. Three properties of it decide the treatment,
- * and the first is the reason this is the one list in the repo that is imported
- * despite recording no directory.
+ * `<cli home>/chats/<md5>/view/prompt_history.json` is a **flat JSON array of bare
+ * strings** — not the JSONL of every other source here, which is why it gets its
+ * own reader rather than a shared line parser. Three properties of it decide the
+ * treatment, and the first is the reason this is the one list in the repo that is
+ * imported despite recording no directory.
  *
  * **No directory, and no timestamp either.** The entries are strings: there is
  * nowhere in the format to record either, so unlike OpenCode's list — which
@@ -2185,18 +2185,21 @@ function readOpencodePromptHistory(
  * and an unsorted middle (an array the CLI rewrote rather than appended to) would
  * defeat it; a list this short is not worth sorting defensively for.
  *
- * **Two spellings, and this is the one Cursor path with no official citation.**
- * `cursorPromptHistoryFile` tries `$XDG_CONFIG_HOME/cursor/` and then
- * `~/.config/cursor/`, and returns the first that is there; when neither is, the
- * source is reported as having no list, which is a different statement from having
- * an empty one.
+ * **One path, and this is the one Cursor path with no official citation.** The
+ * list is `<cli home>/chats/<md5 of this cwd>/view/prompt_history.json` — three
+ * directories down, in a subtree whose name is a digest of the working directory.
+ * `cursorPromptHistoryFile` returns it when it is there and `null` when it is not;
+ * the "not there" sentence then names the exact path that was looked for, because
+ * a report that says only "no list" is indistinguishable from one that looked in
+ * the wrong place. When nothing is found the source is reported as having no list,
+ * which is a different statement from having an empty one.
  */
 function readCursorPromptHistory(
 	home: string,
 	options: { cwd: string; scope: HistoryScope; limit: number },
 ): PromptHistoryInput {
 	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
-	const located = cursorPromptHistoryFile(home);
+	const located = cursorPromptHistoryFile(home, options.cwd);
 	if (!located) {
 		return {
 			seen: 0,
@@ -2204,9 +2207,7 @@ function readCursorPromptHistory(
 			notes: [],
 			overLimit: 0,
 			truncated: false,
-			absent:
-				// biome-ignore lint/suspicious/noTemplateCurlyInString: the sentence quotes a variable name, so the text is the point
-				"no prompt list at either spelling cursor is reported to use (${XDG_CONFIG_HOME}/cursor/prompt_history.json and ~/.config/cursor/prompt_history.json) — a list is looked for and there is none",
+			absent: `no prompt list at ${tildePath(home, cursorPromptHistoryPath(home, options.cwd))} — a list is looked for and there is none`,
 		};
 	}
 	const text = readText(located.path);

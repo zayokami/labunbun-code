@@ -32,6 +32,7 @@ import {
 	CURSOR_PROJECT_FILES,
 	CURSOR_RULE_EXTENSION,
 	CURSOR_USER_FILES,
+	type CursorConfigRootOrigin,
 	type CursorUserDataOrigin,
 	cursorGlobalStateDatabase,
 	cursorProjectRoot,
@@ -260,8 +261,8 @@ export interface RawCursor {
 	cli: { global: CursorDocument; project: CursorDocument };
 	hooks: { global: CursorDocument; project: CursorDocument };
 	stateDatabases: Array<{ path: string; kind: "workspace" | "global"; workspace?: string }>;
-	/** The CLI's prompt list, and which of the two spellings answered. */
-	promptHistory: { path: string; origin: "xdg-config-home" | "default" } | null;
+	/** The CLI's prompt list, and which of the three config-root rules answered. */
+	promptHistory: { path: string; origin: CursorConfigRootOrigin } | null;
 	/** Entries of the user directory this importer reads nothing out of. */
 	otherUserFiles: string[];
 	/** Entries of the project directory this importer reads nothing out of. */
@@ -284,7 +285,7 @@ export function readCursor(home: string, cwd: string): RawCursor {
 	};
 	const mcp = [readCursorMcpDocument(join(userRoot, "mcp.json")), readCursorMcpDocument(join(projectRoot, "mcp.json"))];
 	const stateDatabases = readCursorStateDatabases(userData.root);
-	const promptHistoryFile = cursorPromptHistoryFile(home);
+	const promptHistoryFile = cursorPromptHistoryFile(home, cwd);
 
 	const documentCount = (doc: CursorDocument): number => (doc.kind === "document" ? Object.keys(doc.value).length : 0);
 	const otherUserFiles = unaccountedNames(userRoot, [...Object.keys(CURSOR_USER_FILES), "rules"]);
@@ -306,8 +307,9 @@ export function readCursor(home: string, cwd: string): RawCursor {
 			documentCount(hooks.global) > 0 ||
 			documentCount(hooks.project) > 0 ||
 			stateDatabases.length > 0 ||
-			// The prompt list is in a different root from everything else — it is
-			// under `~/.config/cursor/`, not `~/.cursor` — so it is the one piece of
+			// The prompt list is buried where no other file this importer reads is:
+			// under the CLI's own home, but three directories down, in a per-workspace
+			// subtree named by a digest of the cwd. So it is the one piece of
 			// evidence that a user who has typed prompts and written no rule, no
 			// config and no server file would otherwise not have counted as an
 			// install. Excluding it made the report say "nothing migratable in it"

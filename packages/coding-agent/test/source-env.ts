@@ -29,6 +29,7 @@
 export const MIGRATION_ENV_VARS: readonly string[] = [
 	"APPDATA",
 	"CODEX_HOME",
+	"CURSOR_CONFIG_DIR",
 	"DSH_HOME",
 	"GROK_HOME",
 	"KIMI_CODE_HOME",

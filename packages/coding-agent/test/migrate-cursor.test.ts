@@ -5,9 +5,9 @@
  * different things in different places — which is why this file has four groups
  * of assertions that read like four unrelated importers. Rules come from
  * `.cursor/rules`; permissions come from the **CLI's** file, not the IDE's
- * `permissions.json`; the CLI's prompt list comes from `~/.config/cursor/`,
- * which is not under `~/.cursor` at all; and the editor's own storage is named
- * and never opened.
+ * `permissions.json`; the CLI's prompt list comes from a per-workspace subtree
+ * of the CLI's own home, three directories down; and the editor's own storage is
+ * named and never opened.
  *
  * The claims behind that are documentation-level rather than source-level —
  * Cursor ships no public tree, and `cursor-home.ts` says so where it applies.
@@ -18,14 +18,16 @@
  * plants a file that could only be read by opening it.
  */
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
 	CURSOR_DIR_BASENAME,
 	cursorDetectionRoots,
 	cursorPromptHistoryFile,
 	cursorUserDataRoot,
+	cursorUserRoot,
 } from "../src/cursor-home.ts";
 import { CURSOR_PLAIN_MARKDOWN_IGNORED, CURSOR_USER_RULES_NOT_LOADED, readCursor } from "../src/cursor-read.ts";
 import {
@@ -735,6 +737,105 @@ describe("cursor detection", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The CLI's home, which two environment variables can move
+// ---------------------------------------------------------------------------
+
+/**
+ * `~/.cursor` is the **default**, not the location.
+ *
+ * The shipped bundle resolves the CLI's home in three steps
+ * (`cursor-config/dist/paths.js`, `WI()`) and the importer used to hard-code the
+ * last one, so on a Linux desktop that exports `XDG_CONFIG_HOME` the config
+ * genuinely lives at `$XDG_CONFIG_HOME/cursor`, `~/.cursor` does not exist, every
+ * read came back empty, and the report said **nothing at all** — not a file, not
+ * a directory, and not "not installed" either, because the importer called the
+ * source absent while the evidence sat one directory over.
+ *
+ * The variables are borrowed by `withHome`, which is what makes these assertions
+ * about the rule rather than about the box: a developer who has set either one
+ * gets the same answer here as a developer who has set neither.
+ */
+describe("cursor's config root", () => {
+	test("CURSOR_CONFIG_DIR moves the CLI home, and the home is not under the user's", () => {
+		// The override is returned **verbatim** — the source trims to test the value
+		// and returns the original — so the path is asserted with the stray spaces
+		// still in it. A reader that tidied this would be diverging from the thing
+		// it is mirroring, and on a value with a trailing space the two point
+		// somewhere different on Windows.
+		let located: string | undefined;
+		let expected = "";
+		withHome({ "elsewhere/cli-config.json": "{}" }, (home) => {
+			process.env.CURSOR_CONFIG_DIR = `  ${join(home, "elsewhere")}  `;
+			located = cursorUserRoot(home);
+			expected = `  ${join(home, "elsewhere")}  `;
+		});
+		expect(located).toBe(expected);
+	});
+
+	test("a relocated CLI home is where the config is read from, and the default is not", () => {
+		// The consequence, not the path. The file is planted **only** at the
+		// relocated root, so a reader that still looked under `~/.cursor` would find
+		// an empty directory and report a cursor install with nothing in it — the
+		// failure this whole group exists to prevent, and one no path assertion
+		// would catch on its own.
+		let keys: string[] = [];
+		withHome({ "elsewhere/cli-config.json": JSON.stringify({ vimMode: { enable: true } }) }, (home) => {
+			process.env.CURSOR_CONFIG_DIR = join(home, "elsewhere");
+			const document = readCursor(home, home).cli.global;
+			keys = document.kind === "document" ? Object.keys(document.value) : [];
+		});
+		expect(keys).toEqual(["vimMode"]);
+	});
+
+	test("XDG_CONFIG_HOME/cursor is the middle rule, and it beats the default", () => {
+		// Both spellings are planted and the variable picks between them, so this
+		// is a precedence assertion rather than a fallback one: with `~/.cursor`
+		// present *and* the variable set, the variable is the answer.
+		let located: string | undefined;
+		let expected = "";
+		withHome({ ".cursor/cli-config.json": "{}" }, (home) => {
+			process.env.XDG_CONFIG_HOME = join(home, "xdg");
+			located = cursorUserRoot(home);
+			expected = join(home, "xdg", "cursor");
+		});
+		expect(located).toBe(expected);
+	});
+
+	test("whitespace-only is not a value, in either variable", () => {
+		// The test the source makes is `value?.trim()` being truthy. `join(" ", …)`
+		// would resolve to a path relative to the process's working directory, so a
+		// reader that took a blank value at face value would read — and this
+		// importer would report — somewhere arbitrary. The XDG half of the
+		// assertion is also the regression: pre-fix the root ignored both variables.
+		withHome({}, (home) => {
+			process.env.CURSOR_CONFIG_DIR = "   ";
+			expect(cursorUserRoot(home)).toBe(join(home, CURSOR_DIR_BASENAME));
+			delete process.env.CURSOR_CONFIG_DIR;
+			process.env.XDG_CONFIG_HOME = "\t";
+			expect(cursorUserRoot(home)).toBe(join(home, CURSOR_DIR_BASENAME));
+		});
+	});
+
+	test("with neither variable set the root is the documented one", () => {
+		withHome({}, (home) => {
+			expect(cursorUserRoot(home)).toBe(join(home, CURSOR_DIR_BASENAME));
+		});
+	});
+
+	test("a user who moved the root is detected through the moved one", () => {
+		// `detectSources` reads `cursorDetectionRoots`, so a relocated root that
+		// detection did not follow would leave the CLI's config invisible to the
+		// one function that decides whether to offer the source at all.
+		let detected: string[] = [];
+		withHome({ "elsewhere/cli-config.json": "{}" }, (home) => {
+			process.env.CURSOR_CONFIG_DIR = join(home, "elsewhere");
+			detected = detectSources(home);
+		});
+		expect(detected).toEqual(["cursor"]);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // The prompt list
 // ---------------------------------------------------------------------------
 
@@ -744,41 +845,109 @@ describe("cursor prompt history", () => {
 		return JSON.stringify(prompts);
 	}
 
-	test("the list is read from ~/.config/cursor, which is not under ~/.cursor", () => {
-		withHome({ ".config/cursor/prompt_history.json": promptList("a prompt") }, (home) => {
+	test("the list is read from the workspace subtree of the CLI home", () => {
+		withHome({}, (home) => {
 			// The path is asserted through the reader rather than through the report,
 			// because a report line that named a directory the reader never opened
 			// would be the exact defect this module's header warns about.
-			expect(cursorPromptHistoryFile(home)?.path).toBe(join(home, ".config", "cursor", "prompt_history.json"));
-			const raw = readCursor(home, home);
-			expect(raw.promptHistory?.path).toBe(join(home, ".config", "cursor", "prompt_history.json"));
+			const planted = withPromptList(home, promptList("a prompt"));
+			expect(cursorPromptHistoryFile(home, home)?.path).toBe(planted);
+			expect(readCursor(home, home).promptHistory?.path).toBe(planted);
 		});
 	});
 
-	test("an XDG_CONFIG_HOME that holds the list wins, and the one that answered is named", () => {
+	test("a prompt_history.json under ~/.config is not this file and is not read", () => {
+		// The two spellings this importer used to choose between are both under
+		// `~/.config/cursor/`, and the source writes to **neither** — not in the
+		// shipped bundle's `WI()`, which resolves the config root to
+		// `CURSOR_CONFIG_DIR` / `$XDG_CONFIG_HOME/cursor` / `~/.cursor`, and not in
+		// the workspace subtree the file is actually in. So the file had never been
+		// found on any machine, and a `prompt_history.json` that *is* sitting in
+		// `~/.config/cursor` belongs to something other than this CLI.
+		withHome({ ".config/cursor/prompt_history.json": promptList("not cursor's") }, (home) => {
+			expect(cursorPromptHistoryFile(home, home)).toBeNull();
+			expect(readPromptHistory("cursor", home, { cwd: home, scope: "all", limit: 10 }).absent).toContain(join("chats"));
+		});
+	});
+
+	test("the digest is the md5 of the resolved working directory, pinned as a literal", () => {
+		// A literal, not a re-derivation: the file is planted at a digest this test
+		// states outright, so an implementation that hashed the home, the raw
+		// argument or a trimmed path would not find it at all. The value differs per
+		// platform **because** the digest is of the *resolved* path — that is the
+		// property under test, not an inconvenience: `resolve` of a native absolute
+		// path is that path, and the two natives are spelled differently.
+		const cwd = process.platform === "win32" ? "C:\\work\\repo" : "/work/repo";
+		const digest =
+			process.platform === "win32" ? "b7b763bda2734ee95fbb91f3e92dbf5b" : "343f7bd911faa66cb512d68f95a5f2f9";
+		let found: string | undefined;
+		let expected = "";
 		withHome({}, (home) => {
-			const xdg = join(home, "xdg");
-			mkdirSync(join(xdg, "cursor"), { recursive: true });
-			writeFileSync(join(xdg, "cursor", "prompt_history.json"), promptList("from xdg"));
-			// Both spellings are in play and the sources disagree about whether both
-			// are used, so the one that is there is read and named.
-			process.env.XDG_CONFIG_HOME = xdg;
-			mkdirSync(join(home, ".config", "cursor"), { recursive: true });
-			writeFileSync(join(home, ".config", "cursor", "prompt_history.json"), promptList("from home"));
-			const located = cursorPromptHistoryFile(home);
+			expected = join(home, CURSOR_DIR_BASENAME, "chats", digest, "view", "prompt_history.json");
+			withPromptList(home, promptList("a prompt"), cwd);
+			found = cursorPromptHistoryFile(home, cwd)?.path;
+		});
+		expect(found).toBe(expected);
+	});
+
+	test("the path has the shape the source builds, in that order", () => {
+		withHome({}, (home) => {
+			withPromptList(home, promptList("a prompt"));
+			const path = cursorPromptHistoryFile(home, home)?.path ?? "";
+			expect(path.replace(/\\/g, "/")).toMatch(/\/\.cursor\/chats\/[0-9a-f]{32}\/view\/prompt_history\.json$/);
+		});
+	});
+
+	test("CURSOR_CONFIG_DIR moves the list too, because both hang off the same root", () => {
+		// The failure this prevents is the silent one: a user who exported
+		// `CURSOR_CONFIG_DIR` keeps their whole CLI state there, so a list at the
+		// default root is not a fallback, it is a different install's file.
+		withHome({}, (home) => {
+			const root = join(home, "elsewhere");
+			process.env.CURSOR_CONFIG_DIR = root;
+			const planted = withPromptList(home, promptList("from the override"), home, root);
+			const located = cursorPromptHistoryFile(home, home);
+			expect(located?.origin).toBe("cursor-config-dir");
+			expect(located?.path).toBe(planted);
+		});
+	});
+
+	test("XDG_CONFIG_HOME moves the list, and the rule that answered is named", () => {
+		withHome({}, (home) => {
+			const root = join(home, "xdg", "cursor");
+			process.env.XDG_CONFIG_HOME = join(home, "xdg");
+			// The default root holds a *different* list, so "which one answered" is
+			// a question with two possible answers and this asserts the right one.
+			withPromptList(home, promptList("from the default"));
+			const planted = withPromptList(home, promptList("from xdg"), home, root);
+			const located = cursorPromptHistoryFile(home, home);
 			expect(located?.origin).toBe("xdg-config-home");
-			expect(located?.path).toBe(join(xdg, "cursor", "prompt_history.json"));
+			expect(located?.path).toBe(planted);
 			expect(
 				readPromptHistory("cursor", home, { cwd: home, scope: "all", limit: 10 }).entries.map((e) => e.text),
 			).toEqual(["from xdg"]);
 		});
 	});
 
+	test("a user whose only cursor file is the list is still a cursor install", () => {
+		// Why getting this path wrong cost more than one file. The list is one of
+		// the four pillars of the source's `present` flag, so a user who has typed
+		// prompts and written no rule, no config and no server file has this file
+		// and nothing else — and a reader that missed it reported the whole source
+		// as absent, taking every other thing Cursor had with it.
+		let report = "";
+		withHome({}, (home) => {
+			withPromptList(home, promptList("the only evidence"));
+			report = runMigration({ home, cwd: home, from: "cursor" }).report;
+		});
+		expect(report).toContain("1 prompt(s) added to the recall history");
+	});
+
 	test("a run offers the prompts and says which directory they are filed under", () => {
 		let report = "";
-		withHome({ ".config/cursor/prompt_history.json": promptList("first prompt", "second prompt") }, (home) => {
-			const result = runMigration({ home, cwd: home, from: "cursor" });
-			report = result.report;
+		withHome({}, (home) => {
+			withPromptList(home, promptList("first prompt", "second prompt"));
+			report = runMigration({ home, cwd: home, from: "cursor" }).report;
 		});
 		expect(report).toContain("2 prompt(s) added to the recall history");
 		// The list records no directory, so the entries are filed under one place
@@ -793,7 +962,8 @@ describe("cursor prompt history", () => {
 	});
 
 	test("--history-scope cwd cannot narrow this source, and says so", () => {
-		withHome({ ".config/cursor/prompt_history.json": promptList("a prompt") }, (home) => {
+		withHome({}, (home) => {
+			withPromptList(home, promptList("a prompt"));
 			const scoped = readPromptHistory("cursor", home, { cwd: home, scope: "cwd", limit: 10 });
 			// The entry is still offered, and the reason it cannot be narrowed is
 			// stated rather than the option being honoured by accident.
@@ -805,14 +975,12 @@ describe("cursor prompt history", () => {
 	});
 
 	test("a slash command is not offered as a prompt, and is counted", () => {
-		const input = readWith({ ".config/cursor/prompt_history.json": promptList("/compact", "a real prompt") });
+		const input = readWith(promptList("/compact", "a real prompt"));
 		expect(input.entries.map((entry) => entry.text)).toEqual(["a real prompt"]);
 	});
 
 	test("a non-string entry, an empty one, and a pasted block are each counted", () => {
-		const input = readWith({
-			".config/cursor/prompt_history.json": JSON.stringify(["kept", "", "   ", "[Pasted text #1 +12 lines]", 7]),
-		});
+		const input = readWith(JSON.stringify(["kept", "", "   ", "[Pasted text #1 +12 lines]", 7]));
 		expect(input.entries.map((entry) => entry.text)).toEqual(["kept"]);
 		// `seen` is what the list *had*, before any filter: the two entries that are
 		// still strings count, and the number 7 does not. Reading it as "one prompt
@@ -837,7 +1005,7 @@ describe("cursor prompt history", () => {
 		// *oldest* `limit` and report "truncated" as if it were the newest — a
 		// recall list that has quietly forgotten everything you asked today.
 		const prompts = Array.from({ length: 12 }, (_, index) => `prompt ${index}`);
-		const input = readWith({ ".config/cursor/prompt_history.json": promptList(...prompts) }, 5);
+		const input = readWith(promptList(...prompts), 5);
 		expect(input.entries.map((entry) => entry.text)).toEqual([
 			"prompt 11",
 			"prompt 10",
@@ -850,14 +1018,21 @@ describe("cursor prompt history", () => {
 	});
 
 	test("a list that is not an array is named, and a list that is not JSON is named differently", () => {
-		expect(readWith({ ".config/cursor/prompt_history.json": JSON.stringify({ a: 1 }) }).entries).toEqual([]);
-		expect(readWith({ ".config/cursor/prompt_history.json": "not json" }).entries).toEqual([]);
+		expect(readWith(JSON.stringify({ a: 1 })).entries).toEqual([]);
+		expect(readWith("not json").entries).toEqual([]);
 	});
 
-	test("with no list at either spelling the report says both were looked for", () => {
-		const input = readWith({});
+	test("with no list the report names the exact path that was looked for", () => {
+		// "There is no list" and "we looked somewhere else" used to print the same
+		// sentence, and the old one named two paths that were both wrong. The
+		// sentence has to name the path, so the user can go and check it.
+		const input = readWith(undefined);
 		expect(input.entries).toEqual([]);
-		expect(input.absent).toContain("~/.config/cursor/prompt_history.json");
+		// `tildePath` rewrites the separator while it abbreviates, so the shape is
+		// matched rather than joined — the sentence has to name the directory that
+		// was searched, whichever platform printed it.
+		expect(input.absent).toMatch(/chats[\\/][0-9a-f]{32}[\\/]view[\\/]prompt_history\.json/);
+		expect(input.absent).toContain("a list is looked for and there is none");
 	});
 
 	test("a prompt that is a credential-looking string is still a prompt, and the report does not print it", () => {
@@ -867,7 +1042,8 @@ describe("cursor prompt history", () => {
 		const secret = "sk-ant-CURSOR-PROMPT-SENTINEL";
 		let report = "";
 		let written = "";
-		withHome({ ".config/cursor/prompt_history.json": promptList(secret) }, (home) => {
+		withHome({}, (home) => {
+			withPromptList(home, promptList(secret));
 			const result = runMigration({ home, cwd: home, from: "cursor" });
 			report = result.report;
 			written = result.plan.writes.find((write) => write.path.endsWith("history.jsonl"))?.content ?? "";
@@ -965,10 +1141,29 @@ describe("cursor: the credential boundary", () => {
 // Helpers used only by the prompt-history group
 // ---------------------------------------------------------------------------
 
+/**
+ * Where the CLI's prompt list is, spelled out rather than derived from the
+ * importer — a fixture that asked the code under test where the file is would
+ * pass for any implementation, including the one that had the path wrong.
+ *
+ * The digest is written out because it is the rule, not a re-implementation of
+ * it: `md5(resolve(cwd))` over the **resolved** working directory, which is what
+ * `./src/state/index.ts` (`r7()`) does. It is *not* the `state.vscdb` workspace
+ * hash, which mixes in the folder's creation time and cannot be recomputed; see
+ * `cursor-home.ts`, where the two are kept apart on purpose.
+ */
+function withPromptList(home: string, contents: string, cwd = home, root = join(home, CURSOR_DIR_BASENAME)): string {
+	const path = join(root, "chats", createHash("md5").update(resolve(cwd)).digest("hex"), "view", "prompt_history.json");
+	mkdirSync(join(path, ".."), { recursive: true });
+	writeFileSync(path, contents);
+	return path;
+}
+
 /** Read a home's prompt list the way the importer does, with the env borrowed. */
-function readWith(tree: SourceTree, limit = 10): ReturnType<typeof readPromptHistory> {
+function readWith(list: string | undefined, limit = 10): ReturnType<typeof readPromptHistory> {
 	let out: ReturnType<typeof readPromptHistory> | undefined;
-	withHome(tree, (home) => {
+	withHome({}, (home) => {
+		if (list !== undefined) withPromptList(home, list);
 		out = readPromptHistory("cursor", home, { cwd: home, scope: "all", limit });
 	});
 	if (!out) throw new Error("the fake home did not survive");
