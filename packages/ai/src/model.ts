@@ -18,6 +18,31 @@ const GLM_BASE = "https://api.z.ai/api/paas/v4";
 const DEEPSEEK_BASE = "https://api.deepseek.com/v1";
 /** MiniMax's international host; `/chat/completions` on it is OpenAI's wire. */
 const MINIMAX_BASE = "https://api.minimax.io/v1";
+// OpenCode's two plans, on two wires each. The two spellings of one plan differ
+// only by a path prefix, and the difference is the SDK's, not a convenience: the
+// Anthropic client appends `/v1/messages` to whatever base it is given, so it
+// needs the prefix *stripped*, while the OpenAI client appends
+// `/chat/completions` and needs it *kept*. The unversioned pair is therefore not
+// a typo to be tidied up — it is the value the Anthropic wire has to be given.
+/** OpenCode Zen, the pay-as-you-go plan, on the Anthropic wire. */
+const OPENCODE_ZEN_BASE = "https://opencode.ai/zen";
+/** OpenCode Go, the $10/month subscription, on the Anthropic wire. */
+const OPENCODE_GO_BASE = "https://opencode.ai/zen/go";
+/** The same two, for the OpenAI-compatible wire. */
+const OPENCODE_ZEN_OAI_BASE = "https://opencode.ai/zen/v1";
+const OPENCODE_GO_OAI_BASE = "https://opencode.ai/zen/go/v1";
+
+/**
+ * The four providers above are a *route to* a model rather than a home for one,
+ * and `resolveModel` treats them differently for exactly that reason: a bare id
+ * never resolves to one of these rows. See the comment on that function for what
+ * that costs and why the alternative is worse.
+ *
+ * Deliberately the four built-in ids and not a shape — a "looks like a reseller"
+ * test would also catch a user who registered their own gateway, and a user
+ * registering `openrouter` under that name is telling us to believe them.
+ */
+const GATEWAY_PROVIDERS = new Set(["opencode-zen", "opencode-go", "opencode-zen-oai", "opencode-go-oai"]);
 
 /** 10 * 1.25 is 1.25, but 0.1 * 3 leaves floating-point dust in a price table. */
 function roundPrice(usd: number): number {
@@ -60,6 +85,56 @@ function openAIPricing(input: number, output: number, cacheRead: number): ModelP
 	};
 }
 
+/**
+ * A row on the Anthropic wire, for a host that is not Anthropic's.
+ *
+ * This exists because the wire and the vendor are separate questions. A gateway
+ * in front of Claude speaks exactly this protocol and is not this vendor: it
+ * has its own host, its own credential, its own price list, and — the reason it
+ * could not be expressed before — no way to be written down. The three fields
+ * that say *which vendor* used to be literals inside {@link anthropicModel}, so
+ * a non-Anthropic host had no constructor to call.
+ *
+ * It takes no `thinkingBlockBinding`. The flag and its beta header travel
+ * together, to the two models that run the check, and a gateway in front of
+ * those models is not evidence that it forwards either one; naming a model here
+ * would send a parameter whose handling on the far side is unknown.
+ */
+function anthropicCompatModel(
+	provider: string,
+	baseUrl: string,
+	apiKeyEnv: string,
+	apiKeyEnvFallbacks: string[] | undefined,
+	id: string,
+	name: string,
+	opts: {
+		contextWindow: number;
+		maxOutputTokens: number;
+		reasoning?: boolean;
+		images?: boolean;
+		thinkingMode?: "adaptive" | "extended";
+		pricing: ModelPricing;
+	},
+): Model {
+	return {
+		id,
+		name,
+		api: "anthropic-messages",
+		provider,
+		baseUrl,
+		apiKeyEnv,
+		// Omitted rather than empty when there is none, so "no other variable works"
+		// and "this row never had a second name" stay distinguishable.
+		...(apiKeyEnvFallbacks ? { apiKeyEnvFallbacks } : {}),
+		contextWindow: opts.contextWindow,
+		maxOutputTokens: opts.maxOutputTokens,
+		reasoning: opts.reasoning ?? true,
+		input: opts.images === false ? ["text"] : ["text", "image"],
+		...(opts.thinkingMode ? { thinkingMode: opts.thinkingMode } : {}),
+		pricing: opts.pricing,
+	};
+}
+
 function anthropicModel(
 	id: string,
 	name: string,
@@ -74,22 +149,18 @@ function anthropicModel(
 	},
 ): Model {
 	return {
-		id,
-		name,
-		api: "anthropic-messages",
-		provider: "anthropic",
-		baseUrl: ANTHROPIC_BASE,
-		apiKeyEnv: "ANTHROPIC_API_KEY",
-		// Proxies and gateways in front of the Anthropic API commonly issue the
-		// credential as ANTHROPIC_AUTH_TOKEN instead.
-		apiKeyEnvFallbacks: ["ANTHROPIC_AUTH_TOKEN"],
-		contextWindow: opts.contextWindow,
-		maxOutputTokens: opts.maxOutputTokens,
-		reasoning: opts.reasoning ?? true,
-		input: opts.images === false ? ["text"] : ["text", "image"],
-		...(opts.thinkingMode ? { thinkingMode: opts.thinkingMode } : {}),
+		...anthropicCompatModel(
+			"anthropic",
+			ANTHROPIC_BASE,
+			"ANTHROPIC_API_KEY",
+			// Proxies and gateways in front of the Anthropic API commonly issue the
+			// credential as ANTHROPIC_AUTH_TOKEN instead.
+			["ANTHROPIC_AUTH_TOKEN"],
+			id,
+			name,
+			opts,
+		),
 		...(opts.thinkingBlockBinding ? { thinkingBlockBinding: true } : {}),
-		pricing: opts.pricing,
 	};
 }
 
@@ -103,6 +174,15 @@ function openAICompatModel(
 		contextWindow: number;
 		maxOutputTokens: number;
 		reasoning?: boolean;
+		/**
+		 * Off unless a row asks. Every first-party row on this wire is a text model,
+		 * and the two that could take an image part — Gemini — are reached by their
+		 * own native client where it exists. It is a field rather than a constant
+		 * because a *gateway* in front of several vendors serves image-capable
+		 * models on the same host, and a row there that said "text" would be a
+		 * claim the model does not support.
+		 */
+		images?: boolean;
 		apiKeyEnvFallbacks?: string[];
 		/**
 		 * Omitted rather than defaulted, for the reason `reasoning` cannot carry:
@@ -129,10 +209,676 @@ function openAICompatModel(
 		contextWindow: opts.contextWindow,
 		maxOutputTokens: opts.maxOutputTokens,
 		reasoning: opts.reasoning ?? false,
-		input: ["text"],
+		input: opts.images ? ["text", "image"] : ["text"],
 		pricing: opts.pricing,
 	};
 }
+
+/**
+ * One model on one of the two OpenCode plans, transcribed once and materialized
+ * onto both wires below.
+ *
+ * OpenCode sells the same catalog two ways: Zen, pay-as-you-go, and Go, a
+ * subscription. Each plan has its own key, its own host and its own price list,
+ * and the two do not agree with each other on a model they share — which is what
+ * stops this collapsing into one table. `deepseek-v4-pro` is $1.74/$3.84 on Zen
+ * and $0.66/$1.98 on Go, so Go is the cheaper plan there; `grok-4.7` is
+ * $1.40/$4.20 on Zen and $2.00/$6.00 on Go, so it is the dearer one. Both plans
+ * are cheaper and dearer depending on the model, and no rule is published for
+ * converting between them, so the two lists below are separate transcriptions
+ * and neither is ever filled in from the other.
+ *
+ * The figures are models.dev's catalogue for its `opencode` and `opencode-go`
+ * providers, swept 2026-09-28, filtered against the gateway's own unauthenticated
+ * `/v1/models` listing the same day. Both halves are needed and neither is
+ * sufficient, and each is wrong on its own: the gateway proves which ids can be
+ * called and publishes no price and no limit; models.dev states the money and
+ * the sizes but is hand-edited and drifts in both directions. The gateway serves
+ * 82 ids on Zen against the 77 priced here, and 43 on Go against 29 — while every
+ * priced, undeprecated entry is served, so nothing we can state has been left
+ * out. The ids the gateway serves that models.dev does not price are named at the
+ * foot of this comment rather than guessed at.
+ *
+ * Nothing here is routed through `openAIPricing`, whose `cacheWrite` is derived
+ * at 1.25x input. The gateway publishes a write rate for 29 of these 106 rows and
+ * states no rate at all for 74 of the rest, and the read rates are not a fixed
+ * multiple of input either: `qwen3.8-flash` reads at 0.016 against an input of
+ * 0.15, which is 0.107x, while `qwen3.8-max` beside it reads at exactly 0.125x. A
+ * derived figure would land close enough to pass review and wrong in the channel
+ * that bills a long session. Where no rate is published the row carries 0, the
+ * reading the Gemini and MiniMax M3 rows above already take.
+ *
+ * Two display names are the catalogue's with a promotion taken off: it lists
+ * Grok 4.7 as "Grok 4.7 (30% Off)" and DeepSeek V4 Pro on Go as "DeepSeek V4 Pro
+ * (New)". A discount that expires does not belong in a model picker.
+ */
+type GatewayModel = readonly [
+	id: string,
+	name: string,
+	contextWindow: number,
+	maxOutputTokens: number,
+	pricing: ModelPricing,
+	images: boolean,
+	toolReasoningEffort?: "none",
+];
+
+const OPENCODE_ZEN_MODELS: GatewayModel[] = [
+	["big-pickle", "Big Pickle", 200_000, 32_000, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, false],
+	[
+		"claude-fable-5",
+		"Claude Fable 5",
+		1_000_000,
+		128_000,
+		{ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+		true,
+	],
+	[
+		"claude-fable-5-1",
+		"Claude Fable 5.1",
+		1_000_000,
+		128_000,
+		{ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
+		true,
+	],
+	[
+		"claude-haiku-4-5",
+		"Claude Haiku 4.5",
+		200_000,
+		64_000,
+		{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+		true,
+	],
+	[
+		"claude-opus-4-5",
+		"Claude Opus 4.5",
+		200_000,
+		64_000,
+		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		true,
+	],
+	[
+		"claude-opus-4-6",
+		"Claude Opus 4.6",
+		1_000_000,
+		128_000,
+		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		true,
+	],
+	[
+		"claude-opus-4-7",
+		"Claude Opus 4.7",
+		1_000_000,
+		128_000,
+		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		true,
+	],
+	[
+		"claude-opus-4-8",
+		"Claude Opus 4.8",
+		1_000_000,
+		128_000,
+		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		true,
+	],
+	[
+		"claude-opus-5",
+		"Claude Opus 5",
+		1_000_000,
+		128_000,
+		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		true,
+	],
+	[
+		"claude-opus-5-5",
+		"Claude Opus 5.5",
+		1_000_000,
+		128_000,
+		{ input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+		true,
+	],
+	[
+		"claude-sonnet-4",
+		"Claude Sonnet 4",
+		1_000_000,
+		64_000,
+		{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+		true,
+	],
+	[
+		"claude-sonnet-4-5",
+		"Claude Sonnet 4.5",
+		1_000_000,
+		64_000,
+		{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+		true,
+	],
+	[
+		"claude-sonnet-4-6",
+		"Claude Sonnet 4.6",
+		1_000_000,
+		64_000,
+		{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+		true,
+	],
+	[
+		"claude-sonnet-5",
+		"Claude Sonnet 5",
+		1_000_000,
+		128_000,
+		{ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+		true,
+	],
+	[
+		"deepseek-v4-flash",
+		"DeepSeek V4 Flash",
+		1_000_000,
+		384_000,
+		{ input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 },
+		false,
+	],
+	[
+		"deepseek-v4-flash-vision-exp",
+		"DeepSeek V4 Flash Vision Exp",
+		1_000_000,
+		384_000,
+		{ input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 },
+		true,
+	],
+	[
+		"deepseek-v4-pro",
+		"DeepSeek V4 Pro",
+		1_000_000,
+		384_000,
+		{ input: 1.74, output: 3.84, cacheRead: 0.145, cacheWrite: 0 },
+		false,
+	],
+	[
+		"deepseek-v4.1-flash",
+		"DeepSeek V4.1 Flash",
+		1_000_000,
+		384_000,
+		{ input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gemini-3-flash",
+		"Gemini 3 Flash",
+		1_048_576,
+		65_536,
+		{ input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gemini-3.1-pro",
+		"Gemini 3.1 Pro Preview",
+		1_048_576,
+		65_536,
+		{ input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gemini-3.5-flash",
+		"Gemini 3.5 Flash",
+		1_048_576,
+		65_536,
+		{ input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gemini-3.5-flash-lite",
+		"Gemini 3.5 Flash Lite",
+		1_048_576,
+		65_536,
+		{ input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gemini-3.6-flash",
+		"Gemini 3.6 Flash",
+		1_048_576,
+		65_536,
+		{ input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gemini-3.7-flash",
+		"Gemini 3.7 Flash",
+		1_048_576,
+		65_536,
+		{ input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gemini-3.8-flash",
+		"Gemini 3.8 Flash",
+		1_048_576,
+		65_536,
+		{ input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
+		true,
+	],
+	["glm-5", "GLM-5", 204_800, 131_072, { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 }, false],
+	["glm-5.1", "GLM-5.1", 204_800, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
+	["glm-5.2", "GLM-5.2", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
+	["glm-5.3", "GLM-5.3", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
+	[
+		"glm-5.3-flash",
+		"GLM-5.3-Flash",
+		1_000_000,
+		131_072,
+		{ input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
+		true,
+	],
+	["gpt-5", "GPT-5", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }, true],
+	["gpt-5-codex", "GPT-5 Codex", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }, true],
+	["gpt-5-nano", "GPT-5 Nano", 400_000, 128_000, { input: 0.05, output: 0.4, cacheRead: 0.005, cacheWrite: 0 }, true],
+	["gpt-5.1", "GPT-5.1", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }, true],
+	[
+		"gpt-5.1-codex",
+		"GPT-5.1 Codex",
+		400_000,
+		128_000,
+		{ input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gpt-5.1-codex-max",
+		"GPT-5.1 Codex Max",
+		400_000,
+		128_000,
+		{ input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gpt-5.1-codex-mini",
+		"GPT-5.1 Codex Mini",
+		400_000,
+		128_000,
+		{ input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0 },
+		true,
+	],
+	["gpt-5.2", "GPT-5.2", 400_000, 128_000, { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 }, true],
+	[
+		"gpt-5.2-codex",
+		"GPT-5.2 Codex",
+		400_000,
+		128_000,
+		{ input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gpt-5.3-codex",
+		"GPT-5.3 Codex",
+		400_000,
+		128_000,
+		{ input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gpt-5.3-codex-spark",
+		"GPT-5.3 Codex Spark",
+		128_000,
+		128_000,
+		{ input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
+		false,
+	],
+	["gpt-5.4", "GPT-5.4", 1_050_000, 128_000, { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 }, true],
+	[
+		"gpt-5.4-mini",
+		"GPT-5.4 Mini",
+		400_000,
+		128_000,
+		{ input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gpt-5.4-nano",
+		"GPT-5.4 Nano",
+		400_000,
+		128_000,
+		{ input: 0.2, output: 1.25, cacheRead: 0.02, cacheWrite: 0 },
+		true,
+	],
+	["gpt-5.4-pro", "GPT-5.4 Pro", 1_050_000, 128_000, { input: 30, output: 180, cacheRead: 30, cacheWrite: 0 }, true],
+	["gpt-5.5", "GPT-5.5", 1_050_000, 128_000, { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }, true],
+	["gpt-5.5-pro", "GPT-5.5 Pro", 1_050_000, 128_000, { input: 30, output: 180, cacheRead: 30, cacheWrite: 0 }, true],
+	[
+		"gpt-5.6-luna",
+		"GPT-5.6 Luna",
+		1_050_000,
+		128_000,
+		{ input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
+		true,
+	],
+	["gpt-5.6-sol", "GPT-5.6 Sol", 1_050_000, 128_000, { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }, true],
+	[
+		"gpt-5.6-terra",
+		"GPT-5.6 Terra",
+		1_050_000,
+		128_000,
+		{ input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
+		true,
+	],
+	["gpt-6-astra", "GPT-6 Astra", 1_050_000, 128_000, { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, true],
+	[
+		"gpt-6-luna",
+		"GPT-6 Luna",
+		1_050_000,
+		128_000,
+		{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+		true,
+		"none",
+	],
+	[
+		"gpt-6-sol",
+		"GPT-6 Sol",
+		1_050_000,
+		128_000,
+		{ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+		true,
+		"none",
+	],
+	["grok-4.5", "Grok 4.5", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 }, true],
+	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
+	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 1.4, output: 4.2, cacheRead: 0.35, cacheWrite: 0 }, true],
+	["grok-build-0.1", "Grok Build 0.1", 256_000, 256_000, { input: 1, output: 2, cacheRead: 0.2, cacheWrite: 0 }, true],
+	["kimi-k2.5", "Kimi K2.5", 262_144, 65_536, { input: 0.6, output: 3, cacheRead: 0.08, cacheWrite: 0 }, true],
+	["kimi-k2.6", "Kimi K2.6", 262_144, 65_536, { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }, true],
+	[
+		"kimi-k2.7-code",
+		"Kimi K2.7 Code",
+		262_144,
+		262_144,
+		{ input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+		true,
+	],
+	["kimi-k3", "Kimi K3", 1_048_576, 131_072, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }, true],
+	[
+		"ling-3.0-flash-fin-free",
+		"Ling 3.0 Flash Fin Free",
+		262_144,
+		32_768,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		false,
+	],
+	[
+		"longcat-2.5-preview-free",
+		"LongCat 2.5 Preview Free",
+		1_000_000,
+		131_072,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		true,
+	],
+	[
+		"mimo-v2.6-flash-free",
+		"MiMo-V2.6-Flash Free",
+		200_000,
+		32_000,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		true,
+	],
+	[
+		"minimax-m2.5",
+		"MiniMax-M2.5",
+		204_800,
+		131_072,
+		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+		false,
+	],
+	[
+		"minimax-m2.7",
+		"MiniMax-M2.7",
+		204_800,
+		131_072,
+		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+		false,
+	],
+	["minimax-m3", "MiniMax-M3", 512_000, 128_000, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }, true],
+	[
+		"muse-spark-1.2",
+		"Muse Spark 1.2",
+		1_048_576,
+		131_072,
+		{ input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+		true,
+	],
+	[
+		"muse-spark-1.3",
+		"Muse Spark 1.3",
+		1_048_576,
+		131_072,
+		{ input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+		true,
+	],
+	[
+		"muse-spark-1.3-contributor-free",
+		"Muse Spark 1.3 Free",
+		1_048_576,
+		131_072,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		true,
+	],
+	[
+		"nemotron-3-ultra-free",
+		"Nemotron 3 Ultra Free",
+		1_000_000,
+		128_000,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		false,
+	],
+	[
+		"nemotron-3.5-lightning-free",
+		"Nemotron 3.5 Lightning Free",
+		262_144,
+		262_144,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		false,
+	],
+	[
+		"qwen3.5-plus",
+		"Qwen3.5 Plus",
+		262_144,
+		65_536,
+		{ input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
+		true,
+	],
+	[
+		"qwen3.6-plus",
+		"Qwen3.6 Plus",
+		262_144,
+		65_536,
+		{ input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0.625 },
+		true,
+	],
+	[
+		"qwen3.8-flash",
+		"Qwen3.8 Flash",
+		1_000_000,
+		131_072,
+		{ input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.2 },
+		true,
+	],
+	["qwen3.8-max", "Qwen3.8 Max", 262_144, 131_072, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }, true],
+	[
+		"space-bunny-free",
+		"Space Bunny Free",
+		1_048_576,
+		524_288,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		true,
+	],
+];
+const OPENCODE_GO_MODELS: GatewayModel[] = [
+	[
+		"deepseek-v4-flash",
+		"DeepSeek V4 Flash",
+		1_000_000,
+		384_000,
+		{ input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+		false,
+	],
+	[
+		"deepseek-v4-flash-vision-exp",
+		"DeepSeek V4 Flash Vision Exp",
+		1_000_000,
+		384_000,
+		{ input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+		true,
+	],
+	[
+		"deepseek-v4-pro",
+		"DeepSeek V4 Pro",
+		1_000_000,
+		384_000,
+		{ input: 0.66, output: 1.98, cacheRead: 0.022, cacheWrite: 0 },
+		false,
+	],
+	[
+		"deepseek-v4.1-flash",
+		"DeepSeek V4.1 Flash",
+		1_000_000,
+		384_000,
+		{ input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+		true,
+	],
+	["glm-5.2", "GLM-5.2", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
+	["glm-5.3", "GLM-5.3", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
+	[
+		"glm-5.3-flash",
+		"GLM-5.3-Flash",
+		1_000_000,
+		131_072,
+		{ input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
+		true,
+	],
+	[
+		"gpt-5.6-luna",
+		"GPT-5.6 Luna",
+		1_050_000,
+		128_000,
+		{ input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
+		true,
+	],
+	[
+		"gpt-6-luna",
+		"GPT-6 Luna",
+		1_050_000,
+		128_000,
+		{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+		true,
+		"none",
+	],
+	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
+	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
+	["hy3", "Hy3", 256_000, 128_000, { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 }, false],
+	[
+		"hy4-preview",
+		"Hy4 preview",
+		1_024_000,
+		64_000,
+		{ input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 },
+		false,
+	],
+	[
+		"kimi-k2.7-code",
+		"Kimi K2.7 Code",
+		262_144,
+		262_144,
+		{ input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+		true,
+	],
+	["kimi-k3", "Kimi K3", 1_048_576, 131_072, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }, true],
+	[
+		"longcat-2.0",
+		"LongCat-2.0",
+		1_000_000,
+		131_072,
+		{ input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+		false,
+	],
+	[
+		"longcat-2.5-preview-free",
+		"LongCat 2.5 Preview Free",
+		1_000_000,
+		131_072,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		true,
+	],
+	["mimo-v2.5", "MiMo V2.5", 1_000_000, 128_000, { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 }, true],
+	[
+		"mimo-v2.5-pro",
+		"MiMo V2.5 Pro",
+		1_048_576,
+		128_000,
+		{ input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
+		false,
+	],
+	[
+		"mimo-v2.6-flash",
+		"MiMo-V2.6-Flash",
+		1_048_576,
+		131_072,
+		{ input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+		true,
+	],
+	[
+		"mimo-v2.6-pro",
+		"MiMo-V2.6-Pro",
+		1_048_576,
+		131_072,
+		{ input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
+		true,
+	],
+	[
+		"minimax-m2.7",
+		"MiniMax-M2.7",
+		204_800,
+		131_072,
+		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
+		false,
+	],
+	["minimax-m3", "MiniMax-M3", 1_000_000, 131_072, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }, true],
+	[
+		"muse-spark-1.2-contributor",
+		"Muse Spark 1.2 Contributor",
+		1_048_576,
+		131_072,
+		{ input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+		true,
+	],
+	[
+		"muse-spark-1.3-contributor",
+		"Muse Spark 1.3 Contributor",
+		1_048_576,
+		131_072,
+		{ input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+		true,
+	],
+	[
+		"qwen3.7-plus",
+		"Qwen3.7 Plus",
+		1_000_000,
+		65_536,
+		{ input: 0.4, output: 1.6, cacheRead: 0.04, cacheWrite: 0.5 },
+		true,
+	],
+	[
+		"qwen3.8-flash",
+		"Qwen3.8 Flash",
+		1_000_000,
+		131_072,
+		{ input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.2 },
+		true,
+	],
+	["qwen3.8-max", "Qwen3.8 Max", 1_000_000, 131_072, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }, true],
+	[
+		"space-bunny-free",
+		"Space Bunny Free",
+		1_048_576,
+		524_288,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		true,
+	],
+];
 
 /**
  * Where the money numbers come from.
@@ -149,6 +895,13 @@ function openAICompatModel(
  * the documented multipliers rather than copied, because a hand-copied third
  * number is where a table like this goes stale first (Sonnet 5 is $2/$10 — the
  * increase to $3/$15 that was scheduled for 2026-09-01 was cancelled).
+ *
+ * The 106 rows above are the exception to "the vendor's own page", and they say
+ * so. They are a gateway's, and a gateway has no price list of its own: what it
+ * resells is priced by the resellers, so the figures are a third-party
+ * catalogue's, taken 2026-09-28 and checked against what the gateway will
+ * actually serve. Treat them as a tier below the rows around them, and re-sweep
+ * them sooner than the rest.
  *
  * The OpenAI-compatible rows are worth less than the Anthropic ones: they differ
  * per host, and DeepSeek has billed peak and off-peak rates since 2026-08-16 —
@@ -511,6 +1264,95 @@ const BUILT_IN_MODELS: Model[] = [
 	// M2.1 and M2 are absent on purpose: both are two generations behind, and
 	// M2 is the one row on the vendor's model list that states an output cap
 	// (128k, counting CoT) — which is not a number that transfers to a successor.
+	//
+	// OpenCode, last. Two plans, two wires, four provider ids, from the two
+	// transcriptions above: a gateway is not a vendor, so one plan on one wire is
+	// one provider, and the base URL is the only thing that distinguishes them.
+	// Writing these out as four separate call sites would be 106 rows that differ
+	// in one string each, and the copy that drifted.
+	//
+	// `reasoning: false` on every one of them, and the reason is a model that is
+	// on the list: Zen carries `claude-opus-5-5`, and on the Anthropic wire
+	// `reasoning: true` makes the adapter send `thinking: {type: "enabled",
+	// budget_tokens}` — the shape Claude 4.6 and later reject with a 400. There is
+	// no documentation that the gateway forwards `thinking: {type: "adaptive"}`
+	// or `output_config` either, so the adaptive shape is no safer than the
+	// budget one; sending nothing is the only request known to work. The cost is
+	// real and worth stating: a Claude model reached through a gateway thinks
+	// less than the same model reached directly, and `thinkingMode` is left off
+	// on purpose rather than set optimistically.
+	//
+	// One hazard is left open rather than papered over. `thinkingLevel` from the
+	// session wins over `model.reasoning` in the adapter, so a session that picks
+	// a thinking level overrides this and sends the budget shape to the gateway —
+	// a 400 against a 4.6-or-later Claude row, and a field the gateway may not
+	// understand against any other. Nothing here can prevent that from the row
+	// alone; it would take a flag the provider layer does not carry today.
+	//
+	// `toolReasoningEffort` reaches only the two OpenAI-wire providers, and that
+	// is where the two ids that need it are. The field is read in exactly one
+	// place in this repo — the OpenAI compatibility adapter — so on the Anthropic
+	// wire it would be a claim about a code path nothing executes. `gpt-6-sol` and
+	// `gpt-6-luna` publish function calling as available only at
+	// `reasoning_effort: "none"` and name `medium` as the server default, which
+	// returns a turn with no tool calls in it and no error; the constraint is the
+	// model's, not the host's, so it rides through the gateway with them. That
+	// `gpt-6-astra` is on the same list without it is the reason the field is a
+	// row's and not a provider's.
+	//
+	// What the gateway serves and this table does not, because models.dev states
+	// no price or no limit for them: `jev-1.13` and `jev-1.13-free` (which
+	// models.dev does not know at all), plus on Zen `deepseek-v4-flash-free`,
+	// `mimo-v2.5-free` and `muse-spark-1.2-contributor-free`, and on Go
+	// `deepseek-flash`, `glm-5`, `glm-5.1`, `grok-4.5`, `hy3-preview`,
+	// `kimi-k2.5`, `kimi-k2.6`, `mimo-v2-omni`, `mimo-v2-pro`, `minimax-m2.5`,
+	// `omen-alpha`, `qwen3.5-plus`, `qwen3.6-plus` and `qwen3.7-max`. A user who
+	// sees one of these in OpenCode's own picker is not seeing a mistake here, and
+	// an entry added for any of them would be a price invented to fill a gap.
+	//
+	// A fourth wire exists that these rows deliberately do not reach: several of
+	// Zen's OpenAI models — the `gpt-6-*` and `grok-*` families among them —
+	// answer only on `/v1/responses`, which is not a wire `ApiId` can name. The
+	// same reason `gpt-5.3-codex` is absent from OpenAI's own rows above applies
+	// here, and a row that 404s on the wire we speak is worse than no row.
+	...OPENCODE_ZEN_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images]) =>
+		anthropicCompatModel("opencode-zen", OPENCODE_ZEN_BASE, "OPENCODE_API_KEY", undefined, id, name, {
+			contextWindow,
+			maxOutputTokens,
+			reasoning: false,
+			images,
+			pricing,
+		}),
+	),
+	...OPENCODE_GO_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images]) =>
+		anthropicCompatModel("opencode-go", OPENCODE_GO_BASE, "OPENCODE_API_KEY", undefined, id, name, {
+			contextWindow,
+			maxOutputTokens,
+			reasoning: false,
+			images,
+			pricing,
+		}),
+	),
+	...OPENCODE_ZEN_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images, toolReasoningEffort]) =>
+		openAICompatModel("opencode-zen-oai", OPENCODE_ZEN_OAI_BASE, "OPENCODE_API_KEY", id, name, {
+			contextWindow,
+			maxOutputTokens,
+			reasoning: false,
+			images,
+			toolReasoningEffort,
+			pricing,
+		}),
+	),
+	...OPENCODE_GO_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images, toolReasoningEffort]) =>
+		openAICompatModel("opencode-go-oai", OPENCODE_GO_OAI_BASE, "OPENCODE_API_KEY", id, name, {
+			contextWindow,
+			maxOutputTokens,
+			reasoning: false,
+			images,
+			toolReasoningEffort,
+			pricing,
+		}),
+	),
 ];
 
 /**
@@ -816,6 +1658,41 @@ export function baseUrlEnvVar(provider: string): string {
 }
 
 /**
+ * The gateway providers that sell a model under exactly this bare id, for a
+ * "no such model, but it is here" message.
+ *
+ * Exists because of the rule `resolveModel` enforces and cannot itself report: a
+ * bare id no vendor makes resolves to nothing, while the `/model` picker lists it
+ * a screen away as `opencode-zen/gpt-5-codex`. Without this the user is told a
+ * model is unknown while looking at it.
+ *
+ * Empty whenever the bare name would have worked, which is two cases beyond the
+ * obvious one: a model a first-party vendor makes (`claude-opus-5-5` is sold by
+ * the gateway too, and the bare name is the one the user should keep typing),
+ * and an id that forwards to its replacement. The contract is "consult this after
+ * a resolution has already failed", and a hint that fires when it should not is
+ * worse than none — it would send a user off to buy a plan they did not need.
+ *
+ * A qualified reference needs no guard of its own, which a falsification run
+ * pointed out by holding every attempt to break one: the id below is compared
+ * whole, so `opencode-ze/gpt-5-codex` matches no row and a correct one already
+ * returned empty from the test above. An earlier version spelled `includes("/")`
+ * out here to be safe against a model id that contained a slash; if one ever
+ * does, the guard would suppress a hint that is the right thing to give, so it
+ * is not worth having.
+ */
+export function gatewayProvidersFor(reference: string): string[] {
+	if (resolveModel(reference)) return [];
+	return [
+		...new Set(
+			allModels()
+				.filter((m) => m.id === reference)
+				.map((m) => m.provider),
+		),
+	].filter((p) => GATEWAY_PROVIDERS.has(p));
+}
+
+/**
  * Point a model at a proxy or gateway via `<PROVIDER>_BASE_URL`.
  *
  * Applied on the `resolveModel` path so every consumer sees the redirected
@@ -871,13 +1748,44 @@ export class MissingApiKeyError extends Error {
 /**
  * Resolve a model reference:
  * - "provider/model" → exact match on provider + id
- * - "model-id" → unique id match across providers
+ * - "model-id" → unique id match across providers, at the vendor that makes it
  *
  * A reference that matches nothing is tried once more against the ids that have
  * been retired, so a settings file written before a model was renamed keeps
  * resolving to the model that answers to it today.
  */
 export function resolveModel(reference: string): Model | undefined {
+	// A bare id means the vendor that makes the model, and only that vendor. Two
+	// ways a row breaks that promise, both of them created by the gateway tables
+	// and neither visible in the row itself:
+	//
+	// A bare id a vendor has since *retired* still means the retirement, even
+	// where some other host is selling a model of that name today. The reference
+	// was written when exactly one row carried it, so answering it with a
+	// reseller's row would move the session to a different vendor on a different
+	// host at a different price without anything having asked for that —
+	// `deepseek-v4-flash` is exactly the case: retired at DeepSeek in favour of
+	// `deepseek-flash`, and sold under its own name and its own rates by four
+	// OpenCode providers.
+	//
+	// And an id *no* first-party vendor carries resolves to nothing at all rather
+	// than to the gateway. `gpt-5-codex` is the case that shaped this: before the
+	// gateway tables it was an unknown model, which is a fact a migration reports;
+	// with them it is a Zen row, so a user's `model` setting silently becomes a
+	// subscription plan they may hold no key for, on a host whose prices are not
+	// OpenAI's, and the only symptom is a request that fails at the auth header.
+	// The rule the picker already follows is the one worth following here too: a
+	// model at a gateway is chosen by picking it, under the name it is offered
+	// under. Nothing about `gpt-5-codex` says "on OpenCode Zen".
+	//
+	// A qualified reference is exempt from both, and has to be:
+	// `opencode-zen/deepseek-v4-flash` names the reseller, and resolving it to
+	// DeepSeek would be the guess this whole function exists to avoid.
+	if (!reference.includes("/")) {
+		if (RETIRED_MODEL_IDS.has(reference)) return lookupReplacement(reference);
+		const bare = lookupModel(reference);
+		return bare && !GATEWAY_PROVIDERS.has(bare.provider) ? bare : undefined;
+	}
 	return lookupModel(reference) ?? lookupReplacement(reference);
 }
 

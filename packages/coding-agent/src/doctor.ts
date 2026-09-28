@@ -5,6 +5,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { apiKeyEnvNames, listModels } from "@labunbun/ai";
 import { detectShell } from "@labunbun/tools";
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
 import { changedBindings, type PadConfig } from "./gamepad-runtime.ts";
@@ -70,18 +71,13 @@ export async function runDoctorChecks(
 	}
 	checks.push({ name: "ripgrep", status: rgStatus, detail: rgDetail });
 
-	// Auth: which API keys are visible. The same names the registry reads, so a
-	// provider that resolves here is one the probe will also ask.
-	const keys = [
-		"ANTHROPIC_API_KEY",
-		"ANTHROPIC_AUTH_TOKEN",
-		"DEEPSEEK_API_KEY",
-		"KIMI_API_KEY",
-		"MOONSHOT_API_KEY",
-		"GLM_API_KEY",
-		"OPENAI_API_KEY",
-		"GEMINI_API_KEY",
-	];
+	// Auth: which API keys are visible. Read off the registry rather than copied
+	// out of it, because a hand-kept list of the same names is a list that goes
+	// stale silently: it was already missing `MINIMAX_API_KEY` while five built-in
+	// rows read it, so a machine whose only key was MiniMax's was told it had none.
+	// Nothing here is secret — the names are the whole point — and `listModels`
+	// covers custom providers too, which is the other half of what a user can hold.
+	const keys = [...new Set(listModels().flatMap((model) => apiKeyEnvNames(model)))].sort();
 	const present = keys.filter((k) => process.env[k]);
 	checks.push({
 		name: "Auth",

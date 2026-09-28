@@ -28,6 +28,7 @@ import {
 	apiKeyEnvNames,
 	createTrackedStreamFn,
 	formatCatalogNotice,
+	gatewayProvidersFor,
 	listModels,
 	type Model,
 	refreshModelCatalog,
@@ -747,7 +748,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	function switchModel(ref: string): boolean {
 		const next = resolveModel(ref);
 		if (!next) {
-			pushInfo(handle, `Unknown model: ${ref}`);
+			pushInfo(handle, unknownModelMessage(ref));
 			return false;
 		}
 		if (!resolveApiKey(next)) {
@@ -2118,6 +2119,30 @@ export function shortenHome(path: string, home: string | undefined): string {
 	if (path === home) return "~";
 	const prefix = home.endsWith(sep) ? home : `${home}${sep}`;
 	return path.startsWith(prefix) ? `~${sep}${path.slice(prefix.length)}` : path;
+}
+
+/**
+ * What `/model <ref>` says when the reference names nothing.
+ *
+ * At module scope rather than inside `switchModel` for one reason: that closure
+ * holds seven bindings and is not reachable from any exported entry point, so a
+ * message written in it is a message nothing can check. This is pure over two
+ * exported functions and is tested as one.
+ *
+ * The hint exists because the `/model` picker labels every row `provider/id`
+ * while a bare id is the thing people type. Since the gateway rows are reachable
+ * only qualified, "Unknown model: gpt-5-codex" would be a sentence about a model
+ * the user can see on the list they just came from. `gatewayProvidersFor` returns
+ * nothing whenever the bare name would have worked, so the hint cannot fire on a
+ * model that was fine.
+ */
+export function unknownModelMessage(ref: string): string {
+	const elsewhere = gatewayProvidersFor(ref);
+	if (elsewhere.length === 0) return `Unknown model: ${ref}`;
+	// Every provider, so a model on all four says so once rather than sending the
+	// reader off to compare; the first is offered as the thing to try, and table
+	// order puts Zen before Go.
+	return `Unknown model: ${ref} — offered by ${elsewhere.join(", ")}; try ${elsewhere[0]}/${ref}`;
 }
 
 export { type AppCommandContext, appendHistory, handleAppCommand, handleCommandDispatch };

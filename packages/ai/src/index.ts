@@ -57,6 +57,7 @@ export {
 	clearDiscovery,
 	clearPricingOverrides,
 	type DiscoveredModel,
+	gatewayProvidersFor,
 	listModels,
 	MissingApiKeyError,
 	type OpenAICompatibleProviderSpec,

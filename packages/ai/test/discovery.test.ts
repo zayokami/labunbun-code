@@ -51,6 +51,11 @@ const KEY_VARS = [
 	"GLM_API_KEY",
 	"OPENAI_API_KEY",
 	"GEMINI_API_KEY",
+	// One name for all four OpenCode providers: Zen and Go issue a single
+	// dashboard key, and the gateway names the same variable the two plans are
+	// reached under in OpenCode's own catalog (`env: ["OPENCODE_API_KEY"]` on
+	// both the `opencode` and `opencode-go` entries).
+	"OPENCODE_API_KEY",
 ];
 
 /** Every Anthropic id in the built-in table, in table order. A complete listing

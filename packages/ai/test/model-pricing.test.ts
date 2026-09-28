@@ -11,6 +11,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
 	clearCustomModels,
 	clearPricingOverrides,
+	gatewayProvidersFor,
 	listModels,
 	registerOpenAICompatibleProvider,
 	resolveModel,
@@ -28,7 +29,7 @@ afterEach(() => {
  * host test below reads resolved models, so every one of these is borrowed for
  * the duration — this file otherwise asserts the shipped table, and inheriting
  * the machine's configuration would make a developer's proxy a test failure. All
- * seven, not just the one that happened to be set: the point is that no machine
+ * eleven, not just the one that happened to be set: the point is that no machine
  * can change the answer.
  *
  * The `finally` is the whole restore path, and deliberately not an `afterEach`
@@ -45,6 +46,10 @@ const BASE_URL_VARS = [
 	"OPENAI_BASE_URL",
 	"GOOGLE_BASE_URL",
 	"MINIMAX_BASE_URL",
+	"OPENCODE_ZEN_BASE_URL",
+	"OPENCODE_GO_BASE_URL",
+	"OPENCODE_ZEN_OAI_BASE_URL",
+	"OPENCODE_GO_OAI_BASE_URL",
 ];
 const savedEnv = new Map<string, string | undefined>();
 
@@ -108,7 +113,245 @@ const BUILT_IN_REFS = [
 	"minimax/minimax-m2.7-highspeed",
 	"minimax/minimax-m2.5",
 	"minimax/minimax-m2.5-highspeed",
+	// OpenCode: 77 Zen rows and 29 Go rows, each on both wires — 212 references,
+	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
+	// transcriptions and neither was ever filled in from the other, which the
+	// pairs below show: `deepseek-v4-pro` is 1.74/3.84 on Zen and 0.66/1.98 on Go,
+	// and `grok-4.7` runs the other way at 1.4/4.2 against 2/6. Swept 2026-09-28
+	// from models.dev, filtered against the gateway's own model listing.
+	"opencode-zen/big-pickle",
+	"opencode-zen/claude-fable-5",
+	"opencode-zen/claude-fable-5-1",
+	"opencode-zen/claude-haiku-4-5",
+	"opencode-zen/claude-opus-4-5",
+	"opencode-zen/claude-opus-4-6",
+	"opencode-zen/claude-opus-4-7",
+	"opencode-zen/claude-opus-4-8",
+	"opencode-zen/claude-opus-5",
+	"opencode-zen/claude-opus-5-5",
+	"opencode-zen/claude-sonnet-4",
+	"opencode-zen/claude-sonnet-4-5",
+	"opencode-zen/claude-sonnet-4-6",
+	"opencode-zen/claude-sonnet-5",
+	"opencode-zen/deepseek-v4-flash",
+	"opencode-zen/deepseek-v4-flash-vision-exp",
+	"opencode-zen/deepseek-v4-pro",
+	"opencode-zen/deepseek-v4.1-flash",
+	"opencode-zen/gemini-3-flash",
+	"opencode-zen/gemini-3.1-pro",
+	"opencode-zen/gemini-3.5-flash",
+	"opencode-zen/gemini-3.5-flash-lite",
+	"opencode-zen/gemini-3.6-flash",
+	"opencode-zen/gemini-3.7-flash",
+	"opencode-zen/gemini-3.8-flash",
+	"opencode-zen/glm-5",
+	"opencode-zen/glm-5.1",
+	"opencode-zen/glm-5.2",
+	"opencode-zen/glm-5.3",
+	"opencode-zen/glm-5.3-flash",
+	"opencode-zen/gpt-5",
+	"opencode-zen/gpt-5-codex",
+	"opencode-zen/gpt-5-nano",
+	"opencode-zen/gpt-5.1",
+	"opencode-zen/gpt-5.1-codex",
+	"opencode-zen/gpt-5.1-codex-max",
+	"opencode-zen/gpt-5.1-codex-mini",
+	"opencode-zen/gpt-5.2",
+	"opencode-zen/gpt-5.2-codex",
+	"opencode-zen/gpt-5.3-codex",
+	"opencode-zen/gpt-5.3-codex-spark",
+	"opencode-zen/gpt-5.4",
+	"opencode-zen/gpt-5.4-mini",
+	"opencode-zen/gpt-5.4-nano",
+	"opencode-zen/gpt-5.4-pro",
+	"opencode-zen/gpt-5.5",
+	"opencode-zen/gpt-5.5-pro",
+	"opencode-zen/gpt-5.6-luna",
+	"opencode-zen/gpt-5.6-sol",
+	"opencode-zen/gpt-5.6-terra",
+	"opencode-zen/gpt-6-astra",
+	"opencode-zen/gpt-6-luna",
+	"opencode-zen/gpt-6-sol",
+	"opencode-zen/grok-4.5",
+	"opencode-zen/grok-4.6",
+	"opencode-zen/grok-4.7",
+	"opencode-zen/grok-build-0.1",
+	"opencode-zen/kimi-k2.5",
+	"opencode-zen/kimi-k2.6",
+	"opencode-zen/kimi-k2.7-code",
+	"opencode-zen/kimi-k3",
+	"opencode-zen/ling-3.0-flash-fin-free",
+	"opencode-zen/longcat-2.5-preview-free",
+	"opencode-zen/mimo-v2.6-flash-free",
+	"opencode-zen/minimax-m2.5",
+	"opencode-zen/minimax-m2.7",
+	"opencode-zen/minimax-m3",
+	"opencode-zen/muse-spark-1.2",
+	"opencode-zen/muse-spark-1.3",
+	"opencode-zen/muse-spark-1.3-contributor-free",
+	"opencode-zen/nemotron-3-ultra-free",
+	"opencode-zen/nemotron-3.5-lightning-free",
+	"opencode-zen/qwen3.5-plus",
+	"opencode-zen/qwen3.6-plus",
+	"opencode-zen/qwen3.8-flash",
+	"opencode-zen/qwen3.8-max",
+	"opencode-zen/space-bunny-free",
+	"opencode-go/deepseek-v4-flash",
+	"opencode-go/deepseek-v4-flash-vision-exp",
+	"opencode-go/deepseek-v4-pro",
+	"opencode-go/deepseek-v4.1-flash",
+	"opencode-go/glm-5.2",
+	"opencode-go/glm-5.3",
+	"opencode-go/glm-5.3-flash",
+	"opencode-go/gpt-5.6-luna",
+	"opencode-go/gpt-6-luna",
+	"opencode-go/grok-4.6",
+	"opencode-go/grok-4.7",
+	"opencode-go/hy3",
+	"opencode-go/hy4-preview",
+	"opencode-go/kimi-k2.7-code",
+	"opencode-go/kimi-k3",
+	"opencode-go/longcat-2.0",
+	"opencode-go/longcat-2.5-preview-free",
+	"opencode-go/mimo-v2.5",
+	"opencode-go/mimo-v2.5-pro",
+	"opencode-go/mimo-v2.6-flash",
+	"opencode-go/mimo-v2.6-pro",
+	"opencode-go/minimax-m2.7",
+	"opencode-go/minimax-m3",
+	"opencode-go/muse-spark-1.2-contributor",
+	"opencode-go/muse-spark-1.3-contributor",
+	"opencode-go/qwen3.7-plus",
+	"opencode-go/qwen3.8-flash",
+	"opencode-go/qwen3.8-max",
+	"opencode-go/space-bunny-free",
+	"opencode-zen-oai/big-pickle",
+	"opencode-zen-oai/claude-fable-5",
+	"opencode-zen-oai/claude-fable-5-1",
+	"opencode-zen-oai/claude-haiku-4-5",
+	"opencode-zen-oai/claude-opus-4-5",
+	"opencode-zen-oai/claude-opus-4-6",
+	"opencode-zen-oai/claude-opus-4-7",
+	"opencode-zen-oai/claude-opus-4-8",
+	"opencode-zen-oai/claude-opus-5",
+	"opencode-zen-oai/claude-opus-5-5",
+	"opencode-zen-oai/claude-sonnet-4",
+	"opencode-zen-oai/claude-sonnet-4-5",
+	"opencode-zen-oai/claude-sonnet-4-6",
+	"opencode-zen-oai/claude-sonnet-5",
+	"opencode-zen-oai/deepseek-v4-flash",
+	"opencode-zen-oai/deepseek-v4-flash-vision-exp",
+	"opencode-zen-oai/deepseek-v4-pro",
+	"opencode-zen-oai/deepseek-v4.1-flash",
+	"opencode-zen-oai/gemini-3-flash",
+	"opencode-zen-oai/gemini-3.1-pro",
+	"opencode-zen-oai/gemini-3.5-flash",
+	"opencode-zen-oai/gemini-3.5-flash-lite",
+	"opencode-zen-oai/gemini-3.6-flash",
+	"opencode-zen-oai/gemini-3.7-flash",
+	"opencode-zen-oai/gemini-3.8-flash",
+	"opencode-zen-oai/glm-5",
+	"opencode-zen-oai/glm-5.1",
+	"opencode-zen-oai/glm-5.2",
+	"opencode-zen-oai/glm-5.3",
+	"opencode-zen-oai/glm-5.3-flash",
+	"opencode-zen-oai/gpt-5",
+	"opencode-zen-oai/gpt-5-codex",
+	"opencode-zen-oai/gpt-5-nano",
+	"opencode-zen-oai/gpt-5.1",
+	"opencode-zen-oai/gpt-5.1-codex",
+	"opencode-zen-oai/gpt-5.1-codex-max",
+	"opencode-zen-oai/gpt-5.1-codex-mini",
+	"opencode-zen-oai/gpt-5.2",
+	"opencode-zen-oai/gpt-5.2-codex",
+	"opencode-zen-oai/gpt-5.3-codex",
+	"opencode-zen-oai/gpt-5.3-codex-spark",
+	"opencode-zen-oai/gpt-5.4",
+	"opencode-zen-oai/gpt-5.4-mini",
+	"opencode-zen-oai/gpt-5.4-nano",
+	"opencode-zen-oai/gpt-5.4-pro",
+	"opencode-zen-oai/gpt-5.5",
+	"opencode-zen-oai/gpt-5.5-pro",
+	"opencode-zen-oai/gpt-5.6-luna",
+	"opencode-zen-oai/gpt-5.6-sol",
+	"opencode-zen-oai/gpt-5.6-terra",
+	"opencode-zen-oai/gpt-6-astra",
+	"opencode-zen-oai/gpt-6-luna",
+	"opencode-zen-oai/gpt-6-sol",
+	"opencode-zen-oai/grok-4.5",
+	"opencode-zen-oai/grok-4.6",
+	"opencode-zen-oai/grok-4.7",
+	"opencode-zen-oai/grok-build-0.1",
+	"opencode-zen-oai/kimi-k2.5",
+	"opencode-zen-oai/kimi-k2.6",
+	"opencode-zen-oai/kimi-k2.7-code",
+	"opencode-zen-oai/kimi-k3",
+	"opencode-zen-oai/ling-3.0-flash-fin-free",
+	"opencode-zen-oai/longcat-2.5-preview-free",
+	"opencode-zen-oai/mimo-v2.6-flash-free",
+	"opencode-zen-oai/minimax-m2.5",
+	"opencode-zen-oai/minimax-m2.7",
+	"opencode-zen-oai/minimax-m3",
+	"opencode-zen-oai/muse-spark-1.2",
+	"opencode-zen-oai/muse-spark-1.3",
+	"opencode-zen-oai/muse-spark-1.3-contributor-free",
+	"opencode-zen-oai/nemotron-3-ultra-free",
+	"opencode-zen-oai/nemotron-3.5-lightning-free",
+	"opencode-zen-oai/qwen3.5-plus",
+	"opencode-zen-oai/qwen3.6-plus",
+	"opencode-zen-oai/qwen3.8-flash",
+	"opencode-zen-oai/qwen3.8-max",
+	"opencode-zen-oai/space-bunny-free",
+	"opencode-go-oai/deepseek-v4-flash",
+	"opencode-go-oai/deepseek-v4-flash-vision-exp",
+	"opencode-go-oai/deepseek-v4-pro",
+	"opencode-go-oai/deepseek-v4.1-flash",
+	"opencode-go-oai/glm-5.2",
+	"opencode-go-oai/glm-5.3",
+	"opencode-go-oai/glm-5.3-flash",
+	"opencode-go-oai/gpt-5.6-luna",
+	"opencode-go-oai/gpt-6-luna",
+	"opencode-go-oai/grok-4.6",
+	"opencode-go-oai/grok-4.7",
+	"opencode-go-oai/hy3",
+	"opencode-go-oai/hy4-preview",
+	"opencode-go-oai/kimi-k2.7-code",
+	"opencode-go-oai/kimi-k3",
+	"opencode-go-oai/longcat-2.0",
+	"opencode-go-oai/longcat-2.5-preview-free",
+	"opencode-go-oai/mimo-v2.5",
+	"opencode-go-oai/mimo-v2.5-pro",
+	"opencode-go-oai/mimo-v2.6-flash",
+	"opencode-go-oai/mimo-v2.6-pro",
+	"opencode-go-oai/minimax-m2.7",
+	"opencode-go-oai/minimax-m3",
+	"opencode-go-oai/muse-spark-1.2-contributor",
+	"opencode-go-oai/muse-spark-1.3-contributor",
+	"opencode-go-oai/qwen3.7-plus",
+	"opencode-go-oai/qwen3.8-flash",
+	"opencode-go-oai/qwen3.8-max",
+	"opencode-go-oai/space-bunny-free",
 ];
+
+/**
+ * The four providers that are a gateway rather than a vendor, named once because
+ * four separate tests now have to carve them out. Resolved through `resolveModel`
+ * and not by splitting the reference: a retired id under a bare reference resolves
+ * to its replacement at some *first-party* provider, so `startsWith` would put
+ * `deepseek-v4-flash` in the reseller set and quietly exempt the first-party rows
+ * the carve-out exists to keep in scope.
+ */
+const RESELLER_PROVIDERS = new Set(["opencode-zen", "opencode-go", "opencode-zen-oai", "opencode-go-oai"]);
+
+function isReseller(ref: string): boolean {
+	return RESELLER_PROVIDERS.has(resolveModel(ref)?.provider ?? "");
+}
+
+/** A row whose output budget is its whole window, whatever that means for it. */
+function isWholeWindowOutput(ref: string): boolean {
+	const model = resolveModel(ref);
+	return model?.maxOutputTokens === model?.contextWindow;
+}
 
 describe("the built-in catalog", () => {
 	test("every model carries a price", () => {
@@ -239,10 +482,30 @@ describe("the built-in catalog", () => {
 		// Astra is the control and the reason this is a row and not a provider: it
 		// is the same price tier and the same 6-generation, and its page does not
 		// carry the constraint — "none" is not one of its efforts at all.
+		//
+		// The three OpenCode rows below are the same two models reached through a
+		// reseller, which is the point of the constraint being a row's: the host
+		// changed and it travelled anyway. They are on the OpenAI wire only. The
+		// field is read in exactly one place in this repo — the OpenAI
+		// compatibility adapter — so on the Anthropic wire it would be a claim
+		// about a path nothing executes, and the two providers below are the
+		// negative assertion for that.
 		const flagged = BUILT_IN_REFS.filter((ref) => resolveModel(ref)?.toolReasoningEffort);
-		expect(flagged).toEqual(["openai/gpt-6-sol", "openai/gpt-6-luna"]);
+		expect(flagged).toEqual([
+			"openai/gpt-6-sol",
+			"openai/gpt-6-luna",
+			"opencode-zen-oai/gpt-6-luna",
+			"opencode-zen-oai/gpt-6-sol",
+			"opencode-go-oai/gpt-6-luna",
+		]);
 		expect(resolveModel("openai/gpt-6-sol")?.toolReasoningEffort).toBe("none");
 		expect(resolveModel("openai/gpt-6-astra")?.toolReasoningEffort).toBeUndefined();
+		expect(resolveModel("opencode-zen-oai/gpt-6-luna")?.toolReasoningEffort).toBe("none");
+		// The same two models, the same wire's other half, no field — and not a
+		// row that was merely forgotten, since the id is identical.
+		expect(resolveModel("opencode-zen/gpt-6-luna")?.toolReasoningEffort).toBeUndefined();
+		expect(resolveModel("opencode-zen/gpt-6-sol")?.toolReasoningEffort).toBeUndefined();
+		expect(resolveModel("opencode-go/gpt-6-luna")?.toolReasoningEffort).toBeUndefined();
 		// They still claim the default for a request with no tools on it, which is
 		// the one request where the flag is the whole story.
 		expect(resolveModel("openai/gpt-6-luna")?.reasoning).toBe(true);
@@ -323,6 +586,226 @@ describe("the built-in catalog", () => {
 			["minimax/minimax-m2.7-highspeed", 0.6, 2.4, 0.06, 0.375],
 			["minimax/minimax-m2.5", 0.3, 1.2, 0.03, 0.375],
 			["minimax/minimax-m2.5-highspeed", 0.6, 2.4, 0.03, 0.375],
+
+			// OpenCode, on the same terms and the same day. Twenty-nine of these rows
+			// state a cache-write rate and the rest state none, so three quarters of the
+			// table ends in 0 — which is the reading Gemini and MiniMax M3 already take,
+			// not a claim that writing the cache is free everywhere on the gateway.
+			// Nothing here is derived: `qwen3.8-flash` reads at 0.107x input beside
+			// `qwen3.8-max`'s exact 0.125x, so a multiplier would be wrong on one of
+			// the two and would still read as plausible.
+			["opencode-zen/big-pickle", 0, 0, 0, 0],
+			["opencode-zen/claude-fable-5", 10, 50, 1, 12.5],
+			["opencode-zen/claude-fable-5-1", 10, 50, 0.25, 12.5],
+			["opencode-zen/claude-haiku-4-5", 1, 5, 0.1, 1.25],
+			["opencode-zen/claude-opus-4-5", 5, 25, 0.5, 6.25],
+			["opencode-zen/claude-opus-4-6", 5, 25, 0.5, 6.25],
+			["opencode-zen/claude-opus-4-7", 5, 25, 0.5, 6.25],
+			["opencode-zen/claude-opus-4-8", 5, 25, 0.5, 6.25],
+			["opencode-zen/claude-opus-5", 5, 25, 0.5, 6.25],
+			["opencode-zen/claude-opus-5-5", 4, 20, 0.2, 5],
+			["opencode-zen/claude-sonnet-4", 3, 15, 0.3, 3.75],
+			["opencode-zen/claude-sonnet-4-5", 3, 15, 0.3, 3.75],
+			["opencode-zen/claude-sonnet-4-6", 3, 15, 0.3, 3.75],
+			["opencode-zen/claude-sonnet-5", 2, 10, 0.2, 2.5],
+			["opencode-zen/deepseek-v4-flash", 0.14, 0.28, 0.028, 0],
+			["opencode-zen/deepseek-v4-flash-vision-exp", 0.14, 0.28, 0.028, 0],
+			["opencode-zen/deepseek-v4-pro", 1.74, 3.84, 0.145, 0],
+			["opencode-zen/deepseek-v4.1-flash", 0.3, 1.2, 0.006, 0],
+			["opencode-zen/gemini-3-flash", 0.5, 3, 0.05, 0],
+			["opencode-zen/gemini-3.1-pro", 2, 12, 0.2, 0],
+			["opencode-zen/gemini-3.5-flash", 1.5, 9, 0.15, 0],
+			["opencode-zen/gemini-3.5-flash-lite", 0.3, 2.5, 0.03, 0],
+			["opencode-zen/gemini-3.6-flash", 1.5, 7.5, 0.15, 0],
+			["opencode-zen/gemini-3.7-flash", 1.5, 7.5, 0.15, 0],
+			["opencode-zen/gemini-3.8-flash", 1.5, 7.5, 0.15, 0],
+			["opencode-zen/glm-5", 1, 3.2, 0.2, 0],
+			["opencode-zen/glm-5.1", 1.4, 4.4, 0.26, 0],
+			["opencode-zen/glm-5.2", 1.4, 4.4, 0.26, 0],
+			["opencode-zen/glm-5.3", 1.4, 4.4, 0.26, 0],
+			["opencode-zen/glm-5.3-flash", 0.15, 0.5, 0.03, 0],
+			["opencode-zen/gpt-5", 1.07, 8.5, 0.107, 0],
+			["opencode-zen/gpt-5-codex", 1.07, 8.5, 0.107, 0],
+			["opencode-zen/gpt-5-nano", 0.05, 0.4, 0.005, 0],
+			["opencode-zen/gpt-5.1", 1.07, 8.5, 0.107, 0],
+			["opencode-zen/gpt-5.1-codex", 1.07, 8.5, 0.107, 0],
+			["opencode-zen/gpt-5.1-codex-max", 1.25, 10, 0.125, 0],
+			["opencode-zen/gpt-5.1-codex-mini", 0.25, 2, 0.025, 0],
+			["opencode-zen/gpt-5.2", 1.75, 14, 0.175, 0],
+			["opencode-zen/gpt-5.2-codex", 1.75, 14, 0.175, 0],
+			["opencode-zen/gpt-5.3-codex", 1.75, 14, 0.175, 0],
+			["opencode-zen/gpt-5.3-codex-spark", 1.75, 14, 0.175, 0],
+			["opencode-zen/gpt-5.4", 2.5, 15, 0.25, 0],
+			["opencode-zen/gpt-5.4-mini", 0.75, 4.5, 0.075, 0],
+			["opencode-zen/gpt-5.4-nano", 0.2, 1.25, 0.02, 0],
+			["opencode-zen/gpt-5.4-pro", 30, 180, 30, 0],
+			["opencode-zen/gpt-5.5", 5, 30, 0.5, 0],
+			["opencode-zen/gpt-5.5-pro", 30, 180, 30, 0],
+			["opencode-zen/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
+			["opencode-zen/gpt-5.6-sol", 4, 20, 0.4, 5],
+			["opencode-zen/gpt-5.6-terra", 2.5, 15, 0.25, 3.125],
+			["opencode-zen/gpt-6-astra", 10, 50, 1, 12.5],
+			["opencode-zen/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
+			["opencode-zen/gpt-6-sol", 2, 10, 0.2, 2.5],
+			["opencode-zen/grok-4.5", 2, 6, 0.3, 0],
+			["opencode-zen/grok-4.6", 2, 6, 0.5, 0],
+			["opencode-zen/grok-4.7", 1.4, 4.2, 0.35, 0],
+			["opencode-zen/grok-build-0.1", 1, 2, 0.2, 0],
+			["opencode-zen/kimi-k2.5", 0.6, 3, 0.08, 0],
+			["opencode-zen/kimi-k2.6", 0.95, 4, 0.16, 0],
+			["opencode-zen/kimi-k2.7-code", 0.95, 4, 0.19, 0],
+			["opencode-zen/kimi-k3", 3, 15, 0.3, 0],
+			["opencode-zen/ling-3.0-flash-fin-free", 0, 0, 0, 0],
+			["opencode-zen/longcat-2.5-preview-free", 0, 0, 0, 0],
+			["opencode-zen/mimo-v2.6-flash-free", 0, 0, 0, 0],
+			["opencode-zen/minimax-m2.5", 0.3, 1.2, 0.06, 0],
+			["opencode-zen/minimax-m2.7", 0.3, 1.2, 0.06, 0],
+			["opencode-zen/minimax-m3", 0.3, 1.2, 0.06, 0],
+			["opencode-zen/muse-spark-1.2", 1.25, 4.25, 0.15, 0],
+			["opencode-zen/muse-spark-1.3", 1.25, 4.25, 0.15, 0],
+			["opencode-zen/muse-spark-1.3-contributor-free", 0, 0, 0, 0],
+			["opencode-zen/nemotron-3-ultra-free", 0, 0, 0, 0],
+			["opencode-zen/nemotron-3.5-lightning-free", 0, 0, 0, 0],
+			["opencode-zen/qwen3.5-plus", 0.2, 1.2, 0.02, 0.25],
+			["opencode-zen/qwen3.6-plus", 0.5, 3, 0.05, 0.625],
+			["opencode-zen/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
+			["opencode-zen/qwen3.8-max", 2, 6, 0.25, 2.5],
+			["opencode-zen/space-bunny-free", 0, 0, 0, 0],
+			["opencode-go/deepseek-v4-flash", 0.15, 0.6, 0.003, 0],
+			["opencode-go/deepseek-v4-flash-vision-exp", 0.15, 0.6, 0.003, 0],
+			["opencode-go/deepseek-v4-pro", 0.66, 1.98, 0.022, 0],
+			["opencode-go/deepseek-v4.1-flash", 0.15, 0.6, 0.003, 0],
+			["opencode-go/glm-5.2", 1.4, 4.4, 0.26, 0],
+			["opencode-go/glm-5.3", 1.4, 4.4, 0.26, 0],
+			["opencode-go/glm-5.3-flash", 0.15, 0.5, 0.03, 0],
+			["opencode-go/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
+			["opencode-go/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
+			["opencode-go/grok-4.6", 2, 6, 0.5, 0],
+			["opencode-go/grok-4.7", 2, 6, 0.5, 0],
+			["opencode-go/hy3", 0.14, 0.58, 0.035, 0],
+			["opencode-go/hy4-preview", 0.834, 2.501, 0.042, 0],
+			["opencode-go/kimi-k2.7-code", 0.95, 4, 0.19, 0],
+			["opencode-go/kimi-k3", 3, 15, 0.3, 0],
+			["opencode-go/longcat-2.0", 0.3, 1.2, 0.006, 0],
+			["opencode-go/longcat-2.5-preview-free", 0, 0, 0, 0],
+			["opencode-go/mimo-v2.5", 0.14, 0.28, 0.0028, 0],
+			["opencode-go/mimo-v2.5-pro", 0.435, 0.87, 0.003625, 0],
+			["opencode-go/mimo-v2.6-flash", 0.14, 0.28, 0.0028, 0],
+			["opencode-go/mimo-v2.6-pro", 0.435, 0.87, 0.003625, 0],
+			["opencode-go/minimax-m2.7", 0.3, 1.2, 0.06, 0.375],
+			["opencode-go/minimax-m3", 0.3, 1.2, 0.06, 0],
+			["opencode-go/muse-spark-1.2-contributor", 0.1, 0.2, 0.002, 0],
+			["opencode-go/muse-spark-1.3-contributor", 0.1, 0.2, 0.002, 0],
+			["opencode-go/qwen3.7-plus", 0.4, 1.6, 0.04, 0.5],
+			["opencode-go/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
+			["opencode-go/qwen3.8-max", 2, 6, 0.25, 2.5],
+			["opencode-go/space-bunny-free", 0, 0, 0, 0],
+			["opencode-zen-oai/big-pickle", 0, 0, 0, 0],
+			["opencode-zen-oai/claude-fable-5", 10, 50, 1, 12.5],
+			["opencode-zen-oai/claude-fable-5-1", 10, 50, 0.25, 12.5],
+			["opencode-zen-oai/claude-haiku-4-5", 1, 5, 0.1, 1.25],
+			["opencode-zen-oai/claude-opus-4-5", 5, 25, 0.5, 6.25],
+			["opencode-zen-oai/claude-opus-4-6", 5, 25, 0.5, 6.25],
+			["opencode-zen-oai/claude-opus-4-7", 5, 25, 0.5, 6.25],
+			["opencode-zen-oai/claude-opus-4-8", 5, 25, 0.5, 6.25],
+			["opencode-zen-oai/claude-opus-5", 5, 25, 0.5, 6.25],
+			["opencode-zen-oai/claude-opus-5-5", 4, 20, 0.2, 5],
+			["opencode-zen-oai/claude-sonnet-4", 3, 15, 0.3, 3.75],
+			["opencode-zen-oai/claude-sonnet-4-5", 3, 15, 0.3, 3.75],
+			["opencode-zen-oai/claude-sonnet-4-6", 3, 15, 0.3, 3.75],
+			["opencode-zen-oai/claude-sonnet-5", 2, 10, 0.2, 2.5],
+			["opencode-zen-oai/deepseek-v4-flash", 0.14, 0.28, 0.028, 0],
+			["opencode-zen-oai/deepseek-v4-flash-vision-exp", 0.14, 0.28, 0.028, 0],
+			["opencode-zen-oai/deepseek-v4-pro", 1.74, 3.84, 0.145, 0],
+			["opencode-zen-oai/deepseek-v4.1-flash", 0.3, 1.2, 0.006, 0],
+			["opencode-zen-oai/gemini-3-flash", 0.5, 3, 0.05, 0],
+			["opencode-zen-oai/gemini-3.1-pro", 2, 12, 0.2, 0],
+			["opencode-zen-oai/gemini-3.5-flash", 1.5, 9, 0.15, 0],
+			["opencode-zen-oai/gemini-3.5-flash-lite", 0.3, 2.5, 0.03, 0],
+			["opencode-zen-oai/gemini-3.6-flash", 1.5, 7.5, 0.15, 0],
+			["opencode-zen-oai/gemini-3.7-flash", 1.5, 7.5, 0.15, 0],
+			["opencode-zen-oai/gemini-3.8-flash", 1.5, 7.5, 0.15, 0],
+			["opencode-zen-oai/glm-5", 1, 3.2, 0.2, 0],
+			["opencode-zen-oai/glm-5.1", 1.4, 4.4, 0.26, 0],
+			["opencode-zen-oai/glm-5.2", 1.4, 4.4, 0.26, 0],
+			["opencode-zen-oai/glm-5.3", 1.4, 4.4, 0.26, 0],
+			["opencode-zen-oai/glm-5.3-flash", 0.15, 0.5, 0.03, 0],
+			["opencode-zen-oai/gpt-5", 1.07, 8.5, 0.107, 0],
+			["opencode-zen-oai/gpt-5-codex", 1.07, 8.5, 0.107, 0],
+			["opencode-zen-oai/gpt-5-nano", 0.05, 0.4, 0.005, 0],
+			["opencode-zen-oai/gpt-5.1", 1.07, 8.5, 0.107, 0],
+			["opencode-zen-oai/gpt-5.1-codex", 1.07, 8.5, 0.107, 0],
+			["opencode-zen-oai/gpt-5.1-codex-max", 1.25, 10, 0.125, 0],
+			["opencode-zen-oai/gpt-5.1-codex-mini", 0.25, 2, 0.025, 0],
+			["opencode-zen-oai/gpt-5.2", 1.75, 14, 0.175, 0],
+			["opencode-zen-oai/gpt-5.2-codex", 1.75, 14, 0.175, 0],
+			["opencode-zen-oai/gpt-5.3-codex", 1.75, 14, 0.175, 0],
+			["opencode-zen-oai/gpt-5.3-codex-spark", 1.75, 14, 0.175, 0],
+			["opencode-zen-oai/gpt-5.4", 2.5, 15, 0.25, 0],
+			["opencode-zen-oai/gpt-5.4-mini", 0.75, 4.5, 0.075, 0],
+			["opencode-zen-oai/gpt-5.4-nano", 0.2, 1.25, 0.02, 0],
+			["opencode-zen-oai/gpt-5.4-pro", 30, 180, 30, 0],
+			["opencode-zen-oai/gpt-5.5", 5, 30, 0.5, 0],
+			["opencode-zen-oai/gpt-5.5-pro", 30, 180, 30, 0],
+			["opencode-zen-oai/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
+			["opencode-zen-oai/gpt-5.6-sol", 4, 20, 0.4, 5],
+			["opencode-zen-oai/gpt-5.6-terra", 2.5, 15, 0.25, 3.125],
+			["opencode-zen-oai/gpt-6-astra", 10, 50, 1, 12.5],
+			["opencode-zen-oai/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
+			["opencode-zen-oai/gpt-6-sol", 2, 10, 0.2, 2.5],
+			["opencode-zen-oai/grok-4.5", 2, 6, 0.3, 0],
+			["opencode-zen-oai/grok-4.6", 2, 6, 0.5, 0],
+			["opencode-zen-oai/grok-4.7", 1.4, 4.2, 0.35, 0],
+			["opencode-zen-oai/grok-build-0.1", 1, 2, 0.2, 0],
+			["opencode-zen-oai/kimi-k2.5", 0.6, 3, 0.08, 0],
+			["opencode-zen-oai/kimi-k2.6", 0.95, 4, 0.16, 0],
+			["opencode-zen-oai/kimi-k2.7-code", 0.95, 4, 0.19, 0],
+			["opencode-zen-oai/kimi-k3", 3, 15, 0.3, 0],
+			["opencode-zen-oai/ling-3.0-flash-fin-free", 0, 0, 0, 0],
+			["opencode-zen-oai/longcat-2.5-preview-free", 0, 0, 0, 0],
+			["opencode-zen-oai/mimo-v2.6-flash-free", 0, 0, 0, 0],
+			["opencode-zen-oai/minimax-m2.5", 0.3, 1.2, 0.06, 0],
+			["opencode-zen-oai/minimax-m2.7", 0.3, 1.2, 0.06, 0],
+			["opencode-zen-oai/minimax-m3", 0.3, 1.2, 0.06, 0],
+			["opencode-zen-oai/muse-spark-1.2", 1.25, 4.25, 0.15, 0],
+			["opencode-zen-oai/muse-spark-1.3", 1.25, 4.25, 0.15, 0],
+			["opencode-zen-oai/muse-spark-1.3-contributor-free", 0, 0, 0, 0],
+			["opencode-zen-oai/nemotron-3-ultra-free", 0, 0, 0, 0],
+			["opencode-zen-oai/nemotron-3.5-lightning-free", 0, 0, 0, 0],
+			["opencode-zen-oai/qwen3.5-plus", 0.2, 1.2, 0.02, 0.25],
+			["opencode-zen-oai/qwen3.6-plus", 0.5, 3, 0.05, 0.625],
+			["opencode-zen-oai/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
+			["opencode-zen-oai/qwen3.8-max", 2, 6, 0.25, 2.5],
+			["opencode-zen-oai/space-bunny-free", 0, 0, 0, 0],
+			["opencode-go-oai/deepseek-v4-flash", 0.15, 0.6, 0.003, 0],
+			["opencode-go-oai/deepseek-v4-flash-vision-exp", 0.15, 0.6, 0.003, 0],
+			["opencode-go-oai/deepseek-v4-pro", 0.66, 1.98, 0.022, 0],
+			["opencode-go-oai/deepseek-v4.1-flash", 0.15, 0.6, 0.003, 0],
+			["opencode-go-oai/glm-5.2", 1.4, 4.4, 0.26, 0],
+			["opencode-go-oai/glm-5.3", 1.4, 4.4, 0.26, 0],
+			["opencode-go-oai/glm-5.3-flash", 0.15, 0.5, 0.03, 0],
+			["opencode-go-oai/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
+			["opencode-go-oai/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
+			["opencode-go-oai/grok-4.6", 2, 6, 0.5, 0],
+			["opencode-go-oai/grok-4.7", 2, 6, 0.5, 0],
+			["opencode-go-oai/hy3", 0.14, 0.58, 0.035, 0],
+			["opencode-go-oai/hy4-preview", 0.834, 2.501, 0.042, 0],
+			["opencode-go-oai/kimi-k2.7-code", 0.95, 4, 0.19, 0],
+			["opencode-go-oai/kimi-k3", 3, 15, 0.3, 0],
+			["opencode-go-oai/longcat-2.0", 0.3, 1.2, 0.006, 0],
+			["opencode-go-oai/longcat-2.5-preview-free", 0, 0, 0, 0],
+			["opencode-go-oai/mimo-v2.5", 0.14, 0.28, 0.0028, 0],
+			["opencode-go-oai/mimo-v2.5-pro", 0.435, 0.87, 0.003625, 0],
+			["opencode-go-oai/mimo-v2.6-flash", 0.14, 0.28, 0.0028, 0],
+			["opencode-go-oai/mimo-v2.6-pro", 0.435, 0.87, 0.003625, 0],
+			["opencode-go-oai/minimax-m2.7", 0.3, 1.2, 0.06, 0.375],
+			["opencode-go-oai/minimax-m3", 0.3, 1.2, 0.06, 0],
+			["opencode-go-oai/muse-spark-1.2-contributor", 0.1, 0.2, 0.002, 0],
+			["opencode-go-oai/muse-spark-1.3-contributor", 0.1, 0.2, 0.002, 0],
+			["opencode-go-oai/qwen3.7-plus", 0.4, 1.6, 0.04, 0.5],
+			["opencode-go-oai/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
+			["opencode-go-oai/qwen3.8-max", 2, 6, 0.25, 2.5],
+			["opencode-go-oai/space-bunny-free", 0, 0, 0, 0],
 		]);
 	});
 
@@ -379,6 +862,222 @@ describe("the built-in catalog", () => {
 			["minimax/minimax-m2.7-highspeed", 204_800, 204_800],
 			["minimax/minimax-m2.5", 204_800, 204_800],
 			["minimax/minimax-m2.5-highspeed", 204_800, 204_800],
+
+			// OpenCode, swept 2026-09-28. These are the numbers the compaction threshold
+			// is derived from, so they are transcribed rather than rounded:
+			// `hy4-preview` on Go is 1,024,000 rather than 1M.
+			["opencode-zen/big-pickle", 200_000, 32_000],
+			["opencode-zen/claude-fable-5", 1_000_000, 128_000],
+			["opencode-zen/claude-fable-5-1", 1_000_000, 128_000],
+			["opencode-zen/claude-haiku-4-5", 200_000, 64_000],
+			["opencode-zen/claude-opus-4-5", 200_000, 64_000],
+			["opencode-zen/claude-opus-4-6", 1_000_000, 128_000],
+			["opencode-zen/claude-opus-4-7", 1_000_000, 128_000],
+			["opencode-zen/claude-opus-4-8", 1_000_000, 128_000],
+			["opencode-zen/claude-opus-5", 1_000_000, 128_000],
+			["opencode-zen/claude-opus-5-5", 1_000_000, 128_000],
+			["opencode-zen/claude-sonnet-4", 1_000_000, 64_000],
+			["opencode-zen/claude-sonnet-4-5", 1_000_000, 64_000],
+			["opencode-zen/claude-sonnet-4-6", 1_000_000, 64_000],
+			["opencode-zen/claude-sonnet-5", 1_000_000, 128_000],
+			["opencode-zen/deepseek-v4-flash", 1_000_000, 384_000],
+			["opencode-zen/deepseek-v4-flash-vision-exp", 1_000_000, 384_000],
+			["opencode-zen/deepseek-v4-pro", 1_000_000, 384_000],
+			["opencode-zen/deepseek-v4.1-flash", 1_000_000, 384_000],
+			["opencode-zen/gemini-3-flash", 1_048_576, 65_536],
+			["opencode-zen/gemini-3.1-pro", 1_048_576, 65_536],
+			["opencode-zen/gemini-3.5-flash", 1_048_576, 65_536],
+			["opencode-zen/gemini-3.5-flash-lite", 1_048_576, 65_536],
+			["opencode-zen/gemini-3.6-flash", 1_048_576, 65_536],
+			["opencode-zen/gemini-3.7-flash", 1_048_576, 65_536],
+			["opencode-zen/gemini-3.8-flash", 1_048_576, 65_536],
+			["opencode-zen/glm-5", 204_800, 131_072],
+			["opencode-zen/glm-5.1", 204_800, 131_072],
+			["opencode-zen/glm-5.2", 1_000_000, 131_072],
+			["opencode-zen/glm-5.3", 1_000_000, 131_072],
+			["opencode-zen/glm-5.3-flash", 1_000_000, 131_072],
+			["opencode-zen/gpt-5", 400_000, 128_000],
+			["opencode-zen/gpt-5-codex", 400_000, 128_000],
+			["opencode-zen/gpt-5-nano", 400_000, 128_000],
+			["opencode-zen/gpt-5.1", 400_000, 128_000],
+			["opencode-zen/gpt-5.1-codex", 400_000, 128_000],
+			["opencode-zen/gpt-5.1-codex-max", 400_000, 128_000],
+			["opencode-zen/gpt-5.1-codex-mini", 400_000, 128_000],
+			["opencode-zen/gpt-5.2", 400_000, 128_000],
+			["opencode-zen/gpt-5.2-codex", 400_000, 128_000],
+			["opencode-zen/gpt-5.3-codex", 400_000, 128_000],
+			["opencode-zen/gpt-5.3-codex-spark", 128_000, 128_000],
+			["opencode-zen/gpt-5.4", 1_050_000, 128_000],
+			["opencode-zen/gpt-5.4-mini", 400_000, 128_000],
+			["opencode-zen/gpt-5.4-nano", 400_000, 128_000],
+			["opencode-zen/gpt-5.4-pro", 1_050_000, 128_000],
+			["opencode-zen/gpt-5.5", 1_050_000, 128_000],
+			["opencode-zen/gpt-5.5-pro", 1_050_000, 128_000],
+			["opencode-zen/gpt-5.6-luna", 1_050_000, 128_000],
+			["opencode-zen/gpt-5.6-sol", 1_050_000, 128_000],
+			["opencode-zen/gpt-5.6-terra", 1_050_000, 128_000],
+			["opencode-zen/gpt-6-astra", 1_050_000, 128_000],
+			["opencode-zen/gpt-6-luna", 1_050_000, 128_000],
+			["opencode-zen/gpt-6-sol", 1_050_000, 128_000],
+			["opencode-zen/grok-4.5", 500_000, 500_000],
+			["opencode-zen/grok-4.6", 500_000, 500_000],
+			["opencode-zen/grok-4.7", 500_000, 500_000],
+			["opencode-zen/grok-build-0.1", 256_000, 256_000],
+			["opencode-zen/kimi-k2.5", 262_144, 65_536],
+			["opencode-zen/kimi-k2.6", 262_144, 65_536],
+			["opencode-zen/kimi-k2.7-code", 262_144, 262_144],
+			["opencode-zen/kimi-k3", 1_048_576, 131_072],
+			["opencode-zen/ling-3.0-flash-fin-free", 262_144, 32_768],
+			["opencode-zen/longcat-2.5-preview-free", 1_000_000, 131_072],
+			["opencode-zen/mimo-v2.6-flash-free", 200_000, 32_000],
+			["opencode-zen/minimax-m2.5", 204_800, 131_072],
+			["opencode-zen/minimax-m2.7", 204_800, 131_072],
+			["opencode-zen/minimax-m3", 512_000, 128_000],
+			["opencode-zen/muse-spark-1.2", 1_048_576, 131_072],
+			["opencode-zen/muse-spark-1.3", 1_048_576, 131_072],
+			["opencode-zen/muse-spark-1.3-contributor-free", 1_048_576, 131_072],
+			["opencode-zen/nemotron-3-ultra-free", 1_000_000, 128_000],
+			["opencode-zen/nemotron-3.5-lightning-free", 262_144, 262_144],
+			["opencode-zen/qwen3.5-plus", 262_144, 65_536],
+			["opencode-zen/qwen3.6-plus", 262_144, 65_536],
+			["opencode-zen/qwen3.8-flash", 1_000_000, 131_072],
+			["opencode-zen/qwen3.8-max", 262_144, 131_072],
+			["opencode-zen/space-bunny-free", 1_048_576, 524_288],
+			["opencode-go/deepseek-v4-flash", 1_000_000, 384_000],
+			["opencode-go/deepseek-v4-flash-vision-exp", 1_000_000, 384_000],
+			["opencode-go/deepseek-v4-pro", 1_000_000, 384_000],
+			["opencode-go/deepseek-v4.1-flash", 1_000_000, 384_000],
+			["opencode-go/glm-5.2", 1_000_000, 131_072],
+			["opencode-go/glm-5.3", 1_000_000, 131_072],
+			["opencode-go/glm-5.3-flash", 1_000_000, 131_072],
+			["opencode-go/gpt-5.6-luna", 1_050_000, 128_000],
+			["opencode-go/gpt-6-luna", 1_050_000, 128_000],
+			["opencode-go/grok-4.6", 500_000, 500_000],
+			["opencode-go/grok-4.7", 500_000, 500_000],
+			["opencode-go/hy3", 256_000, 128_000],
+			["opencode-go/hy4-preview", 1_024_000, 64_000],
+			["opencode-go/kimi-k2.7-code", 262_144, 262_144],
+			["opencode-go/kimi-k3", 1_048_576, 131_072],
+			["opencode-go/longcat-2.0", 1_000_000, 131_072],
+			["opencode-go/longcat-2.5-preview-free", 1_000_000, 131_072],
+			["opencode-go/mimo-v2.5", 1_000_000, 128_000],
+			["opencode-go/mimo-v2.5-pro", 1_048_576, 128_000],
+			["opencode-go/mimo-v2.6-flash", 1_048_576, 131_072],
+			["opencode-go/mimo-v2.6-pro", 1_048_576, 131_072],
+			["opencode-go/minimax-m2.7", 204_800, 131_072],
+			["opencode-go/minimax-m3", 1_000_000, 131_072],
+			["opencode-go/muse-spark-1.2-contributor", 1_048_576, 131_072],
+			["opencode-go/muse-spark-1.3-contributor", 1_048_576, 131_072],
+			["opencode-go/qwen3.7-plus", 1_000_000, 65_536],
+			["opencode-go/qwen3.8-flash", 1_000_000, 131_072],
+			["opencode-go/qwen3.8-max", 1_000_000, 131_072],
+			["opencode-go/space-bunny-free", 1_048_576, 524_288],
+			["opencode-zen-oai/big-pickle", 200_000, 32_000],
+			["opencode-zen-oai/claude-fable-5", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-fable-5-1", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-haiku-4-5", 200_000, 64_000],
+			["opencode-zen-oai/claude-opus-4-5", 200_000, 64_000],
+			["opencode-zen-oai/claude-opus-4-6", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-opus-4-7", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-opus-4-8", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-opus-5", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-opus-5-5", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-sonnet-4", 1_000_000, 64_000],
+			["opencode-zen-oai/claude-sonnet-4-5", 1_000_000, 64_000],
+			["opencode-zen-oai/claude-sonnet-4-6", 1_000_000, 64_000],
+			["opencode-zen-oai/claude-sonnet-5", 1_000_000, 128_000],
+			["opencode-zen-oai/deepseek-v4-flash", 1_000_000, 384_000],
+			["opencode-zen-oai/deepseek-v4-flash-vision-exp", 1_000_000, 384_000],
+			["opencode-zen-oai/deepseek-v4-pro", 1_000_000, 384_000],
+			["opencode-zen-oai/deepseek-v4.1-flash", 1_000_000, 384_000],
+			["opencode-zen-oai/gemini-3-flash", 1_048_576, 65_536],
+			["opencode-zen-oai/gemini-3.1-pro", 1_048_576, 65_536],
+			["opencode-zen-oai/gemini-3.5-flash", 1_048_576, 65_536],
+			["opencode-zen-oai/gemini-3.5-flash-lite", 1_048_576, 65_536],
+			["opencode-zen-oai/gemini-3.6-flash", 1_048_576, 65_536],
+			["opencode-zen-oai/gemini-3.7-flash", 1_048_576, 65_536],
+			["opencode-zen-oai/gemini-3.8-flash", 1_048_576, 65_536],
+			["opencode-zen-oai/glm-5", 204_800, 131_072],
+			["opencode-zen-oai/glm-5.1", 204_800, 131_072],
+			["opencode-zen-oai/glm-5.2", 1_000_000, 131_072],
+			["opencode-zen-oai/glm-5.3", 1_000_000, 131_072],
+			["opencode-zen-oai/glm-5.3-flash", 1_000_000, 131_072],
+			["opencode-zen-oai/gpt-5", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5-codex", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5-nano", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.1", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.1-codex", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.1-codex-max", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.1-codex-mini", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.2", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.2-codex", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.3-codex", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.3-codex-spark", 128_000, 128_000],
+			["opencode-zen-oai/gpt-5.4", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-5.4-mini", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.4-nano", 400_000, 128_000],
+			["opencode-zen-oai/gpt-5.4-pro", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-5.5", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-5.5-pro", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-5.6-luna", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-5.6-sol", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-5.6-terra", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-6-astra", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-6-luna", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-6-sol", 1_050_000, 128_000],
+			["opencode-zen-oai/grok-4.5", 500_000, 500_000],
+			["opencode-zen-oai/grok-4.6", 500_000, 500_000],
+			["opencode-zen-oai/grok-4.7", 500_000, 500_000],
+			["opencode-zen-oai/grok-build-0.1", 256_000, 256_000],
+			["opencode-zen-oai/kimi-k2.5", 262_144, 65_536],
+			["opencode-zen-oai/kimi-k2.6", 262_144, 65_536],
+			["opencode-zen-oai/kimi-k2.7-code", 262_144, 262_144],
+			["opencode-zen-oai/kimi-k3", 1_048_576, 131_072],
+			["opencode-zen-oai/ling-3.0-flash-fin-free", 262_144, 32_768],
+			["opencode-zen-oai/longcat-2.5-preview-free", 1_000_000, 131_072],
+			["opencode-zen-oai/mimo-v2.6-flash-free", 200_000, 32_000],
+			["opencode-zen-oai/minimax-m2.5", 204_800, 131_072],
+			["opencode-zen-oai/minimax-m2.7", 204_800, 131_072],
+			["opencode-zen-oai/minimax-m3", 512_000, 128_000],
+			["opencode-zen-oai/muse-spark-1.2", 1_048_576, 131_072],
+			["opencode-zen-oai/muse-spark-1.3", 1_048_576, 131_072],
+			["opencode-zen-oai/muse-spark-1.3-contributor-free", 1_048_576, 131_072],
+			["opencode-zen-oai/nemotron-3-ultra-free", 1_000_000, 128_000],
+			["opencode-zen-oai/nemotron-3.5-lightning-free", 262_144, 262_144],
+			["opencode-zen-oai/qwen3.5-plus", 262_144, 65_536],
+			["opencode-zen-oai/qwen3.6-plus", 262_144, 65_536],
+			["opencode-zen-oai/qwen3.8-flash", 1_000_000, 131_072],
+			["opencode-zen-oai/qwen3.8-max", 262_144, 131_072],
+			["opencode-zen-oai/space-bunny-free", 1_048_576, 524_288],
+			["opencode-go-oai/deepseek-v4-flash", 1_000_000, 384_000],
+			["opencode-go-oai/deepseek-v4-flash-vision-exp", 1_000_000, 384_000],
+			["opencode-go-oai/deepseek-v4-pro", 1_000_000, 384_000],
+			["opencode-go-oai/deepseek-v4.1-flash", 1_000_000, 384_000],
+			["opencode-go-oai/glm-5.2", 1_000_000, 131_072],
+			["opencode-go-oai/glm-5.3", 1_000_000, 131_072],
+			["opencode-go-oai/glm-5.3-flash", 1_000_000, 131_072],
+			["opencode-go-oai/gpt-5.6-luna", 1_050_000, 128_000],
+			["opencode-go-oai/gpt-6-luna", 1_050_000, 128_000],
+			["opencode-go-oai/grok-4.6", 500_000, 500_000],
+			["opencode-go-oai/grok-4.7", 500_000, 500_000],
+			["opencode-go-oai/hy3", 256_000, 128_000],
+			["opencode-go-oai/hy4-preview", 1_024_000, 64_000],
+			["opencode-go-oai/kimi-k2.7-code", 262_144, 262_144],
+			["opencode-go-oai/kimi-k3", 1_048_576, 131_072],
+			["opencode-go-oai/longcat-2.0", 1_000_000, 131_072],
+			["opencode-go-oai/longcat-2.5-preview-free", 1_000_000, 131_072],
+			["opencode-go-oai/mimo-v2.5", 1_000_000, 128_000],
+			["opencode-go-oai/mimo-v2.5-pro", 1_048_576, 128_000],
+			["opencode-go-oai/mimo-v2.6-flash", 1_048_576, 131_072],
+			["opencode-go-oai/mimo-v2.6-pro", 1_048_576, 131_072],
+			["opencode-go-oai/minimax-m2.7", 204_800, 131_072],
+			["opencode-go-oai/minimax-m3", 1_000_000, 131_072],
+			["opencode-go-oai/muse-spark-1.2-contributor", 1_048_576, 131_072],
+			["opencode-go-oai/muse-spark-1.3-contributor", 1_048_576, 131_072],
+			["opencode-go-oai/qwen3.7-plus", 1_000_000, 65_536],
+			["opencode-go-oai/qwen3.8-flash", 1_000_000, 131_072],
+			["opencode-go-oai/qwen3.8-max", 1_000_000, 131_072],
+			["opencode-go-oai/space-bunny-free", 1_048_576, 524_288],
 		]);
 	});
 
@@ -395,7 +1094,14 @@ describe("the built-in catalog", () => {
 		// told not to, but its page states no effort values at all, so "medium" is
 		// unconfirmed for it. Saying nothing leaves the model at its own default,
 		// which is the same thing we would have asked for anyway.
-		const alwaysThinking = BUILT_IN_REFS.filter((ref) => !resolveModel(ref)?.reasoning);
+		// Split in two, and the split is a partition rather than an exception: the
+		// rows below are the ones whose vendor published an effort vocabulary, and
+		// the resellers are the ones whose vendor published nothing about thinking
+		// at all. Both are right to say "not medium", for reasons that have nothing
+		// to do with each other, and the second group is 212 rows long — a third of
+		// the catalog — which would bury the first. The gateway rows are held by
+		// the assertion directly below, which is exhaustive over the same set.
+		const alwaysThinking = BUILT_IN_REFS.filter((ref) => !resolveModel(ref)?.reasoning && !isReseller(ref));
 		expect(alwaysThinking).toEqual([
 			"kimi/kimi-k3",
 			"kimi/kimi-k2.7-code",
@@ -418,6 +1124,26 @@ describe("the built-in catalog", () => {
 			"minimax/minimax-m2.5",
 			"minimax/minimax-m2.5-highspeed",
 		]);
+		// The other half of the partition, exhaustive over the same rows. Every
+		// gateway row claims no thinking at all, and the reason is a model in the
+		// list: Zen carries `claude-opus-5-5`, and on the Anthropic wire
+		// `reasoning: true` sends `thinking: {type: "enabled", budget_tokens}` —
+		// the shape Claude 4.6 and later answer with a 400. Nothing documents that
+		// the gateway forwards `thinking: {type: "adaptive"}` either, so the
+		// adaptive shape is no safer than the budget one and sending nothing is the
+		// only request known to work. That costs real thinking depth on a Claude
+		// model reached this way, which is the trade being made in writing.
+		//
+		// This is the claim that would be easiest to lose: `reasoning` defaults to
+		// true inside `anthropicCompatModel`, so a row added to those tables
+		// without the flag set is a 400 on its first request, and nothing else in
+		// the suite would notice.
+		const gateway = BUILT_IN_REFS.filter(isReseller);
+		expect(gateway).toHaveLength(212);
+		expect(gateway.filter((ref) => resolveModel(ref)?.reasoning)).toEqual([]);
+		// And none of them claims a thinking shape either, for the same reason:
+		// the shape is what the 400 is about.
+		expect(gateway.filter((ref) => resolveModel(ref)?.thinkingMode)).toEqual([]);
 	});
 
 	test("every vendor is reached at the host its API actually lives on", () => {
@@ -435,6 +1161,10 @@ describe("the built-in catalog", () => {
 				host("openai/gpt-6-sol"),
 				host("google/gemini-3.8-flash"),
 				host("minimax/minimax-m3"),
+				host("opencode-zen/claude-opus-5-5"),
+				host("opencode-go/deepseek-v4-pro"),
+				host("opencode-zen-oai/gpt-6-sol"),
+				host("opencode-go-oai/kimi-k3"),
 			]).toEqual([
 				"https://api.anthropic.com",
 				"https://api.deepseek.com/v1",
@@ -446,6 +1176,16 @@ describe("the built-in catalog", () => {
 				"https://api.openai.com/v1",
 				"https://generativelanguage.googleapis.com/v1beta/openai/",
 				"https://api.minimax.io/v1",
+				// The gateway's four, and the pairs are not interchangeable: the
+				// Anthropic client appends `/v1/messages` to whatever base it is
+				// given, so the pair of rows above must arrive without a `/v1`; the
+				// OpenAI client appends `/chat/completions`, which does need it. A
+				// base with the wrong prefix is not a 404 on the models endpoint —
+				// it is a 404 on every request, forever.
+				"https://opencode.ai/zen",
+				"https://opencode.ai/zen/go",
+				"https://opencode.ai/zen/v1",
+				"https://opencode.ai/zen/go/v1",
 			]);
 			// One host each, not one per row: a provider that serves several of the
 			// rows above under different URLs is a shape this table does not have.
@@ -474,12 +1214,42 @@ describe("the built-in catalog", () => {
 			const model = resolveModel(ref);
 			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
 		}
-		// And no other vendor is in that situation, so the rule stays a fact about
-		// MiniMax rather than a description of the whole table.
-		const others = BUILT_IN_REFS.filter((ref) => !ref.startsWith("minimax/")).filter(
+		// And no other first-party vendor is in that situation, so the rule stays a
+		// fact about MiniMax rather than a description of the whole table.
+		const others = BUILT_IN_REFS.filter((ref) => !ref.startsWith("minimax/") && !isReseller(ref)).filter(
 			(ref) => resolveModel(ref)?.maxOutputTokens === resolveModel(ref)?.contextWindow,
 		);
 		expect(others).toEqual([]);
+		// The resellers are the third case, and the one this test had to be widened
+		// for: seven gateway ids carry a *published* output cap equal to the window
+		// — `grok-4.5` at 500000/500000, `gpt-5.3-codex-spark` at 128000 all three
+		// ways. That is not the MiniMax stand-in; it is a number somebody states.
+		// The distinction cannot be derived from the row, so it is written down
+		// instead, and naming the ids is what makes the list checkable: a model
+		// appearing or disappearing here is the catalogue moving, and it breaks
+		// this test on purpose.
+		expect(BUILT_IN_REFS.filter((ref) => isReseller(ref)).filter(isWholeWindowOutput)).toEqual([
+			"opencode-zen/gpt-5.3-codex-spark",
+			"opencode-zen/grok-4.5",
+			"opencode-zen/grok-4.6",
+			"opencode-zen/grok-4.7",
+			"opencode-zen/grok-build-0.1",
+			"opencode-zen/kimi-k2.7-code",
+			"opencode-zen/nemotron-3.5-lightning-free",
+			"opencode-go/grok-4.6",
+			"opencode-go/grok-4.7",
+			"opencode-go/kimi-k2.7-code",
+			"opencode-zen-oai/gpt-5.3-codex-spark",
+			"opencode-zen-oai/grok-4.5",
+			"opencode-zen-oai/grok-4.6",
+			"opencode-zen-oai/grok-4.7",
+			"opencode-zen-oai/grok-build-0.1",
+			"opencode-zen-oai/kimi-k2.7-code",
+			"opencode-zen-oai/nemotron-3.5-lightning-free",
+			"opencode-go-oai/grok-4.6",
+			"opencode-go-oai/grok-4.7",
+			"opencode-go-oai/kimi-k2.7-code",
+		]);
 	});
 
 	test("a provider that does not bill cached input separately says so with a zero", () => {
@@ -552,6 +1322,14 @@ describe("ids that were retired", () => {
 
 	test("retired ids are not offered as models", () => {
 		// The map is for references already written, not a catalog to choose from.
+		//
+		// Scoped away from the four OpenCode providers, and the scoping is the point
+		// rather than a concession: an id is retired *at a vendor*, not everywhere.
+		// `deepseek-v4-flash` and `kimi-k2.5` are ids DeepSeek and Kimi no longer
+		// serve under that name, and they are also the names of models a reseller
+		// sells today at its own rates. Excluding the resellers by name keeps the
+		// original invariant intact and still fails the day a *first-party* row
+		// re-lists an id its own vendor retired.
 		const retired = [
 			"deepseek-chat",
 			"deepseek-reasoner",
@@ -562,7 +1340,123 @@ describe("ids that were retired", () => {
 			"claude-3-5-sonnet-20241022",
 			"claude-opus-4-1-20250805",
 		];
-		expect(listModels().filter((m) => retired.includes(m.id))).toEqual([]);
+		expect(listModels().filter((m) => !RESELLER_PROVIDERS.has(m.provider) && retired.includes(m.id))).toEqual([]);
+	});
+
+	test("a reseller's model under a retired name is still offered, and is asked for by name", () => {
+		// The other half of the rule above, and the reason that rule is scoped the
+		// way it is. These are live models on a host that is serving them today; a
+		// picker that hid them would be hiding something the user can buy. They are
+		// reachable only qualified, because a bare one means the retirement — see
+		// the three that collide, which is the whole reason the two tests sit apart.
+		expect(resolveModel("opencode-zen/deepseek-v4-flash")?.id).toBe("deepseek-v4-flash");
+		expect(resolveModel("opencode-zen/kimi-k2.5")?.id).toBe("kimi-k2.5");
+		expect(resolveModel("opencode-zen-oai/kimi-k2.5")?.provider).toBe("opencode-zen-oai");
+		// Zen only, and that is worth saying out loud: the Go plan serves an id by
+		// that name today, but nobody publishes a price for it, so the Go tables
+		// carry no row and this reference correctly resolves to nothing. An id
+		// working on one plan and not the other is what a name collision looks like
+		// when only one side of it is priced.
+		expect(resolveModel("opencode-go/kimi-k2.5")).toBeUndefined();
+		// Priced as the reseller sells them, not as the vendor whose id it borrows:
+		// $0.14/$0.28 on Zen against a `deepseek-flash` row that is not this.
+		expect(resolveModel("opencode-zen/deepseek-v4-flash")?.pricing?.output).toBe(0.28);
+		// The forwarding is untouched, and it is what a bare reference still gets.
+		expect(resolveModel("deepseek-v4-flash")?.id).toBe("deepseek-flash");
+		expect(resolveModel("kimi-k2.5")?.id).toBe("kimi-k2.6");
+	});
+
+	test("a gateway row says what it takes, and the text-only set is named", () => {
+		// `openAICompatModel` grew an `images` flag for the gateway, and nothing
+		// else in the catalog has to say this: every first-party row on that wire is
+		// a text model, and the two that could take an image are reached by their
+		// own native client. So 44 of 212 rows are the only place the claim lives,
+		// and before this one nothing in the suite could see it — flipping `false`
+		// to `true` on any row was a silent edit.
+		//
+		// What makes it a claim about the model rather than about us: `input` is
+		// what the tool layer asks before it offers a file, so a row that says
+		// `image` for a model that takes none produces a picker entry that fails
+		// on first use, and the reverse hides a capability. The list is the
+		// transcription from the catalogue, and is exhaustive in both directions.
+		const textOnly = [
+			...new Set(
+				BUILT_IN_REFS.filter(isReseller)
+					.filter((ref) => resolveModel(ref)?.input.length === 1)
+					.map((ref) => ref.slice(ref.indexOf("/") + 1)),
+			),
+		].sort();
+		expect(textOnly).toEqual([
+			"big-pickle",
+			"deepseek-v4-flash",
+			"deepseek-v4-pro",
+			"glm-5",
+			"glm-5.1",
+			"glm-5.2",
+			"glm-5.3",
+			"gpt-5.3-codex-spark",
+			"hy3",
+			"hy4-preview",
+			"ling-3.0-flash-fin-free",
+			"longcat-2.0",
+			"mimo-v2.5-pro",
+			"minimax-m2.5",
+			"minimax-m2.7",
+			"nemotron-3-ultra-free",
+			"nemotron-3.5-lightning-free",
+		]);
+		// 44 of 212: 13 Zen rows and 9 Go rows, each on both wires. Asserted as a
+		// count rather than derived, so a row that silently joins the list below
+		// cannot do it by also quietly leaving it here.
+		const rows = BUILT_IN_REFS.filter(isReseller);
+		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 1)).toHaveLength(44);
+		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(168);
+		// The two wires agree about the model, which is a check on the *tuple*
+		// being shared rather than transcribed twice — a per-wire table could
+		// disagree and both halves would look right.
+		expect(resolveModel("opencode-zen/deepseek-v4-pro")?.input).toEqual(
+			resolveModel("opencode-zen-oai/deepseek-v4-pro")?.input,
+		);
+		expect(resolveModel("opencode-zen/claude-opus-5-5")?.input).toEqual(["text", "image"]);
+	});
+
+	test("a bare id no vendor makes is not quietly served by a gateway", () => {
+		// The other half of "reachable only qualified", and the half with no
+		// collision behind it: `gpt-5-codex` is not retired anywhere, it simply
+		// belongs to a vendor this build does not carry, and only the gateway
+		// sells it. Left to the plain id match it resolves — to OpenCode Zen, at
+		// Zen's price, on a host whose key is `OPENCODE_API_KEY`.
+		//
+		// What that costs is not a failed lookup but a silently changed meaning,
+		// and the blast radius is the whole app rather than the picker: a
+		// `model` in any source's config file is resolved through this function
+		// before it is written, so a config that pinned `gpt-5-codex` and used to
+		// be reported as an unrecognised model would instead be written out as a
+		// working reference to a subscription the user may not hold. Both migrate
+		// tests that pin such an id are what found this.
+		expect(resolveModel("gpt-5-codex")).toBeUndefined();
+		expect(resolveModel("grok-4.6")).toBeUndefined();
+		expect(resolveModel("hy3")).toBeUndefined();
+		// Qualified, all three still resolve — the rule is about the bare name
+		// only, and the picker hands out exactly the qualified form.
+		expect(resolveModel("opencode-zen/gpt-5-codex")?.pricing?.output).toBe(8.5);
+		expect(resolveModel("opencode-zen/grok-4.6")?.provider).toBe("opencode-zen");
+		expect(resolveModel("opencode-go/hy3")?.provider).toBe("opencode-go");
+		// And the rule does not reach past the four gateway ids: a vendor that
+		// makes the model still answers for it, first-party rows sit ahead of the
+		// gateway ones, and a model on both is still the vendor's.
+		expect(resolveModel("claude-opus-5-5")?.provider).toBe("anthropic");
+		expect(resolveModel("deepseek-v4-pro")?.provider).toBe("deepseek");
+		expect(resolveModel("kimi-k3")?.provider).toBe("kimi");
+		// Exhaustive, and about the right thing: no bare id may *land on* a gateway
+		// row. Most of the 212 do resolve bare — to the vendor that makes the model
+		// — which is the rule working, not the rule failing, so the check is on
+		// where the resolution goes rather than on whether one happens. A fifth
+		// gateway added to the table without a decision here fails this.
+		const landing = BUILT_IN_REFS.filter(isReseller)
+			.map((ref) => ref.slice(ref.indexOf("/") + 1))
+			.filter((id) => RESELLER_PROVIDERS.has(resolveModel(id)?.provider ?? ""));
+		expect([...new Set(landing)]).toEqual([]);
 	});
 });
 
@@ -627,5 +1521,37 @@ describe("custom providers", () => {
 			models: [{ id: "m1", contextWindow: 8_000, maxOutputTokens: 1_000 }],
 		});
 		expect(resolveModel("custom/m1")?.pricing).toBeUndefined();
+	});
+});
+
+describe("where a bare id can be bought", () => {
+	test("names the gateway that sells it, and only when it is bare", () => {
+		// The `/model` picker lists `opencode-zen/gpt-5-codex`, and `resolveModel`
+		// answers "nothing" to the bare `gpt-5-codex` on purpose. This is the
+		// third half that makes that a rule rather than a dead end: the rejection
+		// says where the model went.
+		expect(gatewayProvidersFor("gpt-5-codex")).toEqual(["opencode-zen", "opencode-zen-oai"]);
+		expect(gatewayProvidersFor("grok-4.6")).toEqual([
+			"opencode-zen",
+			"opencode-go",
+			"opencode-zen-oai",
+			"opencode-go-oai",
+		]);
+		expect(gatewayProvidersFor("hy3")).toEqual(["opencode-go", "opencode-go-oai"]);
+		// Not for a model a first-party vendor makes. The gateway sells
+		// `claude-opus-5-5` too, and redirecting someone who typed the name that
+		// already works at Anthropic would send them off to buy a plan they do not
+		// need. The contract is "ask after a resolution has already failed", and a
+		// hint that fires when it should not is worse than no hint.
+		expect(gatewayProvidersFor("claude-opus-5-5")).toEqual([]);
+		expect(gatewayProvidersFor("kimi-k3")).toEqual([]);
+		// Nor for an id that forwards to its replacement: `deepseek-v4-flash`
+		// resolves, so a caller never gets as far as asking.
+		expect(gatewayProvidersFor("deepseek-v4-flash")).toEqual([]);
+		// And not for a typo in a provider name, which is a different mistake with
+		// the same empty answer.
+		expect(gatewayProvidersFor("opencode-zen/gpt-5-codex")).toEqual([]);
+		expect(gatewayProvidersFor("opencode-ze/gpt-5-codex")).toEqual([]);
+		expect(gatewayProvidersFor("nope")).toEqual([]);
 	});
 });
