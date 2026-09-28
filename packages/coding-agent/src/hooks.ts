@@ -222,7 +222,9 @@ function execWithTimeout(
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
+		let timedOut = false;
 		const timer = setTimeout(() => {
+			timedOut = true;
 			if (process.platform === "win32" && child.pid) {
 				// cmd.exe doesn't propagate signals — kill the whole process tree.
 				spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
@@ -241,10 +243,31 @@ function execWithTimeout(
 			clearTimeout(timer);
 			resolve({ stdout, stderr: `${stderr}${error}`, exitCode: 127 });
 		});
-		child.on("close", (code) => {
+		child.on("close", (code, signal) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			// A hook we killed is a hook that did not finish, and it has to read as a
+			// failure. POSIX reports a signalled child as `code === null`, and
+			// `null ?? 0` is a clean exit — so without this the timeout resolved as
+			// success, `exitCode !== 0` never held, and every hung hook counted as
+			// having passed. A `PreToolUse` hook that hangs is the one case that must
+			// not let the tool run quietly. Windows never reached that branch, because
+			// `taskkill` leaves `cmd.exe` with a non-zero code of its own.
+			if (timedOut) {
+				resolve({
+					stdout,
+					stderr: stderr || `hook timed out after ${timeoutMs}ms`,
+					exitCode: 124,
+				});
+				return;
+			}
+			// The same shape for a hook something *else* killed: still a child that
+			// never exited, and still not a zero.
+			if (code === null && signal) {
+				resolve({ stdout, stderr: `${stderr}hook killed by ${signal}`, exitCode: 128 });
+				return;
+			}
 			resolve({ stdout, stderr, exitCode: code ?? 0 });
 		});
 		child.stdin.write(`${stdinData}\n`);

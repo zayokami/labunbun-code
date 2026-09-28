@@ -107,5 +107,30 @@ describe("PreToolUse blocking", () => {
 		const outcome = await runtime.run("Notification", {});
 		expect(Date.now() - started).toBeLessThan(3000);
 		expect(outcome.blocked).toBe(true);
+		// Named as a timeout rather than left to whatever exit code the kill left
+		// behind. `blocked` alone cannot tell the two apart on Windows, where
+		// `taskkill` gives `cmd.exe` a non-zero code of its own and the hook would
+		// read as blocked either way — so on that platform the assertion above was
+		// passing without the timeout being recognised as one, and the reason is what
+		// pins it everywhere.
+		expect(outcome.reason).toContain("timed out");
 	}, 10_000);
+
+	// A hook killed by something other than its own timeout — the OOM killer, an
+	// operator with a `kill` — never exited either, and has to read the same way.
+	// POSIX is the only platform this is expressible on: it reports a signalled
+	// child as a null exit code, which is the whole reason the case exists, while
+	// Windows has no equivalent (there the kill lands as an exit code of its own).
+	// `$$` is the shell the runtime already spawned, so the command signals itself
+	// and the runtime never has to know it happened.
+	test.skipIf(process.platform === "win32")(
+		"a hook killed by a signal is blocked, not passed",
+		async () => {
+			const runtime = snapshotHooks({ PreToolUse: [{ hooks: [{ command: "kill -TERM $$" }] }] });
+			const outcome = await runtime.run("PreToolUse", { tool_name: "Bash" });
+			expect(outcome.blocked).toBe(true);
+			expect(outcome.reason).toContain("killed by SIGTERM");
+		},
+		10_000,
+	);
 });
