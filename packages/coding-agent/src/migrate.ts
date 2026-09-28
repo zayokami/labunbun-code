@@ -55,7 +55,7 @@ import { readClaudeCode } from "./claude-read.ts";
 import { planCodex, planCodexRules } from "./codex-plan.ts";
 import type { RawCodex } from "./codex-read.ts";
 import { readCodex } from "./codex-read.ts";
-import { planCursor } from "./cursor-plan.ts";
+import { planCursor, planCursorAssets } from "./cursor-plan.ts";
 import type { RawCursor } from "./cursor-read.ts";
 import { readCursor } from "./cursor-read.ts";
 import { planDeepSeekAssets, planDeepSeekHarness } from "./dsh-plan.ts";
@@ -766,6 +766,11 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				force,
 			);
 		}
+		// Its own branch, and the same reason OpenCode has one: `planCursor` hangs
+		// off `wants("settings")`, so a run that asked only for assets would reach
+		// the three directories below through no path at all and the code would
+		// never run.
+		if (wants("assets")) planCursorAssets(raw.cursor, raw.home, force, items, writes);
 	}
 	if (only.includes("trae") && raw.trae.present) {
 		if (wants("settings")) {

@@ -41,12 +41,15 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { CursorDocument, RawCursor } from "./cursor-read.ts";
+import { CURSOR_COMMAND_ARGUMENTS, cursorCommandDescription } from "./cursor-read.ts";
 import { HooksConfigSchema } from "./hooks.ts";
 import {
+	collectFileWrites,
 	isRecord,
 	MAX_HOOK_TIMEOUT_MS,
 	normalizeClaudeHooks,
 	placeholderNote,
+	planAssetTrees,
 	reportUnhandledKeys,
 	summarizeNames,
 	tildePath,
@@ -58,6 +61,7 @@ import {
 	looksLikeSecretName,
 	type MigrationItem,
 	type PlannedWrite,
+	type RawFile,
 	resolveModelReference,
 } from "./migrate-types.ts";
 
@@ -624,6 +628,165 @@ function planCursorMcp(
 }
 
 // ---------------------------------------------------------------------------
+// The three asset directories
+// ---------------------------------------------------------------------------
+
+/**
+ * A Cursor command file, rewritten as a skill.
+ *
+ * **Not `migrate-core.ts`'s `commandAsSkill`, and the two differences are both
+ * forced by the source rather than chosen.** That function reports
+ * 「`$ARGUMENTS` is substituted, $1..$9 … are not」, which is right for the
+ * sources it serves and **exactly backwards for Cursor**: the bundle
+ * substitutes `$ARGUMENTS` *and* `$1` through `$99`
+ * ({@link CURSOR_COMMAND_ARGUMENTS}). Shipping the borrowed sentence would have
+ * told a user the opposite of the truth about the one behaviour a command is
+ * mostly used for.
+ *
+ * Nor can it be made to work by editing the shared function — `parseFrontmatter`
+ * is what produces the rewrite, and a Cursor command has no frontmatter to
+ * parse, so the shared path would emit a header carrying an empty description
+ * and eat the first `---` block of a file that happens to have one.
+ *
+ * **The body is the file, whole.** Cursor reads a command as its entire text
+ * (`content: t.trim()`), so a `---` block at the top of a user's command was
+ * text the model saw, and it stays text. The header this writes is above it,
+ * which is the only part of the file that is new.
+ */
+function cursorCommandAsSkill(file: RawFile): RawFile {
+	const description = cursorCommandDescription(file.name, file.content);
+	return {
+		...file,
+		// No quoting around the value, and that is deliberate rather than
+		// careless: `skills.ts`'s `parseFrontmatter` — the reader the loader
+		// itself uses — takes everything after the *first* colon, so
+		// `description: Task: deploy` reads back as `Task: deploy` while
+		// `description: "Task: deploy"` reads back with the quotes still in it.
+		// Quoting here would survive the round trip as literal quote characters in
+		// every description this build reads back.
+		content: `---\nname: ${file.name}\ndescription: ${description}\n---\n${file.content}`,
+		detail: [
+			file.detail ?? "",
+			"command imported as a skill: cursor has no frontmatter for one, so the name and description here are this build's, not cursor's",
+			`the description is the first heading in the file, or its first line of text ("${description}")`,
+			CURSOR_COMMAND_ARGUMENTS,
+		]
+			.filter(Boolean)
+			.join("; "),
+	};
+}
+
+/**
+ * The three reusable-text directories Cursor reads, and the vendor trees it
+ * shares with the sources that own them.
+ *
+ * Skills and agents go through the shared {@link planAssetTrees}, which is what
+ * every other source's two directories go through — the target paths, the
+ * same-path collision rule, the "already exists, kept" rule and the attachment
+ * handling are one code path on purpose, and a second copy of it is a second set
+ * of behaviours to keep in step.
+ *
+ * Commands do not, and the reason is in {@link cursorCommandAsSkill}.
+ */
+export function planCursorAssets(
+	raw: RawCursor,
+	home: string,
+	force: boolean,
+	items: MigrationItem[],
+	writes: PlannedWrite[],
+): void {
+	planAssetTrees(
+		"cursor",
+		{ skills: raw.assets.skills, agents: raw.assets.agents, memory: null },
+		home,
+		force,
+		items,
+		writes,
+	);
+
+	if (raw.assets.commands.skips.length > 0) {
+		items.push({
+			source: "cursor",
+			from: "~/.cursor/commands, <project>/.cursor/commands",
+			to: "—",
+			action: "skip",
+			detail: `${raw.assets.commands.skips.length} command file(s) not imported — ${summarizeNames(
+				raw.assets.commands.skips.map((skip) => `${tildePath(home, skip.path)} (${skip.reason})`),
+			)}`,
+			containsSecret: false,
+		});
+	}
+	collectFileWrites(
+		"cursor",
+		raw.assets.commands.files.map(cursorCommandAsSkill),
+		(name) => join(home, ".labunbun", "skills", name, "SKILL.md"),
+		"skill",
+		force,
+		items,
+		writes,
+		home,
+	);
+
+	// The two skip lists the shared tree planner has no place for: it takes
+	// `RawFile[]`, and both of these are reasons a file that *looked* importable
+	// was not one. A `.md` beside an agent that has no frontmatter is the case
+	// worth naming — the user wrote it in the right place, and the only thing
+	// missing is the block Cursor would have needed.
+	for (const [label, skips] of [
+		["<project>/.cursor/agents", raw.assets.agentSkips],
+		["~/.cursor/skills, <project>/.cursor/skills", raw.assets.skillSkips],
+	] as const) {
+		if (skips.length === 0) continue;
+		items.push({
+			source: "cursor",
+			from: label,
+			to: "—",
+			action: "skip",
+			detail: `${skips.length} path(s) not imported — ${summarizeNames(
+				skips.map((skip) => `${tildePath(home, skip.path)} (${skip.reason})`),
+			)}`,
+			containsSecret: false,
+		});
+	}
+
+	// One line for the whole set rather than one per tree, and the `~/<dir>` and
+	// not `<dir>` spelling for the same reason `opencode-plan.ts` gives: these
+	// names carry a leading dot, and reporting `.claude` as `~claude` names a
+	// directory the user does not have.
+	//
+	// **The tilde is only right for the user half.** A `<cwd>/.claude/skills` is
+	// spelled `<project>/.claude/skills`, because printing it as `~/.claude/skills`
+	// names a path in the home that does not exist — and the same directory at two
+	// levels is two findings, not one, which is why the scope is part of the
+	// spelling rather than something folded away.
+	//
+	// No `Set` here, where there was one. It used to be load-bearing, and stopped
+	// being so the moment the scope joined the spelling: `CURSOR_VENDOR_TREES` has
+	// one row per (kind, `dir`), two rows differ in `dir`, and two scopes of one row
+	// differ in scope — so the mapping is injective and the `Set` can only ever
+	// return its input. A mechanism that can only be a no-op is one more thing that
+	// looks load-bearing.
+	if (raw.assets.vendorTrees.length > 0) {
+		const spelled = raw.assets.vendorTrees
+			.map((tree) => (tree.scope === "user" ? `~/${tree.dir}/${tree.kind}` : `<project>/${tree.dir}/${tree.kind}`))
+			.sort();
+		const owners = [...new Set(raw.assets.vendorTrees.map((tree) => tree.owner))];
+		items.push({
+			source: "cursor",
+			from: spelled.join(", "),
+			to: "—",
+			action: "skip",
+			detail:
+				`cursor harvests ${summarizeNames(spelled)} as well as its own .cursor directories, and this importer does not copy them a second time — the ${owners.join(
+					" and ",
+				)} source${owners.length > 1 ? "s" : ""} already import${owners.length > 1 ? "" : "s"} those trees` +
+				" (and the same is true whether or not cursor's third-party extensibility is on: if it is off, those trees are none of its business either)",
+			containsSecret: false,
+		});
+	}
+}
+
+// ---------------------------------------------------------------------------
 // What is left behind
 // ---------------------------------------------------------------------------
 
@@ -640,6 +803,15 @@ const CURSOR_OTHER_ENTRY_REASONS: Readonly<Record<string, string>> = {
 	"permissions.json":
 		"the IDE's permission list, which the cursor CLI neither reads nor applies — the CLI's own permissions were read from cli-config.json instead, and a migration that imported this one would import the list that was never in effect",
 	"extensions.json": "installed editor extensions, which are the editor's own and have no equivalent in an agent",
+	// **Source-level** — module `src/ephemeral-bridge.ts`, the path table it hands
+	// the editor (build `2026.09.26-dd393fe`). The name appears exactly once in the
+	// whole bundle, as a `home`-scoped entry between `/etc/ssl/cert.pem` and the
+	// other CA-bundle paths, and **no reader in this build constructs it**. That is
+	// worth saying rather than leaving to the generic sentence, because the
+	// generic one reads as "we did not bother" and this is the other thing: there
+	// is nothing behind the name to read.
+	"sandbox-policies":
+		"a name cursor hands the editor for its file watcher, sitting in the same table as the CA-bundle paths — and nothing in this build of the CLI reads it, so there is nothing behind the name to bring across",
 };
 
 function planCursorLeftovers(raw: RawCursor, home: string, items: MigrationItem[]): void {
@@ -693,6 +865,56 @@ function planCursorLeftovers(raw: RawCursor, home: string, items: MigrationItem[
 			detail: `${raw.stateDatabases.length} state database(s) (${workspaces} workspace, ${raw.stateDatabases.length - workspaces} global) opened by name only, never read: cursor is a vs code fork, so a chat is an editor state record rather than a transcript, and the workspace key it is filed under mixes in the folder's creation time and cannot be recomputed from the path`,
 			containsSecret: false,
 		});
+	}
+
+	// The CLI's own per-workspace tree. Up to three lines, and the split is the
+	// whole point: the credential and the two decision lists get different
+	// sentences because they are different kinds of file. Folding them together
+	// would either call a list of approvals a secret, which spends the one
+	// warning a user actually reads, or call a token store a list, which is the
+	// error the whole credential-naming convention exists to prevent.
+	if (raw.projectData.root !== null) {
+		const credentials = raw.projectData.files.filter((file) => file.kind === "credential");
+		const decisions = raw.projectData.files.filter((file) => file.kind === "decision");
+		const workspaces = new Set(raw.projectData.files.map((file) => file.workspace));
+		if (raw.projectData.files.length === 0) {
+			items.push({
+				source: "cursor",
+				from: tildePath(home, raw.projectData.root),
+				to: "—",
+				action: "skip",
+				detail:
+					"cursor's per-workspace data directory, which is there and holds nothing this importer has a name for. It hangs off cursor's data root, which is a different root from its config root once CURSOR_DATA_DIR is set, and this one the importer has never read",
+				containsSecret: false,
+			});
+		}
+		if (credentials.length > 0) {
+			items.push({
+				source: "cursor",
+				from: `${tildePath(home, raw.projectData.root)} → ${summarizeNames(
+					credentials.map((file) => file.name),
+					6,
+				)}`,
+				to: "—",
+				action: "skip",
+				detail: `cursor's own MCP OAuth tokens, for ${workspaces.size} workspace(s), named so you know they were here and never opened. The values are not carried across, so a server that authenticated this way is not authenticated by this import — and this importer has no MCP OAuth of its own to offer in exchange, so there is nothing on the other side to set`,
+				containsSecret: false,
+			});
+		}
+		if (decisions.length > 0) {
+			items.push({
+				source: "cursor",
+				from: `${tildePath(home, raw.projectData.root)} → ${summarizeNames(
+					decisions.map((file) => file.name),
+					6,
+				)}`,
+				to: "—",
+				action: "skip",
+				detail:
+					"cursor's own record of which MCP servers you approved and which you switched off, named and not read: these are answers cursor asked its own user, and an approval given in another tool's file is not an approval here",
+				containsSecret: false,
+			});
+		}
 	}
 }
 

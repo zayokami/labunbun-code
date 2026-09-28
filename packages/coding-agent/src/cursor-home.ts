@@ -149,8 +149,129 @@ export function cursorProjectRoot(cwd: string): string {
 	return join(cwd, CURSOR_DIR_BASENAME);
 }
 
+// ---------------------------------------------------------------------------
+// The data root, and the one tree under it this importer only ever names
+// ---------------------------------------------------------------------------
+
+/**
+ * `$CURSOR_DATA_DIR`, else `~/.cursor` — **a different root from
+ * {@link cursorConfigRoot}**, and one the importer did not read at all.
+ *
+ * **Source-level, verified against the shipped bundle** — module
+ * `cursor-config/dist/paths.js`, function `ok()`, build `2026.09.26-dd393fe`:
+ *
+ * ```js
+ * function u(){
+ *   const e=process.env.CURSOR_DATA_DIR;
+ *   return(null==e?void 0:e.trim())?e:(0,i.join)((0,s.homedir)(),".cursor");
+ * }
+ * ```
+ *
+ * Six lines, and only the first two matter: there is **no `XDG_CONFIG_HOME` step
+ * here**, so the two roots diverge in exactly the case batch 1 was about. Under
+ * the default both are `~/.cursor` and the difference is invisible — the two
+ * functions returning different things is only observable once somebody exports
+ * `CURSOR_DATA_DIR` (which moves the data root and leaves the config root alone)
+ * or `XDG_CONFIG_HOME` (which moves the config root and leaves the data root
+ * alone). Neither variable is documented on any Cursor page, so a user who has
+ * set one has had no way to learn that the two halves are addressed separately.
+ *
+ * What lives under the data root is {@link cursorProjectDataRoot} — and that tree
+ * holds the CLI's MCP OAuth tokens, so "we never read the data root" is a
+ * statement about what we choose, not a statement about there being nothing there.
+ */
+export function cursorDataRoot(home: string): string {
+	const override = process.env.CURSOR_DATA_DIR;
+	return override?.trim() ? override : join(home, CURSOR_DIR_BASENAME);
+}
+
+/** `<data root>/projects` — `m4()` in the same module, one directory per workspace. */
+export function cursorProjectDataRoot(home: string): string {
+	return join(cursorDataRoot(home), "projects");
+}
+
+/**
+ * The files under `projects/<workspace>/` this importer names, and which is which.
+ *
+ * The three are one constructor in one place and must not be read the same way.
+ * `mcp-auth.json` holds `access_token` and `refresh_token` per MCP server —
+ * module `mcp-agent-exec/dist/index.js`, class `Yt` (exported `Q7`), build
+ * `2026.09.26-dd393fe`, whose `loadMcpAuth` reads the parsed object and keeps
+ * whichever shape it finds:
+ *
+ * ```js
+ * if(Object.values(t).some(e=>e&&"object"==typeof e&&null!==e&&("access_token"in e||"refresh_token"in e)&&!("tokens"in e)&&!("clientInfo"in e)))
+ *   {const e={};for(const[r,n]of Object.entries(t))e[r]={tokens:n};return e}
+ * ```
+ *
+ * So that one is a credential file: named, `existsSync`, never opened. The other
+ * two are decision lists — which servers you approved, which you switched off —
+ * and calling them credentials would spend the one warning a user actually reads
+ * on a file with no secret in it, which is the same mistake the module header
+ * already records OpenCode making about its own `server.json`.
+ */
+export const CURSOR_PROJECT_DATA_FILES: Readonly<Record<string, "credential" | "decision">> = {
+	"mcp-auth.json": "credential",
+	"mcp-approvals.json": "decision",
+	"mcp-disabled.json": "decision",
+};
+
+/*
+ * **The per-workspace directory name is deliberately not computed here.** It is
+ * a pure function and could be written in one line — module
+ * `utils/dist/workspace-paths.js`, function `r_()`, build `2026.09.26-dd393fe`:
+ *
+ * ```js
+ * function s(e){return e.replace(/[^a-zA-Z0-9]/g,"-").replace(/-+/g,"-").replace(/^-+|-+$/g,"")}
+ * ```
+ *
+ * Two reasons not to, and the second is the one that matters:
+ *
+ *   1. The importer would be guessing. `Xq()` is called with the **git root**
+ *      where there is one, not with the working directory — the approvals module
+ *      passes `gitRoot ?? workspace` — so the slug is over a directory this
+ *      importer never resolves and has no other reason to resolve.
+ *   2. A path built from the wrong root is worse than no path. A report that
+ *      prints `~/.cursor/projects/<slug of cwd>/mcp-auth.json` and that file is
+ *      not there teaches the reader to distrust every other path in the report,
+ *      which is the one cost a "named, never opened" line is allowed to pay.
+ *
+ * So `readCursorProjectData` lists the tree instead, which finds the file
+ * wherever the git root pointed and needs no slug at all.
+ */
+
 /** The extension Cursor's project and user rules carry, and the one it ignores. */
 export const CURSOR_RULE_EXTENSION = ".mdc";
+
+// ---------------------------------------------------------------------------
+// The asset directories
+// ---------------------------------------------------------------------------
+
+/**
+ * The three directories Cursor reads its reusable text out of.
+ *
+ * Not interchangeable, and the differences are the whole of how they are read —
+ * so the kind is carried through the reader rather than the reader taking three
+ * near-identical directory arguments that could be passed in the wrong order:
+ *
+ *   - `commands` — **user and project**, one level only, `*.md` only.
+ *   - `agents` — **project only**. There is no `~/.cursor/agents`; the source
+ *     computes the list from the workspace path alone.
+ *   - `skills` — user and project, walked **recursively** to a depth limit.
+ *
+ * **Source-level, verified against the shipped bundle** (build
+ * `2026.09.26-dd393fe`): `computeAgentsDirs()` returns
+ * `[<workspace>/.cursor/agents]` and pushes two more only when third-party
+ * extensibility is on; `loadCommandsFromDirectory` filters
+ * `!isDirectory && name.endsWith(".md")` and never recurses; and
+ * `findSkillMarkdownFiles` recurses under `if (s > 10) return`.
+ */
+export type CursorAssetKind = "commands" | "agents" | "skills";
+
+/** `<root>/.cursor/<kind>`, for whichever half `root` is. */
+export function cursorAssetDir(root: string, kind: CursorAssetKind): string {
+	return join(root, kind);
+}
 
 // ---------------------------------------------------------------------------
 // The editor's own storage

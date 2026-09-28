@@ -40,6 +40,7 @@ import {
 } from "../src/migrate.ts";
 import { readPromptHistory } from "../src/migrate-history.ts";
 import { MIGRATION_SOURCE_IDS, MIGRATION_SOURCE_LABELS } from "../src/migrate-types.ts";
+import { parseFrontmatter } from "../src/skills.ts";
 import { borrowSourceEnv } from "./source-env.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
@@ -143,6 +144,20 @@ function line(planned: MigrationPlan, needle: string): MigrationItem | undefined
 /** Every item whose source label contains `needle`. */
 function lines(planned: MigrationPlan, needle: string): MigrationItem[] {
 	return planned.items.filter((item) => item.from.includes(needle));
+}
+
+/**
+ * The first item whose **detail** contains `needle`.
+ *
+ * Separate from {@link line} because the two label a report's rows differently:
+ * a grouped skip names the *directory* it looked in and counts the files, so the
+ * sentence the user reads is in `detail` and the path a test would naturally
+ * reach for is not there at all. Matching on the detail is also the more honest
+ * of the two — it fails when the sentence stops saying what it says, rather than
+ * when a label is reworded.
+ */
+function note(planned: MigrationPlan, needle: string): MigrationItem | undefined {
+	return planned.items.find((item) => item.detail.includes(needle));
 }
 
 /** The settings document the plan would write, parsed. */
@@ -1134,6 +1149,788 @@ describe("cursor: the credential boundary", () => {
 		expect(content).toContain(token);
 		expect(report).toContain("~/.labunbun/.mcp.json");
 		expect(report).not.toContain(token);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The three asset directories
+// ---------------------------------------------------------------------------
+
+/**
+ * `.cursor/commands` — one level, `*.md` only, and a header this build writes.
+ *
+ * Every claim below is **source-level** (build `2026.09.26-dd393fe`), and the
+ * one that matters most is the one the other three sources say the opposite
+ * of: Cursor **substitutes** `$ARGUMENTS` and `$1`-`$99` when a command runs.
+ * `migrate-core.ts`'s `commandAsSkill` reports 「`$ARGUMENTS` is substituted,
+ * $1..$9 … are not」, which is true for the sources it serves and backwards for
+ * this one, so the assertion that catches a regression here is a *negative* one
+ * on that sentence rather than a positive one on any text of our own.
+ */
+describe("cursor commands", () => {
+	const command = ["# Ship it", "", "Deploy $1 to $ARGUMENTS."].join("\n");
+
+	test("the user half and the project half are two different commands, and both land", () => {
+		const planned = planInProject({
+			".cursor/commands/mine.md": "# Mine\n\nDo mine.",
+			"proj/.cursor/commands/theirs.md": "# Theirs\n\nDo theirs.",
+		});
+		expect(writeAt(planned, ".labunbun/skills/mine/SKILL.md")?.content).toContain("Do mine.");
+		expect(writeAt(planned, ".labunbun/skills/theirs/SKILL.md")?.content).toContain("Do theirs.");
+	});
+
+	test("the written file has a name and a description, and the body is the command whole", () => {
+		// Cursor parses no frontmatter for a command at all — `parseMarkdownCommand`
+		// reads the id off the filename and the content as the entire trimmed text —
+		// so both header keys are this build's, and the file is not otherwise
+		// touched. A `---` block the user happened to put at the top was text the
+		// model saw in Cursor, which is why it stays in the body.
+		const planned = plan({ ".cursor/commands/ship.md": command });
+		const written = writeAt(planned, ".labunbun/skills/ship/SKILL.md")?.content ?? "";
+		expect(written.startsWith("---\nname: ship\ndescription: Ship it\n---\n")).toBe(true);
+		expect(written.endsWith(command)).toBe(true);
+		// The same reader `skills.ts` gives the loader, not a second parser written
+		// here: one written in the test would agree with itself and disagree with
+		// the thing being tested.
+		expect(parseFrontmatter(written).body).toBe(command);
+	});
+
+	test("the report says cursor substitutes its placeholders, and does not say the other thing", () => {
+		const planned = plan({ ".cursor/commands/ship.md": command });
+		const detail = line(planned, "commands/ship.md")?.detail ?? "";
+		expect(detail).toContain("substitutes $ARGUMENTS and $1-$99");
+		// The shared sentence, in full. Swapping `cursorCommandAsSkill` for
+		// `commandAsSkill` is a one-line change and this is what catches it.
+		expect(detail).not.toContain("$1..$9 and inline shell expansion are not");
+	});
+
+	test("a command in a subdirectory is named, because cursor does not recurse", () => {
+		// `loadCommandsFromDirectory` filters `!isDirectory && name.endsWith(".md")`
+		// over one directory's entries and stops there, so `sub/nested.md` is not a
+		// command to Cursor. The other three sources flatten their command trees
+		// instead — which is why this is worth a test of its own: copying that
+		// behaviour here would import a command Cursor never offered.
+		const planned = plan({ ".cursor/commands/sub/nested.md": "# Nested\n\nBody." });
+		expect(writeAt(planned, ".labunbun/skills/nested/SKILL.md")).toBeUndefined();
+		const skip = note(planned, "command file(s) not imported")?.detail ?? "";
+		expect(skip).toContain("sub");
+		expect(skip).toContain("does not recurse");
+	});
+
+	test("a non-markdown file beside a command is neither imported nor named", () => {
+		// The extension filter is ordinary rather than a Cursor quirk, and this is
+		// the line that says so: the *directory* is named (its "extension" is a
+		// filename, and Cursor's filter would have accepted it), the `.txt` is not.
+		const planned = plan({ ".cursor/commands/notes.txt": "not a command" });
+		expect(planned.writes).toHaveLength(0);
+		expect(note(planned, "command file(s) not imported")).toBeUndefined();
+	});
+
+	test("a command whose name is blank is named, because cursor drops the file", () => {
+		// `if (!o.trim()) return null` after stripping `.md` — the check is on the
+		// name, not the contents, so a file full of text still goes.
+		const planned = plan({ ".cursor/commands/   .md": "# Real heading\n\nBody." });
+		expect(planned.writes).toHaveLength(0);
+		expect(note(planned, "command file(s) not imported")?.detail).toContain("blank");
+	});
+
+	test("the description is the first heading anywhere, not cursor's first line", () => {
+		// `extractTitle` looks at **one line** and falls back to that line verbatim,
+		// so a command opening with a frontmatter block is described to the model as
+		// `---`. Reproducing that would write a description of three characters; the
+		// heading the author wrote is the same text and is the useful one.
+		//
+		// The second assertion is the load-bearing one and it needs the same fixture:
+		// a mutation that strips a leading `---` block out of the body is invisible
+		// to a command file that has none, so "the body is the file whole" is
+		// checked *here*, on the one fixture that has a block to strip. The other
+		// test uses a command with no header, where the two behaviours coincide.
+		const source = "---\nfoo: bar\n---\n\n# Ship it\n\nBody.";
+		const planned = plan({ ".cursor/commands/ship.md": source });
+		const written = writeAt(planned, ".labunbun/skills/ship/SKILL.md")?.content ?? "";
+		expect(written).toContain("description: Ship it");
+		// Cursor reads the whole file as the command's content, `---` block and
+		// all, so the block the model saw in cursor is text the model sees here.
+		expect(parseFrontmatter(written).body).toBe(source);
+	});
+});
+
+/**
+ * `.cursor/agents` — the project's only, and carried over byte for byte.
+ *
+ * The verbatim copy is possible because Cursor's parser and this build's are the
+ * same shape: line-based `key: value`, lowercased keys, no YAML, and the body is
+ * the prompt. `subagents.ts` reads the same four keys.
+ */
+describe("cursor agents", () => {
+	const agent = [
+		"---",
+		"name: reviewer",
+		"description: Reviews a diff",
+		"tools: Read, Grep",
+		"model: x",
+		"---",
+		"",
+		"You review.",
+	].join("\n");
+
+	test("a project agent is copied byte for byte, and the keys are reported as read", () => {
+		const planned = planInProject({ "proj/.cursor/agents/reviewer.md": agent });
+		const written = writeAt(planned, ".labunbun/agents/reviewer");
+		expect(written?.kind).toBe("agent");
+		expect(written?.content).toBe(agent);
+		const detail = line(planned, "agents/reviewer.md")?.detail ?? "";
+		expect(detail).toContain('"name"');
+		expect(detail).toContain('"tools" (Read, Grep)');
+		expect(detail).toContain('"model"');
+	});
+
+	test("there is no user half, and the report never claims to have looked for one", () => {
+		// `computeAgentsDirs()` computes its list from `resolve(workspacePath)` and
+		// nowhere else in the bundle. So a `~/.cursor/agents` is not read by Cursor,
+		// and the report must not print a path it never looked at — the sentence
+		// "no user-level agents found" would name a directory the user has.
+		const planned = planInProject({ ".cursor/agents/mine.md": agent });
+		expect(writeAt(planned, ".labunbun/agents/mine")).toBeUndefined();
+		expect(JSON.stringify(planned.items)).not.toContain("~/.cursor/agents");
+	});
+
+	test("cursor's own three keys are named, because this build has none of them", () => {
+		const withKeys = [
+			"---",
+			"name: r",
+			"readonly: true",
+			"background: true",
+			"force-default-model: gpt",
+			"---",
+			"",
+			"Body.",
+		].join("\n");
+		const detail = line(plan({ ".cursor/agents/r.md": withKeys }), "agents/r.md")?.detail ?? "";
+		expect(detail).toContain('"readonly"');
+		expect(detail).toContain('"background"');
+		expect(detail).toContain('"force-default-model"');
+	});
+
+	test("a file with no frontmatter is named rather than imported", () => {
+		// The body *is* the prompt, and cursor requires a header to find one, so a
+		// plain `.md` here is not an agent to it. The user wrote it in the right
+		// place, which is why this is a named skip and not silence.
+		const planned = plan({ ".cursor/agents/loose.md": "Just prose." });
+		expect(writeAt(planned, ".labunbun/agents/loose")).toBeUndefined();
+		expect(note(planned, "path(s) not imported")?.detail).toContain("frontmatter");
+	});
+
+	test("a header with nothing after it is named too", () => {
+		// `if (0 === n.length) return null`: an empty prompt is not an agent, and
+		// importing one would write a subagent that starts with no instructions.
+		const planned = plan({ ".cursor/agents/empty.md": "---\nname: e\n---\n" });
+		expect(writeAt(planned, ".labunbun/agents/empty")).toBeUndefined();
+		expect(note(planned, "path(s) not imported")?.detail).toContain("empty");
+	});
+});
+
+/**
+ * `.cursor/skills` — recursive, and named after the directory that holds
+ * `SKILL.md` rather than the top-level one.
+ *
+ * That naming rule is the one place this reader differs from every other in the
+ * repository, and getting it wrong does not fail loudly: it names every nested
+ * skill after its top-level directory, so two unrelated skills called `deploy`
+ * arrive as one and the report claims two.
+ */
+describe("cursor skills", () => {
+	const skill = ["---", "name: pdf", "description: Work with PDFs", "---", "", "Do the thing."].join("\n");
+
+	test("the user half and the project half are both read", () => {
+		const planned = planInProject({
+			".cursor/skills/mine/SKILL.md": skill,
+			"proj/.cursor/skills/theirs/SKILL.md": skill,
+		});
+		expect(writeAt(planned, ".labunbun/skills/mine/SKILL.md")?.content).toBe(skill);
+		expect(writeAt(planned, ".labunbun/skills/theirs/SKILL.md")?.content).toBe(skill);
+	});
+
+	test("a nested skill is named after the directory that holds it, not the top-level one", () => {
+		// `getSkillIdForPath`: `basename(dirname(skillMdPath))` first, and the
+		// relative path *only* when that bare name is duplicated in the same root.
+		const planned = plan({ ".cursor/skills/frontend/deploy/SKILL.md": skill });
+		expect(writeAt(planned, ".labunbun/skills/deploy/SKILL.md")).toBeDefined();
+		expect(writeAt(planned, ".labunbun/skills/frontend")).toBeUndefined();
+	});
+
+	test("two directories of the same name both survive, because the path then decides", () => {
+		const planned = plan({
+			".cursor/skills/frontend/deploy/SKILL.md": skill,
+			".cursor/skills/backend/deploy/SKILL.md": skill,
+		});
+		expect(writeAt(planned, ".labunbun/skills/frontend-deploy/SKILL.md")).toBeDefined();
+		expect(writeAt(planned, ".labunbun/skills/backend-deploy/SKILL.md")).toBeDefined();
+		// Neither is dropped, and the report says why the names are paths.
+		expect(line(planned, "frontend/deploy/SKILL.md")?.detail).toContain("frontend-deploy");
+	});
+
+	test("the rest of the directory travels, even though cursor loads only SKILL.md", () => {
+		// Two different questions, and only conflating them would justify dropping
+		// them: what the model is *told* at load time is `SKILL.md` alone; what the
+		// skill may *use* when it runs is everything beside it, and a skill whose
+		// body names `references/guide.md` needs that file to exist.
+		const planned = plan({
+			".cursor/skills/pdf/SKILL.md": `${skill}\n\nRead references/guide.md first.`,
+			".cursor/skills/pdf/references/guide.md": "the guide",
+		});
+		expect(writeAt(planned, ".labunbun/skills/pdf/SKILL.md")?.content).toContain("references/guide.md");
+		expect(writeAt(planned, ".labunbun/skills/pdf/references/guide.md")?.content).toBe("the guide");
+		// Counted on the row for the file it belongs to, which is the shared
+		// `collectFileWrites` wording rather than a Cursor one.
+		expect(note(planned, "with 1 supporting file(s)")?.from).toContain("skills/pdf/SKILL.md");
+	});
+
+	test("a markdown file sitting directly in the skills directory is not a skill", () => {
+		// `entry.name !== "SKILL.md"` — a bare `notes.md` beside the directories is
+		// nothing to cursor, so it is not imported and not worth a line in the report.
+		const planned = plan({ ".cursor/skills/notes.md": "not a skill" });
+		expect(planned.writes).toHaveLength(0);
+	});
+
+	test("the walk gives up at the depth cursor gives up at, and says where", () => {
+		// `if (s > 10) return`. A leaf ten directories below the skills root is the
+		// last one cursor reaches and one deeper is not, and the cap has to be
+		// **named** rather than silently truncating: "nothing to import" and "I
+		// stopped looking" are different facts about the same directory.
+		//
+		// Every leaf is a differently-named directory on purpose. Twelve leaves all
+		// called `leaf` would trip the duplicate rule first and every id would
+		// become a path, which is a different mechanism and would make this test
+		// pass for the wrong reason.
+		const tree: SourceTree = {};
+		for (let i = 0; i < 12; i++) tree[`.cursor/skills/${"d/".repeat(i)}l${i}/SKILL.md`] = `name: l${i}\n`;
+		const planned = plan(tree);
+		expect(writeAt(planned, ".labunbun/skills/l9/SKILL.md")).toBeDefined();
+		expect(writeAt(planned, ".labunbun/skills/l10/SKILL.md")).toBeUndefined();
+		expect(note(planned, "10 directories below")?.detail).toContain("d/".repeat(10));
+	});
+
+	test("one skill read from both halves is written once, and the collision is named", () => {
+		// `plan()` makes the home its own project, so `~/.cursor/skills` and
+		// `<project>/.cursor/skills` are the same directory read twice — the case
+		// `planInProject`'s own comment is about. The source's `-2` suffix exists
+		// for exactly this, and it is **not** reproduced: the two reads are two
+		// calls, and one directory's ids are already distinct within it. So the
+		// second is reported as a collision and dropped, which is what the rules
+		// reader does for the same situation and what `collectFileWrites` does for
+		// every source. Inventing `pdf-2` would put a directory in the user's
+		// `~/.labunbun/skills` that names nothing they wrote.
+		const planned = plan({ ".cursor/skills/pdf/SKILL.md": "---\nname: pdf\n---\n\nBody." });
+		expect(writeAt(planned, ".labunbun/skills/pdf/SKILL.md")).toBeDefined();
+		expect(writeAt(planned, ".labunbun/skills/pdf-2/SKILL.md")).toBeUndefined();
+		expect(note(planned, "already being written by this run")?.from).toContain("skills/pdf/SKILL.md");
+	});
+});
+
+/**
+ * The trees Cursor harvests and the sources that own them.
+ *
+ * The table is **per asset kind**, and the test that pins it is the negative one:
+ * `~/.codex/agents` is named for nothing because Cursor reads no vendor agents
+ * from `.codex`, while `~/.codex/skills` is. A flat list of four directories
+ * would name both, and the extra name is a report telling the user a tool reads a
+ * directory it does not.
+ */
+describe("the vendor trees", () => {
+	test("a claude skill is not copied a second time, and the owner is named", () => {
+		const planned = planInProject({ ".claude/skills/shared/SKILL.md": "---\nname: shared\n---\n\nBody." });
+		expect(writeAt(planned, ".labunbun/skills/shared/SKILL.md")).toBeUndefined();
+		const detail = line(planned, "~/.claude/skills")?.detail ?? "";
+		expect(detail).toContain("claude-code");
+		expect(detail).toContain("already imports those trees");
+	});
+
+	// The third column is the **spelling**, and it is the per-kind scope table
+	// again: `commands` and `skills` are read at the user level as well as the
+	// project one, and `agents` only at the project one — so the same directory
+	// under a `home` that is also the `cwd` is named twice for the first two
+	// kinds and once as `<project>` for the third. Spelling it `~/` throughout
+	// would name a user-level `~/.claude/agents` for a directory that does not
+	// exist, which is the sentence this file's own header says is the failure.
+	test.each([
+		["commands", ".claude/commands/ship.md", "# Ship\n\nBody.", "~/.claude/commands"],
+		["agents", ".claude/agents/rev.md", "---\nname: rev\n---\n\nBody.", "<project>/.claude/agents"],
+		["skills", ".claude/skills/s/SKILL.md", "---\nname: s\n---\n\nBody.", "~/.claude/skills"],
+	])("%s: the same vendor directory is named for its own kind", (_kind, path, content, spelling) => {
+		const planned = plan({ [path]: content });
+		const detail = line(planned, ".claude")?.detail ?? "";
+		expect(detail).toContain(spelling);
+		expect(detail).toContain("claude-code");
+	});
+
+	test("the exclusion is per kind: a codex skill is named and a codex agent is not", () => {
+		const planned = plan({
+			".codex/skills/shared/SKILL.md": "---\nname: shared\n---\n\nBody.",
+			".codex/agents/rev.md": "---\nname: rev\n---\n\nBody.",
+		});
+		const named = line(planned, "~/.codex")?.detail ?? "";
+		expect(named).toContain("codex");
+		expect(named).toContain("skills");
+		// `.codex` is in the skills row and not in the agents row, and this is the
+		// assertion that would go red if the two were flattened into one list.
+		expect(named).not.toContain("agents");
+	});
+
+	test("grok is owned by grok-build, for both the skills and the agents tree", () => {
+		// The one vendor this repository's Cursor source did not have before:
+		// `grok-build` is the sixth source, and cursor reads `.grok/skills` *and*
+		// `.grok/agents`, so a table that stopped at `.claude` would have imported
+		// a second copy of both.
+		const planned = plan({
+			".grok/skills/s/SKILL.md": "---\nname: s\n---\n\nBody.",
+			".grok/agents/a.md": "---\nname: a\n---\n\nBody.",
+		});
+		const named = line(planned, "~/.grok")?.detail ?? "";
+		expect(named).toContain("grok-build");
+		expect(named).toContain("skills");
+		expect(named).toContain("agents");
+	});
+
+	test("the sentence is the same whether or not third-party extensibility is on", () => {
+		// `thirdPartyExtensibilityEnabled` defaults to true and nothing in the
+		// bundle turns it off, so there is no second outcome to branch on. The
+		// exclusion is right in both states, which is why nothing here reads it.
+		const planned = plan({ ".claude/commands/ship.md": "# Ship\n\nBody." });
+		expect(line(planned, "~/.claude/commands")?.detail).toContain(
+			"whether or not cursor's third-party extensibility is on",
+		);
+	});
+});
+
+/**
+ * The two lists that have to agree with each other.
+ *
+ * `commands`, `agents` and `skills` are now read, so they have left the "this
+ * importer reads nothing out of" report — and if only one of the two lists were
+ * updated, a single run would print 「3 entries imported」 and 「commands is one
+ * of the entries this importer reads nothing out of」 in the same report.
+ */
+describe("presence and the accounted lists", () => {
+	test("a home whose only cursor file is one command is still a cursor install", () => {
+		// The pillar: `present` gates the whole source, so a user who has written
+		// one command and nothing else would have been reported as having no
+		// Cursor at all.
+		let detected: string[] = [];
+		withHome({ ".cursor/commands/ship.md": "# Ship\n\nBody." }, (home) => {
+			detected = detectSources(home);
+		});
+		expect(detected).toEqual(["cursor"]);
+	});
+
+	test.each([
+		["commands", ".cursor/commands/ship.md", "# Ship\n\nBody."],
+		["skills", ".cursor/skills/s/SKILL.md", "---\nname: s\n---\n\nBody."],
+		["agents", "proj/.cursor/agents/rev.md", "---\nname: rev\n---\n\nBody."],
+	])("%s is imported and is not also reported as unread", (kind, path, content) => {
+		const planned = planInProject({ [path]: content });
+		const unread = lines(planned, "~/.cursor")
+			.map((item) => item.detail)
+			.join(" ");
+		expect(unread).not.toContain(kind);
+	});
+
+	test("an entry the importer really does read nothing out of is still named", () => {
+		// The other direction: accounting for the three directories must not have
+		// swallowed the sentence that had work to do.
+		const planned = plan({ ".cursor/permissions.json": "{}" });
+		expect(lines(planned, "~/.cursor")[0]?.detail).toContain("permissions.json");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Where the user half of the assets is read from
+// ---------------------------------------------------------------------------
+
+describe("the user half of the three asset directories", () => {
+	// The rule the source follows, verbatim, from `../commands.ts` (chunk
+	// `4723.index.js`, build `2026.09.26-dd393fe`):
+	//
+	//   this.userHomeDirectory = t?.userHomeDirectory ?? homedir()
+	//   loadCommandsFromDirectory(join(this.userHomeDirectory, ".cursor", "commands"), "user")
+	//
+	// and the skill roots are handed that same `userHomeDirectory`. **`WI()` is in
+	// neither.** So the config root and the asset root come apart the moment
+	// `CURSOR_CONFIG_DIR` or `XDG_CONFIG_HOME` is set — and a reader that used the
+	// config root for the assets would read the config files and nothing else,
+	// which is batch 1's failure mode one level down.
+	test("a command under the home is read even when the config root is elsewhere", () => {
+		const planned = plan({ ".cursor/commands/ship.md": "# Ship\n\nBody." }, undefined, {
+			CURSOR_CONFIG_DIR: undefined,
+		});
+		// Baseline first: with no override the same tree imports, so a green here is
+		// a fact about the *path* and not about the fixture being read at all.
+		expect(writeAt(planned, ".labunbun/skills/ship/SKILL.md")).toBeDefined();
+	});
+
+	test("a command under the config root but not the home is NOT read", () => {
+		// The load-bearing half. A home whose only command lives where `WI()` points
+		// is a tree Cursor does not read, and importing it would put a file in the
+		// user's skills that was never a command to them.
+		const root = join(tmpdir(), "lbb-cursor-config-root");
+		try {
+			const planned = plan(
+				{ "elsewhere/commands/ghost.md": "# Ghost\n\nBody." },
+				() => {
+					mkdirSync(join(root, "commands"), { recursive: true });
+					writeFileSync(join(root, "commands", "ghost.md"), "# Ghost\n\nBody.");
+				},
+				{ CURSOR_CONFIG_DIR: root },
+			);
+			expect(writeAt(planned, ".labunbun/skills/ghost/SKILL.md")).toBeUndefined();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("the two roots really can come apart, or the test above proves nothing", () => {
+		// If `WI()` and the asset root were the same function, the test above would
+		// pass for the wrong reason — because the command would be found either way.
+		// So: a home with BOTH a command under the home and a different one under
+		// the config root, and the two must not both land.
+		const root = join(tmpdir(), "lbb-cursor-config-root-2");
+		try {
+			const planned = plan(
+				{ ".cursor/commands/real.md": "# Real\n\nBody." },
+				() => {
+					mkdirSync(join(root, "commands"), { recursive: true });
+					writeFileSync(join(root, "commands", "real.md"), "# Decoy\n\nBody.");
+				},
+				{ CURSOR_CONFIG_DIR: root },
+			);
+			expect(writeAt(planned, ".labunbun/skills/real/SKILL.md")).toBeDefined();
+			expect(writeAt(planned, ".labunbun/skills/real/SKILL.md")?.content).toContain("# Real");
+			expect(writeAt(planned, ".labunbun/skills/real/SKILL.md")?.content).not.toContain("# Decoy");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a skill under the home is read even when the config root is elsewhere", () => {
+		const planned = plan({ ".cursor/skills/s/SKILL.md": "---\nname: s\n---\n\nBody." });
+		expect(writeAt(planned, ".labunbun/skills/s/SKILL.md")).toBeDefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The agents directory, which is read three ways this once got wrong
+// ---------------------------------------------------------------------------
+
+describe("cursor agents, in the shape the source reads them", () => {
+	test("the walk is recursive, because the source's is", () => {
+		// `load()` calls the ripwalk and iterates its results with no depth check of
+		// its own, so a nested agent is an agent. A flat reader would skip it and
+		// say nothing.
+		const planned = planInProject({
+			"proj/.cursor/agents/top.md": "---\nname: top\n---\n\nBody.",
+			"proj/.cursor/agents/group/inner.md": "---\nname: inner\n---\n\nBody.",
+		});
+		expect(writeAt(planned, ".labunbun/agents/top")).toBeDefined();
+		expect(writeAt(planned, ".labunbun/agents/inner")).toBeDefined();
+	});
+
+	test.each([
+		["a .md file", "a.md", true],
+		["a .mdc file", "a.mdc", true],
+		["a .markdown file", "a.markdown", true],
+		["an uppercase .MD file", "a.MD", true],
+		["a .txt file", "a.txt", false],
+		["a file with no extension", "agent", false],
+	])("%s is %s", (_label, file, wanted) => {
+		// `Ys` is `.md || .mdc || .markdown`, applied to `extname(...).toLowerCase()`.
+		// Three extensions and the lowercasing, both of which a one-extension reader
+		// gets wrong — and `.mdc` is not a strange file to find in an agents
+		// directory, because `.mdc` is the extension Cursor's *rules* use.
+		const planned = planInProject({
+			[`proj/.cursor/agents/${file}`]: "---\nname: a\n---\n\nBody.",
+		});
+		expect(writeAt(planned, ".labunbun/agents/a") !== undefined).toBe(wanted);
+	});
+
+	test("the depth the walk gives up on is named, not swallowed", () => {
+		// The source's walk has no cap and this one does. A cap that reports
+		// nothing is indistinguishable from a source that has no files down there.
+		const tree: SourceTree = { "proj/.cursor/agents/leaf.md": "---\nname: leaf\n---\n\nBody." };
+		let deep = "proj/.cursor/agents";
+		for (let i = 0; i < 12; i++) {
+			deep = join(deep, `d${i}`);
+			tree[`${deep}/leaf.md`] = "---\nname: leaf\n---\n\nBody.";
+		}
+		const planned = planInProject(tree);
+		const skipped = planned.items.find((item) => item.detail.includes("below depth"));
+		expect(skipped?.detail).toContain("cursor's walk has none");
+	});
+
+	test("a name cursor would show differently is reported, not silently changed", () => {
+		// The loader does `name: n.name || Vs(basename)`, and `Vs` collapses runs of
+		// spaces and underscores to dashes. The target reads the filename, so the
+		// directory is named from the filename — and the difference is the user's to
+		// see rather than this run's to decide.
+		const planned = planInProject({
+			"proj/.cursor/agents/code reviewer.md": "---\nname: reviewer\ntools: Read\n---\n\nBody.",
+		});
+		const item = note(planned, "agent copied verbatim");
+		expect(item?.detail).toContain('cursor shows this as "reviewer"');
+	});
+
+	test("a slug-only difference is reported too, because it is a difference", () => {
+		// No `name:` key at all: Cursor still does not call this
+		// `code reviewer` — `Vs` turns it into `code-reviewer`, which is a different
+		// string and a different agent name in a merged list.
+		const planned = planInProject({
+			"proj/.cursor/agents/code reviewer.md": "---\ntools: Read\n---\n\nBody.",
+		});
+		expect(note(planned, "agent copied verbatim")?.detail).toContain('cursor shows this as "code-reviewer"');
+	});
+
+	test("an agent whose two names agree is not told it was renamed", () => {
+		const planned = planInProject({
+			"proj/.cursor/agents/rev.md": "---\nname: rev\n---\n\nBody.",
+		});
+		const detail = note(planned, "agent copied verbatim")?.detail ?? "";
+		expect(detail).not.toContain("cursor shows this as");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The vendor trees, per kind and per level
+// ---------------------------------------------------------------------------
+
+describe("the vendor trees, at the levels each kind is read at", () => {
+	test("an agents tree under the home is not named: cursor reads no such thing", () => {
+		// `computeAgentsDirs()` resolves every one of its joins off
+		// `resolve(this.workspacePath)`; `homedir()` appears nowhere in it. A
+		// `~/.claude/agents` is a tree the `claude-code` source imports, and naming
+		// it here would print a sentence telling the user cursor harvests a
+		// directory it never touches.
+		//
+		// **The tree has to be there.** The first version of this test seeded an
+		// empty home, so the sentence was absent because nothing matched rather
+		// than because the level was filtered out — which is a claim about the
+		// assertion, not about the reader, and it let a driver mutation that
+		// deleted the `scopes` filter report HELD. Same shape as the dead-anchor
+		// case in the emacs work: a test that never reaches the branch it claims
+		// to judge.
+		const planned = planInProject({ ".claude/agents/rev.md": "---\nname: rev\n---\n\nBody." });
+		const named = note(planned, "cursor harvests")?.detail ?? "";
+		expect(named).not.toContain("agents");
+	});
+
+	test("the same directory at the user level IS named for skills, or the test above is vacuous", () => {
+		// The control for the test above, and it is the only thing that makes it a
+		// statement about agents rather than about the scan not running: the
+		// identical `~/.claude` prefix, one level down the kinds table, read at
+		// both levels.
+		const planned = planInProject({ ".claude/skills/s/SKILL.md": "---\nname: s\n---\n\nBody." });
+		const named = note(planned, "cursor harvests")?.detail ?? "";
+		expect(named).toContain("skills");
+		expect(named).toContain("~/.claude/skills");
+	});
+
+	test("the project-level agents tree is still named", () => {
+		// The other direction, so the test above is not passing because the table
+		// lost its agent rows altogether.
+		const planned = planInProject({ "proj/.claude/agents/a.md": "---\nname: a\n---\n\nB." });
+		const named = note(planned, "cursor harvests")?.detail ?? "";
+		expect(named).toContain(".claude");
+		expect(named).toContain("agents");
+	});
+
+	test("a skill tree under the home is named, because skills do have a user half", () => {
+		// `plan` puts the project at `<home>/proj`, so a path with no `proj/`
+		// prefix is the **user** half — which is the half being tested here, and the
+		// half that a `.cursor`-prefixed fixture would not have reached.
+		const planned = planInProject({ ".claude/skills/s/SKILL.md": "---\nname: s\n---\n\nB." });
+		expect(note(planned, "cursor harvests")?.detail ?? "").toContain("skills");
+	});
+
+	test("a user-level tree is spelled with the tilde, and a project-level one without", () => {
+		// The tilde is not decoration. `<project>/.claude/skills` printed as
+		// `~/.claude/skills` names a path in the home that does not exist, and this
+		// is the second time a level this importer got wrong was hidden by it: batch
+		// 1 was the same mistake about the *root* of the user half.
+		const user = planInProject({ ".claude/skills/s/SKILL.md": "---\nname: s\n---\n\nB." });
+		expect(note(user, "cursor harvests")?.from ?? "").toContain("~/.claude/skills");
+
+		const project = planInProject({ "proj/.claude/skills/s/SKILL.md": "---\nname: s\n---\n\nB." });
+		const from = note(project, "cursor harvests")?.from ?? "";
+		expect(from).toContain("<project>/.claude/skills");
+		expect(from).not.toContain("~/.claude/skills");
+	});
+
+	test("the same directory at two levels is two names, not one", () => {
+		// `Set` over the spelling used to fold the two into a single entry, which
+		// is how a user half could hide behind a project half: the reader would see
+		// one name and could not tell which level it described.
+		const planned = planInProject({
+			".claude/skills/s/SKILL.md": "---\nname: s\n---\n\nB.",
+			"proj/.claude/skills/s/SKILL.md": "---\nname: s\n---\n\nB.",
+		});
+		const from = note(planned, "cursor harvests")?.from ?? "";
+		expect(from).toContain("~/.claude/skills");
+		expect(from).toContain("<project>/.claude/skills");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The CLI's per-workspace data tree, and the one credential in it
+// ---------------------------------------------------------------------------
+
+describe("the CLI's per-workspace data tree", () => {
+	const seedProject = (home: string, files: Record<string, string>) => {
+		for (const [name, content] of Object.entries(files)) {
+			const path = join(home, ".cursor", "projects", "ws", name);
+			mkdirSync(join(path, ".."), { recursive: true });
+			writeFileSync(path, content);
+		}
+	};
+
+	test("a home whose only trace is an MCP token store is still a cursor install", () => {
+		// The tree is under the *data* root, and it is the only thing left of the
+		// CLI's own state once `CURSOR_CONFIG_DIR` has moved the config elsewhere.
+		// Gating on the importable files would report a user with a token store as
+		// having no Cursor.
+		const planned = plan({}, (home) => seedProject(home, { "mcp-auth.json": "{}" }));
+		expect(planned.items.length).toBeGreaterThan(0);
+		expect(note(planned, "MCP OAuth tokens")?.detail).toContain("never opened");
+	});
+
+	test("the credential and the two decision lists are three names and two sentences", () => {
+		// Folding them together would either call a list of approvals a secret,
+		// which spends the one warning a user actually reads, or call a token store
+		// a list, which is the error the convention exists to prevent.
+		const planned = plan({}, (home) =>
+			seedProject(home, {
+				"mcp-auth.json": "{}",
+				"mcp-approvals.json": "{}",
+				"mcp-disabled.json": "{}",
+			}),
+		);
+		const credential = note(planned, "MCP OAuth tokens");
+		expect(credential?.from).toContain("mcp-auth.json");
+		expect(credential?.from).not.toContain("mcp-approvals.json");
+		const decisions = note(planned, "which MCP servers you approved");
+		expect(decisions?.from).toContain("mcp-approvals.json");
+		expect(decisions?.from).toContain("mcp-disabled.json");
+	});
+
+	test("a decision list alone is never called a credential", () => {
+		const planned = plan({}, (home) => seedProject(home, { "mcp-approvals.json": "{}" }));
+		expect(note(planned, "MCP OAuth tokens")).toBeUndefined();
+		expect(note(planned, "which MCP servers you approved")).toBeDefined();
+	});
+
+	test("`projects` is not also reported as an entry read nothing out of", () => {
+		// The double report: a line saying the tree was read, and a line saying
+		// there is nothing in it worth reading.
+		//
+		// **Both lists, and this is the second version of the test.** The first
+		// looked only at the user entries, and it passed — while the project list,
+		// which the accounted names had never been extended to, was printing
+		// `<project>/.cursor … reads nothing out of: projects` right next to the
+		// paragraph about the token in it. The fixture is `cwd === home`, so the
+		// directory is at both roots and the two lines are two rows of one report.
+		// A test that checks one list is a test of half the claim.
+		const planned = plan({}, (home) => seedProject(home, { "mcp-auth.json": "{}" }));
+		const unread = planned.items
+			.filter((item) => item.detail.includes("reads nothing out of"))
+			.map((item) => `${item.from} ${item.detail}`)
+			.join(" ");
+		expect(unread).not.toContain("projects");
+	});
+
+	test("a `projects` directory that is not the tree the reader walks is still named", () => {
+		// The other direction, so the fix above cannot be over-fitted. Once
+		// `CURSOR_DATA_DIR` points elsewhere, a `projects` under the config root is
+		// an unrelated directory — and "this importer reads nothing out of it" is
+		// true of it, so the sentence belongs.
+		const elsewhere = join(tmpdir(), "lbb-cursor-data-root-2");
+		try {
+			const planned = plan(
+				{ ".cursor/projects/ws/leftover.json": "{}" },
+				() => {
+					mkdirSync(join(elsewhere, "projects", "ws"), { recursive: true });
+					writeFileSync(join(elsewhere, "projects", "ws", "mcp-auth.json"), "{}");
+				},
+				{ CURSOR_DATA_DIR: elsewhere },
+			);
+			const unread = planned.items
+				.filter((item) => item.detail.includes("reads nothing out of"))
+				.map((item) => item.detail)
+				.join(" ");
+			expect(unread).toContain("projects");
+			// And the tree that *is* the reader's still got its own line, so the
+			// entry above is not the generic sentence standing in for it.
+			expect(note(planned, "MCP OAuth tokens")).toBeDefined();
+		} finally {
+			rmSync(elsewhere, { recursive: true, force: true });
+		}
+	});
+
+	test("an empty tree is named once, and not as a credential", () => {
+		const planned = plan({}, (home) => {
+			mkdirSync(join(home, ".cursor", "projects", "ws"), { recursive: true });
+		});
+		expect(note(planned, "per-workspace data directory")).toBeDefined();
+		expect(note(planned, "MCP OAuth tokens")).toBeUndefined();
+	});
+
+	test("a blank `CURSOR_DATA_DIR` is not a value, so the tree stays where it was", () => {
+		// `const e=process.env.CURSOR_DATA_DIR; … e.trim()?` — the same judgment
+		// `WI()` makes on `CURSOR_CONFIG_DIR` and every other override in this
+		// repository. Without it, `CURSOR_DATA_DIR="   "` sends the data root to a
+		// path that is three spaces, and the report names a directory no user has.
+		const planned = plan({}, (home) => seedProject(home, { "mcp-auth.json": "{}" }), {
+			CURSOR_DATA_DIR: "   ",
+		});
+		expect(note(planned, "MCP OAuth tokens")?.detail).toContain("never opened");
+		const from = note(planned, "MCP OAuth tokens")?.from ?? "";
+		expect(from).not.toContain("   ");
+	});
+
+	test("`CURSOR_DATA_DIR` moves the tree, and only the tree", () => {
+		const elsewhere = join(tmpdir(), "lbb-cursor-data-root");
+		try {
+			const planned = plan(
+				{ ".cursor/cli-config.json": "{}" },
+				() => {
+					mkdirSync(join(elsewhere, "projects", "ws"), { recursive: true });
+					writeFileSync(join(elsewhere, "projects", "ws", "mcp-auth.json"), "{}");
+				},
+				{ CURSOR_DATA_DIR: elsewhere },
+			);
+			// The config file is still read from the config root…
+			expect(note(planned, "MCP OAuth tokens")?.detail).toContain("never opened");
+			// …and the tree came from the data root, which is a different variable.
+			expect(planned.items.some((item) => item.from.includes("lbb-cursor-data-root"))).toBe(true);
+		} finally {
+			rmSync(elsewhere, { recursive: true, force: true });
+		}
+	});
+
+	test("the workspace directory is the name cursor files it under, not one this run invented", () => {
+		// The importer lists the tree rather than computing the slug, because the
+		// source slugs the **git root** where there is one. So the name in the report
+		// has to be the directory that is actually there.
+		const planned = plan({}, (home) => seedProject(home, { "mcp-auth.json": "{}" }));
+		expect(note(planned, "MCP OAuth tokens")?.detail).toContain("1 workspace(s)");
+	});
+});
+
+describe("the entries cursor names and this importer has nothing behind", () => {
+	test("`sandbox-policies` says why rather than what", () => {
+		// The name appears once in the whole bundle, in `src/ephemeral-bridge.ts`'s
+		// path table, and no reader constructs it. The generic sentence reads as
+		// "we did not bother"; this one is the other thing.
+		const planned = plan({ ".cursor/sandbox-policies": "{}" });
+		const detail = lines(planned, "~/.cursor")[0]?.detail ?? "";
+		expect(detail).toContain("sandbox-policies");
+		expect(detail).toContain("nothing in this build of the CLI reads it");
 	});
 });
 

@@ -15,21 +15,44 @@
  * state databases. It took thirteen files to find all the affected ones by
  * running them.
  *
- * So the list lives here rather than in each file, and `MIGRATION_ENV_VARS` is
- * derived from the sources themselves: a variable read by any `*-home.ts`
- * module, plus the three `XDG_*_HOME` bases. Adding a source that reads a new
- * variable means adding one line here, not hunting thirteen test files.
+ * So the list lives here rather than in each file, and `MIGRATION_ENV_VARS`
+ * covers every variable a source reads by name: a variable read by any
+ * `*-home.ts` or `*-read.ts` module, plus the three `XDG_*_HOME` bases. Adding a
+ * source that reads a new variable means adding one line here — and
+ * `source-env-coverage.test.ts` is what tells you that you forgot, because the
+ * list used to be maintained by hand with nothing checking it, and the variable
+ * it missed (`CURSOR_DATA_DIR`) leaked a developer's real Cursor tree into
+ * every test in a file that was not about Cursor's data root.
  */
 
 /**
+ * Variables a source reads that are deliberately **not** in the list below, and
+ * why.
+ *
+ * Exempt rather than absent. The coverage test in `source-env-coverage.test.ts`
+ * reads this, so the exemption is a fact the test can see and a reader can check
+ * — the alternative is a list that is quietly short of the sources it claims to
+ * cover, which is the exact state this file was in when `CURSOR_DATA_DIR` was
+ * added to a source and not to the list.
+ */
+export const MIGRATION_ENV_VARS_EXEMPT: Readonly<Record<string, string>> = {
+	HOME: "a test that wants a fake home sets this itself, and borrowing it would undo that",
+	USERPROFILE: "the Windows spelling of the same, and the same reason",
+};
+
+/**
  * Every variable a source root can be relocated by. `USERPROFILE` and `HOME`
- * are absent on purpose — a test that wants a fake home sets those itself, and
- * borrowing them would undo that.
+ * are absent on purpose — see {@link MIGRATION_ENV_VARS_EXEMPT} for why, which is
+ * the same reason but in a place a test can read.
+ *
+ * **The list is hand-maintained, not derived.** `source-env-coverage.test.ts`
+ * checks it against the sources; that test is what keeps this comment honest.
  */
 export const MIGRATION_ENV_VARS: readonly string[] = [
 	"APPDATA",
 	"CODEX_HOME",
 	"CURSOR_CONFIG_DIR",
+	"CURSOR_DATA_DIR",
 	"DSH_HOME",
 	"GROK_HOME",
 	"KIMI_CODE_HOME",
