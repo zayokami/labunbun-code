@@ -44,9 +44,16 @@ describe("expandIncludes", () => {
 		expect(expanded).not.toContain("TOP SECRET");
 	});
 
-	test("UNC-style include paths are rejected", () => {
-		const dir = mkdtempSync(join(tmpdir(), "lbb-mem-unc-"));
-		const expanded = expandIncludes("@\\\\evil-host\\share\\file.md", dir);
+	test("an absolute include path is rejected, in this platform's spelling", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-mem-abs-"));
+		// The same attack either way — a path that names a location outside the
+		// root — written the way the platform spells "somewhere else entirely".
+		// A UNC share is the Windows form; on POSIX `\\evil-host\share\file.md`
+		// is not absolute at all but one relative filename (backslashes included)
+		// that genuinely does sit under the root, so asserting on it there would
+		// be asserting that a file which does not exist is not found.
+		const outside = process.platform === "win32" ? "\\\\evil-host\\share\\file.md" : "/evil-host/share/file.md";
+		const expanded = expandIncludes(`@${outside}`, dir);
 		expect(expanded).toContain("include outside allowed directory");
 	});
 
@@ -111,11 +118,27 @@ describe("loadMemoryFiles", () => {
 		expect(result.content.split("ONCE ONLY")).toHaveLength(2);
 	});
 
-	test("empty when no memory files exist", () => {
+	test("a directory with nothing in it contributes nothing", () => {
 		const dir = mkdtempSync(join(tmpdir(), "lbb-memempty-"));
 		const result = loadMemoryFiles(dir, join(dir, "home"));
-		expect(result.content).toBe("");
-		expect(result.files).toHaveLength(0);
+		// Scoped to the directories this test named, and that is the whole point of
+		// the rewrite: it used to assert `result.files` was empty, which is only true
+		// on a machine with no memory above the fixture. `loadMemoryFiles` walks cwd
+		// to the filesystem root collecting `<dir>/.labunbun` at every level, and
+		// `mkdtemp` lives under the user's own directory on Windows — so on any
+		// machine that has a `~/.labunbun/rules` the walk collects it, by design (see
+		// step 1 of `loadMemoryFiles`), and the old assertion went red for a fact
+		// about the machine rather than about the code. There is no fixture placement
+		// that avoids it: the walk ends at the drive root.
+		//
+		// What is left is the claim that actually holds everywhere and is the one
+		// worth protecting — a directory with nothing in it yields nothing, and the
+		// loader does not invent content to fill the gap. On a machine with nothing
+		// above the fixture this is the old assertion, exactly.
+		expect(result.files.filter((path) => path.startsWith(dir))).toEqual([]);
+		// Still a real reading rather than a vacuous one: whatever the walk did pick
+		// up above the fixture, it was not so much of it that the cap engaged.
+		expect(result.truncated).toBe(false);
 	});
 
 	test("oversized memory is truncated at the 40k cap with a notice", () => {

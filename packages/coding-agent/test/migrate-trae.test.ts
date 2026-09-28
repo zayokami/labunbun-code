@@ -52,8 +52,9 @@ type SourceTree = Record<string, string>;
  * directory the same directory.
  *
  * `seed` runs after the files exist, for the fixtures a string cannot express —
- * a `state.vscdb` is a directory tree rather than a file's contents, and `%APPDATA%`
- * has to point inside the fake home before any profile directory is probed.
+ * a `state.vscdb` is a directory tree rather than a file's contents, and the
+ * platform's user-data base has to point inside the fake home before any profile
+ * directory is probed (see {@link pointAtProfileBase}).
  */
 function withHome(
 	tree: SourceTree,
@@ -133,9 +134,74 @@ function rule(options: { description?: string; globs?: string; alwaysApply?: str
 	].join("\n");
 }
 
-/** `appdata/<product>/User` for whichever product `product` names. */
+/**
+ * Where the reader starts looking for the editor profile on this platform, and
+ * the variable it consults to be told — `traeProfileBase`'s contract, in the same
+ * three-branch order so the two can be read against each other.
+ *
+ * Both halves are needed and neither is enough. The fixture is only found if the
+ * base is the one the *running* platform computes, and on the two platforms that
+ * compute it from a variable the variable also has to point **inside** the fake
+ * home: `borrowSourceEnv` has already cleared the machine's own `%APPDATA%` and
+ * `$XDG_CONFIG_HOME`, so a variable left unset would send the reader to a
+ * home-relative default the fixture never planted. That is the whole of the
+ * bug this file used to have — an `appdata` tree and a `APPDATA` assignment, which
+ * is the Windows branch and nothing else, so the profile was found on a Windows
+ * machine and the reader looked under `~/.config` and `Library/Application
+ * Support` on every other one and reported a TRAE install with nothing in it.
+ *
+ * The directory is called `appdata` on both variable-reading platforms even
+ * though on Linux it stands for `$XDG_CONFIG_HOME`, because the assertions below
+ * quote that spelling and a fixture whose name changed with the platform would
+ * make them mean something different on each.
+ *
+ * macOS is the one platform with no variable: `traeProfileBase` returns
+ * `~/Library/Application Support` before reading anything, so the fixture has to
+ * be exactly that path and there is nothing to point.
+ */
+function profileBase(home: string): { base: string; variable: string | null } {
+	if (process.platform === "win32") return { base: join(home, "appdata"), variable: "APPDATA" };
+	if (process.platform === "darwin") {
+		return { base: join(home, "Library", "Application Support"), variable: null };
+	}
+	return { base: join(home, "appdata"), variable: "XDG_CONFIG_HOME" };
+}
+
+/** `<base>/<product>/User` for whichever product `product` names. */
 function profileDir(home: string, product: string): string {
-	return join(home, "appdata", product, "User");
+	return join(profileBase(home).base, product, "User");
+}
+
+/**
+ * Point the reader at a profile base inside `home`, and answer with the
+ * `<product>/User` directory inside it.
+ *
+ * The two halves are not separable at a call site, and that is the reason they
+ * are one function: a caller that computes the directory without setting the
+ * variable gets a path the reader will not look at, and an unread fixture is a
+ * silently empty report rather than a failure.
+ */
+function pointAtProfileBase(home: string, product: string): string {
+	const { base, variable } = profileBase(home);
+	if (variable) process.env[variable] = base;
+	return join(base, product, "User");
+}
+
+/**
+ * A path inside the profile as the report spells it: forward slashes, with the
+ * throwaway home elided so what is left is the part worth asserting on.
+ *
+ * `appdata/Trae/User/mcp.json` on the two platforms that read a variable, and
+ * `Library/Application Support/Trae/User/mcp.json` on macOS. The two assertions
+ * that quote this used to be the Windows spelling written out in full, which is
+ * the other half of why this file passed on a Windows machine and failed on a
+ * Linux one: the reader was right and the expectation was not.
+ */
+function profileTail(home: string, product: string, ...rest: string[]): string {
+	const normalized = profileDir(home, product).replace(/\\/g, "/");
+	const prefix = `${home.replace(/\\/g, "/")}/`;
+	const elided = normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
+	return [elided, ...rest].join("/");
 }
 
 // ---------------------------------------------------------------------------
@@ -442,12 +508,9 @@ describe("trae: rules found and deliberately not imported", () => {
 describe("trae mcp", () => {
 	/** A fake profile directory holding a global `mcp.json`. */
 	function seedProfile(home: string, product: string, servers: unknown): void {
-		process.env.APPDATA = join(home, "appdata");
-		mkdirSync(profileDir(home, product), { recursive: true });
-		writeFileSync(
-			join(profileDir(home, product), "mcp.json"),
-			typeof servers === "string" ? servers : JSON.stringify(servers),
-		);
+		const dir = pointAtProfileBase(home, product);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "mcp.json"), typeof servers === "string" ? servers : JSON.stringify(servers));
 	}
 
 	test("the global document is read from the editor profile, not from ~/.trae", () => {
@@ -470,6 +533,7 @@ describe("trae mcp", () => {
 	test("the path the document came from is named, because a file the user cannot find is one they assume was skipped", () => {
 		let item: MigrationItem | undefined;
 		let expected = "";
+		let tail = "";
 		withHome({}, (home) => {
 			seedProfile(home, "Trae", { mcpServers: { docs: { type: "http", url: "https://mcp.invalid/d" } } });
 			const planned = planMigration(readSources(home, home), {}, { only: ["trae"] });
@@ -478,9 +542,10 @@ describe("trae mcp", () => {
 			// profile directory has to be made here too instead of quietly leaving
 			// the report pointing at a file that is not there.
 			expected = traeGlobalMcpFile(profileDir(home, "Trae")).replace(/\\/g, "/").replace(home.replace(/\\/g, "/"), "~");
+			tail = profileTail(home, "Trae", "mcp.json");
 		});
 		expect(item?.from).toContain(expected);
-		expect(item?.from).toContain("appdata/Trae/User/mcp.json");
+		expect(item?.from).toContain(tail);
 	});
 
 	test("all four product directories are probed, and the one that answered is named", () => {
@@ -491,8 +556,7 @@ describe("trae mcp", () => {
 		for (const product of TRAE_PRODUCT_DIRS) {
 			let located: { root: string; product: string } | null | undefined;
 			withHome({}, (home) => {
-				process.env.APPDATA = join(home, "appdata");
-				mkdirSync(join(home, "appdata", product, "User"), { recursive: true });
+				mkdirSync(pointAtProfileBase(home, product), { recursive: true });
 				located = traeUserDataRoot(home);
 			});
 			expect(located?.product).toBe(product);
@@ -545,10 +609,13 @@ describe("trae mcp", () => {
 		// — and that list is enough to make the source `present` on its own. So the
 		// reachability of the malformed-server sentence is pinned here, in a home
 		// where the only thing wrong is the one thing this test is about.
-		const bad = plan({}, (home) => seedProfile(home, "Trae", { mcpServers: ["node"] }));
-		expect(bad.items).toHaveLength(1);
-		expect(bad.items[0].from.replace(/\\/g, "/")).toContain("appdata/Trae/User/mcp.json");
-		expect(bad.items[0].detail).toContain("not a table of servers");
+		withHome({}, (home) => {
+			seedProfile(home, "Trae", { mcpServers: ["node"] });
+			const bad = planMigration(readSources(home, home), {}, { only: ["trae"] });
+			expect(bad.items).toHaveLength(1);
+			expect(bad.items[0].from.replace(/\\/g, "/")).toContain(profileTail(home, "Trae", "mcp.json"));
+			expect(bad.items[0].detail).toContain("not a table of servers");
+		});
 	});
 
 	test("an environment reference in the colon spelling is named, not passed through as text", () => {
@@ -583,9 +650,9 @@ describe("trae's editor storage and settings", () => {
 		let bytesAfter = "";
 		let sizeBefore = 0;
 		withHome({ ".trae/user_rules/a.md": rule({ alwaysApply: "true" }) }, (home) => {
-			process.env.APPDATA = join(home, "appdata");
-			mkdirSync(join(profileDir(home, "Trae"), "workspaceStorage", "abc123"), { recursive: true });
-			const database = join(profileDir(home, "Trae"), "workspaceStorage", "abc123", "state.vscdb");
+			const workspace = join(pointAtProfileBase(home, "Trae"), "workspaceStorage", "abc123");
+			mkdirSync(workspace, { recursive: true });
+			const database = join(workspace, "state.vscdb");
 			writeFileSync(database, sentinel);
 			sizeBefore = statSync(database).size;
 			const result = runMigration({ home, cwd: home, from: "trae" });
@@ -610,10 +677,10 @@ describe("trae's editor storage and settings", () => {
 		// pattern-matched one shape would skip half a real install.
 		let located: MigrationItem | undefined;
 		withHome({}, (home) => {
-			process.env.APPDATA = join(home, "appdata");
+			const storage = join(pointAtProfileBase(home, "Trae"), "workspaceStorage");
 			for (const id of ["0123456789abcdef0123456789abcdef", "1758901200000"]) {
-				mkdirSync(join(profileDir(home, "Trae"), "workspaceStorage", id), { recursive: true });
-				writeFileSync(join(profileDir(home, "Trae"), "workspaceStorage", id, "state.vscdb"), "x");
+				mkdirSync(join(storage, id), { recursive: true });
+				writeFileSync(join(storage, id, "state.vscdb"), "x");
 			}
 			located = planMigration(readSources(home, home), {}, { only: ["trae"] }).items.find((item) =>
 				item.from.includes("editor storage"),
@@ -627,10 +694,10 @@ describe("trae's editor storage and settings", () => {
 		// for it, and an importer that says nothing about the file a tool documents
 		// as its main configuration reads as having missed it.
 		const planned = plan({}, (home) => {
-			process.env.APPDATA = join(home, "appdata");
-			mkdirSync(profileDir(home, "Trae"), { recursive: true });
-			writeFileSync(join(profileDir(home, "Trae"), "settings.json"), JSON.stringify({ "editor.fontSize": 14 }));
-			writeFileSync(join(profileDir(home, "Trae"), "keybindings.json"), "[]");
+			const dir = pointAtProfileBase(home, "Trae");
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, "settings.json"), JSON.stringify({ "editor.fontSize": 14 }));
+			writeFileSync(join(dir, "keybindings.json"), "[]");
 		});
 		const settings = line(planned, "settings.json");
 		expect(settings?.action).toBe("skip");
@@ -642,13 +709,14 @@ describe("trae's editor storage and settings", () => {
 		// The same `present` rule as everywhere else: those two sentences exist
 		// only when the plan is reached, so a home whose only trace is the editor's
 		// settings must not be reported as having nothing migratable in it.
-		const planned = plan({}, (home) => {
-			process.env.APPDATA = join(home, "appdata");
-			mkdirSync(profileDir(home, "Trae"), { recursive: true });
-			writeFileSync(join(profileDir(home, "Trae"), "settings.json"), "{}");
+		withHome({}, (home) => {
+			const dir = pointAtProfileBase(home, "Trae");
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, "settings.json"), "{}");
+			const planned = planMigration(readSources(home, home), {}, { only: ["trae"] });
+			const settings = planned.items.find((item) => item.detail.includes("configure the editor"));
+			expect(settings?.from.replace(/\\/g, "/")).toContain(profileTail(home, "Trae", "settings.json"));
 		});
-		const settings = planned.items.find((item) => item.detail.includes("configure the editor"));
-		expect(settings?.from.replace(/\\/g, "/")).toContain("appdata/Trae/User/settings.json");
 	});
 
 	test("entries in the global root this importer reads nothing out of are named", () => {
@@ -675,15 +743,15 @@ describe("trae's editor storage and settings", () => {
 describe("trae detection", () => {
 	test("the two global homes and the product directory are the detection roots", () => {
 		withHome({}, (home) => {
-			process.env.APPDATA = join(home, "appdata");
-			mkdirSync(profileDir(home, "Trae"), { recursive: true });
+			const dir = pointAtProfileBase(home, "Trae");
+			mkdirSync(dir, { recursive: true });
 			const roots = traeUserDataRoot(home);
-			expect(roots?.root).toBe(profileDir(home, "Trae"));
+			expect(roots?.root).toBe(dir);
 			// The detection entry is the *product* directory, one level up from
 			// `User`, because `User` is created on first launch and can be empty on
 			// an install that has been opened once — and a root that reads as empty
 			// is a root detection skips.
-			expect(join(profileDir(home, "Trae"), "..")).toContain("Trae");
+			expect(join(dir, "..")).toContain("Trae");
 		});
 	});
 
@@ -716,10 +784,10 @@ describe("trae: the credential boundary", () => {
 		let report = "";
 		let items: MigrationItem[] = [];
 		withHome({ ".trae/user_rules/a.md": rule({ alwaysApply: "true" }) }, (home) => {
-			process.env.APPDATA = join(home, "appdata");
-			mkdirSync(profileDir(home, "Trae"), { recursive: true });
+			const dir = pointAtProfileBase(home, "Trae");
+			mkdirSync(dir, { recursive: true });
 			writeFileSync(
-				join(profileDir(home, "Trae"), "mcp.json"),
+				join(dir, "mcp.json"),
 				JSON.stringify({
 					mcpServers: {
 						vault: {

@@ -61,8 +61,6 @@ async function runCaptured(
 	const writeOut = process.stdout.write.bind(process.stdout);
 	const writeErr = process.stderr.write.bind(process.stderr);
 	const consoleErr = console.error;
-	const prevHome = process.env.HOME;
-	const prevProfile = process.env.USERPROFILE;
 	process.stdout.write = ((chunk: unknown) => {
 		out.push(String(chunk));
 		return true;
@@ -74,8 +72,6 @@ async function runCaptured(
 	console.error = (...args: unknown[]) => {
 		err.push(`${args.map(String).join(" ")}\n`);
 	};
-	process.env.HOME = harness.home;
-	process.env.USERPROFILE = harness.home;
 	const startedAt = Date.now();
 	try {
 		const code = await runHeadless({
@@ -84,16 +80,13 @@ async function runCaptured(
 			cwd: harness.cwd,
 			noSession: true,
 			streamFn: options.streamFn,
+			home: harness.home,
 		});
 		return { code, stdout: out.join(""), stderr: err.join(""), elapsedMs: Date.now() - startedAt };
 	} finally {
 		process.stdout.write = writeOut;
 		process.stderr.write = writeErr;
 		console.error = consoleErr;
-		if (prevHome === undefined) delete process.env.HOME;
-		else process.env.HOME = prevHome;
-		if (prevProfile === undefined) delete process.env.USERPROFILE;
-		else process.env.USERPROFILE = prevProfile;
 		rmSync(harness.home, { recursive: true, force: true });
 		rmSync(harness.cwd, { recursive: true, force: true });
 	}

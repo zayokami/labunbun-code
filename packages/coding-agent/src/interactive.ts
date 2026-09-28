@@ -194,7 +194,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	if (shouldRunWizard({ home })) await runWizard(cwd, home);
 
 	// ---- settings & providers ----
-	const loadedSettings = loadSettings(cwd);
+	const loadedSettings = loadSettings(cwd, undefined, home);
 	const { settings } = loadedSettings;
 	// Say out loud what a file inside this project asked for and did not get —
 	// silence here would look like the setting simply didn't work.
@@ -1267,6 +1267,7 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 			compaction: ctx.compaction(),
 			cwd: ctx.cwd,
 			pushInfo: (info) => pushInfo(ctx.handle, info),
+			home: ctx.home,
 			dialog: ctx.handle ?? undefined,
 			refreshContext: () => ctx.refreshContextInfo(session),
 			// `/compact` and `/trim` both replace part of the transcript, and the

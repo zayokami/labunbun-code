@@ -752,9 +752,19 @@ describe("migrate: ZCode source", () => {
 	test("the applied settings file loads", () => {
 		withHome({ ".zcode/v2/config.json": ZCODE_CONFIG }, (home) => {
 			runMigration({ home, apply: true });
-			const loaded = loadSettings(home);
-			expect(loaded.settings.env?.ANTHROPIC_BASE_URL).toBe("https://z.ai/api/v1");
-			expect(loaded.settings.providers?.openaiCompatible.some((p) => p.id === "zcode-local")).toBe(true);
+			// A real project directory, not the home: `loadSettings`'s first argument
+			// is the cwd, so passing the home there reads the applied file as *both*
+			// the user tier and the project tier, and leaves the home it loads from
+			// to chance. The migration wrote the user tier; that is the tier under
+			// test here.
+			const cwd = mkdtempSync(join(tmpdir(), "lbb-zcode-proj-"));
+			try {
+				const loaded = loadSettings(cwd, undefined, home);
+				expect(loaded.settings.env?.ANTHROPIC_BASE_URL).toBe("https://z.ai/api/v1");
+				expect(loaded.settings.providers?.openaiCompatible.some((p) => p.id === "zcode-local")).toBe(true);
+			} finally {
+				rmSync(cwd, { recursive: true, force: true });
+			}
 		});
 	});
 
@@ -775,10 +785,13 @@ describe("migrate: ZCode source", () => {
 			writeFileSync(join(home, ".zcode", "v2", "config.json"), "{}");
 
 			process.env.ZCODE_DATA_BASE_DIR = base;
+			// A real project directory rather than the home, so the applied file is
+			// read as the user tier and not twice over — see the sibling test.
+			const cwd = mkdtempSync(join(tmpdir(), "lbb-zcode-proj-"));
 			try {
 				expect(detectSources(home)).toContain("zcode");
 				const result = runMigration({ home, apply: true });
-				const loaded = loadSettings(home);
+				const loaded = loadSettings(cwd, undefined, home);
 				expect(loaded.settings.env?.ANTHROPIC_BASE_URL).toBe("https://z.ai/api/v1");
 
 				// Report labels are rendered with `~/` and forward slashes whatever the
@@ -789,6 +802,7 @@ describe("migrate: ZCode source", () => {
 				for (const label of labels) expect(label).not.toContain("~/.zcode/v2/config.json");
 			} finally {
 				delete process.env.ZCODE_DATA_BASE_DIR;
+				rmSync(cwd, { recursive: true, force: true });
 			}
 		});
 	});

@@ -428,7 +428,8 @@ describe("shell resolution", () => {
 	// (deliberately — that install is the one the user chose), so a machine that
 	// has it answers with it whatever PATH says, and the PATH test steps aside.
 	const realGit = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files\\Git\\usr\\bin\\bash.exe"];
-	const hasRealGit = realGit.some((path) => existsSync(path));
+	const realGitPath = realGit.find((path) => existsSync(path));
+	const hasRealGit = realGitPath !== undefined;
 
 	test("a bash.exe on PATH is found, not only one in the conventional places", () => {
 		if (process.platform !== "win32" || hasRealGit) return;
@@ -458,6 +459,7 @@ describe("shell resolution", () => {
 		const windowsApps = join(root, "Microsoft", "WindowsApps");
 		mkdirSync(windowsApps, { recursive: true });
 		writeFileSync(join(windowsApps, "bash.exe"), "");
+		const launchers = [join(system32, "bash.exe"), join(windowsApps, "bash.exe")];
 
 		withEnv(
 			{
@@ -468,7 +470,19 @@ describe("shell resolution", () => {
 				USERPROFILE: tempDir(),
 			},
 			() => {
-				expect(detectShell().command).toBe("cmd.exe");
+				const command = detectShell().command;
+				// The rule, and the only part of it that is decidable on every
+				// machine: a launcher on PATH is never the answer.
+				expect(launchers).not.toContain(command);
+				// What answers instead is cmd.exe — but only where there is no
+				// conventional install to answer first. `detectShell` probes the
+				// two absolute Git paths *before* it reads PATH, deliberately (the
+				// comment above), and no staged PATH can outrank an absolute
+				// probe. A GitHub windows runner has Git for Windows at exactly
+				// that path, so the fallback is simply unreachable there; the
+				// sibling test steps aside for the same reason, and this one pins
+				// the machine it is on instead of dropping the assertion.
+				expect(command).toBe(hasRealGit ? realGitPath : "cmd.exe");
 			},
 		);
 

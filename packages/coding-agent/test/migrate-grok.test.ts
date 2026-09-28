@@ -253,14 +253,23 @@ describe("reading a Grok Build home", () => {
 		const home = makeDir("lbb-grok-home-");
 		const root = makeDir("lbb-grok-root-");
 		setEnv("GROK_HOME", root);
-		writeTree(root, { "Agents.md": "capitalised\n" });
-		expect(readGrokBuild(home).memory).toBe("capitalised\n");
+		writeTree(root, { "Agents.md": "shouting\n" });
+		expect(readGrokBuild(home).memory).toBe("shouting\n");
+		// The *same* text under the other spelling, which is what a case-insensitive
+		// filesystem turns the first write into: one file with two names. grok dedups
+		// by canonical path there, and reading it twice would put the user's
+		// instructions into the imported rule twice.
+		//
+		// Writing the same text is what makes that assertion mean the same thing on a
+		// case-sensitive filesystem, where the two names really are two files and the
+		// text-identity dedup in the reader is the only thing standing between them
+		// and a doubled rule. The old fixture wrote *different* text, so on a
+		// case-insensitive filesystem the second write silently replaced the first:
+		// the assertion passed there without the dedup ever running, and on a
+		// case-sensitive one it failed, because there the two files are both real
+		// and both are read — which is correct, and is what the neighbouring test
+		// below pins from the other side.
 		writeFileSync(join(root, "AGENTS.md"), "shouting\n");
-		// One file or two, depending on the filesystem, and this is the assertion
-		// that holds either way: on a case-insensitive one both names are this file
-		// — grok dedups exactly here, by canonical path — and reading it twice would
-		// put the user's instructions into the imported rule twice. Which of the two
-		// names wins cannot be observed here at all: the filesystem collapses them.
 		expect(readGrokBuild(home).memory).toBe("shouting\n");
 	});
 

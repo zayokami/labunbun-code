@@ -9,9 +9,19 @@
  * these tests check.
  */
 import { describe, expect, test } from "bun:test";
+import { join, resolve } from "node:path";
 import { alwaysAllowLabel, permissionOptions, ruleSpecifierFor } from "../src/permission-options.ts";
 
-const CWD = "C:\\work\\proj";
+/**
+ * A workspace root in the spelling *this* platform resolves. A literal
+ * `C:\work\proj` is not a Windows path that happens to be written with
+ * backslashes — on POSIX it is one filename, backslashes included, and
+ * `resolve` hands it back under the cwd. So the root, and every path below
+ * that is supposed to sit inside it, are built from the platform's own
+ * `join`/`resolve` and the assertions are about the rule rather than about
+ * which separators this machine happens to use.
+ */
+const CWD = process.platform === "win32" ? "C:/work/proj" : "/work/proj";
 
 describe("ruleSpecifierFor", () => {
 	test("a command becomes a prefix rule, never a glob that swallows its siblings", () => {
@@ -23,14 +33,16 @@ describe("ruleSpecifierFor", () => {
 
 	test("a file becomes the directory it lives in", () => {
 		expect(ruleSpecifierFor("Edit", { file_path: "src/tui/app.tsx" }, CWD)).toBe("src/tui/**");
-		expect(ruleSpecifierFor("Read", { file_path: "C:\\work\\proj\\src\\a.ts" }, CWD)).toBe("src/**");
+		// The absolute spelling a tool call carries, which has to land on the
+		// same specifier as the relative one.
+		expect(ruleSpecifierFor("Read", { file_path: join(CWD, "src", "a.ts") }, CWD)).toBe("src/**");
 	});
 
 	test("nothing to scope to falls back to the bare tool", () => {
 		// A file at the workspace root has no directory; a path outside the
 		// workspace has one that would be a lie.
 		expect(ruleSpecifierFor("Edit", { file_path: "notes.md" }, CWD)).toBeUndefined();
-		expect(ruleSpecifierFor("Edit", { file_path: "C:\\other\\a.ts" }, CWD)).toBeUndefined();
+		expect(ruleSpecifierFor("Edit", { file_path: resolve(CWD, "..", "other", "a.ts") }, CWD)).toBeUndefined();
 		expect(ruleSpecifierFor("Edit", { file_path: "src/a.ts" }, undefined)).toBeUndefined();
 		expect(ruleSpecifierFor("Bash", { command: "   " }, CWD)).toBeUndefined();
 		expect(ruleSpecifierFor("WebFetch", { url: "https://example.com" }, CWD)).toBeUndefined();

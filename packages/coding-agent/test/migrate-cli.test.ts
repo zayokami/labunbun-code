@@ -11,8 +11,6 @@ type SourceTree = Record<string, string>;
 
 function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void): Promise<void> | void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-cli-"));
-	const prevHome = process.env.USERPROFILE;
-	const prevPosixHome = process.env.HOME;
 	// Several sources keep their root in the environment rather than under the home
 	// — `$DSH_HOME`, `$GROK_HOME`, `$KIMI_CODE_HOME`, the MiniMax and Step pairs —
 	// so a developer whose shell exports one of them would have the CLI read
@@ -24,14 +22,8 @@ function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void
 	const releaseSourceEnv = borrowSourceEnv();
 	const restore = (): void => {
 		releaseSourceEnv();
-		if (prevHome === undefined) delete process.env.USERPROFILE;
-		else process.env.USERPROFILE = prevHome;
-		if (prevPosixHome === undefined) delete process.env.HOME;
-		else process.env.HOME = prevPosixHome;
 		rmSync(home, { recursive: true, force: true });
 	};
-	process.env.USERPROFILE = home;
-	process.env.HOME = home;
 	for (const [path, content] of Object.entries(tree)) {
 		const full = join(home, path);
 		mkdirSync(join(full, ".."), { recursive: true });
@@ -43,8 +35,12 @@ function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void
 	return undefined;
 }
 
-/** Run `main` with console captured, since the CLI reports by printing. */
-async function run(args: string[]): Promise<{ code: number; out: string; err: string }> {
+/**
+ * Run `main` with console captured, since the CLI reports by printing. `home` is
+ * optional because `--help` genuinely reads no configuration; everything that
+ * does is inside a `withHome` and has one to hand.
+ */
+async function run(args: string[], home?: string): Promise<{ code: number; out: string; err: string }> {
 	const out: string[] = [];
 	const err: string[] = [];
 	const log = spyOn(console, "log").mockImplementation((...parts: unknown[]) => {
@@ -54,7 +50,7 @@ async function run(args: string[]): Promise<{ code: number; out: string; err: st
 		err.push(parts.map(String).join(" "));
 	});
 	try {
-		return { code: await main(args), out: out.join("\n"), err: err.join("\n") };
+		return { code: await main(args, { home }), out: out.join("\n"), err: err.join("\n") };
 	} finally {
 		log.mockRestore();
 		error.mockRestore();
@@ -78,8 +74,8 @@ function sessionRow(): string {
 
 describe("migrate CLI", () => {
 	test("a home with no source says so and exits clean", async () => {
-		await withHome({}, async () => {
-			const { code, out, err } = await run(["migrate"]);
+		await withHome({}, async (home) => {
+			const { code, out, err } = await run(["migrate"], home);
 			expect(code).toBe(0);
 			expect(err).toBe("");
 			expect(out).toContain("Nothing to import.");
@@ -87,9 +83,9 @@ describe("migrate CLI", () => {
 	});
 
 	test("--migrate is the same command as the subcommand", async () => {
-		await withHome(CLAUDE_TREE, async () => {
-			const sub = await run(["migrate"]);
-			const flag = await run(["--migrate"]);
+		await withHome(CLAUDE_TREE, async (home) => {
+			const sub = await run(["migrate"], home);
+			const flag = await run(["--migrate"], home);
 			expect(flag.code).toBe(sub.code);
 			expect(flag.out).toBe(sub.out);
 			// Both are dry runs, so neither wrote anything.
@@ -98,14 +94,14 @@ describe("migrate CLI", () => {
 	});
 
 	test("yoshi is the subcommand, and every older spelling is the same run", async () => {
-		await withHome(CLAUDE_TREE, async () => {
-			const yoshi = await run(["yoshi"]);
+		await withHome(CLAUDE_TREE, async (home) => {
+			const yoshi = await run(["yoshi"], home);
 			expect(yoshi.code).toBe(0);
 			expect(yoshi.err).toBe("");
 			// Compared as whole runs rather than exit codes: a spelling that parsed
 			// but took a different path would still exit 0.
 			for (const spelling of [["migrate"], ["--yoshi"], ["--migrate"]]) {
-				const other = await run(spelling);
+				const other = await run(spelling, home);
 				expect(other.code).toBe(yoshi.code);
 				expect(other.out).toBe(yoshi.out);
 				expect(other.err).toBe(yoshi.err);
@@ -116,8 +112,8 @@ describe("migrate CLI", () => {
 	});
 
 	test("--help names yoshi and says the old spelling still works", async () => {
-		await withHome({}, async () => {
-			const { code, out } = await run(["--help"]);
+		await withHome({}, async (home) => {
+			const { code, out } = await run(["--help"], home);
 			expect(code).toBe(0);
 			expect(out).toContain("labunbun yoshi");
 			expect(out).toContain("yoshi options:");
@@ -126,8 +122,8 @@ describe("migrate CLI", () => {
 	});
 
 	test("an unknown source is a usage error, not a crash", async () => {
-		await withHome({}, async () => {
-			const { code, err } = await run(["migrate", "--from", "nope"]);
+		await withHome({}, async (home) => {
+			const { code, err } = await run(["migrate", "--from", "nope"], home);
 			expect(code).toBe(2);
 			expect(err).toContain("Unknown migration source: nope");
 			expect(err).toContain(`${MIGRATION_SOURCE_IDS.join(", ")}, all`);
@@ -139,8 +135,8 @@ describe("migrate CLI", () => {
 			".grok/config.toml": '[models]\ndefault = "grok-4.6"\n',
 			".grok/skills/pdf/SKILL.md": "---\nname: pdf\n---\nfill forms\n",
 		};
-		await withHome(tree, async () => {
-			const { code, out, err } = await run(["migrate", "--from", "grok-build"]);
+		await withHome(tree, async (home) => {
+			const { code, out, err } = await run(["migrate", "--from", "grok-build"], home);
 			expect(err).toBe("");
 			expect(code).toBe(0);
 			// The plan is built out of the grok tree, and the default model the source
@@ -159,8 +155,8 @@ describe("migrate CLI", () => {
 			".kimi-code/config.toml": 'default_model = "kimi-k9-unreleased"\n',
 			".kimi-code/skills/pdf/SKILL.md": "---\nname: pdf\n---\nfill forms\n",
 		};
-		await withHome(tree, async () => {
-			const { code, out, err } = await run(["migrate", "--from", "kimi-code"]);
+		await withHome(tree, async (home) => {
+			const { code, out, err } = await run(["migrate", "--from", "kimi-code"], home);
 			expect(err).toBe("");
 			expect(code).toBe(0);
 			expect(out).toContain("~/.kimi-code/skills/pdf/SKILL.md");
@@ -179,8 +175,8 @@ describe("migrate CLI", () => {
 			".cursor/rules/style.mdc": "---\ndescription: One\nalwaysApply: true\n---\n\nDo the thing.\n",
 			".cursor/cli-config.json": JSON.stringify({ model: "cursor-model-that-does-not-exist" }),
 		};
-		await withHome(tree, async () => {
-			const { code, out, err } = await run(["migrate", "--from", "cursor"]);
+		await withHome(tree, async (home) => {
+			const { code, out, err } = await run(["migrate", "--from", "cursor"], home);
 			expect(err).toBe("");
 			expect(code).toBe(0);
 			expect(out).toContain("~/.labunbun/rules/style.md");
@@ -202,8 +198,8 @@ describe("migrate CLI", () => {
 			".trae-cn/user_rules/preferences.md": "---\nalwaysApply: true\n---\n\nDo the thing.\n",
 			".trae-cn/stray.md": "---\nalwaysApply: true\n---\n\nDo the other thing.\n",
 		};
-		await withHome(tree, async () => {
-			const { code, out, err } = await run(["migrate", "--from", "trae"]);
+		await withHome(tree, async (home) => {
+			const { code, out, err } = await run(["migrate", "--from", "trae"], home);
 			expect(err).toBe("");
 			expect(code).toBe(0);
 			expect(out).toContain("~/.labunbun/rules/preferences.md");
@@ -214,24 +210,24 @@ describe("migrate CLI", () => {
 	});
 
 	test("an unknown category and a bad limit are usage errors too", async () => {
-		await withHome(CLAUDE_TREE, async () => {
-			const category = await run(["migrate", "--only", "plugins"]);
+		await withHome(CLAUDE_TREE, async (home) => {
+			const category = await run(["migrate", "--only", "plugins"], home);
 			expect(category.code).toBe(2);
 			expect(category.err).toContain("Unknown category: plugins");
 
-			const limit = await run(["migrate", "--history-limit", "abc"]);
+			const limit = await run(["migrate", "--history-limit", "abc"], home);
 			expect(limit.code).toBe(2);
 			expect(limit.err).toContain("Invalid history limit");
 
-			const scope = await run(["migrate", "--history-scope", "everything"]);
+			const scope = await run(["migrate", "--history-scope", "everything"], home);
 			expect(scope.code).toBe(2);
 			expect(scope.err).toContain("Invalid history scope");
 		});
 	});
 
 	test("--only reaches the planner", async () => {
-		await withHome(CLAUDE_TREE, async () => {
-			const { code, out } = await run(["migrate", "--only", "settings"]);
+		await withHome(CLAUDE_TREE, async (home) => {
+			const { code, out } = await run(["migrate", "--only", "settings"], home);
 			expect(code).toBe(0);
 			expect(out).toContain("excluded by the category filter");
 			expect(out).toContain("settings.json");
@@ -240,8 +236,8 @@ describe("migrate CLI", () => {
 	});
 
 	test("--history-scope none turns history off out loud", async () => {
-		await withHome(CLAUDE_TREE, async () => {
-			const { code, out } = await run(["migrate", "--history-scope", "none"]);
+		await withHome(CLAUDE_TREE, async (home) => {
+			const { code, out } = await run(["migrate", "--history-scope", "none"], home);
 			expect(code).toBe(0);
 			expect(out).toContain("history import is off (--history-scope none)");
 		});
@@ -255,7 +251,7 @@ describe("migrate CLI", () => {
 				mkdirSync(join(path, ".."), { recursive: true });
 				writeFileSync(path, sessionRow());
 			}
-			const { code, out } = await run(["migrate", "--only", "history", "--history-limit", "1"]);
+			const { code, out } = await run(["migrate", "--only", "history", "--history-limit", "1"], home);
 			expect(code).toBe(0);
 			expect(out).toContain("2 more session(s) matched but exceeded the limit");
 		});
@@ -263,9 +259,9 @@ describe("migrate CLI", () => {
 
 	test("--apply writes, and the default run does not", async () => {
 		await withHome(CLAUDE_TREE, async (home) => {
-			await run(["migrate"]);
+			await run(["migrate"], home);
 			expect(existsSync(join(home, ".labunbun", "settings.json"))).toBe(false);
-			const { code, out } = await run(["migrate", "--apply"]);
+			const { code, out } = await run(["migrate", "--apply"], home);
 			expect(code).toBe(0);
 			expect(out).toContain("Wrote 2 file(s):");
 			expect(out).toContain("~/.labunbun/settings.json");
@@ -275,6 +271,8 @@ describe("migrate CLI", () => {
 	});
 
 	test("--help lists the new sources and flags", async () => {
+		// No `withHome`: printing the help reads no configuration, which is the
+		// point of checking it before anything is migrated.
 		const { code, out } = await run(["--help"]);
 		expect(code).toBe(0);
 		// Built from the source list rather than written out, so a source added

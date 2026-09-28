@@ -419,8 +419,7 @@ export function shadowedChoiceNotice(
 	return `${display(tier.path)} sets ${key} and wins on the next start`;
 }
 
-function settingsPath(source: SettingsSourceName, cwd: string): string {
-	const home = homedir();
+function settingsPath(source: SettingsSourceName, cwd: string, home: string): string {
 	switch (source) {
 		case "user":
 			return join(home, ".labunbun", "settings.json");
@@ -460,7 +459,16 @@ export function mergeSettings<T>(base: T, override: unknown): T {
 	return out as T;
 }
 
-export function loadSettings(cwd: string, flagSettings?: RawSettingsInput): LoadedSettings {
+/**
+ * Read the four file tiers. `home` is a parameter with a default rather than a
+ * call to `homedir()` in the body, like every other module that resolves one
+ * (`loadSkills`, `loadMemoryFiles`, `historyFilePath`, `sessionsRoot`): it is
+ * what lets a caller that already knows which home it is serving — the REPL's
+ * `options.home`, or a test with a throwaway one — read that home's files
+ * instead of the process's own. Resolving it here would also mean the wizard
+ * could be pointed at one home and the settings load at another.
+ */
+export function loadSettings(cwd: string, flagSettings?: RawSettingsInput, home: string = homedir()): LoadedSettings {
 	const order: SettingsSourceName[] = ["user", "project", "local", "policy"];
 	let merged: RawSettingsInput = {};
 	const sources: Partial<Record<SettingsSourceName, string>> = {};
@@ -468,7 +476,7 @@ export function loadSettings(cwd: string, flagSettings?: RawSettingsInput): Load
 	const ignoredKeys: IgnoredSettingsKey[] = [];
 
 	for (const source of order) {
-		const path = settingsPath(source, cwd);
+		const path = settingsPath(source, cwd, home);
 		let data = readJsonFile(path);
 		if (data === undefined) continue;
 		// Project and local files travel with the repo; the other tiers are the

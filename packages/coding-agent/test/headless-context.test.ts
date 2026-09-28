@@ -81,6 +81,7 @@ async function runScene(options: { prompt: string; steps: unknown[] }, f: Fixtur
 				noSession: true,
 				outputFormat: "json",
 				streamFn: faux.streamFn,
+				home: ${JSON.stringify(f.home)},
 			});
 		} finally {
 			process.stdout.write = write;
@@ -92,9 +93,12 @@ async function runScene(options: { prompt: string; steps: unknown[] }, f: Fixtur
 			toolNames: faux.receivedContexts.map((context) => (context.tools ?? []).map((tool) => tool.name)),
 		}));
 	`;
+	// The home goes to `runHeadless` rather than through the environment. An env
+	// assignment does reach `os.homedir()` in a child on every platform, but only
+	// because it is read at process start; in-process the same assignment is
+	// invisible on linux and macOS.
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
-		env: { ...process.env, HOME: f.home, USERPROFILE: f.home },
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",

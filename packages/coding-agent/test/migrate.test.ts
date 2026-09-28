@@ -465,7 +465,7 @@ describe("apply", () => {
 			expect(result.applied?.failed).toEqual([]);
 			const cwd = mkdtempSync(join(tmpdir(), "lbb-proj-"));
 			try {
-				const loaded = loadSettings(cwd);
+				const loaded = loadSettings(cwd, undefined, home);
 				expect(loaded.settings.model).toBe("anthropic/claude-opus-5");
 				expect(loaded.settings.env?.ANTHROPIC_BASE_URL).toBe("https://proxy.example/v1");
 				expect(loaded.settings.permissions.deny).toEqual(["Read(**/.env)"]);

@@ -180,4 +180,33 @@ describe("test suite isolation", () => {
 			expect(offenders, `pass a temp home as the last argument to ${name}`).toEqual([]);
 		}
 	});
+
+	// The reader behind every settings tier, and the reason this batch of platform
+	// fixes exists at all. `loadSettings` takes the home last, and a call that
+	// omits it resolves the *process's* home — which on linux and macOS a test
+	// cannot redirect by assigning `process.env.HOME`, because the assignment is
+	// not visible to the C library `os.homedir()` goes through. A test written that
+	// way passes on Windows and reads the developer's own configuration everywhere
+	// else, silently, in a way no assertion in the file can see.
+	test("no test loads settings from the real home", () => {
+		const offenders = FILES.filter(({ source }) => callersWithTooFewArguments(source, "loadSettings", 3) > 0).map(
+			(f) => f.name,
+		);
+		expect(offenders, "pass a temp home as the third argument to loadSettings").toEqual([]);
+	});
+
+	// The same hazard one layer out, and a different shape: `runHeadless` takes an
+	// options object, so there is no argument to count. The home has to be a key in
+	// it, and a test that leaves the key out gets the process's home for the
+	// settings tiers, the session file, the memory files, the skills and the agent
+	// definitions at once.
+	//
+	// A child-process script counts like any other call site: the string it is
+	// generated into is source, and the key has to be there for the same reason.
+	test("no test starts a headless run against the real home", () => {
+		const offenders = FILES.filter(({ source }) =>
+			callArguments(code(source), "runHeadless").some((args) => !/(?:^|[{,\s])home\s*[:,]/.test(args)),
+		).map((f) => f.name);
+		expect(offenders, "pass `home` in the options object to runHeadless").toEqual([]);
+	});
 });

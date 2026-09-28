@@ -71,14 +71,10 @@ async function runCaptured(
 ): Promise<{ code: number; stdout: string }> {
 	const chunks: string[] = [];
 	const write = process.stdout.write.bind(process.stdout);
-	const prevHome = process.env.HOME;
-	const prevProfile = process.env.USERPROFILE;
 	process.stdout.write = ((chunk: unknown) => {
 		chunks.push(String(chunk));
 		return true;
 	}) as typeof process.stdout.write;
-	process.env.HOME = home;
-	process.env.USERPROFILE = home;
 	try {
 		const code = await runHeadless({
 			prompt: options.prompt,
@@ -87,14 +83,11 @@ async function runCaptured(
 			noSession: true,
 			outputFormat: "json",
 			streamFn: options.streamFn,
+			home,
 		});
 		return { code, stdout: chunks.join("") };
 	} finally {
 		process.stdout.write = write;
-		if (prevHome === undefined) delete process.env.HOME;
-		else process.env.HOME = prevHome;
-		if (prevProfile === undefined) delete process.env.USERPROFILE;
-		else process.env.USERPROFILE = prevProfile;
 	}
 }
 

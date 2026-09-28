@@ -7,6 +7,7 @@
  * - stream-json: one JSON line per event, live
  */
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import type { AgentEvent, PermissionMode } from "@labunbun/agent";
 import { AgentSession, evaluatePermissions, formatRetryNotice, SessionStore } from "@labunbun/agent";
 import {
@@ -48,6 +49,15 @@ export interface HeadlessOptions {
 	noSession?: boolean;
 	cwd?: string;
 	outputFormat?: OutputFormat;
+	/**
+	 * Which home the run reads. Threaded into every loader below that would
+	 * otherwise resolve one for itself — the settings tiers, the session file,
+	 * the memory files, the skills, the agent definitions — so that a run given
+	 * a home reads that home throughout. The alternative is what this parameter
+	 * exists to remove: a caller that wants a different home has to mutate
+	 * `process.env` and hope every loader it does not know about re-resolves.
+	 */
+	home?: string;
 	/**
 	 * The model transport. Injected by tests, which is the only way to run this
 	 * path without a network or a bill; production leaves it out and gets the
@@ -104,8 +114,9 @@ function cacheResult(messages: AgentMessage[], tracker?: CacheTracker): CacheRes
 export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const cwd = options.cwd ?? process.cwd();
 	const format = options.outputFormat ?? "text";
+	const home = options.home ?? homedir();
 
-	const loadedSettings = loadSettings(cwd);
+	const loadedSettings = loadSettings(cwd, undefined, home);
 	const { settings } = loadedSettings;
 	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
 	if (ignoredNotice) console.error(`Warning: ${ignoredNotice}`);
@@ -125,7 +136,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// session, and a build log that does not fit is no more reproducible for
 	// being unattended.
 	const tools = createAllTools(cwd, { readOnlyRoots: [toolOutputRoot(cwd)] });
-	const store = options.noSession ? undefined : SessionStore.startNew(cwd);
+	const store = options.noSession ? undefined : SessionStore.startNew(cwd, home);
 	pruneToolOutput(cwd);
 	const rules = collectPermissionRules(loadedSettings);
 	// Headless defaults to bypassPermissions, so this is the tier check that
@@ -169,17 +180,17 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// silently does nothing under `-p` made the same prompt behave differently in
 	// two modes — which is the kind of difference nobody notices until they trust
 	// a nightly job to do what they just did by hand.
-	const memory = loadMemoryFiles(cwd);
-	const skills = loadSkills(cwd);
+	const memory = loadMemoryFiles(cwd, home);
+	const skills = loadSkills(cwd, home);
 	const commands = [...builtInCommands(), ...skillsAsCommands(skills)];
-	const agentDefinitions = loadAgentDefinitions(cwd);
+	const agentDefinitions = loadAgentDefinitions(cwd, home);
 	// A `-p` run has no dialog to approve a project's definitions with, so an
 	// untrusted one is not loaded at all — the gate is inside the loaders above.
 	// Said on stderr rather than passed over in silence: a scripted run whose
 	// skills quietly expand to nothing is the exact failure that is invisible
 	// until someone reads the transcript and wonders why the model ignored them.
-	const withheldAgents = withheldProjectAgents(cwd);
-	const withheldSkills = withheldProjectSkills(cwd);
+	const withheldAgents = withheldProjectAgents(cwd, home);
+	const withheldSkills = withheldProjectSkills(cwd, home);
 	if (withheldAgents.length + withheldSkills.length > 0) {
 		console.error(
 			withheldDefinitionNotice({ agents: withheldAgents.length, skills: withheldSkills.length }, "headless"),

@@ -186,7 +186,19 @@ yoshi options:
   spellings this command had before it was renamed, and still work.`);
 }
 
-export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
+/**
+ * `home` is the directory the run reads and writes user-owned state under. The
+ * process entry point has no reason to want one, and takes the default; it is
+ * here because `argv` is already injectable and a caller that supplies it is
+ * running the CLI in-process, where "which home" is otherwise only answerable by
+ * mutating `process.env` — which resolves differently depending on the platform
+ * the code happens to be running on.
+ */
+export interface MainOptions {
+	home?: string;
+}
+
+export async function main(argv: string[] = process.argv.slice(2), options: MainOptions = {}): Promise<number> {
 	const args = parseArgs(argv);
 
 	if (args.version) {
@@ -209,6 +221,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 			only: args.only ?? undefined,
 			historyScope: args.historyScope ?? undefined,
 			historyLimit: args.historyLimit ?? undefined,
+			home: options.home,
 		});
 		if (result.error) {
 			console.error(result.error);
@@ -240,6 +253,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 			maxTurns: args.maxTurns ?? undefined,
 			noSession: args.noSession,
 			outputFormat: (args.outputFormat as never) ?? undefined,
+			home: options.home,
 		});
 	}
 
@@ -250,6 +264,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 		resumeSessionId: args.resume ?? undefined,
 		continueLast: args.continueLast,
 		gamepad: args.gamepad ?? undefined,
+		home: options.home,
 	});
 }
 

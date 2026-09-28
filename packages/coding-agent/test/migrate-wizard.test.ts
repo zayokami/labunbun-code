@@ -27,19 +27,11 @@ type SourceTree = Record<string, string>;
  */
 function withHome(tree: SourceTree, body: (home: string) => Promise<void> | void): Promise<void> | void {
 	const home = mkdtempSync(join(tmpdir(), "lbb-migrate-wizard-"));
-	const prevHome = process.env.USERPROFILE;
-	const prevPosixHome = process.env.HOME;
 	const releaseSourceEnv = borrowSourceEnv();
 	const restore = (): void => {
 		releaseSourceEnv();
-		if (prevHome === undefined) delete process.env.USERPROFILE;
-		else process.env.USERPROFILE = prevHome;
-		if (prevPosixHome === undefined) delete process.env.HOME;
-		else process.env.HOME = prevPosixHome;
 		rmSync(home, { recursive: true, force: true });
 	};
-	process.env.USERPROFILE = home;
-	process.env.HOME = home;
 	for (const [path, content] of Object.entries(tree)) {
 		const full = join(home, path);
 		mkdirSync(join(full, ".."), { recursive: true });
@@ -752,11 +744,19 @@ describe("migrate wizard: the plan is shown before it is written", () => {
 
 describe("migrate command: when the wizard is not the right shape", () => {
 	/** The command only reaches for the context in its wizard branch. */
-	function commandContext(dialog?: MigrationDialogBridge): LocalCommandContext {
+	/**
+	 * The command the way the REPL dispatches it. `home` is the point of
+	 * passing it: `/yoshi` forwards the context home to the migration, which
+	 * reads — and with `--apply`, writes — under it. Left out, the migration
+	 * resolves `os.homedir()` for itself, which a test that planted a throwaway
+	 * home cannot see.
+	 */
+	function commandContext(home: string, dialog?: MigrationDialogBridge): LocalCommandContext {
 		return {
 			session: null as unknown as LocalCommandContext["session"],
 			cwd: CWD,
 			pushInfo: () => {},
+			home,
 			dialog,
 		};
 	}
@@ -789,8 +789,8 @@ describe("migrate command: when the wizard is not the right shape", () => {
 
 	test("the old spelling reaches the same call, not a lookalike", async () => {
 		await withHome(twoSources(), async (home) => {
-			const byName = await yoshiCommand().call(commandContext(), "");
-			const byOldName = await yoshiCommand("migrate").call(commandContext(), "");
+			const byName = await yoshiCommand().call(commandContext(home), "");
+			const byOldName = await yoshiCommand("migrate").call(commandContext(home), "");
 			expect(byOldName).toBe(byName);
 			expect(byOldName).toContain("Dry run — nothing written.");
 			expect(existsSync(join(home, ".labunbun"))).toBe(false);
@@ -808,7 +808,7 @@ describe("migrate command: when the wizard is not the right shape", () => {
 					throw new Error("the dialog must not be opened when flags are given");
 				},
 			};
-			const result = await command.call(commandContext(refuse), "--apply");
+			const result = await command.call(commandContext(home, refuse), "--apply");
 			expect(result).toContain("Restart to pick up the imported configuration.");
 			expect(existsSync(join(home, ".labunbun", "settings.json"))).toBe(true);
 		});
@@ -817,7 +817,7 @@ describe("migrate command: when the wizard is not the right shape", () => {
 	test("without a dialog the bare command is still the non-interactive report", async () => {
 		await withHome(twoSources(), async (home) => {
 			const command = yoshiCommand();
-			const result = await command.call(commandContext(), "");
+			const result = await command.call(commandContext(home), "");
 			expect(result).toContain("Dry run — nothing written.");
 			expect(result).toContain("~/.labunbun/settings.json");
 			expect(existsSync(join(home, ".labunbun"))).toBe(false);

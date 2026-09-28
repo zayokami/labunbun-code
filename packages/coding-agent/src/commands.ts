@@ -30,6 +30,14 @@ export interface LocalCommandContext {
 	cwd: string;
 	pushInfo(text: string): void;
 	/**
+	 * Which home the command reads and writes under. `/yoshi` passes it to the
+	 * migration, which resolves a home for itself when it is not given one — and
+	 * `--apply` writes. A session pointed at another home would otherwise be
+	 * offered a migration out of the operator's real one, and applying it would
+	 * rewrite it.
+	 */
+	home?: string;
+	/**
 	 * Present only with a REPL attached. A command that can ask the user checks
 	 * for it and falls back to its non-interactive form without it.
 	 */
@@ -144,6 +152,7 @@ export function builtInCommands(): Command[] {
 					return runMigrationWizard({
 						dialog: ctx.dialog,
 						cwd: ctx.cwd,
+						home: ctx.home,
 						report: (text) => ctx.pushInfo(text),
 					});
 				}
@@ -152,6 +161,7 @@ export function builtInCommands(): Command[] {
 					from: fromIndex === -1 ? undefined : tokens[fromIndex + 1],
 					apply: tokens.includes("--apply"),
 					force: tokens.includes("--force"),
+					home: ctx.home,
 				});
 				if (result.error) return result.error;
 				if (!result.applied) return result.report;

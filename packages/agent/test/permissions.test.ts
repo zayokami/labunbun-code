@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join, resolve } from "node:path";
 import {
 	evaluatePermissions,
 	inputMatchesSpecifier,
@@ -9,7 +10,19 @@ import {
 	specifierToRegExp,
 } from "../src/permissions.ts";
 
-const CWD = "G:\\work\\proj";
+/**
+ * A workspace root in the spelling *this* platform resolves, and a sibling
+ * outside it.
+ *
+ * These used to be the literals `G:\work\proj` and `G:\other`. On POSIX a
+ * backslash is an ordinary filename character, so `resolve` treated the whole
+ * thing as one relative name under the cwd — and the matching that followed
+ * only came out right by coincidence, because the cwd got appended to itself
+ * (`pathMatches` computes `resolve(cwd, cwd)` for the workspace prefix) and
+ * happened to produce the same doubled path the test's own input had.
+ */
+const CWD = process.platform === "win32" ? "G:/work/proj" : "/work/proj";
+const OUTSIDE = resolve(CWD, "..", "other");
 
 describe("parseRuleText", () => {
 	test("bare tool and specifier forms", () => {
@@ -42,10 +55,14 @@ describe("inputMatchesSpecifier", () => {
 		expect(inputMatchesSpecifier("Bash", "*", { command: "anything" }, CWD)).toBe(true);
 	});
 
-	test("file tools match workspace-relative and absolute paths (Windows)", () => {
-		expect(inputMatchesSpecifier("Edit", "src/**", { file_path: "G:\\work\\proj\\src\\a.ts" }, CWD)).toBe(true);
-		expect(inputMatchesSpecifier("Edit", "src/**", { file_path: "G:/work/proj/src/deep/b.ts" }, CWD)).toBe(true);
-		expect(inputMatchesSpecifier("Edit", "src/**", { file_path: "G:\\other\\src\\a.ts" }, CWD)).toBe(false);
+	test("file tools match workspace-relative and absolute paths, in either spelling", () => {
+		// `join` gives the platform's native separator and the template gives the
+		// other one, so on Windows the same file is checked twice under both
+		// spellings and `normalizePathSpec` is what has to carry it. On POSIX
+		// there is only the one spelling, and these are the same string.
+		expect(inputMatchesSpecifier("Edit", "src/**", { file_path: join(CWD, "src", "a.ts") }, CWD)).toBe(true);
+		expect(inputMatchesSpecifier("Edit", "src/**", { file_path: `${CWD}/src/deep/b.ts` }, CWD)).toBe(true);
+		expect(inputMatchesSpecifier("Edit", "src/**", { file_path: join(OUTSIDE, "src", "a.ts") }, CWD)).toBe(false);
 
 		// The same lookup the source does, so the value does not matter — what is
 		// under test is that `~` expands at all. That is only true if there *is* a
@@ -159,7 +176,7 @@ describe("evaluatePermissions", () => {
 		const config = { mode: "default" as const, rules: rules([["Read(secret/**)", "deny"]]), cwd: CWD };
 
 		// The same file, through each tool that can read it.
-		expect(evaluatePermissions("Read", { file_path: "G:\\work\\proj\\secret\\key" }, config).behavior).toBe("deny");
+		expect(evaluatePermissions("Read", { file_path: join(CWD, "secret", "key") }, config).behavior).toBe("deny");
 		expect(evaluatePermissions("Bash", { command: "cat secret/key" }, config).behavior).toBe("deny");
 		expect(evaluatePermissions("Bash", { command: "head -n1 secret/key" }, config).behavior).toBe("deny");
 		// Hidden behind a pipe, which is the shape that made this worth extracting

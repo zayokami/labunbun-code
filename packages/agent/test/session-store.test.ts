@@ -285,7 +285,15 @@ describe("the chain the store hands back", () => {
 		// the same way. Four times the entries measured fourteen times the time.
 		const walkCost = (count: number): number => {
 			const store = longSession(count);
-			const leaf = store.linearEntries().at(-1)?.id ?? "";
+			// From `entries`, not from `linearEntries()`. Taking the leaf out of the
+			// walk's own output made this measurement depend on the walk being
+			// correct: a regression that returned the chain in the wrong order
+			// handed back the root as the leaf, `branch` to it collapsed the walk to
+			// one entry, and the ratio came out as zero over zero — a check that
+			// passes precisely when the thing it measures has stopped working. The
+			// session is written in order, so its last entry is the leaf, and that
+			// holds whatever the walk does with it.
+			const leaf = store.entries[store.entries.length - 1]?.id ?? "";
 			const walk = () => {
 				store.branch(leaf);
 				store.linearEntries();
@@ -296,12 +304,29 @@ describe("the chain the store hands back", () => {
 		};
 
 		const small = walkCost(5_000);
-		const large = walkCost(20_000);
+		const large = walkCost(30_000);
 
-		// Four times the entries is four times the work; four times the *steps* of
-		// the walk would be sixteen. The bound sits between, with room for a noisy
-		// machine: it is 5 on the code below and was 14 on the code above.
-		expect(large / small).toBeLessThan(8);
+		// Six times the entries is six times the work; six times the *steps* of the
+		// walk would be thirty-six. The bound sits between them, and both distances
+		// are measured rather than picked.
+		//
+		// Linear measures 6.5 here (median of five trials, 4.4–8.3) and 8.3 on a
+		// two-vCPU CI runner, so 16 leaves it about 1.6 times. Quadratic measures
+		// 36.5 at this size ratio, so the bound sits 2.3 times under it. On a
+		// logarithmic scale that is 1 : 2.3 : 5.2 for linear, bound and quadratic,
+		// where the bound of 8 this replaces gave 1 : 2 : 4 — the margin went into
+		// both gaps, not into slack above the linear number.
+		//
+		// The ratio is a difference of two best-of-twenty timings, and that is why the
+		// sizes are where they are. The small end has to be big enough for the
+		// residual to dominate the fixed cost of the measurement: at 2,500 entries it
+		// does not, and the ratio stops tracking the size ratio entirely — 2,500 to
+		// 20,000 (eight times) measured 13.6 and 2,500 to 30,000 (twelve times)
+		// measured 13.9, which is two different predictions arriving at the same
+		// number. At 5,000 it behaves as it should: four times gives 4.8 and six
+		// gives 6.5. Doubling the rounds does not help either, which says the
+		// variance is process-level rather than measurement-level.
+		expect(large / small).toBeLessThan(16);
 	});
 });
 

@@ -48,14 +48,10 @@ async function runCaptured(
 ): Promise<{ code: number; stdout: string }> {
 	const chunks: string[] = [];
 	const write = process.stdout.write.bind(process.stdout);
-	const prevHome = process.env.HOME;
-	const prevProfile = process.env.USERPROFILE;
 	process.stdout.write = ((chunk: unknown) => {
 		chunks.push(String(chunk));
 		return true;
 	}) as typeof process.stdout.write;
-	process.env.HOME = f.home;
-	process.env.USERPROFILE = f.home;
 	try {
 		const code = await runHeadless({
 			prompt: "hello",
@@ -64,14 +60,11 @@ async function runCaptured(
 			noSession: options.noSession ?? true,
 			outputFormat: "json",
 			streamFn: options.streamFn,
+			home: f.home,
 		});
 		return { code, stdout: chunks.join("") };
 	} finally {
 		process.stdout.write = write;
-		if (prevHome === undefined) delete process.env.HOME;
-		else process.env.HOME = prevHome;
-		if (prevProfile === undefined) delete process.env.USERPROFILE;
-		else process.env.USERPROFILE = prevProfile;
 	}
 }
 
@@ -104,13 +97,18 @@ async function runChild(f: Fixture, steps: unknown[]): Promise<{ code: number; s
 			noSession: true,
 			outputFormat: "text",
 			streamFn,
+			home: ${JSON.stringify(f.home)},
 		});
 		console.error("CALLS=" + call);
 		process.exitCode = code;
 	`;
+	// The home is handed to `runHeadless` in the script rather than through the
+	// environment. An env assignment does reach `os.homedir()` in a child on every
+	// platform, but only because it is read at process start — in *this* process the
+	// same assignment is invisible on linux and macOS, and a test that quietly
+	// depends on which of the two it is running is a test that means two things.
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
-		env: { ...process.env, HOME: f.home, USERPROFILE: f.home },
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
