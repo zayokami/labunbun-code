@@ -20,7 +20,12 @@ import { detectSources, runMigration } from "../src/migrate.ts";
 import { parseJsonc, tildePath } from "../src/migrate-core.ts";
 import { collectHistory, listHistory, readPromptHistory } from "../src/migrate-history.ts";
 import { MIGRATION_SOURCE_IDS, MIGRATION_SOURCE_LABELS } from "../src/migrate-types.ts";
-import { readOpencodeConversation, readOpencodeSessions, readOpencodeTableNames } from "../src/opencode-db.ts";
+import {
+	readOpencodeConversation,
+	readOpencodeSessionMessages,
+	readOpencodeSessions,
+	readOpencodeTableNames,
+} from "../src/opencode-db.ts";
 import {
 	channelDatabaseNames,
 	OPENCODE_CONFIG_DIR_ENV,
@@ -510,7 +515,13 @@ describe("opencode: assets", () => {
 			},
 			(home) => {
 				const raw = readOpencode(home);
-				expect(raw.skills.map((skill) => skill.name)).toEqual(["mine"]);
+				// `pdf`, not `mine`: the directory the file was found in and the name
+				// OpenCode will invoke it by are different keys
+				// (`packages/core/src/skill.ts:87-92` takes the frontmatter's, and
+				// `skills.ts:29` on our side does the same), and this fixture is the one
+				// place where that difference is visible. Asserting `mine` would pin a
+				// directory-name rule neither program has.
+				expect(raw.skills.map((skill) => skill.name)).toEqual(["pdf"]);
 				const result = runMigration({ home });
 				const names = result.plan.items.filter((i) => i.from === "~/.claude, ~/.agents");
 				expect(names).toHaveLength(1);
@@ -566,6 +577,140 @@ describe("opencode: assets", () => {
 		withHome({ ".config/opencode/agent/reviewer.md": "You review code.\n" }, (home) => {
 			const result = runMigration({ home });
 			expect(result.plan.writes.some((w) => w.path === join(home, ".labunbun", "agents", "reviewer.md"))).toBe(true);
+		});
+	});
+
+	test("an agent nested under {agent,agents} is found, and the nesting becomes a dash", () => {
+		// `agent`/`agents` is read **recursively** while `mode`/`modes` is read one
+		// level deep (`packages/core/src/config/plugin/agent.ts:21-24`), so a
+		// one-level reader misses this file and finds the `modes/` one it should not.
+		// v2's own name for the agent is `build/plan` (`agent.ts:156-160`); this
+		// importer writes one file per agent into a flat directory, so the separator
+		// becomes a dash. The `.md` stays, because the target path is built from the
+		// name and a one-level `agent/reviewer.md` already landed at `reviewer.md`.
+		withHome({ ".config/opencode/agent/build/plan.md": "You plan the build.\n" }, (home) => {
+			const result = runMigration({ home });
+			const write = result.plan.writes.find((w) => w.path === join(home, ".labunbun", "agents", "build-plan.md"));
+			expect(write?.content).toContain("You plan the build.");
+		});
+	});
+
+	test("a mode file is forced to a primary agent, and the report says so", () => {
+		// `mode`/`modes` is v1's spelling of a primary agent and v2 still reads it,
+		// forcing `mode: "primary"` on whatever is in there (`agent.ts:173`). That is
+		// the difference between a subagent the model spawns and a top-level choice
+		// the user picks, so it is worth a sentence rather than a silent copy.
+		withHome({ ".config/opencode/mode/plan.md": "You plan.\n" }, (home) => {
+			const result = runMigration({ home });
+			const write = result.plan.writes.find((w) => w.path === join(home, ".labunbun", "agents", "plan.md"));
+			expect(write?.content).toContain("You plan.");
+			const item = result.plan.items.find(
+				(i) => i.to === tildePath(home, join(home, ".labunbun", "agents", "plan.md")),
+			);
+			expect(item?.detail).toContain("primary agent");
+		});
+	});
+
+	test("a file nested under mode/modes is not an agent, because opencode reads that one level only", () => {
+		// The other half of the same line: recursion is the difference between the
+		// two directory pairs, so a reader that recurses everywhere imports a file
+		// OpenCode will never run.
+		withHome({ ".config/opencode/modes/build/plan.md": "You plan.\n" }, (home) => {
+			const result = runMigration({ home });
+			expect(result.plan.writes.some((w) => w.path === join(home, ".labunbun", "agents", "build-plan.md"))).toBe(false);
+		});
+	});
+
+	test("an agent's own `model:` frontmatter travels with a note, not silently", () => {
+		// The name resolves when the subagent starts and falls back to the session
+		// model if it no longer names one, so a copy that says nothing about it reads
+		// as though the model had been carried over.
+		withHome({ ".config/opencode/agent/fast.md": "---\nmodel: some/model-id\n---\n\nYou are quick.\n" }, (home) => {
+			const result = runMigration({ home });
+			const write = result.plan.writes.find((w) => w.path === join(home, ".labunbun", "agents", "fast.md"));
+			expect(write?.content).toContain("some/model-id");
+			const item = result.plan.items.find(
+				(i) => i.to === tildePath(home, join(home, ".labunbun", "agents", "fast.md")),
+			);
+			expect(item?.detail).toContain("some/model-id");
+		});
+	});
+
+	test("a bare markdown file at the top of a skill directory is a skill of its own", () => {
+		// One of the two arms of the glob (`packages/core/src/skill.ts:79`): `*.md`
+		// directly in the directory. A reader that only looks inside subdirectories
+		// for a `SKILL.md` never sees one, and the file then goes unmentioned.
+		withHome({ ".config/opencode/skill/pdf.md": "Handle PDFs.\n" }, (home) => {
+			const result = runMigration({ home });
+			const write = result.plan.writes.find((w) => w.path === join(home, ".labunbun", "skills", "pdf", "SKILL.md"));
+			expect(write?.content).toContain("Handle PDFs.");
+		});
+	});
+
+	test("a nested SKILL.md with no `name:` is a file opencode drops too, and the report says which", () => {
+		// `skill.ts:87-92`: with no `name:` in the frontmatter the only fallback is
+		// the file's own basename, and that one is available **only** when the file
+		// sits directly in the source directory. Nested, there is no name and
+		// `if (!name) continue` takes it. Importing it would hand over something the
+		// user cannot run in OpenCode either.
+		withHome({ ".config/opencode/skill/pdf/SKILL.md": "---\ndescription: PDFs\n---\n\nBody.\n" }, (home) => {
+			const raw = readOpencode(home);
+			expect(raw.skills).toEqual([]);
+			expect(raw.unnamedSkills).toEqual([join(home, ".config", "opencode", "skill", "pdf", "SKILL.md")]);
+			const result = runMigration({ home });
+			const skip = result.plan.items.find((i) => i.action === "skip" && i.detail.includes("opencode does not load"));
+			expect(skip?.detail).toContain("add a `name:` to it");
+		});
+	});
+
+	test("a top-level markdown file with no frontmatter at all is still a skill, named by its own name", () => {
+		// The other half: OpenCode's fallback is the basename for a top-level file
+		// whether or not the frontmatter parsed, so an importer that required a
+		// `name:` would drop a skill the user can run today.
+		withHome({ ".config/opencode/skill/plain.md": "Just text.\n" }, (home) => {
+			const raw = readOpencode(home);
+			expect(raw.skills.map((skill) => skill.name)).toEqual(["plain"]);
+		});
+	});
+
+	test("a bare markdown file does not pick up the skills standing beside it", () => {
+		// A bare `<dir>/<name>.md` has the source directory as its directory, so a
+		// supporting-file scan rooted there would copy every other skill's files —
+		// and their `SKILL.md` files with them, since only a scan's own top level
+		// excludes that name. The result would be one skill's directory holding
+		// another's text.
+		withHome(
+			{
+				".config/opencode/skill/bare.md": "Just text.\n",
+				".config/opencode/skill/other/SKILL.md": "---\nname: other\n---\n\nBody.\n",
+				".config/opencode/skill/other/reference.md": "# api",
+			},
+			(home) => {
+				const result = runMigration({ home });
+				const paths = result.plan.writes.map((w) => w.path);
+				expect(paths).toContain(join(home, ".labunbun", "skills", "bare", "SKILL.md"));
+				expect(paths).toContain(join(home, ".labunbun", "skills", "other", "reference.md"));
+				// `other`'s files must not have been written into `bare`'s directory.
+				expect(paths).not.toContain(join(home, ".labunbun", "skills", "bare", "reference.md"));
+			},
+		);
+	});
+
+	test("a SKILL.md two directories down is a skill, because the glob says any depth", () => {
+		withHome({ ".config/opencode/skill/a/b/SKILL.md": "---\nname: deep\n---\n\nBody.\n" }, (home) => {
+			const result = runMigration({ home });
+			const write = result.plan.writes.find((w) => w.path === join(home, ".labunbun", "skills", "deep", "SKILL.md"));
+			expect(write?.content).toContain("Body.");
+		});
+	});
+
+	test("a two-deep SKILL.md with no `name:` is still not a skill, and is still named", () => {
+		// The name fallback is keyed on the **source** directory, not on how far
+		// down the file is, so depth does not rescue it.
+		withHome({ ".config/opencode/skill/a/b/SKILL.md": "---\ndescription: deep\n---\n\nBody.\n" }, (home) => {
+			const raw = readOpencode(home);
+			expect(raw.skills).toEqual([]);
+			expect(raw.unnamedSkills).toHaveLength(1);
 		});
 	});
 
@@ -1649,6 +1794,409 @@ describe("opencode: the database", () => {
 			expect(readOpencodeConversation(join(dataPath(home), "opencode.db"), "s1").messages.map((m) => m.id)).toEqual([
 				"m1",
 			]);
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// v2's message table
+// ---------------------------------------------------------------------------
+
+/**
+ * A database shaped the way v2 leaves one.
+ *
+ * **The v1 `message`/`part` tables are created and left empty on purpose.** v2
+ * keeps them — its own migration re-indexes `message` and `part` rather than
+ * dropping them (`packages/core/src/database/migration/20260312043431_session_message_cursor.ts:6-11`)
+ * and adds `session_message` beside them
+ * (`20260427172553_slow_nightmare.ts:9-17`) — but nothing under
+ * `packages/core/src/` reads or writes them. A fixture that omitted them would
+ * pass for a reader that simply prefers the new table; a fixture where they are
+ * present and empty fails for a reader that asks the v1 question first, which is
+ * the bug.
+ */
+function makeOpencodeV2Db(dir: string, name: string, seed?: (db: Database) => void): string {
+	mkdirSync(dir, { recursive: true });
+	const path = join(dir, name);
+	const db = new Database(path);
+	db.run(
+		"create table session (id text primary key, project_id text, parent_id text, slug text, directory text not null, title text, time_created integer, time_archived integer)",
+	);
+	db.run("create table message (id text primary key, session_id text, time_created integer, data text)");
+	db.run("create table part (id text primary key, message_id text, session_id text, time_created integer, data text)");
+	db.run(
+		"create table session_message (id text primary key, session_id text not null, type text not null, seq integer not null, time_created integer not null, time_updated integer not null, data text not null)",
+	);
+	seed?.(db);
+	db.close();
+	return path;
+}
+
+/** `session_message` columns in the order `sql.ts:116-131` declares them. */
+function insertSessionMessage(
+	db: Database,
+	row: {
+		id: string;
+		sessionId: string;
+		seq: number;
+		type: string;
+		created?: number;
+		updated?: number;
+		data: Record<string, unknown>;
+	},
+): void {
+	db.run(
+		"insert into session_message (id, session_id, type, seq, time_created, time_updated, data) values (?, ?, ?, ?, ?, ?, ?)",
+		[
+			row.id,
+			row.sessionId,
+			row.type,
+			row.seq,
+			row.created ?? 1,
+			row.updated ?? row.created ?? 1,
+			JSON.stringify(row.data),
+		],
+	);
+}
+
+/** A v2 `user` row, the one shape the reader turns into a turn. */
+function v2User(
+	seq: number,
+	text: string,
+	created = 1000 + seq,
+	files?: unknown[],
+): Parameters<typeof insertSessionMessage>[1] {
+	return {
+		id: `msg_u${seq}`,
+		sessionId: "s1",
+		seq,
+		type: "user",
+		created,
+		data: { type: "user", text, ...(files ? { files } : {}) },
+	};
+}
+
+function v2Assistant(
+	seq: number,
+	content: unknown[],
+	created = 1000 + seq,
+): Parameters<typeof insertSessionMessage>[1] {
+	return {
+		id: `msg_a${seq}`,
+		sessionId: "s1",
+		seq,
+		type: "assistant",
+		created,
+		data: { type: "assistant", agent: "build", model: { providerID: "p", modelID: "m" }, content, time: { created } },
+	};
+}
+
+describe("opencode: v2's session_message table", () => {
+	test("a v2 conversation is imported, and the empty v1 tables beside it are not what says so", () => {
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				// Content in the v1 tables too, so "the reader found the rows" cannot
+				// be satisfied by falling back to them — only the v2 row has `text`.
+				insertMessage(db, "m1", "s1", 10, { role: "user", time: { created: 10 } });
+				insertPart(db, "p1", "m1", "s1", 10, { type: "text", text: "the v1 table's text" });
+				insertSessionMessage(db, v2User(0, "the v2 table's text"));
+			});
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			const session = read.sessions[0];
+			const texts = session.entries
+				.filter((e) => e.kind === "message")
+				.map((e) => JSON.stringify((e as { message: { content: unknown } }).message.content));
+			expect(texts).toEqual([JSON.stringify("the v2 table's text")]);
+		});
+	});
+
+	test("`readOpencodeSessionMessages` says `null` for a v1 database, so the two are told apart", () => {
+		// `[]` and `null` are different answers: an empty v2 session, and a database
+		// with no such table at all. Collapsing them is what makes a v1 install
+		// report a conversation it never read.
+		withHome({}, (home) => {
+			makeOpencodeDb(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+			});
+			expect(readOpencodeSessionMessages(join(dataPath(home), "opencode.db"), "s1")).toBeNull();
+		});
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+			});
+			// A v2 database with nothing in the session is `[]`, not `null`.
+			expect(readOpencodeSessionMessages(join(dataPath(home), "opencode.db"), "s1")).toEqual([]);
+		});
+	});
+
+	test("messages are ordered by `seq`, not by the clock", () => {
+		// `(session_id, seq)` is the unique index the source puts on the table
+		// (`session/sql.ts:133`), and two rows can share a millisecond — so a
+		// reader that ordered by time would depend on the rowid it happened to get.
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSessionMessage(db, { ...v2User(2, "third"), created: 5 });
+				insertSessionMessage(db, { ...v2User(0, "first"), created: 9 });
+				insertSessionMessage(db, { ...v2User(1, "second"), created: 1 });
+			});
+			const rows = readOpencodeSessionMessages(join(dataPath(home), "opencode.db"), "s1");
+			expect(rows?.map((r) => r.data.text)).toEqual(["first", "second", "third"]);
+		});
+	});
+
+	test("a conversation read for one session does not bring another's rows along", () => {
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSession(db, { id: "s2" });
+				insertSessionMessage(db, v2User(0, "s1's text"));
+				insertSessionMessage(db, { ...v2User(0, "s2's text"), id: "msg_u0b", sessionId: "s2" });
+			});
+			const rows = readOpencodeSessionMessages(join(dataPath(home), "opencode.db"), "s1");
+			expect(rows?.map((r) => r.data.text)).toEqual(["s1's text"]);
+		});
+	});
+
+	test("a row whose `data` is not JSON is skipped, and the rest of the session still reads", () => {
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSessionMessage(db, v2User(0, "before"));
+				db.run(
+					"insert into session_message (id, session_id, type, seq, time_created, time_updated, data) values (?, ?, ?, ?, ?, ?, ?)",
+					["msg_bad", "s1", "user", 1, 2, 2, "{not json"],
+				);
+				insertSessionMessage(db, { ...v2User(2, "after") });
+			});
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			const texts = read.sessions[0].entries
+				.filter((e) => e.kind === "message")
+				.map((e) => JSON.stringify((e as { message: { content: unknown } }).message.content));
+			expect(texts).toEqual([JSON.stringify("before"), JSON.stringify("after")]);
+		});
+	});
+
+	test("the `type` column is read, and the blob's own copy of it is only a fallback", () => {
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				// A row whose blob claims one type and whose column claims another.
+				insertSessionMessage(db, {
+					id: "msg_x",
+					sessionId: "s1",
+					seq: 0,
+					type: "system",
+					created: 1,
+					data: { type: "user", text: "claimed to be a user turn" },
+				});
+				insertSessionMessage(db, { ...v2User(1, "a real turn"), id: "msg_real" });
+			});
+			const rows = readOpencodeSessionMessages(join(dataPath(home), "opencode.db"), "s1");
+			// The column is the discriminator the union is indexed by, so it wins.
+			expect(rows?.[0].type).toBe("system");
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			const texts = read.sessions[0].entries
+				.filter((e) => e.kind === "message")
+				.map((e) => JSON.stringify((e as { message: { content: unknown } }).message.content));
+			// Had the blob's copy won, the session would carry two user turns and
+			// the system message would be one of them.
+			expect(texts).toEqual([JSON.stringify("a real turn")]);
+			expect(read.notes).toContainEqual({ reason: "system message", count: 1 });
+		});
+	});
+
+	test("a tool result is read off whichever arm of v2's `ToolState` carries the answer", () => {
+		// v2 has **no `state.output`** — that was v1's field. The four arms
+		// (`session-message.ts:83-114`) put the answer in `result` once completed,
+		// `error.message` once it failed, `content[]` on both, and none of the three
+		// while pending or running. A reader that still asked for `output` would find
+		// the empty string on all four and report every call as unanswered.
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSessionMessage(
+					db,
+					v2Assistant(0, [
+						{
+							type: "tool",
+							id: "c1",
+							name: "bash",
+							state: { status: "completed", input: { command: "ls" }, result: "a.txt", content: [] },
+						},
+						{
+							type: "tool",
+							id: "c2",
+							name: "read",
+							state: { status: "error", input: { path: "nope" }, error: { type: "unknown", message: "no such file" } },
+						},
+						{
+							type: "tool",
+							id: "c3",
+							name: "read",
+							state: { status: "completed", input: {}, content: [{ type: "text", text: "from content" }] },
+						},
+						{ type: "tool", id: "c4", name: "grep", state: { status: "running", input: { pattern: "x" } } },
+						{
+							// A tool that finished and returned nothing: `result` is
+							// `Schema.Unknown.pipe(optional)` (`session-message.ts:104`), so
+							// the empty string is a legal result rather than an absent one.
+							// The blocks beside it are what it showed the model, so stopping at
+							// the empty string reports a call as unanswered when the answer is
+							// sitting in the same state.
+							type: "tool",
+							id: "c5",
+							name: "edit",
+							state: { status: "completed", input: {}, result: "", content: [{ type: "text", text: "wrote it" }] },
+						},
+					]),
+				);
+			});
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			const results = read.sessions[0].entries.filter(
+				(e) => e.kind === "message" && e.message.role === "toolResult",
+			) as Array<{ message: { isError: boolean; content: Array<{ type: string; text?: string }> } }>;
+			expect(results).toHaveLength(5);
+			expect(results[0].message.content[0].text).toContain("a.txt");
+			expect(results[1].message.isError).toBe(true);
+			expect(results[1].message.content[0].text).toContain("no such file");
+			expect(results[2].message.content[0].text).toContain("from content");
+			expect(results[4].message.content[0].text).toContain("wrote it");
+			expect(read.notes).toContainEqual({ reason: "tool call with no recorded output", count: 1 });
+		});
+	});
+
+	test("`ToolState.input` is a string on a pending call, so it is not stringified to `{}`", () => {
+		// `session-message.ts:85-88`: `pending` holds `input` as a `Schema.String`
+		// and the other three hold a record. A reader that assumed the record — as
+		// the v1 path could, because all four of v1's arms are records — reports
+		// `{}` for every call that was recorded before it ran.
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSessionMessage(
+					db,
+					v2Assistant(0, [{ type: "tool", id: "c1", name: "bash", state: { status: "pending", input: "git status" } }]),
+				);
+			});
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			const call = read.sessions[0].entries.find((e) => e.kind === "message" && e.message.role === "assistant") as {
+				message: { content: Array<{ type: string; arguments?: string }> };
+			};
+			const block = call.message.content.find((c) => c.type === "toolCall");
+			expect(block?.arguments).toBe("git status");
+		});
+	});
+
+	test("a compaction is one row here, and it becomes a marker holding the summary", () => {
+		// v1 split it across two messages joined by a `parentID` link; v2 records one
+		// `compaction` row with both halves in it (`session-message.ts:184-189`), so
+		// the v1 pairing pass has nothing to pair and the summary has to be read off
+		// this row directly.
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSessionMessage(db, v2User(0, "the long one"));
+				insertSessionMessage(db, {
+					id: "msg_c",
+					sessionId: "s1",
+					seq: 1,
+					type: "compaction",
+					created: 12,
+					data: { type: "compaction", reason: "auto", summary: "what it decided", recent: "…" },
+				});
+				insertSessionMessage(db, { ...v2User(2, "after"), id: "msg_u2" });
+			});
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			const entries = read.sessions[0].entries;
+			const marker = entries.findIndex((e) => e.kind === "compaction");
+			expect(marker).toBe(1);
+			expect((entries[marker] as { summary: string }).summary).toBe("what it decided");
+			expect(read.notes).toContainEqual({ reason: "compaction summary", count: 1 });
+		});
+	});
+
+	test("the types that are not messages are counted under their own names, not turned into turns", () => {
+		// This importer's transcript has three roles — user, assistant, tool result
+		// (`packages/ai/src/types.ts:125`) — and no system one. `synthetic` is what
+		// the tool injected, `system` is the harness talking to itself, `shell` is a
+		// record of a command and its output rather than something the user said, and
+		// the two switches record a setting change. Rendering any of them as a user
+		// turn would put words in the user's mouth.
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSessionMessage(db, v2User(0, "the only real turn"));
+				for (const [seq, type, data] of [
+					[1, "synthetic", { text: "injected" }],
+					[2, "system", { text: "harness" }],
+					[3, "shell", { callID: "c", command: "ls", output: "a.txt" }],
+					[4, "agent-switched", { agent: "plan" }],
+					[5, "model-switched", { model: { providerID: "p", modelID: "m" } }],
+				] as Array<[number, string, Record<string, unknown>]>) {
+					insertSessionMessage(db, {
+						id: `msg_${type}`,
+						sessionId: "s1",
+						seq,
+						type,
+						created: 100 + seq,
+						data: { type, ...data },
+					});
+				}
+			});
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			const texts = read.sessions[0].entries
+				.filter((e) => e.kind === "message")
+				.map((e) => JSON.stringify((e as { message: { content: unknown } }).message.content));
+			expect(texts).toEqual([JSON.stringify("the only real turn")]);
+			expect(read.notes).toEqual([
+				{ reason: "tool-injected message", count: 1 },
+				{ reason: "system message", count: 1 },
+				{ reason: "shell record, with its output", count: 1 },
+				{ reason: "agent or model switch", count: 2 },
+			]);
+		});
+	});
+
+	test("a file attached to a user turn is counted, and the turn still imports", () => {
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSessionMessage(
+					db,
+					v2User(0, "look at this", 10, [
+						{ uri: "file:///a.png", mime: "image/png", name: "a.png" },
+						{ uri: "file:///b.txt", mime: "text/plain" },
+					]),
+				);
+			});
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			expect(read.sessions[0].entries.filter((e) => e.kind === "message")).toHaveLength(1);
+			expect(read.notes).toContainEqual({ reason: "file attachment", count: 2 });
+		});
+	});
+
+	test("text, reasoning and an unknown content block are each read or counted", () => {
+		withHome({}, (home) => {
+			makeOpencodeV2Db(dataPath(home), "opencode.db", (db) => {
+				insertSession(db, { id: "s1" });
+				insertSessionMessage(
+					db,
+					v2Assistant(0, [
+						{ type: "text", id: "t1", text: "the answer" },
+						{ type: "reasoning", id: "r1", text: "the thinking" },
+						{ type: "citation", id: "c1" },
+						"not an object",
+					]),
+				);
+			});
+			const read = collectHistory("opencode", home, { cwd: process.cwd(), scope: "all", limit: 5 });
+			const message = read.sessions[0].entries.find((e) => e.kind === "message" && e.message.role === "assistant") as {
+				message: { content: Array<{ type: string }> };
+			};
+			expect(message.message.content.map((c) => c.type)).toEqual(["text", "thinking"]);
+			expect(read.notes).toContainEqual({ reason: "message this build does not read", count: 2 });
 		});
 	});
 });

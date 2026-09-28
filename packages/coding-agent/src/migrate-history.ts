@@ -42,7 +42,13 @@ import { readText, tildePath } from "./migrate-core.ts";
 import type { MigrationSourceId } from "./migrate-types.ts";
 import { minimaxRoot } from "./minimax-home.ts";
 import { listMinimaxSessions, readMinimaxSession } from "./minimax-session.ts";
-import { type OpencodePartRow, readOpencodeConversation, readOpencodeSessions } from "./opencode-db.ts";
+import {
+	type OpencodePartRow,
+	type OpencodeSessionMessageRow,
+	readOpencodeConversation,
+	readOpencodeSessionMessages,
+	readOpencodeSessions,
+} from "./opencode-db.ts";
 import { opencodeDatabasePath, opencodePromptHistoryFile, opencodeRoots } from "./opencode-home.ts";
 import { listStepSessions, readStepSession } from "./step-session.ts";
 import { readZcodeConversation, readZcodeSessions, type ZcodePartRow } from "./zcode-db.ts";
@@ -1112,9 +1118,230 @@ function opencodeSummaryText(parts: OpencodePartRow[]): string {
 		.trim();
 }
 
+/**
+ * A tool's recorded answer, in the order v1's `output` then `error` put them.
+ *
+ * **v2 has no `state.output`.** The four arms of `ToolState`
+ * (`packages/schema/src/session-message.ts:83-114`) carry their answer in
+ * three different places: a completed call has `result` (typed `unknown`, so a
+ * tool that returns something other than a string is stringified here) and
+ * `content[]` of `text`/`file` blocks; a failed one has `error.message`;
+ * pending and running have none of the three. `result` first because that is
+ * what v1's `output` held — the tool's own answer rather than the rendering of
+ * it — and `content` last because it is the fallback for a tool that filled in
+ * only its model-facing blocks.
+ */
+function opencodeV2ToolOutput(state: Record<string, unknown>): string {
+	const result = state.result;
+	if (typeof result === "string" && result !== "") return result;
+	const error = asRecord(state.error);
+	const message = error === null ? "" : asText(error.message);
+	if (message !== "") return message;
+	const blocks: string[] = [];
+	for (const block of Array.isArray(state.content) ? state.content : []) {
+		const entry = asRecord(block);
+		if (entry === null) continue;
+		if (entry.type === "text") {
+			const text = asText(entry.text);
+			if (text) blocks.push(text);
+			continue;
+		}
+		// A file block has no text to carry, so it is named by whichever of the
+		// two identifying fields it has rather than dropped without a word.
+		if (entry.type === "file") blocks.push(`[file] ${asText(entry.name) || asText(entry.uri)}`);
+	}
+	return blocks.join("\n");
+}
+
+/**
+ * `ToolState.input` is a **string** on the pending arm and a record on the other
+ * three (`session-message.ts:85-113`), so a call that was recorded before it ran
+ * has arguments this would otherwise stringify to `{}`.
+ */
+function opencodeV2ToolArguments(input: unknown): string {
+	if (typeof input === "string") return input;
+	const record = asRecord(input);
+	return record === null ? "{}" : JSON.stringify(record);
+}
+
+/**
+ * Pair the repaired message stream with the compaction markers, in that order.
+ *
+ * A marker's position is an index into `collected` recorded as the stream was
+ * built, and a repair pass that dropped something invalidates it — so when
+ * anything was dropped the markers all move to the end rather than land at
+ * positions that no longer mean what they said. The drop count comes back
+ * because the caller reports it: an unpaired half is a thing left out.
+ */
+function assembleOpencodeEntries(
+	collected: AgentMessage[],
+	markers: Array<{ after: number; entry: HistoryEntry }>,
+): { entries: HistoryEntry[]; dropped: number } {
+	const repaired = repairToolPairing(collected);
+	const entries: HistoryEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
+	if (markers.length > 0) {
+		if (repaired.dropped === 0) {
+			for (const marker of [...markers].sort((a, b) => b.after - a.after)) {
+				entries.splice(Math.min(marker.after, entries.length), 0, marker.entry);
+			}
+		} else {
+			entries.push(...markers.map((marker) => marker.entry));
+		}
+	}
+	return { entries, dropped: repaired.dropped };
+}
+
+/**
+ * v2's messages, which are one typed JSON object per row rather than a `message`
+ * row plus its `part` rows.
+ *
+ * Three of the eight types are **not messages and are counted rather than
+ * turned into one**: `synthetic` is what the tool itself injected, `system` is
+ * the harness talking to itself, and `agent-switched`/`model-switched` record a
+ * setting change. This importer's transcript has three roles — user, assistant,
+ * tool result (`packages/ai/src/types.ts:125`) — and no system one, so rendering
+ * any of them as a user turn would put words in the user's mouth. `shell` is the
+ * same case: a record of a command the user ran, carrying its output, which is
+ * not something the user said. Each is counted under a name that says which.
+ *
+ * The one type that is a real message and is not read as a turn is `compaction`,
+ * which becomes a marker: v1 split it across two messages joined by a `parentID`
+ * link, v2 records it as one row with both halves in it
+ * (`session-message.ts:184-189`).
+ */
+function opencodeV2Session(rows: OpencodeSessionMessageRow[]): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const notes: HistoryNote[] = [];
+	let synthetic = 0;
+	let system = 0;
+	let shells = 0;
+	let switches = 0;
+	let attachments = 0;
+	let unknown = 0;
+	let emptyOutputs = 0;
+	let summaries = 0;
+
+	const collected: AgentMessage[] = [];
+	const markers: Array<{ after: number; entry: HistoryEntry }> = [];
+
+	for (const message of rows) {
+		const created = asRecord(message.data.time)?.created;
+		const timestamp = typeof created === "number" ? created : message.timeCreated;
+
+		if (message.type === "user") {
+			if (Array.isArray(message.data.files)) attachments += message.data.files.length;
+			const text = asText(message.data.text);
+			if (text) collected.push(userMessage(text, timestamp));
+			continue;
+		}
+		if (message.type === "synthetic") {
+			synthetic += 1;
+			continue;
+		}
+		if (message.type === "system") {
+			system += 1;
+			continue;
+		}
+		if (message.type === "shell") {
+			shells += 1;
+			continue;
+		}
+		if (message.type === "agent-switched" || message.type === "model-switched") {
+			switches += 1;
+			continue;
+		}
+		if (message.type === "compaction") {
+			summaries += 1;
+			markers.push({
+				after: collected.length,
+				entry: {
+					kind: "compaction",
+					// `summary` is required by the schema, so this only fires on a row
+					// that failed to decode; the marker still has to say something.
+					summary: asText(message.data.summary) || OPENCODE_MISSING_SUMMARY,
+					preTokens: 0,
+				},
+			});
+			continue;
+		}
+		if (message.type !== "assistant") {
+			unknown += 1;
+			continue;
+		}
+
+		const content: AssistantContent[] = [];
+		const results: AgentMessage[] = [];
+		for (const block of Array.isArray(message.data.content) ? message.data.content : []) {
+			const entry = asRecord(block);
+			if (entry === null) {
+				unknown += 1;
+				continue;
+			}
+			if (entry.type === "text") {
+				const text = asText(entry.text);
+				if (text) content.push(textContent(text));
+				continue;
+			}
+			if (entry.type === "reasoning") {
+				const thinking = asText(entry.text);
+				if (thinking) content.push({ type: "thinking", thinking });
+				continue;
+			}
+			if (entry.type !== "tool") {
+				unknown += 1;
+				continue;
+			}
+			// v2's tool block carries its own `id` where v1's part carried a
+			// separate `callID` (`session-message.ts:140-152`).
+			const callId = asText(entry.id);
+			if (!callId) {
+				unknown += 1;
+				continue;
+			}
+			const name = asText(entry.name) || UNKNOWN_TOOL_NAME;
+			const state = asRecord(entry.state) ?? {};
+			content.push({
+				type: "toolCall",
+				id: callId,
+				name,
+				arguments: opencodeV2ToolArguments(state.input),
+			});
+			const output = opencodeV2ToolOutput(state);
+			if (output === "") emptyOutputs += 1;
+			results.push(toolResultMessage(callId, name, resultContent(output), asText(state.status) === "error", timestamp));
+		}
+		// A tool block that got this far also pushed its call, so `content` is
+		// non-empty whenever `results` is — there is no result-only case to count.
+		if (content.length > 0) {
+			const calls = content.some((block) => block.type === "toolCall");
+			collected.push(assistantMessage({ content, timestamp, stopReason: calls ? "toolUse" : "stop" }));
+			collected.push(...results);
+		}
+	}
+
+	const { entries, dropped } = assembleOpencodeEntries(collected, markers);
+	if (synthetic > 0) notes.push({ reason: "tool-injected message", count: synthetic });
+	if (system > 0) notes.push({ reason: "system message", count: system });
+	if (shells > 0) notes.push({ reason: "shell record, with its output", count: shells });
+	if (switches > 0) notes.push({ reason: "agent or model switch", count: switches });
+	if (attachments > 0) notes.push({ reason: "file attachment", count: attachments });
+	if (unknown > 0) notes.push({ reason: "message this build does not read", count: unknown });
+	if (emptyOutputs > 0) notes.push({ reason: "tool call with no recorded output", count: emptyOutputs });
+	if (summaries > 0) notes.push({ reason: "compaction summary", count: summaries });
+	if (dropped > 0) notes.push({ reason: "unpaired tool call or result", count: dropped });
+	return { entries, notes };
+}
+
 function readOpencodeSession(sourceId: string, home: string): { entries: HistoryEntry[]; notes: HistoryNote[] } {
 	const dbPath = opencodeDbPathFor(home);
 	if (dbPath === null) return { entries: [], notes: [] };
+	// v2 keeps its messages in `session_message`, one row each with the whole body
+	// in a JSON column, and reads nothing out of the v1 `message`/`part` pair —
+	// `packages/core/src/session/sql.ts:116-137` declares the new table, and there is
+	// no query against `message` anywhere under `packages/core/src/`. Asking for the
+	// v1 pair first would therefore report an empty conversation for a v2 install
+	// that has one, which is the failure this branch exists to prevent.
+	const v2 = readOpencodeSessionMessages(dbPath, sourceId);
+	if (v2 !== null) return opencodeV2Session(v2);
 	const { messages, parts } = readOpencodeConversation(dbPath, sourceId);
 	const notes: HistoryNote[] = [];
 	let synthetic = 0;
@@ -1265,22 +1492,12 @@ function readOpencodeSession(sourceId: string, home: string): { entries: History
 		}
 	}
 
-	const repaired = repairToolPairing(collected);
-	let entries: HistoryEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
-	if (markers.length > 0) {
-		if (repaired.dropped === 0) {
-			for (const marker of [...markers].sort((a, b) => b.after - a.after)) {
-				entries.splice(Math.min(marker.after, entries.length), 0, marker.entry);
-			}
-		} else {
-			entries = [...entries, ...markers.map((marker) => marker.entry)];
-		}
-	}
+	const { entries, dropped } = assembleOpencodeEntries(collected, markers);
 	if (synthetic > 0) notes.push({ reason: "tool-injected text part", count: synthetic });
 	if (ignored > 0) notes.push({ reason: "unsupported part", count: ignored });
 	if (emptyOutputs > 0) notes.push({ reason: "tool call with no recorded output", count: emptyOutputs });
 	if (summaries > 0) notes.push({ reason: "compaction summary", count: summaries });
-	if (repaired.dropped > 0) notes.push({ reason: "unpaired tool call or result", count: repaired.dropped });
+	if (dropped > 0) notes.push({ reason: "unpaired tool call or result", count: dropped });
 	return { entries, notes };
 }
 

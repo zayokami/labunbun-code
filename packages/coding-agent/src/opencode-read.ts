@@ -8,17 +8,9 @@
  * source and a blog post disagree, this module follows the source and says so.
  */
 
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import {
-	countTreeEntries,
-	isRecord,
-	parseJsonc,
-	readAgentFiles,
-	readCommandFiles,
-	readSkillDirs,
-	readText,
-} from "./migrate-core.ts";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { countTreeEntries, isRecord, parseJsonc, readAttachments, readCommandFiles, readText } from "./migrate-core.ts";
 import type { RawCommands, RawFile } from "./migrate-types.ts";
 import { readOpencodeTableNames } from "./opencode-db.ts";
 import {
@@ -31,6 +23,7 @@ import {
 	opencodeRoots,
 	opencodeVendorTree,
 } from "./opencode-home.ts";
+import { parseFrontmatter } from "./skills.ts";
 
 // ---------------------------------------------------------------------------
 // OpenCode
@@ -237,9 +230,16 @@ export interface RawOpencode {
 	plugins: string[];
 	/** `instructions` — extra instruction files, resolved the way OpenCode resolves them. */
 	instructionPaths: string[];
-	/** Skills under `<config>/skill` and `<config>/skills`. */
+	/** Skills under `<config>/skill` and `<config>/skills`, plus any `skills.paths`. */
 	skills: RawFile[];
-	/** Agent markdown under `<config>/agent` and `<config>/agents`. */
+	/**
+	 * `SKILL.md` files OpenCode itself will not load — nested ones whose frontmatter
+	 * has no `name:` (`packages/core/src/skill.ts:87-99`). Named in the report
+	 * rather than imported, because importing them would hand over a skill the user
+	 * cannot run in OpenCode either.
+	 */
+	unnamedSkills: string[];
+	/** Agent markdown under `<config>/agent`, `agents`, `mode` and `modes`. */
 	agents: RawFile[];
 	/** Command markdown under `<config>/command` and `<config>/commands`. */
 	commands: RawCommands;
@@ -352,15 +352,199 @@ function parseOpencodeConfig(text: string): Record<string, unknown> {
 /** Directories under a config root that hold one kind of asset, in the tool's own spelling. */
 const OPENCODE_ASSET_DIRS: Readonly<Record<"skills" | "agents" | "commands", readonly string[]>> = {
 	// `{skill,skills}/**/SKILL.md` (opencode/src/skill/index.ts:24, scanned over
-	// every config directory at `:204-208`).
+	// every config directory at `:204-208`). v2 registers **both** of these
+	// unconditionally, as two separate sources
+	// (`packages/core/src/config/plugin/skill.ts:23-34`).
 	skills: ["skill", "skills"],
-	agents: ["agent", "agents"],
+	// `agent`/`agents` recursively and `mode`/`modes` one level deep
+	// (`packages/core/src/config/plugin/agent.ts:21-24`) — four directories, two
+	// depths. `mode`/`modes` are v1's spelling of a primary agent and are still
+	// read by v2.
+	agents: ["agent", "agents", "mode", "modes"],
 	commands: ["command", "commands"],
 };
 
 /** Every directory under a config root that holds one kind of asset. */
 function opencodeAssetDirs(configRoot: string, kind: keyof typeof OPENCODE_ASSET_DIRS): string[] {
 	return OPENCODE_ASSET_DIRS[kind].map((name) => join(configRoot, name)).filter((path) => existsSync(path));
+}
+
+/**
+ * The skills in one source directory, by OpenCode's own rule, and the ones it skips.
+ *
+ * OpenCode globs two shapes in the directory (`packages/core/src/skill.ts:79`): any
+ * `*.md` at the top level, and `SKILL.md` at any depth
+ * and then names each hit (`skill.ts:87-99`): the frontmatter's `name` if it has
+ * one, otherwise the file's own basename — **but only when the file sits directly
+ * in the source directory**, and otherwise nothing at all. Two consequences, and
+ * both are silent in OpenCode:
+ *
+ * - a bare `<dir>/<name>.md` is a skill, and a reader that only looks inside
+ *   subdirectories for a `SKILL.md` never sees one;
+ * - a `<dir>/<sub>/SKILL.md` whose frontmatter has no `name:` is not a skill at
+ *   all, so importing it would be importing something the user cannot run in
+ *   OpenCode either. Those are returned as `unnamed` and named in the report.
+ *
+ * The name is the frontmatter's where there is one, so a skill can arrive under a
+ * different name than the directory it was found in.
+ *
+ * A nested skill carries the files beside its `SKILL.md`, and a bare top-level
+ * `.md` carries none: its directory is the source directory, so anything scanned
+ * there belongs to some other skill too.
+ */
+function readOpencodeSkillDir(dir: string): { skills: RawFile[]; unnamed: string[] } {
+	const skills: RawFile[] = [];
+	const unnamed: string[] = [];
+	const entries: string[] = [];
+	try {
+		if (!existsSync(dir)) return { skills, unnamed };
+		// The two glob arms, spelled out: `*.md` directly in `dir`, and `SKILL.md`
+		// at any depth below it. A `.md` below the top that is not named `SKILL.md`
+		// is not a skill, and is not counted either — OpenCode's glob does not match
+		// it, so nothing is lost by not mentioning it.
+		for (const name of readdirSync(dir).sort()) {
+			const path = join(dir, name);
+			if (!name.endsWith(".md") || !statSync(path).isFile()) continue;
+			entries.push(path);
+		}
+		const walk = (current: string): void => {
+			for (const sub of readdirSync(current, { withFileTypes: true })) {
+				if (!sub.isDirectory() || sub.name === "node_modules") continue;
+				const full = join(current, sub.name);
+				const nested = join(full, "SKILL.md");
+				if (existsSync(nested) && statSync(nested).isFile()) entries.push(nested);
+				walk(full);
+			}
+		};
+		walk(dir);
+	} catch {
+		return { skills, unnamed };
+	}
+
+	for (const file of entries) {
+		const content = readText(file);
+		if (content === null) continue;
+		const { data } = parseFrontmatter(content);
+		const declared = typeof data.name === "string" ? data.name.trim() : "";
+		// The fallback is the file's own basename, and it is offered **only** to a
+		// file sitting directly in the source directory. The comparison is against
+		// the source directory rather than the immediate parent, because that is
+		// the directory OpenCode globs in.
+		const isTopLevel = dirname(file) === dir;
+		const name = declared !== "" ? declared : isTopLevel ? basename(file, ".md") : "";
+		if (name === "") {
+			unnamed.push(file);
+			continue;
+		}
+		// A bare `.md` gets no attachments: its "directory" is the source directory
+		// itself, and scanning that would carry every skill beside it — including
+		// their own `SKILL.md` files, which `readAttachments` only excludes at the
+		// top of a scan. A nested skill's directory is its own, so that one scans.
+		const { attachments, attachmentSkips } = isTopLevel
+			? { attachments: undefined, attachmentSkips: undefined }
+			: readAttachments(dirname(file));
+		skills.push({
+			name,
+			sourcePath: file,
+			content,
+			attachments,
+			attachmentSkips,
+			detail: isTopLevel ? "a bare markdown file opencode loads as a skill of its own" : undefined,
+		});
+	}
+	return { skills, unnamed };
+}
+
+/**
+ * Agent markdown under the four directories v2 reads, with the nesting flattened.
+ *
+ * `legacySources` (`packages/core/src/config/plugin/agent.ts:21-24`) is two
+ * patterns with **different depths**: `agent`/`agents` is read recursively and
+ * `mode`/`modes` only one level down. A nested `agent/build/plan.md` is a real
+ * agent to OpenCode and invisible to a one-level reader.
+ *
+ * The name v2 derives is the path relative to the config directory with the
+ * leading segment and the extension removed (`agent.ts:156-160`), so
+ * `agent/build/plan.md` is `build/plan`. This importer writes one file per agent
+ * under a flat directory, so the separator becomes a dash — the same call
+ * `readCommandFiles` makes for the same reason, and a collision between two
+ * flattened names is reported by `collectFileWrites` rather than silently won.
+ *
+ * A file under `mode`/`modes` is forced to `mode: "primary"` (`agent.ts:173`),
+ * which is why those two are worth saying out loud in the report: the agent is
+ * offered to the session as a top-level choice, not spawned as a subagent.
+ */
+function readOpencodeAgentFiles(configRoot: string): RawFile[] {
+	const files: RawFile[] = [];
+	for (const name of OPENCODE_ASSET_DIRS.agents) {
+		const dir = join(configRoot, name);
+		if (!existsSync(dir)) continue;
+		const primary = name === "mode" || name === "modes";
+		for (const file of primary ? markdownFilesIn(dir) : markdownFilesUnder(dir)) {
+			const content = readText(file.path);
+			if (content === null) continue;
+			const { data } = parseFrontmatter(content);
+			const notes: string[] = [];
+			if (primary) {
+				notes.push(
+					"opencode forces this one to be a primary agent, so it is offered as a top-level choice rather than spawned as a subagent",
+				);
+			}
+			if (data.model) {
+				notes.push(
+					`agent copied verbatim; its "model: ${data.model}" frontmatter is resolved when a subagent starts — a name that no longer resolves falls back to the session model and says so`,
+				);
+			}
+			files.push({
+				name: file.name,
+				sourcePath: file.path,
+				content,
+				detail: notes.length === 0 ? undefined : `${notes.join(" — ")}`,
+			});
+		}
+	}
+	return files;
+}
+
+/** `*.md` directly in `dir`, sorted. */
+function markdownFilesIn(dir: string): Array<{ name: string; path: string }> {
+	try {
+		return readdirSync(dir)
+			.filter((name) => name.endsWith(".md"))
+			.sort()
+			.map((name) => ({ name, path: join(dir, name) }))
+			.filter((entry) => statSync(entry.path).isFile());
+	} catch {
+		return [];
+	}
+}
+
+/** `*.md` at any depth under `dir`, with the separators flattened into the name. */
+function markdownFilesUnder(dir: string): Array<{ name: string; path: string }> {
+	const out: Array<{ name: string; path: string }> = [];
+	const walk = (current: string, prefix: string): void => {
+		for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+			if (entry.name === "node_modules") continue;
+			const path = join(current, entry.name);
+			if (entry.isDirectory()) {
+				walk(path, prefix === "" ? entry.name : `${prefix}-${entry.name}`);
+				continue;
+			}
+			if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+			// The extension stays: `readMarkdownDir` — which read one level and is
+			// what this replaces for `agent`/`agents` — put it in the name, and the
+			// target path is built from that name. Dropping it would move every
+			// already-migrated agent's file.
+			out.push({ name: prefix === "" ? entry.name : `${prefix}-${entry.name}`, path });
+		}
+	};
+	try {
+		if (!existsSync(dir)) return out;
+		walk(dir, "");
+	} catch {
+		return out;
+	}
+	return out;
 }
 
 /**
@@ -451,10 +635,15 @@ export function readOpencode(home: string): RawOpencode {
 	const credentialFiles = root.files.filter((name) => OPENCODE_CREDENTIAL_NAME.test(name));
 	const skillEntries = opencodeSkillEntries(config);
 	const extraSkillPaths = skillEntries.paths;
-	const skills = [
-		...opencodeAssetDirs(roots.config, "skills").flatMap((dir) => readSkillDirs(dir)),
-		...extraSkillPaths.flatMap((path) => readSkillDirs(path)),
-	];
+	// OpenCode's own skill rules, not the generic one-level reader nine sources
+	// share: a skill is either a directory holding a `SKILL.md` **that names
+	// itself** or a bare `.md` sitting directly in the source directory. Both are
+	// read, and what OpenCode skips is counted and named.
+	const scanned = [...opencodeAssetDirs(roots.config, "skills"), ...extraSkillPaths].map((dir) =>
+		readOpencodeSkillDir(dir),
+	);
+	const skills = scanned.flatMap((entry) => entry.skills);
+	const unnamedSkills = scanned.flatMap((entry) => entry.unnamed);
 	// The vendor exclusion runs over the paths themselves, not over the results,
 	// so a `skills.paths` entry pointing into `~/.claude` is caught the same way a
 	// scan of that tree would be.
@@ -480,7 +669,8 @@ export function readOpencode(home: string): RawOpencode {
 		plugins: opencodeStringList(opencodeConfigValue(config, "plugins")),
 		instructionPaths: opencodeInstructionPaths(config, home),
 		skills: allowedSkills,
-		agents: opencodeAssetDirs(roots.config, "agents").flatMap((dir) => readAgentFiles(dir)),
+		unnamedSkills,
+		agents: readOpencodeAgentFiles(roots.config),
 		commands: opencodeAssetDirs(roots.config, "commands").reduce<RawCommands>(
 			(acc, dir) => {
 				const read = readCommandFiles(dir);

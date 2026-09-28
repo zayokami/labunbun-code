@@ -1171,6 +1171,21 @@ export function planOpencodeAssets(
 			containsSecret: false,
 		});
 	}
+	if (raw.unnamedSkills.length > 0) {
+		// OpenCode drops these itself, in silence: a nested `SKILL.md` is only a
+		// skill if its frontmatter names it, and a file that is not a skill there
+		// is not one to hand over as though it were.
+		items.push({
+			source: "opencode",
+			from: raw.unnamedSkills.map((path) => at(path)).join(", "),
+			to: "—",
+			action: "skip",
+			detail:
+				"a skill file opencode does not load: its frontmatter has no `name:`, and a nested `SKILL.md` without one is skipped " +
+				"rather than named after its directory — add a `name:` to it and it is a skill again",
+			containsSecret: false,
+		});
+	}
 
 	for (const entry of raw.otherDirs) {
 		items.push({

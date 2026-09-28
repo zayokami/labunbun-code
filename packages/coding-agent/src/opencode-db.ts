@@ -48,6 +48,28 @@ export interface OpencodePartRow {
 }
 
 /**
+ * One row of `session_message`, the table v2 actually keeps its messages in.
+ *
+ * **The whole message body is the `data` column** — a JSON object typed by
+ * `SessionMessage.Message` (`packages/schema/src/session-message.ts:190-196`),
+ * a union of eight shapes discriminated on `type`. There is no `part` table
+ * beside it: a tool call, its output and the text around them are all
+ * `content[]` entries of one `assistant` row (`session-message.ts:140-183`).
+ */
+export interface OpencodeSessionMessageRow {
+	id: string;
+	sessionId: string;
+	/** The `type` column, falling back to `data.type`; see {@link readOpencodeSessionMessages}. */
+	type: string;
+	/** The per-session ordinal. `(session_id, seq)` is a unique index (`session/sql.ts:133`). */
+	seq: number;
+	timeCreated: number;
+	timeUpdated: number;
+	/** The decoded `data` JSON blob. */
+	data: Record<string, unknown>;
+}
+
+/**
  * Open the database read-only for the duration of `fn`, or return `null`.
  *
  * `fn`'s own errors are swallowed too: the schema belongs to whichever OpenCode
@@ -191,5 +213,71 @@ export function readOpencodeConversation(
 			});
 			return { messages, parts };
 		}) ?? empty
+	);
+}
+
+/**
+ * Does this database have v2's `session_message` table?
+ *
+ * A question about `sqlite_master`, which holds the schema rather than any
+ * user's rows — the one query that is safe to ask of a database whose contents
+ * are otherwise off limits.
+ */
+export function hasOpencodeSessionMessages(dbPath: string): boolean {
+	return (
+		withDb(dbPath, (db) => {
+			const row = db
+				.query("select name from sqlite_master where type = 'table' and name = 'session_message'")
+				.get() as Record<string, unknown> | null;
+			return row !== null && row !== undefined;
+		}) === true
+	);
+}
+
+/**
+ * v2's messages for one session, in order, or `null` when this install has no
+ * `session_message` table at all.
+ *
+ * **`null` and `[]` mean different things** and the caller has to tell them
+ * apart: `[]` is a v2 database holding a session with nothing in it, while
+ * `null` is a v1 database, whose messages live in the `message`/`part` pair
+ * that {@link readOpencodeConversation} reads. Returning `[]` for a missing
+ * table is what would make a v2 install import no conversations while the
+ * report said there was nothing there.
+ *
+ * Ordered by `seq` rather than by time: `(session_id, seq)` is the unique
+ * index the source puts on the table (`packages/core/src/session/sql.ts:133`),
+ * and two messages can share a millisecond.
+ */
+export function readOpencodeSessionMessages(dbPath: string, sessionId: string): OpencodeSessionMessageRow[] | null {
+	if (!hasOpencodeSessionMessages(dbPath)) return null;
+	return (
+		withDb(dbPath, (db) => {
+			const rows = (
+				db
+					.query(
+						"select id, session_id, type, seq, time_created, time_updated, data from session_message where session_id = ? order by seq asc",
+					)
+					.all(sessionId) as Array<Record<string, unknown>>
+			).flatMap((row) => {
+				const data = asRecord(decodeJson(row.data));
+				if (!data) return [];
+				return [
+					{
+						id: asString(row.id),
+						sessionId: asString(row.session_id),
+						// The column is what the union is discriminated on
+						// (`sql.ts:120-131`); the blob carries its own copy, and a row
+						// written by a build that filled only one of the two still reads.
+						type: asString(row.type) || asString(data.type),
+						seq: asNumber(row.seq),
+						timeCreated: asNumber(row.time_created),
+						timeUpdated: asNumber(row.time_updated),
+						data,
+					},
+				];
+			});
+			return rows;
+		}) ?? []
 	);
 }
