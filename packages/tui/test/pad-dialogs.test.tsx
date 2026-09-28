@@ -14,7 +14,7 @@
  * happened at all.
  */
 import { describe, expect, test } from "bun:test";
-import type { PadAction } from "@labunbun/gamepad";
+import { PAD_HOLD_MS, type PadAction } from "@labunbun/gamepad";
 import { render } from "ink-testing-library";
 import { act, type ReactNode } from "react";
 import { ListPickerDialog } from "../src/components/ListPickerDialog.tsx";
@@ -63,6 +63,30 @@ async function press(pad: FakePad, action: PadAction): Promise<void> {
 	await settle(() => {
 		pad.push(action);
 	});
+}
+
+/**
+ * A hold that began after the dialog it is aimed at appeared.
+ *
+ * `isAimedAt` answers that by comparing the age of the press against the moment
+ * the dialog opened, so "aimed at this one" is a claim about elapsed time that
+ * the test otherwise has no hold of. The fixture used to be a 20 ms hold pressed
+ * the moment the dialog appeared, which passed on every machine that took more
+ * than 20 ms to get there — and on the macOS runner, which did not, the hold was
+ * correctly filtered as aimed at the screen before and the dialog never answered.
+ * A wrong answer reads as a product bug when it is the fixture racing.
+ *
+ * The age is now the one a real pad emits, and the wait past it makes the lower
+ * bound a fact instead of a hope. Twice the hold, so a timer that fires a
+ * fraction early still leaves the press inside the window.
+ *
+ * The tests that want the other side — a press that began *before* the question
+ * — are left alone: they need the elapsed time to stay under their own hold age,
+ * and 5 s and 9 s are nowhere near the time it takes to reach the press.
+ */
+async function holdAimedHere(pad: FakePad): Promise<void> {
+	await delay(PAD_HOLD_MS * 2);
+	await press(pad, padAction("confirm", { phase: "hold", heldMs: PAD_HOLD_MS }));
 }
 
 /** Render inside a theme (the components take one), with the mount flushed. */
@@ -265,7 +289,7 @@ describe("PermissionDialog and the pad", () => {
 		// the age of its own press, so it is written here as one that began after
 		// the dialog appeared: a longer one would be filtered as aimed at the
 		// screen before, which is a different rule and is tested on its own.)
-		await press(pad, padAction("confirm", { phase: "hold", heldMs: 20 }));
+		await holdAimedHere(pad);
 		expect(d.answers).toEqual([]);
 		expect(pad.buzzes).toEqual(["refused", "refused"]);
 
@@ -299,7 +323,7 @@ describe("PermissionDialog and the pad", () => {
 		const d = await permission(pad);
 
 		// Still on row one — "just this once" — and holding goes past it.
-		await press(pad, padAction("confirm", { phase: "hold", heldMs: 20 }));
+		await holdAimedHere(pad);
 		expect(d.answers).toEqual([[true, true]]);
 
 		d.unmount();
