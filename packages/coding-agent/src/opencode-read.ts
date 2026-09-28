@@ -24,6 +24,7 @@ import { readOpencodeTableNames } from "./opencode-db.ts";
 import {
 	OPENCODE_CONFIG_FILES,
 	OPENCODE_VENDOR_DIRS,
+	type OpencodeRoots,
 	opencodeDatabasePath,
 	opencodeLegacyStorageDir,
 	opencodeLegacyTomlPath,
@@ -39,15 +40,47 @@ import {
 const OPENCODE_CREDENTIAL_NAME = /(credential|secret|token|auth|\.env$)/i;
 
 /**
- * The two files at the config root that hold credentials and are never opened.
+ * The files OpenCode writes credentials into, by the root each one sits in.
  *
- * `auth.json` is written 0600 (`opencode/src/auth/index.ts:10`) and holds an
- * OAuth token per provider; `mcp-auth.json` is the MCP client's own OAuth cache
- * and is written the same way (`opencode/src/mcp/auth.ts:37`). Their contents are
- * the credentials of the user's accounts, and this importer reports their presence
- * and nothing else.
+ * **The data root, not the config root** — which is where a reader looks first,
+ * and where this importer looked until the report said "no credentials here" on a
+ * machine holding two. `auth.json` is
+ * `path.join(Global.Path.data, "auth.json")` (`opencode/src/auth/index.ts:10`),
+ * an OAuth token per provider, written 0600 (`:88`); `mcp-auth.json` is
+ * `path.join(Global.Path.data, "mcp-auth.json")` (`opencode/src/mcp/auth.ts:37`),
+ * the MCP client's own OAuth cache, written the same way (`:80`).
+ *
+ * `password` is the CLI daemon's shared secret, at
+ * `path.join(directory, "password")` over `Global.Path.state`
+ * (`cli/src/services/daemon.ts:39-41`): 32 random bytes as base64url (`:50`),
+ * written 0600 through a temp file and a rename (`:53-54`) so a reader never sees
+ * a half-written one. Its own comment gives the reason it is a file at all — so
+ * discovered clients can reconnect "without exposing a password flag or
+ * environment variable" (`:48-49`).
+ *
+ * Beside it sits `server.json`, deliberately **not** in this list. Its
+ * `Registration` is `{id, version?, url, pid}` (`cli/src/services/daemon.ts:23-28`):
+ * the address to reach the daemon and the pid of the one running it, with no
+ * secret in it. Reporting it as a credential would spend the one warning a user
+ * actually reads on a file with nothing in it.
+ *
+ * Their contents are the credentials of the user's accounts, and this importer
+ * reports their presence and nothing else.
  */
-export const OPENCODE_CREDENTIAL_FILES: readonly string[] = ["auth.json", "mcp-auth.json"];
+export const OPENCODE_CREDENTIAL_FILES: Readonly<Record<"data" | "state", readonly string[]>> = {
+	data: ["auth.json", "mcp-auth.json"],
+	state: ["password"],
+};
+
+/** One known credential file that was actually found, and where. */
+export interface OpencodeCredentialFile {
+	/** The file name, as the report prints it. */
+	name: string;
+	/** Which root it lives in, so the report can name that root rather than a guess. */
+	root: keyof typeof OPENCODE_CREDENTIAL_FILES;
+	/** The path it was found at, absolute. */
+	path: string;
+}
 
 /**
  * The tables in `opencode.db` that are never read, with the reason.
@@ -131,12 +164,19 @@ export interface RawOpencode {
 	agents: RawFile[];
 	/** Command markdown under `<config>/command` and `<config>/commands`. */
 	commands: RawCommands;
-	/** Credential files at the config root, by name. Named; never opened. */
+	/** Credential-shaped file names at the config root, by name. Named; never opened. */
 	credentialFiles: string[];
 	/** Credential tables found in the database, by name, with the reason each was left. */
 	credentialTables: string[];
-	/** `auth.json`/`mcp-auth.json`, whether or not the directory listing showed them. */
-	credentialFilesNamed: string[];
+	/**
+	 * The known credential files, found under the root each one lives in.
+	 *
+	 * Separate from `credentialFiles` because that one is a listing of the config
+	 * root and these are probes of a named path, so it reports a file whether or
+	 * not any directory listing showed it — and it carries the root, which is the
+	 * part a report line has to get right.
+	 */
+	credentialFilesNamed: OpencodeCredentialFile[];
 	/** The pre-JSON TOML file, by presence only. */
 	legacyToml: boolean;
 	/** The pre-SQLite `storage/` tree, by presence only. */
@@ -291,6 +331,25 @@ function readOpencodeCredentialTables(dbPath: string | null): string[] {
 	return readOpencodeTableNames(dbPath).filter((name) => name in OPENCODE_CREDENTIAL_TABLES);
 }
 
+/**
+ * The known credential files on this machine, each against the root it is in.
+ *
+ * `existsSync` is the only contact: a name and a path, never a byte. Each name is
+ * looked for in the root its source joins it to rather than in one root for all of
+ * them, which is the whole reason this is keyed by root — the flat list it replaces
+ * sent `password` to the config root too, and found nothing.
+ */
+function readOpencodeCredentialFiles(roots: OpencodeRoots): OpencodeCredentialFile[] {
+	const found: OpencodeCredentialFile[] = [];
+	for (const root of ["data", "state"] as const) {
+		for (const name of OPENCODE_CREDENTIAL_FILES[root]) {
+			const path = join(roots[root], name);
+			if (existsSync(path)) found.push({ name, root, path });
+		}
+	}
+	return found.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function readOpencode(home: string): RawOpencode {
 	const roots = opencodeRoots(home);
 	const merge = mergeOpencodeConfig(roots.config);
@@ -347,7 +406,7 @@ export function readOpencode(home: string): RawOpencode {
 		),
 		credentialFiles,
 		credentialTables: readOpencodeCredentialTables(databasePath),
-		credentialFilesNamed: OPENCODE_CREDENTIAL_FILES.filter((name) => existsSync(join(roots.config, name))),
+		credentialFilesNamed: readOpencodeCredentialFiles(roots),
 		legacyToml: existsSync(opencodeLegacyTomlPath(roots.config)),
 		legacyStorage,
 		databasePath,

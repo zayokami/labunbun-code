@@ -1307,6 +1307,7 @@ describe("opencode: the credential boundary", () => {
 		const headerToken = "opencode-HEADER-SENTINEL";
 		const envToken = "opencode-ENV-SENTINEL";
 		const fileToken = "opencode-FILE-SENTINEL";
+		const daemonSecret = "opencode-DAEMON-SENTINEL";
 		withHome(
 			{
 				".config/opencode/opencode.json": JSON.stringify({
@@ -1318,9 +1319,16 @@ describe("opencode: the credential boundary", () => {
 					},
 					mcp: { secretbox: { type: "remote", url: "https://m.invalid/mcp", headers: { Authorization: headerToken } } },
 				}),
-				".config/opencode/auth.json": JSON.stringify({ anthropic: { type: "oauth", refresh: fileToken } }),
-				".config/opencode/mcp-auth.json": JSON.stringify({ secretbox: { access: fileToken } }),
+				// The data root, not the config root: `auth/index.ts:10` and
+				// `mcp/auth.ts:37` both join `Global.Path.data`. Planted under
+				// `.config` these were found only because this importer was looking
+				// there too, which is the bug this placement is what pins down.
+				".local/share/opencode/auth.json": JSON.stringify({ anthropic: { type: "oauth", refresh: fileToken } }),
+				".local/share/opencode/mcp-auth.json": JSON.stringify({ secretbox: { access: fileToken } }),
 				".config/opencode/.env": `TOKEN=${fileToken}\n`,
+				// The state root, and a third secret, so the daemon's own is covered by
+				// the same boundary as the two provider ones.
+				".local/state/opencode/password": daemonSecret,
 			},
 			(home) => {
 				makeOpencodeDb(dataPath(home), "opencode.db", (db) => {
@@ -1328,7 +1336,7 @@ describe("opencode: the credential boundary", () => {
 					insertSession(db, { id: "s1" });
 				});
 				const result = runMigration({ home });
-				for (const secret of [inlineKey, headerToken, envToken, fileToken]) {
+				for (const secret of [inlineKey, headerToken, envToken, fileToken, daemonSecret]) {
 					expect(result.report).not.toContain(secret);
 				}
 				// The files are still named, so the user knows a credential was here.
@@ -1346,5 +1354,104 @@ describe("opencode: the credential boundary", () => {
 			expect(raw.credentialFilesNamed).toEqual([]);
 			expect(raw.otherFiles).toEqual([]);
 		});
+	});
+
+	/**
+	 * The three known files live in three different places, and the reader is the
+	 * only thing that knows which.
+	 *
+	 * Every one of these assertions is a location, not a membership: a reader that
+	 * asked the wrong root finds nothing and says "no credentials here", which is
+	 * the one answer a credential warning must never give. So each file is planted
+	 * under its real root, and each assertion checks the root the reader named — a
+	 * version of this that only checked the file names would pass against the
+	 * original, which looked in the config root for all three.
+	 */
+	test("each known credential file is found under the root its source joins it to", () => {
+		withHome(
+			{
+				".local/share/opencode/auth.json": "{}",
+				".local/share/opencode/mcp-auth.json": "{}",
+				".local/state/opencode/password": "s",
+				".config/opencode/opencode.json": "{}",
+			},
+			(home) => {
+				const raw = readOpencode(home);
+				expect(raw.credentialFilesNamed.map((f) => [f.name, f.root])).toEqual([
+					["auth.json", "data"],
+					["mcp-auth.json", "data"],
+					["password", "state"],
+				]);
+				// The paths are the ones under the resolved roots, spelled the way the
+				// machine spells them.
+				expect(raw.credentialFilesNamed.map((f) => f.path)).toEqual([
+					join(dataPath(home), "auth.json"),
+					join(dataPath(home), "mcp-auth.json"),
+					join(statePath(home), "password"),
+				]);
+			},
+		);
+	});
+
+	/**
+	 * The reverse direction, because that is the bug: a credential file parked in
+	 * the config root is **not** one of the known three.
+	 *
+	 * Nothing stops a user from putting a file there, and it is still caught — by
+	 * the config-root listing, which is what `credentialFiles` is. What must not
+	 * happen is the known-name probe claiming it, because the report would then name
+	 * a directory the tool does not read those names from.
+	 */
+	test("a known name in the config root is not reported as one of the known files", () => {
+		withHome(
+			{
+				".config/opencode/auth.json": "{}",
+				".config/opencode/opencode.json": "{}",
+				".local/share/opencode/mcp-auth.json": "{}",
+			},
+			(home) => {
+				const raw = readOpencode(home);
+				// Still named — by the listing, which is the mechanism that actually
+				// finds an unplaced file.
+				expect(raw.credentialFiles).toContain("auth.json");
+				// And the probe found only the one that is in its own root.
+				expect(raw.credentialFilesNamed.map((f) => f.name)).toEqual(["mcp-auth.json"]);
+			},
+		);
+	});
+
+	/**
+	 * The report line names the directory the file is really in.
+	 *
+	 * The line used to hardcode the config root, so a machine whose credentials sat
+	 * in the data root — which is where they sit — was told to look in a directory
+	 * that has none. Two roots in one home produce two lines rather than one merged
+	 * line, because the daemon's password is not a provider token and the advice
+	 * that is right for one is wrong for the other.
+	 */
+	test("the report names each root the credentials are in", () => {
+		withHome(
+			{
+				".local/share/opencode/auth.json": "{}",
+				".local/share/opencode/mcp-auth.json": "{}",
+				".local/state/opencode/password": "s",
+				".config/opencode/opencode.json": "{}",
+			},
+			(home) => {
+				const result = runMigration({ home });
+				const lines = result.plan.items.filter(
+					(i) => i.detail.startsWith("credentials: named") || i.detail.startsWith("opencode's own daemon"),
+				);
+				expect(lines.map((i) => [i.from, i.action])).toEqual([
+					[`${tildePath(home, dataPath(home))} → auth.json, mcp-auth.json`, "skip"],
+					[`${tildePath(home, statePath(home))} → password`, "skip"],
+				]);
+				// The env-var advice is for the provider tokens; the daemon's own secret
+				// gets the line that says there is nothing to carry across.
+				expect(lines[0].detail).toContain("environment variables");
+				expect(lines[1].detail).toContain("daemon server password");
+				expect(lines[1].detail).not.toContain("environment variables");
+			},
+		);
 	});
 });

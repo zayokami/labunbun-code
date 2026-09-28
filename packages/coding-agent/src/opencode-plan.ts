@@ -8,7 +8,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
 	ASSUMED_MAX_OUTPUT_TOKENS,
 	collectFileWrites,
@@ -828,16 +828,38 @@ export function planOpencode(
 	reportUnhandledKeys("opencode", config, OPENCODE_HANDLED, configFrom, items);
 
 	// ── credentials, named and never opened ──────────────────────────────────
-	const credentialNames = [...new Set([...raw.credentialFiles, ...raw.credentialFilesNamed])].sort();
-	if (credentialNames.length > 0) {
+	// Each name with the path it was found at, because the two sources of names
+	// live under different roots: the config-root ones come out of a directory
+	// listing, the known ones out of a probe of a named path, and the known ones are
+	// in the data and state roots (`OPENCODE_CREDENTIAL_FILES`). Grouped by the
+	// directory they are actually in, so a root holding two files is named once and
+	// two roots are never collapsed into one line that reads as a single directory.
+	const credentials = [
+		...raw.credentialFiles.map((name) => ({ name, path: join(raw.roots.config, name) })),
+		...raw.credentialFilesNamed.map((file) => ({ name: file.name, path: file.path })),
+	];
+	const byRoot = new Map<string, string[]>();
+	for (const entry of credentials) {
+		const dir = dirname(entry.path);
+		byRoot.set(dir, [...(byRoot.get(dir) ?? []), entry.name]);
+	}
+	for (const [dir, names] of [...byRoot].sort(([a], [b]) => a.localeCompare(b))) {
+		// The state root holds the daemon's own server password, and the advice that
+		// is right for a provider token is wrong for it: there is no environment
+		// variable to set, because it is not a credential this build has any use
+		// for. Saying "set the same values as environment variables" about it would
+		// be a line that reads as a secret a user should go and put somewhere.
+		const isDaemonState = dir === raw.roots.state;
 		items.push({
 			source: "opencode",
-			from: `${from(home, raw.roots.config)} → ${summarizeNames(credentialNames, 6)}`,
+			from: `${from(home, dir)} → ${summarizeNames(names, 6)}`,
 			to: "—",
 			action: "skip",
-			detail:
-				"credentials: named so you know they were here, never opened. Set the same values as environment variables after " +
-				"importing, and the providers above will find them",
+			detail: isDaemonState
+				? "opencode's own daemon server password, kept under the state root. Named so you know a secret was here, never " +
+					"opened, and nothing to carry across — it belongs to a server this build does not run"
+				: "credentials: named so you know they were here, never opened. Set the same values as environment variables after " +
+					"importing, and the providers above will find them",
 			containsSecret: false,
 		});
 	}
