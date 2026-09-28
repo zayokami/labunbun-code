@@ -4,7 +4,7 @@
  * are the ones an attacker would try, not the ones a well-behaved caller sends.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -224,8 +224,18 @@ describe("symlinks and junctions", () => {
 	function withWorkspace(run: (workspace: string) => void): void {
 		const root = mkdtempSync(join(tmpdir(), "labunbun-containment-"));
 		try {
-			const workspace = join(root, "workspace");
-			mkdirSync(workspace, { recursive: true });
+			const created = join(root, "workspace");
+			mkdirSync(created, { recursive: true });
+			// The workspace in the spelling the guard works in, which is not always
+			// the spelling `mkdtemp` hands back. The guard resolves symlinks before
+			// it compares anything, so it returns a real path; macOS's `tmpdir()` is
+			// `/var/folders/…` while its real path is `/private/var/folders/…`, and
+			// the two tests below that compare an exact result failed there and
+			// nowhere else. The `\\?\` prefix goes the way `resolveCanonical` strips
+			// it — but the realpath call is this file's own, so a guard that stopped
+			// resolving would still fail these tests rather than quietly agree with
+			// a fixture built by the same code it is meant to check.
+			const workspace = realpathSync(created).replace(/^\\\\\?\\/, "");
 			run(workspace);
 		} finally {
 			rmSync(root, { recursive: true, force: true });

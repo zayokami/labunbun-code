@@ -3,6 +3,7 @@ import {
 	apiKeyEnvNames,
 	applyBaseUrlOverrides,
 	baseUrlEnvVar,
+	clearCustomModels,
 	registerOpenAICompatibleProvider,
 	resolveApiKey,
 	resolveModel,
@@ -33,6 +34,14 @@ afterEach(() => {
 		else process.env[name] = original;
 	}
 	saved.clear();
+	// `registerOpenAICompatibleProvider` writes to module-level state, and this
+	// file registers one under `describe("custom providers")`. Restoring the
+	// environment above is not the same thing: the `acme-ai` provider and its
+	// `ACME_API_KEY` stayed in the registry for every test file Bun ran after this
+	// one in the same process. It surfaced as `discovery.test.ts`'s registry
+	// coverage guard naming a variable no provider ships — a red that is about
+	// this file's leftovers, landing on whichever file happened to run next.
+	clearCustomModels();
 });
 
 describe("baseUrlEnvVar", () => {
