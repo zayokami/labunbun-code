@@ -27,20 +27,39 @@
  *    instructions in the context twice under two owners. The two settings toggles
  *    TRAE requires are named too, because a copy that never activates is a silent
  *    failure in TRAE even after a faithful copy.
+ *
+ * **What the 2026-09-29 re-check added to that list, and it is most of it.** This
+ * module was written from the rules page and the MCP page alone, and a home whose
+ * only TRAE content was a skill, a command, a hook or a memory produced a report
+ * that said nothing about any of it — the global names fell into the anonymous
+ * "N entries this importer reads nothing out of" line and the project ones were
+ * never looked for at all. Seven more paths are now named with their own
+ * sentences; see {@link TRAE_OWNED_ASSET_REASONS} and the table behind it in
+ * `trae-home.ts`. None of them is **imported**, and that is a boundary rather
+ * than a verdict: each one has a home in this repo's asset planner, and reaching
+ * it is a change to the shared planner and the source registry rather than to this
+ * reader. Naming them is what this module can do alone, and it is the difference
+ * between a report that is silent and one that is honest.
  */
 
 import { type Dirent, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { isRecord, readText } from "./migrate-core.ts";
 import {
+	TRAE_OWNED_ASSETS,
 	TRAE_RULES_MAX_DEPTH,
+	TRAE_SKILL_CONFIG_FILENAME,
+	traeCrossToolSkillsDir,
 	traeEdition,
 	traeGlobalMcpFile,
+	traeGlobalMemoryFile,
 	traeGlobalRulesDir,
 	traeGlobalStateDatabase,
+	traeOwnedPath,
+	traeProjectMcpFile,
+	traeProjectMemoryDir,
 	traeProjectRoot,
 	traeProjectRulesDir,
-	traeProjectSkillsDir,
 	traeUserDataRoot,
 	traeWorkspaceStorageDir,
 } from "./trae-home.ts";
@@ -265,6 +284,62 @@ export interface RawTrae {
 export const TRAE_USER_RULES_FILE =
 	"a user_rules.md file rather than the documented user_rules directory — the documentation only ever gives the directory, and this importer reads that";
 
+/**
+ * One sentence per documented TRAE feature this importer names and does not carry.
+ *
+ * Exported for the same reason {@link TRAE_USER_RULES_FILE} is: a test that
+ * retypes a report string stops being an assertion about the report the day
+ * somebody rewords it, and starts passing again by coincidence. Each one names
+ * the feature, says it is real, and says the one thing that would make an import
+ * wrong — because "this importer does not read it" on its own reads as an
+ * oversight rather than as a decision.
+ *
+ * Every feature here is **vendor-documented** (`docs.trae.ai`, read 2026-09-29);
+ * the changelog version that introduced each is in the sentence, so a reader can
+ * tell "TRAE has this" from "TRAE had this once". The changelog is what dates
+ * the hooks claim in particular — v3.5.66, 2026-06-10, "Supported hooks" — and
+ * that entry is the reason the previous draft of `trae-plan.ts`, which said
+ * TRAE had no hook system, was wrong rather than merely out of date.
+ *
+ * The first three keys are the `name` column of `TRAE_OWNED_ASSETS` in
+ * `trae-home.ts` and are typed to match it, so the two tables cannot drift: a
+ * row with no sentence is a compile error rather than a report line that renders
+ * as `undefined`. The last three are named by the reader directly, because they
+ * are not "the documented basename under the documented root".
+ */
+export const TRAE_OWNED_ASSET_REASONS = {
+	skills:
+		"trae skills (docs.trae.ai/ide/skills, since v3.5.24/25 on 2026-01-23) are a directory of SKILL.md folders that trae loads on demand; this importer carries no skills at all yet, so naming the tree is the whole of what it can do",
+	commands:
+		"trae slash commands (docs.trae.ai/ide/slash-commands, since v3.5.54/56 in April 2026) are a directory of .md files up to three levels deep; this build's rules directory is flat and its commands are not the same shape, so importing them here would change what runs",
+	"hooks.json":
+		"trae hooks (docs.trae.ai/ide/automate-actions-with-hooks, since v3.5.66 on 2026-06-10) are user-defined shell commands on six lifecycle events; they are executable code, not settings, and a copy that lands in the wrong place runs at the wrong time — the events are not the same as this build's",
+	memory:
+		"trae memories (docs.trae.ai/ide/memories, since v3.5.21 on 2026-01-13) are a user-profile file the agent maintains about you; this importer carries no memory of its own yet, so naming it is all it can do",
+	"memory-projects":
+		"trae's per-project memory (docs.trae.ai/ide/memories) lives under memory/projects/{project_path}/project_memory.md, and the vendor never says what {project_path} is spelled like — the tree is named so you can look, and the file inside it is not guessed at",
+	"skill-config":
+		"trae's skill-config.json (docs.trae.ai/ide/skills) is the only record of which project skills you switched off; it configures trae rather than this build, so it is named and left where it is",
+} as const satisfies Record<string, string>;
+
+/**
+ * The invariant that makes {@link TRAE_OWNED_ASSETS} safe to index by `name`.
+ *
+ * Written as a value rather than a comment because a comment is not checked: if
+ * a seventh row is ever added to the table in `trae-home.ts`, this stops
+ * compiling until a sentence exists for it. `TraeName` is exactly the union of
+ * the table's `name` column, inferred rather than restated.
+ */
+type TraeOwnedName = (typeof TRAE_OWNED_ASSETS)[number]["name"];
+// A value so the type is used, and an error rather than a silent widening if a
+// row's name ever falls outside the sentences above.
+const _everyNameHasASentence: Record<TraeOwnedName, true> = {
+	skills: true,
+	commands: true,
+	"hooks.json": true,
+};
+void _everyNameHasASentence;
+
 /** The project-root files TRAE reads, named because this build reads them itself. */
 const TRAE_PROJECT_CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", "CLAUDE.local.md"] as const;
 
@@ -295,21 +370,48 @@ export function readTrae(home: string, cwd: string): RawTrae {
 			});
 		}
 	}
-	const skills = traeProjectSkillsDir(cwd);
+	const skills = traeCrossToolSkillsDir(cwd);
 	if (existsSync(skills)) {
 		notImported.push({
 			path: skills,
 			reason:
-				"TRAE reads the cross-tool .agents/skills directory; the agents source owns the .agents convention here, and two sources reading one tree is how a skill lands twice",
+				'TRAE reads the cross-tool .agents/skills directory, and only once you add the directory to the project and switch on "Enable the .agents/skills directory" under Settings > Skills & Commands; the agents source owns the .agents convention here, and two sources reading one tree is how a skill lands twice',
 		});
 	}
 	if (existsSync(join(globalRoot, "user_rules.md"))) {
 		notImported.push({ path: join(globalRoot, "user_rules.md"), reason: TRAE_USER_RULES_FILE });
 	}
+	// The four features the 2026-09-29 re-check found documented. Probed rather
+	// than listed unconditionally, because a sentence about a directory that is
+	// not there is noise, and because each of these is opt-in in trae itself
+	// (a toggle, or a file the editor only writes once the user creates
+	// something) — its absence is the normal case on most machines.
+	for (const asset of TRAE_OWNED_ASSETS) {
+		const path = traeOwnedPath(asset, home, edition, cwd);
+		if (existsSync(path)) notImported.push({ path, reason: TRAE_OWNED_ASSET_REASONS[asset.name] });
+	}
+	// The two memory paths and the skill switch file are outside that table on
+	// purpose. The memories page names a *file* one level under the directory
+	// (`user_profile.md`) and a project tree whose directory is written as
+	// `{project_path}` and never defined, and the skill page names a file rather
+	// than a directory; none of the three is "the documented basename under the
+	// root", so none of them belongs in a table that means exactly that.
+	const globalMemory = traeGlobalMemoryFile(home, edition);
+	if (existsSync(globalMemory)) {
+		notImported.push({ path: globalMemory, reason: TRAE_OWNED_ASSET_REASONS.memory });
+	}
+	const projectMemory = traeProjectMemoryDir(home, edition);
+	if (existsSync(projectMemory)) {
+		notImported.push({ path: projectMemory, reason: TRAE_OWNED_ASSET_REASONS["memory-projects"] });
+	}
+	const skillConfig = join(traeProjectRoot(cwd), TRAE_SKILL_CONFIG_FILENAME);
+	if (existsSync(skillConfig)) {
+		notImported.push({ path: skillConfig, reason: TRAE_OWNED_ASSET_REASONS["skill-config"] });
+	}
 
 	const mcp = [
 		...(userData ? [readTraeMcpDocument(traeGlobalMcpFile(userData.root), "global")] : []),
-		readTraeMcpDocument(join(projectRoot, "mcp.json"), "project"),
+		readTraeMcpDocument(traeProjectMcpFile(cwd), "project"),
 	];
 	const stateDatabases = userData ? readTraeStateDatabases(userData.root) : [];
 	const editorSettings = userData
@@ -318,11 +420,24 @@ export function readTrae(home: string, cwd: string): RawTrae {
 				.filter((entry) => existsSync(entry.path))
 		: [];
 
+	// The global names already accounted for above. Every one of these now has a
+	// sentence of its own, and leaving them in this list as well would put the
+	// same directory in one report twice — once as "trae skills, not carried"
+	// and once as "an entry this importer reads nothing out of" — which is the
+	// self-contradiction this module warns about one screen up. The list is what
+	// is left over, and it is only meaningful if the accounted half is really
+	// accounted.
+	const accountedGlobalNames = new Set<string>([
+		"user_rules",
+		"user_rules.md",
+		...TRAE_OWNED_ASSETS.filter((asset) => asset.scope === "global").map((asset) => asset.name),
+		"memory",
+	]);
 	let otherGlobalEntries: string[] = [];
 	try {
 		otherGlobalEntries = existsSync(globalRoot)
 			? readdirSync(globalRoot)
-					.filter((name) => name !== "user_rules" && name !== "user_rules.md")
+					.filter((name) => !accountedGlobalNames.has(name))
 					.sort()
 			: [];
 	} catch {

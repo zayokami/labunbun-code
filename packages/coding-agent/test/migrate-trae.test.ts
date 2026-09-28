@@ -3,8 +3,8 @@
  *
  * Smaller than Cursor's and for a reason that is a fact about the product rather
  * than a shortcut: Trae exposes less to import. There is no portable provider
- * configuration, no CLI permission list and no hook system, so this file is
- * rules, MCP, and the report of everything else found.
+ * configuration and no CLI permission list, so this file is rules, MCP, and the
+ * report of everything else found.
  *
  * Most of what is left is **negative** space, and the negative space is the
  * point. Two of Trae's paths are named in this repo only so that a reader can
@@ -20,9 +20,21 @@
  * nothing: the product-directory probe plants all four names, the depth-cap test
  * plants a rule at the fourth level, and the state-database test plants a file
  * that could only be read by opening it.
+ *
+ * **The last block in this file is the 2026-09-29 documentation re-check**, and
+ * it is the largest group of new assertions here. An earlier draft of this file
+ * opened by saying Trae has "no hook system", which was wrong: the vendor
+ * changelog records hooks in v3.5.66 (2026-06-10) and two documentation pages
+ * give the file and the six events. Four more features turned up documented with
+ * paths — skills, commands, memories, and the skill switch file — none of which
+ * the importer could reach, and all of which used to produce a report that said
+ * nothing at all. The tests below pin what the report now says, and two of them
+ * pin things that are easy to get subtly wrong: that a name is reported *once*
+ * and not twice, and that a rule bound to the git-message scene is treated as a
+ * different thing from a rule that also happens to mention commit messages.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -35,13 +47,16 @@ import {
 } from "../src/migrate.ts";
 import { MIGRATION_SOURCE_IDS, MIGRATION_SOURCE_LABELS } from "../src/migrate-types.ts";
 import {
+	TRAE_OWNED_ASSETS,
 	TRAE_PRODUCT_DIRS,
 	TRAE_RULES_MAX_DEPTH,
 	traeEdition,
 	traeGlobalMcpFile,
+	traeOwnedPath,
 	traeUserDataRoot,
 } from "../src/trae-home.ts";
-import { readTrae, TRAE_USER_RULES_FILE } from "../src/trae-read.ts";
+import { TRAE_GIT_MESSAGE_RULE } from "../src/trae-plan.ts";
+import { readTrae, TRAE_OWNED_ASSET_REASONS, TRAE_USER_RULES_FILE } from "../src/trae-read.ts";
 import { borrowSourceEnv } from "./source-env.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
@@ -185,6 +200,21 @@ function pointAtProfileBase(home: string, product: string): string {
 	const { base, variable } = profileBase(home);
 	if (variable) process.env[variable] = base;
 	return join(base, product, "User");
+}
+
+/**
+ * A fake profile directory holding a global `mcp.json`.
+ *
+ * At module scope rather than inside `describe("trae mcp")`, which is where it
+ * started: the re-check block below also has to plant a server in a profile, and
+ * a helper defined inside a `describe` body is not in scope outside it. That cost
+ * two tests a `ReferenceError` at the moment of writing, which is the whole reason
+ * this note exists — the helper is trivially correct and its *placement* was not.
+ */
+function seedProfile(home: string, product: string, servers: unknown): void {
+	const dir = pointAtProfileBase(home, product);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "mcp.json"), typeof servers === "string" ? servers : JSON.stringify(servers));
 }
 
 /**
@@ -506,13 +536,6 @@ describe("trae: rules found and deliberately not imported", () => {
 // ---------------------------------------------------------------------------
 
 describe("trae mcp", () => {
-	/** A fake profile directory holding a global `mcp.json`. */
-	function seedProfile(home: string, product: string, servers: unknown): void {
-		const dir = pointAtProfileBase(home, product);
-		mkdirSync(dir, { recursive: true });
-		writeFileSync(join(dir, "mcp.json"), typeof servers === "string" ? servers : JSON.stringify(servers));
-	}
-
 	test("the global document is read from the editor profile, not from ~/.trae", () => {
 		// The consequential fact in `trae-home.ts`, and the one with no vendor
 		// citation behind it: Trae's rules, skills and memory all live under
@@ -811,5 +834,327 @@ describe("trae: the credential boundary", () => {
 		expect(report).toContain("~/.labunbun/.mcp.json");
 		expect(items.find((item) => item.from.includes("mcpServers.vault"))?.containsSecret).toBe(true);
 		expect(report).toContain("including credential headers");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The 2026-09-29 documentation re-check
+// ---------------------------------------------------------------------------
+
+/**
+ * A rule in the shape TRAE itself writes for commit messages.
+ *
+ * The frontmatter is the point and it is the vendor's own example: the rules
+ * page's "Set rules for Git commit messages" section shows `scene: git_message`
+ * and nothing else, and the Source Control menu's "Configure Commit Message
+ * Generation Rules" produces a `.trae/rules/git-commit-message.md` containing
+ * exactly these three lines. No `alwaysApply`, no `description`, no `globs`.
+ */
+function gitMessageRule(body = "Write commit messages in the conventional-commits style."): string {
+	return ["---", "scene: git_message", "---", "", body, ""].join("\n");
+}
+
+describe("trae: a rule bound to the git-message scene", () => {
+	test("a rule whose only binding is the scene is named, not imported", () => {
+		// The same reasoning as a subdirectory's rules, one level up: the file
+		// means "when trae writes a commit message" and the target's rules
+		// directory has no moment to bind to, so importing it would put a
+		// commit-message template in front of every conversation. Before the
+		// re-check this rule was imported as a `downgrade` whose detail claimed
+		// "trae attaches this by its description when the model judges it
+		// relevant" — a sentence about a file that has no description.
+		const planned = plan({ ".trae/rules/git-commit-message.md": gitMessageRule() });
+		expect(writeAt(planned, "~/.labunbun/rules/git-commit-message.md")).toBeUndefined();
+		const item = line(planned, "git-commit-message.md");
+		expect(item?.action).toBe("skip");
+		expect(item?.detail).toBe(TRAE_GIT_MESSAGE_RULE);
+		// And nothing anywhere in the report calls it a description-matched rule.
+		expect(planned.items.map((entry) => entry.detail).join("\n")).not.toContain("its description");
+	});
+
+	test("a rule that also has a general binding is imported, and the loss is named", () => {
+		// The other half of the same decision, and the half that is easy to get
+		// wrong in the other direction. The vendor says `scene: git_message` is
+		// "compatible with existing fields such as alwaysApply, description and
+		// globs" and that it applies "regardless of how other fields are
+		// configured" — so it *adds* an activation rather than replacing one, and
+		// a file that declares both is a real rule that also constrains commit
+		// messages. Refusing it would lose the general part, which is the half
+		// the user can act on.
+		const content = ["---", "alwaysApply: true", "scene: git_message", "---", "", "Do the thing.", ""].join("\n");
+		const planned = plan({ ".trae/rules/both.md": content });
+		expect(writeAt(planned, "~/.labunbun/rules/both.md")?.content).toBe(content);
+		const item = line(planned, "both.md");
+		expect(item?.action).toBe("downgrade");
+		expect(item?.detail).toContain("whenever it writes a commit message");
+		expect(item?.detail).not.toContain(TRAE_GIT_MESSAGE_RULE);
+	});
+
+	test("a manual-mode rule is still imported, because it is not a commit-message rule", () => {
+		// The boundary case, and the one that decides the predicate. The rules
+		// page documents four application modes and the fourth is manual
+		// activation with `#Rule`, which sets `alwaysApply: false` and carries
+		// neither `description` nor `globs`. A predicate written as "no
+		// alwaysApply:true means no binding" would swallow this rule along with
+		// the commit-message one; the predicate is "declares none of the three
+		// general keys", and this is the test that says so.
+		const content = ["---", "alwaysApply: false", "---", "", "Ask me before deleting files.", ""].join("\n");
+		const planned = plan({ ".trae/rules/manual.md": content });
+		expect(writeAt(planned, "~/.labunbun/rules/manual.md")?.content).toBe(content);
+		const item = line(planned, "manual.md");
+		expect(item?.action).toBe("downgrade");
+		expect(item?.detail).not.toContain("commit message");
+	});
+
+	test("a skipped commit-message rule does not take the name a later rule wants", () => {
+		// Ordering, and the reason the scene check runs before the collision and
+		// exists checks. A rule that was never going to be written has no claim on
+		// the target path: if the scene check came second, this file would occupy
+		// `style.md` in `taken` and the real rule below would be reported as
+		// "kept the first" over something that does not exist.
+		const planned = plan({
+			".trae/rules/git-commit-message.md": gitMessageRule(),
+			".trae/rules/style.md": rule({ alwaysApply: "true", body: "One" }),
+		});
+		const style = line(planned, "style.md");
+		expect(style?.detail).toContain("with its frontmatter intact");
+		expect(writeAt(planned, "~/.labunbun/rules/style.md")?.content).toContain("One");
+		expect(planned.items.map((entry) => entry.detail).join("\n")).not.toContain("kept the first");
+	});
+});
+
+describe("trae: the documented trees this importer names and does not carry", () => {
+	test("every row of the asset table is probed at the documented path", () => {
+		// Written against the table rather than against six hand-copied paths, so a
+		// seventh row added to `trae-home.ts` is covered by this test the moment it
+		// exists instead of being silently unprobed.
+		for (const asset of TRAE_OWNED_ASSETS) {
+			// The documented location, written out as a literal rather than derived
+			// from `traeOwnedPath`. Deriving it would make this test agree with the
+			// resolver by construction, and a resolver that sent every row to one
+			// directory would pass.
+			//
+			// `plan` points the project directory at the fake home, so the project
+			// row and the global row of the same name both find the one thing planted
+			// here. That is why the count below is 2 and never 1, and why the path is
+			// asserted in the sentence rather than in `from` — `planTraeLeftovers`
+			// puts a grouped line's paths after the colon and puts the generic
+			// "trae's project and user trees" in the `from` column. That display
+			// choice is the shared grouper's, and is already pinned by the AGENTS.md
+			// test above; what belongs here is that both rows fired and both point at
+			// the documented place.
+			const documented = `~/.trae/${asset.name}`;
+			const resolved: boolean[] = [];
+			const planned = plan({ [`.trae/${asset.name}`]: asset.shape === "file" ? "{}" : "x" }, (home) => {
+				resolved.push(existsSync(traeOwnedPath(asset, home, "intl", home)));
+			});
+			// The resolver production uses lands on the thing just planted...
+			expect(resolved).toEqual([true]);
+			// ...both scopes found it...
+			const named = planned.items.find((entry) => entry.detail.includes(TRAE_OWNED_ASSET_REASONS[asset.name]));
+			expect(named?.action).toBe("skip");
+			expect(named?.detail).toContain("2 entr(ies) not imported");
+			// ...and the report spells the place the way the documentation writes it.
+			expect(named?.detail).toContain(documented);
+		}
+	});
+
+	test("the six rows are six rows, and none of them is a memory", () => {
+		// A census rather than a behaviour. Memories are named by the reader
+		// directly (a file one level under a directory, and a directory whose
+		// spelling the vendor never defines), so they are deliberately *not* in
+		// this table — and a table that quietly grew a memory row would mean the
+		// arithmetic resolver had started naming a directory where the report
+		// wants a file.
+		expect(TRAE_OWNED_ASSETS.map((asset) => `${asset.scope}:${asset.name}`)).toEqual([
+			"project:skills",
+			"global:skills",
+			"project:commands",
+			"global:commands",
+			"project:hooks.json",
+			"global:hooks.json",
+		]);
+	});
+
+	test("hooks are named with their own sentence, at both scopes", () => {
+		// The claim this whole block exists for. Before the re-check the report
+		// said nothing whatever about `hooks.json`: the project one was never
+		// looked for, and the global one fell into the anonymous "N entries this
+		// importer reads nothing out of" line. The module header used to go
+		// further and say TRAE has no hook system at all, which the vendor
+		// changelog entry for v3.5.66 (2026-06-10) refutes outright.
+		//
+		// The count is what proves both scopes are probed. `plan` points the
+		// project directory at the fake home, so the project row and the global row
+		// both find this one file; one probe firing would print "1 entr(ies)".
+		const planned = plan({ ".trae/hooks.json": JSON.stringify({ hooks: {} }) });
+		const named = planned.items.find((entry) => entry.detail.includes(TRAE_OWNED_ASSET_REASONS["hooks.json"]));
+		expect(named?.action).toBe("skip");
+		expect(named?.detail).toContain("2 entr(ies) not imported");
+		// The sentence names the feature, dates it, and says why carrying it is
+		// not a copy job.
+		expect(named?.detail).toContain("since v3.5.66 on 2026-06-10");
+		expect(named?.detail).toContain("executable code, not settings");
+		// The hooks are named, and nothing anywhere still claims there is no
+		// such feature.
+		expect(planned.items.map((entry) => entry.detail).join("\n")).not.toContain("no hook system");
+	});
+
+	test("a global hook file is named, and does not also appear in the unaccounted list", () => {
+		// The double-report guard, and the reason `otherGlobalEntries` grew an
+		// exclusion list. Without it `~/.trae/hooks.json` would be printed twice:
+		// once as "trae hooks, not carried" and once as "an entry this importer
+		// reads nothing out of". A report that says the same directory is both
+		// named-for-a-reason and unknown is the one disagreement a migration must
+		// not have.
+		const planned = plan({}, (home) => {
+			mkdirSync(join(home, ".trae"), { recursive: true });
+			writeFileSync(join(home, ".trae", "hooks.json"), "{}");
+			writeFileSync(join(home, ".trae", "somethingelse.json"), "{}");
+		});
+		const unaccounted = planned.items.find((entry) => entry.detail.includes("this importer reads nothing out of"));
+		expect(unaccounted?.detail).toContain("somethingelse.json");
+		expect(unaccounted?.detail).not.toContain("hooks.json");
+		expect(unaccounted?.detail).toContain("1 entr(ies)");
+	});
+
+	test("skills and commands are named at both scopes, sharing one sentence each", () => {
+		// Both features are documented with the same two-scope shape and the same
+		// three-level cap, and both were invisible. They share a sentence, so a
+		// home with all four directories gets two lines with two names in each —
+		// which is the shape `planTraeLeftovers` groups by, and the assertion is
+		// on the grouping rather than on four separate lines.
+		//
+		// As in the hooks test, `plan` points the project directory at the fake
+		// home, so the two scopes of each feature resolve to one directory here
+		// and the "2 entr(ies)" count is what shows both probes fired. The names
+		// land in the sentence rather than in `from`, because a grouped line puts
+		// the paths after the colon instead of in the `from` column.
+		const planned = plan({
+			".trae/skills/pdf/SKILL.md": "---\nname: pdf\n---\nfill forms\n",
+			".trae/commands/summarize.md": "Summarize the PR.\n",
+		});
+		const skills = planned.items.find((entry) => entry.detail.includes(TRAE_OWNED_ASSET_REASONS.skills));
+		expect(skills?.detail).toContain("docs.trae.ai/ide/skills");
+		expect(skills?.detail).toContain("2 entr(ies) not imported");
+		expect(skills?.detail).toContain("~/.trae/skills");
+		const commands = planned.items.find((entry) => entry.detail.includes(TRAE_OWNED_ASSET_REASONS.commands));
+		expect(commands?.detail).toContain("docs.trae.ai/ide/slash-commands");
+		expect(commands?.detail).toContain("2 entr(ies) not imported");
+		expect(commands?.detail).toContain("~/.trae/commands");
+		// None of them became a write.
+		expect(planned.writes.filter((write) => write.kind === "skill")).toHaveLength(0);
+	});
+
+	test("memories are named: the global file, and the project tree whose path the vendor never defines", () => {
+		// Two sentences for one feature, and the second exists because the vendor
+		// writes the directory as `{project_path}` and never says what that is
+		// spelled like. Naming the tree is honest; naming a file inside it would
+		// be a fabrication, and the sentence says so.
+		const planned = plan({}, (home) => {
+			mkdirSync(join(home, ".trae", "memory", "projects", "some-slug"), { recursive: true });
+			writeFileSync(join(home, ".trae", "memory", "user_profile.md"), "Prefers TypeScript.\n");
+		});
+		const global = planned.items.find((entry) => entry.detail.includes(TRAE_OWNED_ASSET_REASONS.memory));
+		expect(global?.from.replace(/\\/g, "/")).toContain(".trae/memory/user_profile.md");
+		expect(global?.detail).toContain("since v3.5.21 on 2026-01-13");
+		const project = planned.items.find((entry) => entry.detail.includes(TRAE_OWNED_ASSET_REASONS["memory-projects"]));
+		expect(project?.from.replace(/\\/g, "/")).toContain(".trae/memory/projects");
+		expect(project?.detail).toContain("{project_path}");
+		expect(project?.detail).toContain("not guessed at");
+	});
+
+	test("skill-config.json is named, because it is the only record of what was switched off", () => {
+		const planned = plan({
+			".trae/skill-config.json": JSON.stringify({ disabled: ["pdf"] }),
+		});
+		const named = planned.items.find((entry) => entry.detail.includes(TRAE_OWNED_ASSET_REASONS["skill-config"]));
+		expect(named?.from.replace(/\\/g, "/")).toContain(".trae/skill-config.json");
+		expect(named?.detail).toContain("which project skills you switched off");
+	});
+
+	test("the China build's trees are looked for under .trae-cn", () => {
+		// The edition rule has to reach the new paths too, not just the rules
+		// directory. A China install whose only trace is a global skill was
+		// reporting nothing, because the probe looked in `~/.trae` and the
+		// `~/.trae-cn` root was empty of anything this importer knew.
+		const planned = plan({ ".trae-cn/skills/pdf/SKILL.md": "---\nname: pdf\n---\n" });
+		const named = planned.items.find((entry) => entry.detail.includes(TRAE_OWNED_ASSET_REASONS.skills));
+		expect(named?.from.replace(/\\/g, "/")).toContain(".trae-cn/skills");
+	});
+
+	test("a home whose only trace is a documented asset is still a trae install", () => {
+		// `present` gates the whole plan, so this is the reachability assertion
+		// for every sentence in this block: a home with nothing importable in it
+		// must still reach the sentences written for it, or it reports "nothing
+		// migratable" while the user is looking at a screen full of TRAE
+		// settings. The `~/.trae` root was already non-empty so detection was
+		// never the risk — reaching the *right* sentence is.
+		const planned = plan({}, (home) => {
+			mkdirSync(join(home, ".trae", "skills", "x"), { recursive: true });
+			writeFileSync(join(home, ".trae", "skills", "x", "SKILL.md"), "x");
+		});
+		expect(planned.items).toHaveLength(1);
+		expect(planned.items[0].action).toBe("skip");
+		// Two, not one: `plan` points the project directory at the fake home, so the
+		// project row and the global row both find the same `~/.trae/skills`. The
+		// count is what says the sentence is reachable from either scope.
+		expect(planned.items[0].detail).toContain("2 entr(ies) not imported");
+		expect(planned.items[0].detail).toContain(TRAE_OWNED_ASSET_REASONS.skills);
+	});
+
+	test("the .agents/skills sentence says the directory is behind a switch", () => {
+		// The vendor puts `.agents/skills` behind a toggle under Settings >
+		// Skills & Commands, so "TRAE reads this directory" is only true once the
+		// user has turned it on. The old sentence said it unconditionally, which
+		// describes a state the user's own settings may never have reached.
+		const planned = plan({ ".agents/skills/pdf/SKILL.md": "---\nname: pdf\n---\n" });
+		const named = line(planned, ".agents/skills");
+		expect(named?.detail).toContain("Enable the .agents/skills directory");
+		expect(named?.detail).toContain("Settings > Skills & Commands");
+		// And the reason it is not imported is still the one that mattered.
+		expect(named?.detail).toContain("the agents source owns the .agents convention here");
+	});
+});
+
+describe("trae: the one variable TRAE documents", () => {
+	// biome-ignore lint/suspicious/noTemplateCurlyInString: the title is the placeholder under discussion, and a renamed title would be a different claim
+	test("${workspaceFolder} is named, because this file is global and will not expand it", () => {
+		// `docs.trae.ai/ide/add-mcp-servers` says under "Variable reference" that
+		// "currently, only ${workspaceFolder} is supported" and that it is replaced
+		// with the project root when the server starts. The target file is
+		// `~/.labunbun/.mcp.json`, which has no project, so a server written with
+		// it would fail at start — and before the re-check it arrived under a
+		// "copied verbatim" line with no warning, because the placeholder handling
+		// only knew VS Code's `${env:NAME}`.
+		const planned = plan({ ".trae/mcp.json": "{}" }, (home) =>
+			seedProfile(home, "Trae", {
+				mcpServers: {
+					// biome-ignore lint/suspicious/noTemplateCurlyInString: the fixture writes TRAE's own spelling into the file
+					local: { type: "stdio", command: "node", args: ["${workspaceFolder}/plugins/mcp.js"] },
+				},
+			}),
+		);
+		const item = line(planned, "mcpServers.local");
+		expect(item?.action).toBe("downgrade");
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: the assertion is that this text survives unexpanded
+		expect(item?.detail).toContain("${workspaceFolder}");
+		expect(item?.detail).toContain("is not expanded here");
+		// And the sentence says why, rather than only that it is unexpanded.
+		expect(item?.detail).toContain("this file is global");
+	});
+
+	test("a server with no variables is still a clean copy", () => {
+		// The other direction, because "name every unexpanded placeholder" is a
+		// rule that can be over-applied. A plain server has nothing to warn
+		// about and must keep the `map` it always had.
+		const planned = plan({ ".trae/mcp.json": "{}" }, (home) =>
+			seedProfile(home, "Trae", {
+				mcpServers: { plain: { type: "http", url: "https://mcp.invalid/p" } },
+			}),
+		);
+		const item = line(planned, "mcpServers.plain");
+		expect(item?.action).toBe("map");
+		expect(item?.detail).toBe("copied verbatim");
 	});
 });
