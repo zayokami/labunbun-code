@@ -165,7 +165,7 @@ function planOpencodePermissions(
 	label: string,
 	items: MigrationItem[],
 	addPermissionRules: AddPermissionRules,
-): void {
+): { allow: string[]; deny: string[] } {
 	const action = (value: unknown): "allow" | "deny" | "ask" | null => {
 		if (value === "allow" || value === "deny" || value === "ask") return value;
 		return null;
@@ -317,7 +317,7 @@ function planOpencodePermissions(
 			detail: "neither one of opencode's three answers nor a table of them, so none of its rules were read",
 			containsSecret: false,
 		});
-		return;
+		return { allow, deny };
 	}
 	if (ask.length > 0) {
 		items.push({
@@ -338,6 +338,113 @@ function planOpencodePermissions(
 		notes.push(
 			`${overlap.length} rule(s) appear as both an allow and a deny; deny wins here as it does in opencode, and the allow is left ` +
 				"in place so the file still reads like the decision that was made",
+		);
+	}
+	const caveat =
+		"an allowed command runs without a prompt here, and a deny blocks it whatever else is allowed" +
+		(notes.length > 0 ? ` — ${notes.join("; ")}` : "");
+	if (allow.length > 0) addPermissionRules("opencode", "allow", allow, `${label} → allow`, caveat);
+	if (deny.length > 0) addPermissionRules("opencode", "deny", deny, `${label} → deny`, caveat);
+	return { allow, deny };
+}
+
+/**
+ * OpenCode's v1 `tools` block → this build's allow/deny rule strings.
+ *
+ * v1 had two ways to say the same thing and v1's own migration folds them into
+ * one list: `tools` is a table of tool names to booleans and `permission` a table
+ * of tool names to one of three answers, and
+ * `permissions(permission, tools)` (`core/src/v1/config/migrate.ts:74-92`) writes
+ * the `tools` entries first and the `permission` entries after. v2 takes the
+ * **last** rule that matches (`core/src/permission.ts:76-86`, `findLast`), so a
+ * tool named in both is decided by `permission`.
+ *
+ * Two consequences this build has to reproduce rather than approximate:
+ *
+ * - the spelling is normalized first, and only by one rule —
+ *   `normalizeAction` (`migrate.ts:95-97`) maps `write` and `patch` to `edit` and
+ *   changes nothing else, so `tools: {write: true}` is an `Edit` allow;
+ * - a tool both blocks name is reported, because this build keeps the two lists
+ *   apart and resolves the conflict structurally (deny wins) instead of by order.
+ *   Silently preferring one would be a different decision from the one the file
+ *   already made.
+ *
+ * A value that is not a boolean is named rather than read: a third state here is
+ * neither an allow nor a deny, and guessing which one the user meant is the one
+ * thing a permission must not do.
+ */
+function planOpencodeTools(
+	block: unknown,
+	label: string,
+	permission: { allow: string[]; deny: string[] },
+	items: MigrationItem[],
+	addPermissionRules: AddPermissionRules,
+): void {
+	if (!isRecord(block) || Object.keys(block).length === 0) {
+		items.push({
+			source: "opencode",
+			from: label,
+			to: "—",
+			action: "skip",
+			detail: "not a table of tool names to on/off answers, so none of its switches were read",
+			containsSecret: false,
+		});
+		return;
+	}
+	const allow: string[] = [];
+	const deny: string[] = [];
+	for (const [name, enabled] of Object.entries(block)) {
+		if (typeof enabled !== "boolean") {
+			items.push({
+				source: "opencode",
+				from: `${label} → ${name}`,
+				to: "—",
+				action: "skip",
+				detail: "not an on/off answer, so it is neither an allow nor a deny and no rule was written for it",
+				containsSecret: false,
+			});
+			continue;
+		}
+		// `normalizeAction`, transcribed: two names become one and the rest are
+		// themselves, so the lookup below is the same table `permission` uses.
+		const action = name === "write" || name === "patch" ? "edit" : name;
+		const tool = OPENCODE_PERMISSION_TOOL[action];
+		if (tool === undefined) {
+			const why = OPENCODE_PERMISSION_UNMAPPED[action];
+			items.push({
+				source: "opencode",
+				from: `${label} → ${name}`,
+				to: "—",
+				action: "skip",
+				detail: why
+					? `${why} — there is no rule here that means the same thing`
+					: "a tool this build has no permission rule for, so there is nothing to write a rule about",
+				containsSecret: false,
+			});
+			continue;
+		}
+		(enabled ? allow : deny).push(tool);
+	}
+
+	const notes: string[] = [];
+	// Two conflicts, and they come out differently here, so both are named.
+	const shadowed = allow.filter((rule) => permission.deny.includes(rule));
+	const overridden = deny.filter((rule) => permission.allow.includes(rule));
+	if (shadowed.length > 0) {
+		// opencode keeps the `permission` deny, and so does this file: same answer.
+		notes.push(
+			`${summarizeNames(shadowed, 6)} switched on here and denied by the \`permission\` block, which is the one opencode keeps — the ` +
+				"allow is written and the deny still wins, as it does there",
+		);
+	}
+	if (overridden.length > 0) {
+		// opencode keeps the `permission` **allow**; this file's two lists cannot
+		// carry an order, so the deny wins instead. That is the one place the two
+		// programs disagree about the same pair of lines, so it is said outright
+		// rather than left for the user to discover by being blocked.
+		notes.push(
+			`${summarizeNames(overridden, 6)} switched off here and allowed by the \`permission\` block — opencode keeps that allow, but a ` +
+				"deny wins in this file whichever list it is in, so the two disagree and the deny is the one in force",
 		);
 	}
 	const caveat =
@@ -820,6 +927,37 @@ export function planOpencode(
 		claimScalar("opencode", "model", reference, `${configFrom} → ${key}`, "carried over as the default model");
 	}
 
+	// ── default agent ─────────────────────────────────────────────────────────
+	// `default_agent` names the primary agent a session starts as, and v1's own
+	// description carries the part that matters: it must be a primary agent, and
+	// an invalid one falls back to `build` rather than failing
+	// (`core/src/v1/config/config.ts:80-83`). Both halves are reported, because a
+	// user who set this to a name this build has never heard of should know that
+	// OpenCode was quietly running `build` and that nothing here reproduces the
+	// choice at all.
+	const defaultAgent = config.default_agent;
+	if (typeof defaultAgent === "string" && defaultAgent.trim() !== "") {
+		items.push({
+			source: "opencode",
+			from: `${configFrom} → default_agent`,
+			to: "—",
+			action: "skip",
+			detail:
+				`"${defaultAgent}" is the primary agent opencode starts a session as, falling back to "build" when that name is not a primary ` +
+				"agent; this build's sessions all run as the same agent and pick a subagent by name, so there is no setting for it",
+			containsSecret: false,
+		});
+	} else if (defaultAgent !== undefined) {
+		items.push({
+			source: "opencode",
+			from: `${configFrom} → default_agent`,
+			to: "—",
+			action: "skip",
+			detail: "not a name, so it selected no agent; there is no setting here for it either way",
+			containsSecret: false,
+		});
+	}
+
 	// ── MCP ──────────────────────────────────────────────────────────────────
 	// v1's `mcp` is the server table; v2's is an envelope with the table inside it
 	// (`{timeout?, servers?}`, `core/src/config/mcp.ts:45-48`) and v1's migration
@@ -909,14 +1047,25 @@ export function planOpencode(
 	// ── permissions ──────────────────────────────────────────────────────────
 	// v1's object and v2's array are the same rules in two spellings, and the label
 	// says which one the file used so the per-rule lines point at keys that exist.
+	//
+	// `tools` goes through the same door and is planned **after**, so a tool the
+	// two blocks name differently is reported: v1's own migration writes the
+	// `tools` rules first and the `permission` rules after and v2 takes the last
+	// match, so the order of the two calls is the order the file's two halves are
+	// weighed in.
 	const permissionKey = opencodeConfigKey(config, "permissions");
-	if (permissionKey !== null) {
-		planOpencodePermissions(
-			permissionKey.value,
-			`${configFrom} → ${permissionKey.spelling}`,
-			items,
-			addPermissionRules,
-		);
+	const permission =
+		permissionKey === null
+			? { allow: [] as string[], deny: [] as string[] }
+			: planOpencodePermissions(
+					permissionKey.value,
+					`${configFrom} → ${permissionKey.spelling}`,
+					items,
+					addPermissionRules,
+				);
+	const tools = config.tools;
+	if (tools !== undefined) {
+		planOpencodeTools(tools, `${configFrom} → tools`, permission, items, addPermissionRules);
 	}
 
 	// ── instructions ─────────────────────────────────────────────────────────
@@ -943,17 +1092,34 @@ export function planOpencode(
 	// ── inline agents and commands ───────────────────────────────────────────
 	// Both keys were renamed in v2, and the labels carry the spelling so the line
 	// names a key that is in the file rather than one that is not.
+	//
+	// `mode` joins the same line: v1 marked it `@deprecated Use \`agent\` field
+	// instead` (`core/src/v1/config/config.ts:90-96`) and v1's own migration folds
+	// it into the same table as `agent` (`migrate.ts:96-105`). A file with both
+	// spellings is one table written twice, and two lines about it would read as
+	// two decisions.
 	const agentsKey = opencodeConfigKey(config, "agents");
-	if (agentsKey !== null && isRecord(agentsKey.value) && Object.keys(agentsKey.value).length > 0) {
+	const modeKey = isRecord(config.mode) && Object.keys(config.mode).length > 0 ? config.mode : null;
+	const inlineAgents = [agentsKey?.value, modeKey].filter(
+		(value): value is Record<string, unknown> => isRecord(value) && Object.keys(value).length > 0,
+	);
+	if (inlineAgents.length > 0) {
+		const spellings = [agentsKey?.spelling, modeKey === null ? undefined : "mode"].filter(
+			(name): name is string => name !== undefined,
+		);
+		const names = [...new Set(inlineAgents.flatMap((value) => Object.keys(value)))];
 		items.push({
 			source: "opencode",
-			from: `${configFrom} → ${agentsKey.spelling}`,
+			from: `${configFrom} → ${spellings.join(", ")}`,
 			to: "—",
 			action: "skip",
 			detail:
-				`${summarizeNames(Object.keys(agentsKey.value), 6)} are opencode's own built-in agent definitions (plan, build, ` +
+				`${summarizeNames(names, 6)} are opencode's own built-in agent definitions (plan, build, ` +
 				"explore and the rest), overridden inline in the config; this build's own agents are its own, and a copied " +
-				"definition would describe opencode's tool names rather than this one's",
+				"definition would describe opencode's tool names rather than this one's" +
+				(modeKey === null
+					? ""
+					: " — and a `mode` entry is forced to a primary agent by opencode, which this build has no counterpart for"),
 			containsSecret: false,
 		});
 	}

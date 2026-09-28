@@ -1034,6 +1034,162 @@ describe("opencode: providers, MCP and permissions", () => {
 		);
 	});
 
+	test("`tools` becomes permission rules, and `write` becomes `Edit` first", () => {
+		// v1 kept two spellings of the same decision — `tools` as booleans and
+		// `permission` as ask/allow/deny — and folded them into one rule list
+		// (`core/src/v1/config/migrate.ts:74-92`). The one normalization it applies is
+		// `normalizeAction` (`:95-97`): `write` and `patch` are spelled `edit`
+		// everywhere else, and a rule written under the old name would name a tool
+		// that does not exist here.
+		withHome(
+			{
+				".config/opencode/opencode.json": JSON.stringify({
+					tools: { write: true, patch: true, bash: false, webfetch: true },
+				}),
+			},
+			(home) => {
+				const result = runMigration({ home });
+				const settings = JSON.parse(
+					result.plan.writes.find((w) => w.path.endsWith("settings.json"))?.content ?? "{}",
+				) as { permissions: { allow: string[]; deny: string[] } };
+				expect(settings.permissions.allow).toEqual(["Edit", "WebFetch"]);
+				expect(settings.permissions.deny).toEqual(["Bash"]);
+			},
+		);
+	});
+
+	test("a tool both `tools` and `permission` name is reported, because the two blocks are weighed in order", () => {
+		// v1's migration writes the `tools` rules first and the `permission` rules
+		// after, and v2 takes the **last** match (`core/src/permission.ts:76-86`), so
+		// `permission` decides. This build keeps the two lists apart and lets deny
+		// win, which agrees in the first case and disagrees in the second — and a
+		// disagreement about whether a command runs without a prompt is the one
+		// thing the report has to say out loud.
+		withHome(
+			{
+				".config/opencode/opencode.json": JSON.stringify({
+					tools: { bash: true, webfetch: false },
+					permission: { bash: "deny", webfetch: "allow" },
+				}),
+			},
+			(home) => {
+				const result = runMigration({ home });
+				const detail = result.plan.items
+					.filter((i) => i.from.includes("→ tools →"))
+					.map((i) => i.detail)
+					.join("\n");
+				// Both notes, each named for what it is about rather than for the tool
+				// in it — both lines mention Bash, so a substring check on the tool name
+				// alone would pass whichever note was missing.
+				expect(detail).toContain("switched on here and denied by the `permission` block");
+				expect(detail).toContain("switched off here and allowed by the `permission` block");
+				expect(detail).toContain("the two disagree and the deny is the one in force");
+				// The load-bearing half: two calls into the rule writer, and the
+				// second must add to the file rather than replace what the first put
+				// there. A report that names a conflict over rules the settings file
+				// does not contain is worse than no report.
+				const settings = JSON.parse(
+					result.plan.writes.find((w) => w.path.endsWith("settings.json"))?.content ?? "{}",
+				) as { permissions: { allow: string[]; deny: string[] } };
+				expect(settings.permissions.allow).toContain("WebFetch");
+				expect(settings.permissions.deny).toEqual(expect.arrayContaining(["Bash", "WebFetch"]));
+			},
+		);
+	});
+
+	test("a `tools` switch this build has no rule for, or that is not on or off, is named", () => {
+		withHome(
+			{
+				".config/opencode/opencode.json": JSON.stringify({
+					tools: { external_directory: false, bash: "yes" },
+				}),
+			},
+			(home) => {
+				const result = runMigration({ home });
+				expect(
+					result.plan.items.some(
+						(i) => i.from.includes("tools → external_directory") && i.detail.includes("outside the working directory"),
+					),
+				).toBe(true);
+				// A third state is neither an allow nor a deny, and guessing which one
+				// the user meant is the one thing a permission must not do.
+				expect(
+					result.plan.items.some((i) => i.from.includes("tools → bash") && i.detail.includes("not an on/off answer")),
+				).toBe(true);
+			},
+		);
+	});
+
+	test("`tools` that is not a table of switches is named rather than read", () => {
+		withHome({ ".config/opencode/opencode.json": JSON.stringify({ tools: "bash" }) }, (home) => {
+			const result = runMigration({ home });
+			expect(
+				result.plan.items.some(
+					(i) => i.from.includes("→ tools") && i.detail.includes("none of its switches were read"),
+				),
+			).toBe(true);
+		});
+	});
+
+	test("`mode` is reported on the same line as `agent`, because v2 merges the two", () => {
+		// `mode` is marked `@deprecated Use \`agent\` field instead`
+		// (`core/src/v1/config/config.ts:90-96`) and v1's own migration folds it into
+		// the same table (`migrate.ts:96-105`). A file with both spellings is one
+		// table written twice, and two report lines would read as two decisions.
+		withHome(
+			{
+				".config/opencode/opencode.json": JSON.stringify({
+					agent: { build: { prompt: "b" } },
+					mode: { plan: { prompt: "p" } },
+				}),
+			},
+			(home) => {
+				const result = runMigration({ home });
+				const line = result.plan.items.find((i) => i.detail.includes("opencode's own built-in agent definitions"));
+				expect(line?.from).toContain("agent, mode");
+				expect(line?.detail).toContain("forced to a primary agent");
+				expect(
+					result.plan.items.filter((i) => i.detail.includes("opencode's own built-in agent definitions")),
+				).toHaveLength(1);
+			},
+		);
+	});
+
+	test("a `mode` on its own is still reported, and the deprecation is what is said about it", () => {
+		// The line is not only about built-in definitions: a user who wrote one
+		// custom mode has written an agent, and the primary/subagent distinction it
+		// was forced into has no counterpart here.
+		withHome({ ".config/opencode/opencode.json": JSON.stringify({ mode: { plan: { prompt: "p" } } }) }, (home) => {
+			const result = runMigration({ home });
+			const line = result.plan.items.find((i) => i.detail.includes("opencode's own built-in agent definitions"));
+			expect(line?.from).toContain("mode");
+			expect(line?.detail).toContain("primary agent");
+		});
+	});
+
+	test("`default_agent` is named with the fallback v1 quietly applied to it", () => {
+		// The key's own description says it must name a primary agent and falls back
+		// to `build` when it does not (`core/src/v1/config/config.ts:80-83`). A user
+		// who set it to a name this build has never heard of should know that
+		// OpenCode was running `build` the whole time.
+		withHome({ ".config/opencode/opencode.json": JSON.stringify({ default_agent: "plan" }) }, (home) => {
+			const result = runMigration({ home });
+			const item = result.plan.items.find((i) => i.from.endsWith("→ default_agent"));
+			expect(item?.action).toBe("skip");
+			expect(item?.detail).toContain('"plan"');
+			expect(item?.detail).toContain('falling back to "build"');
+		});
+	});
+
+	test("a `default_agent` that is not a name is named, rather than ignored", () => {
+		withHome({ ".config/opencode/opencode.json": JSON.stringify({ default_agent: 7 }) }, (home) => {
+			const result = runMigration({ home });
+			expect(result.plan.items.some((i) => i.from.endsWith("→ default_agent") && i.detail.includes("not a name"))).toBe(
+				true,
+			);
+		});
+	});
+
 	test("a key with nowhere to go is named, and the file keeps it", () => {
 		withHome({ ".config/opencode/opencode.json": JSON.stringify({ autoupdate: true, layout: "wide" }) }, (home) => {
 			const result = runMigration({ home });
