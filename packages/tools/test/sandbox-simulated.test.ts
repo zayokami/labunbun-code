@@ -180,13 +180,21 @@ describe("decideWrite: the candidate is canonicalised, not string-matched", () =
 			return;
 		}
 		// On POSIX a backslash is an ordinary character in a filename, so
-		// `sub\..\ .git\config` is one directory named `sub\..\ .git\config` — it
-		// does not exist, it is not inside `.git`, and the honest answer is that
-		// the write is allowed because there is nothing there to protect. This
-		// used to be asserted the Windows way on every platform, which is the
-		// same mistake as skipping a Windows-only test on Linux: green, having
-		// checked the wrong thing.
-		expect(decision.canonicalPath).toBe(`${WORKSPACE}/sub\\..\\.git\\config`);
+		// `sub\..\ .git\config` names one entry in the workspace — it does not
+		// exist, it is not inside `.git`, and the honest answer is that the write
+		// is allowed because there is nothing there to protect. This used to be
+		// asserted the Windows way on every platform, which is the same mistake as
+		// skipping a Windows-only test on Linux: green, having checked the wrong
+		// thing.
+		//
+		// The canonical form is worth reading twice. The separators are normalised
+		// on every platform (`resolveCanonical` rewrites `\` to `/` regardless of
+		// whether the filesystem does), but the `..` is *not* collapsed, because it
+		// was part of a filename rather than a path segment. So this string looks
+		// like a traversal into `.git` and is not one — which is exactly why the
+		// allowance below is correct, and why the decision rests on the comparison
+		// rather than on the appearance of the string.
+		expect(decision.canonicalPath).toBe(`${WORKSPACE}/sub/../.git/config`);
 		expect(decision.allowed).toBe(true);
 	});
 

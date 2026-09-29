@@ -187,8 +187,11 @@ describe("a spilled result, end to end through the real tools", () => {
 
 		const limit = bash.maxResultSizeChars ?? 0;
 		expect(limit).toBeGreaterThan(0);
-		// The tool hands the whole log on...
-		expect(shown.length).toBeGreaterThan(limit * 1.5);
+		// The tool hands the whole log on... The tool's own output rides along as
+		// the assertion message, because "expected 45000, received 153" from a
+		// command that runs under a platform sandbox is a puzzle, and the answer
+		// is sitting in the 153 characters.
+		expect(shown.length, shown.slice(0, 1_000)).toBeGreaterThan(limit * 1.5);
 		expect(shown).toContain(last);
 		expect(shown.startsWith("[exit code: 0]\n")).toBe(true);
 
