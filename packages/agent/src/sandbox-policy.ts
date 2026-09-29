@@ -183,6 +183,15 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
  * A path it cannot place inside a known root is refused, never allowed, so a
  * caller that treats a wrong answer as "no opinion" is not a caller that can
  * widen access by being wrong.
+ *
+ * **Both sides must already be canonical.** It has no filesystem to consult, so
+ * a root that reaches it through a symlink is compared as the spelling it
+ * arrived with, and a candidate resolved past that symlink will not match it.
+ * On macOS that is the difference between `/var/folders/…` and
+ * `/private/var/folders/…`, and it means this answers "no" for a directory that
+ * is genuinely inside the root. `decideWrite` in `@labunbun/tools` resolves the
+ * root for this reason and is what production code should call; use this where
+ * the caller already holds both forms.
  */
 export function isWritePermitted(policy: SandboxPolicy, candidate: string): boolean {
 	// `protected` first. `buildSandboxPolicy` cannot produce an unrestricted

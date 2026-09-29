@@ -171,11 +171,23 @@ describe("decideWrite: the candidate is canonicalised, not string-matched", () =
 		});
 	}
 
-	test("a backslash path resolves the same as the forward-slash spelling", () => {
+	test("a backslash path is a separator or it is a filename, and which one is the filesystem's answer", () => {
 		const policy = policyFor({ protectedPaths: [`${WORKSPACE}/.git`] });
 		const decision = decideWrite(policy, "sub\\..\\.git\\config", WORKSPACE);
-		expect(decision.allowed).toBe(false);
-		expect(decision.canonicalPath).toBe(`${WORKSPACE}/.git/config`);
+		if (process.platform === "win32") {
+			expect(decision.allowed).toBe(false);
+			expect(decision.canonicalPath).toBe(`${WORKSPACE}/.git/config`);
+			return;
+		}
+		// On POSIX a backslash is an ordinary character in a filename, so
+		// `sub\..\ .git\config` is one directory named `sub\..\ .git\config` — it
+		// does not exist, it is not inside `.git`, and the honest answer is that
+		// the write is allowed because there is nothing there to protect. This
+		// used to be asserted the Windows way on every platform, which is the
+		// same mistake as skipping a Windows-only test on Linux: green, having
+		// checked the wrong thing.
+		expect(decision.canonicalPath).toBe(`${WORKSPACE}/sub\\..\\.git\\config`);
+		expect(decision.allowed).toBe(true);
 	});
 
 	// A root that arrives with Windows separators must still match the
@@ -233,6 +245,13 @@ describe("decideWrite: agrees with the lexical fallback beside it", () => {
 	// touching the filesystem, and it deliberately does not fold case. On inputs
 	// where the two case rules agree, the two must return the same verdict; if
 	// either were changed to answer a different question, this goes red.
+	//
+	// The roots here are deliberately paths that do not exist, because that is
+	// the *only* shape on which the two can still agree: `decideWrite` resolves
+	// the root and `isWritePermitted` cannot, so a root behind a symlink is
+	// exactly where they part company. See the "root reached through a symlink"
+	// test below for where that shows up, and for why the pure one is not the
+	// one production calls.
 	const hostPlatform = caseInsensitivePaths ? "win32" : "linux";
 	// A root in the spelling this machine can resolve. `/w/p` is a valid string
 	// to `isContainedIn` but not to `resolveCanonical`, which resolves against
@@ -392,6 +411,70 @@ describe("decideWrite: on a real filesystem with real links", () => {
 			});
 			expect(decideWrite(policy, "vendor/lib/hookdir/hooks/pre-commit", workspace).allowed).toBe(false);
 		});
+	});
+});
+
+describe("decideWrite: a workspace root reached through a link", () => {
+	// This is the macOS bug, reproduced on a machine that has it, because every
+	// other machine in this repository does not.
+	//
+	// `os.tmpdir()` on macOS is `/var/folders/…`, which is a symlink to
+	// `/private/var/folders/…`. `decideWrite` canonicalises the candidate and
+	// used to compare the root as a string, so a policy naming the workspace by
+	// the spelling the process was handed never matched a resolved path — and
+	// the result was that **every write in the workspace was refused**. It took
+	// the macOS CI job to find it; no machine this was built on has that symlink,
+	// and `withWorkspace` above was no help either because it hands back the
+	// *canonical* spelling, which is the one spelling that never disagrees.
+	//
+	// So the fixture here keeps the two apart: `via` is the link's own spelling
+	// and `real` is what the filesystem calls the same directory. Windows gets
+	// the identical case from a junction, which is why this is not skipped.
+	test("a write inside it is allowed, and one beside it is still refused", async () => {
+		const outer = mkdtempSync(join(tmpdir(), "lbb-sandbox-link-"));
+		try {
+			const real = join(outer, "real");
+			mkdirSync(join(real, "src"), { recursive: true });
+			const via = join(outer, "via");
+			linkDir(real, via);
+			expect(canon(via)).toBe(canon(real));
+
+			const policy = buildSandboxPolicy({ sandbox: "workspace-write", workspace: via });
+			// The allowance. Without the root being resolved this is refused, and
+			// the reason it names is "not inside any root this policy allows".
+			expect(decideWrite(policy, "src/index.ts", via).allowed).toBe(true);
+			// The control, and the reason the fix is not simply "resolve less": a
+			// path outside the link is outside, and resolving the root must not have
+			// widened the policy to cover the whole parent directory.
+			const outside = decideWrite(policy, join(outer, "secret.txt"), via);
+			expect(outside.allowed).toBe(false);
+			expect(outside.reason).toContain("not inside any root");
+		} finally {
+			rmSync(outer, { recursive: true, force: true });
+		}
+	});
+
+	test("a protected path behind the same link is still refused", async () => {
+		// The other direction, because resolving the root could equally have been
+		// implemented as "stop resolving" and that would have leaked `.git`.
+		const outer = mkdtempSync(join(tmpdir(), "lbb-sandbox-link2-"));
+		try {
+			const real = join(outer, "real");
+			mkdirSync(join(real, ".git"), { recursive: true });
+			const via = join(outer, "via");
+			linkDir(real, via);
+
+			const policy = buildSandboxPolicy({
+				sandbox: "workspace-write",
+				workspace: via,
+				protectedPaths: [join(via, ".git")],
+			});
+			const decision = decideWrite(policy, ".git/config", via);
+			expect(decision.allowed).toBe(false);
+			expect(decision.reason).toContain("version-control metadata");
+		} finally {
+			rmSync(outer, { recursive: true, force: true });
+		}
 	});
 });
 

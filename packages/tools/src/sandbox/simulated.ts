@@ -263,18 +263,35 @@ export function describeSimulatedSandbox(policy: SandboxPolicy): string {
  * platform where the two case rules agree, this and `isContainedIn` return the
  * same answer for the same inputs. Change either and that test goes red.
  *
- * Trailing-slash handling is one trim of one slash, matching `isContainedIn`,
- * so the two cannot diverge on a root written as `C:/ws/`.
+ * The root is canonicalised here rather than at the point the policy is built,
+ * because the two are not the same guarantee. `candidate` arrives already
+ * resolved by the caller; `root` arrives however the caller spelled it, and
+ * those two spellings are not always the same directory. macOS is the case that
+ * broke this — and it broke it in the loudest direction available: `os.tmpdir()`
+ * is `/var/folders/…`, which is a symlink to `/private/var/folders/…`, so every
+ * canonicalised path stopped matching a lexically-compared root and the layer
+ * refused *every write in the workspace*. Not one machine this was developed on
+ * has that symlink, so no local run could see it; the macOS CI job did, in the
+ * first run. `guardPathContainment` never had the bug because it resolves both
+ * sides, which is the shape this now has.
+ *
+ * The cost is a `realpathSync` per root per decision — a policy carries a
+ * handful of roots, and a write is already a file operation, so this is not the
+ * expensive part of the answer. Correctness in the decision function beats a
+ * cache here for the reason given above: a "roots are canonical" convention is
+ * exactly the kind of invariant that lives in a comment and dies with the
+ * caller that knew about it.
  */
 function isWithinRoot(candidate: string, root: string, platform: string): boolean {
 	const fold = caseInsensitiveSandboxPaths(platform)
 		? (value: string) => value.toLowerCase()
 		: (value: string) => value;
-	// Separators are normalised because a policy built on Windows may well have
-	// been built from `C:\ws` and carry backslashes, and comparing those against
-	// the forward-slash path this layer resolved would deny every write in the
-	// workspace. That is the safe direction to fail, but it is a failure.
-	const normalizedRoot = normalizePathSeparators(root).replace(/\/$/, "");
+	// `resolveCanonical(root, root)` is `guardPathContainment`'s own spelling:
+	// resolve the absolute path against itself, which is a no-op for the
+	// `resolve` step and a symlink walk for the rest. A root that does not exist
+	// degrades to the lexical form rather than throwing, which is what keeps the
+	// decision usable for a workspace that has not been created yet.
+	const normalizedRoot = normalizePathSeparators(resolveCanonical(root, root)).replace(/\/$/, "");
 	const path = fold(normalizePathSeparators(candidate));
 	const trimmedRoot = fold(normalizedRoot);
 	return path === trimmedRoot || path.startsWith(`${trimmedRoot}/`);
