@@ -3,6 +3,7 @@ import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import type { BackgroundShellManager } from "./background.ts";
 import type { Operations } from "./operations.ts";
+import { workspacePolicy } from "./sandbox/workspace-policy.ts";
 
 /** How much output the live preview keeps — the tail of it, and not the result. */
 const MAX_PREVIEW_CHARS = 30_000;
@@ -73,6 +74,13 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 		// error, and a head-only cut would throw exactly that part away.
 		overflow: "spill",
 		call: async (input, ctx) => {
+			// Read per call, not captured at construction: `/mode` can change the
+			// sandbox mid-session, and a tool holding the value it was built with
+			// would keep applying the old one. Built before the branch because the
+			// background path is spawned by the manager, not by `exec`, and leaving
+			// it out would make `run_in_background: true` the way around the sandbox.
+			const policy = await workspacePolicy(cwd, { sandbox: ctx.sandbox });
+
 			if (input.run_in_background) {
 				if (!background) {
 					return {
@@ -80,7 +88,7 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 						isError: true,
 					};
 				}
-				const shell = background.start(input.command, cwd);
+				const shell = background.start(input.command, cwd, policy);
 				return {
 					content: [
 						textContent(
@@ -98,6 +106,7 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 				cwd,
 				timeoutMs: input.timeout ?? 120_000,
 				signal: ctx.signal,
+				sandbox: policy,
 				onOutput: (chunk) => {
 					buffer.push(chunk);
 					const now = Date.now();

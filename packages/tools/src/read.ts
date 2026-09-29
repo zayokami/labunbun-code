@@ -1,27 +1,9 @@
 import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
-import { guardPathContainment, isContainedIn, resolveCanonical } from "./containment.ts";
+import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
-
-/**
- * Containment for a read: the workspace, or one of the app's read-only roots.
- *
- * The exception is narrow on purpose. It is per-directory (the spill directory
- * the caller named, not a prefix pattern that a `..` could widen), it is
- * read-only by construction — this is the Read tool, and the guard below it is
- * the same one every other path goes through — and it grants nothing to Write,
- * Edit, or a shell command.
- */
-function guardReadablePath(inputPath: string, cwd: string, readOnlyRoots: string[]): string {
-	try {
-		return guardPathContainment(inputPath, cwd, "Read");
-	} catch (error) {
-		const resolved = resolveCanonical(inputPath, cwd);
-		const allowed = readOnlyRoots.some((root) => isContainedIn(resolved, resolveCanonical(root, cwd)));
-		if (!allowed) throw error;
-		return resolved;
-	}
-}
+import { decideRead } from "./sandbox/simulated.ts";
+import { readableRootsPolicy } from "./sandbox/workspace-policy.ts";
 
 const MAX_LINES = 2000;
 const MAX_LINE_CHARS = 2000;
@@ -40,6 +22,28 @@ const MAX_RESULT_CHARS = 200_000;
  * because the file a spilled Bash result points at is a dead end otherwise.
  */
 export function createReadTool(cwd: string, ops: Operations, readOnlyRoots: string[] = []): AnyTool {
+	// Containment decides the workspace boundary, so `outside workspace` reads the
+	// same here as it does for Glob, Grep, LS, Write and Edit. The only way past
+	// it is a root the caller named, and that question is asked of a `read` entry
+	// rather than of a list this file keeps — so a root is sayable in one place
+	// and the same entry is what stops Write from writing there.
+	//
+	// `ctx.sandbox` is deliberately not consulted. The boundary is the
+	// application's, not the mode's: the same file is readable in Agent and in
+	// Agent 无沙箱, just as the write tools' `.git` rule holds in every mode. What
+	// the sandbox axis governs is the shell, which the kernel confines on macOS
+	// and Linux and nothing confines on Windows. See `readableRootsPolicy` for
+	// the widening that threading the mode through here was measured to cause.
+	const resolveReadable = (inputPath: string): string => {
+		try {
+			return guardPathContainment(inputPath, cwd, "Read");
+		} catch (error) {
+			const decision = decideRead(readableRootsPolicy(cwd, readOnlyRoots), inputPath, cwd);
+			if (!decision.allowed) throw error;
+			return decision.canonicalPath;
+		}
+	};
+
 	return buildTool({
 		name: "Read",
 		description:
@@ -61,7 +65,7 @@ export function createReadTool(cwd: string, ops: Operations, readOnlyRoots: stri
 		call: async (input) => {
 			let path: string;
 			try {
-				path = guardReadablePath(input.file_path, cwd, readOnlyRoots);
+				path = resolveReadable(input.file_path);
 			} catch (error) {
 				return {
 					content: [{ type: "text", text: String(error) }],

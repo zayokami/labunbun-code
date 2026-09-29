@@ -68,7 +68,7 @@ describe("pipeline cancellation across real pending gates", () => {
 					callId: "pending",
 					tool,
 					rawInput: {},
-					ctx: { callId: "pending", cwd: process.cwd(), signal: controller.signal },
+					ctx: { callId: "pending", cwd: process.cwd(), signal: controller.signal, sandbox: "workspace-write" },
 					permissionContext: {
 						mode: "ask",
 						sandbox: "workspace-write",

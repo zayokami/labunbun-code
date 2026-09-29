@@ -166,6 +166,7 @@ describe("background shells (real spawn)", () => {
 			callId: "t",
 			signal: new AbortController().signal,
 			cwd: process.cwd(),
+			sandbox: "workspace-write" as const,
 			onUpdate: () => {},
 		};
 

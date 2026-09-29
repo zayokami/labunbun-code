@@ -9,6 +9,16 @@ import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { SandboxPolicy } from "@labunbun/agent";
+import {
+	detectRuntime,
+	resolveSandboxExecution,
+	type SandboxBackend,
+	type SandboxRuntime,
+	sandboxBackendFor,
+} from "./sandbox/index.ts";
+
+export type { SandboxExecution } from "./sandbox/index.ts";
 
 export interface FileStat {
 	size: number;
@@ -55,7 +65,28 @@ export interface ExecOperations {
 		signal?: AbortSignal;
 		env?: Record<string, string>;
 		onOutput?: (chunk: string) => void;
+		/**
+		 * A confinement policy to put around the shell, or `undefined` for none.
+		 *
+		 * Optional because a caller with no sandbox in play is a real case — the
+		 * `!` shell passthrough is deliberately outside the mode system — not
+		 * because forgetting it should be quiet. When present, this resolves the
+		 * platform's backend and wraps the shell with it; `sandboxBackend` on the
+		 * implementation says which backend that turned out to be, including the
+		 * cases where the answer is "none, and here is why".
+		 */
+		sandbox?: SandboxPolicy;
 	}): Promise<ExecResult>;
+
+	/**
+	 * What confines commands run through here, when this implementation knows.
+	 *
+	 * Optional because a fake or an embedder's own executor may have no backend to
+	 * report, not because a missing answer may be read optimistically: an absent
+	 * backend renders as "simulated", so forgetting it is the safe direction to
+	 * fail in.
+	 */
+	readonly sandboxBackend?: SandboxBackend;
 }
 
 export type Operations = FileSystemOperations & ExecOperations;
@@ -190,6 +221,33 @@ export function detectShell(): { command: string; args: (cmd: string) => string[
 
 export class ChildProcessExecOperations implements ExecOperations {
 	#shell = detectShell();
+	/**
+	 * What this machine can confine with, asked once at construction.
+	 *
+	 * A PATH scan per command would be pure waste, and the answer does not change
+	 * while the process runs. Injectable so the wrapping branch is reachable from
+	 * a test on a machine that is not the one it wraps for — see
+	 * `sandbox-wiring.test.ts`, where a fake Linux runtime is the only thing that
+	 * makes "the wrapper is really around the shell" an assertion rather than a
+	 * hope.
+	 */
+	readonly #runtime: SandboxRuntime;
+
+	constructor(runtime: SandboxRuntime = detectRuntime()) {
+		this.#runtime = runtime;
+	}
+
+	/**
+	 * What confines a command on this machine.
+	 *
+	 * Optional on the interface because an embedder's own `Operations` has no
+	 * backend to report, and required here because this class always does — a
+	 * caller that asked "what is holding my commands in?" must not be told
+	 * nothing. `describeSandboxBackend` treats a missing answer as `simulated`.
+	 */
+	get sandboxBackend(): SandboxBackend {
+		return sandboxBackendFor(this.#runtime.platform, this.#runtime.hasNativeBackend);
+	}
 
 	exec(options: {
 		command: string;
@@ -198,12 +256,33 @@ export class ChildProcessExecOperations implements ExecOperations {
 		signal?: AbortSignal;
 		env?: Record<string, string>;
 		onOutput?: (chunk: string) => void;
+		sandbox?: SandboxPolicy;
 	}): Promise<ExecResult> {
-		const { command, cwd, timeoutMs = 120_000, signal, env, onOutput } = options;
+		const { command, cwd, timeoutMs = 120_000, signal, env, onOutput, sandbox } = options;
 		const { command: shellCommand, args } = this.#shell;
 
+		// The shell is named here and nowhere else, so this is the only place the
+		// argv tail a wrapper has to enclose can be built. `resolveSandboxExecution`
+		// therefore takes a policy rather than a finished command, and the
+		// wrapper ends up *outside* the shell: the confinement is the parent of the
+		// process tree rather than something the shell could drop. With no policy
+		// this reduces to exactly the two arguments it always was, which is the
+		// case the passthrough shell and most tests exercise.
+		const resolution = sandbox
+			? resolveSandboxExecution({
+					policy: sandbox,
+					command: [shellCommand, ...args(command)],
+					platform: this.#runtime.platform,
+					hasNativeBackend: this.#runtime.hasNativeBackend,
+				})
+			: ({ kind: "unconfined" } as const);
+		const [program, ...programArgs] =
+			resolution.kind === "native"
+				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
+				: [shellCommand, ...args(command)];
+
 		return new Promise((resolve) => {
-			const child = spawn(shellCommand, args(command), {
+			const child = spawn(program, programArgs, {
 				cwd,
 				windowsHide: true,
 				env: env ? { ...process.env, ...env } : process.env,

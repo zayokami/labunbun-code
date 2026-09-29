@@ -9,6 +9,7 @@ const BASE_CTX = {
 	callId: "t1",
 	signal: new AbortController().signal,
 	cwd: process.cwd(),
+	sandbox: "workspace-write" as const,
 };
 const PERM_CTX = {
 	mode: "ask" as const,

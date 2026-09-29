@@ -48,6 +48,7 @@ describe("connectMcpServer (fixture stdio server)", () => {
 				callId: "t1",
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
 				onUpdate: () => {},
 			},
 		);
@@ -73,7 +74,7 @@ describe("connectMcpServer (fixture stdio server)", () => {
 		const started = Date.now();
 		const pending = sleepTool.call(
 			{ ms: 5_000 },
-			{ callId: "t1", signal: controller.signal, cwd: process.cwd(), onUpdate: () => {} },
+			{ callId: "t1", signal: controller.signal, cwd: process.cwd(), sandbox: "workspace-write", onUpdate: () => {} },
 		);
 		setTimeout(() => controller.abort(), 150);
 		const result = await pending;
@@ -85,7 +86,13 @@ describe("connectMcpServer (fixture stdio server)", () => {
 		// The connection survives the cancel — later calls still go through.
 		const after = await sleepTool.call(
 			{ ms: 1 },
-			{ callId: "t2", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t2",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write",
+				onUpdate: () => {},
+			},
 		);
 		expect(after.isError).toBeFalsy();
 		expect((after.content[0] as any).text).toBe("slept 1ms");

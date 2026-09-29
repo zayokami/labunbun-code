@@ -626,7 +626,7 @@ export class AgentSession {
 			tool: call.tool,
 			rawInput: call.input,
 			deps: this.#deps,
-			ctx: { callId: call.callId, signal, cwd: this.cwd },
+			ctx: { callId: call.callId, signal, cwd: this.cwd, sandbox: this.sandbox },
 			permissionContext: {
 				mode: this.#permissionMode,
 				sandbox: this.#sandbox,

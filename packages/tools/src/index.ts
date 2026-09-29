@@ -23,6 +23,11 @@ export type {
 } from "./operations.ts";
 export { ChildProcessExecOperations, defaultOperations, detectShell, NodeFileSystemOperations } from "./operations.ts";
 export { createReadTool } from "./read.ts";
+export {
+	describeSandboxBackend,
+	type SandboxBackend,
+	sandboxBackendFor,
+} from "./sandbox/index.ts";
 export { type AgentTask, createTaskTools, type TaskStatus, TaskStore } from "./tasks.ts";
 export {
 	createWebFetchTool,
@@ -70,7 +75,11 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		createGrepTool(cwd, ops),
 		createLsTool(cwd, ops),
 		createReadTool(cwd, ops, options.readOnlyRoots ?? []),
-		createWriteTool(cwd, ops),
+		// Write takes the same list, and not because it may write there: a root
+		// the policy calls readable-only is exactly the root `decideWrite` has to
+		// refuse, and a policy that only Read knows about is a policy the shell
+		// and the write tools disagree with.
+		createWriteTool(cwd, ops, options.readOnlyRoots ?? []),
 		createBashOutputTool(background),
 		createKillBashTool(background),
 	];

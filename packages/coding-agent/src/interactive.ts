@@ -64,7 +64,9 @@ import {
 	BackgroundShellManager,
 	createAllTools,
 	defaultOperations,
+	describeSandboxBackend,
 	type Operations,
+	type SandboxBackend,
 	TaskStore,
 } from "@labunbun/tools";
 import {
@@ -932,6 +934,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				refreshBackgroundShells: publishShells,
 				settings,
 				cwd,
+				sandboxBackend: ops.sandboxBackend,
 				home,
 				costTracker,
 				cache: {
@@ -1226,6 +1229,18 @@ interface AppCommandContext {
 	 */
 	loadedSettings: LoadedSettings;
 	cwd: string;
+	/**
+	 * What confines commands run through this session's exec backend, if it can
+	 * say. `/permissions` is the screen a user opens to find out what is actually
+	 * holding the session in, and the sandbox axis is half of the answer — so it
+	 * has to come from the same `Operations` the Bash tool spawns through rather
+	 * than from a second look at `process.platform`, which is how the sentence
+	 * would come to describe a machine other than the one running.
+	 *
+	 * Optional because a context built by hand has no exec backend behind it, and
+	 * an absent answer renders as "simulated" rather than as the good news.
+	 */
+	sandboxBackend?: SandboxBackend;
 	/** Home directory for user-owned state (MCP approvals). Defaults to the real one. */
 	home?: string;
 	costTracker: CostTracker;
@@ -1500,11 +1515,13 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				`Mode: ${session.permissionMode} · sandbox: ${session.sandbox}`,
 				// Printed here rather than left to the mode hints, because this is
 				// the screen a user opens to find out what is actually holding the
-				// session in — and the sandbox axis does not yet hold it in
-				// anything. What holds a command in today is the deny rules below
-				// and the dangerous-command classifier, neither of which reads
-				// this setting.
-				"Sandbox: recorded, not enforced — this build confines nothing yet; deny rules and the dangerous-command classifier are what apply.",
+				// session in. The wording is not this file's to choose: the same
+				// resolution that picks the argv picks the sentence, so the answer
+				// cannot say "enforced" on a machine where nothing wraps the shell.
+				// What the sentence never covers is the deny rules and the
+				// classifier below — those apply in every case, including the
+				// unrestricted one, and they are not the sandbox.
+				describeSandboxBackend(ctx.sandboxBackend, session.sandbox),
 				`Rules (${rules.length}):`,
 				...rules.map(
 					(r) =>

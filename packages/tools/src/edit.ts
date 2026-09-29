@@ -3,6 +3,8 @@ import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import { guardWritablePath } from "./containment.ts";
 import type { Operations } from "./operations.ts";
+import { decideWrite } from "./sandbox/simulated.ts";
+import { workspacePolicy } from "./sandbox/workspace-policy.ts";
 
 export function createEditTool(cwd: string, ops: Operations): AnyTool {
 	return buildTool({
@@ -27,10 +29,18 @@ export function createEditTool(cwd: string, ops: Operations): AnyTool {
 			}
 			return null;
 		},
-		call: async (input) => {
+		call: async (input, ctx) => {
 			let path: string;
 			try {
+				// Two checks, both of which have to pass, and neither of which can
+				// widen what the other allows. See the pair and its honest limits in
+				// `write.ts`; Edit is the same composition, and is the stricter of
+				// the two in that it is handed no read-only roots, so `decideWrite`
+				// here has even less to decide.
 				path = guardWritablePath(input.file_path, cwd, "Edit");
+				const policy = await workspacePolicy(cwd, { sandbox: ctx.sandbox });
+				const decision = decideWrite(policy, path, cwd);
+				if (!decision.allowed) throw new Error(`Edit: ${decision.reason}`);
 			} catch (error) {
 				return { content: [{ type: "text", text: String(error) }], isError: true };
 			}

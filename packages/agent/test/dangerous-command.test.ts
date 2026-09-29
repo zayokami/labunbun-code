@@ -92,18 +92,18 @@ describe("the depth bound fails closed", () => {
 	 */
 	test.each(["sudo ", "env -i "])("`%s` nests to the limit and is still classified on its merits", (prefix) => {
 		for (let depth = 0; depth <= MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH; depth++) {
-			expect(posix(prefix.repeat(depth) + "rm -rf /")?.kind).toBe("ForcedRm");
+			expect(posix(`${prefix.repeat(depth)}rm -rf /`)?.kind).toBe("ForcedRm");
 		}
 	});
 
 	test("the bound counts across different wrappers, not per wrapper kind", () => {
 		const half = MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH / 2;
-		expect(posix("sudo ".repeat(half) + "env -i ".repeat(half) + "rm -rf /")?.kind).toBe("ForcedRm");
-		expect(posix("sudo ".repeat(half) + "env -i ".repeat(half + 1) + "rm -rf /")?.kind).toBe("Other");
+		expect(posix(`${"sudo ".repeat(half)}${"env -i ".repeat(half)}rm -rf /`)?.kind).toBe("ForcedRm");
+		expect(posix(`${"sudo ".repeat(half)}${"env -i ".repeat(half + 1)}rm -rf /`)?.kind).toBe("Other");
 	});
 
 	test("one wrapper past the limit is refused for the nesting, and says so", () => {
-		const match = posix("sudo ".repeat(MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH + 1) + "ls");
+		const match = posix(`${"sudo ".repeat(MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH + 1)}ls`);
 		expect(match).not.toBeNull();
 		// `Other`, not `ForcedRm`: nothing was actually a forced delete, and the
 		// reason the user is shown has to name the real cause or it will read as

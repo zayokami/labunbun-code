@@ -166,6 +166,20 @@ export interface ToolCallContext {
 	callId: string;
 	signal: AbortSignal;
 	cwd: string;
+	/**
+	 * The sandbox axis as it stands for *this* call.
+	 *
+	 * Read per call rather than captured when the tool was built, because `/mode`
+	 * can change it mid-session and a tool holding the value it was constructed
+	 * with would keep running the old one — the same staleness `plan-mode.ts` had
+	 * with `previousModes` recording one axis of a pair. The session is the single
+	 * source for it, so there is no second copy here to fall out of step.
+	 *
+	 * Required rather than optional so that forgetting it is a type error at every
+	 * construction site, instead of an unsandboxed command that runs because
+	 * nobody supplied the field.
+	 */
+	sandbox: SandboxMode;
 	/** Stream partial results (live bash output, progress lines...). */
 	onUpdate: (partial: unknown) => void;
 }

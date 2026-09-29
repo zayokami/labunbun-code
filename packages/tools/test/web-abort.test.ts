@@ -30,7 +30,13 @@ function stallingFetch() {
 	};
 }
 
-const ctx = (signal: AbortSignal) => ({ callId: "t1", signal, cwd: process.cwd(), onUpdate: () => {} });
+const ctx = (signal: AbortSignal) => ({
+	callId: "t1",
+	signal,
+	cwd: process.cwd(),
+	sandbox: "workspace-write" as const,
+	onUpdate: () => {},
+});
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

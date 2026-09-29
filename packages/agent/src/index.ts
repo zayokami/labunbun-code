@@ -71,6 +71,21 @@ export {
 } from "./permissions.ts";
 // Pipeline / concurrency
 export { type PipelineRunOptions, runToolPipeline } from "./pipeline.ts";
+// The sandbox policy: data only. The backends that turn it into something
+// executable live in @labunbun/tools, which depends on this package.
+export {
+	type BuildSandboxPolicyOptions,
+	buildSandboxPolicy,
+	canRead,
+	canWrite,
+	type FileSystemAccessMode,
+	type FileSystemSandboxEntry,
+	type FileSystemSandboxKind,
+	type FileSystemSandboxPolicy,
+	isWritePermitted,
+	type NetworkSandboxPolicy,
+	type SandboxPolicy,
+} from "./sandbox-policy.ts";
 // Session loop
 export { AgentSession, type AgentSessionOptions } from "./session.ts";
 // Session persistence

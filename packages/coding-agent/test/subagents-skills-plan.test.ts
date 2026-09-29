@@ -100,7 +100,13 @@ describe("Task tool (subagents)", () => {
 		const { taskTool } = makeHarness();
 		const result = await taskTool.call(
 			{ description: "run sub", prompt: "do the thing", subagent_type: "general-purpose" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 		expect(result.isError).toBeFalsy();
 		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
@@ -126,7 +132,13 @@ describe("Task tool (subagents)", () => {
 
 		const result = await taskTool.call(
 			{ description: "run sub", prompt: "do the thing" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 
 		expect(result.isError).toBeFalsy();
@@ -177,7 +189,13 @@ describe("Task tool (subagents)", () => {
 		const { taskTool } = makeHarness();
 		const result = await taskTool.call(
 			{ description: "x", prompt: "y", subagent_type: "nope" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 		expect(result.isError).toBe(true);
 		expect((result.content[0] as any).text).toContain("general-purpose");
@@ -191,7 +209,13 @@ describe("Task tool (subagents)", () => {
 
 		await taskTool.call(
 			{ description: "x", prompt: "task body" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: dir, onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: dir,
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 
 		const customs = store.linearEntries().filter((e) => e.type === "custom");
@@ -218,7 +242,13 @@ describe("Task tool (subagents)", () => {
 		const taskTool = createTaskTool(ctx);
 		const result = await taskTool.call(
 			{ description: "run sub", prompt: "do the thing" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 		expect(result.isError).toBeFalsy();
 		// The subagent's own transcript recorded a denied tool call rather than "ok".
@@ -243,7 +273,13 @@ describe("Task tool (subagents)", () => {
 		const taskTool = createTaskTool(ctx);
 		const result = await taskTool.call(
 			{ description: "run sub", prompt: "do the thing" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 		expect(result.isError).toBeFalsy();
 		expect((result.content[0] as any).text).toContain("SUBAGENT DONE");
@@ -253,7 +289,13 @@ describe("Task tool (subagents)", () => {
 		const { taskTool } = makeHarness();
 		const result = await taskTool.call(
 			{ description: "run sub", prompt: "do the thing" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 		expect(result.isError).toBeFalsy();
 		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
@@ -271,7 +313,13 @@ describe("Task tool (subagents)", () => {
 		});
 		await taskTool.call(
 			{ description: "run sub", prompt: "do the thing", subagent_type: "scribe" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 		expect(subFaux.receivedContexts[0]?.systemPrompt).toBe("You write terse commit messages.");
 	});
@@ -287,7 +335,13 @@ describe("Task tool (subagents)", () => {
 		});
 		await taskTool.call(
 			{ description: "run sub", prompt: "do the thing", subagent_type: "scribe" },
-			{ callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				onUpdate: () => {},
+			},
 		);
 		expect(subFaux.receivedContexts[0]?.systemPrompt).toBe("OVERRIDE");
 	});
@@ -339,7 +393,13 @@ describe("Task tool (subagents)", () => {
 
 			const call = taskTool.call(
 				{ description: "run sub", prompt: "do the thing" },
-				{ callId: "t1", signal: abortController.signal, cwd: process.cwd(), onUpdate: () => {} },
+				{
+					callId: "t1",
+					signal: abortController.signal,
+					cwd: process.cwd(),
+					sandbox: "workspace-write" as const,
+					onUpdate: () => {},
+				},
 			);
 			expect(await settleWithin(entered.promise, 5_000)).not.toBe("timeout");
 			abortController.abort();
@@ -423,6 +483,7 @@ describe("what the Task tool reads at the call", () => {
 			callId: "t1",
 			signal: new AbortController().signal,
 			cwd: process.cwd(),
+			sandbox: "workspace-write" as const,
 			onUpdate: () => {},
 		});
 	}
@@ -651,7 +712,13 @@ describe("plan mode tools", () => {
 				return plan.includes("bad idea") ? { approved: false, feedback: "too risky" } : { approved: true };
 			},
 		});
-		const ctx = { callId: "t1", signal: new AbortController().signal, cwd: process.cwd(), onUpdate: () => {} };
+		const ctx = {
+			callId: "t1",
+			signal: new AbortController().signal,
+			cwd: process.cwd(),
+			sandbox: "workspace-write" as const,
+			onUpdate: () => {},
+		};
 
 		await enter.call({}, ctx);
 		expect(entered).toBe(true);

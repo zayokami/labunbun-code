@@ -5,6 +5,7 @@ const NO_CTX = {
 	callId: "t1",
 	signal: new AbortController().signal,
 	cwd: process.cwd(),
+	sandbox: "workspace-write" as const,
 	onUpdate: () => {},
 };
 

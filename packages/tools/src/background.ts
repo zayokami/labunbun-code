@@ -7,7 +7,9 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SandboxPolicy } from "@labunbun/agent";
 import { detectShell } from "./operations.ts";
+import { detectRuntime, resolveSandboxExecution, type SandboxRuntime } from "./sandbox/index.ts";
 
 /** How much of a shell's log one read may bring back. */
 const MAX_SHELL_OUTPUT_CHARS = 30_000;
@@ -62,15 +64,46 @@ let shellCounter = 0;
 export class BackgroundShellManager {
 	readonly #entries = new Map<string, ShellEntry>();
 	readonly #shell = detectShell();
+	/** Injected for the same reason as `ChildProcessExecOperations`'s: so a test on
+	 * one platform can exercise the wrapping branch for another. */
+	readonly #runtime: SandboxRuntime;
 
-	start(command: string, cwd: string): BackgroundShell {
+	constructor(runtime: SandboxRuntime = detectRuntime()) {
+		this.#runtime = runtime;
+	}
+
+	/**
+	 * Start a detached command.
+	 *
+	 * `sandbox` is a parameter rather than something this manager resolves for
+	 * itself because it spawns the shell directly instead of going through
+	 * `Operations.exec`. That made it a second, unwrapped spawn path: the moment
+	 * a filesystem sandbox existed, `run_in_background: true` would have been a
+	 * one-word bypass around it, and it would have looked like the sandbox working
+	 * for every command a user actually ran in the foreground. The wrapping is
+	 * resolved here for the same reason it is in `exec` — the wrapper has to be
+	 * the parent of the shell, and this is the parent of the shell.
+	 */
+	start(command: string, cwd: string, sandbox?: SandboxPolicy): BackgroundShell {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
 		const outputFile = join(tmpdir(), `lbb-${id}.log`);
 		writeFileSync(outputFile, "");
 
 		const { command: shellCommand, args } = this.#shell;
-		const proc: ChildProcess = spawn(shellCommand, args(command), {
+		const resolution = sandbox
+			? resolveSandboxExecution({
+					policy: sandbox,
+					command: [shellCommand, ...args(command)],
+					platform: this.#runtime.platform,
+					hasNativeBackend: this.#runtime.hasNativeBackend,
+				})
+			: ({ kind: "unconfined" } as const);
+		const [program, ...programArgs] =
+			resolution.kind === "native"
+				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
+				: [shellCommand, ...args(command)];
+		const proc: ChildProcess = spawn(program, programArgs, {
 			cwd,
 			windowsHide: true,
 			stdio: ["ignore", "pipe", "pipe"],

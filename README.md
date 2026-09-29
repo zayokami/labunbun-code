@@ -27,6 +27,12 @@ labunbun                                # interactive REPL
   `mcp__server__*`), two axes composed into four modes (Ask / Plan / Agent /
   Agent 无沙箱), a dangerous-command classifier that sits above every mode,
   interactive approval dialog, "don't ask again" session rules.
+- **Filesystem sandbox** — the sandbox axis is a real confinement on macOS
+  (`sandbox-exec`) and Linux (`bwrap`), covering the workspace and refusing
+  writes to version-control metadata. It is **simulated on Windows**: a path
+  decision this process makes about calls that arrive through the tools, so a
+  subprocess started outside them is not subject to it. `/permissions` names
+  which of the three you have, in those words, rather than saying "sandbox on".
 - **Sessions** — append-only JSONL tree per project (`~/.labunbun/projects/`),
   crash-safe resume with `--resume`, prompt history with ↑ recall.
 - **Activity** — `/activity` draws the days you used this as a heatmap, with
@@ -553,9 +559,9 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
 - Project: `.labunbun/` — `settings.json`, `settings.local.json`,
   `rules/*.md`, `agents/`, `skills/`, `themes/`
 - Project and local settings are read as **repo-controlled**: they may not set
-  `model`, `fallbackModels`, `permissionMode`, `env`, `providers`, `hooks`,
-  `mcpServers`, `pricing`, `trimOldToolResults`, `gamepad`, `permissions.allow`,
-  or `permissions.additionalDirectories`.
+  `model`, `fallbackModels`, `permissionMode`, `sandbox`, `env`, `providers`,
+  `hooks`, `mcpServers`, `pricing`, `trimOldToolResults`, `gamepad`,
+  `permissions.allow`, or `permissions.additionalDirectories`.
   Those are honored from the user, policy (`managed-settings.json`), and
   `--settings` tiers only; anything dropped is listed at startup. `permissions.deny`
   is still honored from every tier — tightening is always allowed. Whether
