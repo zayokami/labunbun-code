@@ -1,7 +1,19 @@
 /**
- * System prompt builder. Static sections are byte-stable for prompt caching;
- * a DYNAMIC_BOUNDARY marker separates per-session dynamic content (P5 adds
- * git status etc.). Tool prompt contributions are appended by the caller.
+ * System prompt builder. `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` splits it in two: above
+ * it, how the harness works and what the working environment is; below it, what
+ * belongs to this session — the tools' own guidance and the project memory, which
+ * is also what the model reads closest to the conversation. Tool prompt
+ * contributions are appended by the caller.
+ *
+ * The marker is an ordering one, not a cache breakpoint, and it used to be
+ * documented as a cache one: the header said the sections above it were
+ * "byte-stable for prompt caching" — a claim nothing in the repo reads, and one
+ * that could not have held anyway, since `# Environment` above the marker carries
+ * cwd and today's date. The API sends the whole system prompt as one text block
+ * with at most one `cache_control` at its end, and the OpenAI-compat route hashes
+ * the whole prompt into `prefixIdentity`, so a boundary here cannot change either
+ * behaviour. It still has to mean something, or the next reader assumes the halves
+ * differ in a way that buys something.
  */
 import { type AnyTool, localDayKey } from "@labunbun/agent";
 
@@ -46,16 +58,23 @@ export function buildSystemPrompt(tools: AnyTool[], ctx: SystemPromptContext): s
 # Attitude
 You MUST answer the user's question directly, without padding, and to the point. Do not restate what was asked. Skip flattery like "great question". Be direct and technical.
 
+# Context
+- This conversation is compacted for you automatically before it outgrows the model's context window, so do not stop or wrap up early because the context is filling.
+- A compaction replaces earlier messages with a summary; anything you will still need afterwards belongs in a file, not in the conversation.
+
 # Doing tasks
 - Explore before acting: read files before editing them; never guess content.
 - Prefer the dedicated tools (Read/Edit/Write/Grep/Glob) over shell equivalents.
 - Make focused, minimal changes that match the codebase's existing style.
-- After changes, verify: run builds/tests when they exist.
+- Stop when the work asked for is done. Do not add features, tests, docs or refactors that were not asked for; the exception is a regression test for a bug you just fixed. If something else would help, name it at the end instead of doing it.
+- After changes, run the project's own check — a build, a type check, or a test that exercises the change. A check that only parses, or a command that failed to start, does not count.
+- If no real check can run, name the one you did not run and why, instead of reporting the change as done.
 - Do not commit unless explicitly asked.
 
 # Communication
 - Answer in the user's language.
 - Reference code as path:line.
+- Say in one line what you are about to do before your first tool call, and note briefly what you just found when a turn runs long.
 - Report outcomes faithfully: if a command failed, say so with its output.`);
 
 	sections.push(`# Environment

@@ -515,4 +515,25 @@ describe("tool registry shape", () => {
 			expect(typeof tool.description).toBe("string");
 		}
 	});
+
+	test("the search prompt, and every prompt, key off the world rather than the model's memory", () => {
+		const tools = createAllTools(process.cwd());
+		const search = tools.find((t) => t.name === "WebSearch");
+		if (!search) throw new Error("WebSearch is not in the default tool set");
+
+		// The old wording was "beyond your knowledge", which hands the decision to
+		// search to the model's self-assessment — and a model that believes it knows
+		// a library's version is precisely the one that will not go and check. The
+		// replacement keys the decision to a fact about the world having moved.
+		expect(search.prompt).toContain("could have changed since your training data");
+
+		// Read across every tool rather than only this one. The same weak phrasing
+		// in a second tool's prompt would be just as inert, and a single assertion
+		// on WebSearch walks straight past it.
+		for (const tool of tools) {
+			expect(tool.prompt ?? "", `${tool.name} still hands the decision to the model`).not.toContain(
+				"beyond your knowledge",
+			);
+		}
+	});
 });

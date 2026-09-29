@@ -271,7 +271,9 @@ export function createWebSearchTool(): AnyTool {
 			query: z.string().min(2).describe("The search query"),
 			max_results: z.number().int().min(1).max(10).optional().describe("Result cap (default 5)"),
 		}),
-		prompt: "- Search when you need current information beyond your knowledge.",
+		prompt:
+			"- Search when a specific fact could have changed since your training data — " +
+			"versions, prices, dates, current status — rather than answering from memory.",
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
 		call: async (input, ctx) => {

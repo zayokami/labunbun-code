@@ -512,7 +512,7 @@ The loop never imports provider adapters directly — they arrive via injected
 
 ```bash
 pnpm typecheck        # tsc over all packages (source-mapped, no build step)
-pnpm test             # bun test — 3818 tests, no network needed
+pnpm test             # bun test — no network needed
 pnpm lint             # biome check
 bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
 bun run packages/coding-agent/scripts/cache-check.ts anthropic/claude-opus-5 6   # live hit rate (costs money)

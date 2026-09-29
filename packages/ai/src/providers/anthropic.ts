@@ -336,8 +336,11 @@ export function buildAnthropicRequest(
 			type: "adaptive",
 			// Left off, these models return thinking blocks whose text is empty:
 			// the panel goes blank and so does the narration between tool calls,
-			// on every turn, without an error to explain it. `updates` is the
-			// richer beta value and is not what we ask for.
+			// on every turn, without an error to explain it. The beta alternative
+			// is not the way out of that — `display: "updates"` empties the
+			// reasoning blocks and fills only the progress-update ones, so it
+			// buys back the narration by giving up the thinking. `summarized`
+			// fills both, and is the richer of the two.
 			display: "summarized",
 			...(model.thinkingBlockBinding ? { block_binding: { prefix_mismatch_behavior: "drop_block" } } : {}),
 		};
