@@ -8,7 +8,7 @@
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentEvent, PermissionMode } from "@labunbun/agent";
+import type { AgentEvent, PermissionMode, SandboxMode } from "@labunbun/agent";
 import { AgentSession, evaluatePermissions, formatRetryNotice, SessionStore } from "@labunbun/agent";
 import {
 	type AgentMessage,
@@ -32,7 +32,7 @@ import {
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
 	loadSettings,
-	resolvePermissionMode,
+	resolveMode,
 } from "./settings.ts";
 import { loadSkills, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
 import { createTaskTool, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
@@ -45,6 +45,7 @@ export interface HeadlessOptions {
 	prompt: string;
 	modelRef?: string;
 	permissionMode?: PermissionMode;
+	sandbox?: SandboxMode;
 	maxTurns?: number;
 	noSession?: boolean;
 	cwd?: string;
@@ -139,13 +140,22 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const store = options.noSession ? undefined : SessionStore.startNew(cwd, home);
 	pruneToolOutput(cwd);
 	const rules = collectPermissionRules(loadedSettings);
-	// Headless defaults to bypassPermissions, so this is the tier check that
-	// matters most: managed settings can veto it and force real evaluation.
+	// Headless runs unattended, so there is nobody to ask: the default is the
+	// only pairing that still finishes the work, which is why this is
+	// `agent` + `danger-full-access` rather than `ask`. Both axes go through the
+	// policy tier, so a managed machine can take the confinement back.
 	// Note `settings.permissionMode` is deliberately not consulted here — it
 	// governs the interactive default, and honouring it would change what
 	// existing scripted `-p` runs are allowed to do.
-	const { mode: effectiveMode, downgradeReason } = resolvePermissionMode(
-		options.permissionMode ?? "bypassPermissions",
+	const {
+		mode: effectiveMode,
+		sandbox: effectiveSandbox,
+		downgradeReason,
+	} = resolveMode(
+		{
+			mode: options.permissionMode ?? "agent",
+			sandbox: options.sandbox ?? "danger-full-access",
+		},
 		loadedSettings,
 	);
 	if (downgradeReason) console.error(`Warning: ${downgradeReason}`);
@@ -252,14 +262,22 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		cwd,
 		maxTurns: options.maxTurns,
 		permissionMode: effectiveMode,
+		sandbox: effectiveSandbox,
 		deps: {
 			streamFn: transport.streamFn,
 			checkCompaction: compactionWiring.checkCompaction,
 			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
 			// Headless has no interactive dialog, so an unresolved "ask" fails
-			// closed rather than hanging — matches dontAsk's documented contract.
+			// closed rather than hanging: there is nobody to ask, and waiting
+			// forever is not a decision. This is what the deleted `dontAsk` mode
+			// did, reached here by the fact that is actually the reason for it.
 			canUseTool: async (toolName, input, ctx) => {
-				const decision = evaluatePermissions(toolName, input, { mode: ctx.mode, rules, cwd });
+				const decision = evaluatePermissions(toolName, input, {
+					mode: ctx.mode,
+					sandbox: ctx.sandbox,
+					rules,
+					cwd,
+				});
 				if (decision.behavior === "ask") {
 					return {
 						behavior: "deny",

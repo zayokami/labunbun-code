@@ -1,9 +1,43 @@
 #!/usr/bin/env bun
-import { PERMISSION_MODES } from "@labunbun/agent";
+import { PERMISSION_MODES, type PermissionMode, SANDBOX_MODES, type SandboxMode } from "@labunbun/agent";
 import { runHeadless } from "./headless.ts";
 import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
 import { DEFAULT_HISTORY_LIMIT, MIGRATION_SOURCE_IDS, runMigration } from "./migrate.ts";
+
+/**
+ * Check `--permission-mode` and `--sandbox` against the lists that define them.
+ *
+ * Returns the typed values or a sentence naming the valid ones, so the caller
+ * has one thing to do either way. Absent flags come back as `undefined`, which
+ * is the whole point: the session then derives the axis from its default rather
+ * than this function inventing one, so `--sandbox` alone and no flag at all
+ * cannot disagree about what confined means.
+ */
+export function validateModeFlags(args: { permissionMode: string | null; sandbox: string | null }): {
+	mode?: PermissionMode;
+	sandbox?: SandboxMode;
+	error?: string;
+} {
+	const validModes = new Set<string>(PERMISSION_MODES);
+	if (args.permissionMode && !validModes.has(args.permissionMode)) {
+		return { error: `Invalid permission mode: ${args.permissionMode} (${PERMISSION_MODES.join(" | ")})` };
+	}
+	const validSandboxes = new Set<string>(SANDBOX_MODES);
+	if (args.sandbox && !validSandboxes.has(args.sandbox)) {
+		return { error: `Invalid sandbox: ${args.sandbox} (${SANDBOX_MODES.join(" | ")})` };
+	}
+	// An untyped flag comes back as `undefined` and not as the `null` the
+	// argument parser produced. The two behave the same under `??`, so nothing
+	// downstream was reading the difference — which is exactly why the return
+	// type claiming `undefined` while the value was `null` went unnoticed, and
+	// why a consumer that checked `"mode" in flags` would have been told the
+	// flag was there when nobody typed it.
+	return {
+		mode: args.permissionMode ? (args.permissionMode as PermissionMode) : undefined,
+		sandbox: args.sandbox ? (args.sandbox as SandboxMode) : undefined,
+	};
+}
 
 /**
  * Subcommands, recognised only as the first argument, each spelling mapped to
@@ -26,6 +60,7 @@ interface CliArgs {
 	print: string | null;
 	model: string | null;
 	permissionMode: string | null;
+	sandbox: string | null;
 	maxTurns: number | null;
 	noSession: boolean;
 	resume: string | null;
@@ -54,6 +89,7 @@ function parseArgs(argv: string[]): CliArgs {
 		print: null,
 		model: null,
 		permissionMode: null,
+		sandbox: null,
 		maxTurns: null,
 		noSession: false,
 		resume: null,
@@ -96,6 +132,9 @@ function parseArgs(argv: string[]): CliArgs {
 				break;
 			case "--permission-mode":
 				args.permissionMode = rest[++i] ?? null;
+				break;
+			case "--sandbox":
+				args.sandbox = rest[++i] ?? null;
 				break;
 			case "--max-turns":
 				args.maxTurns = Number(rest[++i]) || null;
@@ -165,7 +204,9 @@ Usage:
 Options:
   -p, --print <prompt>         Run headless mode
       --model <provider/id>    Model to use (default anthropic/claude-sonnet-5)
-      --permission-mode <m>    ${PERMISSION_MODES.join(" | ")}
+      --permission-mode <m>    ${PERMISSION_MODES.join(" | ")}  (default ask)
+      --sandbox <s>            ${SANDBOX_MODES.join(" | ")}
+                               The other axis: what a run may touch at all.
       --max-turns <n>          Cap agent turns in headless mode
       --no-session             Don't persist this session to disk
       --resume <id>            Resume a saved session
@@ -231,14 +272,21 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		return result.applied && result.applied.failed.length > 0 ? 1 : 0;
 	}
 
+	// Both axes, validated once, before either path branches. This used to live
+	// inside the `-p` branch only, so the interactive path reached the session
+	// with `permissionMode: args.permissionMode as never` — a cast, no check. A
+	// typo in `--permission-mode` exited 2 when there was a prompt and was
+	// silently dropped to the default when there wasn't, which is the worse half
+	// being the one nobody runs.
+	const flags = validateModeFlags(args);
+	if (flags.error !== undefined) {
+		console.error(flags.error);
+		return 2;
+	}
+
 	if (args.print !== null) {
 		if (!args.print.trim()) {
 			console.error("-p requires a prompt string");
-			return 2;
-		}
-		const validModes = new Set<string>(PERMISSION_MODES);
-		if (args.permissionMode && !validModes.has(args.permissionMode)) {
-			console.error(`Invalid permission mode: ${args.permissionMode}`);
 			return 2;
 		}
 		const validFormats = new Set(["text", "json", "stream-json"]);
@@ -249,7 +297,8 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		return runHeadless({
 			prompt: args.print,
 			modelRef: args.model ?? undefined,
-			permissionMode: (args.permissionMode as never) ?? undefined,
+			permissionMode: flags.mode,
+			sandbox: flags.sandbox,
 			maxTurns: args.maxTurns ?? undefined,
 			noSession: args.noSession,
 			outputFormat: (args.outputFormat as never) ?? undefined,
@@ -260,7 +309,8 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	console.log(`${CLI_NAME} ${CODING_AGENT_VERSION} — starting interactive mode…`);
 	return runInteractive({
 		modelRef: args.model ?? undefined,
-		permissionMode: (args.permissionMode as never) ?? undefined,
+		permissionMode: flags.mode,
+		sandbox: flags.sandbox,
 		resumeSessionId: args.resume ?? undefined,
 		continueLast: args.continueLast,
 		gamepad: args.gamepad ?? undefined,

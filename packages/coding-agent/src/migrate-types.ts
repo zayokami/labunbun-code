@@ -12,6 +12,7 @@
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
 import { codexRoot } from "./codex-home.ts";
 import { cursorDetectionRoots, cursorUserRoot } from "./cursor-home.ts";
@@ -401,6 +402,7 @@ export const CLAUDE_SETTINGS_HANDLED = new Set([
 	"env",
 	"model",
 	"permissions",
+	"sandbox",
 	"hooks",
 	"fallbackModel",
 	"effortLevel",
@@ -429,6 +431,7 @@ export type ClaimableScalarKey =
 	| "model"
 	| "theme"
 	| "permissionMode"
+	| "sandbox"
 	| "fallbackModels"
 	| "disableBypassPermissionsMode";
 
@@ -489,6 +492,30 @@ export type ClaimScalar = (
 	source: MigrationSourceId,
 	key: ClaimableScalarKey,
 	value: ClaimedScalarValue,
+	from: string,
+	detail: string,
+) => void;
+
+/**
+ * Claim a mode and a sandbox together, as the one decision they are.
+ *
+ * Every foreign tool's notion of "how much do you ask me" is a single value, and
+ * in this repo the closest equivalent is often a *pair*: `bypassPermissions`
+ * meant never-ask and unconfined, and `yolo` means the same. Calling
+ * `claimScalar` twice by hand in each of eight mappers is how one of them ends
+ * up writing the mode and forgetting the sandbox — a session that auto-approves
+ * everything and still enforces a workspace sandbox is a combination the user
+ * never chose, and nothing in the report would say so.
+ *
+ * So this is the only way a mode is written. Both halves are claimed even when
+ * the source named only one, because "the source had no opinion about the
+ * sandbox" is not the same claim as "import nothing" — the alternative is a
+ * half-written pair that reads as a deliberate setting.
+ */
+export type ClaimModePair = (
+	source: MigrationSourceId,
+	mode: PermissionMode,
+	sandbox: SandboxMode,
 	from: string,
 	detail: string,
 ) => void;

@@ -32,4 +32,4 @@ Migration reads other agents' homes, several of which keep tokens next to their 
 
 Two asymmetries a reviewer should know rather than assume away: not every source uses the name-regex shape (grok, codex, dsh and zcode hard-code their filenames, and **zcode has no credential-file skip at all** — it relies entirely on the write-side marking), and nothing stops a new `*-plan.ts` from calling `readText()` on one of these paths. That is exactly why this is worth a look on every migration diff: the boundary is a habit, and habits are what a diff erodes.
 
-For each hit, name the surface, the concrete input that triggers it, and whether it's exploitable now or only under a specific configuration (e.g. `acceptEdits` mode, a permissive allowlist).
+For each hit, name the surface, the concrete input that triggers it, and whether it's exploitable now or only under a specific configuration (e.g. Agent mode with an unrestricted sandbox, a permissive allowlist).

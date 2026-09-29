@@ -9,6 +9,18 @@ import {
 	parseRuleText,
 	specifierToRegExp,
 } from "../src/permissions.ts";
+import { PERMISSION_MODES, SANDBOX_MODES } from "../src/types.ts";
+
+/**
+ * The confined pairing, spelled once.
+ *
+ * Every case below is about the *mode* axis, so the sandbox axis is pinned to
+ * the confined value rather than left to each case. `danger-full-access` is not
+ * interchangeable with it for the rules under test — the deny scan and the
+ * classifier both run above it — and the two facts are asserted separately
+ * below instead of being assumed by omission.
+ */
+const SANDBOX = "workspace-write" as const;
 
 /**
  * A workspace root in the spelling *this* platform resolves, and a sibling
@@ -89,21 +101,117 @@ describe("evaluatePermissions", () => {
 			return { ...parsed, behavior, source: "projectSettings" as const };
 		});
 
-	test("bypassPermissions allows everything without consulting rules", () => {
-		const result = evaluatePermissions(
-			"Bash",
-			{ command: "rm -rf /" },
-			{
-				mode: "bypassPermissions",
-				rules: rules([["Bash", "deny"]]),
-				cwd: CWD,
-			},
-		);
-		expect(result.behavior).toBe("allow");
+	/**
+	 * The reverse of a test that used to be here.
+	 *
+	 * It read: "bypassPermissions allows everything without consulting rules" —
+	 * a `Bash` deny rule in the config, `rm -rf /` at the tool, and `allow`. That
+	 * was a true statement about the code, and it was the only place in the build
+	 * where a permission mode could overrule a rule the user had written
+	 * themselves. `deny-scan-first` is written down as a security invariant in
+	 * `.labunbun/skills/code-review-security/SKILL.md:8`, and the code was the
+	 * thing that disagreed with it.
+	 *
+	 * So the assertion is inverted rather than the test deleted: the same three
+	 * facts, the same command, the answer is now `deny`. Deleting it would have
+	 * left the rewrite with nothing to point at — a test that only ever checked
+	 * the mode the *old* system got right cannot tell the new one apart from the
+	 * old one.
+	 *
+	 * `test.each` over both axes rather than a single case, because "no mode and
+	 * no sandbox setting reaches past a deny rule" is a claim about the whole
+	 * product, and a claim about six values tested on one of them is a claim
+	 * about one value.
+	 */
+	test.each(PERMISSION_MODES.flatMap((mode) => SANDBOX_MODES.map((sandbox) => [mode, sandbox] as const)))(
+		"a deny rule beats %s with sandbox %s",
+		(mode, sandbox) => {
+			const result = evaluatePermissions(
+				"Bash",
+				{ command: "rm -rf /" },
+				{
+					mode,
+					sandbox,
+					rules: rules([["Bash", "deny"]]),
+					cwd: CWD,
+				},
+			);
+			expect(result.behavior).toBe("deny");
+		},
+	);
+
+	/**
+	 * The same property on the other deny path.
+	 *
+	 * A file deny rule is extended across the shell (`bashHitsFileDenyRule`), and
+	 * that extension is a *second* place a mode could have short-circuited. It is
+	 * a different branch of `evaluatePermissions` from the bare-tool match above,
+	 * so a test on the bare-tool branch says nothing about it — the deny scan
+	 * "passes" and the extension below it does not.
+	 */
+	test.each([...PERMISSION_MODES])("a file deny rule reaches the shell in %s too", (mode) => {
+		const config = { mode, sandbox: SANDBOX, rules: rules([["Read(secret/**)", "deny"]]), cwd: CWD };
+		expect(evaluatePermissions("Bash", { command: "cat secret/key" }, config).behavior).toBe("deny");
+	});
+
+	/**
+	 * The classifier is above the allow rules, and this is the test that holds it
+	 * there. It exists because a falsification run found the gap rather than
+	 * because the property was thought of: moving the classifier block from step 2
+	 * to below the allow loop left the whole suite green — 4202 pass, 0 fail —
+	 * while silently undoing the sentence in the comment above it ("a match is
+	 * never turned into a pass by an allow rule").
+	 *
+	 * That gap was live for the whole batch. An allow rule is the *ordinary* way a
+	 * user grants a standing permission (`Bash(git *)` so the agent stops asking
+	 * about git), so the case is not exotic: a user who allows `Bash` broadly and
+	 * then runs `rm -rf /` would have got `allow` from the allow loop and never
+	 * reached the classifier at all.
+	 *
+	 * The refusal to copy Codex's `allow`-prefix short-circuit
+	 * (`execpolicy/src/policy.rs:305-332`) is a decision the plan states in
+	 * writing. A decision that only exists in a comment is not a decision, and
+	 * this is the line that makes it one.
+	 */
+	test.each(PERMISSION_MODES.flatMap((mode) => SANDBOX_MODES.map((sandbox) => [mode, sandbox] as const)))(
+		"an allow rule does not buy %s with sandbox %s a dangerous command",
+		(mode, sandbox) => {
+			const result = evaluatePermissions(
+				"Bash",
+				{ command: "rm -rf /" },
+				{ mode, sandbox, rules: rules([["Bash", "allow"]]), cwd: CWD },
+			);
+			// `agent` has nobody to ask, so a classified command is refused outright;
+			// `ask` still reaches a person. Neither answer is `allow`, and which one
+			// it is matters: a test that only asserted "not allow" would pass on a
+			// build that had quietly turned every dangerous command into a prompt.
+			expect(result.behavior).toBe(mode === "agent" ? "deny" : "ask");
+		},
+	);
+
+	/**
+	 * A *specifier* allow rule, not just the bare-tool one above, because a
+	 * specifier is the form users actually write and it is matched by a different
+	 * branch of `ruleMatches`. `Bash(rm *)` is also the more pointed case: it is
+	 * the rule someone writes precisely so the agent can delete things without
+	 * asking, and it must still not be able to delete everything.
+	 */
+	test("a specifier allow rule covering rm does not reach a forced delete", () => {
+		const config = { mode: "agent" as const, sandbox: SANDBOX, rules: rules([["Bash(rm *)", "allow"]]), cwd: CWD };
+		expect(evaluatePermissions("Bash", { command: "rm -rf /" }, config).behavior).toBe("deny");
+		// The control half, and it is in `ask` mode on purpose. In `agent` mode
+		// step 5 answers `allow` to anything nothing else decided, so the same
+		// assertion there would pass whether or not the rule matched at all — a
+		// control that cannot fail is not a control. In `ask` mode the two
+		// outcomes differ: the rule matching gives `allow`, and nothing deciding
+		// gives `ask`.
+		const askConfig = { ...config, mode: "ask" as const };
+		expect(evaluatePermissions("Bash", { command: "rm build/out.txt" }, askConfig).behavior).toBe("allow");
+		expect(evaluatePermissions("Bash", { command: "git status" }, askConfig).behavior).toBe("ask");
 	});
 
 	test("plan mode denies mutating tools, allows read-only", () => {
-		const config = { mode: "plan" as const, rules: [], cwd: CWD };
+		const config = { mode: "plan" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
 		expect(evaluatePermissions("Write", { file_path: "a.txt", content: "" }, config).behavior).toBe("deny");
 		expect(evaluatePermissions("Read", { file_path: "a.txt" }, config).behavior).toBe("ask");
 	});
@@ -111,7 +219,7 @@ describe("evaluatePermissions", () => {
 	test.each(["EnterPlanMode", "ExitPlanMode"])(
 		"plan mode permits %s to reach approval without bypassing denies",
 		(toolName) => {
-			const config = { mode: "plan" as const, rules: [], cwd: CWD };
+			const config = { mode: "plan" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
 			expect(evaluatePermissions(toolName, { plan: "proposal" }, config).behavior).toBe("ask");
 			expect(evaluatePermissions(toolName, {}, { ...config, rules: rules([[toolName, "allow"]]) }).behavior).toBe(
 				"allow",
@@ -133,23 +241,16 @@ describe("evaluatePermissions", () => {
 	);
 
 	test("plan control exceptions do not permit mutation even with allow rules", () => {
-		const config = { mode: "plan" as const, rules: rules([["*", "allow"]]), cwd: CWD };
+		const config = { mode: "plan" as const, sandbox: SANDBOX, rules: rules([["*", "allow"]]), cwd: CWD };
 		for (const toolName of ["Write", "Edit", "Bash", "NotebookEdit", "mcp__server__mutate"]) {
 			expect(evaluatePermissions(toolName, {}, config).behavior).toBe("deny");
 		}
 	});
 
-	test("acceptEdits auto-allows workspace edits only", () => {
-		const config = { mode: "acceptEdits" as const, rules: [], cwd: CWD };
-		expect(
-			evaluatePermissions("Edit", { file_path: `${CWD}\\a.ts`, old_string: "a", new_string: "b" }, config).behavior,
-		).toBe("allow");
-		expect(evaluatePermissions("Bash", { command: "ls" }, config).behavior).toBe("ask");
-	});
-
 	test("deny wins over allow regardless of order", () => {
 		const config = {
-			mode: "default" as const,
+			mode: "ask" as const,
+			sandbox: SANDBOX,
 			rules: rules([
 				["Bash(git *)", "allow"],
 				["Bash(git push*)", "deny"],
@@ -173,7 +274,7 @@ describe("evaluatePermissions", () => {
 	 * extension from a blanket denial.
 	 */
 	test("a file deny rule reaches the shell that reads the same file", () => {
-		const config = { mode: "default" as const, rules: rules([["Read(secret/**)", "deny"]]), cwd: CWD };
+		const config = { mode: "ask" as const, rules: rules([["Read(secret/**)", "deny"]]), sandbox: SANDBOX, cwd: CWD };
 
 		// The same file, through each tool that can read it.
 		expect(evaluatePermissions("Read", { file_path: join(CWD, "secret", "key") }, config).behavior).toBe("deny");
@@ -191,12 +292,12 @@ describe("evaluatePermissions", () => {
 	});
 
 	test("bare deny blocks the whole tool before the model sees matching input", () => {
-		const config = { mode: "default" as const, rules: rules([["WebFetch", "deny"]]), cwd: CWD };
+		const config = { mode: "ask" as const, rules: rules([["WebFetch", "deny"]]), sandbox: SANDBOX, cwd: CWD };
 		expect(evaluatePermissions("WebFetch", { url: "https://x" }, config).behavior).toBe("deny");
 	});
 
 	test("no matching rule → ask", () => {
-		const config = { mode: "default" as const, rules: [], cwd: CWD };
+		const config = { mode: "ask" as const, rules: [], sandbox: SANDBOX, cwd: CWD };
 		expect(evaluatePermissions("Bash", { command: "ls" }, config).behavior).toBe("ask");
 	});
 
@@ -228,28 +329,29 @@ describe("evaluatePermissions", () => {
 				["mcp__github", "mcp__githubby__whatever", false],
 				["mcp__github", "Read", false],
 			])("%s vs %s", (ruleText, toolName, shouldMatch) => {
-				const config = { mode: "default" as const, rules: rules([[ruleText, behavior]]), cwd: CWD };
+				const config = { mode: "ask" as const, rules: rules([[ruleText, behavior]]), sandbox: SANDBOX, cwd: CWD };
 				expect(evaluatePermissions(toolName, {}, config).behavior).toBe(shouldMatch ? onMatch : onMiss);
 			});
 		},
 	);
 
 	test("a non-MCP rule is unaffected by MCP matching", () => {
-		const config = { mode: "default" as const, rules: rules([["Read", "allow"]]), cwd: CWD };
+		const config = { mode: "ask" as const, rules: rules([["Read", "allow"]]), sandbox: SANDBOX, cwd: CWD };
 		expect(evaluatePermissions("Read", { file_path: "a.ts" }, config).behavior).toBe("allow");
 		expect(evaluatePermissions("Write", { file_path: "a.ts" }, config).behavior).toBe("ask");
 		// `*` still matches everything, including MCP tools.
-		const wildcard = { mode: "default" as const, rules: rules([["*", "allow"]]), cwd: CWD };
+		const wildcard = { mode: "ask" as const, rules: rules([["*", "allow"]]), sandbox: SANDBOX, cwd: CWD };
 		expect(evaluatePermissions("mcp__github__x", {}, wildcard).behavior).toBe("allow");
 	});
 
 	test("an MCP deny beats an MCP allow for the same server", () => {
 		const config = {
-			mode: "default" as const,
+			mode: "ask" as const,
 			rules: rules([
 				["mcp__github", "allow"],
 				["mcp__github__delete_repo", "deny"],
 			]),
+			sandbox: SANDBOX,
 			cwd: CWD,
 		};
 		expect(evaluatePermissions("mcp__github__create_issue", {}, config).behavior).toBe("allow");

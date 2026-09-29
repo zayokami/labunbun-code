@@ -38,6 +38,13 @@ export {
 	stripAnalysis,
 } from "./compaction.ts";
 export { partitionToolCalls, type ToolBatch } from "./concurrency.ts";
+// Dangerous-command classification
+export {
+	classifyDangerousCommand,
+	type DangerousCommandMatch,
+	type DangerousCommandPlatform,
+	MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH,
+} from "./dangerous-command.ts";
 // Bounding what tool output may enter the conversation
 export {
 	capRoundResults,
@@ -77,6 +84,8 @@ export {
 	sessionFilePath,
 	sessionsRoot,
 } from "./session-store.ts";
+// Shell tokenizing, shared with the classifier
+export { COMMAND_SEPARATOR_RE, splitShellCommands, tokenizeShell } from "./shell-tokens.ts";
 // Core types
 export type {
 	AgentDeps,
@@ -87,13 +96,28 @@ export type {
 	BeforeToolCallDecision,
 	CompactionCheck,
 	LoopHooks,
+	ModeChoice,
 	PermissionContext,
 	PermissionMode,
 	PermissionResult,
 	ResolvedToolCall,
+	SandboxMode,
 	Tool,
 	ToolCallContext,
 	ToolResult,
 	TrimmedToolResults,
 } from "./types.ts";
-export { allow, ask, buildTool, deny, formatRetryNotice, PERMISSION_MODES, toWireTools } from "./types.ts";
+export {
+	allow,
+	ask,
+	buildTool,
+	DEFAULT_MODE_CHOICE,
+	DEFAULT_SANDBOX_FOR_MODE,
+	deny,
+	findModeChoice,
+	formatRetryNotice,
+	MODE_CHOICES,
+	PERMISSION_MODES,
+	SANDBOX_MODES,
+	toWireTools,
+} from "./types.ts";

@@ -12,8 +12,10 @@
  * The planner's decisions are policy calls, and a policy call that is not
  * written down reads as an oversight. Each test below names the function it
  * pins and, where the wording *is* the decision, quotes it:
- * `planMinimaxPermissionMode` carries `off` as `bypassPermissions` because
- * MiniMax itself calls it that; `planMinimaxPermissions` refuses a file
+ * `planMinimaxPermissionMode` carries MiniMax's `off` and `bypassPermissions`
+ * as one unconfined pair, because MiniMax itself calls them the same thing, and
+ * its `acceptEdits` as `ask` with the rules it could not carry named in the
+ * report; `planMinimaxPermissions` refuses a file
  * `readMinimaxPermissions` refused, whole, rather than importing the allows out
  * of a store the source is refusing to honour; `planMinimaxProviders` reads a
  * variable *name* out of `env[]` and never a key — the difference between
@@ -28,6 +30,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { MODE_CHOICES } from "@labunbun/agent";
 import {
 	detectSources,
 	MIGRATION_SOURCE_IDS,
@@ -46,6 +49,7 @@ import {
 	MINIMAX_LEGACY_DATA_DIR_ENV,
 	minimaxRoot,
 } from "../src/minimax-home.ts";
+import { MINIMAX_PERMISSION_MODES } from "../src/minimax-plan.ts";
 import type { RawSettingsInput } from "../src/settings.ts";
 
 /** Directories a test made, swept when it ends. */
@@ -607,77 +611,212 @@ describe("config.yaml → custom_provider", () => {
 });
 
 describe("config.yaml → permissionMode", () => {
-	test("off is bypassPermissions, which is what MiniMax itself calls it", () => {
-		// `modeToAskPolicy` sends both spellings to "always allow"
-		// (`ask-policy.ts:22-36`) and the facade rewrites `off` into
-		// `bypassPermissions` before its engine sees the mode (`facade.ts:563-566`),
-		// so this is a second spelling rather than a third posture — and the report
-		// says so, because a reader of the two files would not guess it.
-		const { home } = minimaxHome({ "config.yaml": 'permissionMode: "off"\n' });
-		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBe("bypassPermissions");
-		const item = itemTo(planned, "settings.json → permissionMode");
-		expect(item?.from).toContain('("off")');
-		expect(item?.detail).toContain("which is what MiniMax itself calls it");
-		expect(item?.detail).toContain("always allow");
+	/**
+	 * A `config.yaml` whose only content is this mode, planned.
+	 *
+	 * Every test in this describe goes through here, so the fixture is the same
+	 * shape in each: a value MiniMax's own reader would look at, and nothing
+	 * else for the rest of the report to talk about.
+	 */
+	function planWithMode(spelled: string): MigrationPlan {
+		const { home } = minimaxHome({ "config.yaml": `permissionMode: ${JSON.stringify(spelled)}\n` });
+		return plan(home);
+	}
+
+	/**
+	 * Every row of `MINIMAX_PERMISSION_MODES`, both halves.
+	 *
+	 * The pair is the claim and not the mode: MiniMax has one value doing two
+	 * jobs, so a report line that named the mode alone would read as "never asks"
+	 * and say nothing about confinement. `claimModePair` (migrate.ts:295-306) is
+	 * what writes the second line, and each row below asserts that it is there.
+	 *
+	 * `bypassPermissions` and `off` are two rows and not one, because they are
+	 * one posture spelled two ways and the file's spelling is what the report has
+	 * to quote — a single row would leave one of them unread.
+	 */
+	const CARRIED: ReadonlyArray<{ spelled: string; mode: string; sandbox: string }> = [
+		{ spelled: "default", mode: "ask", sandbox: "workspace-write" },
+		{ spelled: "bypassPermissions", mode: "agent", sandbox: "danger-full-access" },
+		{ spelled: "off", mode: "agent", sandbox: "danger-full-access" },
+		{ spelled: "acceptEdits", mode: "ask", sandbox: "workspace-write" },
+	];
+
+	for (const { spelled, mode, sandbox } of CARRIED) {
+		test(`"${spelled}" is imported as ${mode} with the sandbox ${sandbox}`, () => {
+			const planned = planWithMode(spelled);
+			const written = settingsWritten(planned);
+			expect(written.permissionMode).toBe(mode);
+			expect(written.sandbox).toBe(sandbox);
+
+			// Two lines, both quoting the value as the file spelled it: a user who
+			// greps their own `config.yaml` has to land on both halves.
+			for (const key of ["permissionMode", "sandbox"] as const) {
+				const item = itemTo(planned, `settings.json → ${key}`);
+				expect(item?.action).toBe("map");
+				expect(item?.from).toContain(`("${spelled}")`);
+			}
+			expect(itemTo(planned, "settings.json → permissionMode")?.detail).toContain(`mapped to "${mode}"`);
+			// And the half MiniMax folded into one value, named where it lands.
+			// This is the line that matters: a mode's own default sandbox is
+			// confined for all three of them (`DEFAULT_SANDBOX_FOR_MODE`,
+			// packages/agent/src/types.ts:116-120), so the two unconfined rows are
+			// the ones a mode-only report would quietly lose.
+			expect(itemTo(planned, "settings.json → sandbox")?.detail).toContain(
+				sandbox === "danger-full-access" ? "imported unrestricted" : "imported confined",
+			);
+		});
+	}
+
+	test("every pair the map produces is a row the mode picker offers", () => {
+		// A pair the picker cannot produce is a posture the user cannot get back
+		// to by hand — `ask` with no sandbox, say, is not one of the four rows in
+		// `MODE_CHOICES` (packages/agent/src/types.ts:70-99), so an import that
+		// wrote it would be a setting the rest of the build accepts and no user
+		// could have arrived at.
+		const reachable = MODE_CHOICES.map((choice) => `${choice.mode} + ${choice.sandbox}`);
+		for (const row of CARRIED) expect(reachable).toContain(`${row.mode} + ${row.sandbox}`);
 	});
 
-	test("acceptEdits travels, with MiniMax's two readers named", () => {
+	test("`off` and `bypassPermissions` are one posture in two spellings, and both are read", () => {
+		// MiniMax's own code says they are the same decision: both switch arms
+		// return "never" (`ask-policy.ts:33-35`, under a doc line that reads
+		// "Always allow (PermissionMode 'bypassPermissions' / 'off')" at :20), and
+		// the facade rewrites `off` into `bypassPermissions` before its engine ever
+		// sees a mode (`facade.ts:564-566`). The import is the same pair either
+		// way; what differs is the line, which has to name the value the file
+		// actually held.
+		const off = planWithMode("off");
+		const bypass = planWithMode("bypassPermissions");
+		expect(settingsWritten(off)).toEqual(settingsWritten(bypass));
+
+		for (const key of ["permissionMode", "sandbox"] as const) {
+			expect(itemTo(off, `settings.json → ${key}`)?.from).toContain('("off")');
+			expect(itemTo(bypass, `settings.json → ${key}`)?.from).toContain('("bypassPermissions")');
+		}
+
+		// The report says which is which rather than reading as a rename: the mode
+		// line names MiniMax's own name for the value, and the sandbox line is
+		// the only place the "and no confinement" half of it is said.
+		const detail = itemTo(off, "settings.json → permissionMode")?.detail ?? "";
+		expect(detail).toContain("which is what MiniMax itself calls it");
+		expect(detail).toContain("always allow");
+		expect(itemTo(off, "settings.json → sandbox")?.detail).toContain("imported unrestricted");
+	});
+
+	test("`acceptEdits` lands on the asking pair, and the two readers that disagree are named", () => {
 		// MiniMax's own readers disagree about this value: the runtime's reader
-		// accepts it (`readLocalPermissionMode`, host-helpers.ts:543-554) and the
-		// writer that persists the key lists it, while the reader the bundled
-		// config goes through does not and falls back to `auto`
-		// (`config.ts:2053-2059`). Its documented meaning there is this build's
-		// mode of the same name, so the value is carried and the split is said.
-		const { home } = minimaxHome({ "config.yaml": 'permissionMode: "acceptEdits"\n' });
-		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBe("acceptEdits");
-		const [detail] = detailsMatching(planned, /MiniMax's runtime reader accepts this value/);
-		expect(detail).toContain('"auto"');
+		// accepts it (`readLocalPermissionMode`, host-helpers.ts:543-551) and the
+		// writer that persists the key lists it, while the reader a bundled
+		// config.yaml goes through does not list it at all and falls back to
+		// `auto` (`config.ts:2053-2059`). Its documented meaning is "default plus
+		// pre-seeded edit/write allow rules" (`ask-policy.ts:42-43`) — an `ask`
+		// narrower than it says, because no mode here carries rules of its own. So
+		// the pair is the asking one, and the report names what was left out
+		// instead of calling it a rename.
+		const planned = planWithMode("acceptEdits");
+		const written = settingsWritten(planned);
+		expect(written.permissionMode).toBe("ask");
+		expect(written.sandbox).toBe("workspace-write");
+
+		const detail = itemTo(planned, "settings.json → permissionMode")?.detail ?? "";
+		expect(detail).toContain("with the edit/write allow rules left out");
+		expect(detail).toMatch(/runtime reader accepts this value/);
+		expect(detail).toContain('would run the session as "auto"');
+		expect(detail).toContain("no mode here that carries its own rules");
 	});
 
-	test("auto is left behind, and the line says why the nearest mode is the wrong one", () => {
-		// `auto` is a classifier that approves what it judges safe; the nearest
-		// mode here, `dontAsk`, means the opposite — anything not explicitly
-		// allowed is denied — so carrying it under a different name would be a lie
-		// about what the session will do (`MINIMAX_PERMISSION_MODES`' doc comment,
-		// migrate.ts:9253-9289).
-		const { home } = minimaxHome({ "config.yaml": 'permissionMode: "auto"\n' });
-		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBeUndefined();
-		const [detail] = detailsMatching(planned, /approves the calls it judges safe/);
-		expect(detail).toContain("dontAsk");
-		expect(detail).toContain("denied");
+	test("`auto` is left behind, and the line says no mode here decides a call for you", () => {
+		// `auto` is a classifier that approves what it judges safe
+		// (`modeToAskPolicy` sends it to "on-request-llm", ask-policy.ts:36-37).
+		// There is no mode here that decides a call on your behalf: `ask` asks
+		// for every write and command, `agent` runs them all unasked — so
+		// carrying it under either name would be a claim about the session that
+		// would not come true. Neither half of the pair is written, and the
+		// session keeps whatever mode it would have started in.
+		const planned = planWithMode("auto");
+		const written = settingsWritten(planned);
+		expect(written.permissionMode).toBeUndefined();
+		expect(written.sandbox).toBeUndefined();
+		const details = detailsMatching(planned, /approves the calls it judges safe/);
+		expect(details).toHaveLength(1);
+		expect(details[0]).toContain("no mode here decides a call on your behalf");
+		expect(details[0]).toContain("keeps whatever mode it would otherwise start in");
+		expect(fromsMatching(planned, /permissionMode \("auto"\)/)).toHaveLength(1);
 	});
 
-	test("dontAsk is left behind, because no reader of this file accepts it", () => {
+	test("`dontAsk` is left behind, because no reader of this file accepts it", () => {
 		// It is a live session mode in MiniMax, reached through `setMode`
 		// (`plugin-hook-permission-state.ts:76-84,232`), and no reader of
-		// *config.yaml* accepts it — the file's own reader validates against
-		// `["default", "bypassPermissions", "auto", "off"]` (config.ts:2053-2059) —
-		// so a config.yaml carrying it runs as `auto` over there.
-		const { home } = minimaxHome({ "config.yaml": 'permissionMode: "dontAsk"\n' });
-		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBeUndefined();
-		const [detail] = detailsMatching(planned, /none of the readers that open this file accept it/);
-		expect(detail).toContain('runs as "auto"');
+		// *config.yaml* accepts it — that file's own reader validates against
+		// `["default", "bypassPermissions", "auto", "off"]` (config.ts:2053-2059)
+		// and the runtime's reader lists five names that are not this one
+		// (host-helpers.ts:543-551) — so a config.yaml carrying it runs as `auto`
+		// over there, and the mode the user believed they had is not one this
+		// build offers.
+		const planned = planWithMode("dontAsk");
+		const written = settingsWritten(planned);
+		expect(written.permissionMode).toBeUndefined();
+		expect(written.sandbox).toBeUndefined();
+		const details = detailsMatching(planned, /none of the readers that open this file accept it/);
+		expect(details).toHaveLength(1);
+		expect(details[0]).toContain('runs as "auto"');
+		expect(details[0]).toContain("not one this build offers");
+		expect(fromsMatching(planned, /permissionMode \("dontAsk"\)/)).toHaveLength(1);
 	});
 
-	test("a mode MiniMax never read decides nothing, and a blank one is not a mode", () => {
-		const { home } = minimaxHome({ "config.yaml": 'permissionMode: "yolo"\n' });
-		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBeUndefined();
-		const [detail] = detailsMatching(planned, /not a mode MiniMax reads/);
-		expect(detail).toContain("never decided a session");
+	test("a value MiniMax never read is skipped, and the report quotes it", () => {
+		const planned = planWithMode("yolo");
+		const written = settingsWritten(planned);
+		expect(written.permissionMode).toBeUndefined();
+		expect(written.sandbox).toBeUndefined();
+		// The line has to name the value as it was spelled: a user cannot go and
+		// fix a mode they are not told about.
 		expect(fromsMatching(planned, /permissionMode \("yolo"\)/)).toHaveLength(1);
+		const details = detailsMatching(planned, /not a mode MiniMax reads/);
+		expect(details).toHaveLength(1);
+		expect(details[0]).toContain("never decided a session");
 
-		// `planMinimaxPermissionMode` trims and treats the empty string as "the key
-		// is not there" (migrate.ts:9299-9300): a value of spaces decided nothing
-		// there either, so there is no line to write.
-		const blank = minimaxHome({ "config.yaml": 'permissionMode: "   "\n' });
-		const blankPlan = plan(blank.home);
-		expect(settingsWritten(blankPlan).permissionMode).toBeUndefined();
-		expect(fromsMatching(blankPlan, /permissionMode/)).toHaveLength(0);
+		// Worth knowing when reading that line: MiniMax's reader does not reject a
+		// value it does not know, it substitutes its own default
+		// (`DEFAULTS.permissionMode` is "auto", config.ts:1726, reached at
+		// :2053-2059), so over there this file ran as `auto` — the same thing the
+		// `dontAsk` line above says out loud. The skip is right either way; only
+		// the second half of the reason is thinner here than it is there.
+	});
+
+	test("a value of spaces is not a mode, and leaves no line at all", () => {
+		// `planMinimaxPermissionMode` trims and treats the empty string as "the
+		// key is not there": a value of spaces decided nothing there either, so a
+		// line saying "skipped" would be reporting a decision the file never made.
+		const planned = planWithMode("   ");
+		expect(settingsWritten(planned)).toEqual({});
+		expect(fromsMatching(planned, /permissionMode/)).toHaveLength(0);
+	});
+
+	test("the six names MiniMax knows are each answered once, and the table is the whole map", () => {
+		// The two halves of the completeness claim, because either alone leaves a
+		// hole: a row added to the map without a row in the table is an import
+		// nobody checked, and a row dropped from the table takes its own test with
+		// it. The map is exported for the count (`minimax-plan.ts`,
+		// `MINIMAX_PERMISSION_MODES`) rather than for the values, which are restated
+		// here on purpose.
+		expect(Object.keys(MINIMAX_PERMISSION_MODES)).toEqual(CARRIED.map((row) => row.spelled));
+
+		// Every name MiniMax's permission module knows (agent-modules/permission/
+		// src/types.ts:13-19) is answered from that file, and a carried value is
+		// answered once per half of the pair while a skipped one is answered once —
+		// so the line count is the map's own answer to "was this a claim?", and it
+		// is never zero.
+		const names = ["default", "acceptEdits", "bypassPermissions", "auto", "off", "dontAsk"];
+		for (const name of names) {
+			const lines = fromsMatching(planWithMode(name), /→ permissionMode \(/);
+			expect(lines).toHaveLength(name === "auto" || name === "dontAsk" ? 1 : 2);
+			for (const line of lines) expect(line).toContain(`"${name}"`);
+		}
+		const carried = names.filter((name) => settingsWritten(planWithMode(name)).permissionMode !== undefined);
+		expect(carried).toEqual(["default", "acceptEdits", "bypassPermissions", "off"]);
+		expect(names.filter((name) => !carried.includes(name))).toEqual(["auto", "dontAsk"]);
 	});
 });
 

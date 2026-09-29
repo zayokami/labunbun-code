@@ -435,15 +435,98 @@ describe("cursor permissions", () => {
 		expect(line(planned, ".cursor/cli.json → permissions.allow")).toBeDefined();
 	});
 
-	test("sandbox and network are named as settings with no equivalent here", () => {
+	test("sandbox is read as the second axis, and network is named as having no equivalent here", () => {
+		// `sandbox` and `network` are no longer the same kind of thing, and the
+		// test that used to lump them together was asserting a claim about
+		// `network` the bundled CLI does not support. `sandbox.mode` *is* the
+		// second axis of the pair `approvalMode` already decided, so it is read
+		// and named as such; `network` is a different key entirely.
 		const planned = plan({
-			".cursor/cli-config.json": JSON.stringify({ sandbox: true, network: { allow: ["example.com"] } }),
+			".cursor/cli-config.json": JSON.stringify({
+				sandbox: { mode: "enabled", networkAccess: "user_config_with_defaults" },
+				network: { useHttp1ForAgent: true },
+			}),
 		});
-		for (const key of ["sandbox", "network"]) {
-			const skipped = line(planned, `→ ${key}`);
-			expect(skipped?.action).toBe("skip");
-			expect(skipped?.detail).toContain("its own process may reach");
+
+		const sandbox = line(planned, 'sandbox.mode ("enabled")');
+		expect(sandbox?.action).toBe("skip");
+		// The sentence has to say *which* half of the pair it agreed with, or a
+		// user reading one line has no way to tell a deliberate merge from a
+		// setting the importer forgot.
+		expect(sandbox?.detail).toContain('approvalMode "allowlist" already maps to');
+
+		const unconfined = line(
+			plan({ ".cursor/cli-config.json": JSON.stringify({ sandbox: { mode: "disabled" } }) }),
+			'sandbox.mode ("disabled")',
+		);
+		expect(unconfined?.action).toBe("skip");
+		expect(unconfined?.detail).toContain('approvalMode "unrestricted" already maps to');
+
+		const network = line(planned, "→ network");
+		expect(network?.action).toBe("skip");
+		// `network` is `{useHttp1ForAgent}` in the real CLI — a transport switch,
+		// not an allowlist of reachable hosts — and the report says so rather
+		// than sending the user after a permission list that was never there.
+		expect(network?.detail).toContain("{useHttp1ForAgent}");
+		expect(network?.detail).toContain("sandbox.networkAccess");
+	});
+
+	/**
+	 * The other half of the sandbox block, named one key at a time.
+	 *
+	 * The fixture in the test above plants `networkAccess` next to `mode` and, at
+	 * the time this was written, nothing in the report mentioned it: `sandbox` is
+	 * a whole key in the handled list, so `reportUnhandledKeys` stayed quiet, and
+	 * the reader only ever looked at `mode`. A user reading that report had no way
+	 * to tell "the importer saw your network settings and decided they did not
+	 * matter" from "the importer never looked".
+	 *
+	 * `networkAccess` is the pointed case because it *is* the setting that governs
+	 * what cursor's process may reach — the sentence about the separate `network`
+	 * key above says as much, which is what made the omission hard to spot.
+	 */
+	test("keys inside the sandbox block that were not read are named individually", () => {
+		const planned = plan({
+			".cursor/cli-config.json": JSON.stringify({
+				sandbox: { mode: "enabled", networkAccess: "allow_all", networkAllowlist: ["example.com"] },
+			}),
+		});
+
+		for (const key of ["networkAccess", "networkAllowlist"]) {
+			const unread = line(planned, `→ sandbox.${key}`);
+			expect(unread?.action).toBe("skip");
+			expect(unread?.detail).toContain("is not read");
 		}
+	});
+
+	/**
+	 * The keys are enumerated from the object, not from a list of names cursor is
+	 * known to use. A name written out in the importer would stop being checked
+	 * the day cursor adds another one, which is the same rot the mode enums had.
+	 */
+	test("an unrecognised sandbox sub-key is still reported, without its value", () => {
+		const planned = plan({
+			".cursor/cli-config.json": JSON.stringify({
+				sandbox: { mode: "enabled", somethingNew: "hunter2" },
+			}),
+		});
+		const unread = line(planned, "→ sandbox.somethingNew");
+		expect(unread?.action).toBe("skip");
+		// The value is not echoed. A key nobody recognises is exactly the kind that
+		// turns out to hold a token, and naming what was left behind is the whole
+		// job — reproducing it would be the one way to make this line unsafe.
+		expect(unread?.detail).not.toContain("hunter2");
+	});
+
+	/**
+	 * And a `sandbox` that is not an object at all. The key is in the handled
+	 * list, so nothing else in this file would say a word about it.
+	 */
+	test("a sandbox key that is not an object is reported rather than passing silently", () => {
+		const planned = plan({ ".cursor/cli-config.json": JSON.stringify({ sandbox: true }) });
+		const reported = line(planned, "→ sandbox");
+		expect(reported?.action).toBe("skip");
+		expect(reported?.detail).toContain("not an object");
 	});
 });
 
@@ -466,19 +549,29 @@ describe("cursor model and approval mode", () => {
 		expect(skipped?.detail).toContain("no model in the registry matches");
 	});
 
-	test("each approval mode is read as the nearest one here, and the near-miss says why", () => {
-		for (const [value, expected] of [
-			["ask", "default"],
-			["auto", "acceptEdits"],
-			["yolo", "bypassPermissions"],
+	test("each approval mode is read as the pair it stands for, and the near-miss says why", () => {
+		// The three values the bundled CLI declares for `approvalMode`, and both
+		// halves of what each becomes. `cursor-approval-modes.test.ts` checks
+		// that this is the *whole* declared list against the bundle itself; this
+		// is the behavioural half, over the plan rather than the table.
+		for (const [value, mode, sandbox] of [
+			["allowlist", "ask", "workspace-write"],
+			["auto-review", "ask", "workspace-write"],
+			["unrestricted", "agent", "danger-full-access"],
 		] as const) {
 			const planned = plan({ ".cursor/cli-config.json": JSON.stringify({ approvalMode: value }) });
-			expect(settingsJson(planned).permissionMode).toBe(expected);
+			const settings = settingsJson(planned);
+			expect(settings.permissionMode).toBe(mode);
+			// The second axis too: cursor's mode is one value doing both jobs and
+			// this build splits them, so `unrestricted` has to arrive unconfined
+			// and not merely un-asked.
+			expect(settings.sandbox).toBe(sandbox);
 		}
-		// `auto` is the one that is genuinely narrower than cursor's promise, so
-		// the report has to say so rather than presenting three exact translations.
-		const auto = plan({ ".cursor/cli-config.json": JSON.stringify({ approvalMode: "auto" }) });
-		expect(line(auto, 'approvalMode ("auto")')?.detail).toContain("nearest mode");
+		// `auto-review` is the one that is genuinely narrower than cursor's
+		// promise, so the report has to say so rather than presenting three exact
+		// translations.
+		const auto = plan({ ".cursor/cli-config.json": JSON.stringify({ approvalMode: "auto-review" }) });
+		expect(line(auto, 'approvalMode ("auto-review")')?.detail).toContain("narrower than what the config asked for");
 	});
 
 	test("an approval mode with no counterpart is a skip, and does not leave a stale mode", () => {

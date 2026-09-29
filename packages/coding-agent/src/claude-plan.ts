@@ -9,6 +9,7 @@
  * this file's history: renaming it would be a change, and this is a move.
  */
 
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { RawClaudeCode } from "./claude-read.ts";
 import { HooksConfigSchema } from "./hooks.ts";
@@ -21,7 +22,14 @@ import {
 	reportUnhandledKeys,
 	summarizeNames,
 } from "./migrate-core.ts";
-import type { ClaimEnv, ClaimHooks, ClaimPermissionList, ClaimScalar, MigrationItem } from "./migrate-types.ts";
+import type {
+	ClaimEnv,
+	ClaimHooks,
+	ClaimModePair,
+	ClaimPermissionList,
+	ClaimScalar,
+	MigrationItem,
+} from "./migrate-types.ts";
 
 export { normalizeClaudeHooks } from "./migrate-core.ts";
 
@@ -35,26 +43,40 @@ import {
 import type { RawSettingsInput } from "./settings.ts";
 
 /**
- * Claude Code's `permissions.defaultMode` → this build's permission mode.
+ * Claude Code's `permissions.defaultMode` → this build's two mode axes.
  *
  * `manual` is an older spelling of `default`. `auto` is deliberately absent: it
- * means a classifier decides, and the nearest mode here (`dontAsk`) means the
- * opposite — anything not explicitly allowed is denied — so carrying it over
- * under a different name would be a lie about what the session will do.
+ * means a classifier decides, and the nearest mode here (`ask`) means the
+ * opposite — a human decides — so carrying it over under a different name would
+ * be a lie about what the session will do.
+ *
+ * `acceptEdits` maps to `ask`, which is narrower than what it says: this build
+ * has no "edits run, everything else asks" mode, and an import that silently
+ * widened writes to unasked would be the worse error of the two. The report line
+ * says so in those words rather than calling it a rename.
+ *
+ * `bypassPermissions` was one value doing two jobs — never ask, and no
+ * confinement — which is why it is the one row that maps to the unconfined
+ * sandbox. Claude Code's own `sandbox` object is a separate axis over there too
+ * (`danger-full-access` replaced it), and when that object is present it wins:
+ * see {@link planClaudeSandbox}.
+ *
+ * Exported for the row count, not for the values: a row added here without a
+ * line in the mapper test's table is an import whose claim nobody has checked.
  */
-const CLAUDE_PERMISSION_MODES: Record<string, string> = {
-	default: "default",
-	manual: "default",
-	plan: "plan",
-	acceptEdits: "acceptEdits",
-	bypassPermissions: "bypassPermissions",
+export const CLAUDE_PERMISSION_MODES: Record<string, { mode: PermissionMode; sandbox: SandboxMode }> = {
+	default: { mode: "ask", sandbox: "workspace-write" },
+	manual: { mode: "ask", sandbox: "workspace-write" },
+	plan: { mode: "plan", sandbox: "workspace-write" },
+	acceptEdits: { mode: "ask", sandbox: "workspace-write" },
+	bypassPermissions: { mode: "agent", sandbox: "danger-full-access" },
 };
 
 /** Map Claude Code's `permissions` block onto this build's, sub-key by sub-key. */
 function planClaudePermissions(
 	settings: Record<string, unknown>,
 	items: MigrationItem[],
-	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	claimPermissionList: ClaimPermissionList,
 ): void {
 	const permissions = isRecord(settings.permissions) ? settings.permissions : undefined;
@@ -65,7 +87,15 @@ function planClaudePermissions(
 	if (mode) {
 		const mapped = CLAUDE_PERMISSION_MODES[mode];
 		if (mapped) {
-			claimScalar("claude-code", "permissionMode", mapped, `${from}.defaultMode ("${mode}")`, `mapped to "${mapped}"`);
+			claimModePair(
+				"claude-code",
+				mapped.mode,
+				mapped.sandbox,
+				`${from}.defaultMode ("${mode}")`,
+				mode === "acceptEdits"
+					? 'mapped to "ask": this build has no mode that applies edits without asking, so a write is asked like everything else. Narrower than the mode it replaced, deliberately'
+					: `mapped to "${mapped.mode}"`,
+			);
 		} else {
 			items.push({
 				source: "claude-code",
@@ -74,7 +104,7 @@ function planClaudePermissions(
 				action: "skip",
 				detail:
 					mode === "auto"
-						? '"auto" has no equivalent here: it is a classifier that approves calls it judges safe, and the nearest mode, "dontAsk", does the opposite — anything not explicitly allowed is denied'
+						? '"auto" has no equivalent here: it is a classifier that approves calls it judges safe, and the nearest mode, "ask", is the opposite — a person decides'
 						: "no permission mode here corresponds to this value — the session keeps the mode it would otherwise start in",
 				containsSecret: false,
 			});
@@ -131,6 +161,72 @@ function planClaudePermissions(
 			to: "—",
 			action: "downgrade",
 			detail: `not written to ~/.labunbun/settings.json: this key is honoured only from the policy tier, where the file being restricted cannot lift its own restriction — put "disableBypassPermissionsMode": ${JSON.stringify(lockdown)} in ~/.labunbun/managed-settings.json instead`,
+			containsSecret: false,
+		});
+	}
+}
+
+/**
+ * Claude Code's `sandbox` object → this build's sandbox axis.
+ *
+ * Claude Code already treats confinement as separate from approval, which is
+ * why this build does: `permissions.defaultMode` decides who answers, `sandbox`
+ * decides what Bash may touch. `examples/settings/settings-bash-sandbox.json:3`
+ * is the shape, and the two switches that matter are `enabled` and
+ * `filesystem.disabled` (the latter added in `CHANGELOG.md:543`, "skip
+ * filesystem isolation while keeping network egress control").
+ *
+ * `filesystem.disabled: true` maps to `danger-full-access`, and the report says
+ * the other half of that sentence out loud: the network egress control it pairs
+ * with there has no counterpart on this axis, which covers the filesystem only.
+ * Importing it as though it had would be the exact overclaim this build's own
+ * `/doctor` text warns against.
+ *
+ * `autoAllowBashIfSandboxed` is the opposite axis's business — it decides
+ * whether a sandboxed Bash still prompts — so it is reported as unread rather
+ * than guessed at.
+ */
+function planClaudeSandbox(settings: Record<string, unknown>, items: MigrationItem[], claimScalar: ClaimScalar): void {
+	const sandbox = isRecord(settings.sandbox) ? settings.sandbox : undefined;
+	if (!sandbox) return;
+	const from = "~/.claude/settings.json → sandbox";
+
+	const filesystem = isRecord(sandbox.filesystem) ? sandbox.filesystem : undefined;
+	const disabled = filesystem?.disabled === true;
+	if (disabled) {
+		claimScalar(
+			"claude-code",
+			"sandbox",
+			"danger-full-access",
+			`${from}.filesystem.disabled`,
+			'mapped to "danger-full-access": commands run with no filesystem confinement. The network egress control this pairs with in Claude Code has no counterpart on this axis, which covers the filesystem only — nothing was imported for it',
+		);
+	} else if (sandbox.enabled === false) {
+		claimScalar(
+			"claude-code",
+			"sandbox",
+			"danger-full-access",
+			`${from}.enabled`,
+			'mapped to "danger-full-access": the sandbox is off there, so Bash is unconfined here too',
+		);
+	} else {
+		claimScalar(
+			"claude-code",
+			"sandbox",
+			"workspace-write",
+			from,
+			'mapped to "workspace-write": the sandbox is on there, so commands run confined here too',
+		);
+	}
+
+	if (typeof sandbox.autoAllowBashIfSandboxed === "boolean") {
+		items.push({
+			source: "claude-code",
+			from: `${from}.autoAllowBashIfSandboxed`,
+			to: "—",
+			action: "skip",
+			detail:
+				"not imported: it decides whether a sandboxed command still gets asked about, which is the permission mode's question rather than the sandbox's. There is no mode here that pairs a confined session with auto-approved commands",
 			containsSecret: false,
 		});
 	}
@@ -237,6 +333,7 @@ export function planClaudeCode(
 	items: MigrationItem[],
 	claimEnv: ClaimEnv,
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	claimPermissionList: ClaimPermissionList,
 	claimHooks: ClaimHooks,
 	mcpServers: Record<string, unknown>,
@@ -390,7 +487,8 @@ export function planClaudeCode(
 		}
 	}
 
-	planClaudePermissions(raw.settings, items, claimScalar, claimPermissionList);
+	planClaudePermissions(raw.settings, items, claimModePair, claimPermissionList);
+	planClaudeSandbox(raw.settings, items, claimScalar);
 	planClaudeHooks(raw.settings, items, claimHooks, existing, force);
 
 	if (raw.settings.effortLevel !== undefined) {

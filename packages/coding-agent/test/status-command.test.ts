@@ -71,7 +71,11 @@ describe("/status", () => {
 		expect(card).toBeDefined();
 		expect(card?.model).toBe(`${h.ctx.getSession()?.model.provider}/${h.ctx.getSession()?.model.id}`);
 		expect(card?.directory).toBe(`~${sep}project`);
-		expect(card?.permissions).toBe("default");
+		// The card names the *pair*, using the picker's label for it. A card that
+		// printed only the mode could not distinguish `Agent` from
+		// `Agent 无沙箱` — the two rows differ only in confinement, and that is the
+		// one fact on this card a user cannot infer from the rest of it.
+		expect(card?.permissions).toBe("Ask");
 		expect(card?.session).toBe("abcdef01");
 		expect(card?.context).toEqual({ usedTokens: 42_000, threshold: 200_000 });
 		expect(card?.details.map(([label]) => label)).toEqual(["Cost", "Cache", "Theme", "MCP"]);

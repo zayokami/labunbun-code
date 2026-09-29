@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import { detectSources, runMigration } from "../src/migrate.ts";
 import { loadSettings } from "../src/settings.ts";
@@ -16,7 +17,7 @@ import {
 	zcodeRoot,
 	zcodeStorageDir,
 } from "../src/zcode-home.ts";
-import { zcodeReachableCommands } from "../src/zcode-plan.ts";
+import { ZCODE_PERMISSION_MODES, zcodeReachableCommands } from "../src/zcode-plan.ts";
 import { borrowSourceEnv } from "./source-env.ts";
 
 /** Files a source tree should contain, keyed by path relative to the fake home. */
@@ -142,6 +143,43 @@ const USER_RULESET_ROWS: Array<[string, string, string, unknown]> = [
 	["user", "model", "reasoningLevel", { level: "enabled" }],
 	["user", "permission", "ruleset", { version: 1, allow: [{ toolName: "Bash", ruleContent: "npm test" }] }],
 ];
+
+/**
+ * Every row of `ZCODE_PERMISSION_MODES`, as the pair this build writes it as:
+ * `[ZCode's value, permissionMode, sandbox, the report's own sentence]`.
+ *
+ * Both axes are columns because ZCode's one value does both jobs and this repo
+ * splits them — a table pinning only the mode would pass while the confinement
+ * the import actually chose drifted. The `detail` column is the whole sentence
+ * rather than a fragment, so a row that grows a caveat (`edit`) and a row that
+ * does not are told apart by the test and not by whichever assertion happens to
+ * be present. ZCode's fifth value, `auto`, is deliberately not here: it is a
+ * skip, and a skip has its own test below.
+ */
+const ZCODE_MODE_ROWS: ReadonlyArray<readonly [string, PermissionMode, SandboxMode, string]> = [
+	["plan", "plan", "workspace-write", 'mapped to "plan"'],
+	["build", "ask", "workspace-write", 'mapped to "ask"'],
+	[
+		"edit",
+		"ask",
+		"workspace-write",
+		'mapped to "ask": this build has no mode that applies edits without asking, so a write is asked like ' +
+			"everything else. Narrower than the mode it replaced, deliberately",
+	],
+	["yolo", "agent", "danger-full-access", 'mapped to "agent"'],
+];
+
+/**
+ * The clause of the sandbox half's sentence that says *which* confinement was
+ * chosen, keyed by the sandbox it belongs to. The surrounding prose belongs to
+ * `claimModePair` rather than to this source, so the assertion stops at the part
+ * a ZCode row can change: `yolo` is the only value that reached the unconfined
+ * one, and a report that read "confined" on that row would be the whole error.
+ */
+const SANDBOX_CONFINEMENT: Record<SandboxMode, string> = {
+	"workspace-write": "imported confined",
+	"danger-full-access": "imported unrestricted",
+};
 
 describe("migrate: ZCode source", () => {
 	test("detects zcode and ~/.agents alongside the older sources", () => {
@@ -555,38 +593,116 @@ describe("migrate: ZCode source", () => {
 		});
 	});
 
-	test.each([
-		["plan", "plan"],
-		["build", "default"],
-		["edit", "acceptEdits"],
-		["yolo", "bypassPermissions"],
-	])("a user-scoped %s in the database maps to %s, as the mode it names", (zcodeMode, ours) => {
-		// This assertion used to pin the opposite claim — that ZCode's mode
-		// vocabulary "has no faithful equivalent here" — which was an admission
-		// that nobody had read the CLI's `permission/service.ts`, where each mode
-		// is a literal branch. The map is walked in full, because a match that
-		// three of four tests exercise is three of four ways to be wrong.
+	// ZCode records one mode in two places — `permission.mode` in the config file
+	// and a `permission/mode` row in its database — and both reach the same
+	// `claimZcodeMode`. The two `test.each` blocks below walk the *same* table
+	// through the two paths, which is what makes "the same mapping whichever
+	// place it was written" true by construction rather than by two lists that
+	// happen to agree today.
+
+	/**
+	 * The two report items one ZCode mode produces, found by the key each writes.
+	 *
+	 * Position would do for these fixtures and stop being true the first time a
+	 * planner pushed something else in front of the mode: an item's place in a
+	 * plan is an artefact of the order the pushes happened in, and the key it
+	 * writes is the only part of it that is a promise.
+	 */
+	const modePair = (result: ReturnType<typeof runMigration>, from: string) => {
+		const items = result.plan.items.filter((i) => i.from === from);
+		return {
+			mode: items.find((i) => i.to === "settings.json → permissionMode"),
+			sandbox: items.find((i) => i.to === "settings.json → sandbox"),
+		};
+	};
+
+	test.each(ZCODE_MODE_ROWS)(
+		"a user-scoped %s in the database maps to %s + %s, as the pair it names",
+		(zcodeMode, mode, sandbox, detail) => {
+			// The whole table is walked, because a match that three of four tests
+			// exercise is three of four ways to be wrong. Both axes are listed per
+			// row because ZCode's one value does both jobs and this build splits
+			// them: a table pinning only the mode would pass while the confinement
+			// the import actually chose drifted to the other one.
+			withHome({ ".zcode/v2/config.json": "{}" }, (home) => {
+				makeZcodeDb(home, [["user", "permission", "mode", { mode: zcodeMode }]]);
+				const result = runMigration({ home });
+				const from = `~/.zcode/cli/db/db.sqlite → permission/mode (user) ("${zcodeMode}")`;
+				const pair = modePair(result, from);
+				expect(pair.mode?.action).toBe("map");
+				expect(pair.mode?.detail).toBe(detail);
+				// The sandbox half is a claim of its own rather than a footnote on
+				// the mode: ZCode has no separate setting for it, so a report that
+				// named the mode and said nothing about the confinement would read
+				// as though the source had chosen one. It did not — the import did,
+				// and that is the half the user needs to see.
+				expect(pair.sandbox?.action).toBe("map");
+				expect(pair.sandbox?.detail).toContain(SANDBOX_CONFINEMENT[sandbox]);
+				const parsed = JSON.parse(settingsWrite(result).content) as { permissionMode: string; sandbox: string };
+				expect(parsed.permissionMode).toBe(mode);
+				expect(parsed.sandbox).toBe(sandbox);
+			});
+		},
+	);
+
+	test.each(ZCODE_MODE_ROWS)(
+		"the config-level %s maps to the same %s + %s the database row does",
+		(zcodeMode, mode, sandbox, detail) => {
+			// The other of ZCode's two homes for a mode, and the only difference
+			// from the block above is the label: both go through `claimZcodeMode`,
+			// so a change to one half's expectations has to be made to both.
+			withHome(
+				{
+					".zcode/v2/config.json": "{}",
+					".zcode/cli/config.json": JSON.stringify({ permission: { mode: zcodeMode } }),
+				},
+				(home) => {
+					const result = runMigration({ home });
+					const from = `~/.zcode/cli/config.json → permission.mode ("${zcodeMode}")`;
+					const pair = modePair(result, from);
+					expect(pair.mode?.action).toBe("map");
+					expect(pair.mode?.detail).toBe(detail);
+					expect(pair.sandbox?.action).toBe("map");
+					expect(pair.sandbox?.detail).toContain(SANDBOX_CONFINEMENT[sandbox]);
+					const parsed = JSON.parse(settingsWrite(result).content) as { permissionMode: string; sandbox: string };
+					expect(parsed.permissionMode).toBe(mode);
+					expect(parsed.sandbox).toBe(sandbox);
+				},
+			);
+		},
+	);
+
+	test("every row of the mapper's table is pinned above, and this file names no mode it does not have", () => {
+		// A `test.each` table is a place coverage can rot without anything going
+		// red: add a row to the mapper and the tests above go on passing over the
+		// rows that are still there, one of them untested. Comparing the two sets
+		// is what turns "every row" from a claim into something a run checks. It
+		// is set equality and not order — the mapper's insertion order is not
+		// something these tests should be asserting.
+		expect(Object.keys(ZCODE_PERMISSION_MODES).sort()).toEqual(ZCODE_MODE_ROWS.map(([zcodeMode]) => zcodeMode).sort());
+	});
+
+	test("a mode this build has no counterpart for is named, and neither half of the pair is written", () => {
+		// Reached through both of ZCode's homes, because they are two call sites
+		// and a skip that one of them kept would write a half-pair: a sandbox with
+		// no mode beside it, confining a session the report never mentioned.
+		const zcodeMode = "auto-approve";
+
 		withHome({ ".zcode/v2/config.json": "{}" }, (home) => {
 			makeZcodeDb(home, [["user", "permission", "mode", { mode: zcodeMode }]]);
 			const result = runMigration({ home });
-			const item = result.plan.items[0];
-			expect(item.action).toBe("map");
-			expect(item.to).toBe("settings.json → permissionMode");
-			expect(item.from).toBe(`~/.zcode/cli/db/db.sqlite → permission/mode (user) ("${zcodeMode}")`);
-			expect(item.detail).toBe(`mapped to "${ours}"`);
-			const parsed = JSON.parse(settingsWrite(result).content) as { permissionMode: string };
-			expect(parsed.permissionMode).toBe(ours);
+			const item = result.plan.items.find((i) => i.from.includes("permission/mode"));
+			expect(item?.action).toBe("skip");
+			// The report names the value it could not read, and the label is what
+			// does it: a user whose file holds a mode this build has no answer for
+			// has to see the string, not "a permission mode".
+			expect(item?.to).toBe("—");
+			expect(item?.detail).toContain("no permission mode here corresponds to this value");
+			expect(result.plan.items.some((i) => i.to === "settings.json → permissionMode")).toBe(false);
+			expect(result.plan.items.some((i) => i.to === "settings.json → sandbox")).toBe(false);
+			expect(result.plan.writes).toEqual([]);
 		});
-	});
 
-	test.each([
-		["plan", "plan"],
-		["build", "default"],
-		["edit", "acceptEdits"],
-		["yolo", "bypassPermissions"],
-	])("the config-level %s maps to the same %s the database row does", (zcodeMode, ours) => {
-		// ZCode records a mode in two places, so a test that walks one of them
-		// leaves the other free to drift; the two labels are the only difference.
 		withHome(
 			{
 				".zcode/v2/config.json": "{}",
@@ -594,11 +710,13 @@ describe("migrate: ZCode source", () => {
 			},
 			(home) => {
 				const result = runMigration({ home });
-				const item = result.plan.items[0];
-				expect(item.action).toBe("map");
-				expect(item.to).toBe("settings.json → permissionMode");
-				expect(item.from).toBe(`~/.zcode/cli/config.json → permission.mode ("${zcodeMode}")`);
-				expect(item.detail).toBe(`mapped to "${ours}"`);
+				const item = result.plan.items.find((i) => i.from.includes("permission.mode"));
+				expect(item?.action).toBe("skip");
+				expect(item?.to).toBe("—");
+				expect(item?.detail).toContain("no permission mode here corresponds to this value");
+				expect(result.plan.items.some((i) => i.to === "settings.json → permissionMode")).toBe(false);
+				expect(result.plan.items.some((i) => i.to === "settings.json → sandbox")).toBe(false);
+				expect(result.plan.writes).toEqual([]);
 			},
 		);
 	});
@@ -629,7 +747,18 @@ describe("migrate: ZCode source", () => {
 			const result = runMigration({ home });
 			const item = result.plan.items[0];
 			expect(item.action).toBe("skip");
+			// Its own sentence, and not the generic one: ZCode's permission service
+			// answers `auto` with a denial saying the mode is reserved, so the user
+			// is being told that the value is dead in the tool they came from and
+			// not merely unreadable here.
 			expect(item.detail).toContain("reserved and not implemented");
+			// The label names the value, so a file holding `auto` says so rather
+			// than reporting an untranslatable mode in the abstract.
+			expect(item.from).toBe('~/.zcode/cli/db/db.sqlite → permission/mode (user) ("auto")');
+			// Neither half of the pair: a skipped mode that still left a sandbox
+			// behind would confine a session the report never claimed anything for.
+			expect(result.plan.items.some((i) => i.to === "settings.json → permissionMode")).toBe(false);
+			expect(result.plan.items.some((i) => i.to === "settings.json → sandbox")).toBe(false);
 			expect(result.plan.writes).toEqual([]);
 		});
 	});

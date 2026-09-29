@@ -29,6 +29,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PERMISSION_MODES, SANDBOX_MODES } from "@labunbun/agent";
 import { KIMI_CODE_HOME_ENV, KIMI_SHARE_DIR_ENV } from "../src/kimi-home.ts";
 import {
 	detectSources,
@@ -364,35 +365,101 @@ describe("the live document, and the two retired ones", () => {
 });
 
 describe("the permission posture", () => {
+	/**
+	 * Every row of the vendor's own mode table, as the pair this build splits it
+	 * into — `STEP_PERMISSION_PRESETS` and the two normalizers beneath it,
+	 * `step/permissions.ts:37-71,155-196`.
+	 *
+	 * Both halves are claimed on every row, and that is the claim: a foreign mode
+	 * is one value doing two jobs, and an import that writes `permissionMode` and
+	 * leaves `sandbox` to a default nobody chose is carrying half a decision
+	 * (`claimModePair`, migrate.ts:286-306). The two axes are separate keys here —
+	 * `MODE_CHOICES` in `@labunbun/agent` pairs `agent` with *both* sandboxes —
+	 * so a mode alone does not say which one is meant.
+	 */
+	const ROWS = [
+		{
+			step: "confirm",
+			mode: "ask",
+			sandbox: "workspace-write",
+			reported: "a mutating call is put to you before it runs",
+		},
+		{
+			step: "strict",
+			mode: "plan",
+			sandbox: "workspace-write",
+			reported: "leaving plan mode here is itself an approval",
+		},
+		{ step: "auto", mode: "agent", sandbox: "workspace-write", reported: "The sandbox is imported confined" },
+	] as const;
+
+	test("every row of the vendor's table resolves to a mode and a sandbox", () => {
+		for (const row of ROWS) {
+			const { home } = stepHome({ "config.toml": `approvalMode = "${row.step}"\n` });
+			const planned = plan(home);
+			const written = settingsWritten(planned);
+			expect(written.permissionMode).toBe(row.mode);
+			expect(written.sandbox).toBe(row.sandbox);
+
+			// One report line per half, both under the key the mode was read from.
+			const mode = itemTo(planned, "settings.json → permissionMode");
+			const sandbox = itemTo(planned, "settings.json → sandbox");
+			expect(mode?.from).toBe("~/.stepcode/config.toml → approvalMode");
+			expect(sandbox?.from).toBe("~/.stepcode/config.toml → approvalMode");
+			expect(mode?.detail).toContain(`mapped to "${row.mode}"`);
+			expect(mode?.detail).toContain(row.reported);
+			// The half the source never mentioned is named as chosen, not as found.
+			expect(sandbox?.detail).toContain("no separate confinement setting, so the sandbox is imported confined");
+			expect(sandbox?.detail).not.toContain("unrestricted");
+		}
+	});
+
+	test("no row lands on a mode or a sandbox this build does not have", () => {
+		// The value space is the two constant tables rather than a second list of
+		// literals spelled here: a row resolving to a retired name is still a string
+		// this build would write, and `settings.json` refuses it at load rather than
+		// at the moment a user goes looking for the setting.
+		for (const row of ROWS) {
+			const written = settingsWritten(plan(stepHome({ "config.toml": `approvalMode = "${row.step}"\n` }).home));
+			expect(PERMISSION_MODES as readonly unknown[]).toContain(written.permissionMode);
+			expect(SANDBOX_MODES as readonly unknown[]).toContain(written.sandbox);
+		}
+	});
+
+	test("the auto row widens approval and leaves the sandbox alone, and the report says which is which", () => {
+		// Step's `bypass` preset is `auto` with `nonInteractiveApproval: allow` and
+		// `autoResume: false` (`step/permissions.ts:54-60`) — one value, three fields,
+		// and not one of them about what a process may touch. So `auto` is the row
+		// that looks like every other source's unconfined row and is not: over there
+		// a command the analyser calls hazardous still came back `confirm`
+		// (`decideStepToolCall`, `permissions.ts:366-372`), and here it is refused
+		// outright. `MODE_CHOICES` gives `agent` a confined row for exactly this
+		// reason, and this is the row that takes it.
+		const { home } = stepHome({ "config.toml": 'permissionPreset = "bypass"\n' });
+		const planned = plan(home);
+		const written = settingsWritten(planned);
+		expect(written.permissionMode).toBe("agent");
+		expect(written.sandbox).toBe("workspace-write");
+
+		const [mode] = detailsMatching(planned, /mapped to "agent"/);
+		expect(mode).toContain("every call runs without asking");
+		expect(mode).toContain("is refused here rather than confirmed");
+		expect(mode).toContain("The sandbox is imported confined");
+		expect(mode).toContain("its auto mode constrains approval, not what a process may touch");
+		expect(itemTo(planned, "settings.json → sandbox")?.detail).toContain("imported confined");
+		// The widening is stated, not implied: nothing in this row reaches the
+		// unrestricted sandbox, and saying so is the only thing that stops a reader
+		// from treating the two `agent` rows as the same import.
+		expect(reportText(planned)).not.toContain("imported unrestricted");
+	});
+
 	test("read-only resolves to plan, with the caveat that leaving it is itself an approval", () => {
 		const { home } = stepHome({ "config.toml": 'permissionPreset = "read-only"\n' });
 		const planned = plan(home);
 		expect(settingsWritten(planned).permissionMode).toBe("plan");
+		expect(settingsWritten(planned).sandbox).toBe("workspace-write");
 		const [detail] = detailsMatching(planned, /mapped to "plan"/);
 		expect(detail).toContain("leaving plan mode here is itself an approval");
-	});
-
-	test("the auto preset widens: bypassPermissions, and the report says so", () => {
-		// A widening stated rather than implied: Step's auto mode still asks before
-		// a command its command analyser calls dangerous, and nothing here asks.
-		const { home } = stepHome({ "config.toml": 'permissionPreset = "bypass"\n' });
-		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBe("bypassPermissions");
-		const [detail] = detailsMatching(planned, /mapped to "bypassPermissions"/);
-		expect(detail).toContain("a wider one");
-		expect(detail).toContain("nothing here asks");
-	});
-
-	test("the plain modes resolve to the plain answers", () => {
-		expect(settingsWritten(plan(stepHome({ "config.toml": 'approvalMode = "confirm"\n' }).home)).permissionMode).toBe(
-			"default",
-		);
-		expect(settingsWritten(plan(stepHome({ "config.toml": 'approvalMode = "strict"\n' }).home)).permissionMode).toBe(
-			"plan",
-		);
-		expect(settingsWritten(plan(stepHome({ "config.toml": 'approvalMode = "auto"\n' }).home)).permissionMode).toBe(
-			"bypassPermissions",
-		);
 	});
 
 	test("an explicit mode beats a preset, and the report says which overrode which", () => {
@@ -405,13 +472,19 @@ describe("the permission posture", () => {
 		});
 		const planned = plan(home);
 		expect(settingsWritten(planned).permissionMode).toBe("plan");
+		// The preset the mode overrode is the unconfined-looking one, so the sandbox
+		// that did *not* follow it is worth pinning here too.
+		expect(settingsWritten(planned).sandbox).toBe("workspace-write");
 		const [detail] = detailsMatching(planned, /mapped to "plan"/);
 		expect(detail).toContain('the preset beside it is "bypass", whose mode "auto" the explicit mode overrides');
 	});
 
 	test("a preset beside a mode that agrees with it is named as agreeing", () => {
 		const { home } = stepHome({ "config.toml": 'permissionPreset = "ask"\napprovalMode = "confirm"\n' });
-		const [detail] = detailsMatching(plan(home), /mapped to "default"/);
+		const planned = plan(home);
+		expect(settingsWritten(planned).permissionMode).toBe("ask");
+		expect(settingsWritten(planned).sandbox).toBe("workspace-write");
+		const [detail] = detailsMatching(planned, /mapped to "ask"/);
 		expect(detail).toContain('the preset beside it, "ask", resolves to the same mode');
 	});
 
@@ -419,18 +492,26 @@ describe("the permission posture", () => {
 		const { home } = stepHome({ "config.toml": 'permissionMode = "yolo"\n' });
 		const planned = plan(home);
 		expect(settingsWritten(planned).permissionMode).toBeUndefined();
+		expect(settingsWritten(planned).sandbox).toBeUndefined();
 		const [detail] = detailsMatching(planned, /not a preset or mode Step reads/);
 		expect(detail).toContain("never decided a session there either");
 		expect(fromsMatching(planned, /permissionMode \("yolo"\)/)).toHaveLength(1);
 	});
 
-	test("an approval mode the vendor does not recognize decides nothing either", () => {
+	test("an approval mode the vendor does not recognize claims neither half of the pair", () => {
 		// The same rule on the other chain: `approvalMode` is read through
 		// `resolveStepApprovalMode`, which recognizes Step's three modes and nothing
-		// else — a fourth spelling is named and claims no posture at all.
+		// else — a fourth spelling is named and claims no posture at all. Neither
+		// half of it either: with no mode there is no row to read a sandbox out of,
+		// and writing one alone would confine a user whose Step tree said nothing
+		// about confinement.
 		const { home } = stepHome({ "config.toml": 'approvalMode = "yolo"\n' });
 		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBeUndefined();
+		const written = settingsWritten(planned);
+		expect(written.permissionMode).toBeUndefined();
+		expect(written.sandbox).toBeUndefined();
+		expect(itemTo(planned, "settings.json → permissionMode")).toBeUndefined();
+		expect(itemTo(planned, "settings.json → sandbox")).toBeUndefined();
 		expect(detailsMatching(planned, /not a preset or mode Step reads/)).toHaveLength(1);
 		expect(fromsMatching(planned, /approvalMode \("yolo"\)/)).toHaveLength(1);
 	});
@@ -442,7 +523,11 @@ describe("the permission posture", () => {
 		// which is why the report can say it was in force.
 		const { home } = stepHome({ "config.toml": 'permissionPreset = "autopilot"\n' });
 		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBe("bypassPermissions");
+		expect(settingsWritten(planned).permissionMode).toBe("agent");
+		// `autopilot` is `auto` plus the ladder, so it lands on the same confined
+		// row `bypass` does — the preset's extra half is about resuming, not
+		// confinement, and must not be read as a second kind of widening.
+		expect(settingsWritten(planned).sandbox).toBe("workspace-write");
 		const [detail] = detailsMatching(planned, /a continuation ladder for transient model errors/);
 		expect(detail).toContain("it was in force over there");
 		expect(fromsMatching(planned, /permissionPreset \("autopilot"\)$/)).toHaveLength(1);
@@ -955,11 +1040,16 @@ describe("keys with no counterpart, and the closing report", () => {
 			"config.toml": '[tools]\nunknownThing = 2\n\n[tools.approval]\nmode = "confirm"\n',
 		});
 		const planned = plan(home);
-		// The mode was read out of the approval table, and the only key under
-		// `tools` the closing line names is the one nothing read: `approval` is
-		// accounted for by the claim above it.
-		expect(settingsWritten(planned).permissionMode).toBe("default");
-		expect(fromsMatching(planned, /config\.toml → tools\.approval\.mode$/)).toHaveLength(1);
+		// The mode was read out of the approval table, and it is claimed as the pair
+		// it is — so the table's own key is spent by two report lines, one per half.
+		expect(settingsWritten(planned).permissionMode).toBe("ask");
+		expect(settingsWritten(planned).sandbox).toBe("workspace-write");
+		expect(itemTo(planned, "settings.json → permissionMode")?.from).toBe(
+			"~/.stepcode/config.toml → tools.approval.mode",
+		);
+		expect(itemTo(planned, "settings.json → sandbox")?.from).toBe("~/.stepcode/config.toml → tools.approval.mode");
+		// The only key under `tools` the closing line names is the one nothing read:
+		// `approval` is accounted for by the claim above it.
 		expect(fromsMatching(planned, /config\.toml → tools →/)).toEqual([
 			"~/.stepcode/config.toml → tools → unknownThing",
 		]);

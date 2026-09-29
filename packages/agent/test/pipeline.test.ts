@@ -10,7 +10,13 @@ const BASE_CTX = {
 	signal: new AbortController().signal,
 	cwd: process.cwd(),
 };
-const PERM_CTX = { mode: "default" as const, toolName: "echo", input: {}, cwd: process.cwd() };
+const PERM_CTX = {
+	mode: "ask" as const,
+	sandbox: "workspace-write" as const,
+	toolName: "echo",
+	input: {},
+	cwd: process.cwd(),
+};
 // The pipeline never reaches streamFn in these tests; a throwing placeholder
 // proves it.
 const NO_STREAM: AgentDeps = {

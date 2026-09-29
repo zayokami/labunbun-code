@@ -9,6 +9,7 @@
  */
 
 import { join } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { HookEventName } from "./hooks.ts";
@@ -30,6 +31,7 @@ import {
 } from "./migrate-core.ts";
 import type {
 	ClaimHooks,
+	ClaimModePair,
 	ClaimScalar,
 	MigrationItem,
 	NormalizedHookEntry,
@@ -56,17 +58,17 @@ import type { RawSettingsInput } from "./settings.ts";
  *
  * Only two of the three have a counterpart here. `yolo` approves everything —
  * the policy that answers a request in that mode is an unconditional approve, and
- * the dangerous-command policy returns nothing — which is this build's
- * `bypassPermissions`; `manual` asks, which is `default`. `auto` is a classifier
- * that approves the calls it judges safe and asks about the rest, and the nearest
- * mode here (`dontAsk`) does the opposite: anything not explicitly allowed is
- * denied. Mapping it would invert the user's posture, so it is left where it is
- * and said out loud — the same call `CLAUDE_PERMISSION_MODES` makes for Claude
- * Code's own `auto`.
+ * the dangerous-command policy returns nothing — which is this build's `agent`
+ * with the sandbox off; `manual` asks, which is `ask`. `auto` is a classifier
+ * that approves the calls it judges safe and asks about the rest, and no mode
+ * here does that: `ask` is the opposite of a classifier (a person decides) and
+ * `agent` is the opposite of one (nothing decides). Mapping it either way would
+ * change the posture the user chose, so it is left alone and said out loud — the
+ * same call `CLAUDE_PERMISSION_MODES` makes for Claude Code's own `auto`.
  */
-const KIMI_PERMISSION_MODES: Record<string, string | undefined> = {
-	manual: "default",
-	yolo: "bypassPermissions",
+const KIMI_PERMISSION_MODES: Record<string, { mode: PermissionMode; sandbox: SandboxMode } | undefined> = {
+	manual: { mode: "ask", sandbox: "workspace-write" },
+	yolo: { mode: "agent", sandbox: "danger-full-access" },
 	auto: undefined,
 };
 
@@ -75,7 +77,7 @@ function planKimiPermissionMode(
 	raw: RawKimiCode,
 	home: string,
 	items: MigrationItem[],
-	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 ): void {
 	const from = tildePath(home, kimiConfigPath(raw.root));
 	const mode = typeof raw.config.defaultPermissionMode === "string" ? raw.config.defaultPermissionMode.trim() : "";
@@ -86,10 +88,10 @@ function planKimiPermissionMode(
 		// `defaultPlanMode = true` is where a session starts, and this build holds one
 		// starting mode, so that is the one claimed. The permission mode is named
 		// rather than mapped: here it would have to be the same single value.
-		claimScalar(
+		claimModePair(
 			"kimi-code",
-			"permissionMode",
 			"plan",
+			"workspace-write",
 			`${from} → defaultPlanMode (true)`,
 			'kimi starts in plan mode, which is what this build calls "plan"',
 		);
@@ -110,12 +112,12 @@ function planKimiPermissionMode(
 
 	const mapped = KIMI_PERMISSION_MODES[mode];
 	if (mapped !== undefined) {
-		claimScalar(
+		claimModePair(
 			"kimi-code",
-			"permissionMode",
-			mapped,
+			mapped.mode,
+			mapped.sandbox,
 			`${from} → defaultPermissionMode ("${mode}")`,
-			`mapped to "${mapped}"`,
+			`mapped to "${mapped.mode}"`,
 		);
 		return;
 	}
@@ -126,8 +128,9 @@ function planKimiPermissionMode(
 			to: "—",
 			action: "skip",
 			detail:
-				'"auto" is a classifier that approves the calls it judges safe, and the nearest mode here, dontAsk, does the ' +
-				"opposite — anything not explicitly allowed is denied — so the session keeps whatever mode it would otherwise start in",
+				'"auto" is a classifier that approves the calls it judges safe, and no mode here does that: "ask" puts a person ' +
+				'in the loop instead of a classifier and "agent" runs everything instead of judging. Either would change the posture ' +
+				"the mode names, so the session keeps whatever it would otherwise start in",
 			containsSecret: false,
 		});
 		return;
@@ -576,6 +579,7 @@ export function planKimiCode(
 	home: string,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	claimHooks: ClaimHooks,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
@@ -638,7 +642,7 @@ export function planKimiCode(
 		}
 	}
 
-	planKimiPermissionMode(raw, home, items, claimScalar);
+	planKimiPermissionMode(raw, home, items, claimModePair);
 	planKimiPermissions(raw, home, items);
 	planKimiHooks(raw, home, items, claimHooks, existing, force);
 

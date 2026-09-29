@@ -39,6 +39,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { CursorDocument, RawCursor } from "./cursor-read.ts";
 import { CURSOR_COMMAND_ARGUMENTS, cursorCommandDescription } from "./cursor-read.ts";
@@ -56,6 +57,7 @@ import {
 } from "./migrate-core.ts";
 import {
 	type ClaimHooks,
+	type ClaimModePair,
 	type ClaimPermissionList,
 	type ClaimScalar,
 	looksLikeSecretName,
@@ -932,17 +934,45 @@ const CURSOR_CLI_CONFIG_HANDLED = new Set([
 /** Keys of the project `cli.json`; the documented set is permissions only. */
 const CURSOR_CLI_PROJECT_HANDLED = new Set(["permissions"]);
 
-/** Cursor's `approvalMode` → this build's permission mode. */
-const CURSOR_APPROVAL_MODES: Record<string, string> = {
-	// Cursor asks before each tool the rules do not already cover.
-	ask: "default",
-	// Everything not denied runs. Not `bypassPermissions`: that name would claim
-	// the sandbox is off too, and this is a different promise.
-	auto: "acceptEdits",
-	// Reads run, writes are asked about. `acceptEdits` is the nearest thing here
-	// and is narrower than cursor's, which is why this one is scored as a downgrade
-	// at the call site below.
-	yolo: "bypassPermissions",
+/**
+ * Cursor's `approvalMode` → this build's two mode axes.
+ *
+ * The values are the ones the bundled CLI actually declares, read out of
+ * `cursor-cli-lab/index.js`: `s.k5(["allowlist","unrestricted","auto-review"])
+ * .default("allowlist")`, with `"allowlist"` also the value its own default
+ * config writes. The table used to be keyed `ask` / `auto` / `yolo` — none of
+ * which that CLI can produce — so it matched nothing, every real value fell
+ * through to the "no equivalent here" skip, and the three comments above it
+ * described three different promises in the wrong order. A table that reads as
+ * load-bearing and cannot fire is the shape of thing this repo's own rule is
+ * about; it is keyed off the source now, and `cursor-approval-modes.test.ts`
+ * asserts each key is a value the bundle really declares.
+ *
+ * `unrestricted` maps to the unconfined sandbox because it is exactly that
+ * elsewhere in the same bundle: `always-approve-decision-provider.ts` answers
+ * every request with `{approved: true}` and nothing gates the process.
+ */
+export const CURSOR_APPROVAL_MODES: Record<string, { mode: PermissionMode; sandbox: SandboxMode }> = {
+	// Every call the rules do not already cover is put to you.
+	allowlist: { mode: "ask", sandbox: "workspace-write" },
+	// A classifier reviews calls and approves the ones it judges safe. There is
+	// no mode here that does that, and `ask` is the opposite of it, so this one
+	// is reported as unread rather than quietly rounded to something.
+	"auto-review": { mode: "ask", sandbox: "workspace-write" },
+	// Nothing is denied and nothing is asked.
+	unrestricted: { mode: "agent", sandbox: "danger-full-access" },
+};
+
+/**
+ * `approvalMode` values this build has no honest counterpart for.
+ *
+ * Exported beside {@link CURSOR_APPROVAL_MODES} because the pair is only
+ * meaningful together: a note with no row behind it is a sentence about a
+ * translation that cannot happen, and nothing else would notice.
+ */
+export const CURSOR_APPROVAL_MODE_NOTES: Record<string, string> = {
+	"auto-review":
+		'read as "ask": cursor classifies a call and approves the ones it judges safe, and no mode here does that. A classifier is a different answer, not a nearer one, so this is narrower than what the config asked for',
 };
 
 export function planCursor(
@@ -951,6 +981,7 @@ export function planCursor(
 	items: MigrationItem[],
 	writes: PlannedWrite[],
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	claimPermissionList: ClaimPermissionList,
 	claimHooks: ClaimHooks,
 	mcpServers: Record<string, unknown>,
@@ -992,16 +1023,15 @@ export function planCursor(
 	}
 	if (raw.cli.global.kind === "document" && typeof raw.cli.global.value.approvalMode === "string") {
 		const value = raw.cli.global.value.approvalMode.trim();
-		const mapped = CURSOR_APPROVAL_MODES[value.toLowerCase()];
+		const key = value.toLowerCase();
+		const mapped = CURSOR_APPROVAL_MODES[key];
 		if (mapped) {
-			claimScalar(
+			claimModePair(
 				"cursor",
-				"permissionMode",
-				mapped,
+				mapped.mode,
+				mapped.sandbox,
 				`~/.cursor/cli-config.json → approvalMode ("${value}")`,
-				value.toLowerCase() === "auto"
-					? `read "${mapped}" as the nearest mode: cursor approves any read and asks about a write, and this build asks about a write without granting the read`
-					: `read as "${mapped}"`,
+				CURSOR_APPROVAL_MODE_NOTES[key] ?? `read as "${mapped.mode}"`,
 			);
 		} else {
 			items.push({
@@ -1015,14 +1045,93 @@ export function planCursor(
 			});
 		}
 	}
-	for (const key of ["sandbox", "network"] as const) {
+	// `sandbox` is the second axis, and unlike `network` it has a direct
+	// counterpart. Cursor's own values are `enabled` / `disabled`
+	// (`sandboxMode:"enabled"` / `:"disabled"` in the bundled CLI), carried
+	// under `sandbox.mode`; `approvalMode: "unrestricted"` above already implies
+	// `disabled`, so an explicit block only speaks when the two agree or the
+	// sandbox key is the only one present.
+	if (raw.cli.global.kind === "document" && raw.cli.global.value.sandbox !== undefined) {
+		const sandbox = raw.cli.global.value.sandbox;
+		if (!isRecord(sandbox)) {
+			// The key is in `CURSOR_CLI_CONFIG_HANDLED`, so `reportUnhandledKeys`
+			// will not name it, and without this line a `sandbox` that is not an
+			// object produces no report line at all — the file claims to have read a
+			// key and says nothing about it. Not a shape the real CLI writes, which
+			// is exactly why silence is the wrong answer to it.
+			items.push({
+				source: "cursor",
+				from: "~/.cursor/cli-config.json → sandbox",
+				to: "—",
+				action: "skip",
+				detail: `cursor's \`sandbox\` key is present but is ${typeof sandbox}, not an object, so there was no \`mode\` in it to read and nothing under it was imported`,
+				containsSecret: false,
+			});
+		} else {
+			if (typeof sandbox.mode === "string") {
+				const disabled = sandbox.mode.trim().toLowerCase() === "disabled";
+				const from = `~/.cursor/cli-config.json → sandbox.mode ("${sandbox.mode}")`;
+				items.push({
+					source: "cursor",
+					from,
+					to: "—",
+					action: "skip",
+					detail: disabled
+						? 'cursor runs unconfined here, and that is what approvalMode "unrestricted" already maps to — importing it separately would write the same key twice'
+						: 'cursor runs confined here, which is what approvalMode "allowlist" already maps to. Where approvalMode says otherwise the two disagree, and approvalMode is the one that decides whether you are asked',
+					containsSecret: false,
+				});
+			}
+			// Every *other* key in the block, named one by one.
+			//
+			// `sandbox` is a whole key in `CURSOR_CLI_CONFIG_HANDLED`, so a block
+			// holding `networkAccess` or `networkAllowlist` produced exactly one
+			// line — about `mode` — and nothing at all about the rest. A user
+			// reading that report has no way to tell the importer looked at their
+			// network settings and decided they did not matter, from the importer
+			// never having seen them.
+			//
+			// Enumerated from the object rather than from a list of names cursor is
+			// known to use, for the same reason the mode enums have a single
+			// source: a name written out here is a name that stops being checked
+			// the day cursor adds another one.
+			for (const key of Object.keys(sandbox).sort()) {
+				if (key === "mode") continue;
+				items.push({
+					source: "cursor",
+					from: `~/.cursor/cli-config.json → sandbox.${key}`,
+					to: "—",
+					action: "skip",
+					// The value is deliberately not printed. A key nobody recognises
+					// is exactly the kind that turns out to hold a token, and the
+					// report's job is to name what was left behind, not to reproduce it.
+					detail: `cursor's \`sandbox.${key}\` is not read: this importer reads that block's \`mode\` and nothing else, so this one stayed behind in the file. The value is not shown here in case it is not only a setting`,
+					containsSecret: false,
+				});
+			}
+		}
+	}
+	// `network`, which has no equivalent here — and the sentence says *which*
+	// setting it is, because "there is no equivalent for a thing that was never
+	// what the user thought it was" is the least useful report in this file.
+	//
+	// The key used to be described here as deciding "what its own process may
+	// reach", and that is not what the bundled CLI puts there. `index.js`
+	// declares `network:w.default({useHttp1ForAgent:!1})`, where
+	// `w=s.Ik({useHttp1ForAgent:s.zM().default(!1)})` — a switch on the transport
+	// the agent talks to the model endpoint over, not an allowlist of anywhere.
+	// What governs reach is `sandbox.networkAccess`, which sits *under* the
+	// sandbox block above. Saying otherwise sent a user looking for a permission
+	// setting in a key that never held one, so the description below names the
+	// shape the file actually has.
+	for (const key of ["network"] as const) {
 		if (raw.cli.global.kind !== "document" || raw.cli.global.value[key] === undefined) continue;
 		items.push({
 			source: "cursor",
 			from: `~/.cursor/cli-config.json → ${key}`,
 			to: "—",
 			action: "skip",
-			detail: `cursor's ${key} setting decides what its own process may reach; there is no equivalent here, and this build's permission rules govern tool calls rather than the process's own access`,
+			detail: `cursor's \`${key}\` key is not a list of anywhere its process may go: in the CLI it is \`{useHttp1ForAgent}\`, a switch on the transport to the model endpoint, and there is nothing here for that. What governs reach is \`sandbox.networkAccess\`, which sits under the sandbox block and is not read either — this importer reads that block's \`mode\` and no more`,
 			containsSecret: false,
 		});
 	}

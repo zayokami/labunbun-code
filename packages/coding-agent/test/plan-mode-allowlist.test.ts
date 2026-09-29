@@ -50,7 +50,11 @@ describe("plan mode's allow-list against the tools' declarations", () => {
 	// tool, and bun's each-templates print their placeholders literally.
 	for (const [name, readOnly] of TOOLS) {
 		test(`${name} (isReadOnly: ${readOnly})`, () => {
-			const { behavior } = evaluatePermissions(name, {}, { mode: "plan", rules: [], cwd: CWD, workspaceRoots: [CWD] });
+			const { behavior } = evaluatePermissions(
+				name,
+				{},
+				{ mode: "plan", sandbox: "workspace-write", rules: [], cwd: CWD },
+			);
 			// Not "allow" but "not denied": a read-only tool still goes through the
 			// user's own rules, and asks when none allows it. What the mode must not do
 			// is refuse it outright — that is a decision taken out of the user's hands

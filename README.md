@@ -24,8 +24,9 @@ labunbun                                # interactive REPL
 - **Interactive dialogs** — permission approvals plus structured
   AskUserQuestion multiple-choice prompts.
 - **Permission system** — rule engine (`Bash(git *)`, `Edit(src/**)`,
-  `mcp__server__*`), five permission modes, interactive approval dialog,
-  "don't ask again" session rules.
+  `mcp__server__*`), two axes composed into four modes (Ask / Plan / Agent /
+  Agent 无沙箱), a dangerous-command classifier that sits above every mode,
+  interactive approval dialog, "don't ask again" session rules.
 - **Sessions** — append-only JSONL tree per project (`~/.labunbun/projects/`),
   crash-safe resume with `--resume`, prompt history with ↑ recall.
 - **Activity** — `/activity` draws the days you used this as a heatmap, with
@@ -55,7 +56,9 @@ labunbun                                # interactive REPL
 - **Subagents** — the Task tool runs nested agent sessions (sidechain
   transcripts persisted); custom agents via frontmatter `.md` files.
 - **Skills** — `SKILL.md` folders become prompt-expanding slash commands.
-- **Plan mode** — read-only research then plan approval before mutations.
+- **Plan mode** — read-only research then plan approval before mutations. The
+  pair that was in force before you entered is the pair that comes back, so
+  approving a plan cannot quietly re-confine a session you had un-confined.
 - **Model fallback chain** — `fallbackModels` in settings are tried in order
   when the primary model fails before streaming any content.
 - **Cost** — the built-in catalog carries each model's list price, and `pricing`

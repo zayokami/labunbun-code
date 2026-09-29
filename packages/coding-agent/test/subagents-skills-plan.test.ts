@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentSession, type AnyTool, buildTool, type PermissionMode, SessionStore } from "@labunbun/agent";
+import {
+	AgentSession,
+	type AnyTool,
+	buildTool,
+	DEFAULT_MODE_CHOICE,
+	type PermissionMode,
+	type SandboxMode,
+	SessionStore,
+} from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider, type Model, type StreamFn } from "@labunbun/ai";
 import { z } from "zod";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanApprovalUi } from "../src/plan-mode.ts";
@@ -194,7 +202,7 @@ describe("Task tool (subagents)", () => {
 
 	test("subagent inherits parent permissionMode and denies a tool the rules don't allow", async () => {
 		// Subagent script attempts the echo tool; with no allow rule and mode
-		// "default", an unresolved ask must fail closed to a tool-result error
+		// "ask", an unresolved ask must fail closed to a tool-result error
 		// (there is no interactive dialog inside a subagent), not run the tool.
 		const subScript = [{ toolCalls: [{ name: "echo", arguments: { text: "should be blocked" } }] }, { text: "done" }];
 		const subFaux = fauxProvider(subScript);
@@ -203,7 +211,8 @@ describe("Task tool (subagents)", () => {
 			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
 			definitions: () => [],
-			permissionMode: () => "default" as const,
+			permissionMode: () => "ask" as const,
+			sandbox: () => "workspace-write" as const,
 			getPermissionRules: () => [],
 		};
 		const taskTool = createTaskTool(ctx);
@@ -227,7 +236,8 @@ describe("Task tool (subagents)", () => {
 			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
 			definitions: () => [],
-			permissionMode: () => "default" as const,
+			permissionMode: () => "ask" as const,
+			sandbox: () => "workspace-write" as const,
 			getPermissionRules: () => [{ toolName: "echo", behavior: "allow" as const, source: "session" as const }],
 		};
 		const taskTool = createTaskTool(ctx);
@@ -364,7 +374,8 @@ describe("Task tool (subagents)", () => {
 			const session = new AgentSession({
 				model: FAUX_MODEL,
 				tools: [taskTool],
-				permissionMode: "bypassPermissions",
+				permissionMode: "agent",
+				sandbox: "danger-full-access",
 				deps: { streamFn: parentFaux.streamFn, canUseTool: async () => ({ behavior: "allow" as const }) },
 			});
 
@@ -471,7 +482,7 @@ describe("what the Task tool reads at the call", () => {
 
 	test("the parent's permission mode is read now, not captured", async () => {
 		// EnterPlanMode mid-session: the subagent must inherit plan restrictions. A
-		// captured "default" would let it run the mutating tool while its parent is
+		// captured "ask" would let it run the mutating tool while its parent is
 		// only allowed to read. The same call is made twice under the same allow-all
 		// rule — the mode is the only thing that changes, so the pair says what the
 		// mode is worth rather than what the fixture happens to allow.
@@ -485,7 +496,7 @@ describe("what the Task tool reads at the call", () => {
 			mkdtempSync(join(tmpdir(), "lbb-mode-")),
 			mkdtempSync(join(tmpdir(), "lbb-mode-home-")),
 		);
-		let mode: PermissionMode = "default";
+		let mode: PermissionMode = "ask";
 		const taskTool = createTaskTool({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
@@ -493,6 +504,7 @@ describe("what the Task tool reads at the call", () => {
 			definitions: () => [],
 			store: () => store,
 			permissionMode: () => mode,
+			sandbox: () => "workspace-write" as const,
 			getPermissionRules: () => [{ toolName: "*", behavior: "allow", source: "session" }],
 		});
 
@@ -657,6 +669,7 @@ describe("plan mode tools", () => {
 describe("plan mode callbacks", () => {
 	interface HarnessOptions {
 		mode?: PermissionMode;
+		sandbox?: SandboxMode;
 		ui?: PlanApprovalUi | null;
 		approve?: boolean;
 		swapDuringApproval?: () => void;
@@ -669,7 +682,8 @@ describe("plan mode callbacks", () => {
 		let current: AgentSession | null = new AgentSession({
 			model: FAUX_MODEL,
 			tools: [],
-			permissionMode: options.mode ?? "default",
+			permissionMode: options.mode ?? DEFAULT_MODE_CHOICE.mode,
+			sandbox: options.sandbox ?? DEFAULT_MODE_CHOICE.sandbox,
 			deps: { streamFn: faux.streamFn },
 		});
 		const ui: PlanApprovalUi | null =
@@ -693,7 +707,7 @@ describe("plan mode callbacks", () => {
 			get session() {
 				return current;
 			},
-			swapSession(nextMode: PermissionMode = "default") {
+			swapSession(nextMode: PermissionMode = DEFAULT_MODE_CHOICE.mode) {
 				current = new AgentSession({
 					model: FAUX_MODEL,
 					tools: [],
@@ -707,18 +721,31 @@ describe("plan mode callbacks", () => {
 		};
 	}
 
-	test("approval restores the mode the session had before plan mode", async () => {
-		const harness = makeHarness({ mode: "acceptEdits" });
+	/**
+	 * Both axes, or the restore is half a restore.
+	 *
+	 * `previousModes` used to hold one `PermissionMode`, so approving a plan
+	 * handed back the mode and left the sandbox wherever the session had drifted
+	 * to in the meantime. A session that came out of plan mode unconfined when it
+	 * went in confined is a session that quietly got less safe, and nothing said
+	 * so — so the assertion here is on the pair, and the fixture is chosen so the
+	 * two halves differ (`agent` + unconfined is the only pairing `ask` cannot
+	 * stand in for).
+	 */
+	test("approval restores both axes the session had before plan mode", async () => {
+		const harness = makeHarness({ mode: "agent", sandbox: "danger-full-access" });
 		const decision = await harness.callbacks.requestPlanApproval("the plan");
 		expect(decision.approved).toBe(true);
-		expect(harness.session?.permissionMode).toBe("acceptEdits");
+		expect(harness.session?.permissionMode).toBe("agent");
+		expect(harness.session?.sandbox).toBe("danger-full-access");
 	});
 
-	test("initial plan approval defaults to default mode", async () => {
+	test("initial plan approval falls back to the default pair", async () => {
 		const harness = makeHarness({ mode: "plan" });
 		const decision = await harness.callbacks.requestPlanApproval("the plan");
 		expect(decision.approved).toBe(true);
-		expect(harness.session?.permissionMode).toBe("default");
+		expect(harness.session?.permissionMode).toBe(DEFAULT_MODE_CHOICE.mode);
+		expect(harness.session?.sandbox).toBe(DEFAULT_MODE_CHOICE.sandbox);
 	});
 
 	test("rejection keeps plan mode active", async () => {
@@ -756,16 +783,16 @@ describe("plan mode callbacks", () => {
 	});
 
 	test("session swapped mid-dialog leaves the new session's mode untouched", async () => {
-		const harness = makeHarness({ mode: "plan", swapDuringApproval: () => harness.swapSession("default") });
+		const harness = makeHarness({ mode: "plan", swapDuringApproval: () => harness.swapSession("ask") });
 		const swapped = harness.session;
 		const decision = await harness.callbacks.requestPlanApproval("the plan");
 		expect(decision.approved).toBe(false);
 		expect(swapped?.permissionMode).toBe("plan");
-		expect(harness.session?.permissionMode).toBe("default");
+		expect(harness.session?.permissionMode).toBe("ask");
 	});
 
 	test("EnterPlanMode flips only the captured session", async () => {
-		const harness = makeHarness({ mode: "default" });
+		const harness = makeHarness({ mode: "ask" });
 		harness.callbacks.enterPlanMode();
 		expect(harness.session?.permissionMode).toBe("plan");
 	});
@@ -782,7 +809,16 @@ describe("plan mode restricts mutating tools end-to-end", () => {
 		});
 		// The engine denies non-read-only tools in plan mode.
 		const { evaluatePermissions } = await import("@labunbun/agent");
-		const decision = evaluatePermissions("echo", { text: "x" }, { mode: session.permissionMode, rules: [], cwd: "/" });
+		const decision = evaluatePermissions(
+			"echo",
+			{ text: "x" },
+			{
+				mode: session.permissionMode,
+				sandbox: session.sandbox,
+				rules: [],
+				cwd: "/",
+			},
+		);
 		expect(decision.behavior).toBe("deny");
 	});
 });

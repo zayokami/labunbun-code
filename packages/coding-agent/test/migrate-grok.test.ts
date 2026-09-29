@@ -23,6 +23,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MODE_CHOICES, type PermissionMode, type SandboxMode } from "@labunbun/agent";
 import { decodeGrokCwdDir, GROK_DEFAULT_DIR, grokRoot, grokSessions, grokSessionsRoot } from "../src/grok-home.ts";
 import {
 	detectSources,
@@ -943,9 +944,15 @@ function writtenPermissions(planned: MigrationPlan): Record<string, string[]> {
 	return settings.permissions ?? { allow: [], deny: [], additionalDirectories: [] };
 }
 
-/** The report line whose `from` names `needle`, or `undefined` when there is none. */
-function line(planned: MigrationPlan, needle: string): MigrationItem | undefined {
-	return planned.items.find((item) => item.from.includes(needle));
+/**
+ * The report line whose `from` names `needle`, or `undefined` when there is none.
+ *
+ * `to` picks out one half of a claim when two lines share a `from`: a mode pair
+ * is written as two settings and reported as two lines off one decision, so a
+ * lookup by `from` alone cannot say which half of the pair it found.
+ */
+function line(planned: MigrationPlan, needle: string, to?: string): MigrationItem | undefined {
+	return planned.items.find((item) => item.from.includes(needle) && (to === undefined || item.to === to));
 }
 
 describe("the grok permission table", () => {
@@ -1133,56 +1140,219 @@ describe("the grok permission table", () => {
 	});
 });
 
+/**
+ * One row of grok's `[ui]` resolution: the TOML a user would have written, and
+ * the pair this build imports out of it.
+ *
+ * `pair` is the decision, not a value. grok says one thing where this build asks
+ * for two, so a reading has to be imported as both halves or not imported at
+ * all — a planner that wrote `permissionMode` and left `sandbox` alone would put
+ * half a decision in the file and report it as the whole. `always-approve` is
+ * the reading whose pair is unrestricted on both axes and `ask` the one confined;
+ * an absent `pair` is the only honest answer for a mode this build has no
+ * counterpart for, because half a pair is not a setting.
+ *
+ * `why` is what keeps a row from being a number. Every key but the first
+ * readable one is passed over and every read is type-gated, so most of the TOML
+ * below resolves to something other than what its spelling suggests, and those
+ * are the rows worth writing down rather than the obvious ones.
+ */
+const GROK_MODE_ROWS: Array<{
+	/** The `[ui]` body, written verbatim into the fixture. */
+	ui: string[];
+	why: string;
+	pair?: { mode: PermissionMode; sandbox: SandboxMode };
+}> = [
+	{
+		ui: ['permission_mode = "always-approve"'],
+		why: "the one reading whose pair is unrestricted on both axes — nothing asked and nothing confined",
+		pair: { mode: "agent", sandbox: "danger-full-access" },
+	},
+	{
+		ui: ['approval_mode = "always-approve"'],
+		why: "the same decision under grok's second spelling, which is read when the first key is absent or unreadable",
+		pair: { mode: "agent", sandbox: "danger-full-access" },
+	},
+	{
+		ui: ["yolo = true"],
+		why: "the shortest spelling of the same pair, and the only value of `yolo` grok reads at all",
+		pair: { mode: "agent", sandbox: "danger-full-access" },
+	},
+	{
+		ui: ['permission_mode = "ask"'],
+		why: "a person in the loop and nothing else — which is still a decision about confinement",
+		pair: { mode: "ask", sandbox: "workspace-write" },
+	},
+	{
+		ui: ['permission_mode = "default"'],
+		why: "grok's own alias of ask, so it resolves to the same pair rather than to an unset",
+		pair: { mode: "ask", sandbox: "workspace-write" },
+	},
+	{
+		ui: ['permission_mode = "plan"'],
+		why: "a name grok does not know: every unrecognised value resolves to ask, even one that is a real mode here",
+		pair: { mode: "ask", sandbox: "workspace-write" },
+	},
+	{
+		ui: ['approval_mode = "ask"'],
+		why: "the second spelling reaching the same pair as its twin",
+		pair: { mode: "ask", sandbox: "workspace-write" },
+	},
+	{
+		ui: ['approval_mode = "auto"'],
+		why: "this spelling has no `auto` tier — grok reads it as always-approve or as nothing else, so `auto` here is an ask",
+		pair: { mode: "ask", sandbox: "workspace-write" },
+	},
+	{
+		ui: ["yolo = false"],
+		why: "`false` is not a reading of the key, but the presence of any of the three still pins the answer",
+		pair: { mode: "ask", sandbox: "workspace-write" },
+	},
+	{
+		ui: ["permission_mode = 3"],
+		why: "a number is not a string, so nothing here is readable — and a key that is present still pins ask",
+		pair: { mode: "ask", sandbox: "workspace-write" },
+	},
+	{
+		ui: ["permission_mode = 3", "yolo = true"],
+		why: "the unreadable key falls through to the next readable one instead of deciding",
+		pair: { mode: "agent", sandbox: "danger-full-access" },
+	},
+	{
+		ui: ['permission_mode = "always-approve"', 'approval_mode = "ask"'],
+		why: "precedence: grok stops at the first key it can read, so the second never ran",
+		pair: { mode: "agent", sandbox: "danger-full-access" },
+	},
+	{
+		ui: ['permission_mode = "auto"'],
+		why: "a classifier, and no mode here is one — both halves stay unset rather than one of them being guessed",
+	},
+];
+
 describe("the grok permission mode", () => {
-	test("always-approve becomes bypass, named as the mode grok resolved", () => {
+	for (const row of GROK_MODE_ROWS) {
+		const imported = row.pair === undefined ? "nothing imported" : `${row.pair.mode} + ${row.pair.sandbox}`;
+		test(`[ui] ${row.ui.join(" / ")} → ${imported} (${row.why})`, () => {
+			const planned = plan({ "config.toml": `[ui]\n${row.ui.join("\n")}\n` });
+			const settings = writtenSettings(planned);
+			expect(settings.permissionMode).toBe(row.pair?.mode);
+			expect(settings.sandbox).toBe(row.pair?.sandbox);
+			// The pair is one decision, so it is reported once: both halves carry the
+			// same `from`, and a planner that wrote one setting and left the other
+			// alone would show two labels for what the user wrote as one line.
+			const mode = planned.items.filter((item) => item.to === "settings.json → permissionMode");
+			const sandbox = planned.items.filter((item) => item.to === "settings.json → sandbox");
+			expect(mode).toHaveLength(row.pair === undefined ? 0 : 1);
+			expect(sandbox).toHaveLength(row.pair === undefined ? 0 : 1);
+			const pair = row.pair;
+			if (pair === undefined) return;
+			expect(sandbox[0]?.from).toBe(mode[0]?.from);
+			// A pair the picker does not offer is a setting `/mode` can never get the
+			// user back to, and a claim is written once and never reported again.
+			expect(MODE_CHOICES.some((choice) => choice.mode === pair.mode && choice.sandbox === pair.sandbox)).toBe(true);
+		});
+	}
+
+	test("always-approve becomes the pair that asks nothing and confines nothing", () => {
 		const planned = plan({ "config.toml": '[ui]\npermission_mode = "always-approve"\n' });
-		expect(writtenSettings(planned).permissionMode).toBe("bypassPermissions");
-		expect(line(planned, 'ui.permission_mode ("always-approve")')?.to).toContain("permissionMode");
+		// Both halves are the claim, and that is the whole reason `always-approve`
+		// cannot become `agent` alone: this build splits grok's one decision into
+		// two keys, and the picker row that says "asks nothing and confines
+		// nothing" is `agent` under an unrestricted sandbox. Importing the mode
+		// and not the sandbox would import the half the user can see and drop the
+		// half they cannot.
+		expect(writtenSettings(planned).permissionMode).toBe("agent");
+		expect(writtenSettings(planned).sandbox).toBe("danger-full-access");
+		// Named after the mode grok resolved, not after the string in the file.
+		const claimed = line(planned, 'ui.permission_mode ("always-approve")', "settings.json → permissionMode");
+		expect(claimed?.detail).toBe('mapped to "agent"');
 	});
 
 	test("a name grok does not know is imported as what grok did with it", () => {
 		const planned = plan({ "config.toml": '[ui]\npermission_mode = "plan"\n' });
 		// `parse_permission_mode_canonical` sends everything it does not recognize to
 		// ask, so a Claude Code mode name written here never auto-approved anything.
-		// Carrying the name across would hand the user a mode grok never applied.
-		expect(writtenSettings(planned).permissionMode).toBe("default");
-		expect(line(planned, "ui.permission_mode")?.detail).toContain('grok resolves "plan" to "ask"');
+		// Carrying the name across would hand the user a mode grok never applied —
+		// and `plan` is the sharper case of that, because it *is* a mode here: the
+		// pair below is what grok's resolution of it becomes, not the name.
+		expect(writtenSettings(planned).permissionMode).toBe("ask");
+		expect(writtenSettings(planned).sandbox).toBe("workspace-write");
+		const claimed = line(planned, "ui.permission_mode", "settings.json → permissionMode");
+		expect(claimed?.detail).toContain('grok resolves "plan" to "ask"');
+		expect(claimed?.detail).toContain("the name written there is not the mode it ran");
 	});
 
-	test("auto keeps whatever mode the session would otherwise start in", () => {
+	test("a mode with no counterpart here is skipped by name, both halves unset", () => {
 		const planned = plan({ "config.toml": '[ui]\npermission_mode = "auto"\n' });
+		// `auto` approves the calls a classifier judges safe; the nearest mode here
+		// (`ask`) puts a person where the classifier was, and `agent` runs everything
+		// instead of judging. Either would change the posture the name describes, so
+		// the pair is skipped whole and the session keeps whatever it would otherwise
+		// start in — a half-imported pair is a mode this migration invented.
 		expect(writtenSettings(planned).permissionMode).toBeUndefined();
-		expect(line(planned, "ui.permission_mode")?.detail).toContain("classifier that approves");
+		expect(writtenSettings(planned).sandbox).toBeUndefined();
+		const named = line(planned, 'ui.permission_mode ("auto")');
+		expect(named?.action).toBe("skip");
+		expect(named?.to).toBe("—");
+		expect(named?.detail).toContain("classifier that approves");
 	});
 
-	test("yolo = false pins the mode to ask rather than leaving it unset", () => {
+	test("yolo = false pins the pair to ask rather than leaving it unset", () => {
 		const planned = plan({ "config.toml": "[ui]\nyolo = false\n" });
 		// grok reads the presence of any of the three keys as a decision, so a
-		// `false` is an explicit ask rather than an unset a remote default could fill.
-		// `false` is not a reading of the key, so the label names the key rather than
-		// a value — the decision it pinned is still the one grok makes.
-		const claimed = line(planned, "ui.yolo");
-		expect(claimed?.to).toContain("permissionMode");
-		expect(claimed?.detail).toBe('mapped to "default"');
+		// `false` is an explicit ask rather than an unset a remote default could
+		// fill. `false` is not a reading of the key, so the label names the key rather
+		// than a value — the decision it pinned is still the one grok makes.
+		const claimed = line(planned, "ui.yolo", "settings.json → permissionMode");
+		expect(claimed?.detail).toBe('mapped to "ask"');
+		// And the confinement half is imported with it. grok states no confinement
+		// beside the mode — its `[sandbox] profile` is a section this importer
+		// reports and does not read — so that half is this build's default, and the
+		// claim line says which half was chosen. Writing `ask` and no sandbox would
+		// leave the other half of one decision unstated.
+		expect(writtenSettings(planned).permissionMode).toBe("ask");
+		expect(writtenSettings(planned).sandbox).toBe("workspace-write");
 		// And the key that decided is not also reported as one that did not.
-		expect(planned.items.filter((item) => item.from.includes("ui.yolo"))).toHaveLength(1);
+		expect(planned.items.filter((item) => item.action === "skip" && item.from.includes("ui.yolo"))).toHaveLength(0);
 	});
 
 	test("a key in a shape grok does not read does not decide", () => {
 		const planned = plan({ "config.toml": "[ui]\npermission_mode = 3\nyolo = true\n" });
-		expect(writtenSettings(planned).permissionMode).toBe("bypassPermissions");
+		// `permission_mode` counts only as a string, so the number falls through and
+		// `yolo = true` decides — which is the pair for "asks nothing and confines
+		// nothing", not the reading of a number written first.
+		expect(writtenSettings(planned).permissionMode).toBe("agent");
+		expect(writtenSettings(planned).sandbox).toBe("danger-full-access");
 		expect(line(planned, "ui.permission_mode (3)")?.detail).toContain("only as a string");
 	});
 
 	test("a second spelling of the same decision is named when it would have differed", () => {
 		const planned = plan({ "config.toml": '[ui]\npermission_mode = "ask"\napproval_mode = "always-approve"\n' });
-		expect(writtenSettings(planned).permissionMode).toBe("default");
-		expect(line(planned, "ui.approval_mode")?.detail).toContain('grok reads "permission_mode" first');
+		// grok stops at the first key it can read, so the approval mode never ran:
+		// the pair is the confined ask, not the one `approval_mode` would have given
+		// on its own — which is the difference that makes the line worth reading.
+		expect(writtenSettings(planned).permissionMode).toBe("ask");
+		expect(writtenSettings(planned).sandbox).toBe("workspace-write");
+		const named = line(planned, "ui.approval_mode");
+		expect(named?.action).toBe("skip");
+		expect(named?.detail).toContain('grok reads "permission_mode" first');
+		expect(named?.detail).toContain('would have meant "always-approve"');
+	});
+
+	test("a second spelling that agrees with the first is not named", () => {
+		const planned = plan({ "config.toml": '[ui]\npermission_mode = "ask"\napproval_mode = "ask"\n' });
+		// The other half of "when it would have differed": a line here would tell a
+		// user a setting was dropped when it said exactly what the key beside it
+		// said, which is the shape of a report nobody reads twice.
+		expect(writtenSettings(planned).permissionMode).toBe("ask");
+		expect(writtenSettings(planned).sandbox).toBe("workspace-write");
+		expect(planned.items.filter((item) => item.from.includes("ui.approval_mode"))).toHaveLength(0);
 	});
 
 	test("no mode key means no mode is claimed", () => {
 		const planned = plan({ "config.toml": '[ui]\ntheme = "dark"\n' });
 		expect(writtenSettings(planned).permissionMode).toBeUndefined();
+		expect(writtenSettings(planned).sandbox).toBeUndefined();
 		expect(planned.items.find((item) => item.to.includes("permissionMode"))).toBeUndefined();
 	});
 
@@ -1195,7 +1365,9 @@ describe("the grok permission mode", () => {
 		expect(managed?.action).toBe("skip");
 		expect(managed?.detail).toContain("machine or organization policy");
 		// The one thing that must not happen: an administrator's requirement
-		// becoming the user's own setting, where it would outlive the policy.
+		// becoming the user's own setting, where it would outlive the policy. The
+		// name of the grok key is spelled the way grok spells it; what matters is
+		// that no such key reaches the settings document.
 		expect(writtenSettings(planned).disableBypassPermissionsMode).toBeUndefined();
 	});
 });

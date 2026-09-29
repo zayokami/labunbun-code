@@ -4,6 +4,7 @@
  */
 
 import { join } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import {
 	collectFileWrites,
@@ -15,7 +16,7 @@ import {
 	summarizeNames,
 	tildePath,
 } from "./migrate-core.ts";
-import type { AddPermissionRules, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
+import type { AddPermissionRules, ClaimModePair, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
 import { looksLikeSecretName, resolveModelReference } from "./migrate-types.ts";
 import {
 	MINIMAX_DATA_DIR_BASENAME,
@@ -173,41 +174,62 @@ const MINIMAX_COMPUTED_PATHS: string[] = [
 ];
 
 /**
- * MiniMax's permission mode names, and what each one means over there.
+ * MiniMax's permission mode names, and the *pair* each one lands on here.
  *
- * The two mode sets were designed against the same four meanings, so this is
- * nearly one-to-one — but two of MiniMax's six values are not imported, and
- * neither is the one a reader would guess:
+ * MiniMax has one value doing two jobs — `bypassPermissions` means never ask
+ * *and* no confinement — while this build asks for the two separately
+ * ({@link ClaimModePair}, migrate-types.ts:499-521), so every row below answers
+ * with a pair. That is not bookkeeping: a mode's own default sandbox is confined
+ * for all three of them (`DEFAULT_SANDBOX_FOR_MODE`, packages/agent/src/types.ts:116-120),
+ * so a row that carried the mode alone would quietly put a scripted run inside a
+ * workspace sandbox. Two of MiniMax's six values are not imported, and the
+ * reasons are not the ones a reader would guess:
  *
  *   - `off` is a second spelling of `bypassPermissions` in MiniMax's own code
- *     rather than a third posture: `modeToAskPolicy` sends both to "always
- *     allow" (`ask-policy.ts:22-36`, where the comment reads "PermissionMode
- *     'bypassPermissions' / 'off'"), and the facade rewrites `off` into
- *     `bypassPermissions` before its engine sees the mode (`facade.ts:563-566`).
- *     It travels as the name this build has for it;
- *   - `auto` stays behind: it is a classifier that approves what it judges safe,
- *     and the nearest mode here — `dontAsk` — means the opposite;
- *   - `acceptEdits` travels, with a note, because MiniMax's own readers disagree
- *     about it. The runtime's reader accepts it (`readLocalPermissionMode`,
- *     `local-runtime/src/api/host-helpers.ts:545-554`) and so does the writer
+ *     rather than a third posture: `modeToAskPolicy` sends both to "never"
+ *     (`ask-policy.ts:33-35`, documented at :20 as "Always allow (PermissionMode
+ *     'bypassPermissions' / 'off')"), and the facade rewrites `off` into
+ *     `bypassPermissions` before its engine sees the mode (`facade.ts:564-566`).
+ *     Both land on the unconfined pair, and each is reported under the spelling
+ *     the file used — one row for the posture would be one spelling of it that
+ *     this importer never reads;
+ *   - `auto` stays behind: it is a classifier that approves what it judges safe
+ *     (`on-request-llm`, `ask-policy.ts:36-37`), and no mode here decides a call
+ *     on your behalf — `ask` asks for every write and command, `agent` runs them
+ *     all unasked — so there is no name to carry it under;
+ *   - `acceptEdits` lands on `ask` with a note, because MiniMax's own readers
+ *     disagree about it. The runtime's reader accepts it (`readLocalPermissionMode`,
+ *     `local-runtime/src/api/host-helpers.ts:543-551`) and so does the writer
  *     that persists this key (`LOCAL_PERMISSION_MODES`, `config/update.ts:42-48`),
  *     while the reader the bundled config goes through does not list it at all
  *     and falls back to `auto` (`config.ts:2053-2059`). Its documented meaning
- *     there — "default plus pre-seeded edit/write allow rules" (`ask-policy.ts:44-45`)
- *     — is this build's mode of the same name, so the value is carried as
- *     written and the split is named in the report rather than guessed away;
+ *     there — "default plus pre-seeded edit/write allow rules" (`ask-policy.ts:42-43`)
+ *     — is an `ask` narrower than it says, because no mode here carries rules of
+ *     its own; the pair is the asking one and the report says what was left out;
  *   - `dontAsk` is *not* imported. It is a live session mode in MiniMax, reached
  *     through `setMode` and listed by the permission-scope store
  *     (`plugin-hook-permission-state.ts:76-84,232`), and no reader of *this file*
  *     accepts it anywhere, so a `config.yaml` carrying it runs as `auto` over
- *     there. Writing it here would set a posture the source never had — the same
- *     line the rules below draw for a store MiniMax itself refuses to read.
+ *     there — and the mode the user believed they had is not one this build
+ *     offers. Writing it would be the same lie the rules below draw for a store
+ *     MiniMax itself refuses to read.
+ *
+ * The confined half of every row is this build's default rather than something
+ * read out of the file: MiniMax has a `sandbox` block of its own (`config.ts:1027`,
+ * parsed at :2113) and it is not imported — see {@link MINIMAX_UNMIGRATED_SECTIONS}.
+ *
+ * Exported for the row count, not for the values: a row added here without a
+ * line in the mapper test's table is an import whose claim nobody has checked.
  */
-const MINIMAX_PERMISSION_MODES: Record<string, string> = {
-	default: "default",
-	bypassPermissions: "bypassPermissions",
-	off: "bypassPermissions",
-	acceptEdits: "acceptEdits",
+export const MINIMAX_PERMISSION_MODES: Record<string, { mode: PermissionMode; sandbox: SandboxMode } | undefined> = {
+	default: { mode: "ask", sandbox: "workspace-write" },
+	bypassPermissions: { mode: "agent", sandbox: "danger-full-access" },
+	off: { mode: "agent", sandbox: "danger-full-access" },
+	// MiniMax's documented meaning here is "default plus pre-seeded edit/write
+	// allow rules", which is `ask` *with* those rules. This build has no mode that
+	// carries rules of its own, so the mode is `ask` and the rules are the
+	// user's to write — narrower than the value, and the report says which way.
+	acceptEdits: { mode: "ask", sandbox: "workspace-write" },
 };
 
 /** `config.yaml → permissionMode`. */
@@ -215,7 +237,7 @@ function planMinimaxPermissionMode(
 	raw: RawMinimaxCode,
 	home: string,
 	items: MigrationItem[],
-	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 ): void {
 	const from = `${tildePath(home, minimaxConfigPath(raw.root))} → permissionMode`;
 	const mode = typeof raw.config.permissionMode === "string" ? raw.config.permissionMode.trim() : "";
@@ -224,11 +246,11 @@ function planMinimaxPermissionMode(
 	if (mapped !== undefined) {
 		const detail =
 			mode === "off"
-				? 'mapped to "bypassPermissions", which is what MiniMax itself calls it — its ask policy sends both spellings to "always allow"'
+				? 'mapped to "agent" with the sandbox off, which is what MiniMax itself calls it — its ask policy sends both spellings to "always allow"'
 				: mode === "acceptEdits"
-					? 'mapped to "acceptEdits"; MiniMax\'s runtime reader accepts this value where the reader its bundled config goes through would run the session as "auto"'
-					: `mapped to "${mapped}"`;
-		claimScalar("minimax-code", "permissionMode", mapped, `${from} ("${mode}")`, detail);
+					? 'mapped to "ask", with the edit/write allow rules left out: MiniMax’s runtime reader accepts this value where the reader its bundled config goes through would run the session as "auto", and there is no mode here that carries its own rules. Add the rules yourself to keep the same posture'
+					: `mapped to "${mapped.mode}"`;
+		claimModePair("minimax-code", mapped.mode, mapped.sandbox, `${from} ("${mode}")`, detail);
 		return;
 	}
 	if (mode === "auto") {
@@ -238,8 +260,9 @@ function planMinimaxPermissionMode(
 			to: "—",
 			action: "skip",
 			detail:
-				'"auto" is a classifier that approves the calls it judges safe, and the nearest mode here, dontAsk, does the ' +
-				"opposite — anything not explicitly allowed is denied — so the session keeps whatever mode it would otherwise start in",
+				'"auto" is a classifier that approves the calls it judges safe, and no mode here decides a call on your behalf — ' +
+				"`ask` asks for every write and command, `agent` runs them all unasked — so there is no name to carry it under " +
+				"and the session keeps whatever mode it would otherwise start in",
 			containsSecret: false,
 		});
 		return;
@@ -252,7 +275,8 @@ function planMinimaxPermissionMode(
 			action: "skip",
 			detail:
 				"MiniMax has this mode, but none of the readers that open this file accept it — a config.yaml carrying it runs as " +
-				'"auto" there, so writing it here would put a stricter posture in force than the one you actually had',
+				'"auto" there, and the mode you believed you had is not one this build offers — so nothing is carried and the ' +
+				"session keeps whatever mode it would otherwise start in",
 			containsSecret: false,
 		});
 		return;
@@ -609,6 +633,7 @@ export function planMinimaxCode(
 	home: string,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
 	settingsPatch: Record<string, unknown>,
@@ -752,7 +777,7 @@ export function planMinimaxCode(
 		}
 	}
 
-	planMinimaxPermissionMode(raw, home, items, claimScalar);
+	planMinimaxPermissionMode(raw, home, items, claimModePair);
 	planMinimaxPermissions(raw, home, items, addPermissionRules);
 
 	// ── custom_provider / provider / minimax_api ─────────────────────────────

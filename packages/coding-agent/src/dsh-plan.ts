@@ -9,6 +9,7 @@
  */
 
 import { join } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { DshMcpServer } from "./dsh-cordis.ts";
@@ -22,7 +23,7 @@ import {
 	summarizeNames,
 	tildePath,
 } from "./migrate-core.ts";
-import type { ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
+import type { ClaimModePair, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
 import { resolveModelReference } from "./migrate-types.ts";
 import type { RawSettingsInput } from "./settings.ts";
 import { OpenAICompatibleProviderSchema } from "./settings.ts";
@@ -53,19 +54,60 @@ const DSH_PI_AI_DEFAULTS: DshWindowDefaults = { contextWindow: 262_144, maxToken
 const DSH_DEEPSEEK_DEFAULTS: DshWindowDefaults = { contextWindow: 1_000_000, maxTokens: 256_000 };
 
 /**
- * The name in the harness's *shipped* preset table whose bundle means
- * `bypassPermissions` here.
+ * The harness's *shipped* preset table, read as a pair each.
  *
  * A preset is a name for a bundle — a sandbox mode plus an approval policy — and
  * the table itself is deployment configuration, so a name only settles what the
  * session will do when the document reading it also states the table, or when no
- * table is stated and the shipped one applies. The shipped entry `danger-full-access`
- * is `danger-full-access` + `never`: no confinement and no approval questions,
- * which is exactly what `bypassPermissions` means. The other shipped entry,
- * `workspace-write`, is `workspace-write` + `ask` — a sandbox mode and an approval
- * policy are different axes from a permission mode, so nothing else maps.
+ * table is stated and the shipped one applies.
+ *
+ * These two rows are the whole of it, spelled the way
+ * `PermissionPresetService.Config` spells the `presets` default
+ * (`packages/interaction/permission-presets/src/index.ts`): two names, each named
+ * after its own sandbox half, and neither named after an approval policy.
+ *
+ * Both land now. Before, one value had to carry both halves at once, so the only
+ * row that could be written was `danger-full-access` + `never`; `workspace-write` +
+ * `ask` was reported as unreadable for the honest reason that it was, and a
+ * comment at the time said so. The harness's own table also has rows a deployment
+ * can add, and this build can import more of those than it could before — see
+ * {@link dshBundle} for what happens to a bundle it cannot import whole.
  */
-const DSH_SHIPPED_BYPASS_PRESET = "danger-full-access";
+export const DSH_SHIPPED_PRESETS: Record<string, { sandbox: SandboxMode; approval: "never" | "ask" }> = {
+	"danger-full-access": { sandbox: "danger-full-access", approval: "never" },
+	"workspace-write": { sandbox: "workspace-write", approval: "ask" },
+};
+
+/**
+ * A harness preset's two halves, as this build's two keys.
+ *
+ * The sandbox half carries across verbatim for the two names both products share
+ * — `workspace-write` and `danger-full-access` — and stops there: the harness also
+ * ships `read-only`, which this build has no value for. The approval half does not
+ * carry across at all: `APPROVAL_POLICIES` in the harness is exactly `ask` and
+ * `never`, and here `never` is `agent` while `ask` is `ask`. Anything outside those
+ * — the harness's own `read-only` sandbox, or an approval policy a newer harness
+ * adds — makes the whole pair unimportable.
+ *
+ * Returning null for half a pair is the point. Writing the sandbox and skipping
+ * the mode would leave a confined session asking questions it should not, or an
+ * unconfined one asking too many, and the report would show one key changed —
+ * which reads as a decision rather than as half of one that could not be made.
+ */
+function dshBundle(
+	sandbox: string,
+	approval: string,
+): { mode: PermissionMode; sandbox: SandboxMode; detail: (preset: string) => string } | null {
+	const mappedSandbox = sandbox === "workspace-write" || sandbox === "danger-full-access" ? sandbox : undefined;
+	const mappedApproval = approval === "never" ? "agent" : approval === "ask" ? "ask" : undefined;
+	if (mappedSandbox === undefined || mappedApproval === undefined) return null;
+	return {
+		mode: mappedApproval,
+		sandbox: mappedSandbox,
+		detail: (preset: string) =>
+			`the document's "${preset}" preset bundles ${sandbox} with ${approval} — imported as both keys rather than the single mode this used to be spelled as, so the confinement and the approval stay separately changeable`,
+	};
+}
 
 /** One model entry a source document declares, with only the numbers it states itself. */
 interface DshModelEntry {
@@ -301,6 +343,7 @@ export function planDeepSeekHarness(
 	home: string,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
 	settingsPatch: Record<string, unknown>,
@@ -631,11 +674,12 @@ export function planDeepSeekHarness(
 	}
 
 	// Permissions. The section names the preset a new session starts in, and a
-	// preset is a *bundle*: a sandbox mode plus an approval policy. Only a bundle
-	// that confines nothing and never asks coincides with a permission mode here —
-	// a mode decides which calls ask, while a sandbox decides what the process may
-	// touch at all, so neither implies the other. The name alone says nothing about
-	// the bundle, which is why the entry is what gets read.
+	// preset is a *bundle*: a sandbox mode plus an approval policy. Those are the
+	// two axes this build has separately, so a bundle now imports as a pair rather
+	// than being squeezed into one value that has to mean both — a mode decides
+	// which calls ask, a sandbox decides what the process may touch at all, and
+	// the four combinations are four different sessions. The name alone still says
+	// nothing about the bundle, which is why the entry is what gets read.
 	const permissionSection = isRecord(raw.settings.permission) ? raw.settings.permission : undefined;
 	const preset = typeof permissionSection?.defaultPreset === "string" ? permissionSection.defaultPreset.trim() : "";
 	if (preset !== "") {
@@ -645,21 +689,16 @@ export function planDeepSeekHarness(
 		if (table !== undefined && isRecord(entry)) {
 			const sandbox = typeof entry.sandbox === "string" ? entry.sandbox.trim() : "";
 			const approval = typeof entry.approval === "string" ? entry.approval.trim() : "";
-			if (sandbox === "danger-full-access" && approval === "never") {
-				claimScalar(
-					"deepseek-harness",
-					"permissionMode",
-					"bypassPermissions",
-					from,
-					`the document's "${preset}" preset bundles ${sandbox} with ${approval} — no confinement and no approval questions, which is what "bypassPermissions" means here`,
-				);
+			const pair = dshBundle(sandbox, approval);
+			if (pair) {
+				claimModePair("deepseek-harness", pair.mode, pair.sandbox, from, pair.detail(preset));
 			} else {
 				items.push({
 					source: "deepseek-harness",
 					from,
 					to: "—",
 					action: "skip",
-					detail: `the document's "${preset}" preset bundles ${sandbox || "an unnamed"} sandbox with ${approval || "an unnamed"} approval — a sandbox and a permission mode are different axes: a mode decides which calls ask, a sandbox decides what the process may touch at all; pick a mode with /permissions`,
+					detail: `the document's "${preset}" preset bundles ${sandbox || "an unnamed"} sandbox with ${approval || "an unnamed"} approval, and one of the two is not a value this build has — a sandbox and a permission mode are different axes, and half a pair would be a setting nobody chose; pick one with /permissions`,
 					containsSecret: false,
 				});
 			}
@@ -672,26 +711,27 @@ export function planDeepSeekHarness(
 				detail: `the document names "${preset}" while the permission.presets table it states does not define that name — a default the harness cannot resolve to a sandbox and an approval policy, so no mode is picked from it; pick one with /permissions`,
 				containsSecret: false,
 			});
-		} else if (preset === DSH_SHIPPED_BYPASS_PRESET) {
+		} else if (DSH_SHIPPED_PRESETS[preset]) {
 			// No table in the document, so the harness's shipped one applies, and its
 			// two entries are named after their own sandbox modes.
-			claimScalar(
-				"deepseek-harness",
-				"permissionMode",
-				"bypassPermissions",
-				from,
-				`"${preset}" is one of the harness's shipped presets, whose bundle is an unconfined sandbox and no approval questions — the same meaning as "bypassPermissions" here; the document states no table of its own, so the shipped one is the one that applies`,
-			);
+			const shipped = DSH_SHIPPED_PRESETS[preset];
+			const pair = dshBundle(shipped.sandbox, shipped.approval);
+			if (pair) {
+				claimModePair(
+					"deepseek-harness",
+					pair.mode,
+					pair.sandbox,
+					from,
+					`"${preset}" is one of the harness's shipped presets, whose bundle is a ${shipped.sandbox} sandbox and ${shipped.approval} approval — imported as the two keys they are here, rather than the single mode this used to be spelled as; the document states no table of its own, so the shipped one is the one that applies`,
+				);
+			}
 		} else {
 			items.push({
 				source: "deepseek-harness",
 				from,
 				to: "—",
 				action: "skip",
-				detail:
-					preset === "workspace-write"
-						? 'the harness\'s shipped "workspace-write" preset is a sandbox that confines writes plus an ask-for-approval policy — a sandbox and a permission mode are different axes, and there is no sandbox here for the confinement to mean anything; pick a mode with /permissions'
-						: `"${preset}" is not a name in the harness's shipped preset table, and the table a deployment composes for itself lives in its composition rather than in this document — a name alone does not say which sandbox and approval it stands for; pick a mode with /permissions`,
+				detail: `"${preset}" is not a name in the harness's shipped preset table, and the table a deployment composes for itself lives in its composition rather than in this document — a name alone does not say which sandbox and approval it stands for; pick a mode with /permissions`,
 				containsSecret: false,
 			});
 		}

@@ -7,6 +7,7 @@
  */
 
 import { join, resolve } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import { HooksConfigSchema } from "./hooks.ts";
 import {
@@ -25,6 +26,7 @@ import {
 import type {
 	ClaimEnv,
 	ClaimHooks,
+	ClaimModePair,
 	ClaimPermissionList,
 	ClaimScalar,
 	MigrationItem,
@@ -75,6 +77,7 @@ export function planZcode(
 	claimEnv: ClaimEnv,
 	claimPermissionList: ClaimPermissionList,
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	claimHooks: ClaimHooks,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
@@ -304,7 +307,7 @@ export function planZcode(
 	if (configPermission) {
 		const permissionFrom = `${cliConfigPath} → permission`;
 		const mode = typeof configPermission.mode === "string" ? configPermission.mode.trim() : "";
-		if (mode) claimZcodeMode(mode, `${permissionFrom}.mode`, claimScalar, items);
+		if (mode) claimZcodeMode(mode, `${permissionFrom}.mode`, claimModePair, items);
 		// The two tool lists, which are not symmetrical and the report says so: a
 		// name in `disallowedTools` is refused before anything else is consulted,
 		// so it is this build's `deny` list and not a lower-priority allow. Both
@@ -440,7 +443,7 @@ export function planZcode(
 			claimZcodeMode(
 				isRecord(row.value) && typeof row.value.mode === "string" ? row.value.mode : "",
 				label,
-				claimScalar,
+				claimModePair,
 				items,
 			);
 			continue;
@@ -1093,16 +1096,30 @@ export function planZcodeAssets(
 }
 
 /**
- * ZCode's `permission.mode` against this build's. Four of ZCode's five values
- * have a counterpart and the fifth is not a mode at all; both facts come from
- * `checkPermission` in the CLI's `core/src/permission/service.ts`, where each
+ * ZCode's `permission.mode` against this build's two axes. Four of ZCode's five
+ * values have a counterpart and the fifth is not a mode at all; both facts come
+ * from `checkPermission` in the CLI's `core/src/permission/service.ts`, where each
  * branch is a literal rather than a description in a comment.
+ *
+ * `edit` maps to `ask`: this build has no "edits run, everything else asks"
+ * mode, so the import is narrower than what the file said. `yolo` is the one
+ * value that means both halves — never ask and no confinement — and so is the
+ * one row that reaches the unconfined sandbox.
+ *
+ * Exported so the test that walks every row can also assert that it walks every
+ * row: a `test.each` table is a place a new value can be added here and go
+ * untested without anything failing.
  */
-const ZCODE_PERMISSION_MODES: Record<string, string> = {
-	plan: "plan",
-	build: "default",
-	edit: "acceptEdits",
-	yolo: "bypassPermissions",
+export const ZCODE_PERMISSION_MODES: Record<string, { mode: PermissionMode; sandbox: SandboxMode }> = {
+	plan: { mode: "plan", sandbox: "workspace-write" },
+	build: { mode: "ask", sandbox: "workspace-write" },
+	edit: { mode: "ask", sandbox: "workspace-write" },
+	yolo: { mode: "agent", sandbox: "danger-full-access" },
+};
+
+/** Modes this build reads more narrowly than the source meant them. */
+const ZCODE_MODE_NOTES: Record<string, string> = {
+	edit: 'mapped to "ask": this build has no mode that applies edits without asking, so a write is asked like everything else. Narrower than the mode it replaced, deliberately',
 };
 
 /**
@@ -1110,11 +1127,11 @@ const ZCODE_PERMISSION_MODES: Record<string, string> = {
  * two places — `permission.mode` in its config file and a `permission/mode` row
  * in its database — and they are the same vocabulary, so they share this.
  */
-function claimZcodeMode(mode: string, from: string, claimScalar: ClaimScalar, items: MigrationItem[]): void {
+function claimZcodeMode(mode: string, from: string, claimModePair: ClaimModePair, items: MigrationItem[]): void {
 	const label = mode ? `${from} ("${mode}")` : from;
 	const mapped = ZCODE_PERMISSION_MODES[mode];
 	if (mapped) {
-		claimScalar("zcode", "permissionMode", mapped, label, `mapped to "${mapped}"`);
+		claimModePair("zcode", mapped.mode, mapped.sandbox, label, ZCODE_MODE_NOTES[mode] ?? `mapped to "${mapped.mode}"`);
 		return;
 	}
 	items.push({

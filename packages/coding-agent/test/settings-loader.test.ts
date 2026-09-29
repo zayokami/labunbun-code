@@ -2,13 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionStore } from "@labunbun/agent";
+import { PERMISSION_MODES, SessionStore } from "@labunbun/agent";
 import {
 	applySettingsEnv,
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
 	loadSettings,
-	resolvePermissionMode,
+	resolveMode,
 	SettingsSchema,
 	shadowedChoiceNotice,
 	shadowingTier,
@@ -213,7 +213,8 @@ describe("repo-controlled settings (project + local tiers)", () => {
 		withSettingsTiers(
 			{
 				user: {
-					permissionMode: "acceptEdits",
+					permissionMode: "agent",
+					sandbox: "danger-full-access",
 					model: "kimi/kimi-k2-0905-preview",
 					trimOldToolResults: true,
 					modelDiscovery: false,
@@ -225,7 +226,8 @@ describe("repo-controlled settings (project + local tiers)", () => {
 			},
 			(cwd, home) => {
 				const { settings } = loadSettings(cwd, undefined, home);
-				expect(settings.permissionMode).toBe("acceptEdits");
+				expect(settings.permissionMode).toBe("agent");
+				expect(settings.sandbox).toBe("danger-full-access");
 				expect(settings.model).toBe("kimi/kimi-k2-0905-preview");
 				expect(settings.env?.LBB_TEST_USER_TIER).toBe("yes");
 				expect(settings.providers?.openaiCompatible[0]?.id).toBe("evil");
@@ -394,31 +396,50 @@ describe("permission rule tiers", () => {
 	});
 });
 
+/**
+ * The setting is now about the *sandbox axis*, and the rename is not cosmetic.
+ *
+ * It used to be read as "this build will not run in `bypassPermissions`", and
+ * the response was to drop the session to `default` — which also turned the
+ * approval policy off, so a policy that wanted "never unconfined" got "never
+ * unattended" instead. `danger-full-access` is the one thing that key actually
+ * names, so that is the axis it now moves, and the mode it was asked for is left
+ * exactly as asked. A test that still walked mode names would pass against
+ * either reading, which is why these walk the pairs.
+ */
 describe("disableBypassPermissionsMode", () => {
-	test("policy downgrades bypassPermissions to default with a reason", () => {
+	test("policy narrows the unrestricted sandbox and says so, leaving the mode alone", () => {
 		withSettingsTiers({ policy: { disableBypassPermissionsMode: true } }, (cwd, home) => {
-			const result = resolvePermissionMode("bypassPermissions", loadSettings(cwd, undefined, home));
-			expect(result.mode).toBe("default");
+			const result = resolveMode({ mode: "agent", sandbox: "danger-full-access" }, loadSettings(cwd, undefined, home));
+			expect(result.sandbox).toBe("workspace-write");
+			// The mode is untouched: the policy said "no unconfined runs", not
+			// "stop running things without a person present".
+			expect(result.mode).toBe("agent");
 			expect(result.downgradeReason).toContain("managed settings");
 		});
 	});
 
-	test("other modes pass through untouched", () => {
+	test.each([...PERMISSION_MODES])("a confined %s is untouched by the policy", (mode) => {
 		withSettingsTiers({ policy: { disableBypassPermissionsMode: true } }, (cwd, home) => {
-			const loaded = loadSettings(cwd, undefined, home);
-			for (const mode of ["default", "plan", "acceptEdits", "dontAsk"] as const) {
-				const result = resolvePermissionMode(mode, loaded);
-				expect(result.mode).toBe(mode);
-				expect(result.downgradeReason).toBeUndefined();
-			}
+			const result = resolveMode({ mode, sandbox: "workspace-write" }, loadSettings(cwd, undefined, home));
+			expect(result).toEqual({ mode, sandbox: "workspace-write" });
+			expect(result.downgradeReason).toBeUndefined();
 		});
 	});
 
-	test("bypassPermissions is untouched when policy does not disable it", () => {
+	test.each([...PERMISSION_MODES])("the policy narrows the sandbox of an unconfined %s but not its mode", (mode) => {
+		withSettingsTiers({ policy: { disableBypassPermissionsMode: true } }, (cwd, home) => {
+			const result = resolveMode({ mode, sandbox: "danger-full-access" }, loadSettings(cwd, undefined, home));
+			expect(result.sandbox).toBe("workspace-write");
+			expect(result.mode).toBe(mode);
+		});
+	});
+
+	test("the unrestricted sandbox is untouched when policy does not disable it", () => {
 		withSettingsTiers({ user: { disableBypassPermissionsMode: true } }, (cwd, home) => {
 			// Set at the user tier, which has no authority to restrict itself.
-			const result = resolvePermissionMode("bypassPermissions", loadSettings(cwd, undefined, home));
-			expect(result.mode).toBe("bypassPermissions");
+			const result = resolveMode({ mode: "agent", sandbox: "danger-full-access" }, loadSettings(cwd, undefined, home));
+			expect(result).toEqual({ mode: "agent", sandbox: "danger-full-access" });
 			expect(result.downgradeReason).toBeUndefined();
 		});
 	});

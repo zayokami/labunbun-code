@@ -26,16 +26,98 @@ import type { SpillWriter } from "./output-limits.ts";
 // ---------------------------------------------------------------------------
 
 /**
- * Every mode there is, in the order they escalate.
+ * Two axes, not one list.
  *
- * The type is derived from this list rather than written beside it, so a mode
- * added here is a mode everywhere: the picker, the CLI's accepted values and the
- * settings schema all read the same list, and none of them can quietly be the one
- * that forgot.
+ * A permission mode decides *which calls ask*. A sandbox mode decides *what the
+ * process may touch at all*. They are different questions — a mode that never
+ * asks still runs something, and that something can delete files or open a
+ * socket whether or not a human was consulted — so they are two enumerations
+ * here and the pair is what a user actually picks. Codex composes them the same
+ * way (`AskForApproval` × `SandboxMode` in `codex-rs/protocol/src/protocol.rs:986`
+ * and `config_types.rs:104`), and Claude Code made the same split when it
+ * replaced `danger-full-access` with a nested `sandbox` object.
+ *
+ * Each type is derived from its list, and every consumer — the zod schema in
+ * `settings.ts`, the CLI validator, the picker — reads these two arrays rather
+ * than re-spelling them. That claim is worth making because it was made before
+ * and was false: `settings.ts` carried a hand-written `z.enum` of the same five
+ * names, so a mode added here was a mode everywhere except in the one place a
+ * user could set it.
  */
-export const PERMISSION_MODES = ["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"] as const;
-
+export const PERMISSION_MODES = ["ask", "plan", "agent"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
+
+export const SANDBOX_MODES = ["workspace-write", "danger-full-access"] as const;
+export type SandboxMode = (typeof SANDBOX_MODES)[number];
+
+/**
+ * What the picker shows: the two axes composed, in the order they escalate.
+ *
+ * `id` is what the user typed and what `/mode <id>` takes, so it is not the same
+ * string as either axis value — `agentNoSandbox` names a pairing, not a mode.
+ * Order is load-bearing twice over: it is the picker's row order and the
+ * default's row, so the first entry is the default (`mode-command.test.ts`
+ * pins the marker on row 0 rather than trusting this comment).
+ */
+export interface ModeChoice {
+	id: string;
+	mode: PermissionMode;
+	sandbox: SandboxMode;
+	label: string;
+	hint: string;
+}
+
+export const MODE_CHOICES: readonly ModeChoice[] = [
+	{
+		id: "ask",
+		mode: "ask",
+		sandbox: "workspace-write",
+		label: "Ask",
+		hint: "read and research freely; ask before every write and command",
+	},
+	{
+		id: "plan",
+		mode: "plan",
+		sandbox: "workspace-write",
+		label: "Plan",
+		hint: "ask mode with no mutations at all — research and design, then ExitPlanMode for approval",
+	},
+	{
+		id: "agent",
+		mode: "agent",
+		sandbox: "workspace-write",
+		label: "Agent",
+		hint: "every call runs without asking; a dangerous command is refused outright",
+	},
+	{
+		id: "agentNoSandbox",
+		mode: "agent",
+		sandbox: "danger-full-access",
+		label: "Agent 无沙箱",
+		hint: "the same, with the sandbox axis set to no confinement",
+	},
+];
+
+/** The choice a session starts in, and the one `resolveMode` falls back to. */
+export const DEFAULT_MODE_CHOICE: ModeChoice = MODE_CHOICES[0];
+
+/** Look a choice up by the id a user typed. */
+export function findModeChoice(id: string): ModeChoice | undefined {
+	return MODE_CHOICES.find((choice) => choice.id === id);
+}
+
+/**
+ * The pairing a mode implies when the other axis was not set.
+ *
+ * Only used to fill in an axis someone left out — a user who wrote
+ * `permissionMode: "agent"` and no `sandbox` gets the sandboxed pairing, because
+ * the escalation is in the id, not the other way round.
+ */
+export const DEFAULT_SANDBOX_FOR_MODE: Record<PermissionMode, SandboxMode> = {
+	ask: "workspace-write",
+	plan: "workspace-write",
+	agent: "workspace-write",
+};
 
 export type PermissionResult =
 	| { behavior: "allow"; updatedInput?: unknown }
@@ -44,6 +126,13 @@ export type PermissionResult =
 
 export interface PermissionContext {
 	mode: PermissionMode;
+	/**
+	 * The other axis. Carried alongside `mode` because the two are decided
+	 * together and a resolver that only saw the mode would be reasoning about
+	 * half the question — `agent` with a sandbox and `agent` without one are the
+	 * same approval policy and a materially different blast radius.
+	 */
+	sandbox: SandboxMode;
 	toolName: string;
 	input: unknown;
 	cwd: string;
@@ -97,10 +186,9 @@ export interface ToolResult {
  *
  * There is deliberately no per-tool permission hook. A tool that decided its own
  * permission would be a second source of truth beside `evaluatePermissions`,
- * which is the only thing that sees the mode, the rules and the workspace roots
- * at once — including the one arm a tool cannot see: `acceptEdits`' allowance
- * for edits inside the workspace. One used to be declared here
- * (`checkPermissions`, implemented by Edit and Write as "acceptEdits → allow,
+ * which is the only thing that sees the mode, the sandbox, the rules and the
+ * workspace roots at once. One used to be declared here (`checkPermissions`,
+ * implemented by Edit and Write as "edits inside the workspace → allow,
  * otherwise ask") and nothing ever called it. The engine already answered the
  * same question, and wiring the tool's answer in would have allowed a write
  * outside the workspace that the engine asks about, because the tool never

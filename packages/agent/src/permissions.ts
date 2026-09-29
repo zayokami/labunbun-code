@@ -5,14 +5,35 @@
  *   Bash · Bash(git *) · Bash(npm run *) · Edit(src/**) · Read(~/.ssh/*)
  *   mcp__github · mcp__github__*
  *
- * Evaluation: deny rules always win across all sources; among allows, later
- * sources override earlier (user → project → local → policy → cliArg →
- * session). Mode shortcuts: bypassPermissions skips the engine; acceptEdits
- * auto-allows Edit/Write in the workspace; plan denies mutating tools;
- * dontAsk turns unresolved asks into denies (handled by the caller).
+ * Evaluation order, and the order is the security property:
+ *
+ *   1. deny rules, across every source. No mode and no sandbox setting gets to
+ *      reach past them — a rule the user wrote is a floor, not a preference.
+ *   2. the dangerous-command classifier, for Bash. Also above every mode, and
+ *      also above `danger-full-access`: turning the sandbox off is not a request
+ *      to stop classifying. Codex composes it the same way
+ *      (`codex-rs/core/src/exec_policy.rs:770-855`).
+ *   3. `plan`'s read-only tool list, which is a deny and so sits above the
+ *      allow rules for the same reason step 1 does.
+ *   4. among allows, later sources override earlier (user → project → local →
+ *      policy → cliArg → session).
+ *   5. the mode's own answer to "nothing decided it": `agent` runs it, `ask`
+ *      brings it to a person.
+ *
+ * Step 1 used to come after a `bypassPermissions` early return, so that one mode
+ * was the only thing in the system that could overrule a user's own `deny`. That
+ * line is gone; `deny-scan-first` was already written down as a security
+ * invariant in `.labunbun/skills/code-review-security/SKILL.md:8`, and the code
+ * was the thing that disagreed with it.
  */
 import { resolve } from "node:path";
-import type { PermissionMode, PermissionResult } from "./types.ts";
+import {
+	classifyDangerousCommand,
+	type DangerousCommandMatch,
+	type DangerousCommandPlatform,
+} from "./dangerous-command.ts";
+import { COMMAND_SEPARATOR_RE, tokenizeShell } from "./shell-tokens.ts";
+import type { PermissionMode, PermissionResult, SandboxMode } from "./types.ts";
 
 export type RuleSource = "userSettings" | "projectSettings" | "localSettings" | "policy" | "cliArg" | "session";
 
@@ -98,7 +119,7 @@ const FILE_READING_COMMANDS = new Set([
 ]);
 
 /** Shell metacharacters that separate one command from the next. */
-const COMMAND_SEPARATOR_RE = /(?:\|\||&&|[;|&\n])/;
+export { COMMAND_SEPARATOR_RE, tokenizeShell } from "./shell-tokens.ts";
 
 /**
  * Best-effort extraction of file paths a shell command would read or write.
@@ -107,12 +128,18 @@ const COMMAND_SEPARATOR_RE = /(?:\|\||&&|[;|&\n])/;
  * `Bash(cat .env)` — without it the shell is an open bypass around every file
  * deny rule the user configured.
  *
- * Deliberately defense-in-depth, NOT a sandbox: a shell can express file
- * access in unbounded ways (`$(printf ...)`, variable indirection, `bash -c`,
- * `eval`), so static extraction can always be evaded by someone trying. The
- * contract that keeps this safe to rely on is directional — callers use the
+ * Deliberately defense-in-depth, and still not a sandbox: a shell can express
+ * file access in unbounded ways (`$(printf ...)`, variable indirection, `bash
+ * -c`, `eval`), so static extraction can always be evaded by someone trying.
+ * The contract that keeps this safe to rely on is directional — callers use the
  * result only to *deny*, never to allow. Failing to extract a path leaves the
  * original decision untouched rather than widening it.
+ *
+ * What constrains a command today is neither this function nor the sandbox axis.
+ * The sandbox axis is a setting this build carries and does not yet enforce;
+ * what it has today is the per-command classifier, which sits above every mode
+ * and above the sandbox setting in both directions. Neither of those reaches a
+ * process that goes around the tools, which is the honest limit of the pair.
  */
 export function extractBashFilePaths(command: string): string[] {
 	const found: string[] = [];
@@ -145,41 +172,6 @@ export function extractBashFilePaths(command: string): string[] {
 	}
 
 	return found.filter((path) => path.length > 0);
-}
-
-/**
- * Split a shell segment into tokens, honoring quotes so a quoted path with
- * spaces stays one token, and unwrapping the quotes as the shell would.
- */
-function tokenizeShell(segment: string): string[] {
-	const tokens: string[] = [];
-	let current = "";
-	let quote: '"' | "'" | null = null;
-	let started = false;
-
-	for (let i = 0; i < segment.length; i++) {
-		const char = segment[i];
-		if (quote) {
-			if (char === quote) quote = null;
-			else current += char;
-			continue;
-		}
-		if (char === '"' || char === "'") {
-			quote = char;
-			started = true;
-			continue;
-		}
-		if (/\s/.test(char)) {
-			if (started) tokens.push(current);
-			current = "";
-			started = false;
-			continue;
-		}
-		current += char;
-		started = true;
-	}
-	if (started) tokens.push(current);
-	return tokens;
 }
 
 /**
@@ -275,25 +267,34 @@ function pathMatches(filePath: string, specifier: string, cwd: string): boolean 
 
 export interface PermissionEngineConfig {
 	mode: PermissionMode;
+	/**
+	 * The other axis. Read here so the engine can refuse to widen access, not to
+	 * decide anything: `danger-full-access` does not skip the classifier and does
+	 * not skip the deny rules, and the one thing it does is tell the caller which
+	 * policy to hand the process.
+	 */
+	sandbox: SandboxMode;
 	rules: PermissionRule[];
 	cwd: string;
-	/** Workspace roots acceptEdits applies to (defaults to cwd). */
-	workspaceRoots?: string[];
+	/**
+	 * Whose command semantics the dangerous-command classifier reads a Bash line
+	 * with. Defaults to the running platform; overridable so both sets of rules
+	 * are testable from one machine rather than one of them being skipped.
+	 */
+	platform?: DangerousCommandPlatform;
 }
 
 /**
  * Rule-based evaluation. Returns allow/deny when rules or modes decide;
  * returns ask when a human decision is needed. The caller (app layer) turns
- * remaining asks into a dialog or, in dontAsk mode, a deny.
+ * remaining asks into a dialog — or, when there is nobody to ask, a deny.
  */
 export function evaluatePermissions(
 	toolName: string,
 	input: unknown,
 	config: PermissionEngineConfig,
 ): PermissionResult {
-	if (config.mode === "bypassPermissions") return { behavior: "allow" };
-
-	// Deny rules win across every source (check before mode shortcuts).
+	// 1. Deny rules, across every source. First, and with no mode above it.
 	for (const rule of config.rules) {
 		if (rule.behavior !== "deny") continue;
 		if (ruleMatches(rule, toolName, input, config.cwd)) {
@@ -312,15 +313,25 @@ export function evaluatePermissions(
 		}
 	}
 
-	// Mode shortcuts after deny rules (so explicit denies can override mode shortcuts).
+	// 2. The dangerous-command classifier, above every mode and above the
+	//    sandbox setting both ways. A non-match is never widened by anything
+	//    below, and a match is never turned into a pass by an allow rule.
+	if (toolName === "Bash") {
+		const command = readBashCommand(input);
+		if (command !== undefined) {
+			const match = classifyDangerousCommand(command, config.platform);
+			if (match) return decideDangerous(match, config.mode);
+		}
+	}
+
+	// 3. `plan` is a deny, so it sits above the allow rules for the same
+	//    reason step 1 does: an allow rule must not buy a write in a mode whose
+	//    whole promise is that there are none.
 	if (config.mode === "plan" && !isReadOnlyTool(toolName)) {
 		return { behavior: "deny", message: `Plan mode: ${toolName} is not allowed (read-only mode)` };
 	}
-	if (config.mode === "acceptEdits" && isWorkspaceEdit(toolName, input, config)) {
-		return { behavior: "allow" };
-	}
 
-	// Among allows, later sources win — any match is enough since denies lost.
+	// 4. Among allows, later sources win — any match is enough since denies lost.
 	for (const rule of config.rules) {
 		if (rule.behavior !== "allow") continue;
 		if (ruleMatches(rule, toolName, input, config.cwd)) {
@@ -328,7 +339,41 @@ export function evaluatePermissions(
 		}
 	}
 
-	return { behavior: "ask" };
+	// 5. The mode's own answer to "nothing decided it": `agent` runs it,
+	//    `ask` brings it to a person.
+	return { behavior: config.mode === "agent" ? "allow" : "ask" };
+}
+
+/** The Bash tool's `command` field, when this call really is a Bash call. */
+function readBashCommand(input: unknown): string | undefined {
+	if (typeof input !== "object" || input === null) return undefined;
+	const command = (input as Record<string, unknown>).command;
+	return typeof command === "string" ? command : undefined;
+}
+
+/**
+ * What a classified command becomes, per mode.
+ *
+ * `ask` asks, and says why — the reason is the only thing the dialog has that
+ * the model does not, so a bare "allow?" would train a user to say yes to the
+ * one prompt that needed reading.
+ *
+ * `agent` refuses outright. This is the same shape as Codex's
+ * `AskForApproval::Never => Decision::Forbidden` (`exec_policy.rs:799-807`) and
+ * it is what keeps "every call runs without asking" from being read as "every
+ * call runs, including the one that deletes the repository". A mode that
+ * auto-approves everything has nothing left to protect a user with, so the
+ * commands that cannot be un-done are the ones it is not allowed to spend.
+ */
+function decideDangerous(match: DangerousCommandMatch, mode: PermissionMode): PermissionResult {
+	const why = `Blocked as a dangerous command: ${match.rule}`;
+	if (mode === "agent") {
+		return {
+			behavior: "deny",
+			message: `${why}. No permission mode runs this without an explicit rule naming it.`,
+		};
+	}
+	return { behavior: "ask", message: why };
 }
 
 /**
@@ -399,19 +444,6 @@ export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
 
 function isReadOnlyTool(toolName: string): boolean {
 	return PLAN_MODE_READ_ONLY_TOOLS.includes(toolName);
-}
-
-function isWorkspaceEdit(toolName: string, input: unknown, config: PermissionEngineConfig): boolean {
-	if (toolName !== "Edit" && toolName !== "Write") return false;
-	if (typeof input !== "object" || input === null) return false;
-	const filePath = String((input as Record<string, unknown>).file_path ?? "");
-	if (!filePath) return false;
-	const resolved = resolveCanonical(filePath, config.cwd);
-	const roots = config.workspaceRoots ?? [config.cwd];
-	return roots.some((root) => {
-		const normalizedRoot = `${resolveCanonical(root, config.cwd).replace(/\/$/, "")}/`;
-		return resolved.toLowerCase().startsWith(normalizedRoot.toLowerCase());
-	});
 }
 
 export function formatRule(rule: PermissionRule): string {

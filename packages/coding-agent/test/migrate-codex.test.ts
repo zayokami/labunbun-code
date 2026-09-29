@@ -423,14 +423,6 @@ describe("$CODEX_HOME", () => {
 });
 
 describe("codex keys that are reported rather than carried", () => {
-	test("the permission posture is one line rather than silence", () => {
-		const planned = planConfig(codexConfig({ top: ['approval_policy = "on-request"', 'sandbox_mode = "read-only"'] }));
-		const posture = item(planned, "approval_policy");
-		expect(posture?.action).toBe("skip");
-		expect(posture?.from).toContain("sandbox_workspace_write");
-		expect(posture?.detail).toContain("no OS-level sandbox");
-	});
-
 	test("named permission profiles are named", () => {
 		const planned = planConfig(
 			codexConfig({
@@ -529,5 +521,222 @@ describe("codex keys that are reported rather than carried", () => {
 	test("a config this importer fully understands says nothing about unhandled keys", () => {
 		const planned = planConfig(codexConfig({ tail: MCP_SERVERS }));
 		expect(planned.items.some((i) => i.detail.includes("no mapping for and no note about"))).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// approval_policy and sandbox_mode: the two halves of one decision
+// ---------------------------------------------------------------------------
+
+describe("codex approval_policy and sandbox_mode", () => {
+	/**
+	 * A config carrying only the posture keys, so each half is read on its own.
+	 *
+	 * `codexConfig` writes `top` before the provider table, which is where a
+	 * top-level `approval_policy` or `sandbox_mode` has to be to be one: TOML
+	 * assigns every line after a table header to that table.
+	 */
+	function postureConfig(top: string[], tail: string[] = []): MigrationPlan {
+		return planConfig(codexConfig({ top, tail }));
+	}
+
+	/**
+	 * The sentence the two mapping tables replaced, and the part of it that is
+	 * now false.
+	 *
+	 * It claimed this build had "no OS-level sandbox and no per-command policy".
+	 * The second half is what the rewrite killed: `dangerous-command.ts`
+	 * classifies a command line and sits above every mode and above the sandbox
+	 * setting both ways. The first half is still true — nothing in this repo
+	 * enforces `workspace-write` at the OS level — so the guard is on the half
+	 * that changed, not on the phrase "no OS-level sandbox", which two remaining
+	 * lines say and say correctly.
+	 */
+	const DEAD_CLAIM = "no per-command policy";
+
+	// One row per `approval_policy` the mapper knows, each paired with a sandbox
+	// this build also has so the pair path runs and the assertion is about the
+	// policy half. `difference` is the part of the note that tells the user what
+	// importing their value actually cost them.
+	const APPROVAL_ROWS: Array<[value: string, mode: string, difference: string]> = [
+		["never", "agent", "nothing is asked"],
+		["on-request", "ask", "sandbox would not cover the call"],
+		["untrusted", "ask", "trusted list"],
+		["on-failure", "ask", "only asks when the command fails"],
+	];
+
+	test.each(APPROVAL_ROWS)('approval_policy "%s" imports as "%s"', (value, mode, difference) => {
+		const planned = postureConfig([`approval_policy = "${value}"`, 'sandbox_mode = "workspace-write"']);
+		const settings = plannedSettings(planned);
+		expect(settings.permissionMode).toBe(mode);
+		// Both halves travel together: a mode imported without the sandbox beside
+		// it is a session that asks and still confines, a combination nobody chose.
+		expect(settings.sandbox).toBe("workspace-write");
+		const line = item(planned, "approval_policy, sandbox_mode");
+		expect(line?.action).toBe("map");
+		expect(line?.detail).toContain(difference);
+	});
+
+	test("the three policies that ask are not the same thing upstream, and the notes say so", () => {
+		const notes = ["on-request", "untrusted", "on-failure"].map(
+			(value) =>
+				item(
+					postureConfig([`approval_policy = "${value}"`, 'sandbox_mode = "workspace-write"']),
+					"approval_policy, sandbox_mode",
+				)?.detail ?? "",
+		);
+		// All three land on `ask`, so the note is the only thing left that tells
+		// the user which of Codex's prompts they are getting. Three identical
+		// notes would read as an exact translation, and none of them is one.
+		expect(new Set(notes).size).toBe(3);
+		for (const note of notes) expect(note.length).toBeGreaterThan(60);
+	});
+
+	const SANDBOX_ROWS: Array<[value: string, expected: string]> = [
+		["workspace-write", "workspace-write"],
+		["danger-full-access", "danger-full-access"],
+	];
+
+	test.each(SANDBOX_ROWS)('sandbox_mode "%s" carries over under the same name', (value, expected) => {
+		const planned = postureConfig(['approval_policy = "never"', `sandbox_mode = "${value}"`]);
+		const settings = plannedSettings(planned);
+		expect(settings.sandbox).toBe(expected);
+		// Paired, so the two axes are written as the one decision they are.
+		expect(settings.permissionMode).toBe("agent");
+	});
+
+	test("a read-only sandbox is named, not rounded up to a writable one", () => {
+		const planned = postureConfig(['approval_policy = "on-request"', 'sandbox_mode = "read-only"']);
+		const settings = plannedSettings(planned);
+		// The whole point of the row: `workspace-write` is this build's confined
+		// mode and it permits writes, so importing `read-only` as it would hand
+		// the session more than the config asked for, and the widening would be
+		// invisible in the report.
+		expect(settings.sandbox).toBeUndefined();
+		// The half that *is* known still comes across — the source did say
+		// something, and dropping it too would be a second loss.
+		expect(settings.permissionMode).toBe("ask");
+		const skipped = item(planned, 'sandbox_mode ("read-only")');
+		expect(skipped?.action).toBe("skip");
+		expect(skipped?.detail).toContain("no counterpart");
+		expect(skipped?.detail).toContain("widen");
+		// The report has to offer the way to get what the user was asking for.
+		expect(skipped?.detail).toContain("deny rule");
+	});
+
+	test("a read-only sandbox with no policy claims neither half", () => {
+		const settings = plannedSettings(postureConfig(['sandbox_mode = "read-only"']));
+		// A refused half is not a reason to pick the other one: this config said
+		// nothing about approval, and choosing `ask` for it would be a mode the
+		// user never set.
+		expect(settings.sandbox).toBeUndefined();
+		expect(settings.permissionMode).toBeUndefined();
+	});
+
+	test("one known half claims the axis it knows and leaves the other alone", () => {
+		const planned = postureConfig(['sandbox_mode = "danger-full-access"']);
+		const settings = plannedSettings(planned);
+		expect(settings.sandbox).toBe("danger-full-access");
+		// The other axis keeps whatever the session would otherwise start in.
+		expect(settings.permissionMode).toBeUndefined();
+		const line = item(planned, 'sandbox_mode ("danger-full-access")');
+		expect(line?.action).toBe("map");
+		// The note has to admit that a stored setting is not an enforced one, and
+		// point at the command that says which mechanism is actually in force.
+		expect(line?.detail).toContain("whether or not anything here enforces it");
+		expect(line?.detail).toContain("/doctor");
+	});
+
+	test("a policy on its own claims the mode and no sandbox", () => {
+		const settings = plannedSettings(postureConfig(['approval_policy = "never"']));
+		expect(settings.permissionMode).toBe("agent");
+		expect(settings.sandbox).toBeUndefined();
+	});
+
+	test("an approval policy this build has no mode for is named and skipped", () => {
+		const planned = postureConfig(['approval_policy = "escalate"', 'sandbox_mode = "workspace-write"']);
+		const settings = plannedSettings(planned);
+		expect(settings.permissionMode).toBeUndefined();
+		// The other half is a separate decision and still comes across: one
+		// unknown value must not take the known one down with it.
+		expect(settings.sandbox).toBe("workspace-write");
+		const skipped = item(planned, 'approval_policy ("escalate")');
+		expect(skipped?.action).toBe("skip");
+		expect(skipped?.detail).toContain("not a policy this build has");
+	});
+
+	test("a sandbox mode this build has no counterpart for is named and skipped", () => {
+		const planned = postureConfig(['approval_policy = "never"', 'sandbox_mode = "seatbelt"']);
+		const settings = plannedSettings(planned);
+		expect(settings.sandbox).toBeUndefined();
+		expect(settings.permissionMode).toBe("agent");
+		const skipped = item(planned, 'sandbox_mode ("seatbelt")');
+		expect(skipped?.action).toBe("skip");
+		// `read-only` gets its own line because it is a *narrower* setting being
+		// dropped; an unrecognized name is a different failure and must not
+		// borrow that wording, which would tell the user their value was refused
+		// for being stricter than it is.
+		expect(skipped?.detail).toContain("not a sandbox mode this build has");
+		expect(skipped?.detail).not.toContain("no counterpart here");
+	});
+
+	test("sandbox_workspace_write is named whichever halves of the pair are present", () => {
+		// Four ways in, one answer. The key names extra directories a confined
+		// run may write to; it is not a mode and it is not an axis, so it is
+		// reported whatever the pair around it happened to look like. A key that
+		// reaches no report line at all reads as an importer that missed it.
+		for (const top of [
+			['approval_policy = "never"', 'sandbox_mode = "workspace-write"'],
+			['approval_policy = "never"'],
+			['sandbox_mode = "read-only"'],
+			[],
+		]) {
+			const named = item(
+				postureConfig(top, ["[sandbox_workspace_write]", "network_access = true"]),
+				"→ sandbox_workspace_write",
+			);
+			expect(named?.action).toBe("skip");
+			expect(named?.detail).toContain("additionalDirectories");
+		}
+	});
+
+	test("no report line claims this build has no per-command policy", () => {
+		// Read through the real renderer rather than off the item list, so the
+		// string the user actually reads is what is checked, and swept over every
+		// shape the mapper can be reached in.
+		const configs = [
+			codexConfig({ top: ['approval_policy = "never"', 'sandbox_mode = "workspace-write"'] }),
+			codexConfig({ top: ['approval_policy = "on-request"', 'sandbox_mode = "danger-full-access"'] }),
+			codexConfig({ top: ['approval_policy = "untrusted"'] }),
+			codexConfig({ top: ['approval_policy = "on-failure"', 'sandbox_mode = "read-only"'] }),
+			codexConfig({ top: ['sandbox_mode = "seatbelt"'] }),
+			codexConfig({ top: ['approval_policy = "escalate"'] }),
+			codexConfig({ tail: ["[sandbox_workspace_write]", "network_access = true"] }),
+		];
+		let namesTheClassifier = false;
+		for (const config of configs) {
+			withHome({ ".codex/config.toml": config }, (home) => {
+				const report = runMigration({ home, from: "codex" }).report;
+				expect(report).not.toContain(DEAD_CLAIM);
+				expect(report).not.toContain("decide per tool rather than per command");
+				if (report.includes("dangerous-command classifier still refuses")) namesTheClassifier = true;
+			});
+		}
+		// The claim is replaced, not merely deleted: the report now says what does
+		// decide a command, in the row where it matters most — the policy that
+		// asks the least.
+		expect(namesTheClassifier).toBe(true);
+	});
+
+	test("the catch-all sentence is gone from the mapper, comments aside", () => {
+		// The mapper documents the sentence it replaced, by name, so the next
+		// author finds the reasoning where the line used to be. A scan over the
+		// raw text would match that explanation and nothing else; what must not
+		// come back is the claim reaching a report, so this reads the code.
+		const code = readFileSync(join(import.meta.dir, "..", "src", "codex-plan.ts"), "utf8")
+			.replace(/\/\*[\s\S]*?\*\//g, "")
+			.replace(/^[\t ]*\/\/.*$/gm, "");
+		expect(code).not.toContain(DEAD_CLAIM);
+		expect(code).not.toContain("this build has no OS-level sandbox and no per-command policy");
 	});
 });

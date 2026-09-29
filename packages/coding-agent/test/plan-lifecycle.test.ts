@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
 	AgentSession,
 	buildTool,
+	DEFAULT_MODE_CHOICE,
 	evaluatePermissions,
+	MODE_CHOICES,
 	type PermissionMode,
 	type PermissionRule,
+	type SandboxMode,
 } from "@labunbun/agent";
 import { FAUX_MODEL, type FauxStep, fauxProvider } from "@labunbun/ai";
 import { z } from "zod";
@@ -26,6 +29,12 @@ const allowAll: PermissionRule = { toolName: "*", behavior: "allow", source: "se
 function harness(
 	options: {
 		mode?: PermissionMode;
+		/**
+		 * The other axis. Defaults to the confined value, which is what every
+		 * `MODE_CHOICES` row but one uses, and the tests below that care about the
+		 * pair set it explicitly.
+		 */
+		sandbox?: SandboxMode;
 		steps?: FauxStep[];
 		approval?: () => Promise<boolean>;
 		rules?: PermissionRule[];
@@ -47,7 +56,8 @@ function harness(
 	const faux = fauxProvider(options.steps ?? [{ text: "done" }]);
 	const session = new AgentSession({
 		model: FAUX_MODEL,
-		permissionMode: options.mode ?? "default",
+		permissionMode: options.mode ?? DEFAULT_MODE_CHOICE.mode,
+		sandbox: options.sandbox ?? DEFAULT_MODE_CHOICE.sandbox,
 		maxTurns: 12,
 		tools: [
 			...createPlanModeTools(callbacks),
@@ -65,7 +75,12 @@ function harness(
 			streamFn: faux.streamFn,
 			canUseTool: async (name, input, ctx) => {
 				modes.push({ tool: name, mode: ctx.mode });
-				return evaluatePermissions(name, input, { mode: ctx.mode, cwd: ctx.cwd, rules: options.rules ?? [allowAll] });
+				return evaluatePermissions(name, input, {
+					mode: ctx.mode,
+					sandbox: ctx.sandbox,
+					cwd: ctx.cwd,
+					rules: options.rules ?? [allowAll],
+				});
 			},
 		},
 	});
@@ -86,10 +101,22 @@ function harness(
 }
 
 describe("plan mode full lifecycle", () => {
-	for (const mode of ["default", "acceptEdits", "dontAsk", "bypassPermissions"] as const) {
-		test(`${mode}: enter twice, approve, then mutate using restored mode`, async () => {
+	// The walk is over the *pairs* the picker offers, not over mode names. Two of
+	// the four rows share a mode and differ only in the sandbox, and a walk over
+	// modes would run that pair twice and prove nothing about the axis that
+	// actually differs — which is the one ExitPlanMode has to put back.
+	//
+	// The `plan` row is the one row this walk leaves out, and not because it is
+	// untested: a session that *starts* in plan mode has no pair to restore, so
+	// approval lands on the default instead. That is its own case, with its own
+	// assertions, below — folding it into this walk would mean the expected
+	// "restored" value is the starting value for three rows and something else
+	// for the fourth, and the walk would stop saying what it says.
+	for (const choice of MODE_CHOICES.filter((c) => c.mode !== "plan")) {
+		test(`${choice.id}: enter twice, approve, then mutate under the restored pair`, async () => {
 			const h = harness({
-				mode,
+				mode: choice.mode,
+				sandbox: choice.sandbox,
 				steps: [
 					call("EnterPlanMode"),
 					call("EnterPlanMode"),
@@ -100,38 +127,41 @@ describe("plan mode full lifecycle", () => {
 				],
 			});
 			expect(await h.session.prompt("go")).toBe("completed");
-			expect(h.session.permissionMode).toBe(mode);
+			expect(h.session.permissionMode).toBe(choice.mode);
+			expect(h.session.sandbox).toBe(choice.sandbox);
 			expect(h.writes).toBe(1);
 			expect(h.dialogs).toEqual([{ name: "ExitPlanMode", input: { plan: "Implement the agreed change" } }]);
 			expect(h.modes).toEqual([
-				{ tool: "EnterPlanMode", mode },
+				{ tool: "EnterPlanMode", mode: choice.mode },
 				{ tool: "EnterPlanMode", mode: "plan" },
 				{ tool: "Write", mode: "plan" },
 				{ tool: "ExitPlanMode", mode: "plan" },
-				{ tool: "Write", mode },
+				{ tool: "Write", mode: choice.mode },
 			]);
 			const results = h.session.messages.filter((m) => m.role === "toolResult");
 			expect(results.map((m) => m.isError)).toEqual([false, false, true, false, false]);
 		});
 	}
 
-	test("startup plan mode approves into default without bypassing a Write deny", async () => {
+	test("startup plan mode approves into the default pair without bypassing a Write deny", async () => {
 		const h = harness({
 			mode: "plan",
 			rules: [allowAll, { toolName: "Write", behavior: "deny", source: "policy" }],
 			steps: [call("ExitPlanMode", { plan: "proposal" }), call("Write"), { text: "done" }],
 		});
 		expect(await h.session.prompt("go")).toBe("completed");
-		expect(h.session.permissionMode).toBe("default");
+		expect(h.session.permissionMode).toBe(DEFAULT_MODE_CHOICE.mode);
+		expect(h.session.sandbox).toBe(DEFAULT_MODE_CHOICE.sandbox);
 		expect(h.dialogs).toHaveLength(1);
 		expect(h.writes).toBe(0);
 		expect(h.session.messages.filter((m) => m.role === "toolResult").at(-1)?.isError).toBe(true);
 	});
 
-	test("rejection preserves plan restrictions; revised approval restores original mode", async () => {
+	test("rejection preserves plan restrictions; revised approval restores the original pair", async () => {
 		let attempts = 0;
 		const h = harness({
-			mode: "acceptEdits",
+			mode: "agent",
+			sandbox: "danger-full-access",
 			approval: async () => ++attempts === 2,
 			steps: [
 				call("EnterPlanMode"),
@@ -145,8 +175,9 @@ describe("plan mode full lifecycle", () => {
 		expect(await h.session.prompt("go")).toBe("completed");
 		expect(h.dialogs).toHaveLength(2);
 		expect(h.writes).toBe(1);
-		expect(h.modes.filter((m) => m.tool === "Write").map((m) => m.mode)).toEqual(["plan", "acceptEdits"]);
-		expect(h.session.permissionMode).toBe("acceptEdits");
+		expect(h.modes.filter((m) => m.tool === "Write").map((m) => m.mode)).toEqual(["plan", "agent"]);
+		expect(h.session.permissionMode).toBe("agent");
+		expect(h.session.sandbox).toBe("danger-full-access");
 	});
 
 	test.each([false, true])("explicit ExitPlanMode deny wins regardless of rule order: reversed=%s", async (reverse) => {
@@ -166,7 +197,8 @@ describe("plan mode full lifecycle", () => {
 	test("dialog rejection by exception fails closed and can be retried", async () => {
 		let attempts = 0;
 		const h = harness({
-			mode: "acceptEdits",
+			mode: "agent",
+			sandbox: "danger-full-access",
 			approval: async () => {
 				if (++attempts === 1) throw new Error("UI unavailable");
 				return true;
@@ -176,7 +208,8 @@ describe("plan mode full lifecycle", () => {
 		expect(await h.callbacks.requestPlanApproval("proposal")).toMatchObject({ approved: false });
 		expect(h.session.permissionMode).toBe("plan");
 		expect(await h.callbacks.requestPlanApproval("proposal")).toEqual({ approved: true });
-		expect(h.session.permissionMode).toBe("acceptEdits");
+		expect(h.session.permissionMode).toBe("agent");
+		expect(h.session.sandbox).toBe("danger-full-access");
 	});
 
 	test("abort while real ExitPlanMode is awaiting UI cannot approve or execute the following Write", async () => {
@@ -249,7 +282,8 @@ describe("plan mode full lifecycle", () => {
 			const entered = deferred<void>();
 			const release = deferred<boolean>();
 			const h = harness({
-				mode: "acceptEdits",
+				mode: "agent",
+				sandbox: "danger-full-access",
 				approval: () => {
 					entered.resolve();
 					return release.promise;
@@ -259,7 +293,7 @@ describe("plan mode full lifecycle", () => {
 			const pending = h.callbacks.requestPlanApproval("proposal");
 			const replacement = new AgentSession({
 				model: FAUX_MODEL,
-				permissionMode: "dontAsk",
+				permissionMode: "ask",
 				deps: { streamFn: h.faux.streamFn },
 			});
 			try {
@@ -270,28 +304,32 @@ describe("plan mode full lifecycle", () => {
 			}
 			expect(await pending).toMatchObject({ approved: false });
 			expect(h.session.permissionMode).toBe("plan");
-			expect(replacement.permissionMode).toBe("dontAsk");
+			expect(replacement.permissionMode).toBe("ask");
 		}
 	});
 
 	test("mode bookkeeping is per session and per entry, not a single captured startup mode", async () => {
-		const h = harness({ mode: "acceptEdits" });
+		const h = harness({ mode: "agent", sandbox: "danger-full-access" });
 		h.callbacks.enterPlanMode();
 		const next = new AgentSession({
 			model: FAUX_MODEL,
-			permissionMode: "dontAsk",
+			permissionMode: "ask",
 			deps: { streamFn: h.faux.streamFn },
 		});
 		h.swap(next);
 		h.callbacks.enterPlanMode();
 		expect(await h.callbacks.requestPlanApproval("next")).toEqual({ approved: true });
-		expect(next.permissionMode).toBe("dontAsk");
+		expect(next.permissionMode).toBe("ask");
 		h.swap(h.session);
 		expect(await h.callbacks.requestPlanApproval("original")).toEqual({ approved: true });
-		expect(h.session.permissionMode).toBe("acceptEdits");
-		h.session.setPermissionMode("default");
+		expect(h.session.permissionMode).toBe("agent");
+		// The whole point of the pair: the sandbox has to come back too, or
+		// approving a plan silently re-confines a session the user un-confined.
+		expect(h.session.sandbox).toBe("danger-full-access");
+		h.session.setMode("ask", "workspace-write");
 		h.callbacks.enterPlanMode();
 		expect(await h.callbacks.requestPlanApproval("new cycle")).toEqual({ approved: true });
-		expect(h.session.permissionMode).toBe("default");
+		expect(h.session.permissionMode).toBe("ask");
+		expect(h.session.sandbox).toBe("workspace-write");
 	});
 });

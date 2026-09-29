@@ -4,6 +4,7 @@
  */
 
 import { join } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { BUILT_IN_THEME_NAMES } from "@labunbun/tui";
 import {
 	collectFileWrites,
@@ -17,7 +18,7 @@ import {
 	summarizeNames,
 	tildePath,
 } from "./migrate-core.ts";
-import type { ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
+import type { ClaimModePair, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
 import { looksLikeSecretName, resolveModelReference } from "./migrate-types.ts";
 import type { RawSettingsInput } from "./settings.ts";
 import { OpenAICompatibleProviderSchema } from "./settings.ts";
@@ -47,23 +48,30 @@ import { STEP_STATE_FILES, stepConfigPath } from "./step-read.ts";
  *     is put to the user in `confirm`, denied in `strict`, and runs in `auto`
  *     unless Step's command analyser calls the command dangerous.
  */
-const STEP_APPROVAL_MODES: Record<string, { mode: string; detail: string }> = {
+const STEP_APPROVAL_MODES: Record<string, { mode: PermissionMode; sandbox: SandboxMode; detail: string }> = {
 	confirm: {
-		mode: "default",
-		detail:
-			'mapped to "default": a mutating call is put to you before it runs, which is what Step\'s confirm mode does',
+		mode: "ask",
+		sandbox: "workspace-write",
+		detail: 'mapped to "ask": a mutating call is put to you before it runs, which is what Step\'s confirm mode does',
 	},
 	strict: {
 		mode: "plan",
+		sandbox: "workspace-write",
 		detail:
 			'mapped to "plan", which denies every mutating tool the way Step\'s read-only mode does — the difference worth knowing is ' +
 			"that leaving plan mode here is itself an approval, where read-only is a standing answer",
 	},
 	auto: {
-		mode: "bypassPermissions",
+		mode: "agent",
+		// Step's auto mode is about *approval*, not confinement: `decideStepToolCall`
+		// runs the call and its own command analyser still names `rm -rf` dangerous.
+		// This build's classifier refuses a dangerous command outright in `agent`,
+		// which is the same posture with no dialog — and the sandbox stays on,
+		// because Step never had a second axis to turn off.
+		sandbox: "workspace-write",
 		detail:
-			'mapped to "bypassPermissions", the nearest posture and a wider one: Step\'s auto mode still asks before a command its ' +
-			"command analyser calls dangerous (`rm -rf` above all — it needs confirming for every target there), and nothing here asks",
+			'mapped to "agent": every call runs without asking, and a command Step\'s own analyser would call dangerous is refused here rather than confirmed. ' +
+			"The sandbox is imported confined: Step has no separate setting for it, and its auto mode constrains approval, not what a process may touch",
 	},
 };
 
@@ -154,7 +162,7 @@ function planStepPermissionMode(
 	raw: RawStepCode,
 	home: string,
 	items: MigrationItem[],
-	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 ): void {
 	const config = raw.config;
 	const from = tildePath(home, stepConfigPath(raw.root));
@@ -193,7 +201,7 @@ function planStepPermissionMode(
 					: preset.value.mode === effectiveMode
 						? `; the preset beside it, "${preset.value.preset}", resolves to the same mode`
 						: `; the preset beside it is "${preset.value.preset}", whose mode "${preset.value.mode}" the explicit mode overrides`;
-			claimScalar("step-code", "permissionMode", mapped.mode, source, `${mapped.detail}${provenance}`);
+			claimModePair("step-code", mapped.mode, mapped.sandbox, source, `${mapped.detail}${provenance}`);
 		}
 	} else {
 		// Nothing in the chain was recognized. Only worth a line when something was
@@ -728,6 +736,7 @@ export function planStepCode(
 	home: string,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
 	settingsPatch: Record<string, unknown>,
@@ -879,7 +888,7 @@ export function planStepCode(
 	}
 
 	// ── permission posture, theme ────────────────────────────────────────────
-	planStepPermissionMode(raw, home, items, claimScalar);
+	planStepPermissionMode(raw, home, items, claimModePair);
 
 	const theme = typeof config.theme === "string" ? config.theme.trim() : "";
 	if (theme !== "") {

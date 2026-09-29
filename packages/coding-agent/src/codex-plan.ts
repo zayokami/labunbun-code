@@ -8,6 +8,7 @@
  * without touching a disk.
  */
 
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { RawCodex } from "./codex-read.ts";
@@ -21,7 +22,7 @@ import {
 	reportUnhandledKeys,
 	summarizeNames,
 } from "./migrate-core.ts";
-import type { AddPermissionRules, ClaimScalar, MigrationItem } from "./migrate-types.ts";
+import type { AddPermissionRules, ClaimModePair, ClaimScalar, MigrationItem } from "./migrate-types.ts";
 import { looksLikeSecretName, resolveModelReference } from "./migrate-types.ts";
 import type { RawSettingsInput } from "./settings.ts";
 
@@ -233,6 +234,7 @@ export function planCodex(
 	at: (name: string) => string,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
 	settingsPatch: Record<string, unknown>,
@@ -538,28 +540,20 @@ export function planCodex(
 			containsSecret: false,
 		});
 	}
-	// ── the posture that decides what may run, and the prose this build has no
-	// slot for ──────────────────────────────────────────────────────────────
-	// Each of these is one decision in the source and a silent change in what the
-	// agent may do here, so each gets a sentence of its own rather than the
-	// catch-all line at the end: a user who set `sandbox_mode` is entitled to know
-	// which of the two builds is the permissive one.
+	// ── the posture that decides what may run ───────────────────────────────
+	// Two keys that used to share one catch-all sentence saying this build had
+	// neither an OS sandbox nor a per-command policy. Both of those claims are
+	// narrower now, and one of them is simply false: this build classifies
+	// dangerous commands, above every mode and above the sandbox setting both
+	// ways. Codex splits the same decision the same way — `approval_policy` says
+	// who answers and `sandbox_mode` says what a process may touch — so both keys
+	// now import, and the ones with no counterpart are named individually.
 	if (
 		raw.config.approval_policy !== undefined ||
 		raw.config.sandbox_mode !== undefined ||
 		raw.config.sandbox_workspace_write !== undefined
 	) {
-		items.push({
-			source: "codex",
-			from: `${configAt} → approval_policy, sandbox_mode, sandbox_workspace_write`,
-			to: "—",
-			action: "skip",
-			detail:
-				"how Codex decides whether a command runs, asks first or is refused, and the sandbox it runs under — " +
-				"this build has no OS-level sandbox and no per-command policy: a tool call is allowed or denied by permission " +
-				"rules, which decide per tool rather than per command, so the rules here are what decides",
-			containsSecret: false,
-		});
+		planCodexMode(raw, items, claimScalar, claimModePair, configAt);
 	}
 	if (raw.config.default_permissions !== undefined || raw.config.permissions !== undefined) {
 		items.push({
@@ -812,4 +806,146 @@ function normalizeCodexMcp(
 		return { config: out, downgrades };
 	}
 	return null;
+}
+
+/**
+ * Codex's `approval_policy` and `sandbox_mode`, as this build's two keys.
+ *
+ * Codex already separates these — a `FileSystemSandboxPolicy` from one
+ * `NetworkSandboxPolicy`, and an approval policy that only decides what a
+ * `Prompt` becomes (`core/src/exec_policy.rs:770-855`) — so this importer does
+ * not have to invent a mapping for the split; it has to decide what to do with
+ * the values.
+ *
+ * `sandbox_mode` carries across verbatim for the two names this build also
+ * uses. `read-only` has no counterpart: this build's confined mode is
+ * `workspace-write`, which permits writes inside the workspace, and rounding
+ * `read-only` up to it would widen a user's confinement without saying so. It
+ * is named, not approximated.
+ *
+ * `approval_policy` splits the four values in two. `never` is `agent` exactly.
+ * The other three are all `Prompt` in Codex's own composition, differing only in
+ * *which* commands reach the prompt — and which ones is what permission rules
+ * are for here, so they map to `ask` and the note names the difference. This is
+ * the one row where importing is narrower than the source: Codex's `untrusted`
+ * consults a trusted-command list this build has no equivalent of, and the only
+ * honest thing is to say so rather than pretend the rules came with it.
+ */
+const CODEX_APPROVAL_POLICIES: Record<string, { mode: PermissionMode; detail: string }> = {
+	never: {
+		mode: "agent",
+		detail: 'mapped to "agent": nothing is asked, and the dangerous-command classifier still refuses',
+	},
+	"on-request": {
+		mode: "ask",
+		detail:
+			'mapped to "ask": Codex prompts when the sandbox would not cover the call. This build has no OS-level sandbox, so the same call is put to you whether or not the filesystem policy would have allowed it — narrow permission rules are where that difference is expressed now',
+	},
+	untrusted: {
+		mode: "ask",
+		detail:
+			'mapped to "ask": Codex asks only for commands outside its trusted list, and this build has no equivalent of that list. Everything the rules do not already decide is asked, which is more questions than Codex would have asked',
+	},
+	"on-failure": {
+		mode: "ask",
+		detail:
+			'mapped to "ask": Codex runs first and only asks when the command fails. This build asks first, so a command that would have succeeded without a prompt is prompted for',
+	},
+};
+
+/** `sandbox_mode` values this build also has, and the ones it does not. */
+const CODEX_SANDBOX_MODES: Record<string, SandboxMode> = {
+	"workspace-write": "workspace-write",
+	"danger-full-access": "danger-full-access",
+};
+
+function planCodexMode(
+	raw: RawCodex,
+	items: MigrationItem[],
+	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
+	configAt: string,
+): void {
+	const policy = typeof raw.config.approval_policy === "string" ? raw.config.approval_policy.trim() : "";
+	const sandbox = typeof raw.config.sandbox_mode === "string" ? raw.config.sandbox_mode.trim() : "";
+
+	// Reported first, and outside every branch below, because the branches all
+	// end in an early return: this key is not half of the pair, so where it sits
+	// in the pair's flow decides whether it is reported at all. It is in
+	// `CODEX_CONFIG_HANDLED`, so the by-name sweep will not rescue it either —
+	// a key a user set, that reaches no report line, reads as an importer that
+	// missed it rather than as a decision.
+	if (raw.config.sandbox_workspace_write !== undefined) {
+		items.push({
+			source: "codex",
+			from: `${configAt} → sandbox_workspace_write`,
+			to: "—",
+			action: "skip",
+			detail:
+				"not imported: it names extra directories Codex lets a confined run write to, and a path is a runtime argument of the sandbox rather than a mode. Add the directory with /permissions additionalDirectories instead",
+			containsSecret: false,
+		});
+	}
+
+	if (policy === "" && sandbox === "") return;
+
+	const mappedPolicy = policy === "" ? undefined : CODEX_APPROVAL_POLICIES[policy];
+	const mappedSandbox = sandbox === "" ? undefined : CODEX_SANDBOX_MODES[sandbox];
+
+	// Half a pair is not a setting, it is a fragment. Codex's default for both is
+	// stated, but a config that states one of them has still expressed only half
+	// an opinion, and this build's default for the other half is a decision
+	// somebody has to own.
+	if (mappedPolicy && mappedSandbox) {
+		claimModePair(
+			"codex",
+			mappedPolicy.mode,
+			mappedSandbox,
+			`${configAt} → approval_policy, sandbox_mode`,
+			mappedPolicy.detail,
+		);
+		return;
+	}
+
+	if (policy !== "" && mappedPolicy === undefined) {
+		items.push({
+			source: "codex",
+			from: `${configAt} → approval_policy ("${policy}")`,
+			to: "—",
+			action: "skip",
+			detail:
+				"not a policy this build has, so no mode is picked from it; the session keeps the mode it would otherwise start in",
+			containsSecret: false,
+		});
+	}
+	if (sandbox !== "" && mappedSandbox === undefined) {
+		items.push({
+			source: "codex",
+			from: `${configAt} → sandbox_mode ("${sandbox}")`,
+			to: "—",
+			action: "skip",
+			detail:
+				sandbox === "read-only"
+					? 'read-only has no counterpart here: the confined mode this build has is "workspace-write", which permits writes inside the workspace, and importing a read-only sandbox as a writable one would widen what the config asked for. Use a deny rule on the paths you meant to protect'
+					: "not a sandbox mode this build has, so no sandbox is picked from it; the session keeps the sandbox it would otherwise start in",
+			containsSecret: false,
+		});
+	}
+	if (mappedPolicy !== undefined) {
+		claimScalar(
+			"codex",
+			"permissionMode",
+			mappedPolicy.mode,
+			`${configAt} → approval_policy ("${policy}")`,
+			mappedPolicy.detail,
+		);
+	} else if (mappedSandbox !== undefined) {
+		claimScalar(
+			"codex",
+			"sandbox",
+			mappedSandbox,
+			`${configAt} → sandbox_mode ("${sandbox}")`,
+			`mapped to "${mappedSandbox}": the same name in both, and the setting is stored whether or not anything here enforces it yet — /doctor says which mechanism is actually in force on this machine`,
+		);
+	}
 }

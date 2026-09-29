@@ -28,7 +28,8 @@ describe("SettingsSchema", () => {
 	test("parses a full document with defaults", () => {
 		const parsed = SettingsSchema.parse({
 			model: "deepseek/deepseek-chat",
-			permissionMode: "acceptEdits",
+			permissionMode: "agent",
+			sandbox: "danger-full-access",
 			permissions: { allow: ["Read"], deny: [] },
 			providers: {
 				openaiCompatible: [
@@ -43,6 +44,11 @@ describe("SettingsSchema", () => {
 		});
 		expect(parsed.permissions.deny).toEqual([]);
 		expect(parsed.providers?.openaiCompatible[0].id).toBe("custom");
+		// Both axes survive a parse. They are separate keys, and a test that only
+		// set `permissionMode` would pass against a schema that had quietly dropped
+		// the other one.
+		expect(parsed.permissionMode).toBe("agent");
+		expect(parsed.sandbox).toBe("danger-full-access");
 	});
 
 	test("rejects invalid permission mode and bad urls", () => {

@@ -14,6 +14,7 @@ import {
 	evaluatePermissions,
 	type PermissionMode,
 	type PermissionRule,
+	type SandboxMode,
 	type SessionStore,
 } from "@labunbun/agent";
 import type { Model, StreamFn } from "@labunbun/ai";
@@ -144,6 +145,13 @@ export interface TaskToolContext {
 	systemPromptFor?: (agent: AgentDefinition) => string;
 	/** Read at the call: the parent's mode follows EnterPlanMode and `/resume`. */
 	permissionMode?: () => PermissionMode | undefined;
+	/**
+	 * The other axis, read at the same moment. Inherited for the same reason the
+	 * mode is: a subagent that ran confined while its parent ran unconfined would
+	 * be the one place in the system where the sandbox is not what the user
+	 * picked. `undefined` means the subagent's own default, which is confined.
+	 */
+	sandbox?: () => SandboxMode | undefined;
 	/** Resolved fresh per call so session-scoped allow rules added mid-conversation apply to new subagents. */
 	getPermissionRules?: () => PermissionRule[];
 	/**
@@ -218,6 +226,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 			const tools = definition.tools ? ctx.allTools.filter((t) => definition.tools?.includes(t.name)) : ctx.allTools;
 			const store = ctx.store?.();
 			const permissionMode = ctx.permissionMode?.();
+			const sandbox = ctx.sandbox?.();
 			// A definition may name its own model. One that no longer resolves falls
 			// back to the session's — said out loud, because a subagent quietly
 			// running on a different model than its definition asks for is the kind
@@ -254,6 +263,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 				maxTurns: input.max_turns ?? definition.maxTurns,
 				cwd: toolCtx.cwd,
 				permissionMode,
+				sandbox,
 				deps: {
 					streamFn: ctx.streamFn,
 					checkCompaction: subagentWiring.checkCompaction,
@@ -263,6 +273,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 						? async (toolName, permInput, permCtx) => {
 								const decision = evaluatePermissions(toolName, permInput, {
 									mode: permCtx.mode,
+									sandbox: permCtx.sandbox,
 									rules: ctx.getPermissionRules?.() ?? [],
 									cwd: toolCtx.cwd,
 								});

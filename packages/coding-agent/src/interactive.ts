@@ -14,12 +14,16 @@ import {
 	collectActivity,
 	compactionThreshold,
 	contextBreakdown,
+	DEFAULT_MODE_CHOICE,
 	estimateContextUsage,
 	evaluatePermissions,
+	findModeChoice,
 	formatRetryNotice,
+	MODE_CHOICES,
 	PERMISSION_MODES,
 	type PermissionMode,
 	type PermissionRule,
+	type SandboxMode,
 	type SessionEntry,
 	SessionStore,
 	windowStartFor,
@@ -133,7 +137,7 @@ import {
 	formatIgnoredKeysNotice,
 	type LoadedSettings,
 	loadSettings,
-	resolvePermissionMode,
+	resolveMode,
 	type Settings,
 	shadowedChoiceNotice,
 } from "./settings.ts";
@@ -162,6 +166,18 @@ import { runWizard, shouldRunWizard } from "./wizard.ts";
 export interface InteractiveOptions {
 	modelRef?: string;
 	permissionMode?: PermissionMode;
+	/**
+	 * The other axis. Absent means "derive it from the mode", which is
+	 * `DEFAULT_SANDBOX_FOR_MODE` — every mode ships confined, and turning the
+	 * confinement off has to be something asked for by name.
+	 */
+	sandbox?: SandboxMode;
+	/**
+	 * A `MODE_CHOICES` id. Sets both axes at once, and wins over the two
+	 * separate options when they disagree, because a picker entry is one thing
+	 * and two contradictory options are not.
+	 */
+	modeId?: string;
 	resumeSessionId?: string;
 	/** Continue the most recent session (the --continue flag). */
 	continueLast?: boolean;
@@ -299,8 +315,22 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	pruneToolOutput(cwd, { home });
 	const sessionRules: PermissionRule[] = [];
 	const baseRules: PermissionRule[] = collectPermissionRules(loadedSettings);
-	const requestedMode = options.permissionMode ?? settings.permissionMode ?? "default";
-	const { mode: effectiveMode, downgradeReason } = resolvePermissionMode(requestedMode, loadedSettings);
+	// Both axes, resolved together. Three sources in the order the user would
+	// expect: the flag or picker entry, then settings, then the default. The
+	// default is `MODE_CHOICES[0]` rather than a hardcoded pair, so "what does
+	// this start in" has exactly one answer in the repo.
+	//
+	// A `modeId` names one row of that table and therefore both axes at once, so
+	// it takes precedence over the two separate options: passed together with a
+	// contradicting `--permission-mode`, it is the picker entry the user picked.
+	const choice = findModeChoice(options.modeId ?? "");
+	const requestedMode = choice?.mode ?? options.permissionMode ?? settings.permissionMode ?? DEFAULT_MODE_CHOICE.mode;
+	const requestedSandbox = choice?.sandbox ?? options.sandbox ?? settings.sandbox ?? DEFAULT_MODE_CHOICE.sandbox;
+	const {
+		mode: effectiveMode,
+		sandbox: effectiveSandbox,
+		downgradeReason,
+	} = resolveMode({ mode: requestedMode, sandbox: requestedSandbox }, loadedSettings);
 	let handle: ReplAppHandle | null = null;
 
 	// Memory files (LABUNBUN.md / AGENTS.md), part of the system prompt. `home` is
@@ -446,6 +476,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		definitions: () => agentDefinitions,
 		store: () => store,
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
+		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
 		getPermissionRules: () => [...baseRules, ...sessionRules],
 		trimOldToolResults: settings.trimOldToolResults,
 		report: (text) => pushInfo(handle, text),
@@ -499,14 +530,21 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		canUseTool: async (toolName, input, ctx) => {
 			const decision = evaluatePermissions(toolName, input, {
 				mode: ctx.mode,
+				sandbox: ctx.sandbox,
 				rules: [...baseRules, ...sessionRules],
 				cwd,
 			});
 			if (decision.behavior !== "ask") return decision;
-			// dontAsk has no dialog of its own — an unresolved ask fails closed
-			// rather than falling through to the interactive prompt it exists to skip.
-			if (ctx.mode === "dontAsk" || !handle) {
-				return { behavior: "deny", message: "Permission required (dontAsk mode denies unresolved prompts)" };
+			// No handle means nothing can answer — a `-p` run reached this code, or
+			// the REPL is shutting down mid-call. An unresolved ask then fails
+			// closed, because a wait that no one is present for is not an approval.
+			// This is what the deleted `dontAsk` mode used to be a name for; the
+			// real condition was never the mode, it was the absent human.
+			if (!handle) {
+				return {
+					behavior: "deny",
+					message: `Permission required and there is no one to ask (${toolName})`,
+				};
 			}
 			// ExitPlanMode and AskUserQuestion do not need permission, they need an
 			// answer: each one's own call puts its dialog up and returns what the user
@@ -586,6 +624,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		store,
 		cwd,
 		permissionMode: effectiveMode,
+		sandbox: effectiveSandbox,
 		deps: sessionDeps,
 	});
 	sessionRef = session;
@@ -696,6 +735,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * included, so there is nothing session-specific to re-inject: whatever the
 	 * conversation being left behind had been told to work under, the one
 	 * arriving is told too.
+	 *
+	 * Which is why both axes are read off `current` rather than off the startup
+	 * values. Resuming a session used to reset the mode to whatever this process
+	 * launched in, so a `/mode agent` picked five minutes ago became `ask` again
+	 * on `/resume` — the sentence above promised continuity and the argument
+	 * underneath it delivered the opposite.
 	 */
 	async function hotSwapSession(summary: SessionSummary): Promise<void> {
 		const loaded = loadSessionForResume(summary.path);
@@ -712,7 +757,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			tools: [...(current?.tools ?? allTools)],
 			store: loaded.store,
 			cwd,
-			permissionMode: effectiveMode,
+			permissionMode: current?.permissionMode ?? effectiveMode,
+			sandbox: current?.sandbox ?? effectiveSandbox,
 			deps: sessionDeps,
 		});
 		next.messages.push(...loaded.messages);
@@ -1291,19 +1337,39 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 }
 
 /**
- * What each permission mode means, in the one line `/mode`'s list has room for.
+ * What each mode means, in the one line `/mode`'s list has room for.
  *
- * Keyed by the mode rather than written as a list, so the compiler is what
- * notices a mode that has a name and no explanation: adding one to
- * `PERMISSION_MODES` fails to typecheck here until this says what it does.
+ * There is no second list. The hint lives on the `ModeChoice` it describes, and
+ * `hint` is a required field, so the compiler is what notices a mode that has a
+ * name and no explanation. `PERMISSION_MODE_HINTS` used to be a hand-written
+ * `Record<PermissionMode, string>` with the modes spelled out again, and the two
+ * could drift — which is the one thing `types.ts` claimed could not happen.
+ *
+ * `PERMISSION_MODES` itself is now unused here: `/mode` takes choice ids, and
+ * the two are the same list wearing different names.
  */
-const PERMISSION_MODE_HINTS: Record<PermissionMode, string> = {
-	default: "ask before tools that change anything",
-	plan: "read-only; propose a plan and wait for approval",
-	acceptEdits: "apply file edits without asking, still ask for the rest",
-	dontAsk: "never prompt — refuse anything not already allowed",
-	bypassPermissions: "skip permission checks entirely",
-};
+function choiceForMode(mode: string): (typeof MODE_CHOICES)[number] | undefined {
+	if (!(PERMISSION_MODES as readonly string[]).includes(mode)) return undefined;
+	// The confined row for that mode. `agent`'s first entry is the sandboxed one,
+	// so `/mode agent` can never be the row that turns the sandbox off — the only
+	// way there is naming `agentNoSandbox` in full.
+	return MODE_CHOICES.find((choice) => choice.mode === mode && choice.sandbox === "workspace-write");
+}
+
+/**
+ * One short line naming both axes, for the status card and `/status`.
+ *
+ * Prefers the choice's own label, so the card says "Agent 无沙箱" rather than
+ * "agent · danger-full-access" — the second is a fact and the first is what the
+ * user asked for, and a card that names a combination not in the picker would
+ * suggest a fifth mode exists. Falls back to the raw pair for a combination the
+ * picker has no row for, which is a real state (settings can set either axis
+ * alone) and is better shown accurately than rounded to a neighbour.
+ */
+function describeAxes(mode: PermissionMode, sandbox: SandboxMode): string {
+	const named = MODE_CHOICES.find((c) => c.mode === mode && c.sandbox === sandbox);
+	return named ? named.label : `${mode} · ${sandbox}`;
+}
 
 /**
  * App-level commands, which live in `handleAppCommand`'s switch rather than in
@@ -1431,7 +1497,14 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			if (!session) return true;
 			const rules = [...ctx.baseRules, ...ctx.sessionRules];
 			const lines = [
-				`Mode: ${session.permissionMode}`,
+				`Mode: ${session.permissionMode} · sandbox: ${session.sandbox}`,
+				// Printed here rather than left to the mode hints, because this is
+				// the screen a user opens to find out what is actually holding the
+				// session in — and the sandbox axis does not yet hold it in
+				// anything. What holds a command in today is the deny rules below
+				// and the dangerous-command classifier, neither of which reads
+				// this setting.
+				"Sandbox: recorded, not enforced — this build confines nothing yet; deny rules and the dangerous-command classifier are what apply.",
 				`Rules (${rules.length}):`,
 				...rules.map(
 					(r) =>
@@ -1511,7 +1584,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			ctx.handle?.setStatusCard({
 				model: `${session.model.provider}/${session.model.id}`,
 				directory: shortenHome(ctx.cwd, ctx.home),
-				permissions: session.permissionMode,
+				permissions: describeAxes(session.permissionMode, session.sandbox),
 				session: storeId ? storeId.slice(0, 8) : "(not persisted)",
 				context: info,
 				details: [
@@ -1536,7 +1609,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// fact that it was asked for is still in the session's own history.
 			pushInfo(
 				ctx.handle,
-				`Status: ${session.model.provider}/${session.model.id} · ${session.permissionMode} · ${
+				`Status: ${session.model.provider}/${session.model.id} · ${describeAxes(session.permissionMode, session.sandbox)} · ${
 					storeId ? storeId.slice(0, 8) : "not persisted"
 				}`,
 			);
@@ -1652,12 +1725,19 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		}
 		case "/permissions-mode":
 		case "/mode": {
-			const arg = text.split(/\s+/)[1] as PermissionMode | undefined;
-			if (arg && PERMISSION_MODES.includes(arg)) {
-				ctx.getSession()?.setPermissionMode(arg);
-				pushInfo(ctx.handle, `Permission mode: ${arg}`);
-			} else if (arg) {
-				pushInfo(ctx.handle, `Usage: /mode ${PERMISSION_MODES.join("|")}`);
+			const session = ctx.getSession();
+			const arg = text.split(/\s+/)[1];
+			// A choice id names both axes at once, which is why `agentNoSandbox` is
+			// spelled the way it is. A bare mode name is also accepted, since three
+			// of the four ids are the mode name verbatim and typing `/mode agent`
+			// is what a keyboard user reaches for first; it means that mode under
+			// the confinement every mode ships with, never "keep whatever I had".
+			const target = arg ? (findModeChoice(arg) ?? choiceForMode(arg)) : undefined;
+			if (arg && !target) {
+				pushInfo(ctx.handle, `Usage: /mode ${MODE_CHOICES.map((c) => c.id).join("|")}`);
+			} else if (target) {
+				session?.setMode(target.mode, target.sandbox);
+				pushInfo(ctx.handle, `Mode: ${target.label} (${target.mode} · sandbox ${target.sandbox})`);
 			} else {
 				// No argument opens the same list `/model` and `/theme` do, rather than
 				// printing a usage line. A usage line is a dead end for a user with no
@@ -1666,20 +1746,24 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const handleRef = ctx.handle;
 				if (!handleRef) return true;
 				void (async () => {
-					const current = ctx.getSession()?.permissionMode;
-					const active = PERMISSION_MODES.indexOf(current as PermissionMode);
-					const items = PERMISSION_MODES.map((mode, i) => ({
-						label: `${i === active ? "* " : "  "}${mode}`,
-						description: PERMISSION_MODE_HINTS[mode],
+					// The tick marks the *pair* the session is in, not just the mode:
+					// `agent` and `Agent 无沙箱` share a mode and differ only here, and
+					// a star on both of them would be a lie.
+					const active = MODE_CHOICES.findIndex(
+						(c) => c.mode === session?.permissionMode && c.sandbox === session.sandbox,
+					);
+					const items = MODE_CHOICES.map((choice, i) => ({
+						label: `${i === active ? "* " : "  "}${choice.label}`,
+						description: choice.hint,
 					}));
-					const index = await handleRef.pickFromList("Permission mode", items, {
+					const index = await handleRef.pickFromList("Mode", items, {
 						initialIndex: Math.max(active, 0),
 					});
 					if (index === null || index < 0) return;
-					const chosen = PERMISSION_MODES[index];
+					const chosen = MODE_CHOICES[index];
 					if (!chosen) return;
-					ctx.getSession()?.setPermissionMode(chosen);
-					pushInfo(ctx.handle, `Permission mode: ${chosen}`);
+					session?.setMode(chosen.mode, chosen.sandbox);
+					pushInfo(ctx.handle, `Mode: ${chosen.label} (${chosen.mode} · sandbox ${chosen.sandbox})`);
 				})();
 			}
 			return true;

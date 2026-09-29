@@ -69,7 +69,13 @@ describe("pipeline cancellation across real pending gates", () => {
 					tool,
 					rawInput: {},
 					ctx: { callId: "pending", cwd: process.cwd(), signal: controller.signal },
-					permissionContext: { mode: "default", toolName: tool.name, input: {}, cwd: process.cwd() },
+					permissionContext: {
+						mode: "ask",
+						sandbox: "workspace-write",
+						toolName: tool.name,
+						input: {},
+						cwd: process.cwd(),
+					},
 					onUpdate: () => {},
 					deps: {
 						// biome-ignore lint/correctness/useYield: StreamFn requires a generator; this stub must never be called

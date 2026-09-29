@@ -34,8 +34,9 @@ import type {
 	AnyTool,
 	PermissionMode,
 	ResolvedToolCall,
+	SandboxMode,
 } from "./types.ts";
-import { toWireTools } from "./types.ts";
+import { DEFAULT_MODE_CHOICE, DEFAULT_SANDBOX_FOR_MODE, toWireTools } from "./types.ts";
 
 export interface AgentSessionOptions {
 	model: Model;
@@ -46,6 +47,7 @@ export interface AgentSessionOptions {
 	cwd?: string;
 	maxTurns?: number;
 	permissionMode?: PermissionMode;
+	sandbox?: SandboxMode;
 }
 
 const MAX_OUTPUT_TOKENS_CAP = 64_000;
@@ -63,6 +65,7 @@ export class AgentSession {
 	#store?: import("./session-store.ts").SessionStore;
 	#maxTurns: number;
 	#permissionMode: PermissionMode;
+	#sandbox: SandboxMode;
 
 	#handlers = new Set<AgentEventHandler>();
 	#steering: string[] = [];
@@ -87,7 +90,8 @@ export class AgentSession {
 		this.#store = options.store;
 		this.cwd = options.cwd ?? process.cwd();
 		this.#maxTurns = options.maxTurns ?? Number.POSITIVE_INFINITY;
-		this.#permissionMode = options.permissionMode ?? "default";
+		this.#permissionMode = options.permissionMode ?? DEFAULT_MODE_CHOICE.mode;
+		this.#sandbox = options.sandbox ?? DEFAULT_SANDBOX_FOR_MODE[this.#permissionMode];
 		// Freeze wire-tool order at construction for prompt-cache stability.
 		this.#wireTools = toWireTools(this.#tools);
 	}
@@ -115,12 +119,24 @@ export class AgentSession {
 		this.#systemPrompt = prompt;
 	}
 
-	setPermissionMode(mode: PermissionMode): void {
+	/**
+	 * Move one or both axes.
+	 *
+	 * `sandbox` is optional so that the plan-mode tools, which only change what
+	 * asks, do not have to restate — and so cannot accidentally rewrite — the
+	 * axis they never meant to touch.
+	 */
+	setMode(mode: PermissionMode, sandbox?: SandboxMode): void {
 		this.#permissionMode = mode;
+		if (sandbox !== undefined) this.#sandbox = sandbox;
 	}
 
 	get permissionMode(): PermissionMode {
 		return this.#permissionMode;
+	}
+
+	get sandbox(): SandboxMode {
+		return this.#sandbox;
 	}
 
 	get isRunning(): boolean {
@@ -613,6 +629,7 @@ export class AgentSession {
 			ctx: { callId: call.callId, signal, cwd: this.cwd },
 			permissionContext: {
 				mode: this.#permissionMode,
+				sandbox: this.#sandbox,
 				toolName: call.tool.name,
 				input: call.input,
 				cwd: this.cwd,

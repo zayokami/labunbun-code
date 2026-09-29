@@ -250,7 +250,7 @@ function subagentToolCalls(cwd: string, home: string): string[][] {
 	return out;
 }
 
-describe("a subagent spawned after /mode acceptEdits", () => {
+describe("a subagent spawned after /mode agent", () => {
 	// Startup, two turns and a subagent on each: past the 5s default.
 	test("runs under the mode the session is in now, not the one the REPL started in", async () => {
 		const cwd = tempDir("lbb-taskmode-cwd-");
@@ -258,9 +258,12 @@ describe("a subagent spawned after /mode acceptEdits", () => {
 		// No permission rules at all, so the mode is the only thing that differs
 		// between the two runs: in the startup mode an edit is an unresolved ask
 		// and the subagent fails closed (it has no dialog to ask through), and
-		// under acceptEdits it is allowed outright. Plan mode is not the mode to
-		// reach for here — it denies the Task call itself, and then there is no
+		// under agent it is allowed outright. Plan mode is not the mode to reach
+		// for here — it denies the Task call itself, and then there is no
 		// subagent to observe.
+		//
+		// `/mode agent` also puts the sandbox on that axis, so what is under test
+		// is inheritance of the *pair*, not just of the mode name.
 		const write = { name: "Write", arguments: { file_path: "written.txt", content: "hi" } };
 		const outcome = await runScene(
 			{
@@ -270,7 +273,7 @@ describe("a subagent spawned after /mode acceptEdits", () => {
 					]`,
 				run: `
 						promptResult = (await session.prompt("first")).toString();
-						await onCommand("/mode acceptEdits");
+						await onCommand("/mode agent");
 						promptResult = await session.prompt("second");
 					`,
 			},

@@ -94,6 +94,7 @@ import type {
 	ClaimableScalarKey,
 	ClaimedScalarValue,
 	ClaimHooks,
+	ClaimModePair,
 	MigrationAction,
 	MigrationCategory,
 	MigrationItem,
@@ -278,8 +279,55 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 			});
 			return;
 		}
+		// Two claims on one key in a single run: only the second one lands, and
+		// until this demoted the first the report showed two green ticks, a
+		// written file with one value in it, and a sentence — usually in the past
+		// tense — saying the first claim's value was imported. It was not.
+		//
+		// The collision is not detectable when the first claim is made: `existing`
+		// is what the file held *before* this migration and cannot see a write
+		// from a moment ago, which is exactly why the two looked independent. So
+		// the earlier line is rewritten here, where the collision is a fact, and
+		// the scan is by target key rather than by source — a superseded claim is
+		// superseded whoever made it.
+		//
+		// The scan runs over what is already in `items`, before this claim joins
+		// it: a loop that reached the new line would find it, and a report that
+		// skipped its own write is the same lie one step further along.
+		const target = `settings.json → ${key}`;
+		for (let i = items.length - 1; i >= 0; i--) {
+			const item = items[i];
+			if (item.action !== "map" || item.to !== target) continue;
+			item.action = "skip";
+			item.to = "—";
+			item.detail = `superseded by a later claim on ${key}; ${item.detail}`;
+			break;
+		}
+
 		settingsPatch[key] = value;
-		items.push({ source, from, to: `settings.json → ${key}`, action: "map", detail, containsSecret: false });
+		items.push({ source, from, to: target, action: "map", detail, containsSecret: false });
+	};
+
+	/**
+	 * Claim the two mode axes as the single decision they are.
+	 *
+	 * A foreign tool's mode is one value doing both jobs; this repo splits them,
+	 * so an import has to say both. Funnelling every mode write through here
+	 * means no planner can write `permissionMode` and leave `sandbox` alone, and
+	 * the report gains a line naming the half that the source never mentioned —
+	 * which is the honest way to record a default the import chose.
+	 */
+	const claimModePair: ClaimModePair = (source, mode, sandbox, from, detail) => {
+		claimScalar(source, "permissionMode", mode, from, detail);
+		claimScalar(
+			source,
+			"sandbox",
+			sandbox,
+			from,
+			sandbox === "danger-full-access"
+				? "The source's mode also meant no confinement, so the sandbox is imported unrestricted. It is a separate key here: change it and the mode is untouched."
+				: "The source had no separate confinement setting, so the sandbox is imported confined. It is a separate key here: change it and the mode is untouched.",
+		);
 	};
 
 	/**
@@ -457,6 +505,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				items,
 				claimEnv,
 				claimScalar,
+				claimModePair,
 				claimPermissionList,
 				claimHooks,
 				mcpServers,
@@ -533,6 +582,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				codexAt,
 				items,
 				claimScalar,
+				claimModePair,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
@@ -602,6 +652,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				claimEnv,
 				claimPermissionList,
 				claimScalar,
+				claimModePair,
 				claimHooks,
 				mcpServers,
 				(hasSecret) => {
@@ -629,6 +680,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				raw.home,
 				items,
 				claimScalar,
+				claimModePair,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
@@ -649,6 +701,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				raw.home,
 				items,
 				claimScalar,
+				claimModePair,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
@@ -670,6 +723,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				raw.home,
 				items,
 				claimScalar,
+				claimModePair,
 				claimHooks,
 				mcpServers,
 				(hasSecret) => {
@@ -690,6 +744,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				raw.home,
 				items,
 				claimScalar,
+				claimModePair,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
@@ -711,6 +766,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				raw.home,
 				items,
 				claimScalar,
+				claimModePair,
 				mcpServers,
 				(hasSecret) => {
 					mcpHasSecret = mcpHasSecret || hasSecret;
@@ -756,6 +812,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				items,
 				writes,
 				claimScalar,
+				claimModePair,
 				claimPermissionList,
 				claimHooks,
 				mcpServers,

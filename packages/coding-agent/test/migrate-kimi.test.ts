@@ -11,9 +11,11 @@
  *
  * The planner's decisions are policy calls, and a policy call that is not written
  * down reads as an oversight, so each one is pinned here with the words that carry
- * it: `auto` is not mapped because the nearest mode here does the opposite,
- * `[permission].rules` is not imported because kimi never loads it, a hook array
- * with one bad entry is not partly imported because kimi rejects the whole array.
+ * it: a mode kimi names is imported as a *pair*, because one value there does the
+ * two jobs this build keeps in two keys; `auto` is not imported at all, and its
+ * line says so in this build's own mode names; `[permission].rules` is not imported
+ * because kimi never loads it, a hook array with one bad entry is not partly
+ * imported because kimi rejects the whole array.
  *
  * Fixtures hold fake values only, and the credential sentinel is deliberately not
  * key-shaped.
@@ -326,44 +328,132 @@ describe("the model", () => {
 });
 
 describe("the permission posture", () => {
-	test("manual and yolo map", () => {
-		const manual = kimiHome({ "config.toml": 'defaultPermissionMode = "manual"\n' });
-		expect(settingsWritten(plan(manual.home)).permissionMode).toBe("default");
-
-		const yolo = kimiHome({ "config.toml": 'defaultPermissionMode = "yolo"\n' });
-		expect(settingsWritten(plan(yolo.home)).permissionMode).toBe("bypassPermissions");
+	/**
+	 * Kimi's two mapped modes, each as the pair this build writes.
+	 *
+	 * `defaultPermissionMode` is one value doing two jobs, and this build keeps them
+	 * in two keys, so every row is checked on both halves. A claim that wrote the mode
+	 * and left the sandbox alone is a session that never asks and is still confined,
+	 * or the reverse — neither of which kimi can express and neither of which anybody
+	 * chose, so the half the source never named is the half worth checking.
+	 */
+	test.each([
+		["manual", "ask", "workspace-write"],
+		["yolo", "agent", "danger-full-access"],
+	])("%s is imported as %s with %s", (source, mode, sandbox) => {
+		const { home } = kimiHome({ "config.toml": `defaultPermissionMode = "${source}"\n` });
+		const planned = plan(home);
+		const settings = settingsWritten(planned);
+		expect(settings.permissionMode).toBe(mode);
+		expect(settings.sandbox).toBe(sandbox);
+		// Two report lines under one `from`, one for each key written. A single line
+		// would describe a mode and leave the confinement unmentioned, which is the
+		// shape of a report that made a default look like the user's own setting.
+		const lines = itemsOf(planned).filter((item) => item.from.includes(`defaultPermissionMode ("${source}")`));
+		expect(lines.map((item) => item.to)).toEqual(["settings.json → permissionMode", "settings.json → sandbox"]);
+		expect(lines.map((item) => item.action)).toEqual(["map", "map"]);
+		expect(lines[0].detail).toBe(`mapped to "${mode}"`);
 	});
 
-	test("auto is left alone, and the line says why the nearest mode is the wrong one", () => {
+	/**
+	 * The half of the pair kimi has no key for, reported as the import's own decision.
+	 *
+	 * `yolo` is the row this matters for: it means never-ask *and* unconfined, and a
+	 * report naming only the mode would read as though the confinement had been kimi's
+	 * choice. `manual` is the other direction — kimi's own mode is silent about
+	 * confinement there, so the confinement this build adds is a default too, and it
+	 * is named the same way.
+	 */
+	test.each([
+		["yolo", "The source's mode also meant no confinement", "imported unrestricted"],
+		["manual", "The source had no separate confinement setting", "imported confined"],
+	])("%s says where its sandbox half came from", (source, cause, imported) => {
+		const { home } = kimiHome({ "config.toml": `defaultPermissionMode = "${source}"\n` });
+		const [sandboxLine] = itemsOf(plan(home)).filter(
+			(item) => item.from.includes(`defaultPermissionMode ("${source}")`) && item.to === "settings.json → sandbox",
+		);
+		expect(sandboxLine.detail).toContain(cause);
+		expect(sandboxLine.detail).toContain(imported);
+		// And the two halves stay separately changeable here, or the report would be
+		// describing a single decision the file no longer holds.
+		expect(sandboxLine.detail).toContain("separate key here");
+	});
+
+	test("auto is left alone, and the line names the two modes that are the wrong ones", () => {
+		// A deliberate skip, not a row that fell out of the map: `auto` is a mode kimi
+		// defines, and it is still answered as one. What it must not become is a
+		// half-written pair — a mode claimed without its sandbox is a setting that
+		// reads as deliberate, so the check is that nothing at all is written.
 		const { home } = kimiHome({ "config.toml": 'defaultPermissionMode = "auto"\n' });
 		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBeUndefined();
-		const [detail] = detailsMatching(planned, /approves the calls it judges safe/);
-		expect(detail).toContain("dontAsk");
-		expect(detail).toContain("denied");
+		expect(planned.writes.some((write) => write.kind === "settings")).toBe(false);
+		const [item] = itemsOf(planned).filter((candidate) => candidate.from.includes('defaultPermissionMode ("auto")'));
+		expect(item.action).toBe("skip");
+		expect(item.to).toBe("—");
+		// Both wrong answers, and which way each is wrong: `ask` puts a person in the
+		// loop, `agent` runs everything. Naming one of them would leave a reader to
+		// assume the other was the match.
+		expect(item.detail).toContain("no mode here does that");
+		expect(item.detail).toContain('"ask" puts a person in the loop');
+		expect(item.detail).toContain('"agent" runs everything');
+		// A line that read like a mapping is the failure this is here to catch: it
+		// would name a mode and leave the sandbox the other half of the pair unsaid.
+		expect(item.detail).not.toMatch(/mapped to/);
 	});
 
-	test("a mode kimi does not define is a skip that says it never decided a session", () => {
+	test("every mode kimi's own schema accepts is answered as one, not as a name it does not define", () => {
+		// The whole set is `z.enum(['manual', 'auto', 'yolo'])`
+		// (`permissionMode/configSection.ts:7`), so a fourth spelling cannot exist. A
+		// row can leave the table above, though, and then one of these three falls
+		// through to the "not a mode kimi defines" line — a claim about a name kimi
+		// holds. Walking all three is the only way to see the table shrink.
+		for (const name of ["manual", "auto", "yolo"]) {
+			const { home } = kimiHome({ "config.toml": `defaultPermissionMode = "${name}"\n` });
+			expect(detailsMatching(plan(home), /not a mode kimi defines/)).toHaveLength(0);
+		}
+	});
+
+	test("a name kimi does not define is a skip that says it never decided a session", () => {
+		// The negative the walk above cannot make. A name outside the schema never
+		// chose a posture, so there is nothing to preserve and no direction to report:
+		// the line is about the name, and that is what tells this apart from `auto`,
+		// which is a real mode deliberately left alone.
 		const { home } = kimiHome({ "config.toml": 'defaultPermissionMode = "godmode"\n' });
 		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBeUndefined();
-		expect(detailsMatching(planned, /not a mode kimi defines/)).toHaveLength(1);
+		expect(planned.writes.some((write) => write.kind === "settings")).toBe(false);
+		const [item] = itemsOf(planned).filter((candidate) => candidate.from.includes('defaultPermissionMode ("godmode")'));
+		expect(item.action).toBe("skip");
+		expect(item.detail).toContain("not a mode kimi defines");
+		expect(item.detail).toContain("never decided a session");
 	});
 
 	test("plan mode is the starting mode, and the permission mode is named rather than folded into it", () => {
 		const { home } = kimiHome({ "config.toml": 'defaultPlanMode = true\ndefaultPermissionMode = "yolo"\n' });
 		const planned = plan(home);
-		expect(settingsWritten(planned).permissionMode).toBe("plan");
+		const settings = settingsWritten(planned);
+		expect(settings.permissionMode).toBe("plan");
+		// The pair again: a session that starts in plan mode here is confined, and
+		// kimi said nothing about confinement either way, so the report owns that half
+		// rather than passing it off as something the source asked for.
+		expect(settings.sandbox).toBe("workspace-write");
 		const [item] = itemsOf(planned).filter((candidate) =>
 			candidate.detail.includes("this build takes one starting mode"),
 		);
 		expect(item.from).toContain('defaultPermissionMode ("yolo")');
-		expect(settingsWritten(planned).permissionMode).not.toBe("bypassPermissions");
+		expect(item.action).toBe("skip");
+		// `yolo` is named, not written: this build holds one starting mode and kimi
+		// starts in plan mode, so claiming `yolo` here would be a second one.
+		expect(settings.permissionMode).not.toBe("agent");
+		expect(settings.sandbox).not.toBe("danger-full-access");
 	});
 
 	test("a plan mode that is not exactly true is not plan mode", () => {
+		// kimi's schema takes a boolean, so only `true` is plan mode. A string that
+		// reads like one claims nothing at all, and the key is in the handled set
+		// either way — so the sweep does not name it and a mistyped value leaves no
+		// line of its own. Only the absence of a claim is pinned here.
 		const { home } = kimiHome({ "config.toml": 'defaultPlanMode = "true"\n' });
-		expect(settingsWritten(plan(home)).permissionMode).toBeUndefined();
+		expect(plan(home).writes.some((write) => write.kind === "settings")).toBe(false);
 	});
 
 	test("[permission].rules is named and not imported, because kimi loads none of it", () => {
@@ -667,8 +757,14 @@ describe("the spelling kimi writes", () => {
 	});
 
 	test("default_permission_mode is the posture, and it maps", () => {
+		// The snake spelling has to reach the same claim the camel one does, and the
+		// claim is a pair: a reader that only knew the camel spelling would miss the
+		// posture in every file kimi itself wrote, and one that knew the mode but not
+		// the confinement would miss half of what the import decided.
 		const { home } = kimiHome({ "config.toml": kimiSpelled });
-		expect(settingsWritten(plan(home)).permissionMode).toBe("bypassPermissions");
+		const settings = settingsWritten(plan(home));
+		expect(settings.permissionMode).toBe("agent");
+		expect(settings.sandbox).toBe("danger-full-access");
 	});
 
 	test("dangerous_command_guard is named with the direction it points", () => {

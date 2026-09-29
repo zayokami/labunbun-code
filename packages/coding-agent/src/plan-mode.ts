@@ -3,7 +3,14 @@
  * ExitPlanMode presents the plan for user approval before mutations resume.
  */
 
-import { type AgentSession, type AnyTool, buildTool, type PermissionMode } from "@labunbun/agent";
+import {
+	type AgentSession,
+	type AnyTool,
+	buildTool,
+	DEFAULT_MODE_CHOICE,
+	type PermissionMode,
+	type SandboxMode,
+} from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 
@@ -32,32 +39,42 @@ export interface PlanApprovalUi {
  * dialog is async, and an in-app /resume can swap the running session while it
  * is open — the saved mode then belongs to the session that asked, not to
  * whichever session is current when the user answers.
+ *
+ * Both axes are saved, not just the mode. The map used to hold one
+ * `PermissionMode` and restore it with `setPermissionMode`, which left the
+ * sandbox at whatever the session happened to be in when the plan was
+ * approved — so a `/mode agentNoSandbox` before EnterPlanMode came back from
+ * ExitPlanMode as a sandboxed `agent`, and nothing said so. Entering plan mode
+ * does not change the sandbox, so restoring the pair is what "put it back how
+ * you found it" actually means.
  */
 export function createPlanModeCallbacks(
 	getSession: () => AgentSession | null,
 	getUi: () => PlanApprovalUi | null,
 ): PlanModeCallbacks {
-	const previousModes = new WeakMap<AgentSession, PermissionMode>();
+	const previousModes = new WeakMap<AgentSession, { mode: PermissionMode; sandbox: SandboxMode }>();
 	return {
 		enterPlanMode: () => {
 			const session = getSession();
 			if (!session) return;
 			if (session.permissionMode !== "plan") {
-				previousModes.set(session, session.permissionMode);
+				previousModes.set(session, { mode: session.permissionMode, sandbox: session.sandbox });
 			}
-			session.setPermissionMode("plan");
+			session.setMode("plan");
 		},
 		requestPlanApproval: async (plan, signal) => {
 			// Capture everything before the await: the session that entered plan
-			// mode and the mode it had before. A swap must leave the newcomer's
+			// mode and the pair it had before. A swap must leave the newcomer's
 			// mode untouched.
 			const session = getSession();
 			const ui = getUi();
 			if (!session || !ui) {
 				return { approved: false, feedback: "No interactive session to approve the plan" };
 			}
-			const previousMode =
-				session.permissionMode === "plan" ? (previousModes.get(session) ?? "default") : session.permissionMode;
+			const previous =
+				session.permissionMode === "plan"
+					? (previousModes.get(session) ?? { ...DEFAULT_MODE_CHOICE })
+					: { mode: session.permissionMode, sandbox: session.sandbox };
 			let approved: boolean;
 			try {
 				approved = await ui.requestPermission("ExitPlanMode", { plan }, signal);
@@ -80,8 +97,8 @@ export function createPlanModeCallbacks(
 				// mode and must not inherit a lift granted to its predecessor.
 				return { approved: false, feedback: "Session changed during approval" };
 			}
-			// Keep the saved mode across rejection/retry; consume it only on approval.
-			session.setPermissionMode(previousMode);
+			// Keep the saved pair across rejection/retry; consume it only on approval.
+			session.setMode(previous.mode, previous.sandbox);
 			previousModes.delete(session);
 			return { approved: true };
 		},

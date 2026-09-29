@@ -13,6 +13,7 @@
  */
 
 import { join } from "node:path";
+import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { McpServerConfigSchema } from "@labunbun/mcp";
 import type { RawGrokBuild } from "./grok-read.ts";
 import { GROK_INSTALL_DIR, GROK_PLUGIN_DIR, GROK_PLUGIN_MCP, grokStringList } from "./grok-read.ts";
@@ -29,7 +30,7 @@ import {
 	summarizeNames,
 	tildePath,
 } from "./migrate-core.ts";
-import type { AddPermissionRules, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
+import type { AddPermissionRules, ClaimModePair, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
 import { looksLikeSecretName, resolveModelReference } from "./migrate-types.ts";
 import type { RawSettingsInput } from "./settings.ts";
 
@@ -106,8 +107,8 @@ const GROK_UNMIGRATED_SECTIONS: Array<[key: string, reason: string]> = [
 	],
 	[
 		"auto_mode",
-		"grok's classifier mode, which approves calls it judges safe — there is no classifier here, and the " +
-			"nearest mode, dontAsk, does the opposite",
+		"grok's classifier mode, which approves the calls it judges safe, and no mode here does that: `ask` puts " +
+			"a person in the loop instead of a classifier and `agent` runs everything instead of judging",
 	],
 	["default_auto_mode", "starts sessions in that classifier mode; see [auto_mode]"],
 	["announcements", "payloads the deployment publishes, not preferences you wrote"],
@@ -879,6 +880,7 @@ export function planGrokBuild(
 	home: string,
 	items: MigrationItem[],
 	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 	mcpServers: Record<string, unknown>,
 	markMcpSecret: (hasSecret: boolean) => void,
 	settingsPatch: Record<string, unknown>,
@@ -1204,7 +1206,7 @@ export function planGrokBuild(
 	// than inside it, the way Codex's are: the list they append to is built in the
 	// dispatch, and a planner that reached for it would take the whole accumulator
 	// as a parameter.
-	planGrokPermissionMode(raw, home, items, claimScalar);
+	planGrokPermissionMode(raw, home, items, claimModePair);
 
 	// The policy files beside `config.toml` are not a second copy of the user's
 	// preferences: `requirements.toml` is where `disable_bypass_permissions_mode`
@@ -1723,14 +1725,14 @@ export function planGrokAssets(
  * shape grok does not read falls through to the next instead of deciding. And
  * the presence of *any* of the three pins the answer — an explicit
  * `yolo = false` resolves to ask rather than to "unset", so an account default
- * cannot win — which is why a reading of ask is claimed as an explicit
- * `default` here rather than left out as if nothing had been said.
+ * cannot win — which is why a reading of ask is claimed as an explicit pair
+ * here rather than left out as if nothing had been said.
  */
 function planGrokPermissionMode(
 	raw: RawGrokBuild,
 	home: string,
 	items: MigrationItem[],
-	claimScalar: ClaimScalar,
+	claimModePair: ClaimModePair,
 ): void {
 	const ui = isRecord(raw.config.ui) ? raw.config.ui : {};
 	const from = `${grokConfigPath(home, raw.root)} → ui`;
@@ -1760,20 +1762,33 @@ function planGrokPermissionMode(
 	const label =
 		readable.length > 0 ? `${from}.${decidedBy} (${JSON.stringify(ui[decidedBy])})` : `${from}.${present.join(", ")}`;
 
-	const mode = reads === "always-approve" ? "bypassPermissions" : reads === "ask" ? "default" : undefined;
-	if (mode !== undefined) {
+	// One key, two axes here. `always-approve` is the reading that becomes the
+	// pair which asks nothing *and* confines nothing — `agent` under the open
+	// sandbox, which is the pairing Claude Code's `bypassPermissions` already maps
+	// to in claude-plan.ts. `ask` becomes a *confined* pair because grok states no
+	// confinement beside the mode: its `[sandbox] profile` is a separate section
+	// this importer reports and does not read (see the unmigrated sections above),
+	// so that half is this build's default and the claim line says in those words
+	// which half was chosen. `auto` is a classifier, and no mode here is one.
+	const mapped =
+		reads === "always-approve"
+			? { mode: "agent" as PermissionMode, sandbox: "danger-full-access" as SandboxMode }
+			: reads === "ask"
+				? { mode: "ask" as PermissionMode, sandbox: "workspace-write" as SandboxMode }
+				: undefined;
+	if (mapped !== undefined) {
 		// A name grok does not know is the case worth spelling out: the file says
 		// one thing and the session did another, and the user is the only one who
 		// can say which of the two they want from here on.
 		const surprising = written !== undefined && !GROK_PERMISSION_MODE_NAMES.has(written);
-		claimScalar(
+		claimModePair(
 			"grok-build",
-			"permissionMode",
-			mode,
+			mapped.mode,
+			mapped.sandbox,
 			label,
 			surprising
-				? `mapped to "${mode}" — grok resolves "${written}" to "${reads}", so the name written there is not the mode it ran`
-				: `mapped to "${mode}"`,
+				? `mapped to "${mapped.mode}" — grok resolves "${written}" to "${reads}", so the name written there is not the mode it ran`
+				: `mapped to "${mapped.mode}"`,
 		);
 	} else {
 		items.push({
@@ -1782,9 +1797,9 @@ function planGrokPermissionMode(
 			to: "—",
 			action: "skip",
 			detail:
-				'"auto" is a classifier that approves the calls it judges safe, and the nearest mode here, dontAsk, ' +
-				"does the opposite — anything not explicitly allowed is denied — so the session keeps whatever mode " +
-				"it would otherwise start in",
+				'"auto" is a classifier that approves the calls it judges safe, and no mode here is one: "ask" puts a ' +
+				'person in the loop instead of a classifier and "agent" runs everything instead of judging. Either would ' +
+				"change the posture the mode names, so the session keeps whatever it would otherwise start in",
 			containsSecret: false,
 		});
 	}

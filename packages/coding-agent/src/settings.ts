@@ -19,12 +19,74 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { type PermissionMode, type PermissionRule, parseRuleList, type RuleSource } from "@labunbun/agent";
+import {
+	PERMISSION_MODES,
+	type PermissionMode,
+	type PermissionRule,
+	parseRuleList,
+	type RuleSource,
+	SANDBOX_MODES,
+	type SandboxMode,
+} from "@labunbun/agent";
 import { registerOpenAICompatibleProvider, setPricingOverride } from "@labunbun/ai";
 import { z } from "zod";
 import { stripBom } from "./json-text.ts";
 
-export const PermissionModeSchema = z.enum(["default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"]);
+/**
+ * Mode values from releases that had them, and what to write instead.
+ *
+ * Each entry is the whole replacement, not just a mode name, because the answer
+ * is a *pair*: `bypassPermissions` was one value doing two jobs (never ask, no
+ * confinement) and the new system asks for both halves separately. Naming only
+ * the mode would send `bypassPermissions` users to the sandboxed pairing, which
+ * is the one change in this batch that could quietly narrow a scripted run.
+ */
+const LEGACY_MODE_SUGGESTIONS: Record<string, string> = {
+	default: 'permissionMode "ask"',
+	manual: 'permissionMode "ask"',
+	acceptEdits: 'permissionMode "ask"',
+	dontAsk: 'permissionMode "ask"',
+	bypassPermissions: 'permissionMode "agent" together with sandbox "danger-full-access"',
+};
+
+/**
+ * The mode axis, validated against the one list that defines it.
+ *
+ * Written by hand as a `z.enum` this used to be a second, independent copy of
+ * {@link PERMISSION_MODES} — the file's own comment claimed the schema read the
+ * same list, and it did not, so a mode added there was a mode the settings
+ * file rejected. Deriving it here is what makes the claim true, and the legacy
+ * branch is why a stale value produces a sentence to act on rather than
+ * "invalid enum value" from a zod version whose error text is not ours.
+ */
+export const PermissionModeSchema = z.custom<PermissionMode>().superRefine((value, ctx) => {
+	if (typeof value !== "string") {
+		ctx.addIssue({ code: "custom", message: `permissionMode must be a string, got ${typeof value}` });
+		return;
+	}
+	if ((PERMISSION_MODES as readonly string[]).includes(value)) return;
+	const suggestion = LEGACY_MODE_SUGGESTIONS[value];
+	ctx.addIssue({
+		code: "custom",
+		message:
+			suggestion !== undefined
+				? `"${value}" is no longer a permission mode. Write ${suggestion} instead.`
+				: `"${value}" is not a permission mode. Valid values: ${PERMISSION_MODES.join(", ")}.`,
+	});
+});
+
+/** The sandbox axis, derived the same way. */
+export const SandboxModeSchema = z.custom<SandboxMode>().superRefine((value, ctx) => {
+	if (typeof value !== "string") {
+		ctx.addIssue({ code: "custom", message: `sandbox must be a string, got ${typeof value}` });
+		return;
+	}
+	if ((SANDBOX_MODES as readonly string[]).includes(value)) return;
+	ctx.addIssue({
+		code: "custom",
+		message: `"${value}" is not a sandbox mode. Valid values: ${SANDBOX_MODES.join(", ")}.`,
+	});
+});
 
 /** USD per million tokens, the same shape the built-in catalog uses. */
 export const ModelPricingSchema = z.object({
@@ -57,6 +119,16 @@ export const SettingsSchema = z.object({
 	/** Model references tried in order when the primary errors before streaming. */
 	fallbackModels: z.array(z.string()).optional(),
 	permissionMode: PermissionModeSchema.optional(),
+	/**
+	 * The other axis: what the process may touch, as opposed to what asks.
+	 *
+	 * Separate from `permissionMode` because the two are separate — see
+	 * `PERMISSION_MODES` in `@labunbun/agent`. `workspace-write` resolves to an
+	 * OS-enforced policy on macOS and Linux; on Windows it resolves to a
+	 * tool-layer one, which is a weaker guarantee and says so in `/doctor` and
+	 * in the mode's own hint rather than being described here as confinement.
+	 */
+	sandbox: SandboxModeSchema.optional(),
 	/**
 	 * Theme name: a built-in, a theme file from `~/.labunbun/themes/`, or
 	 * `"auto"` to follow the terminal background. Free-form rather than an enum
@@ -287,6 +359,9 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	model: "denied",
 	fallbackModels: "denied",
 	permissionMode: "denied",
+	// A cloned repository choosing its own confinement level is the same move as
+	// one choosing its own approval policy: it hands itself the widest one.
+	sandbox: "denied",
 	env: "denied",
 	providers: "denied",
 	hooks: "denied",
@@ -550,21 +625,31 @@ export function collectPermissionRules(loaded: LoadedSettings): PermissionRule[]
 }
 
 /**
- * Resolve the effective permission mode, letting the policy tier veto
- * `bypassPermissions`. Returns the reason when a downgrade happened so the
- * caller can tell the user why the mode they asked for isn't the one they got.
+ * Resolve the effective pair, letting the policy tier veto the unrestricted
+ * sandbox. Returns the reason when a downgrade happened so the caller can tell
+ * the user why the mode they asked for isn't the one they got.
+ *
+ * `disableBypassPermissionsMode` keeps its name and its meaning under the
+ * rename: it is a Claude Code compatibility key, and in that product it turns
+ * off the mode that neither asks nor confines. Here that mode is
+ * `danger-full-access`, so the key downgrades that one axis and leaves the
+ * approval policy alone — narrowing a machine's confinement without also
+ * making it prompt for things it used to run silently is the smaller change,
+ * and a policy file that wanted both can set them itself.
  */
-export function resolvePermissionMode(
-	requested: PermissionMode,
+export function resolveMode(
+	requested: { mode: PermissionMode; sandbox: SandboxMode },
 	loaded: LoadedSettings,
-): { mode: PermissionMode; downgradeReason?: string } {
-	if (requested === "bypassPermissions" && loaded.perSource.policy?.disableBypassPermissionsMode === true) {
+): { mode: PermissionMode; sandbox: SandboxMode; downgradeReason?: string } {
+	if (requested.sandbox === "danger-full-access" && loaded.perSource.policy?.disableBypassPermissionsMode === true) {
 		return {
-			mode: "default",
-			downgradeReason: "bypassPermissions is disabled by managed settings — using default mode instead",
+			mode: requested.mode,
+			sandbox: "workspace-write",
+			downgradeReason:
+				"the unrestricted sandbox is disabled by managed settings — commands will run under workspace-write instead",
 		};
 	}
-	return { mode: requested };
+	return { ...requested };
 }
 
 /**

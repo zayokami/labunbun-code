@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { CLAUDE_PERMISSION_MODES } from "../src/claude-plan.ts";
 import {
 	detectSources,
 	formatMigrationReport,
@@ -599,14 +600,19 @@ describe("apply", () => {
 	});
 });
 
-/** A claude settings file holding just `permissions`, planned on its own. */
-function planPermissions(permissions: Record<string, unknown>): MigrationPlan {
+/** A claude settings file holding `settings`, planned on its own. */
+function planClaudeSettings(settings: Record<string, unknown>): MigrationPlan {
 	let planned: MigrationPlan | undefined;
-	withHome({ ".claude/settings.json": JSON.stringify({ permissions }) }, (home) => {
+	withHome({ ".claude/settings.json": JSON.stringify(settings) }, (home) => {
 		planned = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
 	});
 	if (!planned) throw new Error("the fake home did not survive");
 	return planned;
+}
+
+/** A claude settings file holding just `permissions`, planned on its own. */
+function planPermissions(permissions: Record<string, unknown>): MigrationPlan {
+	return planClaudeSettings({ permissions });
 }
 
 /** The settings file a plan would write, parsed. */
@@ -618,24 +624,114 @@ function plannedItem(planned: MigrationPlan, from: string): MigrationItem | unde
 	return planned.items.find((i) => i.from.includes(from));
 }
 
+/**
+ * The report line that writes `key` into the target settings.
+ *
+ * Both halves of a mode pair are claimed from one source line, so `plannedItem`
+ * (which finds by `from`) can only ever reach the first of them. The target key
+ * is what tells `permissionMode: ask` apart from the `sandbox` it was chosen
+ * with, which is exactly the half a mode-only assertion cannot see.
+ */
+function itemWriting(planned: MigrationPlan, key: string): MigrationItem | undefined {
+	return planned.items.find((i) => i.to === `settings.json → ${key}`);
+}
+
+/**
+ * What every Claude Code mode means here, written out by hand rather than read
+ * back out of the mapper. A table that compared `CLAUDE_PERMISSION_MODES` to
+ * itself would pass for any mapping at all, including a wrong one — so these
+ * are the claims, and {@link CLAUDE_PERMISSION_MODES} is only checked for
+ * membership.
+ */
+const CLAUDE_MODE_PAIRS: Array<[source: string, mode: string, sandbox: string]> = [
+	["default", "ask", "workspace-write"],
+	["manual", "ask", "workspace-write"],
+	["plan", "plan", "workspace-write"],
+	["acceptEdits", "ask", "workspace-write"],
+	// The one row that meant *no confinement* as well as never-ask. Reading it as
+	// `agent` alone would quietly re-confine a session the user had told Claude
+	// Code to leave unrestricted.
+	["bypassPermissions", "agent", "danger-full-access"],
+];
+
 describe("claude code permissions", () => {
-	test.each([
-		["default", "default"],
-		["manual", "default"],
-		["plan", "plan"],
-		["acceptEdits", "acceptEdits"],
-		["bypassPermissions", "bypassPermissions"],
-	] as Array<[string, string]>)("defaultMode %s becomes permissionMode %s", (mode, expected) => {
-		expect(writtenSettings(planPermissions({ defaultMode: mode })).permissionMode).toBe(expected);
+	test("the mapper's rows are exactly the rows checked below", () => {
+		// Adding a mode to the mapper without adding it here leaves a source value
+		// whose claim no test has read; the assertion fails on the extra key rather
+		// than silently widening coverage.
+		expect(Object.keys(CLAUDE_PERMISSION_MODES).sort()).toEqual(CLAUDE_MODE_PAIRS.map(([source]) => source).sort());
+	});
+
+	test.each(CLAUDE_MODE_PAIRS)(
+		'defaultMode "%s" becomes permissionMode %s with sandbox %s',
+		(source, mode, sandbox) => {
+			const planned = planPermissions({ defaultMode: source });
+			const written = writtenSettings(planned);
+			expect(written.permissionMode).toBe(mode);
+			// Both halves, on every row. A mode-only assertion passes for a mapper
+			// that stopped claiming the sandbox, which is the silent narrowing the
+			// pair exists to prevent.
+			expect(written.sandbox).toBe(sandbox);
+
+			const modeItem = itemWriting(planned, "permissionMode");
+			expect(modeItem?.action).toBe("map");
+			expect(modeItem?.from).toBe(`~/.claude/settings.json → permissions.defaultMode ("${source}")`);
+			expect(modeItem?.detail).toContain(`mapped to "${mode}"`);
+
+			// The sandbox is claimed from the same source line, so only the target
+			// key tells the two apart — and the sentence beside it has to agree with
+			// the value, not merely exist.
+			const sandboxItem = itemWriting(planned, "sandbox");
+			expect(sandboxItem?.action).toBe("map");
+			expect(sandboxItem?.from).toBe(modeItem?.from);
+			expect(sandboxItem?.detail).toContain(
+				sandbox === "danger-full-access" ? "imported unrestricted" : "imported confined",
+			);
+		},
+	);
+
+	test("an unknown mode is named and skipped, and claims neither half", () => {
+		// The enum moves; a value this build has never heard of must not reach the
+		// settings file by falling through to a default nobody chose.
+		const planned = planPermissions({ defaultMode: "someFutureClaudeMode" });
+		const written = writtenSettings(planned);
+		expect(written.permissionMode).toBeUndefined();
+		expect(written.sandbox).toBeUndefined();
+		expect(itemWriting(planned, "permissionMode")).toBeUndefined();
+		expect(itemWriting(planned, "sandbox")).toBeUndefined();
+		const skipped = plannedItem(planned, '"someFutureClaudeMode"');
+		expect(skipped?.action).toBe("skip");
+		expect(skipped?.to).toBe("—");
+		expect(skipped?.from).toBe('~/.claude/settings.json → permissions.defaultMode ("someFutureClaudeMode")');
+		expect(skipped?.detail).toContain("no permission mode here corresponds to this value");
 	});
 
 	test("the classifier mode is skipped, because the nearest mode means the opposite", () => {
 		const planned = planPermissions({ defaultMode: "auto" });
-		expect(writtenSettings(planned).permissionMode).toBeUndefined();
+		const written = writtenSettings(planned);
+		expect(written.permissionMode).toBeUndefined();
+		// Not even the half that would be harmless: a lone `sandbox` here would be a
+		// setting the user never expressed an opinion about.
+		expect(written.sandbox).toBeUndefined();
 		const skipped = plannedItem(planned, '"auto"');
 		expect(skipped?.action).toBe("skip");
 		expect(skipped?.detail).toContain("classifier");
-		expect(skipped?.detail).toContain("dontAsk");
+		// The sentence names the mode it refused to approximate with, so the row
+		// stays out of the table above for a stated reason rather than by omission.
+		expect(skipped?.detail).toContain('the nearest mode, "ask", is the opposite');
+	});
+
+	test("acceptEdits says the import is narrower than the mode it replaced", () => {
+		// The only row that loses something: edits used to run unasked. The sentence
+		// naming that loss is the part of the row worth pinning — a bare
+		// `ask` here would read as an exact rename.
+		const planned = planPermissions({ defaultMode: "acceptEdits" });
+		expect(itemWriting(planned, "permissionMode")?.detail).toContain("Narrower than the mode it replaced");
+		// The caveat belongs to that row alone: attached to `default` too it would
+		// be calling an exact rename a loss.
+		expect(itemWriting(planPermissions({ defaultMode: "default" }), "permissionMode")?.detail).not.toContain(
+			"Narrower",
+		);
 	});
 
 	test("the ask list is skipped with what its absence means", () => {
@@ -705,6 +801,109 @@ describe("claude code permissions", () => {
 			deny: ["Read(**/.env)"],
 			additionalDirectories: [],
 		});
+	});
+});
+
+/**
+ * Claude Code's own `sandbox` block, which decides what Bash may touch
+ * independently of who answers. Each case carries the sentence the report has
+ * to use beside the value, because the value alone cannot catch a mapper that
+ * wrote `danger-full-access` and then explained it as confinement — and the
+ * switch it was read from, because `enabled: false` and
+ * `filesystem.disabled: true` land on the same key for different reasons and
+ * the user is the one who can tell which their file holds.
+ */
+const CLAUDE_SANDBOX_CASES: Array<
+	[label: string, expected: string, phrase: string, from: string, sandbox: Record<string, unknown>]
+> = [
+	[
+		"enabled: false",
+		"danger-full-access",
+		"unconfined here too",
+		"~/.claude/settings.json → sandbox.enabled",
+		{ enabled: false },
+	],
+	[
+		"filesystem.disabled: true",
+		"danger-full-access",
+		"no filesystem confinement",
+		"~/.claude/settings.json → sandbox.filesystem.disabled",
+		{ filesystem: { disabled: true } },
+	],
+	// An absent switch is not an absent sandbox: "on" is the reading that keeps
+	// commands in the workspace, and reading "no switch" as "unconfined" would
+	// widen every Claude Code user who never wrote the block.
+	["enabled: true", "workspace-write", "run confined here too", "~/.claude/settings.json → sandbox", { enabled: true }],
+	[
+		"filesystem.disabled: false",
+		"workspace-write",
+		"run confined here too",
+		"~/.claude/settings.json → sandbox",
+		{ filesystem: { disabled: false } },
+	],
+	[
+		"an object naming neither switch",
+		"workspace-write",
+		"run confined here too",
+		"~/.claude/settings.json → sandbox",
+		{},
+	],
+];
+
+describe("claude code sandbox", () => {
+	test.each(CLAUDE_SANDBOX_CASES)("sandbox %s imports as %s", (_label, expected, phrase, from, sandbox) => {
+		const planned = planClaudeSettings({ sandbox });
+		expect(writtenSettings(planned).sandbox).toBe(expected);
+		const item = itemWriting(planned, "sandbox");
+		expect(item?.action).toBe("map");
+		expect(item?.from).toBe(from);
+		expect(item?.detail).toContain(`mapped to "${expected}"`);
+		expect(item?.detail).toContain(phrase);
+	});
+
+	test("no sandbox block at all claims nothing, rather than picking a value", () => {
+		// "The source had no opinion" is not "import the confined default": an
+		// import that filled this in would write a setting nobody chose, and the
+		// mode pair already claims the sandbox for whatever the source's mode meant.
+		const planned = planClaudeSettings({});
+		expect(writtenSettings(planned).sandbox).toBeUndefined();
+		expect(itemWriting(planned, "sandbox")).toBeUndefined();
+	});
+
+	test("the mode's pair and an explicit sandbox block are two claims, and the block wins", () => {
+		// The mapper's own comment says the block wins when it is present, so the
+		// file has to agree with that sentence: `defaultMode` claims an unconfined
+		// sandbox and `sandbox.enabled: true` claims a confined one. The block is
+		// read after the mode, so it is the value that lands — and it is the more
+		// specific of the two anyway, having been written as an axis of its own.
+		const planned = planClaudeSettings({
+			permissions: { defaultMode: "bypassPermissions" },
+			sandbox: { enabled: true },
+		});
+		expect(writtenSettings(planned).sandbox).toBe("workspace-write");
+
+		// Both claims stay in the report, because a report that quietly dropped the
+		// loser would leave a user with a mode they set having no effect and
+		// nothing on the screen to say why. What changed is the *label* on the
+		// loser: it used to be a second green tick reading "the sandbox is imported
+		// unrestricted", in the past tense, for a value that was never written. One
+		// `map` and one superseded line is the honest shape — the overwrite is
+		// still visible, it is just no longer claiming to have happened.
+		const sandboxLines = planned.items.filter(
+			(i) => i.from.includes("permissions.defaultMode") || i.from.endsWith("→ sandbox"),
+		);
+		expect(sandboxLines.length).toBeGreaterThanOrEqual(2);
+		const mapped = planned.items.filter((i) => i.action === "map" && i.to === "settings.json → sandbox");
+		expect(mapped).toHaveLength(1);
+		expect(mapped[0].from).toBe("~/.claude/settings.json → sandbox");
+		expect(mapped[0].detail).toContain('mapped to "workspace-write"');
+
+		const superseded = planned.items.find((i) => i.detail.startsWith("superseded by a later claim on sandbox"));
+		expect(superseded?.action).toBe("skip");
+		expect(superseded?.to).toBe("—");
+		// The reason the loser lost is still there — it just no longer reads as the
+		// outcome.
+		expect(superseded?.detail).toContain("imported unrestricted");
 	});
 });
 

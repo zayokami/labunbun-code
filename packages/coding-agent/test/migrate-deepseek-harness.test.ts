@@ -20,6 +20,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveModel } from "@labunbun/ai";
+import { DSH_SHIPPED_PRESETS } from "../src/dsh-plan.ts";
 import { detectSources, runMigration } from "../src/migrate.ts";
 import { borrowSourceEnv } from "./source-env.ts";
 
@@ -140,6 +141,18 @@ function settingsJson(result: Result): Record<string, unknown> {
 }
 
 /**
+ * The report line that writes `key` into the target settings.
+ *
+ * Both halves of a mode pair are claimed from one source line, so a search by
+ * `from` can only ever reach the first of them. The target key is what tells
+ * `permissionMode: ask` apart from the `sandbox` it was chosen with — which is
+ * exactly the half a mode-only assertion cannot see.
+ */
+function itemWriting(result: Result, key: string): Result["plan"]["items"][number] | undefined {
+	return result.plan.items.find((i) => i.to === `settings.json → ${key}`);
+}
+
+/**
  * Where `needle` shows up in a finished run, as a sentence; empty when it does
  * not. The credential test asserts this is empty, so a failure names the field
  * that carried the secret instead of only reporting that something did.
@@ -251,11 +264,23 @@ const DRIFT_SETTINGS = [
 	"",
 ].join("\n");
 
-/** The preset table the harness ships, name → the bundle that name stands for. */
-const SHIPPED_PRESETS: Record<string, { sandbox: string; approval: string }> = {
-	"danger-full-access": { sandbox: "danger-full-access", approval: "never" },
-	"workspace-write": { sandbox: "workspace-write", approval: "ask" },
-};
+/**
+ * What every shipped DeepSeek Harness preset means here, written by hand rather
+ * than read back out of the mapper — the harness's own claim, per row.
+ *
+ * A table that read `DSH_SHIPPED_PRESETS` back into itself would pass for any
+ * mapping at all, including a wrong one, so these are the claims and the mapper's
+ * own table is only checked against them. The approval column is the *source*
+ * spelling, which is not the target's: the target has three modes and the harness
+ * has two policies, so no row below has its approval half survive as itself.
+ */
+const DSH_SHIPPED_PRESET_CLAIMS: Array<[preset: string, mode: string, sandbox: string, approval: string]> = [
+	// `PermissionPresetService.Config`'s `presets` default
+	// (`packages/interaction/permission-presets/src/index.ts`): the harness's whole
+	// shipped table, and each name is spelled like its own sandbox half.
+	["danger-full-access", "agent", "danger-full-access", "never"],
+	["workspace-write", "ask", "workspace-write", "ask"],
+];
 
 /**
  * The preset section of a settings document.
@@ -266,14 +291,15 @@ const SHIPPED_PRESETS: Record<string, { sandbox: string; approval: string }> = {
  * would prove nothing about this one — it would only show that *a* key was read.
  *
  * `presets` is the table from the harness's own `Config`, which a deployment may
- * replace. Omitting it entirely is the shipped table applying, which is how the
+ * replace; the default is the table the harness ships, restated in the document.
+ * Omitting it entirely (`{}`) is the shipped table applying, which is how the
  * shipped preset names keep their meaning; passing an empty table writes a
  * document that names no table at all, and a deployment is free to make a name
  * mean something else there.
  */
 function permissionSettings(
 	defaultPreset: string,
-	presets: Record<string, { sandbox: string; approval: string }> = SHIPPED_PRESETS,
+	presets: Record<string, { sandbox: string; approval: string }> = DSH_SHIPPED_PRESETS,
 ): string {
 	const lines = ["permission:", `  defaultPreset: ${defaultPreset}`];
 	if (Object.keys(presets).length > 0) {
@@ -495,25 +521,18 @@ describe("migrate: DeepSeek Harness source", () => {
 
 	// 8.
 	test("a permission preset is a different axis from a permission mode", () => {
-		// `danger-full-access` + `never` is the one preset that means the same
-		// thing here; the presets that name a sandbox are skipped, because a
-		// sandbox mode and a permission mode are not the same setting.
-		withHome({ ".dsh/settings.yaml": permissionSettings("danger-full-access") }, (home) => {
-			const result = runMigration({ home });
-			expect(settingsJson(result).permissionMode).toBe("bypassPermissions");
-			expect(settingsText(result)).not.toContain("acceptEdits");
-		});
-
+		// A preset is a bundle — a sandbox plus an approval policy — and a bundle
+		// lands as both keys. Reading the name as the mode would write
+		// `permissionMode: "workspace-write"`, which is a sandbox value in a mode
+		// slot, and skip the half that actually confines the process.
 		withHome({ ".dsh/settings.yaml": permissionSettings("workspace-write") }, (home) => {
 			const result = runMigration({ home });
-			// The sandbox word is the signal: only the permission preset carries one.
-			const skip = result.plan.items.find((i) => i.action === "skip" && /sandbox/i.test(i.detail));
-			expect(skip?.source).toBe("deepseek-harness");
-			expect(skip?.detail).toMatch(/sandbox/i);
-			expect(skip?.detail).toMatch(/permission[\s-]?mode/i);
-			// Nothing "close enough" was written instead.
-			expect(settingsJson(result).permissionMode).toBeUndefined();
-			expect(settingsText(result)).not.toContain("acceptEdits");
+			const written = settingsJson(result);
+			expect(written.permissionMode).toBe("ask");
+			expect(written.sandbox).toBe("workspace-write");
+			// The axis claim, on the row where the two spellings collide: the preset
+			// name is the sandbox's, and it did not become the mode.
+			expect(written.permissionMode).not.toBe("workspace-write");
 		});
 	});
 
@@ -530,7 +549,8 @@ describe("migrate: DeepSeek Harness source", () => {
 			},
 			(home) => {
 				const result = runMigration({ home });
-				expect(settingsJson(result).permissionMode).toBe("bypassPermissions");
+				expect(settingsJson(result).permissionMode).toBe("agent");
+				expect(settingsJson(result).sandbox).toBe("danger-full-access");
 			},
 		);
 
@@ -546,7 +566,7 @@ describe("migrate: DeepSeek Harness source", () => {
 			(home) => {
 				const result = runMigration({ home });
 				expect(settingsJson(result).permissionMode).toBeUndefined();
-				expect(settingsText(result)).not.toContain("bypassPermissions");
+				expect(settingsText(result)).not.toContain("agent");
 				const skip = result.plan.items.find((i) => i.action === "skip" && /sandbox/i.test(i.detail));
 				expect(skip?.source).toBe("deepseek-harness");
 			},
@@ -554,14 +574,161 @@ describe("migrate: DeepSeek Harness source", () => {
 	});
 
 	// 8c.
-	test("a document that states no preset table keeps the shipped names' meaning", () => {
-		// A settings document with no table means the harness applies the one it
-		// ships, where `danger-full-access` is the whole-access, never-ask bundle.
-		// That is the whole reason the name can be trusted here — and only here.
-		withHome({ ".dsh/settings.yaml": permissionSettings("danger-full-access", {}) }, (home) => {
-			const result = runMigration({ home });
-			expect(settingsJson(result).permissionMode).toBe("bypassPermissions");
-		});
+	test("the shipped table is the harness's own two rows, spelled as the harness spells them", () => {
+		// `PermissionPresetService.Config`'s `presets` default is the whole of what
+		// ships, and each name is spelled after its own sandbox half. A row added
+		// here without a claim above — or a claim for a row the harness never ships
+		// — fails on the extra key rather than quietly widening coverage.
+		// Widened to plain strings on the received side only, so the comparison is
+		// between two hand-written claims and not between a value and the literal
+		// types that value is already declared to have. `toEqual` compares deeply at
+		// run time, so the cast changes what the compiler checks and not what the
+		// assertion sees.
+		expect(DSH_SHIPPED_PRESETS as Record<string, { sandbox: string; approval: string }>).toEqual(
+			Object.fromEntries(
+				DSH_SHIPPED_PRESET_CLAIMS.map(([preset, , sandbox, approval]) => [preset, { sandbox, approval }]),
+			),
+		);
+	});
+
+	test.each(DSH_SHIPPED_PRESET_CLAIMS)(
+		'a document stating the "%s" preset imports it as mode %s and sandbox %s',
+		(preset, mode, sandbox, approval) => {
+			withHome({ ".dsh/settings.yaml": permissionSettings(preset) }, (home) => {
+				const result = runMigration({ home });
+				const written = settingsJson(result);
+				// Both halves, on every row. A mode-only assertion passes for a mapper
+				// that stopped claiming the sandbox, which is the silent narrowing the
+				// pair exists to prevent.
+				expect(written.permissionMode).toBe(mode);
+				expect(written.sandbox).toBe(sandbox);
+
+				const from = `settings.yaml → permission.defaultPreset ("${preset}")`;
+				const modeItem = itemWriting(result, "permissionMode");
+				expect(modeItem?.action).toBe("map");
+				expect(modeItem?.from).toBe(from);
+				// The sentence names both halves of the bundle it read, so a report
+				// line that outlived its mapping would show it.
+				expect(modeItem?.detail).toContain(`bundles ${sandbox} with ${approval}`);
+				expect(modeItem?.detail).toContain("imported as both keys");
+
+				// The sandbox is claimed from the same source line, so only the target
+				// key tells the two apart — and the sentence beside it has to agree
+				// with the value, not merely exist.
+				const sandboxItem = itemWriting(result, "sandbox");
+				expect(sandboxItem?.action).toBe("map");
+				expect(sandboxItem?.from).toBe(from);
+				expect(sandboxItem?.detail).toContain(
+					sandbox === "danger-full-access" ? "imported unrestricted" : "imported confined",
+				);
+			});
+		},
+	);
+
+	// 8d.
+	test.each([
+		[
+			"a sandbox this build has no value for",
+			{ "danger-full-access": { sandbox: "read-only", approval: "never" } },
+			"read-only",
+			"never",
+		],
+		[
+			"an approval policy this build has no mode for",
+			{ "danger-full-access": { sandbox: "danger-full-access", approval: "unless-trusted" } },
+			"danger-full-access",
+			"unless-trusted",
+		],
+	])("half a pair is skipped rather than half-imported: %s", (_label, presets, sandbox, approval) => {
+		// The first row is the reachable one: `read-only` is a real mode the harness
+		// ships (`SANDBOX_MODES`) and this build has no name for. The second stands
+		// for a policy a newer harness could add — the harness's own `APPROVAL_POLICIES`
+		// is exactly `ask` and `never` today, so there is no shipped value for it yet.
+		//
+		// Importing the half that is known is the failure this guards, and it goes
+		// loose in both directions: a `danger-full-access` sandbox on its own leaves
+		// the process unrestricted while the report never says the approval half
+		// could not be read, and an `agent` mode on its own takes the confined pairing
+		// for the missing sandbox — a session that never asks, in a confinement the
+		// document never asked for. Neither is a posture the source described.
+		withHome(
+			{
+				".dsh/settings.yaml": permissionSettings(
+					"danger-full-access",
+					presets as Record<string, { sandbox: string; approval: string }>,
+				),
+			},
+			(home) => {
+				const result = runMigration({ home });
+				// Neither half. A lone `sandbox` would be a setting nobody chose.
+				expect(settingsJson(result).permissionMode).toBeUndefined();
+				expect(settingsJson(result).sandbox).toBeUndefined();
+				expect(itemWriting(result, "permissionMode")).toBeUndefined();
+				expect(itemWriting(result, "sandbox")).toBeUndefined();
+
+				// The skip names the preset and both of the halves as the document
+				// spelled them, so the refusal says what it could not read.
+				const skip = result.plan.items.find(
+					(i) => i.action === "skip" && i.from.includes('permission.defaultPreset ("danger-full-access")'),
+				);
+				expect(skip?.source).toBe("deepseek-harness");
+				expect(skip?.to).toBe("—");
+				expect(skip?.detail).toContain(`bundles ${sandbox} sandbox with ${approval} approval`);
+				expect(skip?.detail).toContain("one of the two is not a value this build has");
+			},
+		);
+	});
+
+	// 8e.
+	test.each(DSH_SHIPPED_PRESET_CLAIMS)(
+		'a document that states no preset table keeps the shipped "%s" meaning',
+		(preset, mode, sandbox) => {
+			// A settings document with no table means the harness applies the one it
+			// ships. That is the whole reason the name can be trusted here — and only
+			// here: a document that states a table owns its own names, which is why
+			// the table-driven row above reads the bundle and never the name.
+			withHome({ ".dsh/settings.yaml": permissionSettings(preset, {}) }, (home) => {
+				const result = runMigration({ home });
+				expect(settingsJson(result).permissionMode).toBe(mode);
+				expect(settingsJson(result).sandbox).toBe(sandbox);
+				const modeItem = itemWriting(result, "permissionMode");
+				expect(modeItem?.detail).toContain("the shipped one is the one that applies");
+			});
+		},
+	);
+
+	// 8f.
+	test.each([
+		["no table stated", {}, "is not a name in the harness"],
+		["a stated table that does not define it", DSH_SHIPPED_PRESETS, "does not define that name"],
+	])("a preset name no table defines is skipped, and the report names it: %s", (_label, presets, phrase) => {
+		// A name in neither the shipped table nor the one the document states, so
+		// there is no bundle to read at all. Where a deployment's own table for a
+		// name like this would live is its composition, not this document — which is
+		// why the two cases exit the same way and each says which of the two
+		// documents failed to define it.
+		withHome(
+			{
+				".dsh/settings.yaml": permissionSettings(
+					"yolo",
+					presets as Record<string, { sandbox: string; approval: string }>,
+				),
+			},
+			(home) => {
+				const result = runMigration({ home });
+				expect(settingsJson(result).permissionMode).toBeUndefined();
+				expect(settingsJson(result).sandbox).toBeUndefined();
+				expect(itemWriting(result, "permissionMode")).toBeUndefined();
+				expect(itemWriting(result, "sandbox")).toBeUndefined();
+
+				const skip = result.plan.items.find(
+					(i) => i.action === "skip" && i.from.includes('permission.defaultPreset ("yolo")'),
+				);
+				expect(skip?.source).toBe("deepseek-harness");
+				expect(skip?.to).toBe("—");
+				expect(skip?.detail).toContain(phrase as string);
+			},
+		);
 	});
 
 	// 9.
