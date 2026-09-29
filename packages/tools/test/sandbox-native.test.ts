@@ -50,6 +50,20 @@ const UNRESTRICTED: SandboxPolicy = {
 	protected: [],
 };
 
+/** Every profile shape this file can ask for, restricted and not. */
+const PROFILES: readonly SandboxPolicy[] = [POLICY, { ...POLICY, network: "restricted" }, UNRESTRICTED];
+
+/**
+ * The profile text out of each argv, for the cases that produce one.
+ *
+ * `argv[1]` is the `-p` value, and a policy that confines nothing with the
+ * network on returns the command unwrapped — that case has no profile, so the
+ * slice is empty and contributes nothing to check.
+ */
+function profilesUnderTest(): string[] {
+	return PROFILES.map((policy) => buildSeatbeltArgs(policy, COMMAND)[1] ?? "");
+}
+
 interface Backend {
 	readonly platform: "darwin" | "linux";
 	readonly name: string;
@@ -164,6 +178,44 @@ const DENY_ORDERING_CASES: { policy: SandboxPolicy; expectedPathDenies: number }
 const HOSTILE_PATH = '/w/repo") (allow file-write*) (subpath "/';
 
 describe("buildSeatbeltArgs", () => {
+	// `sandbox-exec` reads SBPL, and the one thing SBPL will not do is accept a
+	// wildcard where a *literal* operation name goes. `(allow ipc-posix-sysv*)`
+	// compiles nowhere: the profile is rejected, the process exits 65, and every
+	// confined command on the machine fails to start carrying a parser backtrace.
+	// Nothing outside macOS parses SBPL, so nothing outside the macOS CI job
+	// could have found it.
+	//
+	// The rule being checked is narrower than "no wildcards", because some of
+	// them are real: SBPL defines operation *families* for the filesystem
+	// operations — `file-read*` is `file-read-metadata` plus `file-read-data` plus
+	// the rest — and `process-info*` is one too. The IPC, Mach, signal and sysctl
+	// names are literals, and appending `*` to one of those produces a variable
+	// rather than a family. So: a `*` is legal after `file-` and on
+	// `process-info`, and nowhere else. Finding a new legal family means editing
+	// this line, which is the friction that is wanted.
+	const WILDCARD_FAMILIES = /^(file-.*|process-info)\*$/;
+	test("every operation name is one SBPL would accept", () => {
+		const offenders: string[] = [];
+		for (const profile of profilesUnderTest()) {
+			for (const line of profile.split("\n")) {
+				if (line.trimStart().startsWith(";")) continue;
+				// Paths only ever reach a profile through `(param …)`, so every token
+				// outside a nested form is an operation name.
+				for (const raw of line
+					.trim()
+					.replace(/^\((?:allow|deny)\s+/, "")
+					.split(/\s+/)) {
+					if (raw.startsWith("(")) break;
+					const token = raw.replace(/\)+$/, "");
+					if (!token.includes("*") || WILDCARD_FAMILIES.test(token)) continue;
+					offenders.push(line.trim());
+					break;
+				}
+			}
+		}
+		expect(offenders).toEqual([]);
+	});
+
 	test("produces the argv verbatim for a workspace-write policy", () => {
 		expect(buildSeatbeltArgs(POLICY, COMMAND)).toEqual([
 			"-p",
@@ -193,7 +245,6 @@ describe("buildSeatbeltArgs", () => {
 				"(allow ipc-posix-shm-write-create)",
 				"(allow ipc-posix-shm-write-unlink)",
 				"(allow ipc-posix-sem)",
-				"(allow ipc-posix-sysv*)",
 				"(allow mach-lookup",
 				'  (global-name "com.apple.system.opendirectoryd.libinfo")',
 				'  (global-name "com.apple.PowerManagement.control"))',

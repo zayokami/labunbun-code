@@ -54,19 +54,21 @@ import { canWrite, type SandboxPolicy } from "@labunbun/agent";
  * Trimmed from `codex-rs/sandboxing/src/seatbelt_base_policy.sbpl` (116 lines).
  * What was left out and why:
  *
- *   - The enumerated `sysctl-name` list (about 40 `hw.*` / `kern.*` entries) is
- *     replaced by a bare `(allow sysctl-read)`. Codex's own comment on that list
- *     says it is there to blunt hardware fingerprinting and "not an issue for
- *     codex". Widening it is a choice this build makes, not a property checked
- *     here: node and bun read several of those at startup, and the working theory
- *     is that a shell which cannot read `hw.ncpu` misreports itself. Which of them
- *     were actually read was not measured — the cost of being wrong is a sandbox
- *     that discloses the machine's hardware to the code it runs, which is the
- *     thing Codex's list exists to prevent.
- *   - The `(ipc-posix-shm-*)` KMP regex is dropped for the three bare operations
- *     Codex allows. The operations are the same, and the comparison against
- *     `seatbelt.rs:98-101` is verified; the claim that libomp then registers its
- *     segment under an unfiltered name is the working theory, not a measurement.
+ *   - The enumerated `sysctl-name` list (about 40 `hw.*` / `kern.*` entries at
+ *     `seatbelt_base_policy.sbpl:24-76`) is **not replaced by anything**. No
+ *     sysctl rule is emitted, so under the `(deny default)` below every sysctl
+ *     read is refused and a runtime that asks for `hw.ncpu` is told there are
+ *     none. Whether bun or node can start under that is **not verified from a
+ *     Mac** — it is the open question on this backend, and the sysctl lines are
+ *     absent rather than widened because guessing a bare `(allow sysctl-read)`
+ *     would hand every confined command the whole machine's hardware profile in
+ *     exchange for a guess. Codex's list is the measured answer; copying it
+ *     verbatim is the fix if the question comes back "no".
+ *   - The `(ipc-posix-name-regex #"^/__KMP_REGISTERED_LIB_[0-9]+$")` filter on
+ *     the shared-memory operations (`seatbelt_base_policy.sbpl:98-101`) is
+ *     dropped; the three operations themselves are emitted bare, which is a
+ *     widening. The claim that libomp then registers its segment under an
+ *     unfiltered name is the working theory, not a measurement.
  *   - `(deny default)` and `(allow signal (target same-sandbox))` are kept
  *     verbatim — they are the closed-by-default posture the whole file rests on.
  *
@@ -75,6 +77,16 @@ import { canWrite, type SandboxPolicy } from "@labunbun/agent";
  * services a process cannot start without are here; the network-service list
  * lives in the network section, which is emitted only when the policy enables
  * the network.
+ *
+ * **Operation names are literals; there is no wildcard in that position.** A
+ * `*` there is not "every operation under this prefix", it is an unbound
+ * variable — `sandbox-exec` refuses to compile the profile and exits 65, so
+ * the symptom is a command that never runs carrying a parser backtrace instead
+ * of a program. This file carried `(allow ipc-posix-sysv*)` for a while, and
+ * that is not a real operation: Codex names the three SysV shared-memory
+ * operations individually and has no sysv line at all
+ * (`seatbelt_base_policy.sbpl:95-101`). Only the macOS job could find it,
+ * because nothing outside a Mac parses SBPL.
  */
 const BASE_POLICY = `(version 1)
 (deny default)
@@ -101,7 +113,6 @@ const BASE_POLICY = `(version 1)
 (allow ipc-posix-shm-write-create)
 (allow ipc-posix-shm-write-unlink)
 (allow ipc-posix-sem)
-(allow ipc-posix-sysv*)
 (allow mach-lookup
   (global-name "com.apple.system.opendirectoryd.libinfo")
   (global-name "com.apple.PowerManagement.control"))`;
