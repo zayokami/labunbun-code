@@ -96,7 +96,7 @@ function openAIPricing(input: number, output: number, cacheRead: number): ModelP
  * a non-Anthropic host had no constructor to call.
  *
  * It takes no `thinkingBlockBinding`. The flag and its beta header travel
- * together, to the two models that run the check, and a gateway in front of
+ * together, to the three models that run the check, and a gateway in front of
  * those models is not evidence that it forwards either one; naming a model here
  * would send a parameter whose handling on the far side is unknown.
  */
@@ -234,14 +234,14 @@ function openAICompatModel(
  * sufficient, and each is wrong on its own: the gateway proves which ids can be
  * called and publishes no price and no limit; models.dev states the money and
  * the sizes but is hand-edited and drifts in both directions. The gateway serves
- * 82 ids on Zen against the 77 priced here, and 43 on Go against 29 — while every
+ * 83 ids on Zen against the 78 priced here, and 43 on Go against 29 — while every
  * priced, undeprecated entry is served, so nothing we can state has been left
  * out. The ids the gateway serves that models.dev does not price are named at the
  * foot of this comment rather than guessed at.
  *
  * Nothing here is routed through `openAIPricing`, whose `cacheWrite` is derived
- * at 1.25x input. The gateway publishes a write rate for 29 of these 106 rows and
- * states no rate at all for 74 of the rest, and the read rates are not a fixed
+ * at 1.25x input. The gateway publishes a write rate for 30 of these 107 rows and
+ * states no rate at all for 77 of the rest, and the read rates are not a fixed
  * multiple of input either: `qwen3.8-flash` reads at 0.016 against an input of
  * 0.15, which is 0.107x, while `qwen3.8-max` beside it reads at exactly 0.125x. A
  * derived figure would land close enough to pass review and wrong in the channel
@@ -363,6 +363,19 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 	[
 		"claude-sonnet-5",
 		"Claude Sonnet 5",
+		1_000_000,
+		128_000,
+		{ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+		true,
+	],
+	// Added 2026-09-29, the day after it shipped. The gateway lists it and
+	// models.dev prices it at the same figures as its own predecessor, which is
+	// also the vendor's — three sources agreeing is why this row is a copy rather
+	// than a derivation. It is the first row here added on a re-check of the
+	// listing rather than on the 09-28 sweep the rest of the table was taken on.
+	[
+		"claude-sonnet-5-5",
+		"Claude Sonnet 5.5",
 		1_000_000,
 		128_000,
 		{ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
@@ -887,7 +900,8 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
  * a date on this line means "as of", not "covers every row below it". Rows added
  * between sweeps name a later date in their own comment: `claude-opus-5-5`
  * (2026-09-23); `gpt-6-sol` / `gpt-6-luna`, `glm-5.3-flashx` and the five
- * MiniMax rows (2026-09-27). The 09-27 sweep changed prices on no existing row;
+ * MiniMax rows (2026-09-27); `claude-sonnet-5-5` (2026-09-29).
+ * The 09-27 sweep changed prices on no existing row;
  * it added those eight and re-confirmed the rest, including the DeepSeek v4-pro
  * and Kimi K2.6 rows that third-party aggregators were reporting as changed.
  * Anthropic's
@@ -896,7 +910,7 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
  * number is where a table like this goes stale first (Sonnet 5 is $2/$10 — the
  * increase to $3/$15 that was scheduled for 2026-09-01 was cancelled).
  *
- * The 106 rows above are the exception to "the vendor's own page", and they say
+ * The 107 rows above are the exception to "the vendor's own page", and they say
  * so. They are a gateway's, and a gateway has no price list of its own: what it
  * resells is priced by the resellers, so the figures are a third-party
  * catalogue's, taken 2026-09-28 and checked against what the gateway will
@@ -943,7 +957,7 @@ const BUILT_IN_MODELS: Model[] = [
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
-		// One of the two models whose thinking blocks are checked against the
+		// One of the three models whose thinking blocks are checked against the
 		// conversation that produced them; see `thinkingBlockBinding`.
 		thinkingBlockBinding: true,
 		// The 0.05x cache-read regime, between the 0.025x pair below and the
@@ -954,8 +968,8 @@ const BUILT_IN_MODELS: Model[] = [
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
-		// The other. Mythos 5.1 records the same signatures but runs no such check,
-		// so it is deliberately not flagged.
+		// One of the other two. Mythos 5.1 records the same signatures but runs no
+		// such check, so it is deliberately not flagged.
 		thinkingBlockBinding: true,
 		// One of the two rows whose cache reads are not a tenth of input.
 		pricing: anthropicPricing(10, 50, 0.025),
@@ -1007,6 +1021,26 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
 		pricing: anthropicPricing(5, 25),
+	}),
+	// Sonnet 5.5, checked against the vendor's own model page on 2026-09-29, the
+	// day after it shipped. Two facts here are read rather than carried over, and
+	// the flag is the one that must be: its breaking-change list says the API
+	// checks a replayed thinking block against the conversation that produced it,
+	// enforced by default for accounts created on or after 2026-08-31, so it runs
+	// the check the pair above runs and belongs beside them. It is not inferred
+	// from "the newest model" — Mythos 5.1 is newer than the pair and runs none.
+	//
+	// The price is unchanged from Sonnet 5, and the vendor, models.dev's `anthropic`
+	// entry and models.dev's `opencode` entry all say the same four figures, so
+	// this is a copy of an agreement rather than a derivation. Its own default
+	// effort is `high`, which is what we send for a session that asked for nothing.
+	anthropicModel("claude-sonnet-5-5", "Claude Sonnet 5.5", {
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
+		// The third model that runs the prefix check. See `thinkingBlockBinding`.
+		thinkingBlockBinding: true,
+		pricing: anthropicPricing(2, 10),
 	}),
 	anthropicModel("claude-sonnet-5", "Claude Sonnet 5", {
 		contextWindow: 1_000_000,
@@ -1268,7 +1302,7 @@ const BUILT_IN_MODELS: Model[] = [
 	// OpenCode, last. Two plans, two wires, four provider ids, from the two
 	// transcriptions above: a gateway is not a vendor, so one plan on one wire is
 	// one provider, and the base URL is the only thing that distinguishes them.
-	// Writing these out as four separate call sites would be 106 rows that differ
+	// Writing these out as four separate call sites would be 107 rows that differ
 	// in one string each, and the copy that drifted.
 	//
 	// `reasoning: false` on every one of them, and the reason is a model that is

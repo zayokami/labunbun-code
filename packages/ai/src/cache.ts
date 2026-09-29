@@ -94,7 +94,9 @@ const UNKNOWN: CacheCapability = {
  * The shortest prefix each Anthropic model will cache, as documented.
  *
  * A table rather than a family rule, because the spread is not something a rule
- * can express: 512 tokens on Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5. The
+ * can express: 512 tokens on Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5 — and
+ * 512 again on Sonnet 5.5, which is a floor that went *down* inside a family
+ * whose rows are prefixes of one another. The
  * earlier "the Haiku family needs twice as much" inference got both ends wrong —
  * it refused to mark short prefixes that current models cache happily, and it
  * marked Haiku prefixes half the size of what Haiku accepts, which the provider
@@ -105,6 +107,12 @@ const UNKNOWN: CacheCapability = {
  * `claude-opus-4` or an Opus 4.5 request is held to the wrong floor.
  */
 const ANTHROPIC_MIN_PREFIX: ReadonlyArray<readonly [RegExp, number]> = [
+	// Ahead of the Sonnet 5 row below, and the reason the ordering note exists in
+	// its sharpest form: a *newer* model in a family whose floor went **down**.
+	// Sonnet 5.5 caches from 512 where Sonnet 5 needs 1024, so the row that
+	// matches both is the one that would be wrong, and inheriting it is the
+	// expensive direction — see the note on `ANTHROPIC_UNKNOWN_MIN`.
+	[/^claude-sonnet-5-5/, 512],
 	[/^claude-fable-5-1/, 512],
 	[/^claude-mythos-5-1/, 512],
 	[/^claude-opus-5/, 512],

@@ -51,6 +51,7 @@ describe("cacheCapability", () => {
 		const floor = (id: string) => cacheCapability(model({ id })).minPrefixTokens;
 		expect(floor("claude-opus-5")).toBe(512);
 		expect(floor("claude-sonnet-5")).toBe(1024);
+		expect(floor("claude-sonnet-5-5")).toBe(512);
 		expect(floor("claude-opus-4-7")).toBe(2048);
 		expect(floor("claude-haiku-4-5")).toBe(4096);
 		expect(floor("claude-3-5-haiku-latest")).toBe(2048);
@@ -69,6 +70,13 @@ describe("cacheCapability", () => {
 		expect(floor("claude-opus-4-6")).toBe(4096);
 		expect(floor("claude-opus-4")).toBe(1024);
 		expect(floor("claude-opus-4-8")).toBe(1024);
+		// The same trap with the stakes reversed: the newer model in the family
+		// needs *less*, so the row that matches both ids is the wrong one and
+		// inheriting it forfeits every hit without an error to explain it. This
+		// assertion is why `claude-sonnet-5-5` has a row of its own rather than
+		// riding on the `claude-sonnet-5` pattern.
+		expect(floor("claude-sonnet-5")).toBe(1024);
+		expect(floor("claude-sonnet-5-5")).toBe(512);
 	});
 
 	test("an unrecognised Anthropic model gets the lowest documented floor", () => {

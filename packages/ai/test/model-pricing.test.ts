@@ -85,6 +85,7 @@ const BUILT_IN_REFS = [
 	"anthropic/claude-opus-4-8",
 	"anthropic/claude-opus-4-7",
 	"anthropic/claude-opus-4-6",
+	"anthropic/claude-sonnet-5-5",
 	"anthropic/claude-sonnet-5",
 	"anthropic/claude-sonnet-4-6",
 	"anthropic/claude-haiku-4-5",
@@ -113,12 +114,13 @@ const BUILT_IN_REFS = [
 	"minimax/minimax-m2.7-highspeed",
 	"minimax/minimax-m2.5",
 	"minimax/minimax-m2.5-highspeed",
-	// OpenCode: 77 Zen rows and 29 Go rows, each on both wires — 212 references,
+	// OpenCode: 78 Zen rows and 29 Go rows, each on both wires — 214 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
 	// pairs below show: `deepseek-v4-pro` is 1.74/3.84 on Zen and 0.66/1.98 on Go,
 	// and `grok-4.7` runs the other way at 1.4/4.2 against 2/6. Swept 2026-09-28
-	// from models.dev, filtered against the gateway's own model listing.
+	// from models.dev, filtered against the gateway's own model listing, plus
+	// `claude-sonnet-5-5` added 2026-09-29 on a re-check of both halves.
 	"opencode-zen/big-pickle",
 	"opencode-zen/claude-fable-5",
 	"opencode-zen/claude-fable-5-1",
@@ -133,6 +135,7 @@ const BUILT_IN_REFS = [
 	"opencode-zen/claude-sonnet-4-5",
 	"opencode-zen/claude-sonnet-4-6",
 	"opencode-zen/claude-sonnet-5",
+	"opencode-zen/claude-sonnet-5-5",
 	"opencode-zen/deepseek-v4-flash",
 	"opencode-zen/deepseek-v4-flash-vision-exp",
 	"opencode-zen/deepseek-v4-pro",
@@ -239,6 +242,7 @@ const BUILT_IN_REFS = [
 	"opencode-zen-oai/claude-sonnet-4-5",
 	"opencode-zen-oai/claude-sonnet-4-6",
 	"opencode-zen-oai/claude-sonnet-5",
+	"opencode-zen-oai/claude-sonnet-5-5",
 	"opencode-zen-oai/deepseek-v4-flash",
 	"opencode-zen-oai/deepseek-v4-flash-vision-exp",
 	"opencode-zen-oai/deepseek-v4-pro",
@@ -419,6 +423,16 @@ describe("the built-in catalog", () => {
 			cacheRead: 0.3,
 			cacheWrite: 3.75,
 		});
+		// Sonnet 5.5 launched at the same four figures as the row below it, and the
+		// vendor page, models.dev's `anthropic` entry and its `opencode` entry all
+		// agree — so the cache channel here is the standard tenth and the 1.25x,
+		// which is what the row's `anthropicPricing(2, 10)` spells out.
+		expect(resolveModel("anthropic/claude-sonnet-5-5")?.pricing).toEqual({
+			input: 2,
+			output: 10,
+			cacheRead: 0.2,
+			cacheWrite: 2.5,
+		});
 		// $2/$10 is the standard price, not an introductory one: the increase to
 		// $3/$15 that was scheduled for 2026-09-01 was cancelled.
 		expect(resolveModel("anthropic/claude-sonnet-5")?.pricing).toEqual({
@@ -456,6 +470,7 @@ describe("the built-in catalog", () => {
 			["anthropic/claude-opus-4-8", "adaptive"],
 			["anthropic/claude-opus-4-7", "adaptive"],
 			["anthropic/claude-opus-4-6", "adaptive"],
+			["anthropic/claude-sonnet-5-5", "adaptive"],
 			["anthropic/claude-sonnet-5", "adaptive"],
 			["anthropic/claude-sonnet-4-6", "adaptive"],
 			["anthropic/claude-haiku-4-5", "extended"],
@@ -466,9 +481,11 @@ describe("the built-in catalog", () => {
 		// The parameter the adapter sends on their behalf is one the API rejects on
 		// a model that runs no such check, so this flag is not a tier: Mythos 5.1
 		// records the same signatures as Fable 5.1 and runs no check, and is
-		// deliberately absent.
+		// deliberately absent. Sonnet 5.5 joins the two that do run it — its own
+		// release notes say the check is enforced by default on accounts created
+		// from 2026-08-31, which is a different reason from "it is the newest".
 		const flagged = BUILT_IN_REFS.filter((ref) => resolveModel(ref)?.thinkingBlockBinding);
-		expect(flagged).toEqual(["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1"]);
+		expect(flagged).toEqual(["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1", "anthropic/claude-sonnet-5-5"]);
 	});
 
 	test("the models that need an effort of their own when tools are on are named", () => {
@@ -608,6 +625,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen/claude-sonnet-4-5", 3, 15, 0.3, 3.75],
 			["opencode-zen/claude-sonnet-4-6", 3, 15, 0.3, 3.75],
 			["opencode-zen/claude-sonnet-5", 2, 10, 0.2, 2.5],
+			["opencode-zen/claude-sonnet-5-5", 2, 10, 0.2, 2.5],
 			["opencode-zen/deepseek-v4-flash", 0.14, 0.28, 0.028, 0],
 			["opencode-zen/deepseek-v4-flash-vision-exp", 0.14, 0.28, 0.028, 0],
 			["opencode-zen/deepseek-v4-pro", 1.74, 3.84, 0.145, 0],
@@ -714,6 +732,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/claude-sonnet-4-5", 3, 15, 0.3, 3.75],
 			["opencode-zen-oai/claude-sonnet-4-6", 3, 15, 0.3, 3.75],
 			["opencode-zen-oai/claude-sonnet-5", 2, 10, 0.2, 2.5],
+			["opencode-zen-oai/claude-sonnet-5-5", 2, 10, 0.2, 2.5],
 			["opencode-zen-oai/deepseek-v4-flash", 0.14, 0.28, 0.028, 0],
 			["opencode-zen-oai/deepseek-v4-flash-vision-exp", 0.14, 0.28, 0.028, 0],
 			["opencode-zen-oai/deepseek-v4-pro", 1.74, 3.84, 0.145, 0],
@@ -828,6 +847,7 @@ describe("the built-in catalog", () => {
 			["anthropic/claude-opus-4-8", 1_000_000, 128_000],
 			["anthropic/claude-opus-4-7", 1_000_000, 128_000],
 			["anthropic/claude-opus-4-6", 1_000_000, 128_000],
+			["anthropic/claude-sonnet-5-5", 1_000_000, 128_000],
 			["anthropic/claude-sonnet-5", 1_000_000, 128_000],
 			["anthropic/claude-sonnet-4-6", 1_000_000, 128_000],
 			["anthropic/claude-haiku-4-5", 200_000, 64_000],
@@ -880,6 +900,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen/claude-sonnet-4-5", 1_000_000, 64_000],
 			["opencode-zen/claude-sonnet-4-6", 1_000_000, 64_000],
 			["opencode-zen/claude-sonnet-5", 1_000_000, 128_000],
+			["opencode-zen/claude-sonnet-5-5", 1_000_000, 128_000],
 			["opencode-zen/deepseek-v4-flash", 1_000_000, 384_000],
 			["opencode-zen/deepseek-v4-flash-vision-exp", 1_000_000, 384_000],
 			["opencode-zen/deepseek-v4-pro", 1_000_000, 384_000],
@@ -986,6 +1007,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/claude-sonnet-4-5", 1_000_000, 64_000],
 			["opencode-zen-oai/claude-sonnet-4-6", 1_000_000, 64_000],
 			["opencode-zen-oai/claude-sonnet-5", 1_000_000, 128_000],
+			["opencode-zen-oai/claude-sonnet-5-5", 1_000_000, 128_000],
 			["opencode-zen-oai/deepseek-v4-flash", 1_000_000, 384_000],
 			["opencode-zen-oai/deepseek-v4-flash-vision-exp", 1_000_000, 384_000],
 			["opencode-zen-oai/deepseek-v4-pro", 1_000_000, 384_000],
@@ -1098,7 +1120,7 @@ describe("the built-in catalog", () => {
 		// rows below are the ones whose vendor published an effort vocabulary, and
 		// the resellers are the ones whose vendor published nothing about thinking
 		// at all. Both are right to say "not medium", for reasons that have nothing
-		// to do with each other, and the second group is 212 rows long — a third of
+		// to do with each other, and the second group is 214 rows long — a third of
 		// the catalog — which would bury the first. The gateway rows are held by
 		// the assertion directly below, which is exhaustive over the same set.
 		const alwaysThinking = BUILT_IN_REFS.filter((ref) => !resolveModel(ref)?.reasoning && !isReseller(ref));
@@ -1139,7 +1161,7 @@ describe("the built-in catalog", () => {
 		// without the flag set is a 400 on its first request, and nothing else in
 		// the suite would notice.
 		const gateway = BUILT_IN_REFS.filter(isReseller);
-		expect(gateway).toHaveLength(212);
+		expect(gateway).toHaveLength(214);
 		expect(gateway.filter((ref) => resolveModel(ref)?.reasoning)).toEqual([]);
 		// And none of them claims a thinking shape either, for the same reason:
 		// the shape is what the 400 is about.
@@ -1370,7 +1392,7 @@ describe("ids that were retired", () => {
 		// `openAICompatModel` grew an `images` flag for the gateway, and nothing
 		// else in the catalog has to say this: every first-party row on that wire is
 		// a text model, and the two that could take an image are reached by their
-		// own native client. So 44 of 212 rows are the only place the claim lives,
+		// own native client. So 44 of 214 rows are the only place the claim lives,
 		// and before this one nothing in the suite could see it — flipping `false`
 		// to `true` on any row was a silent edit.
 		//
@@ -1405,12 +1427,12 @@ describe("ids that were retired", () => {
 			"nemotron-3-ultra-free",
 			"nemotron-3.5-lightning-free",
 		]);
-		// 44 of 212: 13 Zen rows and 9 Go rows, each on both wires. Asserted as a
+		// 44 of 214: 13 Zen rows and 9 Go rows, each on both wires. Asserted as a
 		// count rather than derived, so a row that silently joins the list below
 		// cannot do it by also quietly leaving it here.
 		const rows = BUILT_IN_REFS.filter(isReseller);
 		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 1)).toHaveLength(44);
-		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(168);
+		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(170);
 		// The two wires agree about the model, which is a check on the *tuple*
 		// being shared rather than transcribed twice — a per-wire table could
 		// disagree and both halves would look right.
@@ -1449,7 +1471,7 @@ describe("ids that were retired", () => {
 		expect(resolveModel("deepseek-v4-pro")?.provider).toBe("deepseek");
 		expect(resolveModel("kimi-k3")?.provider).toBe("kimi");
 		// Exhaustive, and about the right thing: no bare id may *land on* a gateway
-		// row. Most of the 212 do resolve bare — to the vendor that makes the model
+		// row. Most of the 214 do resolve bare — to the vendor that makes the model
 		// — which is the rule working, not the rule failing, so the check is on
 		// where the resolution goes rather than on whether one happens. A fifth
 		// gateway added to the table without a decision here fails this.

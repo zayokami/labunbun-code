@@ -48,7 +48,8 @@ const HAIKU: Model = {
 	thinkingMode: "extended",
 };
 
-/** The two models whose thinking blocks are checked against their conversation. */
+/** A model whose thinking blocks are checked against their conversation. The set
+ * of them is pinned in `model-pricing.test.ts`; this stands for the behaviour. */
 const BINDING_MODEL: Model = { ...MODEL, id: "claude-opus-5-5", thinkingBlockBinding: true };
 
 function ctx(overrides: Partial<Context> = {}): Context {
@@ -148,7 +149,7 @@ describe("buildAnthropicRequest", () => {
 // ---------------------------------------------------------------------------
 
 describe("thinking-block binding", () => {
-	test("the beta header goes to the two models that run the check, and no others", () => {
+	test("the beta header goes to the models that run the check, and no others", () => {
 		// Spelled out rather than compared to itself: a wrong beta name is a 400,
 		// and the tests below use the constant on both sides.
 		expect(THINKING_BLOCK_BINDING_BETA).toBe("thinking-binding-controls-2026-08-01");
