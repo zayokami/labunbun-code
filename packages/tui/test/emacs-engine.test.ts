@@ -107,10 +107,19 @@ function pressToken(e: ReturnType<typeof editor>, token: string): boolean {
  * `C-x` then a member of `ctl-x-map`, which is how every `C-x` command is reached.
  *
  * The member is spelled the way {@link CTL_X_RESERVED} spells it — a *raw* key spelling, because
- * that is what the dispatch compares — so `C-x u` is `pressCtlX(e, "C-u")` and not `"u"`. The two
- * reserved tables do not agree on spelling: `RESERVED_KEYS` is keyed by `emacsKeyToken`, so a
- * ctrl+meta key there is `C-M-t`, while `CTL_X_RESERVED` holds `t` and `C-@` as themselves. One
- * of the two spellings was already wrong in `emacs.ts` for the same reason.
+ * that is what the dispatch compares — so the reserved members (`t`, `C-@`, ` `) and the
+ * implemented ones (`C-x`, `u`) come out of two vocabularies on purpose. The two reserved tables
+ * do not agree on spelling either: `RESERVED_KEYS` is keyed by `emacsKeyToken`, so a ctrl+meta key
+ * there is `C-M-t`, while `CTL_X_RESERVED` holds `t` and `C-@` as themselves.
+ *
+ * This doc used to assert the opposite for one member, and it is worth recording why it was wrong
+ * rather than quietly restating it. It said `C-x u` is `pressCtlX(e, "C-u")` "and not `\"u\"`",
+ * on the grounds that a bare `u` "would type a literal `u` into the prompt". It would have — the
+ * dispatch compared `key.ctrl && input === "u"`, so the modifier *was* the member and the binding
+ * string in `bindings.el:1246` was being overridden by a test helper's spelling of it. A fixture
+ * that names a key the way the code compares it cannot notice when the comparison is the thing
+ * that is wrong. `C-x u` is `pressCtlX(e, "u")`, and there is a test below that presses the raw
+ * `C-x C-u` and gets nothing.
  */
 function pressCtlX(e: ReturnType<typeof editor>, member: string): boolean {
 	e.press("x", C);
@@ -962,7 +971,7 @@ describe("emacs: undo", () => {
 		e.press("k", C);
 		expect(e.state.text).toBe("abcdefgh");
 		e.press("x", C);
-		expect(e.press("u", C)).toBe(true);
+		expect(e.press("u")).toBe(true);
 		expect(e.state.text).toBe("abc\ndefgh");
 		expect(e.state.cursor).toBe(3);
 		// One entry gone from the host's stack, which is the only stack there is.
@@ -979,7 +988,7 @@ describe("emacs: undo", () => {
 		e.press("k", C);
 		expect(e.engine.killRing).toEqual(["ab"]);
 		e.press("x", C);
-		e.press("u", C);
+		e.press("u");
 		expect(e.engine.lastCommand).toBe("undo");
 		// Onto the second line, whose text the first kill left alone.
 		e.repeat(3, "f", C);
@@ -996,7 +1005,7 @@ describe("emacs: undo", () => {
 		const e = editor("ab\ncd", 0);
 		e.press("k", C);
 		e.press("x", C);
-		e.press("u", C);
+		e.press("u");
 		expect(e.state.text).toBe("ab\ncd");
 		e.press("y", C);
 		expect(e.state.text).toBe("abab\ncd");
@@ -1022,7 +1031,7 @@ describe("emacs: undo", () => {
 		expect(e.engine.markActive).toBe(true);
 		expect(e.undoDepth()).toBe(0);
 		e.press("x", C);
-		e.press("u", C);
+		e.press("u");
 		expect(e.state.text).toBe("abcdef");
 		// The mark's *number* survives; the region does not come back with it.
 		expect(e.engine.mark).toBe(0);
@@ -1043,7 +1052,7 @@ describe("emacs: undo", () => {
 		expect(e.state.text).toBe("zab\ncd");
 		expect(e.engine.lastCommand).toBeNull();
 		e.press("x", C);
-		e.press("u", C);
+		e.press("u");
 		expect(e.engine.lastCommand).toBe("undo");
 		// And the key after is read on its own evidence: the next real edit is recorded as
 		// itself rather than continuing a self-insert the undo already closed.
@@ -1070,7 +1079,7 @@ describe("emacs: undo", () => {
 		e.press("u", C);
 		expect(e.engine.prefixArg).toEqual({ car: 4, cdr: [] });
 		e.press("x", C);
-		e.press("u", C);
+		e.press("u");
 		expect(e.state.text).toBe("bcdefghij");
 		expect(e.undoDepth()).toBe(1);
 		// Sixteen, with one entry left to undo: the count is honoured and the stack stops it.
@@ -1078,7 +1087,7 @@ describe("emacs: undo", () => {
 		e.press("u", C);
 		expect(e.engine.prefixArg).toEqual({ car: 16, cdr: [] });
 		e.press("x", C);
-		e.press("u", C);
+		e.press("u");
 		expect(e.state.text).toBe("abcdefghij");
 		expect(e.undoDepth()).toBe(0);
 	});
@@ -1090,7 +1099,7 @@ describe("emacs: undo", () => {
 		// `C-x u` that fell through would type a `u` into the prompt.
 		const e = editor("abc", 0);
 		expect(e.press("x", C)).toBe(true);
-		expect(e.press("u", C)).toBe(true);
+		expect(e.press("u")).toBe(true);
 		expect(e.state.text).toBe("abc");
 		expect(e.engine.lastCommand).toBe("undo");
 	});
@@ -1109,7 +1118,7 @@ describe("emacs: undo", () => {
 		expect(e.state.cursor).toBe(2);
 		expect(e.undoDepth()).toBe(1);
 		e.press("x", C);
-		e.press("u", C);
+		e.press("u");
 		expect(e.state.text).toBe("abc");
 		expect(e.state.cursor).toBe(0);
 	});
@@ -1240,12 +1249,47 @@ describe("emacs: the reserved tables", () => {
 		expect(pressCtlX(e, "C-x")).toBe(true);
 		expect(e.state.cursor).toBe(0);
 		expect(e.state.text).toBe("bc");
-		// `C-u`, not `u`: the two tables spell their keys differently and a helper that took one
-		// spelling for both would type a literal `u` into the prompt instead of undoing. The
-		// reserved table holds *raw* key spellings (`t`, `C-@`, ` `) because that is what
-		// `#handleCtlX` compares; the implemented members are named the way the key is written.
-		expect(pressCtlX(e, "C-u")).toBe(true);
+		// And `C-x u` is the *bare* `u`: `bindings.el:1246` binds the literal character, so a
+		// fixture that spelled the member `C-u` would be testing the modifier the binding does
+		// not have. That is not a hypothetical — this line was `pressCtlX(e, "C-u")` and passed
+		// for the whole life of a dispatch that compared `key.ctrl && input === "u"`.
+		expect(pressCtlX(e, "u")).toBe(true);
 		expect(e.state.text).toBe("abc");
+	});
+
+	/**
+	 * The negative half of the assertion above, and the reason the fix was not "accept both".
+	 *
+	 * `C-x C-u` is `upcase-region` (`subr.el:1748`), not undo. It is a different command, and one
+	 * that is `disabled` at that binding so Emacs asks before running it. The engine implements
+	 * neither, so the only honest answer is the one every other unbound member gets: consumed,
+	 * nothing run. What this pins is the *distinction* — the two sequences differ by one modifier
+	 * and must not both undo, because a key that means "uppercase the region" undoing is a lie
+	 * about what the key does, and the buffer here is one where a reader would never notice.
+	 *
+	 * `lastCommand` going null is load-bearing rather than incidental: it is what breaks the kill
+	 * chain (`#ctlXPending`'s own comment), so an implementation that quietly ran undo would
+	 * show up here as a *surviving* ring.
+	 */
+	test("C-x C-u is upcase-region, which is not implemented, so it runs nothing", () => {
+		// Deliberately the same fixture as the `C-x u` test above, one modifier apart, so the two
+		// cannot both be right: that one undoes the kill and reads a joined ring, this one does
+		// neither.
+		const e = editor("ab\ncd", 0);
+		e.press("k", C);
+		expect(e.engine.killRing).toEqual(["ab"]);
+		expect(e.state.text).toBe("\ncd");
+		e.press("x", C);
+		expect(e.press("u", C)).toBe(true); // C-x C-u
+		expect(e.engine.lastCommand).toBeNull();
+		// No undo: the kill above is still gone from the buffer and nothing came back.
+		expect(e.state.text).toBe("\ncd");
+		// And the chain broke, so the next kill opens a new ring entry — the same `["cd", "ab"]`
+		// shape the `C-x u` test ends on, reached without an undo having run.
+		e.repeat(2, "f", C);
+		e.press("k", C);
+		expect(e.state.text).toBe("\nc");
+		expect(e.engine.killRing).toEqual(["d", "ab"]);
 	});
 });
 

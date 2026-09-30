@@ -967,9 +967,19 @@ export class EmacsEngine {
 			// the prompt, and no command runs — which is what `this_command` = `Qnil` means
 			// (`src/keyboard.c:1416`), and `last-command` becomes `nil`, breaking a kill chain
 			// and re-seeding the goal column exactly as any other non-kill command would.
+			//
+			// `u` is compared as a bare character because that is the member: the binding string
+			// carries no modifier (`bindings.el:1246`). The ctrl test that used to stand here made
+			// `C-x C-u` the spelling that worked while every other mention of this sequence
+			// already said `C-x u` — the field comment on `#ctlXPending`, the row in
+			// `shortcuts.ts`, and the tests named after it. What `C-x C-u` can *mean* is
+			// `upcase-region` (`subr.el:1748`), a different command, and one that is `disabled`
+			// there so it asks before it runs. It is not implemented here, and calling it undo
+			// would put undo on a key that means "uppercase the region" — the lie `shortcuts.ts`
+			// is written to prevent, one layer down. So it falls to the read-and-dropped line.
 			this.#ctlXPending = false;
 			if (key.ctrl && input === "x") return this.#exchangePointAndMark();
-			if (key.ctrl && input === "u") return this.#undo();
+			if (input === "u" && !key.ctrl && !key.meta) return this.#undo();
 			this.#commit = true;
 			return true;
 		}

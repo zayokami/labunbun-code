@@ -791,7 +791,16 @@ export function REPL({
 					onToggleHelp={() => setShortcutsOpen(true)}
 					commandSuggestions={commandSuggestions}
 					completeFiles={completeFiles}
+					// The prompt is the only thing that constructs an editor engine, so this
+					// prop is the whole of what `/emacs on` does to typing — and it was the one
+					// prop the REPL did not pass. `/emacs` wrote the settings file, and `/help`
+					// and the `?` overlay went on saying "Emacs" from `resolveEditingMode`,
+					// while every key on the list they print (`C-a`, `C-k`, `M-f`, …) did
+					// nothing at all in the buffer: an engine that was never built cannot
+					// claim them. A key list describing an engine that does not exist is the
+					// failure `shortcuts.ts` is written to prevent, one layer up.
 					vim={vim}
+					emacs={emacs}
 					history={history}
 					escapeRef={escapeRef}
 					busy={busy}
