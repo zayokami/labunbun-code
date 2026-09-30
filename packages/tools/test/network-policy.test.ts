@@ -15,6 +15,7 @@ import {
 	decideNetworkRequest,
 	describeNetworkPolicy,
 	domainMatches,
+	isBlockedAddress,
 	matchDomainRule,
 	type NetworkConfinement,
 	type NetworkDomainRule,
@@ -119,19 +120,104 @@ describe("an address has more spellings than a hostname does", () => {
 		"2001:db8::1",
 		"2001:0db8:0000:0000:0000:0000:0000:0001",
 		"registry.npmjs.org",
-		"localhost",
 	])("a deny rule for loopback does NOT reach %s", (host) => {
 		// The other half, and the one that keeps the first from being satisfied by a
 		// matcher that refuses everything. Loopback is the only range where the
 		// families merge: `10.0.0.1` and `fd00::1` are not interchangeable, and a
 		// deny that covered both would be covering addresses nobody named.
-		//
-		// `localhost` is here deliberately. It is a *name*, not an address; where it
-		// points is the resolver's business and not this table's, so a user who
-		// wants it stopped writes it. Asserting it here is what stops someone later
-		// "fixing" this by resolving names, which would be a far larger change than
-		// the one it would appear to be.
 		expect(decideNetworkRequest(deny("127.0.0.1"), host, "enabled")).toEqual({ allowed: true });
+	});
+
+	describe("the reserved name is loopback, and knowing that costs no lookup", () => {
+		// This table used to assert the opposite, on the reasoning that where a *name*
+		// points is the resolver's business. Measured, that cost exactly the thing it
+		// was meant to protect: with `allow *` and `deny 127.0.0.1` in force, every
+		// loopback spelling was refused and `localhost` was permitted — the spelling a
+		// user is most likely to actually type. RFC 6761 §6.3 reserves `localhost` and
+		// its subdomains to loopback, so placing the name needs no DNS, and this must
+		// not grow one: resolving would make a pure matcher impure and re-open the gap
+		// that check-then-resolve leaves, where the name is judged once and connected
+		// to on a second lookup.
+		test.each(["localhost", "LOCALHOST", "localhost.", "foo.localhost", "a.b.localhost"])(
+			"a deny rule for loopback reaches the reserved name %s",
+			(host) => {
+				expect(decideNetworkRequest(deny("127.0.0.1"), host, "enabled")).toEqual({
+					allowed: false,
+					reason: "domain_denied",
+				});
+			},
+		);
+
+		// The direction that matters most, and the one the table above cannot see: a
+		// broad allow must not become a way round a deny the user wrote. `allow *` is
+		// what a real config carries, and under it the default is allow — so without
+		// this, everything above would also pass on a matcher that merged the families
+		// only in the one mode where a deny was already the answer.
+		test("an allow-* rule does not reopen loopback that a deny closed", () => {
+			const rules: NetworkDomainRule[] = [
+				{ pattern: "*", permission: "allow" },
+				{ pattern: "127.0.0.1", permission: "deny" },
+			];
+			expect(decideNetworkRequest(rules, "127.0.0.1", "restricted").allowed).toBe(false);
+			expect(decideNetworkRequest(rules, "localhost", "restricted").allowed).toBe(false);
+
+			// The control, and it earns its place: this harness can tell a deny from an
+			// allow at all. An earlier version of this work asserted the two lines above
+			// under `restricted` with no allow rule present, where *everything* is denied
+			// — so it read as proof while measuring nothing.
+			const control: NetworkDomainRule[] = [
+				{ pattern: "*", permission: "allow" },
+				{ pattern: "evil.example", permission: "deny" },
+			];
+			expect(decideNetworkRequest(control, "evil.example", "restricted").allowed).toBe(false);
+			expect(decideNetworkRequest(control, "good.example", "restricted").allowed).toBe(true);
+		});
+	});
+
+	describe("one blocklist, reached from both halves of the repo", () => {
+		// Moved out of `web.ts` into this package. The copy that was there unwrapped
+		// `::ffff:` into its dotted tail, which answers for `::ffff:127.0.0.1` and not
+		// for `::ffff:7f00:1` — the same address in the spelling the canonicaliser
+		// produces. A comment here claimed the two halves agreed while measurement said
+		// the `web.ts` one answered false for the hex form.
+		test.each([
+			"127.0.0.1",
+			"::1",
+			// Uncompressed loopback: only the fully-compressed `::1` used to match.
+			"0:0:0:0:0:0:0:1",
+			"10.0.0.1",
+			"172.16.0.1",
+			"192.168.1.1",
+			"169.254.169.254",
+			"fe80::1",
+			"fd00::1",
+			// The mapped forms, both spellings. The hex ones are what the moved copy
+			// missed and are the reason the table is pinned at all.
+			"::ffff:127.0.0.1",
+			"::ffff:7f00:1",
+			"::ffff:a00:1",
+			"::ffff:c0a8:101",
+			"::ffff:a9fe:a9fe",
+			"0:0:0:0:0:ffff:7f00:1",
+		])("isBlockedAddress refuses %s", (address) => {
+			expect(isBlockedAddress(address)).toBe(true);
+		});
+
+		test.each(["8.8.8.8", "2001:db8::1", "203.0.113.10"])(
+			"isBlockedAddress does not refuse the public address %s",
+			(address) => {
+				expect(isBlockedAddress(address)).toBe(false);
+			},
+		);
+
+		test("isBlockedAddress answers about addresses only, and says no to a name", () => {
+			// A name is not blocked by a table, it is *resolved* by the caller and every
+			// address that comes back is passed through here. `localhost` is refused by
+			// rule one layer up instead, because its placement is a property of the name.
+			// Asserting both keeps the two questions from drifting into one wrong answer.
+			expect(isBlockedAddress("localhost")).toBe(false);
+			expect(isBlockedAddress("example.com")).toBe(false);
+		});
 	});
 
 	test.each([

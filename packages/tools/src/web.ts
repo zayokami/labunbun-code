@@ -13,7 +13,14 @@
 
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { type AnyTool, buildTool, decideNetworkRequest, type NetworkAxis, normalizeHost } from "@labunbun/agent";
+import {
+	type AnyTool,
+	buildTool,
+	decideNetworkRequest,
+	isBlockedAddress,
+	type NetworkAxis,
+	normalizeHost,
+} from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 
@@ -110,36 +117,6 @@ async function fetchWithTimeout(url: string, init?: RequestInit, signal?: AbortS
 		clearTimeout(timer);
 		signal?.removeEventListener("abort", onAbort);
 	}
-}
-
-/**
- * Reject fetches aimed at loopback/link-local/private ranges so a model can't
- * be steered into hitting internal services (metadata endpoints, admin panels
- * on localhost, LAN devices) via a URL it was merely asked to "read."
- */
-function isBlockedAddress(address: string): boolean {
-	const kind = isIP(address);
-	if (kind === 4) {
-		const octets = address.split(".").map(Number);
-		const [a, b] = octets;
-		if (a === 127) return true; // loopback
-		if (a === 10) return true; // private
-		if (a === 172 && b >= 16 && b <= 31) return true; // private
-		if (a === 192 && b === 168) return true; // private
-		if (a === 169 && b === 254) return true; // link-local incl. cloud metadata
-		if (a === 0) return true;
-		if (a === 100 && b >= 64 && b <= 127) return true; // shared address space (CGNAT)
-		return false;
-	}
-	if (kind === 6) {
-		const normalized = address.toLowerCase();
-		if (normalized === "::1") return true; // loopback
-		if (normalized.startsWith("fe80:")) return true; // link-local
-		if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true; // unique local
-		if (normalized.startsWith("::ffff:")) return isBlockedAddress(normalized.slice(7)); // IPv4-mapped
-		return false;
-	}
-	return false; // not a literal IP — hostname is resolved separately
 }
 
 /**

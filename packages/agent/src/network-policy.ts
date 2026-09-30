@@ -233,15 +233,21 @@ export function normalizeHost(raw: string): string {
  * treating them as one would make a deny silently cover addresses the user
  * never named — the failure mode that has the opposite sign but the same cause.
  *
+ * **The reserved name belongs here too, and leaving it out was a hole.** The
+ * first version of this function merged literals only, on the reasoning that
+ * where a *name* points is the resolver's business. Measured, that reasoning
+ * cost exactly the thing it was protecting: with `allow *` and `deny 127.0.0.1`
+ * in force, every loopback spelling was refused and `localhost` was permitted —
+ * one word, the spelling a user is most likely to actually type. `localhost`
+ * needs no resolution to place it, because RFC 6761 §6.3 reserves it and its
+ * subdomains to loopback; see {@link isLoopbackHost}.
+ *
  * Expressed through the same address the rules are matched on, so it cannot
  * disagree with {@link normalizeHost} about what a host is.
  */
 function sameIpAddress(a: string, b: string): boolean {
 	if (a === b) return true;
-	const left = canonicalIpLiteral(a);
-	const right = canonicalIpLiteral(b);
-	if (left === null || right === null) return false;
-	return isLoopbackLiteral(left) && isLoopbackLiteral(right);
+	return isLoopbackHost(a) && isLoopbackHost(b);
 }
 
 /**
@@ -250,10 +256,12 @@ function sameIpAddress(a: string, b: string): boolean {
  * **Includes IPv4-mapped IPv6.** `::ffff:127.0.0.1` and `::1` both land on the
  * loopback interface, and a deny rule that stopped the first while permitting
  * the second would be stopping a spelling rather than a destination — the same
- * defect canonicalisation exists to remove, one layer up. `web.ts`'s
- * `isBlockedAddress` has unwrapped this prefix since before the network axis
- * existed (`web.ts:139`), so the two halves of this repo now agree about which
- * literals are loopback instead of each knowing a different half of it.
+ * defect canonicalisation exists to remove, one layer up. The other half of this
+ * repo's blocklist is this same function: `web.ts` imports `isBlockedAddress`
+ * from here rather than keeping a private copy, so there is no second table for
+ * two halves to drift apart over. That was not true before this batch — the two
+ * copies had already drifted, and the comment that then stood here claimed they
+ * agreed while `isBlockedAddress("::ffff:7f00:1")` returned false.
  *
  * **Every input is already canonical**, which is why there is no dotted-form
  * handling below: `canonicalIpLiteral` reduces `::ffff:127.0.0.1` to
@@ -276,6 +284,91 @@ function isLoopbackLiteral(literal: string): boolean {
 	const groups = literal.slice("::ffff:".length).split(":");
 	if (groups.length !== 2 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return false;
 	return Number.parseInt(groups[0], 16) >> 8 === 127;
+}
+
+/**
+ * Whether a host — a name or a literal — reaches this machine's loopback.
+ *
+ * **The reserved name is included on purpose, and no lookup happens.** RFC 6761
+ * §6.3 reserves `localhost` and its subdomains to loopback and says name
+ * resolution APIs "SHOULD recognize localhost names as special"; it is a
+ * statement about the name, not a claim about one resolver's answer, so placing
+ * it needs no DNS and must not do any. Resolving here would be the wrong fix
+ * twice over: it would make a pure matcher impure, and it would re-open the gap
+ * that resolving-and-then-connecting leaves open, where the name is checked once
+ * and connected to on a second lookup.
+ *
+ * Callers pass values that {@link normalizeHost} has already lowercased and
+ * stripped of its trailing dot, so the comparison is against the reduced form.
+ */
+function isLoopbackHost(host: string): boolean {
+	if (host === "localhost" || host.endsWith(".localhost")) return true;
+	const literal = canonicalIpLiteral(host);
+	return literal !== null && isLoopbackLiteral(literal);
+}
+
+/**
+ * Whether an address literal is one this build refuses to fetch or connect to:
+ * loopback, private, link-local, or the shared and zero ranges beside them.
+ *
+ * **This used to live in `web.ts` and was moved here so there is one table.**
+ * Two copies is not tidiness — they had already drifted. The copy in `web.ts`
+ * unwrapped `::ffff:` into its dotted tail, which handles `::ffff:127.0.0.1` and
+ * not `::ffff:7f00:1`, and a comment in this file asserted the two agreed about
+ * which literals are loopback while measurement said the `web.ts` half answered
+ * false for the hex spelling. Canonicalising first is what closes that: the
+ * reduced form is the only one the range checks below ever see.
+ *
+ * Addresses only, never names. A name is not blocked by this — it is *resolved*
+ * by the caller, and every address that comes back is passed through here
+ * (`web.ts`, `guardPublicUrl`). `localhost` is refused by rule rather than by
+ * table, one layer up in {@link isLoopbackHost}, because its placement is a
+ * property of the name.
+ */
+export function isBlockedAddress(address: string): boolean {
+	const literal = canonicalIpLiteral(address);
+	if (literal === null) return false;
+
+	// An IPv4-mapped IPv6 address reaches the same interface as the IPv4 it
+	// carries, so it is handed back as dotted and one range table answers for
+	// both families. Reading the two hextets is what makes the *hex* spelling
+	// work, which the dotted-only recursion this replaces did not.
+	const mapped = embeddedIpv4(literal);
+	if (mapped !== null) return isBlockedAddress(mapped);
+
+	if (isIP(literal) === 4) {
+		const octets = literal.split(".").map(Number);
+		const [a, b] = octets;
+		if (a === 127) return true; // loopback
+		if (a === 10) return true; // private
+		if (a === 172 && b >= 16 && b <= 31) return true; // private
+		if (a === 192 && b === 168) return true; // private
+		if (a === 169 && b === 254) return true; // link-local incl. cloud metadata
+		if (a === 0) return true;
+		if (a === 100 && b >= 64 && b <= 127) return true; // shared address space (CGNAT)
+		return false;
+	}
+	const lower = literal.toLowerCase();
+	if (lower === "::1") return true; // loopback
+	if (lower.startsWith("fe80:")) return true; // link-local
+	if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // unique local
+	return false;
+}
+
+/**
+ * The IPv4 address an IPv4-mapped IPv6 literal carries, in dotted form, or `null`
+ * when it carries none. `::ffff:7f00:1` and `::ffff:127.0.0.1` are the same
+ * address written two ways, and canonicalisation reduces the first to the second
+ * shape — which is exactly why the reduction has to be undone here rather than
+ * left to the range table.
+ */
+function embeddedIpv4(literal: string): string | null {
+	if (!literal.startsWith("::ffff:")) return null;
+	const groups = literal.slice("::ffff:".length).split(":");
+	if (groups.length !== 2 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+	const high = Number.parseInt(groups[0], 16);
+	const low = Number.parseInt(groups[1], 16);
+	return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
 }
 
 /**
