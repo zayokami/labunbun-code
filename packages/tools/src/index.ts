@@ -25,6 +25,7 @@ export { ChildProcessExecOperations, defaultOperations, detectShell, NodeFileSys
 export { createReadTool } from "./read.ts";
 export {
 	describeSandboxBackend,
+	detectRuntime,
 	type SandboxBackend,
 	sandboxBackendFor,
 } from "./sandbox/index.ts";
@@ -47,6 +48,7 @@ import { createGrepTool } from "./grep.ts";
 import { createLsTool } from "./ls.ts";
 import { defaultOperations, type Operations } from "./operations.ts";
 import { createReadTool } from "./read.ts";
+import { detectRuntime } from "./sandbox/index.ts";
 import { createTaskTools, type TaskStore } from "./tasks.ts";
 import { createWebFetchTool, createWebSearchTool } from "./web.ts";
 import { createWriteTool } from "./write.ts";
@@ -67,7 +69,9 @@ export interface CreateAllToolsOptions {
  */
 export function createAllTools(cwd: string, options: CreateAllToolsOptions = {}): AnyTool[] {
 	const ops = options.operations ?? defaultOperations();
-	const background = options.backgroundShells ?? new BackgroundShellManager();
+	// The same executor, so a backgrounded command joins the proxy the foreground
+	// one uses instead of opening a second listener that nothing would close.
+	const background = options.backgroundShells ?? new BackgroundShellManager(detectRuntime(), ops);
 	const coreTools: AnyTool[] = [
 		createBashTool(cwd, ops, background),
 		createEditTool(cwd, ops),

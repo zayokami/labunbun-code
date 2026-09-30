@@ -113,7 +113,7 @@ describe("background shells (real spawn)", () => {
 	test("start → output accumulates → completes", async () => {
 		mkdtempSync(join(tmpdir(), "lbb-bg-")); // ensure tmpdir usable
 		const manager = new BackgroundShellManager();
-		const shell = manager.start(process.platform === "win32" ? "echo hello-bg" : "echo hello-bg", process.cwd());
+		const shell = await manager.start("echo hello-bg", process.cwd());
 
 		// Wait for completion.
 		for (let i = 0; i < 50 && shell.status === "running"; i++) {
@@ -130,7 +130,7 @@ describe("background shells (real spawn)", () => {
 		// the answer is a window on it — so it has to read as one: where the whole
 		// log is, and that this is not it.
 		const manager = new BackgroundShellManager();
-		const shell = manager.start("echo one-two-three-four-five", process.cwd());
+		const shell = await manager.start("echo one-two-three-four-five", process.cwd());
 		for (let i = 0; i < 50 && shell.status === "running"; i++) {
 			await new Promise((r) => setTimeout(r, 100));
 		}
@@ -150,7 +150,7 @@ describe("background shells (real spawn)", () => {
 	test("kill terminates a running shell", async () => {
 		const manager = new BackgroundShellManager();
 		const command = process.platform === "win32" ? "ping -n 30 127.0.0.1 > nul" : "sleep 30";
-		const shell = manager.start(command, process.cwd());
+		const shell = await manager.start(command, process.cwd());
 		await new Promise((r) => setTimeout(r, 300));
 
 		expect(manager.kill(shell.id)).toBe(true);
@@ -175,7 +175,7 @@ describe("background shells (real spawn)", () => {
 		expect(missing.isError).toBe(true);
 
 		const command = process.platform === "win32" ? "ping -n 30 127.0.0.1 > nul" : "sleep 30";
-		const shell = manager.start(command, process.cwd());
+		const shell = await manager.start(command, process.cwd());
 		const out = await outputTool.call({ shell_id: shell.id }, ctx);
 		expect((out.content[0] as any).text).toContain("still running");
 

@@ -8,7 +8,7 @@ import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
-import { detectShell } from "./operations.ts";
+import { defaultOperations, detectShell, type ExecOperations } from "./operations.ts";
 import { detectRuntime, resolveSandboxExecution, type SandboxRuntime } from "./sandbox/index.ts";
 
 /** How much of a shell's log one read may bring back. */
@@ -67,9 +67,13 @@ export class BackgroundShellManager {
 	/** Injected for the same reason as `ChildProcessExecOperations`'s: so a test on
 	 * one platform can exercise the wrapping branch for another. */
 	readonly #runtime: SandboxRuntime;
+	/** Whoever owns the proxy lifecycle. Defaults to a real executor so a manager
+	 * that confines a network cannot be built without one. */
+	readonly #operations: ExecOperations;
 
-	constructor(runtime: SandboxRuntime = detectRuntime()) {
+	constructor(runtime: SandboxRuntime = detectRuntime(), operations: ExecOperations = defaultOperations()) {
 		this.#runtime = runtime;
+		this.#operations = operations;
 	}
 
 	/**
@@ -83,8 +87,20 @@ export class BackgroundShellManager {
 	 * for every command a user actually ran in the foreground. The wrapping is
 	 * resolved here for the same reason it is in `exec` — the wrapper has to be
 	 * the parent of the shell, and this is the parent of the shell.
+	 *
+	 * The network half of that policy is resolved here too, and that was the
+	 * second instance of the same bypass: the wrapper is built from the policy's
+	 * filesystem half and the proxy's variables were never added to the spawn,
+	 * so a backgrounded command reached the network unconfined while every
+	 * foreground command was held by the proxy. `networkRules` is enforced by
+	 * the proxy alone — there is no second reading of the domain table — so
+	 * dropping those variables dropped the axis.
+	 *
+	 * Async because resolving them is: starting a listener is not something a
+	 * synchronous spawn can do, and making `start` wait is what keeps the two
+	 * spawn paths on one lifecycle instead of one listener each.
 	 */
-	start(command: string, cwd: string, sandbox?: SandboxPolicy): BackgroundShell {
+	async start(command: string, cwd: string, sandbox?: SandboxPolicy): Promise<BackgroundShell> {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
 		const outputFile = join(tmpdir(), `lbb-${id}.log`);
@@ -103,9 +119,15 @@ export class BackgroundShellManager {
 			resolution.kind === "native"
 				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
 				: [shellCommand, ...args(command)];
+		// The policy's variables go last, for the reason `exec` puts them last:
+		// what confines this command outranks what this process happened to
+		// inherit. A manager with no policy spawns with no env of its own, so a
+		// session that confines nothing runs with the environment it had.
+		const proxyEnv = sandbox ? await this.#operations.networkEnvFor?.(sandbox) : undefined;
 		const proc: ChildProcess = spawn(program, programArgs, {
 			cwd,
 			windowsHide: true,
+			env: proxyEnv ? { ...process.env, ...proxyEnv } : process.env,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 

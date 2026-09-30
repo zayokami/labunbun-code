@@ -80,6 +80,30 @@ export interface ExecOperations {
 	}): Promise<ExecResult>;
 
 	/**
+	 * The proxy variables a child spawned under `policy` needs for its traffic to
+	 * be confined, or `undefined` when the policy confines no network.
+	 *
+	 * This exists because `exec` is not the only thing that spawns a shell. The
+	 * background manager spawns one directly, and for as long as the proxy
+	 * lifecycle was a private detail of this class, that second spawn path
+	 * resolved the policy's *filesystem* half and quietly dropped its network
+	 * half: the domain table is enforced by the proxy alone, so
+	 * `run_in_background: true` was a one-word way around the whole network axis
+	 * while every foreground command looked correctly confined.
+	 *
+	 * The lifecycle — one listener, shared between concurrent callers, closed
+	 * once — lives here, so a second spawner joins the existing proxy rather than
+	 * opening a second one nobody closes.
+	 *
+	 * Optional because a fake or an embedder's own executor may confine nothing
+	 * and have nothing to share, not because a missing answer may be read
+	 * optimistically: a caller with no answer injects nothing, which is the
+	 * direction that fails open, so a real executor that confines a network has
+	 * to answer this.
+	 */
+	networkEnvFor?(policy: SandboxPolicy): Promise<Record<string, string> | undefined>;
+
+	/**
 	 * What confines commands run through here, when this implementation knows.
 	 *
 	 * Optional because a fake or an embedder's own executor may have no backend to
@@ -297,6 +321,17 @@ export class ChildProcessExecOperations implements ExecOperations {
 	}
 
 	/**
+	 * The proxy variables for `policy`, or `undefined` when nothing is confined.
+	 *
+	 * Public because the background manager spawns shells itself and has to reach
+	 * the same listener rather than start a second one; the sharing is the point,
+	 * so this hands out the environment and keeps the lifecycle private.
+	 */
+	async networkEnvFor(policy: SandboxPolicy): Promise<Record<string, string> | undefined> {
+		return (await this.#proxyFor(policy))?.env;
+	}
+
+	/**
 	 * What confines a command on this machine.
 	 *
 	 * Optional on the interface because an embedder's own `Operations` has no
@@ -345,8 +380,8 @@ export class ChildProcessExecOperations implements ExecOperations {
 		// policy this command is running under is the thing that has to win.
 		// A proxy that is not running injects nothing at all, which is what
 		// leaves a session that confined nothing with the environment it had.
-		const proxy = sandbox ? await this.#proxyFor(sandbox) : undefined;
-		const childEnv = { ...process.env, ...env, ...proxy?.env };
+		const proxyEnv = sandbox ? await this.networkEnvFor(sandbox) : undefined;
+		const childEnv = { ...process.env, ...env, ...proxyEnv };
 
 		return new Promise((resolve) => {
 			const child = spawn(program, programArgs, {

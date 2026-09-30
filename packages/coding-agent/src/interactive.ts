@@ -66,6 +66,7 @@ import {
 	createAllTools,
 	defaultOperations,
 	describeSandboxBackend,
+	detectRuntime,
 	type Operations,
 	type SandboxBackend,
 	TaskStore,
@@ -306,7 +307,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Owned here rather than inside createAllTools so `/ps` and `/stop` can reach
 	// the same shells the Bash tool started; the factory would otherwise make a
 	// private manager nobody else can see.
-	const backgroundShells = new BackgroundShellManager();
+	const backgroundShells = new BackgroundShellManager(detectRuntime(), ops);
 	// Results too large for the context go here instead of being thrown away, and
 	// Read is allowed back into this directory to fetch them.
 	const tools = createAllTools(cwd, {

@@ -88,7 +88,7 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 						isError: true,
 					};
 				}
-				const shell = background.start(input.command, cwd, policy);
+				const shell = await background.start(input.command, cwd, policy);
 				return {
 					content: [
 						textContent(

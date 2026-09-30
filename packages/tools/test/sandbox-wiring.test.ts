@@ -20,9 +20,17 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildSandboxPolicy, isWritePermitted, type SandboxMode, type SandboxPolicy } from "@labunbun/agent";
+import {
+	buildSandboxPolicy,
+	isWritePermitted,
+	type NetworkAxis,
+	type SandboxMode,
+	type SandboxPolicy,
+	type ToolCallContext,
+} from "@labunbun/agent";
 import { BackgroundShellManager } from "../src/background.ts";
 import { createBashTool } from "../src/bash.ts";
+import { createAllTools } from "../src/index.ts";
 import { ChildProcessExecOperations, defaultOperations, type ExecResult, type Operations } from "../src/operations.ts";
 import { createReadTool } from "../src/read.ts";
 import {
@@ -44,6 +52,22 @@ function workspace(): string {
 
 function policy(sandbox: SandboxMode, cwd: string) {
 	return buildSandboxPolicy({ sandbox, workspace: cwd });
+}
+
+/**
+ * A policy the filesystem half does not object to, carrying a network axis.
+ *
+ * Unrestricted on purpose: the filesystem wrapper is built out of that half, and
+ * `bwrap` is not installed here, so a `workspace-write` command never reaches
+ * the point where it could report an environment. These tests are about the
+ * network, and the network has to be the only thing in play.
+ */
+function netPolicy(
+	cwd: string,
+	network: "enabled" | "restricted",
+	rules: { pattern: string; permission: "allow" | "deny" }[],
+) {
+	return buildSandboxPolicy({ sandbox: "danger-full-access", workspace: cwd, network, networkRules: rules });
 }
 
 const CTX = (sandbox: SandboxMode) => ({
@@ -107,8 +131,9 @@ describe("the sandbox reaches the background spawn too", () => {
 	// for every command a user ran in the foreground.
 	test("a backgrounded command is wrapped the same way a foreground one is", async () => {
 		const cwd = workspace();
-		const manager = new BackgroundShellManager(FAKE_LINUX);
-		const shell = manager.start("echo hi", cwd, policy("workspace-write", cwd));
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		const manager = new BackgroundShellManager(FAKE_LINUX, exec);
+		const shell = await manager.start("echo hi", cwd, policy("workspace-write", cwd));
 
 		const exited = await new Promise<boolean>((resolve) => {
 			const poll = setInterval(() => {
@@ -131,8 +156,9 @@ describe("the sandbox reaches the background spawn too", () => {
 
 	test("the control: unrestricted runs in the background as well", async () => {
 		const cwd = workspace();
-		const manager = new BackgroundShellManager(FAKE_LINUX);
-		const shell = manager.start("echo hi", cwd, policy("danger-full-access", cwd));
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		const manager = new BackgroundShellManager(FAKE_LINUX, exec);
+		const shell = await manager.start("echo hi", cwd, policy("danger-full-access", cwd));
 
 		for (let i = 0; i < 200; i++) {
 			if (manager.get(shell.id)?.status !== "running") break;
@@ -458,15 +484,6 @@ describe("isWritePermitted is directional, including on a policy the builder can
  * own `HTTP_PROXY` wins — left every test in the repository green.
  */
 describe("the network axis reaches the spawn", () => {
-	/** A policy the filesystem half does not object to, carrying a network axis. */
-	function netPolicy(
-		cwd: string,
-		network: "enabled" | "restricted",
-		rules: { pattern: string; permission: "allow" | "deny" }[],
-	) {
-		return buildSandboxPolicy({ sandbox: "danger-full-access", workspace: cwd, network, networkRules: rules });
-	}
-
 	/** What the spawned process actually saw, asked of the process itself. */
 	function childEnvOf(exec: ChildProcessExecOperations, cwd: string, env?: Record<string, string>) {
 		// `node` rather than `echo $VAR`: this file runs on Windows too, where the
@@ -539,5 +556,214 @@ describe("the network axis reaches the spawn", () => {
 		// the machines least likely to look at why.
 		expect(result.stdout).toBe(process.env.HTTP_PROXY || "(none)");
 		expect(exec.networkProxyRunning).toBe(false);
+	});
+});
+
+/**
+ * The background spawn is a second process tree, and the network axis has no
+ * second reading of its own: `networkRules` is enforced by the proxy and nothing
+ * else.
+ *
+ * Found by reading the two spawn paths against each other rather than by reading
+ * the tests. The proxy's variables were added to `exec`'s child environment and
+ * to nothing else, so a backgrounded command reached the network unconfined —
+ * measured on the machine this was written on, under one and the same policy, as
+ * `HTTP_PROXY` reading `http://127.0.0.1:2613` through `exec` and `(none)`
+ * through the manager. `run_in_background: true` is a word the model chooses.
+ *
+ * Worth being precise about what this drops and what it does not: the deny rules
+ * and the dangerous-command classifier still read the command either way,
+ * because they read the tool's input rather than the spawn. What was missing is
+ * the confinement around the process that input asked for.
+ */
+describe("the network axis reaches the background spawn too", () => {
+	/** `node` rather than `echo $VAR`: this file runs on Windows, where the shell
+	 * is `cmd.exe` and `$HTTP_PROXY` is a literal string. */
+	const PROBE = `node -e "process.stdout.write(String(process.env.HTTP_PROXY||'(none)'))"`;
+
+	/** Run one command to completion in the background and read what it saw. */
+	async function runBackground(
+		manager: BackgroundShellManager,
+		cwd: string,
+		policy: SandboxPolicy | undefined,
+	): Promise<{ exitCode: number | null; stdout: string }> {
+		const shell = await manager.start(PROBE, cwd, policy);
+		for (let i = 0; i < 400; i++) {
+			const info = manager.get(shell.id);
+			if (info && info.status !== "running") break;
+			await Bun.sleep(25);
+		}
+		return {
+			exitCode: manager.get(shell.id)?.exitCode ?? null,
+			// The manager writes the exit code into the same log the child wrote to.
+			stdout: manager
+				.output(shell.id)
+				.replace(/\n?\[exit code: -?\d+\]\s*$/, "")
+				.trim(),
+		};
+	}
+
+	test("a backgrounded command is pointed at the proxy, and at the same one", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const restricted = netPolicy(cwd, "restricted", [{ pattern: "registry.npmjs.org", permission: "allow" }]);
+			const foreground = await exec.exec({ command: PROBE, cwd, sandbox: restricted });
+			const background = await runBackground(new BackgroundShellManager(FAKE_LINUX, exec), cwd, restricted);
+
+			expect(foreground.exitCode).toBe(0);
+			expect(background.exitCode).toBe(0);
+			// The *same* port, not merely a proxy-shaped URL. A background path that
+			// opened a listener of its own would satisfy a weaker version of this,
+			// and nothing in the session would ever close it.
+			expect(background.stdout).toBe(foreground.stdout);
+			expect(background.stdout).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+			expect(exec.networkProxyRunning).toBe(true);
+		} finally {
+			// The proxy holds a listening socket; leaving it open would keep the
+			// test process alive.
+			await exec.close();
+		}
+	});
+
+	test("a caller's own HTTP_PROXY does not win over the policy, in the background", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		// A proxy in this process's own environment is the same hazard `exec` has:
+		// whatever is already set here would be inherited by a child that injects
+		// nothing, which is exactly how this bypass hid.
+		const had = process.env.HTTP_PROXY;
+		process.env.HTTP_PROXY = "http://192.0.2.1:9/";
+		try {
+			const result = await runBackground(
+				new BackgroundShellManager(FAKE_LINUX, exec),
+				cwd,
+				netPolicy(cwd, "restricted", [{ pattern: "registry.npmjs.org", permission: "allow" }]),
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).not.toContain("192.0.2.1");
+			expect(result.stdout).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+		} finally {
+			if (had === undefined) process.env.HTTP_PROXY = "";
+			else process.env.HTTP_PROXY = had;
+			await exec.close();
+		}
+	});
+
+	test("the control: a policy that confines no network adds no variables in the background", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const result = await runBackground(
+				new BackgroundShellManager(FAKE_LINUX, exec),
+				cwd,
+				netPolicy(cwd, "enabled", []),
+			);
+			// Compared against what this process already had rather than a literal:
+			// a developer behind a corporate proxy has one in their environment, and
+			// the child inheriting it is not the manager having done anything —
+			// which is the fact under test.
+			expect(result.stdout).toBe(process.env.HTTP_PROXY || "(none)");
+			expect(exec.networkProxyRunning).toBe(false);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("the control: no policy at all starts no proxy in the background", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const result = await runBackground(new BackgroundShellManager(FAKE_LINUX, exec), cwd, undefined);
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout).toBe(process.env.HTTP_PROXY || "(none)");
+			expect(exec.networkProxyRunning).toBe(false);
+		} finally {
+			await exec.close();
+		}
+	});
+});
+
+/**
+ * The two halves above say the manager injects the policy. These say the tool
+ * hands it one, because that is the seam a later refactor would cut: a factory
+ * that built its own executor, or a Bash tool that stopped awaiting `start`,
+ * would leave every assertion above passing while the app ran unconfined.
+ */
+
+/**
+ * The blocks above say the manager injects the policy. These say the tool hands
+ * it one, because that is the seam a later refactor would cut: a factory that
+ * built an executor of its own, or a Bash tool that stopped awaiting `start`,
+ * would leave every assertion above passing while the app ran unconfined.
+ */
+describe("the tool hands the background spawn a confined policy", () => {
+	const PROBE = `node -e "process.stdout.write(String(process.env.HTTP_PROXY||'(none)'))"`;
+	const RESTRICTED: NetworkAxis = {
+		access: "restricted",
+		domains: [{ pattern: "registry.npmjs.org", permission: "allow" }],
+	};
+
+	function ctxFor(sandbox: SandboxMode, network: NetworkAxis): ToolCallContext {
+		return {
+			callId: "t1",
+			signal: new AbortController().signal,
+			cwd: process.cwd(),
+			sandbox,
+			network,
+			onUpdate: () => {},
+		};
+	}
+
+	async function readShell(manager: BackgroundShellManager, result: unknown): Promise<string> {
+		const id = (result as { details?: { backgroundShellId?: string } }).details?.backgroundShellId;
+		if (id === undefined) throw new Error(`the tool did not report a shell: ${JSON.stringify(result)}`);
+		for (let i = 0; i < 400; i++) {
+			const info = manager.get(id);
+			if (info && info.status !== "running") break;
+			await Bun.sleep(25);
+		}
+		return manager
+			.output(id)
+			.replace(/\n?\[exit code: -?\d+\]\s*$/, "")
+			.trim();
+	}
+
+	test("run_in_background reaches the child with the proxy, not just the manager", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			// `danger-full-access` so nothing refuses the call before the shell
+			// spawns: the filesystem half is not what this is about.
+			const manager = new BackgroundShellManager(FAKE_LINUX, exec);
+			const tool = createBashTool(cwd, exec, manager);
+			const result = await tool.call(
+				{ command: PROBE, run_in_background: true },
+				ctxFor("danger-full-access", RESTRICTED),
+			);
+			expect(await readShell(manager, result)).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("the tool set builds its background manager on the executor it was given", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			// No manager passed, so the factory builds one — the only way this
+			// wiring is reached in the app.
+			const tools = createAllTools(cwd, { operations: exec });
+			const bash = tools.find((tool) => tool.name === "Bash");
+			if (!bash) throw new Error("no Bash tool in the default set");
+			await bash.call({ command: "echo hi", run_in_background: true }, ctxFor("danger-full-access", RESTRICTED));
+			// Asserted on the *given* executor, which is the whole point: a factory
+			// that built the manager on an executor of its own would confine the
+			// command just as well and leave this false — two listeners, and only
+			// one of them reachable to be closed.
+			expect(exec.networkProxyRunning).toBe(true);
+		} finally {
+			await exec.close();
+		}
 	});
 });
