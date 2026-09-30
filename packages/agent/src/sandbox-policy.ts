@@ -21,10 +21,13 @@
  *
  * The network half is a proxy, on all three platforms, and it is enforced by
  * convention rather than by the kernel everywhere: `HTTP_PROXY` is something
- * most tooling honours and not something the OS requires. On macOS and Linux
- * the sandbox above is what closes that gap, so the two are layered. On
- * Windows the proxy is the whole of it. `describeNetworkPolicy` in
- * `network-policy.ts` says which, per platform, and the sentence differs.
+ * most tooling honours and not something the OS requires. Where a native
+ * sandbox backend is installed it closes that gap, so the two are layered.
+ * Where one is not — Windows, or Linux without bubblewrap — the proxy is the
+ * whole of it. `describeNetworkPolicy` in `network-policy.ts` says which, and
+ * the sentence differs; `networkConfinement` in @labunbun/tools is the
+ * derivation, because whether a backend is *installed* is not a fact this
+ * package can see.
  *
  * That limit is the honest one and is repeated wherever the sandbox is shown
  * to a user. A mechanism that reads as OS-enforced when it is not is worse

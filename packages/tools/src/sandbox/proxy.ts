@@ -24,9 +24,10 @@
  *
  * Proxy environment variables are a convention. A program that calls `connect`
  * without consulting them is not routed here and is subject to no rule in this
- * file. On macOS and Linux the OS sandbox closes that gap; on Windows nothing
- * in this build does, and `describeNetworkPolicy` says so per platform rather
- * than in a footnote nobody reads.
+ * file. Where an OS sandbox backend is actually installed it closes that gap;
+ * where none is — Windows, or Linux without bubblewrap — nothing in this build
+ * does, and `describeNetworkPolicy` says so per case rather than in a footnote
+ * nobody reads.
  *
  * ## Two ports, because tooling differs
  *

@@ -216,11 +216,74 @@ export function needsNetworkProxy(network: "restricted" | "enabled", rules: read
 	return network === "restricted" || rules.length > 0;
 }
 
+/**
+ * What, if anything, holds the network boundary besides the proxy.
+ *
+ * The proxy is user-space by construction: it holds a command that consults
+ * `HTTP_PROXY`, which is most commands and none of them by guarantee. Whether
+ * something *else* also holds the line is a separate fact, and it is not the
+ * same on every machine — which is why this is a type with five answers instead
+ * of a boolean. Four of the five are "no", for four different reasons, and the
+ * reason is what the user is owed.
+ *
+ * Declared here rather than reused from the sandbox module because this is the
+ * agent package and the sandbox module is downstream of it: the agent half
+ * states what it can say, and the caller derives which case applies from facts
+ * only it knows. `networkConfinement` in `@labunbun/tools` is that derivation.
+ */
+export type NetworkConfinement =
+	/** An OS sandbox wraps the command and denies outbound traffic at the kernel. */
+	| "os-namespace"
+	/** No argv-level backend exists for this platform, so nothing wraps the shell. */
+	| "no-os-backend"
+	/** A backend exists for this platform but is not installed here. */
+	| "backend-missing"
+	/**
+	 * A backend is wrapping, but the network is open inside it.
+	 *
+	 * Separate from the two above because this one is a choice rather than a
+	 * gap: a sandbox that denied outbound would also deny the traffic the
+	 * allowlist exists to permit, so the network has to stay open and the proxy
+	 * is the whole boundary anyway. Reporting this as `os-namespace` would be
+	 * true of the filesystem and false of the network.
+	 */
+	| "network-left-open"
+	/**
+	 * A backend is installed and nothing wrapped the shell anyway.
+	 *
+	 * `danger-full-access` is the absence of a *filesystem* sandbox, and
+	 * `resolveSandboxExecution` short-circuits on it, so nothing is around the
+	 * command on a machine that has `sandbox-exec` sitting right there. Reporting
+	 * this as `os-namespace` — which is what the platform alone would suggest — is
+	 * the one way this sentence could be confidently, smoothly, and completely
+	 * wrong: everything about the platform says native and nothing about the
+	 * command is confined.
+	 */
+	| "filesystem-axis-off";
+
+/**
+ * Why the proxy is the whole boundary, per case — and it is four different
+ * answers to one question.
+ *
+ * Held apart from the shared tail so the tail can stay identical across all
+ * four, which is the part that has to be identical: the claim is the same in
+ * every one of them, and a reader who saw a differently-worded claim in one
+ * case would have no way to know it meant the same thing. Only the reason is
+ * allowed to differ, and it is the reason a user acts on.
+ */
+const REASON_BY_CONFINEMENT: Record<Exclude<NetworkConfinement, "os-namespace">, string> = {
+	"no-os-backend": "This build ships no OS-level sandbox for this platform.",
+	"backend-missing": "The sandbox backend is not installed here, so nothing below the proxy is enforcing anything.",
+	"filesystem-axis-off":
+		"This session's sandbox axis is off, so no wrapper is around the command even where one could be.",
+	"network-left-open": "The sandbox leaves the network open so allowed traffic can get through.",
+};
+
 /** One sentence saying what the network half is actually doing. */
 export function describeNetworkPolicy(
 	network: "restricted" | "enabled",
 	rules: readonly NetworkDomainRule[],
-	platform: string,
+	confinement: NetworkConfinement,
 ): string {
 	if (!needsNetworkProxy(network, rules)) {
 		return "Network: not restricted. Commands reach whatever the host can reach, and no proxy is interposed.";
@@ -233,13 +296,19 @@ export function describeNetworkPolicy(
 				: `Only the ${count} listed domain${count === 1 ? "" : "s"} may be reached.`
 			: `Traffic is routed through a local proxy that refuses the ${rules.length - count} denied pattern${rules.length - count === 1 ? "" : "s"}.`;
 
-	// Windows has no OS backend in this build, so on that platform the proxy is
-	// the entire boundary and it is enforced by convention rather than by the
-	// kernel. Saying so here is the same obligation the filesystem half has.
+	// Written per case rather than as one sentence covering all five, because
+	// "the OS holds the rest of the boundary" and "nothing but the proxy holds
+	// it" are opposite facts and averaging them is how a proxy-only boundary
+	// starts reading as a kernel-held one. This is the same obligation the
+	// filesystem half carries in `describeSandboxBackend`, and the reason it used
+	// to be wrong is the same one: it keyed off `process.platform`, so a Linux box
+	// without bubblewrap and a Mac with `sandbox-exec` both printed the sentence
+	// for a machine that has one, and the sentence claims the OS is holding
+	// something.
 	const caveat =
-		platform === "darwin" || platform === "linux"
-			? " The OS sandbox holds the rest of the boundary, so a program that ignores the proxy environment still reaches nothing."
-			: " This platform has no OS-level network backend in this build, so the proxy is the whole boundary: a program that opens a socket without consulting the proxy environment is not subject to it.";
+		confinement === "os-namespace"
+			? " The OS sandbox denies outbound traffic to the command itself, so a program that ignores the proxy environment still reaches nothing."
+			: ` ${REASON_BY_CONFINEMENT[confinement]} So the proxy is the whole network boundary: a program that opens a socket without consulting the proxy environment is not subject to it.`;
 
 	return `Network: restricted. ${detail}${caveat}`;
 }

@@ -27,7 +27,13 @@
  */
 import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { buildSandboxPolicy, type NetworkAxis, type SandboxMode, type SandboxPolicy } from "@labunbun/agent";
+import {
+	buildSandboxPolicy,
+	type NetworkAxis,
+	type NetworkConfinement,
+	type SandboxMode,
+	type SandboxPolicy,
+} from "@labunbun/agent";
 import { buildBwrapArgs } from "./bwrap.ts";
 import { buildSeatbeltArgs } from "./seatbelt.ts";
 import { SIMULATED_SANDBOX_DISCLAIMER } from "./simulated.ts";
@@ -193,6 +199,32 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	// "a sandbox with a very wide allow list" — it is the absence of one, and
 	// reporting it as a wrapped-but-permissive sandbox would be a lie in the
 	// direction that matters.
+	//
+	// The **network** half does not change this, and it is worth saying why,
+	// because the obvious-looking alternative is wrong. Both translators carry a
+	// branch for "unconfined filesystem, restricted network" that still wraps, and
+	// removing this short-circuit reaches it — but on Linux that branch adds
+	// `--unshare-net`, which gives the command an empty network namespace. The
+	// proxy listening on `127.0.0.1` is then unreachable, so *allowed* domains
+	// fail alongside denied ones and the allowlist is decoration that reads as a
+	// broken network rather than as a policy.
+	//
+	// Codex does wrap in this case, and it has what this does not: in proxy mode
+	// it pairs `--unshare-net` with an internal TCP→UDS→TCP bridge so the
+	// command's loopback traffic is carried out to the host's proxy
+	// (`codex-rs/linux-sandbox/README.md`: "In managed proxy mode, the helper uses
+	// `--unshare-net` plus an internal TCP->UDS->TCP routing bridge so tool
+	// traffic reaches only configured proxy endpoints"). With no bridge, wrapping
+	// here would enforce the network axis by breaking the network, which is
+	// strictly worse than enforcing it with the proxy and saying that is what is
+	// doing it.
+	//
+	// The cost of this line is real and is reported rather than hidden: on a
+	// native backend, `workspace-write` with a restricted network holds the line
+	// at the kernel while `danger-full-access` holds it only in user space. That
+	// asymmetry is the price of not having the bridge, and `networkConfinement`
+	// below is what stops `/permissions` from claiming the kernel holds it in
+	// both cases.
 	if (policy.fileSystem.kind === "unrestricted") return { kind: "unconfined" };
 
 	if (!hasNativeSandboxBackend(platform)) {
@@ -268,6 +300,44 @@ export type SandboxBackend = "native" | "simulated" | "unavailable";
 export function sandboxBackendFor(platform: SandboxPlatform, hasNativeBackend: boolean): SandboxBackend {
 	if (!hasNativeSandboxBackend(platform)) return "simulated";
 	return hasNativeBackend ? "native" : "unavailable";
+}
+
+/**
+ * Which of `describeNetworkPolicy`'s five caveats applies on this machine.
+ *
+ * The knowledge lives here and not at the call site because the caller is the
+ * app: `agent` is a downstream package that cannot see whether bubblewrap is
+ * installed, and having it answer anyway is exactly how the sentence came to
+ * key off `process.platform` and print "the OS sandbox holds the rest of the
+ * boundary" on a Linux box with no bubblewrap on it.
+ *
+ * The order of the questions is the whole function, and each one exists because
+ * a later check would have answered "yes" for a command nothing is around:
+ *
+ *   1. `network === "enabled"` — an OS sandbox that denied outbound would also
+ *      deny the traffic the allowlist exists to permit, so an open network has
+ *      to stay open inside the wrapper and the proxy is the whole boundary even
+ *      on a Mac with `sandbox-exec` in front of the shell.
+ *   2. `danger-full-access` — the filesystem axis is off, so
+ *      `resolveSandboxExecution` short-circuits and nothing wraps the command at
+ *      all. This is the case a platform-only check gets wrong: every fact about
+ *      the machine says native and the command is still unwrapped.
+ *   3. The backend itself, and only now can "native" mean what it says.
+ *
+ * An unreported backend is read as the weakest, matching
+ * `describeSandboxBackend`: not knowing what confines this is not evidence that
+ * something does.
+ */
+export function networkConfinement(
+	backend: SandboxBackend | undefined,
+	sandbox: SandboxMode,
+	network: "restricted" | "enabled",
+): NetworkConfinement {
+	if (network === "enabled") return "network-left-open";
+	if (sandbox === "danger-full-access") return "filesystem-axis-off";
+	if (backend === "native") return "os-namespace";
+	if (backend === "unavailable") return "backend-missing";
+	return "no-os-backend";
 }
 
 /**

@@ -15,10 +15,12 @@ import {
 	describeNetworkPolicy,
 	domainMatches,
 	matchDomainRule,
+	type NetworkConfinement,
 	type NetworkDomainRule,
 	needsNetworkProxy,
 	normalizeHost,
 } from "@labunbun/agent";
+import { networkConfinement } from "../src/sandbox/index.ts";
 
 const allow = (...patterns: string[]): NetworkDomainRule[] =>
 	patterns.map((pattern) => ({ pattern, permission: "allow" as const }));
@@ -156,22 +158,88 @@ describe("needsNetworkProxy", () => {
 });
 
 describe("describeNetworkPolicy", () => {
-	test("says the proxy is not the whole boundary only where that is true", () => {
-		// The two sentences differ because the two platforms differ. A build that
-		// ships the macOS sentence on Windows has told the user their network is
-		// kernel-held when nothing here holds it.
-		const onMac = describeNetworkPolicy("restricted", allow("example.com"), "darwin");
-		const onWindows = describeNetworkPolicy("restricted", allow("example.com"), "win32");
-		expect(onMac).toContain("OS sandbox holds the rest of the boundary");
-		expect(onWindows).toContain("no OS-level network backend");
-		expect(onWindows).toContain("not subject to it");
+	test("only claims the OS is holding the line when something is", () => {
+		// The single most expensive sentence in this file is "the OS sandbox denies
+		// outbound traffic to the command itself". A build that prints it where
+		// nothing wraps the command has told the user their network is kernel-held
+		// when the only thing holding it is a proxy a program can ignore. So: the
+		// four non-native answers must each deny it, and the native one must be the
+		// only one that claims it.
+		const claims = (confinement: NetworkConfinement) =>
+			describeNetworkPolicy("restricted", allow("example.com"), confinement);
+		expect(claims("os-namespace")).toContain("still reaches nothing");
+		for (const confinement of [
+			"no-os-backend",
+			"backend-missing",
+			"network-left-open",
+			"filesystem-axis-off",
+		] as const) {
+			const text = claims(confinement);
+			expect(text).toContain("proxy is the whole network boundary");
+			expect(text).toContain("not subject to it");
+			expect(text).not.toContain("still reaches nothing");
+		}
+		// The reason differs across the four, and that difference is the point: one
+		// is a gap in this build, one is a backend that is not installed, one is
+		// what the sandbox must do to let allowed traffic out, and one is the mode
+		// asking for no wrapper at all. Averaging them would leave the user with
+		// something true and useless — unable to tell "this build cannot" from "you
+		// asked it not to".
+		expect(claims("no-os-backend")).toContain("ships no OS-level sandbox for this platform");
+		expect(claims("backend-missing")).toContain("not installed here");
+		expect(claims("network-left-open")).toContain("leaves the network open so allowed traffic");
+		expect(claims("filesystem-axis-off")).toContain("sandbox axis is off");
 	});
 
 	test("an unrestricted network with no rules says nothing is interposed", () => {
-		expect(describeNetworkPolicy("enabled", [], "darwin")).toContain("no proxy is interposed");
+		expect(describeNetworkPolicy("enabled", [], "os-namespace")).toContain("no proxy is interposed");
 	});
 
 	test("restricted with nothing allowed says nothing is reachable", () => {
-		expect(describeNetworkPolicy("restricted", [], "linux")).toContain("Nothing is reachable");
+		expect(describeNetworkPolicy("restricted", [], "os-namespace")).toContain("Nothing is reachable");
+	});
+});
+
+describe("networkConfinement", () => {
+	test("an open network beats a working backend", () => {
+		// A sandbox that denied outbound would deny the traffic the allowlist
+		// exists to permit, so `enabled` forces the network open inside the
+		// wrapper — and the proxy is then the whole boundary even on a Mac. The
+		// reverse order here would print "still reaches nothing" about a machine
+		// where the command's own socket is wide open.
+		expect(networkConfinement("native", "workspace-write", "enabled")).toBe("network-left-open");
+		expect(networkConfinement("native", "workspace-write", "restricted")).toBe("os-namespace");
+	});
+
+	test("danger-full-access beats a working backend too, which is the one no platform can see", () => {
+		// The finding this file exists for. Every fact about a Mac says native, and
+		// `resolveSandboxExecution` still returns `unconfined` because the mode asked
+		// for no filesystem sandbox — so nothing is around the command and the
+		// kernel holds nothing. Deriving the answer from the backend alone is the
+		// mistake the fourth case exists to prevent.
+		expect(networkConfinement("native", "danger-full-access", "restricted")).toBe("filesystem-axis-off");
+		expect(
+			describeNetworkPolicy(
+				"restricted",
+				allow("example.com"),
+				networkConfinement("native", "danger-full-access", "restricted"),
+			),
+		).not.toContain("still reaches nothing");
+	});
+
+	test.each([
+		[undefined, "no-os-backend"],
+		["simulated", "no-os-backend"],
+		["unavailable", "backend-missing"],
+		["native", "os-namespace"],
+	] as const)("backend %s with a confined filesystem", (backend, expected) => {
+		// The one case the old signature got wrong by construction: `linux` with no
+		// bubblewrap is `unavailable`, not `native`, and the sentence has to say so.
+		expect(networkConfinement(backend, "workspace-write", "restricted")).toBe(expected);
+	});
+
+	test("an executor that reports no backend is read as the weakest", () => {
+		// Same rule as `describeSandboxBackend`: not knowing is not evidence.
+		expect(networkConfinement(undefined, "workspace-write", "restricted")).toBe("no-os-backend");
 	});
 });

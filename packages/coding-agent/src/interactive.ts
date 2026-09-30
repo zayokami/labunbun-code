@@ -67,6 +67,7 @@ import {
 	defaultOperations,
 	describeSandboxBackend,
 	detectRuntime,
+	networkConfinement,
 	type Operations,
 	type SandboxBackend,
 	TaskStore,
@@ -1604,8 +1605,18 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				describeSandboxBackend(ctx.sandboxBackend, session.sandbox),
 				// The third axis, from the same source as the other two — read off
 				// the session rather than off settings, so a session that changed it
-				// mid-run reports what it is actually running under.
-				describeNetworkPolicy(session.network.access, session.network.domains, process.platform),
+				// mid-run reports what it is actually running under. The caveat is
+				// derived from `ctx.sandboxBackend` and the sandbox axis — the same
+				// two answers the line above prints — and not from `process.platform`:
+				// a platform name says a backend *could* exist, not that one is
+				// installed, and it says nothing about whether the mode asked for a
+				// wrapper, so keying off it told a Linux box without bubblewrap, and a
+				// Mac running `danger-full-access`, that the OS was holding the line.
+				describeNetworkPolicy(
+					session.network.access,
+					session.network.domains,
+					networkConfinement(ctx.sandboxBackend, session.sandbox, session.network.access),
+				),
 				`Rules (${rules.length}):`,
 				...rules.map(
 					(r) =>

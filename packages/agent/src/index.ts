@@ -53,6 +53,7 @@ export {
 	domainMatches,
 	matchDomainRule,
 	NETWORK_DOMAIN_PERMISSIONS,
+	type NetworkConfinement,
 	type NetworkDecision,
 	type NetworkDenialReason,
 	type NetworkDomainPermission,

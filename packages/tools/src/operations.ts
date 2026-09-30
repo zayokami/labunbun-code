@@ -445,9 +445,24 @@ export class ChildProcessExecOperations implements ExecOperations {
 	}
 }
 
-export function defaultOperations(): Operations {
+/**
+ * The operations the app runs on.
+ *
+ * `exec` is a parameter so a caller can name the executor it owns — a test that
+ * has to observe the proxy under test cannot, if the object it holds is not the
+ * one running commands. It also keeps one listener: everything routed through
+ * the returned object shares the executor's proxy rather than each part opening
+ * its own.
+ *
+ * The executor's own answers are forwarded rather than recomputed here. They
+ * used to be dropped, and the drop was invisible in both directions at once:
+ * `sandboxBackend` came back `undefined`, so `/permissions` rendered "simulated,
+ * not OS-enforced" on every machine — including a Mac with `sandbox-exec`
+ * sitting right there — and `networkEnvFor` came back `undefined`, so a spawn
+ * that asked this object for the policy's proxy got nothing and ran unconfined.
+ */
+export function defaultOperations(exec: ChildProcessExecOperations = new ChildProcessExecOperations()): Operations {
 	const fs = new NodeFileSystemOperations();
-	const exec = new ChildProcessExecOperations();
 	return {
 		readTextFile: (path, encoding) => fs.readTextFile(path, encoding),
 		writeTextFile: (path, content) => fs.writeTextFile(path, content),
@@ -459,5 +474,7 @@ export function defaultOperations(): Operations {
 		deleteFile: (path) => fs.deleteFile(path),
 		move: (from, to) => fs.move(from, to),
 		exec: (options) => exec.exec(options),
+		networkEnvFor: (policy) => exec.networkEnvFor(policy),
+		sandboxBackend: exec.sandboxBackend,
 	};
 }

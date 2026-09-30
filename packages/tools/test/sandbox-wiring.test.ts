@@ -35,6 +35,7 @@ import { ChildProcessExecOperations, defaultOperations, type ExecResult, type Op
 import { createReadTool } from "../src/read.ts";
 import {
 	describeSandboxBackend,
+	policyFor,
 	resolveSandboxExecution,
 	type SandboxRuntime,
 	sandboxBackendFor,
@@ -377,6 +378,97 @@ describe("what the user is told", () => {
 		expect(new ChildProcessExecOperations({ platform: "win32", hasNativeBackend: true }).sandboxBackend).toBe(
 			"simulated",
 		);
+	});
+
+	test("the app's own executor reports its backend, rather than nothing", () => {
+		// `/permissions` reads `ops.sandboxBackend`, and `defaultOperations()` is
+		// what the app builds. When this dropped the executor's answer, that read
+		// got `undefined`, and the resolver turns an unreported backend into
+		// "simulated" — so every machine was told its commands were not
+		// OS-enforced, including the Mac with `sandbox-exec` sitting right there.
+		// The bug is invisible from the other side: nothing errors, and the
+		// sentence it produces is the pessimistic one.
+		const ops = defaultOperations(new ChildProcessExecOperations(FAKE_LINUX));
+		expect(ops.sandboxBackend).toBe("native");
+		expect(describeSandboxBackend(ops.sandboxBackend, "workspace-write", "linux")).toContain("enforced by the OS");
+		// The control: the same call on a machine with no backend must not be
+		// rescued by the fix above into claiming confinement.
+		const unavailable = defaultOperations(
+			new ChildProcessExecOperations({ platform: "linux", hasNativeBackend: false }),
+		);
+		expect(unavailable.sandboxBackend).toBe("unavailable");
+		expect(describeSandboxBackend(unavailable.sandboxBackend, "workspace-write", "linux")).not.toContain(
+			"enforced by the OS",
+		);
+	});
+});
+
+describe("the network axis does not smuggle a wrapper around an unrestricted filesystem", () => {
+	// Both translators carry a branch for "unconfined filesystem, restricted
+	// network" that still wraps, and this pins the short-circuit that keeps it
+	// unreachable. The tempting change is to delete the short-circuit so the
+	// network axis looks like it is held at the kernel in both modes — and on
+	// Linux that silently breaks the network instead of confining it, because
+	// `--unshare-net` puts the command in a namespace where the proxy on
+	// `127.0.0.1` is unreachable and allowed domains fail alongside denied ones.
+	// Codex reaches that branch only because it pairs `--unshare-net` with a
+	// TCP→UDS→TCP bridge (`codex-rs/linux-sandbox/README.md`); this build has no
+	// bridge, so "wrap anyway" would enforce the axis by breaking the network.
+	test.each(["darwin", "linux"] as const)(
+		"an unrestricted filesystem wraps nothing on %s, whatever the network",
+		(platform) => {
+			const restricted: NetworkAxis = {
+				access: "restricted",
+				domains: [{ pattern: "registry.npmjs.org", permission: "allow" }],
+			};
+			for (const network of [restricted, { access: "enabled" as const, domains: [] }]) {
+				const resolution = resolveSandboxExecution({
+					policy: policyFor({ sandbox: "danger-full-access", workspace: workspace(), network }),
+					command: ["/bin/bash", "-c", "true"],
+					platform,
+					hasNativeBackend: true,
+				});
+				expect(resolution.kind).toBe("unconfined");
+			}
+		},
+	);
+
+	test("a confined filesystem with a restricted network does unshare the network", () => {
+		// The control, and the reason the short-circuit is a decision rather than a
+		// shrug: the *other* side of the same branch does confine the network at
+		// the kernel, so the asymmetry `networkConfinement` reports is real and this
+		// is what keeps it from being an excuse. Without this, the test above
+		// would also pass if the whole restricted-network path had stopped working.
+		const resolution = resolveSandboxExecution({
+			policy: policyFor({
+				sandbox: "workspace-write",
+				workspace: workspace(),
+				network: { access: "restricted", domains: [{ pattern: "registry.npmjs.org", permission: "allow" }] },
+			}),
+			command: ["/bin/bash", "-c", "true"],
+			platform: "linux",
+			hasNativeBackend: true,
+			exists: () => true,
+		});
+		expect(resolution.kind).toBe("native");
+		if (resolution.kind !== "native") return;
+		expect(resolution.execution.argv).toContain("--unshare-net");
+		// And the network is *not* unshared when it is open, or an allowed request
+		// could never get out — the same reason Codex does not pair the two.
+		const open = resolveSandboxExecution({
+			policy: policyFor({
+				sandbox: "workspace-write",
+				workspace: workspace(),
+				network: { access: "enabled", domains: [] },
+			}),
+			command: ["/bin/bash", "-c", "true"],
+			platform: "linux",
+			hasNativeBackend: true,
+			exists: () => true,
+		});
+		expect(open.kind).toBe("native");
+		if (open.kind !== "native") return;
+		expect(open.execution.argv).not.toContain("--unshare-net");
 	});
 });
 
@@ -736,7 +828,7 @@ describe("the tool hands the background spawn a confined policy", () => {
 			// `danger-full-access` so nothing refuses the call before the shell
 			// spawns: the filesystem half is not what this is about.
 			const manager = new BackgroundShellManager(FAKE_LINUX, exec);
-			const tool = createBashTool(cwd, exec, manager);
+			const tool = createBashTool(cwd, defaultOperations(exec), manager);
 			const result = await tool.call(
 				{ command: PROBE, run_in_background: true },
 				ctxFor("danger-full-access", RESTRICTED),
@@ -753,7 +845,7 @@ describe("the tool hands the background spawn a confined policy", () => {
 		try {
 			// No manager passed, so the factory builds one — the only way this
 			// wiring is reached in the app.
-			const tools = createAllTools(cwd, { operations: exec });
+			const tools = createAllTools(cwd, { operations: defaultOperations(exec) });
 			const bash = tools.find((tool) => tool.name === "Bash");
 			if (!bash) throw new Error("no Bash tool in the default set");
 			await bash.call({ command: "echo hi", run_in_background: true }, ctxFor("danger-full-access", RESTRICTED));

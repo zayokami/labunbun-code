@@ -26,6 +26,8 @@ export { createReadTool } from "./read.ts";
 export {
 	describeSandboxBackend,
 	detectRuntime,
+	networkConfinement,
+	policyFor,
 	type SandboxBackend,
 	sandboxBackendFor,
 } from "./sandbox/index.ts";
