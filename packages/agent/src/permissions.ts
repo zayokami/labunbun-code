@@ -15,10 +15,19 @@
  *      (`codex-rs/core/src/exec_policy.rs:770-855`).
  *   3. `plan`'s read-only tool list, which is a deny and so sits above the
  *      allow rules for the same reason step 1 does.
- *   4. among allows, later sources override earlier (user → project → local →
- *      policy → cliArg → session).
+ *   4. among allows, the first match decides, and there is deliberately no
+ *      precedence between sources — every allow produces the same answer, so
+ *      which one matched is not observable. `RULE_SOURCE_ORDER` still fixes the
+ *      order rules are *collected* in, because that is what makes a rule's
+ *      reported source stable.
  *   5. the mode's own answer to "nothing decided it": `agent` runs it, `ask`
  *      brings it to a person.
+ *
+ * Step 2 is a filter, not a gate, and the difference matters at step 5: a
+ * command the classifier does not recognise falls through to `agent` mode and
+ * runs. What the classifier buys is that the commands it *does* recognise stop
+ * there — it is not a whitelist, and nothing upstream treats its silence as
+ * safety.
  *
  * Step 1 used to come after a `bypassPermissions` early return, so that one mode
  * was the only thing in the system that could overrule a user's own `deny`. That
@@ -136,10 +145,12 @@ export { COMMAND_SEPARATOR_RE, tokenizeShell } from "./shell-tokens.ts";
  * original decision untouched rather than widening it.
  *
  * What constrains a command today is neither this function nor the sandbox axis.
- * The sandbox axis is a setting this build carries and does not yet enforce;
- * what it has today is the per-command classifier, which sits above every mode
- * and above the sandbox setting in both directions. Neither of those reaches a
- * process that goes around the tools, which is the honest limit of the pair.
+ * The sandbox axis is enforced — by seatbelt or bubblewrap on the platforms
+ * that have them, and by the tool-layer path policy where they do not, which
+ * `describeSandboxBackend` says out loud rather than leaving for the reader to
+ * assume. The per-command classifier sits above every mode and above the
+ * sandbox setting in both directions. Neither of those reaches a process that
+ * goes around the tools, which is the honest limit of the pair.
  */
 export function extractBashFilePaths(command: string): string[] {
 	const found: string[] = [];
@@ -314,8 +325,12 @@ export function evaluatePermissions(
 	}
 
 	// 2. The dangerous-command classifier, above every mode and above the
-	//    sandbox setting both ways. A non-match is never widened by anything
-	//    below, and a match is never turned into a pass by an allow rule.
+	//    sandbox setting both ways. A match is terminal: it returns here, so no
+	//    allow rule below can turn it into a pass. A non-match grants nothing on
+	//    its own — it has no opinion — and the decision carries on below, where an
+	//    allow rule or `agent` mode may still say yes. That is the limit worth
+	//    stating: what this classifier does not recognise becomes an ordinary
+	//    command, and the rules below are what an ordinary command gets.
 	if (toolName === "Bash") {
 		const command = readBashCommand(input);
 		if (command !== undefined) {
@@ -331,7 +346,12 @@ export function evaluatePermissions(
 		return { behavior: "deny", message: `Plan mode: ${toolName} is not allowed (read-only mode)` };
 	}
 
-	// 4. Among allows, later sources win — any match is enough since denies lost.
+	// 4. Among allows, the first match decides. Which one that is depends on the
+	//    order `config.rules` arrives in, so there is deliberately no precedence
+	//    between sources here: every allow produces the same answer, and a rule
+	//    that only *looked* stronger because it was later would be an ordering
+	//    nobody chose. Denies already ran in step 1, so nothing below this can
+	//    widen past one.
 	for (const rule of config.rules) {
 		if (rule.behavior !== "allow") continue;
 		if (ruleMatches(rule, toolName, input, config.cwd)) {

@@ -305,10 +305,18 @@ export function describeNetworkPolicy(
 	// without bubblewrap and a Mac with `sandbox-exec` both printed the sentence
 	// for a machine that has one, and the sentence claims the OS is holding
 	// something.
+	//
+	// The scope of the gap is stated as carefully as the gap itself. "A program
+	// that ignores the proxy environment" names subprocesses, and a user reading
+	// only that would reasonably conclude the model's own tools are covered — which
+	// was false until `WebFetch` and `WebSearch` were put under this same table.
+	// They are named explicitly below because the caveat's silence about them was
+	// an overclaim in its own right: it disclosed one bypass and let the reader
+	// assume there was not another.
 	const caveat =
 		confinement === "os-namespace"
 			? " The OS sandbox denies outbound traffic to the command itself, so a program that ignores the proxy environment still reaches nothing."
 			: ` ${REASON_BY_CONFINEMENT[confinement]} So the proxy is the whole network boundary: a program that opens a socket without consulting the proxy environment is not subject to it.`;
 
-	return `Network: restricted. ${detail}${caveat}`;
+	return `Network: restricted. ${detail}${caveat} The web tools are covered by this too, since they fetch in this process where the proxy is not in the path.`;
 }

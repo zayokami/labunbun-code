@@ -2,17 +2,34 @@
  * Web tools: WebFetch (URL → readable text) and WebSearch (DuckDuckGo HTML
  * endpoint, no API key). Network access is the tool's job; tests cover the
  * pure text-extraction and result-parsing helpers.
+ *
+ * Both are subject to the session's network axis. That is not an addition, it
+ * is the whole reason the axis exists: these two fetch in *this* process, so
+ * `HTTP_PROXY` is not in the path and the proxy cannot hold them — which left
+ * a single tool call reaching any public host while the same host over `Bash`
+ * was refused by the axis. A network policy that one built-in tool walks
+ * around is not a policy, it is a suggestion with a shell.
  */
 
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { type AnyTool, buildTool } from "@labunbun/agent";
+import { type AnyTool, buildTool, decideNetworkRequest, type NetworkAxis, normalizeHost } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 
 const MAX_CONTENT_CHARS = 40_000;
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 10_000_000;
+
+/**
+ * Where WebSearch goes. Named so the network axis has something to judge.
+ *
+ * A literal inlined into the fetch URL would make the check above it read as a
+ * comparison against a constant that cannot vary — which is true, and is the
+ * point: the host is fixed, so the decision can be made without a network round
+ * trip, and the only variable in the request is the part that should be gated.
+ */
+const SEARCH_HOST = "html.duckduckgo.com";
 
 /** Strip HTML down to readable text: drop scripts/styles/tags, decode entities, collapse whitespace. */
 export function htmlToText(html: string): string {
@@ -126,12 +143,32 @@ function isBlockedAddress(address: string): boolean {
 }
 
 /**
+ * The network axis's answer for `hostname`, as a refusal string or `null`.
+ *
+ * `decideNetworkRequest` is the same function the proxy calls, used here with
+ * the same arguments, so there is one table and one decision rather than a
+ * second matcher that could disagree with the first. `normalizeHost` first
+ * because that is what the proxy applies to a CONNECT target, and the two
+ * paths have to judge the same spelling of the same name the same way.
+ */
+function refuseByNetworkPolicy(hostname: string, network: NetworkAxis | undefined): string | null {
+	if (!network) return null;
+	const decision = decideNetworkRequest(network.domains, normalizeHost(hostname), network.access);
+	if (decision.allowed) return null;
+	return `Network policy refuses ${hostname} (${decision.reason})`;
+}
+
+/**
  * Guard against SSRF: resolve the hostname and check every returned address
  * (DNS can return multiple/mixed records, and a hostname can rebind between
  * check and fetch — this narrows the window but the real backstop is that
  * fetch() itself will only ever connect to what DNS hands back here).
+ *
+ * The network axis is checked first and on the same pass, for two reasons. It
+ * is cheaper — no DNS lookup — and it is the user's declared intent, so there
+ * is no reason to resolve a name before finding out it was never allowed.
  */
-async function guardPublicUrl(rawUrl: string): Promise<string | null> {
+async function guardPublicUrl(rawUrl: string, network?: NetworkAxis): Promise<string | null> {
 	let url: URL;
 	try {
 		url = new URL(rawUrl);
@@ -142,6 +179,8 @@ async function guardPublicUrl(rawUrl: string): Promise<string | null> {
 		return `Unsupported protocol: ${url.protocol}`;
 	}
 	const hostname = url.hostname.replace(/^\[|\]$/g, "");
+	const policyRefusal = refuseByNetworkPolicy(hostname, network);
+	if (policyRefusal) return policyRefusal;
 	if (hostname.toLowerCase() === "localhost") return "Requests to localhost are not allowed";
 	if (isIP(hostname) && isBlockedAddress(hostname)) return "Requests to private/internal addresses are not allowed";
 	if (!isIP(hostname)) {
@@ -185,16 +224,23 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
  * Fetch with SSRF re-validation on every hop. `redirect: "manual"` stops the
  * runtime from silently following a redirect to a blocked address after the
  * initial URL passed the check — a public URL can 302 to a private one.
+ *
+ * The network axis rides on the same hop loop rather than being checked once
+ * at the entry, which is the only placement that covers it: a public URL the
+ * axis allows can 302 to a host it does not, and a check outside this loop
+ * would be a check of the URL the model typed rather than of every host the
+ * fetch actually visits.
  */
 async function fetchGuarded(
 	url: string,
 	init: RequestInit,
 	maxRedirects = 5,
 	signal?: AbortSignal,
+	network?: NetworkAxis,
 ): Promise<Response | { blocked: string }> {
 	let current = url;
 	for (let hop = 0; hop <= maxRedirects; hop++) {
-		const blockReason = await guardPublicUrl(current);
+		const blockReason = await guardPublicUrl(current, network);
 		if (blockReason) return { blocked: blockReason };
 		const response = await fetchWithTimeout(current, { ...init, redirect: "manual" }, signal);
 		const isRedirect = response.status >= 300 && response.status < 400;
@@ -228,6 +274,7 @@ export function createWebFetchTool(): AnyTool {
 					{ headers: { "user-agent": "labunbun-code/0.1 (+webfetch)" } },
 					5,
 					ctx.signal,
+					ctx.network,
 				);
 				if ("blocked" in result) {
 					return { content: [textContent(`Fetch blocked: ${result.blocked}`)], isError: true };
@@ -277,6 +324,20 @@ export function createWebSearchTool(): AnyTool {
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
 		call: async (input, ctx) => {
+			// The destination is a constant, so this reads like it cannot need a
+			// check — and that is exactly why it needs one. The query is free text
+			// the model chose, and it leaves the machine inside a URL to a third
+			// party, which makes a search the shortest exfiltration channel in the
+			// tool set: whatever is in the query reaches an outside host. A network
+			// axis the search ignores is an axis with a hole shaped like "ask a
+			// question".
+			const refusal = refuseByNetworkPolicy(SEARCH_HOST, ctx.network);
+			if (refusal) {
+				return {
+					content: [textContent(`Search blocked: ${refusal}. WebSearch sends the query to ${SEARCH_HOST}.`)],
+					isError: true,
+				};
+			}
 			let response: Response;
 			try {
 				response = await fetchWithTimeout(
