@@ -90,9 +90,11 @@ export interface ResolveSandboxOptions {
 	/** Whether the platform's native backend is installed. Injected so this is testable. */
 	hasNativeBackend?: boolean;
 	/**
-	 * Whether a path exists. Injected for the same reason as the flag above: the
-	 * `missingPathBehavior` filter below has to run before a translator, and a
-	 * translator that could see the filesystem would stop being pure.
+	 * Whether a path exists. Injected for the same reason as the flag above, and
+	 * consulted for two decisions rather than one: the `missingPathBehavior` filter
+	 * below runs before a translator, and the bwrap translator needs the answer for
+	 * a protected path too. Neither is allowed to see the filesystem for itself, so
+	 * neither being a translator that stops being pure is a cost worth paying twice.
 	 */
 	exists?: (path: string) => boolean;
 }
@@ -247,16 +249,31 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 		};
 	}
 
-	const present = presentEntries(policy, options.exists ?? ((path) => existsSync(path)));
+	// One predicate, consulted in two places for two different reasons, so that
+	// both consult it about the same machine rather than about two lookups that
+	// could straddle a `mkdir` and disagree. What they do with the answer differs
+	// and the difference is the point: an *entry* marked `skip` that is missing is
+	// dropped (see `presentEntries`), whereas a *protected* path that is missing is
+	// kept and turned into an empty read-only mount, because dropping it would be
+	// the one answer that quietly removes the protection it is there to provide.
+	const exists = options.exists ?? ((path: string) => existsSync(path));
+	const present = presentEntries(policy, exists);
 
 	// Both translators return the argv *after* the program name — that is how
 	// Codex returns them too (`seatbelt.rs:1087`, `bwrap.rs:248`) — so the program
 	// is named here and nowhere else. Absolute for `sandbox-exec`, which must be
 	// the system binary: resolving it through `PATH` is how a wrapper gets
 	// substituted.
+	//
+	// Only bwrap is given `exists`. Under seatbelt a protected path that is absent
+	// needs nothing special: a `subpath` filter that matches no file grants
+	// nothing, which is exactly the protection, and the profile it produces is the
+	// profile it produced before any of this was derived.
 	const program = nativeSandboxProgram(platform);
 	const args =
-		platform === "darwin" ? buildSeatbeltArgs(present, options.command) : buildBwrapArgs(present, options.command);
+		platform === "darwin"
+			? buildSeatbeltArgs(present, options.command)
+			: buildBwrapArgs(present, options.command, exists);
 
 	return { kind: "native", execution: { argv: [program, ...args], simulated: false }, program };
 }

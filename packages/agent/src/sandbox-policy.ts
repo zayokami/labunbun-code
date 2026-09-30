@@ -33,6 +33,7 @@
  * to a user. A mechanism that reads as OS-enforced when it is not is worse
  * than no mechanism.
  */
+import { join } from "node:path";
 import type { NetworkDomainRule } from "./network-policy.ts";
 import type { SandboxMode } from "./types.ts";
 
@@ -173,6 +174,15 @@ export function canRead(access: FileSystemAccessMode): boolean {
  * rather than one that happens to allow everything: an empty policy is one a
  * backend can recognise and refuse to wrap at all, and a test can tell apart
  * "unconfined" from "confined with a very wide allow list".
+ *
+ * The derived `.git` below does not apply there, and that is not an oversight
+ * left to be rediscovered. `resolveSandboxExecution` short-circuits on an
+ * unrestricted policy and wraps nothing, so a protected path in it would be
+ * inert for both native backends — while the tool layer, which *is* still in
+ * force in this mode, refuses `.git` from `containment.ts` by matching the path
+ * rather than by consulting a list. Putting a list here would mean the mode's
+ * protection lived in a place that stops being read, which is the shape of a
+ * guarantee that quietly stops existing.
  */
 export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxPolicy {
 	const { sandbox, workspace } = options;
@@ -207,8 +217,52 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
 		fileSystem: { kind: "restricted", entries },
 		network: options.network ?? "enabled",
 		networkRules: [...(options.networkRules ?? [])],
-		protected: [...(options.protectedPaths ?? [])],
+		protected: protectedFor(options, [workspace, ...(options.writableRoots ?? [])]),
 	};
+}
+
+/**
+ * The protected paths a confined policy carries: what the caller found, plus the
+ * one that is derived rather than found.
+ *
+ * **The derived `.git` is the point of this function.** Everything in
+ * `protectedPaths` arrives from `findProtectedPaths`, which walks the tree to
+ * depth 4, skips `node_modules`, is cached per workspace for the life of the
+ * process, and resolves to `[]` if it fails. Those are reasonable limits for
+ * *discovering* directories nobody told us about — but they are the wrong limits
+ * for the one directory everybody knows is there. A repository created after the
+ * first Bash call, or one whose `.git` sits five levels down, produced no
+ * protected entry, so seatbelt emitted no `(deny file-write*)` for it and bwrap
+ * emitted no `--ro-bind`: the session wrote `.git/config` and reported success.
+ *
+ * Codex derives the same paths rather than scanning for them —
+ * `permissions.rs:2392-2415` builds `.git` / `.agents` / `.codex` per writable
+ * root unconditionally — and the reason is the same: a security control that is
+ * only as good as the scan's coverage is not a control on the path that matters.
+ * Only `.git` is derived here, because `.git` is the one this build's docs, its
+ * tool-layer guard and its tests all name.
+ *
+ * Deduplicated, because the scan will usually have found it: a workspace that is
+ * a git repository lists `<workspace>/.git` in `protectedPaths` already, and a
+ * policy carrying it twice makes every "how many protected paths" assertion in
+ * the suite wrong for a reason that is not a behaviour change.
+ *
+ * A path that does not exist is still derived. That is deliberate and it is why
+ * the bwrap translator needs the empty-directory recipe: `--ro-bind` on an absent
+ * source makes bubblewrap refuse to start, so a narrower sandbox would become a
+ * broken tool on a machine that is simply not a repository. Creating an empty,
+ * read-only mount at the path instead is both harmless when it is absent and the
+ * stronger answer when it appears later — an empty `.git` cannot be written into
+ * either.
+ */
+function protectedFor(options: BuildSandboxPolicyOptions, writableRoots: string[]): string[] {
+	const found = options.protectedPaths ?? [];
+	const out = new Set(found);
+	for (const root of writableRoots) {
+		if (root === "") continue;
+		out.add(join(root, ".git"));
+	}
+	return [...out];
 }
 
 /**

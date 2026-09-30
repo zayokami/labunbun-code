@@ -13,6 +13,8 @@
  * looks right; the things that must never appear are the things worth pinning.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { FileSystemSandboxEntry, SandboxPolicy } from "@labunbun/agent";
 import { buildBwrapArgs } from "../src/sandbox/bwrap.ts";
 import { policyFor } from "../src/sandbox/index.ts";
@@ -126,6 +128,33 @@ function mountsOf(argv: string[]): Mount[] {
 		mounts.push({ flag, source: argv[index + 1], target: argv[index + 2], index });
 	}
 	return mounts;
+}
+
+/**
+ * How `path` was made read-only, or `null` if it was not made read-only at all.
+ *
+ * Both recipes a protected path can receive are recognised, deliberately: the
+ * properties the tests above assert about `.git` — that it is never in a writable
+ * position, that its protection lands after the bind that could cover it — are
+ * properties of the *outcome*, and a reader that only understood `--ro-bind`
+ * would stop checking them the moment the second recipe existed. `--perms` is
+ * skipped rather than parsed because it takes a mode, not a path; `--remount-ro`
+ * is an attribute of the mount just made, not a mount of its own.
+ */
+function protectionOf(argv: string[], path: string): "ro-bind" | "empty-dir" | null {
+	for (let index = 0; index < argv.length; index++) {
+		const flag = argv[index];
+		if (flag === "--ro-bind" && argv[index + 1] === path && argv[index + 2] === path) return "ro-bind";
+		if (flag === "--tmpfs" && argv[index + 1] === path) return "empty-dir";
+	}
+	return null;
+}
+
+/** The flags and the path of the empty-directory recipe, sliced straight out. */
+function emptyDirRecipe(argv: string[], path: string): string[] {
+	const at = argv.indexOf("--perms");
+	if (at < 0 || argv[at + 2] !== "--tmpfs" || argv[at + 3] !== path) return [];
+	return argv.slice(at, at + 6);
 }
 
 /** Whether `candidate` is `root` or sits inside it, on canonical absolute paths. */
@@ -727,6 +756,121 @@ describe("buildBwrapArgs", () => {
 		expect(twice).toEqual(once);
 		expect(twice).not.toBe(once);
 		expect(COMMAND).toEqual(["bash", "-lc", "npm test"]);
+	});
+});
+
+describe("buildBwrapArgs on a protected path that is not there", () => {
+	// `buildSandboxPolicy` derives `<root>/.git` for every writable root whether or
+	// not it exists, which is what makes the protection independent of a scan. The
+	// cost of that is a policy naming a path that is not on the disk, and
+	// `--ro-bind` of an absent source makes bubblewrap refuse to start — so a
+	// narrower sandbox would turn into a shell that does not run, on exactly the
+	// machines (a fresh directory, a container that was never `git init`) where the
+	// protection has nothing to do anyway. The recipe below is Codex's
+	// (`bwrap.rs` `append_empty_directory_args`) and it is the only third answer:
+	// neither binding a path that cannot be bound nor dropping a path that must not
+	// be writable.
+
+	test("a path that is there is bound read-only, as before", () => {
+		const argv = buildBwrapArgs(POLICY, COMMAND, () => true);
+
+		expect(protectionOf(argv, GIT)).toBe("ro-bind");
+		expect(emptyDirRecipe(argv, GIT)).toEqual([]);
+	});
+
+	test("a path that is not there gets an empty read-only mount instead of a bind that cannot work", () => {
+		const argv = buildBwrapArgs(POLICY, COMMAND, (path) => path !== GIT);
+
+		expect(emptyDirRecipe(argv, GIT)).toEqual(["--perms", "555", "--tmpfs", GIT, "--remount-ro", GIT]);
+		expect(protectionOf(argv, GIT)).toBe("empty-dir");
+		// The negative that carries the finding, stated against the *path* rather than
+		// the flag. `--ro-bind / /` is the read baseline and is in every argv this
+		// function ever produces, so a bare "no `--ro-bind`" would be asserting the
+		// baseline is gone — and would go red the first time the recipe was correct.
+		expect(mountsOf(argv).some((mount) => mount.source === GIT)).toBe(false);
+	});
+
+	test("the absent path is never in a writable position, under either recipe", () => {
+		// The property the tests above the seam assert for a present `.git`, stated
+		// again for the case that has no test of its own anywhere else. Without it,
+		// the second recipe would be the one path in this file that could ship a
+		// writable `.git` with every existing assertion still green — the protections
+		// they read are the `--ro-bind` ones, and a `--tmpfs` is not one.
+		for (const present of [true, false]) {
+			const argv = buildBwrapArgs(POLICY, COMMAND, () => present);
+
+			// Neither recipe binds `.git` read-write, so there is no position from
+			// which it could be written — which is the property, rather than a flag
+			// name that one recipe uses and the other does not.
+			expect(
+				mountsOf(argv).some((mount) => mount.flag === "--bind" && (mount.source === GIT || mount.target === GIT)),
+			).toBe(false);
+			// And the path is named at all, so the loop above is not passing because
+			// the protection was dropped rather than given a different recipe. This is
+			// the assertion an earlier version of this test got wrong: it asserted a
+			// count that was 2 under both recipes, which is to say it asserted nothing.
+			expect(argv.filter((arg) => arg === GIT).length).toBeGreaterThan(0);
+			expect(protectionOf(argv, GIT)).not.toBeNull();
+		}
+	});
+
+	test("the empty mount lands after the bind that could cover it", () => {
+		// Ordering is the protection on this backend, and the second recipe has to
+		// obey it too. `mountsOf` does not read `--tmpfs`, so this asserts the index
+		// directly rather than borrowing a helper that would have to grow a case.
+		const argv = buildBwrapArgs(POLICY, COMMAND, (path) => path !== GIT);
+		const tmpfs = argv.indexOf("--tmpfs");
+
+		expect(argv.lastIndexOf("--bind")).toBeLessThan(tmpfs);
+		expect(argv.lastIndexOf("--ro-bind")).toBeLessThan(tmpfs);
+	});
+
+	test("one absent path does not change the recipe the others get", () => {
+		const policy = { ...POLICY, protected: [GIT, "/w/repo/sub/.git"] };
+		const neither = buildBwrapArgs(policy, COMMAND, () => false);
+		const one = buildBwrapArgs(policy, COMMAND, (path) => path === GIT);
+
+		expect(protectionOf(neither, GIT)).toBe("empty-dir");
+		expect(protectionOf(neither, "/w/repo/sub/.git")).toBe("empty-dir");
+		// Two tmpfs mounts and no stray ro-bind for either path, so neither fell
+		// through to the recipe that would have failed.
+		expect(neither.filter((arg) => arg === "--tmpfs")).toHaveLength(2);
+		expect(mountsOf(neither).some((mount) => mount.source === GIT)).toBe(false);
+		// And the split case: one present, one absent, each getting its own recipe. A
+		// single boolean for "does this policy have an absent path" would give both
+		// the same answer and one of them would be wrong.
+		expect(protectionOf(one, GIT)).toBe("ro-bind");
+		expect(protectionOf(one, "/w/repo/sub/.git")).toBe("empty-dir");
+	});
+
+	test("a caller that says nothing gets the argv it got before", () => {
+		// The default is `() => true`, which is a fact about this function's contract
+		// rather than a hedge: a translator that stat-ed the filesystem would make
+		// every test in this file a test of the machine it ran on, and a CI runner
+		// with no `/w/repo/.git` would then expect the tmpfs recipe for a path the
+		// policy says is protected. Production passes the real predicate
+		// (`resolveSandboxExecution`); this pins that adding the parameter did not
+		// quietly move the default under every existing caller.
+		expect(buildBwrapArgs(POLICY, COMMAND)).toEqual(buildBwrapArgs(POLICY, COMMAND, () => true));
+	});
+
+	test("and it never reaches for the filesystem itself", () => {
+		// The guard on the guard. A stat call reaching this file would compile, pass
+		// every test above on a machine where `/w/repo/.git` happens not to exist,
+		// and make the verbatim argv test at the top of the describe fail on a
+		// developer who ran `git init`. The same mistake `web-network-axis.test.ts`
+		// made with live DNS, so it is checked here the same way: against the source.
+		//
+		// The assertion is on the **import**, not on the identifier. An earlier
+		// version of this test scanned for the function's name and failed on the
+		// doc comment two hundred lines above, which quotes it to explain why it is
+		// not the default — the file scanning its own prose is the failure mode this
+		// test was written to prevent, so the check is narrowed to the one thing that
+		// would actually let a stat call in.
+		const source = readFileSync(join(import.meta.dir, "..", "src", "sandbox", "bwrap.ts"), "utf8");
+
+		expect(source).not.toMatch(/^\s*import\s+.*\bfrom\s+"node:fs"/m);
+		expect(source).not.toMatch(/\bglobalThis\.existsSync\b/);
 	});
 });
 

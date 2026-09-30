@@ -3,7 +3,10 @@
  *
  * Pure. No filesystem access, no `process.platform`, no clock. Which backend runs
  * is the caller's decision and it passes the policy in; which policy is in
- * force is the only thing this file branches on.
+ * force is the only thing this file branches on. The one thing it has to be told
+ * it cannot know — whether a protected path is there — arrives as an injected
+ * `exists` rather than an import, so a test's verdict is a fact about the policy
+ * and not about the machine the test ran on.
  *
  * ## Shape
  *
@@ -61,6 +64,12 @@
  * turns a policy that named an unused directory into a broken shell.
  * `resolveSandboxExecution` filters those entries out before calling here, which
  * is why the contract belongs on the entry and the work belongs one layer up.
+ *
+ * A **protected** path that does not exist is the opposite case and does not go
+ * through that filter, because the two answers are not interchangeable: dropping
+ * a `skip`-marked cache is what the caller asked for, and dropping a protected
+ * path is exactly the failure this file's whole `.git` protection exists to
+ * prevent. It gets a mount of its own instead — see `readOnlyPathArgs`.
  */
 import { canWrite, type SandboxPolicy } from "@labunbun/agent";
 
@@ -78,8 +87,17 @@ import { canWrite, type SandboxPolicy } from "@labunbun/agent";
  * restriction the caller asked for. Codex takes the same branch for the same
  * reason (`bwrap.rs:259-270`), and that branch is `bwrap --bind / /` plus the
  * namespace flags.
+ *
+ * `exists` is the one impure thing this function needs, and it is injected rather
+ * than imported for the reason `resolveSandboxExecution` injects the same predicate:
+ * a translator that stats the filesystem is a translator whose tests are tests of
+ * the machine they run on. See {@link readOnlyPathArgs} for what it is asked.
  */
-export function buildBwrapArgs(policy: SandboxPolicy, command: string[]): string[] {
+export function buildBwrapArgs(
+	policy: SandboxPolicy,
+	command: string[],
+	exists: (path: string) => boolean = () => true,
+): string[] {
 	if (policy.fileSystem.kind === "unrestricted") {
 		return policy.network === "enabled" ? [...command] : [...fullFilesystemArgs(), "--", ...command];
 	}
@@ -110,13 +128,43 @@ export function buildBwrapArgs(policy: SandboxPolicy, command: string[]): string
 		// `.git`. See the file header.
 		...writable.flatMap((entry) => ["--bind", entry.path, entry.path]),
 		...denied.flatMap((path) => ["--ro-bind", path, path]),
-		...protectedPaths.flatMap((path) => ["--ro-bind", path, path]),
+		...protectedPaths.flatMap((path) => readOnlyPathArgs(path, exists)),
 		...namespaceArgs(policy.network),
 		"--cap-drop",
 		"ALL",
 		"--",
 		...command,
 	];
+}
+
+/**
+ * The argv that makes one protected path read-only, chosen by whether it is there.
+ *
+ * `--ro-bind` needs its source to exist: bubblewrap fails to start otherwise, so
+ * a policy naming a path that was never created turns a narrower sandbox into a
+ * shell that does not run. That was fine while `protected` came only from a scan
+ * — a scan does not report what it did not find — and stopped being fine the
+ * moment `buildSandboxPolicy` began *deriving* `<root>/.git`, which is absent in
+ * every workspace that is not a repository.
+ *
+ * The alternative is to mount an empty, read-only directory there instead, and it
+ * is Codex's: `--perms 555 --tmpfs <path> --remount-ro <path>`
+ * (`codex-rs/linux-sandbox/src/bwrap.rs:1198-1205`,
+ * `append_empty_directory_args`). The path exists, it is empty, and it cannot be
+ * written — so the protection holds for the directory that is not there yet as
+ * well as the one that is, which is what a derived path needs and what a
+ * scan-found path got for free.
+ *
+ * `exists` defaults to "yes", which is the answer that reproduces the previous
+ * argv exactly. It is not the right answer in production — the caller passes the
+ * real one — and defaulting to it rather than to the filesystem is what keeps
+ * this function from becoming impure. A default of `existsSync` would make every
+ * existing test of this translator a test of the machine it runs on, which is the
+ * same mistake `web-network-axis.test.ts` was just fixed for.
+ */
+function readOnlyPathArgs(path: string, exists: (path: string) => boolean): string[] {
+	if (exists(path)) return ["--ro-bind", path, path];
+	return ["--perms", "555", "--tmpfs", path, "--remount-ro", path];
 }
 
 /**

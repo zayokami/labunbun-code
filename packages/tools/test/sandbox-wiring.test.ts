@@ -17,7 +17,7 @@
  * control a control.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -528,6 +528,79 @@ describe("a path the policy names but the disk does not have", () => {
 		});
 		expect(resolution.kind).toBe("unconfined");
 	});
+
+	test("but a protected path that is absent is not filtered out — it is mounted empty", () => {
+		// The two halves of this describe pull in opposite directions and the whole
+		// file depends on them not cancelling: an absent *entry* marked `skip` is
+		// dropped, and an absent *protected* path is not, because dropping the second
+		// is the one answer that removes the protection it is there to provide.
+		//
+		// This one deliberately does **not** use `argvFor`, so nothing about the disk
+		// is stubbed: `resolveSandboxExecution` falls back to the real `existsSync`,
+		// which is the production path, and a `mkdtemp` directory genuinely has no
+		// `.git`. The claim under test is that the two answers differ on the disk the
+		// command will actually run against, and a stubbed predicate could only ever
+		// prove they differ on a table.
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-sandbox-no-git-"));
+		const argv = realDiskArgv(buildSandboxPolicy({ sandbox: "workspace-write", workspace: cwd }));
+
+		expect(existsSync(join(cwd, ".git"))).toBe(false);
+		expect(tmpfsTargetOf(argv)).toBe(join(cwd, ".git"));
+		expect(roBindTargetOf(argv, join(cwd, ".git"))).toBeNull();
+	});
+
+	test("and the same workspace with a real `.git` gets the bind, not the empty mount", () => {
+		// The control, without which the test above would also pass if *every*
+		// protected path had become a tmpfs — that is, if the protection had been
+		// quietly deleted rather than made robust. Creating the directory is the only
+		// way to make the two answers distinguishable, and it is safe because the
+		// directory goes into a temp dir that is removed with it.
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-sandbox-with-git-"));
+		mkdirSync(join(cwd, ".git"));
+		try {
+			const argv = realDiskArgv(buildSandboxPolicy({ sandbox: "workspace-write", workspace: cwd }));
+
+			expect(roBindTargetOf(argv, join(cwd, ".git"))).toBe(join(cwd, ".git"));
+			expect(tmpfsTargetOf(argv)).toBeNull();
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	/** The argv for `policy` with no `exists` seam, so the real disk decides. */
+	function realDiskArgv(policy: SandboxPolicy): string[] {
+		const resolution = resolveSandboxExecution({
+			policy,
+			command: ["/bin/sh", "-lc", "true"],
+			platform: "linux",
+			hasNativeBackend: true,
+		});
+		expect(resolution.kind).toBe("native");
+		return resolution.kind === "native" ? resolution.execution.argv : [];
+	}
+
+	/**
+	 * The single `--tmpfs` target, or `null`.
+	 *
+	 * Every "the other recipe was not used" assertion in this describe has to name
+	 * the path rather than the flag, because `--ro-bind / /` is the read baseline and
+	 * appears in every argv `buildBwrapArgs` produces. An assertion of the form
+	 * `expect(argv).not.toContain("--ro-bind")` is therefore red against correct code
+	 * — which is a test that fails for the right reason and the wrong one, and is
+	 * worse than no assertion because the next person "fixes" the code.
+	 */
+	function tmpfsTargetOf(argv: string[]): string | null {
+		const at = argv.indexOf("--tmpfs");
+		return at < 0 ? null : argv[at + 1];
+	}
+
+	/** The target of the `--ro-bind` for `path`, or `null` if it has none. */
+	function roBindTargetOf(argv: string[], path: string): string | null {
+		for (let index = 0; index < argv.length; index++) {
+			if (argv[index] === "--ro-bind" && argv[index + 1] === path && argv[index + 2] === path) return path;
+		}
+		return null;
+	}
 });
 
 describe("isWritePermitted is directional, including on a policy the builder cannot produce", () => {

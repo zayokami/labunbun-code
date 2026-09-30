@@ -340,9 +340,21 @@ describe("describeSimulatedSandbox", () => {
 	});
 
 	test("counts the roots and the protected paths, and pluralises them", () => {
-		const one = describeSimulatedSandbox(policyFor({ protectedPaths: [`${WORKSPACE}/.git`] }));
+		// `join`, not a literal. The scan that fills `protectedPaths` in production
+		// goes through `resolveCanonical` (`protected-paths.ts:143`), so a real entry
+		// carries the platform's separator — and `buildSandboxPolicy` now derives the
+		// workspace's `.git` with `join` too. A forward-slash literal on Windows is
+		// therefore a *different string* from the derived one, and the count this
+		// test exists to check would read 2 for a path that is really one directory.
+		const one = describeSimulatedSandbox(policyFor({ protectedPaths: [join(WORKSPACE, ".git")] }));
 		expect(one).toContain("1 writable root");
 		expect(one).toContain("1 protected path");
+
+		// And the derivation alone, with no scan result at all, produces the same
+		// one — which is the property `sandbox-policy.test.ts` states at its own
+		// layer. Without this the count above would be satisfied by a scan and the
+		// number would drop to 0 in every workspace the scan misses.
+		expect(describeSimulatedSandbox(policyFor())).toContain("1 protected path");
 
 		const two = describeSimulatedSandbox(
 			policyFor({ writableRoots: [WRITABLE_ROOT], readOnlyRoots: [READ_ONLY_ROOT] }),
