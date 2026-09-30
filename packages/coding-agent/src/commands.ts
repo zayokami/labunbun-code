@@ -9,6 +9,7 @@
  */
 import type { AgentSession, CompactionManager } from "@labunbun/agent";
 import { estimateContextUsage } from "@labunbun/agent";
+import { playDaisyBell } from "./daisy-bell.ts";
 import { runMigration } from "./migrate.ts";
 import { type MigrationDialogBridge, runMigrationWizard } from "./migrate-wizard.ts";
 
@@ -180,6 +181,12 @@ export function builtInCommands(): Command[] {
 				`2. Otherwise create it with: build/lint/test commands (especially for running a single test),\n` +
 				`   architecture overview, and any conventions an agent must follow.\n` +
 				`Be concise — future agent sessions will read this file first.`,
+		},
+		{
+			name: "hal",
+			description: "I'm sorry, Dave. I'm afraid I can't do that.",
+			type: "local",
+			call: async () => (await playDaisyBell()).message,
 		},
 		{
 			name: "trim",
