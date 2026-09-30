@@ -32,6 +32,7 @@ import type {
 	AgentEvent,
 	AgentEventHandler,
 	AnyTool,
+	NetworkAxis,
 	PermissionMode,
 	ResolvedToolCall,
 	SandboxMode,
@@ -48,6 +49,8 @@ export interface AgentSessionOptions {
 	maxTurns?: number;
 	permissionMode?: PermissionMode;
 	sandbox?: SandboxMode;
+	/** The network axis. Defaults to `enabled` with no table — today's behaviour. */
+	network?: NetworkAxis;
 }
 
 const MAX_OUTPUT_TOKENS_CAP = 64_000;
@@ -66,6 +69,7 @@ export class AgentSession {
 	#maxTurns: number;
 	#permissionMode: PermissionMode;
 	#sandbox: SandboxMode;
+	#network: NetworkAxis;
 
 	#handlers = new Set<AgentEventHandler>();
 	#steering: string[] = [];
@@ -92,6 +96,7 @@ export class AgentSession {
 		this.#maxTurns = options.maxTurns ?? Number.POSITIVE_INFINITY;
 		this.#permissionMode = options.permissionMode ?? DEFAULT_MODE_CHOICE.mode;
 		this.#sandbox = options.sandbox ?? DEFAULT_SANDBOX_FOR_MODE[this.#permissionMode];
+		this.#network = options.network ?? { access: "enabled", domains: [] };
 		// Freeze wire-tool order at construction for prompt-cache stability.
 		this.#wireTools = toWireTools(this.#tools);
 	}
@@ -137,6 +142,34 @@ export class AgentSession {
 
 	get sandbox(): SandboxMode {
 		return this.#sandbox;
+	}
+
+	/**
+	 * The network axis as it stands. Read per call for the same reason
+	 * `sandbox` is: `/mode` can change the session and a tool holding the value
+	 * it was built with would keep applying the old one.
+	 */
+	get network(): NetworkAxis {
+		return this.#network;
+	}
+
+	/**
+	 * Change the network axis mid-session.
+	 *
+	 * Takes the whole `NetworkAxis` rather than two arguments for the reason the
+	 * field is one: a mode with no table and a table with no mode are both
+	 * configurations nobody means, and a two-argument setter makes producing one
+	 * a two-step affair.
+	 *
+	 * Note what this does **not** do: it does not stop a proxy that is already
+	 * listening under the old rules. `ChildProcessExecOperations` keeps one
+	 * proxy for the session, so the new rules take effect for the next command
+	 * only if the caller rebuilt the operations — which is why the honest
+	 * statement in `/permissions` is about what the next command is subject to,
+	 * not about the session having changed.
+	 */
+	setNetwork(network: NetworkAxis): void {
+		this.#network = network;
 	}
 
 	get isRunning(): boolean {
@@ -626,7 +659,7 @@ export class AgentSession {
 			tool: call.tool,
 			rawInput: call.input,
 			deps: this.#deps,
-			ctx: { callId: call.callId, signal, cwd: this.cwd, sandbox: this.sandbox },
+			ctx: { callId: call.callId, signal, cwd: this.cwd, sandbox: this.sandbox, network: this.#network },
 			permissionContext: {
 				mode: this.#permissionMode,
 				sandbox: this.#sandbox,

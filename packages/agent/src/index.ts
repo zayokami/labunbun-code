@@ -45,6 +45,21 @@ export {
 	type DangerousCommandPlatform,
 	MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH,
 } from "./dangerous-command.ts";
+// Which hosts a confined command may reach. Also data only — the proxy that
+// enforces it is in @labunbun/tools, which depends on this package.
+export {
+	decideNetworkRequest,
+	describeNetworkPolicy,
+	domainMatches,
+	matchDomainRule,
+	NETWORK_DOMAIN_PERMISSIONS,
+	type NetworkDecision,
+	type NetworkDenialReason,
+	type NetworkDomainPermission,
+	type NetworkDomainRule,
+	needsNetworkProxy,
+	normalizeHost,
+} from "./network-policy.ts";
 // Bounding what tool output may enter the conversation
 export {
 	capRoundResults,
@@ -83,6 +98,7 @@ export {
 	type FileSystemSandboxKind,
 	type FileSystemSandboxPolicy,
 	isWritePermitted,
+	NETWORK_SANDBOX_POLICIES,
 	type NetworkSandboxPolicy,
 	type SandboxPolicy,
 } from "./sandbox-policy.ts";
@@ -112,6 +128,7 @@ export type {
 	CompactionCheck,
 	LoopHooks,
 	ModeChoice,
+	NetworkAxis,
 	PermissionContext,
 	PermissionMode,
 	PermissionResult,

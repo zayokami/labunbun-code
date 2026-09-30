@@ -32,6 +32,7 @@ import {
 	collectPermissionRules,
 	formatIgnoredKeysNotice,
 	loadSettings,
+	networkAxisFrom,
 	resolveMode,
 } from "./settings.ts";
 import { loadSkills, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
@@ -159,6 +160,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		loadedSettings,
 	);
 	if (downgradeReason) console.error(`Warning: ${downgradeReason}`);
+	// The network axis is read from settings even though the other two are not:
+	// there is no headless default to preserve, because before this axis existed
+	// every command reached whatever the host could reach. So the settings value
+	// is the only thing that can turn it down, and reading it here is what makes
+	// `networkAccess` mean anything in a `-p` run.
+	const effectiveNetwork = networkAxisFrom(settings);
 
 	// ---- user hooks (snapshotted at startup against mid-session injection) ----
 	const hooksRuntime = snapshotHooks(settings.hooks);
@@ -217,6 +224,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		definitions: () => agentDefinitions,
 		store: () => store,
 		permissionMode: () => effectiveMode,
+		// Both axes, because a subagent that got different ones from the session
+		// that spawned it would be running under a policy nobody chose. `sandbox`
+		// was missing here and defaulted to `workspace-write`, so a `-p` run at
+		// `danger-full-access` got subagents that could not write outside the
+		// workspace — narrower, so nothing leaked, but a subagent in `agent` mode
+		// cannot ask, so the failure was an unexplained "not permitted" deep in a
+		// tool result with no line anywhere saying why.
+		sandbox: () => effectiveSandbox,
+		network: () => effectiveNetwork,
 		getPermissionRules: () => rules,
 		trimOldToolResults: settings.trimOldToolResults,
 		report: (text) => console.error(text),
@@ -263,6 +279,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		maxTurns: options.maxTurns,
 		permissionMode: effectiveMode,
 		sandbox: effectiveSandbox,
+		network: effectiveNetwork,
 		deps: {
 			streamFn: transport.streamFn,
 			checkCompaction: compactionWiring.checkCompaction,

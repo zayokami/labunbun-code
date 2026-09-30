@@ -27,7 +27,7 @@
  */
 import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { buildSandboxPolicy, type SandboxMode, type SandboxPolicy } from "@labunbun/agent";
+import { buildSandboxPolicy, type NetworkAxis, type SandboxMode, type SandboxPolicy } from "@labunbun/agent";
 import { buildBwrapArgs } from "./bwrap.ts";
 import { buildSeatbeltArgs } from "./seatbelt.ts";
 import { SIMULATED_SANDBOX_DISCLAIMER } from "./simulated.ts";
@@ -98,12 +98,23 @@ export function policyFor(options: {
 	protectedPaths?: string[];
 	readOnlyRoots?: string[];
 	writableRoots?: string[];
+	/** The network axis. Both halves, or the caller has to say why it has none. */
+	network?: NetworkAxis;
 }): SandboxPolicy {
 	return buildSandboxPolicy({
 		sandbox: options.sandbox,
 		workspace: options.workspace,
 		protectedPaths: options.protectedPaths,
 		readOnlyRoots: options.readOnlyRoots,
+		// Forwarded, and it was not: this function accepted `writableRoots` and
+		// dropped it on the floor, so every caller that named a writable root —
+		// `workspacePolicy` included — got a policy without it. Narrower than
+		// asked for, so nothing leaked, but a root a user was told was writable
+		// was not. The type kept accepting the argument the whole time, which is
+		// why no error ever pointed at it.
+		writableRoots: options.writableRoots,
+		network: options.network?.access,
+		networkRules: options.network?.domains,
 	});
 }
 

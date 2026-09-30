@@ -12,6 +12,7 @@ import {
 	type AnyTool,
 	buildTool,
 	evaluatePermissions,
+	type NetworkAxis,
 	type PermissionMode,
 	type PermissionRule,
 	type SandboxMode,
@@ -152,6 +153,14 @@ export interface TaskToolContext {
 	 * picked. `undefined` means the subagent's own default, which is confined.
 	 */
 	sandbox?: () => SandboxMode | undefined;
+	/**
+	 * The third axis, read at the same moment and for the same reason. A
+	 * subagent that reached the network while its parent was `restricted` would
+	 * make every allow-list entry in `settings.networkDomains` advisory, and the
+	 * parent is the thing a user thinks of as the session — a subagent is an
+	 * implementation detail of a tool call.
+	 */
+	network?: () => NetworkAxis | undefined;
 	/** Resolved fresh per call so session-scoped allow rules added mid-conversation apply to new subagents. */
 	getPermissionRules?: () => PermissionRule[];
 	/**
@@ -227,6 +236,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 			const store = ctx.store?.();
 			const permissionMode = ctx.permissionMode?.();
 			const sandbox = ctx.sandbox?.();
+			const network = ctx.network?.();
 			// A definition may name its own model. One that no longer resolves falls
 			// back to the session's — said out loud, because a subagent quietly
 			// running on a different model than its definition asks for is the kind
@@ -264,6 +274,7 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 				cwd: toolCtx.cwd,
 				permissionMode,
 				sandbox,
+				network,
 				deps: {
 					streamFn: ctx.streamFn,
 					checkCompaction: subagentWiring.checkCompaction,

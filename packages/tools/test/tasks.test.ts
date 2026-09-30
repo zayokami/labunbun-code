@@ -6,6 +6,7 @@ const NO_CTX = {
 	signal: new AbortController().signal,
 	cwd: process.cwd(),
 	sandbox: "workspace-write" as const,
+	network: { access: "enabled" as const, domains: [] },
 	onUpdate: () => {},
 };
 

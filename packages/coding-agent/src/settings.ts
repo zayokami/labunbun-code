@@ -20,6 +20,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+	NETWORK_DOMAIN_PERMISSIONS,
+	NETWORK_SANDBOX_POLICIES,
+	type NetworkAxis,
+	type NetworkDomainRule,
 	PERMISSION_MODES,
 	type PermissionMode,
 	type PermissionRule,
@@ -88,6 +92,20 @@ export const SandboxModeSchema = z.custom<SandboxMode>().superRefine((value, ctx
 	});
 });
 
+/**
+ * One domain rule, in either of the two spellings a user would write.
+ *
+ * A bare string is an allow, because that is what almost every entry in a
+ * `networkDomains` list is and the object form would be tedious for the
+ * common case. `{domain, action: "deny"}` exists because a deny with no way to
+ * express it is a deny nobody writes — and once `allow: "*"` is in a table,
+ * the deny is the only thing standing between it and everything.
+ */
+export const NetworkDomainRuleSchema = z.union([
+	z.string(),
+	z.object({ domain: z.string(), action: z.enum(NETWORK_DOMAIN_PERMISSIONS) }),
+]);
+
 /** USD per million tokens, the same shape the built-in catalog uses. */
 export const ModelPricingSchema = z.object({
 	input: z.number().nonnegative(),
@@ -129,6 +147,26 @@ export const SettingsSchema = z.object({
 	 * in the mode's own hint rather than being described here as confinement.
 	 */
 	sandbox: SandboxModeSchema.optional(),
+	/**
+	 * The network axis, which is **not** derived from `sandbox`.
+	 *
+	 * Separate for the same reason the two sandbox keys are: `workspace-write`
+	 * that silently cut the network would break `npm install` and `git fetch`
+	 * for everyone who took the default, so confinement here is something the
+	 * user asks for by name. Defaults to `enabled`, which is today's behaviour.
+	 */
+	networkAccess: z.enum(NETWORK_SANDBOX_POLICIES).optional(),
+	/**
+	 * Domain rules for the proxy. A bare string is an allow; the object form
+	 * carries an explicit `deny`. See {@link NetworkDomainRuleSchema}.
+	 *
+	 * Under `networkAccess: "restricted"` an empty list reaches nothing, which
+	 * is the fail-closed reading and the reason it is safe to leave unset: the
+	 * restriction does not turn on because someone filled this in, it turns on
+	 * because someone set `networkAccess`, and by then an empty list is the
+	 * answer "nothing, yet".
+	 */
+	networkDomains: z.array(NetworkDomainRuleSchema).optional(),
 	/**
 	 * Theme name: a built-in, a theme file from `~/.labunbun/themes/`, or
 	 * `"auto"` to follow the terminal background. Free-form rather than an enum
@@ -362,6 +400,11 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	// A cloned repository choosing its own confinement level is the same move as
 	// one choosing its own approval policy: it hands itself the widest one.
 	sandbox: "denied",
+	// Same reasoning, applied to the network axis. A repository that could turn
+	// the network on would be choosing where the user's traffic goes, and one
+	// that could turn it *off* would be choosing which of its own commands fail.
+	networkAccess: "denied",
+	networkDomains: "denied",
 	env: "denied",
 	providers: "denied",
 	hooks: "denied",
@@ -650,6 +693,37 @@ export function resolveMode(
 		};
 	}
 	return { ...requested };
+}
+
+/**
+ * Read the network axis out of a settings object.
+ *
+ * The one place the two are turned into a configuration, for the same reason
+ * `resolveMode` is the one place the other two are: a second place doing this
+ * arithmetic is a second answer to "what may this session reach", and the two
+ * answers only have to differ on the one machine where nobody is looking.
+ *
+ * The default is `enabled` with an empty table, and that is a deliberate
+ * statement rather than a filler. An empty table under `restricted` reaches
+ * nothing, so defaulting the mode to `restricted` would make a settings file
+ * that says nothing about the network into a session that cannot fetch
+ * anything — a silent, invisible breakage for the many people who never touch
+ * these keys. Writing `"networkAccess": "restricted"` is how you ask for that.
+ *
+ * The union in the schema is a convenience for the file (a bare string is
+ * almost always what anyone wants to write) and is collapsed here, so nothing
+ * downstream has to know a rule has two spellings.
+ */
+export function networkAxisFrom(settings: Settings): NetworkAxis {
+	return {
+		access: settings.networkAccess ?? "enabled",
+		domains: (settings.networkDomains ?? []).map(
+			(rule): NetworkDomainRule =>
+				typeof rule === "string"
+					? { pattern: rule, permission: "allow" }
+					: { pattern: rule.domain, permission: rule.action },
+		),
+	};
 }
 
 /**

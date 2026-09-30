@@ -15,6 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FileSystemSandboxEntry, SandboxPolicy } from "@labunbun/agent";
 import { buildBwrapArgs } from "../src/sandbox/bwrap.ts";
+import { policyFor } from "../src/sandbox/index.ts";
 import { buildSeatbeltArgs } from "../src/sandbox/seatbelt.ts";
 
 const WORKSPACE = "/w/repo";
@@ -40,6 +41,7 @@ const POLICY: SandboxPolicy = {
 		],
 	},
 	network: "enabled",
+	networkRules: [],
 	protected: [GIT],
 };
 
@@ -47,6 +49,7 @@ const POLICY: SandboxPolicy = {
 const UNRESTRICTED: SandboxPolicy = {
 	fileSystem: { kind: "unrestricted", entries: [] },
 	network: "enabled",
+	networkRules: [],
 	protected: [],
 };
 
@@ -768,6 +771,7 @@ describe("both backends", () => {
 			const empty: SandboxPolicy = {
 				fileSystem: { kind: "restricted", entries: [] },
 				network: "enabled",
+				networkRules: [],
 				protected: [],
 			};
 			// A restricted policy with nothing in it still confines the
@@ -775,4 +779,41 @@ describe("both backends", () => {
 			expect(backend.build(empty, COMMAND)).not.toEqual(COMMAND);
 		});
 	}
+});
+
+/**
+ * `policyFor` builds the policy; these are the two things it has to carry into
+ * it. Both were found while wiring the network axis through this function, and
+ * both failed in the same direction — an option that was accepted, named by a
+ * caller, and then dropped, so the policy was narrower than what was asked for
+ * and nothing anywhere said so.
+ */
+describe("policyFor carries what it is given", () => {
+	test("a writable root reaches the policy", () => {
+		// It did not. The parameter was in the options type and never passed to
+		// `buildSandboxPolicy`, so every caller naming one — `workspacePolicy`
+		// included — got a policy without it. The type kept accepting the argument
+		// throughout, which is exactly why no error ever pointed at it: the
+		// signature was a promise the body did not keep.
+		const policy = policyFor({
+			sandbox: "workspace-write",
+			workspace: WORKSPACE,
+			writableRoots: ["/tmp/scratch"],
+		});
+		expect(policy.fileSystem.entries.some((entry) => entry.path === "/tmp/scratch")).toBe(true);
+	});
+
+	test("the network axis reaches the policy as both halves", () => {
+		const policy = policyFor({
+			sandbox: "workspace-write",
+			workspace: WORKSPACE,
+			network: { access: "restricted", domains: [{ pattern: "x.test", permission: "allow" }] },
+		});
+		// Asserted as a pair because either alone is a configuration nobody can
+		// write: the mode with no table reaches nothing at all, and the table with
+		// no mode is consulted by nothing. Passing one without the other is the
+		// failure this single `NetworkAxis` field exists to make impossible.
+		expect(policy.network).toBe("restricted");
+		expect(policy.networkRules).toEqual([{ pattern: "x.test", permission: "allow" }]);
+	});
 });

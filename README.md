@@ -33,6 +33,24 @@ labunbun                                # interactive REPL
   decision this process makes about calls that arrive through the tools, so a
   subprocess started outside them is not subject to it. `/permissions` names
   which of the three you have, in those words, rather than saying "sandbox on".
+- **Network access** — a third axis, off the filesystem: a local HTTP and SOCKS5
+  proxy that commands are pointed at, with a domain allow-list. Unlike the
+  filesystem half this one is really enforced on all three platforms — the proxy
+  is this process, not a kernel — with the honest limit that a program which
+  opens a socket without consulting `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+  is not subject to it. On macOS and Linux the OS sandbox holds the rest of the
+  boundary; on Windows the proxy is all of it, and `/doctor` says so.
+
+  ```jsonc
+  { "networkAccess": "restricted", "networkDomains": ["registry.npmjs.org", { "domain": "*.internal", "action": "deny" }] }
+  ```
+
+  `networkAccess: "enabled"` (the default) with no patterns confines nothing and
+  starts no proxy. A bare string is an allow; the object form carries an
+  explicit `deny`. Both keys are user-tier only — a repository may not set them,
+  because a checked-in file that turns the network off would be a checked-in
+  file that makes `bun install` fail for everyone who clones it. Set
+  `networkAccess: "restricted"` with an empty list and nothing is reachable.
 - **Sessions** — append-only JSONL tree per project (`~/.labunbun/projects/`),
   crash-safe resume with `--resume`, prompt history with ↑ recall.
 - **Activity** — `/activity` draws the days you used this as a heatmap, with
@@ -559,7 +577,8 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
 - Project: `.labunbun/` — `settings.json`, `settings.local.json`,
   `rules/*.md`, `agents/`, `skills/`, `themes/`
 - Project and local settings are read as **repo-controlled**: they may not set
-  `model`, `fallbackModels`, `permissionMode`, `sandbox`, `env`, `providers`,
+  `model`, `fallbackModels`, `permissionMode`, `sandbox`, `networkAccess`,
+  `networkDomains`, `env`, `providers`,
   `hooks`, `mcpServers`, `pricing`, `trimOldToolResults`, `gamepad`,
   `permissions.allow`, or `permissions.additionalDirectories`.
   Those are honored from the user, policy (`managed-settings.json`), and

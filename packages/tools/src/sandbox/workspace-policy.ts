@@ -10,7 +10,7 @@
  *
  * So this is shared, and the `.git` discovery behind it is shared too.
  */
-import type { SandboxMode, SandboxPolicy } from "@labunbun/agent";
+import type { NetworkAxis, SandboxMode, SandboxPolicy } from "@labunbun/agent";
 import { policyFor } from "./index.ts";
 import { findProtectedPaths } from "./protected-paths.ts";
 
@@ -56,6 +56,15 @@ export interface WorkspacePolicyOptions {
 	readOnlyRoots?: string[];
 	/** Directories outside the workspace that may be written. */
 	writableRoots?: string[];
+	/**
+	 * The network axis. Read per call alongside `sandbox` for the same reason:
+	 * `/mode` can change the session and a tool holding the value it was built
+	 * with would keep enforcing the old one.
+	 *
+	 * Optional, unlike `sandbox`, because the *read* policy below is built
+	 * without a session and the network does not move the Read tool's boundary.
+	 */
+	network?: NetworkAxis;
 }
 
 /**
@@ -97,5 +106,6 @@ export async function workspacePolicy(workspace: string, options: WorkspacePolic
 		protectedPaths: await protectedPathsFor(workspace),
 		readOnlyRoots: options.readOnlyRoots,
 		writableRoots: options.writableRoots,
+		network: options.network,
 	});
 }

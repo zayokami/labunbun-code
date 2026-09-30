@@ -15,15 +15,22 @@
  *   - Linux   `bwrap` argv — real, OS-level, and needs bubblewrap installed
  *   - Windows **simulated**: a tool-layer path decision, because the plan
  *             rules out a helper program and there is no user-mode equivalent
- *             of seatbelt. The network half is genuinely enforced (batch 4,
- *             the proxy); the filesystem half is a decision this process makes
- *             about calls that arrive through the tools, and a subprocess that
- *             goes around them is not subject to it.
+ *             of seatbelt. The filesystem half is a decision this process
+ *             makes about calls that arrive through the tools, and a
+ *             subprocess that goes around them is not subject to it.
  *
- * That last line is the honest limit of the pair and is repeated wherever the
- * sandbox is shown to a user. A mechanism that reads as OS-enforced when it is
- * not is worse than no mechanism.
+ * The network half is a proxy, on all three platforms, and it is enforced by
+ * convention rather than by the kernel everywhere: `HTTP_PROXY` is something
+ * most tooling honours and not something the OS requires. On macOS and Linux
+ * the sandbox above is what closes that gap, so the two are layered. On
+ * Windows the proxy is the whole of it. `describeNetworkPolicy` in
+ * `network-policy.ts` says which, per platform, and the sentence differs.
+ *
+ * That limit is the honest one and is repeated wherever the sandbox is shown
+ * to a user. A mechanism that reads as OS-enforced when it is not is worse
+ * than no mechanism.
  */
+import type { NetworkDomainRule } from "./network-policy.ts";
 import type { SandboxMode } from "./types.ts";
 
 /** Whether the filesystem is confined at all. Mirrors Codex's `FileSystemSandboxKind`. */
@@ -38,8 +45,16 @@ export type FileSystemSandboxKind = "restricted" | "unrestricted";
  */
 export type FileSystemAccessMode = "read" | "write" | "deny";
 
+/**
+ * The network axis values, as a value so the settings schema can derive its
+ * enum from them — the `PERMISSION_MODES` lesson (F1), applied to the second
+ * axis: a hand-written `z.enum(["enabled", "restricted"])` in the settings file
+ * is a copy of this list that can drift.
+ */
+export const NETWORK_SANDBOX_POLICIES = ["restricted", "enabled"] as const;
+
 /** Mirrors Codex's `NetworkSandboxPolicy`. */
-export type NetworkSandboxPolicy = "restricted" | "enabled";
+export type NetworkSandboxPolicy = (typeof NETWORK_SANDBOX_POLICIES)[number];
 
 export interface FileSystemSandboxEntry {
 	/** Absolute, already canonical. Backends match on this string, not on a pattern. */
@@ -71,6 +86,18 @@ export interface FileSystemSandboxPolicy {
 export interface SandboxPolicy {
 	fileSystem: FileSystemSandboxPolicy;
 	network: NetworkSandboxPolicy;
+	/**
+	 * The domain table the proxy enforces. Empty means "judge by mode alone",
+	 * which under `restricted` reaches nothing and under `enabled` reaches
+	 * everything — both correct, and both reachable from this build.
+	 *
+	 * It lives on the policy rather than being passed to `exec` beside it so
+	 * that the network axis arrives the way the filesystem one does: as one
+	 * value a caller cannot assemble from two arguments that disagree. Every
+	 * producer of a `SandboxPolicy` now states its domain rules, including the
+	 * ones that have none.
+	 */
+	networkRules: NetworkDomainRule[];
 	/**
 	 * Paths inside the workspace that must never be written, whatever else the
 	 * policy allows.
@@ -118,6 +145,12 @@ export interface BuildSandboxPolicyOptions {
 	 * exists this defaults to `enabled`, which is today's behaviour.
 	 */
 	network?: NetworkSandboxPolicy;
+	/**
+	 * Domain rules for the proxy. A copy, not a reference to the loaded
+	 * settings: a policy is read by backends that must not be able to see it
+	 * change underneath them mid-command.
+	 */
+	networkRules?: readonly NetworkDomainRule[];
 }
 
 /** Whether an entry's access level permits writing. */
@@ -145,6 +178,7 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
 		return {
 			fileSystem: { kind: "unrestricted", entries: [] },
 			network: options.network ?? "enabled",
+			networkRules: [...(options.networkRules ?? [])],
 			protected: [],
 		};
 	}
@@ -169,6 +203,7 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
 	return {
 		fileSystem: { kind: "restricted", entries },
 		network: options.network ?? "enabled",
+		networkRules: [...(options.networkRules ?? [])],
 		protected: [...(options.protectedPaths ?? [])],
 	};
 }

@@ -105,6 +105,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -137,6 +138,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -194,6 +196,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -214,6 +217,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: dir,
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -247,6 +251,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -278,6 +283,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -294,6 +300,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -318,6 +325,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -340,6 +348,7 @@ describe("Task tool (subagents)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -398,6 +407,7 @@ describe("Task tool (subagents)", () => {
 					signal: abortController.signal,
 					cwd: process.cwd(),
 					sandbox: "workspace-write" as const,
+					network: { access: "enabled" as const, domains: [] },
 					onUpdate: () => {},
 				},
 			);
@@ -484,6 +494,7 @@ describe("what the Task tool reads at the call", () => {
 			signal: new AbortController().signal,
 			cwd: process.cwd(),
 			sandbox: "workspace-write" as const,
+			network: { access: "enabled" as const, domains: [] },
 			onUpdate: () => {},
 		});
 	}
@@ -717,6 +728,7 @@ describe("plan mode tools", () => {
 			signal: new AbortController().signal,
 			cwd: process.cwd(),
 			sandbox: "workspace-write" as const,
+			network: { access: "enabled" as const, domains: [] },
 			onUpdate: () => {},
 		};
 

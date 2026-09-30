@@ -51,6 +51,7 @@ const CTX = (sandbox: SandboxMode) => ({
 	signal: new AbortController().signal,
 	cwd: process.cwd(),
 	sandbox,
+	network: { access: "enabled" as const, domains: [] },
 	onUpdate: () => {},
 });
 
@@ -422,6 +423,7 @@ describe("isWritePermitted is directional, including on a policy the builder can
 		const hand: SandboxPolicy = {
 			fileSystem: { kind: "unrestricted", entries: [] },
 			network: "enabled",
+			networkRules: [],
 			protected: ["/repo/.git"],
 		};
 		expect(isWritePermitted(hand, "/repo/.git/config")).toBe(false);
@@ -438,5 +440,104 @@ describe("isWritePermitted is directional, including on a policy the builder can
 		// A prefix that is not a path boundary. `/repository` starts with the
 		// string `/repo` and is a different directory.
 		expect(isWritePermitted(built, "/repository/file.txt")).toBe(false);
+	});
+});
+
+/**
+ * Does the network axis reach the spawn?
+ *
+ * The same question the rest of this file asks about the filesystem half, and
+ * with less room for doubt: a proxy that is started, correct, and never named
+ * in the child's environment confines nothing, and nothing about that looks
+ * like a failure. The command still runs and still prints what it printed
+ * before. Both tests below drive a real `exec` and read the child's own view of
+ * its environment.
+ *
+ * Found by the batch-4 falsification driver: two mutations — dropping the proxy
+ * variables from the child environment, and reordering the merge so a caller's
+ * own `HTTP_PROXY` wins — left every test in the repository green.
+ */
+describe("the network axis reaches the spawn", () => {
+	/** A policy the filesystem half does not object to, carrying a network axis. */
+	function netPolicy(
+		cwd: string,
+		network: "enabled" | "restricted",
+		rules: { pattern: string; permission: "allow" | "deny" }[],
+	) {
+		return buildSandboxPolicy({ sandbox: "danger-full-access", workspace: cwd, network, networkRules: rules });
+	}
+
+	/** What the spawned process actually saw, asked of the process itself. */
+	function childEnvOf(exec: ChildProcessExecOperations, cwd: string, env?: Record<string, string>) {
+		// `node` rather than `echo $VAR`: this file runs on Windows too, where the
+		// shell is `cmd.exe` and `$HTTP_PROXY` is a literal string. A test that
+		// only passed on a POSIX machine would report the wiring as working on the
+		// platform where it is most often not.
+		return exec
+			.exec({
+				command: "node -e \"process.stdout.write(process.env.HTTP_PROXY || '(none)')\"",
+				cwd,
+				sandbox: netPolicy(cwd, "restricted", [{ pattern: "registry.npmjs.org", permission: "allow" }]),
+				env,
+			})
+			.then((result) => ({ exitCode: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr }));
+	}
+
+	test("a restricted session's child is pointed at the proxy this process started", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const result = await childEnvOf(exec, cwd);
+			expect(result.exitCode).toBe(0);
+			// Not "some URL" — the port belongs to a proxy this process is holding
+			// open, and a child that got a URL with nothing listening on it would
+			// pass a weaker version of this assertion and break every fetch.
+			expect(result.stdout).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+			expect(exec.networkProxyRunning).toBe(true);
+		} finally {
+			// The proxy holds a listening socket. Leaving it open would keep the
+			// test process alive and the next test's port from being free.
+			await exec.close();
+		}
+	});
+
+	test("a caller's own HTTP_PROXY does not win over the policy", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const result = await childEnvOf(exec, cwd, { HTTP_PROXY: "http://192.0.2.1:9/" });
+			expect(result.exitCode).toBe(0);
+			// The merge order is the whole test. `HTTP_PROXY` is last on purpose:
+			// a caller handing `exec` a proxy is a way around the policy, and the
+			// session that owns the policy is the one that has to hold.
+			expect(result.stdout).not.toContain("192.0.2.1");
+			expect(result.stdout).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("a policy that confines no network starts no proxy and adds no variables", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		// The control, and the reason the two above mean something: with nothing
+		// restricted there is no proxy to point at, and a child that found a
+		// `127.0.0.1` proxy here would mean the proxy is started unconditionally
+		// — a listening socket and a rewritten environment in every command of
+		// every session, enforcing nothing.
+		const result = await exec.exec({
+			command: "node -e \"process.stdout.write(process.env.HTTP_PROXY || '(none)')\"",
+			cwd,
+			sandbox: netPolicy(cwd, "enabled", []),
+		});
+		expect(result.exitCode).toBe(0);
+		// Compared against what this process already had rather than against a
+		// literal. An unset `HTTP_PROXY` is the common case, but a developer
+		// behind a corporate proxy has one in their environment and the child
+		// inherits it — and that is not the executor having done anything, which
+		// is the fact under test. Asserting "(none)" here would fail on exactly
+		// the machines least likely to look at why.
+		expect(result.stdout).toBe(process.env.HTTP_PROXY || "(none)");
+		expect(exec.networkProxyRunning).toBe(false);
 	});
 });

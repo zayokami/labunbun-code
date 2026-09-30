@@ -5,11 +5,12 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { needsNetworkProxy } from "@labunbun/agent";
 import { apiKeyEnvNames, listModels } from "@labunbun/ai";
 import { detectShell } from "@labunbun/tools";
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
 import { changedBindings, type PadConfig } from "./gamepad-runtime.ts";
-import type { Settings } from "./settings.ts";
+import { networkAxisFrom, type Settings } from "./settings.ts";
 import { loadThemeFiles, resolveTheme } from "./theme-file.ts";
 
 export interface DoctorCheck {
@@ -31,6 +32,11 @@ export interface DoctorCheck {
  * but without the command names — would let `/doctor` call a binding fine that
  * `/gamepad` calls unreadable. The runtime is built before the REPL mounts, so
  * the caller always has it.
+ *
+ * `platform` is the fourth, and for the same reason: the network row is a
+ * statement about what can back a restriction up *on this machine*, so a test
+ * running anywhere has to be able to ask the question about both. Defaults to
+ * the real one, which is what a caller with no opinion wants.
  */
 export async function runDoctorChecks(
 	settings: Settings,
@@ -38,6 +44,7 @@ export async function runDoctorChecks(
 	home = homedir(),
 	liveThemeName?: string,
 	pad?: PadConfig,
+	platform: string = process.platform,
 ): Promise<DoctorCheck[]> {
 	const checks: DoctorCheck[] = [];
 
@@ -101,6 +108,43 @@ export async function runDoctorChecks(
 		status: found.length > 0 ? "ok" : "warn",
 		detail: found.length > 0 ? found.join(", ") : "no settings files (all defaults)",
 	});
+
+	// The network axis, and specifically whether this machine can back it up.
+	//
+	// `/permissions` reports the axis as the session holds it, which is the right
+	// answer to "what may this session reach". This row answers the other
+	// question — "is that restriction real here" — which is a property of the
+	// platform rather than of the session, so it cannot be read off it. On a
+	// platform with a native backend the proxy is belt-and-braces: a program
+	// that ignores `HTTP_PROXY` still has no route out, because the OS holds the
+	// rest of the boundary. On a platform without one the proxy is the entire
+	// boundary, and a row that only said "restricted" would be the exact lie the
+	// plan forbids — so the row warns instead, and says what the restriction
+	// actually depends on.
+	const axis = networkAxisFrom(settings);
+	if (needsNetworkProxy(axis.access, axis.domains)) {
+		const allowCount = axis.domains.filter((rule) => rule.permission === "allow").length;
+		const reach =
+			axis.access === "restricted"
+				? allowCount === 0
+					? "nothing is reachable"
+					: `${allowCount} domain${allowCount === 1 ? "" : "s"} allowed`
+				: `${axis.domains.length} pattern${axis.domains.length === 1 ? "" : "s"} denied`;
+		const backed = platform === "darwin" || platform === "linux";
+		checks.push({
+			name: "Network",
+			status: backed ? "ok" : "warn",
+			detail: backed
+				? `${axis.access} (${reach}) · enforced by a local proxy, with the OS sandbox holding the rest`
+				: `${axis.access} (${reach}) · no OS network backend in this build, so the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`,
+		});
+	} else {
+		checks.push({
+			name: "Network",
+			status: "ok",
+			detail: "not restricted — commands reach whatever the host can reach",
+		});
+	}
 
 	// Theme resolution: an unresolved name or a broken theme file shows up as a
 	// theme that silently did nothing, so it is worth naming here.

@@ -79,7 +79,7 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 			// would keep applying the old one. Built before the branch because the
 			// background path is spawned by the manager, not by `exec`, and leaving
 			// it out would make `run_in_background: true` the way around the sandbox.
-			const policy = await workspacePolicy(cwd, { sandbox: ctx.sandbox });
+			const policy = await workspacePolicy(cwd, { sandbox: ctx.sandbox, network: ctx.network });
 
 			if (input.run_in_background) {
 				if (!background) {

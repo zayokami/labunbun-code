@@ -171,3 +171,82 @@ describe("the Gamepad row", () => {
 		expect(row?.detail).toBe("off — /gamepad on, or --gamepad for one run");
 	});
 });
+
+/**
+ * The Network row, which is the one place the repo says out loud whether the
+ * network restriction can be backed up on the machine asking.
+ *
+ * Driven through an injected platform rather than skipped per OS, because the
+ * Windows branch is the one that matters: a test that only ran where the author
+ * happens to be would report the row as fine and never read the sentence that
+ * admits the proxy is the whole boundary.
+ */
+describe("the Network row", () => {
+	function networkRow(settings: ReturnType<typeof SettingsSchema.parse>, cwd: string, home: string, platform: string) {
+		return runDoctorChecks(settings, cwd, home, undefined, undefined, platform).then((checks) =>
+			checks.find((c) => c.name === "Network"),
+		);
+	}
+
+	// Four platforms, not three. With only darwin/linux/win32 the table agrees
+	// with `platform !== "win32"` as well as with the real predicate, so a
+	// falsification run could swap one for the other and every assertion here
+	// would still hold. `freebsd` is the fourth: a platform this build has no
+	// backend for and that is not the one special-cased by name, which is what
+	// makes the difference between "not darwin and not linux" and "not windows"
+	// visible in a test rather than in a reviewer's head.
+	test.each([
+		["darwin", "ok"],
+		["linux", "ok"],
+		["win32", "warn"],
+		["freebsd", "warn"],
+	] as const)("on %s the row is %s", async (platform, status) => {
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(
+			SettingsSchema.parse({ networkAccess: "restricted", networkDomains: ["registry.npmjs.org"] }),
+			cwd,
+			home,
+			platform,
+		);
+		expect(row?.status).toBe(status);
+		expect(row?.detail).toContain("1 domain allowed");
+	});
+
+	test("the platform without a backend says what the restriction depends on", async () => {
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(
+			SettingsSchema.parse({ networkAccess: "restricted", networkDomains: ["x.test"] }),
+			cwd,
+			home,
+			"win32",
+		);
+		// The names, not "sandbox on". A user reading this row on Windows is
+		// deciding whether to trust the setting, and the difference between
+		// "restricted" and "restricted, as long as the program is honest about
+		// proxy variables" is the entire content of that decision.
+		expect(row?.detail).toContain("HTTP_PROXY/HTTPS_PROXY/ALL_PROXY");
+		expect(row?.detail).toContain("no OS network backend");
+	});
+
+	test("a session that confines nothing is reported plainly, and not as a warning", async () => {
+		// The row has to distinguish "not restricted" from "restricted and not
+		// enforceable here". A warn on the default would be noise on every machine
+		// in the repository, and a warn is the signal that makes the Windows case
+		// worth reading.
+		const { home, cwd } = makeDirs();
+		for (const platform of ["darwin", "linux", "win32", "freebsd"]) {
+			const row = await networkRow(SettingsSchema.parse({}), cwd, home, platform);
+			expect(row?.status).toBe("ok");
+			expect(row?.detail).toBe("not restricted — commands reach whatever the host can reach");
+		}
+	});
+
+	test("`restricted` with an empty list says nothing is reachable", async () => {
+		// The two axes are separate settings, so this is a configuration someone
+		// can write by accident. A row that said "1 policy" or nothing at all
+		// would leave a session that cannot fetch looking configured.
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(SettingsSchema.parse({ networkAccess: "restricted" }), cwd, home, "linux");
+		expect(row?.detail).toContain("nothing is reachable");
+	});
+});

@@ -49,6 +49,7 @@ describe("connectMcpServer (fixture stdio server)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);
@@ -74,7 +75,14 @@ describe("connectMcpServer (fixture stdio server)", () => {
 		const started = Date.now();
 		const pending = sleepTool.call(
 			{ ms: 5_000 },
-			{ callId: "t1", signal: controller.signal, cwd: process.cwd(), sandbox: "workspace-write", onUpdate: () => {} },
+			{
+				callId: "t1",
+				signal: controller.signal,
+				cwd: process.cwd(),
+				network: { access: "enabled" as const, domains: [] },
+				sandbox: "workspace-write",
+				onUpdate: () => {},
+			},
 		);
 		setTimeout(() => controller.abort(), 150);
 		const result = await pending;
@@ -91,6 +99,7 @@ describe("connectMcpServer (fixture stdio server)", () => {
 				signal: new AbortController().signal,
 				cwd: process.cwd(),
 				sandbox: "workspace-write",
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			},
 		);

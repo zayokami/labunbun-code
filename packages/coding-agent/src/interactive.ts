@@ -15,6 +15,7 @@ import {
 	compactionThreshold,
 	contextBreakdown,
 	DEFAULT_MODE_CHOICE,
+	describeNetworkPolicy,
 	estimateContextUsage,
 	evaluatePermissions,
 	findModeChoice,
@@ -139,6 +140,7 @@ import {
 	formatIgnoredKeysNotice,
 	type LoadedSettings,
 	loadSettings,
+	networkAxisFrom,
 	resolveMode,
 	type Settings,
 	shadowedChoiceNotice,
@@ -333,6 +335,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		sandbox: effectiveSandbox,
 		downgradeReason,
 	} = resolveMode({ mode: requestedMode, sandbox: requestedSandbox }, loadedSettings);
+	// The third axis, resolved from settings only. Deliberately not part of
+	// `resolveMode`: that function exists to apply managed-settings downgrades,
+	// and the network axis is not in the project-tier key policy, so there is
+	// nothing for it to say. It is computed here for the same reason the other
+	// two are — one value, derived once, rather than each session site deciding.
+	const effectiveNetwork = networkAxisFrom(settings);
 	let handle: ReplAppHandle | null = null;
 
 	// Memory files (LABUNBUN.md / AGENTS.md), part of the system prompt. `home` is
@@ -479,6 +487,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		store: () => store,
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
 		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
+		network: () => sessionRef?.network ?? effectiveNetwork,
 		getPermissionRules: () => [...baseRules, ...sessionRules],
 		trimOldToolResults: settings.trimOldToolResults,
 		report: (text) => pushInfo(handle, text),
@@ -627,6 +636,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		cwd,
 		permissionMode: effectiveMode,
 		sandbox: effectiveSandbox,
+		network: effectiveNetwork,
 		deps: sessionDeps,
 	});
 	sessionRef = session;
@@ -761,6 +771,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			cwd,
 			permissionMode: current?.permissionMode ?? effectiveMode,
 			sandbox: current?.sandbox ?? effectiveSandbox,
+			network: current?.network ?? effectiveNetwork,
 			deps: sessionDeps,
 		});
 		next.messages.push(...loaded.messages);
@@ -1522,6 +1533,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// classifier below — those apply in every case, including the
 				// unrestricted one, and they are not the sandbox.
 				describeSandboxBackend(ctx.sandboxBackend, session.sandbox),
+				// The third axis, from the same source as the other two — read off
+				// the session rather than off settings, so a session that changed it
+				// mid-run reports what it is actually running under.
+				describeNetworkPolicy(session.network.access, session.network.domains, process.platform),
 				`Rules (${rules.length}):`,
 				...rules.map(
 					(r) =>

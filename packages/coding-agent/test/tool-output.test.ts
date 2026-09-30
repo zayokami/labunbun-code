@@ -141,6 +141,7 @@ describe("a spilled result, end to end through the real tools", () => {
 				signal: new AbortController().signal,
 				cwd,
 				sandbox: "workspace-write",
+				network: { access: "enabled" as const, domains: [] },
 				onUpdate: () => {},
 			});
 
@@ -181,7 +182,14 @@ describe("a spilled result, end to end through the real tools", () => {
 		// Windows path before the command it belongs to ever runs.
 		const result = await bash.call(
 			{ command: `${process.execPath.replace(/\\/g, "/")} noisy.js` },
-			{ callId: "call_1", signal: new AbortController().signal, cwd, sandbox: "workspace-write", onUpdate: () => {} },
+			{
+				callId: "call_1",
+				signal: new AbortController().signal,
+				cwd,
+				network: { access: "enabled" as const, domains: [] },
+				sandbox: "workspace-write",
+				onUpdate: () => {},
+			},
 		);
 		const shown = (result.content[0] as { text: string }).text;
 
@@ -214,7 +222,14 @@ describe("a spilled result, end to end through the real tools", () => {
 		const read = tools.find((tool) => tool.name === "Read");
 		const tail = await read?.call(
 			{ file_path: path, offset: 401 },
-			{ callId: "call_2", signal: new AbortController().signal, cwd, sandbox: "workspace-write", onUpdate: () => {} },
+			{
+				callId: "call_2",
+				signal: new AbortController().signal,
+				cwd,
+				network: { access: "enabled" as const, domains: [] },
+				sandbox: "workspace-write",
+				onUpdate: () => {},
+			},
 		);
 		expect((tail?.content[0] as { text?: string } | undefined)?.text).toContain(last);
 	}, 30_000);

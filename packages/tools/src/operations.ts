@@ -17,6 +17,7 @@ import {
 	type SandboxRuntime,
 	sandboxBackendFor,
 } from "./sandbox/index.ts";
+import { type NetworkProxy, startNetworkProxy } from "./sandbox/proxy.ts";
 
 export type { SandboxExecution } from "./sandbox/index.ts";
 
@@ -233,8 +234,66 @@ export class ChildProcessExecOperations implements ExecOperations {
 	 */
 	readonly #runtime: SandboxRuntime;
 
+	/**
+	 * The proxy, started on the first command that needs one and kept until
+	 * {@link close}.
+	 *
+	 * A single instance rather than one per command: the rules and the listening
+	 * port belong to the session, and a fresh proxy per command would mean a fresh
+	 * loopback port per command — which reads to a child process as "my network
+	 * configuration is changing underneath me", and breaks anything that caches
+	 * the proxy URL. It is created lazily because the common case (`network:
+	 * enabled`, no rules) must not pay for a listening socket, and `close` exists
+	 * because a proxy nobody tears down is a socket nobody owns.
+	 */
+	#proxy: NetworkProxy | undefined;
+	#starting: Promise<NetworkProxy | undefined> | undefined;
+
 	constructor(runtime: SandboxRuntime = detectRuntime()) {
 		this.#runtime = runtime;
+	}
+
+	/** Whether a proxy is listening right now. For tests and for `/doctor`. */
+	get networkProxyRunning(): boolean {
+		return this.#proxy !== undefined;
+	}
+
+	/**
+	 * Stop the proxy, if one was ever started.
+	 *
+	 * Called on shutdown. Safe to call twice and safe to call when no command
+	 * ever needed one.
+	 */
+	async close(): Promise<void> {
+		const proxy = this.#proxy;
+		this.#proxy = undefined;
+		this.#starting = undefined;
+		await proxy?.close();
+	}
+
+	/**
+	 * The proxy for `policy`, or `undefined` when the policy confines nothing.
+	 *
+	 * Two callers racing here must not start two listeners, so the in-flight
+	 * promise is shared rather than each awaiting its own `startNetworkProxy`.
+	 * A start that fails clears the slot: leaving a rejected promise cached
+	 * would turn one transient `EADDRNOTAVAIL` into a permanently broken
+	 * `exec`, and the next command would retry the same way the first did.
+	 */
+	async #proxyFor(policy: SandboxPolicy): Promise<NetworkProxy | undefined> {
+		if (this.#proxy) return this.#proxy;
+		this.#starting ??= startNetworkProxy({
+			network: policy.network,
+			rules: policy.networkRules,
+		}).then((proxy) => {
+			this.#proxy = proxy;
+			return proxy;
+		});
+		try {
+			return await this.#starting;
+		} finally {
+			this.#starting = undefined;
+		}
 	}
 
 	/**
@@ -249,7 +308,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 		return sandboxBackendFor(this.#runtime.platform, this.#runtime.hasNativeBackend);
 	}
 
-	exec(options: {
+	async exec(options: {
 		command: string;
 		cwd: string;
 		timeoutMs?: number;
@@ -281,11 +340,19 @@ export class ChildProcessExecOperations implements ExecOperations {
 				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
 				: [shellCommand, ...args(command)];
 
+		// The proxy's variables go **after** the caller's, not before: a caller
+		// that names `HTTP_PROXY` is stating where its traffic goes, and the
+		// policy this command is running under is the thing that has to win.
+		// A proxy that is not running injects nothing at all, which is what
+		// leaves a session that confined nothing with the environment it had.
+		const proxy = sandbox ? await this.#proxyFor(sandbox) : undefined;
+		const childEnv = { ...process.env, ...env, ...proxy?.env };
+
 		return new Promise((resolve) => {
 			const child = spawn(program, programArgs, {
 				cwd,
 				windowsHide: true,
-				env: env ? { ...process.env, ...env } : process.env,
+				env: childEnv,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 

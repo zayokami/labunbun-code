@@ -10,6 +10,7 @@ const BASE_CTX = {
 	signal: new AbortController().signal,
 	cwd: process.cwd(),
 	sandbox: "workspace-write" as const,
+	network: { access: "enabled" as const, domains: [] },
 };
 const PERM_CTX = {
 	mode: "ask" as const,

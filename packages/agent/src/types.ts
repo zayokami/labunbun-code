@@ -19,7 +19,9 @@ import type {
 	WireTool,
 } from "@labunbun/ai";
 import { z } from "zod";
+import type { NetworkDomainRule } from "./network-policy.ts";
 import type { SpillWriter } from "./output-limits.ts";
+import type { NetworkSandboxPolicy } from "./sandbox-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Permissions
@@ -161,6 +163,17 @@ export function ask(message?: string): PermissionResult {
 // Tools
 // ---------------------------------------------------------------------------
 
+/**
+ * The network axis, as one value: a mode and the domain table it is judged
+ * against. `SandboxPolicy` carries the same pair for the same reason.
+ */
+export interface NetworkAxis {
+	/** `enabled` reaches what the host can; `restricted` reaches only an allowed domain. */
+	access: NetworkSandboxPolicy;
+	/** The table. Empty is meaningful: under `restricted` it reaches nothing. */
+	domains: NetworkDomainRule[];
+}
+
 export interface ToolCallContext {
 	/** Unique id of the originating tool_use block. */
 	callId: string;
@@ -180,6 +193,20 @@ export interface ToolCallContext {
 	 * nobody supplied the field.
 	 */
 	sandbox: SandboxMode;
+	/**
+	 * The network axis as it stands for *this* call: the mode, and the domain
+	 * table it is judged against.
+	 *
+	 * One field rather than two for the same reason the policy carries
+	 * `networkRules` beside `network`: a mode without its table is not a
+	 * configuration anybody can write, and two fields are two things a caller
+	 * can update one of.
+	 *
+	 * Required rather than optional, like `sandbox`: a tool that forgot this
+	 * would build a policy that confines nothing, and it would do so silently,
+	 * which is the failure mode this whole axis exists to prevent.
+	 */
+	network: NetworkAxis;
 	/** Stream partial results (live bash output, progress lines...). */
 	onUpdate: (partial: unknown) => void;
 }
