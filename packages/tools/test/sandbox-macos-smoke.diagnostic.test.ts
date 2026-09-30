@@ -1,20 +1,25 @@
 /**
  * TEMPORARY DIAGNOSTIC — not a permanent test. Delete once the answer is known.
  *
- * Every line of BASE_POLICY passes on its own and (allow default) is green, yet
- * the assembled base traps even /bin/echo with SIGTRAP (133). So the fault needs
- * a combination. Test the assembled base, then leave-one-out to find the line
- * that only misbehaves in company, then pairs. (allow process-exec) and
- * (allow file-read*) stay in every rung so a compiling rung also runs.
+ * The hand-assembled base (every rule, no comments) runs /bin/echo: exit=0. The
+ * base as the file spells it, reached through buildSeatbeltArgs, gave exit=133.
+ * Two things differ — the `;` comments and the cwd the process starts in — so
+ * vary one at a time instead of guessing. Control first; a control that fails
+ * voids every other row.
  */
 import { expect, test } from "bun:test";
+import { mkdtempSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildSandboxPolicy } from "@labunbun/agent";
+import { buildSeatbeltArgs } from "../src/sandbox/seatbelt.ts";
 
-const MINIMUM = `(allow process-exec)\n(allow file-read*)`;
+const REAL = realpathSync(mkdtempSync(join(tmpdir(), "lbb-cwd-")));
 
-async function run(body: string): Promise<string> {
+async function run(body: string, cwd?: string): Promise<string> {
 	const proc = Bun.spawn(
 		["/usr/bin/sandbox-exec", "-p", `(version 1)\n(deny default)\n${body}\n`, "--", "/bin/echo", "MARKER-OK"],
-		{ stdout: "pipe", stderr: "pipe" },
+		{ stdout: "pipe", stderr: "pipe", ...(cwd === undefined ? {} : { cwd }) },
 	);
 	const [out, err, code] = await Promise.all([
 		new Response(proc.stdout).text(),
@@ -25,55 +30,77 @@ async function run(body: string): Promise<string> {
 	return `exit=${code} out=${brief(out)} err=${brief(err)}`;
 }
 
-/** BASE_POLICY's rules, in the order the file emits them, minus the header. */
-const LINES: [string, string][] = [
-	["fork", `(allow process-fork)`],
-	["exec", `(allow process-exec)`],
-	["signal", `(allow signal (target same-sandbox))`],
-	["pinfo", `(allow process-info*)`],
-	["ptty", `(allow pseudo-tty)`],
-	["devnull", `(allow file-read* file-write* file-ioctl (literal "/dev/null"))`],
-	["devptmx", `(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))`],
-	["ttysioctl", `(allow file-ioctl (regex #"^/dev/ttys[0-9]+"))`],
-	["iokit", `(allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))`],
-	["shmr", `(allow ipc-posix-shm-read-data)`],
-	["shmw", `(allow ipc-posix-shm-write-create)`],
-	["shmu", `(allow ipc-posix-shm-write-unlink)`],
-	["sem", `(allow ipc-posix-sem)`],
-	[
-		"mach",
-		`(allow mach-lookup\n  (global-name "com.apple.system.opendirectoryd.libinfo")\n  (global-name "com.apple.PowerManagement.control"))`,
-	],
-];
+const MIN = `(allow process-exec)\n(allow file-read*)`;
 
-const all = LINES.map(([, body]) => body).join("\n");
-const without = (name: string) =>
-	LINES.filter(([n]) => n !== name)
-		.map(([, body]) => body)
-		.join("\n");
+/** Every base rule, no comments — the shape that measured exit=0. */
+const RULES = [
+	`(allow process-fork)`,
+	`(allow process-exec)`,
+	`(allow signal (target same-sandbox))`,
+	`(allow process-info*)`,
+	`(allow pseudo-tty)`,
+	`(allow file-read* file-write* file-ioctl (literal "/dev/null"))`,
+	`(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))`,
+	`(allow file-ioctl (regex #"^/dev/ttys[0-9]+"))`,
+	`(allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))`,
+	`(allow ipc-posix-shm-read-data)`,
+	`(allow ipc-posix-shm-write-create)`,
+	`(allow ipc-posix-shm-write-unlink)`,
+	`(allow ipc-posix-sem)`,
+	`(allow mach-lookup\n  (global-name "com.apple.system.opendirectoryd.libinfo")\n  (global-name "com.apple.PowerManagement.control"))`,
+].join("\n");
 
-test("which combination", async () => {
+test("comments or cwd", async () => {
 	if (process.platform !== "darwin") return;
 	const rows: string[] = [];
-	rows.push(`CONTROL: ${await run(MINIMUM)}`);
-	rows.push(`ALL: ${await run(`${all}\n(allow file-read*)`)}`);
-	// Leave-one-out: if dropping a line turns the trap green, that line is in the
-	// combination. If every drop is still 133, no single line is responsible.
-	for (const [name] of LINES) rows.push(`ALL-minus-${name}: ${await run(`${without(name)}\n(allow file-read*)`)}`);
-	// Halves, in case the interaction is not with one line at all.
-	rows.push(
-		`HALF-1: ${await run(
-			`${LINES.slice(0, 7)
-				.map(([, b]) => b)
-				.join("\n")}\n(allow file-read*)`,
-		)}`,
-	);
-	rows.push(
-		`HALF-2: ${await run(
-			`${LINES.slice(7)
-				.map(([, b]) => b)
-				.join("\n")}\n${MINIMUM}`,
-		)}`,
-	);
+
+	// Control in both cwds, so a cwd-specific failure is visible as such.
+	rows.push(`CONTROL-repo: ${await run("(allow default)")}`);
+	rows.push(`CONTROL-tmp: ${await run("(allow default)", REAL)}`);
+
+	// Vary cwd, no comments.
+	rows.push(`RULES-repo: ${await run(RULES)}`);
+	rows.push(`RULES-tmp: ${await run(RULES, REAL)}`);
+
+	// Vary comments, same cwd. The file's own text, comments included.
+	const full = buildSeatbeltArgs(buildSandboxPolicy({ sandbox: "workspace-write", workspace: REAL }), [
+		"/bin/echo",
+		"MARKER-OK",
+	]);
+	const profile = full[1] ?? "";
+	const params = full.slice(2).filter((a) => a !== "--");
+	const baseWithComments = profile.split("\n; Read baseline")[0] ?? "";
+	rows.push(`COMMENTS-repo: ${await run(`${baseWithComments}\n${MIN}`)}`);
+	rows.push(`COMMENTS-tmp: ${await run(`${baseWithComments}\n${MIN}`, REAL)}`);
+
+	// The whole thing, as production builds it.
+	const prod = Bun.spawn;
+	void prod;
+	rows.push(`FULL-profile-tmp: ${await spawnFull(profile, params, REAL)}`);
+
+	// The same profile text with every `;` comment line deleted: if this passes
+	// and COMMENTS-tmp does not, a comment is the trigger.
+	const stripped = baseWithComments
+		.split("\n")
+		.filter((line) => !line.trimStart().startsWith(";"))
+		.join("\n");
+	rows.push(`STRIPPED-repo: ${await run(`${stripped}\n${MIN}`)}`);
+	rows.push(`STRIPPED-tmp: ${await run(`${stripped}\n${MIN}`, REAL)}`);
+
 	expect(rows.join("\n")).toBe("table");
 }, 180_000);
+
+async function spawnFull(profile: string, params: string[], cwd: string): Promise<string> {
+	const proc = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, ...params, "--", "/bin/echo", "MARKER-OK"], {
+		stdout: "pipe",
+		stderr: "pipe",
+		cwd,
+	});
+	const [out, err, code] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	const brief = (s: string) => JSON.stringify(s.length > 200 ? `${s.slice(0, 200)}…(${s.length})` : s);
+	return `exit=${code} out=${brief(out)} err=${brief(err)}`;
+}
