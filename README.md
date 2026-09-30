@@ -11,10 +11,14 @@ labunbun                                # interactive REPL
 
 ## Features
 
-- **Multi-provider LLM support** — Anthropic, OpenAI, Google and any
-  OpenAI-compatible API (DeepSeek, Kimi, GLM, OpenRouter, custom endpoints) via
-  settings; the startup probe asks each provider holding a key what it serves and
-  corrects the catalog from the answer.
+- **Multi-provider LLM support** — Anthropic, OpenAI (on both the Chat
+  Completions and the Responses wire), Google and any OpenAI-compatible API
+  (DeepSeek, Kimi, GLM, OpenRouter, custom endpoints) via settings; the startup
+  probe asks each provider holding a key what it serves and corrects the catalog
+  from the answer. A model whose function calling its vendor publishes on one
+  wire only is registered on the wire that serves it; the same model reached
+  through a reseller that speaks the other one is still listed, and is not
+  offered as a session model — see `/model`.
 - **Core coding tools** — Bash (incl. `run_in_background` with BashOutput /
   KillBash), Read, Write, Edit (exact string replace with diff preview),
   Grep, Glob, LS, WebFetch, WebSearch; parallel execution of safe tools,

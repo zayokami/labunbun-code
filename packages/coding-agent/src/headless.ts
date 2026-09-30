@@ -25,6 +25,7 @@ import { createCompactionWiring } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
+import { noToolCallingNotice } from "./model-offer.ts";
 import { withheldDefinitionNotice } from "./project-trust.ts";
 import {
 	applyCatalogSettings,
@@ -132,6 +133,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	if (!model) {
 		console.error(`Unknown model: ${options.modelRef}`);
 		return 1;
+	}
+	// Warned, not refused, for the reason the interactive picker filters these rows
+	// out instead: an unattended run has no one to tell, so the fact has to be in
+	// the log or it is nowhere. stderr so a piped stdout stays machine-readable.
+	if (model.toolCalling === false) {
+		console.error(`Warning: ${noToolCallingNotice(model)}`);
 	}
 
 	// Spilling applies here too: a `-p` run reads a repository like any other

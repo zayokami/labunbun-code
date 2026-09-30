@@ -385,11 +385,13 @@ export function cacheHitRate(usage: Usage): number | undefined {
 /**
  * Read the cached-token count out of whichever field a provider used.
  *
- * Three spellings are in the wild for the same number: OpenAI and its clones
- * nest it under `prompt_tokens_details.cached_tokens`, Moonshot puts it at the
- * top level of `usage`, and DeepSeek reports `prompt_cache_hit_tokens`
- * alongside the nested copy. Reading only the first is how a Kimi session that
- * hit its cache ~99% of the time was recorded as hitting none of it.
+ * Four spellings are in the wild for the same number: OpenAI's Chat Completions
+ * nests it under `prompt_tokens_details.cached_tokens`, Moonshot puts it at the
+ * top level of `usage`, DeepSeek reports `prompt_cache_hit_tokens` alongside the
+ * nested copy, and the Responses wire renames both halves of the usage block —
+ * `input_tokens_details.cached_tokens`. Reading only the first is how a Kimi
+ * session that hit its cache ~99% of the time was recorded as hitting none of it;
+ * not reading the fourth is the same failure one wire over.
  *
  * Where more than one of them is present and they disagree, the largest wins.
  * They name the same quantity, so the smaller one is the one under-reporting —
@@ -399,10 +401,16 @@ export function cacheHitRate(usage: Usage): number | undefined {
  */
 export function cachedTokensFrom(usage: {
 	prompt_tokens_details?: { cached_tokens?: number } | null;
+	input_tokens_details?: { cached_tokens?: number } | null;
 	cached_tokens?: number;
 	prompt_cache_hit_tokens?: number;
 }): number | undefined {
-	const spellings = [usage.prompt_tokens_details?.cached_tokens, usage.cached_tokens, usage.prompt_cache_hit_tokens];
+	const spellings = [
+		usage.prompt_tokens_details?.cached_tokens,
+		usage.input_tokens_details?.cached_tokens,
+		usage.cached_tokens,
+		usage.prompt_cache_hit_tokens,
+	];
 	const known = spellings.filter((value): value is number => typeof value === "number");
 	return known.length > 0 ? Math.max(...known) : undefined;
 }

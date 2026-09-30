@@ -24,7 +24,7 @@ import {
 	setProviderCatalogue,
 } from "./model.ts";
 import { listAnthropicModels } from "./providers/anthropic.ts";
-import { listOpenAIModels } from "./providers/openai-compat.ts";
+import { listOpenAIModels, type OpenAIModelsClientLike } from "./providers/openai-compat.ts";
 import type { Model } from "./types.ts";
 
 /**
@@ -119,13 +119,33 @@ function providersWithKeys(): Model[] {
 	return [...byProvider.values()];
 }
 
-async function probeProvider(model: Model, signal?: AbortSignal): Promise<DiscoveredListing | undefined> {
+/**
+ * The catalog request for one model, as the startup refresh makes it.
+ *
+ * Exported, and with an injected client, for one reason: which wire a model
+ * answers its catalog on is a per-model decision made here, and `refreshModelCatalog`
+ * already lets a caller replace this whole function — so without a way to reach
+ * *this* one, the only test available is that the refresh returns nothing, which
+ * is indistinguishable from the branch not existing. That distinction is not
+ * theoretical: `providersWithKeys` picks one model per provider, so a provider
+ * whose first row sits on a wire this function does not handle is never probed
+ * at all, and the catalog silently stops refreshing for it.
+ */
+export async function probeProvider(
+	model: Model,
+	signal?: AbortSignal,
+	openaiClient?: OpenAIModelsClientLike,
+): Promise<DiscoveredListing | undefined> {
 	if (model.api === "anthropic-messages") {
 		const listing = await listAnthropicModels(model, { signal });
 		return { provider: model.provider, models: listing.models, complete: listing.complete };
 	}
-	if (model.api === "openai-completions") {
-		const listing = await listOpenAIModels(model, { signal });
+	if (model.api === "openai-completions" || model.api === "openai-responses") {
+		// One lister for both OpenAI wires, because the catalog is not part of
+		// either: `GET /models` is the same request on both and answers the same
+		// shape. Splitting this by wire would need a second copy of an endpoint
+		// that does not differ.
+		const listing = await listOpenAIModels(model, { client: openaiClient, signal });
 		return { provider: model.provider, models: listing.models, complete: listing.complete };
 	}
 	// An API this module has no listing call for is one it cannot check.

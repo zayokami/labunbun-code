@@ -34,7 +34,6 @@ import {
 	createTrackedStreamFn,
 	formatCatalogNotice,
 	gatewayProvidersFor,
-	listModels,
 	type Model,
 	refreshModelCatalog,
 	resolveApiKey,
@@ -117,6 +116,7 @@ import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
+import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import {
 	approveProjectDefinitions,
@@ -831,6 +831,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		if (sessionRef) refreshContextInfo(sessionRef);
 		const shadowed = shadowedChoiceNotice(loadedSettings, "model", (path) => shortenHome(path, home));
 		pushInfo(handle, `Model: ${ref} — takes effect on the next prompt${shadowed ? ` (${shadowed})` : ""}`);
+		// Said after the switch rather than used to refuse it. The picker already
+		// hides this row, so reaching it means the user named it deliberately — and
+		// a model that cannot call tools is a legitimate thing to want for talking
+		// about code. What must not happen is finding out by waiting for a turn that
+		// returns prose where a file edit should be, so the fact is on screen first.
+		if (next.toolCalling === false) {
+			pushInfo(handle, noToolCallingNotice(next));
+		}
 		return true;
 	}
 
@@ -1581,7 +1589,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const handleRef = ctx.handle;
 				if (!handleRef) return;
 				const current = ctx.getSession()?.model;
-				const models = listModels();
+				// Which models may be offered is a question about what a session can
+				// do, not about how a row looks — see `offeredModels`.
+				const models = offeredModels();
 				// Opened on the model in use, so Enter without moving anything keeps
 				// it rather than switching to whichever happens to be first.
 				const active = models.findIndex((m) => current && m.provider === current.provider && m.id === current.id);

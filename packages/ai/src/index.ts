@@ -93,6 +93,21 @@ export {
 	type OpenAIRequestParams,
 	type OpenAIStreamFnOptions,
 } from "./providers/openai-compat.ts";
+export {
+	buildResponsesRequest,
+	convertInput as convertInputForResponses,
+	createResponsesStreamFn,
+	mapResponsesStream,
+	type ResponsesClientLike,
+	type ResponsesEnvelope,
+	type ResponsesInputItem,
+	type ResponsesItem,
+	type ResponsesRawEvent,
+	type ResponsesRequestParams,
+	type ResponsesStreamFnOptions,
+	resolveStopReason,
+	responsesEffort,
+} from "./providers/openai-responses.ts";
 
 // Retry / pricing / registry
 export {
@@ -143,6 +158,7 @@ import { withCacheTracker } from "./cache-tracker.ts";
 import { MissingApiKeyError, resolveApiKey } from "./model.ts";
 import { createAnthropicStreamFn } from "./providers/anthropic.ts";
 import { createOpenAIStreamFn } from "./providers/openai-compat.ts";
+import { createResponsesStreamFn, type ResponsesClientLike } from "./providers/openai-responses.ts";
 import { withRetry } from "./retry.ts";
 import type { Model, StreamFn, StreamOptions } from "./types.ts";
 
@@ -158,6 +174,14 @@ export interface StreamFnOptions {
 	 * provoked it.
 	 */
 	onCacheNotice?: (notice: CacheNotice) => void;
+	/**
+	 * The Responses client, for the same reason the adapters each take one
+	 * internally: a test that wants to prove *which adapter a model's `api` reaches*
+	 * cannot do it without either a network call or an injection point, and
+	 * without one the only available proof is that the call fails — which is
+	 * indistinguishable from the branch not existing at all.
+	 */
+	responsesClientFactory?: () => ResponsesClientLike;
 }
 
 /**
@@ -185,11 +209,20 @@ function dispatchStreamFn(settings: StreamFnOptions): StreamFn {
 		onCacheNotice: settings.onCacheNotice,
 	});
 	const openai = createOpenAIStreamFn({ policy: settings.policy });
+	// Same `policy`, no `onCacheNotice`: the notices this adapter can raise are the
+	// two the tracking wrapper already derives, and it has nothing to say about a
+	// Responses request that the Chat Completions one might refuse. Wiring the
+	// callback in without a notice to pass would be a lie about a hook.
+	const responses = createResponsesStreamFn({
+		policy: settings.policy,
+		clientFactory: settings.responsesClientFactory,
+	});
 	return (model, context, options) => {
 		const missingKey = missingApiKey(model, options);
 		if (missingKey) throw missingKey;
 		if (model.api === "anthropic-messages") return anthropic(model, context, options);
 		if (model.api === "openai-completions") return openai(model, context, options);
+		if (model.api === "openai-responses") return responses(model, context, options);
 		throw new Error(`Unsupported API: ${model.api}`);
 	};
 }

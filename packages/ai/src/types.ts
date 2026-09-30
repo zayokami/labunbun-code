@@ -159,7 +159,21 @@ export function textContent(text: string): TextContent {
 // Models, context, streaming
 // ---------------------------------------------------------------------------
 
-export type ApiId = "anthropic-messages" | "openai-completions";
+/**
+ * The three wires this app speaks.
+ *
+ * `openai-responses` is not a vendor but an endpoint, and it is separate from
+ * `openai-completions` because the two disagree on nearly everything that
+ * matters to an agent: the system prompt is a top-level field rather than the
+ * first message, tools are declared flat rather than nested under `function`,
+ * tool results are input items carrying a `call_id` rather than `role: "tool"`
+ * messages, and the stream is a sequence of named events rather than a delta
+ * array. A row that answers on one does not answer on the other — `gpt-6.1-sol`
+ * is the one that makes this concrete, since its function calling is published
+ * on Responses only and a Chat Completions request that carries tools is a shape
+ * it does not accept.
+ */
+export type ApiId = "anthropic-messages" | "openai-completions" | "openai-responses";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
 
 /** Minimal structural type for a JSON Schema object (tool parameters). */
@@ -243,6 +257,41 @@ export interface Model<Api extends ApiId = ApiId> {
 	 * is one it rejects outright rather than one it quietly ignores.
 	 */
 	toolReasoningEffort?: "low" | "medium" | "high" | "none";
+	/**
+	 * The efforts this model accepts on its own wire, when it accepts a proper
+	 * subset of ours — the OpenAI-compatibility field cannot say this, because it
+	 * exists to name one *replacement* effort, not a range.
+	 *
+	 * The session asks for a `ThinkingLevel` and this is what says whether the
+	 * request can carry it. `gpt-6.1-sol` is the case that needs it: it supports
+	 * neither `minimal` nor `none`, so a session set to `minimal` would otherwise
+	 * put a value the model rejects on every request, and the adapter has no way
+	 * to learn that from the request it is building. The field is per-row because
+	 * it is a per-model fact, the same way `toolReasoningEffort` is.
+	 *
+	 * A requested level outside the list is **omitted from the request** rather
+	 * than rounded to the nearest one it does accept. Rounding is a guess about
+	 * what the session would have wanted; omitting says what actually happened,
+	 * and the model's own default is a thing the vendor picked rather than one we
+	 * picked on the user's behalf.
+	 */
+	reasoningEfforts?: readonly Exclude<ThinkingLevel, "off">[];
+	/**
+	 * `false` when this model cannot call tools on the wire its own row names.
+	 *
+	 * Absent means it can, which is true of every row but one shape. The shape is
+	 * a reseller: it serves a model whose function calling is published on
+	 * `/v1/responses` over an endpoint that only answers `/chat/completions`. The
+	 * row is not broken — it answers, the text is good, the price is right — and
+	 * it is still wrong to offer it for an agent session, because
+	 * `packages/agent/src/session.ts` puts `tools` on every request and a model
+	 * that cannot act returns prose where the user is waiting for a file edit.
+	 *
+	 * So this is a fact about the row rather than a filter applied at the picker:
+	 * every place that offers a model to a session reads it, and a second place
+	 * that forgot to would re-open the trap this field exists to close.
+	 */
+	toolCalling?: false;
 	input: ("text" | "image")[];
 	pricing?: ModelPricing;
 }
