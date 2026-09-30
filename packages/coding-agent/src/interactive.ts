@@ -581,7 +581,39 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				reportHookErrors(handle, advisoryHookFailures("Notification", outcome));
 			}
 			const allowed = await requestPermissionOrAbort(handle, toolName, input, ctx.signal);
-			return allowed ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
+			if (!allowed) return { behavior: "deny", message: "User denied permission" };
+			// The answer settles the question that was asked. Whether *this* call may run
+			// is a separate question, and the mode it was asked under can be gone: the
+			// dialog is a blocking wait, and `EnterPlanMode` is concurrency-safe, so a
+			// sibling call in the same batch switches modes with this one on screen. The
+			// user answered "may I write this" and got a plan-mode promise they were never
+			// shown.
+			//
+			// So the answer is applied, and then re-decided — and only a fresh `deny` is
+			// allowed to override it. Narrowing refuses, because that is the direction
+			// that matters. Widening changes nothing: the human said yes and the wider
+			// mode would have run it without asking. A fresh `ask` is answered by the
+			// human who just answered, so there is nothing left to do.
+			//
+			// (This is the same "recheck after the permission wait" that `pipeline.ts:116`
+			// does for aborts, applied to the other thing that can change under the wait.)
+			//
+			// Only the mode is compared. `evaluatePermissions` does not read `sandbox` at
+			// all — the axis exists to pick the policy handed to the process, not to
+			// decide a call — so a sandbox change on its own cannot flip this verdict, and
+			// a comparison that looks load-bearing but cannot change anything is a thing
+			// a reader will come to rely on.
+			const live = sessionRef;
+			if (live && live.permissionMode !== ctx.mode) {
+				const after = evaluatePermissions(toolName, input, {
+					mode: live.permissionMode,
+					sandbox: live.sandbox,
+					rules: [...baseRules, ...sessionRules],
+					cwd,
+				});
+				if (after.behavior === "deny") return after;
+			}
+			return { behavior: "allow" };
 		},
 		// The whole decision — threshold, cheap rung, breaker, cache registration
 		// and what the user is told — lives in the wiring, shared with `-p` runs
@@ -913,6 +945,20 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				source: "session",
 			});
 		},
+		// Whether the queue may answer a pending request from that grant instead of
+		// asking. The queue has already matched the rule; this is the second half —
+		// the engine's own answer, under the rules *including* the one just pushed and
+		// the mode as it stands now. `sessionRules` is read here rather than captured
+		// for the same reason `getPermissionRules` exists on the subagent bridge: the
+		// grant is pushed by the `onAlwaysAllow` above, one statement earlier, and a
+		// snapshot taken before it would answer without it.
+		canAutoResolve: (toolName, input) =>
+			evaluatePermissions(toolName, input, {
+				mode: sessionRef?.permissionMode ?? effectiveMode,
+				sandbox: sessionRef?.sandbox ?? effectiveSandbox,
+				rules: [...baseRules, ...sessionRules],
+				cwd,
+			}).behavior === "allow",
 		onSubmitText: async (text) => {
 			appendHistory(text, cwd);
 			// "!cmd" runs the shell directly — no model, no permission prompt (the

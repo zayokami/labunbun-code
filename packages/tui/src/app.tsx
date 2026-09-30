@@ -66,6 +66,12 @@ export interface ReplAppOptions {
 	 */
 	onAlwaysAllow?: (toolName: string, input: unknown) => void;
 	/**
+	 * Whether a call the queue matched against a fresh grant may be answered
+	 * without asking. Supplied by the app layer because the rules and the mode
+	 * are its to know; the TUI can only match, never decide.
+	 */
+	canAutoResolve?: (toolName: string, input: unknown) => boolean;
+	/**
 	 * The controller, when the app layer built one. The TUI never builds one: it
 	 * is handed the bridge, which is what keeps node-hid and everything else a
 	 * device needs on the other side of a package boundary.
@@ -260,6 +266,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		fullPreview: toolFullView,
 		cwd: options.cwd,
 		onAlwaysAllow: options.onAlwaysAllow,
+		canAutoResolve: options.canAutoResolve,
 	});
 
 	const questionSlot = createQuestionSlot({

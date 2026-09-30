@@ -20,6 +20,21 @@ export interface PermissionRequestQueueOptions {
 	 * granted for — the scope of the rule depends on what they were looking at.
 	 */
 	onAlwaysAllow?: (toolName: string, input: unknown) => void;
+	/**
+	 * May this queued call be answered from a grant the user just made, rather
+	 * than by asking about it?
+	 *
+	 * The queue knows *matching* — whether the rule just granted covers this
+	 * input. It does not know *policy*: the rules, the permission mode, or the
+	 * sandbox. Those live in the app layer, so the app layer answers, and the
+	 * answer is a fresh evaluation rather than a restatement of the match. This
+	 * is the shape of OpenCode's `if (denied(input, rules)) continue` before its
+	 * cascade (`core/src/permission.ts:266`).
+	 *
+	 * Optional, and its absence is the safe direction: a queue with no policy
+	 * access keeps the old behaviour rather than guessing.
+	 */
+	canAutoResolve?: (toolName: string, input: unknown) => boolean;
 }
 
 export interface PermissionRequestQueue {
@@ -66,7 +81,16 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 					// what a name-only check would do.
 					const specifier = ruleSpecifierFor(next.toolName, next.input, options.cwd);
 					for (let i = pending.length - 1; i >= 0; i--) {
-						if (coveredBy(pending[i], next.toolName, specifier, options.cwd)) pending.splice(i, 1)[0].resolve(true);
+						const queued = pending[i];
+						if (!queued) continue;
+						if (!coveredBy(queued, next.toolName, specifier, options.cwd)) continue;
+						// A match is not a permission. Everything queued here was raised
+						// under the mode in force when it was raised, and a mode can change
+						// while the queue waits — `EnterPlanMode` is concurrency-safe, so a
+						// sibling call switches modes with a dialog up. A grant made after
+						// that must not carry a call the current mode would refuse.
+						if (options.canAutoResolve && !options.canAutoResolve(queued.toolName, queued.input)) continue;
+						pending.splice(i, 1)[0]?.resolve(true);
 					}
 				}
 				show();
