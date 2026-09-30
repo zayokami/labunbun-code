@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+	ANTHROPIC_MIN_PREFIX,
+	anthropicMinPrefixTokens,
 	cacheCapability,
 	cacheCeiling,
 	cachedTokensFrom,
@@ -123,6 +125,47 @@ describe("cacheCapability", () => {
 		// A Haiku-shaped id on a non-Anthropic provider keeps that provider's row.
 		const cap = cacheCapability(model({ id: "haiku-clone", provider: "kimi", api: "openai-completions" }));
 		expect(cap.minPrefixTokens).toBe(256);
+	});
+
+	test("the per-model floor table is Anthropic's alone, and OpenAI ids stay out of it", () => {
+		// The third place a new model can go wrong, and the one that cannot be
+		// found by grepping for the model id: `ANTHROPIC_MIN_PREFIX` is keyed by
+		// id, so a new id that happens to match an existing pattern silently
+		// inherits that pattern's floor. It is ordered most-specific-first because
+		// the ids are prefixes of one another, and the expensive direction is
+		// inheriting a floor the vendor no longer holds.
+		//
+		// None of the `gpt-*` ids come near that. Asserted on the function the
+		// table feeds rather than on `cacheCapability`, because the two tell you
+		// different things and only the first can go red: `cacheCapability`
+		// returns early for any provider whose mode is not `explicit`, so a
+		// pattern added for an OpenAI id would be dead code and would leave every
+		// assertion below green. The table is the thing to keep Anthropic-only.
+		expect(anthropicMinPrefixTokens("gpt-6.1-sol")).toBe(anthropicMinPrefixTokens("claude-something-new"));
+		expect(anthropicMinPrefixTokens("gpt-6-sol")).toBe(anthropicMinPrefixTokens("claude-something-new"));
+		expect(anthropicMinPrefixTokens("gpt-6-astra")).toBe(anthropicMinPrefixTokens("claude-something-new"));
+		expect(anthropicMinPrefixTokens("claude-sonnet-5-5")).toBe(512);
+		// Which is the form of that assertion that could not be trusted on its
+		// own: the fallback is 512, and so is half the table, so a pattern added
+		// for a `gpt-*` id at 512 is invisible from the outside and a mutation
+		// check confirms it — the first version of this test read the lookup and
+		// held against exactly that mutant. Reading the patterns is the only
+		// version that holds whatever floor is picked.
+		const matchesAPattern = (id: string) => ANTHROPIC_MIN_PREFIX.some(([pattern]) => pattern.test(id));
+		for (const id of ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna", "gpt-5.6-sol"]) {
+			expect(matchesAPattern(id)).toBe(false);
+		}
+		// And the table is not empty, so the loop above is not passing vacuously.
+		expect(ANTHROPIC_MIN_PREFIX.length).toBeGreaterThan(0);
+		expect(matchesAPattern("claude-sonnet-5-5")).toBe(true);
+		// And the floor those ids actually get is the provider's, which is a
+		// different question with a different answer: OpenAI caches
+		// automatically from 1024, in 128-token increments, with no row of its own
+		// per model to keep in step with a release.
+		const cap = cacheCapability(model({ id: "gpt-6.1-sol", provider: "openai", api: "openai-completions" }));
+		expect(cap.mode).toBe("automatic");
+		expect(cap.minPrefixTokens).toBe(1024);
+		expect(cap.incrementTokens).toBe(128);
 	});
 });
 

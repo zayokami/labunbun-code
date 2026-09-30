@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolveModel } from "../src/model.ts";
 import {
 	buildOpenAIRequest,
 	convertMessages,
@@ -114,6 +115,41 @@ describe("a model that needs an effort of its own to keep its tools", () => {
 		const astra = { ...SOL, toolReasoningEffort: undefined };
 		expect(buildOpenAIRequest(astra, ctx({ tools: TOOLS }), { thinkingLevel: "high" }).reasoning_effort).toBe("high");
 		expect(buildOpenAIRequest(astra, ctx({ tools: TOOLS })).reasoning_effort).toBe("medium");
+	});
+
+	test("a model that rejects the value cannot be given it, so its request goes out as asked", () => {
+		// The other reason this is a row's field, and the one that is not a silent
+		// loss. Astra simply has no constraint; GPT-6.1 Sol is in the opposite
+		// position — it supports `low`/`medium`/`high`/`xhigh`/`max` and says
+		// outright that `none` and `minimal` are not supported efforts, so the
+		// value that rescues Sol and Luna would be a 400 here. The table therefore
+		// leaves the field off, and the request goes out asking for the depth the
+		// session wanted, which is the best a row can do on a model that has taken
+		// tool calling to the Responses API and left Chat Completions to the
+		// tool-less requests.
+		//
+		// Read from the shipped row rather than restated as a fixture, so that
+		// adding `toolReasoningEffort: "none"` to `openai/gpt-6.1-sol` fails here
+		// and not only in the catalog test.
+		const point = resolveModel("openai/gpt-6.1-sol");
+		expect(point).toBeDefined();
+		expect(point?.toolReasoningEffort).toBeUndefined();
+		for (const level of ["low", "medium", "high"] as const) {
+			const params = buildOpenAIRequest(point as Model, ctx({ tools: TOOLS }), { thinkingLevel: level });
+			// Never the rescue value, and never one the vendor does not take.
+			expect(params.reasoning_effort).toBe(level);
+		}
+		// The three levels above are the whole vocabulary this adapter can put on
+		// the wire, and they are a subset of the five the model takes
+		// (`low`/`medium`/`high`/`xhigh`/`max`) — so leaving the field unset cannot
+		// send it a value it rejects. The other direction is a ceiling rather than
+		// a bug: `xhigh` and `max` are reachable on this model and `ThinkingLevel`
+		// has no word for either, which is true of every reasoning row here.
+		//
+		// The tools still go out, and the row says nothing about them. What
+		// happens next is OpenAI's: the request is well-formed, and the turn comes
+		// back without `tool_calls` on this wire.
+		expect(buildOpenAIRequest(point as Model, ctx({ tools: TOOLS })).tools).toHaveLength(1);
 	});
 });
 

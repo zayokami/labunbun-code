@@ -105,8 +105,14 @@ const UNKNOWN: CacheCapability = {
  * Ordered most-specific-first, and tested with a start anchor: the ids are
  * prefixes of one another, so `claude-opus-4-5` has to be matched before
  * `claude-opus-4` or an Opus 4.5 request is held to the wrong floor.
+ *
+ * Exported, and only for the test that keeps it Anthropic's. A pattern added
+ * for another vendor's id cannot be caught by asserting on the floor a lookup
+ * returns, because the fallback is 512 and so is half this table: a mutant that
+ * adds `[/^gpt-6-/, 512]` is invisible from the outside. Reading the patterns is
+ * the only form of that assertion which holds whatever floor is chosen.
  */
-const ANTHROPIC_MIN_PREFIX: ReadonlyArray<readonly [RegExp, number]> = [
+export const ANTHROPIC_MIN_PREFIX: ReadonlyArray<readonly [RegExp, number]> = [
 	// Ahead of the Sonnet 5 row below, and the reason the ordering note exists in
 	// its sharpest form: a *newer* model in a family whose floor went **down**.
 	// Sonnet 5.5 caches from 512 where Sonnet 5 needs 1024, so the row that

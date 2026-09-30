@@ -232,6 +232,15 @@ export interface Model<Api extends ApiId = ApiId> {
 	 * Applies only to a request that has tools: without them there is nothing to
 	 * protect, and forcing `none` would drop the reasoning depth the session asked
 	 * for on a request that could have carried it.
+	 *
+	 * The value is not a preference between the efforts a model has, which is why
+	 * it is a row's field and not something a family or a provider settles.
+	 * `gpt-6-astra` has the same price tier and the same generation and no
+	 * constraint at all, and `gpt-6.1-sol` is the case where setting the field
+	 * would be worse than leaving it unset: it moved tool calling to the Responses
+	 * API, leaving Chat Completions to requests that carry no tools, and it does
+	 * not support `none` as an effort — so the value that rescues the rows above
+	 * is one it rejects outright rather than one it quietly ignores.
 	 */
 	toolReasoningEffort?: "low" | "medium" | "high" | "none";
 	input: ("text" | "image")[];

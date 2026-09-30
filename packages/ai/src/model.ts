@@ -590,6 +590,14 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		true,
 		"none",
 	],
+	// Sorts after `gpt-6-sol` because "-" (0x2D) precedes "." (0x2E), which is
+	// the same reason `gpt-5-codex` precedes `gpt-5.1` earlier in this table.
+	// Added on a re-check of both halves of the rule — Zen's own listing serves
+	// the id and models.dev prices it — and with no seventh element for the same
+	// reason its first-party row has no `toolReasoningEffort`: the constraint
+	// rides through a reseller, and so does the absence of the value that would
+	// satisfy it. Go sells no `gpt-6.1-*` id, so there is no row to add there.
+	["gpt-6.1-sol", "GPT-6.1 Sol", 1_050_000, 128_000, { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }, true],
 	["grok-4.5", "Grok 4.5", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 }, true],
 	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
 	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 1.4, output: 4.2, cacheRead: 0.35, cacheWrite: 0 }, true],
@@ -1170,6 +1178,30 @@ const BUILT_IN_MODELS: Model[] = [
 	// wire this file talks is OpenAI's. gpt-5.3-codex is current and deliberately
 	// absent — it answers only on /v1/responses, and a row that 404s on the wire we
 	// speak is worse than no row.
+	//
+	// GPT-6.1 Sol is a point release inside the 6-generation rather than a new
+	// family, and it is *not* a rename of `gpt-6-sol`: same $2/$10, but its cache
+	// read is $0.10 where Sol's is $0.20, so it is half price on exactly one
+	// channel and unchanged on the other three. Luna is the same shape and the
+	// same trap — "half of the 6-generation row" is wrong in the channel that
+	// costs the most for Luna and wrong in the one nobody watches for 6.1.
+	openAICompatModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-6.1-sol", "GPT-6.1 Sol", {
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		reasoning: true,
+		// `toolReasoningEffort` is absent on purpose, and this is the row where
+		// taking it from the family would be a 400 rather than a quiet loss. Sol
+		// and Luna carry it because their pages say function calling on Chat
+		// Completions works *only* at `reasoning_effort: "none"`. This model's
+		// page says the opposite on both counts: `none` and `minimal` are not
+		// efforts it supports at all, and tool calling needs the Responses API
+		// while Chat Completions takes requests that carry no tools. So there is
+		// no value the field could hold — `none` is rejected, and every effort it
+		// does take is one the model applies without being told. The cost is
+		// written down rather than left to be discovered: on the wire this file
+		// speaks, GPT-6.1 Sol cannot call tools.
+		pricing: openAIPricing(2, 10, 0.1),
+	}),
 	openAICompatModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-6-astra", "GPT-6 Astra", {
 		contextWindow: 1_050_000,
 		maxOutputTokens: 128_000,
@@ -1344,11 +1376,22 @@ const BUILT_IN_MODELS: Model[] = [
 	// sees one of these in OpenCode's own picker is not seeing a mistake here, and
 	// an entry added for any of them would be a price invented to fill a gap.
 	//
-	// A fourth wire exists that these rows deliberately do not reach: several of
-	// Zen's OpenAI models — the `gpt-6-*` and `grok-*` families among them —
-	// answer only on `/v1/responses`, which is not a wire `ApiId` can name. The
-	// same reason `gpt-5.3-codex` is absent from OpenAI's own rows above applies
-	// here, and a row that 404s on the wire we speak is worse than no row.
+	// A fourth wire exists that some of a vendor's rows deliberately do not
+	// reach: several of Zen's OpenAI models answer only on `/v1/responses`, which
+	// is not a wire `ApiId` can name. The same reason `gpt-5.3-codex` is absent
+	// from OpenAI's own rows above applies here, and a row that 404s on the wire
+	// we speak is worse than no row.
+	//
+	// This used to name "the `gpt-6-*` and `grok-*` families" as the members that
+	// answer only there, which stopped being true and became actively misleading:
+	// every `grok-*` id Zen serves is in this table, and so are `gpt-6-astra`,
+	// `gpt-6-sol` and `gpt-6-luna`, all three on the OpenAI wire below. The
+	// id-level check that replaces the family claim is the listing itself —
+	// everything Zen serves is in these two tables or in the unpriced list above —
+	// and `gpt-6.1-sol` was added on that basis on 2026-09-30, alongside its three
+	// siblings rather than on a family rule. Reachability on the wire is the one
+	// thing here that listing does not prove; it takes a request, which this
+	// checkout cannot make.
 	...OPENCODE_ZEN_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images]) =>
 		anthropicCompatModel("opencode-zen", OPENCODE_ZEN_BASE, "OPENCODE_API_KEY", undefined, id, name, {
 			contextWindow,

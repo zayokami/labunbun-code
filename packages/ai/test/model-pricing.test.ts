@@ -101,6 +101,7 @@ const BUILT_IN_REFS = [
 	"glm/glm-4.7",
 	"glm/glm-4.7-flashx",
 	"glm/glm-4.6",
+	"openai/gpt-6.1-sol",
 	"openai/gpt-6-astra",
 	"openai/gpt-6-sol",
 	"openai/gpt-6-luna",
@@ -114,13 +115,15 @@ const BUILT_IN_REFS = [
 	"minimax/minimax-m2.7-highspeed",
 	"minimax/minimax-m2.5",
 	"minimax/minimax-m2.5-highspeed",
-	// OpenCode: 78 Zen rows and 29 Go rows, each on both wires — 214 references,
+	// OpenCode: 79 Zen rows and 29 Go rows, each on both wires — 216 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
 	// pairs below show: `deepseek-v4-pro` is 1.74/3.84 on Zen and 0.66/1.98 on Go,
 	// and `grok-4.7` runs the other way at 1.4/4.2 against 2/6. Swept 2026-09-28
 	// from models.dev, filtered against the gateway's own model listing, plus
-	// `claude-sonnet-5-5` added 2026-09-29 on a re-check of both halves.
+	// `claude-sonnet-5-5` added 2026-09-29 on a re-check of both halves, and
+	// `gpt-6.1-sol` on 2026-09-30 the same way — Zen's listing serves it and
+	// models.dev prices it, Go sells no `gpt-6.1-*` id at all.
 	"opencode-zen/big-pickle",
 	"opencode-zen/claude-fable-5",
 	"opencode-zen/claude-fable-5-1",
@@ -175,6 +178,7 @@ const BUILT_IN_REFS = [
 	"opencode-zen/gpt-6-astra",
 	"opencode-zen/gpt-6-luna",
 	"opencode-zen/gpt-6-sol",
+	"opencode-zen/gpt-6.1-sol",
 	"opencode-zen/grok-4.5",
 	"opencode-zen/grok-4.6",
 	"opencode-zen/grok-4.7",
@@ -282,6 +286,7 @@ const BUILT_IN_REFS = [
 	"opencode-zen-oai/gpt-6-astra",
 	"opencode-zen-oai/gpt-6-luna",
 	"opencode-zen-oai/gpt-6-sol",
+	"opencode-zen-oai/gpt-6.1-sol",
 	"opencode-zen-oai/grok-4.5",
 	"opencode-zen-oai/grok-4.6",
 	"opencode-zen-oai/grok-4.7",
@@ -518,6 +523,20 @@ describe("the built-in catalog", () => {
 		expect(resolveModel("openai/gpt-6-sol")?.toolReasoningEffort).toBe("none");
 		expect(resolveModel("openai/gpt-6-astra")?.toolReasoningEffort).toBeUndefined();
 		expect(resolveModel("opencode-zen-oai/gpt-6-luna")?.toolReasoningEffort).toBe("none");
+		// The third reason this is a row and not a family rule, and the one where
+		// guessing is not a quiet failure. Astra is same-tier, same-generation and
+		// simply has no `none` in its effort set; GPT-6.1 Sol is the case that
+		// looks like it should copy Sol and must not. Its page supports
+		// `low`/`medium`/`high`/`xhigh`/`max` and says outright that `none` and
+		// `minimal` are not supported, and it moves tool calling to the Responses
+		// API entirely. So there is no value here that both exists and works:
+		// `none` is rejected rather than merely ignored, and every effort it does
+		// take is one it applies on its own. Asserted by id as well as by the
+		// list above because the list would stay green if a *new* row inherited
+		// the field from somewhere the filter could not see.
+		expect(resolveModel("openai/gpt-6.1-sol")?.toolReasoningEffort).toBeUndefined();
+		expect(resolveModel("opencode-zen-oai/gpt-6.1-sol")?.toolReasoningEffort).toBeUndefined();
+		expect(resolveModel("opencode-zen/gpt-6.1-sol")?.toolReasoningEffort).toBeUndefined();
 		// The same two models, the same wire's other half, no field — and not a
 		// row that was merely forgotten, since the id is identical.
 		expect(resolveModel("opencode-zen/gpt-6-luna")?.toolReasoningEffort).toBeUndefined();
@@ -543,6 +562,32 @@ describe("the built-in catalog", () => {
 		}
 		// Every exception has to be a real one, or it is a loophole in the loop.
 		expect([...offTheRule.values()]).not.toContain(0.1);
+	});
+
+	test("GPT-6.1 Sol is half of GPT-6 Sol on one channel and identical on the rest", () => {
+		// The relationship, not the four numbers: the table further down pins
+		// those absolutely, and a copy of Sol's row with a different name would
+		// sail straight past it. What is easy to get wrong is treating a point
+		// release as a re-pricing of the whole row, and getting it wrong in the
+		// direction that reads as a bargain. OpenAI halved exactly one channel —
+		// the cache read, $0.20 to $0.10 — and left the other three alone. The
+		// write is derived from input, so it cannot move on its own, which makes
+		// input and output the only two that could have.
+		const sol = resolveModel("openai/gpt-6-sol")?.pricing;
+		const point = resolveModel("openai/gpt-6.1-sol")?.pricing;
+		expect(sol?.input).toBe(point?.input);
+		expect(sol?.output).toBe(point?.output);
+		expect(sol?.cacheWrite).toBe(point?.cacheWrite);
+		expect(point?.cacheRead).toBe((sol?.cacheRead ?? 0) / 2);
+		// So the read rate is a twentieth of input where every other OpenAI row
+		// in this catalog pays a tenth — the same "do not extrapolate from the
+		// family" trap as Luna's output and FlashX's read, on a row whose two
+		// neighbours both look like it.
+		expect((point?.cacheRead ?? 0) / (point?.input ?? 0)).toBeCloseTo(0.05, 10);
+		// The reseller carries the same figure because both wires read one
+		// tuple, so this also fails if the row is ever transcribed twice.
+		expect(resolveModel("opencode-zen/gpt-6.1-sol")?.pricing).toEqual(point);
+		expect(resolveModel("opencode-zen-oai/gpt-6.1-sol")?.pricing).toEqual(point);
 	});
 
 	test("every other vendor's row costs what its page publishes", () => {
@@ -581,6 +626,7 @@ describe("the built-in catalog", () => {
 			["glm/glm-4.6", 0.6, 2.2, 0.11, 0],
 			// The current regime's rates: Flash doubles on 2027-01-01, and the Pro
 			// row's figures are its ≤200k tier.
+			["openai/gpt-6.1-sol", 2, 10, 0.1, 2.5],
 			["openai/gpt-6-astra", 10, 50, 1, 12.5],
 			// Sol is half of 5.6 Sol on all three channels. Luna is not: its output
 			// comes down harder than its input ($1.20 → $0.50 against $0.20 → $0.10),
@@ -665,6 +711,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen/gpt-6-astra", 10, 50, 1, 12.5],
 			["opencode-zen/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
 			["opencode-zen/gpt-6-sol", 2, 10, 0.2, 2.5],
+			["opencode-zen/gpt-6.1-sol", 2, 10, 0.1, 2.5],
 			["opencode-zen/grok-4.5", 2, 6, 0.3, 0],
 			["opencode-zen/grok-4.6", 2, 6, 0.5, 0],
 			["opencode-zen/grok-4.7", 1.4, 4.2, 0.35, 0],
@@ -772,6 +819,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/gpt-6-astra", 10, 50, 1, 12.5],
 			["opencode-zen-oai/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
 			["opencode-zen-oai/gpt-6-sol", 2, 10, 0.2, 2.5],
+			["opencode-zen-oai/gpt-6.1-sol", 2, 10, 0.1, 2.5],
 			["opencode-zen-oai/grok-4.5", 2, 6, 0.3, 0],
 			["opencode-zen-oai/grok-4.6", 2, 6, 0.5, 0],
 			["opencode-zen-oai/grok-4.7", 1.4, 4.2, 0.35, 0],
@@ -864,6 +912,7 @@ describe("the built-in catalog", () => {
 			["glm/glm-4.7", 200_000, 131_072],
 			["glm/glm-4.7-flashx", 200_000, 131_072],
 			["glm/glm-4.6", 200_000, 131_072],
+			["openai/gpt-6.1-sol", 1_050_000, 128_000],
 			["openai/gpt-6-astra", 1_050_000, 128_000],
 			["openai/gpt-6-sol", 1_050_000, 128_000],
 			["openai/gpt-6-luna", 1_050_000, 128_000],
@@ -940,6 +989,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen/gpt-6-astra", 1_050_000, 128_000],
 			["opencode-zen/gpt-6-luna", 1_050_000, 128_000],
 			["opencode-zen/gpt-6-sol", 1_050_000, 128_000],
+			["opencode-zen/gpt-6.1-sol", 1_050_000, 128_000],
 			["opencode-zen/grok-4.5", 500_000, 500_000],
 			["opencode-zen/grok-4.6", 500_000, 500_000],
 			["opencode-zen/grok-4.7", 500_000, 500_000],
@@ -1047,6 +1097,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/gpt-6-astra", 1_050_000, 128_000],
 			["opencode-zen-oai/gpt-6-luna", 1_050_000, 128_000],
 			["opencode-zen-oai/gpt-6-sol", 1_050_000, 128_000],
+			["opencode-zen-oai/gpt-6.1-sol", 1_050_000, 128_000],
 			["opencode-zen-oai/grok-4.5", 500_000, 500_000],
 			["opencode-zen-oai/grok-4.6", 500_000, 500_000],
 			["opencode-zen-oai/grok-4.7", 500_000, 500_000],
@@ -1106,7 +1157,7 @@ describe("the built-in catalog", () => {
 	test("the models that always think do not claim a medium effort", () => {
 		// `reasoning: true` makes the adapters ask for "medium" when the caller
 		// states no level, which is only safe where "medium" is a value the vendor
-		// takes. Every Anthropic row claims it and so do the six OpenAI ones, the
+		// takes. Every Anthropic row claims it and so do the seven OpenAI ones, the
 		// two DeepSeek ones (medium maps to high) and Gemini 3.8 Flash. What is
 		// listed here is the opposite decision, and it is the interesting one: K3's
 		// effort set is low/high/max and GLM-5.3's is max/high/low, so asking either
@@ -1120,7 +1171,7 @@ describe("the built-in catalog", () => {
 		// rows below are the ones whose vendor published an effort vocabulary, and
 		// the resellers are the ones whose vendor published nothing about thinking
 		// at all. Both are right to say "not medium", for reasons that have nothing
-		// to do with each other, and the second group is 214 rows long — a third of
+		// to do with each other, and the second group is 216 rows long — a third of
 		// the catalog — which would bury the first. The gateway rows are held by
 		// the assertion directly below, which is exhaustive over the same set.
 		const alwaysThinking = BUILT_IN_REFS.filter((ref) => !resolveModel(ref)?.reasoning && !isReseller(ref));
@@ -1161,7 +1212,7 @@ describe("the built-in catalog", () => {
 		// without the flag set is a 400 on its first request, and nothing else in
 		// the suite would notice.
 		const gateway = BUILT_IN_REFS.filter(isReseller);
-		expect(gateway).toHaveLength(214);
+		expect(gateway).toHaveLength(216);
 		expect(gateway.filter((ref) => resolveModel(ref)?.reasoning)).toEqual([]);
 		// And none of them claims a thinking shape either, for the same reason:
 		// the shape is what the 400 is about.
@@ -1392,7 +1443,7 @@ describe("ids that were retired", () => {
 		// `openAICompatModel` grew an `images` flag for the gateway, and nothing
 		// else in the catalog has to say this: every first-party row on that wire is
 		// a text model, and the two that could take an image are reached by their
-		// own native client. So 44 of 214 rows are the only place the claim lives,
+		// own native client. So 44 of 216 rows are the only place the claim lives,
 		// and before this one nothing in the suite could see it — flipping `false`
 		// to `true` on any row was a silent edit.
 		//
@@ -1427,12 +1478,12 @@ describe("ids that were retired", () => {
 			"nemotron-3-ultra-free",
 			"nemotron-3.5-lightning-free",
 		]);
-		// 44 of 214: 13 Zen rows and 9 Go rows, each on both wires. Asserted as a
+		// 44 of 216: 13 Zen rows and 9 Go rows, each on both wires. Asserted as a
 		// count rather than derived, so a row that silently joins the list below
 		// cannot do it by also quietly leaving it here.
 		const rows = BUILT_IN_REFS.filter(isReseller);
 		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 1)).toHaveLength(44);
-		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(170);
+		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(172);
 		// The two wires agree about the model, which is a check on the *tuple*
 		// being shared rather than transcribed twice — a per-wire table could
 		// disagree and both halves would look right.
@@ -1470,8 +1521,15 @@ describe("ids that were retired", () => {
 		expect(resolveModel("claude-opus-5-5")?.provider).toBe("anthropic");
 		expect(resolveModel("deepseek-v4-pro")?.provider).toBe("deepseek");
 		expect(resolveModel("kimi-k3")?.provider).toBe("kimi");
+		// A first instance of that collision on the OpenAI wire, where the bare
+		// name is also a name a gateway sells. First-party rows sit ahead of the
+		// gateway ones, so the answer is OpenAI's row at OpenAI's price — and
+		// dropping the first-party row is exactly what would turn this into a
+		// subscription plan the user never chose.
+		expect(resolveModel("gpt-6.1-sol")?.provider).toBe("openai");
+		expect(resolveModel("gpt-6.1-sol")?.pricing?.cacheRead).toBe(0.1);
 		// Exhaustive, and about the right thing: no bare id may *land on* a gateway
-		// row. Most of the 214 do resolve bare — to the vendor that makes the model
+		// row. Most of the 216 do resolve bare — to the vendor that makes the model
 		// — which is the rule working, not the rule failing, so the check is on
 		// where the resolution goes rather than on whether one happens. A fifth
 		// gateway added to the table without a decision here fails this.
