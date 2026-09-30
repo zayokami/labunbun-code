@@ -5,9 +5,9 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { needsNetworkProxy } from "@labunbun/agent";
+import { DEFAULT_SANDBOX_FOR_MODE, needsNetworkProxy, networkConfinementReason } from "@labunbun/agent";
 import { apiKeyEnvNames, listModels } from "@labunbun/ai";
-import { detectShell } from "@labunbun/tools";
+import { detectNativeBackend, detectShell, networkConfinement, sandboxBackendFor } from "@labunbun/tools";
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
 import { changedBindings, type PadConfig } from "./gamepad-runtime.ts";
 import { networkAxisFrom, type Settings } from "./settings.ts";
@@ -37,6 +37,14 @@ export interface DoctorCheck {
  * statement about what can back a restriction up *on this machine*, so a test
  * running anywhere has to be able to ask the question about both. Defaults to
  * the real one, which is what a caller with no opinion wants.
+ *
+ * `hasNativeBackend` is the fifth, and it is a seam rather than an answer. The
+ * row asks whether the platform's sandbox program is *installed*, which on Linux
+ * is a PATH scan and on Windows is always false — so a test that passed only
+ * `platform` would be asserting against whatever this machine happens to have,
+ * and the "Linux without bubblewrap" case would be reachable only on a Linux box.
+ * Probing for real is still the default, because that is the honest question to
+ * ask in production; a test that wants the case says which one it means.
  */
 export async function runDoctorChecks(
 	settings: Settings,
@@ -45,6 +53,7 @@ export async function runDoctorChecks(
 	liveThemeName?: string,
 	pad?: PadConfig,
 	platform: string = process.platform,
+	hasNativeBackend?: boolean,
 ): Promise<DoctorCheck[]> {
 	const checks: DoctorCheck[] = [];
 
@@ -114,13 +123,21 @@ export async function runDoctorChecks(
 	// `/permissions` reports the axis as the session holds it, which is the right
 	// answer to "what may this session reach". This row answers the other
 	// question — "is that restriction real here" — which is a property of the
-	// platform rather than of the session, so it cannot be read off it. On a
-	// platform with a native backend the proxy is belt-and-braces: a program
-	// that ignores `HTTP_PROXY` still has no route out, because the OS holds the
-	// rest of the boundary. On a platform without one the proxy is the entire
-	// boundary, and a row that only said "restricted" would be the exact lie the
-	// plan forbids — so the row warns instead, and says what the restriction
-	// actually depends on.
+	// machine rather than of the session, so it cannot be read off it.
+	//
+	// Both facts this row needs come from the same functions `/permissions` uses,
+	// which is the only way two surfaces stop disagreeing. It used to ask
+	// `platform === "darwin" || platform === "linux"`, which is a different question
+	// and the wrong one: it said `ok` on a Linux box with no bubblewrap, while
+	// `/permissions` on the same session said the backend was missing. A `warn` is
+	// the only signal this row gives, and it was staying green on the machine that
+	// needed it.
+	//
+	// The wording is `describeNetworkPolicy`'s, for the same reason — and it matters
+	// that the native case is *not* "the proxy, with the OS holding the rest". On a
+	// native backend with a restricted network the OS denies the proxy as well, so
+	// the proxy is not belt-and-braces here, it is simply unreachable from a shell.
+	// This row says which of the two it is rather than averaging them.
 	const axis = networkAxisFrom(settings);
 	if (needsNetworkProxy(axis.access, axis.domains)) {
 		const allowCount = axis.domains.filter((rule) => rule.permission === "allow").length;
@@ -130,14 +147,33 @@ export async function runDoctorChecks(
 					? "nothing is reachable"
 					: `${allowCount} domain${allowCount === 1 ? "" : "s"} allowed`
 				: `${axis.domains.length} pattern${axis.domains.length === 1 ? "" : "s"} denied`;
-		const backed = platform === "darwin" || platform === "linux";
-		checks.push({
-			name: "Network",
-			status: backed ? "ok" : "warn",
-			detail: backed
-				? `${axis.access} (${reach}) · enforced by a local proxy, with the OS sandbox holding the rest`
-				: `${axis.access} (${reach}) · no OS network backend in this build, so the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`,
-		});
+		const backend = sandboxBackendFor(platform, hasNativeBackend ?? detectNativeBackend(platform));
+		// The pairing, not just the setting: an unset `sandbox` resolves through
+		// `DEFAULT_SANDBOX_FOR_MODE`, which is how the session resolves it too. Every
+		// mode currently pairs to `workspace-write`, so this is not a place where
+		// three answers collapse into one by accident — it is the same resolution the
+		// app runs, stated once.
+		const sandbox = settings.sandbox ?? DEFAULT_SANDBOX_FOR_MODE[settings.permissionMode ?? "ask"];
+		const confinement = networkConfinement(backend, sandbox, axis.access);
+		// `ok` is reserved for the one case where nothing is holding the boundary but
+		// the program itself: the OS denies every route, so the restriction holds
+		// more completely than a proxy could manage. It costs the allowlist its
+		// effect on a shell, and the detail says so rather than the status
+		// pretending otherwise.
+		//
+		// The other four all warn, and the *reason* is in the row rather than left to
+		// `/permissions`: "the proxy is the whole boundary" on its own tells a user
+		// they have a problem without telling them which of three they have, and the
+		// three are fixed by three different things — a build that ships no backend, a
+		// package they can install, or a setting they wrote. Read off the same table
+		// `describeNetworkPolicy` uses, so the two surfaces cannot drift apart.
+		const kernelHoldsIt = confinement === "os-namespace";
+		const detail = kernelHoldsIt
+			? axis.access === "restricted"
+				? `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine, proxy included, so a shell command reaches nothing and the allowed list governs the web tools`
+				: `${axis.access} (${reach}) · a local proxy decides, and a program that ignores HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`
+			: `${axis.access} (${reach}) · ${networkConfinementReason(confinement)} So the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`;
+		checks.push({ name: "Network", status: kernelHoldsIt ? "ok" : "warn", detail });
 	} else {
 		checks.push({
 			name: "Network",

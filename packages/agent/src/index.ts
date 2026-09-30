@@ -59,6 +59,7 @@ export {
 	type NetworkDomainPermission,
 	type NetworkDomainRule,
 	needsNetworkProxy,
+	networkConfinementReason,
 	normalizeHost,
 } from "./network-policy.ts";
 // Bounding what tool output may enter the conversation

@@ -182,50 +182,105 @@ describe("the Gamepad row", () => {
  * admits the proxy is the whole boundary.
  */
 describe("the Network row", () => {
-	function networkRow(settings: ReturnType<typeof SettingsSchema.parse>, cwd: string, home: string, platform: string) {
-		return runDoctorChecks(settings, cwd, home, undefined, undefined, platform).then((checks) =>
+	function networkRow(
+		settings: ReturnType<typeof SettingsSchema.parse>,
+		cwd: string,
+		home: string,
+		platform: string,
+		hasNativeBackend: boolean,
+	) {
+		return runDoctorChecks(settings, cwd, home, undefined, undefined, platform, hasNativeBackend).then((checks) =>
 			checks.find((c) => c.name === "Network"),
 		);
 	}
 
-	// Four platforms, not three. With only darwin/linux/win32 the table agrees
-	// with `platform !== "win32"` as well as with the real predicate, so a
-	// falsification run could swap one for the other and every assertion here
-	// would still hold. `freebsd` is the fourth: a platform this build has no
-	// backend for and that is not the one special-cased by name, which is what
-	// makes the difference between "not darwin and not linux" and "not windows"
-	// visible in a test rather than in a reviewer's head.
+	const restricted = () => SettingsSchema.parse({ networkAccess: "restricted", networkDomains: ["x.test"] });
+
+	/**
+	 * Five rows, and the pair is the whole point.
+	 *
+	 * This table used to be four platforms against one status, and it read
+	 * `darwin → ok`, `linux → ok` off `platform === "darwin" || platform ===
+	 * "linux"`. That predicate is the bug: it says `ok` on a Linux box with no
+	 * bubblewrap, while `/permissions` on the same session says the backend is
+	 * missing. So `hasNativeBackend` is now driven separately, and the row that
+	 * matters most is the fourth — the same platform, the same settings, a
+	 * different machine, and the honest answer flips. A test with only the three
+	 * platforms that *have* backends cannot tell the old predicate from the new
+	 * one, which is why the table needs the flag at all.
+	 */
 	test.each([
-		["darwin", "ok"],
-		["linux", "ok"],
-		["win32", "warn"],
-		["freebsd", "warn"],
-	] as const)("on %s the row is %s", async (platform, status) => {
+		["darwin", true, "ok"],
+		["linux", true, "ok"],
+		// Same platform, same settings, backend not installed. This is the row that
+		// was `ok` before and must not be.
+		["linux", false, "warn"],
+		// A platform with no backend at all, whether one is "installed" or not.
+		["win32", true, "warn"],
+		["freebsd", true, "warn"],
+	] as const)("on %s with a native backend %s the row is %s", async (platform, hasNativeBackend, status) => {
 		const { home, cwd } = makeDirs();
 		const row = await networkRow(
 			SettingsSchema.parse({ networkAccess: "restricted", networkDomains: ["registry.npmjs.org"] }),
 			cwd,
 			home,
 			platform,
+			hasNativeBackend,
 		);
 		expect(row?.status).toBe(status);
 		expect(row?.detail).toContain("1 domain allowed");
 	});
 
+	/**
+	 * The two `warn` cases are different problems, so the row has to name which.
+	 *
+	 * "The proxy is the whole boundary" is true of both, and it is the sentence
+	 * a user reads while deciding whether to trust the setting. What they act on
+	 * is the difference: one is fixed by a package they can install, the other
+	 * only by a build that does not exist. Averaging the two into one sentence is
+	 * the same mistake as averaging the two `ok` cases used to be.
+	 */
+	test.each([
+		["linux", false, "not installed here"],
+		["win32", true, "no OS-level sandbox for this platform"],
+	] as const)("on %s the warn names the reason, not just the boundary", async (platform, hasNative, phrase) => {
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(restricted(), cwd, home, platform, hasNative);
+		expect(row?.status).toBe("warn");
+		expect(row?.detail).toContain(phrase);
+		expect(row?.detail).toContain("HTTP_PROXY/HTTPS_PROXY/ALL_PROXY");
+	});
+
+	test("the ok row says the allowlist governs the web tools, not a command", async () => {
+		// The sentence `/permissions` prints for the native case, and the reason
+		// this row needs its own copy of it: `ok` here means the restriction is
+		// enforced more completely than a proxy manages — at the price of the
+		// allowlist having no effect on a shell. A green row with no mention of
+		// that reads as "your allowlist works", which is false of every entry.
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(restricted(), cwd, home, "darwin", true);
+		expect(row?.status).toBe("ok");
+		expect(row?.detail).toContain("denies a command every route off the machine, proxy included");
+		expect(row?.detail).toContain("the allowed list governs the web tools");
+		// The inverse: the four proxy-only cases must not claim a kernel holds it.
+		for (const [platform, hasNative] of [
+			["linux", false],
+			["win32", true],
+			["freebsd", true],
+		] as const) {
+			expect((await networkRow(restricted(), cwd, home, platform, hasNative))?.detail).not.toContain("OS sandbox");
+		}
+	});
+
 	test("the platform without a backend says what the restriction depends on", async () => {
 		const { home, cwd } = makeDirs();
-		const row = await networkRow(
-			SettingsSchema.parse({ networkAccess: "restricted", networkDomains: ["x.test"] }),
-			cwd,
-			home,
-			"win32",
-		);
+		const row = await networkRow(restricted(), cwd, home, "win32", true);
 		// The names, not "sandbox on". A user reading this row on Windows is
 		// deciding whether to trust the setting, and the difference between
 		// "restricted" and "restricted, as long as the program is honest about
 		// proxy variables" is the entire content of that decision.
 		expect(row?.detail).toContain("HTTP_PROXY/HTTPS_PROXY/ALL_PROXY");
-		expect(row?.detail).toContain("no OS network backend");
+		expect(row?.detail).toContain("no OS-level sandbox for this platform");
 	});
 
 	test("a session that confines nothing is reported plainly, and not as a warning", async () => {
@@ -235,7 +290,7 @@ describe("the Network row", () => {
 		// worth reading.
 		const { home, cwd } = makeDirs();
 		for (const platform of ["darwin", "linux", "win32", "freebsd"]) {
-			const row = await networkRow(SettingsSchema.parse({}), cwd, home, platform);
+			const row = await networkRow(SettingsSchema.parse({}), cwd, home, platform, true);
 			expect(row?.status).toBe("ok");
 			expect(row?.detail).toBe("not restricted — commands reach whatever the host can reach");
 		}
@@ -246,7 +301,7 @@ describe("the Network row", () => {
 		// can write by accident. A row that said "1 policy" or nothing at all
 		// would leave a session that cannot fetch looking configured.
 		const { home, cwd } = makeDirs();
-		const row = await networkRow(SettingsSchema.parse({ networkAccess: "restricted" }), cwd, home, "linux");
+		const row = await networkRow(SettingsSchema.parse({ networkAccess: "restricted" }), cwd, home, "linux", true);
 		expect(row?.detail).toContain("nothing is reachable");
 	});
 });

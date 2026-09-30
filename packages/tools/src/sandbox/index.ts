@@ -200,31 +200,35 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	// reporting it as a wrapped-but-permissive sandbox would be a lie in the
 	// direction that matters.
 	//
-	// The **network** half does not change this, and it is worth saying why,
-	// because the obvious-looking alternative is wrong. Both translators carry a
-	// branch for "unconfined filesystem, restricted network" that still wraps, and
-	// removing this short-circuit reaches it — but on Linux that branch adds
-	// `--unshare-net`, which gives the command an empty network namespace. The
-	// proxy listening on `127.0.0.1` is then unreachable, so *allowed* domains
-	// fail alongside denied ones and the allowlist is decoration that reads as a
-	// broken network rather than as a policy.
+	// The **network** half does not change this, and the reason is not the one
+	// this comment used to give. It used to claim the problem was confined to
+	// this branch — "both translators carry a branch for *unconfined filesystem,
+	// restricted network* that still wraps, and removing this short-circuit
+	// reaches it". That was half of it, and the half that mattered was left out:
+	// `workspace-write` with a restricted network reaches `--unshare-net` and a
+	// `(deny default)` profile with no network rule **today**, and has the same
+	// consequence. The command's only route to the proxy is loopback, and both
+	// of those take loopback away.
 	//
-	// Codex does wrap in this case, and it has what this does not: in proxy mode
-	// it pairs `--unshare-net` with an internal TCP→UDS→TCP bridge so the
-	// command's loopback traffic is carried out to the host's proxy
-	// (`codex-rs/linux-sandbox/README.md`: "In managed proxy mode, the helper uses
-	// `--unshare-net` plus an internal TCP->UDS->TCP routing bridge so tool
-	// traffic reaches only configured proxy endpoints"). With no bridge, wrapping
-	// here would enforce the network axis by breaking the network, which is
-	// strictly worse than enforcing it with the proxy and saying that is what is
-	// doing it.
+	// So the situation is not a property of this short-circuit. It is what a
+	// restricted network means on a native backend: the OS denies every route
+	// off the machine, the proxy is on one of those routes, and therefore a
+	// command run through the shell reaches nothing — allowed or denied — while
+	// the domain list governs the web tools, which fetch in this process. That is
+	// now what `describeNetworkPolicy` says for the `os-namespace` case, and it
+	// says it because this function is the resolution it is derived from.
 	//
-	// The cost of this line is real and is reported rather than hidden: on a
-	// native backend, `workspace-write` with a restricted network holds the line
-	// at the kernel while `danger-full-access` holds it only in user space. That
-	// asymmetry is the price of not having the bridge, and `networkConfinement`
-	// below is what stops `/permissions` from claiming the kernel holds it in
-	// both cases.
+	// What is *not* done here is the fix that would make the list work from a
+	// shell: dropping the OS denial so the network stays open and the proxy is
+	// the boundary. That is a real option and it is deliberately not taken
+	// silently — it converts `restricted` from "the kernel denies it" into "a
+	// proxy the program can ignore", which is a different and weaker promise,
+	// and a user who set `restricted` chose the stronger one. Codex does have
+	// the bridge that makes both true at once (`codex-rs/linux-sandbox/
+	// README.md`: "the helper uses `--unshare-net` plus an internal TCP->UDS->TCP
+	// routing bridge so tool traffic reaches only configured proxy endpoints");
+	// this build has no bridge, so it has one of the two properties rather than
+	// both, and says which.
 	if (policy.fileSystem.kind === "unrestricted") return { kind: "unconfined" };
 
 	if (!hasNativeSandboxBackend(platform)) {

@@ -17,13 +17,34 @@
  * kernel boundary. Where the platform has one, the OS sandbox is what closes
  * that gap, and the two are layered rather than confused:
  *
- *   - macOS / Linux: `sandbox-exec` / `bwrap` hold the network boundary at the
- *     kernel. When domain rules narrow an otherwise-enabled network the profile
- *     is narrowed to loopback so only the proxy is reachable, and everything
- *     else is unreachable without going through the decision in this file.
+ *   - macOS / Linux, `enabled`: the OS confines the filesystem and leaves the
+ *     network open, so the proxy is still the whole of the *network* boundary
+ *     and a program that ignores the environment gets out. Reported as
+ *     `network-left-open` rather than as a kernel-held line.
+ *   - macOS / Linux, `restricted`: the OS denies the command **every** route
+ *     off the machine. Not "loopback only" — the profile starts from
+ *     `(deny default)` and adds no network rule at all (`seatbelt.ts`), and
+ *     `--unshare-net` puts the command in an empty network namespace
+ *     (`bwrap.ts`). The consequence is worth stating plainly because it is the
+ *     opposite of what the setting sounds like: **the proxy is unreachable
+ *     from the shell too, so this domain list governs the web tools — which
+ *     fetch in this process — and not a command run through Bash.** A shell
+ *     command reaches nothing, allowed or denied.
  *   - Windows: there is no such backend, so this file and the proxy are the
  *     whole of the network story. That is stated in `/permissions` and `/doctor`
  *     rather than papered over, for the same reason the filesystem half is.
+ *
+ * That middle bullet used to say the profile was "narrowed to loopback so only
+ * the proxy is reachable". No code did that, on either platform, and the
+ * sentence described a design rather than the build. Narrowing a seatbelt
+ * profile to loopback is expressible; the equivalent is **not** available for
+ * `--unshare-net`, whose namespace has no route to the host's loopback at all
+ * without a userspace bridge (Codex pairs the two — `codex-rs/linux-sandbox/
+ * README.md`: "the helper uses `--unshare-net` plus an internal TCP->UDS->TCP
+ * routing bridge so tool traffic reaches only configured proxy endpoints").
+ * A loopback-narrowed macOS profile next to an unreachable-proxy Linux one
+ * would be two behaviours under one setting, so neither is done and the
+ * setting means what it does.
  *
  * A user told "the network is restricted" on a machine where a program can
  * ignore the proxy has been told something false, so the honest sentence is
@@ -232,7 +253,19 @@ export function needsNetworkProxy(network: "restricted" | "enabled", rules: read
  * only it knows. `networkConfinement` in `@labunbun/tools` is that derivation.
  */
 export type NetworkConfinement =
-	/** An OS sandbox wraps the command and denies outbound traffic at the kernel. */
+	/**
+	 * An OS sandbox wraps the command and denies outbound traffic at the kernel.
+	 *
+	 * The case this is written for is `restricted` under a native backend, and
+	 * its consequence is the one a reader is most likely to get backwards: the
+	 * denial covers the *proxy* too, because the proxy is reached over the same
+	 * loopback the namespace has no route to. So a command run through the shell
+	 * reaches nothing at all, whether its host is on the allowlist or not, and the
+	 * domain list governs only the paths that fetch in this process. Saying "only
+	 * the listed domains may be reached" here would be false about every domain
+	 * on the list, in the direction that makes a dead network look like a working
+	 * policy.
+	 */
 	| "os-namespace"
 	/** No argv-level backend exists for this platform, so nothing wraps the shell. */
 	| "no-os-backend"
@@ -279,6 +312,23 @@ const REASON_BY_CONFINEMENT: Record<Exclude<NetworkConfinement, "os-namespace">,
 	"network-left-open": "The sandbox leaves the network open so allowed traffic can get through.",
 };
 
+/**
+ * The one-line reason a given confinement has the proxy as the whole boundary.
+ *
+ * A function rather than an exported table because the interesting mistake is the
+ * one a `Record` invites: indexing it with a `NetworkConfinement` has to
+ * account for `os-namespace`, which is the case with no reason here because it is
+ * not a proxy-only boundary at all. Narrowing the parameter puts that fact in the
+ * type instead of in a runtime check some caller would eventually skip.
+ *
+ * Exported because `/doctor` reports the same four cases and copying the strings
+ * into a second surface is how two of them start disagreeing — which is exactly
+ * what happened to the *shape* of this sentence once already.
+ */
+export function networkConfinementReason(confinement: Exclude<NetworkConfinement, "os-namespace">): string {
+	return REASON_BY_CONFINEMENT[confinement];
+}
+
 /** One sentence saying what the network half is actually doing. */
 export function describeNetworkPolicy(
 	network: "restricted" | "enabled",
@@ -289,12 +339,23 @@ export function describeNetworkPolicy(
 		return "Network: not restricted. Commands reach whatever the host can reach, and no proxy is interposed.";
 	}
 	const count = rules.filter((rule) => rule.permission === "allow").length;
+
+	// The `os-namespace` case gets its own `detail` because the sentence the other
+	// four use is false here, and false in the way that costs a user an afternoon.
+	// "Only the 2 listed domains may be reached" reads as a working allowlist; what
+	// is actually true is that a command cannot reach the proxy the allowlist is
+	// enforced at, so it reaches nothing, and the two listed domains are reachable
+	// only from the web tools. The count is kept in the sentence because a user
+	// comparing two sessions needs to see that the list did not change — what
+	// changed is who can act on it.
 	const detail =
-		network === "restricted"
-			? count === 0
-				? "Nothing is reachable: the network is restricted and no domain is allowed."
-				: `Only the ${count} listed domain${count === 1 ? "" : "s"} may be reached.`
-			: `Traffic is routed through a local proxy that refuses the ${rules.length - count} denied pattern${rules.length - count === 1 ? "" : "s"}.`;
+		confinement === "os-namespace" && count > 0
+			? `A command run through the shell reaches nothing at all here, so the ${count} listed domain${count === 1 ? "" : "s"} are what the web tools may fetch rather than what a command may reach.`
+			: network === "restricted"
+				? count === 0
+					? "Nothing is reachable: the network is restricted and no domain is allowed."
+					: `Only the ${count} listed domain${count === 1 ? "" : "s"} may be reached.`
+				: `Traffic is routed through a local proxy that refuses the ${rules.length - count} denied pattern${rules.length - count === 1 ? "" : "s"}.`;
 
 	// Written per case rather than as one sentence covering all five, because
 	// "the OS holds the rest of the boundary" and "nothing but the proxy holds
@@ -313,9 +374,14 @@ export function describeNetworkPolicy(
 	// They are named explicitly below because the caveat's silence about them was
 	// an overclaim in its own right: it disclosed one bypass and let the reader
 	// assume there was not another.
+	//
+	// The `os-namespace` half now names a second thing it used to leave out, which
+	// is that the denial reaches the proxy as well. That is what makes the sentence
+	// above say what it says, and leaving it out is what let the old wording claim
+	// the list was governing a shell it never reaches.
 	const caveat =
 		confinement === "os-namespace"
-			? " The OS sandbox denies outbound traffic to the command itself, so a program that ignores the proxy environment still reaches nothing."
+			? " The OS sandbox denies the command every route off the machine, the proxy included — so ignoring the proxy environment gains a program nothing, and a command that would have been allowed is refused too."
 			: ` ${REASON_BY_CONFINEMENT[confinement]} So the proxy is the whole network boundary: a program that opens a socket without consulting the proxy environment is not subject to it.`;
 
 	return `Network: restricted. ${detail}${caveat} The web tools are covered by this too, since they fetch in this process where the proxy is not in the path.`;

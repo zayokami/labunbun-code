@@ -11,6 +11,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+	buildSandboxPolicy,
 	decideNetworkRequest,
 	describeNetworkPolicy,
 	domainMatches,
@@ -18,9 +19,10 @@ import {
 	type NetworkConfinement,
 	type NetworkDomainRule,
 	needsNetworkProxy,
+	networkConfinementReason,
 	normalizeHost,
 } from "@labunbun/agent";
-import { networkConfinement } from "../src/sandbox/index.ts";
+import { networkConfinement, resolveSandboxExecution } from "../src/sandbox/index.ts";
 
 const allow = (...patterns: string[]): NetworkDomainRule[] =>
 	patterns.map((pattern) => ({ pattern, permission: "allow" as const }));
@@ -167,7 +169,10 @@ describe("describeNetworkPolicy", () => {
 		// only one that claims it.
 		const claims = (confinement: NetworkConfinement) =>
 			describeNetworkPolicy("restricted", allow("example.com"), confinement);
-		expect(claims("os-namespace")).toContain("still reaches nothing");
+		// The native case no longer says "still reaches nothing" — it says the
+		// stronger and more useful thing, which is *why* a command reaches nothing.
+		// Asserting the old phrase would have pinned the vaguer sentence.
+		expect(claims("os-namespace")).toContain("denies the command every route off the machine, the proxy included");
 		for (const confinement of [
 			"no-os-backend",
 			"backend-missing",
@@ -178,6 +183,7 @@ describe("describeNetworkPolicy", () => {
 			expect(text).toContain("proxy is the whole network boundary");
 			expect(text).toContain("not subject to it");
 			expect(text).not.toContain("still reaches nothing");
+			expect(text).not.toContain("the proxy included");
 		}
 		// The reason differs across the four, and that difference is the point: one
 		// is a gap in this build, one is a backend that is not installed, one is
@@ -197,6 +203,77 @@ describe("describeNetworkPolicy", () => {
 
 	test("restricted with nothing allowed says nothing is reachable", () => {
 		expect(describeNetworkPolicy("restricted", [], "os-namespace")).toContain("Nothing is reachable");
+	});
+
+	/**
+	 * A restricted network under a native backend does not mean "this list is
+	 * enforced on the shell". It means the shell has no route at all.
+	 *
+	 * The domain list is enforced at the proxy, and the proxy is reached over
+	 * loopback — which `--unshare-net` and a `(deny default)` seatbelt profile both
+	 * take away. So the list governs the web tools, which fetch in this process, and
+	 * a command reaches nothing whether its host is listed or not. The old wording
+	 * said "Only the 2 listed domains may be reached", which reads as a working
+	 * allowlist and is false about every entry in it.
+	 */
+	test("the native case does not tell the user their allowlist governs a command", () => {
+		const text = describeNetworkPolicy("restricted", allow("example.com", "registry.npmjs.org"), "os-namespace");
+		expect(text).not.toContain("Only the 2 listed domains may be reached");
+		expect(text).toContain("A command run through the shell reaches nothing at all here");
+		expect(text).toContain("2 listed domains");
+		expect(text).toContain("web tools may fetch");
+		// And the four cases where the list *does* govern a command still say so,
+		// so this is not a sentence that was simply softened everywhere.
+		for (const confinement of [
+			"no-os-backend",
+			"backend-missing",
+			"network-left-open",
+			"filesystem-axis-off",
+		] as const) {
+			expect(describeNetworkPolicy("restricted", allow("example.com", "registry.npmjs.org"), confinement)).toContain(
+				"Only the 2 listed domains may be reached",
+			);
+		}
+	});
+
+	/**
+	 * The sentence is derived from what the translators actually emit.
+	 *
+	 * Every "honest reporting" claim in this repo is only worth something if the
+	 * reporting and the argv come from the same fact. This is the test that ties
+	 * them together: if someone implements the loopback narrowing the module header
+	 * used to describe, this goes red and they have to revisit the sentence, and if
+	 * someone drops `--unshare-net` without thinking, the control below is what says
+	 * so.
+	 */
+	test("and that sentence is true of the argv a native backend is given", () => {
+		const argvFor = (network: "restricted" | "enabled", platform: "darwin" | "linux") => {
+			const resolution = resolveSandboxExecution({
+				policy: buildSandboxPolicy({ sandbox: "workspace-write", workspace: "/w/repo", network }),
+				command: ["/bin/sh", "-lc", "true"],
+				platform,
+				hasNativeBackend: true,
+				exists: () => true,
+			});
+			if (resolution.kind !== "native") throw new Error(`expected native, got ${resolution.kind}`);
+			return resolution.execution.argv.join(" ");
+		};
+
+		// Restricted: the shell has no route off the machine. Linux says so with a
+		// namespace, macOS by emitting no network rule at all over `(deny default)`.
+		expect(argvFor("restricted", "linux")).toContain("--unshare-net");
+		const seatbelt = argvFor("restricted", "darwin");
+		expect(seatbelt).not.toContain("(allow network-outbound)");
+		// Neither backend lets the command reach the proxy on loopback, which is the
+		// whole reason the sentence above says what it says. A future loopback
+		// narrowing would put `127.0.0.1` in one of these and fail here.
+		expect(argvFor("restricted", "linux")).not.toContain("127.0.0.1");
+		expect(seatbelt).not.toContain("127.0.0.1");
+
+		// The control: `enabled` leaves the network open, which is the other half of
+		// what makes `network-left-open` the right answer for it.
+		expect(argvFor("enabled", "linux")).not.toContain("--unshare-net");
+		expect(argvFor("enabled", "darwin")).toContain("(allow network-outbound)");
 	});
 });
 
@@ -241,5 +318,35 @@ describe("networkConfinement", () => {
 	test("an executor that reports no backend is read as the weakest", () => {
 		// Same rule as `describeSandboxBackend`: not knowing is not evidence.
 		expect(networkConfinement(undefined, "workspace-write", "restricted")).toBe("no-os-backend");
+	});
+});
+
+describe("networkConfinementReason", () => {
+	test("every proxy-only case has a reason that is about its own cause", () => {
+		// Four cases, four different texts, and the text is the part a user acts
+		// on — "install this" and "this build does not do that" are not the same
+		// advice. A table with one generic sentence would pass every assertion in
+		// the file above it and tell the user nothing here, so the distinguishing
+		// phrase is what gets asserted.
+		expect(networkConfinementReason("no-os-backend")).toContain("ships no OS-level sandbox");
+		expect(networkConfinementReason("backend-missing")).toContain("not installed here");
+		expect(networkConfinementReason("filesystem-axis-off")).toContain("sandbox axis is off");
+		expect(networkConfinementReason("network-left-open")).toContain("leaves the network open");
+		const reasons = new Set(
+			(["no-os-backend", "backend-missing", "filesystem-axis-off", "network-left-open"] as const).map(
+				networkConfinementReason,
+			),
+		);
+		expect(reasons.size).toBe(4);
+	});
+
+	test("the reason appears in the sentence the two surfaces share", () => {
+		// `/doctor` reads this function rather than restating the table, so this is
+		// the tie between them: the caveat `describeNetworkPolicy` builds and the
+		// sentence `/doctor` prints cannot drift apart unless this goes red.
+		const confinement: NetworkConfinement = "backend-missing";
+		expect(describeNetworkPolicy("restricted", allow("example.com"), confinement)).toContain(
+			networkConfinementReason(confinement),
+		);
 	});
 });
