@@ -216,6 +216,40 @@ describe("buildSeatbeltArgs", () => {
 		expect(offenders).toEqual([]);
 	});
 
+	// The base profile opens `(deny default)`, so an operation with no rule is
+	// refused rather than merely discouraged. sysctl is the one omission that
+	// was load-bearing: measured on macOS, with no sysctl rule a JavaScript
+	// runtime died during startup — `bun -e '…'` exited 133 (SIGTRAP) with both
+	// streams empty, and the Bash tool faithfully reported "[exit code: 0]".
+	// `/bin/echo` under the same profile was fine, because it queries nothing,
+	// which is what made the fault look like a lost pipe instead of a dead
+	// process. Seven CI runs passed with the block absent because nothing
+	// asserted it was there; this asserts it.
+	//
+	// The enumeration is checked rather than a bare `(allow sysctl-read)`: a
+	// confined command should get the named keys, not every key the kernel has.
+	// So a profile that widens to the bare form fails, which is the direction
+	// this file's negative assertions are for.
+	test("reads sysctl through an enumerated list, not a blanket allow", () => {
+		// Only the profiles that are profiles: `danger-full-access` with the
+		// network on returns the command unwrapped, so its `argv[1]` is `-lc`
+		// and asserting SBPL against it would fail for the wrong reason.
+		const profiles = profilesUnderTest().filter((profile) => profile.startsWith("(version 1)"));
+		expect(profiles.length).toBeGreaterThan(0);
+		for (const profile of profiles) {
+			// Rules only. The block's own comment names the blanket form it is
+			// avoiding, and a check that reads prose is a check that can be
+			// satisfied or broken by a sentence.
+			const rules = profile
+				.split("\n")
+				.filter((line) => !line.trimStart().startsWith(";"))
+				.join("\n");
+			expect(rules).toContain("(allow sysctl-read");
+			expect(rules).toContain('(sysctl-name "hw.ncpu")');
+			expect(rules).not.toMatch(/\(allow sysctl-read\s*\)/);
+		}
+	});
+
 	test("produces the argv verbatim for a workspace-write policy", () => {
 		expect(buildSeatbeltArgs(POLICY, COMMAND)).toEqual([
 			"-p",
@@ -228,6 +262,76 @@ describe("buildSeatbeltArgs", () => {
 				"(allow process-exec)",
 				"(allow signal (target same-sandbox))",
 				"(allow process-info*)",
+				"",
+				"; Sysctls permitted. This list is not decoration and the omission of it was a",
+				"; real defect, measured on macOS rather than reasoned about: with no sysctl rule",
+				"; at all under the (deny default) below, a JavaScript runtime dies during",
+				"; startup and takes the whole command with it. A one-liner under this profile",
+				"; exited 133 -- SIGTRAP -- with both streams empty, so the Bash tool reported",
+				'; "[exit code: 0]" and a test asserting that a command\'s output arrives saw',
+				"; nothing. /bin/echo under the identical profile was fine, because it queries",
+				"; nothing, which is what pinned the fault on the runtime's startup rather than",
+				"; on exec.",
+				";",
+				"; The rules are Codex's, copied from seatbelt_base_policy.sbpl:24-76 plus the",
+				"; sysctl-write at :81-82. They are enumerated rather than a bare",
+				"; (allow sysctl-read) because the enumeration is the reference implementation's",
+				"; measured answer and it hands a confined command those specific keys rather",
+				"; than every key the kernel has. The trade is that a runtime querying a key",
+				"; outside this list still fails to start, so adding to it is the price of not",
+				"; widening it.",
+				"(allow sysctl-read",
+				'  (sysctl-name "hw.activecpu")',
+				'  (sysctl-name "hw.busfrequency_compat")',
+				'  (sysctl-name "hw.byteorder")',
+				'  (sysctl-name "hw.cacheconfig")',
+				'  (sysctl-name "hw.cachelinesize_compat")',
+				'  (sysctl-name "hw.cpufamily")',
+				'  (sysctl-name "hw.cpufrequency_compat")',
+				'  (sysctl-name "hw.cputype")',
+				'  (sysctl-name "hw.l1dcachesize_compat")',
+				'  (sysctl-name "hw.l1icachesize_compat")',
+				'  (sysctl-name "hw.l2cachesize_compat")',
+				'  (sysctl-name "hw.l3cachesize_compat")',
+				'  (sysctl-name "hw.logicalcpu_max")',
+				'  (sysctl-name "hw.machine")',
+				'  (sysctl-name "hw.model")',
+				'  (sysctl-name "hw.memsize")',
+				'  (sysctl-name "hw.ncpu")',
+				'  (sysctl-name "hw.nperflevels")',
+				'  (sysctl-name "hw.packages")',
+				'  (sysctl-name "hw.pagesize_compat")',
+				'  (sysctl-name "hw.pagesize")',
+				'  (sysctl-name "hw.physicalcpu")',
+				'  (sysctl-name "hw.physicalcpu_max")',
+				'  (sysctl-name "hw.logicalcpu")',
+				'  (sysctl-name "hw.cpufrequency")',
+				'  (sysctl-name "hw.tbfrequency_compat")',
+				'  (sysctl-name "hw.vectorunit")',
+				'  (sysctl-name "machdep.cpu.brand_string")',
+				'  (sysctl-name "kern.argmax")',
+				'  (sysctl-name "kern.hostname")',
+				'  (sysctl-name "kern.maxfilesperproc")',
+				'  (sysctl-name "kern.maxproc")',
+				'  (sysctl-name "kern.osproductversion")',
+				'  (sysctl-name "kern.osrelease")',
+				'  (sysctl-name "kern.ostype")',
+				'  (sysctl-name "kern.osvariant_status")',
+				'  (sysctl-name "kern.osversion")',
+				'  (sysctl-name "kern.secure_kernel")',
+				'  (sysctl-name "kern.sysv.semmns")',
+				'  (sysctl-name "kern.usrstack64")',
+				'  (sysctl-name "kern.version")',
+				'  (sysctl-name "sysctl.proc_cputype")',
+				'  (sysctl-name "vm.loadavg")',
+				'  (sysctl-name-prefix "hw.optional.arm.")',
+				'  (sysctl-name-prefix "hw.optional.armv8_")',
+				'  (sysctl-name-prefix "hw.perflevel")',
+				'  (sysctl-name-prefix "kern.proc.pgrp.")',
+				'  (sysctl-name-prefix "kern.proc.pid.")',
+				'  (sysctl-name-prefix "net.routetable."))',
+				"; Misclassified as a write because the caller passes a buffer to read into.",
+				'(allow sysctl-write (sysctl-name "kern.grade_cputype"))',
 				"",
 				"; The terminal. Without these an interactive shell cannot detect a TTY and",
 				"; coreutils refuses to run at all.",

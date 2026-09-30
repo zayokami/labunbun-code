@@ -54,16 +54,6 @@ import { canWrite, type SandboxPolicy } from "@labunbun/agent";
  * Trimmed from `codex-rs/sandboxing/src/seatbelt_base_policy.sbpl` (116 lines).
  * What was left out and why:
  *
- *   - The enumerated `sysctl-name` list (about 40 `hw.*` / `kern.*` entries at
- *     `seatbelt_base_policy.sbpl:24-76`) is **not replaced by anything**. No
- *     sysctl rule is emitted, so under the `(deny default)` below every sysctl
- *     read is refused and a runtime that asks for `hw.ncpu` is told there are
- *     none. Whether bun or node can start under that is **not verified from a
- *     Mac** — it is the open question on this backend, and the sysctl lines are
- *     absent rather than widened because guessing a bare `(allow sysctl-read)`
- *     would hand every confined command the whole machine's hardware profile in
- *     exchange for a guess. Codex's list is the measured answer; copying it
- *     verbatim is the fix if the question comes back "no".
  *   - The `(ipc-posix-name-regex #"^/__KMP_REGISTERED_LIB_[0-9]+$")` filter on
  *     the shared-memory operations (`seatbelt_base_policy.sbpl:98-101`) is
  *     dropped; the three operations themselves are emitted bare, which is a
@@ -96,6 +86,76 @@ const BASE_POLICY = `(version 1)
 (allow process-exec)
 (allow signal (target same-sandbox))
 (allow process-info*)
+
+; Sysctls permitted. This list is not decoration and the omission of it was a
+; real defect, measured on macOS rather than reasoned about: with no sysctl rule
+; at all under the (deny default) below, a JavaScript runtime dies during
+; startup and takes the whole command with it. A one-liner under this profile
+; exited 133 -- SIGTRAP -- with both streams empty, so the Bash tool reported
+; "[exit code: 0]" and a test asserting that a command's output arrives saw
+; nothing. /bin/echo under the identical profile was fine, because it queries
+; nothing, which is what pinned the fault on the runtime's startup rather than
+; on exec.
+;
+; The rules are Codex's, copied from seatbelt_base_policy.sbpl:24-76 plus the
+; sysctl-write at :81-82. They are enumerated rather than a bare
+; (allow sysctl-read) because the enumeration is the reference implementation's
+; measured answer and it hands a confined command those specific keys rather
+; than every key the kernel has. The trade is that a runtime querying a key
+; outside this list still fails to start, so adding to it is the price of not
+; widening it.
+(allow sysctl-read
+  (sysctl-name "hw.activecpu")
+  (sysctl-name "hw.busfrequency_compat")
+  (sysctl-name "hw.byteorder")
+  (sysctl-name "hw.cacheconfig")
+  (sysctl-name "hw.cachelinesize_compat")
+  (sysctl-name "hw.cpufamily")
+  (sysctl-name "hw.cpufrequency_compat")
+  (sysctl-name "hw.cputype")
+  (sysctl-name "hw.l1dcachesize_compat")
+  (sysctl-name "hw.l1icachesize_compat")
+  (sysctl-name "hw.l2cachesize_compat")
+  (sysctl-name "hw.l3cachesize_compat")
+  (sysctl-name "hw.logicalcpu_max")
+  (sysctl-name "hw.machine")
+  (sysctl-name "hw.model")
+  (sysctl-name "hw.memsize")
+  (sysctl-name "hw.ncpu")
+  (sysctl-name "hw.nperflevels")
+  (sysctl-name "hw.packages")
+  (sysctl-name "hw.pagesize_compat")
+  (sysctl-name "hw.pagesize")
+  (sysctl-name "hw.physicalcpu")
+  (sysctl-name "hw.physicalcpu_max")
+  (sysctl-name "hw.logicalcpu")
+  (sysctl-name "hw.cpufrequency")
+  (sysctl-name "hw.tbfrequency_compat")
+  (sysctl-name "hw.vectorunit")
+  (sysctl-name "machdep.cpu.brand_string")
+  (sysctl-name "kern.argmax")
+  (sysctl-name "kern.hostname")
+  (sysctl-name "kern.maxfilesperproc")
+  (sysctl-name "kern.maxproc")
+  (sysctl-name "kern.osproductversion")
+  (sysctl-name "kern.osrelease")
+  (sysctl-name "kern.ostype")
+  (sysctl-name "kern.osvariant_status")
+  (sysctl-name "kern.osversion")
+  (sysctl-name "kern.secure_kernel")
+  (sysctl-name "kern.sysv.semmns")
+  (sysctl-name "kern.usrstack64")
+  (sysctl-name "kern.version")
+  (sysctl-name "sysctl.proc_cputype")
+  (sysctl-name "vm.loadavg")
+  (sysctl-name-prefix "hw.optional.arm.")
+  (sysctl-name-prefix "hw.optional.armv8_")
+  (sysctl-name-prefix "hw.perflevel")
+  (sysctl-name-prefix "kern.proc.pgrp.")
+  (sysctl-name-prefix "kern.proc.pid.")
+  (sysctl-name-prefix "net.routetable."))
+; Misclassified as a write because the caller passes a buffer to read into.
+(allow sysctl-write (sysctl-name "kern.grade_cputype"))
 
 ; The terminal. Without these an interactive shell cannot detect a TTY and
 ; coreutils refuses to run at all.
