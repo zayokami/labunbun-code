@@ -57,6 +57,186 @@ describe("normalizeHost", () => {
 	});
 });
 
+describe("an address has more spellings than a hostname does", () => {
+	// The finding. A `deny` rule for `127.0.0.1` used to catch exactly one of the
+	// thirteen below, because `domainMatches` reduced to `host === pattern` and
+	// `normalizeHost` tidied case and brackets without ever touching the address.
+	// Under `enabled` — the mode in which a table is the only thing between a
+	// confined command and the network — the other twelve were permitted, and the
+	// only way a user could tell was to notice a rule was absent from the list of
+	// things it stopped.
+	//
+	// Asserted as a table over *destinations* rather than over the normaliser,
+	// because the property worth protecting is not "these strings reduce" — it is
+	// "a rule stops what it names". A test on `normalizeHost` alone would pass on
+	// an implementation that canonicalised the host and not the pattern, which is
+	// half a fix and looks identical from here.
+	const LOOPBACK_SPELLINGS = [
+		"127.0.0.1",
+		"127.0.0.01",
+		"127.1",
+		"127.5.5.5",
+		"2130706433",
+		"0x7f000001",
+		"0177.0.0.1",
+		"0177.1",
+		"0x7f.1",
+		"::1",
+		"[::1]",
+		"0:0:0:0:0:0:0:1",
+		"::ffff:127.0.0.1",
+		"[::ffff:127.0.0.1]",
+	];
+
+	test.each(LOOPBACK_SPELLINGS)("a deny rule for 127.0.0.1 refuses %s", (host) => {
+		expect(decideNetworkRequest(deny("127.0.0.1"), host, "enabled")).toEqual({
+			allowed: false,
+			reason: "domain_denied",
+		});
+	});
+
+	test.each(LOOPBACK_SPELLINGS)("a deny rule for ::1 refuses %s too", (host) => {
+		// The other direction, which canonicalisation alone does not give: `::1` and
+		// `127.0.0.1` are two addresses rather than two spellings of one. Both reach
+		// the loopback interface, so a rule naming either is naming where the
+		// connection goes — see `sameIpAddress`.
+		expect(decideNetworkRequest(deny("::1"), host, "enabled")).toEqual({
+			allowed: false,
+			reason: "domain_denied",
+		});
+	});
+
+	test.each([
+		"10.0.0.1",
+		"10.0.0.01",
+		"192.168.1.1",
+		"172.16.0.1",
+		"169.254.169.254",
+		"8.8.8.8",
+		"::ffff:10.0.0.1",
+		"fd00::1",
+		"fe80::1",
+		"2001:db8::1",
+		"2001:0db8:0000:0000:0000:0000:0000:0001",
+		"registry.npmjs.org",
+		"localhost",
+	])("a deny rule for loopback does NOT reach %s", (host) => {
+		// The other half, and the one that keeps the first from being satisfied by a
+		// matcher that refuses everything. Loopback is the only range where the
+		// families merge: `10.0.0.1` and `fd00::1` are not interchangeable, and a
+		// deny that covered both would be covering addresses nobody named.
+		//
+		// `localhost` is here deliberately. It is a *name*, not an address; where it
+		// points is the resolver's business and not this table's, so a user who
+		// wants it stopped writes it. Asserting it here is what stops someone later
+		// "fixing" this by resolving names, which would be a far larger change than
+		// the one it would appear to be.
+		expect(decideNetworkRequest(deny("127.0.0.1"), host, "enabled")).toEqual({ allowed: true });
+	});
+
+	test.each([
+		// IPv4, five spellings of one address. Measured against WHATWG parsing
+		// rather than written from memory — `2130706433` and `0177.1` are the two
+		// most surprising and the two most likely to be wrong.
+		["2130706433", "127.0.0.1"],
+		["127.1", "127.0.0.1"],
+		["0x7f000001", "127.0.0.1"],
+		["0177.0.0.1", "127.0.0.1"],
+		["127.0.0.01", "127.0.0.1"],
+		["0x7f.1", "127.0.0.1"],
+		["0177.1", "127.0.0.1"],
+		["127.0.0.1", "127.0.0.1"],
+		["10.0.0.01", "10.0.0.1"],
+		// IPv6, fully compressed. `::ffff:127.0.0.1` keeps the hex spelling rather
+		// than collapsing to dotted — asserted because a change here would move the
+		// embedded address the loopback check reads, silently and correctly-looking.
+		["::1", "::1"],
+		["[::1]", "::1"],
+		["0:0:0:0:0:0:0:1", "::1"],
+		["2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"],
+		["::ffff:127.0.0.1", "::ffff:7f00:1"],
+		["FE80::1", "fe80::1"],
+	])("normalizeHost reduces %s to %s", (raw, expected) => {
+		// Direct, and deliberately *not* only through `decideNetworkRequest`. A
+		// mutation run showed that once the loopback merge exists, every loopback
+		// table entry above passes whether or not `normalizeHost` canonicalises at
+		// all — `sameIpAddress` reduces both sides itself. So the loopback table
+		// alone leaves the normaliser's own contract unpinned, and this is where it
+		// is pinned.
+		expect(normalizeHost(raw)).toBe(expected);
+	});
+
+	test("a deny rule written in a non-canonical spelling still matches a canonical host", () => {
+		// The pattern side of the same fix. Canonicalising only the host would mean
+		// `[::1]` stopped matching `::1` — the rule written by a user stops working
+		// the moment they write it a second way, which is the same defect with the
+		// sign flipped.
+		expect(domainMatches("[::1]", "::1")).toBe(true);
+		expect(domainMatches("0:0:0:0:0:0:0:1", "::1")).toBe(true);
+		expect(domainMatches("2130706433", "127.0.0.1")).toBe(true);
+		expect(domainMatches("127.1", "127.0.0.1")).toBe(true);
+		expect(domainMatches("0177.0.0.1", "127.0.0.1")).toBe(true);
+	});
+
+	test("…including for an address outside loopback, where nothing else covers it", () => {
+		// Written after a mutation driver showed the four assertions above passing
+		// against code with the pattern's own `normalizeHost` call replaced by a
+		// bare `toLowerCase`. Every loopback spelling they use is also reachable
+		// through the loopback merge, so the whole table was satisfied by a second
+		// mechanism and was testing the merge twice.
+		//
+		// The gap is a *non-loopback* address in a non-canonical spelling, because
+		// that is the only shape where the two mechanisms can disagree: loopback
+		// collapses `2001:0db8::1` to `2001:db8::1` on both sides either way, and
+		// nothing merges it into anything else.
+		expect(domainMatches("2001:0db8::1", "2001:db8::1")).toBe(true);
+		expect(domainMatches("2001:0DB8:0000:0000:0000:0000:0000:0001", "2001:db8::1")).toBe(true);
+		expect(domainMatches("FE80::1", "fe80::1")).toBe(true);
+		// And the reason that direction matters: it is what makes a *deny* on a
+		// private IPv6 address stop working when the user writes it the long way.
+		expect(decideNetworkRequest(deny("2001:0db8::1"), "2001:db8::1", "enabled")).toEqual({
+			allowed: false,
+			reason: "domain_denied",
+		});
+		// The control: the two are genuinely different addresses, so the merge must
+		// not have grown to cover them.
+		expect(domainMatches("2001:db8::1", "2001:db8::2")).toBe(false);
+	});
+
+	test("normalisation is idempotent, which is what makes it safe to apply twice", () => {
+		// `decideNetworkRequest` normalises the host and `domainMatches` normalises
+		// the pattern, so both sides of a comparison go through it. If reduction had
+		// a fixed point that moved, the second application would produce a
+		// comparison against a string neither side holds.
+		for (const host of [...LOOPBACK_SPELLINGS, "example.com", "2001:db8::1", "fd00::1"]) {
+			const once = normalizeHost(host);
+			expect(normalizeHost(once), `${host} -> ${once} -> ${normalizeHost(once)}`).toBe(once);
+		}
+	});
+
+	test("a hostname that merely looks numeric is still a hostname", () => {
+		// The over-reduction, stated as the test it deserves. Every reduction here
+		// is "ask a URL parser whether this is an address"; the failure mode of that
+		// question being asked carelessly is turning a real name into a loopback one,
+		// which would be an outage rather than a hole — and just as invisible.
+		for (const host of ["0x7f.example.com", "127.example.com", "2130706433.example.com"]) {
+			expect(normalizeHost(host), host).toBe(host);
+			expect(decideNetworkRequest(deny("127.0.0.1"), host, "enabled")).toEqual({ allowed: true });
+		}
+	});
+
+	test("the suffix patterns still behave, because the address path bypasses them", () => {
+		// `domainMatches` now normalises the pattern, and the two suffix spellings
+		// branch *before* that. This is the control: without it, a change to the
+		// branch order would turn every `.example.com` rule into an address question
+		// and these would quietly stop matching.
+		expect(domainMatches("*.example.com", "api.example.com")).toBe(true);
+		expect(domainMatches(".example.com", "example.com")).toBe(true);
+		expect(domainMatches("example.com", "api.example.com")).toBe(false);
+		expect(domainMatches("*", "2130706433")).toBe(true);
+	});
+});
+
 describe("domainMatches", () => {
 	test.each([
 		["example.com", "example.com", true],

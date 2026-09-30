@@ -50,6 +50,7 @@
  * ignore the proxy has been told something false, so the honest sentence is
  * per-platform and derived from the same resolution the env is.
  */
+import { isIP } from "node:net";
 
 /**
  * Per-pattern verdicts, as a value rather than a bare type.
@@ -101,6 +102,67 @@ export interface NetworkDecision {
 }
 
 /**
+ * The one spelling of an IP literal that everything else reduces to.
+ *
+ * `normalizeHost` handles the *syntactic* wrappers — case, brackets, a trailing
+ * port, the root label's dot. It did not handle the address itself, and an
+ * address has more spellings than that. Measured on this repository's own
+ * inputs, a `deny` rule written for `127.0.0.1` caught exactly one of these:
+ *
+ *     127.0.0.1     caught
+ *     127.0.0.01    not caught      extra leading zero in an octet
+ *     127.1         not caught      the short form, two parts
+ *     0177.0.0.1    not caught      octal
+ *     0x7f000001    not caught      hex
+ *     2130706433    not caught      the whole thing as one integer
+ *
+ * `domainMatches` reduces to `host === pattern`, so each of those five was a
+ * host the proxy judged as an unrelated name and — under `enabled` — permitted.
+ * A user who wrote the rule got nothing, and the way to find that out was to
+ * notice the rule was not in the list of things it stopped.
+ *
+ * WHATWG URL parsing is the reducer, not a hand-rolled one: it is the same
+ * parser `new URL()` applies to every URL this process builds, it is already
+ * the thing standing between a `WebFetch` URL and `isBlockedAddress`, and a
+ * second implementation of IPv4 parsing is a second set of answers to "what
+ * does `0177.0.0.1` mean". Measured, it maps all five forms above onto
+ * `127.0.0.1`, and it fully compresses IPv6 (`0:0:0:0:0:0:0:1` → `::1`,
+ * `2001:0db8::1` → `2001:db8::1`).
+ *
+ * **What it deliberately does not do: merge the address families.** `::1` and
+ * `127.0.0.1` are both loopback and both reach the same interface, but they are
+ * two addresses rather than two spellings of one, and collapsing them would be a
+ * policy decision taken inside a normaliser. It is taken explicitly instead, in
+ * {@link sameIpAddress}, which is the only place allowed to make it.
+ *
+ * A host that is not an address is returned as `null` rather than as itself, so
+ * the caller can tell "not an address" from "an address that failed to parse" —
+ * and the latter is impossible here, because the only inputs reaching this are
+ * strings that already survived the character filter below.
+ */
+function canonicalIpLiteral(host: string): string | null {
+	// A hostname is not an address, and guessing is what would be dangerous: an
+	// over-eager reduction that turned `0x7f.example` into an address would make
+	// a real host into a loopback one. The test is therefore "does a URL parser
+	// read this as an address", which is exactly the question being asked.
+	const candidate = isIP(host) === 6 ? `[${host}]` : host;
+	let parsed: string;
+	try {
+		parsed = new URL(`http://${candidate}`).hostname;
+	} catch {
+		return null;
+	}
+	// A hostname parses fine and comes back as itself; that is the "not an address"
+	// answer, and it is the common case here rather than an error path.
+	if (isIP(parsed.replace(/^\[|\]$/g, "")) === 0) return null;
+	// Brackets off, to match what `normalizeHost` has always returned for
+	// `[::1]:8080` — which is `::1`, and which `domainMatches` has always been
+	// handed. Changing that shape would silently unmatch every rule written for
+	// an IPv6 literal.
+	return parsed.replace(/^\[|\]$/g, "");
+}
+
+/**
  * Reduce a host as a client wrote it to the form the rules are written in.
  *
  * A client asks for `EXAMPLE.com:443`, `[::1]:8080`, `example.com.` and
@@ -143,22 +205,114 @@ export function normalizeHost(raw: string): string {
 	// digits, `-`, `.`, `:` for IPv6 and `%` for an IPv6 zone id. Anything a
 	// real client sends is punycoded before it gets here, so a non-ASCII host
 	// is not a case to make room for.
-	return /^[a-z0-9._:%-]+$/.test(host) ? host : "";
+	if (!/^[a-z0-9._:%-]+$/.test(host)) return "";
+
+	// Last, because it is the only step that can *change* what a rule is matched
+	// against rather than only tidy it. A host that reduces to an address is
+	// replaced by that address's one spelling; one that does not is left exactly
+	// as it was, so nothing here can turn a hostname into something else.
+	return canonicalIpLiteral(host) ?? host;
 }
 
-/** Whether `host` is covered by `pattern`. See `NetworkDomainRule.pattern`. */
-export function domainMatches(pattern: string, host: string): boolean {
-	const p = pattern.trim().toLowerCase();
-	if (p === "") return false;
-	if (p === "*") return true;
+/**
+ * Whether two IP literals name the same machine.
+ *
+ * The one place families are allowed to merge, and only for loopback.
+ *
+ * Canonicalisation above settles the *spelling* question: five ways of writing
+ * `127.0.0.1` are now one string. It deliberately does not answer the different
+ * question of whether `::1` and `127.0.0.1` are the same destination, because
+ * they are two addresses that happen to reach one interface — a fact about the
+ * network, not about the string.
+ *
+ * But a `deny` rule is a user's statement about a destination, and a user who
+ * wrote `127.0.0.1` and then reached the proxy with `::1` was refused by nothing
+ * and permitted by everything. Both addresses land on the loopback interface,
+ * so a rule naming either one is naming where the connection goes. Every other
+ * range is left alone: `10.0.0.1` and `fd00::1` are *not* interchangeable, and
+ * treating them as one would make a deny silently cover addresses the user
+ * never named — the failure mode that has the opposite sign but the same cause.
+ *
+ * Expressed through the same address the rules are matched on, so it cannot
+ * disagree with {@link normalizeHost} about what a host is.
+ */
+function sameIpAddress(a: string, b: string): boolean {
+	if (a === b) return true;
+	const left = canonicalIpLiteral(a);
+	const right = canonicalIpLiteral(b);
+	if (left === null || right === null) return false;
+	return isLoopbackLiteral(left) && isLoopbackLiteral(right);
+}
 
-	// Both suffix spellings collapse to one comparison here. The leading dot is
-	// already the boundary: `host.endsWith(".example.com")` cannot be satisfied
-	// by `evil-example.com`, which is exactly the case a bare `endsWith` gets
-	// wrong.
-	if (p.startsWith("*.")) return host.endsWith(p.slice(1)) || host === p.slice(2);
-	if (p.startsWith(".")) return host.endsWith(p) || host === p.slice(1);
-	return host === p;
+/**
+ * Whether an already-canonical literal reaches this machine's loopback.
+ *
+ * **Includes IPv4-mapped IPv6.** `::ffff:127.0.0.1` and `::1` both land on the
+ * loopback interface, and a deny rule that stopped the first while permitting
+ * the second would be stopping a spelling rather than a destination — the same
+ * defect canonicalisation exists to remove, one layer up. `web.ts`'s
+ * `isBlockedAddress` has unwrapped this prefix since before the network axis
+ * existed (`web.ts:139`), so the two halves of this repo now agree about which
+ * literals are loopback instead of each knowing a different half of it.
+ *
+ * **Every input is already canonical**, which is why there is no dotted-form
+ * handling below: `canonicalIpLiteral` reduces `::ffff:127.0.0.1` to
+ * `::ffff:7f00:1` on its way past, and this function's only caller
+ * ({@link sameIpAddress}) hands it the output of that. A branch here for the
+ * dotted spelling would be a line that cannot run under a comment saying it
+ * sometimes does, which is the kind of claim this repository treats as its most
+ * expensive error.
+ *
+ * The embedded IPv4 occupies the low 32 bits, so its **first** octet is the
+ * high byte of the first hextet: `127.0.0.1` is `7f00:0001`, and asking whether
+ * it is loopback is asking whether the high byte is `0x7f`. Only that byte is
+ * read — the other three are `127.0.0.x`, which is loopback too, so there is
+ * nothing in them left to check.
+ */
+function isLoopbackLiteral(literal: string): boolean {
+	if (/^127\./.test(literal)) return true;
+	if (literal === "::1") return true;
+	if (!literal.startsWith("::ffff:")) return false;
+	const groups = literal.slice("::ffff:".length).split(":");
+	if (groups.length !== 2 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return false;
+	return Number.parseInt(groups[0], 16) >> 8 === 127;
+}
+
+/**
+ * Whether `host` is covered by `pattern`. See `NetworkDomainRule.pattern`.
+ *
+ * The pattern goes through `normalizeHost` too, and that is not tidiness. Both
+ * sides have to reduce by the *same* function or the reduction is a one-way
+ * street: canonicalising the host alone would mean a rule written `[::1]` no
+ * longer matches the host it was written for, which is the same class of bug as
+ * the one the canonicalisation was added to fix.
+ *
+ * `*` and the two suffix spellings are checked before normalisation, because a
+ * pattern containing `*` or a leading dot is a hostname pattern and cannot be an
+ * address — running it through a URL parser to find that out would be the kind
+ * of clever that surprises someone in a year.
+ */
+export function domainMatches(pattern: string, host: string): boolean {
+	const trimmed = pattern.trim();
+	if (trimmed === "") return false;
+	if (trimmed === "*") return true;
+
+	if (trimmed.startsWith("*.")) {
+		const p = trimmed.slice(2).toLowerCase();
+		return host.endsWith(`.${p}`) || host === p;
+	}
+	if (trimmed.startsWith(".")) {
+		const p = trimmed.toLowerCase();
+		return host.endsWith(p) || host === p.slice(1);
+	}
+
+	const p = normalizeHost(trimmed);
+	if (p === "") return false;
+	if (p === host) return true;
+	// Two addresses that reach the same interface. Only for IP literals: a
+	// hostname pair never gets here, because `canonicalIpLiteral` returns null
+	// for anything that is not an address.
+	return sameIpAddress(p, host);
 }
 
 /**
