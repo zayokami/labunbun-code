@@ -1,80 +1,65 @@
 /**
  * TEMPORARY DIAGNOSTIC — not a permanent test. Delete once the answer is known.
  *
- * The spill test still gets 15 characters — exactly "[exit code: 0]\n" — while
- * the generated profile compiles and runs /bin/echo. So the sandbox is not what
- * stops the output: the command is `bun noisy.js`, and the question is whether
- * bun runs at all under the profile. Previous rungs forgot (allow process-exec),
- * which made every isolated construct fail to exec and test nothing; this one
- * keeps it. Control first.
+ * SIGTRAP (exit 133) kills /bin/echo as well as bun under any profile carrying
+ * our BASE_POLICY, while (allow default) runs both. So the fault is a single
+ * line in the base, and SIGTRAP is what seatbelt raises for a policy it
+ * refuses at runtime rather than a parse error. Test the base one line at a
+ * time, always with (allow process-exec) and (allow file-read*) present so a
+ * rung that compiles also runs. Control first.
  */
 import { expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { buildSandboxPolicy } from "@labunbun/agent";
-import { buildSeatbeltArgs } from "../src/sandbox/seatbelt.ts";
 
-/** Runs `command` under `profile` verbatim: no repacking, no dropped `-D`. */
-async function run(profile: string, params: string[], command: string[]): Promise<string> {
-	const proc = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, ...params, "--", ...command], {
-		stdout: "pipe",
-		stderr: "pipe",
-		cwd: REAL,
-	});
+const MINIMUM = `(allow process-exec)\n(allow file-read*)`;
+
+async function run(body: string): Promise<string> {
+	const proc = Bun.spawn(
+		["/usr/bin/sandbox-exec", "-p", `(version 1)\n(deny default)\n${body}\n`, "--", "/bin/echo", "MARKER-OK"],
+		{
+			stdout: "pipe",
+			stderr: "pipe",
+		},
+	);
 	const [out, err, code] = await Promise.all([
 		new Response(proc.stdout).text(),
 		new Response(proc.stderr).text(),
 		proc.exited,
 	]);
-	const brief = (s: string) => JSON.stringify(s.length > 220 ? `${s.slice(0, 220)}…(${s.length})` : s);
+	const brief = (s: string) => JSON.stringify(s.length > 200 ? `${s.slice(0, 200)}…(${s.length})` : s);
 	return `exit=${code} out=${brief(out)} err=${brief(err)}`;
 }
 
-const REAL = realpathSync(mkdtempSync(join(tmpdir(), "lbb-bun-")));
-const NOISY = join(REAL, "noisy.js");
-writeFileSync(NOISY, `console.log("MARKER-OK");\nfor (let i = 1; i <= 5; i++) console.log("line " + i);\n`);
+const LINES: [string, string][] = [
+	["process-fork", `(allow process-fork)`],
+	["signal-same-sandbox", `(allow signal (target same-sandbox))`],
+	["process-info-star", `(allow process-info*)`],
+	["pseudo-tty", `(allow pseudo-tty)`],
+	["dev-null", `(allow file-read* file-write* file-ioctl (literal "/dev/null"))`],
+	["dev-ptmx", `(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))`],
+	["ttys-ioctl", `(allow file-ioctl (regex #"^/dev/ttys[0-9]+"))`],
+	["iokit", `(allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))`],
+	["ipc-posix-sem", `(allow ipc-posix-sem)`],
+	[
+		"shm-three",
+		`(allow ipc-posix-shm-read-data)\n(allow ipc-posix-shm-write-create)\n(allow ipc-posix-shm-write-unlink)`,
+	],
+	[
+		"mach-two",
+		`(allow mach-lookup\n  (global-name "com.apple.system.opendirectoryd.libinfo")\n  (global-name "com.apple.PowerManagement.control"))`,
+	],
+	[
+		"mach-two-separate",
+		`(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))\n(allow mach-lookup (global-name "com.apple.PowerManagement.control"))`,
+	],
+	["network-outbound", `(allow network-outbound)\n(allow network-inbound)`],
+	["system-socket", `(allow system-socket\n  (require-all\n    (socket-domain AF_SYSTEM)\n    (socket-protocol 2)))`],
+];
 
-test("does bun run under the profile", async () => {
+test("which base line traps", async () => {
 	if (process.platform !== "darwin") return;
 	const rows: string[] = [];
-
-	const args = buildSeatbeltArgs(buildSandboxPolicy({ sandbox: "workspace-write", workspace: REAL }), [
-		process.execPath,
-		"noisy.js",
-	]);
-	const profile = args[1] ?? "";
-	const params = args.slice(2).filter((a) => a !== "--");
-
-	// Controls, unsandboxed: what the command does with no profile at all.
-	rows.push(`NO-SANDBOX bun: ${await run("(version 1)\n(allow default)", [], [process.execPath, "noisy.js"])}`);
-	rows.push(`NO-SANDBOX echo: ${await run("(version 1)\n(allow default)", [], ["/bin/echo", "MARKER-OK"])}`);
-
-	// The real thing, and the same command with the read baseline removed, to
-	// separate "bun cannot start" from "bun runs but cannot write the file".
-	rows.push(`OURS bun: ${await run(profile, params, [process.execPath, "noisy.js"])}`);
-	rows.push(`OURS echo: ${await run(profile, params, ["/bin/echo", "MARKER-OK"])}`);
-
-	// Base policy with process-exec, then base + every write, to find which
-	// operation bun needs that /bin/echo does not.
-	const base = profile.split("\n; Read baseline")[0] ?? "";
-	rows.push(`BASE bun: ${await run(`${base}\n(allow file-read*)`, [], [process.execPath, "noisy.js"])}`);
-	rows.push(
-		`BASE+WRITE bun: ${await run(
-			`${base}\n(allow file-read*)\n(allow file-write*)`,
-			[],
-			[process.execPath, "noisy.js"],
-		)}`,
-	);
-	// bun caches transpiled output; if that write is what is missing, naming the
-	// cache directory as a writable root is what changes the answer.
-	rows.push(
-		`BASE+WRITECACHE bun: ${await run(
-			`${base}\n(allow file-read*)\n(allow file-write*)`,
-			[`-DCACHE=${join(REAL, "cache")}`],
-			[process.execPath, "noisy.js"],
-		)}`,
-	);
-
+	rows.push(`CONTROL allow-default: ${await run("(allow default)")}`);
+	rows.push(`MINIMUM: ${await run(MINIMUM)}`);
+	for (const [name, body] of LINES) rows.push(`${name}: ${await run(`${body}\n${MINIMUM}`)}`);
 	expect(rows.join("\n")).toBe("table");
 }, 180_000);
