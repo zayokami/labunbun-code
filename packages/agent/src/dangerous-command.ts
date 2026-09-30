@@ -70,7 +70,13 @@ const BROWSER_EXECUTABLES = new Set([
 function executableName(raw: string, platform: DangerousCommandPlatform): string | undefined {
 	if (platform === "posix") {
 		const name = raw.split("/").pop();
-		return name ? name : undefined;
+		// Lower-cased even though POSIX paths are case-sensitive. `RM -rf` and
+		// `sudo RM -rf` are not commands a POSIX shell can run, so this does not
+		// change what any real invocation matches; it stops a program that
+		// *reached* the shell under a different case from being read as an
+		// unrelated name. The Windows branch below has always folded, and the
+		// two platforms are not supposed to disagree about a program's name.
+		return name ? name.toLowerCase() : undefined;
 	}
 	const name = raw.split(/[/\\]/).pop();
 	if (!name) return undefined;
@@ -89,8 +95,15 @@ function rmArgsIncludeForce(args: string[]): boolean {
 		// file literally called `-f`, and reading the `-f` as a flag would make
 		// an ordinary command look forced.
 		if (arg === "--") return false;
-		if (arg === "--force") return true;
-		if (arg.startsWith("-") && !arg.startsWith("--") && arg.slice(1).includes("f")) return true;
+		// Case-folded, and only here: a path argument never starts with `-`, so
+		// the two comparisons below cannot be reached by `rm -rf /tmp/MyFile` and
+		// its capital letters are never compared against anything. GNU and BSD
+		// `rm` reject `-F` outright, so `rm -RF` deletes nothing on either —
+		// folding it is not a claim about POSIX option syntax, it is this
+		// function refusing to depend on the local `rm` being the strict one.
+		const lower = arg.toLowerCase();
+		if (lower === "--force") return true;
+		if (arg.startsWith("-") && !arg.startsWith("--") && lower.slice(1).includes("f")) return true;
 	}
 	return false;
 }
@@ -174,6 +187,136 @@ function substitutionScripts(segment: string): string[] {
 	return found;
 }
 
+/**
+ * The words that can open a command segment without being the command.
+ *
+ * `splitShellCommands` splits on `;`, `|`, `&` and newline, so a command
+ * segment can still begin with the punctuation of a group or with the keyword
+ * that introduces a control structure's body. Every rule below reads
+ * `tokens[0]` as the program's name, so without this list the word in front of
+ * the command is the word those rules see.
+ */
+const SHELL_SCAFFOLDING = new Set([
+	"(",
+	")",
+	"{",
+	"}",
+	"if",
+	"then",
+	"elif",
+	"else",
+	"fi",
+	"for",
+	"while",
+	"until",
+	"do",
+	"done",
+	"case",
+	"in",
+	"esac",
+	"time",
+	"!",
+]);
+
+/**
+ * The command a segment's leading scaffolding introduces, or `undefined` when
+ * the segment opens with the command already.
+ *
+ * This is not a shell parser and does not try to be one — Codex reads these
+ * constructs with a tree-sitter parse, which this repo has no equivalent of.
+ * It reads *leading* scaffolding only, which is the narrowest rule that catches
+ * the evasions measured for this batch, and narrowing it is what keeps the
+ * controls standing: a `{` or a `(` that is not the first character of a
+ * segment is inside an argument, a quoted string or a filename, and
+ * `echo "{"`, `find . -exec {} \;`, `awk '{print $1}'` and
+ * `git log --format='(%h)'` all keep the word they start with.
+ *
+ * The return is `undefined` — not the same array — so a glued opener like
+ * `(rm` can be reported as a change even though stripping it leaves the array
+ * the same length.
+ */
+function stripShellScaffolding(tokens: string[]): string[] | undefined {
+	let rest = tokens;
+	let stripped = false;
+	while (rest.length > 0) {
+		const head = rest[0];
+		// A group punctuation glued to the word behind it, as in `(rm` and
+		// `{echo`: the punctuation goes, the word is looked at next.
+		const word = head.replace(/^[{()}]+/, "");
+		if (word === "") {
+			rest = rest.slice(1);
+			stripped = true;
+			continue;
+		}
+		if (word !== head) return [word, ...rest.slice(1)];
+
+		const keyword = head.toLowerCase();
+		// Nothing has been consumed yet on the first pass, and returning the
+		// array unchanged would be the same tokens the caller already has —
+		// which is what `undefined` says, and what stops the caller's recursion.
+		if (!SHELL_SCAFFOLDING.has(keyword)) return stripped ? rest : undefined;
+		rest = rest.slice(1);
+		stripped = true;
+		// `case` answers with a pattern list before it answers with a command,
+		// so the word after it is the subject being matched and not the program:
+		// `case $x in *) rm -rf /` has three words in front of the `rm`. The
+		// pattern list ends at the `)` that closes it.
+		if (keyword === "case") {
+			while (rest.length > 0 && !rest[0].includes(")")) rest = rest.slice(1);
+			rest = rest.slice(1);
+		}
+	}
+	return rest;
+}
+
+/** `xargs` options that consume the word after them. */
+const XARGS_VALUE_OPTIONS = new Set([
+	"-a",
+	"-d",
+	"-e",
+	"-E",
+	"-I",
+	"-i",
+	"-L",
+	"-n",
+	"-P",
+	"-s",
+	"-S",
+	"--arg-file",
+	"--delimiter",
+	"--eof",
+	"--replace",
+	"--max-args",
+	"--max-chars",
+	"--max-lines",
+	"--max-procs",
+]);
+
+/**
+ * The command `xargs` will run, which is the first word that is not one of its
+ * options.
+ *
+ * This function cannot run `xargs`, so the list of options that consume the
+ * word after them is a list it has to be right about rather than one it can
+ * ask. Getting it wrong moves the boundary one word either way, and the words
+ * on either side of the boundary belong to `xargs` — an option, or the
+ * argument of one — so the effect is on how often the command behind them is
+ * found, not on what is found.
+ */
+function xargsCommand(args: string[]): string[] {
+	let i = 0;
+	while (i < args.length) {
+		const arg = args[i];
+		if (arg === "--") {
+			i++;
+			break;
+		}
+		if (!arg.startsWith("-")) break;
+		i += XARGS_VALUE_OPTIONS.has(arg) ? 2 : 1;
+	}
+	return args.slice(i);
+}
+
 function matchTokens(
 	tokens: string[],
 	depth: number,
@@ -187,6 +330,9 @@ function matchTokens(
 		return { kind: "Other", rule: `nested deeper than ${MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH} wrappers` };
 	}
 	if (tokens.length === 0) return null;
+
+	const command = stripShellScaffolding(tokens);
+	if (command !== undefined) return matchTokens(command, depth, platform, segment);
 
 	const program = executableName(tokens[0], platform);
 	if (program === "rm" && rmArgsIncludeForce(tokens.slice(1))) {
@@ -211,6 +357,12 @@ function matchTokens(
 			break;
 		}
 		return matchTokens(tokens.slice(i), depth + 1, platform, segment);
+	}
+	// `xargs rm -rf` is `rm -rf` once per line of input: a wrapper in exactly
+	// the sense `sudo` and `env` are, and the reason `find … | xargs rm -rf` is
+	// the ordinary spelling of the delete this file exists to catch.
+	if (program === "xargs") {
+		return matchTokens(xargsCommand(tokens.slice(1)), depth + 1, platform, segment);
 	}
 	// A trap's action is shell source sitting in the first operand.
 	if (program === "trap") {
@@ -289,13 +441,15 @@ const SEGMENT_SEPARATORS = /[;|&\n\r\t]/;
 const SOFT_SEPARATORS = /[{}()[\],;]/;
 
 /**
- * A delete cmdlet and a force flag in the *same* command segment.
+ * The command segments of a Windows invocation, with the punctuation that can
+ * glue a word to its neighbours split off.
  *
- * The segmenting is the point: `Remove-Item x; Write-Host -Force` has both
- * words and deletes nothing, and flagging it would be the classifier crying
- * wolf often enough that a user learns to dismiss it.
+ * The tokenizer has already separated words on whitespace, so only the soft
+ * separators are split here: these are the places where a cmdlet and its
+ * arguments can arrive as one token, and a rule that compared whole tokens
+ * would not see the cmdlet in `Invoke-Expression(Invoke-WebRequest https://…)`.
  */
-function hasForceDeleteCmdlet(tokens: string[]): boolean {
+function windowsSegments(tokens: string[]): string[][] {
 	const segments: string[][] = [[]];
 	for (const token of tokens) {
 		const pieces = token.split(SEGMENT_SEPARATORS);
@@ -310,18 +464,102 @@ function hasForceDeleteCmdlet(tokens: string[]): boolean {
 		}
 	}
 
-	return segments.some((segment) => {
+	return segments.map((segment) =>
+		segment.flatMap((token) => token.split(SOFT_SEPARATORS).map((word) => word.trim())).filter(Boolean),
+	);
+}
+
+/**
+ * A delete cmdlet and a force flag in the *same* command segment.
+ *
+ * The segmenting is the point: `Remove-Item x; Write-Host -Force` has both
+ * words and deletes nothing, and flagging it would be the classifier crying
+ * wolf often enough that a user learns to dismiss it.
+ */
+function hasForceDeleteCmdlet(tokens: string[]): boolean {
+	return windowsSegments(tokens).some((segment) => {
 		let hasDelete = false;
 		let hasForce = false;
-		for (const token of segment.flatMap((t) => t.split(SOFT_SEPARATORS))) {
-			const word = token.trim();
-			if (!word) continue;
+		for (const word of segment) {
 			if (DELETE_CMDLETS.has(word.toLowerCase())) hasDelete = true;
 			const lower = word.toLowerCase();
 			if (lower === "-force" || lower.startsWith("-force:")) hasForce = true;
 		}
 		return hasDelete && hasForce;
 	});
+}
+
+/**
+ * The spellings this function reads as running a string as PowerShell code.
+ *
+ * `iex` is the documented alias of `Invoke-Expression`. `Invoke-Expr` is not a
+ * name PowerShell defines, and is here because a word that is nearly the
+ * dangerous one is worth a question rather than a run.
+ */
+const EVAL_CMDLETS = new Set(["invoke-expression", "invoke-expr", "iex"]);
+
+/**
+ * The names this function reads a download under. None of them is a rule on
+ * its own — reading a web address is ordinary work, and a rule that flagged
+ * every fetch would be the classifier crying wolf. Every entry is read in
+ * exactly one place, inside a segment whose command has already been found to
+ * be an eval cmdlet, so a name here can change which reason is reported and
+ * cannot add a match on its own. `curl` and `wget` are here for the case where
+ * an eval cmdlet is handed one of those instead of a PowerShell cmdlet.
+ */
+const FETCH_CMDLETS = new Set([
+	"invoke-webrequest",
+	"iwr",
+	"invoke-restmethod",
+	"irm",
+	"start-bitstransfer",
+	"curl",
+	"wget",
+]);
+
+/**
+ * Code that was written somewhere else being run here.
+ *
+ * Three shapes, in the order they are reported:
+ *
+ * - **Fetch into eval.** A fetch cmdlet, a URL and an eval cmdlet in one
+ *   segment is the download-and-execute idiom, and the pair is what makes it
+ *   one. Either half alone is ordinary, so neither half is a rule. In
+ *   `iwr https://… | iex` the `|` splits the line first, so this shape is the
+ *   one that arrives glued instead — `iex (iwr https://…)`.
+ * - **Eval on its own.** `Invoke-Expression` runs a string as code, which is
+ *   `eval` with a different spelling, and it is a rule on its own because
+ *   there is no argument that makes it safe. It is also what catches the
+ *   `iex` at the end of a `| iex` pipeline, which the pair rule above never
+ *   sees because the `|` has already put the two halves in different
+ *   segments.
+ * - **Dot-sourcing.** `. .\setup.ps1` runs a file's contents as code. The
+ *   token has to be *only* a dot: `./setup.ps1`, `.\setup.ps1`, `..` and `.5`
+ *   all begin with one and are not it.
+ *
+ * Each is read at the *head* of a segment and by whole word, so neither
+ * `Write-Output iex` nor `Select-String iwr` matches: an alias that is an
+ * argument is a pattern or a message, not a command.
+ *
+ * Codex's `windows_dangerous_commands.rs` has no rules for any of these three
+ * — its PowerShell rules are the URL/launcher rules and the forced delete, and
+ * nothing else — so this is a divergence from the file this is ported from,
+ * not a port of it.
+ */
+function powershellExecutionRules(lower: string[]): DangerousCommandMatch | null {
+	for (const segment of windowsSegments(lower)) {
+		const head = segment[0];
+		if (head === undefined) continue;
+		if (head === ".") {
+			return { kind: "Other", rule: "PowerShell dot-sourcing a script with `.`" };
+		}
+		if (!EVAL_CMDLETS.has(head)) continue;
+		if (segment.some((word) => FETCH_CMDLETS.has(word)) && segment.some((word) => looksLikeUrl(word) !== undefined)) {
+			return { kind: "Other", rule: "PowerShell fetching a URL and running it" };
+		}
+		return { kind: "Other", rule: "PowerShell `Invoke-Expression` running a string as code" };
+	}
+	return null;
 }
 
 function dangerousPowershellWords(words: string[]): DangerousCommandMatch | null {
@@ -365,7 +603,7 @@ function dangerousPowershellWords(words: string[]): DangerousCommandMatch | null
 	if (hasForceDeleteCmdlet(lower)) {
 		return { kind: "Other", rule: "a delete cmdlet with `-Force`" };
 	}
-	return null;
+	return powershellExecutionRules(lower);
 }
 
 /** Split a CMD token on the operators that can be written inside one word. */
@@ -374,6 +612,16 @@ function splitCmdOperators(token: string): string[] {
 }
 
 const CMD_SEPARATORS = new Set(["&", "&&", "|", "||"]);
+
+/**
+ * The switches that introduce a CMD body, and that a body may itself open with.
+ *
+ * `/k` is here and not in Codex's list at
+ * `windows_dangerous_commands.rs:105`. `/k` does not run the body and leave; it
+ * runs the body and *then* leaves a prompt open, so everything `/c` would have
+ * run, it runs first.
+ */
+const CMD_BODY_SWITCHES = new Set(["/c", "/k", "/r", "-c"]);
 
 function dangerousCmd(tokens: string[]): DangerousCommandMatch | null {
 	if (tokens.length === 0) return null;
@@ -386,17 +634,32 @@ function dangerousCmd(tokens: string[]): DangerousCommandMatch | null {
 	let i = 0;
 	for (; i < rest.length; i++) {
 		const lower = rest[i].toLowerCase();
-		if (lower === "/c" || lower === "/r" || lower === "-c") break;
+		if (CMD_BODY_SWITCHES.has(lower)) break;
 		if (lower.startsWith("/")) continue;
 		return null;
 	}
-	const body = rest.slice(i + 1);
+	// One switch does not end the switches. `cmd /k /c rd /s /q C:\x` runs the
+	// delete through the inner `/c` and then leaves a prompt open, so a second
+	// switch between the one that was found and the body is the same body
+	// starting one word later. Only these switches are skipped; an unrecognized
+	// `/x` still falls through to the word after it and ends the shape, which
+	// is what the loop above decides.
+	let start = i + 1;
+	while (start < rest.length && CMD_BODY_SWITCHES.has(rest[start].toLowerCase())) start++;
+	const body = rest.slice(start);
 	if (body.length === 0) return null;
 
 	const words = (body.length === 1 ? (body[0].split(/\s+/).filter(Boolean) as string[]) : body).flatMap(
 		splitCmdOperators,
 	);
-	return dangerousCmdBody(words);
+	// The body is read against PowerShell's words as well as CMD's. The body of
+	// a `/c` arrives as *one* argument — a quoted `"Remove-Item C:\x -Force"`
+	// is a single token until it is split, and until it is split every word
+	// rule sees is one long word that matches nothing. This is the same move
+	// `powershellScript` makes for `-Command`, and the same reason: an
+	// unrecognised shape is read against the rules of every shell that could be
+	// the one running it, never as "nothing here".
+	return dangerousCmdBody(words) ?? dangerousPowershellWords(words);
 }
 
 /**
