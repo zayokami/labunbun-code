@@ -25,7 +25,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { MODE_CHOICES, PERMISSION_MODES, SANDBOX_MODES } from "@labunbun/agent";
+import { cycleModeChoice, describeModeChoice, MODE_CHOICES, PERMISSION_MODES, SANDBOX_MODES } from "@labunbun/agent";
 import { validateModeFlags } from "../src/main.ts";
 import { PermissionModeSchema, SandboxModeSchema } from "../src/settings.ts";
 
@@ -258,5 +258,102 @@ describe("the lists are the ones the rest of the build is written against", () =
 
 	test("every combination of the two axes is one the engine can be asked for", () => {
 		expect(PAIRS).toHaveLength(PERMISSION_MODES.length * SANDBOX_MODES.length);
+	});
+});
+
+/**
+ * Shift+Tab's arithmetic, and the name of a pairing.
+ *
+ * Both live in `types.ts` beside `MODE_CHOICES` rather than in the TUI, because
+ * the two things that need them — the prompt's badge and the app layer's status
+ * card — are in different packages and the one thing neither may do is keep its
+ * own copy of "what is this mode called". `describeModeChoice` was a second
+ * copy in `interactive.ts` until this batch, which is a bug that cannot announce
+ * itself: each copy was right, and they disagreed.
+ */
+describe("cycling the mode, and naming where it landed", () => {
+	/**
+	 * The whole table, walked, because the cycle is defined as "the next row" and
+	 * a test that names three of the four rows is a test that would survive the
+	 * fourth being reordered. This one pins that the cycle is a *permutation*:
+	 * pressing the key `MODE_CHOICES.length` times from any row is back where it
+	 * started, which is the property that makes it a cycle rather than a walk that
+	 * eventually falls off the end.
+	 */
+	test("one press per row returns to the row it started from, from every row", () => {
+		for (const start of MODE_CHOICES) {
+			const visited: string[] = [];
+			let here = start;
+			for (let i = 0; i < MODE_CHOICES.length; i++) {
+				here = cycleModeChoice({ mode: here.mode, sandbox: here.sandbox });
+				// Every step lands on a row of the table, and on a row not yet seen
+				// — which is what catches a cycle that stalls on one row, jumps two,
+				// or forgets to move at all. Stalling is the failure that matters
+				// most: the key would still "work", and the mode would never change.
+				expect(MODE_CHOICES).toContain(here);
+				expect(visited).not.toContain(here.id);
+				visited.push(here.id);
+			}
+			expect(here.id).toBe(start.id);
+		}
+	});
+
+	test("each row's successor is the next one, in the order the picker shows", () => {
+		for (let i = 0; i < MODE_CHOICES.length; i++) {
+			const here = MODE_CHOICES[i];
+			const next = MODE_CHOICES[(i + 1) % MODE_CHOICES.length];
+			const got = cycleModeChoice({ mode: here.mode, sandbox: here.sandbox });
+			expect(got.id).toBe(next.id);
+		}
+	});
+
+	/**
+	 * The wrap, on its own, because it is the one step with a safety argument
+	 * behind it and the one a reader is most likely to "fix" into a clamp.
+	 *
+	 * The last row is the widest grant on offer. A cycle that stopped there would
+	 * make one more press of the key do nothing exactly where being wrong costs
+	 * the most, so the step off the end lands on `Ask` — the safest row, not the
+	 * first row by accident: row 0 and the default are the same row today, and
+	 * this is what stops that coincidence from being the reason.
+	 */
+	test("the step off the end lands on Ask, not on nothing", () => {
+		const widest = MODE_CHOICES[MODE_CHOICES.length - 1];
+		expect(widest.sandbox).toBe("danger-full-access");
+		const got = cycleModeChoice({ mode: widest.mode, sandbox: widest.sandbox });
+		expect(got.id).toBe(MODE_CHOICES[0].id);
+		expect(got.id).toBe("ask");
+	});
+
+	/**
+	 * The combination with no row, which `settings.json` can produce and the type
+	 * system cannot prevent: either axis alone is a valid setting, so `plan` with
+	 * the sandbox turned off is reachable with no row to name it.
+	 *
+	 * `MODE_CHOICES` has one `plan` row and it is confined, so anchoring on the
+	 * exact pair would have no index to advance from. The answer is to anchor on
+	 * the **last row carrying the same mode**, which keeps the mode the user chose
+	 * on purpose and lets the sandbox land where the table puts it.
+	 */
+	test("a pairing with no row cycles off the last row of its own mode", () => {
+		const got = cycleModeChoice({ mode: "plan", sandbox: "danger-full-access" });
+		// The last `plan` row is index 1, so the next one is `Agent` — and the
+		// confinement comes back on, which is the direction a key that widens
+		// permissions should fail when the state it started from was unusual.
+		expect(got.id).toBe("agent");
+		expect(got.sandbox).toBe("workspace-write");
+	});
+
+	test("an unlisted pairing is named for what it is, not rounded to a neighbour", () => {
+		// The badge under the prompt has to say this. Printing `Plan` for a
+		// session running `plan` with the sandbox off would be the one thing on
+		// screen that is confidently wrong about a permission.
+		expect(describeModeChoice("plan", "danger-full-access")).toBe("plan · danger-full-access");
+	});
+
+	test("a listed pairing is named by its own row, so the picker and the prompt agree", () => {
+		for (const choice of MODE_CHOICES) {
+			expect(describeModeChoice(choice.mode, choice.sandbox)).toBe(choice.label);
+		}
 	});
 });

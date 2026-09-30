@@ -109,6 +109,66 @@ export function findModeChoice(id: string): ModeChoice | undefined {
 }
 
 /**
+ * The pairing a session is in, named for a human.
+ *
+ * Prefers the choice's own label, so the answer is "Agent 无沙箱" rather than
+ * "agent · danger-full-access" — the second is a fact and the first is what the
+ * user asked for, and naming a combination the picker has no row for would
+ * suggest a fifth mode exists. Falls back to the raw pair for a combination the
+ * picker does not have, which is a real state (`settings.json` can set either
+ * axis alone) and is better shown accurately than rounded to a neighbour.
+ */
+export function describeModeChoice(mode: PermissionMode, sandbox: SandboxMode): string {
+	const named = MODE_CHOICES.find((c) => c.mode === mode && c.sandbox === sandbox);
+	return named ? named.label : `${mode} · ${sandbox}`;
+}
+
+/**
+ * The next row after the one a session is in, wrapping at the end.
+ *
+ * Forward means *up* the escalation, and it means the same thing in both
+ * directions of the wrap: the last row is the widest grant on offer, so the
+ * step off the end lands on `Ask` rather than stopping. A cycle that dead-ended
+ * on its most permissive row would leave one more press of the key doing
+ * nothing exactly where being wrong costs the most, and a key that means nothing
+ * is the failure this package's own key lists are written against.
+ *
+ * **The anchor when the session is in a pair with no row.** `settings.json` can
+ * set the two axes to a combination the picker never offered — `plan` with
+ * `danger-full-access` is reachable that way, and `mode-enum.test.ts` walks the
+ * whole cross product, so the case is real rather than theoretical. Anchoring on
+ * the exact pair would then have no index to advance from, and the two ways to
+ * paper over that are both bad: picking row 0 would throw away a mode the user
+ * configured on purpose, and refusing to cycle would make the key dead in
+ * exactly the configuration that needed it explained. So the anchor is the
+ * **last row carrying the same mode**, which keeps the mode the user chose and
+ * lets the sandbox axis land wherever the table puts it. The label the caller
+ * then shows is `describeModeChoice`'s, so the combination the user ends up in is
+ * always named — nothing about the move is silent.
+ */
+export function cycleModeChoice(current: { mode: PermissionMode; sandbox: SandboxMode }): ModeChoice {
+	const exact = MODE_CHOICES.findIndex((c) => c.mode === current.mode && c.sandbox === current.sandbox);
+	const index = exact >= 0 ? exact : lastRowWithMode(current.mode);
+	return MODE_CHOICES[(index + 1) % MODE_CHOICES.length];
+}
+
+/**
+ * Where a mode's rows end, or row 0 when the mode has none.
+ *
+ * `lastRowWithMode` is only ever reached with a mode that has no exact row, and
+ * every `PermissionMode` has at least one row, so the `-1` is unreachable from
+ * the type system — but the function is total anyway, because a caller that gets
+ * `MODE_CHOICES[-1 + 1]` is `MODE_CHOICES[0]`, which is the safe default anyway,
+ * and a `NaN` index would be neither.
+ */
+function lastRowWithMode(mode: PermissionMode): number {
+	for (let i = MODE_CHOICES.length - 1; i >= 0; i--) {
+		if (MODE_CHOICES[i]?.mode === mode) return i;
+	}
+	return 0;
+}
+
+/**
  * The pairing a mode implies when the other axis was not set.
  *
  * Only used to fill in an axis someone left out — a user who wrote

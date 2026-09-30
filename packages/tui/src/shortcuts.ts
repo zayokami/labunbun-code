@@ -6,6 +6,7 @@
  * overlay test walks every advertised key. A shortcut list that lies is worse
  * than no list.
  */
+import { MODE_CHOICES } from "@labunbun/agent";
 import type { EditorKind } from "./editing-mode.ts";
 import type { VimMode } from "./vim.ts";
 
@@ -90,6 +91,17 @@ export function shortcutGroups(opts: {
 				// nothing else could be true; under Emacs the parenthetical would
 				// be false, so it is a fact about vim and stays under vim.
 				["Tab", vim ? "complete (insert mode)" : "complete command or file"],
+				// Its own row rather than a parenthetical on the Tab row above,
+				// because the two are different keys that arrive as the same Ink flag
+				// with one modifier apart, and the modifier is the whole of the
+				// difference. A row that read "complete · change mode" would be a
+				// sentence about a key nobody presses.
+				//
+				// The four names are read out of `MODE_CHOICES` rather than typed here,
+				// because this file's own header is about lists that drift and a
+				// hand-written arrow chain is the same class of bug: a fifth row would
+				// leave the overlay promising a cycle it no longer has.
+				["Shift+Tab", `cycle permission mode (${MODE_CHOICES.map((c) => c.label).join(" → ")})`],
 				// The same failure as the `Ctrl+R` row above, and the same fix: `EmacsEngine`
 				// claims `C-o` as reserved `open-line` (`emacs.ts`, `RESERVED_KEYS`), so under
 				// emacs the key is eaten and the transcript is unreachable — not merely

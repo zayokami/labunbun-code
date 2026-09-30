@@ -15,6 +15,7 @@ import {
 	compactionThreshold,
 	contextBreakdown,
 	DEFAULT_MODE_CHOICE,
+	describeModeChoice,
 	describeNetworkPolicy,
 	estimateContextUsage,
 	evaluatePermissions,
@@ -1393,16 +1394,29 @@ function choiceForMode(mode: string): (typeof MODE_CHOICES)[number] | undefined 
 /**
  * One short line naming both axes, for the status card and `/status`.
  *
- * Prefers the choice's own label, so the card says "Agent 无沙箱" rather than
- * "agent · danger-full-access" — the second is a fact and the first is what the
- * user asked for, and a card that names a combination not in the picker would
- * suggest a fifth mode exists. Falls back to the raw pair for a combination the
- * picker has no row for, which is a real state (settings can set either axis
- * alone) and is better shown accurately than rounded to a neighbour.
+ * It is `describeModeChoice` — the same function the prompt's badge and
+ * Shift+Tab's label go through. It used to be a second copy living here, which
+ * meant the name of a mode had two answers: a card could say "Agent 无沙箱"
+ * while the prompt under it said `agent · danger-full-access`, and nothing in
+ * either file would have noticed, because each was right on its own. The table
+ * is in `@labunbun/agent` and so is the one function that reads it.
  */
-function describeAxes(mode: PermissionMode, sandbox: SandboxMode): string {
-	const named = MODE_CHOICES.find((c) => c.mode === mode && c.sandbox === sandbox);
-	return named ? named.label : `${mode} · ${sandbox}`;
+const describeAxes = describeModeChoice;
+
+/**
+ * Tell the prompt which mode it is in, if there is a prompt to tell.
+ *
+ * The method is required on `ReplAppHandle`, and it is still called optionally
+ * here. `/mode`'s job is to move the session's two axes, and that has already
+ * happened by the time this runs — a handle that cannot carry a label (an
+ * embedder's, or a test's hand-built one, which reaches the context through an
+ * `as unknown as` cast and so never learns the method was added) should cost
+ * the prompt's badge, not the command. `handle?.setModeLabel?.(label)` rather
+ * than `handle?.setModeLabel(label)`: the outer `?.` guards the handle being
+ * absent, and the inner one is the part that is actually load-bearing.
+ */
+function publishModeLabel(handle: ReplAppHandle | null, label: string): void {
+	handle?.setModeLabel?.(label);
 }
 
 /**
@@ -1779,6 +1793,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				pushInfo(ctx.handle, `Usage: /mode ${MODE_CHOICES.map((c) => c.id).join("|")}`);
 			} else if (target) {
 				session?.setMode(target.mode, target.sandbox);
+				// The prompt's badge is a copy of the mode, and the session has no
+				// event for `setMode` — so this is the only place that can tell the
+				// store. Without it `/mode agent` would leave the prompt naming
+				// whatever Shift+Tab last set, which is the one way this pair can
+				// disagree after the wiring landed.
+				publishModeLabel(ctx.handle, target.label);
 				pushInfo(ctx.handle, `Mode: ${target.label} (${target.mode} · sandbox ${target.sandbox})`);
 			} else {
 				// No argument opens the same list `/model` and `/theme` do, rather than
@@ -1805,6 +1825,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					const chosen = MODE_CHOICES[index];
 					if (!chosen) return;
 					session?.setMode(chosen.mode, chosen.sandbox);
+					// The picker's answer has to reach the prompt for the same reason the
+					// argument path's does — this is the other way `/mode` can be run
+					// with no keyboard at all, so it is the one where a stale badge would
+					// be worst: a controller user who picked `Plan` and saw `Agent` under
+					// their finger.
+					publishModeLabel(ctx.handle, chosen.label);
 					pushInfo(ctx.handle, `Mode: ${chosen.label} (${chosen.mode} · sandbox ${chosen.sandbox})`);
 				})();
 			}

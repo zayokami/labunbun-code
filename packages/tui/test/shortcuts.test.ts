@@ -8,6 +8,7 @@
  * fewer columns, strictly less text, never a wrapped second line.
  */
 import { describe, expect, test } from "bun:test";
+import { MODE_CHOICES } from "@labunbun/agent";
 import { RESERVED_KEYS } from "../src/emacs.ts";
 import {
 	escapeHint,
@@ -137,6 +138,36 @@ describe("shortcutGroups", () => {
 		// The claim is checkable one layer down rather than taken on trust: the row says the key
 		// is eaten, and `RESERVED_KEYS` is where that is decided.
 		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-o");
+	});
+
+	/**
+	 * The row that names the key the mode moves on, and the reason it is checked
+	 * against the table rather than against a string.
+	 *
+	 * Two things can go wrong and both are invisible: the row can be dropped (a key
+	 * that works, advertised nowhere) and the row can be hand-written (a fifth mode
+	 * would be cycled through and never named). So the assertion walks
+	 * `MODE_CHOICES` — the same table `cycleModeChoice` walks, and not a copy of it.
+	 *
+	 * It is also the one Prompt row that does not depend on the editor, because the
+	 * key does not: Shift+Tab means the same thing at the prompt under vim, under
+	 * emacs, and with neither, and a row that appeared only in some of them would be
+	 * claiming a conditional the implementation does not have.
+	 */
+	test("Shift+Tab is advertised under every editor, naming every mode it cycles", () => {
+		for (const editor of ["none", "vim", "emacs"] as const) {
+			const row = shortcutGroups({ editor, vimMode: "normal" })
+				.find((g) => g.title === "Prompt")
+				?.rows.find(([k]) => k === "Shift+Tab");
+			expect(row).toBeDefined();
+			for (const choice of MODE_CHOICES) expect(row?.[1]).toContain(choice.label);
+		}
+		// And it is a separate row from Tab rather than a parenthetical on it. Two
+		// keys that arrive as the same Ink flag with one modifier apart are exactly
+		// the case where a merged row hides which one does what.
+		const prompt = shortcutGroups({ editor: "none" }).find((g) => g.title === "Prompt");
+		expect(prompt?.rows.some(([k]) => k === "Tab" && k.includes("Shift"))).toBe(false);
+		expect(prompt?.rows.find(([k]) => k === "Tab")?.[1]).not.toContain("mode");
 	});
 
 	test("vim mode adds a group that admits Ctrl+R is redo there", () => {

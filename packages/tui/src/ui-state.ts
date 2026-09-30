@@ -158,6 +158,19 @@ export interface UiState {
 	/** Display name of the active model. In the store so /model switching updates the status line live. */
 	modelName: string;
 	/**
+	 * The permission mode, named by `describeModeChoice` — the label, not the id,
+	 * because the id of the widest row (`agentNoSandbox`) is not a thing to put
+	 * on a prompt.
+	 *
+	 * In the store rather than read from the session because the session cannot
+	 * announce a change: `setMode` is a setter, and there is no event for it, so a
+	 * label read straight off the session would go stale the moment `/mode` ran.
+	 * That is the same reason `/vim` and `/emacs` are flags here rather than
+	 * props, and the same reason `setModeLabel` sits on the app handle — the app
+	 * layer is the only place that can tell the store what it just did.
+	 */
+	modeLabel: string;
+	/**
 	 * Modal vim editing in the prompt. In the store rather than a prop because
 	 * `/vim` turns it on and off while the app is running — and because `/help`
 	 * and the key-list overlay have to describe the editor that is actually up.
@@ -226,7 +239,7 @@ export interface QuestionDialogState {
  */
 export const RESULT_TEXT_CAP = 16_000;
 
-export function initialUiState(vim = false, emacs = false): UiState {
+export function initialUiState(vim = false, emacs = false, modeLabel = ""): UiState {
 	return {
 		entries: [],
 		streamingText: "",
@@ -243,6 +256,7 @@ export function initialUiState(vim = false, emacs = false): UiState {
 		queued: [],
 		theme: DEFAULT_THEME,
 		modelName: "",
+		modeLabel,
 		vim,
 		emacs,
 		paint: 0,

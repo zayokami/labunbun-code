@@ -34,6 +34,30 @@ export interface PromptInputProps {
 	 */
 	emacs?: boolean;
 	/**
+	 * The permission mode, by name, drawn beside the editor badge.
+	 *
+	 * A name rather than the pair because the pair is four facts and the prompt
+	 * has one dim row: `Agent 无沙箱` says the thing, and `agent` +
+	 * `danger-full-access` says the same thing while implying there is a fifth
+	 * mode. It is drawn here rather than in the status line because the status
+	 * line collapses to nothing at an idle prompt with no context meter and no
+	 * controller (`StatusLine.tsx`, and `status-battery.test.tsx` pins that
+	 * empty frame) — which is the one moment there is anything to say and
+	 * something to press.
+	 */
+	modeLabel?: string;
+	/**
+	 * Shift+Tab. Called with no argument because the next mode is the host's to
+	 * compute: the session holds both axes and the table that names them lives
+	 * beside it, and a prompt that derived the answer from a label string would
+	 * be parsing a caption.
+	 *
+	 * Optional so that a prompt rendered on its own — a test, an embedder — has
+	 * no duty to answer for a mode it does not own. When it is absent the key is
+	 * still **claimed**: see the handler.
+	 */
+	onCycleMode?: () => void;
+	/**
 	 * Prompts from earlier sessions, oldest first, for ↑ recall. Without this the
 	 * buffer starts empty and ↑ only reaches prompts typed in this session.
 	 */
@@ -141,6 +165,8 @@ export function PromptInput({
 	completeFiles,
 	vim = false,
 	emacs = false,
+	modeLabel,
+	onCycleMode,
 	history = [],
 	escapeRef,
 	onToggleHelp,
@@ -439,6 +465,25 @@ export function PromptInput({
 
 	useInput(
 		(input, key) => {
+			// Shift+Tab, first line, before the editor and before every other Tab
+			// meaning below. The key arrives as `{tab: true, shift: true}` — ink's
+			// parser maps the `ESC [ Z` sequence to the name `tab` and gets the
+			// modifier from `isShiftKey`, so a plain Tab is `{tab: true, shift:
+			// false}` and the two cannot be confused. (Verified rather than assumed:
+			// an unclaimed `ESC [ Z` reports `input: ""`, so the only thing standing
+			// between it and the three Tab branches below is this return.)
+			//
+			// First because it is the one key that has to mean the same thing
+			// everywhere. A permission mode that changed behind a dialog but not at a
+			// prompt is a mode nobody can reason about, and the branches below are all
+			// context-sensitive: a suggestion list is open, a run is in flight, a
+			// search is up. The key is claimed whether or not `onCycleMode` was
+			// passed — a prompt that cannot cycle a mode must not answer Tab by
+			// completing a file name.
+			if (key.shift && key.tab) {
+				onCycleMode?.();
+				return;
+			}
 			// The owner calls back into the handler above; acting on it here as well
 			// would run the cancel twice.
 			if (key.escape && escapeRef) return;
@@ -722,6 +767,13 @@ export function PromptInput({
 					    saying `[EMACS]` on a modeless prompt would be the one place the
 					    screen lied about it. */}
 					{editor.mode === "vim" ? `[${MODE_LABEL[vimMode] ?? "NORMAL"}] ` : ""}
+					{/* The permission mode is a different thing from an editor mode and
+					    says what it is: every row of `MODE_CHOICES` is a mode a user can
+					    be *in*, so the one they are in is the fact worth having on the
+					    prompt. The mode the key changes is the mode that has to be
+					    visible, which is why this sits under the editor rather than in
+					    the status line that collapses when the turn is idle. */}
+					{modeLabel ? `[${modeLabel}] ` : ""}
 					{hintLine(columns, { editor: editor.mode, vimMode })}
 				</Text>
 			</Box>

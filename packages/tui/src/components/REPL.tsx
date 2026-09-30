@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentSession } from "@labunbun/agent";
+import { cycleModeChoice } from "@labunbun/agent";
 import { type PadBridge, padPalette } from "@labunbun/gamepad";
 import { Box, Text, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -194,6 +195,24 @@ export function REPL({
 	// Ctrl+L wipes the screen the sealed transcript was printed onto; this is the
 	// stamp that says so, and it rides along in the list's key.
 	const paint = useStore(store, (s) => s.paint);
+	// The permission mode, read from the store for the same reason `vim` is: the
+	// app layer's `/mode` writes it, and there is no event to subscribe to.
+	const modeLabel = useStore(store, (s) => s.modeLabel);
+	/**
+	 * Shift+Tab: one step up the escalation, and the label follows.
+	 *
+	 * The mode is read off the session and the label written back to the store
+	 * **in the same handler**, because the store is a copy: leaving them to two
+	 * places is how a prompt ends up naming `Ask` while the session runs `Agent`,
+	 * and that is the exact lie this whole path exists to stop telling. `/mode`
+	 * writes the pair through the app handle for the same reason.
+	 */
+	const cycleMode = useCallback(() => {
+		const session = getSession();
+		const next = cycleModeChoice({ mode: session.permissionMode, sandbox: session.sandbox });
+		session.setMode(next.mode, next.sandbox);
+		store.set((s) => ({ ...s, modeLabel: next.label }));
+	}, [getSession, store]);
 	const modelName = useStore(store, (s) => s.modelName) || modelNameProp;
 	// Ink's own writer, not `process.stdout`: it knows where the frame it drew is,
 	// so it can take it down and put it back around whatever we write.
@@ -801,6 +820,8 @@ export function REPL({
 					// failure `shortcuts.ts` is written to prevent, one layer up.
 					vim={vim}
 					emacs={emacs}
+					modeLabel={modeLabel}
+					onCycleMode={cycleMode}
 					history={history}
 					escapeRef={escapeRef}
 					busy={busy}

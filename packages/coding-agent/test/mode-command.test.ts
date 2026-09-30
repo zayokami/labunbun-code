@@ -51,6 +51,14 @@ function makeCtx(pair?: { mode: PermissionMode; sandbox: SandboxMode }) {
 		getSession: () => session,
 		handle: {
 			store,
+			// The prompt's badge, written the way `mountRepl` writes it rather than
+			// stubbed to a no-op, so the assertions below can read the store instead
+			// of trusting that the call happened. The `as unknown as` cast below is
+			// why this has to be here at all: the cast lets a handle reach the
+			// command without carrying every method the interface has since grown,
+			// and the way that shows up is a `/mode` that changes the mode and then
+			// throws on the way to telling anybody.
+			setModeLabel: (label: string) => store.set((s) => (s.modeLabel === label ? s : { ...s, modeLabel: label })),
 			pickFromList: (title: string, items: Pick["items"], options?: Pick) => {
 				picks.push({ title, items, ...options });
 				return new Promise<number | null>((resolve) => {
@@ -94,6 +102,11 @@ describe("/mode with a name", () => {
 		expect(h.session.sandbox).toBe("workspace-write");
 		expect(h.picks).toHaveLength(0);
 		expect(infoTexts(h.store)).toBe("Mode: Plan (plan · sandbox workspace-write)");
+		// The badge under the prompt is a *copy*, because the session has no event
+		// for `setMode`, so a `/mode` that changed the session without telling the
+		// store would leave the prompt naming the last mode Shift+Tab set — two
+		// ways of changing the mode, and the visible one going stale.
+		expect(h.store.get().modeLabel).toBe("Plan");
 	});
 
 	/**
@@ -113,7 +126,30 @@ describe("/mode with a name", () => {
 			expect(h.session.permissionMode).toBe(choice.mode);
 			expect(h.session.sandbox).toBe(choice.sandbox);
 			expect(infoTexts(h.store)).toBe(`Mode: ${choice.label} (${choice.mode} · sandbox ${choice.sandbox})`);
+			// The badge has to be that same row's own label, walked with it. Asserting
+			// the label separately from the pair is the point: a publish that sent the
+			// *mode* where the *label* belongs would satisfy a weaker test, because
+			// `agent` and `Agent 无沙箱` share a mode and differ only in what the prompt
+			// can see.
+			expect(h.store.get().modeLabel).toBe(choice.label);
 		}
+	});
+
+	/**
+	 * A rejected name must not move the badge either.
+	 *
+	 * The badge is the answer to "what is this session running under", and a usage
+	 * line changes nothing — so a `/mode plna` that left `Agent` on screen while
+	 * printing usage would be correct on screen and wrong about what happened.
+	 */
+	test("a refused name leaves the badge where it was", () => {
+		const h = makeCtx({ mode: "agent", sandbox: "workspace-write" });
+		handleAppCommand("/mode agent", h.ctx);
+		expect(h.store.get().modeLabel).toBe("Agent");
+
+		handleAppCommand("/mode plna", h.ctx);
+		expect(h.store.get().modeLabel).toBe("Agent");
+		expect(h.session.permissionMode).toBe("agent");
 	});
 
 	/**
@@ -183,6 +219,11 @@ describe("/mode without an argument", () => {
 		expect(h.session.permissionMode).toBe("agent");
 		expect(h.session.sandbox).toBe("danger-full-access");
 		expect(infoTexts(h.store)).toBe("Mode: Agent 无沙箱 (agent · sandbox danger-full-access)");
+		// The picker is the one path a user with no keyboard at all can take, so it is
+		// the one where a stale badge would be worst: a controller user who picked
+		// `Agent 无沙箱` and read `Agent` under their thumb, unable to tell the
+		// confinement the session is actually in.
+		expect(h.store.get().modeLabel).toBe("Agent 无沙箱");
 	});
 
 	test("cancelling leaves both axes alone and says nothing", async () => {
@@ -193,6 +234,11 @@ describe("/mode without an argument", () => {
 		expect(h.session.permissionMode).toBe("plan");
 		expect(h.session.sandbox).toBe("workspace-write");
 		expect(infoTexts(h.store)).toBe("");
+		// Untouched, rather than published as whatever row the list happened to open
+		// on. A cancel that wrote the opening row's label would be harmless today —
+		// the list opens on the row already in force — and would be a lie the moment
+		// the list remembered a cursor between invocations.
+		expect(h.store.get().modeLabel).toBe("");
 	});
 });
 

@@ -4,6 +4,7 @@
  */
 
 import type { ActivityRange, AgentSession, PermissionMode } from "@labunbun/agent";
+import { describeModeChoice } from "@labunbun/agent";
 import type { PadBridge } from "@labunbun/gamepad";
 import { render } from "ink";
 import { sealCount } from "./components/MessageList.tsx";
@@ -138,6 +139,17 @@ export interface ReplAppHandle {
 	/** Turn modeless emacs editing in the prompt on or off (`/emacs`). */
 	setEmacsMode(on: boolean): void;
 	/**
+	 * Republish the permission mode the prompt shows.
+	 *
+	 * Here for the same reason `setVimMode` is: `/mode` runs in the app layer and
+	 * sets the mode on the session, and the session has no event for it, so the
+	 * prompt's label would keep naming the mode the user just left. The label is
+	 * `describeModeChoice`'s — the caller names the pair, this does not interpret
+	 * it, because "what does `agent` + `danger-full-access` call itself" is the
+	 * one answer in the codebase and it belongs beside the table.
+	 */
+	setModeLabel(label: string): void;
+	/**
 	 * Hot-swap the running REPL onto a different AgentSession (in-app /resume):
 	 * rebinds event subscription, clears transient transcript state, and keeps
 	 * dialogs/theme/model name.
@@ -197,7 +209,15 @@ function ThemedTree({ store, children }: { store: Store<UiState>; children: Reac
  */
 export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	const store = createStore<UiState>({
-		...initialUiState(options.vimMode ?? false, options.emacsMode ?? false),
+		// Seeded from the session rather than defaulted: a run started with
+		// `--permission-mode agent` is in `Agent` on its first frame, and a prompt
+		// that says `Ask` until something changes it is a prompt that lied for as
+		// long as it took to notice.
+		...initialUiState(
+			options.vimMode ?? false,
+			options.emacsMode ?? false,
+			describeModeChoice(options.session.permissionMode, options.session.sandbox),
+		),
 		theme: options.theme ?? DEFAULT_THEME,
 		modelName: options.modelName,
 	});
@@ -279,6 +299,9 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		setEmacsMode: (on) => {
 			store.set((s) => (on ? { ...s, emacs: true, vim: false } : { ...s, emacs: false }));
 		},
+		setModeLabel: (label) => {
+			store.set((s) => (s.modeLabel === label ? s : { ...s, modeLabel: label }));
+		},
 		setTasks: (tasks) => {
 			store.set((s) => ({ ...s, tasks }));
 		},
@@ -307,7 +330,10 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 			unsubscribeSession();
 			unsubscribeSession = connectSessionToStore(next, store);
 			// Transient transcript state belongs to the old session; dialogs and
-			// the theme belong to the app and survive.
+			// the theme belong to the app and survive. The mode label does **not**
+			// survive, and is the one thing here that has to be re-read rather than
+			// kept: the new session was built from a different settings file, and
+			// carrying the old label over would name a mode this session is not in.
 			store.set((s) => ({
 				...s,
 				entries: [],
@@ -317,6 +343,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				statusPhase: "idle",
 				contextInfo: undefined,
 				tasks: [],
+				modeLabel: describeModeChoice(next.permissionMode, next.sandbox),
 			}));
 		},
 		setModelName: (name) => {
