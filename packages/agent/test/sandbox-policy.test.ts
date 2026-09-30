@@ -110,7 +110,7 @@ describe("buildSandboxPolicy derives .git rather than waiting to find it", () =>
 	test("the derived path is joined, not concatenated, so it matches what the backends compare", () => {
 		// `join` is what produces the separator. A hand-built `` `${root}/.git` ``
 		// would be right on POSIX and produce a mixed-separator path on Windows —
-		// `G:\w\repo/.git` — which the seatbelt translator and the simulated layer
+		// `\w\repo/.git` — which the seatbelt translator and the simulated layer
 		// would then compare against a root that came from `resolveCanonical` and
 		// spell differently. A `protected` entry that does not match its own root is
 		// a protection that never fires, and the mismatch is invisible in the argv
@@ -118,11 +118,18 @@ describe("buildSandboxPolicy derives .git rather than waiting to find it", () =>
 		const policy = buildSandboxPolicy({ sandbox: "workspace-write", workspace: WORKSPACE });
 
 		expect(policy.protected).toEqual([join(WORKSPACE, ".git")]);
-		// On POSIX the two spellings agree, so this is the assertion that would fail
-		// for a hand-built template on the platform where the bug does not show. It is
-		// stated as "one separator, used consistently" rather than as an absolute
-		// path, because a Windows workspace root is legitimately spelled `G:\…`.
-		expect(policy.protected[0]).not.toContain("/");
-		expect(policy.protected[0].split(sep).join("/")).toBe(`${WORKSPACE}/.git`);
+
+		// The mixed-separator shape only *exists* where the separator differs from the
+		// template's `/`. On POSIX a templated `.git` and a joined one are the same
+		// string, so the defect is unrepresentable there and asserting it anyway would
+		// be a test that passes on one platform by coincidence and fails on another by
+		// accident — which is what the first version of this test did, and what CI's
+		// ubuntu and macos jobs caught on 7c87a06 while Windows stayed green. So the
+		// Windows-only half is stated conditionally, and the unconditional assertion
+		// above is the one that has to hold everywhere.
+		if (sep !== "/") {
+			expect(policy.protected[0]).not.toContain("/");
+			expect(policy.protected[0]).not.toBe(`${WORKSPACE}/.git`);
+		}
 	});
 });
