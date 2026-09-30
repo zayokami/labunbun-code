@@ -249,7 +249,12 @@ describe("the choice list itself", () => {
 	 * the row's identity, and it is what `findModeChoice` resolves against.
 	 */
 	test("no two choices name the same pair", () => {
-		const pairs = MODE_CHOICES.map((c) => `${c.mode} ${c.sandbox}`);
+		// Serialized, not joined. A separator character has to be something no
+		// field can contain, and the one this used was a NUL — which made the whole
+		// file binary to `file` and invisible to `grep`. JSON has no such problem:
+		// the two fields are quoted and delimited, so the key cannot collide by
+		// construction rather than by a character someone has to remember to avoid.
+		const pairs = MODE_CHOICES.map((c) => JSON.stringify([c.mode, c.sandbox]));
 		expect(new Set(pairs).size).toBe(pairs.length);
 	});
 

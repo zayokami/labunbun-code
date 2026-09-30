@@ -502,11 +502,11 @@ describe("a path the policy names but the disk does not have", () => {
 		const built = buildSandboxPolicy({ sandbox: "workspace-write", workspace: cwd, writableRoots: [present, absent] });
 
 		const argv = argvFor(built, [present]);
-		expect(argv.join(" ")).toContain(present);
-		expect(argv.join(" ")).not.toContain(absent);
+		expect(argv).toContain(present);
+		expect(argv).not.toContain(absent);
 		// The workspace itself is never marked skip, so it survives the filter
 		// even though `exists` was told it is not there either.
-		expect(argv.join(" ")).toContain(cwd);
+		expect(argv).toContain(cwd);
 	});
 
 	test("the workspace is kept even when it is absent, because a missing one is a broken session", () => {
@@ -515,7 +515,7 @@ describe("a path the policy names but the disk does not have", () => {
 		const ghost = join(tmpdir(), "lbb-sandbox-no-workspace");
 		const built = buildSandboxPolicy({ sandbox: "workspace-write", workspace: ghost });
 		const argv = argvFor(built, []);
-		expect(argv.join(" ")).toContain(ghost);
+		expect(argv).toContain(ghost);
 	});
 
 	test("an unrestricted policy wraps nothing, so the filter never runs", () => {

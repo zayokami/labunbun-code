@@ -375,17 +375,6 @@ function splitCmdOperators(token: string): string[] {
 
 const CMD_SEPARATORS = new Set(["&", "&&", "|", "||"]);
 
-/**
- * Appended to the word list to make the last segment get looked at.
- *
- * The rules below only run when a separator ends a segment, and the words after
- * the last `&`/`|` have none — without this the scan reads every segment but the
- * one the command actually ends on, and `cmd /c del /f C:\x` is nothing but a
- * final segment. It is a word like any other, which is why it is checked
- * separately rather than added to the set above whose name would then be wrong.
- */
-const CMD_FLUSH = " ";
-
 function dangerousCmd(tokens: string[]): DangerousCommandMatch | null {
 	if (tokens.length === 0) return null;
 	const program = executableName(tokens[0], "windows");
@@ -426,25 +415,39 @@ function dangerousCmd(tokens: string[]): DangerousCommandMatch | null {
  */
 function dangerousCmdBody(words: string[]): DangerousCommandMatch | null {
 	let segment: string[] = [];
-	for (const word of [...words, CMD_FLUSH]) {
-		if (word === CMD_FLUSH || CMD_SEPARATORS.has(word)) {
-			const head = segment[0]?.toLowerCase();
-			if (head !== undefined) {
-				if (head === "start" && argsHaveUrl(segment)) {
-					return { kind: "Other", rule: "`start` with a URL" };
-				}
-				const hasFlag = (flag: string) => segment.some((t) => t.toLowerCase() === flag);
-				if ((head === "del" || head === "erase") && hasFlag("/f")) {
-					return { kind: "Other", rule: "`del /f` (forced delete)" };
-				}
-				if ((head === "rd" || head === "rmdir") && hasFlag("/s") && hasFlag("/q")) {
-					return { kind: "Other", rule: "`rd /s /q` (silent recursive delete)" };
-				}
-			}
+	for (const word of words) {
+		if (CMD_SEPARATORS.has(word)) {
+			const match = dangerousCmdSegment(segment);
+			if (match) return match;
 			segment = [];
 			continue;
 		}
 		segment.push(word);
+	}
+	// The words after the last `&`/`|` are a segment no separator ever closes, and
+	// `cmd /c del /f C:\x` is nothing *but* that segment — so it is checked here
+	// rather than by a sentinel appended to the word list. It was a sentinel until
+	// now, and the sentinel was a NUL byte, which is a value no word can be
+	// *and* a value that makes the whole file binary: `file` reported `data`, and
+	// `grep` stopped reporting lines from it, so the file the classifier lives in
+	// became the one file nobody could search. A separate call for the tail needs
+	// no such value to exist.
+	return dangerousCmdSegment(segment);
+}
+
+/** What one CMD segment's words match, or `null` for the ordinary ones. */
+function dangerousCmdSegment(segment: string[]): DangerousCommandMatch | null {
+	const head = segment[0]?.toLowerCase();
+	if (head === undefined) return null;
+	if (head === "start" && argsHaveUrl(segment)) {
+		return { kind: "Other", rule: "`start` with a URL" };
+	}
+	const hasFlag = (flag: string) => segment.some((t) => t.toLowerCase() === flag);
+	if ((head === "del" || head === "erase") && hasFlag("/f")) {
+		return { kind: "Other", rule: "`del /f` (forced delete)" };
+	}
+	if ((head === "rd" || head === "rmdir") && hasFlag("/s") && hasFlag("/q")) {
+		return { kind: "Other", rule: "`rd /s /q` (silent recursive delete)" };
 	}
 	return null;
 }
