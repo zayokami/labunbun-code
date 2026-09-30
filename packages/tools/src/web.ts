@@ -159,16 +159,55 @@ function refuseByNetworkPolicy(hostname: string, network: NetworkAxis | undefine
 }
 
 /**
- * Guard against SSRF: resolve the hostname and check every returned address
- * (DNS can return multiple/mixed records, and a hostname can rebind between
- * check and fetch — this narrows the window but the real backstop is that
- * fetch() itself will only ever connect to what DNS hands back here).
+ * The addresses a hostname stands for, at the moment of the check.
+ *
+ * Injected rather than reached for directly, for the reason `resolveSandboxExecution`
+ * takes an `exists`: the one impure call in the guard is the one a test must be
+ * able to state. A test that lets this reach a real resolver is asserting on the
+ * DNS of the machine and of the moment — and it does so *quietly*, because a name
+ * that resolves on a developer laptop and does not resolve in CI fails the test
+ * for a reason that has nothing to do with the code under test. That is not
+ * hypothetical: this file's own header says nothing is contacted, and the guard's
+ * lookup was still reaching out, so the one test asserting the network was open
+ * passed at home and failed everywhere else.
+ */
+export type HostResolver = (hostname: string) => Promise<string[]>;
+
+/** The real resolver. The only place in this module that touches DNS. */
+export const resolveHostWithDns: HostResolver = async (hostname) => {
+	const records = await lookup(hostname, { all: true });
+	return records.map((record) => record.address);
+};
+
+/**
+ * Guard against SSRF: resolve the hostname and check every returned address.
+ * DNS can return several records, mixed families among them, so every one is
+ * checked rather than the first.
+ *
+ * **What this does not do, stated because the alternative reading is stronger.**
+ * It does not pin the connection to the address it checked. `fetch()` resolves
+ * the name a second time, so a name whose answer changes between this lookup and
+ * that one is checked against one address and connected to another. This narrows
+ * that window to the gap between two resolutions; it does not close it. Closing
+ * it means connecting to the resolved address while presenting the original
+ * `Host`/SNI, which is the same problem Codex solves with a MITM CA and an
+ * attribution frame (`codex-rs/network-proxy/src/mitm.rs`) — a trade this build
+ * has declined and documented at the top of `proxy.ts`, so the honest sentence
+ * here is the narrow one rather than a claim about the backstop.
+ *
+ * A lookup that fails is a refusal rather than a pass: not knowing where a name
+ * points is not evidence that it points somewhere public, and the fail-closed
+ * reading is the only one a URL the model chose can be given.
  *
  * The network axis is checked first and on the same pass, for two reasons. It
  * is cheaper — no DNS lookup — and it is the user's declared intent, so there
  * is no reason to resolve a name before finding out it was never allowed.
  */
-async function guardPublicUrl(rawUrl: string, network?: NetworkAxis): Promise<string | null> {
+async function guardPublicUrl(
+	rawUrl: string,
+	network: NetworkAxis | undefined,
+	resolveHost: HostResolver,
+): Promise<string | null> {
 	let url: URL;
 	try {
 		url = new URL(rawUrl);
@@ -184,13 +223,21 @@ async function guardPublicUrl(rawUrl: string, network?: NetworkAxis): Promise<st
 	if (hostname.toLowerCase() === "localhost") return "Requests to localhost are not allowed";
 	if (isIP(hostname) && isBlockedAddress(hostname)) return "Requests to private/internal addresses are not allowed";
 	if (!isIP(hostname)) {
+		let addresses: string[];
 		try {
-			const records = await lookup(hostname, { all: true });
-			for (const record of records) {
-				if (isBlockedAddress(record.address)) return "Requests to private/internal addresses are not allowed";
-			}
+			addresses = await resolveHost(hostname);
 		} catch {
 			return `Could not resolve host: ${hostname}`;
+		}
+		// Zero addresses is a refusal, not a pass. The loop below is vacuously
+		// satisfied by an empty list, so a resolver that answers "I know nothing
+		// about this name" would otherwise turn the guard off for exactly the
+		// names it cannot vouch for — and the failure is silent, because a name
+		// that resolves to nothing private looks identical to a name that was
+		// never checked.
+		if (addresses.length === 0) return `Could not resolve host: ${hostname}`;
+		for (const address of addresses) {
+			if (isBlockedAddress(address)) return "Requests to private/internal addresses are not allowed";
 		}
 	}
 	return null;
@@ -237,10 +284,11 @@ async function fetchGuarded(
 	maxRedirects = 5,
 	signal?: AbortSignal,
 	network?: NetworkAxis,
+	resolveHost: HostResolver = resolveHostWithDns,
 ): Promise<Response | { blocked: string }> {
 	let current = url;
 	for (let hop = 0; hop <= maxRedirects; hop++) {
-		const blockReason = await guardPublicUrl(current, network);
+		const blockReason = await guardPublicUrl(current, network, resolveHost);
 		if (blockReason) return { blocked: blockReason };
 		const response = await fetchWithTimeout(current, { ...init, redirect: "manual" }, signal);
 		const isRedirect = response.status >= 300 && response.status < 400;
@@ -251,7 +299,16 @@ async function fetchGuarded(
 	return { blocked: "Too many redirects" };
 }
 
-export function createWebFetchTool(): AnyTool {
+export interface WebFetchOptions {
+	/**
+	 * How the SSRF guard turns a hostname into addresses. Defaults to the system
+	 * resolver, which is the only correct answer in production; see
+	 * {@link HostResolver} for why a test must not use it.
+	 */
+	resolveHost?: HostResolver;
+}
+
+export function createWebFetchTool(options: WebFetchOptions = {}): AnyTool {
 	return buildTool({
 		name: "WebFetch",
 		description:
@@ -275,6 +332,7 @@ export function createWebFetchTool(): AnyTool {
 					5,
 					ctx.signal,
 					ctx.network,
+					options.resolveHost ?? resolveHostWithDns,
 				);
 				if ("blocked" in result) {
 					return { content: [textContent(`Fetch blocked: ${result.blocked}`)], isError: true };

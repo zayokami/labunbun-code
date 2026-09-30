@@ -25,6 +25,7 @@ export { ChildProcessExecOperations, defaultOperations, detectShell, NodeFileSys
 export { createReadTool } from "./read.ts";
 export {
 	describeSandboxBackend,
+	detectNativeBackend,
 	detectRuntime,
 	networkConfinement,
 	policyFor,
@@ -35,9 +36,12 @@ export { type AgentTask, createTaskTools, type TaskStatus, TaskStore } from "./t
 export {
 	createWebFetchTool,
 	createWebSearchTool,
+	type HostResolver,
 	htmlToText,
 	parseDuckDuckGoResults,
+	resolveHostWithDns,
 	type SearchResult,
+	type WebFetchOptions,
 } from "./web.ts";
 export { createWriteTool } from "./write.ts";
 
