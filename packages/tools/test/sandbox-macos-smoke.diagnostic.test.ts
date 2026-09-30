@@ -1,50 +1,19 @@
 /**
  * TEMPORARY DIAGNOSTIC — not a permanent test. Delete once the answer is known.
  *
- * The spill test on macOS reports a real command exiting 0 with no output under
- * the profile this build generates. This runs the same command by hand under a
- * ladder of profiles, from "allow everything" up to ours, so one CI run says
- * which rung breaks. Control first: if `(allow default)` does not echo, the
- * harness is wrong and every other row is meaningless.
+ * The ladder said: our full profile fails to compile
+ * ("invalid data type of path filter; expected pattern, got boolean") while the
+ * base policy alone runs a command fine. So one construct above the base is bad.
+ * This tests each section on its own, so one CI run names the line rather than
+ * the region. Control first: if `(allow default)` does not echo, the harness is
+ * wrong and every other row is meaningless.
  */
 import { expect, test } from "bun:test";
-import { mkdtempSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { buildSandboxPolicy } from "@labunbun/agent";
 import { buildSeatbeltArgs } from "../src/sandbox/seatbelt.ts";
 
-const SYSCTL = `(allow sysctl-read
-  (sysctl-name "hw.activecpu") (sysctl-name "hw.byteorder")
-  (sysctl-name "hw.cpufamily") (sysctl-name "hw.cputype")
-  (sysctl-name "hw.l1dcachesize_compat") (sysctl-name "hw.l1icachesize_compat")
-  (sysctl-name "hw.l2cachesize_compat") (sysctl-name "hw.l3cachesize_compat")
-  (sysctl-name "hw.logicalcpu_max") (sysctl-name "hw.machine")
-  (sysctl-name "hw.memsize") (sysctl-name "hw.ncpu")
-  (sysctl-name "hw.nperflevels") (sysctl-name-prefix "hw.optional.arm.")
-  (sysctl-name-prefix "hw.optional.armv8_") (sysctl-name "hw.packages")
-  (sysctl-name "hw.pagesize_compat") (sysctl-name "hw.pagesize")
-  (sysctl-name "hw.physicalcpu") (sysctl-name "hw.physicalcpu_max")
-  (sysctl-name "hw.logicalcpu") (sysctl-name "hw.cpufrequency")
-  (sysctl-name "hw.tbfrequency_compat") (sysctl-name "hw.vectorunit")
-  (sysctl-name "machdep.cpu.brand_string") (sysctl-name "kern.argmax")
-  (sysctl-name "kern.hostname") (sysctl-name "kern.maxfilesperproc")
-  (sysctl-name "kern.maxproc") (sysctl-name "kern.osproductversion")
-  (sysctl-name "kern.osrelease") (sysctl-name "kern.ostype")
-  (sysctl-name "kern.osvariant_status") (sysctl-name "kern.osversion")
-  (sysctl-name "kern.secure_kernel") (sysctl-name "kern.sysv.semmns")
-  (sysctl-name "kern.usrstack64") (sysctl-name "kern.version")
-  (sysctl-name "sysctl.proc_cputype") (sysctl-name "vm.loadavg")
-  (sysctl-name-prefix "hw.perflevel") (sysctl-name-prefix "kern.proc.pgrp.")
-  (sysctl-name-prefix "kern.proc.pid.") (sysctl-name-prefix "net.routetable."))
-(allow sysctl-write (sysctl-name "kern.grade_cputype"))`;
-
-const CONTROL = `(version 1)\n(allow default)`;
-
-const RUNG = (extra: string) => `(version 1)\n(deny default)\n${extra}\n(allow file-read*)`;
-
-async function run(profile: string, command: string[]): Promise<string> {
-	const proc = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, "--", ...command], {
+async function run(profile: string, args: string[] = []): Promise<string> {
+	const proc = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, ...args, "--", "/bin/echo", "hello"], {
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -53,28 +22,56 @@ async function run(profile: string, command: string[]): Promise<string> {
 		new Response(proc.stderr).text(),
 		proc.exited,
 	]);
-	return `exit=${code} stdout=${JSON.stringify(out.slice(0, 200))} stderr=${JSON.stringify(err.slice(0, 300))}`;
+	return `exit=${code} out=${JSON.stringify(out.slice(0, 80))} err=${JSON.stringify(err.trim().slice(0, 160))}`;
 }
 
-test("ladder", async () => {
+const P = (body: string) => `(version 1)\n(deny default)\n${body}\n(allow file-read*)`;
+
+test("which construct", async () => {
 	if (process.platform !== "darwin") return;
 	const rows: string[] = [];
-	rows.push(`CONTROL allow-default: ${await run(CONTROL, ["/bin/echo", "hello"])}`);
+	const add = async (name: string, body: string, args: string[] = []) => {
+		rows.push(`${name}: ${await run(P(body), args)}`);
+	};
 
-	const tmp = realpathSync(mkdtempSync(join(tmpdir(), "lbb-smoke-")));
-	const policy = buildSandboxPolicy({ sandbox: "workspace-write", workspace: tmp });
-	const ours = buildSeatbeltArgs(policy, ["/bin/echo", "hello"]);
-	const ourProfile = ours[1] ?? "";
+	rows.push(`CONTROL: ${await run("(version 1)\n(allow default)")}`);
 
-	// Rung by rung: which addition makes a real command print again.
-	const base = ourProfile.split("\n(allow file-read*)")[0] ?? "";
-	rows.push(`OURS echo: ${await run(ourProfile, ["/bin/echo", "hello"])}`);
-	rows.push(`OURS bun: ${await run(ourProfile, [process.execPath, "-e", "console.log('hi')"])}`);
-	rows.push(`BASE-ONLY echo: ${await run(`${base}\n(allow file-read*)`, ["/bin/echo", "hello"])}`);
-	rows.push(`BASE+SYSCTL echo: ${await run(`${base}\n(allow file-read*)\n${SYSCTL}`, ["/bin/echo", "hello"])}`);
+	// The full generated profile, for the record.
+	const ours = buildSeatbeltArgs(buildSandboxPolicy({ sandbox: "workspace-write", workspace: "/w" }), ["/bin/echo"]);
 	rows.push(
-		`BASE+SYSCTL bun: ${await run(`${base}\n(allow file-read*)\n${SYSCTL}`, [process.execPath, "-e", "console.log('hi')"])}`,
+		`FULL-OURS: ${await run(
+			ours[1] ?? "",
+			(ours.slice(2) as string[]).filter((a) => a !== "--"),
+		)}`,
 	);
 
-	expect(rows.join("\n\n")).toBe("ladder");
-}, 120_000);
+	await add("tty-literal-devnull", `(allow file-read* file-write* file-ioctl (literal "/dev/null"))`);
+	await add("tty-literal-ptmx", `(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))`);
+	await add("tty-regex-ttys", `(allow file-ioctl (regex #"^/dev/ttys[0-9]+"))`);
+	await add("pseudo-tty", `(allow pseudo-tty)`);
+	await add("ipc-posix-sem", `(allow ipc-posix-sem)`);
+	await add(
+		"shm-three",
+		`(allow ipc-posix-shm-read-data)\n(allow ipc-posix-shm-write-create)\n(allow ipc-posix-shm-write-unlink)`,
+	);
+	await add(
+		"mach-two-globals",
+		`(allow mach-lookup\n  (global-name "com.apple.system.opendirectoryd.libinfo")\n  (global-name "com.apple.PowerManagement.control"))`,
+	);
+	await add("network-outbound", `(allow network-outbound)\n(allow network-inbound)`);
+	await add(
+		"system-socket",
+		`(allow system-socket\n  (require-all\n    (socket-domain AF_SYSTEM)\n    (socket-protocol 2)))`,
+	);
+	await add("iokit", `(allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))`);
+	await add("process-info-star", `(allow process-info*)`);
+	await add("writable-subpath", `(allow file-write* (subpath (param "W")))`, ["-DW=/w"]);
+	await add("deny-file-read-star", `(deny file-read* file-write* (subpath (param "D")))`, ["-DD=/w/d"]);
+	await add(
+		"protected-ancestor",
+		`(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal (param "A"))))`,
+		["-DA=/w"],
+	);
+
+	expect(rows.join("\n")).toBe("ladder");
+}, 180_000);
