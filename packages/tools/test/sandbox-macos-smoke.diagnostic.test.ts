@@ -1,106 +1,77 @@
 /**
  * TEMPORARY DIAGNOSTIC — not a permanent test. Delete once the answer is known.
  *
- * The hand-assembled base (every rule, no comments) runs /bin/echo: exit=0. The
- * base as the file spells it, reached through buildSeatbeltArgs, gave exit=133.
- * Two things differ — the `;` comments and the cwd the process starts in — so
- * vary one at a time instead of guessing. Control first; a control that fails
- * voids every other row.
+ * The generated profile runs /bin/echo under sandbox-exec (exit=0), so the
+ * profile is not what empties the spill test. What is left is the path between:
+ * the Bash tool -> exec -> the shell -> the command. The test gets exactly
+ * "[exit code: 0]\n", i.e. exit 0 and both streams empty, which no real command
+ * does. So drive the same tool call and report what each layer returned.
  */
 import { expect, test } from "bun:test";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildSandboxPolicy } from "@labunbun/agent";
-import { buildSeatbeltArgs } from "../src/sandbox/seatbelt.ts";
+import { createAllTools, defaultOperations } from "@labunbun/tools";
+import { workspacePolicy } from "../src/sandbox/workspace-policy.ts";
 
-const REAL = realpathSync(mkdtempSync(join(tmpdir(), "lbb-cwd-")));
-
-async function run(body: string, cwd?: string): Promise<string> {
-	const proc = Bun.spawn(
-		["/usr/bin/sandbox-exec", "-p", `(version 1)\n(deny default)\n${body}\n`, "--", "/bin/echo", "MARKER-OK"],
-		{ stdout: "pipe", stderr: "pipe", ...(cwd === undefined ? {} : { cwd }) },
-	);
-	const [out, err, code] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	const brief = (s: string) => JSON.stringify(s.length > 200 ? `${s.slice(0, 200)}…(${s.length})` : s);
-	return `exit=${code} out=${brief(out)} err=${brief(err)}`;
-}
-
-const MIN = `(allow process-exec)\n(allow file-read*)`;
-
-/** Every base rule, no comments — the shape that measured exit=0. */
-const RULES = [
-	`(allow process-fork)`,
-	`(allow process-exec)`,
-	`(allow signal (target same-sandbox))`,
-	`(allow process-info*)`,
-	`(allow pseudo-tty)`,
-	`(allow file-read* file-write* file-ioctl (literal "/dev/null"))`,
-	`(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))`,
-	`(allow file-ioctl (regex #"^/dev/ttys[0-9]+"))`,
-	`(allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))`,
-	`(allow ipc-posix-shm-read-data)`,
-	`(allow ipc-posix-shm-write-create)`,
-	`(allow ipc-posix-shm-write-unlink)`,
-	`(allow ipc-posix-sem)`,
-	`(allow mach-lookup\n  (global-name "com.apple.system.opendirectoryd.libinfo")\n  (global-name "com.apple.PowerManagement.control"))`,
-].join("\n");
-
-test("comments or cwd", async () => {
+test("where the output goes", async () => {
 	if (process.platform !== "darwin") return;
 	const rows: string[] = [];
+	const cwd = mkdtempSync(join(tmpdir(), "lbb-where-"));
+	writeFileSync(
+		join(cwd, "noisy.js"),
+		`console.log("MARKER-OK");\nfor (let i = 1; i <= 5; i++) console.log("line " + i);\n`,
+	);
 
-	// Control in both cwds, so a cwd-specific failure is visible as such.
-	rows.push(`CONTROL-repo: ${await run("(allow default)")}`);
-	rows.push(`CONTROL-tmp: ${await run("(allow default)", REAL)}`);
+	// 1. The operations layer alone, no policy: is stdout captured at all?
+	const bare = await defaultOperations().exec({
+		command: `${process.execPath} noisy.js`,
+		cwd,
+		timeoutMs: 60_000,
+		signal: new AbortController().signal,
+		onOutput: () => {},
+	});
+	rows.push(`NO-POLICY: exit=${bare.exitCode} out=${JSON.stringify(bare.stdout)} err=${JSON.stringify(bare.stderr)}`);
 
-	// Vary cwd, no comments.
-	rows.push(`RULES-repo: ${await run(RULES)}`);
-	rows.push(`RULES-tmp: ${await run(RULES, REAL)}`);
+	// 2. The same, with the policy the tool would build. If this is the one that
+	// empties, the difference is the policy and not the tool or the shell.
+	const policy = await workspacePolicy(cwd, { sandbox: "workspace-write" });
+	rows.push(`POLICY: roots=${JSON.stringify(policy.fileSystem.entries.map((e) => `${e.access}:${e.path}`))}`);
+	const wrapped = await defaultOperations().exec({
+		command: `${process.execPath} noisy.js`,
+		cwd,
+		timeoutMs: 60_000,
+		signal: new AbortController().signal,
+		sandbox: policy,
+		onOutput: () => {},
+	});
+	rows.push(
+		`WITH-POLICY: exit=${wrapped.exitCode} out=${JSON.stringify(wrapped.stdout)} err=${JSON.stringify(wrapped.stderr)}`,
+	);
 
-	// Vary comments, same cwd. The file's own text, comments included.
-	const full = buildSeatbeltArgs(buildSandboxPolicy({ sandbox: "workspace-write", workspace: REAL }), [
-		"/bin/echo",
-		"MARKER-OK",
-	]);
-	const profile = full[1] ?? "";
-	const params = full.slice(2).filter((a) => a !== "--");
-	const baseWithComments = profile.split("\n; Read baseline")[0] ?? "";
-	rows.push(`COMMENTS-repo: ${await run(`${baseWithComments}\n${MIN}`)}`);
-	rows.push(`COMMENTS-tmp: ${await run(`${baseWithComments}\n${MIN}`, REAL)}`);
+	// 3. A command that cannot be a path or a policy question: a bare echo.
+	const echoed = await defaultOperations().exec({
+		command: "echo MARKER-DIRECT",
+		cwd,
+		timeoutMs: 60_000,
+		signal: new AbortController().signal,
+		sandbox: policy,
+		onOutput: () => {},
+	});
+	rows.push(
+		`ECHO-WITH-POLICY: exit=${echoed.exitCode} out=${JSON.stringify(echoed.stdout)} err=${JSON.stringify(echoed.stderr)}`,
+	);
 
-	// The whole thing, as production builds it.
-	const prod = Bun.spawn;
-	void prod;
-	rows.push(`FULL-profile-tmp: ${await spawnFull(profile, params, REAL)}`);
-
-	// The same profile text with every `;` comment line deleted: if this passes
-	// and COMMENTS-tmp does not, a comment is the trigger.
-	const stripped = baseWithComments
-		.split("\n")
-		.filter((line) => !line.trimStart().startsWith(";"))
-		.join("\n");
-	rows.push(`STRIPPED-repo: ${await run(`${stripped}\n${MIN}`)}`);
-	rows.push(`STRIPPED-tmp: ${await run(`${stripped}\n${MIN}`, REAL)}`);
+	// 4. The tool, exactly as the failing test calls it.
+	const tools = createAllTools(cwd, { operations: defaultOperations() });
+	const bash = tools.find((tool) => tool.name === "Bash");
+	const result = await bash?.call(
+		{ command: `${process.execPath} noisy.js` },
+		{ callId: "c1", signal: new AbortController().signal, cwd, sandbox: "workspace-write", onUpdate: () => {} },
+	);
+	rows.push(
+		`TOOL: ${JSON.stringify(result === undefined ? "no Bash tool" : (result.content[0] as { text: string }).text)}`,
+	);
 
 	expect(rows.join("\n")).toBe("table");
 }, 180_000);
-
-async function spawnFull(profile: string, params: string[], cwd: string): Promise<string> {
-	const proc = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, ...params, "--", "/bin/echo", "MARKER-OK"], {
-		stdout: "pipe",
-		stderr: "pipe",
-		cwd,
-	});
-	const [out, err, code] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	const brief = (s: string) => JSON.stringify(s.length > 200 ? `${s.slice(0, 200)}…(${s.length})` : s);
-	return `exit=${code} out=${brief(out)} err=${brief(err)}`;
-}
