@@ -94,14 +94,34 @@ async function startEcho() {
 	return { port: portOf(server), connections: () => connections, close: () => shut(server) };
 }
 
+/**
+ * The blocklist stand-in for tests that need a connection to actually happen.
+ *
+ * Every upstream in this file listens on `127.0.0.1`, which is the one address
+ * class this build refuses, so without this there is no way to write a test that
+ * reaches an origin. `() => false` is the widest possible stand-in on purpose —
+ * a narrower one (blocking only some hosts) would let a test pass while the real
+ * table still covered what it was exercising.
+ *
+ * The tests that pin the blocklist itself deliberately do **not** use it. That
+ * split is the point of having the option at all, and it is why the option is a
+ * parameter rather than a module-level default a test could not override.
+ */
+const blockNothing = (): boolean => false;
+
 /** Run `body` against a restricted proxy and two upstreams, then tear all down. */
 async function withProxy(
 	rules: readonly NetworkDomainRule[],
 	body: (ports: { proxy: number; socks: number; upstream: number; echo: number }) => Promise<void>,
+	/**
+	 * Passed straight through to `startNetworkProxy`. Left out means the real
+	 * blocklist runs, which is the default every test should be in.
+	 */
+	isBlockedHost?: (host: string) => boolean,
 ) {
 	const upstream = await startUpstream();
 	const echo = await startEcho();
-	const proxy = await startNetworkProxy({ network: "restricted", rules });
+	const proxy = await startNetworkProxy({ network: "restricted", rules, isBlockedHost });
 	if (!proxy) throw new Error("expected the policy to confine something");
 	try {
 		await body({
@@ -273,7 +293,11 @@ describe("startNetworkProxy", () => {
 describe("HTTP proxy", () => {
 	test("an absolute-form request to an allowed host arrives at the origin", async () => {
 		const upstream = await startUpstream();
-		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("127.0.0.1") });
+		const proxy = await startNetworkProxy({
+			network: "restricted",
+			rules: allow("127.0.0.1"),
+			isBlockedHost: blockNothing,
+		});
 		if (!proxy) throw new Error("expected a proxy");
 		try {
 			const { head, body } = await exchange(
@@ -291,7 +315,15 @@ describe("HTTP proxy", () => {
 
 	test("a request the rules do not allow is refused and never reaches the origin", async () => {
 		const upstream = await startUpstream();
-		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("example.com") });
+		// Injected, and the reason is not tidiness. The origin is on `127.0.0.1`,
+		// so with the real blocklist running the refusal would be
+		// `blocked_address` — the right answer for the wrong reason, and this
+		// test would stop testing the rule engine it is named for.
+		const proxy = await startNetworkProxy({
+			network: "restricted",
+			rules: allow("example.com"),
+			isBlockedHost: blockNothing,
+		});
 		if (!proxy) throw new Error("expected a proxy");
 		try {
 			const { head } = await exchange(
@@ -312,30 +344,41 @@ describe("HTTP proxy", () => {
 	});
 
 	test("CONNECT tunnels to an allowed destination", async () => {
-		await withProxy(allow("127.0.0.1"), async ({ proxy, echo }) => {
-			const socket = await open(proxy);
-			const io = reader(socket);
-			socket.write(`CONNECT 127.0.0.1:${echo} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
-			expect(await io.until("\r\n\r\n")).toContain("200 Connection Established");
-			socket.write("ping");
-			// Upper-cased by the echo upstream, so the bytes are provably its.
-			expect((await io.read(4)).toString("latin1")).toBe("PING");
-			socket.destroy();
-		});
+		await withProxy(
+			allow("127.0.0.1"),
+			async ({ proxy, echo }) => {
+				const socket = await open(proxy);
+				const io = reader(socket);
+				socket.write(`CONNECT 127.0.0.1:${echo} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+				expect(await io.until("\r\n\r\n")).toContain("200 Connection Established");
+				socket.write("ping");
+				// Upper-cased by the echo upstream, so the bytes are provably its.
+				expect((await io.read(4)).toString("latin1")).toBe("PING");
+				socket.destroy();
+			},
+			blockNothing,
+		);
 	});
 
 	test("CONNECT refuses a denied destination before opening a socket", async () => {
-		await withProxy([...allow("127.0.0.1"), ...deny("127.0.0.1")], async ({ proxy, echo }) => {
-			// Both rules cover the same host, so this is the deny-beats-allow
-			// invariant arriving over a real socket rather than as a value.
-			const socket = await open(proxy);
-			const io = reader(socket);
-			socket.write(`CONNECT 127.0.0.1:${echo} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
-			const status = await io.until("\r\n\r\n");
-			expect(status).toContain("403 Forbidden");
-			expect(status).toContain("X-LBB-Denial: domain_denied");
-			socket.destroy();
-		});
+		await withProxy(
+			[...allow("127.0.0.1"), ...deny("127.0.0.1")],
+			async ({ proxy, echo }) => {
+				// Both rules cover the same host, so this is the deny-beats-allow
+				// invariant arriving over a real socket rather than as a value.
+				const socket = await open(proxy);
+				const io = reader(socket);
+				socket.write(`CONNECT 127.0.0.1:${echo} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+				const status = await io.until("\r\n\r\n");
+				expect(status).toContain("403 Forbidden");
+				expect(status).toContain("X-LBB-Denial: domain_denied");
+				socket.destroy();
+			},
+			// Same reason as above: `127.0.0.1` under the real blocklist never
+			// reaches the rules, so `domain_denied` would be asserted by a refusal
+			// the rules had nothing to do with.
+			blockNothing,
+		);
 	});
 });
 
@@ -343,53 +386,65 @@ describe("HTTP proxy", () => {
 
 describe("SOCKS5", () => {
 	test("tunnels an allowed destination", async () => {
-		await withProxy(allow("127.0.0.1"), async ({ socks, echo }) => {
-			const socket = await open(socks);
-			const io = reader(socket);
-			socket.write(Buffer.from([0x05, 0x01, 0x00]));
-			expect(Array.from(await io.read(2))).toEqual([0x05, 0x00]);
-			socket.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, echo >> 8, echo & 0xff]));
-			expect((await io.read(10))[1]).toBe(0x00);
-			socket.write("ping");
-			expect((await io.read(4)).toString("latin1")).toBe("PING");
-			socket.destroy();
-		});
+		await withProxy(
+			allow("127.0.0.1"),
+			async ({ socks, echo }) => {
+				const socket = await open(socks);
+				const io = reader(socket);
+				socket.write(Buffer.from([0x05, 0x01, 0x00]));
+				expect(Array.from(await io.read(2))).toEqual([0x05, 0x00]);
+				socket.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, echo >> 8, echo & 0xff]));
+				expect((await io.read(10))[1]).toBe(0x00);
+				socket.write("ping");
+				expect((await io.read(4)).toString("latin1")).toBe("PING");
+				socket.destroy();
+			},
+			blockNothing,
+		);
 	});
 
 	test("refuses with the ruleset code rather than dropping the connection", async () => {
-		await withProxy(allow("example.com"), async ({ socks, echo }) => {
-			const socket = await open(socks);
-			const io = reader(socket);
-			socket.write(Buffer.from([0x05, 0x01, 0x00]));
-			await io.read(2);
-			socket.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, echo >> 8, echo & 0xff]));
-			// 0x02 is "connection not allowed by ruleset". A dropped socket would
-			// also keep the destination unreachable, but the client would report
-			// a transport failure and never learn there was a policy.
-			expect((await io.read(10))[1]).toBe(0x02);
-			socket.destroy();
-		});
+		await withProxy(
+			allow("example.com"),
+			async ({ socks, echo }) => {
+				const socket = await open(socks);
+				const io = reader(socket);
+				socket.write(Buffer.from([0x05, 0x01, 0x00]));
+				await io.read(2);
+				socket.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, echo >> 8, echo & 0xff]));
+				// 0x02 is "connection not allowed by ruleset". A dropped socket would
+				// also keep the destination unreachable, but the client would report
+				// a transport failure and never learn there was a policy.
+				expect((await io.read(10))[1]).toBe(0x02);
+				socket.destroy();
+			},
+			blockNothing,
+		);
 	});
 
 	test("reads a domain-name address, which is the length-prefixed branch", async () => {
-		await withProxy(allow("127.0.0.1"), async ({ socks, echo }) => {
-			const socket = await open(socks);
-			const io = reader(socket);
-			socket.write(Buffer.from([0x05, 0x01, 0x00]));
-			await io.read(2);
-			const name = Buffer.from("127.0.0.1", "latin1");
-			socket.write(
-				Buffer.concat([
-					Buffer.from([0x05, 0x01, 0x00, 0x03, name.length]),
-					name,
-					Buffer.from([echo >> 8, echo & 0xff]),
-				]),
-			);
-			expect((await io.read(10))[1]).toBe(0x00);
-			socket.write("ping");
-			expect((await io.read(4)).toString("latin1")).toBe("PING");
-			socket.destroy();
-		});
+		await withProxy(
+			allow("127.0.0.1"),
+			async ({ socks, echo }) => {
+				const socket = await open(socks);
+				const io = reader(socket);
+				socket.write(Buffer.from([0x05, 0x01, 0x00]));
+				await io.read(2);
+				const name = Buffer.from("127.0.0.1", "latin1");
+				socket.write(
+					Buffer.concat([
+						Buffer.from([0x05, 0x01, 0x00, 0x03, name.length]),
+						name,
+						Buffer.from([echo >> 8, echo & 0xff]),
+					]),
+				);
+				expect((await io.read(10))[1]).toBe(0x00);
+				socket.write("ping");
+				expect((await io.read(4)).toString("latin1")).toBe("PING");
+				socket.destroy();
+			},
+			blockNothing,
+		);
 	});
 
 	test("decides on the IPv6 address it parsed, not on the raw bytes", async () => {
@@ -398,17 +453,228 @@ describe("SOCKS5", () => {
 		// written so that a correct parse denies and a broken one allows — and an
 		// allowed `::1` would then try to connect, which is what makes this fail
 		// loudly rather than silently.
-		await withProxy([...allow("*"), ...deny("::1")], async ({ socks }) => {
+		//
+		// Injected, and this is the one that *would* have gone vacuous: `::1` is
+		// refused by the blocklist too, so without the stand-in this test would
+		// still see 0x02 — for a different reason — and would stop testing the
+		// sixteen-byte parse entirely.
+		await withProxy(
+			[...allow("*"), ...deny("::1")],
+			async ({ socks }) => {
+				const socket = await open(socks);
+				const io = reader(socket);
+				socket.write(Buffer.from([0x05, 0x01, 0x00]));
+				await io.read(2);
+				socket.write(
+					// `::1` is sixteen bytes; the last group is 1.
+					Buffer.from([0x05, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb]),
+				);
+				expect((await io.read(10))[1]).toBe(0x02);
+				socket.destroy();
+			},
+			blockNothing,
+		);
+	});
+});
+
+// --- the address blocklist, with the real table running --------------------
+
+/**
+ * Everything above injects a stand-in, which is the only way a test on this
+ * machine can reach an origin. These are the tests that pay for it: they run the
+ * real blocklist and none of them pass `isBlockedHost`, so deleting the table
+ * from `proxy.ts` turns every one of them red.
+ *
+ * The rules are `allow("*")` in each case. That is the whole point — it is the
+ * rule a user writes to make the network work, and measured against the code as
+ * it was it answered `allowed: true` for `127.0.0.1` and for
+ * `169.254.169.254`, so the proxy would relay to either one. A blocklist tested
+ * only against rules that *refuse* proves nothing about the case that mattered.
+ */
+describe("the address blocklist runs before the rules, on the real table", () => {
+	test("HTTP: allow-* does not reach loopback, and says so in the reason", async () => {
+		const upstream = await startUpstream();
+		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("*") });
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			const { head } = await exchange(
+				portOfUrl(proxy.httpUrl),
+				`GET http://127.0.0.1:${upstream.port}/secret HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`,
+			);
+			expect(head).toContain("403 Forbidden");
+			// Not `no_matching_allow_rule`, and not `domain_denied`: those two send
+			// the user to the allow list, where the entry they need is one they
+			// cannot add. The origin never answers either way, so the count below
+			// is the assertion that matters.
+			expect(head.toLowerCase()).toContain("x-lbb-denial: blocked_address");
+			expect(upstream.seen()).toEqual([]);
+			expect(upstream.connections()).toBe(0);
+		} finally {
+			await proxy.close();
+			await upstream.close();
+		}
+	});
+
+	test("CONNECT: allow-* does not tunnel to loopback", async () => {
+		await withProxy(allow("*"), async ({ proxy, echo }) => {
+			const socket = await open(proxy);
+			const io = reader(socket);
+			socket.write(`CONNECT 127.0.0.1:${echo} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+			const status = await io.until("\r\n\r\n");
+			expect(status).toContain("403 Forbidden");
+			expect(status).toContain("X-LBB-Denial: blocked_address");
+			socket.destroy();
+		});
+	});
+
+	/**
+	 * The order, as an assertion.
+	 *
+	 * `allow("*")` alone would pass whichever order the two ran in — the rules
+	 * permit and the blocklist refuses, and a blocklist consulted second still
+	 * refuses. What distinguishes them is a host the user's rules *also* have an
+	 * opinion about. Here the deny wins over nothing and the blocklist wins over
+	 * it, so the reason has to be `blocked_address`: a refusal the user wrote a
+	 * rule for would be reported as one, and the entry they would go and remove
+	 * is an `allow` they cannot remove. Equivalently — a user cannot un-block an
+	 * address by configuring one, which is the property worth having.
+	 */
+	test("a rule about the same host does not change the reason, because the table is asked first", async () => {
+		await withProxy([...allow("*"), ...deny("127.0.0.1")], async ({ proxy, echo }) => {
+			const socket = await open(proxy);
+			const io = reader(socket);
+			socket.write(`CONNECT 127.0.0.1:${echo} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+			const status = await io.until("\r\n\r\n");
+			expect(status).toContain("403 Forbidden");
+			expect(status).toContain("X-LBB-Denial: blocked_address");
+			expect(status).not.toContain("X-LBB-Denial: domain_denied");
+			socket.destroy();
+		});
+	});
+
+	/**
+	 * The other direction, and this one is what makes the stand-in trustworthy.
+	 *
+	 * Written first as "the same rules now permit the request", which failed with
+	 * `X-LBB-Denial: domain_denied` — correctly. The stand-in removes the *table*
+	 * and nothing else, so the rules still run and a `deny` for this host still
+	 * refuses. The assertion below is that failure turned round: with the table
+	 * gone the refusal comes from the user's own rule, and no longer from
+	 * `blocked_address`. A stand-in that also disabled the decision would pass
+	 * the `allow`-only rows above and fail to be noticed.
+	 */
+	test("the stand-in replaces the table, not the decision", async () => {
+		await withProxy(
+			[...allow("*"), ...deny("127.0.0.1")],
+			async ({ proxy, echo }) => {
+				const socket = await open(proxy);
+				const io = reader(socket);
+				socket.write(`CONNECT 127.0.0.1:${echo} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`);
+				const status = await io.until("\r\n\r\n");
+				expect(status).toContain("403 Forbidden");
+				expect(status).toContain("X-LBB-Denial: domain_denied");
+				expect(status).not.toContain("X-LBB-Denial: blocked_address");
+				socket.destroy();
+			},
+			blockNothing,
+		);
+	});
+
+	test("SOCKS5 ATYP 1: a refused IPv4 literal answers 0x02", async () => {
+		await withProxy(allow("*"), async ({ socks, echo }) => {
 			const socket = await open(socks);
 			const io = reader(socket);
 			socket.write(Buffer.from([0x05, 0x01, 0x00]));
 			await io.read(2);
+			socket.write(Buffer.from([0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, echo >> 8, echo & 0xff]));
+			expect((await io.read(10))[1]).toBe(0x02);
+			socket.destroy();
+		});
+	});
+
+	/**
+	 * The row that pins the *name* layer, and the reason `isBlockedNetworkHost`
+	 * exists rather than `isBlockedAddress` being wired in directly.
+	 *
+	 * `isBlockedAddress("localhost")` is `false` — it is an address predicate, and
+	 * a name is resolved rather than matched. A proxy wired to it would relay
+	 * `localhost` to whatever `/etc/hosts` says. This one goes through ATYP 3, the
+	 * length-prefixed name branch, so nothing about it is an address.
+	 */
+	test("SOCKS5 ATYP 3: the name localhost is refused, which the address table alone would not do", async () => {
+		await withProxy(allow("*"), async ({ socks }) => {
+			const socket = await open(socks);
+			const io = reader(socket);
+			socket.write(Buffer.from([0x05, 0x01, 0x00]));
+			await io.read(2);
+			const name = Buffer.from("localhost", "latin1");
 			socket.write(
-				// `::1` is sixteen bytes; the last group is 1.
-				Buffer.from([0x05, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb]),
+				Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, name.length]), name, Buffer.from([0x00, 0x50])]),
 			);
 			expect((await io.read(10))[1]).toBe(0x02);
 			socket.destroy();
 		});
+	});
+
+	/** The same name in the spelling a socket actually produces, upper-cased. */
+	test("SOCKS5 ATYP 3: LOCALHOST is refused too, which is what the case folding is for", async () => {
+		await withProxy(allow("*"), async ({ socks }) => {
+			const socket = await open(socks);
+			const io = reader(socket);
+			socket.write(Buffer.from([0x05, 0x01, 0x00]));
+			await io.read(2);
+			const name = Buffer.from("LOCALHOST", "latin1");
+			socket.write(
+				Buffer.concat([Buffer.from([0x05, 0x01, 0x00, 0x03, name.length]), name, Buffer.from([0x00, 0x50])]),
+			);
+			expect((await io.read(10))[1]).toBe(0x02);
+			socket.destroy();
+		});
+	});
+
+	test("SOCKS5 ATYP 4: a refused IPv6 literal answers 0x02 on the real table", async () => {
+		await withProxy(allow("*"), async ({ socks }) => {
+			const socket = await open(socks);
+			const io = reader(socket);
+			socket.write(Buffer.from([0x05, 0x01, 0x00]));
+			await io.read(2);
+			socket.write(Buffer.from([0x05, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb]));
+			expect((await io.read(10))[1]).toBe(0x02);
+			socket.destroy();
+		});
+	});
+
+	/**
+	 * The pair, and the one that makes the stand-in above honest.
+	 *
+	 * Every other test in this file refuses because the blocklist ran. This one
+	 * reaches a real origin through the *same* request shape the two SOCKS5 rows
+	 * above are refused for, differing only in the injected predicate. If the
+	 * injection stopped being what it says it is, this goes red; if the blocklist
+	 * stopped running, the rows above go red.
+	 */
+	test("the same request is allowed once the table is stood down, so the refusals above were the table's doing", async () => {
+		await withProxy(
+			allow("*"),
+			async ({ socks, echo }) => {
+				const socket = await open(socks);
+				const io = reader(socket);
+				socket.write(Buffer.from([0x05, 0x01, 0x00]));
+				await io.read(2);
+				const name = Buffer.from("localhost", "latin1");
+				socket.write(
+					Buffer.concat([
+						Buffer.from([0x05, 0x01, 0x00, 0x03, name.length]),
+						name,
+						Buffer.from([echo >> 8, echo & 0xff]),
+					]),
+				);
+				expect((await io.read(10))[1]).toBe(0x00);
+				socket.write("ping");
+				expect((await io.read(4)).toString("latin1")).toBe("PING");
+				socket.destroy();
+			},
+			blockNothing,
+		);
 	});
 });

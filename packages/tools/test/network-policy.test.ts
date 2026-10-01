@@ -16,6 +16,7 @@ import {
 	describeNetworkPolicy,
 	domainMatches,
 	isBlockedAddress,
+	isBlockedNetworkHost,
 	matchDomainRule,
 	type NetworkConfinement,
 	type NetworkDomainRule,
@@ -217,6 +218,74 @@ describe("an address has more spellings than a hostname does", () => {
 			// Asserting both keeps the two questions from drifting into one wrong answer.
 			expect(isBlockedAddress("localhost")).toBe(false);
 			expect(isBlockedAddress("example.com")).toBe(false);
+		});
+	});
+
+	describe("isBlockedNetworkHost, the one the socket-facing callers use", () => {
+		/**
+		 * The whole reason this function exists is that it answers a different
+		 * question from the one above it. `isBlockedAddress` takes something that
+		 * has already been resolved; a proxy reads a hostname off a socket, and a
+		 * hostname that is never resolved here is relayed to whatever `/etc/hosts`
+		 * says. So the two are asserted against each other rather than only
+		 * against a list of right answers — a change that made them agree by
+		 * making the new one stop covering names would pass a table of answers.
+		 */
+		test.each([
+			["localhost", "the name itself"],
+			["LOCALHOST", "the same name as a socket spells it"],
+			["LocalHost", "mixed case"],
+			["foo.localhost", "a subdomain of it, which the name layer covers too"],
+			// Below: the same rows as the address table, to show the new function
+			// is a superset rather than a replacement.
+			["127.0.0.1", "an address"],
+			["[::1]", "an address in the brackets a URL carries"],
+			["169.254.169.254", "link-local, which is cloud metadata"],
+			["10.0.0.1", "private"],
+			["0.0.0.0", "the unspecified address"],
+		])("refuses %s (%s)", (host) => {
+			expect(isBlockedNetworkHost(host)).toBe(true);
+		});
+
+		test.each(["8.8.8.8", "example.com", "2001:db8::1", "[2001:db8::1]:8080", "not a host"])(
+			"does not refuse %s",
+			(host) => {
+				expect(isBlockedNetworkHost(host)).toBe(false);
+			},
+		);
+
+		test("the two functions disagree about exactly the names, and the row is the disagreement", () => {
+			// Read as a pair: the left column is what the address table answers and
+			// the right is what the host-level function answers for the same input.
+			// Every row is a case where using the wrong one is a hole.
+			expect([
+				[isBlockedAddress("localhost"), isBlockedNetworkHost("localhost")],
+				[isBlockedAddress("LOCALHOST"), isBlockedNetworkHost("LOCALHOST")],
+				[isBlockedAddress("foo.localhost"), isBlockedNetworkHost("foo.localhost")],
+				[isBlockedAddress("127.0.0.1"), isBlockedNetworkHost("127.0.0.1")],
+			]).toEqual([
+				[false, true],
+				[false, true],
+				[false, true],
+				[true, true],
+			]);
+		});
+
+		test("the bracket form is not hypothetical — it is what URL parsing produces", () => {
+			// `new URL("http://[::1]:8080/").hostname` returns the literal with its
+			// brackets, so a caller that skipped normalisation would hand
+			// `isBlockedAddress` a string its range table cannot read.
+			expect(new URL("http://[::1]:8080/").hostname).toBe("[::1]");
+			expect(isBlockedNetworkHost(new URL("http://[::1]:8080/").hostname)).toBe(true);
+		});
+
+		test("a host that will not normalise is not reported as a blocked address", () => {
+			// It is refused — by the rule engine, as `malformed_host`. Answering
+			// true here would point at the wrong of the two, and the two travel in
+			// the same header.
+			expect(isBlockedNetworkHost("not a host")).toBe(false);
+			expect(isBlockedNetworkHost("")).toBe(false);
+			expect(isBlockedNetworkHost("[bad")).toBe(false);
 		});
 	});
 

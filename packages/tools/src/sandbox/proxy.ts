@@ -4,9 +4,10 @@
  * This is the part of the network axis that touches a socket; the decision it
  * enforces is a pure function in `@labunbun/agent` (`network-policy.ts`) so
  * that the rules can be asserted on any machine, including the Windows one this
- * was written on. Every connection here goes through `decideNetworkRequest`
- * **before** an upstream socket is opened, which is the property that makes
- * this a filter rather than a logger.
+ * was written on. Every connection here goes through one gate —
+ * {@link decideUpstream}, the address blocklist and then the domain rules —
+ * **before** an upstream socket is opened, which is the property that makes this
+ * a filter rather than a logger.
  *
  * ## No MITM, deliberately
  *
@@ -41,7 +42,13 @@ import type { EventEmitter } from "node:events";
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createTcpServer, connect as netConnect, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
-import { decideNetworkRequest, type NetworkDomainRule, needsNetworkProxy } from "@labunbun/agent";
+import {
+	decideNetworkRequest,
+	isBlockedNetworkHost,
+	type NetworkDecision,
+	type NetworkDomainRule,
+	needsNetworkProxy,
+} from "@labunbun/agent";
 
 /** SOCKS5 reply codes. RFC 1928 §6. */
 const SOCKS_SUCCESS = 0x00;
@@ -72,6 +79,39 @@ export interface NetworkProxyOptions {
 	host?: string;
 	/** Give up on an upstream that has not answered `connect` in this long. */
 	connectTimeoutMs?: number;
+	/**
+	 * The address blocklist. Defaults to {@link isBlockedNetworkHost}.
+	 *
+	 * Injectable for one reason, and it is a narrow one: a test that wants to
+	 * watch a *permitted* connection happen has to connect somewhere, and every
+	 * address this build refuses is a loopback address — the only kind the test
+	 * machine has. An injection point lets those tests run against a stand-in
+	 * without turning the real table off, and the tests that pin the real table
+	 * deliberately do **not** pass this.
+	 */
+	isBlockedHost?: (host: string) => boolean;
+}
+
+/**
+ * The one gate. Every upstream connection in this file goes through here, and it
+ * runs the address blocklist **before** the domain rules rather than after.
+ *
+ * The order is the whole point. The rules are a user's configuration and a user
+ * can write `*`, which answers `allowed: true` for `127.0.0.1` and for
+ * `169.254.169.254` — so the blocklist has to be the thing that can still say
+ * no. It is also the reason `blocked_address` is its own reason code: a refusal
+ * from here that reported `no_matching_allow_rule` would send the user to the
+ * allowlist, where the entry they need is one they cannot add.
+ *
+ * One function rather than a check pasted into three handlers, because three
+ * copies is how {@link handleHttp} ends up consulting a table `handleSocks` does
+ * not — and with a SOCKS client the only evidence it got is a single byte, so a
+ * missed gate there is invisible from the outside.
+ */
+function decideUpstream(options: NetworkProxyOptions, host: string): NetworkDecision {
+	const blocked = (options.isBlockedHost ?? isBlockedNetworkHost)(host);
+	if (blocked) return { allowed: false, reason: "blocked_address" };
+	return decideNetworkRequest(options.rules, host, options.network);
 }
 
 export interface NetworkProxy {
@@ -197,7 +237,7 @@ async function handleConnect(
 	track: <T extends Duplex>(socket: T) => T,
 ): Promise<void> {
 	const [host, port] = splitHostPort(req.url ?? "");
-	const decision = decideNetworkRequest(options.rules, host, options.network);
+	const decision = decideUpstream(options, host);
 	if (!decision.allowed) {
 		// 403 rather than a reset, and the reason in a header. A client that
 		// cannot read why it was refused says "connection failed", and the one
@@ -226,7 +266,7 @@ async function handleConnect(
  */
 async function handleHttp(options: NetworkProxyOptions, req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const target = new URL(req.url ?? "");
-	const decision = decideNetworkRequest(options.rules, target.hostname, options.network);
+	const decision = decideUpstream(options, target.hostname);
 	if (!decision.allowed) {
 		res.writeHead(403, { "content-type": "text/plain", "x-lbb-denial": decision.reason ?? "denied" });
 		res.end(`refused by network policy: ${decision.reason ?? "denied"}\n`);
@@ -304,8 +344,13 @@ async function handleSocks(
 		const host = await readAddress(reader.read, byte(head, 3));
 		const port = uint16(await reader.read(2));
 
-		const decision = decideNetworkRequest(options.rules, host, options.network);
+		const decision = decideUpstream(options, host);
 		if (!decision.allowed) {
+			// No reason reaches the client here, and that is the protocol rather
+			// than an oversight: RFC 1928's reply carries a code and nothing else,
+			// so a blocked address, a denied domain and an unmatched allow rule
+			// are one byte apart to a SOCKS client. `handleConnect` above answers
+			// in a header because HTTP has somewhere to put it.
 			client.write(socksReply(SOCKS_REFUSED));
 			client.end();
 			return;

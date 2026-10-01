@@ -88,12 +88,21 @@ export interface NetworkDomainRule {
 /**
  * Why a request was refused. Carried so the proxy can answer in words.
  *
- * There is no "the mode said no" code, because there is no case only the mode
- * can produce: a request the mode refuses is one that matched no rule, and a
- * request that matched a rule was already answered by that rule. A fourth code
- * that nothing can return would be a reason string with no request behind it.
+ * The first three are the rule engine's, and there is deliberately no "the mode
+ * said no" code among them: a request the mode refuses is one that matched no
+ * rule, and a request that matched a rule was already answered by that rule. A
+ * fourth code from the engine would be a reason string with no request behind
+ * it.
+ *
+ * `blocked_address` is that fourth code, and it exists because the set of things
+ * that can refuse grew rather than because the reasoning above was wrong. An
+ * address the blocklist refuses is a request the rules never see: `*` under
+ * `restricted` answers `allowed: true` for `127.0.0.1` and for
+ * `169.254.169.254`, so with only these three codes a refusal by the blocklist
+ * would have to be reported as one of the rule engine's, and the user would go
+ * looking for an allowlist entry that was never the problem.
  */
-export type NetworkDenialReason = "domain_denied" | "no_matching_allow_rule" | "malformed_host";
+export type NetworkDenialReason = "domain_denied" | "no_matching_allow_rule" | "malformed_host" | "blocked_address";
 
 export interface NetworkDecision {
 	allowed: boolean;
@@ -353,6 +362,39 @@ export function isBlockedAddress(address: string): boolean {
 	if (lower.startsWith("fe80:")) return true; // link-local
 	if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // unique local
 	return false;
+}
+
+/**
+ * Whether a host arriving off the wire is one this build refuses to reach —
+ * addresses *and* the names that mean them. This is the whole blocklist; the two
+ * functions under it each know one half.
+ *
+ * `isBlockedAddress` above takes an address and refuses every non-address,
+ * `localhost` included, because a name is not blocked by table — it is resolved,
+ * and a resolved name is only blocked once it comes back as one of these
+ * addresses. That is the right contract for a caller that has already resolved.
+ * It is the wrong one for a caller reading a hostname off a socket: `localhost`
+ * arrives as a name, is never resolved here, and would be relayed to whatever
+ * `/etc/hosts` says. `isLoopbackHost` is the layer that knows the name, and it
+ * could not simply be exported, because it does no case folding and assumes the
+ * caller ran {@link normalizeHost} first — a precondition the proxy's three
+ * entry points each met differently, and one a future fourth entry point would
+ * not.
+ *
+ * So this normalises first and is the only thing callers should reach for. That
+ * is also what makes it total over the shapes the wire actually produces:
+ * `[::1]` (which is what `new URL("http://[::1]:8080/").hostname` returns),
+ * `[2001:db8::1]:8080`, `LOCALHOST`, `127.1` and `0177.0.0.1` all reduce to one
+ * string each and all answer the same way.
+ *
+ * **A host that will not normalise is not blocked here.** It is refused by the
+ * rule engine as `malformed_host`, and reporting it as an address problem would
+ * point at the wrong one of the two.
+ */
+export function isBlockedNetworkHost(host: string): boolean {
+	const normalized = normalizeHost(host);
+	if (normalized === "") return false;
+	return isLoopbackHost(normalized) || isBlockedAddress(normalized);
 }
 
 /**

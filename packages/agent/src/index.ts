@@ -52,6 +52,7 @@ export {
 	describeNetworkPolicy,
 	domainMatches,
 	isBlockedAddress,
+	isBlockedNetworkHost,
 	matchDomainRule,
 	NETWORK_DOMAIN_PERMISSIONS,
 	type NetworkConfinement,
