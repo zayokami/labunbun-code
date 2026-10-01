@@ -1712,6 +1712,13 @@ describe("Windows: a protection that is switched off rather than used", () => {
 		["Add-MpPreference -ExclusionExtension .ps1", "excludes an extension"],
 		["Add-MpPreference -ExclusionProcess powershell", "excludes a process"],
 		["Add-MpPreference -ExclusionIpAddress 1.2.3.4", "excludes an address"],
+		// `Set-MpPreference` carries the same four `-Exclusion*` parameters as
+		// `Add-MpPreference` (confirmed by `Get-Command Set-MpPreference` on this
+		// machine), so the two install the same carve-out into Defender. One act,
+		// two spellings; before this the `Set-` one was null.
+		["Set-MpPreference -ExclusionPath C:\\Users", "excludes a path, via the cmdlet that replaces the list"],
+		["Set-MpPreference -ExclusionProcess notepad.exe", "excludes a process"],
+		["Set-MpPreference -ExclusionExtension .exe", "excludes an extension"],
 		["Disable-LocalUser someone", "locks an account out"],
 		["Disable-LocalUser -Name someone", "with the name behind a switch"],
 		["Unblock-File C:\\Users\\dev\\Downloads\\setup.exe", "strips the mark-of-the-web"],
@@ -3208,6 +3215,105 @@ describe("POSIX: the two startup families that need no login", () => {
 		["echo hi > /home/dev/ld.so.preload", "the file's name in a home directory"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(posix(command)).toBeNull();
+	});
+});
+
+describe("Windows: the acts whose sc and net twins are already rules", () => {
+	/**
+	 * Cmdlets whose command-line twins (`sc create`, `sc config`, `net user /add`,
+	 * `schtasks /change /disable`, `format`) are all classified. Each of these was
+	 * `null` before this batch — the same act, spelled the PowerShell way, which is
+	 * the exact gap class `POWERSHELL_ADMIN_CMDLETS`'s own docstring says was closed
+	 * once already.
+	 *
+	 * Every name here was confirmed to resolve by `Get-Command` on this machine,
+	 * which is what the table's docstring requires and what makes the list mean
+	 * something: `Set-LocalGroupMember` does *not* exist, so it is absent rather
+	 * than claimed, and the read-only siblings resolve too and are excluded.
+	 */
+	test.each([
+		["New-Service -Name Svc -BinaryPathName C:\\evil.exe", "installs a service, the `sc create` twin"],
+		["Set-Service -Name Spooler -StartupType Disabled", "disables a service, the `sc config` twin"],
+		["Disable-ScheduledTask -TaskName X", "the `schtasks /change /disable` twin"],
+		["Format-Volume -DriveLetter C", "reformats a volume, the `format` twin"],
+		["New-LocalUser backdoor", "creates an account, the `net user /add` twin"],
+		["Remove-LocalUser Administrator", "deletes a built-in account"],
+		["Clear-RecycleBin -Force", "makes a delete permanent"],
+		["Add-LocalGroupMember -Group Administrators -Member evil", "grants administrators membership"],
+		["New-LocalGroup -Name Admins2 -GroupType Administrators", "creates an administrators group"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The read-only half. `Get-LocalUser`, `Get-Service` and `Get-LocalGroup` all
+	 * resolve on this machine and none is destructive, so a rule keyed on the verb
+	 * rather than the name would have flagged them — which is the failure the
+	 * table's docstring says these entries are chosen to avoid.
+	 */
+	test.each([
+		["Get-LocalUser", "lists accounts"],
+		["Get-Service", "lists services"],
+		["Get-LocalGroup", "lists groups"],
+		["Get-LocalGroupMember -Group Administrators", "lists members"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+});
+
+describe("Windows: the Startup folder is the Run key by another door", () => {
+	/**
+	 * A registry Run value and a file in `%APPDATA%\…\Startup` are the same
+	 * persistence claim. The registry half was classified and the filesystem half
+	 * had no rule — `isRunKeyPath` matches a registry key, and a path can never
+	 * match it.
+	 *
+	 * The rule is keyed on the *target*, not the program, because the programs that
+	 * install into that folder (`copy`, `xcopy`, `Copy-Item`) are not registry
+	 * cmdlets. That is why it sits in the Windows admin dispatch rather than only
+	 * among the PowerShell weakening rules.
+	 */
+	test.each([
+		[
+			'copy /y payload.bat "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"',
+			"copy, naming the folder itself as the destination",
+		],
+		[
+			'echo x >> "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\evil.bat"',
+			"a redirect, naming a file inside it",
+		],
+		[
+			'Copy-Item payload.exe "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"',
+			"the PowerShell spelling",
+		],
+		[
+			'xcopy payload.cmd "C:\\Users\\dev\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup" /E',
+			"xcopy",
+		],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The boundary is the part worth pinning. A pattern that required a filename
+	 * after `Startup` catches `…\Startup\evil.bat` and misses `copy …\Startup`,
+	 * which is the more common of the two — so the "names the folder itself" row
+	 * above is what keeps a too-strict regex from passing this suite.
+	 */
+	test.each([
+		['copy /y x.bat "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\StartupBackup\\x.bat"', "a sibling folder"],
+		["copy /y notes.txt C:\\temp\\notes.txt", "an ordinary copy"],
+		['copy /y notes.txt "%APPDATA%\\Microsoft\\Windows\\Start Menu"', "the Start Menu itself, not Startup"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/** The registry half still fires, so the two doors are not conflated. */
+	test("the Run-key rule is untouched by the Startup-folder rule", () => {
+		expect(
+			windows("Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' -Name x -Value y"),
+		).not.toBeNull();
+		expect(windows("Get-Item 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run'")).toBeNull();
 	});
 });
 

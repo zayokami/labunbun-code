@@ -1815,6 +1815,61 @@ function isRunKeyPath(token: string): boolean {
 }
 
 /**
+ * Is this argument a path inside the per-user Startup folder?
+ *
+ * The filesystem counterpart to {@link isRunKeyPath}. A registry Run value and a
+ * `.lnk` or `.bat` dropped in `%APPDATA%\…\Startup` are the same persistence
+ * claim by two different doors: the first launches at logon by the registry
+ * reading it, the second because Explorer runs everything in that folder. The
+ * Run-key half was covered and this half had no rule, so
+ * `copy /y payload.bat "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"`
+ * was `null`.
+ *
+ * Matched on the `…\Startup` tail in the `%APPDATA%` and `$env:APPDATA` spellings a
+ * real command uses, because those are what arrives on the command line — the
+ * variable is not expanded here and must not be, since a rule that required a
+ * resolved `C:\Users\someone\…` would miss the form people actually type.
+ *
+ * **The trailing boundary is `(\\|$)`, and the difference is the whole rule.**
+ * `copy /y payload.bat "%APPDATA%\…\Startup"` names the *folder* — there is no
+ * filename after it — so a pattern requiring a separator followed by a name
+ * matched only the `…\Startup\evil.bat` form and returned null for the more common
+ * one. `\b` is the wrong boundary in the other direction: it fires between `p` and
+ * `B` in `StartupBackup`, so a sibling folder would be caught. Requiring either the
+ * end of the string or a `\` after `startup` excludes the longer word, because a
+ * `\w` sits where the `\` would have to be.
+ */
+function isStartupFolderPath(token: string): boolean {
+	// `\startup` at the end of the path, OR `\startup\anything` (a file dropped in
+	// it). A longer word like `StartupBackup` has a `\w` right after `startup`, so
+	// it fails both alternatives. The bare-`\startup` alternative is what catches
+	// `copy …\Startup`, where the folder itself is the destination.
+	//
+	// The longer `…\Start Menu\Programs\Startup` spelling was tried and removed: it
+	// is subsumed by the plain `\startup` tail, because every path that begins with
+	// it also ends in `\Startup`. Measured — a mutation that drops the long
+	// alternative changes no row's verdict, so it was redundant rather than load-
+	// bearing, and keeping it would be a branch no test could tell from the other.
+	//
+	// `\b` is NOT a substitute for the `(?:\\|$)` boundary, and the reason is the
+	// opposite of the obvious one: `\b` matches word-to-NON-word, and the `B` in
+	// `StartupBackup` is a word character, so `\startup\b` misses that sibling just
+	// the same. The two spellings agree on every path shape here, which is why no
+	// test can tell them apart. `(?:\\|$)` is kept because it states the intent —
+	// the next segment must be a directory or nothing — instead of leaning on a
+	// reader's recall of what `\b` means between two word characters.
+	//
+	// The `/i` is belt-and-braces: the parameter is `lower`, so the whole Windows
+	// line is folded before this runs and `Startup` has already become `startup`.
+	// A mutation that removes the flag therefore stays green. It is kept anyway,
+	// matching `isRunKeyPath` beside it, because a predicate that only works on
+	// pre-folded input is a trap for the next caller — and the cost of keeping it
+	// is one character, against the cost of a reader assuming the flag is load-
+	// bearing when it is not.
+	return /\\startup(?:\\|$)/i.test(token);
+}
+
+/**
  * The value that decides whether UAC prompts at all.
  *
  * Both spellings, because both are real: post-Vista it is `EnableLUA` and the
@@ -1914,8 +1969,18 @@ function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null
 			// direction that matters: skipping the absent case is a hole.
 			return { kind: "Other", rule: "PowerShell `Set-MpPreference` on a `Disable*` setting" };
 		}
-		if (head === "add-mppreference" && segment.some((w) => w.startsWith("-exclusion"))) {
-			return { kind: "Other", rule: "PowerShell `Add-MpPreference` excluding a path from scanning" };
+		// `Set-MpPreference` carries the same four `-Exclusion*` parameters as
+		// `Add-MpPreference` — `Get-Command Set-MpPreference` reports ExclusionPath,
+		// ExclusionExtension, ExclusionProcess, ExclusionIpAddress — so the two
+		// cmdlets install the same carve-out into Defender, one appending to the
+		// list and one replacing it. That is one act spelled two ways, and the
+		// `Add-` branch below was written for the act, so both heads belong in it.
+		// `Set-MpPreference` is the stronger of the two because it overwrites.
+		if (
+			(head === "add-mppreference" || head === "set-mppreference") &&
+			segment.some((w) => w.startsWith("-exclusion"))
+		) {
+			return { kind: "Other", rule: "PowerShell excluding a path from Defender scanning" };
 		}
 		if (head === "disable-localuser") {
 			return { kind: "Other", rule: "PowerShell `Disable-LocalUser`, which locks an account out" };
@@ -1925,6 +1990,26 @@ function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null
 				kind: "Other",
 				rule: "PowerShell `Unblock-File`, which strips the mark-of-the-web off a downloaded file",
 			};
+		}
+		// The Startup folder, checked on the *path* rather than on the program. The
+		// Run key below can only match `set-itemproperty`/`new-itemproperty` because
+		// those are the cmdlets that write a registry value; the Startup folder is
+		// ordinary files, so `copy`, `xcopy` and `Copy-Item` install into it just as
+		// well and none of them is a registry cmdlet. Keying on the target is what
+		// makes it program-agnostic — the same asymmetry `isRunKeyPath` has against
+		// `isRecordPath`, argued in that function's comment.
+		//
+		// **It reaches `copy` and `xcopy` even though this is the PowerShell rule,
+		// and that is measured rather than assumed.** `matchWindows` calls
+		// `dangerousPowershellWords(tokens)` on every Windows line, not only one
+		// prefixed with `powershell` — the comment on `matchWindows` says so — so a
+		// CMD line is read against both vocabularies. A second copy of this check in
+		// `dangerousWindowsAdmin` was measured to be dead: with it removed, `copy`,
+		// `xcopy`, `Copy-Item` and the redirect form are all still caught here. It
+		// was deleted rather than left, and the Startup-folder rows are what keep this
+		// one honest now.
+		if (segment.some(isStartupFolderPath)) {
+			return { kind: "Other", rule: "copying a file into the Startup folder, which runs at every logon" };
 		}
 		// Two independent things, checked apart rather than as one conjunction:
 		// writing a value under the startup key does not mention UAC, and turning
@@ -2582,6 +2667,7 @@ const POWERSHELL_ADMIN_CMDLETS: ReadonlyMap<string, string> = new Map([
 	["remove-netfirewallrule", "removes a firewall rule"],
 	["register-scheduledtask", "registers a task that runs on a trigger, which outlives the session"],
 	["unregister-scheduledtask", "removes a registered task"],
+	["disable-scheduledtask", "disables a scheduled task, which is the other half of schtasks /change /disable"],
 	["clear-disk", "erases the contents of a disk"],
 	["initialize-disk", "re-initializes a disk, which erases it"],
 	// `set-executionpolicy` is deliberately NOT here. It looks like a member —
@@ -2594,6 +2680,29 @@ const POWERSHELL_ADMIN_CMDLETS: ReadonlyMap<string, string> = new Map([
 	["disable-windowsoptionalfeature", "removes a Windows feature"],
 	["set-localuser", "changes a local account, including its password"],
 	["set-autologon", "configures automatic logon"],
+	// Service and account cmdlets whose `sc` and `net` twins are already rules
+	// elsewhere in this file. `sc create` and `net user /add` are covered, and each
+	// of these is the same act spelled the PowerShell way — a gap of the exact kind
+	// this table's own docstring says was closed once already.
+	//
+	// Every one was confirmed to resolve by `Get-Command` on this machine, which is
+	// what makes the list mean something: `Set-LocalGroupMember` does *not* exist,
+	// so it is absent rather than asserted, and the read-only siblings
+	// (`Get-LocalUser`, `Get-Service`, `Get-LocalGroup`) resolve too and are
+	// excluded by the same "no harmless sibling" rule the docstring states.
+	//
+	// `Add-LocalGroupMember` is the sharpest of these. Membership of an
+	// Administrators group *is* privilege escalation, and `net localgroup
+	// Administrators /add evil` only matches today because the admin rule scans
+	// arguments for an `/add` verb — a coincidence, not a rule about membership.
+	["new-service", "installs a service, which runs at every boot"],
+	["set-service", "changes a service, including its startup type"],
+	["new-localuser", "creates a local account"],
+	["remove-localuser", "deletes a local account, including a built-in one"],
+	["new-localgroup", "creates a local group, which can be an administrators group"],
+	["add-localgroupmember", "grants a user membership of a group, which can be the administrators group"],
+	["clear-recyclebin", "empties the Recycle Bin, which makes a delete permanent"],
+	["format-volume", "reformats a volume, which cannot be undone"],
 ]);
 
 /** Values PowerShell accepts for a `[bool]` that mean "off". */
