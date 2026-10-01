@@ -21,7 +21,7 @@
 import { describe, expect, test } from "bun:test";
 import { classifyDangerousCommand } from "../src/dangerous-command.ts";
 import { extractBashFilePaths } from "../src/permissions.ts";
-import { splitShellCommands, tokenizeShell } from "../src/shell-tokens.ts";
+import { splitShellCommands, splitShellSegments, tokenizeShell } from "../src/shell-tokens.ts";
 
 const posix = (command: string) => classifyDangerousCommand(command, "posix");
 
@@ -46,6 +46,107 @@ describe("splitShellCommands: the separators", () => {
 		// empty segment reaching the classifier is a different bug from a missing
 		// one: it is a command with no program, which is not nothing.
 		expect(splitShellCommands("echo a;;echo b")).toEqual(["echo a", "echo b"]);
+	});
+});
+
+/**
+ * The same scan, keeping each command's terminator.
+ *
+ * `splitShellCommands` throws the separator away, and a caller reasoning about
+ * what flows where cannot afford to: `curl … | bash` and `curl … ; bash` cut into
+ * the same two strings and mean opposite things, because only `|` moves bytes
+ * from the command on its left to the command on its right.
+ */
+describe("splitShellSegments: the separators are kept", () => {
+	test.each([
+		[
+			"echo a | rm -rf /",
+			[
+				{ text: "echo a", separator: "|" },
+				{ text: "rm -rf /", separator: "" },
+			],
+			"pipe",
+		],
+		[
+			"echo a ; rm -rf /",
+			[
+				{ text: "echo a", separator: ";" },
+				{ text: "rm -rf /", separator: "" },
+			],
+			"semicolon",
+		],
+		[
+			"echo a && rm -rf /",
+			[
+				{ text: "echo a", separator: "&&" },
+				{ text: "rm -rf /", separator: "" },
+			],
+			"and-and",
+		],
+		[
+			"echo a || rm -rf /",
+			[
+				{ text: "echo a", separator: "||" },
+				{ text: "rm -rf /", separator: "" },
+			],
+			"or-or",
+		],
+		[
+			"echo a & rm -rf /",
+			[
+				{ text: "echo a", separator: "&" },
+				{ text: "rm -rf /", separator: "" },
+			],
+			"single ampersand",
+		],
+		[
+			"echo a\nrm -rf /",
+			[
+				{ text: "echo a", separator: "\n" },
+				{ text: "rm -rf /", separator: "" },
+			],
+			"newline",
+		],
+		["echo a", [{ text: "echo a", separator: "" }], "nothing follows the last command"],
+		[
+			"  echo a  ;;  rm -rf /  ",
+			[
+				{ text: "echo a", separator: ";" },
+				{ text: "rm -rf /", separator: "" },
+			],
+			"an empty segment between two separators is dropped, and the last separator is kept",
+		],
+		['echo "a;rm -rf /"', [{ text: 'echo "a;rm -rf /"', separator: "" }], "a quoted separator is not a separator"],
+		[
+			"find . -exec cmd \\;",
+			[{ text: "find . -exec cmd \\;", separator: "" }],
+			"an escaped separator stays in the text, backslash and all, because that is what a shell passes to the program",
+		],
+	])("%s keeps its terminator (%s)", (input, expected) => {
+		expect(splitShellSegments(input)).toEqual(expected);
+	});
+
+	/**
+	 * The two forms are two views of one scan, and the row that would catch them
+	 * drifting apart is a quoted separator — the case the scan actually has
+	 * trouble with, where the text alone is indistinguishable from an unquoted
+	 * one and the separator is the only thing that keeps the record straight.
+	 */
+	test.each([
+		'echo "a;rm -rf /"',
+		"find . -exec cmd \\;",
+		"echo a; rm -rf /",
+		"echo a && rm -rf /",
+		"echo a || rm -rf /",
+		"echo a | rm -rf /",
+		"echo a & rm -rf /",
+		"echo a\nrm -rf /",
+		"  echo a  ;;  rm -rf /  ",
+		"echo a;;echo b",
+		"",
+		";;;",
+	])("%j is the same commands either way", (input) => {
+		expect(splitShellCommands(input)).toEqual(splitShellSegments(input).map((segment) => segment.text));
 	});
 });
 

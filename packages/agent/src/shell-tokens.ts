@@ -67,8 +67,25 @@ export function tokenizeShell(segment: string): string[] {
 	return tokens;
 }
 
+/** One command of a command line, together with the separator that ends it. */
+export interface ShellSegment {
+	/** The command's own text, trimmed, with its quote characters still on it. */
+	text: string;
+	/**
+	 * The separator that follows this command: `|`, `&&`, `||`, `;`, `&`, a
+	 * newline, or `""` when the command ends the line.
+	 *
+	 * Only `|` moves bytes from the command on its left to the command on its
+	 * right. Every other value here means the second command starts fresh, so a
+	 * caller reasoning about dataflow needs this field and not just the text —
+	 * which is the whole reason {@link splitShellSegments} exists.
+	 */
+	separator: string;
+}
+
 /**
- * Split a command line into the separate commands it runs.
+ * Split a command line into the separate commands it runs, keeping each one's
+ * terminator.
  *
  * The scan tracks two things the regex it replaces did not, and both of them
  * were producing wrong answers rather than merely coarse ones.
@@ -91,8 +108,8 @@ export function tokenizeShell(segment: string): string[] {
  * unwraps them, and the segments are meant to keep their original text so a
  * caller that shows one to a user shows what was actually typed.
  */
-export function splitShellCommands(command: string): string[] {
-	const segments: string[] = [];
+export function splitShellSegments(command: string): ShellSegment[] {
+	const segments: ShellSegment[] = [];
 	let current = "";
 	let quote: '"' | "'" | null = null;
 
@@ -125,19 +142,33 @@ export function splitShellCommands(command: string): string[] {
 		// for no gain.
 		const pair = command.slice(i, i + 2);
 		if (pair === "&&" || pair === "||") {
-			segments.push(current);
+			segments.push({ text: current.trim(), separator: pair });
 			current = "";
 			i++;
 			continue;
 		}
 		if (char === ";" || char === "|" || char === "&" || char === "\n") {
-			segments.push(current);
+			segments.push({ text: current.trim(), separator: char });
 			current = "";
 			continue;
 		}
 		current += char;
 	}
-	segments.push(current);
+	segments.push({ text: current.trim(), separator: "" });
 
-	return segments.map((segment) => segment.trim()).filter((segment) => segment.length > 0);
+	return segments.filter((segment) => segment.text.length > 0);
+}
+
+/**
+ * The commands of a command line, without their separators.
+ *
+ * This is the form most callers want: they ask what a line *does*, not how the
+ * pieces are joined, and dropping the separator loses nothing for them. It is
+ * defined in terms of {@link splitShellSegments} so that the scan is written
+ * once — the two had drifted apart in an earlier revision, which is the sort of
+ * thing that shows up later as one of them quietly answering a different
+ * question than the caller believes it is asking.
+ */
+export function splitShellCommands(command: string): string[] {
+	return splitShellSegments(command).map((segment) => segment.text);
 }

