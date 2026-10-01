@@ -2759,6 +2759,90 @@ function fetchPipedIntoInterpreter(segments: string[]): DangerousCommandMatch | 
  * `historyAssignmentRule`, which is a strict superset of the branch that was
  * deleted. So the branch was unreachable for everything it could catch.
  */
+/**
+ * Destroying a record of what ran, on the half POSIX was missing.
+ *
+ * `historyRules` and `historyAssignmentRule` stop the shell *recording* — the
+ * variable is unset, or history is switched off. Neither touches a record that
+ * already exists, so `> ~/.bash_history` and `truncate -s 0 ~/.bash_history` are
+ * the same act the Windows half was just given a rule for, and both were `null`.
+ *
+ * **The line is what makes this a rule**, not the program. `truncate` is how a
+ * build shrinks an image and `cat > file` is how every file in this repository
+ * was written, so neither program nor verb is the shape — a *log or history
+ * file* is. That is the same distinction the `WINDOWS_ADMIN_VERBS` table draws:
+ * a verb set for the programs that have nothing else worth doing, a target test
+ * for the ones that do everything.
+ *
+ * **Measured on this machine, and only on this machine.** `truncate -s 0` on a
+ * three-line file left 0 bytes; the control is the same command with a nonzero
+ * size, which left the first two bytes intact — so the rule reads the size and
+ * a truncating `-s 0` is distinguished from a truncating `-s 40`. The redirect
+ * needs no measurement to be obvious: `>` truncates its target before writing,
+ * which is what makes `echo x > f` destructive and `echo x >> f` not.
+ *
+ * **Not covered here, and deliberately.** `journalctl --vacuum-time`,
+ * `logrotate`, `utmpdump`, the `iptables -F` family and `ufw disable` are all
+ * absent from this box (`command -v` finds none of them), so a rule for any of
+ * them would be written from the name rather than from the behaviour. The
+ * Windows batch says out loud when a rule is name-derived; this one does not
+ * carry them, because "not measured" is exactly the case this file's comments
+ * treat as the weaker claim.
+ */
+function posixRecordDestruction(segment: string): DangerousCommandMatch | null {
+	const tokens = tokenizeShell(segment);
+	const program = executableName(tokens[0] ?? "", "posix");
+
+	if (program === "truncate") {
+		// `-s 0` is the emptying form. A size that is not zero shrinks rather than
+		// empties, and the measurement above is what separates the two.
+		const size = tokens.findIndex((t) => t === "-s" || t === "--size");
+		if (size !== -1 && /^[-+]?0+$/.test(tokens[size + 1] ?? "")) {
+			const target = tokens.slice(size + 2).find((t) => !t.startsWith("-"));
+			if (target !== undefined && isRecordPath(target)) {
+				return { kind: "Other", rule: `\`truncate -s 0 ${target}\`, which empties a file that records what ran` };
+			}
+		}
+		return null;
+	}
+
+	// `> file` truncates before writing; `>> file` appends. The operator is read
+	// off the segment text rather than off a token because the two spellings
+	// `>file` and `> file` do not have to be two words — the same reason the
+	// POSIX disk rule reads its segment.
+	const redirect = />{1,2}\s*(\S+)/.exec(segment);
+	if (redirect === null) return null;
+	if (redirect[0].startsWith(">>")) return null;
+	const target = redirect[1].replace(/^["']|["']$/g, "");
+	return isRecordPath(target)
+		? { kind: "Other", rule: `output redirected onto \`${target}\`, which empties a file that records what ran` }
+		: null;
+}
+
+/**
+ * Does this path name a file whose contents are a record rather than data?
+ *
+ * A filename test, not a directory test, and deliberately narrow: the words that
+ * mark a file as a record of what happened rather than a file someone was
+ * working on. `~/.bash_history` and `/var/log/auth.log` are records;
+ * `notes/log-ideas.md` is somebody's notes, and flagging it would be the kind of
+ * false positive that teaches a user to dismiss the whole classifier.
+ */
+function isRecordPath(token: string): boolean {
+	const lower = token.toLowerCase();
+	return (
+		/(^|\/)\.?(bash|zsh|sh|ksh)_history$/.test(lower) ||
+		/(^|\/)\.python_history$/.test(lower) ||
+		/(^|\/)\.node_repl_history$/.test(lower) ||
+		/(^|\/)psql_history$/.test(lower) ||
+		/(^|\/)mysql_history$/.test(lower) ||
+		/(^|\/)\.mysql_history$/.test(lower) ||
+		/(^|\/)\.psql_history$/.test(lower) ||
+		/^(\/var\/log\/|\/var\/lib\/.*\/|\/var\/adm\/)/.test(lower) ||
+		/(^|\/)(auth\.log|syslog|messages|wtmp|btmp|utmp|lastlog|faillog)$/.test(lower)
+	);
+}
+
 function historyRules(segment: string): DangerousCommandMatch | null {
 	const tokens = tokenizeShell(segment);
 	const program = executableName(tokens[0] ?? "", "posix");
@@ -3118,6 +3202,8 @@ function matchScript(script: string, depth: number, platform: DangerousCommandPl
 		for (const segment of segments) {
 			const tcp = devTcpRule(segment);
 			if (tcp) return tcp;
+			const record = posixRecordDestruction(segment);
+			if (record) return record;
 			// The body of `sh -c 'unset HISTFILE'` is a segment of its own to the
 			// shell that runs it and not one here, so the wrapper's script is read
 			// as well as the segment. Only the history rules do this: every other

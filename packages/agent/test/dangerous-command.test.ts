@@ -2943,6 +2943,75 @@ describe("what a null does and does not mean", () => {
 
 describe("POSIX: turning off the record of what ran", () => {
 	/**
+	 * Erasing a record that already exists, rather than suppressing the next one.
+	 *
+	 * Every row in the block below stops the shell *recording*. None of them
+	 * touches what is already on disk, so `> ~/.bash_history` and
+	 * `truncate -s 0 ~/.bash_history` were the same act with no rule — and the
+	 * Windows half had just been given one, which is what made the asymmetry
+	 * visible.
+	 *
+	 * The line is the shape, not the program. `truncate` shrinks an image and
+	 * `> file` writes every file in this repository, so neither can be the test;
+	 * a file that *records* what ran can be.
+	 */
+	describe("emptying a file that records what ran", () => {
+		test.each([
+			["> ~/.bash_history", "the redirect, spaced"],
+			[">/root/.bash_history", "and unspaced"],
+			["> ~/.zsh_history", "another shell's history"],
+			["> /var/log/auth.log", "a system log"],
+			["> /var/log/syslog", "and the general one"],
+			["> /var/log/wtmp", "the login record"],
+			// These two are the rows that pin the `/var/log/` *prefix* rather than a
+			// named file. `auth.log` and `syslog` are both in the named list below, so
+			// without a row that only the prefix can catch, deleting that branch
+			// leaves the suite green — which is what a driver found here.
+			["> /var/log/kern.log", "a log with no fixed name to match on"],
+			["> /var/log/nginx/access.log", "and one under a directory"],
+			["truncate -s 0 ~/.bash_history", "emptied by size"],
+			["truncate --size 0 /var/log/auth.log", "and the long option"],
+		])("%s is dangerous — %s", (command) => {
+			expect(posix(command)).not.toBeNull();
+		});
+
+		/**
+		 * The half that decides whether the rows above are usable.
+		 *
+		 * A rule on `>` would flag every file this repository has ever contained,
+		 * and a rule on `truncate` would flag every image build. Both of those are
+		 * ordinary work, and a classifier that flags them gets switched off.
+		 */
+		test.each([
+			["echo x >> ~/.bash_history", "appending adds a line and keeps the rest"],
+			["truncate -s 40 ~/.bash_history", "a nonzero size shrinks rather than empties"],
+			["cat > src/index.ts", "writing a source file"],
+			["echo x > README.md", "and a document"],
+			["> build/out.img", "and an image build"],
+			["truncate -s 0 build/out.img", "and the same by size — truncate is how an image is made"],
+			["echo x > notes/log-ideas.md", "a file with `log` in the name that is somebody's notes"],
+			["truncate -s 0 notes/log-ideas.md", "and the same by size"],
+			["> ~/.ssh/id_rsa", "a key, which is not a record of what ran"],
+		])("%s is not a rule — %s", (command) => {
+			expect(posix(command)).toBeNull();
+		});
+
+		/**
+		 * Measured, and the control is what gives the measurement its meaning.
+		 *
+		 * `truncate -s 0` on a three-line file left 0 bytes. The same command with
+		 * a nonzero size left the first two bytes intact, which is what shows the
+		 * rule is reading the *size* rather than the program name — the difference
+		 * between emptying a file and shortening one.
+		 */
+		test("truncate's size is what the rule reads", () => {
+			expect(posix("truncate -s 0 ~/.bash_history")).not.toBeNull();
+			expect(posix("truncate -s 1 ~/.bash_history")).toBeNull();
+			expect(posix("truncate -s 100 ~/.bash_history")).toBeNull();
+		});
+	});
+
+	/**
 	 * MEASURED, with the history file pre-seeded with one line and `set -o
 	 * history` forced on first.
 	 *
