@@ -1473,6 +1473,224 @@ describe("Windows: an administrative program that destroys machine state", () =>
 		expect(windows("C:\\Windows\\System32\\reg.exe delete HKLM\\X /f")).not.toBeNull();
 		expect(windows("C:\\Windows\\System32\\wevtutil.exe cl Security")).not.toBeNull();
 	});
+
+	/**
+	 * The same acts, spelled as PowerShell cmdlets.
+	 *
+	 * Every row here has a switch-shaped tool that was already a rule — `wevtutil
+	 * cl`, `netsh advfirewall set`, `schtasks /create`, `diskpart` — and the
+	 * PowerShell spelling of the identical act returned `null`. That is the gap
+	 * this block pins: coverage that depended on which shell was used.
+	 *
+	 * The cmdlets were checked against `Get-Command` on this machine, which is
+	 * what makes the list meaningful rather than a guess: `Remove-Disk` does not
+	 * exist at all, and it is deliberately absent here for the same reason.
+	 */
+	describe("the PowerShell spelling of an act the switch-shaped tool already covers", () => {
+		test.each([
+			["Clear-EventLog -LogName Security", "emptying the event log, which `wevtutil cl` also does"],
+			["Remove-EventLog -LogName Application", "deleting the log rather than emptying it"],
+			[
+				"Set-NetFirewallProfile -All -Enabled False",
+				"turning the firewall off, which `netsh advfirewall set` also does",
+			],
+			[
+				"Register-ScheduledTask -TaskName X -Action calc.exe",
+				"a task that outlives the session, which `schtasks /create` also does",
+			],
+			["Clear-Disk -Number 0 -RemoveData", "erasing a disk, which `diskpart` also reaches"],
+			["Initialize-Disk -Number 1", "re-initializing a disk, same act"],
+			["New-NetFirewallRule -Direction Inbound -Action Allow", "opening a port"],
+			["Remove-NetFirewallRule -DisplayName x", "removing a firewall rule"],
+			["Unregister-ScheduledTask -TaskName X", "removing a registered task"],
+			["Disable-WindowsOptionalFeature -Online -FeatureName X", "removing a Windows feature"],
+			["Set-LocalUser -Name x -Password (ConvertTo-SecureString y)", "changing an account's password"],
+		])("%s — %s", (command) => {
+			expect(windows(command)).not.toBeNull();
+		});
+	});
+
+	/**
+	 * The read-only half of each module above must stay silent.
+	 *
+	 * This is the half that decides whether the rules above are usable. A rule on
+	 * `Set-NetFirewallProfile` that also caught `Get-NetFirewallProfile` would
+	 * fire on every `Get-*` a person runs to *look* at the machine, and a
+	 * classifier like that gets switched off — after which none of the rows above
+	 * protects anything.
+	 */
+	test.each([
+		["Get-NetFirewallProfile"],
+		["Get-NetFirewallRule"],
+		["Get-ScheduledTask"],
+		["Get-Disk"],
+		["Get-WinEvent -LogName Security"],
+		["Get-ExecutionPolicy"],
+		["Get-LocalUser"],
+		["Get-History"],
+	])("%s is not a rule", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * Turning the firewall *on* is a repair, and flagging it is the failure mode.
+	 *
+	 * The three value spellings PowerShell binds are all here, because reading
+	 * only the glued one would miss the form scripts actually generate.
+	 */
+	test.each([
+		["Set-NetFirewallProfile -Profile Domain -Enabled True", "separate value"],
+		["Set-NetFirewallProfile -Profile Domain -Enabled:$true", "glued value"],
+	])("%s — %s, so not a rule", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	test.each([
+		["Set-NetFirewallProfile -All -Enabled False", "separate value"],
+		["Set-NetFirewallProfile -All -Enabled:$false", "glued value"],
+		["Set-NetFirewallProfile -All -NotEnabled", "the negated parameter name"],
+	])("%s — %s, so it is a rule", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The session's own record, which POSIX has had a rule for since
+	 * `historyRules` was written and Windows had none of.
+	 *
+	 * The redirect row is the one worth naming. `SOFT_SEPARATORS` splits at the
+	 * parentheses, so `>(Get-PSReadLineOption).HistorySavePath` is three separate
+	 * segments by the time any rule sees it and neither the operator nor the
+	 * target names a history file alone. The check runs on the unsegmented words
+	 * for exactly that reason.
+	 */
+	describe("clearing the PowerShell session's own record", () => {
+		test.each([
+			["Clear-History", "the in-memory list"],
+			["Remove-History -Id 3", "by id, rather than all of it"],
+			["Get-History | Remove-History", "down a pipe"],
+			["Clear-Content (Get-PSReadLineOption).HistorySavePath", "the persisted file, by the expression that names it"],
+			[
+				"Clear-Content $env:APPDATA\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt",
+				"the literal path",
+			],
+			[
+				"Remove-Item $env:APPDATA\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt",
+				"removed rather than emptied",
+			],
+			[
+				"''> $env:APPDATA\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt",
+				"truncated by a redirect, no space",
+			],
+			["echo x >(Get-PSReadLineOption).HistorySavePath", "redirected onto the expression"],
+			["echo x > (Get-PSReadLineOption).HistorySavePath", "redirected, spaced"],
+		])("%s — %s", (command) => {
+			expect(windows(command)).not.toBeNull();
+		});
+
+		// The reason `Clear-Content` and `Remove-Item` are not rules by name: they
+		// write and delete files as a matter of course.
+		test.each([
+			["Clear-Content build.log", "emptying a build log is ordinary work"],
+			["Set-Content config.json '{}'", "and so is writing one"],
+			["Remove-Item build\\out.txt", "deleting a build artifact is ordinary work"],
+			[
+				"Get-Content $env:APPDATA\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt",
+				"reading the history is not destroying it",
+			],
+		])("%s is not a rule — %s", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+	});
+
+	/**
+	 * `reg add` on `EnableLUA`, which is the CMD spelling of a rule that already
+	 * existed in PowerShell.
+	 *
+	 * `Set-ItemProperty` writing `EnableLUA` was covered, `reg delete` of the
+	 * same value was covered, and `reg add` was not — so the coverage of turning
+	 * UAC off depended on the shell. The verb alone cannot be a rule, because
+	 * `reg add` is how every installer on the machine writes a registry value;
+	 * the value is what makes it this rule.
+	 */
+	describe("`reg add` writing the value the UAC prompt reads", () => {
+		const UAC_KEY = "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System";
+
+		test.each([
+			[`reg add ${UAC_KEY} /v EnableLUA /t REG_DWORD /d 0 /f`, "the full spelling"],
+			[
+				`reg add ${UAC_KEY} /v EnableLUA /t REG_DWORD /d 1 /f`,
+				"writing 1 is the same act — it is the key's presence that decides",
+			],
+			[`reg add "${UAC_KEY}" /v EnableLUA /d 0 /f`, "quoted path"],
+		])("%s — %s", (command) => {
+			expect(windows(command)).not.toBeNull();
+		});
+
+		test.each([
+			["reg add HKLM\\SOFTWARE\\Vendor\\Thing /v Version /t REG_SZ /d 1.0 /f", "an ordinary registry write"],
+			["reg add HKCU\\Software\\Vendor /v Setting /d yes /f", "under HKCU, and not a UAC key"],
+			[`reg add ${UAC_KEY} /v SomethingElse /d 0 /f`, "the UAC key but not the UAC value"],
+			["reg add HKLM\\Software\\Policies\\System\\Other /v EnableLUA /d 0 /f", "a child key, not the UAC key"],
+			["reg add HKLM\\Software\\Policies\\SystemOther /v EnableLUA /d 0 /f", "a sibling, one name different"],
+			["reg add HKLM\\Software\\Policies /v EnableLUA /d 0 /f", "Policies alone is not the UAC key"],
+		])("%s — %s, so not a rule", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+	});
+
+	/**
+	 * The same boundary, on the rule that was already here.
+	 *
+	 * These three rows are the reason this block exists. The PowerShell rule
+	 * matched the key with `\b`, and `\` is a non-word character, so `\b` fired
+	 * between `System` and the separator after it — which made
+	 * `Policies\System\Other` count as the UAC key. It fired on a key where
+	 * writing `EnableLUA` turns nothing on, so the rule was over-matching in the
+	 * direction that makes a user dismiss it.
+	 *
+	 * The fix is `isUacPolicyKey`, shared by both rules, and the reason it is
+	 * `$`-anchored rather than an `includes` is the third row: `SystemOther`
+	 * *contains* `Policies\System` and is a different key.
+	 */
+	test("the UAC key is the key itself and not a key underneath it", () => {
+		expect(
+			windows(
+				"Set-ItemProperty HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System -Name EnableLUA -Value 0",
+			),
+		).not.toBeNull();
+		expect(windows("Set-ItemProperty HKLM:\\Software\\Policies\\System\\Other -Name EnableLUA -Value 0")).toBeNull();
+		expect(windows("Set-ItemProperty HKLM:\\Software\\Policies\\SystemOther -Name EnableLUA -Value 0")).toBeNull();
+		expect(windows("Set-ItemProperty HKLM:\\Software\\Policies -Name EnableLUA -Value 0")).toBeNull();
+	});
+
+	/**
+	 * A disabling parameter, on a cmdlet that is not named for it.
+	 *
+	 * These rows exist because `isDisablingParameter` is a private function, and
+	 * a private function with no test is a function nobody is watching: a driver
+	 * that neutered it left the whole suite green. So the branch is pinned here,
+	 * on the rows that reach it and the one that must not reach it.
+	 *
+	 * The last row is the boundary. `-DefaultInboundAction` is not a disabling
+	 * parameter and the cmdlet still fires — on its name, which is the reading
+	 * this file takes deliberately. What must not happen is the message claiming
+	 * a disabling act that was not in the command.
+	 */
+	describe("a disabling parameter on a cmdlet that is not named for it", () => {
+		test.each([
+			["Set-LocalUser -Name x -NoPassword", "`-NoPassword`, which is a `No*` parameter"],
+			["Set-NetFirewallRule -DisplayName x -Disabled True", "`-Disabled`, the past-tense form of the same"],
+			["Remove-NetFirewallRule -DisplayName x -RemoveAll", "the cmdlet name and the parameter agreeing"],
+		])("%s — %s, so the message names the parameter", (command) => {
+			expect(windows(command)?.rule).toContain("disabling parameter");
+		});
+
+		test("a parameter that is not a disabling one does not produce that message", () => {
+			const match = windows("Set-NetFirewallProfile -All -DefaultInboundAction Block");
+			expect(match).not.toBeNull();
+			expect(match?.rule).not.toContain("disabling parameter");
+		});
+	});
 });
 
 describe("Windows: a protection that is switched off rather than used", () => {

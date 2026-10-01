@@ -1679,6 +1679,30 @@ function isUacValueName(token: string): boolean {
 }
 
 /**
+ * Is this argument the `Policies\System` key itself?
+ *
+ * The boundary has to be the *end of the path*, not a word boundary. `\b` is the
+ * wrong tool here because `\` is a non-word character, so `\b` fires between
+ * `System` and the `\` that follows it — which made
+ * `HKLM\Software\Policies\System\Other` count as the UAC key. That key is not
+ * the UAC key; it is a different key that happens to sit underneath it, and
+ * writing `EnableLUA` there turns nothing on.
+ *
+ * Measured over the three shapes that tell the two apart, and the two spellings
+ * the same key is written in (PowerShell's `HKLM:\` and CMD's `HKLM\`):
+ *
+ *   `...\Policies\System`        → yes (a path that ends there)
+ *   `...\Policies\System\Other`  → no  (a child key)
+ *   `...\Policies\SystemOther`   → no  (a sibling, one name)
+ *
+ * The last one is what rules out a plain `includes`: `SystemOther` contains
+ * `Policies\System` as a substring and is a different key.
+ */
+function isUacPolicyKey(token: string): boolean {
+	return /\\policies\\system$/i.test(token);
+}
+
+/**
  * Cmdlets that turn a protection off, and nothing else.
  *
  * Every name and parameter here was read off this machine's own PowerShell 5.1
@@ -1760,7 +1784,7 @@ function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null
 			if (segment.some(isRunKeyPath)) {
 				return { kind: "Other", rule: "PowerShell writing a value to a key that runs at startup" };
 			}
-			if (segment.some((w) => /\\policies\\system\b/.test(w)) && segment.some(isUacValueName)) {
+			if (segment.some(isUacPolicyKey) && segment.some(isUacValueName)) {
 				return { kind: "Other", rule: "PowerShell writing `EnableLUA`, the value the UAC prompt reads" };
 			}
 		}
@@ -1871,7 +1895,12 @@ function dangerousPowershellWords(words: string[]): DangerousCommandMatch | null
 	if (hasForceDeleteCmdlet(lower)) {
 		return { kind: "Other", rule: "a delete cmdlet with `-Force`" };
 	}
-	return powershellExecutionRules(lower) ?? powershellWeakeningRules(lower) ?? powershellTerminationRules(lower);
+	return (
+		powershellExecutionRules(lower) ??
+		powershellWeakeningRules(lower) ??
+		powershellTerminationRules(lower) ??
+		powershellAdminCmdletRules(lower)
+	);
 }
 
 /** Split a CMD token on the operators that can be written inside one word. */
@@ -2115,6 +2144,166 @@ function matchWindows(tokens: string[]): DangerousCommandMatch | null {
 }
 
 /**
+ * Windows administrative cmdlets, and the history-file shapes beside them.
+ *
+ * Every cmdlet here does something the switch-shaped tool for the same act
+ * already does, so the table's reason column is the act rather than the
+ * spelling. The three shapes below it are not cmdlets at all — they are the
+ * ways a PowerShell session's own record gets erased, and POSIX has had a rule
+ * for that since `historyRules` was written, which is the whole reason this
+ * group exists next to it.
+ */
+function powershellAdminCmdletRules(lower: string[]): DangerousCommandMatch | null {
+	// The redirect is checked on the *joined* text, before segmenting, because the
+	// segmenter cannot see it: `>(Get-PSReadLineOption).HistorySavePath` is broken
+	// at the parentheses by `SOFT_SEPARATORS`, so by the time a segment exists the
+	// operator and its target are in different segments and neither one names a
+	// history file on its own. Re-joining the words is enough, because the pieces
+	// are the pieces — `>` `Get-PSReadLineOption` `.HistorySavePath` — and the
+	// history path is spelled by the last two. The POSIX disk rule needs no such
+	// step for the same reason it does not have this problem.
+	if (isHistoryRedirect(lower)) {
+		return {
+			kind: "Other",
+			rule: "output redirected onto the shell history file, which erases the record of what ran",
+		};
+	}
+	for (const segment of windowsSegments(lower)) {
+		const head = segment[0];
+		if (head === undefined) continue;
+
+		const why = POWERSHELL_ADMIN_CMDLETS.get(head);
+		if (why !== undefined) {
+			// `Set-NetFirewallProfile -Enabled False` is the shape that matters most
+			// and it names no destructive verb, so the parameter's *value* is read
+			// rather than its presence. Presence would also catch `-Enabled True`,
+			// which turns the firewall **on** — a repair, not a weakening, and a
+			// rule that flags it is the kind that gets switched off.
+			//
+			// The value is read rather than guessed because it can be glued
+			// (`-Enabled:$false`), separate (`-Enabled False`) or absent, and each
+			// has to give the same answer. Absent means "use the current default",
+			// which is not necessarily off — so absent is *not* treated as a
+			// disabling value, and the cmdlet-name rule below covers that case
+			// instead. A value PowerShell would not accept (`-Enabled maybe`) is
+			// treated as off, because the only way to reach it is a typo on a
+			// command that was meant to disable something.
+			if (head === "set-netfirewallprofile") {
+				if (isFirewallEnabledFalse(segment)) {
+					return { kind: "Other", rule: "PowerShell `Set-NetFirewallProfile` turning the firewall off" };
+				}
+				// `Set-NetFirewallProfile -Enabled True` turns the firewall **on**,
+				// which is a repair. Flagging it is the failure mode this whole
+				// table is written to avoid: a rule that cries wolf about the
+				// *strengthening* half of a command teaches a user to dismiss the
+				// half that matters. So when `-Enabled` is present with a value that
+				// means on, the cmdlet is left alone — the two other things it can
+				// change (`-DefaultInboundAction`, `-DefaultOutboundAction`) are
+				// policy tightening as often as loosening, and reading which one
+				// this invocation picked is a rule that has to earn itself.
+				//
+				// A `-Enabled` with no value at all still falls through to the
+				// cmdlet-name rule below: "use the current default" is a change of
+				// nothing in particular, and leaving it unflagged is the reading
+				// this file takes elsewhere.
+				if (firewallEnabledTrue(segment)) continue;
+			}
+			// A `Disable*`/`No*` parameter is the act whatever the cmdlet is, and it is
+			// read so that the message says what was done rather than naming the
+			// cmdlet: `Set-NetFirewallProfile -NoLockdown` and
+			// `Set-LocalUser -NoPassword` both say so in their own right.
+			//
+			// It does **not** make a `Set-*` cmdlet with no disabling parameter safe —
+			// those fall to the name rule below, which is the deliberate choice:
+			// `-DefaultInboundAction Block` is not a disabling parameter and
+			// tightening a profile is as likely as loosening it, so there is no
+			// reading of the parameters here that earns a rule of its own.
+			if (segment.some(isDisablingParameter)) {
+				return { kind: "Other", rule: `PowerShell \`${head}\` with a disabling parameter, which ${why}` };
+			}
+			return { kind: "Other", rule: `PowerShell \`${head}\`, which ${why}` };
+		}
+
+		// The PowerShell session's own history file, reached three ways. None is a
+		// `POWERSHELL_ADMIN_CMDLETS` entry because none of them is destructive to
+		// anything but a record: `Clear-Content` on a config file is ordinary work,
+		// and `Remove-Item` is already caught by the force-delete rule wherever it
+		// appears. What makes these worth naming is that they target the history.
+		if (head === "clear-content" || head === "remove-item" || head === "clear-history" || head === "remove-history") {
+			const names = segment.some(isShellHistoryPath);
+			const clearsInMemory = head === "clear-history" || head === "remove-history";
+			if (names || clearsInMemory) {
+				return { kind: "Other", rule: "PowerShell clearing the shell history, which erases the record of what ran" };
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Is a redirect operator aimed at the shell history file?
+ *
+ * Two forms, because the tokenizer produces two. `> target` arrives as two
+ * tokens and is matched by position; `>target` arrives as one token with the
+ * operator glued to the front, so the operator is stripped and the remainder
+ * goes through `isShellHistoryPath`. `>>` counts — appending is not erasing, but
+ * the rule cannot tell an append from a truncate without reading the file, and
+ * a redirect at the history file is worth asking about either way.
+ */
+function isHistoryRedirect(segment: string[]): boolean {
+	for (let i = 0; i < segment.length; i++) {
+		const token = segment[i];
+		if (token === ">" || token === ">>") {
+			const next = segment[i + 1];
+			if (next !== undefined && isShellHistoryPath(next)) return true;
+			continue;
+		}
+		// Glued: `>target`. Only a leading operator counts, so a token that merely
+		// *contains* a `>` in the middle (`"a>b"`) is not a redirect target.
+		const stripped = token.replace(/^>>?/, "");
+		if (stripped !== token && isShellHistoryPath(stripped)) return true;
+	}
+	return false;
+}
+
+/**
+ * Does this segment explicitly turn the firewall **on**?
+ *
+ * The mirror of `isFirewallEnabledFalse`, and it exists so that the caller can
+ * decline to flag a repair. A value PowerShell would reject counts as *not* a
+ * deliberate "on" — the reasoning being that a typo means the command will not
+ * run at all, so there is no act to flag.
+ */
+function firewallEnabledTrue(segment: string[]): boolean {
+	for (let i = 0; i < segment.length; i++) {
+		const token = segment[i].toLowerCase();
+		const glued = /^-(?:not)?enabled:(.+)$/.exec(token);
+		if (glued !== null) return !POWERSHELL_FALSE_VALUES.has(glued[1].trim());
+		if (token === "-enabled") {
+			const next = segment[i + 1]?.toLowerCase();
+			if (next !== undefined && !next.startsWith("-")) return !POWERSHELL_FALSE_VALUES.has(next);
+		}
+	}
+	return false;
+}
+
+/**
+ * Does this argument name a shell history file?
+ *
+ * Two spellings are recognized because both are real: the literal
+ * `ConsoleHost_history.txt` that PSReadLine writes, and the
+ * `(Get-PSReadLineOption).HistorySavePath` expression that reads where it
+ * actually is. The literal is matched as a substring rather than as a path,
+ * because it appears glued to a longer path — `$env:APPDATA\Microsoft\Windows\
+ * PowerShell\PSReadLine\ConsoleHost_history.txt` is the usual spelling and
+ * matching it whole would need the prefix to be spelled one way.
+ */
+function isShellHistoryPath(token: string): boolean {
+	const lower = token.toLowerCase();
+	return lower.includes("consolehost_history.txt") || lower.includes("historysavepath");
+}
+
+/**
  * Windows administrative programs, and the verbs that make them destructive.
  *
  * Every program named here is here because each one destroys a machine's state
@@ -2196,6 +2385,133 @@ const WINDOWS_ADMIN_ALWAYS: ReadonlyMap<string, string> = new Map([
 	["diskpart", "runs a disk partitioning script, which can erase a volume"],
 	["takeown", "takes ownership of files away from whoever had it"],
 ]);
+
+/**
+ * Windows administrative cmdlets, and the acts the switch-shaped tools already cover.
+ *
+ * `wevtutil cl`, `netsh advfirewall set`, `schtasks /create`, `diskpart` and
+ * `sc config` are all rules. Each has a PowerShell cmdlet that does the same
+ * thing, and each of those was `null` before this group: the same act, spelled
+ * the way PowerShell spells it, was not classified. That is the gap this closes,
+ * and it is a gap rather than a matter of taste — `wevtutil cl Security` and
+ * `Clear-EventLog -LogName Security` empty the same log.
+ *
+ * **Measured by `Get-Command` on this machine**, which is why the list is what
+ * it is: `Clear-EventLog`, `Set-NetFirewallProfile`, `Register-ScheduledTask`,
+ * `Clear-Disk`, `Initialize-Disk` and `Set-ExecutionPolicy` all resolve to a
+ * Cmdlet or Function, and `Remove-Disk` does not exist at all — a check that
+ * fails is what makes the rest of the list mean something. `Get-Command` also
+ * reports these as *Functions* rather than *Cmdlets* on this box, which is
+ * why the rule reads the name and not the command type.
+ *
+ * Not measured: that any of them destroys anything, on purpose. `Clear-Disk`
+ * with `-RemoveData` would erase a volume; `Clear-EventLog` empties a log;
+ * `Set-NetFirewallProfile -Enabled False` turns the firewall off. None was run
+ * in its destructive form.
+ *
+ * **Why these are listed one per act rather than by verb.** A verb set is right
+ * for `netsh`, where `add` and `delete` mean the same thing across every noun.
+ * It is wrong here: `Set-NetFirewallProfile` is a rule because of what it
+ * changes, `Get-NetFirewallProfile` is the read-only half of the same module
+ * and is not, and the only thing that tells them apart is the name. So each
+ * entry names the cmdlet and the reason it is destructive, and a cmdlet that
+ * turns out to have a harmless sibling is excluded by measurement rather than by
+ * a rule that fires on both.
+ *
+ * `Clear-Content` and `Set-Content` are deliberately **not** here. They write a
+ * file, and `Set-Content` is how a config file is written in every script ever
+ * written — a rule on it would fire on ordinary work. `Clear-Content` aimed at
+ * a history file is the exception, and it is caught by the narrower rule below
+ * rather than by the cmdlet's name.
+ */
+const POWERSHELL_ADMIN_CMDLETS: ReadonlyMap<string, string> = new Map([
+	["clear-eventlog", "empties a Windows event log, which is the audit trail"],
+	["remove-eventlog", "deletes a Windows event log outright"],
+	["set-netfirewallprofile", "changes a firewall profile, including turning it off"],
+	["set-netfirewallrule", "changes a firewall rule"],
+	["new-netfirewallrule", "adds a firewall rule, which can open a port"],
+	["remove-netfirewallrule", "removes a firewall rule"],
+	["register-scheduledtask", "registers a task that runs on a trigger, which outlives the session"],
+	["unregister-scheduledtask", "removes a registered task"],
+	["clear-disk", "erases the contents of a disk"],
+	["initialize-disk", "re-initializes a disk, which erases it"],
+	// `set-executionpolicy` is deliberately NOT here. It looks like a member —
+	// it is the PowerShell spelling of weakening script checking — but it is
+	// already covered by a rule that reads the policy *value*, and that rule is
+	// the better one: only three of the seven policies weaken anything, and
+	// `RemoteSigned`, `AllSigned` and `Restricted` all make the machine
+	// stricter. A table entry would have fired on the strictest policies there
+	// are, which is the exact failure this file is written to avoid.
+	["disable-windowsoptionalfeature", "removes a Windows feature"],
+	["set-localuser", "changes a local account, including its password"],
+	["set-autologon", "configures automatic logon"],
+]);
+
+/** Values PowerShell accepts for a `[bool]` that mean "off". */
+const POWERSHELL_FALSE_VALUES: ReadonlySet<string> = new Set(["false", "0", "$false", "off", "no", "not"]);
+
+/**
+ * Does this segment turn the firewall off?
+ *
+ * Three spellings reach here in real scripts and all three are the same act:
+ * the value glued to the parameter (`-Enabled:$false`), the value as the next
+ * word (`-Enabled False`), and the negated parameter name (`-NotEnabled`). All
+ * three are read, because reading only the glued one misses the most common
+ * form and reading only the separate one misses the form a script generates.
+ *
+ * **A bare `-Enabled` with nothing after it is not a match.** It means "use the
+ * current default", which is not the same as off, and treating it as off would
+ * invent a disabling act nobody asked for. The cmdlet-name rule covers the
+ * case where the caller changed *something* about the profile; this one covers
+ * the case where they turned it off.
+ *
+ * An unrecognized value (`-Enabled maybe`) counts as off. PowerShell would
+ * reject it, so the only way to reach this line with one is a typo on a command
+ * that was meant to disable something, and guessing "off" is the safe side.
+ */
+function isFirewallEnabledFalse(segment: string[]): boolean {
+	for (let i = 0; i < segment.length; i++) {
+		const token = segment[i].toLowerCase();
+		// Glued: `-Enabled:$false`.
+		const glued = /^-(?:not)?enabled:(.+)$/.exec(token);
+		if (glued !== null) return POWERSHELL_FALSE_VALUES.has(glued[1].trim());
+		// The negated name on its own: `-NotEnabled`.
+		if (token === "-notenabled") return true;
+		// Separate: `-Enabled False`. The next word has to be a value, so a
+		// following parameter name means the value was left out.
+		if (token === "-enabled") {
+			const next = segment[i + 1]?.toLowerCase();
+			return next !== undefined && POWERSHELL_FALSE_VALUES.has(next);
+		}
+	}
+	return false;
+}
+
+/**
+ * Parameters that turn a `Set-*` into a `Disable-*`.
+ *
+ * **A prefix match, deliberately, and this is the one place in the file where
+ * that choice had to be argued rather than copied.** `Set-MpPreference`'s own
+ * rule uses `startsWith("-disable")` and has done since it was written, because
+ * PowerShell's real parameter is `-DisableRealtimeMonitoring` — one word. A
+ * boundary was tried here first, on the reasoning that `-nologo` should not
+ * match `no`, and the measurement killed it: with `(?:$|[-:0-9])` after the
+ * stem, **not one real PowerShell parameter matches**, because every one of them
+ * continues with a letter (`-NoPassword`, `-Disabled`, `-RemoveAll`,
+ * `-DisableRealtimeMonitoring`). The branch was dead and green, which is the
+ * state a private function nobody tests reaches.
+ *
+ * So the prefix stands. What it costs: `-NoLockdown` and `-NotSigned` both match,
+ * and both do disable something, so the two spellings that matter are covered
+ * rather than merely the tidy one.
+ *
+ * The value is not consulted, for the reason the Defender rule gives: reading it
+ * means handling three spellings and an absent case, and absent means "use the
+ * default", which for a parameter named `Disable*` is the disabling one.
+ */
+function isDisablingParameter(token: string): boolean {
+	return /^-(?:disable|no|remove|uninstall|clear|block)/i.test(token);
+}
 
 /**
  * Does an argument name this verb?
@@ -2284,8 +2600,23 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 	// the PowerShell rule it has to be narrow, because `reg add` is ordinary
 	// maintenance for the whole rest of the registry and a rule that caught all of
 	// it would catch a machine being configured. Only the Run key is flagged.
-	if (program === "reg" && tokens[1]?.toLowerCase() === "add" && tokens.slice(1).some(isRunKeyPath)) {
-		return { kind: "Other", rule: "`reg add` writing to a key that runs at startup" };
+	if (program === "reg" && tokens[1]?.toLowerCase() === "add") {
+		const args = tokens.slice(1);
+		if (args.some(isRunKeyPath)) {
+			return { kind: "Other", rule: "`reg add` writing to a key that runs at startup" };
+		}
+		// `EnableLUA` is the UAC prompt's own switch, and `Set-ItemProperty`
+		// writing it was already a rule. `reg add` on the same key with the same
+		// value is the CMD spelling of the identical act, and `reg delete` of that
+		// value above is a rule too -- so leaving `add` out made the coverage
+		// depend on which shell was used.
+		//
+		// Both halves are required and neither is enough: the value names what is
+		// being changed, and the path is what makes `EnableLUA` under
+		// `Policies\System` the UAC switch rather than an unrelated name.
+		if (args.some(isUacValueName) && args.some(isUacPolicyKey)) {
+			return { kind: "Other", rule: "`reg add` writing `EnableLUA`, the value the UAC prompt reads" };
+		}
 	}
 	return null;
 }
