@@ -5130,11 +5130,105 @@ function gitRules(tokens: string[], platform: DangerousCommandPlatform): Dangero
 		// Anything longer is left alone for the reason the `--` rule is: `git checkout
 		// src` and `git checkout feature` are the same shape on a command line, and
 		// this file does not guess which one was meant.
+		//
+		// **A force flag is the other way of saying the same thing, and it is not
+		// ambiguous.** MEASURED in a throwaway repo, with a control that keeps the
+		// edit: an edited tracked file survived `git checkout <branch>` and did not
+		// survive `git checkout -f <branch>`, which printed nothing and left the
+		// committed contents. The flag is what discards, whatever the branch is
+		// called, so this arm does not need to know which revision was named — which
+		// is the whole reason the `.` arm above cannot generalise to a branch name.
+		if (args.includes("-f") || args.includes("--force")) {
+			return { kind: "Other", rule: "`git checkout -f`, which discards working-copy changes" };
+		}
 		if (!args.includes("--")) {
 			if (!args.some((arg) => arg === "." || arg === "./")) return null;
 			return { kind: "Other", rule: "`git checkout .`, which discards working-copy changes" };
 		}
 		return { kind: "Other", rule: "`git checkout --`, which discards working-copy changes" };
+	}
+
+	if (subcommand === "switch") {
+		// `git switch` is the modern spelling of `git checkout <branch>`, and it is
+		// the same force flag with the same effect. MEASURED the same way, same
+		// control: `git switch -f <branch>` discarded the edit and left the committed
+		// contents.
+		//
+		// **`-C` is deliberately not here, and the measurement is why.** `git switch
+		// -C <branch>` is `--force-create`: it creates the branch or moves it, and it
+		// reads like the force flag. Tested twice against a real repo — creating a
+		// branch that did not exist, and resetting one that did — an edited tracked
+		// file survived both times, and the command printed "Switched to a new branch"
+		// and "Switched to and reset branch" while leaving the file alone. So `-C`
+		// moves a pointer and `-f` overwrites a working tree, and this rule is about
+		// the second. The same goes for `git branch -f`, which moves a branch pointer
+		// and leaves the orphaned commits in the reflog.
+		if (args.includes("-f") || args.includes("--force")) {
+			return { kind: "Other", rule: "`git switch -f`, which discards working-copy changes" };
+		}
+		return null;
+	}
+
+	if (subcommand === "worktree") {
+		// `git worktree remove -h` on this machine: `-f, --[no-]force   force
+		// removal even if worktree is dirty or locked`. A linked worktree holds a
+		// whole checkout, so this is a directory tree with uncommitted work in it,
+		// and `--force` is what lets it go with that work still in place.
+		if (args[0] !== "remove") return null;
+		if (!args.includes("-f") && !args.includes("--force")) return null;
+		return {
+			kind: "Other",
+			rule: "`git worktree remove --force`, which deletes a checkout with uncommitted work in it",
+		};
+	}
+
+	if (subcommand === "submodule") {
+		// `git submodule deinit -h` on this machine gives the whole grammar as
+		// `git submodule [--quiet] deinit [-f|--force] (--all| [--] <path>...)`.
+		// Deinitialising a submodule removes its checkout; the force is what permits
+		// it while that checkout has local changes in it.
+		if (args[0] !== "deinit") return null;
+		if (!args.includes("-f") && !args.includes("--force")) return null;
+		return {
+			kind: "Other",
+			rule: "`git submodule deinit -f`, which deletes submodule checkouts with local work in them",
+		};
+	}
+
+	if (subcommand === "reflog") {
+		// The reflog is the index that says which commit a `reset` threw away, and
+		// this is the command that empties it. Only the aggressive spelling counts:
+		// `git reflog expire --expire=90.days --all` is routine housekeeping, and
+		// flagging housekeeping is how a classifier gets switched off.
+		//
+		// **What it does and does not destroy, measured.** In a throwaway repo the
+		// reflog went from 8 entries to 0, and `git cat-file -t` on the commit a
+		// `reset --hard` had orphaned still answered `commit` — after the first
+		// `gc --prune=now` and after a second one. So the objects outlive the reflog
+		// by more than one prune, and the honest claim is that this removes the way
+		// back to them, not that it deletes them on the spot. A rule worded as
+		// "deletes unreachable commits" would be claiming something the measurement
+		// contradicts.
+		if (args[0] !== "expire") return null;
+		// The value is what decides, and `--all` is not it: `--all` says which
+		// reflogs to touch, and `git reflog expire --expire=90.days --all` is routine
+		// housekeeping. The first version of this test took a bare `--all` as the
+		// aggressive half, which flagged the housekeeping spelling. `--expire` and
+		// `--expire-unreachable` both take a value, and git's own option parser reads
+		// them in either the `--expire=now` or the `--expire now` form, so both are
+		// read here rather than only the glued one.
+		const expiresNow = args.some((arg, index) => {
+			const flag = arg.toLowerCase();
+			if (flag === "--expire" || flag === "--expire-unreachable") {
+				return (args[index + 1] ?? "").toLowerCase() === "now";
+			}
+			return /^--expire(?:-unreachable)?=now$/i.test(arg);
+		});
+		if (!expiresNow) return null;
+		return {
+			kind: "Other",
+			rule: "`git reflog expire --expire=now`, which empties the record of what a reset threw away",
+		};
 	}
 
 	if (subcommand === "restore") {
@@ -5170,7 +5264,22 @@ function gitRules(tokens: string[], platform: DangerousCommandPlatform): Dangero
 		// bare name misses the form that actually carries a ref.
 		const forced = GIT_FORCE_PUSH_FLAGS.some((flag) => args.some((arg) => arg === flag || arg.startsWith(`${flag}=`)));
 		const refspecForced = args.some((arg) => arg.startsWith("+"));
-		if (!forced && !refspecForced) return null;
+		// `--delete` and `--mirror` take the other end apart rather than overwriting
+		// one ref, and the force flag does not cover them. Spellings from `git push
+		// -h` on this machine: `--[no-]mirror   mirror all refs` and
+		// `-d, --[no-]delete   delete refs`.
+		//
+		// `--prune` is deliberately not here even though it also removes refs on the
+		// far end: it only removes the ones already deleted locally, so by the time
+		// it runs the deletion has been asked for and confirmed somewhere else. This
+		// is the one place in the file where a destructive verb is left out on the
+		// grounds of a narrower reading, and the comment is here so the omission
+		// reads as a decision rather than as an oversight.
+		const deletes = args.some((arg) => arg === "-d" || arg === "--delete" || arg === "--mirror");
+		if (!forced && !refspecForced && !deletes) return null;
+		if (deletes) {
+			return { kind: "Other", rule: "`git push --delete`, which removes a branch on the other end" };
+		}
 		return { kind: "Other", rule: "`git push` with a force, which overwrites the other end" };
 	}
 

@@ -3175,6 +3175,14 @@ describe("git: throwing away work", () => {
 		["git push --force-if-includes", "and the one that checks first"],
 		["git push origin +main:main", "the refspec form, with no flag typed at all"],
 		["git push origin +refs/heads/main:refs/heads/main", "spelled out in full"],
+		// `--delete` and `--mirror` take the far end apart rather than overwriting
+		// one ref, so no force flag is involved. Both spellings are from `git push
+		// -h` on this machine: `-d, --[no-]delete   delete refs` and
+		// `--[no-]mirror   mirror all refs`.
+		["git push origin --delete main", "deletes a branch on the other end"],
+		["git push -d origin main", "and its short spelling"],
+		["git push --delete", "with no ref named on the line at all"],
+		["git push --mirror origin", "mirrors every ref, which replaces the far end wholesale"],
 	])("%s is dangerous — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
 	});
@@ -3184,8 +3192,113 @@ describe("git: throwing away work", () => {
 		["git push origin main", "with a refspec"],
 		["git push origin feature", "to a branch of somebody else's work"],
 		["git push --dry-run origin main", "and the dry run"],
+		["git push --no-delete origin main", "the negative spelling of a delete"],
+		["git push --prune origin main", "prune removes refs already deleted locally, so it is not the act"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * A force flag on a branch switch, which needs no name after it.
+	 *
+	 * The `.` rule above cannot do this job: `git checkout -f main` and
+	 * `git checkout src` are the same shape, and only the flag separates the
+	 * branch from the file. Measured in a throwaway repo with a control that keeps
+	 * the edit: an edited tracked file survived `git checkout <branch>` and did not
+	 * survive `git checkout -f <branch>`.
+	 */
+	test.each([
+		["git checkout -f main", "checkout, switching branch and discarding"],
+		["git checkout --force main", "the long spelling"],
+		["git switch -f other", "the modern spelling of the same act"],
+		["git switch --force other", "and its long form"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * `-C` is not a force flag, and this is the measurement that says so.
+	 *
+	 * `git switch -C <branch>` reads exactly like `-f` and is not. Tested twice
+	 * against a real repo — creating a branch that did not exist, and resetting one
+	 * that did — an edited tracked file survived both, while `git switch -f` in the
+	 * same repo discarded it. So these rows are what keep a future reader from
+	 * adding `-C` on the strength of how it looks.
+	 */
+	test.each([
+		["git checkout main", "switching branch, which keeps local edits"],
+		["git checkout -b feature", "and creating one"],
+		["git checkout src", "restoring one file, which is not a discard"],
+		["git switch other", "the modern spelling of the first row"],
+		["git switch -c feature", "and creating one"],
+		["git switch -C brandnew", "which moves a branch pointer but keeps the working tree"],
+		["git branch -f trunk side", "same, in the other spelling"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * Deleting a checkout, and emptying the record of what a reset threw away.
+	 *
+	 * Flag spellings from this machine: `git worktree remove -h` prints
+	 * `-f, --[no-]force   force removal even if worktree is dirty or locked`, and
+	 * `git submodule deinit -h` gives the grammar as
+	 * `git submodule deinit [-f|--force] (--all| [--] <path>...)`. For the reflog,
+	 * measured in a throwaway repo: 8 entries before, 0 after, and the commit a
+	 * `reset --hard` had orphaned still answered `commit` to `git cat-file -t`
+	 * after the first `gc --prune=now` and after a second one — so the rule claims
+	 * the record is gone and does not claim the objects are.
+	 */
+	test.each([
+		["git worktree remove --force ../wt", "a linked worktree with uncommitted work in it"],
+		["git worktree remove -f ../wt", "and its short spelling"],
+		["git submodule deinit -f --all", "every submodule checkout, with local work in them"],
+		["git submodule deinit --force --all", "the long spelling"],
+		["git reflog expire --expire=now --all", "the glued form of the value"],
+		["git reflog expire --expire now --all", "and the separated form, which git's option parser also reads"],
+		["git reflog expire --expire-unreachable=now --all", "the unreachable half, which is the one that matters"],
+		["git reflog expire --expire-unreachable now --all", "in the separated form"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["git worktree remove ../wt", "a clean worktree, which git protects anyway"],
+		["git worktree list", "and listing them"],
+		["git worktree add ../wt ../base", "creating one, which is the other half of the subcommand"],
+		["git worktree add --force ../wt ../base", "and with the force, which is how you take an existing branch"],
+		["git submodule deinit --all", "submodules with nothing in them"],
+		["git submodule status", "and looking"],
+		["git submodule add ../foo vendor/foo", "adding one, which is the other half of the subcommand"],
+		["git submodule add --force ../foo vendor/foo", "where `-f` means the repository may be a local path"],
+		["git submodule update --init --recursive", "and the ordinary update"],
+		["git reflog", "reading the reflog is how a commit is found again"],
+		["git reflog show main", "the same, explicitly"],
+		// The one that matters most: `--all` says which reflogs, not how much of
+		// each to keep. An earlier version of this rule read a bare `--all` as the
+		// aggressive half and flagged this line.
+		["git reflog expire --expire=90.days --all", "routine housekeeping, which keeps 90 days"],
+		["git reflog expire --all", "the default expiry, which is not now"],
+		["git reflog expire --expire=1.day.ago --all", "and a written-out age"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The two push rules are told apart by their text, and the text is shown to a
+	 * person deciding whether to allow the command.
+	 *
+	 * "Overwrites the other end" and "removes a branch on the other end" are
+	 * different acts, and a version of the rule that reported the second for a
+	 * `--force` would be showing a user a description of something else. The kind
+	 * alone cannot tell them apart — both are `Other` — so the message is what is
+	 * being pinned.
+	 */
+	test("the message names the act, so a force is not described as a deletion", () => {
+		expect(posix("git push --force")?.rule).toContain("overwrites");
+		expect(posix("git push --force")?.rule).not.toContain("removes a branch");
+		expect(posix("git push origin --delete main")?.rule).toContain("removes a branch");
+		expect(posix("git push origin --delete main")?.rule).not.toContain("overwrites");
 	});
 });
 
