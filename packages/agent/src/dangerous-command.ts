@@ -1062,6 +1062,28 @@ const DISK_DESTRUCTIVE_FLAGS: ReadonlySet<string> = new Set(["--zap-all", "--zap
  * if=/dev/zero of=/dev/null bs=1M count=1` printed `1+0 records out` and wrote
  * nothing anywhere.
  */
+/**
+ * The paths a `dd` names as its output.
+ *
+ * Shared by {@link posixDiskRules} and {@link posixStartupWrite} on purpose. `dd
+ * of=/dev/sda` and `dd of=/etc/cron.d/job` are the same option reaching two
+ * different families, and when the parse was written twice it was fixed once — the
+ * reason a regular expression shared by a matcher and a message is a single
+ * function in this file. One reader, two callers.
+ *
+ * `of=` is required at the *start* of a token. `indexOf` would also fire on a file
+ * whose own name contains `of=`, and the option is glued by `dd`'s own syntax, so
+ * there is no spelling this misses.
+ */
+function ddOutputTargets(segment: string): string[] {
+	const targets: string[] = [];
+	for (const token of tokenizeShell(segment)) {
+		if (!token.startsWith("of=")) continue;
+		targets.push(token.slice(3).replace(/^["']|["']$/g, ""));
+	}
+	return targets;
+}
+
 function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "posix");
 	if (program === undefined) return null;
@@ -1077,10 +1099,7 @@ function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatc
 	}
 
 	if (program === "dd") {
-		for (const token of tokens.slice(1)) {
-			const at = token.indexOf("of=");
-			if (at === -1) continue;
-			const target = token.slice(at + 3);
+		for (const target of ddOutputTargets(segment)) {
 			if (BLOCK_DEVICE_PATH.test(target)) {
 				return { kind: "Other", rule: `\`dd\` writing to \`${target}\`, which is a whole disk` };
 			}
@@ -3198,13 +3217,26 @@ function isStartupPath(token: string): boolean {
 	// The machine-wide shells: `/etc/bash.bashrc` is Debian's spelling and
 	// `/etc/bashrc` is the other one, so both are named rather than guessed.
 	const systemFile = /^\/etc\/(bash\.bashrc|bashrc|zshrc|zshenv|shrc|profile|environment)$/.test(lower);
-	// Two directories rather than a fixed set of names, and deliberately: these
+	// Directories rather than a fixed set of names, and deliberately: these
 	// are where a startup script is *meant* to be added, so there is no list of
 	// names to match on. `rc.local` is both a bare `/etc/rc.local` and the
 	// `rc.d/` copy distributions use, and only the second was here at first —
 	// a comment claimed the first and the code did not do it.
+	// `~/.config/autostart/` and `/etc/xdg/autostart/` are the same door for one
+	// user and for every user, so both are here. The user one was here first and
+	// the system one was measured `null` — the regex is written on the *user*
+	// spelling and the system spelling is the same concept with `/etc/xdg` in
+	// front of it, which is exactly the way a concept ends up half-covered.
+	//
+	// `(\/|$)` on both, for the same reason {@link isServicePath} has it: the
+	// destination is often the directory itself, and `cp x ~/.config/autostart` is
+	// the same act as `cp x ~/.config/autostart/evil.desktop`. Requiring a filename
+	// after the slash would have left the one spelling with the least in it open.
 	const directory =
-		/^\/etc\/profile\.d\//.test(lower) || /(^|\/)rc\.local$/.test(lower) || /(^|\/)\.config\/autostart\//.test(lower);
+		/^\/etc\/profile\.d\//.test(lower) ||
+		/(^|\/)rc\.local$/.test(lower) ||
+		/(^|\/)\.config\/autostart(\/|$)/.test(lower) ||
+		/^\/etc\/xdg\/autostart(\/|$)/.test(lower);
 	// `authorized_keys` is persistence by a different door — the next login over
 	// SSH rather than the next shell — so it is named here rather than given a
 	// second rule. `.ssh/rc` and `.ssh/environment` are the same file read on
@@ -3220,7 +3252,72 @@ function isStartupPath(token: string): boolean {
 	// asking again, and the comment says so rather than letting the message carry
 	// a claim the code does not make.
 	const ssh = /(^|\/)\.ssh\/(authorized_keys2?|rc|environment)$/.test(lower);
-	return homeFile || systemFile || directory || ssh || isCronPath(lower) || isLoaderPath(lower) || isSudoersPath(lower);
+	return (
+		homeFile ||
+		systemFile ||
+		directory ||
+		ssh ||
+		isCronPath(lower) ||
+		isLoaderPath(lower) ||
+		isSudoersPath(lower) ||
+		isServicePath(lower)
+	);
+}
+
+/**
+ * A unit file the init system starts on its own.
+ *
+ * Its own predicate for the same reason {@link isCronPath} has one: a service unit
+ * needs no login and no shell, so the "runs on every future login or boot" wording
+ * the shell files get would be an overclaim here too.
+ *
+ * **Measured `null` before it, across every spelling.** `echo x >>
+ * /etc/systemd/system/x.service`, `curl -o /etc/systemd/system/x.service <url>`, `cp
+ * /tmp/x.service /etc/systemd/system/`, `tee`, `cat >`, `install -m 644` and `mv` all
+ * returned `null`, while every neighbouring persistence door in the same function —
+ * `/etc/cron.d/`, `/etc/rc.local`, `/etc/profile.d/`, `~/.ssh/authorized_keys`,
+ * `/etc/ld.so.preload`, `/etc/sudoers.d/` — matched. systemd is the most-used
+ * persistence target on a modern Linux box and it was the one that was missing.
+ *
+ * `SERVICE_INSTALL_VERBS` covers `systemctl enable` and `systemctl link`, which is
+ * the *command*. This is the file that has to be on disk for that command to mean
+ * anything, and it is reached without `systemctl` at all.
+ *
+ * Four prefixes, not one: systemd's own tree is spelled four ways across
+ * distributions (`/etc/systemd/system`, `/lib/systemd/system`,
+ * `/usr/lib/systemd/system`, `/usr/local/lib/systemd/system`) and naming only the
+ * first would leave the rest exactly as uncovered as they were. `init.d`/`rc.d` are
+ * the SysV spellings of the same door on systems that still run them. The per-user
+ * tree is anchored on `(^|/)` rather than `^` because it is reached through `~`.
+ *
+ * `(\/|$)` rather than `\/` because the destination is often the *directory* itself —
+ * `cp /tmp/x.service /etc/systemd/system/` names no file at all, and a rule requiring
+ * a trailing filename would miss the most direct spelling of the whole thing.
+ */
+/**
+ * The path half of an scp/rsync destination spelled `host:/path`.
+ *
+ * Strips the host only when a path follows the colon, which is the only case where
+ * there is one to keep: `scp file host:` names a destination directory on the far
+ * side and no path within it, and the answer for a startup file is the same — none.
+ * Stripping unconditionally would turn `host:` into the empty string, which matches
+ * nothing either way, so the lookahead is there to be honest about the shape rather
+ * than to change an outcome.
+ *
+ * A target with no colon, or one whose colon is followed by something that is not a
+ * path, comes back unchanged, so `C:/x` on a POSIX line and `http://x/y` are not
+ * quietly rewritten.
+ */
+function pathWithinRemoteTarget(target: string): string {
+	return target.replace(/^[^:/]*:(?=\/)/, "");
+}
+
+function isServicePath(lower: string): boolean {
+	return (
+		/^\/(etc|lib|usr\/lib|usr\/local\/lib)\/systemd\/system(\/|$)/.test(lower) ||
+		/(^|\/)\.config\/systemd\/user(\/|$)/.test(lower) ||
+		/^\/etc\/(init\.d|rc\.d)(\/|$)/.test(lower)
+	);
 }
 
 /**
@@ -3319,13 +3416,39 @@ function posixStartupWrite(segment: string): DangerousCommandMatch | null {
 	// DEST` ends in DEST, and `755` never becomes the answer. `tee` above uses
 	// every non-flag argument rather than the last, because `tee` genuinely takes
 	// several targets; that difference is the programs' and not a shortcut.
-	if (program === "cp" || program === "install") {
+	if (program === "cp" || program === "install" || program === "mv" || program === "ln") {
 		for (let index = tokens.length - 1; index > 0; index--) {
 			const token = tokens[index];
 			if (token.startsWith("-")) continue;
 			targets.push(token.replace(/^["']|["']$/g, ""));
 			break;
 		}
+	}
+	// `rsync` and `scp` are the same sources-then-destination shape, and the shape is
+	// the point: the destination is often `host:/path`, so the *remote* half of a
+	// push is the thing that lands in a startup directory. `rsync /tmp/p
+	// root@host:/etc/cron.d/job` is persistence on a machine the user is not looking
+	// at.
+	//
+	// That spelling did NOT work when it was first written here, and the reason is
+	// worth keeping: `isCronPath` anchors on `^\/etc\/cron\.d\//`, so a target
+	// beginning `root@host:` never reaches the directory at all. An earlier comment
+	// here claimed the unanchored `(^|\/)` was what let the remote form through. It
+	// was measured `null` in three spellings, which is what showed the comment was
+	// wrong; the host half is stripped in {@link pathWithinRemoteTarget} instead.
+	if (program === "rsync" || program === "scp") {
+		for (let index = tokens.length - 1; index > 0; index--) {
+			const token = tokens[index];
+			if (token.startsWith("-")) continue;
+			targets.push(token.replace(/^["']|["']$/g, ""));
+			break;
+		}
+	}
+	// `dd` names its target as the *value* of `of=` and has no positional argument at
+	// all, so neither the redirect scan nor the last-argument scan above can see it.
+	// The reader is shared with the disk rule, which was here first.
+	if (program === "dd") {
+		targets.push(...ddOutputTargets(segment));
 	}
 	// `curl -o FILE` and `wget -O FILE` name the destination as the *value* of a
 	// switch rather than as a positional argument, so they need that value and
@@ -3371,7 +3494,11 @@ function posixStartupWrite(segment: string): DangerousCommandMatch | null {
 	}
 
 	for (const target of targets) {
-		if (!isStartupPath(target)) continue;
+		// A remote destination is spelled `host:/path`, and every startup predicate
+		// is anchored on the leading `/` — `^\/etc\/cron\.d\//` cannot match a string
+		// that begins `root@host:`. Measured, not assumed: `rsync /tmp/p
+		// root@host:/etc/cron.d/job` returned `null` until this stripped the host.
+		if (!isStartupPath(pathWithinRemoteTarget(target))) continue;
 		// Three different claims, and the message has to say which one it is making.
 		// "Runs on every future login" is exactly right for a shell startup file
 		// and for an SSH key file. For `sudoers` it would be a claim the code does
@@ -3394,7 +3521,9 @@ function posixStartupWrite(segment: string): DangerousCommandMatch | null {
 					? `\`${target}\` written to, which the dynamic linker loads into every program on this machine`
 					: isCronPath(lower)
 						? `\`${target}\` written to, which the scheduler runs on its own, with no login needed`
-						: `\`${target}\` written to, which runs on every future login or boot`,
+						: isServicePath(lower)
+							? `\`${target}\` written to, which the init system starts on its own, with no login needed`
+							: `\`${target}\` written to, which runs on every future login or boot`,
 		};
 	}
 	return null;

