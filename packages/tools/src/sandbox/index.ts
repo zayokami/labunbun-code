@@ -16,14 +16,31 @@
  *   `unavailable`  a backend exists for this platform but is not installed. The
  *                  command still runs — refusing every command on a machine that
  *                  never installed bubblewrap would be a worse failure than the
- *                  one being guarded — and the reason is reported so the user is
- *                  not left believing they are confined
+ *                  one being guarded. The user is not left believing they are
+ *                  confined, but see the note below on where that sentence comes
+ *                  from, because it is not this one
  *   `unconfined`   the policy says so, and nothing is wrapped
  *
  * The last three all mean "your command is not being confined by this layer", so
  * the distinction between them is for the *report*, not for the argv. Collapsing
  * them into a boolean is precisely how a simulated layer starts reading as a
  * real one.
+ *
+ * **The `reason` on a resolution has no production reader.** This paragraph used
+ * to claim the reason "is reported so the user is not left believing they are
+ * confined", and that was false. Both production readers of a resolution test
+ * `kind` alone and take the argv from it — `operations.ts` and `background.ts`
+ * — and neither looks at anything else on the object, so the `reason` strings
+ * built below are read by tests and by nothing else. The sentence a user
+ * actually sees is produced independently, by `describeSandboxBackend` from the
+ * same two inputs (the detected backend and the session's sandbox mode), and
+ * `/permissions` is its one caller.
+ *
+ * Which is the better shape, and the reason this is worth a sentence rather than
+ * a deletion: the two cannot disagree, because the user-facing one is computed
+ * from the inputs rather than from a decision that already happened. A reason
+ * string with no reader invites a future reader to go looking for the consumer
+ * and conclude the disclosure is missing. It is not missing; it is derived.
  */
 import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";

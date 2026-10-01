@@ -180,7 +180,23 @@ function namespaceArgs(network: SandboxPolicy["network"]): string[] {
 		"--unshare-pid",
 		"--unshare-ipc",
 	];
-	if (network === "restricted") args.push("--unshare-net");
+	// Fail closed, and match what `networkPolicy` does for seatbelt.
+	//
+	// The two backends used to disagree about a value that should not exist. This
+	// asked `network === "restricted"`, so anything else — a corrupted policy, an
+	// embedder that built one by hand, a value the type does not have — left
+	// `--unshare-net` off and the network **open**. Seatbelt asked
+	// `network === "enabled"` and falls through to the restricted text, so the
+	// same input closed the network there. Same policy, opposite direction of
+	// failure, decided by which platform you are on.
+	//
+	// At the type level the two forms are equivalent — `network` is
+	// `"restricted" | "enabled"` and nothing else — so this changes no verdict on
+	// any value the build can produce. That is the point: the reachable inputs
+	// are identical either way, and the unreachable one now costs the network
+	// rather than granting it. The same shape as `canRead`, which reads
+	// `access !== "deny"` for the same reason.
+	if (network !== "enabled") args.push("--unshare-net");
 	// A fresh procfs, so host process roots are not reachable through /proc.
 	args.push("--proc", "/proc");
 	return args;

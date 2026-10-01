@@ -143,8 +143,25 @@ export const SettingsSchema = z.object({
 	 * Separate from `permissionMode` because the two are separate — see
 	 * `PERMISSION_MODES` in `@labunbun/agent`. `workspace-write` resolves to an
 	 * OS-enforced policy on macOS and Linux; on Windows it resolves to a
-	 * tool-layer one, which is a weaker guarantee and says so in `/doctor` and
-	 * in the mode's own hint rather than being described here as confinement.
+	 * tool-layer one, which is a weaker guarantee and is described as such
+	 * rather than as confinement.
+	 *
+	 * **Where that description actually reaches a user: `/permissions`, and only
+	 * there.** An earlier version of this comment said the weakening "says so in
+	 * `/doctor` and in the mode's own hint", and neither was true. `/doctor` has
+	 * no filesystem-sandbox row at all — it calls `sandboxBackendFor` once, to
+	 * compute the *network* caveat, and prints that only when the network axis is
+	 * restricting, which is not the default. The mode hints in `MODE_CHOICES` say
+	 * nothing about the sandbox for `ask`, `plan` or `agent`; the only one that
+	 * mentions it is `agentNoSandbox`, which describes the axis being off.
+	 *
+	 * So on a default-configured Windows install the filesystem layer is
+	 * disclosed in exactly one place, and it is an *under*-disclosure rather than
+	 * an overstatement: nothing shown to a user overstates what the layer does.
+	 * Stated here because the cost of this being wrong is a future `/doctor`
+	 * regression that removes all sandbox disclosure while a comment promises it
+	 * is covered elsewhere. `simulated.ts` carries the same fact about its own
+	 * disclaimer, and gets it right.
 	 */
 	sandbox: SandboxModeSchema.optional(),
 	/**

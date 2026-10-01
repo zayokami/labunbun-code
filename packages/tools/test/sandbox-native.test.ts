@@ -712,6 +712,33 @@ describe("buildBwrapArgs", () => {
 		}
 	});
 
+	/**
+	 * A value the type does not contain, which is the whole point of the row.
+	 *
+	 * bwrap used to ask `network === "restricted"`, so anything else left
+	 * `--unshare-net` off and the network open — while seatbelt, asked
+	 * `network === "enabled"`, closed the network for the same input. Same policy,
+	 * opposite direction of failure, decided by which platform you were on. Both
+	 * now fail closed.
+	 *
+	 * The cast is the point rather than a shortcut: without it the test does not
+	 * compile, because the value is unreachable, and an unreachable value is the
+	 * whole reason this row exists. Nothing in the build produces it — the
+	 * `enabled` row above is what a caller actually gets.
+	 */
+	test("a network value the type does not contain still closes the network", () => {
+		for (const bogus of [undefined, null, "", "none", "RESTRICTED", 0, 1] as unknown[]) {
+			const argv = buildBwrapArgs({ ...POLICY, network: bogus } as SandboxPolicy, COMMAND);
+			expect(argv).toContain("--unshare-net");
+		}
+	});
+
+	/** The other direction, so the row above is not "always on". */
+	test("and `enabled` is still the one value that leaves it open", () => {
+		const argv = buildBwrapArgs({ ...POLICY, network: "enabled" }, COMMAND);
+		expect(argv).not.toContain("--unshare-net");
+	});
+
 	test("an unrestricted policy wraps nothing at all", () => {
 		expect(buildBwrapArgs(UNRESTRICTED, COMMAND)).toEqual(COMMAND);
 	});
