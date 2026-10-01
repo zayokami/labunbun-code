@@ -2974,6 +2974,75 @@ describe("what a null does and does not mean", () => {
 	});
 });
 
+describe("POSIX: switching a host protection off", () => {
+	/**
+	 * The same act the Windows half already flags, on the platform where it had
+	 * no rule at all. `netsh advfirewall set allprofiles state off` fires on
+	 * Windows and `ufw disable` did not fire on Linux — which is not a defensible
+	 * difference, because both leave a machine with nothing filtering traffic.
+	 *
+	 * **Nothing in this block was measured**, and the source comment says so
+	 * rather than borrowing the Windows batch's "measured" wording: `command -v`
+	 * finds none of these programs on the machine the file was written on. The
+	 * rows below pin *which shapes are caught*, which is a claim about this
+	 * table and not about what the programs do on a real host.
+	 */
+	test.each([
+		["ufw disable", "the everyday spelling"],
+		["ufw --force reset", "and the destructive sibling, which needs --force"],
+		["sudo ufw disable", "behind sudo"],
+		["sh -c 'ufw disable'", "inside a shell script"],
+		["nft flush ruleset", "the successor to iptables"],
+		["setenforce 0", "SELinux into permissive mode"],
+		["setenforce Permissive", "and the word rather than the number"],
+		["aa-disable", "AppArmor, which takes no arguments at all"],
+		["firewall-cmd --set-default-zone=trusted", "and the RHEL spelling, glued"],
+		["iptables -F", "emptying the filter table"],
+		["iptables --flush", "and the long form"],
+		["iptables -F INPUT", "emptying one named chain"],
+		["sudo iptables -F", "behind sudo"],
+		["iptables -P INPUT ACCEPT", "and a default policy that lets everything unmatched through"],
+		["ip6tables -F", "the IPv6 half"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * Turning a protection *on* is a repair, and flagging it is the failure mode
+	 * this whole table is written to avoid — the same reasoning
+	 * `firewallEnabledTrue` encodes on the Windows side. Looking at a protection
+	 * is not switching it off.
+	 */
+	test.each([
+		["ufw enable", "turning it back on"],
+		["ufw status", "reading the state"],
+		["ufw status verbose", "and the long form"],
+		["iptables -L -n", "listing the rules"],
+		["iptables -S", "and the other listing spelling"],
+		["nft list ruleset", "reading nftables"],
+		["getenforce", "and asking SELinux what it is doing"],
+		["iptables -A INPUT -p tcp --dport 8080 -j ACCEPT", "adding one rule is ordinary firewall work"],
+		["iptables -P INPUT DROP", "a default that closes rather than opens"],
+		["iptables -P FORWARD REJECT", "and the other tightening direction"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test("the iptables rule names what it emptied, not which program ran", () => {
+		expect(posix("iptables -F")?.rule).toContain("ruleset");
+		expect(posix("iptables -P INPUT ACCEPT")?.rule).toContain("ACCEPT");
+		// The two are different acts and must not borrow each other's message.
+		expect(posix("iptables -F")?.rule).not.toContain("ACCEPT");
+	});
+
+	test("a rule that took no arguments is matched on the program alone", () => {
+		// `aa-disable` has no verb to read, so it is the one row where the program
+		// is the whole shape. A trailing word must not make it stop matching.
+		expect(posix("aa-disable")).not.toBeNull();
+		expect(posix("sudo aa-disable")).not.toBeNull();
+	});
+});
+
 describe("POSIX: turning off the record of what ran", () => {
 	/**
 	 * Erasing a record that already exists, rather than suppressing the next one.

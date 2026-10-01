@@ -899,7 +899,8 @@ function matchTokens(
 		posixDiskRules(tokens, segment) ??
 		posixPermissionRules(tokens) ??
 		posixFindRules(tokens) ??
-		posixProcessRules(tokens)
+		posixProcessRules(tokens) ??
+		posixProtectionRules(tokens)
 	);
 }
 
@@ -1407,6 +1408,106 @@ const POWER_PROGRAMS: ReadonlySet<string> = new Set(["reboot", "halt", "poweroff
  * `-c` is not in it and never could be: it *cancels* a pending shutdown.
  */
 const POSIX_SHUTDOWN_SWITCHES: ReadonlySet<string> = new Set(["-h", "-r", "-p", "--halt", "--reboot", "--poweroff"]);
+
+/**
+ * Switching a host protection off, on POSIX.
+ *
+ * **Nothing here was measured, and the comment says so rather than borrowing the
+ * Windows batch's wording.** `WINDOWS_ADMIN_VERBS` can say "measured, every
+ * program named here exists on this machine under the spelling the rule matches,
+ * and accepts the switch form written against it" — because it could. `command -v`
+ * on this box finds no `ufw`, `iptables`, `nft`, `setenforce` or `firewall-cmd`,
+ * so there was no spelling to check and no behaviour to observe. This is the
+ * weaker position and it is stated as such rather than dressed up.
+ *
+ * The rule is kept anyway, on the `wmic` precedent directly above: "not installed
+ * here" is a fact about the machine the file was written on, not a reason to
+ * leave an act uncovered. These are among the most widely used administration
+ * commands on the platform, and the same act on Windows — `netsh advfirewall set`
+ * — is already flagged.
+ *
+ * **A program and a verb, not a program.** `ufw status`, `iptables -L`,
+ * `nft list ruleset` and `setenforce` are how a person *looks* at the protections
+ * on a machine, and a rule that fired on those is a rule nobody keeps switched on.
+ * So `disable` and `reset` are caught on `ufw` while `enable` and `status` are
+ * not, and `iptables` is caught on the verbs that empty a table or open a default
+ * policy rather than on the program. Turning a protection *on* is a repair and is
+ * left alone here for the same reason `firewallEnabledTrue` leaves it alone on
+ * Windows.
+ *
+ * `iptables -A INPUT -p tcp --dport 8080 -j ACCEPT` is deliberately not a rule:
+ * adding one allow rule is not the same act as emptying the table, and a rule
+ * broad enough to catch the narrow case would catch every firewall rule anyone
+ * writes. `iptables -P INPUT ACCEPT` *is* caught, because it changes the default
+ * for every packet that no rule matches — the whole policy, in one switch.
+ */
+const POSIX_PROTECTION_OFF: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	["ufw", new Set(["disable", "reset"])],
+	["nft", new Set(["flush"])],
+	["setenforce", new Set(["0", "permissive"])],
+	["aa-disable", new Set([])],
+	["firewall-cmd", new Set(["--set-default-zone=trusted"])],
+]);
+
+/**
+ * Is this `iptables` invocation emptying a table or opening a default policy?
+ *
+ * Separate from {@link POSIX_PROTECTION_OFF} because `iptables` is not shaped like
+ * the rest of that table: there is no verb word, only switches. `-F` and
+ * `--flush` empty a table (the table is named or defaults to the filter table),
+ * and `-P <chain> ACCEPT` sets the default for a whole chain.
+ *
+ * `-A`/`-I` are absent on purpose, and the reasoning is the same as the table's:
+ * adding one rule is ordinary firewall work, and a rule broad enough to catch
+ * `-A INPUT ... -j ACCEPT` catches every rule anyone has ever written.
+ */
+function iptablesFlushesOrOpensPolicy(tokens: string[]): DangerousCommandMatch | null {
+	for (let i = 1; i < tokens.length; i++) {
+		const token = tokens[i].toLowerCase();
+		if (token === "-f" || token === "--flush") {
+			return {
+				kind: "Other",
+				rule: "`iptables` emptying a ruleset, which removes every rule that was filtering traffic",
+			};
+		}
+	}
+	// `-P <chain> <target>`. Only ACCEPT opens it; DROP and REJECT are the
+	// tightening directions and belong to a rule that does not exist.
+	const policy = tokens.findIndex((t) => t.toLowerCase() === "-p" || t.toLowerCase() === "--policy");
+	if (policy !== -1 && tokens[policy + 2]?.toLowerCase() === "accept") {
+		return {
+			kind: "Other",
+			rule: "`iptables` setting a chain's default to ACCEPT, which lets through every packet no rule matches",
+		};
+	}
+	return null;
+}
+
+function posixProtectionRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+
+	if (program === "iptables" || program === "ip6tables") {
+		return iptablesFlushesOrOpensPolicy(tokens);
+	}
+
+	// `aa-disable` takes no arguments at all, so it is matched on the program
+	// rather than through the verb loop below.
+	if (program === "aa-disable") {
+		return { kind: "Other", rule: "`aa-disable`, which turns AppArmor off" };
+	}
+
+	const verbs = POSIX_PROTECTION_OFF.get(program);
+	if (verbs === undefined) return null;
+	for (const token of tokens.slice(1)) {
+		// `--set-default-zone=trusted` arrives glued, so a verb set that holds a
+		// switch has to be compared whole rather than as a bare word.
+		if (verbs.has(token.toLowerCase())) {
+			return { kind: "Other", rule: `\`${program} ${token}\`, which switches a host protection off` };
+		}
+	}
+	return null;
+}
 
 function posixProcessRules(tokens: string[]): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "posix");
@@ -2829,13 +2930,22 @@ function fetchPipedIntoInterpreter(segments: string[]): DangerousCommandMatch | 
  * needs no measurement to be obvious: `>` truncates its target before writing,
  * which is what makes `echo x > f` destructive and `echo x >> f` not.
  *
- * **Not covered here, and deliberately.** `journalctl --vacuum-time`,
- * `logrotate`, `utmpdump`, the `iptables -F` family and `ufw disable` are all
- * absent from this box (`command -v` finds none of them), so a rule for any of
- * them would be written from the name rather than from the behaviour. The
- * Windows batch says out loud when a rule is name-derived; this one does not
- * carry them, because "not measured" is exactly the case this file's comments
- * treat as the weaker claim.
+ * **Not covered here, and why.** `journalctl --vacuum-time` and `logrotate` are
+ * not rules: both are absent from this box (`command -v` finds neither), and
+ * unlike `ufw disable` — which `POSIX_PROTECTION_OFF` now covers, on the `wmic`
+ * precedent that "not installed here" is a fact about this machine rather than a
+ * reason to leave the act uncovered — neither is a command whose *effect* is to
+ * switch a protection off. `logrotate` manages rotation policy and
+ * `--vacuum-time` trims archived journals; emptying them removes old records,
+ * which is a weaker act than removing the ability to record at all.
+ *
+ * That reversal is a decision this comment now records rather than hides. The
+ * earlier version of this text excluded `iptables -F` and `ufw disable` on the
+ * grounds that a rule for them would be written from the name, and it was right
+ * that nothing had been measured — the `POSIX_PROTECTION_OFF` doc comment says
+ * the same thing about itself. What was wrong was treating "not measured" as
+ * disqualifying: the Windows half flags the identical act, and it got there
+ * without a measurement of the destruction either.
  */
 function posixRecordDestruction(segment: string): DangerousCommandMatch | null {
 	const tokens = tokenizeShell(segment);
