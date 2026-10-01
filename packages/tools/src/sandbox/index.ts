@@ -390,10 +390,33 @@ export function describeSandboxBackend(
 	}
 	switch (backend) {
 		case "native":
-			return `Sandbox: enforced by the OS. Commands run under ${nativeSandboxProgram(platform)}, confined to the workspace, with version-control metadata refused for writing. This holds at the kernel, however the process tree is arranged.`;
+			// "Confined to the workspace" is a claim about writes only, and it used to
+			// be made about the whole command. Both backends start from an
+			// already-readable baseline — bwrap emits `--ro-bind / /` and seatbelt
+			// emits `(allow file-read*)` — so a `read`-marked root produces no rule at
+			// all rather than a narrower one. The string is scoped to the *mode* rather
+			// than to the policy on purpose: this function is not handed the policy,
+			// and `SandboxPolicy` is a type an embedder can fill with `deny` entries,
+			// so "reads are unrestricted" would be one mechanism's answer wearing the
+			// other's name. "This mode does not narrow reads" is true of every policy
+			// `buildSandboxPolicy` produces, which is the only one this mode has.
+			//
+			// The process-tree sentence is kept, and is a different claim from the one
+			// the bwrap header leaves open: it is about *descendants* keeping the
+			// confinement, which is what the parent-of-the-shell wrapping in
+			// `operations.ts` and seatbelt's inherited profile both give. Whether a
+			// `mv` can carry a protected `.git` out from under its read-only bind on
+			// Linux is a separate question, it is unverified, and it stays in
+			// `bwrap.ts` rather than being resolved in a string this long.
+			return `Sandbox: enforced by the OS. Commands run under ${nativeSandboxProgram(platform)}. The workspace boundary is a write boundary — version-control metadata is refused for writing — and this mode does not narrow reads, which start from the machine's own. The kernel is what holds this rather than this process, and it is attached to the process rather than to the command, so it survives however the process tree is arranged.`;
 		case "unavailable":
 			return `Sandbox: not enforced. ${nativeSandboxProgram(platform)} is not installed here, so commands run without filesystem confinement. The deny rules and the dangerous-command classifier still apply — they live in this process — but the workspace boundary is not being held.`;
 		default:
+			// "Calls that arrive through the tools" is about `Write` and `Edit`, and
+			// not about `Bash` — which builds this same policy, hands it to `exec`, and
+			// has it dropped unread the moment the resolution is not `native`. The
+			// sentence is true as written; it is worth the comment here because the
+			// gap is the kind a reader assumes is closed.
 			return `Sandbox: simulated, not OS-enforced. This build ships no filesystem-sandbox backend for this platform, and adding one would mean a helper program, which is out of scope. Writes are ${SIMULATED_SANDBOX_DISCLAIMER}. The deny rules and the dangerous-command classifier are separate and still apply.`;
 	}
 }

@@ -14,11 +14,14 @@
  * and nothing else — Bash walks straight past it. (`rm -rf .git` *is* refused,
  * but by the dangerous-command classifier catching the `-rf`, not by any `.git`
  * rule.) So the discovery here is for the *shell* policy, which is the one the
- * tool layer's own guard cannot produce: on macOS and Linux that policy becomes a
- * real kernel confinement, and on Windows it becomes a value the Bash tool
- * carries and `resolveSandboxExecution` reports as `simulated` — so on this
- * platform the gap above is narrowed, not closed, and the sentence in
- * `describeSandboxBackend` is the one that says so.
+ * tool layer's own guard cannot produce. On macOS and Linux that policy becomes
+ * a real kernel confinement. On Windows it does not: `resolveSandboxExecution`
+ * reports `simulated`, and `exec` wraps the shell only for a `native`
+ * resolution, so the protected list is built, handed to `exec`, and dropped there
+ * unread. The gap above therefore stands on this platform exactly as measured —
+ * `echo x > .git/hooks/pre-commit` through Bash still lands — so this scan
+ * neither narrows nor closes it here. The sentence in `describeSandboxBackend`
+ * is the one that tells the user so.
  *
  * Two shapes of `.git` are both real and both must be found:
  *

@@ -599,10 +599,16 @@ directly — Bun executes TS natively, so there is no build step in the dev loop
 - Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
 - Base URLs are overridable per provider via `<PROVIDER>_BASE_URL`, e.g.
   `ANTHROPIC_BASE_URL` for a gateway or proxy
-- Inside the workspace, `.git/` is not writable by the agent — in any mode, and
-  including a nested repository's own `.git` or a symlink that resolves into one.
-  Rewriting history is not an edit the user can undo, so it is not something a
-  permission can grant. Reading git metadata is unaffected (`git` runs as usual).
+- Inside the workspace, `.git/` is not writable by the agent through the `Write`
+  and `Edit` tools — in any mode, and including a nested repository's own `.git`
+  or a symlink that resolves into one. A shell gets the same protection on macOS
+  and Linux, where the OS enforces it — with two limits worth stating: only where
+  that sandbox is actually installed (a Linux box without `bubblewrap` confines
+  nothing), and only for repositories the scan finds, which is four levels deep
+  and skips `node_modules`. **On Windows a shell is not covered at all** — there
+  is no OS sandbox there, so `rm .git/config` through Bash succeeds. Rewriting
+  history is not an edit the user can undo, so it is not something a permission
+  can grant. Reading git metadata is unaffected (`git` runs as usual).
 
 ## Sponsor
 

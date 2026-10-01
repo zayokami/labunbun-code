@@ -29,9 +29,34 @@ import { findProtectedPaths } from "./protected-paths.ts";
  * A failed scan resolves to an empty list rather than rejecting. The caller is a
  * tool that is about to do something the user asked for, and a permission error
  * in one subtree is a worse reason to refuse a write than the narrower coverage
- * it costs — but the narrower coverage is real, so `describeSimulatedSandbox`
- * reports the count the policy ended up with, and the count is 0 when this
- * happened.
+ * it costs — but the narrower coverage is real and nobody is told. The one
+ * function that formats the count is `describeSimulatedSandbox`, and nothing in
+ * production calls it, so a scan that came back empty is silent.
+ *
+ * **What an empty list costs is the whole list, the top-level repository
+ * included.** An earlier version of this comment said otherwise — that
+ * `buildSandboxPolicy` derives the workspace's own `.git` without a scan, so
+ * only the nested ones go missing. That is not what the code does, and the
+ * difference is the difference between "a repository deep in the tree is
+ * unprotected" and "the repository you are standing in is unprotected": there is
+ * no separate derivation. `buildSandboxPolicy` takes `protectedPaths` from
+ * `protectedPathsFor` below, and the top-level `.git` is found by the same
+ * breadth-first walk, out of the same `readdir` of the root
+ * (`protected-paths.ts:128`), which is the read that throws when the root itself
+ * cannot be enumerated. So a root the process cannot list loses every repository,
+ * and the policy that comes back protects nothing at all.
+ *
+ * This is not Windows-only, and it is worth being exact about, because the two
+ * backends fail differently:
+ *
+ *   - **native** takes its `--ro-bind` / `deny file-write*` entries from this
+ *     same list, so an empty scan leaves `bwrap` and `sandbox-exec` with nothing
+ *     to protect `.git` — the kernel confinement is real and the thing it was
+ *     confining is missing.
+ *   - **Write and Edit** are unaffected, because `containment.ts` matches on the
+ *     path and never consults a list.
+ *   - `rm -rf .git` is still refused, by the dangerous-command classifier, which
+ *     is also a list — but one that is not this list.
  */
 const protectedPathsCache = new Map<string, Promise<string[]>>();
 
@@ -42,11 +67,6 @@ function protectedPathsFor(workspace: string): Promise<string[]> {
 		protectedPathsCache.set(workspace, found);
 	}
 	return found;
-}
-
-/** Forget what a workspace's scan found. Exists for tests, which build many. */
-export function clearProtectedPathsCache(): void {
-	protectedPathsCache.clear();
 }
 
 export interface WorkspacePolicyOptions {

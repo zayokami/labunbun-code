@@ -29,10 +29,18 @@ import { normalizePathSeparators, resolveCanonical } from "../containment.ts";
 /**
  * The one sentence every surface that shows this layer has to show.
  *
- * Exported rather than written into each call site because the mode banner,
- * `/doctor`, and a deny message are three places a softened version would
- * appear, and a softened version — "sandboxed", "protected", "confined" with
- * nothing after it — is how a tool-layer check ends up reading as a kernel one.
+ * Exported rather than written into each call site because a softened version —
+ * "sandboxed", "protected", "confined" with nothing after it — is how a tool-layer
+ * check ends up reading as a kernel one.
+ *
+ * **One production surface renders it**: the `simulated` case of
+ * `describeSandboxBackend`, which `/permissions` prints
+ * (`coding-agent/src/interactive.ts`). The three this comment used to name are
+ * not there. There is no mode banner in this build. `/doctor` exists but never
+ * reads this. And a deny message from `decideWrite` names the rule that refused
+ * and where the path landed rather than restating this — which is the right
+ * shape for a message the model has to act on, but it does mean the disclaimer
+ * has no second surface to be lost from.
  */
 export const SIMULATED_SANDBOX_DISCLAIMER =
 	"checked in this process for calls that arrive through the tools; a subprocess started outside them is not subject to it, and no OS mechanism is enforcing this";
@@ -222,12 +230,17 @@ export function decideRead(
 }
 
 /**
- * The one line `/doctor` and the mode banner show for this layer.
+ * A one-line summary of this layer, for a caller holding a policy and nowhere to
+ * put it.
  *
- * A single sentence, because the sentence is the thing a user forms their
- * mental model from. It names what the mode means, what the mechanism actually
- * is, and — the part that must not be dropped in a summary — that nothing
- * outside this process is subject to it.
+ * **No production code calls this.** The sentence a user reads is the `simulated`
+ * case of `describeSandboxBackend`, which embeds the disclaimer directly instead
+ * of formatting a policy. It is kept because the wording is worth having and
+ * `sandbox-simulated.test.ts` pins it — that test is the only automated guard
+ * `SIMULATED_SANDBOX_DISCLAIMER` has — and because a policy-shaped caller is the
+ * obvious next thing to want. What it must not do is claim a surface: it is not
+ * the `/doctor` line and not the mode banner, because there is no mode banner in
+ * this build and `/doctor` does not read it.
  */
 export function describeSimulatedSandbox(policy: SandboxPolicy): string {
 	if (policy.fileSystem.kind === "unrestricted") {
