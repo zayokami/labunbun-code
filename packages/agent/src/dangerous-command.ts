@@ -2327,7 +2327,24 @@ function dangerousCmdSegment(segment: string[]): DangerousCommandMatch | null {
 	if (head === "start" && argsHaveUrl(segment)) {
 		return { kind: "Other", rule: "`start` with a URL" };
 	}
-	const hasFlag = (flag: string) => segment.some((t) => t.toLowerCase() === flag);
+	const hasFlag = (flag: string) => segment.some((t) => hasCmdFlag(t, flag));
+	// `del /s /q` is `rd /s /q` wearing the other program name: `/s` walks into
+	// subdirectories and `/q` suppresses the confirmation for each one. The row below
+	// requires *both* for exactly that reason, and `del` was gated on `/f` alone —
+	// so the silent recursive spelling matched only when `/f` happened to be there
+	// too. Measured `null`: `del /s /q C:\x\*`, `erase /s /q`, `del /q /s`, and the
+	// upper-case spelling.
+	//
+	// Both flags are still required together. `del /q file.txt` is a quiet single
+	// delete and `del /s name` is a scoped one; neither is a recursive wipe, and
+	// requiring the pair is what keeps this from firing on ordinary cleanup.
+	//
+	// Checked before the `/f` row because it is strictly more specific: `del /s /q /f`
+	// is a silent recursive delete first and a forced delete second, and the message
+	// should name the act that destroys the most.
+	if ((head === "del" || head === "erase") && hasFlag("/s") && hasFlag("/q")) {
+		return { kind: "Other", rule: `\`${head} /s /q\` (silent recursive delete)` };
+	}
 	if ((head === "del" || head === "erase") && hasFlag("/f")) {
 		return { kind: "Other", rule: "`del /f` (forced delete)" };
 	}
@@ -2335,6 +2352,48 @@ function dangerousCmdSegment(segment: string[]): DangerousCommandMatch | null {
 		return { kind: "Other", rule: "`rd /s /q` (silent recursive delete)" };
 	}
 	return null;
+}
+
+/**
+ * Does one CMD token carry a `/switch`, however the switch was spelled?
+ *
+ * **Measured on `dir`, which owns both `/s` and `/q`:** `/s /q`, `/s/q` and `/q/s`
+ * all list the file, and `/z` answers `Invalid switch - "z"`. So CMD does let
+ * several single-letter switches share one token — each introduced by its own
+ * slash — and an exact token comparison missed that: `rd /s/q C:\x` is a silent
+ * recursive delete and read as neither `/s` nor `/q`.
+ *
+ * One test therefore covers every real spelling, and the two that are not real are
+ * the two it rejects:
+ *
+ * - Letters bundled with **no** slash. `/sq` answers `Invalid switch - "sq"`, and a
+ *   reader that treated it as `/s` plus `/q` would classify a command that cannot
+ *   run — the wrong kind of right.
+ * - A separator that is neither a slash nor a semicolon. `/s:1` answers
+ *   `参数格式不正确 - "s:1"` and the file survives, measured on real `del` against a
+ *   file that existed. An earlier version of this function read "the switch, then
+ *   anything that is not a letter or a digit", which admitted that spelling, and
+ *   the comment above it claimed `/s:1` was real. It was not; it was the only
+ *   observable thing that branch did, since `/s`, `/s/q` and `/q/s` all pass through
+ *   the pieces test below anyway.
+ *
+ * Every piece must be one character, and that is also what keeps a path from faking
+ * a switch: `/tmp/f` splits to `tmp` and `f`, `tmp` is not a switch, and `del /q
+ * /tmp/f` names a file in the current directory rather than deleting recursively.
+ *
+ * The semicolon separator (`dir /s;q` lists the file, measured) never reaches this
+ * function — {@link splitShellCommands} cuts the command at `;` first, because that
+ * is the separator it is on other platforms. The caller rejoins on it; see
+ * {@link hasCmdSwitch}.
+ *
+ * {@link verbMatches} answers the same question for the long verbs in
+ * `WINDOWS_ADMIN_VERBS`, where there are no letters to bundle; it is not a
+ * substitute, and neither is this one for it.
+ */
+function hasCmdFlag(token: string, flag: string): boolean {
+	const pieces = token.toLowerCase().split("/").slice(1);
+	if (pieces.some((piece) => !/^[a-z0-9]$/.test(piece))) return false;
+	return pieces.includes(flag.slice(1));
 }
 
 /** A GUI app or protocol handler launched directly with a URL in its argv. */
@@ -2758,6 +2817,27 @@ const POWERSHELL_ADMIN_CMDLETS: ReadonlyMap<string, string> = new Map([
 	["add-localgroupmember", "grants a user membership of a group, which can be the administrators group"],
 	["clear-recyclebin", "empties the Recycle Bin, which makes a delete permanent"],
 	["format-volume", "reformats a volume, which cannot be undone"],
+	// Four more twins, all measured `null` against rules their CMD half already
+	// matched: `schtasks /run`, `icacls /grant` and `reg delete /f` are each
+	// classified above, and these are the same three acts spelled the PowerShell way
+	// plus the fourth that has no `reg` counterpart at all.
+	//
+	// `Start-ScheduledTask` completes the set beside `register-`, `unregister-` and
+	// `disable-scheduledtask` above: those three change what a task *is* and this one
+	// is the only member of the family that makes it *run*. Running a registered task
+	// is arbitrary code execution by another name, and it was the one gap in a family
+	// the file already covers three quarters of.
+	["start-scheduledtask", "runs a registered task, which executes whatever that task was registered to run"],
+	// `Get-Acl` is the read-only sibling and stays out, by the same rule the rest of
+	// this table is built on.
+	["set-acl", "rewrites an access control list, which is the same change `icacls /grant` makes"],
+	// `Remove-Item` is already in DELETE_CMDLETS and `Remove-Item -Recurse -Force`
+	// against a registry path matches today only because of `-Force`. These two name
+	// no verb at all, so the deletion is the whole of what they do — there is no
+	// harmless reading of either. `Get-ItemProperty` and `Clear-Content`'s absence
+	// above is the same call in the other direction.
+	["remove-itemproperty", "deletes a registry or configuration value, which is the act `reg delete` performs"],
+	["clear-itemproperty", "clears a registry or configuration value, which is `reg delete` without the removal"],
 ]);
 
 /** Values PowerShell accepts for a `[bool]` that mean "off". */
@@ -3466,8 +3546,8 @@ function posixStartupWrite(segment: string): DangerousCommandMatch | null {
 	const unquote = (token: string): string => token.replace(/^["']|["']$/g, "");
 	if (program === "curl" || program === "wget") {
 		const shortFlag = program === "curl" ? "o" : "O";
-		const bareLong = new RegExp(`^--output(?:-document)?$`);
-		const gluedLong = new RegExp(`^--output(?:-document)?=(.+)$`);
+		const bareLong = /^--output(?:-document)?$/;
+		const gluedLong = /^--output(?:-document)?=(.+)$/;
 		const bareShort = new RegExp(`^-[a-zA-Z]*${shortFlag}$`);
 		const gluedShort = new RegExp(`^-[a-zA-Z]*${shortFlag}(.+)$`);
 		for (let index = 1; index < tokens.length; index++) {
@@ -3908,12 +3988,67 @@ function matchScript(script: string, depth: number, platform: DangerousCommandPl
 		const piped = fetchPipedIntoInterpreter(segments);
 		if (piped) return piped;
 	}
-	for (const segment of segments) {
+	// `;` is a CMD switch separator and a command separator on every other platform,
+	// so a Windows line that means it as the first arrives here already cut in two.
+	// The rejoined halves are read *alongside* the original segments and not in
+	// place of them, so a PowerShell `;` is still read as the separator it is.
+	const candidates =
+		platform === "windows" ? [...new Set([...segments, ...rejoinedSwitchSegments(segments)])] : segments;
+	for (const segment of candidates) {
 		const tokens = tokenizeShell(segment);
 		const match = matchTokens(tokens, depth, platform, segment);
 		if (match) return match;
 	}
 	return null;
+}
+
+/**
+ * The commands a Windows line runs once its `;` halves are put back together.
+ *
+ * **Measured on real `del`, against a file that existed:** `del /s;q /q a.txt`
+ * answers `已删除文件` and the file is gone. `;` is a switch separator in CMD —
+ * `dir /s;q *.txt` lists recursively, measured on the same box — and it is also
+ * the separator {@link splitShellCommands} cuts on, which is right for POSIX and
+ * for PowerShell and wrong here. So the command arrives as `del /s` and
+ * `q /q C:\x\*`, and neither half carries both switches.
+ *
+ * The join is made only where the join *is* a switch bundle and nothing else: the
+ * left side has to end in a token made of nothing but single-letter switches, and
+ * the right side has to open with bare letters. `Get-ChildItem; Remove-Item` fails
+ * the first test, a POSIX line never reaches here, and a `;` that satisfies neither
+ * is left exactly as {@link splitShellCommands} produced it.
+ *
+ * The halves are joined with `/` rather than with the `;` that was there, because
+ * `;` between switches means the same thing as `/` between them: `del /s;q` is
+ * `del /s /q`, and rejoining with `;` would hand {@link tokenizeShell} the single
+ * token `/s;q`, which is a spelling it is right to refuse.
+ */
+function rejoinedSwitchSegments(segments: string[]): string[] {
+	const rejoined: string[] = [];
+	for (const segment of segments) {
+		const previous = rejoined[rejoined.length - 1];
+		if (previous !== undefined && continuesSwitchBundle(previous, segment)) {
+			rejoined[rejoined.length - 1] = `${previous}/${segment}`;
+			continue;
+		}
+		rejoined.push(segment);
+	}
+	return rejoined;
+}
+
+/** Does `previous` end in a `/s;-style bundle` that `next` finishes? */
+function continuesSwitchBundle(previous: string, next: string): boolean {
+	const left = previous.trimEnd().split(/\s+/).pop() ?? "";
+	if (!left.startsWith("/") || left.length < 2) return false;
+	if (
+		!left
+			.slice(1)
+			.split("/")
+			.every((piece) => /^[a-z0-9]$/i.test(piece))
+	)
+		return false;
+	const right = next.trimStart().split(/\s+/)[0] ?? "";
+	return /^[a-z]+$/i.test(right);
 }
 
 // ---------------------------------------------------------------------------
