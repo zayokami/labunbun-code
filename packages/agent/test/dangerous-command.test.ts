@@ -1372,6 +1372,111 @@ describe("Windows: ShellExecute-shaped launches", () => {
 	});
 });
 
+/**
+ * Windows administrative programs.
+ *
+ * None of these is in Codex's table; the whole group is new. What was measured
+ * is that each program exists on this machine under the spelling matched here
+ * and accepts the switch form written against it — `format`, `diskpart`, `reg`,
+ * `taskkill`, `vssadmin`, `bcdedit`, `schtasks`, `net`, `sc`, `cipher`,
+ * `takeown`, `icacls`, `wevtutil`, `bitsadmin` and `netsh`, all in
+ * `C:\Windows\System32`, `format` as a `.com` and the rest as `.exe`.
+ *
+ * What was not measured is that they destroy anything, on purpose. `format C:`
+ * would erase the volume; `vssadmin delete shadows /all` and `cipher /w:` would
+ * too; `icacls /grant` and `takeown /f` change a real file's ACLs and owner.
+ * None was run in its destructive form.
+ */
+describe("Windows: an administrative program that destroys machine state", () => {
+	test.each([
+		["format C: /q", "reformats a volume"],
+		["format c: /q /y", "lower-cased drive, and confirmed"],
+		["C:\\Windows\\System32\\format.com C:", "the full path, and the .com extension"],
+		["diskpart /s script.txt", "a disk partitioning script"],
+		["diskpart", "with no arguments at all"],
+		["takeown /f C:\\x", "takes ownership"],
+		["reg delete HKLM\\SOFTWARE /f", "deletes a registry key"],
+		["REG DELETE HKLM\\X /F", "and it upper-cased"],
+		["taskkill /f /im node.exe", "force-kills by image name"],
+		["taskkill /f /pid 1234", "force-kills by pid"],
+		["vssadmin delete shadows /all /for=C:", "deletes every shadow copy"],
+		["bcdedit /delete {current}", "deletes a boot entry"],
+		["bcdedit /set testsigning on", "changes the boot configuration"],
+		["schtasks /delete /tn x /f", "deletes a scheduled task"],
+		["sc config sshd start= disabled", "disables a service"],
+		["sc stop sshd", "stops a service"],
+		["sc delete sshd", "deletes a service"],
+		["cipher /w:C", "wipes free space on a volume"],
+		["cipher /w:C:", "with the drive attached to the switch"],
+		["bitsadmin /transfer job http://x f.exe", "downloads and runs a job"],
+		["wevtutil cl Security", "clears the security event log"],
+		["netsh advfirewall set allprofiles state off", "turns the firewall off"],
+		["takeown /f C:\\Windows\\System32", "takes ownership of a system directory"],
+		["icacls C:\\ /grant Everyone:F /T", "grants full control to everyone"],
+		["net user admin P@ss /add", "creates an account"],
+		["net localgroup Administrators h /add", "adds to the administrators group"],
+		["net user admin NewPassword", "resets a password, with no /add to see"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The read-only halves, and the reason this is a program *and* a verb rather
+	 * than a program. `wevtutil el` lists the event log channels, `sc query` and
+	 * `sc qc` read a service, `cipher /c` and `/k` report on a file, `bcdedit
+	 * /enum` and `/export` read the boot store, `schtasks /query` lists tasks,
+	 * `netsh advfirewall show` prints the firewall state, and `net user` prints
+	 * every account on the machine. Those are the commands a person runs to look
+	 * at a machine; a rule that fired on the program alone would fire on all of
+	 * them, and a classifier like that gets switched off.
+	 */
+	test.each([
+		["wevtutil el", "lists the event log channels"],
+		["sc query sshd", "reads a service"],
+		["sc qc sshd", "reads a service's configuration"],
+		["cipher /c C:\\x", "reports on a file"],
+		["cipher /k C:\\x", "checks whether a key is cached"],
+		["bcdedit /enum all", "reads the boot store"],
+		["bcdedit /export out.bcd ALL", "exports the boot store"],
+		["schtasks /query", "lists tasks"],
+		["netsh advfirewall show allprofiles", "prints the firewall state"],
+		["net user", "prints every account"],
+		["net user someaccount", "prints one account"],
+		["reg query HKLM\\SOFTWARE", "reads the registry"],
+		["reg export HKLM\\X out.reg", "exports a registry key"],
+		["icacls C:\\x", "prints a file's permissions"],
+		["icacls C:\\x /save acl.txt", "saves them to a file"],
+		["taskkill /im node.exe", "asks before killing"],
+		["tasklist", "lists processes"],
+		["vssadmin list shadows", "lists shadow copies"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * `/w:C` is `/w` with a volume attached, but `bcdedit /setup` is not `/set`.
+	 * The boundary is the whole of the difference, so it is worth pinning on its
+	 * own rather than only through the rows above.
+	 */
+	test("a switch verb matches with a value attached but not with more letters", () => {
+		expect(windows("cipher /w:C")).not.toBeNull();
+		expect(windows("cipher /w")).not.toBeNull();
+		expect(windows("bcdedit /set")).not.toBeNull();
+		// Not a verb this program has, and not a prefix of one that ends in a
+		// letter: `/setup` starts with `/set` and is a different switch.
+		expect(windows("bcdedit /setup")).toBeNull();
+	});
+
+	// The program name has to survive a directory, an extension and a drive
+	// letter, which is `executableName`'s job and `format.com` is the case worth
+	// naming: it is the only one of these that is not an `.exe`.
+	test("the program is found through a full path and any extension", () => {
+		expect(windows("C:\\Windows\\System32\\format.com C:")).not.toBeNull();
+		expect(windows("C:\\Windows\\System32\\reg.exe delete HKLM\\X /f")).not.toBeNull();
+		expect(windows("C:\\Windows\\System32\\wevtutil.exe cl Security")).not.toBeNull();
+	});
+});
+
 describe("the two platforms are not the same rules", () => {
 	/**
 	 * A Windows-only rule must not fire on a POSIX line and vice versa. If the

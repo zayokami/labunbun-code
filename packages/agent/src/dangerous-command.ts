@@ -1335,8 +1335,133 @@ function matchWindows(tokens: string[]): DangerousCommandMatch | null {
 	// is a way to run a line in a shell whose vocabulary is *neither*, and no
 	// such vocabulary has these words in it.
 	return (
-		dangerousCmd(tokens) ?? dangerousCmdBody(tokens) ?? dangerousPowershellWords(tokens) ?? directGuiLaunch(tokens)
+		dangerousCmd(tokens) ??
+		dangerousCmdBody(tokens) ??
+		dangerousPowershellWords(tokens) ??
+		directGuiLaunch(tokens) ??
+		dangerousWindowsAdmin(tokens)
 	);
+}
+
+/**
+ * Windows administrative programs, and the verbs that make them destructive.
+ *
+ * These are not in Codex's table at all — Codex flags a forced `rm` and a URL
+ * being launched, and nothing here. They are here because each one is a thing
+ * that destroys a machine's state and can be undone by nothing the user has.
+ *
+ * Almost none of them is dangerous in *every* form, which is why this is a
+ * program and a verb rather than a program. `wevtutil el` lists the event log
+ * channels, `sc query` reads a service, `cipher /c` reports encryption, `bcdedit
+ * /enum` reads the boot configuration, `schtasks /query` lists tasks, `netsh
+ * advfirewall show` prints the firewall state, and `net user` with no password
+ * prints an account. A rule that fired on the program alone would be a rule that
+ * fires on six read-only commands a person runs to *look* at the machine, and a
+ * classifier like that gets switched off.
+ *
+ * Measured: every program named here exists on this machine under the spelling
+ * the rule matches, and accepts the switch form written against it —
+ * `format` (which answered "Required parameter missing" rather than "not
+ * recognized"), `diskpart`, `reg`, `taskkill`, `vssadmin`, `bcdedit`,
+ * `schtasks`, `net`, `sc`, `cipher`, `takeown`, `icacls`, `wevtutil`,
+ * `bitsadmin`, `netsh`. They live in `C:\Windows\System32` with an `.exe`
+ * extension, `format` excepted — it is a `.com`, which `executableName` already
+ * strips alongside the others.
+ *
+ * Not measured, deliberately: that any of them actually destroys anything. None
+ * was run in its destructive form. `format C:` was not run because it would
+ * erase the volume, `vssadmin delete shadows /all` and `cipher /w:` were not run
+ * for the same reason, and `icacls /grant` and `takeown /f` were not run because
+ * they change a real file's ACLs and owner. What a rule needs from a measurement
+ * is that the program and the switch are spelled the way the rule expects, and
+ * that is what was measured.
+ */
+const WINDOWS_ADMIN_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	// `reg import` is left out on purpose: `import` is also `bcdedit import`, and a
+	// verb set is per-program here, so nothing would go wrong -- but `reg import`
+	// of a key is closer to `reg export` in shape than to `reg delete`, and
+	// leaving it out is the smaller claim.
+	["reg", new Set(["delete"])],
+	["schtasks", new Set(["/delete", "/create", "/change", "/run"])],
+	["sc", new Set(["config", "stop", "delete", "create"])],
+	["vssadmin", new Set(["delete", "resize"])],
+	["bcdedit", new Set(["/delete", "/set", "/import", "/create"])],
+	["wevtutil", new Set(["cl", "del"])],
+	["cipher", new Set(["/w"])],
+	["bitsadmin", new Set(["/transfer", "/create", "/addfile"])],
+	["netsh", new Set(["set", "delete", "add"])],
+	["taskkill", new Set(["/f"])],
+	// `net user` on its own prints every account on the machine, and
+	// `net user <name>` prints one -- both measured as the listing commands they
+	// are. What is not a listing is `/add`, which creates an account or a group,
+	// and a bare `net user <name> <password>`, which resets one. The second shape
+	// is caught by count rather than by a verb because the password is just a
+	// word; see `dangerousWindowsAdmin`.
+	["net", new Set(["/add"])],
+	["icacls", new Set(["/grant", "/deny", "/remove", "/setowner", "/reset"])],
+]);
+
+/**
+ * Windows administrative programs where the program name is the whole story.
+ *
+ * `format` reformats a volume whatever it is told, `diskpart` is a disk
+ * partitioning tool whatever it is pointed at, and `takeown` hands ownership to
+ * whoever runs it. There is no read-only spelling of any of the three.
+ */
+const WINDOWS_ADMIN_ALWAYS: ReadonlyMap<string, string> = new Map([
+	["format", "reformats a volume, which cannot be undone"],
+	["diskpart", "runs a disk partitioning script, which can erase a volume"],
+	["takeown", "takes ownership of files away from whoever had it"],
+]);
+
+/**
+ * Does an argument name this verb?
+ *
+ * Exact for a bare word, and prefix-with-a-boundary for a switch: `cipher /w:C`
+ * is `/w` with a volume attached, but `bcdedit /setup` is not `/set`. The
+ * boundary is what tells those apart — a switch matches when the rest is empty
+ * or does not start with a letter or a digit.
+ */
+function verbMatches(token: string, known: string): boolean {
+	const lower = token.toLowerCase();
+	if (lower === known) return true;
+	if (!known.startsWith("/") && !known.startsWith("-")) return false;
+	if (!lower.startsWith(known)) return false;
+	const rest = lower.slice(known.length);
+	return rest === "" || !/^[A-Za-z0-9]/.test(rest);
+}
+
+/** The Windows administrative rules, applied to one command line. */
+function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "windows");
+	if (program === undefined) return null;
+
+	const always = WINDOWS_ADMIN_ALWAYS.get(program);
+	if (always !== undefined) {
+		return { kind: "Other", rule: `\`${program}\` — ${always}` };
+	}
+
+	const verbs = WINDOWS_ADMIN_VERBS.get(program);
+	if (verbs === undefined) return null;
+
+	// Every argument is looked at, not only the first. `sc config` puts its verb
+	// first and `netsh advfirewall set allprofiles state off` puts it third, and
+	// these programs have no shared shape to read the verb out of.
+	for (const token of tokens.slice(1)) {
+		for (const known of verbs) {
+			if (verbMatches(token, known)) {
+				return { kind: "Other", rule: `\`${program} ${known}\`, which destroys machine state` };
+			}
+		}
+	}
+
+	// `net user <name> <password>` resets a password and carries no `/add` to
+	// recognise it by. It is exactly four words -- `net`, `user`, the name, the
+	// password -- and the two listings beside it are two and three.
+	if (program === "net" && tokens.length === 4 && tokens[1].toLowerCase() === "user") {
+		return { kind: "Other", rule: "`net user <name> <password>`, which resets a password" };
+	}
+	return null;
 }
 
 /**
