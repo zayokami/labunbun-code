@@ -1068,9 +1068,11 @@ const WEAK_EXECUTION_POLICIES = new Set(["unrestricted", "bypass", "undefined"])
  *
  * `Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'` is true on
  * this machine, so the key is where it has always been. `RunOnce` is the same
- * idea for one boot. Nothing legitimately writes to either from a command line,
- * and a rule that only matched the program name would catch `reg add` and
- * `Set-ItemProperty` used for ordinary configuration as well.
+ * idea for one boot. Installers do write to both, and a user setting something
+ * to launch on login is not doing anything wrong either — which is why this
+ * matches the *path* and not the program: `Set-ItemProperty` and `reg add` are
+ * how the rest of the registry gets configured, and a rule that caught them all
+ * would catch a machine being set up.
  */
 function isRunKeyPath(token: string): boolean {
 	return /\\currentversion\\run(once)?\b/i.test(token);
@@ -1142,8 +1144,33 @@ function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null
 				return { kind: "Other", rule: "PowerShell writing a value to a key that runs at startup" };
 			}
 			if (segment.some((w) => /\\policies\\system\b/.test(w)) && segment.some(isUacValueName)) {
-				return { kind: "Other", rule: "PowerShell `EnableLUA`, which is the switch UAC prompting turns on" };
+				return { kind: "Other", rule: "PowerShell writing `EnableLUA`, the value the UAC prompt reads" };
 			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Ending a process.
+ *
+ * This is *not* the `taskkill /f` rule wearing a different name, and the
+ * difference was measured rather than assumed, because assuming it by analogy
+ * would have put a `-Force` on the rule and left the common form uncovered.
+ *
+ * `taskkill` without `/f` asks a window to close. `Stop-Process` without
+ * `-Force` terminated a process just the same, on this machine: a sleeper
+ * started with `Start-Process -PassThru` read ALIVE, then `Stop-Process -Id
+ * <pid>` with no switch at all, then GONE — identical to the `-Force` run on a
+ * second sleeper. The control is what makes that reading mean something:
+ * `Get-Process -Id` on a pid nothing owns also prints GONE, without anything
+ * having been stopped, so "GONE after" proves nothing on its own. "ALIVE
+ * before" is the half that carries it.
+ */
+function powershellTerminationRules(lower: string[]): DangerousCommandMatch | null {
+	for (const segment of windowsSegments(lower)) {
+		if (segment[0] === "stop-process") {
+			return { kind: "Other", rule: "PowerShell `Stop-Process`, which ends a process" };
 		}
 	}
 	return null;
@@ -1206,7 +1233,7 @@ function dangerousPowershellWords(words: string[]): DangerousCommandMatch | null
 	if (hasForceDeleteCmdlet(lower)) {
 		return { kind: "Other", rule: "a delete cmdlet with `-Force`" };
 	}
-	return powershellExecutionRules(lower) ?? powershellWeakeningRules(lower);
+	return powershellExecutionRules(lower) ?? powershellWeakeningRules(lower) ?? powershellTerminationRules(lower);
 }
 
 /** Split a CMD token on the operators that can be written inside one word. */
@@ -1498,6 +1525,19 @@ const WINDOWS_ADMIN_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	// word; see `dangerousWindowsAdmin`.
 	["net", new Set(["/add"])],
 	["icacls", new Set(["/grant", "/deny", "/remove", "/setowner", "/reset"])],
+	// The pre-2021 spelling of what `Stop-Process` does, and the other half of
+	// the same batch: `wmic process where "name='x'" delete` ends a process the
+	// same way, and `wmic process call terminate` reaches WMI's own method for
+	// it. `terminate` has to be in the set because it arrives *after* `call`, so
+	// reading the first argument would never see it.
+	//
+	// Not measured: `wmic.exe` is not on this machine's disk. A `existsSync` over
+	// `C:\Windows\System32`, `C:\Windows\SysWOW64` and `C:\Windows` finds no
+	// `wmic.exe` in any of them — Windows 11 removed it. The rule is kept
+	// because older builds and a great many scripts still use it, and "not
+	// installed here" is a fact about this machine rather than a reason to leave
+	// the act uncovered.
+	["wmic", new Set(["delete", "terminate"])],
 ]);
 
 /**

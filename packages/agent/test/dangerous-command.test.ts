@@ -1649,6 +1649,72 @@ describe("Windows: a protection that is switched off rather than used", () => {
 	});
 });
 
+describe("Windows: ending a process", () => {
+	/**
+	 * The reason this is its own block is that `Stop-Process` is *not* the
+	 * `taskkill /f` rule with a PowerShell spelling, and writing it that way
+	 * would have been wrong in the direction that matters.
+	 *
+	 * `taskkill` without `/f` asks a window to close, which is why the row for it
+	 * in the admin table is null. `Stop-Process` was measured on this machine and
+	 * terminated a process with no switch at all: a sleeper created with
+	 * `Start-Process -PassThru` read ALIVE, then `Stop-Process -Id <pid>`, then
+	 * GONE — the same as the `-Force` run beside it. So the rule takes the
+	 * cmdlet on its own and the switch is not in it.
+	 */
+	test.each([
+		["Stop-Process -Name explorer", "with no switch, which is what terminates"],
+		["Stop-Process -Name explorer -Force", "and with one"],
+		["Stop-Process -Id 1234", "by pid"],
+		["stop-process -id 1234", "and lower-cased"],
+		['powershell -Command "Stop-Process -Name x"', "behind `powershell -Command`"],
+		["Get-Process -Name node | Stop-Process -Force", "at the end of a pipe"],
+		["Get-Process | Where-Object { $_.Name -eq 'x' } | Stop-Process", "and after another command in the pipe"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * `wmic` is the same act from CMD. Two shapes, because the verb is not where
+	 * the program puts it: `delete` follows the `where` clause, and `terminate`
+	 * follows a `call`, so neither is the first argument and both have to be
+	 * looked for anywhere on the line.
+	 */
+	test.each([
+		["wmic process where \"name='x.exe'\" delete", "delete, after the where clause"],
+		["wmic process call terminate", "the WMI method, after call"],
+		["WMIC PROCESS WHERE ProcessId=1234 CALL TERMINATE", "and it upper-cased"],
+		["C:\\Windows\\System32\\wbem\\wmic.exe process where \"name='x'\" delete", "through its full path"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * WMI's read-only verbs, which is most of what `wmic` is used for, and the
+	 * commands that look at processes rather than end them. `Stop-Service` sits
+	 * here too and is deliberately *not* a rule: stopping a service is what a
+	 * service is for, and `Stop-Process` ends a program somebody was using.
+	 */
+	test.each([
+		["wmic process list", "lists the processes"],
+		["wmic os get Caption,Version", "reads the OS"],
+		["wmic cpu get Name", "reads the processor"],
+		["wmic process get ProcessId,Name", "reads the process table"],
+		["wmic service where \"name='x'\" get State", "reads a service"],
+		["Get-Process -Name node", "reads a process"],
+		["Get-Process | Select-Object -First 5", "and lists them"],
+		["taskkill /im node.exe", "taskkill without /f only asks the window to close"],
+		["Stop-Service Spooler", "stopping a service is what a service is for"],
+		// The cmdlet has to be the head of its segment. A mutation that read it
+		// anywhere in the segment would leave both of these green, which is why
+		// they are here and not only in the prose above.
+		['Write-Host "Stop-Process -Name x"', "names the cmdlet in an argument"],
+		["Select-String Stop-Process", "and searches for it unquoted"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+});
+
 describe("the two platforms are not the same rules", () => {
 	/**
 	 * A Windows-only rule must not fire on a POSIX line and vice versa. If the
