@@ -184,7 +184,7 @@ Already configured another agent tool? Copy over what has an equivalent:
 
 ```bash
 bun run dev yoshi                      # dry run: report only, writes nothing
-bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | opencode | cursor | trae | all
+bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | t3-code | opencode | cursor | trae | all
 bun run dev yoshi --only settings      # categories: settings | assets | history | all
 bun run dev yoshi --apply              # write it
 bun run dev yoshi --apply --force      # also overwrite values that exist
@@ -200,6 +200,17 @@ equivalent here (`allowed-tools`, `model`, `argument-hint`) is named in the
 report rather than written as if it worked. Codex's `~/.codex/rules/*.rules`
 become permission rules — Codex matches a parsed argv prefix where labunbun
 matches the whole command line, so a chained `git commit && …` matches here too.
+
+T3 Code keeps everything in one SQLite database under `.t3/userdata` (or the
+`.t3/dev` tree, which is read instead when the first is empty). Its runtime mode
+is carried over only if you actually chose one: T3's default is `full-access`,
+and an install that never touched the setting has nothing on disk to copy — so
+importing the absence would silently hand you agent mode with no sandbox. Its
+theme ids (`t3-chat`, `grove`, `ocean`, `ember`, `iris`) name themes this build
+does not ship, so the theme is reported by name and not guessed at. Tool calls
+live in T3's activities table as rows with a title and a status rather than as
+messages, so imported transcripts carry the conversation without the tool calls,
+and the report counts what was left behind.
 
 Anything without an equivalent is reported as skipped with a reason rather than
 dropped silently, keys the importer does not know included: they are listed by

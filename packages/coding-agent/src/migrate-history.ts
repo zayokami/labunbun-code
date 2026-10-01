@@ -51,6 +51,8 @@ import {
 } from "./opencode-db.ts";
 import { opencodeDatabasePath, opencodePromptHistoryFile, opencodeRoots } from "./opencode-home.ts";
 import { listStepSessions, readStepSession } from "./step-session.ts";
+import { t3BaseDir } from "./t3-home.ts";
+import { t3SessionMessages, t3SessionRows } from "./t3-read.ts";
 import { readZcodeConversation, readZcodeSessions, type ZcodePartRow } from "./zcode-db.ts";
 import { zcodeDbPathFor } from "./zcode-read.ts";
 
@@ -2341,6 +2343,152 @@ export function readPromptHistory(
 	return { seen: 0, entries: [], notes: [], overLimit: 0, truncated: false };
 }
 
+// ---------------------------------------------------------------------------
+// T3 Code
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a T3 Code transcript arrives without its tool calls.
+ *
+ * Named once, as a constant, because it is the note most likely to be reworded by
+ * whoever reads a report and wonders why. The reason is short and does not depend
+ * on the wording: T3 stores a tool call as a row in `projection_thread_activities`
+ * with `tone = "tool"`, and that row's payload is `itemType`, `toolCallId`,
+ * `status`, `title`, `detail` and an opaque `data` — a projection for T3's own UI,
+ * not a call with an argument list and a matching result. The count beside it in
+ * the report is how many such rows the offered threads hold.
+ */
+const T3_TOOL_ACTIVITY_NOTE =
+	"tool activity row, not a message — t3 code records a tool call in its activities table with a title, a status and an " +
+	"opaque payload rather than as a message with an argument list and a matching result, so imported transcripts carry the " +
+	"conversation without the tool calls or their output";
+
+/**
+ * Every T3 Code thread, as candidates.
+ *
+ * **A thread with no recorded directory is still offered.** `cwd` is a required
+ * field of a {@link HistoryCandidate}, and T3's thread row has no directory
+ * column of its own — the effective one comes from a join, and a project whose
+ * `workspace_root` is empty (T3 allows registering a project before opening it in
+ * a directory) yields a thread with no path at all. Such a thread is listed with
+ * the source's own base directory rather than dropped, because the alternative is
+ * a conversation the user can see in T3 and that this importer reports as
+ * missing; `narrowCandidates` then decides what the scope means for it, and the
+ * report says which directory it was filed under.
+ */
+function listT3History(home: string): HistoryListing {
+	const base = t3BaseDir(home);
+	const candidates: HistoryCandidate[] = [];
+	const notes: HistoryNote[] = [];
+	let withoutCwd = 0;
+	let toolRows = 0;
+	for (const thread of t3SessionRows(home)) {
+		if (thread.cwd === null) withoutCwd += 1;
+		toolRows += thread.toolCount;
+		candidates.push({
+			source: "t3-code",
+			sourceId: thread.id,
+			cwd: thread.cwd ?? base,
+			title: thread.title,
+			startedAt: thread.startedAt,
+			path: base,
+		});
+	}
+	if (withoutCwd > 0) {
+		notes.push({
+			reason:
+				"thread whose project recorded no directory — listed under t3 code's base directory so it is reachable, and " +
+				"filed there on import",
+			count: withoutCwd,
+		});
+	}
+	if (toolRows > 0) {
+		notes.push({ reason: T3_TOOL_ACTIVITY_NOTE, count: toolRows });
+	}
+	return { candidates, notes };
+}
+
+/**
+ * One chosen T3 thread, as transcript entries.
+ *
+ * **Reasoning folds into the answer that follows it.** T3 records `reasoning` as
+ * its own row in the same message table and orders by the same clock
+ * (`ProjectionThreadMessages.ts:225`), so a thinking run and the reply it
+ * produced are adjacent and the reply is what the user read. Emitting them as two
+ * separate assistant messages would show a turn that stops to think and then says
+ * nothing before another turn that answers a question already answered — so
+ * consecutive reasoning rows are held and prepended to the next assistant message
+ * as `thinking` content, exactly as the four file-based sources fold their own.
+ *
+ * A reasoning run with **no** assistant message after it — a turn that was
+ * interrupted mid-thought — becomes its own message rather than being dropped.
+ * Losing it would leave an imported transcript that silently omits part of a turn
+ * it otherwise carries, which is the kind of gap nobody notices until they try to
+ * resume the session.
+ *
+ * The empty case is reported rather than counted as a failure, and its reason
+ * names the roles rather than saying the thread was empty. Those are different
+ * statements: a T3 thread that recorded nothing is a real thing, and so is one
+ * whose every row is a role this importer does not read.
+ */
+function readT3History(home: string, candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const messages = t3SessionMessages(home, candidate.sourceId);
+	if (messages.length === 0) {
+		return {
+			entries: [],
+			notes: [
+				{
+					reason:
+						"thread with nothing to import — it holds no user, assistant or reasoning rows, which is not the same as " +
+						"a thread with no content: t3 code records a tool call as an activity row rather than a message",
+					count: 1,
+				},
+			],
+		};
+	}
+	const collected: AgentMessage[] = [];
+	const pending: string[] = [];
+	const flushReasoning = (timestamp: number): void => {
+		if (pending.length === 0) return;
+		collected.push(
+			assistantMessage({
+				content: pending.map((thinking) => ({ type: "thinking" as const, thinking })),
+				timestamp,
+				stopReason: "stop",
+			}),
+		);
+		pending.length = 0;
+	};
+	for (const message of messages) {
+		const at = message.at > 0 ? message.at : undefined;
+		if (message.role === "user") {
+			// A user turn after a thinking run means the run belonged to the reply
+			// before it, and that reply never landed — so it is its own message here
+			// rather than being prepended to the wrong turn.
+			flushReasoning(at ?? Date.now());
+			collected.push(userMessage(message.text, at));
+			continue;
+		}
+		if (message.role === "reasoning") {
+			pending.push(message.text);
+			continue;
+		}
+		collected.push(
+			assistantMessage({
+				content: [...pending.map((thinking) => ({ type: "thinking" as const, thinking })), textContent(message.text)],
+				timestamp: at ?? Date.now(),
+				stopReason: "stop",
+			}),
+		);
+		pending.length = 0;
+	}
+	flushReasoning(Date.now());
+	return {
+		entries: collected.map((message) => ({ kind: "message", message })),
+		notes: [],
+	};
+}
+
 /** What a source offers, narrowed to the requested scope. */
 export function listHistory(
 	source: MigrationSourceId,
@@ -2367,7 +2515,9 @@ export function listHistory(
 										? listStepHistory(home)
 										: source === "opencode"
 											? listOpencodeHistory(home)
-											: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
+											: source === "t3-code"
+												? listT3History(home)
+												: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
 	return narrowCandidates(listed, options);
 }
 
@@ -2480,6 +2630,16 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 			} else if (source === "step-code") {
 				const read = readStepHistory(home, candidate);
 				// Same rule as its three neighbours: a session that could not be read is
+				// reported by why, rather than counted as a session that was empty.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "t3-code") {
+				const read = readT3History(home, candidate);
+				// Same rule as its neighbours: a thread that could not be read is
 				// reported by why, rather than counted as a session that was empty.
 				if (read.entries.length === 0) {
 					if (read.notes.length > 0) notes.push(...read.notes);

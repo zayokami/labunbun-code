@@ -22,6 +22,7 @@ import { KIMI_CODE_DEFAULT_DIR, kimiRoot } from "./kimi-home.ts";
 import { MINIMAX_DATA_DIR_BASENAME, minimaxRoot } from "./minimax-home.ts";
 import { opencodeRoots } from "./opencode-home.ts";
 import { STEPCODE_DEFAULT_DIR, stepRoot } from "./step-home.ts";
+import { T3_DEFAULT_DIR, t3Root, t3StateDirs } from "./t3-home.ts";
 import { traeDetectionRoots, traeEdition, traeGlobalRulesDir } from "./trae-home.ts";
 import { ZCODE_DEFAULT_DIR, zcodeRoot } from "./zcode-home.ts";
 
@@ -41,7 +42,8 @@ export type MigrationSourceId =
 	| "step-code"
 	| "opencode"
 	| "cursor"
-	| "trae";
+	| "trae"
+	| "t3-code";
 
 /**
  * Ordered as the picker and `--from` list them. New sources are appended: the
@@ -61,6 +63,7 @@ export const MIGRATION_SOURCE_IDS: MigrationSourceId[] = [
 	"opencode",
 	"cursor",
 	"trae",
+	"t3-code",
 ];
 
 /** Display names for the picker; the ids themselves are the CLI switches. */
@@ -77,6 +80,7 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	opencode: "OpenCode",
 	cursor: "Cursor",
 	trae: "Trae",
+	"t3-code": "T3 Code",
 };
 
 /**
@@ -111,6 +115,13 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	// `detectionRoots` is what finds the trees.
 	cursor: ".cursor",
 	trae: ".trae",
+	// T3 Code's *base* directory, not its state directory, and the gap between
+	// the two is the whole reason `sourceRoot` has a branch for it. The tree a
+	// migration reads lives at `<base>/userdata` (`t3-home.ts`), which is also
+	// where a `$T3CODE_HOME` override lands, so `~/.t3` is the spelling that
+	// exists for every user who has not overridden it — the label, not the answer.
+	// See `sourceRoot`.
+	"t3-code": T3_DEFAULT_DIR,
 };
 
 /**
@@ -165,6 +176,14 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	if (id === "cursor") return cursorUserRoot(home);
 	if (id === "trae") return traeGlobalRulesDir(home, traeEdition(home));
 	if (id === "zcode") return zcodeRoot(home);
+	// T3 Code's state is a *subdirectory* of the directory this table names, and
+	// which of the two subdirectories a given install has depends on whether the
+	// user ever launched a dev build — a fact only `t3Root` and `t3StateDirs`
+	// know, and the reason this entry falls through to `join(home, ".t3")` would
+	// be wrong. `t3Root` is the directory the reader will actually open; the
+	// `??` is the fallback for a label rendered against a tree nothing was read
+	// from, which is the same state `detectionRoots` reports as absent.
+	if (id === "t3-code") return t3Root(home) ?? t3StateDirs(home)[0];
 	return join(home, SOURCE_ROOTS[id]);
 }
 
@@ -221,6 +240,14 @@ function detectionRoots(id: MigrationSourceId, home: string): string[] {
 	// as empty and then imported from anyway.
 	if (id === "cursor") return cursorDetectionRoots(home);
 	if (id === "trae") return traeDetectionRoots(home);
+	// T3 Code is the same mistake a third time, and for the same reason as the two
+	// above: the state directory an installed build writes and the one a dev build
+	// writes are different directories under the same base, and which exist
+	// depends on how the user launched T3. Reading only the production one would
+	// call the source absent on every machine whose only T3 is a dev checkout —
+	// and then find nothing to import, which is the more embarrassing half of
+	// that failure rather than the safer one.
+	if (id === "t3-code") return t3StateDirs(home);
 	return [sourceRoot(id, home)];
 }
 
@@ -420,7 +447,26 @@ export function targetMcpPath(home: string): string {
 	return join(home, ".labunbun", ".mcp.json");
 }
 
-export type ClaimEnv = (source: MigrationSourceId, name: string, value: string, from: string) => void;
+/**
+ * Claim one environment variable.
+ *
+ * `action` defaults to `map`, which is right whenever the source's variable and
+ * the target's mean the same thing. A source that **scopes** its variables more
+ * narrowly than the target does should pass `downgrade`: T3 Code injects a
+ * provider instance's variables into that provider's process, while a target
+ * `settings.env` reaches every tool call, so the value arrives unchanged and its
+ * scope does not — and a report line that called that a faithful copy would be
+ * the kind of imprecision that is only noticed once a shell has inherited an
+ * endpoint meant for one model provider.
+ */
+export type ClaimEnv = (
+	source: MigrationSourceId,
+	name: string,
+	value: string,
+	from: string,
+	action?: MigrationAction,
+	detail?: string,
+) => void;
 
 /**
  * Settings keys a source may claim outright, and the value shapes they carry.

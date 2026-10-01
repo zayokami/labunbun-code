@@ -31,6 +31,10 @@
  *                <project>/.cursor/rules, ~/.config/cursor/prompt_history.json
  *   trae         ~/.trae/user_rules, <project>/.trae/rules, <editor profile>/
  *                User/mcp.json
+ *   t3-code      $T3CODE_HOME when set, else ~/.t3 — <base>/userdata (the
+ *                production tree; a dev build's <base>/dev is read only when
+ *                there is no production one), holding settings.json,
+ *                client-settings.json, desktop-settings.json and state.sqlite
  *
  * Structure: read (I/O) → plan (pure) → apply (I/O). The planning step is where
  * every mapping decision lives, so the decisions are testable without touching
@@ -122,6 +126,9 @@ import { mergeSettings, type RawSettingsInput } from "./settings.ts";
 import { planStepAssets, planStepCode } from "./step-plan.ts";
 import type { RawStepCode } from "./step-read.ts";
 import { readStepCode } from "./step-read.ts";
+import { planT3Code } from "./t3-plan.ts";
+import type { RawT3Code } from "./t3-read.ts";
+import { readT3Code } from "./t3-read.ts";
 import { planTrae } from "./trae-plan.ts";
 import type { RawTrae } from "./trae-read.ts";
 import { readTrae } from "./trae-read.ts";
@@ -143,14 +150,15 @@ export interface RawSources {
 	opencode: RawOpencode;
 	cursor: RawCursor;
 	trae: RawTrae;
+	t3Code: RawT3Code;
 }
 
 /**
  * Read every source tree.
  *
  * `cwd` is required and not defaulted, and that is the one design decision in
- * this file worth arguing for. Eleven sources read only from `home`; Cursor and
- * Trae also read a *project* half — `<project>/.cursor/rules`,
+ * this file worth arguing for. Ten sources read only from `home`; Cursor and Trae
+ * also read a *project* half — `<project>/.cursor/rules`,
  * `<project>/.trae/rules` — and a project directory is not something a reader may
  * pick for itself. With a default of `process.cwd()`, a caller that forgot the
  * argument would silently read whatever directory the process happened to be in,
@@ -159,8 +167,8 @@ export interface RawSources {
  * from, which is the shape of a failure nobody can reproduce.
  *
  * So the compiler makes every call site say which project it means. There are
- * fifty of them and each is a one-word change, which is the trade this module
- * makes everywhere else too.
+ * more than fifty of them and each is a one-word change, which is the trade this
+ * module makes everywhere else too.
  */
 export function readSources(home: string, cwd: string): RawSources {
 	return {
@@ -177,6 +185,7 @@ export function readSources(home: string, cwd: string): RawSources {
 		opencode: readOpencode(home),
 		cursor: readCursor(home, cwd),
 		trae: readTrae(home, cwd),
+		t3Code: readT3Code(home),
 	};
 }
 
@@ -470,8 +479,22 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		});
 	};
 
-	/** Claim one env var, respecting an existing value unless forced. */
-	const claimEnv = (source: MigrationSourceId, name: string, value: string, from: string): void => {
+	/**
+	 * Claim one env var, respecting an existing value unless forced.
+	 *
+	 * `action` and `detail` exist for the sources whose variable is scoped more
+	 * narrowly than a target `settings.env` is — see {@link ClaimEnv}. Both
+	 * default to the faithful-copy reading, so the eight sources that scope
+	 * nothing differently say nothing extra.
+	 */
+	const claimEnv = (
+		source: MigrationSourceId,
+		name: string,
+		value: string,
+		from: string,
+		action: MigrationAction = "map",
+		detail?: string,
+	): void => {
 		const current = existing.env?.[name];
 		const secret = looksLikeSecretName(name);
 		if (current !== undefined && current !== value && !force) {
@@ -492,8 +515,8 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 			source,
 			from,
 			to: `settings.json → env.${name}`,
-			action: "map",
-			detail: secret ? "credential copied verbatim" : "copied verbatim",
+			action,
+			detail: detail ?? (secret ? "credential copied verbatim" : "copied verbatim"),
 			containsSecret: secret,
 		});
 	};
@@ -843,6 +866,17 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 				existingMcpServers,
 				force,
 			);
+		}
+	}
+
+	// T3 Code has no asset tree this importer can read — no rules, no skills, no
+	// agents, and no MCP server list on disk — so there is no `wants("assets")`
+	// branch. The absence is stated here rather than left as a missing arm: see
+	// the header of `t3-plan.ts` for what "no MCP list" means precisely, because
+	// T3 can use MCP servers and the report must not claim it cannot.
+	if (only.includes("t3-code")) {
+		if (wants("settings")) {
+			planT3Code(raw.t3Code, raw.home, items, claimEnv, claimScalar, claimModePair);
 		}
 	}
 
