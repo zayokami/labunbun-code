@@ -1,10 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatDoctorReport, runDoctorChecks } from "../src/doctor.ts";
+import { COMMAND_PATHS_WITHOUT_SANDBOX, formatDoctorReport, runDoctorChecks } from "../src/doctor.ts";
 import { padConfigFrom } from "../src/gamepad-runtime.ts";
 import { SettingsSchema } from "../src/settings.ts";
+
+/** This package's `src`, for the guards that read a call site out of a sibling. */
+const SRC = join(import.meta.dir, "..", "src");
+
+/**
+ * The text around one call site: the anchor and the next 500 characters.
+ *
+ * A window rather than the whole file, because the claim being checked is about
+ * *this* call — "this spawn is handed a policy" — and a whole-file check would
+ * let a policy passed to some other call in the same file vouch for one that has
+ * none. The assertion that the anchor was found at all lives in the caller: an
+ * empty window would otherwise satisfy every "not.toContain" below it.
+ */
+function callSite(source: string, anchor: string): string {
+	const at = source.indexOf(anchor);
+	if (at < 0) throw new Error(`anchor not found in this file: ${anchor}`);
+	return source.slice(at, at + 500);
+}
 
 /**
  * A throwaway home and cwd. The doctor probes the session store for write access
@@ -303,5 +321,94 @@ describe("the Network row", () => {
 		const { home, cwd } = makeDirs();
 		const row = await networkRow(SettingsSchema.parse({ networkAccess: "restricted" }), cwd, home, "linux", true);
 		expect(row?.detail).toContain("nothing is reachable");
+	});
+
+	/**
+	 * The `ok` row's over-claim, and the guard that keeps it from becoming one.
+	 *
+	 * "The OS sandbox denies a command every route off the machine … so a shell
+	 * command reaches nothing" is a true statement about a command the Bash tool
+	 * handed a policy, and a false statement about the repo in general: hooks,
+	 * both MCP transports and the `!` prefix are started without one, so on the
+	 * very machine where the row says `ok`, those are the paths that can still
+	 * reach out. The row now says so.
+	 *
+	 * The second table is the part that matters, because a sentence is the
+	 * cheapest thing in the repo to leave stale — nothing fails when a path
+	 * becomes covered and the list is not updated. So each row reads the call
+	 * site itself and fails when it stops being unwired, and the control below
+	 * reads a call site that *is* covered and finds the policy, which is what
+	 * shows the window is looking where it claims to.
+	 */
+	test("the `ok` row names the paths that are not covered by any of it", async () => {
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(
+			SettingsSchema.parse({ networkAccess: "restricted", networkDomains: ["registry.npmjs.org"] }),
+			cwd,
+			home,
+			"linux",
+			true,
+		);
+		expect(row?.status).toBe("ok");
+		for (const path of COMMAND_PATHS_WITHOUT_SANDBOX) {
+			expect(row?.detail).toContain(path);
+		}
+		expect(row?.detail).toContain("outside all of it");
+	});
+
+	test("the list is exactly these four, and not merely these", () => {
+		// The two guards around this list are one-directional on their own, and the
+		// gap between them is the interesting one. The table below reads each call
+		// site and fails when a listed path becomes *covered*; the row and the
+		// README assertions read the prose and fail when a listed path is not
+		// *named*. Neither notices a path that was never listed, so dropping one
+		// from the constant — without wiring it, and so with the call site still
+		// unwired — leaves every other guard green while `/doctor` and the README
+		// both under-report. This is the assertion that closes it: an independent
+		// literal, which has to be edited deliberately.
+		expect([...COMMAND_PATHS_WITHOUT_SANDBOX]).toEqual([
+			"hooks",
+			"MCP stdio servers",
+			"MCP HTTP servers",
+			"the `!` prompt prefix",
+		]);
+	});
+
+	test.each([
+		["hooks", join(SRC, "hooks.ts"), "spawn(shell, args, {"],
+		["MCP stdio servers", join(SRC, "..", "..", "mcp", "src", "client.ts"), "new StdioClientTransport({"],
+		["MCP HTTP servers", join(SRC, "..", "..", "mcp", "src", "client.ts"), "new StreamableHTTPClientTransport("],
+		["the `!` prompt prefix", join(SRC, "shell-passthrough.ts"), "opts.ops.exec({"],
+	])("%s is still started without a sandbox policy", (_label, file, anchor) => {
+		const window = callSite(readFileSync(file, "utf8"), anchor);
+		expect(window).not.toContain("sandbox:");
+		expect(window).not.toContain("HTTP_PROXY");
+	});
+
+	test("the Bash tool, the one path that is covered, still is", () => {
+		// The control. Without it the table above could be green because the
+		// window is empty, or because the anchor moved, and both would read as
+		// "still unwired" — which is the one answer in this file that must never
+		// be produced by accident.
+		const window = callSite(readFileSync(join(SRC, "..", "..", "tools", "src", "bash.ts"), "utf8"), "ops.exec({");
+		expect(window).toContain("sandbox:");
+	});
+
+	test("the README names the same paths, and does not claim otherwise", () => {
+		// `README.md` states the same fact in prose, for a reader deciding whether
+		// to trust the mode they are about to pick — which is a decision made
+		// before `/doctor` is ever opened. Same reasoning as the migration-source
+		// list in `migrate-opencode.test.ts`: a list TypeScript cannot reach needs
+		// something that reads it.
+		//
+		// The negative is the load-bearing half. The bullet used to say the network
+		// half is "really enforced on all three platforms", which is true of a
+		// Bash-tool command and false of everything else, and nothing about that
+		// sentence could fail.
+		const readme = readFileSync(join(SRC, "..", "..", "..", "README.md"), "utf8");
+		for (const path of COMMAND_PATHS_WITHOUT_SANDBOX) {
+			expect(readme).toContain(path);
+		}
+		expect(readme).not.toContain("really enforced on all three platforms");
 	});
 });

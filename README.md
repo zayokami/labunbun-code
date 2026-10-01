@@ -39,11 +39,16 @@ labunbun                                # interactive REPL
   which of the three you have, in those words, rather than saying "sandbox on".
 - **Network access** — a third axis, off the filesystem: a local HTTP and SOCKS5
   proxy that commands are pointed at, with a domain allow-list. Unlike the
-  filesystem half this one is really enforced on all three platforms — the proxy
-  is this process, not a kernel — with the honest limit that a program which
-  opens a socket without consulting `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
-  is not subject to it. On macOS and Linux the OS sandbox holds the rest of the
-  boundary; on Windows the proxy is all of it, and `/doctor` says so.
+  filesystem half this one needs no OS support, so it works the same on all
+  three platforms — the proxy is this process, not a kernel — with two limits
+  worth stating rather than one. A program that opens a socket without
+  consulting `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` is not subject to it; and
+  only commands that arrive through the tools are pointed at it at all. The four
+  paths this repo starts without a sandbox policy — hooks, MCP stdio servers,
+  MCP HTTP servers and the `!` prompt prefix — get neither the proxy variables
+  nor the OS wrapper. On macOS and Linux the OS sandbox holds the rest of the
+  boundary; on Windows the proxy is all of it for a tool command, and `/doctor`
+  names all of the above.
 
   ```jsonc
   { "networkAccess": "restricted", "networkDomains": ["registry.npmjs.org", { "domain": "*.internal", "action": "deny" }] }

@@ -20,6 +20,29 @@ export interface DoctorCheck {
 }
 
 /**
+ * The command paths this repo starts without handing them a sandbox policy.
+ *
+ * A policy is what buys a command two things: the wrapper `seatbelt-exec` /
+ * `bwrap`, and the proxy variables, which `Operations.exec` injects only when it
+ * is given one. Every other spawn in this repo goes straight to `spawn` or to a
+ * transport, so it gets neither — and on a native backend, where the row below
+ * is `ok` because the OS denies a *sandboxed* command every route, these paths
+ * are outside even that.
+ *
+ * The list is exported rather than inlined into the sentence because a sentence
+ * is the cheapest thing in the repo to leave stale: nothing fails when a path
+ * here stops being true. `doctor.test.ts` reads each file named below and
+ * fails the moment it stops being unwired, so the sentence cannot quietly
+ * outlive the code it describes.
+ */
+export const COMMAND_PATHS_WITHOUT_SANDBOX = [
+	"hooks",
+	"MCP stdio servers",
+	"MCP HTTP servers",
+	"the `!` prompt prefix",
+] as const;
+
+/**
  * `home` and `liveThemeName` are the two things this cannot read off `settings`:
  * where the user's files are (a session may be pointed at another home), and
  * which theme is on screen right now (`/theme` may have changed it since
@@ -168,9 +191,17 @@ export async function runDoctorChecks(
 		// package they can install, or a setting they wrote. Read off the same table
 		// `describeNetworkPolicy` uses, so the two surfaces cannot drift apart.
 		const kernelHoldsIt = confinement === "os-namespace";
+		// Only the `ok` row needs the correction, and it needs it because it is the
+		// one that over-claims. "A shell command reaches nothing" is a statement
+		// about a command that went through the Bash tool and was handed a policy;
+		// the four paths below never are, so on this machine they are the ones that
+		// can still reach the network. The two `warn` rows are already hedged by the
+		// "a program that ignores HTTP_PROXY… is not subject to it" clause they
+		// carry, and a longer sentence does not make them more true.
+		const uncovered = `, and ${COMMAND_PATHS_WITHOUT_SANDBOX.join(", ")} are started without one, so they are outside all of it`;
 		const detail = kernelHoldsIt
 			? axis.access === "restricted"
-				? `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine, proxy included, so a shell command reaches nothing and the allowed list governs the web tools`
+				? `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine, proxy included, so a shell command reaches nothing and the allowed list governs the web tools${uncovered}`
 				: `${axis.access} (${reach}) · a local proxy decides, and a program that ignores HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`
 			: `${axis.access} (${reach}) · ${networkConfinementReason(confinement)} So the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`;
 		checks.push({ name: "Network", status: kernelHoldsIt ? "ok" : "warn", detail });
