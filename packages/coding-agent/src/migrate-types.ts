@@ -14,6 +14,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
+import { antigravityConfigDir, antigravityDataDirs } from "./antigravity-home.ts";
 import { codexRoot } from "./codex-home.ts";
 import { cursorDetectionRoots, cursorUserRoot } from "./cursor-home.ts";
 import { DSH_DEFAULT_DIR, dshRoot } from "./dsh-home.ts";
@@ -43,7 +44,8 @@ export type MigrationSourceId =
 	| "opencode"
 	| "cursor"
 	| "trae"
-	| "t3-code";
+	| "t3-code"
+	| "antigravity";
 
 /**
  * Ordered as the picker and `--from` list them. New sources are appended: the
@@ -64,6 +66,7 @@ export const MIGRATION_SOURCE_IDS: MigrationSourceId[] = [
 	"cursor",
 	"trae",
 	"t3-code",
+	"antigravity",
 ];
 
 /** Display names for the picker; the ids themselves are the CLI switches. */
@@ -81,6 +84,7 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	cursor: "Cursor",
 	trae: "Trae",
 	"t3-code": "T3 Code",
+	antigravity: "Antigravity",
 };
 
 /**
@@ -122,6 +126,13 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	// exists for every user who has not overridden it — the label, not the answer.
 	// See `sourceRoot`.
 	"t3-code": T3_DEFAULT_DIR,
+	// `~/.gemini`, and this one is **not** a directory only Antigravity uses — the
+	// Gemini CLI keeps its own state beside it. That is why it cannot be a detection
+	// root, and why the entry below it says so in as many words: a home with only
+	// Gemini CLI content has a non-empty `~/.gemini` and no Antigravity in it at all,
+	// and detection that looked here would offer those users a source with nothing
+	// to read. `detectionRoots` looks inside instead. See `sourceRoot`.
+	antigravity: ".gemini",
 };
 
 /**
@@ -184,6 +195,11 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	// `??` is the fallback for a label rendered against a tree nothing was read
 	// from, which is the same state `detectionRoots` reports as absent.
 	if (id === "t3-code") return t3Root(home) ?? t3StateDirs(home)[0];
+	// Antigravity needs no branch, and the fallthrough being correct is itself the
+	// interesting part: `~/.gemini` is a plain home-relative join, so this source is
+	// the first whose *tree* is unambiguous while its *detection* is not. What it
+	// is not is a tree only it uses — the Gemini CLI shares the parent — which is
+	// why `detectionRoots` looks inside rather than here.
 	return join(home, SOURCE_ROOTS[id]);
 }
 
@@ -248,6 +264,27 @@ function detectionRoots(id: MigrationSourceId, home: string): string[] {
 	// and then find nothing to import, which is the more embarrassing half of
 	// that failure rather than the safer one.
 	if (id === "t3-code") return t3StateDirs(home);
+	// **Antigravity is the first source whose home-relative root cannot be used for
+	// detection at all.** `~/.gemini` is shared with the Gemini CLI, so a home that
+	// has never run Antigravity can still have a busy `~/.gemini` — and offering
+	// those users an Antigravity migration would be the same failure the two IDE
+	// branches above avoid, except with nothing behind it: every one of those
+	// entries is still a directory Antigravity itself writes.
+	//
+	// So detection looks at three directories Antigravity owns: both data roots
+	// (the new one and the pre-split one, because which exists depends on whether
+	// the user went through the IDE-split wizard), and `~/.gemini/config` — the
+	// customization root the product's own guide names as its "Global Configuration
+	// (Machine-Local)" location, holding `skills/`, `plugins/`, `mcp_config.json`
+	// and `hooks.json`. A user with all three deleted but `config/` still populated
+	// is real, and the reader handles it: `RawAntigravity.dataDir` is `null` there
+	// and every conversation count is zero, which is a report with nothing in it
+	// rather than a crash.
+	//
+	// What this cannot rule out: a home whose *only* `~/.gemini/config` content is
+	// something that is not Antigravity's. That is why `config` is last and not
+	// first — a home with any data root at all is detected by the first two.
+	if (id === "antigravity") return [...antigravityDataDirs(home), antigravityConfigDir(home)];
 	return [sourceRoot(id, home)];
 }
 

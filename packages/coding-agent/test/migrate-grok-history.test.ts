@@ -833,6 +833,12 @@ describe("migrate: grok compaction", () => {
 			const read = readHistory("grok-build", home, listing.candidates);
 			const session = read.sessions[0];
 			expect(session).toBeDefined();
+			// Grok records a directory for this session, so `cwdSubstitute` must not
+			// be set. The Antigravity source is the only one that sets it, and the
+			// report reads it to say "filed under" rather than "came from" — a
+			// marker appearing here would put those words on this session's line and
+			// describe a directory this source never failed to record.
+			expect(session.cwdSubstitute).toBeUndefined();
 			const result = runMigration({
 				home,
 				from: "grok-build",

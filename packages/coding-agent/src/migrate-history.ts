@@ -30,6 +30,8 @@ import {
 	userMessage,
 } from "@labunbun/ai";
 import { caseInsensitivePaths } from "@labunbun/tools";
+import { antigravityDataDirs, antigravityTreeHasContent } from "./antigravity-home.ts";
+import { listAntigravityConversations, readAntigravityConversation } from "./antigravity-session.ts";
 import { codexRoot } from "./codex-home.ts";
 import { cursorPromptHistoryFile, cursorPromptHistoryPath } from "./cursor-home.ts";
 import { dshRoot } from "./dsh-home.ts";
@@ -73,6 +75,25 @@ export interface HistoryCandidate {
 	/** The id the source tool uses, and the input to the target session id. */
 	sourceId: string;
 	cwd: string;
+	/**
+	 * Set when the source records **no** directory for this session and the session
+	 * is filed under one anyway. {@link cwd} is already that directory; this field
+	 * is the marker that says the directory is the user's and not the source's.
+	 *
+	 * **Nothing is gained by leaving {@link cwd} empty and resolving this later,
+	 * and one thing is lost.** An empty cwd is the value `narrowCandidates` counts
+	 * under "no working directory recorded" and drops, which is right for a source
+	 * that records directories and had one session without one (dsh's `_no-cwd`
+	 * bucket). Applying it to a source that records *no* directory for *any*
+	 * session drops every session while the report looks clean — and since the
+	 * default scope is `cwd`, it would do so on the default run. So the substitute
+	 * is applied where it is chosen, the source that chose it says why in a note,
+	 * and this flag survives to the report so the sentence the user reads can name
+	 * the difference between "recorded" and "assumed". This is the same shape the
+	 * prompt-history path uses for the same reason
+	 * ({@link PromptHistoryInput.cwdSubstitute}).
+	 */
+	cwdSubstitute?: string;
 	/** Empty when the source does not name a session; filled in during conversion. */
 	title: string;
 	/** Epoch ms of the session's first entry. */
@@ -104,6 +125,14 @@ export interface HistorySession {
 	source: MigrationSourceId;
 	sourceId: string;
 	cwd: string;
+	/**
+	 * Carried from the candidate unchanged: see
+	 * {@link HistoryCandidate.cwdSubstitute}. {@link cwd} already holds the
+	 * directory, so this is purely the marker the report reads to say the directory
+	 * was assumed rather than recorded — and the prompt-history report reads the
+	 * same way, so the two halves of `/migrate` use one vocabulary.
+	 */
+	cwdSubstitute?: string;
 	title: string;
 	startedAt: number;
 	entries: HistoryEntry[];
@@ -2489,6 +2518,128 @@ function readT3History(home: string, candidate: HistoryCandidate): { entries: Hi
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Antigravity
+// ---------------------------------------------------------------------------
+
+/**
+ * Every Antigravity conversation, as candidates.
+ *
+ * **No conversation carries a working directory, and that is a finding rather than
+ * a gap in the reader.** The compact transcript has no `cwd` field — the product's
+ * own record type has none, and neither does the untruncated one, since they are
+ * the same records — and nothing beside the transcript fills the hole: the
+ * conversation directory's attested siblings are `swarm.md` (the multi-agent
+ * coordination board) and `scratch/`, neither of which names a directory the user
+ * was working in. Antigravity does associate conversations with projects — its
+ * settings carry a `project_conversations` field and a per-project settings file
+ * is what `GetSandboxConfig` reads — but **where that file lives could not be
+ * established**: no `.gemini/projects`, no `project.json`, no `ProjectSettingsPath`
+ * in either binary, and the only `.idea` hits are inside a file-exclusion list.
+ *
+ * **So every candidate is filed under the directory the user is migrating into,
+ * and the report says the directory was assumed.** The alternative — `cwd: ""` —
+ * is the value {@link narrowCandidates} counts under "no working directory
+ * recorded" and *drops*, which is the right verdict for a source that records
+ * directories and had one session without one (dsh's `_no-cwd` bucket) and the
+ * wrong one here: applied to a source that records no directory for any session
+ * it drops all of them, and since the default scope is `cwd` it would do that on
+ * the default run. A history that imports nothing is not a migration that found
+ * nothing, and the report must not be able to make the two look alike.
+ *
+ * The substitute is the user's current project, which is exactly what
+ * `readCursorPromptHistory` does for the identical situation and why
+ * {@link HistoryCandidate.cwdSubstitute} exists: the session lands in the project
+ * being migrated into and `↑` will offer it in every project, and the note below
+ * plus the report line both say in words that the directory is a fallback rather
+ * than a fact. **Nothing here claims which project a conversation belonged to** —
+ * this importer does not know and the product did not record it.
+ *
+ * Which data root is read is the same decision the reader makes, and for the same
+ * reason: {@link antigravityDataDirs} orders them by which tree the current build
+ * writes to, and the first with content wins.
+ */
+function listAntigravityHistory(home: string, options: { cwd: string }): HistoryListing {
+	const dataDir = antigravityDataDirs(home).find((dir) => antigravityTreeHasContent(dir));
+	if (dataDir === undefined) return { candidates: [], notes: [] };
+	const listing = listAntigravityConversations(dataDir);
+	const candidates: HistoryCandidate[] = listing.conversations.map((conversation) => ({
+		source: "antigravity" as const,
+		sourceId: conversation.id,
+		cwd: options.cwd,
+		// See this function's doc comment: the directory above is the user's, and
+		// this is what stops the report calling it the conversation's.
+		cwdSubstitute: options.cwd,
+		title: "",
+		// Read from a bounded head at listing time — see
+		// `AntigravityConversationFile.startedAt`. Without it every conversation
+		// sorts as `0` and `--history-limit` keeps whichever twenty names came
+		// first in the alphabet.
+		startedAt: conversation.startedAt,
+		path: conversation.path,
+	}));
+	const notes: HistoryNote[] = [...listing.notes];
+	if (candidates.length > 0) {
+		notes.push({
+			reason:
+				"conversation with no working directory of its own — filed under the current project, because Antigravity records a directory for none of them, so --history-scope cwd cannot narrow this source",
+			count: candidates.length,
+		});
+	}
+	return { candidates, notes };
+}
+
+/**
+ * One chosen Antigravity conversation, as transcript entries.
+ *
+ * **The title is read here and nowhere else, because the listing phase cannot
+ * afford it.** Antigravity has no metadata file beside the transcript, so the
+ * title is the first *user* turn — and a user turn is not guaranteed to be the
+ * first record: line one of a conversation is the product's own system prompt.
+ * Finding one means scanning until a user turn appears, which for a listing over
+ * a whole tree means reading every conversation on the machine before the user
+ * has chosen any of them. The start time has no such problem — line one carries
+ * it — and is read from a bounded head at listing time instead, so only this one
+ * column is blank in the picker.
+ */
+function readAntigravityHistory(
+	home: string,
+	candidate: HistoryCandidate,
+): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const dataDir = antigravityDataDirs(home).find((dir) => antigravityTreeHasContent(dir));
+	const conversation =
+		dataDir === undefined
+			? undefined
+			: listAntigravityConversations(dataDir).conversations.find((one) => one.id === candidate.sourceId);
+	if (conversation === undefined) {
+		return {
+			entries: [],
+			notes: [
+				{
+					reason:
+						"conversation that was offered and is no longer there — a data root that changed between listing and reading",
+					count: 1,
+				},
+			],
+		};
+	}
+	const read = readAntigravityConversation(conversation);
+	if ("error" in read) {
+		return { entries: [], notes: [{ reason: `transcript that could not be read — ${read.error}`, count: 1 }] };
+	}
+	// Filled in here rather than at listing: the read is what had the transcript
+	// open, and a candidate's own fields are the ones the session is written from.
+	// `startedAt` is written too even though the listing already set it — the
+	// listing saw a bounded head and this saw the whole file, so the whole-file
+	// value is the one the imported session carries.
+	candidate.title = read.title;
+	candidate.startedAt = read.startedAt;
+	return {
+		entries: read.messages.map((message) => ({ kind: "message" as const, message })),
+		notes: read.notes,
+	};
+}
+
 /** What a source offers, narrowed to the requested scope. */
 export function listHistory(
 	source: MigrationSourceId,
@@ -2517,7 +2668,9 @@ export function listHistory(
 											? listOpencodeHistory(home)
 											: source === "t3-code"
 												? listT3History(home)
-												: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
+												: source === "antigravity"
+													? listAntigravityHistory(home, options)
+													: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
 	return narrowCandidates(listed, options);
 }
 
@@ -2647,6 +2800,16 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 					continue;
 				}
 				converted = read;
+			} else if (source === "antigravity") {
+				const read = readAntigravityHistory(home, candidate);
+				// Same rule as its neighbours: a conversation that could not be read is
+				// reported by why, rather than counted as a session that was empty.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
 			} else continue;
 		} catch {
 			failed += 1;
@@ -2668,6 +2831,11 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 			source,
 			sourceId: candidate.sourceId,
 			cwd: candidate.cwd,
+			// Carried rather than resolved here: `cwd` already holds the substitute,
+			// so all this does is tell the report which kind of directory it is.
+			// Left out entirely for the thirteen sources that record one, so `===`
+			// against `undefined` is the test that the thirteen are untouched.
+			...(candidate.cwdSubstitute === undefined ? {} : { cwdSubstitute: candidate.cwdSubstitute }),
 			title: candidate.title,
 			startedAt: candidate.startedAt,
 			entries: converted.entries,

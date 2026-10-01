@@ -129,7 +129,8 @@ labunbun                                # interactive REPL
 - **Headless output** — `--output-format text|json|stream-json`.
 - **Config import** — `labunbun yoshi` maps an existing agent-tool setup
   (Claude Code, Codex, ZCode, DeepSeek Harness, Grok Build, Kimi Code,
-  MiniMax Code, Step Code, OpenCode, Cursor, Trae, `~/.agents`) onto
+  MiniMax Code, Step Code, OpenCode, Cursor, Trae, T3 Code, Antigravity,
+  `~/.agents`) onto
   labunbun's own config: settings, skills, rules, slash commands, past
   conversations and the prompts ↑ recalls. Dry run by default, and a `/yoshi`
   wizard that asks what to take — or takes everything after one question.
@@ -184,7 +185,7 @@ Already configured another agent tool? Copy over what has an equivalent:
 
 ```bash
 bun run dev yoshi                      # dry run: report only, writes nothing
-bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | t3-code | opencode | cursor | trae | all
+bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | t3-code | opencode | cursor | trae | antigravity | all
 bun run dev yoshi --only settings      # categories: settings | assets | history | all
 bun run dev yoshi --apply              # write it
 bun run dev yoshi --apply --force      # also overwrite values that exist
@@ -211,6 +212,20 @@ does not ship, so the theme is reported by name and not guessed at. Tool calls
 live in T3's activities table as rows with a title and a status rather than as
 messages, so imported transcripts carry the conversation without the tool calls,
 and the report counts what was left behind.
+
+Antigravity keeps everything under `~/.gemini`, which the Gemini CLI shares —
+so a home with only Gemini CLI state is not offered an Antigravity migration
+just because that directory is busy. Its conversations live in
+`~/.gemini/antigravity-ide/brain/<id>/` (with `~/.gemini/antigravity` read when
+the first holds nothing), each transcript a `transcript.jsonl` whose `source`
+field — not its 122-valued `type` — says who spoke; a line that names a field as
+truncated is re-read from `transcript_full.jsonl` at the same step. No
+conversation records a working directory, so each one is filed under the project
+you are migrating into and the report says the directory was filed rather than
+recorded. Its agent permission preset is a seven-valued enum whose members are
+all real strings and whose *meanings* are documented nowhere in the product, so
+the value is reported by name and nothing is claimed for it: guessing would move
+a permission setting in the one direction it must not be guessed in.
 
 Anything without an equivalent is reported as skipped with a reason rather than
 dropped silently, keys the importer does not know included: they are listed by

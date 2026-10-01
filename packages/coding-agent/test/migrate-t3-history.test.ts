@@ -34,6 +34,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@labunbun/ai";
+import { runMigration } from "../src/migrate.ts";
 import { listHistory, readHistory } from "../src/migrate-history.ts";
 import { T3_DEFAULT_DIR, t3StateDatabase } from "../src/t3-home.ts";
 import { t3SessionMessages, t3SessionRows } from "../src/t3-read.ts";
@@ -443,6 +444,45 @@ describe("listing the threads", () => {
 	test("--history-scope none reads nothing at all", () => {
 		const { home } = t3Home({ threads: [{ id: "th-1" }] });
 		expect(listHistory("t3-code", home, { cwd: "C:\\anywhere", scope: "none" })).toEqual({ candidates: [], notes: [] });
+	});
+
+	// -------------------------------------------------------------------------
+	// The gate between this reader and the run
+	// -------------------------------------------------------------------------
+
+	test("a run asked for T3 history actually plans it", () => {
+		// Every test above calls `listHistory`/`readHistory` directly, which is the
+		// wrong level to prove this importer works: `runMigration` first asks
+		// `historySourcePresent` whether the source is worth walking, and that gate
+		// had no `t3-code` arm — it fell through to the *agents* source's `present`.
+		// A T3 install with no agents tree therefore reported zero T3 sessions and
+		// planned zero writes while every test in this file passed, because none of
+		// them went through the gate. This is the test that goes through it.
+		const { home } = t3Home({
+			threads: [{ id: "th-1", title: "the thread" }],
+			messages: [
+				{ thread: "th-1", role: "user", text: "hello", createdAt: at(1) },
+				{ thread: "th-1", role: "assistant", text: "hi", createdAt: at(2) },
+			],
+		});
+		const result = runMigration({ home, from: "t3-code", only: ["history"], historyScope: "all", apply: false });
+		expect(result.error).toBeUndefined();
+		const writes = result.plan.writes.filter((write) => write.kind === "history");
+		expect(writes).toHaveLength(1);
+		expect(writes[0].content).toContain("hello");
+		expect(result.plan.items.some((item) => item.action === "map")).toBe(true);
+	});
+
+	test("a home with no T3 tree plans no T3 history, and says the source is absent", () => {
+		// The negative, so the arm added above cannot be "always true". An empty
+		// throwaway home has no T3 tree, so the gate must answer false rather than
+		// letting an unrelated source's presence stand in for this one.
+		const home = mkdtempSync(join(tmpdir(), "lbb-t3-empty-"));
+		roots.push(home);
+		for (const name of TREE_ENV) setEnv(name, undefined);
+		const result = runMigration({ home, from: "t3-code", only: ["history"], historyScope: "all", apply: false });
+		expect(result.error).toBeUndefined();
+		expect(result.plan.writes.filter((write) => write.kind === "history")).toEqual([]);
 	});
 });
 

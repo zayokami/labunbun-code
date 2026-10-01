@@ -35,6 +35,12 @@
  *                production tree; a dev build's <base>/dev is read only when
  *                there is no production one), holding settings.json,
  *                client-settings.json, desktop-settings.json and state.sqlite
+ *   antigravity  ~/.gemini/antigravity-ide (the tree a current build writes
+ *                to; ~/.gemini/antigravity is the pre-split one and is read
+ *                when the first holds nothing) — config/config.json, mcp_config.json,
+ *                skills, workflows + global_workflows, brain/<id>/.system_generated/
+ *                logs/transcript.jsonl. `~/.gemini` itself is *not* a detection
+ *                root: the Gemini CLI shares it.
  *
  * Structure: read (I/O) → plan (pure) → apply (I/O). The planning step is where
  * every mapping decision lives, so the decisions are testable without touching
@@ -53,6 +59,9 @@ import { join } from "node:path";
 import { parseRuleText } from "@labunbun/agent";
 import type { RawAgents } from "./agents-read.ts";
 import { readAgents } from "./agents-read.ts";
+import { planAntigravity } from "./antigravity-plan.ts";
+import type { RawAntigravity } from "./antigravity-read.ts";
+import { readAntigravity } from "./antigravity-read.ts";
 import { planClaudeCode } from "./claude-plan.ts";
 import type { RawClaudeCode } from "./claude-read.ts";
 import { readClaudeCode } from "./claude-read.ts";
@@ -151,6 +160,7 @@ export interface RawSources {
 	cursor: RawCursor;
 	trae: RawTrae;
 	t3Code: RawT3Code;
+	antigravity: RawAntigravity;
 }
 
 /**
@@ -186,6 +196,7 @@ export function readSources(home: string, cwd: string): RawSources {
 		cursor: readCursor(home, cwd),
 		trae: readTrae(home, cwd),
 		t3Code: readT3Code(home),
+		antigravity: readAntigravity(home),
 	};
 }
 
@@ -880,6 +891,30 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
+	// Antigravity has all three categories, so it is one arm per category rather
+	// than one call — `planAntigravity` claims settings, MCP servers *and* assets,
+	// and a run that asked only for assets must still reach the skills and
+	// workflows without passing through a settings gate that would have skipped
+	// them. This is the same reason `planCursor` splits `planCursorAssets` out
+	// from `planCursor`.
+	if (only.includes("antigravity")) {
+		if (wants("settings") || wants("assets")) {
+			planAntigravity(
+				raw.antigravity,
+				raw.home,
+				items,
+				writes,
+				claimScalar,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				force,
+			);
+		}
+	}
+
 	if (options.historyScope === "none" && wants("history")) {
 		items.push({
 			source: only[0] ?? "claude-code",
@@ -1117,14 +1152,24 @@ function planHistory(
 				continue;
 			}
 			writes.push({ path, kind: "history", content: renderHistorySession(session), containsSecret: false });
+			// Which directory `↑` will offer this session in is a claim about the
+			// file just written, and for a substitute it is a claim the source does
+			// not support. The prompt-history half of this report already draws the
+			// same distinction in the same words, so both halves read alike — and a
+			// substituted session labelled a plain `map` would tell the user it came
+			// from a project the product never recorded.
+			const where =
+				session.cwdSubstitute === undefined
+					? ""
+					: ` — filed under ${tildePath(home, session.cwdSubstitute)}, because the source records no directory for any of its sessions, so ↑ will offer this one in every project and not only this one`;
 			items.push({
 				source,
 				from,
 				to: tildePath(home, path),
-				action: "map",
+				action: session.cwdSubstitute === undefined ? "map" : "downgrade",
 				detail: `transcript with ${session.entries.length} entries — resumable with --continue${
 					session.archived ? "; the source had archived it, and this build keeps every session in one place" : ""
-				}`,
+				}${where}`,
 				containsSecret: false,
 			});
 		}
@@ -1395,6 +1440,30 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	if (source === "opencode") return raw.opencode.present;
 	if (source === "cursor") return raw.cursor.present;
 	if (source === "trae") return raw.trae.present;
+
+	// T3 keeps everything in one state directory, and its conversations live in a
+	// database inside it, so the directory's existence is the shallow question
+	// every other branch here asks. `RawT3Code` spells it `stateDir` rather than
+	// `present` because the reader's own two answers are the settings documents
+	// and the skips, and a bare "was there anything here" flag would have been a
+	// third.
+	//
+	// **This arm was missing, and the miss was silent.** Without one this function
+	// fell through to `raw.agents.present`, so a T3 install with no agents tree
+	// planned zero T3 sessions — and every test in `migrate-t3-history.test.ts`
+	// passed, because all of them call `listHistory`/`readHistory` directly and
+	// never came through this gate. The lesson is the reason the gate exists at
+	// all: a reader tested only at its own level is not evidence that anything
+	// calls it.
+	if (source === "t3-code") return raw.t3Code.stateDir !== null;
+
+	// Antigravity asks the question its reader already answered. `~/.gemini` is
+	// shared with the Gemini CLI, so `present` alone would offer every Gemini CLI
+	// user a walk over a tree with no `brain/` in it; `dataDir` is the reader's
+	// own "one of the two roots holds something" answer, and asking it here means
+	// this gate cannot drift from the reader the way a `present` arm would.
+	if (source === "antigravity") return raw.antigravity.present && raw.antigravity.dataDir !== null;
+
 	return raw.agents.present;
 }
 
