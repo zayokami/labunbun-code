@@ -200,6 +200,31 @@ function rmTargets(args: string[]): { paths: string[]; recursive: boolean } {
 }
 
 /**
+ * Resolve `.` and `..` segments the way the kernel resolves them, returning
+ * null for a path that is not absolute.
+ *
+ * This is not a policy invented here. `rm --help` documents its own failsafe
+ * as `--preserve-root[=all]  do not remove '/' (default); with 'all', reject
+ * any command line argument that resolves to '/'` — so coreutils decides the
+ * question by resolving the argument, and the spelling of the test is lexical
+ * segment resolution. `..` at the root is clamped rather than escaping, which
+ * is what the kernel does with it too.
+ */
+function resolveAbsoluteSegments(target: string): string | null {
+	if (!target.startsWith("/")) return null;
+	const segments: string[] = [];
+	for (const segment of target.split("/")) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") {
+			segments.pop();
+			continue;
+		}
+		segments.push(segment);
+	}
+	return `/${segments.join("/")}`;
+}
+
+/**
  * Whether an `rm` target is somewhere whose loss has no narrower form.
  *
  * Three families, and what they share is that pointing `rm -r` at them with
@@ -212,24 +237,63 @@ function rmTargets(args: string[]): { paths: string[]; recursive: boolean } {
  * with `stdio: ["ignore", "pipe", "pipe"]`, so stdin is not a tty and GNU `rm`
  * prompts for nothing. Measured on this machine, stdin closed, no `-f`: a
  * directory holding a mode-444 file was removed whole, that file included, exit
- * 0. So `-r` here is as final as `-rf`, and a rule that only reads the force
- * flag stops `rm -rf /` and not `rm -r /`.
+ * 0. So `-r` here is as final as `-rf` for every target below the root.
+ *
+ * **The root is the exception, and this rule is a failsafe rather than a
+ * claim.** Measured here, GNU coreutils 8.32: `rm -r /` prints `it is dangerous
+ * to operate recursively on '/'` and `use --no-preserve-root to override this
+ * failsafe`, and removes nothing. The default only rejects the *literal* `/`,
+ * and the switch that lifts it is documented in the same `--help` line quoted
+ * above. So matching `/` costs a prompt on a command that GNU already refuses
+ * and stops the one where the failsafe has been lifted, which is the only
+ * spelling of the catastrophe worth being right about. A rule that claimed `rm
+ * -r /` destroys the root would be claiming something this machine's `rm`
+ * does not do.
  *
  * **What this deliberately leaves alone**, because a limit that is not written
- * down is a limit someone discovers: `.` and `..`, `*`, and any path under a
- * root rather than at one. `rm -r .` from a repository checkout is a real
- * mistake, but the working tree is the one thing here with a backup — it is in
- * git — and `rm -r ./*` is ordinary cleaning. Widening the list to cover them
- * would cost a prompt on the most common command in the category.
+ * down is a limit someone discovers: a *relative* `.` or `..`, `*`, and any
+ * path under a root rather than at one. `rm -r .` from a repository checkout is
+ * a real mistake, but the working tree is the one thing here with a backup — it
+ * is in git — and `rm -r ./*` is ordinary cleaning. Widening the list to cover
+ * them would cost a prompt on the most common command in the category. The
+ * relative exemption is why {@link resolveAbsoluteSegments} returns null rather
+ * than resolving everything: `rm -r ..` names whatever the caller is standing
+ * in, which is not knowable from the command line, while `/..` names the root
+ * whatever the caller is standing in.
+ *
+ * Measured here as well: GNU `rm` refuses any argument whose last component is
+ * `.` or `..` — `refusing to remove '.' or '..' directory: skipping 'child/..'`,
+ * exit 1, nothing removed. That refusal is not a licence to match them and not
+ * to match the resolved target either: a `rm` without it is a real thing, and
+ * the argument is matched for what it names rather than for what one
+ * implementation does with it.
+ *
+ * **The empty argument, which is an argument.** A shell collapses `""` and
+ * `''` to the empty string before `rm` runs, so `rm -r ""` reaches here as a
+ * real argument with nothing in it. Measured: `rm -r ''` prints `cannot remove
+ * '': No such file or directory` and exits 1, with the directory it ran in
+ * untouched — so a rule that collapsed it to `/` was inventing a target the
+ * command cannot destroy. It is allowed, and what allows it is the
+ * `startsWith("/")` check in {@link resolveAbsoluteSegments} rather than a line
+ * here: neither loop above can produce an empty string, since the first stops
+ * at length 1 and `.` is not `./`, and an empty string is not absolute, so the
+ * resolver declines it and every test below sees `""`.
  */
 function isUnrecoverableRmTarget(path: string): boolean {
 	// `./.git` and `.git/` name the same directory as `.git`, and a rule that only
 	// compared the raw string would match neither spelling of the thing it exists
-	// for. Trailing slashes go first so `/` does not reduce to the empty string.
+	// for. Trailing slashes go first so `/` does not reduce to `.` and then have
+	// the `./` loop eat the dot.
 	let target = path;
 	while (target.length > 1 && target.endsWith("/")) target = target.slice(0, -1);
 	while (target.startsWith("./")) target = target.slice(2);
-	if (target === "") target = "/";
+
+	// `/..` and `/.` are the root by another spelling, and `/srv/repo/..` is
+	// `/srv` — the system-directory test below matches on the first segment, so
+	// without this `/..` and `/.` fall through every arm and `/foo/../etc` names
+	// nothing at all.
+	const resolved = resolveAbsoluteSegments(target);
+	if (resolved !== null) target = resolved;
 
 	if (target === "/") return true;
 	// biome-ignore lint/suspicious/noTemplateCurlyInString: these are the shell's spellings, not placeholders

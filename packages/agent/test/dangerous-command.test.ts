@@ -142,6 +142,18 @@ describe("POSIX: `rm -r` aimed at a root, a home or a repository", () => {
 		["rm -r / -f", "and with the force after the target"],
 		["rm -r -- /", "past the options terminator, where the path is"],
 		["sudo rm -r /", "through sudo, which is the same command run as someone else"],
+		// The root and the system directories by a spelling that resolves to them.
+		// `--preserve-root=all` is documented in `rm --help` as rejecting "any
+		// command line argument that resolves to '/'", so resolving is what
+		// coreutils itself does to decide this — matching the raw string instead
+		// leaves every row below falling through all three families.
+		["rm -r /..", "the root by the spelling that walks up past it"],
+		["rm -r /.", "and the one that names the same directory"],
+		["rm -r /../../etc", "walking up twice, which clamps at the root rather than escaping it"],
+		["rm -r /foo/../etc", "a detour that lands on a system directory"],
+		["rm -r /srv/repo/..", "and one that lands on /srv, a directory two levels down"],
+		["rm -r /usr/../etc", "which is /etc, so the first-segment test is what answers"],
+		["rm -r /../root/.ssh", "and one that names a home directory through the walk"],
 	])("%s is dangerous — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
 	});
@@ -190,8 +202,40 @@ describe("POSIX: `rm -r` aimed at a root, a home or a repository", () => {
 		["rm -- -r /", "where the -r is a path and there is no recursion at all"],
 		["farm -r /", "a program that ends in rm"],
 		["rm.exe -r /", "and rm is a different program on this platform"],
+		// The empty argument. Measured: `rm -r ''` prints `cannot remove '': No
+		// such file or directory` and exits 1, having removed nothing — so a rule
+		// that collapsed it to `/` was inventing a target the command cannot
+		// destroy. It reached the rule because a shell collapses `""` and `''` to
+		// the empty string before `rm` runs, which is correct of the tokenizer.
+		['rm -r ""', "an empty double-quoted argument, which is one argument"],
+		["rm -r ''", "and the single-quoted spelling"],
+		['rm -r "" /tmp/x', "an empty one alongside a real target, which must not borrow the empty one's verdict"],
+		["rm -r ' '", "a file whose name is a single space"],
 	])("%s is not this rule — %s", (command) => {
 		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The resolution is one-sided, and the asymmetry is the whole decision.
+	 *
+	 * `/..` is the root no matter where the command is run from, so it is matched.
+	 * `..` is whatever directory the caller happens to be standing in, which the
+	 * command line does not say, so it is left alone — the working tree is in git
+	 * and `rm -r ./*` is the commonest cleaning command there is. Resolving
+	 * everything would flag the second while adding nothing to the first.
+	 */
+	test("an absolute `.` or `..` resolves; a relative one stays the stated limit", () => {
+		expect(posix("rm -r /..")).not.toBeNull();
+		expect(posix("rm -r /.")).not.toBeNull();
+		// The relative pair, unchanged, and unchanged for the same reason.
+		expect(posix("rm -r .")).toBeNull();
+		expect(posix("rm -r ..")).toBeNull();
+		// A relative `..` that walks up to a system directory is the same case: the
+		// target depends on where the command runs, so it stays with its relatives.
+		// Pinning it here is what stops the resolution from quietly widening later.
+		expect(posix("rm -r ./../etc")).toBeNull();
+		// The absolute form of that same walk, which does have a fixed answer.
+		expect(posix("rm -r /etc/foo/../..")).not.toBeNull();
 	});
 });
 
