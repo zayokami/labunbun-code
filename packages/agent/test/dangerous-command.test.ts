@@ -4650,6 +4650,15 @@ describe("Windows: a registry hive holding credentials, copied out", () => {
 		["reg export HKLM:\\SAM C:\\s.reg", "the PowerShell provider spelling of the same path"],
 		["cmd /c reg save HKLM\\SAM C:\\sam.hiv", "reached through a cmd body"],
 		["reg.exe save HKLM\\SAM out.hiv", "and through the program's full name"],
+		["reg save HKLM\\SAM\\Domains out.hiv", "a child of SAM, which is the cached domain logon keys"],
+		["reg save HKLM\\SAM\\SAM\\Domains\\Account out.hiv", "and one below that"],
+		["reg save HKLM\\SECURITY\\Policy\\Accounts out.hiv", "a child of SECURITY, which is the same material"],
+		["reg save HKLM\\SYSTEM\\Control\\Lsa out.hiv", "the LSA subtree of SYSTEM"],
+		["reg save HKLM\\SYSTEM\\Control\\Lsa\\Secrets out.hiv", "and the secrets under it"],
+		["reg save HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\Secrets out.hiv", "under the symbolic control-set name"],
+		["reg save HKLM\\SYSTEM\\ControlSet001\\Control\\Lsa\\Secrets out.hiv", "and under the live one"],
+		["reg export HKLM\\SAM\\Domains out.reg", "exported rather than saved, which is the same copy"],
+		["reg export HKLM:\\SAM\\Domains out.reg", "in the PowerShell provider spelling"],
 	])("%s is dangerous — %s", (command) => {
 		expect(windows(command)).not.toBeNull();
 	});
@@ -4658,11 +4667,14 @@ describe("Windows: a registry hive holding credentials, copied out", () => {
 		["reg export HKLM\\SOFTWARE C:\\before.reg", "an ordinary key, and the backup people actually make"],
 		[
 			"reg save HKLM\\SYSTEM\\CurrentControlSet out.hiv",
-			"a child of a credential hive, which is hardware and service configuration",
+			"a control set, which is hardware and service configuration rather than credentials",
 		],
-		["reg save HKLM\\SAM\\Domains out.hiv", "a child of the SAM hive, and a real limit of this rule"],
+		["reg save HKLM\\SYSTEM\\ControlSet001 out.hiv", "and the live one under the symbolic name"],
 		["reg save HKLM\\SAMPLES out.hiv", "a sibling key that merely starts with the same three letters"],
+		["reg save HKLM\\SAMBLON out.hiv", "and one that starts the same way and is not under it either"],
+		["reg save HKLM\\SOFTWARE\\Microsoft out.hiv", "the ordinary software backup"],
 		["reg query HKLM\\SAM", "reading the hive is not copying it out"],
+		["reg query HKLM\\SAM\\Domains", "and reading a child of it is not either"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(windows(command)).toBeNull();
 	});
@@ -4677,12 +4689,26 @@ describe("Windows: a registry hive holding credentials, copied out", () => {
 	/**
 	 * Pinned separately from the rows above because this is the boundary and a
 	 * mutation that widened the predicate to a plain `includes` would pass every
-	 * match row and fail exactly these three.
+	 * match row and fail exactly these.
+	 *
+	 * The first two used to assert the opposite of the first row above: the rule
+	 * did not catch a child of SAM, and said in a comment that catching one meant
+	 * matching an open-ended set. It was not open-ended — SAM and SECURITY hold
+	 * nothing but account material, and one subtree of SYSTEM is credentials — so
+	 * the boundary moved rather than the comment staying.
 	 */
-	test("the hive name has to be the end of the path, and not merely inside it", () => {
-		expect(windows("reg save HKLM\\SAM\\Domains out.hiv")).toBeNull();
+	test("a child matches only where the credentials are, and the name has to be a whole segment", () => {
+		expect(windows("reg save HKLM\\SAM\\Domains out.hiv")).not.toBeNull();
 		expect(windows("reg save HKLM\\SAMPLES out.hiv")).toBeNull();
+		expect(windows("reg save HKLM\\SAMBLON out.hiv")).toBeNull();
 		expect(windows("reg save HKLM\\SAM out.hiv")).not.toBeNull();
+		// The three spellings of the one SYSTEM subtree, and the two control sets
+		// on their own.
+		expect(windows("reg save HKLM\\SYSTEM\\Control\\Lsa\\Secrets out.hiv")).not.toBeNull();
+		expect(windows("reg save HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\Secrets out.hiv")).not.toBeNull();
+		expect(windows("reg save HKLM\\SYSTEM\\ControlSet001\\Control\\Lsa\\Secrets out.hiv")).not.toBeNull();
+		expect(windows("reg save HKLM\\SYSTEM\\CurrentControlSet out.hiv")).toBeNull();
+		expect(windows("reg save HKLM\\SYSTEM\\ControlSet001 out.hiv")).toBeNull();
 	});
 });
 

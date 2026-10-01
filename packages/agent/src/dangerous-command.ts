@@ -2122,22 +2122,45 @@ function isUacPolicyKey(token: string): boolean {
  * service configuration, which `reg save` is asked to back up as a matter of
  * routine, and a rule that matched it would fire on ordinary system imaging.
  *
- * **`HKLM\SAM\Domains` and `HKLM\SYSTEM\Control\Lsa\Secrets` are real
- * credential stores that this therefore does not catch**, and that is a known
- * limit rather than an oversight: catching them means matching an open-ended set
- * of credential paths, and the wider that set becomes the more this becomes the
- * `reg add`-catches-everything rule beside it that its own comment argues
- * against.
+ * **So the children are matched by where the credentials are, and not by being
+ * children.** `SAM` and `SECURITY` hold nothing but account material, so
+ * everything under either is a credential dump; `SYSTEM` holds both, so only the
+ * one subtree that is credentials — `Control\Lsa`, which is where the LSA secrets
+ * and the cached domain logon keys live — is matched there, and the rest of the
+ * hive stays allowed for the imaging it is asked for.
+ *
+ * **`HKLM\SAM\Domains` and `HKLM\SYSTEM\Control\Lsa\Secrets` were real
+ * credential stores this did not catch**, which the comment here used to call an
+ * open-ended set that was better left alone. It was not open-ended: the two hives
+ * that are entirely credentials, and the one subtree of the third that is, is a
+ * closed list, and writing it down costs three patterns rather than a judgement
+ * call about how much is too much.
+ *
+ * The `ControlSet` alternation in the LSA pattern is optional and has two
+ * spellings in it because three names reach the same store: the bare
+ * `SYSTEM\Control\Lsa`, the symbolic `SYSTEM\CurrentControlSet\Control\Lsa`, and
+ * the live `SYSTEM\ControlSet001\Control\Lsa` underneath it. A `reg save` typed
+ * by a person — or written by a backup tool — can carry any of the three, and a
+ * pattern that took only the bare form would catch the name a document uses and
+ * miss the one a machine has. The optional group is also what keeps
+ * `SYSTEM\ControlSet001` on its own out: imaging a control set is routine, and
+ * only the `Lsa` below it is credentials.
  *
  * **Not measured, and the reason is the point of the rule.** Every way of
- * checking whether these three keys exist is `reg query` or `Test-Path` against
- * them, which enumerates the very stores this predicate exists to flag. That is
- * a fact about this machine's session and not a claim that the names are
- * uncertain — `SAM`, `SYSTEM` and `SECURITY` are the hive names Windows itself
- * prints in the `HKEY_LOCAL_MACHINE` list.
+ * checking whether these keys exist is `reg query` or `Test-Path` against them,
+ * which enumerates the very stores this predicate exists to flag. That is a fact
+ * about this machine's session and not a claim that the names are uncertain —
+ * `SAM`, `SYSTEM` and `SECURITY` are the hive names Windows itself prints in the
+ * `HKEY_LOCAL_MACHINE` list, and `Control\Lsa\Secrets` is where the LSA cache is
+ * documented to live.
  */
 function isCredentialHiveKey(token: string): boolean {
-	return /\\(?:sam|system|security)$/i.test(token);
+	if (/\\(?:sam|system|security)$/i.test(token)) return true;
+	// A backslash on both sides of the name, so `SAMPLES\Anything` is not `SAM`
+	// and `SECURITYX` is not `SECURITY`. The `$` above is what does that job for a
+	// hive; this is what does it for a child.
+	if (/\\(?:sam|security)\\/i.test(token)) return true;
+	return /\\system\\(?:(?:currentcontrolset|controlset\d+)\\)?control\\lsa(?:\\|$)/i.test(token);
 }
 
 /**
