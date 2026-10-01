@@ -25,12 +25,27 @@
  *   function can see — and that gap is why the engine runs this **before** the
  *   allow rules and never lets an allow rule turn a match into a pass.
  *
- * One deliberate divergence from Codex: `execpolicy/src/policy.rs:305-332` lets
- * an explicit `allow` prefix rule return `Skip` and short-circuit the classifier
- * without consulting the approval policy at all. That is not copied here. In
- * this repo a `deny` rule is a floor the user wrote on purpose, and a rule on
- * the other side of the file being able to switch the classifier off is a new
- * way around it.
+ * One deliberate divergence from Codex: an explicit `allow` prefix rule
+ * short-circuits its dangerous-command classification entirely, and that is not
+ * copied here. The mechanism is not a decision variant — checked in
+ * `codex-main/codex-rs/execpolicy/src/decision.rs:9-16`, `Decision` has exactly
+ * three arms, `Allow`/`Prompt`/`Forbidden`, and there is no `Skip`. (There *is* an
+ * `ExecApprovalRequirement::Skip` at `core/src/exec_policy.rs:440`, which is a
+ * different enum one layer up and is reached from `Decision::Allow`.) What
+ * happens instead is ordering: the classifier is not called first and consulted
+ * later, it is the fallback. `render_decision_for_unmatched_command_for_platform`
+ * at `core/src/exec_policy.rs:770-776` calls
+ * `dangerous_command_match_for_origin`, and that function is passed in as
+ * `heuristics_fallback` to `check_multiple_with_options`
+ * (`execpolicy/src/policy.rs:265-288`) — which hands it to
+ * `matches_for_command_with_options`, whose own doc at `:290-296` says it runs
+ * the fallback "If no rules match". So one matching `allow` prefix rule is
+ * enough for the classifier never to be called, and the command is decided by
+ * that rule alone.
+ *
+ * That is not copied here. In this repo a `deny` rule is a floor the user wrote
+ * on purpose, and a rule on the other side of the file being able to switch the
+ * classifier off is a new way around it.
  */
 
 import { splitShellCommands, tokenizeShell } from "./shell-tokens.ts";
@@ -92,7 +107,18 @@ const BROWSER_EXECUTABLES = new Set([
 	"iexplore.exe",
 ]);
 
-/** The program's own name: no directory, no `.exe`, and on Windows no drive. */
+/**
+ * The program's own name: no directory, and on Windows also no drive and no
+ * `.exe`/`.cmd`/`.bat`/`.com`.
+ *
+ * The suffix strip is the Windows branch's alone, and that asymmetry is real
+ * rather than an oversight — measured, both directions: `rm.exe -rf /` is
+ * flagged on `windows` and NOT flagged on `posix`, where it is a different
+ * program with a different name. The earlier version of this comment said "no
+ * `.exe`" with no platform attached, which described only half the function.
+ *
+ * The POSIX branch lower-cases the name too, for the reason spelled out below.
+ */
 function executableName(raw: string, platform: DangerousCommandPlatform): string | undefined {
 	if (platform === "posix") {
 		const name = raw.split("/").pop();
@@ -910,9 +936,27 @@ function matchTokens(
  * this box would be writing to a regular file. What *was* measured is that
  * these are the Linux spellings, by name, from the kernel's own device naming
  * (`sd*` SCSI/SATA, `nvme*n*` NVMe, `hd*` IDE, `vd*` virtio, `md*` RAID,
- * `mmcblk*` SD, `mapper/*` LVM and `cryptsetup`). A rule that cannot be run here
- * is still a rule worth having, but it has to be labelled as one rather than
- * dressed up as a measurement.
+ * `mmcblk*` SD, `mapper/*` LVM and `cryptsetup/*`). A rule that cannot be run
+ * here is still a rule worth having, but it has to be labelled as one rather
+ * than dressed up as a measurement.
+ *
+ * `cryptsetup/*` is here for the same reason `mapper/*` is, and the doc above
+ * used to name `cryptsetup` as one of the device namespaces without the pattern
+ * having the alternative — so `dd of=/dev/cryptsetup/root` sailed through while
+ * the same write to `/dev/mapper/cryptroot` was caught. The two spellings are
+ * the same device: cryptsetup creates `/dev/mapper/<name>`, and the
+ * `/dev/cryptsetup/<name>` form is the other place its node appears.
+ *
+ * The `[\w.-]+` under those two directories is a known over-match, and it was
+ * already there for `mapper/` before this batch — `dd of=/dev/mapper/vg-root.img`
+ * is flagged as a disk although it is an ordinary image file. Narrowing it to
+ * `\w+` was tried and is worse: dashes and dots are legal in an LVM volume name
+ * (`vg-root`, `my.volume`), so that trade turns a false positive into a false
+ * *negative* on the devices the rule is for. The two cannot be separated by
+ * shape, because `/dev/mapper/<name>` has no extension and `/dev/mapper/<name>.img`
+ * is not a thing the kernel creates — the `.img` is somebody's own file sitting
+ * in the same directory. Left as it is, with the direction of the error stated:
+ * a prompt on an image file, rather than silence on a volume.
  *
  * The pattern is anchored at the end, and that is load-bearing in a way that is
  * easy to get wrong: without the anchor the `\d*` after `sd[a-z]+` does nothing
@@ -923,7 +967,7 @@ function matchTokens(
  * thing actually being matched.
  */
 const BLOCK_DEVICE_PATH =
-	/^\/dev\/(?:sd[a-z]+\d*|nvme\d+n\d+(?:p\d+)?|hd[a-z]+\d*|vd[a-z]+\d*|xvd[a-z]+\d*|disk\d+|rdisk\d+|md\d+|mmcblk\d+|mapper\/[\w.-]+)\/?$/;
+	/^\/dev\/(?:sd[a-z]+\d*|nvme\d+n\d+(?:p\d+)?|hd[a-z]+\d*|vd[a-z]+\d*|xvd[a-z]+\d*|disk\d+|rdisk\d+|md\d+|mmcblk\d+|mapper\/[\w.-]+|cryptsetup\/[\w.-]+)\/?$/;
 
 /**
  * Programs whose job is to write a fresh filesystem or a fresh partition table
@@ -966,12 +1010,47 @@ function mkfsVariant(program: string): boolean {
 
 /**
  * The read-only spellings of the partition tools, which print a table and change
- * nothing. `--print` is `sgdisk`'s and is here for that reason alone; the other
- * three are shared. None of them is also a way to write: `fdisk`, `sfdisk` and
- * `sgdisk` write through commands (`w`, `mklabel`, `--zap-all`) rather than
- * through a flag that collides with these.
+ * nothing. None of them is also a way to write: `fdisk`, `sfdisk` and `sgdisk`
+ * write through commands (`w`, `mklabel`, `--zap-all`) rather than through a
+ * flag that collides with these.
+ *
+ * `-p` is `sgdisk`'s and `parted`'s short form of `--print` and it was missing
+ * here, which made `sgdisk -p /dev/sda` and `parted -p /dev/sda` the two
+ * false positives in this whole rule — the same commands spelled out long are
+ * not flagged, so the difference was the length of a flag and nothing else.
+ *
+ * NOT MEASURED HERE, and the sentence above is the claim rather than a result:
+ * none of these five programs exists on this machine, so it cannot be. What is
+ * checked is the other half — that nothing in the writing set uses `-p` to mean
+ * write. `mkfs`, `mke2fs`, `mkswap`, `wipefs`, `fdisk`, `sfdisk`, `cfdisk`,
+ * `gdisk`, `sgdisk`, `parted`, `gparted`, `partprobe` and `shred` all write
+ * through `-w`/`w`/`mklabel`/`--zap-all` or a bare destination path, and none
+ * of them documents `-p` as destructive. If a program in this set ever grows a
+ * `-p` that writes, this table is where that becomes a false negative.
  */
-const DISK_LIST_FLAGS: ReadonlySet<string> = new Set(["-l", "--list", "print", "--print"]);
+const DISK_LIST_FLAGS: ReadonlySet<string> = new Set(["-l", "--list", "-p", "print", "--print"]);
+
+/**
+ * The flags that write, for the same programs.
+ *
+ * These are checked BEFORE `DISK_LIST_FLAGS`, because the exemption is a
+ * statement about the whole command line and it cannot be true when a writing
+ * flag is on the same line. Without the ordering, `sgdisk -p /dev/sda
+ * --zap-all` printed its table and then erased it, and the presence of `-p` had
+ * already returned the rule as safe — the row that caught this was one the
+ * `-p` fix above added for exactly this reason, and it went red on the first run.
+ *
+ * `--zap-all` is `sgdisk`'s. The rest are `parted`'s and `sfdisk`'s, and they are
+ * subcommands rather than flags — `parted /dev/sda mklabel msdos` is the everyday
+ * relabelling. `sfdisk`'s `-d`/`--delete` and `--part-type` take a device as a
+ * following argument, so naming a device is what catches them and no flag list
+ * is needed.
+ *
+ * NOT MEASURED HERE, for the same reason as the list above: none of these five
+ * programs exists on this machine. What is checked is that each name here is a
+ * thing the program is documented to accept.
+ */
+const DISK_DESTRUCTIVE_FLAGS: ReadonlySet<string> = new Set(["--zap-all", "--zap", "mklabel", "mkpart", "mkfs"]);
 
 /**
  * Destroying a disk, on the two shapes it comes in.
@@ -1032,12 +1111,26 @@ function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatc
 	}
 
 	// A filesystem tool needs a device to be pointed at, and a partition tool
-	// has a read-only spelling that prints a table and exits. `-l`, `--list` and
-	// a bare `print` are those, whether or not a device is named — `fdisk -l
-	// /dev/sda` prints and changes nothing, and flagging that would teach people
-	// to switch the rule off rather than to read it.
-	if (tokens.slice(1).some((arg) => DISK_LIST_FLAGS.has(arg.toLowerCase()))) return null;
-	if (tokens.slice(1).some((arg) => BLOCK_DEVICE_PATH.test(arg))) {
+	// has a read-only spelling that prints a table and exits. `-l`, `--list`,
+	// `-p` and a bare `print` are those, whether or not a device is named —
+	// `fdisk -l /dev/sda` prints and changes nothing, and flagging that would
+	// teach people to switch the rule off rather than to read it.
+	//
+	// The destructive check comes first and the order is the whole point: the
+	// exemption is a claim about the entire command line, and it is false the
+	// moment a writing flag is on it. `sgdisk -p /dev/sda --zap-all` printed the
+	// table and then erased it.
+	const rest = tokens.slice(1);
+	if (rest.some((arg) => DISK_DESTRUCTIVE_FLAGS.has(arg.toLowerCase()))) {
+		if (rest.some((arg) => BLOCK_DEVICE_PATH.test(arg)) || program === "sgdisk") {
+			return {
+				kind: "Other",
+				rule: `\`${program}\` with a flag that writes a partition table over what is on it`,
+			};
+		}
+	}
+	if (rest.some((arg) => DISK_LIST_FLAGS.has(arg.toLowerCase()))) return null;
+	if (rest.some((arg) => BLOCK_DEVICE_PATH.test(arg))) {
 		return { kind: "Other", rule: `\`${program}\` pointed at a disk, which overwrites what is on it` };
 	}
 	// Nothing to point at: `fdisk` on its own opens the first device it can find
@@ -1328,9 +1421,20 @@ function posixProcessRules(tokens: string[]): DangerousCommandMatch | null {
 		return null;
 	}
 
-	// `shutdown` is Windows' program on this machine — `type -a shutdown`
-	// resolves it to `C:\Windows\system32\sutdown` — so its POSIX switches are
-	// taken from POSIX, not from what running it here would do.
+	// `shutdown` is Windows' program on this machine. Measured: `type -a
+	// shutdown` and `which -a shutdown` both return only
+	// `/c/Windows/system32/shutdown`, five entries that are all the same binary
+	// reached through differently-cased `PATH` elements, and there is no
+	// `/usr/bin/shutdown` or `/bin/shutdown` at all. So the switches in
+	// `POSIX_SHUTDOWN_SWITCHES` are taken from POSIX, not from what running the
+	// word here would do: Windows' own `shutdown.exe` takes `/s`, `/r` and `/h`
+	// and would treat `-r` as an ordinary argument, so a table read off this
+	// machine would be a table of the wrong program.
+	//
+	// The two spellings are deliberately left in separate tables rather than merged
+	// into one covering both platforms. That is a real narrowing on Windows, where
+	// `shutdown /s` powers the machine off and is not flagged: the classifier is
+	// told which platform's semantics to read, and this branch is the POSIX one.
 	if (program === "shutdown") {
 		if (!args.some((arg) => POSIX_SHUTDOWN_SWITCHES.has(arg))) {
 			return null;
@@ -1339,10 +1443,15 @@ function posixProcessRules(tokens: string[]): DangerousCommandMatch | null {
 	}
 
 	// `init 0` and `telinit 0` are the SysV spellings: the runlevel is the
-	// argument and 0 is halt.
+	// argument. 0 is halt and 6 is reboot, so the two need different words and
+	// the earlier version of this returned "halts" for both — a message that is
+	// wrong about half of what it catches. The rule itself is right and is what
+	// the flagging needs; only the claim about what happens was wrong.
 	if (program === "init" || program === "telinit") {
-		if (!args.some((arg) => arg === "0" || arg === "6")) return null;
-		return { kind: "Other", rule: `\`${program} ${args[0]}\`, which halts the machine` };
+		const runlevel = args.find((arg) => arg === "0" || arg === "6");
+		if (runlevel === undefined) return null;
+		const what = runlevel === "0" ? "halts" : "reboots";
+		return { kind: "Other", rule: `\`${program} ${runlevel}\`, which ${what} the machine` };
 	}
 
 	if (POWER_PROGRAMS.has(program)) {
@@ -1404,10 +1513,21 @@ const SOFT_SEPARATORS = /[{}()[\],;]/;
  * The command segments of a Windows invocation, with the punctuation that can
  * glue a word to its neighbours split off.
  *
- * The tokenizer has already separated words on whitespace, so only the soft
- * separators are split here: these are the places where a cmdlet and its
- * arguments can arrive as one token, and a rule that compared whole tokens
- * would not see the cmdlet in `Invoke-Expression(Invoke-WebRequest https://…)`.
+ * Both separator sets are applied here, not only the soft ones. An earlier
+ * version of this comment said "only the soft separators are split here", which
+ * is not what the code below does — `SEGMENT_SEPARATORS` is applied on the same
+ * pass. The reason both are here rather than only the soft ones is that they are
+ * not redundant with the tokenizer: `splitShellCommands`
+ * (`shell-tokens.ts:94-117`) tracks quotes as it goes and only splits a
+ * separator outside them, whereas this function is quote-blind by design and
+ * re-splits the already-tokenized words. That is safe only because a `;` or `|`
+ * inside a quoted string has already been eaten by the quote handling and
+ * cannot reach here as its own token.
+ *
+ * The soft separators are the ones that carry the weight. They are the places
+ * where a cmdlet and its arguments arrive as one token, and a rule that
+ * compared whole tokens would not see the cmdlet in
+ * `Invoke-Expression(Invoke-WebRequest https://…)`.
  */
 function windowsSegments(tokens: string[]): string[][] {
 	const segments: string[][] = [[]];
@@ -1585,7 +1705,31 @@ function isUacValueName(token: string): boolean {
  *   * `Add-MpPreference` takes `ExclusionPath`, `ExclusionExtension`,
  *     `ExclusionProcess` and `ExclusionIpAddress` — a path excluded from
  *     scanning is a path nothing will ever find malware on.
- *   * `Disable-LocalUser` and `Unblock-File` both exist.
+ *   * `Disable-LocalUser` and `Unblock-File` both exist, and both now have a
+ *     rule. `Unblock-File` used to be named here with no branch anywhere near it,
+ *     which is the shape of defect this file's comments exist to prevent: the
+ *     list read as coverage and the code had none.
+ *
+ * `Unblock-File` is the mark-of-the-web removal, and it is the one here whose
+ * effect was measured rather than read off the cmdlet's name. On a file this
+ * script created in `%TEMP%`, with a real `Zone.Identifier` alternate stream
+ * written to it, `Get-Item -Stream *` showed `Zone.Identifier` at 65 bytes
+ * before the call and no such stream after it, with the file's own 26 bytes
+ * untouched. So it removes the mark and does not touch the content, which is
+ * exactly the shape of a step taken immediately before running the file.
+ *
+ * That first measurement was wrong and is worth recording because it nearly
+ * became the comment: the alternate stream was never created — the probe
+ * appended the zone text to the file's data instead — so "before" and "after"
+ * both showed one stream and the run appeared to show Unblock-File doing
+ * nothing. It does not do nothing. Writing the stream with the `path:Zone.Identifier`
+ * syntax and asserting it is present before the call is what makes the result a
+ * result; a probe with no positive control cannot distinguish "did nothing" from
+ * "was never in a position to do anything".
+ *
+ * `-Path` is a `String[]` and takes wildcards, measured, so `Unblock-File -Path
+ * C:\Downloads\*` strips a whole directory tree in one call. There is no narrower
+ * shape to look for — the cmdlet does nothing else.
  *
  * The UAC spelling is worth naming because the obvious one is wrong: the live
  * key is `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`
@@ -1615,6 +1759,12 @@ function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null
 		}
 		if (head === "disable-localuser") {
 			return { kind: "Other", rule: "PowerShell `Disable-LocalUser`, which locks an account out" };
+		}
+		if (head === "unblock-file") {
+			return {
+				kind: "Other",
+				rule: "PowerShell `Unblock-File`, which strips the mark-of-the-web off a downloaded file",
+			};
 		}
 		// Two independent things, checked apart rather than as one conjunction:
 		// writing a value under the startup key does not mention UAC, and turning
@@ -2260,20 +2410,31 @@ function fetchPipedIntoInterpreter(segments: string[]): DangerousCommandMatch | 
  *   writes go to /dev/null, which is where the measured "1 line" comes from.
  *   Those two are caught by `historyAssignmentRule` below, not by this function.
  *
- * Six near neighbours are measured non-actions and are deliberately absent, all
- * of them reading 5 lines against the baseline's 4 — the extra line being the
- * variant line itself, recorded like any other command:
+ * The near neighbours below are measured non-actions and are deliberately
+ * absent from this function. Most read 5 lines against the baseline's 4 — the
+ * extra line being the variant line itself, recorded like any other command —
+ * and the one exception says so where it appears, because a header that claimed
+ * "all of them read 5" would be contradicted by the `history -c` row two lines
+ * below it:
  *
- * - `set +oh` and `set +O history`. Short flags do NOT combine for `set` here,
- *   and the capital O is a different thing. This was tried on the reasoning that
- *   short flags combine the way `git clean -fn` does; they do not, and an earlier
- *   version of the `set` branch below accepted the cluster until this measured.
+ * - `set +oh`, `set +history`, `set +h`, `set +O history`, `set +O` and
+ *   `set +o hist`. Short flags do NOT combine for `set` here, and the capital O
+ *   is a different thing again. This was tried on the reasoning that short flags
+ *   combine the way `git clean -fn` does; they do not, and an earlier version of
+ *   the `set` branch below accepted the cluster until this measured.
+ *   (`set +history` and `set +O history` are two different spellings and both
+ *   were run, because the doc named one and the test row named the other and
+ *   neither could be assumed to stand for both. They agree: both read 5.)
  * - `set +o historyx`, which names no option.
  * - `history -c`: 4 lines, exactly the baseline, seed intact. It clears an
  *   in-memory list, not the file, so neither suppresses the next three commands
  *   nor removes the record of the ones before it.
  * - `unset HISTSIZE`: 5 lines, appending like a baseline.
  * - `set -o history`: the opposite of the rule.
+ * - `env HISTFILE=/dev/null true` and a bare `HISTFILE=/dev/null true`: both 5.
+ *   A per-process variable on a command that exits does not outlive it, so there
+ *   is no suppression to record — the assignment spelling that does suppress is
+ *   `historyAssignmentRule`'s, below.
  *
  * **A fourth builtin spelling group was here and is gone.** `export HISTFILE`,
  * `readonly HISTFILE`, `declare -x HISTFILE` and `typeset HISTFILE` — the forms
@@ -2291,11 +2452,13 @@ function historyRules(segment: string): DangerousCommandMatch | null {
 		// history` turns the record *on* and is left alone, which is why the sign
 		// is read rather than the pair.
 		//
-		// `set +oh` and `set +history` are measured NOT to suppress — each wrote
-		// every line, the same as any no-op setup line — so the short cluster is
-		// not here. An earlier version of this branch accepted them, on the
-		// reasoning that short flags combine; the measurement says bash does not
-		// combine them for `set`, and the branch went rather than the measurement.
+		// `set +oh`, `set +history`, `set +h`, `set +O history`, `set +O` and `set +o
+		// hist` are measured NOT to suppress — each wrote every line, the same as
+		// any no-op setup line — so the short cluster is not here. An earlier
+		// version of this branch accepted them, on the reasoning that short flags
+		// combine; the measurement says bash does not combine them for `set`, and
+		// the branch went rather than the measurement. The table above has the
+		// counts.
 		const args = tokens.slice(1);
 		const at = args.findIndex((arg) => arg === "+o" || arg === "-o");
 		if (at === -1 || args[at] !== "+o") return null;
@@ -2429,14 +2592,38 @@ const CREDENTIAL_SENDERS: ReadonlySet<string> = new Set([
  *
  * `curl`, `scp`, `ssh` and the `nc` family are in both lists by name and reach
  * this one through `segmentProgram`'s Windows branch, which is what strips the
- * `.exe`. The five below are Windows-only: PowerShell's own web cmdlets, and
- * `certutil`, whose `-urlcache -split -f FILE URL` form reads a local file and
- * puts it at an address.
+ * `.exe`. The seven entries below are Windows-only, and they are seven entries
+ * rather than seven programs — `iwr` and `irm` are aliases, measured here with
+ * `Get-Command`: `iwr` resolves to
+ * `Microsoft.PowerShell.Commands.InvokeWebRequestCommand` and `irm` to
+ * `Microsoft.PowerShell.Commands.InvokeRestMethodCommand`, i.e. exactly the
+ * two cmdlets they sit beside. An earlier version of this comment said "the five
+ * below", which was neither the entry count nor the program count.
  *
- * Not measured on this machine — none of these was run, and `certutil -urlcache`
- * in particular would have needed a live request. The names are what each is
- * documented to do, and the rule that uses them is the same one the POSIX side
- * of this batch measured end to end.
+ * The mechanisms, one each, since a list with no reason in it is a list that
+ * cannot be checked later:
+ * - `Invoke-WebRequest`/`Invoke-RestMethod` take `-InFile` and `-Body`, so a
+ *   local file can be the request body.
+ * - `Start-BitsTransfer` is the one whose shape is measurable without a network:
+ *   `Get-Command Start-BitsTransfer` lists both `Source` and `Destination`, and
+ *   which of the two is the local path decides the direction. It lives in the
+ *   `BitsTransfer` module and its service was `Running`/`Automatic` here.
+ * - `certutil -urlcache -split -f FILE URL` reads a local file and puts it at an
+ *   address.
+ * - `bitsadmin /transfer` is the command-line face of the same service and is in
+ *   this table on the same grounds. This one used to be in the list with nothing
+ *   said about it at all, which is the version of this comment worth not
+ *   repeating: an entry nobody can justify is an entry nobody can remove.
+ *
+ * What WAS measured, on this machine, and is only about identity: `certutil` and
+ * `bitsadmin` are both present and both carry a valid `CN=Microsoft Windows`
+ * signature (`Get-AuthenticodeSignature`, status `Valid` for each), so they are
+ * the inbox binaries rather than something shadowing them on `PATH`. What was
+ * NOT measured: none of these seven was run. `certutil -urlcache` and
+ * `bitsadmin /transfer` would each have needed a live request, and the four
+ * cmdlets were not invoked at all. The upload shapes are read from what each is
+ * documented to accept, and the rule that uses them is the same one the POSIX
+ * side of this batch measured end to end.
  */
 const WINDOWS_CREDENTIAL_SENDERS: ReadonlySet<string> = new Set([
 	"invoke-webrequest",

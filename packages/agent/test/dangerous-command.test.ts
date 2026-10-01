@@ -1498,6 +1498,10 @@ describe("Windows: a protection that is switched off rather than used", () => {
 		["Add-MpPreference -ExclusionIpAddress 1.2.3.4", "excludes an address"],
 		["Disable-LocalUser someone", "locks an account out"],
 		["Disable-LocalUser -Name someone", "with the name behind a switch"],
+		["Unblock-File C:\\Users\\dev\\Downloads\\setup.exe", "strips the mark-of-the-web"],
+		["Unblock-File -Path C:\\Downloads\\tool.zip", "the switch form"],
+		["Unblock-File -Path C:\\Downloads\\*", "and on a whole tree, since -Path takes wildcards"],
+		["unblock-file C:\\x", "the cmdlet name is matched folded"],
 		[
 			"Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name EnableLUA -Value 0",
 			"turns UAC off",
@@ -1541,6 +1545,23 @@ describe("Windows: a protection that is switched off rather than used", () => {
 	 *   * `Get-ItemProperty` on the very key the rule above guards is how a
 	 *     person checks whether it is set, and so is `Get-ExecutionPolicy`.
 	 *   * `reg add` writes to the registry constantly; only the Run key is special.
+	 *
+	 * **`Unblock-File` was a row in this table and no longer is.** It read
+	 * `["Unblock-File C:\\x.zip", "removes a mark *off* a downloaded file"]` — the
+	 * italicised half is the whole argument, and it describes what the cmdlet does
+	 * as though the direction of the mark were reassuring. It was here because
+	 * nothing flagged it: the doc comment above the rule listed `Unblock-File`
+	 * beside `Disable-LocalUser` among the protection-disabling cmdlets, but no
+	 * branch implemented it, so "not dangerous" was true only by accident and the
+	 * test pinned the accident rather than a decision.
+	 *
+	 * Measured, on a file created in `%TEMP%` with a real `Zone.Identifier`
+	 * alternate stream: `Get-Item -Stream *` showed the stream at 65 bytes before
+	 * `Unblock-File` and no such stream after it, with the file's own content
+	 * untouched. So it removes the mark and leaves the file, which is the step
+	 * taken immediately before running something that arrived from a browser. That
+	 * is the same category as the `Disable*` switches two rules up, so it now has a
+	 * branch and a positive row of its own.
 	 */
 	test.each([
 		["Set-ExecutionPolicy RemoteSigned -Force", "remote scripts must still be signed"],
@@ -1573,7 +1594,6 @@ describe("Windows: a protection that is switched off rather than used", () => {
 			"a key whose name merely begins with the UAC one, which is a synthetic path made for the word boundary",
 		],
 		["New-Item -Path C:\\temp\\x -ItemType Directory", "makes a directory, not a startup entry"],
-		["Unblock-File C:\\x.zip", "removes a mark *off* a downloaded file"],
 		["reg add HKCU\\Environment /v Path /t REG_EXPAND_SZ /d C:\\x /f", "ordinary registry maintenance"],
 		[
 			"reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System /v x /d 1 /f",
@@ -1759,6 +1779,7 @@ describe("POSIX: destroying a disk", () => {
 		["dd if=/dev/zero of=/dev/sda", "zero over a whole disk"],
 		["dd if=/dev/urandom of=/dev/nvme0n1", "onto NVMe"],
 		["dd of=/dev/mapper/vg-root", "onto an LVM volume, with no input at all"],
+		["dd if=/dev/zero of=/dev/cryptsetup/root", "the other name the same device answers to"],
 		["dd if=/dev/zero of=/dev/sdb1 bs=1M", "onto a partition"],
 	])("%s is dangerous — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
@@ -1833,8 +1854,34 @@ describe("POSIX: destroying a disk", () => {
 		["parted /dev/sda print", "and the bare `print` command"],
 		["parted -s /dev/sda print", "from a script"],
 		["sgdisk --print /dev/sda", "the GPT one"],
+		["sgdisk -p /dev/sda", "the GPT one, short form"],
+		["parted -p /dev/sda", "and parted's short form of the same flag"],
+		["sgdisk -p", "short form without naming a device"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `-p` was the last read-only spelling to be missing, and its absence made
+	 * the rule's behaviour depend on how long a flag is: `sgdisk -p /dev/sda`
+	 * was flagged while `sgdisk --print /dev/sda` was not, with nothing about the
+	 * command differing but the spelling. These rows are paired with the ones
+	 * above on purpose — each short spelling sits next to the long one it stands
+	 * for, so a future removal of `-p` cannot pass by leaving the long form in.
+	 */
+	test.each([
+		["sgdisk -p /dev/sda", "short flag, whole disk"],
+		["parted -p /dev/sda", "short flag, another program"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test.each([
+		["sgdisk --zap-all /dev/sda", "the writing flag is still caught"],
+		["parted /dev/sda mklabel msdos", "and so is relabelling"],
+		["sgdisk -p /dev/sda --zap-all", "the print flag does not excuse the write beside it"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
 	});
 
 	/**
@@ -2137,8 +2184,30 @@ describe("POSIX: ending processes, stopping services, powering off", () => {
 		["sudo shutdown -r now", "as root, which is the one that works"],
 		["init 0", "the SysV runlevel"],
 		["telinit 0", "under either of its two names"],
+		["init 6", "which is reboot rather than halt"],
+		["telinit 6", "under both spellings"],
 	])("%s is dangerous — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * 0 is halt and 6 is reboot, and the two used to produce the same sentence —
+	 * `init 6` was described as "which halts the machine", which is the wrong
+	 * claim about half of what the branch catches. The rule itself was always
+	 * right; only the words were not, so this pins the words.
+	 *
+	 * Asserted on the message rather than on the verdict because the verdict was
+	 * never the defect. A test asking only "is it dangerous" would have gone
+	 * green on the broken version, which is exactly what it did — the rows above
+	 * are the evidence: they were all passing while the sentence was wrong.
+	 */
+	test.each([
+		["init 0", "halts"],
+		["telinit 0", "halts"],
+		["init 6", "reboots"],
+		["telinit 6", "reboots"],
+	])("%s says it %s the machine, which is what that runlevel does", (command, verb) => {
+		expect(posix(command)?.rule).toContain(`${verb} the machine`);
 	});
 
 	test.each([
@@ -2727,12 +2796,23 @@ describe("POSIX: turning off the record of what ran", () => {
 	 * pre-seeded line untouched — so it neither suppresses what comes next nor
 	 * removes the record of what came before. `unset HISTSIZE` wrote five,
 	 * appending exactly like a baseline.
+	 *
+	 * The `set +…` rows are all measured at five lines against the baseline's
+	 * four, and they are here as a block because they were once a disagreement:
+	 * the doc named `set +O history` and this table named `set +history`, neither
+	 * could be assumed to stand for the other, and both were then run. They
+	 * agree, so the block below is the measured set rather than one spelling
+	 * picked out of it.
 	 */
 	test.each([
 		["history -c", "clears the list in memory, not the file"],
 		["unset HISTSIZE", "append rather than suppress"],
 		["set +oh", "short flags do not combine for set"],
 		["set +history", "and this one is no different"],
+		["set +h", "the bare short form"],
+		["set +O history", "the capital O is a different thing"],
+		["set +O", "and on its own"],
+		["set +o hist", "an abbreviation of the option name is not the option"],
 		["set -o history", "the opposite of the rule"],
 		["echo $HISTFILE", "printing a path changes nothing"],
 		["unset HISTSIZE HISTFILESIZE", "and neither of those is HISTFILE"],
