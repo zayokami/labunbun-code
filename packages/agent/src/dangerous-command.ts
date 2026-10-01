@@ -174,23 +174,133 @@ function wrapperScript(tokens: string[]): string | undefined {
 /**
  * PowerShell's own spelling of the same idea: the script lives in one argument.
  *
- * `-Command` takes every unambiguous prefix, so `-c`, `-co` and `-Command` are
- * one switch. `-EncodedCommand` is deliberately not among them: its body is
- * base64, and reading it is not something this function does — which is a real
- * limit, and is why a miss here is never treated as "safe" anywhere upstream.
+ * `powershell.exe` matches its own switches by prefix, longest match first, with
+ * the documented order breaking a tie — which is why most prefixes of
+ * `-EncodedCommand` reach it even though `-ExecutionPolicy` is also an `E`: `-e`
+ * and `-en` match both at the same length and `-EncodedCommand` is documented
+ * first, while `-ex` diverges at the second character and matches neither.
+ *
+ * The set was measured rather than reasoned about, because reasoning about it
+ * gets two of the answers wrong. Each spelling below was run against a
+ * `powershell.exe` on this machine, on 5.1 and on 7.4, with a base64 body that
+ * writes a marker file only the body itself can write:
+ *
+ * - `-e`, `-en`, `-enco`, `-encod`, `-encode`, `-encoded`, `-encodedc`,
+ *   `-encodedcom`, `-encodedcomm`, `-encodedcomma`, `-encodedcomman` and
+ *   `-encodedcommand` each ran it. Every prefix of the name but one.
+ * - `-ec` ran it, in any case. It is not a prefix of anything here.
+ * - `-enc` did not run it — three runs on each build, every one of them waiting
+ *   for input until it was killed — while its immediate neighbours `-en` and
+ *   `-enco` both did. `-eco`, `-ecom` and `-econd` did not run it either.
+ * - `-ex`, `-exe`, `-exec`, `-execu`, `-executio`, `-executionp` and
+ *   `-executionpolicy` each took the body as their own value and ran nothing.
+ * - `-nop` takes no value, so the body became the command.
+ *
+ * So the accepted set is every prefix of the name plus `-ec`, and it is derived
+ * from that name rather than written out. The hand-kept list this replaces
+ * (`c|co|com|comm|comma|comman|command`) was exactly the prefixes of `command`,
+ * so deriving it changes no answer and cannot drift when a switch is spelled
+ * differently.
+ *
+ * Two spellings in the accepted set were measured *not* to run the body, and
+ * they stay in. Dropping them would be a bet on the user's PowerShell build, and
+ * the cost of losing that bet is a destructive command running unsupervised
+ * rather than one prompt too many. Nothing here explains why `-ec` binds, why
+ * `-enc` does not, or why `-enco` does; that is recorded rather than guessed at,
+ * because a rule whose comment explains more than was measured is worse than a
+ * rule that says what it saw.
+ *
+ * `shortest` exists for the one prefix-match rule that PowerShell does not apply
+ * the same way: a *parameter* name binds only when it is unambiguous, so the
+ * prefixes below it have to be left out rather than included. See
+ * `FORCE_PARAMETER_SPELLINGS`.
  */
-const POWERSHELL_COMMAND_SWITCH = /^-(?:c|co|com|comm|comma|comman|command)$/;
+function switchPrefixes(name: string, shortest = 2): ReadonlySet<string> {
+	const full = `-${name.toLowerCase()}`;
+	const out = new Set<string>();
+	for (let n = shortest; n <= full.length; n++) out.add(full.slice(0, n));
+	return out;
+}
 
-/** The script text of a `powershell -Command "…"` invocation. */
+const POWERSHELL_COMMAND_SWITCH = switchPrefixes("command");
+const POWERSHELL_ENCODED_SWITCH = new Set([...switchPrefixes("encodedcommand"), "-ec"]);
+
+/**
+ * The script text of a `powershell -Command "…"` invocation.
+ *
+ * `-EncodedCommand` is read here too, and used to be a hole this file documented
+ * rather than closed: its body is base64, and the comment claimed a miss was
+ * "never treated as safe anywhere upstream". That was wrong, and
+ * `permissions.ts:331-333` says the opposite — an unrecognised command becomes an
+ * ordinary one, and an ordinary command with no deny rule is allowed in Agent
+ * mode. It was arbitrary code execution behind a switch the classifier read as
+ * nothing.
+ */
 function powershellScript(tokens: string[]): string | undefined {
 	const program = executableName(tokens[0] ?? "", "windows");
 	if (program === undefined || !POWERSHELL_EXECUTABLES.has(program)) return undefined;
 	for (let i = 1; i < tokens.length; i++) {
-		if (!POWERSHELL_COMMAND_SWITCH.test(tokens[i].toLowerCase())) continue;
+		const arg = tokens[i].toLowerCase();
+		if (POWERSHELL_ENCODED_SWITCH.has(arg)) return decodeEncodedCommand(tokens[i + 1]);
+		if (!POWERSHELL_COMMAND_SWITCH.has(arg)) continue;
 		const next = tokens[i + 1];
 		return next === undefined || next === "-" ? undefined : next;
 	}
 	return undefined;
+}
+
+/**
+ * How much base64 this will decode. `-EncodedCommand` bodies are a shell
+ * command; the largest one anyone writes by hand is a few kilobytes, and a
+ * classifier that allocates whatever a number in a command line asks for is a
+ * denial of service wearing a rule.
+ */
+const MAX_ENCODED_COMMAND_CHARS = 64 * 1024;
+
+/**
+ * `powershell -EncodedCommand` takes base64 of UTF-16LE, which is what
+ * `[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))` produces
+ * and what every "here is a one-liner" post on the web copies verbatim.
+ *
+ * Decoding is the whole point: the body is ordinary PowerShell source, and the
+ * rest of this file already knows how to read that. Returning `undefined` for a
+ * body it cannot make sense of is the one case that stays a miss, and every one
+ * of those misses is a miss about *decoding* rather than about the shape — the
+ * host rejects an odd number of bytes, a body outside the base64 alphabet and a
+ * body that is not UTF-16LE with the same error and without running anything.
+ * Measured: the body runs when its arguments are separated by spaces or by tabs,
+ * and does not run when they are separated by newlines, so splitting on any
+ * whitespace errs towards flagging rather than towards missing.
+ */
+function decodeEncodedCommand(body: string | undefined): string | undefined {
+	if (body === undefined) return undefined;
+	// Base64 is whitespace-tolerant, and PowerShell tolerates it too, so this
+	// does rather than rejecting a body that would have run.
+	const compact = body.replace(/\s+/g, "");
+	if (compact.length === 0 || compact.length > MAX_ENCODED_COMMAND_CHARS) return undefined;
+	if (!/^[A-Za-z0-9+/]+={0,2}$/.test(compact)) return undefined;
+	const bytes = Buffer.from(compact, "base64");
+	// UTF-16LE of nothing is nothing, and a payload whose length is odd was not
+	// produced by the encoder above.
+	if (bytes.length === 0 || bytes.length % 2 !== 0) return undefined;
+	// UTF-8 is the only other encoding anyone reaches for, and PowerShell does not
+	// read it here. Measured, because the alternative was a comment promising a
+	// catch that does not exist: the same `Remove-Item … -Force` command written as
+	// UTF-16LE ran on 5.1 and on 7.4 and wrote its marker file, and the UTF-8
+	// spelling of the same command wrote nothing on either. So there is no UTF-8
+	// command behind this switch, and reading one would be work on an input that
+	// cannot run.
+	//
+	// The test is on the bytes, not on the decoded text: UTF-16LE of ASCII puts a
+	// zero in the high half of every character, while UTF-8 of the same text has
+	// no zero bytes at all. A first attempt looked for a NUL in the *decoded*
+	// string, which is nearly the same idea and almost never fires — reading
+	// UTF-8 as UTF-16LE pairs two non-zero bytes together and produces no NUL,
+	// which is how a UTF-8 body slipped past it. The one case this rule gives up
+	// is a body with no ASCII in it at all, and a command with no ASCII in it
+	// cannot spell a name any rule here matches.
+	if (!bytes.includes(0)) return undefined;
+	return bytes.toString("utf16le");
 }
 
 /**
@@ -653,14 +763,38 @@ function windowsSegments(tokens: string[]): string[][] {
  * words and deletes nothing, and flagging it would be the classifier crying
  * wolf often enough that a user learns to dismiss it.
  */
+/**
+ * The spellings of `-Force` that PowerShell actually binds.
+ *
+ * Measured on all seven names in `DELETE_CMDLETS` — they are aliases of one
+ * cmdlet, and each one was run rather than assumed, against a directory this
+ * repository created for the purpose: `-Force`, `-Forc`, `-For` and `-Fo` each
+ * deleted it, `-Force:$true` and `-fo:$true` each deleted it, `-F` failed with
+ * `AmbiguousParameter` (`-Filter` is also an `F`), and `-foo` failed with
+ * `NamedParameterNotFound`.
+ *
+ * That pair is the reason this is the set PowerShell accepts rather than a
+ * `startsWith("-fo")`: the shorter rule would flag commands that fail to parse,
+ * and `-F` — the spelling a person reaches for first — has to stay out, because
+ * including it would mean this file claims a delete that PowerShell refuses to
+ * perform. The two-character prefix is what `shortest` leaves off.
+ */
+const FORCE_PARAMETER_SPELLINGS = switchPrefixes("force", 3);
+
+/** `-Force` in any spelling PowerShell binds, with or without a value. */
+function isForceParameter(word: string): boolean {
+	// `-Force:$true` binds the way `-Force` does, and `-F:$true` is exactly as
+	// ambiguous as `-F`, so the value is split off before the spelling is read.
+	return FORCE_PARAMETER_SPELLINGS.has(word.toLowerCase().split(":", 1)[0]);
+}
+
 function hasForceDeleteCmdlet(tokens: string[]): boolean {
 	return windowsSegments(tokens).some((segment) => {
 		let hasDelete = false;
 		let hasForce = false;
 		for (const word of segment) {
 			if (DELETE_CMDLETS.has(word.toLowerCase())) hasDelete = true;
-			const lower = word.toLowerCase();
-			if (lower === "-force" || lower.startsWith("-force:")) hasForce = true;
+			if (isForceParameter(word)) hasForce = true;
 		}
 		return hasDelete && hasForce;
 	});
@@ -941,17 +1075,27 @@ function directGuiLaunch(tokens: string[]): DangerousCommandMatch | null {
  * whole, because a quoted string that merely *mentions* `Remove-Item` is not a
  * command, and a classifier that reads it as one is one the user learns to
  * dismiss.
+ *
+ * `-EncodedCommand` is *not* expanded here, and that is a measured decision
+ * rather than an oversight. `powershellScript` already reads an encoded body —
+ * into the full rule set, which strictly includes the word rules below — and it
+ * reaches the first script switch on the line, which is the one the host uses.
+ * The only inputs this function could add are ones where an earlier switch has
+ * already claimed the script slot and the encoded body therefore never runs.
+ * Expanding it here would mean flagging `powershell -c "Get-Process" -enc <body>`
+ * as dangerous, and PowerShell hands that `<body>` to `Get-Process` as an
+ * argument rather than executing it.
  */
 function powershellWords(tokens: string[]): string[] {
 	const words: string[] = [];
 	for (let i = 1; i < tokens.length; i++) {
-		const arg = tokens[i];
-		if (POWERSHELL_COMMAND_SWITCH.test(arg.toLowerCase()) && i + 1 < tokens.length) {
+		const lower = tokens[i].toLowerCase();
+		if (POWERSHELL_COMMAND_SWITCH.has(lower) && i + 1 < tokens.length) {
 			words.push(...tokens[i + 1].split(/\s+/).filter(Boolean));
 			i++;
 			continue;
 		}
-		words.push(arg);
+		words.push(tokens[i]);
 	}
 	return words;
 }
