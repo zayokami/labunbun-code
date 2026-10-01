@@ -4780,3 +4780,69 @@ describe("Windows: a script URI in place of a URL", () => {
 		);
 	});
 });
+
+/**
+ * The two spellings the `comsvcs` entry did not reach, and the one it should.
+ *
+ * `executableName` does not strip `.dll`, so `comsvcs.dll` — the only spelling
+ * on this machine, in both `System32` and `SysWOW64`, with no `comsvcs.exe`
+ * anywhere — read as the program `comsvcs.dll` and missed the entry by one
+ * suffix. And `rundll32 comsvcs.dll, MiniDump …` is the form a person actually
+ * types, where the program is `rundll32` and the dangerous export is an argument.
+ *
+ * Both now resolve through the same table, so the negative half matters as much
+ * as the positive: a rule that caught *any* `rundll32` would be the
+ * `reg add`-catches-everything mistake the file argues against two hundred lines
+ * above, and `rundll32 shell32.dll,Control_RunDLL` is on the allowed list in the
+ * block before this one for that reason.
+ */
+describe("Windows: the DLL spelling of an export the table already names", () => {
+	test.each([
+		[
+			"C:\\Windows\\System32\\comsvcs.dll MiniDump 704 C:\\Windows\\Temp\\x 00000000",
+			"the file, at the path it is actually at",
+		],
+		["comsvcs.dll MiniDump 704 x 00000000", "and the bare file name beside it"],
+		["comsvcs.dll MiniDumpW 704 x 00000000", "the wide export, through the same suffix"],
+		[
+			"rundll32.exe comsvcs.dll, MiniDump 704 C:\\Windows\\Temp\\x 00000000",
+			"rundll32 with the comma and its own space",
+		],
+		["rundll32 comsvcs.dll,MiniDump 704 x 00000000", "and with the comma but no space, which is one token"],
+		["rundll32.exe C:\\Windows\\System32\\comsvcs.dll,MiniDump 704 x 00000000", "and with the DLL at a full path"],
+		["rundll32.exe comsvcs.dll, MiniDumpW 704 x 00000000", "the wide export through the carrier too"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test.each([
+		["rundll32 user32.dll,MessageBeep", "a DLL this file has no entry for"],
+		["rundll32 comsvcs.dll, NotAnExport", "an export the entry does not have"],
+		["rundll32.exe comsvcs.dll,", "the DLL named with no export after it"],
+		["rundll32.exe shell32.dll,ShellExecuteA calc.exe", "the carrier doing what it is for, which stays allowed"],
+		["rundll32.exe", "and the program with no arguments at all"],
+		["comsvcs.dll", "the DLL invoked with no export, which is what running it is"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	test("the message names the carrier and the export, not the program that hosted them", () => {
+		// The act is `comsvcs`'s, but the user typed `rundll32`, and a message that
+		// named only the former would send them looking for a program they did not
+		// run. Both halves of what they typed are in the sentence.
+		const rule = windows("rundll32.exe comsvcs.dll, MiniDump 704 x 00000000")?.rule;
+		expect(rule).toContain("rundll32");
+		expect(rule).toContain("comsvcs.dll");
+		expect(rule).toContain("minidump");
+	});
+
+	test("the suffix retry cannot reach an entry the program name would not have", () => {
+		// The fix is a second lookup with `.dll` removed, not a change to
+		// `executableName`, so it can only ever find an entry already written for
+		// that DLL. `format.com` is stripped by `executableName` to `format`, and
+		// nothing about `.dll` may alter that: a whole-program rule that started
+		// matching on a suffix would be a rule about file extensions.
+		expect(windows("format.com C:")?.rule).toContain("format");
+		expect(windows("format.dll C:")).toBeNull();
+	});
+});

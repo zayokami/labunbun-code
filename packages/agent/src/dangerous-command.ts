@@ -2949,7 +2949,8 @@ function isShellHistoryPath(token: string): boolean {
  * `C:\Windows\System32` with an `.exe` extension, `format` excepted — it is a
  * `.com`, which `executableName` already strips alongside the others.
  *
- * **The two exceptions, and the sentence above used not to have any.** It read
+ * **The two exceptions this table has had — the second of them is closed now —
+ * and the sentence above used not to have any.** It read
  * "Measured: every program named here exists on this machine", fifty lines above
  * a comment saying that an `existsSync` over `C:\Windows\System32`,
  * `C:\Windows\SysWOW64` and `C:\Windows` finds no `wmic.exe` in any of them
@@ -2957,11 +2958,15 @@ function isShellHistoryPath(token: string): boolean {
  * worse than no header, because the reader who has just been given the exception
  * will assume there are none and stop looking.
  *
- * The second is `comsvcs`, and it is the more interesting one: what is on this
- * machine is `comsvcs.dll`, in both `System32` and `SysWOW64`, and there is no
- * `comsvcs.exe` anywhere — and `executableName` does not strip `.dll`, so the
- * spelling the rule matches is the bare name and not the file that carries it.
- * See the entry below for what that costs.
+ * The second was `comsvcs`, and it is why the table reads the way it does. What
+ * is on this machine is `comsvcs.dll`, in both `System32` and `SysWOW64`, and
+ * there is no `comsvcs.exe` anywhere — and `executableName` does not strip
+ * `.dll`, so the spelling the entry matched was the bare name and not the file
+ * that carries it. That is now closed: `dangerousWindowsAdmin` retries this
+ * table without a trailing `.dll` and separately reads `rundll32 <dll>,
+ * <Export>`, so the rule covers the file on the machine and the form a person
+ * types. It was written down here as an open exception first, and closing it
+ * needed no change to `executableName` and no new table.
  *
  * Not measured, deliberately: that any of them actually destroys anything. None
  * was run in its destructive form. `format C:` was not run because it would
@@ -3060,19 +3065,20 @@ const WINDOWS_ADMIN_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	// Not measured, and the reason is that measuring it means writing another
 	// process's memory out. Nothing was run.
 	//
-	// **MEASURED, and the measurement is a limitation rather than a
-	// confirmation.** What is on this machine is `comsvcs.dll` — 1732608 bytes in
+	// **MEASURED, and the measurement is what the rule had to be built around.**
+	// What is on this machine is `comsvcs.dll` — 1732608 bytes in
 	// `C:\Windows\System32` and 1393152 in `C:\Windows\SysWOW64` — and there is no
 	// `comsvcs.exe` in either. `executableName` strips `.exe`, `.cmd`, `.bat` and
 	// `.com` on the Windows branch and **not** `.dll`, so `comsvcs.exe MiniDump …`
-	// and a bare `comsvcs MiniDump …` both match and `comsvcs.dll MiniDump …` does
-	// not. That is the one spelling this machine's own file has.
+	// and a bare `comsvcs MiniDump …` matched this entry while `comsvcs.dll
+	// MiniDump …` — the one spelling this machine's own file has — did not.
 	//
-	// Closing it means teaching `executableName` about `.dll`, which changes what
-	// every Windows rule in this file reads as a program name, and that is a much
-	// wider claim to take on for one entry. So it is written down here instead of
-	// closed, and the table's doc comment above names this entry as one of its two
-	// exceptions for the same reason.
+	// **All three are caught now**, and not by teaching `executableName` about
+	// `.dll`, which would change what every Windows rule in this file reads as a
+	// program name. `dangerousWindowsAdmin` retries this table without a trailing
+	// `.dll`, and separately reads `rundll32 <dll>, <Export>`, which is the form a
+	// person actually types. Both go through this entry, so this table is still the
+	// one place a dangerous Windows export is written down.
 	["comsvcs", new Set(["minidump", "minidumpw"])],
 ]);
 
@@ -3387,7 +3393,62 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 		}
 	}
 
-	const verbs = WINDOWS_ADMIN_VERBS.get(program);
+	// A DLL named as the program, with the export beside it.
+	//
+	// `executableName` strips `.exe`, `.cmd`, `.bat` and `.com` and **not**
+	// `.dll`, so `C:\Windows\System32\comsvcs.dll` reaches this function as the
+	// program `comsvcs.dll` and misses the `comsvcs` entry by one suffix. That is
+	// the same act the entry above already names, reached by the spelling the
+	// machine's own file has.
+	//
+	// The retry is bounded to this table and to a name that ends in `.dll`,
+	// because the alternative — teaching `executableName` about `.dll` — changes
+	// what *every* Windows rule in this file reads as a program name, and a DLL
+	// base name colliding with an `.exe` rule is the kind of collision that would
+	// be found by an incident rather than by a test. Here the fallback can only
+	// ever reach an entry that was already written for that DLL.
+	// `rundll32 <dll>, <Export>` is the same act reached by a spelling that never
+	// names the program at all: the DLL is an argument and the export is the verb.
+	// This is the documented way to run `comsvcs.dll`'s `MiniDump` — a process's
+	// memory written to a file — and it was `null` while `comsvcs MiniDump` was
+	// flagged, which is the wrong way round: the carrier is the spelling a person
+	// actually types.
+	//
+	// **Bounded to the exports this file has already named.** `rundll32` runs
+	// arbitrary code from any DLL, so a whole-program rule would be the
+	// `reg add`-catches-everything rule its own neighbour argues against, and
+	// `rundll32 shell32.dll,ShellExecuteA calc.exe` is what most of its legitimate
+	// use looks like. What is matched is a DLL this file has an entry for, called
+	// with a verb that entry has, so the table stays the single place a dangerous
+	// Windows export is written down.
+	//
+	// Above the verb lookup for the same reason `shutdown` and `procdump` are:
+	// `rundll32` has no entry of its own, and the `return null` below would take
+	// this branch out of reach entirely.
+	if (program === "rundll32") {
+		for (const [index, token] of tokens.entries()) {
+			const comma = token.indexOf(",");
+			if (comma < 0) continue;
+			const hosted = token.slice(0, comma).split(/[/\\]/).pop()?.toLowerCase();
+			const hostedVerbs = hosted?.endsWith(".dll") ? WINDOWS_ADMIN_VERBS.get(hosted.slice(0, -4)) : undefined;
+			if (hosted === undefined || hostedVerbs === undefined) continue;
+			// `comsvcs.dll,MiniDump` is one token and `comsvcs.dll, MiniDump` is two,
+			// and both are what a command line is. The rest of either is the export.
+			const export_ = token.slice(comma + 1).trim() || tokens[index + 1]?.trim() || "";
+			if ([...hostedVerbs].some((known) => verbMatches(export_, known))) {
+				return {
+					kind: "Other",
+					rule: `\`rundll32 ${hosted}, ${export_.toLowerCase()}\`, which runs that export out of a signed system library`,
+				};
+			}
+		}
+	}
+
+	const dllNamed = program.endsWith(".dll") ? program.slice(0, -".dll".length) : program;
+	const verbs =
+		dllNamed === program
+			? WINDOWS_ADMIN_VERBS.get(program)
+			: (WINDOWS_ADMIN_VERBS.get(program) ?? WINDOWS_ADMIN_VERBS.get(dllNamed));
 	if (verbs === undefined) return null;
 
 	// Every argument is looked at, not only the first. `sc config` puts its verb
