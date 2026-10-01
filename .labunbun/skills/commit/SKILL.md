@@ -20,7 +20,7 @@ Group the changed files by the concern they serve. Two hunks belong in the same 
 Run `git log --oneline -15` before writing anything, and match what it shows. The history has two shapes and it moved between them, so a description of "the style" that doesn't say which is current will send you the wrong way:
 
 - **Older commits** (roughly 70 of the last 200) are a plain imperative summary with no prefix at all: `Stop trusting repo-controlled settings tiers`, `Teach the Vim engine vim's character classes and terminal motions`.
-- **Recent commits** — every batch since the migration work — lead with a scope and a colon: `vim: the quote text objects`, `emacs: modeless editing in the prompt, alongside vim`, `zcode: read the MCP legacy spellings the way ZCode reads them`, `/activity: session heatmap with current and longest streak`, `test: pin the mtimes the newest-session test asserts on`. The scope is a feature, module, or batch name, and the summary after the colon starts lowercase.
+- **Recent commits** — every batch since the migration work — lead with a scope and a colon: `vim: the quote text objects`, `emacs: modeless editing in the prompt, alongside vim`, `classifier: follow a wrapper in front of the command`, `/activity: session heatmap with current and longest streak`, `test: pin the mtimes the newest-session test asserts on`. The scope is a feature, module, or batch name, and the summary after the colon starts lowercase.
 
 What is *not* the convention is Conventional Commits' `feat:`/`fix:`/`chore:` type vocabulary, and it is worth being explicit about the difference: a scope names **which part of the product** a commit touches, a type names **what kind of change** it is. Use the first.
 
