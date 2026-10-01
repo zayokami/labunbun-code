@@ -1841,6 +1841,188 @@ describe("POSIX: destroying a disk", () => {
 	);
 });
 
+describe("POSIX: permissions and ownership", () => {
+	/**
+	 * MEASURED, and only partly: this machine's GNU coreutils 8.32 accepts every
+	 * spelling below with exit 0, and `chmod --help` names `-R, --recursive`.
+	 * What could not be measured is whether any of them did anything — this is
+	 * NTFS through MSYS, which has no POSIX mode bits, so `stat -c %a` reported
+	 * `644` for `4755`, `2755` and `666` alike. The spellings are pinned; the
+	 * effects come from the POSIX definition and are not a claim about this box.
+	 */
+	test.each([
+		["chmod -R 777 /", "the root itself"],
+		["chmod -R 755 /etc", "the configuration tree"],
+		["chmod 755 -R /etc/nginx", "the flag after the mode"],
+		["chmod --recursive 755 /usr/lib", "the long spelling"],
+		["chmod -R 755 /usr/lib/x86_64-linux-gnu", "a machine's own libraries"],
+		["chown -R root:root /", "ownership, not just permission"],
+		["chown -R root /etc", "with no group"],
+		["chgrp -R staff /etc/group", "the third of the three"],
+		["chmod -R 755 /System/Library", "the macOS one"],
+		["sudo chmod -R 777 /etc", "behind the wrapper the tests above already cover"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The rule's shape is two conditions, and both matter. Recursion is ordinary —
+	 * `chmod -R 755 build/` is in a thousand build scripts — and so is changing
+	 * one of these paths; what is not ordinary is the two together.
+	 */
+	test.each([
+		["chmod -R u+w /var", "logs, packages and mail are content, not the machine"],
+		["chown --recursive nobody /opt/app", "so is an application under /opt"],
+		["chmod -R 700 /Volumes/Backup", "and so is a mounted disk"],
+		["chown -R root /var/www", "a web root is somebody's deploy step"],
+		["chown -R me /home", "and so is a home directory"],
+		["chmod -R 755 /usr/local", "/usr/local is the part of /usr the user owns"],
+		["chmod -R 755 build/", "a project is not the machine"],
+		["chmod -R +x node_modules/.bin", "and this is in every package.json"],
+		["chown -R me project", "no recursion flag, no root"],
+		["chown user file.txt", "one file is an ordinary afternoon"],
+		["chmod 755 script.sh", "a mode on its own changes one file"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * A *single* file under a system root, changed without recursing, is the most
+	 * ordinary administrative command there is — and it was missing, which is why
+	 * deleting the `if (!recursive) return null` guard turned out to change
+	 * nothing at all. The mutation driver found the hole; a rule nobody can tell
+	 * apart from a stricter one is a rule that has not been written down.
+	 */
+	test.each([
+		["chmod 755 /etc/nginx.conf", "a config file"],
+		["chmod 644 /etc/hosts", "and another one"],
+		["chmod 755 /usr/bin/python3", "which is what installing a package does"],
+		["chown root /etc/passwd", "ownership, one file, no recursion"],
+		["chgrp wheel /etc/master.passwd", "and the third of the three"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The comparison is on a path *boundary*. Without the slash, a project
+	 * directory that happens to start with a system's name is flagged, and a
+	 * rule that does that is a rule people learn to switch off.
+	 */
+	test.each([
+		["chmod -R 755 /etcetera", "the letters match but the directory does not"],
+		["chmod -R 755 /var/www.myapp", "a suffix is not a path boundary"],
+		["chmod -R 755 /usr/local/lib", "and /usr/local is the user's own"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * Two spellings for the same bit, and the four-digit one hides in the *first*
+	 * digit: `755` has no special digit at all, which is why this reads the
+	 * length rather than the value.
+	 */
+	test.each([
+		["chmod 4755 prog", "set-user-ID, octal"],
+		["chmod 2755 dir", "set-group-ID, octal"],
+		["chmod 6755 prog", "both"],
+		["chmod 7777 prog", "the sticky bit alongside"],
+		["chmod u+s /usr/bin/sudo", "symbolic"],
+		["chmod +s prog", "with no `who`"],
+		["chmod ug+s prog", "two of them at once"],
+		["chmod a+rwxs prog", "inside a wider clause"],
+		["chmod u+s,g-s prog", "and one clause among several"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The other direction, which is the one an over-eager rule gets wrong. Taking
+	 * a bit *away* is not setting it, the sticky bit is a different bit, and a
+	 * filename is allowed to contain a plus sign — `notes+s.txt` is a perfectly
+	 * good name, and reading that name as a mode is the false positive a plain
+	 * "does this contain `+s`" test produces.
+	 */
+	test.each([
+		["chmod -s prog", "clearing the bit, not setting it"],
+		["chmod +t dir", "the sticky bit, which is not a set-user-ID bit"],
+		["chmod 1755 /tmp", "and its octal spelling"],
+		["chmod 0755 prog", "a leading zero makes it a plain mode"],
+		["chmod 666 file.txt", "world-writable, but three digits"],
+		["chmod 755 notes+s.txt", "the plus sign is in the name"],
+		["chmod o+w notes+s.txt", "and the mode is symbolic"],
+		["chmod -R 755 plus+dir", "and it is not a recursive change either"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+});
+
+describe("POSIX: deleting what a search found", () => {
+	/**
+	 * MEASURED on this machine, in a directory this session created: `find . -type
+	 * f -delete` and `find . -name '*.txt' -exec rm {} +` both removed the files
+	 * and exited 0, and `find . -delete` took the directory with them.
+	 *
+	 * `find` is not in `COMMAND_PREFIX_PROGRAMS`, so nothing unwrapped the `rm`
+	 * inside `-exec` and every one of these came back as nothing at all — which
+	 * is the worst shape a gap can have, because the result is indistinguishable
+	 * from the `find . -print` sitting next to it in the transcript.
+	 */
+	test.each([
+		["find . -delete", "the predicate does the deleting"],
+		["find / -name '*.log' -delete", "over the whole machine"],
+		["find . -newer README.md -delete", "chosen by age"],
+		["find . -type f -exec rm {} +", "one rm per batch"],
+		["find . -exec rm -rf {} +", "forced, and by the rule that already exists"],
+		["find /tmp -name '*.tmp' -exec rm -rf {} \\;", "with the escaped terminator"],
+		["find . -execdir shred -u {} +", "a shredder, run from the directory it is in"],
+		["find . -type d -exec rmdir {} +", "and an rmdir, which takes a tree from the leaves up"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * Only the deleting command is named, never the predicate. `find . -name
+	 * '*.ts' -exec grep -l todo {} +` is how a codebase is searched, and a rule
+	 * that flagged `-exec` would be switched off within a day.
+	 */
+	test.each([
+		["find . -print", "the ordinary one"],
+		["find . -name '*.ts' -type f", "searching by name and type"],
+		["find . -name '*.ts' -exec grep -l todo {} +", "running a reader on each match"],
+		["find . -exec echo {} +", "the simplest possible -exec"],
+		["find . -execdir pwd \\;", "and the directory-relative form of it"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `find … | xargs rm -rf` needed no new rule: `xargs` is unwrapped as a
+	 * wrapper program already. These pin that, because a second copy of that
+	 * rule inside the `find` code would read as coverage and measure as nothing.
+	 */
+	test.each([
+		["find . -name '*.tmp' | xargs rm -rf", "the piped spelling of the same delete"],
+		["find . -type f -print0 | xargs -0 shred", "with the null separator"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["ls -1 | xargs wc -l", "counting is not deleting"],
+		["find . -print | xargs grep -l todo", "and neither is reading"],
+		["xargs rm", "an unforced rm asks before it deletes"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test.each(["find . -delete", "find . -exec rm {} +", "chmod u+s x.exe", "chmod -R 777 C:\\etc"])(
+		"%s is not a Windows rule",
+		(command) => {
+			expect(windows(command)).toBeNull();
+		},
+	);
+});
+
 describe("the two platforms are not the same rules", () => {
 	/**
 	 * A Windows-only rule must not fire on a POSIX line and vice versa. If the

@@ -869,7 +869,7 @@ function matchTokens(
 	if (platform === "windows") {
 		return matchWindows(tokens);
 	}
-	return posixDiskRules(tokens, segment);
+	return posixDiskRules(tokens, segment) ?? posixPermissionRules(tokens) ?? posixFindRules(tokens);
 }
 
 // ---------------------------------------------------------------------------
@@ -1027,6 +1027,187 @@ function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatc
 	// and waits at a prompt where `w` writes a table. An error, otherwise.
 	if (tokens.length === 1) {
 		return { kind: "Other", rule: `\`${program}\` with no device named, which opens the first one it finds` };
+	}
+	return null;
+}
+
+/**
+ * The directories whose permissions belong to the machine rather than to a
+ * project.
+ *
+ * `/home` and `/Users` are deliberately *not* here. `chmod -R 755 ~/project` and
+ * `chown -R me ~/project` are two of the most ordinary commands in software
+ * work, and a rule that caught them would be caught by everything. The paths
+ * listed are the ones holding the binaries, the configuration and the devices,
+ * where a recursive change breaks the machine rather than a checkout.
+ *
+ * The macOS entries are here because the POSIX half of this file is not
+ * Linux-only; `classifyDangerousCommand` takes a `posix` platform rather than
+ * distinguishing the two.
+ */
+const SYSTEM_ROOTS: ReadonlySet<string> = new Set([
+	"/",
+	"/bin",
+	"/sbin",
+	"/lib",
+	"/lib32",
+	"/lib64",
+	"/usr/bin",
+	"/usr/lib",
+	"/usr/sbin",
+	"/usr/include",
+	"/etc",
+	"/boot",
+	"/dev",
+	"/proc",
+	"/sys",
+	"/root",
+	"/System",
+	"/Library",
+]);
+
+/**
+ * The first system root among these arguments, if any.
+ *
+ * The comparison is on a path *boundary*, not on the letters: `/etc` and
+ * `/etc/ssh` are the machine's, `/etcetera` is not. A prefix match without the
+ * slash would flag a project directory that happens to start with a system's
+ * name, which is a false positive of exactly the kind that makes people stop
+ * reading the rule.
+ */
+function touchesSystemRoot(tokens: string[]): string | undefined {
+	for (const token of tokens) {
+		// `/` must not be stripped down to the empty string, or the root itself
+		// stops matching — which is what the probe caught, with
+		// `chown -R root:root /` coming back as nothing at all.
+		const path = token.length > 1 ? token.replace(/\/+$/, "") : token;
+		if (!path.startsWith("/")) continue;
+		if (SYSTEM_ROOTS.has(path)) return path;
+		for (const root of SYSTEM_ROOTS) {
+			if (root !== "/" && (path === root || path.startsWith(`${root}/`))) return root;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * A symbolic `chmod` operand: one or more clauses of who, a sign, and what.
+ *
+ * `u+s`, `ug+s`, `a+rwxs`, `u+s,g-s` are all this shape; `notes+s.txt` and
+ * `755` and `/usr/bin/sudo` are not.
+ */
+const MODE_SYMBOLIC = /^[ugoa]*[-+=][rwxXstugoa]*(?:,[ugoa]*[-+=][rwxXstugoa]*)*$/;
+
+/**
+ * Does this argument make a file run as somebody other than its owner?
+ *
+ * Two spellings and both are real. `chmod 4755 f` puts the setuid bit in the
+ * *first* octal digit — a three-digit mode like `755` has no special digit at
+ * all, which is why the test is on the length and not on the value — and
+ * `chmod u+s f` says the same thing symbolically.
+ *
+ * MEASURED, and only partly: this machine's GNU coreutils 8.32 accepts
+ * `-R, --recursive`, `OCTAL-MODE`, `a+rwx`, `u+s`, `g+s`, `o+w`, `4755`, `2755`
+ * and `666`, all with exit 0 and `chmod --help` naming `-R, --recursive`. What
+ * could **not** be measured is whether any of them did anything: this is NTFS
+ * through MSYS, which has no POSIX mode bits, so `stat -c %a` reported `644`
+ * for `4755`, `2755` and `666` alike. The spellings are checked; the effects
+ * are taken from the POSIX definition and are not a claim about this machine.
+ */
+function hasSetIdBit(tokens: string[]): boolean {
+	// An argument is only read as a *mode* when it is shaped like one: three or
+	// four octal digits, or clauses of `[ugoa]` and a sign and permissions.
+	// Checking for a literal `+s` instead is how the probe caught a false
+	// positive — `notes+s.txt` is a perfectly good filename, and the earlier
+	// "no mode contains a `/`" guard did not rule it out, because that filename
+	// has no slash either. The shape test rules it out: there is no `.` in it.
+	for (const token of tokens.slice(1)) {
+		if (MODE_SYMBOLIC.test(token)) {
+			// Only a `+` sets a bit. `chmod -s f` takes the set-user-ID bit *away*,
+			// which is the one thing this rule exists to catch nobody doing.
+			if (/\+[rwxXstugoa]*s/.test(token)) return true;
+			continue;
+		}
+		if (/^[0-7]{4,}$/.test(token) && (Number(token[0]) & 6) !== 0) return true;
+	}
+	return false;
+}
+
+/**
+ * Permissions and ownership, recursively, over the machine.
+ *
+ * The shape is two conditions and both are needed. A recursive change is
+ * ordinary — `chmod -R 755 build/` is in a thousand build scripts — and so is a
+ * change to one of these paths — `chmod 755 /etc/nginx.conf` is an admin's
+ * afternoon. What is neither is the two together, because that is the command
+ * that leaves a machine with nobody able to log into it.
+ *
+ * The recursion flag may come either side of the mode (`chmod -R 755 /etc` and
+ * `chmod 755 -R /etc` are both valid), so it is looked for anywhere rather than
+ * at a fixed offset — which is the same reason `dangerousWindowsAdmin` scans
+ * every argument rather than the first.
+ */
+function posixPermissionRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+	const recursive = tokens
+		.slice(1)
+		.some((arg) => arg === "-R" || arg === "--recursive" || arg === "-r" || /^--recursive=/.test(arg));
+
+	if (program === "chmod" && hasSetIdBit(tokens)) {
+		return { kind: "Other", rule: "`chmod` setting the set-user-ID or set-group-ID bit" };
+	}
+	if (program !== "chmod" && program !== "chown" && program !== "chgrp") return null;
+	if (!recursive) return null;
+	const root = touchesSystemRoot(tokens.slice(1));
+	if (root === undefined) return null;
+	return {
+		kind: "Other",
+		rule: `\`${program}\` applied recursively to \`${root}\`, which is the machine's`,
+	};
+}
+
+/** The `find` predicates that run a command on everything they match. */
+const FIND_EXEC_PREDICATES: ReadonlySet<string> = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+
+/** Commands that destroy a file when `find` hands them one. */
+const DELETING_COMMANDS: ReadonlySet<string> = new Set(["rm", "rmdir", "unlink", "shred"]);
+
+/**
+ * Deleting what a search found, without ever naming `rm`.
+ *
+ * MEASURED on this machine, in a directory this session created: `find . -type
+ * f -delete` and `find . -name '*.txt' -exec rm {} +` both removed the files
+ * and exited 0, and `find . -delete` took the directory with them.
+ *
+ * This is the same shape as the `rm -rf` case and it had the same hole. `find`
+ * is not in `COMMAND_PREFIX_PROGRAMS`, so nothing unwrapped the `rm` inside
+ * `-exec` and every one of these classified as nothing — which is the worst
+ * shape a gap can have, because the result is indistinguishable from the
+ * ordinary `find . -print` sitting next to it in the transcript.
+ *
+ * Only the deleting commands are named, never the predicate: `find . -name
+ * '*.ts' -exec grep -l todo {} +` is how a codebase is searched and must stay
+ * quiet, and a rule that flagged `-exec` would be switched off within a day.
+ * `-ok` and `-okdir` are included even though they ask first — the answer to
+ * that question is `y` far more often than anyone types `n`.
+ *
+ * `find … | xargs rm -rf` needs none of this. `xargs` is already unwrapped as
+ * a wrapper program further up, and this function deliberately does *not*
+ * repeat it: a second, unreachable copy of a rule that already exists is the
+ * kind of thing that reads as coverage and measures as nothing.
+ */
+function posixFindRules(tokens: string[]): DangerousCommandMatch | null {
+	if (executableName(tokens[0], "posix") !== "find") return null;
+	if (tokens.slice(1).includes("-delete")) {
+		return { kind: "Other", rule: "`find -delete`, which removes everything it matches" };
+	}
+	for (let i = 1; i < tokens.length; i++) {
+		if (!FIND_EXEC_PREDICATES.has(tokens[i])) continue;
+		const verb = executableName(tokens[i + 1] ?? "", "posix");
+		if (verb !== undefined && DELETING_COMMANDS.has(verb)) {
+			return { kind: "Other", rule: `\`find\` running \`${verb}\` on everything it matches` };
+		}
 	}
 	return null;
 }
