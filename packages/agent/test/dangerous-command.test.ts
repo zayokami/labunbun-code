@@ -1477,6 +1477,178 @@ describe("Windows: an administrative program that destroys machine state", () =>
 	});
 });
 
+describe("Windows: a protection that is switched off rather than used", () => {
+	/**
+	 * None of these is a `rm` and none of them destroys a file, which is why they
+	 * needed a rule of their own: the whole batch is about the state of the
+	 * machine between two runs rather than inside one.
+	 */
+	test.each([
+		["Set-ExecutionPolicy Unrestricted -Force", "lets every script run, wherever it came from"],
+		["Set-ExecutionPolicy Bypass -Scope CurrentUser -Force", "and the scope does not hide it"],
+		["Set-ExecutionPolicy -ExecutionPolicy Undefined", "with the value behind its own switch"],
+		['powershell -Command "Set-ExecutionPolicy Unrestricted -Force"', "behind `powershell -Command`"],
+		["Set-MpPreference -DisableRealtimeMonitoring $true", "turns Defender off"],
+		["Set-MpPreference -DisableBehaviorMonitoring $true", "turns behaviour monitoring off"],
+		["Set-MpPreference -DisableScriptScanning $true", "stops scripts being scanned"],
+		["Set-MpPreference -DisableTamperProtection $true", "and the protection that stops it being undone"],
+		["Add-MpPreference -ExclusionPath C:\\Users", "excludes a path from scanning"],
+		["Add-MpPreference -ExclusionExtension .ps1", "excludes an extension"],
+		["Add-MpPreference -ExclusionProcess powershell", "excludes a process"],
+		["Add-MpPreference -ExclusionIpAddress 1.2.3.4", "excludes an address"],
+		["Disable-LocalUser someone", "locks an account out"],
+		["Disable-LocalUser -Name someone", "with the name behind a switch"],
+		[
+			"Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name EnableLUA -Value 0",
+			"turns UAC off",
+		],
+		[
+			"Set-ItemProperty -Name:EnableLUA -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Value 0",
+			"and the name glued to its switch, which PowerShell allows",
+		],
+		[
+			"New-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' -Name x -Value 'calc.exe'",
+			"writes a startup entry",
+		],
+		[
+			"Set-ItemProperty -Path HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run -Name x -Value calc.exe",
+			"for the user, not the machine",
+		],
+		[
+			"Set-ItemProperty -Path HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce -Name x -Value calc.exe",
+			"and for one boot only, which is still once",
+		],
+		[
+			"reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run /v x /t REG_SZ /d calc.exe /f",
+			"the same thing from CMD",
+		],
+		['REG ADD "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce" /v y /d calc.exe /f', "and it upper-cased"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The half of the batch that decides whether it is usable at all. Every row
+	 * below is a command somebody runs on purpose, to make the machine *safer* or
+	 * to look at it:
+	 *
+	 *   * Four of the seven execution policies are the safe ones, and `Set-
+	 *     ExecutionPolicy AllSigned` is the strictest setting Windows has. A rule
+	 *     that caught it would be flagging the fix.
+	 *   * `Set-MpPreference` takes far more parameters than it does `Disable*`
+	 *     ones, and `Add-MpPreference` takes far more than its four exclusions.
+	 *   * `Enable-LocalUser` is `Disable-LocalUser` with the sign flipped.
+	 *   * `Get-ItemProperty` on the very key the rule above guards is how a
+	 *     person checks whether it is set, and so is `Get-ExecutionPolicy`.
+	 *   * `reg add` writes to the registry constantly; only the Run key is special.
+	 */
+	test.each([
+		["Set-ExecutionPolicy RemoteSigned -Force", "remote scripts must still be signed"],
+		["Set-ExecutionPolicy AllSigned -Force", "the strictest policy there is"],
+		["Set-ExecutionPolicy Restricted -Force", "no script runs at all"],
+		["Set-ExecutionPolicy Default -Force", "and this one just means whatever the machine says"],
+		["Set-ExecutionPolicy -Scope CurrentUser", "with no policy named at all"],
+		["Get-ExecutionPolicy", "reads it"],
+		["Get-ExecutionPolicy -List", "reads it per scope"],
+		["Set-MpPreference -ScanAvgCPULoadFactor 20", "a preference that is not a switch to disable"],
+		["Add-MpPreference -AttackSurfaceReductionRulesExclusions foo", "an exclusion that is not a scan exclusion"],
+		["Get-MpPreference", "reads Defender's settings"],
+		["Get-MpComputerStatus", "reads Defender's status"],
+		["Start-MpScan", "runs a scan"],
+		["Start-MpWDOScan", "runs an offline scan"],
+		["Enable-LocalUser someone", "the opposite of the rule above"],
+		["Get-LocalUser", "lists accounts"],
+		[
+			"Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' EnableLUA",
+			"reads the very value the rule above guards",
+		],
+		["Get-Item 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run'", "reads the startup key"],
+		["Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run'", "and asks whether it is there"],
+		[
+			"Set-ItemProperty -Path HKCU:\\Environment -Name Path -Value 'C:\\x'",
+			"writes a registry value that is not one of the two",
+		],
+		[
+			"Set-ItemProperty -Path HKLM:\\SOFTWARE\\X\\Policies\\SystemOther -Name EnableLUA -Value 0",
+			"a key whose name merely begins with the UAC one, which is a synthetic path made for the word boundary",
+		],
+		["New-Item -Path C:\\temp\\x -ItemType Directory", "makes a directory, not a startup entry"],
+		["Unblock-File C:\\x.zip", "removes a mark *off* a downloaded file"],
+		["reg add HKCU\\Environment /v Path /t REG_EXPAND_SZ /d C:\\x /f", "ordinary registry maintenance"],
+		[
+			"reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System /v x /d 1 /f",
+			"writes beside UAC without touching it",
+		],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * The seven values are read off the live enum, so this pins the set rather
+	 * than the three of it the rule names — a value added to the enum and not
+	 * thought about should show up here as a row with no expectation yet.
+	 */
+	test("only three of the seven execution policies are flagged, and they are the measured three", () => {
+		const weakening = ["Unrestricted", "Bypass", "Undefined"];
+		const strengthening = ["RemoteSigned", "AllSigned", "Restricted", "Default"];
+		expect([...weakening, ...strengthening].sort()).toEqual([
+			"AllSigned",
+			"Bypass",
+			"Default",
+			"RemoteSigned",
+			"Restricted",
+			"Undefined",
+			"Unrestricted",
+		]);
+		for (const value of weakening) {
+			expect(windows(`Set-ExecutionPolicy ${value}`)).not.toBeNull();
+		}
+		for (const value of strengthening) {
+			expect(windows(`Set-ExecutionPolicy ${value}`)).toBeNull();
+		}
+	});
+
+	/**
+	 * `Set-MpPreference` was measured to have thirty-four parameters beginning
+	 * `Disable`. Listing them in the rule would mean a Windows update that adds a
+	 * thirty-fifth is uncovered until somebody remembers it; matching the prefix
+	 * means it is covered the moment it exists. This checks the prefix is what is
+	 * doing the work rather than one name in particular — and it is a prefix,
+	 * *not* a word: `-DisabledThing` would match too, and is left unmatched here
+	 * deliberately, because no such parameter exists and narrowing the rule to a
+	 * word boundary would put a new `Disable*` parameter out of reach.
+	 */
+	test("any `Disable*` setting is caught, not one remembered name", () => {
+		expect(windows("Set-MpPreference -DisableAThingThatDoesNotExistYet $true")).not.toBeNull();
+		expect(windows("Set-MpPreference -Disable $true")).not.toBeNull();
+		expect(windows("Set-MpPreference -EnableRealtimeMonitoring $true")).toBeNull();
+		expect(windows("Set-MpPreference -ScanAvgCPULoadFactor 20")).toBeNull();
+	});
+
+	/**
+	 * `$false` turns Defender back on, so this row is the batch's one known false
+	 * positive, and it is here rather than in the null block on purpose: a reader
+	 * who finds it should know it was decided rather than missed. The alternative
+	 * — reading the value — has to guess at `:$false` versus a separate `$false`
+	 * versus no value at all, and the no-value case is the disabling default.
+	 */
+	test("a `Disable*` setting is flagged even when it is being turned back on", () => {
+		expect(windows("Set-MpPreference -DisableRealtimeMonitoring $false")).not.toBeNull();
+	});
+
+	/**
+	 * `EnableLUAOld` is not `EnableLUA`, and `RunServices` is not `Run`. Both are
+	 * real registry value names, and a rule that matched on the prefix would flag
+	 * a machine being configured.
+	 */
+	test("the value name and the key name are both bounded", () => {
+		expect(
+			windows("Set-ItemProperty -Path HKLM:\\SOFTWARE\\X\\Policies\\System -Name EnableLUAOld -Value 0"),
+		).toBeNull();
+		expect(windows("Set-ItemProperty -Path HKLM:\\SOFTWARE\\X\\RunServices -Name x -Value calc.exe")).toBeNull();
+	});
+});
+
 describe("the two platforms are not the same rules", () => {
 	/**
 	 * A Windows-only rule must not fire on a POSIX line and vice versa. If the

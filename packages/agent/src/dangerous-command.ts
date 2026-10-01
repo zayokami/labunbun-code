@@ -1050,6 +1050,105 @@ const FETCH_CMDLETS = new Set([
  * nothing else — so this is a divergence from the file this is ported from,
  * not a port of it.
  */
+/**
+ * The execution policies that stop checking whether a script should run.
+ *
+ * Measured on this machine, from
+ * `[Enum]::GetNames([Microsoft.PowerShell.ExecutionPolicy])`:
+ * `Unrestricted, RemoteSigned, AllSigned, Restricted, Default, Bypass, Undefined`.
+ * Only three of the seven belong here. `Restricted` refuses to run any script
+ * that is not signed, `AllSigned` requires all of them to be, `RemoteSigned`
+ * requires local ones to be, and `Default` means "whatever the machine is set
+ * to" — flagging any of those would flag a machine being made *safer*.
+ */
+const WEAK_EXECUTION_POLICIES = new Set(["unrestricted", "bypass", "undefined"]);
+
+/**
+ * A registry path that runs something every time the machine starts.
+ *
+ * `Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'` is true on
+ * this machine, so the key is where it has always been. `RunOnce` is the same
+ * idea for one boot. Nothing legitimately writes to either from a command line,
+ * and a rule that only matched the program name would catch `reg add` and
+ * `Set-ItemProperty` used for ordinary configuration as well.
+ */
+function isRunKeyPath(token: string): boolean {
+	return /\\currentversion\\run(once)?\b/i.test(token);
+}
+
+/**
+ * The value that decides whether UAC prompts at all.
+ *
+ * Both spellings, because both are real: post-Vista it is `EnableLUA` and the
+ * prompt is off when it is `0`; pre-Vista it is `DisableLUA` and the prompt is
+ * off when it is `1`. The leading `[:.-]` is so a parameter written the way
+ * PowerShell accepts it — `-Name:EnableLUA` — is still recognised, and the `\b`
+ * is what keeps `EnableLUAOld` from reading as this one.
+ */
+function isUacValueName(token: string): boolean {
+	return /(?:^|[:.-])(?:enable|disable)lua\b/i.test(token);
+}
+
+/**
+ * Cmdlets that turn a protection off, and nothing else.
+ *
+ * Not in Codex's table. Every name and parameter here was read off this
+ * machine's own PowerShell 5.1 rather than recalled, because a rule written
+ * against a parameter that does not exist guards nothing:
+ *
+ *   * `Set-MpPreference` has thirty-four parameters beginning `Disable`, from
+ *     `DisableRealtimeMonitoring` through `DisableTamperProtection`. They are
+ *     matched by that prefix rather than listed, so a Windows update that adds
+ *     one is covered by the rule already rather than by a second edit.
+ *   * `Add-MpPreference` takes `ExclusionPath`, `ExclusionExtension`,
+ *     `ExclusionProcess` and `ExclusionIpAddress` — a path excluded from
+ *     scanning is a path nothing will ever find malware on.
+ *   * `Disable-LocalUser` and `Unblock-File` both exist.
+ *
+ * The UAC spelling is worth naming because the obvious one is wrong: the live
+ * key is `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`
+ * `EnableLUA`, which is `1` on this machine. `...\Control\LSA\DisableLUA` is the
+ * pre-Vista spelling and does not exist here.
+ */
+function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null {
+	for (const segment of windowsSegments(lower)) {
+		const head = segment[0];
+		if (head === undefined) continue;
+
+		if (head === "set-executionpolicy" && segment.some((w) => WEAK_EXECUTION_POLICIES.has(w))) {
+			return { kind: "Other", rule: "PowerShell `Set-ExecutionPolicy` turning script checking off" };
+		}
+		if (head === "set-mppreference" && segment.some((w) => w.startsWith("-disable"))) {
+			// The parameter is flagged whatever its value is, and that includes
+			// `-DisableRealtimeMonitoring $false`, which turns Defender back on.
+			// Telling those apart means reading the value, and the value may be
+			// glued (`-DisableX:$false`), separate (`-DisableX $false`) or absent —
+			// and absent means "use the default", which for a `Disable*` parameter
+			// is the disabling one. A rule that guessed would be wrong in the
+			// direction that matters: skipping the absent case is a hole.
+			return { kind: "Other", rule: "PowerShell `Set-MpPreference` on a `Disable*` setting" };
+		}
+		if (head === "add-mppreference" && segment.some((w) => w.startsWith("-exclusion"))) {
+			return { kind: "Other", rule: "PowerShell `Add-MpPreference` excluding a path from scanning" };
+		}
+		if (head === "disable-localuser") {
+			return { kind: "Other", rule: "PowerShell `Disable-LocalUser`, which locks an account out" };
+		}
+		// Two independent things, checked apart rather than as one conjunction:
+		// writing a value under the startup key does not mention UAC, and turning
+		// UAC off does not live under the startup key.
+		if (head === "set-itemproperty" || head === "new-itemproperty") {
+			if (segment.some(isRunKeyPath)) {
+				return { kind: "Other", rule: "PowerShell writing a value to a key that runs at startup" };
+			}
+			if (segment.some((w) => /\\policies\\system\b/.test(w)) && segment.some(isUacValueName)) {
+				return { kind: "Other", rule: "PowerShell `EnableLUA`, which is the switch UAC prompting turns on" };
+			}
+		}
+	}
+	return null;
+}
+
 function powershellExecutionRules(lower: string[]): DangerousCommandMatch | null {
 	for (const segment of windowsSegments(lower)) {
 		const head = segment[0];
@@ -1107,7 +1206,7 @@ function dangerousPowershellWords(words: string[]): DangerousCommandMatch | null
 	if (hasForceDeleteCmdlet(lower)) {
 		return { kind: "Other", rule: "a delete cmdlet with `-Force`" };
 	}
-	return powershellExecutionRules(lower);
+	return powershellExecutionRules(lower) ?? powershellWeakeningRules(lower);
 }
 
 /** Split a CMD token on the operators that can be written inside one word. */
@@ -1461,15 +1560,18 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 	if (program === "net" && tokens.length === 4 && tokens[1].toLowerCase() === "user") {
 		return { kind: "Other", rule: "`net user <name> <password>`, which resets a password" };
 	}
+
+	// `reg add` is the other way to get a program to run at every startup, and it
+	// is the same shape of act as writing the value with PowerShell -- but unlike
+	// the PowerShell rule it has to be narrow, because `reg add` is ordinary
+	// maintenance for the whole rest of the registry and a rule that caught all of
+	// it would catch a machine being configured. Only the Run key is flagged.
+	if (program === "reg" && tokens[1]?.toLowerCase() === "add" && tokens.slice(1).some(isRunKeyPath)) {
+		return { kind: "Other", rule: "`reg add` writing to a key that runs at startup" };
+	}
 	return null;
 }
 
-/**
- * Classify a command line, or `null` when no rule matched.
- *
- * `null` means "nothing here was recognized as dangerous" — it is not a claim
- * that the command is safe, and the engine never widens access on it.
- */
 /**
  * Programs that download something over the network.
  *
@@ -1568,6 +1670,12 @@ function matchScript(script: string, depth: number, platform: DangerousCommandPl
 	return null;
 }
 
+/**
+ * Classify a command line, or `null` when no rule matched.
+ *
+ * `null` means "nothing here was recognized as dangerous" — it is not a claim
+ * that the command is safe, and the engine never widens access on it.
+ */
 export function classifyDangerousCommand(
 	command: string,
 	platform: DangerousCommandPlatform = process.platform === "win32" ? "windows" : "posix",
