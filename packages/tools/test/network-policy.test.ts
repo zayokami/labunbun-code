@@ -572,6 +572,29 @@ describe("describeNetworkPolicy", () => {
 	});
 
 	/**
+	 * The allowlist says which domains, not which ports.
+	 *
+	 * `decideNetworkRequest` takes a host and `normalizeHost` strips any `:port`, so
+	 * a rule cannot tell one port from another — allowing a domain allows it on every
+	 * port. That is the intended model, not a bug, but "may be reached" on its own
+	 * reads like a host allowlist tight enough to pin a service's port. This test
+	 * pins the disclosure so a future reword that drops it is a deliberate act.
+	 */
+	test("the allowlist sentence says it names domains, not ports", () => {
+		const text = describeNetworkPolicy("restricted", allow("example.com", "registry.npmjs.org"), "no-os-backend");
+		expect(text).toContain("on any port");
+		expect(text).toContain("the list names domains, not ports");
+		// And the property it discloses is real: the decision function is port-blind,
+		// so the sentence is describing the code rather than softening it.
+		expect(decideNetworkRequest(allow("example.com", "registry.npmjs.org"), "example.com", "restricted").allowed).toBe(
+			true,
+		);
+		expect(
+			decideNetworkRequest(allow("example.com", "registry.npmjs.org"), "example.com:22", "restricted").allowed,
+		).toBe(true);
+	});
+
+	/**
 	 * The sentence is derived from what the translators actually emit.
 	 *
 	 * Every "honest reporting" claim in this repo is only worth something if the

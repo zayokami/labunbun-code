@@ -634,13 +634,23 @@ export function describeNetworkPolicy(
 	// only from the web tools. The count is kept in the sentence because a user
 	// comparing two sessions needs to see that the list did not change — what
 	// changed is who can act on it.
+	// The port clause on the allowlist branch is a disclosure, not a defect. Both
+	// call sites that decide a request — `decideUpstream` in the proxy and
+	// `refuseByNetworkPolicy` in the web tools — pass a bare host to
+	// {@link decideNetworkRequest}, and `normalizeHost` strips any `:port` off before
+	// the rule engine sees it, so a rule genuinely cannot distinguish ports. Allowing
+	// a domain therefore allows it on every port. That is the intended model (the
+	// table is domain-based, like Codex's), but "Only the 2 listed domains may be
+	// reached" reads like a host allowlist tight enough to pin a service's port, and
+	// a user relying on that would be wrong. Stating the granularity is cheaper than
+	// letting them infer a restriction the code does not apply.
 	const detail =
 		confinement === "os-namespace" && count > 0
 			? `A command run through the shell reaches nothing at all here, so the ${count} listed domain${count === 1 ? "" : "s"} are what the web tools may fetch rather than what a command may reach.`
 			: network === "restricted"
 				? count === 0
 					? "Nothing is reachable: the network is restricted and no domain is allowed."
-					: `Only the ${count} listed domain${count === 1 ? "" : "s"} may be reached.`
+					: `Only the ${count} listed domain${count === 1 ? "" : "s"} may be reached, on any port — the list names domains, not ports.`
 				: `Traffic is routed through a local proxy that refuses the ${rules.length - count} denied pattern${rules.length - count === 1 ? "" : "s"}.`;
 
 	// Written per case rather than as one sentence covering all five, because
