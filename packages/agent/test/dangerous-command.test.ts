@@ -2724,6 +2724,17 @@ describe("git: throwing away work", () => {
 		["git clean -f --exclude=node_modules", "with an exclude, which leaves the excluded files alone"],
 		["git clean -f --exclude node_modules", "and the value as the next word"],
 		["git clean -fx", "force plus ignored files"],
+		// The force flag read out of the cluster rather than off the front of it.
+		// Every row below carries `-f` somewhere other than first, and every one of
+		// them classified as nothing before this was fixed, because `-f` was read
+		// only as the opening letter of the token.
+		["git clean -df", "-d first: the same two flags as -fd, reordered"],
+		["git clean -xdf", "-x first, which also takes the ignored files"],
+		["git clean -qfd", "-q first, and -q only means quiet"],
+		["git clean -dqfd", "-d and -q before it"],
+		["git clean -Xfd", "-X first, which narrows to the ignored files rather than adding anything"],
+		["git clean -dXfd", "-d in front of that"],
+		["git clean -ifd", "and -i, which prompts without taking the force flag away"],
 	])("%s is dangerous — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
 	});
@@ -2736,6 +2747,23 @@ describe("git: throwing away work", () => {
 		["git clean -fn", "a force and a dry run in one cluster, which is the everyday spelling"],
 		["git clean -fnx", "with the ignored-files flag as well"],
 		["git clean", "no flags at all, which does nothing"],
+		// The same cluster read, from the other side. None of these carries an `f`,
+		// and none of them removed anything in the fixture below — which is the
+		// other half of the claim, because a cluster reader that stopped at the
+		// first unknown letter would be right about these and wrong about the rows
+		// above for the same reason.
+		["git clean -d", "-d alone, which git refuses to act on without a force flag"],
+		["git clean -dx", "-d and -x, still no force"],
+		["git clean -e", "-e takes its value as the next word, so this is not even a flag"],
+		["git clean --exclude=node_modules", "a long option, whose value is free text and is not read for letters"],
+		// These two exist because the guards they pin are invisible when they are
+		// missing. Both were added after a mutation driver found it could delete
+		// `!arg.startsWith("--")` and `arg.startsWith("-")` and watch the suite stay
+		// green: each guard is the only thing telling a value that happens to
+		// contain an `f` apart from a flag that does. `foo` and `myfile` are the
+		// ordinary spellings, and both removed nothing in the fixture below.
+		["git clean --exclude=foo", "a long option whose value contains an f"],
+		["git clean myfile", "and a pathspec that contains an f, which is a path rather than a flag"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(posix(command)).toBeNull();
 	});
@@ -2749,6 +2777,30 @@ describe("git: throwing away work", () => {
 	 * `Would remove`, and each left all three of those files on disk. So the
 	 * short `-n` really does beat `-f` in either order, which is what makes the
 	 * exemption load-bearing rather than decorative.
+	 */
+
+	/**
+	 * MEASURED, same fixture and a second one that also has an ignored directory:
+	 * `tracked.txt` and a `.gitignore` naming `build/` are committed, then
+	 * `untrackeddir/a.txt`, `untracked.txt` and `build/out/x.o` are created after
+	 * the commit, so the first two are untracked and the third is ignored.
+	 *
+	 *   -df      removed the untracked directory and the untracked file, kept build/
+	 *   -xdf     removed all three
+	 *   -qfd     removed the untracked directory and the untracked file
+	 *   -dqfd    the same
+	 *   -Xfd     removed build/out and kept both untracked paths
+	 *   -dXfd    the same
+	 *   -ifd     removed nothing, with stdin closed
+	 *   -dx -d -e --exclude=node_modules   removed nothing
+	 *
+	 * So the reordered spellings are not a lesser version of `-fd`: `-df` takes the
+	 * untracked tree and `-Xfd` takes the ignored one, and both are deletions with
+	 * no undo. The one row that removed nothing, `-ifd`, is still listed as
+	 * dangerous above, and deliberately so — `-i` asks before each removal rather
+	 * than removing the force flag, so on a terminal it deletes everything a
+	 * `-fd` would, and the rule this describe is about is "a force flag is
+	 * present", not "this particular run had a terminal".
 	 */
 
 	/**

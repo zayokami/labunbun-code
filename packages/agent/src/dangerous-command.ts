@@ -4844,8 +4844,30 @@ function gitRules(tokens: string[], platform: DangerousCommandPlatform): Dangero
 		// directories too; `-x` adds ignored files; `-ffdx` is the whole lot. The
 		// dry-run exemption is checked first so `-f --dry-run` is not flagged for
 		// the flag it is about to be stopped from using.
+		//
+		// The force flag is read out of the cluster rather than off the front of
+		// it, and the earlier version read only the front — `arg.startsWith("-f")`.
+		// That caught `-fd` and missed `-df`, which is the same two flags in the
+		// other order, so the rule could be switched off by reordering two letters.
+		// Measured in the same throwaway repo: `-df` removed the untracked directory
+		// and the untracked file exactly as `-fd` did, and so did `-xdf` and `-qfd`.
+		// All three classified as nothing. `rmArgsIncludeForce` above has read the
+		// cluster for its `f` all along; this was the one reader that did not.
+		//
+		// Reading the cluster is exact here for the reason `isDryRun` above gives
+		// for its letter: `git clean` takes `-f -d -x -X -q -e`, and `f` occurs in
+		// none of them but the one that means force. Excluding the long options is
+		// what keeps the two readings from overlapping — `--force` is caught by the
+		// exact comparison and never by the cluster, and `--exclude=node_modules`,
+		// whose value is free text, is not scanned for letters at all.
 		if (isDryRun(args)) return null;
-		if (!args.some((arg) => arg.startsWith("-f") || arg === "--force")) return null;
+		if (
+			!args.some(
+				(arg) => arg === "--force" || (arg.startsWith("-") && !arg.startsWith("--") && arg.slice(1).includes("f")),
+			)
+		) {
+			return null;
+		}
 		return { kind: "Other", rule: "`git clean` with a force flag, which deletes files with no undo" };
 	}
 
