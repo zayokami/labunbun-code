@@ -20,14 +20,17 @@
  * (`permissions.rs:2392-2415` builds `.git` / `.agents` / `.codex` per writable
  * root, unconditionally), and that is the model here.
  *
- * Every expectation goes through `join`. The derivation does, so an expectation
- * written with a literal `/` would be asserting a value this function never
- * produces on Windows — green nowhere useful and red everywhere on one platform,
- * which is the same shape as the bug it is meant to catch.
+ * Every expectation is a **literal** in the canonical `/` spelling, and that is the
+ * invariant rather than a workaround: the derivation normalises what it emits, so
+ * the value is the same string on every platform and a test can say what the
+ * policy must contain instead of re-deriving it with whatever `join` happens to
+ * produce on the machine running it. An expectation written through `join` was
+ * the previous convention here, and it is what let a Windows-only fail-open
+ * through `isWritePermitted` sit in the suite green — the expectation agreed
+ * with the bug because both used the same non-canonical spelling.
  */
 import { describe, expect, test } from "bun:test";
-import { join, sep } from "node:path";
-import { buildSandboxPolicy } from "../src/sandbox-policy.ts";
+import { buildSandboxPolicy, isWritePermitted } from "../src/sandbox-policy.ts";
 
 const WORKSPACE = "/w/repo";
 const CACHE = "/w/.cache/labunbun";
@@ -41,13 +44,13 @@ describe("buildSandboxPolicy derives .git rather than waiting to find it", () =>
 		// all before, because the only source of the list was the thing that failed.
 		const policy = buildSandboxPolicy({ sandbox: "workspace-write", workspace: WORKSPACE });
 
-		expect(policy.protected).toEqual([join(WORKSPACE, ".git")]);
+		expect(policy.protected).toEqual([`${WORKSPACE}/.git`]);
 	});
 
 	test("each writable root gets its own, so a cache nobody scans is covered too", () => {
 		const policy = buildSandboxPolicy({ sandbox: "workspace-write", workspace: WORKSPACE, writableRoots: [CACHE] });
 
-		expect(policy.protected).toEqual([join(WORKSPACE, ".git"), join(CACHE, ".git")]);
+		expect(policy.protected).toEqual([`${WORKSPACE}/.git`, `${CACHE}/.git`]);
 	});
 
 	test("a path the scan did find is not listed twice", () => {
@@ -56,16 +59,16 @@ describe("buildSandboxPolicy derives .git rather than waiting to find it", () =>
 		// twice — except that every "how many protected paths" assertion in the suite
 		// would then be wrong for a reason that is not a behaviour change, which is
 		// how a duplicate turns into a test that stops meaning anything.
-		const git = join(WORKSPACE, ".git");
+		const git = `${WORKSPACE}/.git`;
 		const policy = buildSandboxPolicy({
 			sandbox: "workspace-write",
 			workspace: WORKSPACE,
-			protectedPaths: [git, join(WORKSPACE, ".git", "config")],
+			protectedPaths: [git, `${WORKSPACE}/.git/config`],
 		});
 
 		// Order is the scan's, then anything the scan did not find — the derivation
 		// adds and does not reorder, so a scan result is never moved by it.
-		expect(policy.protected).toEqual([git, join(WORKSPACE, ".git", "config")]);
+		expect(policy.protected).toEqual([git, `${WORKSPACE}/.git/config`]);
 		expect(policy.protected.filter((path) => path === git)).toHaveLength(1);
 	});
 
@@ -104,32 +107,42 @@ describe("buildSandboxPolicy derives .git rather than waiting to find it", () =>
 			readOnlyRoots: ["/tmp/labunbun-spill"],
 		});
 
-		expect(policy.protected).toEqual([join(WORKSPACE, ".git")]);
+		expect(policy.protected).toEqual([`${WORKSPACE}/.git`]);
 	});
 
-	test("the derived path is joined, not concatenated, so it matches what the backends compare", () => {
-		// `join` is what produces the separator. A hand-built `` `${root}/.git` ``
-		// would be right on POSIX and produce a mixed-separator path on Windows —
-		// `\w\repo/.git` — which the seatbelt translator and the simulated layer
-		// would then compare against a root that came from `resolveCanonical` and
-		// spell differently. A `protected` entry that does not match its own root is
-		// a protection that never fires, and the mismatch is invisible in the argv
-		// because both sides still name the same directory.
+	test("the derived path is spelled canonically, so it matches what the backends compare", () => {
+		// The property is not "not mixed" — it is "the same string everywhere, and
+		// it is the spelling the comparisons use".
+		//
+		// This test previously asserted the opposite. It required the derived `.git`
+		// to carry `\` on Windows, on the reasoning that `join` is what produces the
+		// separator and a hand-built `` `${root}/.git` `` would mix them into
+		// `\w\repo/.git`. The mixed shape is real and was worth avoiding, but the
+		// cure was wrong: every consumer compares against a path resolved by
+		// `resolveCanonical`, which normalises every separator to `/`, so a
+		// pure-backslash root does not match either. Measured on Windows before the
+		// fix, with the workspace spelled both ways: `isWritePermitted` returned
+		// `true` for `<ws>/.git/config`, because the protected entry missed and the
+		// writable entry matched — the protection failing open, which is the one
+		// direction this whole file exists to rule out. The expectation agreed with
+		// the bug because it was written through the same `join`.
+		//
+		// So the invariant is now unconditional and platform-independent: whatever
+		// the caller passes, the policy emits `/`. A backslash input is the case
+		// that proves it, because on POSIX it is the identity and the assertion
+		// would pass by coincidence — which is how the previous version stayed green
+		// on ubuntu and macos while Windows failed to enforce anything.
 		const policy = buildSandboxPolicy({ sandbox: "workspace-write", workspace: WORKSPACE });
 
-		expect(policy.protected).toEqual([join(WORKSPACE, ".git")]);
+		expect(policy.protected).toEqual([`${WORKSPACE}/.git`]);
 
-		// The mixed-separator shape only *exists* where the separator differs from the
-		// template's `/`. On POSIX a templated `.git` and a joined one are the same
-		// string, so the defect is unrepresentable there and asserting it anyway would
-		// be a test that passes on one platform by coincidence and fails on another by
-		// accident — which is what the first version of this test did, and what CI's
-		// ubuntu and macos jobs caught on 7c87a06 while Windows stayed green. So the
-		// Windows-only half is stated conditionally, and the unconditional assertion
-		// above is the one that has to hold everywhere.
-		if (sep !== "/") {
-			expect(policy.protected[0]).not.toContain("/");
-			expect(policy.protected[0]).not.toBe(`${WORKSPACE}/.git`);
-		}
+		const windowsShaped = buildSandboxPolicy({ sandbox: "workspace-write", workspace: "C:\\w\\repo" });
+		expect(windowsShaped.protected).toEqual(["C:/w/repo/.git"]);
+		expect(windowsShaped.fileSystem.entries.map((entry) => entry.path)).toEqual(["C:/w/repo"]);
+
+		// And the comparison the whole thing exists for, on a Windows-shaped policy
+		// with a canonical candidate — the exact pair that used to fail open.
+		expect(isWritePermitted(windowsShaped, "C:/w/repo/.git/config")).toBe(false);
+		expect(isWritePermitted(windowsShaped, "C:/w/repo/src/index.ts")).toBe(true);
 	});
 });

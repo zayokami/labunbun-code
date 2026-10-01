@@ -33,28 +33,41 @@ import { findProtectedPaths } from "./protected-paths.ts";
  * function that formats the count is `describeSimulatedSandbox`, and nothing in
  * production calls it, so a scan that came back empty is silent.
  *
- * **What an empty list costs is the whole list, the top-level repository
- * included.** An earlier version of this comment said otherwise — that
- * `buildSandboxPolicy` derives the workspace's own `.git` without a scan, so
- * only the nested ones go missing. That is not what the code does, and the
- * difference is the difference between "a repository deep in the tree is
- * unprotected" and "the repository you are standing in is unprotected": there is
- * no separate derivation. `buildSandboxPolicy` takes `protectedPaths` from
- * `protectedPathsFor` below, and the top-level `.git` is found by the same
- * breadth-first walk, out of the same `readdir` of the root
- * (`protected-paths.ts:128`), which is the read that throws when the root itself
- * cannot be enumerated. So a root the process cannot list loses every repository,
- * and the policy that comes back protects nothing at all.
+ * **What an empty list costs is the nested repositories, not the one you are
+ * standing in.** An earlier version of this paragraph said the opposite — that
+ * `buildSandboxPolicy` does not derive the workspace's own `.git` without a
+ * scan, so an empty scan costs the top-level repository too, and "a root the
+ * process cannot list loses every repository, and the policy that comes back
+ * protects nothing at all." That is false, and false in the direction that
+ * matters most for a reader deciding whether they are protected. `protectedFor`
+ * in `sandbox-policy.ts:258-266` adds `join(root, ".git")` for every writable
+ * root unconditionally, after the scan result is in hand — so the top-level
+ * repository is derived, not found, and a scan that returns nothing still leaves
+ * it in the policy. Two tests assert it from opposite directions:
+ * `sandbox-policy.test.ts:34-50` ("derives `.git` rather than waiting to find
+ * it" — two cases, an empty scan and a second writable root) against the policy
+ * itself, and `sandbox-simulated.test.ts:353-357` from the layer that consumes
+ * it.
  *
- * This is not Windows-only, and it is worth being exact about, because the two
- * backends fail differently:
+ * What the scan *is* for is repositories **below** the root, and it is narrower
+ * than "below": `findProtectedPaths` stops at
+ * `DEFAULT_PROTECTED_SCAN_DEPTH` = 4 segments (`protected-paths.ts:52-59`) and
+ * does not descend into `node_modules` at all (`:74`, for the measured 76 ms vs
+ * 1762 ms). Nothing else finds those, so the failure this file can actually
+ * have is "a repository nested deeper than four segments, or under
+ * `node_modules`, or on a machine where the walk threw, goes unprotected" — and
+ * the top-level one is safe regardless of the scan.
+ *
+ * This is not Windows-only, and the residual exposure is worth being exact
+ * about, because the backends fail differently:
  *
  *   - **native** takes its `--ro-bind` / `deny file-write*` entries from this
- *     same list, so an empty scan leaves `bwrap` and `sandbox-exec` with nothing
- *     to protect `.git` — the kernel confinement is real and the thing it was
- *     confining is missing.
- *   - **Write and Edit** are unaffected, because `containment.ts` matches on the
- *     path and never consults a list.
+ *     same list plus `protectedFor`'s derivation, so an empty scan leaves
+ *     `bwrap` and `sandbox-exec` protecting the workspace's own `.git` and
+ *     nothing else — the kernel confinement is real and what it confines is
+ *     partly missing.
+ *   - **Write and Edit** are unaffected by this list entirely, because
+ *     `containment.ts` matches on the path and never consults one.
  *   - `rm -rf .git` is still refused, by the dangerous-command classifier, which
  *     is also a list — but one that is not this list.
  */

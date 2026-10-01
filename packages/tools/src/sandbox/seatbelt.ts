@@ -358,15 +358,44 @@ function protectedAncestors(policy: SandboxPolicy): SeatbeltParam[] {
  */
 function ancestorsUpTo(path: string, root: string): string[] {
 	const chain: string[] = [];
-	let current: string | undefined = path;
-	while (current !== undefined && isAtOrBelow(current, root)) {
+	let current = path;
+	// Two conditions, and both are load-bearing.
+	//
+	// `isAtOrBelow` is the ordinary exit: the walk has climbed out of the
+	// writable root. There is no `undefined` arm — `parentOf` returns `/` at the
+	// root rather than nothing — so nothing "runs out" that way.
+	//
+	// The no-progress check is the backstop. With a writable root of `/`,
+	// `isAtOrBelow` matches everything, because its trailing-slash strip turns
+	// `"/"` into `""` and every absolute path starts with `""`; and `parentOf("/")`
+	// is `""` and `parentOf("")` is `""`, so the walk oscillates between `""` and
+	// `""` forever. Measured before this guard: 12 steps and counting, chain
+	// `[…, "/", "", "", …]`. Nothing in this build produces a writable root of
+	// `/` — `danger-full-access` is what a caller means by "the whole disk" — so
+	// this is unreachable today rather than fixed-by-observation. A profile
+	// generator that can be made to hang is worth closing while the door is open,
+	// and the guard costs two comparisons per ancestor.
+	while (isAtOrBelow(current, root)) {
 		chain.push(current);
-		current = parentOf(current);
+		const parent = parentOf(current);
+		if (parent === current || parent === "") break;
+		current = parent;
 	}
 	return chain;
 }
 
-/** The containing directory of an absolute path, or `undefined` at the root. */
+/**
+ * The containing directory of an absolute path, with `/` at the root.
+ *
+ * It returns `/` there rather than `undefined`, and the type says so — an
+ * earlier version of this comment claimed an `undefined` that the signature did
+ * not permit, which left a reader looking for a caller that had to handle a case
+ * the code could not produce. `ancestorsUpTo` below is where that fiction had
+ * already propagated: it declared `string | undefined` and looped on
+ * `current !== undefined`, an arm no input could reach, so the walk's real
+ * termination condition is `isAtOrBelow` and nothing else. Both are now the
+ * shape they actually are.
+ */
 function parentOf(path: string): string {
 	const trimmed = path.replace(/\/+$/, "");
 	const index = trimmed.lastIndexOf("/");

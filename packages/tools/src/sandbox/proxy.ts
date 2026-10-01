@@ -132,8 +132,51 @@ export interface NetworkProxy {
  * lowercase form (`curl`, `requests`, most JVM launchers) and a great deal
  * reads only the uppercase one; setting one and leaving the other is how a
  * policy ends up enforced for half the tools in a build, and it fails open for
- * the other half. Codex lists the same keys for the same reason
- * (`network-proxy/src/proxy.rs:599`).
+ * the other half.
+ *
+ * The earlier version of this comment ended "Codex lists the same keys for the
+ * same reason (`network-proxy/src/proxy.rs:599`)". It does not, and the
+ * difference is the size of the gap: Codex's `PROXY_URL_ENV_KEYS` is sixteen
+ * entries, and the six URL keys in the table below are the ones in common. The
+ * ten it has and this does not are `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`,
+ * `NPM_CONFIG_HTTP_PROXY`, `NPM_CONFIG_HTTPS_PROXY`, `NPM_CONFIG_PROXY`,
+ * `BUNDLE_HTTP_PROXY`, `BUNDLE_HTTPS_PROXY`, `PIP_PROXY`, `DOCKER_HTTP_PROXY`
+ * and `DOCKER_HTTPS_PROXY`.
+ *
+ * Whether the missing ten are a hole is NOT the same question as whether the
+ * comment was wrong, and the honest answer was measured rather than assumed. Of
+ * the four tool families they serve, three read the standard variables this
+ * build already sets:
+ *
+ *   * npm: `node_modules/@npmcli/agent/lib/proxy.js:13` builds `PROXY_ENV_KEYS`
+ *     as `{https_proxy, http_proxy, proxy, no_proxy}` and lower-cases every
+ *     `process.env` key before matching, so `HTTP_PROXY`/`HTTPS_PROXY` reach it,
+ *     and `getProxy` at `:64-71` falls back to them. `NPM_CONFIG_*` is an
+ *     *override* of that fallback (`@npmcli/config/lib/index.js:335-338`), not
+ *     the only path to it.
+ *   * pip: `requests` sets `trust_env = True` by default
+ *     (`pip/_vendor/requests/sessions.py:492`) and only
+ *     `pip/_internal/cli/index_command.py:133` clears it, which requires
+ *     `--proxy` or `--no-proxy-env`. With neither, `get_environ_proxies` reads
+ *     the environment. `PIP_PROXY` likewise turns `trust_env` off rather than
+ *     being the way in.
+ *   * docker: its documented proxy configuration is `HTTP_PROXY`/`HTTPS_PROXY`
+ *     and their lowercase forms, on both the daemon and the client side.
+ *
+ * Yarn is the one that may differ and it is NOT verified here: no `yarn` is
+ * installed on this machine, so nothing about it was run. Yarn Classic falls
+ * back to the standard variables; Yarn Berry (2+) is reported to read only
+ * `YARN_HTTP_PROXY`/`YARN_HTTPS_PROXY` from `networkConfig`, which would make it
+ * a real gap — but that is from the upstream source, not from this box, and it
+ * is left as the one known unknown rather than asserted either way.
+ *
+ * There is a second order to all of this that is worth stating because it is not
+ * about which keys are set: `operations.ts` builds the child environment as
+ * `{...process.env, ...env, ...proxyEnv}`, so these override what the caller had,
+ * but an ambient `NPM_CONFIG_PROXY` or `PIP_PROXY` in the developer's own
+ * environment is neither stripped nor pinned, and both of those *beat*
+ * `HTTP_PROXY` inside the tool. The merge order protects against a caller naming
+ * `HTTP_PROXY`; it does not protect against a caller naming the override.
  */
 const HTTP_PROXY_KEYS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] as const;
 const SOCKS_PROXY_KEYS = ["ALL_PROXY", "all_proxy"] as const;

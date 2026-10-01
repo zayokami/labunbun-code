@@ -37,6 +37,28 @@ import { join } from "node:path";
 import type { NetworkDomainRule } from "./network-policy.ts";
 import type { SandboxMode } from "./types.ts";
 
+/**
+ * The one spelling a path inside a policy is allowed to have.
+ *
+ * Every comparison downstream — `isWithin` here, `isAtOrBelow` in
+ * `packages/tools/src/sandbox/seatbelt.ts`, `isWithinRoot` in `simulated.ts` —
+ * is a `startsWith` against a path a caller resolved, and every such caller
+ * resolves with `/` separators (`resolveCanonical` normalises, and
+ * `node:path.resolve` does the same on Windows). So a policy entry spelled with
+ * `\` does not merely look different: it fails to match, and whether that
+ * narrows or *widens* depends on which side of the comparison it landed on.
+ * Here it widened, measured, which is the direction that must not happen.
+ *
+ * Deliberately not `resolve`. This module does no filesystem access, and
+ * resolving a relative path would silently rebase it on `process.cwd()`, which
+ * on Windows turns the fixture `/w/repo` into `<drive>:\w\repo`. Callers pass
+ * absolute paths; this keeps whatever absoluteness they had and makes only the
+ * separator claim true, which is the part the comparisons actually depend on.
+ */
+function canonicalPolicyPath(path: string): string {
+	return path.replace(/\\/g, "/");
+}
+
 /** Whether the filesystem is confined at all. Mirrors Codex's `FileSystemSandboxKind`. */
 export type FileSystemSandboxKind = "restricted" | "unrestricted";
 
@@ -61,7 +83,24 @@ export const NETWORK_SANDBOX_POLICIES = ["restricted", "enabled"] as const;
 export type NetworkSandboxPolicy = (typeof NETWORK_SANDBOX_POLICIES)[number];
 
 export interface FileSystemSandboxEntry {
-	/** Absolute, already canonical. Backends match on this string, not on a pattern. */
+	/**
+	 * Absolute, with `/` separators. Backends match on this string, not on a pattern.
+	 *
+	 * **The separator half is enforced, the absolute half is a convention.**
+	 * `buildSandboxPolicy` runs every path it is given through
+	 * `canonicalPolicyPath` below, so a `join`-shaped or caller-spelled
+	 * backslash path cannot reach the comparison functions with two spellings in
+	 * play. This is not a cosmetic normalisation: `isWithin` compares by
+	 * `startsWith`, so a root spelled `C:\w\r` never matches a canonical
+	 * candidate `C:/w/r`, and the derived `.git` is built with `join` while a
+	 * caller may hand in a forward-slash workspace. Measured on Windows, before
+	 * this was enforced: `isWritePermitted` returned `true` for `<ws>/.git/config`
+	 * with the workspace spelled either way, because the protected entry missed
+	 * and the writable entry matched. Absolute is left as a convention because
+	 * making it true would mean `resolve`-ing against `process.cwd()`, which
+	 * turns a test fixture like `/w/repo` into a path under the real drive on
+	 * Windows — a worse trade than the one it fixes.
+	 */
 	path: string;
 	access: FileSystemAccessMode;
 	/**
@@ -200,17 +239,17 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
 		// The workspace is the one thing that is writable, which is what the mode
 		// name says. `missingPathBehavior` is not set: a workspace that does not
 		// exist is a broken session, not a policy to be skipped past.
-		{ path: workspace, access: "write" },
+		{ path: canonicalPolicyPath(workspace), access: "write" },
 	];
 	for (const root of options.writableRoots ?? []) {
-		entries.push({ path: root, access: "write", missingPathBehavior: "skip" });
+		entries.push({ path: canonicalPolicyPath(root), access: "write", missingPathBehavior: "skip" });
 	}
 	for (const root of options.readOnlyRoots ?? []) {
 		// Read-only roots are additions to an already read-everything baseline, so
 		// on the backends where the default is readable they are not emitted at
 		// all. They are recorded here regardless, because the Windows simulated
 		// layer has no "readable by default" and needs the list to answer at all.
-		entries.push({ path: root, access: "read", missingPathBehavior: "skip" });
+		entries.push({ path: canonicalPolicyPath(root), access: "read", missingPathBehavior: "skip" });
 	}
 
 	return {
@@ -257,33 +296,48 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
  */
 function protectedFor(options: BuildSandboxPolicyOptions, writableRoots: string[]): string[] {
 	const found = options.protectedPaths ?? [];
-	const out = new Set(found);
+	const out = new Set(found.map(canonicalPolicyPath));
 	for (const root of writableRoots) {
 		if (root === "") continue;
-		out.add(join(root, ".git"));
+		// `join` first, then canonicalise. The other order loses: `join` is what
+		// puts a `\` into the string on Windows, and `canonicalPolicyPath` after it
+		// is the only ordering that ends with the one spelling `isWithin` compares.
+		out.add(canonicalPolicyPath(join(root, ".git")));
 	}
 	return [...out];
 }
 
 /**
- * Whether `candidate` is a write this policy permits, judged the way the Windows
- * layer has to judge it: lexically, from the policy, with no filesystem access.
+ * Whether `candidate` is a write this policy permits, judged lexically, from the
+ * policy, with no filesystem access.
  *
  * The backends that can consult the kernel do not use this — they hand the whole
- * policy to `sandbox-exec` or `bwrap` and let it decide. It exists for the
- * simulated layer and for tests, and it is **directional**: it may only narrow.
- * A path it cannot place inside a known root is refused, never allowed, so a
- * caller that treats a wrong answer as "no opinion" is not a caller that can
- * widen access by being wrong.
+ * policy to `sandbox-exec` or `bwrap` and let it decide. **Neither does the
+ * Windows simulated layer**: `decideWrite` in `@labunbun/tools` uses its own
+ * `isWithinRoot`, because that one takes the case rule as a parameter and
+ * canonicalises the root, neither of which is available here. So the honest
+ * inventory is: **no production caller.** It is exported, it is what this
+ * module's tests use to state the filesystem rule, and it is the piece a
+ * policy-shaped caller would reach for. It is kept for that, and saying so is
+ * the point — the previous version of this comment claimed the simulated layer
+ * used it, and that was false in a way that would have sent a reader looking
+ * for a caller that does not exist.
+ *
+ * It is **directional**: it may only narrow. A path it cannot place inside a
+ * known root is refused, never allowed, so a caller that treats a wrong answer
+ * as "no opinion" is not a caller that can widen access by being wrong. That
+ * held for the POSIX spelling and did **not** hold on Windows until
+ * `buildSandboxPolicy` began emitting canonical separators — see
+ * `FileSystemSandboxEntry.path`, where the measured fail-open is recorded.
  *
  * **Both sides must already be canonical.** It has no filesystem to consult, so
  * a root that reaches it through a symlink is compared as the spelling it
  * arrived with, and a candidate resolved past that symlink will not match it.
  * On macOS that is the difference between `/var/folders/…` and
  * `/private/var/folders/…`, and it means this answers "no" for a directory that
- * is genuinely inside the root. `decideWrite` in `@labunbun/tools` resolves the
- * root for this reason and is what production code should call; use this where
- * the caller already holds both forms.
+ * is genuinely inside the root — the wrong direction to be wrong in, which is
+ * why `decideWrite` is what production code calls. Use this where the caller
+ * already holds both forms and has no filesystem to resolve them with.
  */
 export function isWritePermitted(policy: SandboxPolicy, candidate: string): boolean {
 	// `protected` first. `buildSandboxPolicy` cannot produce an unrestricted
@@ -300,12 +354,21 @@ export function isWritePermitted(policy: SandboxPolicy, candidate: string): bool
  * Whether `candidate` sits inside `root`, treating the root itself as inside.
  *
  * Both sides are compared as already-canonical absolute paths with forward
- * slashes, which is what every producer in this build produces. Case folding is
- * the caller's decision and is not done here: on a case-sensitive filesystem
- * `Repo` and `repo` are different directories, and folding would accept a path
- * that only *spells* like one inside the root. `packages/tools/src/containment.ts`
- * already draws that line and does the folding against the real filesystem; this
- * is the pure fallback, and it says so by not folding.
+ * slashes. The separator half of that is now **enforced** rather than assumed —
+ * `buildSandboxPolicy` runs everything it emits through `canonicalPolicyPath`,
+ * so this no longer depends on the caller spelling a workspace the way
+ * `resolveCanonical` would. The absolute half is still a convention, and
+ * `isWritePermitted`'s doc says where it stops.
+ *
+ * Case folding is the caller's decision and is not done here: on a
+ * case-sensitive filesystem `Repo` and `repo` are different directories, and
+ * folding would accept a path that only *spells* like one inside the root.
+ * `packages/tools/src/containment.ts` already draws that line and does the
+ * folding against the real filesystem; this is the pure fallback, and it says
+ * so by not folding. Note that this makes the predicate over-strict rather
+ * than permissive on Windows and macOS, where `.GIT/config` would slip past a
+ * `.git` root — `decideWrite` is the one that takes the platform's answer, and
+ * production calls it for exactly that reason.
  */
 function isWithin(candidate: string, root: string): boolean {
 	const normalizedRoot = root.replace(/\/+$/, "");

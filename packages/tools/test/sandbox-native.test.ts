@@ -502,6 +502,41 @@ describe("buildSeatbeltArgs", () => {
 		);
 	});
 
+	test("a writable root of `/` terminates the ancestor walk instead of hanging", () => {
+		// The guard, not the ordinary exit. `isAtOrBelow` strips trailing slashes,
+		// so a root of `/` becomes `""` and matches every absolute path; and
+		// `parentOf("/")` is `""` while `parentOf("")` is also `""`, so the climb
+		// oscillates between `""` and `""` and never leaves the loop. Measured
+		// before the guard: a chain of `[…, "/", "", "", "", …]`, still going after
+		// twelve steps.
+		//
+		// Nothing in this build produces such a root — `danger-full-access` is how a
+		// caller means "the whole disk" — so this is a policy no builder emits. It
+		// is here because `buildSeatbeltArgs` accepts a policy by value, and a
+		// profile generator that can be made to spin is worth refusing even on an
+		// input the current builder cannot produce. The assertion is that the call
+		// returns; without the guard this test hangs rather than fails, so it is
+		// paired with the ordinary exit below, which pins the answer rather than
+		// just the absence of a hang.
+		const wholeDisk: SandboxPolicy = {
+			...POLICY,
+			fileSystem: { kind: "restricted", entries: [{ path: "/", access: "write" }] },
+			protected: ["/.git"],
+		};
+
+		const argv = buildSeatbeltArgs(wholeDisk, COMMAND);
+		expect(definitionsOf(argv).get("PROTECTED_ANCESTOR_0")).toBe("/");
+
+		// The control: the same walk with an ordinary root still yields the full
+		// ancestor chain, so the guard above is not what makes the walk produce
+		// anything at all.
+		expect(
+			definitionsOf(buildSeatbeltArgs({ ...POLICY, protected: ["/w/repo/sub/.git"] }, COMMAND)).get(
+				"PROTECTED_ANCESTOR_1",
+			),
+		).toBe("/w/repo/sub");
+	});
+
 	test("a path nothing may read is denied read as well as write", () => {
 		const entries: FileSystemSandboxEntry[] = [
 			{ path: WORKSPACE, access: "write" },

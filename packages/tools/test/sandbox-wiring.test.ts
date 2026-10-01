@@ -51,6 +51,20 @@ function workspace(): string {
 	return mkdtempSync(join(tmpdir(), "lbb-sandbox-wire-"));
 }
 
+/**
+ * The spelling a policy path has once `buildSandboxPolicy` is done with it.
+ *
+ * Every expectation below compares argv against a path built with `join`, and on
+ * Windows that is a backslash path while the policy now emits `/`. The
+ * normalisation is the behaviour under test elsewhere
+ * (`sandbox-policy.test.ts`), so restating it here as a literal `replace` is
+ * deliberate: a test that re-derived the expected value with the same call the
+ * code uses would agree with a regression in that call.
+ */
+function canonical(path: string): string {
+	return path.replace(/\\/g, "/");
+}
+
 function policy(sandbox: SandboxMode, cwd: string) {
 	return buildSandboxPolicy({ sandbox, workspace: cwd });
 }
@@ -501,12 +515,12 @@ describe("a path the policy names but the disk does not have", () => {
 		// filter, which is the kind of test that quietly stops testing the thing.
 		const built = buildSandboxPolicy({ sandbox: "workspace-write", workspace: cwd, writableRoots: [present, absent] });
 
-		const argv = argvFor(built, [present]);
-		expect(argv).toContain(present);
-		expect(argv).not.toContain(absent);
+		const argv = argvFor(built, [canonical(present)]);
+		expect(argv).toContain(canonical(present));
+		expect(argv).not.toContain(canonical(absent));
 		// The workspace itself is never marked skip, so it survives the filter
 		// even though `exists` was told it is not there either.
-		expect(argv).toContain(cwd);
+		expect(argv).toContain(canonical(cwd));
 	});
 
 	test("the workspace is kept even when it is absent, because a missing one is a broken session", () => {
@@ -515,7 +529,7 @@ describe("a path the policy names but the disk does not have", () => {
 		const ghost = join(tmpdir(), "lbb-sandbox-no-workspace");
 		const built = buildSandboxPolicy({ sandbox: "workspace-write", workspace: ghost });
 		const argv = argvFor(built, []);
-		expect(argv).toContain(ghost);
+		expect(argv).toContain(canonical(ghost));
 	});
 
 	test("an unrestricted policy wraps nothing, so the filter never runs", () => {
@@ -545,7 +559,7 @@ describe("a path the policy names but the disk does not have", () => {
 		const argv = realDiskArgv(buildSandboxPolicy({ sandbox: "workspace-write", workspace: cwd }));
 
 		expect(existsSync(join(cwd, ".git"))).toBe(false);
-		expect(tmpfsTargetOf(argv)).toBe(join(cwd, ".git"));
+		expect(tmpfsTargetOf(argv)).toBe(canonical(join(cwd, ".git")));
 		expect(roBindTargetOf(argv, join(cwd, ".git"))).toBeNull();
 	});
 
@@ -560,7 +574,7 @@ describe("a path the policy names but the disk does not have", () => {
 		try {
 			const argv = realDiskArgv(buildSandboxPolicy({ sandbox: "workspace-write", workspace: cwd }));
 
-			expect(roBindTargetOf(argv, join(cwd, ".git"))).toBe(join(cwd, ".git"));
+			expect(roBindTargetOf(argv, canonical(join(cwd, ".git")))).toBe(canonical(join(cwd, ".git")));
 			expect(tmpfsTargetOf(argv)).toBeNull();
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
