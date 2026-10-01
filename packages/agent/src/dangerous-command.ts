@@ -3001,6 +3001,136 @@ function isRecordPath(token: string): boolean {
 	);
 }
 
+/**
+ * A file the machine reads and acts on at the next login or boot.
+ *
+ * The opposite pole from {@link isRecordPath}, and the difference is worth being
+ * exact about because it decides whether `>>` is a rule here. A history file
+ * *records* what happened; appending a line to one changes nothing an attacker
+ * gains, which is why `posixRecordDestruction` returns early on `>>`. A startup
+ * file *causes* what happens next time — appending one line to `~/.bashrc` is
+ * the whole attack, and `>>` is the operator every real example uses. `echo x >
+ * ~/.bashrc` is not more dangerous than `echo x >> ~/.bashrc`; both install.
+ *
+ * So `>>` is caught here, against the measurement below and against the Windows
+ * half, where `isHistoryRedirect` also counts `>>` for the same reason.
+ *
+ * **The file is the shape, not the program.** There is no narrow program to key
+ * on — `echo`, `printf`, `cat`, `tee` and `curl -o` all write these files and all
+ * are ordinary tools — so this is the `isRecordPath` idiom (a trailing-name test
+ * with a path boundary) rather than the `isRunKeyPath` one. That is the same
+ * asymmetry the Windows Run-key rule argues in its own comment: matching the
+ * *target* is what keeps a rule from catching a machine being configured.
+ *
+ * `/etc/profile.d/anything` is a directory rather than a fixed set of names,
+ * which is the one place this is looser than the rest, and deliberately: it is
+ * the documented way to add a machine-wide startup script, and the files there
+ * exist to be added. `.config/autostart/*.desktop` is the same idea in the XDG
+ * spelling and is the closest thing POSIX has to the Windows Run key.
+ *
+ * **What this costs.** A person who puts an alias in `~/.bashrc` is doing this,
+ * and so is every dotfile installer ever written. The prompt is the cost, and it
+ * is the same cost `SERVICE_INSTALL_VERBS` accepts: the line outlives the
+ * session, so whoever approved the command is not whoever lives with it.
+ *
+ * **Measured, and the control is what makes the measurement mean something.** On
+ * a three-line file (14 bytes), `printf 'extra\\n' >> f` left 20 bytes with all
+ * three original lines intact — appending, not destroying. The control is the
+ * same write with `>`: the file came back 4 bytes holding only the new line.
+ * That is the difference between `posixRecordDestruction`'s two operators, and
+ * it is why this rule cannot reuse the history rule's early return.
+ */
+function isStartupPath(token: string): boolean {
+	const lower = token.toLowerCase();
+	// `~/.bashrc`, `$HOME/.zshrc`, `/home/dev/.profile` and `"~/.bash_profile"` all
+	// reduce to a trailing filename, which is why the test is `(^|\/)…$` and not a
+	// prefix: the same file is spelled at least four ways and a prefix test would
+	// catch `~/.bashrc.example` as well.
+	const homeFile =
+		/(^|\/)\.(bashrc|bash_profile|bash_login|bash_logout|zshrc|zprofile|zshenv|zlogin|kshrc|cshrc|profile)$/.test(
+			lower,
+		) || /(^|\/)config\/fish\/config\.fish$/.test(lower);
+	// The machine-wide shells: `/etc/bash.bashrc` is Debian's spelling and
+	// `/etc/bashrc` is the other one, so both are named rather than guessed.
+	const systemFile = /^\/etc\/(bash\.bashrc|bashrc|zshrc|zshenv|shrc|profile|environment)$/.test(lower);
+	// Two directories rather than a fixed set of names, and deliberately: these
+	// are where a startup script is *meant* to be added, so there is no list of
+	// names to match on. `rc.local` is both a bare `/etc/rc.local` and the
+	// `rc.d/` copy distributions use, and only the second was here at first —
+	// a comment claimed the first and the code did not do it.
+	const directory =
+		/^\/etc\/profile\.d\//.test(lower) || /(^|\/)rc\.local$/.test(lower) || /(^|\/)\.config\/autostart\//.test(lower);
+	// `authorized_keys` is persistence by a different door — the next login over
+	// SSH rather than the next shell — so it is named here rather than given a
+	// second rule. `.ssh/rc` and `.ssh/environment` are the same file read on
+	// every connection.
+	//
+	// `sudoers` and `sudoers.d` are here for a different reason and it is worth
+	// stating: a line granting `NOPASSWD:ALL` does not run anything, it removes
+	// the password from every future privileged command. That is not persistence
+	// by execution, it is persistence of *privilege*, and it outlives the session
+	// the same way. The rule message says "runs on every future login" for all of
+	// these, which is accurate for the shell files and is the weaker claim for
+	// sudoers — the honest description there is that it grants privilege without
+	// asking again, and the comment says so rather than letting the message carry
+	// a claim the code does not make.
+	const ssh = /(^|\/)\.ssh\/(authorized_keys2?|rc|environment)$/.test(lower);
+	const sudoers = /^\/etc\/sudoers$/.test(lower) || /^\/etc\/sudoers\.d\//.test(lower);
+	return homeFile || systemFile || directory || ssh || sudoers;
+}
+
+/**
+ * Writing to a file that runs at the next login, on either half of a pipeline.
+ *
+ * `tee -a ~/.bashrc` is the same act as `echo x >> ~/.bashrc` and is not a
+ * redirect at all, so a rule reading only `>` would miss it. `tee` is here for
+ * that reason and not as a general rule: `tee` is in every pipeline anyone has
+ * ever written, and it is the *target* that makes this row mean anything.
+ *
+ * The wrapper's own script is read as well as the segment, so
+ * `bash -c 'echo x >> ~/.bashrc'` is reached — the same reason
+ * `historyRules` is given both.
+ */
+function posixStartupWrite(segment: string): DangerousCommandMatch | null {
+	// The segment text, not the tokens: `tokenizeShell` does not treat `>` as
+	// whitespace, so `echo x>>~/.bashrc` arrives as the single token
+	// `x>>~/.bashrc` and a rule reading tokens would look for a target that is
+	// not there. Measured, not assumed — the same reason `posixDiskRules` reads
+	// its segment.
+	const targets: string[] = [];
+	for (const match of segment.matchAll(/>{1,2}\s*(\S+)/g)) {
+		targets.push(match[1].replace(/^["']|["']$/g, ""));
+	}
+
+	const tokens = tokenizeShell(segment);
+	const program = executableName(tokens[0] ?? "", "posix");
+	if (program === "tee" || program === "tee.exe") {
+		// `-a` is an append flag on the same command, so it is not a redirect and
+		// has to be read from the arguments.
+		for (const token of tokens.slice(1)) {
+			if (!token.startsWith("-")) targets.push(token.replace(/^["']|["']$/g, ""));
+		}
+	}
+
+	for (const target of targets) {
+		if (!isStartupPath(target)) continue;
+		// Two different claims, and the message has to say which one it is making.
+		// "Runs on every future login" is exactly right for a shell startup file
+		// and for an SSH key file. For `sudoers` it would be a claim the code does
+		// not deliver: a sudoers line grants privilege without asking again, it
+		// does not execute. Saying so separately is cheaper than a message that is
+		// true for most rows and wrong for one.
+		const grants = /^\/etc\/sudoers(\.d\/)?/.test(target.toLowerCase());
+		return {
+			kind: "Other",
+			rule: grants
+				? `\`${target}\` written to, which grants privilege without asking for a password again`
+				: `\`${target}\` written to, which runs on every future login or boot`,
+		};
+	}
+	return null;
+}
+
 function historyRules(segment: string): DangerousCommandMatch | null {
 	const tokens = tokenizeShell(segment);
 	const program = executableName(tokens[0] ?? "", "posix");
@@ -3362,6 +3492,8 @@ function matchScript(script: string, depth: number, platform: DangerousCommandPl
 			if (tcp) return tcp;
 			const record = posixRecordDestruction(segment);
 			if (record) return record;
+			const startup = posixStartupWrite(segment);
+			if (startup) return startup;
 			// The body of `sh -c 'unset HISTFILE'` is a segment of its own to the
 			// shell that runs it and not one here, so the wrapper's script is read
 			// as well as the segment. Only the history rules do this: every other

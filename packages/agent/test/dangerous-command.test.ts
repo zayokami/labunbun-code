@@ -3043,6 +3043,105 @@ describe("POSIX: switching a host protection off", () => {
 	});
 });
 
+describe("POSIX: writing to a file that runs at the next login", () => {
+	/**
+	 * The opposite pole from the record rules below: a startup file *causes* what
+	 * happens next time, so appending one line to it is the whole attack.
+	 *
+	 * **This is why `>>` is caught here and is not caught there.** `posixRecordDestruction`
+	 * returns early on `>>` because appending to a history file changes nothing an
+	 * attacker gains. Measured on a three-line file here: `printf 'extra\n' >> f`
+	 * left 20 bytes with all three original lines intact, and the same write with `>`
+	 * left 4 bytes holding only the new line. Both operators install into `~/.bashrc`
+	 * — the difference between them is what happens to the *existing* config, which
+	 * is a different question from whether the line runs at the next login.
+	 *
+	 * The file is the shape, not the program: `echo`, `printf`, `cat`, `tee` and
+	 * `curl -o` all write these files and all are ordinary tools.
+	 */
+	test.each([
+		["echo x >> ~/.bashrc", "the redirect, spaced"],
+		["echo x>>~/.bashrc", "and unspaced, where the operator glues to the word"],
+		["echo x >> $HOME/.zshrc", "and with the home directory as a variable"],
+		["echo x >> /home/dev/.profile", "and with it spelled out"],
+		["printf 'x' >>~/.bash_profile", "printf rather than echo"],
+		["cat payload >> ~/.bashrc", "and cat rather than a redirect of a string"],
+		["tee -a ~/.bashrc", "tee, which is not a redirect at all"],
+		["tee ~/.zshrc < payload", "and tee without its append flag"],
+		["echo x > ~/.bashrc", "the truncating operator installs too"],
+		["echo x >> /etc/profile", "machine-wide, every shell"],
+		["echo x >> /etc/bash.bashrc", "and Debian's spelling"],
+		["echo x >> /etc/profile.d/evil.sh", "a directory of startup scripts"],
+		["echo x >> /etc/rc.local", "and the boot script"],
+		["echo x >> ~/.config/autostart/evil.desktop", "the XDG spelling of the Run key"],
+		["bash -c 'echo x >> ~/.bashrc'", "reached through a shell wrapper"],
+		["echo 'ssh-rsa AAAA' >> ~/.ssh/authorized_keys", "a key that logs in next time"],
+		["echo k >> /root/.ssh/authorized_keys", "and someone else's"],
+		["echo x >> ~/.ssh/rc", "and the per-connection file beside it"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * `sudoers` is a different claim from every row above and gets a different
+	 * message: a line granting `NOPASSWD:ALL` does not run, it removes the
+	 * password from every future privileged command. Asserted separately so the
+	 * two messages cannot drift into claiming the same thing.
+	 */
+	test.each([
+		["echo 'ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers", "the file itself"],
+		["echo x >> /etc/sudoers.d/evil", "and the drop-in directory"],
+	])("%s is dangerous, and says what it actually does — %s", (command) => {
+		expect(posix(command)?.rule).toContain("grants privilege");
+	});
+
+	test("the sudoers message must not claim the line runs", () => {
+		expect(posix("echo x >> /etc/sudoers")?.rule).not.toContain("runs on every future login");
+	});
+
+	/**
+	 * The half that decides whether the rows above are usable. `chmod 755 ~/.bashrc`
+	 * and `cat ~/.bashrc` are not "safe" — they are simply not *this* rule, and
+	 * there is no `toBe(rule)` matcher here, so each row names what keeps it out.
+	 */
+	test.each([
+		"chmod 755 ~/.bashrc",
+		"cat ~/.bashrc",
+		"echo ~/.bashrc",
+		"chmod 600 ~/.ssh/authorized_keys",
+		"cat ~/.ssh/authorized_keys",
+		"ls -la ~/.ssh/",
+		"ssh-keygen -t ed25519",
+		"tee -a notes.txt",
+	])("%s is not this rule", (command) => {
+		expect(posix(command)?.rule ?? "").not.toContain("runs on every future login");
+	});
+
+	test.each([
+		["echo x >> notes.txt", "a file that is not a startup file"],
+		["echo x >> src/index.ts", "writing source"],
+		["echo x >> README.md", "and a document"],
+		["echo x >> build/out.img", "and an image build"],
+		["tee -a notes.txt", "tee aimed somewhere ordinary"],
+		["echo x >> .bashrc.example", "a name that starts with the same letters"],
+		["echo x >> ~/.profile.backup", "and a backup of one"],
+		["echo x >> ~/.ssh/config", "an SSH config, which runs nothing"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The `$`-anchor is load-bearing and this is what pins it: `SystemOther`-style
+	 * near-misses exist here too, and without a row that only the trailing `$` can
+	 * catch, loosening the predicate leaves the suite green.
+	 */
+	test("a startup file's name must end the path, not merely appear in it", () => {
+		expect(posix("echo x >> .bashrc.example")).toBeNull();
+		expect(posix("echo x >> /tmp/profile")).toBeNull();
+		expect(posix("echo x >> ~/.bashrc")).not.toBeNull();
+	});
+});
+
 describe("POSIX: turning off the record of what ran", () => {
 	/**
 	 * Erasing a record that already exists, rather than suppressing the next one.
