@@ -766,6 +766,18 @@ function matchTokens(
 	if (command !== undefined) return matchTokens(command, depth, platform, segment);
 
 	const program = executableName(tokens[0], platform);
+	// Consulted here rather than in `matchScript`, and the difference is not
+	// cosmetic. `matchScript` sees each segment exactly once, before any wrapper
+	// on it has been stepped over, so anything it consults never sees the command
+	// a wrapper was standing in front of. Measured before this was moved here:
+	// `sudo git clean -fdx`, `bash -c "git push --force"` and
+	// `powershell -Command "docker system prune -a"` each classified as nothing,
+	// while the same three commands with the wrapper removed were caught — and the
+	// test that found it is the one asserting a wrapper does not hide a command.
+	// `git` and the rest are never wrappers themselves, so nothing below here can
+	// be reached by unwrapping past them.
+	const tool = developmentToolRules(tokens, platform);
+	if (tool) return tool;
 	if (program === "rm" && rmArgsIncludeForce(tokens.slice(1))) {
 		return { kind: "ForcedRm", rule: "`rm` with a force option" };
 	}
@@ -1797,6 +1809,15 @@ function dangerousCmd(tokens: string[], depth = 0): DangerousCommandMatch | null
 		const match = dangerousCmd(words, depth + 1);
 		if (match) return match;
 	}
+	// A body is not only builtins. `cmd /c "git clean -fdx"` and `cmd /c "docker
+	// system prune -a"` are ordinary ways to type the two commands those tables
+	// do not contain, and both are spelled with the `cmd` in front so that
+	// whatever launches the line does not have to know what `git` is. Consulted
+	// last so that a builtin still gets to name itself; the reason it is
+	// consulted at all is the one in the comment above — a body is read against
+	// every shell that could be the one running it, never as "nothing here".
+	const tool = developmentToolRules(words, "windows");
+	if (tool) return tool;
 	return dangerousCmdBody(words) ?? dangerousPowershellWords(words);
 }
 
@@ -2227,10 +2248,261 @@ function matchScript(script: string, depth: number, platform: DangerousCommandPl
 		if (piped) return piped;
 	}
 	for (const segment of segments) {
-		const match = matchTokens(tokenizeShell(segment), depth, platform, segment);
+		const tokens = tokenizeShell(segment);
+		const match = matchTokens(tokens, depth, platform, segment);
 		if (match) return match;
 	}
 	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Tools that reach outside the machine: version control, containers, clusters,
+// registries and forges
+// ---------------------------------------------------------------------------
+
+/**
+ * These are answered the same on both platforms, deliberately.
+ *
+ * `docker rm -f web` is a forced container removal whether it was typed into
+ * PowerShell or into bash, and the five programs below are spelled identically
+ * in both. Putting the table behind a `platform` check would mean one of the
+ * two silently loses it, which is the kind of gap that reads as a deliberate
+ * decision later.
+ */
+
+/** `git push` flags that overwrite what is on the other end. */
+const GIT_FORCE_PUSH_FLAGS: readonly string[] = ["--force", "-f", "--force-with-lease", "--force-if-includes"];
+
+/**
+ * Whether the arguments ask for a run that prints instead of acting.
+ *
+ * The short `-n` is read as a *cluster* rather than as a token. Short flags
+ * combine, and `-fn` is the everyday spelling of "show me what a forced clean
+ * would take" — an exact match against `-n` misses it because neither token in
+ * `-fn` is `-n`. Measured, because the reading is not obvious: against a real
+ * repo, `-fn`, `-fnx` and `-nf` each exited 0, each printed a line beginning
+ * `Would remove`, and each left the untracked file, the ignored file and the
+ * untracked directory on disk.
+ *
+ * Reading the cluster is only safe because no flag of either caller carries the
+ * letter `n` and no long option can reach here. `git clean` takes
+ * `-f -d -x -X -q -e` and the long `--exclude`/`--dry-run`, and
+ * `npm publish --help` / `npm unpublish --help` on
+ * this machine list `--tag --access --otp --dry-run --provenance -w -ws` and
+ * `--dry-run -f -w -ws` respectively — every short one of those is `-w`, `-ws`
+ * or `-f`. The `--` exclusion is load-bearing rather than tidiness, and not
+ * only for those two callers: `git clean -f --exclude=node_modules` has an `n`
+ * in it and still deletes everything it did not exclude, measured.
+ */
+function isDryRun(args: string[]): boolean {
+	if (args.includes("--dry-run")) return true;
+	return args.some((arg) => arg.startsWith("-") && !arg.startsWith("--") && arg.slice(1).includes("n"));
+}
+
+/**
+ * Note what is NOT folded here: git's flags are case-sensitive, and `git branch
+ * -d` refuses to delete an unmerged branch while `git branch -D` does it. A
+ * lower-casing pass over the arguments would merge the two and make the safe
+ * spelling the dangerous one.
+ */
+function gitRules(tokens: string[], platform: DangerousCommandPlatform): DangerousCommandMatch | null {
+	if (executableName(tokens[0], platform) !== "git") return null;
+	const [subcommand, ...args] = tokens.slice(1);
+	if (subcommand === undefined) return null;
+
+	if (subcommand === "clean") {
+		// MEASURED, one flag at a time, in a throwaway repo: `-n` and `--dry-run`
+		// print and remove nothing; `-f` takes untracked files; `-fd` takes
+		// directories too; `-x` adds ignored files; `-ffdx` is the whole lot. The
+		// dry-run exemption is checked first so `-f --dry-run` is not flagged for
+		// the flag it is about to be stopped from using.
+		if (isDryRun(args)) return null;
+		if (!args.some((arg) => arg.startsWith("-f") || arg === "--force")) return null;
+		return { kind: "Other", rule: "`git clean` with a force flag, which deletes files with no undo" };
+	}
+
+	if (subcommand === "reset") {
+		// MEASURED: `--hard` put a tracked file back to its committed contents and
+		// dropped a staged new file, with no commit-ish argument needed. `--soft`,
+		// `--mixed` and a bare `git reset` all left the working copy alone.
+		if (!args.includes("--hard")) return null;
+		return { kind: "Other", rule: "`git reset --hard`, which throws away uncommitted work" };
+	}
+
+	if (subcommand === "checkout") {
+		// The `--` is the whole signal: it is what separates "restore this path
+		// from the index" from "switch to this branch", which is why
+		// `git checkout main` and `git checkout -b feature` are left alone.
+		if (!args.includes("--")) return null;
+		return { kind: "Other", rule: "`git checkout --`, which discards working-copy changes" };
+	}
+
+	if (subcommand === "restore") {
+		// `--staged` on its own moves a file out of the index and leaves the file
+		// alone; adding `--worktree` is what makes it throw the file away.
+		if (args.includes("--staged") && !args.includes("--worktree")) return null;
+		return { kind: "Other", rule: "`git restore`, which discards working-copy changes" };
+	}
+
+	if (subcommand === "branch") {
+		// MEASURED: `git branch -d doomed` on an unmerged branch exited 1 with
+		// "error: the branch 'doomed' is not fully merged"; `-D` deleted it.
+		if (!args.includes("-D") && !args.includes("--force")) return null;
+		return { kind: "Other", rule: "`git branch -D`, which deletes a branch and its commits" };
+	}
+
+	if (subcommand === "stash") {
+		// MEASURED: both emptied `git stash list`. `push`, `pop` and `list` do not.
+		const verb = args[0];
+		if (verb !== "drop" && verb !== "clear") return null;
+		return { kind: "Other", rule: `\`git stash ${verb}\`, which throws stashed work away` };
+	}
+
+	if (subcommand === "push") {
+		// NOT EXECUTED against any remote, ever. The spellings come from
+		// `git push -h` (`-f, --force`, `--force-with-lease[=<refname>:<expect>]`,
+		// `--force-if-includes`) and from git-push.adoc on this box, which gives
+		// the refspec format as `[+]<src>[:<dst>]` and states that "the `+` is
+		// optional and does the same thing as `--force" -- which is why an
+		// argument beginning with `+` counts even though no flag was typed.
+		// `--force-with-lease` takes a value and is written
+		// `--force-with-lease=<refname>:<expect>`, so an exact match against the
+		// bare name misses the form that actually carries a ref.
+		const forced = GIT_FORCE_PUSH_FLAGS.some((flag) => args.some((arg) => arg === flag || arg.startsWith(`${flag}=`)));
+		const refspecForced = args.some((arg) => arg.startsWith("+"));
+		if (!forced && !refspecForced) return null;
+		return { kind: "Other", rule: "`git push` with a force, which overwrites the other end" };
+	}
+
+	return null;
+}
+
+/**
+ * Container, cluster, registry and forge tools, read off their own help output.
+ *
+ * `docker system prune --help` prints `-a, --all`, `-f, --force` and
+ * `--volumes`; `docker rm --help` and `docker volume rm --help` both print
+ * `-f, --force`; `docker compose down --help` prints `-v, --volumes` and
+ * `--rmi string`, the latter documented as `Remove images used by services.
+ * "local" remove only images that don't have a custom tag ("local"|"all")`.
+ * `kubectl delete --help` prints `--all=false:`, `-A, --all-namespaces=false:`,
+ * `--force=false:` and `--now`. `gh repo delete --help` names a bare `--yes`
+ * with no short form, while `gh repo archive --help` has `-y, --yes`.
+ *
+ * Nothing here was run against a daemon or a cluster, and nothing could have
+ * been: `docker version` on this machine fails with "error during connect ...
+ * open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file
+ * specified", and `kubectl config current-context` answers "error:
+ * current-context is not set".
+ */
+function containerToolRules(tokens: string[], platform: DangerousCommandPlatform): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], platform);
+	const lower = tokens.slice(1).map((arg) => arg.toLowerCase());
+
+	if (program === "docker") {
+		const [group, verb] = lower;
+		// `docker prune` is not a subcommand — `docker prune --help` prints the
+		// whole root usage and exits 0 — so only the spelled-out forms count.
+		if (verb === "prune" && ["system", "image", "container", "network", "volume"].includes(group)) {
+			return { kind: "Other", rule: `\`docker ${group} prune\`, which deletes everything unused` };
+		}
+		if ((group === "rm" || group === "rmi") && (lower.includes("-f") || lower.includes("--force"))) {
+			return { kind: "Other", rule: `\`docker ${group} -f\`, which kills and deletes a running one` };
+		}
+		if (group === "volume" && verb === "rm") {
+			// No force flag required, which looks like an oversight beside the
+			// `docker rm -f` above and is not one. `-f` on `docker volume rm` is
+			// `docker rm -f`'s meaning inverted: it is what lets the removal go ahead
+			// on a volume that is still in use, so a plain `docker volume rm`
+			// deletes the data of any volume nothing else is holding. The flag is
+			// the risk when it is absent, not when it is present.
+			return { kind: "Other", rule: "`docker volume rm`, which deletes the data on a volume" };
+		}
+		if (group === "compose") {
+			// `down` alone stops containers and keeps the volumes; `-v` is what
+			// takes the database with it.
+			if (verb !== "down") return null;
+			if (lower.includes("-v") || lower.includes("--volumes")) {
+				return { kind: "Other", rule: "`docker compose down -v`, which deletes the volumes' data" };
+			}
+			// `--rmi` takes a value and the two values are not the same act, which
+			// `docker compose down --help` spells out: `"local" remove only images
+			// that don't have a custom tag`, `"all"` removes every image the
+			// services use. Only the second is caught here, because only the
+			// second reaches an image somebody tagged and published. The value may
+			// be attached with `=` or given as the next word, and both are read
+			// because the flag with no value is rejected by the tool rather than
+			// defaulting to either — so a bare `--rmi` is left alone on purpose.
+			const rmi = lower.findIndex((arg) => arg === "--rmi" || arg.startsWith("--rmi="));
+			if (rmi !== -1) {
+				const value = lower[rmi].includes("=") ? lower[rmi].split("=")[1] : lower[rmi + 1];
+				if (value === "all") {
+					return { kind: "Other", rule: "`docker compose down --rmi all`, which deletes the service's images" };
+				}
+			}
+			return null;
+		}
+		return null;
+	}
+
+	if (program === "kubectl") {
+		const [verb, ...rest] = lower;
+		if (verb === "drain") {
+			return { kind: "Other", rule: "`kubectl drain`, which evicts everything running on a node" };
+		}
+		if (verb !== "delete") return null;
+		if (rest.includes("namespace")) {
+			return { kind: "Other", rule: "`kubectl delete namespace`, which takes a namespace and its contents" };
+		}
+		// `kubectl delete pod web-1` is an ordinary ops command and stays quiet;
+		// what is caught is the spelling that means "all of them".
+		const sweeping = ["--all", "-a", "--all-namespaces", "--force", "--now"].some((flag) => rest.includes(flag));
+		if (!sweeping) return null;
+		return { kind: "Other", rule: "`kubectl delete` over a whole set rather than one object" };
+	}
+
+	if (program === "npm" || program === "pnpm" || program === "yarn") {
+		// `yarn publish` and `yarn npm publish` both exist; the second is how the
+		// modern yarn spells it, and the indirection is why this reads `lower[1]`
+		// for one program and `lower[0]` for the others rather than unifying them.
+		// None of the three is installed on this machine, so unlike the git rows
+		// above these spellings were read from each tool's documented usage rather
+		// than measured by running it.
+		const verb = program === "yarn" && lower[0] === "npm" ? lower[1] : lower[0];
+		// `npm publish --dry-run` and `npm unpublish --dry-run` both exist and
+		// both print instead of sending, so the dry run is the exemption.
+		if (verb === "publish" || verb === "unpublish") {
+			if (isDryRun(lower)) return null;
+			return { kind: "Other", rule: `\`${program} ${verb}\`, which changes a published package` };
+		}
+		if (verb === "deprecate") {
+			return { kind: "Other", rule: `\`${program} deprecate\`, which changes what every install gets` };
+		}
+		if (verb === "dist-tag" && lower[1] === "rm") {
+			return { kind: "Other", rule: `\`${program} dist-tag rm\`, which moves a published version out of reach` };
+		}
+		return null;
+	}
+
+	if (program === "gh") {
+		// `gh repo archive` is deliberately not here: a repository can be
+		// unarchived, so it is a different act from deleting one. `gh run delete`
+		// is not here either — it removes a CI log, which is a build record and
+		// not the user's own work.
+		if (lower[0] === "repo" && lower[1] === "delete") {
+			return { kind: "Other", rule: "`gh repo delete`, which deletes a repository" };
+		}
+		if (lower[0] === "secret" && lower[1] === "delete") {
+			return { kind: "Other", rule: "`gh secret delete`, which removes a credential from a repository" };
+		}
+		return null;
+	}
+
+	return null;
+}
+
+function developmentToolRules(tokens: string[], platform: DangerousCommandPlatform): DangerousCommandMatch | null {
+	return gitRules(tokens, platform) ?? containerToolRules(tokens, platform);
 }
 
 /**

@@ -2220,6 +2220,365 @@ describe("Windows: stopping a service and powering the machine off", () => {
 	);
 });
 
+describe("git: throwing away work", () => {
+	/**
+	 * MEASURED in a throwaway repo under %TEMP%, one flag at a time. The first
+	 * run of that script reported that `git clean -fd` removed nothing, and the
+	 * reason was the fixture rather than git: `git add -A` had staged the files
+	 * that were supposed to be untracked, so there was nothing left to clean. The
+	 * numbers below are from the corrected fixture, where the untracked files are
+	 * created *after* the commit.
+	 */
+	test.each([
+		["git clean -f", "-f takes untracked files"],
+		["git clean -fd", "-d takes the directories holding them"],
+		["git clean -fdx", "and -x takes the ignored ones too"],
+		["git clean -ffdx", "two -f"],
+		["git clean -fdX", "uppercase, ignored only"],
+		["git clean --force", "the long spelling"],
+		["git clean -f --exclude=node_modules", "with an exclude, which leaves the excluded files alone"],
+		["git clean -f --exclude node_modules", "and the value as the next word"],
+		["git clean -fx", "force plus ignored files"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["git clean -n", "the dry run"],
+		["git clean -nd", "with the directory flag too"],
+		["git clean --dry-run", "the long form"],
+		["git clean -f --dry-run", "and the forced spelling of a dry run, which still only prints"],
+		["git clean -fn", "a force and a dry run in one cluster, which is the everyday spelling"],
+		["git clean -fnx", "with the ignored-files flag as well"],
+		["git clean", "no flags at all, which does nothing"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The rows above are worth their own measurement, because "a dry run prints"
+	 * is an assumption rather than a fact about this flag combination. It was
+	 * measured, in a throwaway repo with an untracked file and an ignored file
+	 * and an untracked directory created after the commit: `-fn`, `-fnx`, `-nf`,
+	 * `-nfd` and `-f --dry-run` each exited 0, each printed a line beginning
+	 * `Would remove`, and each left all three of those files on disk. So the
+	 * short `-n` really does beat `-f` in either order, which is what makes the
+	 * exemption load-bearing rather than decorative.
+	 */
+
+	/**
+	 * MEASURED: `--hard` put a tracked file back to its committed contents and
+	 * dropped a staged new file, with no commit-ish argument needed.
+	 */
+	test.each([
+		["git reset --hard", "with no commit-ish at all"],
+		["git reset --hard HEAD", "and with one"],
+		["git reset --hard origin/main", "onto another branch"],
+		["git checkout -- .", "the index-over working copy spelling"],
+		["git checkout -- src/index.ts", "for one path"],
+		["git restore .", "and the newer command for the same thing"],
+		["git restore --source=HEAD --staged --worktree .", "with both targets named"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * `--soft` and `--mixed` and a bare `reset` all left the working copy alone in
+	 * the same measurement, and `--staged` on its own only moves a file out of the
+	 * index. The `--` in `git checkout` is what separates "restore this path" from
+	 * "switch to that branch", which is why the branch-switching forms are quiet.
+	 */
+	test.each([
+		["git reset", "no flags"],
+		["git reset --soft", "soft leaves the file alone"],
+		["git reset --mixed", "and so does mixed"],
+		["git reset --soft HEAD~1", "with a commit-ish"],
+		["git restore --staged .", "unstages without touching the file"],
+		["git checkout main", "switching branch is not discarding"],
+		["git checkout -b feature", "and making one"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * MEASURED: `git branch -d doomed` on an unmerged branch exited 1 with
+	 * "error: the branch 'doomed' is not fully merged", and `-D` deleted it. That
+	 * is also why the arguments are NOT lower-cased anywhere in this file: `-d`
+	 * and `-D` are different commands and folding them would make the safe
+	 * spelling the dangerous one.
+	 */
+	test.each([
+		["git branch -D feature", "the capital D"],
+		["git branch --delete --force feature", "and the long spelling"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["git branch -d merged-branch", "refuses an unmerged branch, so it cannot lose one"],
+		["git branch feature", "making a branch deletes nothing"],
+		["git branch -m old new", "and renaming keeps the commits"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * MEASURED: both emptied `git stash list`. `push`, `pop` and `list` did not.
+	 */
+	test.each([
+		["git stash drop", "one entry"],
+		["git stash clear", "all of them"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["git stash push -m wip", "putting work aside is the point"],
+		["git stash pop", "and getting it back"],
+		["git stash list", "and looking"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * NOT EXECUTED against any remote, ever — a delegation that asked for it was
+	 * refused, and re-scoping the measurement to documentation was the right
+	 * response rather than a workaround. The spellings come from `git push -h`
+	 * (`-f, --force`, `--force-with-lease[=<refname>:<expect>]`,
+	 * `--force-if-includes`) and from git-push.adoc, which gives the refspec
+	 * format as `[+]<src>[:<dst>]` and says the `+` "does the same thing as
+	 * --force" — which is why a refspec with no flag on the line still counts.
+	 */
+	test.each([
+		["git push --force", "the long spelling"],
+		["git push -f", "the short one"],
+		["git push origin main --force", "after the refspec"],
+		["git push --force-with-lease", "the safer force"],
+		["git push --force-with-lease=main:abc123", "with the ref it is expecting"],
+		["git push --force-if-includes", "and the one that checks first"],
+		["git push origin +main:main", "the refspec form, with no flag typed at all"],
+		["git push origin +refs/heads/main:refs/heads/main", "spelled out in full"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["git push", "the ordinary push"],
+		["git push origin main", "with a refspec"],
+		["git push origin feature", "to a branch of somebody else's work"],
+		["git push --dry-run origin main", "and the dry run"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+});
+
+describe("containers, clusters, registries and forges", () => {
+	/**
+	 * Flag spellings read out of each tool's own `--help` on this machine, and
+	 * cross-checked by hand before any of it was written down.
+	 *
+	 * Nothing here ran against a daemon or a cluster, and nothing could have:
+	 * `docker version` fails with "error during connect ... open
+	 * //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified",
+	 * and `kubectl config current-context` answers "error: current-context is not
+	 * set".
+	 */
+	test.each([
+		["docker rm -f web", "kills and deletes a running container"],
+		["docker rm --force web", "the long spelling"],
+		["docker rmi -f myimage:latest", "and the image"],
+		["docker volume rm data", "which takes the data with it"],
+		["docker system prune", "everything unused"],
+		["docker system prune -a --volumes", "all of it, and the volumes"],
+		["docker image prune -a", "unused images rather than dangling ones"],
+		["docker container prune", "stopped containers"],
+		["docker network prune", "networks"],
+		["docker volume prune -a", "and volumes"],
+		["docker compose down -v", "which is what takes the database"],
+		["docker compose down --volumes", "the long spelling"],
+		["docker compose down --rmi all", "and every image the service uses, tagged or not"],
+		["docker compose down --rmi=all", "the value attached with an equals sign"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * `docker prune` is not in this list because it is not a command: measured,
+	 * `docker prune --help` prints the whole root usage and exits 0 without an
+	 * error. Only the spelled-out forms are rules.
+	 *
+	 * `--rmi local` is here beside `docker compose down` for the reason its help
+	 * text gives — it "remove[s] only images that don't have a custom tag" — so
+	 * the two values are asserted apart rather than the flag being caught whole.
+	 */
+	test.each([
+		["docker rm web", "removing a stopped container is a normal cleanup"],
+		["docker stop web", "and stopping one is not deleting"],
+		["docker compose down", "down alone keeps the volumes"],
+		["docker compose down --rmi local", "and local removes only untagged images"],
+		["docker system df", "df reports disk usage"],
+		["docker ps", "ps lists"],
+		["docker images", "images lists"],
+		["docker volume ls", "and ls lists volumes"],
+		["docker run -d --name web nginx", "starting a container creates things"],
+		["docker builder prune", "and this is the build cache, not anything running"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `kubectl delete --help` prints `--all=false:`,
+	 * `-A, --all-namespaces=false:`, `--force=false:` and `--now`. One named pod
+	 * is ordinary operations work and stays quiet; what is caught is the spelling
+	 * that means all of them.
+	 */
+	test.each([
+		["kubectl delete pods --all", "every pod of a type"],
+		["kubectl delete pods --all -A", "in every namespace"],
+		["kubectl delete deployment --all --all-namespaces", "spelled out"],
+		["kubectl delete pods --force", "forced"],
+		["kubectl delete pod foo --now", "and immediate"],
+		["kubectl delete namespace prod", "a namespace and everything in it"],
+		["kubectl drain node-1", "which evicts everything running on a node"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["kubectl delete pod web-1", "one named pod is ordinary ops"],
+		["kubectl get pods", "getting lists"],
+		["kubectl get pods -A", "across namespaces, and still only lists"],
+		["kubectl delete pods -l app=web", "a label selector picks some, not all"],
+		["kubectl rollout restart deployment/web", "a rollout is not a delete"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `npm publish --dry-run` and `npm unpublish --dry-run` both exist and both
+	 * print instead of sending, so the dry run is the exemption rather than a
+	 * hole.
+	 */
+	test.each([
+		["npm publish", "which cannot be taken back"],
+		["npm publish --tag next", "under a tag"],
+		["npm unpublish my-package", "and taking it down"],
+		["npm deprecate my-package 'use v2'", "which changes what every install gets"],
+		["npm dist-tag rm my-package latest", "moving a version out of reach"],
+		["pnpm publish", "the same command under another package manager"],
+		["yarn npm publish", "and under yarn, where the verb is one word further along"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["npm publish --dry-run", "prints instead of sending"],
+		["npm unpublish --dry-run", "and so does this one"],
+		["npm install", "installing changes the machine, not the registry"],
+		["npm view my-package", "viewing reads"],
+		["npm run build", "and running a script is ordinary"],
+		["pnpm install", "the other package manager's install"],
+		["yarn npm install", "and yarn's, which has the extra word"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test.each([
+		["gh repo delete owner/name", "which deletes a repository"],
+		["gh repo delete owner/name --yes", "with the flag its help names, a bare --yes with no short form"],
+		["gh secret delete API_KEY -R owner/name", "which removes a credential"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * `gh repo archive` is excluded on purpose and this row is here so the
+	 * exclusion is a decision rather than an oversight: a repository can be
+	 * unarchived. `gh run delete` is excluded for a different reason — it removes
+	 * a CI log, which is a build record rather than the user's own work.
+	 */
+	test.each([
+		["gh repo archive owner/name", "reversible, unlike delete"],
+		["gh run delete 12345", "a log, not the user's work"],
+		["gh repo view", "viewing reads"],
+		["gh pr list", "listing lists"],
+		["gh secret list", "and this is the read beside the delete"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * These five programs are spelled the same in both shells, so both platforms
+	 * must answer the same way. A table hidden behind a `platform` check would
+	 * lose one of the two silently.
+	 */
+	test.each(["docker rm -f web", "kubectl delete pods --all", "npm publish", "git clean -fdx"])(
+		"%s is the same command on Windows",
+		(command) => {
+			expect(windows(command)).not.toBeNull();
+		},
+	);
+
+	test.each(["git push --force", "docker system prune -a", "gh repo delete o/n"])(
+		"%s is the same command on Windows, and behind a wrapper",
+		(command) => {
+			expect(windows(`powershell -Command "${command}"`)).not.toBeNull();
+			expect(posix(`sudo ${command}`)).not.toBeNull();
+		},
+	);
+});
+
+describe("a wrapper does not hide a development tool", () => {
+	/**
+	 * These rows are here because the first version of this batch got all of them
+	 * wrong, in one specific way: `developmentToolRules` was called from
+	 * `matchScript`, which sees each segment once and before any wrapper on it has
+	 * been stepped over. Every bare command was caught and every wrapped one came
+	 * back `null` — measured, before the move: `sudo git clean -fdx`,
+	 * `bash -c "git push --force"`, `cmd /c "docker system prune -a"` and
+	 * `powershell -Command "gh repo delete o/n"` were each invisible.
+	 *
+	 * A table placed one level too high is a table with a hole shaped exactly like
+	 * every wrapper in the file, and the tests that pinned the bare commands were
+	 * all green throughout. So the wrappers get their own rows rather than being
+	 * assumed to follow from the plain ones.
+	 */
+	test.each([
+		["sudo git clean -fdx", "the wrapper that has a branch of its own", posix],
+		["sudo docker system prune -a", "same wrapper, another table", posix],
+		["env git push --force", "the wrapper that also takes a split string", posix],
+		["command git clean -fdx", "one that exists only to run a name", posix],
+		["xargs git clean -fdx", "one that runs a command per input line", posix],
+		["bash -c 'git push --force'", "a shell handed the command as a string", posix],
+		["sh -c 'npm publish'", "and the same under sh", posix],
+		["eval 'git clean -fdx'", "and one reached through eval", posix],
+		["bash -c 'git clean -fdx && echo done'", "with a second command in the string", posix],
+		['powershell -Command "git clean -fdx"', "PowerShell's own spelling", windows],
+		['cmd /c "git clean -fdx"', "a CMD body, which is a separate read", windows],
+		['cmd /c "docker system prune -a"', "and a body holding an external program", windows],
+		['powershell -Command "gh repo delete o/n"', "the forge command too", windows],
+	])("%s is still classified — %s", (command, _why, classify) => {
+		expect(classify(command)).not.toBeNull();
+	});
+
+	/**
+	 * The four wrappers are not interchangeable on both platforms, and the reason
+	 * is not symmetry. `cmd` is a Windows shell: on POSIX there is no `/c` switch
+	 * and `cmd` reads as an ordinary program name, so a POSIX line that starts
+	 * with it is not a wrapped command. `sudo` is the other way round — it is
+	 * unwrapped on both platforms, which was true before this batch and is
+	 * deliberate, because Windows 11 ships `sudo.exe` and a line that says
+	 * `sudo` there runs the command behind it exactly as it does here.
+	 */
+	test("cmd /c is not a POSIX wrapper", () => {
+		expect(posix('cmd /c "git clean -fdx"')).toBeNull();
+	});
+
+	test("sudo unwraps on Windows too", () => {
+		expect(windows("sudo git clean -fdx")).not.toBeNull();
+	});
+});
+
 describe("the two platforms are not the same rules", () => {
 	/**
 	 * A Windows-only rule must not fire on a POSIX line and vice versa. If the
