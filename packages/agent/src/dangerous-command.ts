@@ -132,6 +132,20 @@ function isAssignment(arg: string): boolean {
 	return eq > 0 && !arg.startsWith("-");
 }
 
+/**
+ * The assignment prefix of a command line, or the array itself when there is
+ * none.
+ *
+ * Returned by identity rather than by a new array so the caller can ask "did
+ * anything change?" with `!==` and know the answer, which is what stops a
+ * segment that starts with no assignment from recursing into itself.
+ */
+function stripLeadingAssignments(tokens: string[]): string[] {
+	let i = 0;
+	while (i < tokens.length && isAssignment(tokens[i])) i++;
+	return i === 0 ? tokens : tokens.slice(i);
+}
+
 /** Extract the script text from a `sh -c '…'` style invocation. */
 function wrapperScript(tokens: string[]): string | undefined {
 	const program = executableName(tokens[0] ?? "", "posix");
@@ -356,6 +370,34 @@ const COMMAND_PREFIX_VALUE_OPTIONS = new Map<string, ReadonlySet<string>>([
 	// `env -u NAME`, `-C DIR`, `-S STRING`, `--argv0 NAME`. `-i` and
 	// `--ignore-environment` are deliberately absent: they take no value.
 	["env", new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string", "--argv0"])],
+	// `sudo -u USER`, `-g GROUP`, `-p PROMPT`, `-C NUM`, `-D DIR`, `-U USER`,
+	// `-h HOST`, `-r ROLE`, `-t TYPE`. Its `-n`, `-E`, `-b`, `-S`, `-k`, `-i`,
+	// `-A` and `-s` all take nothing, and listing `-n` here would be the exact
+	// mistake the note above describes: `sudo -n rm -rf /` is a non-interactive
+	// delete, not a command called `rm` with `-n` as its adjustment.
+	[
+		"sudo",
+		new Set([
+			"-u",
+			"--user",
+			"-g",
+			"--group",
+			"-p",
+			"--prompt",
+			"-C",
+			"--close-from",
+			"-D",
+			"--chdir",
+			"-U",
+			"--other-user",
+			"-h",
+			"--host",
+			"-r",
+			"--role",
+			"-t",
+			"--type",
+		]),
+	],
 ]);
 
 const EMPTY_VALUE_OPTIONS: ReadonlySet<string> = new Set();
@@ -428,6 +470,21 @@ function matchTokens(
 	}
 	if (tokens.length === 0) return null;
 
+	// `LC_ALL=C rm -rf /` sets an environment variable and then runs a command.
+	// A POSIX shell reads the assignment prefix as part of the command line, not
+	// as a program, so the program is the first word that is not an assignment.
+	// `isAssignment` was already here and already consulted — but only *inside*
+	// `commandAfterOptions`, which is to say only after a wrapper had been
+	// recognised. At the top level it was unreachable.
+	//
+	// The recursion is safe because the array strictly shrinks: every pass removes
+	// at least the word it found, and `commandAfterOptions` below terminates for
+	// the same reason. `depth` is deliberately not raised — an assignment is not a
+	// wrapper, and counting it as one would spend the depth budget on a word that
+	// runs nothing.
+	const assigned = stripLeadingAssignments(tokens);
+	if (assigned !== tokens) return matchTokens(assigned, depth, platform, segment);
+
 	const command = stripShellScaffolding(tokens);
 	if (command !== undefined) return matchTokens(command, depth, platform, segment);
 
@@ -436,8 +493,14 @@ function matchTokens(
 		return { kind: "ForcedRm", rule: "`rm` with a force option" };
 	}
 	// `sudo <cmd>` is `<cmd>`, run as someone else.
+	//
+	// Options go through the shared skipper, which is the whole fix: this used to
+	// hand `tokens.slice(1)` straight back, so every option in front of the command
+	// was left where the program name is read. `sudo -u root rm -rf /` — the
+	// everyday spelling, and the one a user types rather than the one a test
+	// thinks of — classified as nothing.
 	if (program === "sudo") {
-		return matchTokens(tokens.slice(1), depth + 1, platform, segment);
+		return matchTokens(commandAfterOptions(tokens.slice(1), valueOptionsFor("sudo")), depth + 1, platform, segment);
 	}
 	if (program === "env") {
 		// `env -S 'rm -rf /'` does not take a command after the options: it takes

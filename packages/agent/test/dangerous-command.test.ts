@@ -301,6 +301,170 @@ describe("POSIX: a wrapper in front of the command is followed", () => {
 	});
 });
 
+/**
+ * `sudo` is the wrapper whose options are not rare.
+ *
+ * The branch used to hand `tokens.slice(1)` straight back, which is right for
+ * exactly one spelling — `sudo rm -rf /` — and wrong for every spelling a
+ * person actually types. `sudo -u root rm -rf /` puts `-u` where the program
+ * name is read, `-u` is not a dangerous program, and the command classified as
+ * nothing. Measured before this batch: `null`, for every row in the first table.
+ *
+ * A per-program value-option list is the fix, and it is the shape `env`, `doas`
+ * and `pkexec` already use here. What makes it a list rather than a rule of
+ * "skip every word that starts with a dash" is that the two directions
+ * disagree: `-u` takes a value and `-n` does not, and `sudo -n rm -rf /` is a
+ * non-interactive delete rather than a `rm` invoked with `-n` as an adjustment.
+ * `doas -n cat /etc/hosts` and `doas -n rm -rf /`, both in the table above, are
+ * the same collision from the other program, which is why the lists cannot be
+ * shared between them.
+ */
+describe("POSIX: sudo's options say nothing about the command it runs", () => {
+	test.each([
+		["sudo -u root rm -rf /", "`-u USER`, the everyday spelling"],
+		["sudo -u www rm -rf /", "the same with another user name"],
+		["sudo --user root rm -rf /", "the long option with its value as its own word"],
+		["sudo --user=root rm -rf /", "the long option with its value glued on"],
+		["sudo -g wheel rm -rf /", "`-g GROUP`"],
+		["sudo -p 'pw' rm -rf /", "`-p PROMPT`, whose value arrives unquoted and quoted"],
+		["sudo -C 3 rm -rf /", "`-C NUM`"],
+		["sudo -D /var/lib/sudo rm -rf /", "`-D DIR`"],
+		["sudo -U other rm -rf /", "`-U USER`"],
+		["sudo -E rm -rf /", "`-E`, which takes nothing — the first row that was missed"],
+		["sudo -n rm -rf /", "`-n`, which also takes nothing: this is the `doas -n` row again"],
+		["sudo -H rm -rf /", "`-H`"],
+		["sudo -k rm -rf /", "`-k`"],
+		["sudo -b rm -rf /", "`-b`"],
+		["sudo -S rm -rf /", "`-S`, which on sudo is not the split-string option it is on env"],
+		["sudo -- rm -rf /", "after the end-of-options marker"],
+		["sudo -n -u root rm -rf /", "a valueless flag before a value option"],
+		["sudo -E -H -n rm -rf /", "three valueless flags in front of the command"],
+		["sudo -u root -- rm -rf /tmp/build", "a value option, then the marker, then the command"],
+		["sudo -u root sh -c 'rm -rf /'", "the command is another wrapper's script"],
+		["sudo -u root env FOO=1 rm -rf /", "two wrappers deep, with an assignment between them"],
+		["sudo -u root xargs rm -rf", "another wrapper, with no force flag of its own"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	test.each([
+		"sudo",
+		"sudo -l",
+		"sudo -v",
+		"sudo -V",
+		"sudo -k",
+		"sudo --help",
+		"sudo -u root",
+		"sudo ls -la",
+		"sudo make",
+		"sudo apt-get install nginx",
+		"sudo -u www-data make",
+		"sudo -E bun test",
+		"sudo -H vim file.txt",
+		"sudo -n systemctl restart nginx",
+		"sudo -p 'pw' bun test",
+		"sudo -u root -- ls -la /tmp",
+	])("%s is not dangerous", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * Probes again, and again not valid usage — `sudo -h rm -rf /` asks sudo to
+	 * run on the host called `rm`, which is a thing it can be asked to do and not
+	 * a thing anyone types. The rows are here because `-h` and `-t` are in the
+	 * value-option list and nothing else in the file can tell whether they are.
+	 *
+	 * Read one against the other: with `-h` in the list, `sudo -h rm -rf /`
+	 * consumes `rm` as the host and never reads it as a program; without it,
+	 * `-h` is an ordinary flag, `rm` is the program, and the row classifies as a
+	 * forced recursive delete. So the row is not decoration and it is not a
+	 * missed detection either — the command behind it does not exist.
+	 */
+	test.each(["sudo -h rm -rf /", "sudo -t rm -rf /"])(
+		"%s is a probe: the option's value is a word the shell would run",
+		(command) => {
+			expect(posix(command)).toBeNull();
+		},
+	);
+});
+
+/**
+ * `LC_ALL=C rm -rf /` is one command, and the word in front of it is not the
+ * program.
+ *
+ * A POSIX shell reads the assignment prefix as part of the command line, so the
+ * program is the first word that is not an assignment. The predicate for that
+ * already existed and was already correct — `isAssignment` — and it was
+ * unreachable at the top level: it was consulted only inside
+ * `commandAfterOptions`, which runs only once a wrapper has been recognised. So
+ * `FOO=bar rm -rf /`, with no wrapper anywhere in the line, was `null`.
+ *
+ * Two things about this are worth stating because the obvious guess is wrong in
+ * both cases.
+ *
+ * The strip's position relative to `stripShellScaffolding` does not matter, and
+ * it looks as though it must: with the scaffolding strip first,
+ * `FOO=bar nohup rm -rf /` meets a word that is not scaffolding and that pass
+ * returns `undefined`. It is caught anyway, because what the scaffolding pass
+ * returns when it *does* strip something is a shorter array, and the caller
+ * recurses with it — so every path re-runs both strips over whatever survived.
+ *
+ * Nor does the `while` matter as against a single step. The call site recurses,
+ * so stripping one assignment per pass reads `A=1 B=2 rm -rf /` exactly as well
+ * as a loop does. Both were measured, by swapping one for the other and running
+ * the suite: each stayed green. So no row here claims to pin the order or the
+ * loop. The two properties that *are* pinned are that the strip happens at all,
+ * and that it asks `isAssignment` rather than eating every leading word — the
+ * probe row below being the second one.
+ */
+describe("POSIX: an assignment in front of the command is part of the command line", () => {
+	test.each([
+		["FOO=bar rm -rf /", "the plain case"],
+		["LC_ALL=C rm -rf /", "the one people type, and a real assignment"],
+		["PATH=/opt/bin rm -rf /", "an assignment to a name that means something"],
+		["A=1 B=2 rm -rf /", "two of them"],
+		["a=b=c rm -rf /", "a value that itself contains an equals sign"],
+		["FOO=bar sudo -u root rm -rf /", "an assignment, then a wrapper with an option"],
+		["A=1 sh -c 'rm -rf /'", "an assignment, then a wrapper whose argument is a script"],
+		["FOO=bar env rm -rf /", "an assignment, then another wrapper"],
+		["FOO=bar nohup rm -rf /", "an assignment, then a word only scaffolding knows"],
+		["FOO=bar time rm -rf /", "another scaffolding word"],
+		["FOO=bar command rm -rf /", "an assignment, then a builtin wrapper"],
+	] as [string, string][])("%s is dangerous — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	test.each([
+		"FOO=bar",
+		"FOO=bar bun test",
+		"CC=gcc make",
+		"NODE_ENV=test bun run build",
+		"DEBUG=1 cargo test",
+		"FOO=bar baz qux",
+		"PATH=$PATH:/opt/bin ls",
+		"FOO=bar nohup bun test",
+	])("%s is not dangerous", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test("`--flag=value` is an option, not an assignment, even in front of nothing", () => {
+		// The guard is the leading dash and it is doing real work. Without it,
+		// `--define=A=1` reads as an assignment, and the probe below would turn
+		// into a detection rather than staying quiet — which is the only reason
+		// the probe can distinguish the two readings at all.
+		expect(posix("--flag=value ls")).toBeNull();
+		expect(posix("--define=A=1 rm -rf /")).toBeNull();
+	});
+
+	test("an argument that looks like an assignment is not one", () => {
+		// Only the *leading* words are an assignment prefix. `git log
+		// --format=%H` has an assignment-shaped word in it and a program in front
+		// of it, and the strip is a prefix strip rather than a search.
+		expect(posix("git log --format=%H")).toBeNull();
+		expect(posix("curl -d a=b https://x")).toBeNull();
+	});
+});
+
 describe("POSIX: case folding on the command and on its flags", () => {
 	/**
 	 * Every ordering of the letters, in every case.
