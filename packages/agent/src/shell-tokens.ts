@@ -16,6 +16,14 @@
  * `&` and `;` cover backgrounding and sequencing, `|` a pipe, and a newline the
  * same job `;` does. The two-character forms come first in the alternation so
  * `&&` is not read as two `&`.
+ *
+ * **This does not know about quotes, and splitting a command line with it is
+ * wrong in a way that shows up as a false positive rather than a missed match.**
+ * `printf 'a;rm -rf /'` is one command that prints; split with this it becomes
+ * two, and the second one is classified. Use {@link splitShellCommands}, which
+ * tracks quoting and backslash escapes. This stays exported because it also
+ * answers "which characters are separators", which is a question about the
+ * alphabet rather than about any one command.
  */
 export const COMMAND_SEPARATOR_RE = /(?:\|\||&&|[;|&\n])/;
 
@@ -59,10 +67,77 @@ export function tokenizeShell(segment: string): string[] {
 	return tokens;
 }
 
-/** Split a command line into the separate commands it runs. */
+/**
+ * Split a command line into the separate commands it runs.
+ *
+ * The scan tracks two things the regex it replaces did not, and both of them
+ * were producing wrong answers rather than merely coarse ones.
+ *
+ * **Quotes.** `echo "a;rm -rf /"` is one command that prints six words. Split on
+ * the separator characters alone it becomes two, and the second is a forced
+ * recursive delete — so the classifier refused commands that print text
+ * containing a semicolon, which is the sort of false positive a user answers by
+ * switching the thing off.
+ *
+ * **Backslashes.** A backslash quotes the character after it, so `find . -exec
+ * cmd \;` is one command whose argument is a semicolon. Split naively, the
+ * trailing `\` was dropped and the segment lost its terminator.
+ *
+ * A backslash inside single quotes is itself rather than an escape, which is the
+ * one rule here that does not generalise and is the reason this is a scanner and
+ * not a single lookbehind.
+ *
+ * The quote characters are left in each segment. {@link tokenizeShell} is what
+ * unwraps them, and the segments are meant to keep their original text so a
+ * caller that shows one to a user shows what was actually typed.
+ */
 export function splitShellCommands(command: string): string[] {
-	return command
-		.split(COMMAND_SEPARATOR_RE)
-		.map((segment) => segment.trim())
-		.filter((segment) => segment.length > 0);
+	const segments: string[] = [];
+	let current = "";
+	let quote: '"' | "'" | null = null;
+
+	for (let i = 0; i < command.length; i++) {
+		const char = command[i];
+		if (char === "\\" && quote !== "'") {
+			const next = command[i + 1];
+			if (next === undefined) {
+				current += char;
+				continue;
+			}
+			current += char + next;
+			i++;
+			continue;
+		}
+		if (quote) {
+			if (char === quote) quote = null;
+			current += char;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			quote = char;
+			current += char;
+			continue;
+		}
+		// The two-character forms are read as one. Whether they *have* to be is a
+		// question the empty-segment filter answers no: `a && b` split twice still
+		// comes out `["a", "b"]`. It is here because the loop advances a cursor and
+		// reading one separator at a time would leave it straddling the second `&`
+		// for no gain.
+		const pair = command.slice(i, i + 2);
+		if (pair === "&&" || pair === "||") {
+			segments.push(current);
+			current = "";
+			i++;
+			continue;
+		}
+		if (char === ";" || char === "|" || char === "&" || char === "\n") {
+			segments.push(current);
+			current = "";
+			continue;
+		}
+		current += char;
+	}
+	segments.push(current);
+
+	return segments.map((segment) => segment.trim()).filter((segment) => segment.length > 0);
 }

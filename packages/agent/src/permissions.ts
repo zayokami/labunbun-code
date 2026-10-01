@@ -41,7 +41,7 @@ import {
 	type DangerousCommandMatch,
 	type DangerousCommandPlatform,
 } from "./dangerous-command.ts";
-import { COMMAND_SEPARATOR_RE, tokenizeShell } from "./shell-tokens.ts";
+import { splitShellCommands, tokenizeShell } from "./shell-tokens.ts";
 import type { PermissionMode, PermissionResult, SandboxMode } from "./types.ts";
 
 export type RuleSource = "userSettings" | "projectSettings" | "localSettings" | "policy" | "cliArg" | "session";
@@ -155,7 +155,7 @@ export { COMMAND_SEPARATOR_RE, tokenizeShell } from "./shell-tokens.ts";
 export function extractBashFilePaths(command: string): string[] {
 	const found: string[] = [];
 
-	for (const segment of command.split(COMMAND_SEPARATOR_RE)) {
+	for (const segment of splitShellCommands(command)) {
 		const tokens = tokenizeShell(segment);
 		if (tokens.length === 0) continue;
 
