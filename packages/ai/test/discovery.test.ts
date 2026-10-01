@@ -51,10 +51,10 @@ const KEY_VARS = [
 	"GLM_API_KEY",
 	"OPENAI_API_KEY",
 	"GEMINI_API_KEY",
-	// One name for all four OpenCode providers: Zen and Go issue a single
-	// dashboard key, and the gateway names the same variable the two plans are
-	// reached under in OpenCode's own catalog (`env: ["OPENCODE_API_KEY"]` on
-	// both the `opencode` and `opencode-go` entries).
+	// One name for all four gateway providers: Zen and Go issue a single
+	// dashboard key, and each plan's own catalog entry declares the same
+	// variable (`env: ["OPENCODE_API_KEY"]` on both of them), so one exported
+	// key reaches whichever plan the user bought.
 	"OPENCODE_API_KEY",
 ];
 

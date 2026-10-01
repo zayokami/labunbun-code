@@ -425,9 +425,9 @@ describe("the network axis does not smuggle a wrapper around an unrestricted fil
 	// Linux that silently breaks the network instead of confining it, because
 	// `--unshare-net` puts the command in a namespace where the proxy on
 	// `127.0.0.1` is unreachable and allowed domains fail alongside denied ones.
-	// Codex reaches that branch only because it pairs `--unshare-net` with a
-	// TCP→UDS→TCP bridge (`codex-rs/linux-sandbox/README.md`); this build has no
-	// bridge, so "wrap anyway" would enforce the axis by breaking the network.
+	// A build that reaches that branch can only do so because it pairs
+	// `--unshare-net` with a TCP→UDS→TCP bridge; this build has no bridge, so
+	// "wrap anyway" would enforce the axis by breaking the network.
 	test.each(["darwin", "linux"] as const)(
 		"an unrestricted filesystem wraps nothing on %s, whatever the network",
 		(platform) => {
@@ -468,7 +468,7 @@ describe("the network axis does not smuggle a wrapper around an unrestricted fil
 		if (resolution.kind !== "native") return;
 		expect(resolution.execution.argv).toContain("--unshare-net");
 		// And the network is *not* unshared when it is open, or an allowed request
-		// could never get out — the same reason Codex does not pair the two.
+		// could never get out — the same reason this build does not pair the two.
 		const open = resolveSandboxExecution({
 			policy: policyFor({
 				sandbox: "workspace-write",

@@ -337,7 +337,7 @@ describe("what a boundary keeps", () => {
 	});
 
 	test("the one that does not fit is truncated, not skipped", () => {
-		// Codex's rule, and the reason for it: the budget stops the boundary from
+		// The reason for the rule: the budget stops the boundary from
 		// becoming a second transcript, and the message that overruns it is older
 		// than everything kept — a request cut down still beats an absent one.
 		const long = `ask:${"y".repeat(200_000)}`;

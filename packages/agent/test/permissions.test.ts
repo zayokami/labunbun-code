@@ -168,10 +168,9 @@ describe("evaluatePermissions", () => {
 	 * then runs `rm -rf /` would have got `allow` from the allow loop and never
 	 * reached the classifier at all.
 	 *
-	 * The refusal to copy Codex's `allow`-prefix short-circuit
-	 * (`execpolicy/src/policy.rs:305-332`) is a decision the plan states in
-	 * writing. A decision that only exists in a comment is not a decision, and
-	 * this is the line that makes it one.
+	 * The decision not to let an `allow` prefix rule short-circuit the classifier
+	 * is one the plan states in writing. A decision that only exists in a comment
+	 * is not a decision, and this is the line that makes it one.
 	 */
 	test.each(PERMISSION_MODES.flatMap((mode) => SANDBOX_MODES.map((sandbox) => [mode, sandbox] as const)))(
 		"an allow rule does not buy %s with sandbox %s a dangerous command",

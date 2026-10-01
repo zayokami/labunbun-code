@@ -1,11 +1,11 @@
 /**
  * The Windows filesystem sandbox — which is not a sandbox, and says so.
  *
- * Codex's Windows implementation compiles two helper binaries and registers a
- * Windows service (`windows-sandbox-rs`, `windows-sandbox-service`); the shell
- * then goes through a service that holds the real handle and applies the real
- * ACLs. This build does none of that — the user ruled a helper program out —
- * and there is no user-mode equivalent of macOS `seatbelt`.
+ * A real Windows confinement layer compiles two helper binaries and registers a
+ * Windows service; the shell then goes through that service, which holds the
+ * real handle and applies the real ACLs. This build does none of that — the
+ * user ruled a helper program out — and there is no user-mode equivalent of
+ * macOS `seatbelt`.
  *
  * So what this module is: **a decision this process makes about calls that
  * arrive through the tools.** A subprocess that goes around the tools is not

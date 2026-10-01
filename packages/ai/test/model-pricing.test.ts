@@ -115,7 +115,7 @@ const BUILT_IN_REFS = [
 	"minimax/minimax-m2.7-highspeed",
 	"minimax/minimax-m2.5",
 	"minimax/minimax-m2.5-highspeed",
-	// OpenCode: 79 Zen rows and 29 Go rows, each on both wires — 216 references,
+	// The gateway: 79 Zen rows and 29 Go rows, each on both wires — 216 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
 	// pairs below show: `deepseek-v4-pro` is 1.74/3.84 on Zen and 0.66/1.98 on Go,
@@ -429,7 +429,7 @@ describe("the built-in catalog", () => {
 			cacheWrite: 3.75,
 		});
 		// Sonnet 5.5 launched at the same four figures as the row below it, and the
-		// vendor page, models.dev's `anthropic` entry and its `opencode` entry all
+		// vendor page, models.dev's `anthropic` entry and its Zen-plan entry all
 		// agree — so the cache channel here is the standard tenth and the 1.25x,
 		// which is what the row's `anthropicPricing(2, 10)` spells out.
 		expect(resolveModel("anthropic/claude-sonnet-5-5")?.pricing).toEqual({
@@ -505,7 +505,7 @@ describe("the built-in catalog", () => {
 		// is the same price tier and the same 6-generation, and its page does not
 		// carry the constraint — "none" is not one of its efforts at all.
 		//
-		// The three OpenCode rows below are the same two models reached through a
+		// The three gateway rows below are the same two models reached through a
 		// reseller, which is the point of the constraint being a row's: the host
 		// changed and it travelled anyway. They are on the OpenAI wire only. The
 		// field is read in exactly one place in this repo — the OpenAI
@@ -650,7 +650,7 @@ describe("the built-in catalog", () => {
 			["minimax/minimax-m2.5", 0.3, 1.2, 0.03, 0.375],
 			["minimax/minimax-m2.5-highspeed", 0.6, 2.4, 0.03, 0.375],
 
-			// OpenCode, on the same terms and the same day. Twenty-nine of these rows
+			// The gateway, on the same terms and the same day. Twenty-nine of these rows
 			// state a cache-write rate and the rest state none, so three quarters of the
 			// table ends in 0 — which is the reading Gemini and MiniMax M3 already take,
 			// not a claim that writing the cache is free everywhere on the gateway.
@@ -932,7 +932,7 @@ describe("the built-in catalog", () => {
 			["minimax/minimax-m2.5", 204_800, 204_800],
 			["minimax/minimax-m2.5-highspeed", 204_800, 204_800],
 
-			// OpenCode, swept 2026-09-28. These are the numbers the compaction threshold
+			// The gateway, swept 2026-09-28. These are the numbers the compaction threshold
 			// is derived from, so they are transcribed rather than rounded:
 			// `hy4-preview` on Go is 1,024,000 rather than 1M.
 			["opencode-zen/big-pickle", 200_000, 32_000],
@@ -1396,7 +1396,7 @@ describe("ids that were retired", () => {
 	test("retired ids are not offered as models", () => {
 		// The map is for references already written, not a catalog to choose from.
 		//
-		// Scoped away from the four OpenCode providers, and the scoping is the point
+		// Scoped away from the four gateway providers, and the scoping is the point
 		// rather than a concession: an id is retired *at a vendor*, not everywhere.
 		// `deepseek-v4-flash` and `kimi-k2.5` are ids DeepSeek and Kimi no longer
 		// serve under that name, and they are also the names of models a reseller
@@ -1497,7 +1497,7 @@ describe("ids that were retired", () => {
 		// The other half of "reachable only qualified", and the half with no
 		// collision behind it: `gpt-5-codex` is not retired anywhere, it simply
 		// belongs to a vendor this build does not carry, and only the gateway
-		// sells it. Left to the plain id match it resolves — to OpenCode Zen, at
+		// sells it. Left to the plain id match it resolves — to the Zen plan, at
 		// Zen's price, on a host whose key is `OPENCODE_API_KEY`.
 		//
 		// What that costs is not a failed lookup but a silently changed meaning,

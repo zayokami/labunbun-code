@@ -7,11 +7,14 @@
  * switch the session to plan mode before the human answers. The answer the user
  * gives is real, and it is about a promise the screen stopped making.
  *
- * This is the same defect Claude Code's changelog records as "switching modes
- * while a check is pending reliably prompts instead of applying the stale
- * result" (`CHANGELOG.md:430`). The phrasing matters: the fix is not "refuse
- * everything that raced", it is that the verdict is re-decided, and only a fresh
- * refusal overrides a human's yes.
+ * The fix is not "refuse everything that raced", it is that the verdict is
+ * re-decided, and only a fresh refusal overrides a human's yes. Those are two
+ * claims with opposite failure modes, so this file runs three scenes: a switch
+ * to a mode that refuses the call, a switch to a mode that does not need to ask
+ * at all, and the control where nothing switched. Asserting only that the write
+ * did not land would pass just as happily under a resolver that refuses every
+ * answer that raced — the safe-looking bug, and the one these three are here to
+ * rule out.
  *
  * Driven through the real `runInteractive` in a subprocess with a scripted
  * transport and a stub TUI, because the code under test is `canUseTool` — the

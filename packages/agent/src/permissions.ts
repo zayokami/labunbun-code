@@ -11,8 +11,7 @@
  *      reach past them — a rule the user wrote is a floor, not a preference.
  *   2. the dangerous-command classifier, for Bash. Also above every mode, and
  *      also above `danger-full-access`: turning the sandbox off is not a request
- *      to stop classifying. Codex composes it the same way
- *      (`codex-rs/core/src/exec_policy.rs:770-855`).
+ *      to stop classifying.
  *   3. `plan`'s read-only tool list, which is a deny and so sits above the
  *      allow rules for the same reason step 1 does.
  *   4. among allows, the first match decides, and there is deliberately no
@@ -378,9 +377,8 @@ function readBashCommand(input: unknown): string | undefined {
  * the model does not, so a bare "allow?" would train a user to say yes to the
  * one prompt that needed reading.
  *
- * `agent` refuses outright. This is the same shape as Codex's
- * `AskForApproval::Never => Decision::Forbidden` (`exec_policy.rs:799-807`) and
- * it is what keeps "every call runs without asking" from being read as "every
+ * `agent` refuses outright, and that is what keeps "every call runs without
+ * asking" from being read as "every
  * call runs, including the one that deletes the repository". A mode that
  * auto-approves everything has nothing left to protect a user with, so the
  * commands that cannot be un-done are the ones it is not allowed to spend.

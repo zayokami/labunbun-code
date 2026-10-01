@@ -14,11 +14,11 @@
  * `https://` reaches this proxy as `CONNECT host:443` followed by a byte pipe.
  * The proxy sees the hostname and then stops being able to see anything, which
  * is exactly the trade this build makes: it can refuse a destination, and it
- * cannot read the traffic. The alternative — a locally generated CA, as Codex
- * does in `network-proxy/src/mitm.rs` — buys content inspection and costs the
- * user a certificate in their trust store that whoever gets one file write can
- * use. Not making that trade is in the plan's "not delivered" list and it is a
- * real limitation, not an oversight: a domain on the allow list can exfiltrate
+ * cannot read the traffic. The alternative — a locally generated CA with a
+ * man-in-the-middle in front of it — buys content inspection and costs the user
+ * a certificate in their trust store that whoever gets one file write can use.
+ * Not making that trade is in the plan's "not delivered" list and it is a real
+ * limitation, not an oversight: a domain on the allow list can exfiltrate
  * through a request this proxy cannot read.
  *
  * ## What this does not stop
@@ -134,19 +134,15 @@ export interface NetworkProxy {
  * policy ends up enforced for half the tools in a build, and it fails open for
  * the other half.
  *
- * The earlier version of this comment ended "Codex lists the same keys for the
- * same reason (`network-proxy/src/proxy.rs:599`)". It does not, and the
- * difference is the size of the gap: Codex's `PROXY_URL_ENV_KEYS` is sixteen
- * entries, and the six URL keys in the table below are the ones in common. The
- * ten it has and this does not are `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`,
- * `NPM_CONFIG_HTTP_PROXY`, `NPM_CONFIG_HTTPS_PROXY`, `NPM_CONFIG_PROXY`,
- * `BUNDLE_HTTP_PROXY`, `BUNDLE_HTTPS_PROXY`, `PIP_PROXY`, `DOCKER_HTTP_PROXY`
- * and `DOCKER_HTTPS_PROXY`.
- *
- * Whether the missing ten are a hole is NOT the same question as whether the
- * comment was wrong, and the honest answer was measured rather than assumed. Of
- * the four tool families they serve, three read the standard variables this
- * build already sets:
+ * The six URL keys in the table below are the standard spellings, and they are
+ * not the whole of what is in circulation: ten per-tool variables are read by
+ * the package managers that have a proxy option of their own, and none of them
+ * is set here — `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, `NPM_CONFIG_HTTP_PROXY`,
+ * `NPM_CONFIG_HTTPS_PROXY`, `NPM_CONFIG_PROXY`, `BUNDLE_HTTP_PROXY`,
+ * `BUNDLE_HTTPS_PROXY`, `PIP_PROXY`, `DOCKER_HTTP_PROXY` and
+ * `DOCKER_HTTPS_PROXY`. Those ten are the gap, and whether they are a hole was
+ * measured per family rather than assumed. Of the four families they serve,
+ * three read the standard variables this build already sets:
  *
  *   * npm: `node_modules/@npmcli/agent/lib/proxy.js:13` builds `PROXY_ENV_KEYS`
  *     as `{https_proxy, http_proxy, proxy, no_proxy}` and lower-cases every

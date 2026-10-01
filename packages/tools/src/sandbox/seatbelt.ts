@@ -9,8 +9,7 @@
  *
  * ## Shape
  *
- * The returned argv is the **argument vector after the program name**, exactly
- * as Codex returns it (`codex-rs/sandboxing/src/seatbelt.rs:1086-1095`):
+ * The returned argv is the **argument vector after the program name**:
  *
  *     ["-p", <profile>, "-D<KEY>=<value>", ..., "--", ...command]
  *
@@ -28,11 +27,11 @@
  *
  * The reason that is safe is that `sandbox-exec` substitutes a `-D` value as an
  * opaque string and does not re-lex it as SBPL — so there is nothing for a path
- * to escape from. **That premise is inherited from Codex, which builds its argv
- * the same way (`seatbelt.rs:1087-1100`) and relies on the same behaviour; it
- * was not verified here from a Mac.** It is the load-bearing assumption of the
- * file: if a future `sandbox-exec` did re-lex parameter values, the escaping path
- * would be a `.git`-protect rule silently replaced by an attacker-chosen allow.
+ * to escape from. **That premise is the reason this file is shaped this way at
+ * all, and it was not verified here from a Mac.** It is the load-bearing
+ * assumption of the file: if a future `sandbox-exec` did re-lex parameter values,
+ * the escaping path would be a `.git`-protect rule silently replaced by an
+ * attacker-chosen allow.
  * The cheap check is one command on a real Mac — a `-D` value containing
  * `(allow file-write*)` and see whether it takes effect — and it is a smoke test,
  * not a unit test.
@@ -51,14 +50,14 @@ import { canWrite, type SandboxPolicy } from "@labunbun/agent";
  * The part of the profile that is not the policy: process control, the terminal,
  * and local IPC.
  *
- * Trimmed from `codex-rs/sandboxing/src/seatbelt_base_policy.sbpl` (116 lines).
- * What was left out and why:
+ * Trimmed down from a 116-line base policy these rules were derived from, to the
+ * part a confined command actually needs. What was left out and why:
  *
  *   - The `(ipc-posix-name-regex #"^/__KMP_REGISTERED_LIB_[0-9]+$")` filter on
- *     the shared-memory operations (`seatbelt_base_policy.sbpl:98-101`) is
- *     dropped; the three operations themselves are emitted bare, which is a
- *     widening. The claim that libomp then registers its segment under an
- *     unfiltered name is the working theory, not a measurement.
+ *     the shared-memory operations is dropped; the three operations themselves
+ *     are emitted bare, which is a widening. The claim that libomp then
+ *     registers its segment under an unfiltered name is the working theory, not
+ *     a measurement.
  *   - `(deny default)` and `(allow signal (target same-sandbox))` are kept
  *     verbatim — they are the closed-by-default posture the whole file rests on.
  *
@@ -73,10 +72,10 @@ import { canWrite, type SandboxPolicy } from "@labunbun/agent";
  * variable — `sandbox-exec` refuses to compile the profile and exits 65, so
  * the symptom is a command that never runs carrying a parser backtrace instead
  * of a program. This file carried `(allow ipc-posix-sysv*)` for a while, and
- * that is not a real operation: Codex names the three SysV shared-memory
- * operations individually and has no sysv line at all
- * (`seatbelt_base_policy.sbpl:95-101`). Only the macOS job could find it,
- * because nothing outside a Mac parses SBPL.
+ * that is not a real operation: the three SysV shared-memory operations are
+ * named individually above (`ipc-posix-shm-read-data`, `...-write-create`,
+ * `...-write-unlink`) and there is no `ipc-posix-sysv*` form to fall back on.
+ * Only the macOS job could find it, because nothing outside a Mac parses SBPL.
  */
 const BASE_POLICY = `(version 1)
 (deny default)
@@ -97,10 +96,9 @@ const BASE_POLICY = `(version 1)
 ; nothing, which is what pinned the fault on the runtime's startup rather than
 ; on exec.
 ;
-; The rules are Codex's, copied from seatbelt_base_policy.sbpl:24-76 plus the
-; sysctl-write at :81-82. They are enumerated rather than a bare
-; (allow sysctl-read) because the enumeration is the reference implementation's
-; measured answer and it hands a confined command those specific keys rather
+; These rules were carried over from a working base policy rather than written
+; from scratch here. They are enumerated rather than a bare (allow sysctl-read)
+; because the enumeration hands a confined command those specific keys rather
 ; than every key the kernel has. The trade is that a runtime querying a key
 ; outside this list still fails to start, so adding to it is the price of not
 ; widening it.
@@ -282,7 +280,7 @@ export function buildSeatbeltArgs(policy: SandboxPolicy, command: string[]): str
  * are still carried for the Windows simulated layer, which has no readable
  * default and needs the list to answer at all.
  */
-const READ_BASELINE = `; Read baseline: readable everywhere, matching Codex's read-only mode.
+const READ_BASELINE = `; Read baseline: readable everywhere, matching this build's read-only mode.
 ; "read" entries are additions to this and so emit no rule of their own.
 (allow file-read*)`;
 
@@ -325,10 +323,9 @@ ${networkPolicy("restricted")}`;
  * emitted for it, while `/w/repo/x` is writable through the broad root. Denying
  * `file-write-unlink` on those ancestors closes the rename, and it has to be
  * emitted after every allow for the same last-rule-wins reason as the denies
- * themselves. Codex does this for read-only subpaths
- * (`seatbelt.rs:912-935`, `seatbelt.rs:1064-1074`); it applies here to denied
- * paths too, because relocating a denied path onto an unnamed directory is the
- * same bypass.
+ * themselves. The ancestor block covers protected and denied paths alike,
+ * because relocating a read-only subpath onto an unnamed directory and
+ * relocating a denied path onto one are the same bypass.
  */
 function protectedAncestors(policy: SandboxPolicy): SeatbeltParam[] {
 	const writable = policy.fileSystem.entries.filter((entry) => canWrite(entry.access)).map((entry) => entry.path);

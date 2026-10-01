@@ -34,10 +34,7 @@ import type { NetworkSandboxPolicy } from "./sandbox-policy.ts";
  * process may touch at all*. They are different questions — a mode that never
  * asks still runs something, and that something can delete files or open a
  * socket whether or not a human was consulted — so they are two enumerations
- * here and the pair is what a user actually picks. Codex composes them the same
- * way (`AskForApproval` × `SandboxMode` in `codex-rs/protocol/src/protocol.rs:986`
- * and `config_types.rs:104`), and Claude Code made the same split when it
- * replaced `danger-full-access` with a nested `sandbox` object.
+ * here and the pair is what a user actually picks.
  *
  * Each type is derived from its list, and every consumer — the zod schema in
  * `settings.ts`, the CLI validator, the picker — reads these two arrays rather

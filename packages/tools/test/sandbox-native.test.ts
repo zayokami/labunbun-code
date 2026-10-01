@@ -305,10 +305,9 @@ describe("buildSeatbeltArgs", () => {
 				"; nothing, which is what pinned the fault on the runtime's startup rather than",
 				"; on exec.",
 				";",
-				"; The rules are Codex's, copied from seatbelt_base_policy.sbpl:24-76 plus the",
-				"; sysctl-write at :81-82. They are enumerated rather than a bare",
-				"; (allow sysctl-read) because the enumeration is the reference implementation's",
-				"; measured answer and it hands a confined command those specific keys rather",
+				"; These rules were carried over from a working base policy rather than written",
+				"; from scratch here. They are enumerated rather than a bare (allow sysctl-read)",
+				"; because the enumeration hands a confined command those specific keys rather",
 				"; than every key the kernel has. The trade is that a runtime querying a key",
 				"; outside this list still fails to start, so adding to it is the price of not",
 				"; widening it.",
@@ -384,7 +383,7 @@ describe("buildSeatbeltArgs", () => {
 				"(allow mach-lookup",
 				'  (global-name "com.apple.system.opendirectoryd.libinfo")',
 				'  (global-name "com.apple.PowerManagement.control"))',
-				"; Read baseline: readable everywhere, matching Codex's read-only mode.",
+				"; Read baseline: readable everywhere, matching this build's read-only mode.",
 				'; "read" entries are additions to this and so emit no rule of their own.',
 				"(allow file-read*)",
 				'(allow file-write* (subpath (param "WRITABLE_ROOT_0")))',
@@ -801,8 +800,7 @@ describe("buildBwrapArgs on a protected path that is not there", () => {
 	// `--ro-bind` of an absent source makes bubblewrap refuse to start — so a
 	// narrower sandbox would turn into a shell that does not run, on exactly the
 	// machines (a fresh directory, a container that was never `git init`) where the
-	// protection has nothing to do anyway. The recipe below is Codex's
-	// (`bwrap.rs` `append_empty_directory_args`) and it is the only third answer:
+	// protection has nothing to do anyway. The recipe below is the only third answer:
 	// neither binding a path that cannot be bound nor dropping a path that must not
 	// be writable.
 

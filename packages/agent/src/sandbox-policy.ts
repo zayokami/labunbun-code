@@ -1,12 +1,10 @@
 /**
  * The sandbox policy: one data shape, several translators.
  *
- * This is deliberately a *value*, not a mechanism. It mirrors Codex's
- * `FileSystemSandboxPolicy` / `NetworkSandboxPolicy` pair
- * (`codex-rs/protocol/src/permissions.rs:80-239`) closely enough that the
- * backends below can be read against theirs, and it is built by pure functions
- * from a `SandboxMode` so that what a mode means can be asserted without
- * spawning anything.
+ * This is deliberately a *value*, not a mechanism. The filesystem and network
+ * halves are separate data, and it is built by pure functions from a
+ * `SandboxMode` so that what a mode means can be asserted without spawning
+ * anything.
  *
  * Three translators consume it, and which one runs is a property of the
  * platform, not of the policy:
@@ -59,11 +57,11 @@ function canonicalPolicyPath(path: string): string {
 	return path.replace(/\\/g, "/");
 }
 
-/** Whether the filesystem is confined at all. Mirrors Codex's `FileSystemSandboxKind`. */
+/** Whether the filesystem is confined at all. */
 export type FileSystemSandboxKind = "restricted" | "unrestricted";
 
 /**
- * What a single path is allowed. Mirrors Codex's `FileSystemAccessMode`.
+ * What a single path is allowed.
  *
  * `write` implies `read`: a path nothing may read is expressed as `deny`
  * rather than as an entry that is simply absent, because "absent" and "denied"
@@ -79,7 +77,7 @@ export type FileSystemAccessMode = "read" | "write" | "deny";
  */
 export const NETWORK_SANDBOX_POLICIES = ["restricted", "enabled"] as const;
 
-/** Mirrors Codex's `NetworkSandboxPolicy`. */
+/** How much of the network a confined command may use. */
 export type NetworkSandboxPolicy = (typeof NETWORK_SANDBOX_POLICIES)[number];
 
 export interface FileSystemSandboxEntry {
@@ -106,10 +104,9 @@ export interface FileSystemSandboxEntry {
 	/**
 	 * `skip` drops the entry when the path does not exist instead of failing.
 	 *
-	 * Codex has exactly this one variant (`FileSystemSandboxEntryMissingPathBehavior`,
-	 * `permissions.rs:196`) and defaults to it for self-referential entries, because
-	 * a policy naming a directory that was never created would otherwise make every
-	 * command fail on a machine where it does not apply.
+	 * The self-referential entries — a writable root naming itself — take this by
+	 * default, because a policy naming a directory that was never created would
+	 * otherwise make every command fail on a machine where it does not apply.
 	 *
 	 * **Dropped by the caller, not by a backend.** The translators are pure — they
 	 * cannot stat a path — so `resolveSandboxExecution` filters these out before
@@ -145,13 +142,13 @@ export interface SandboxPolicy {
 	 * Paths inside the workspace that must never be written, whatever else the
 	 * policy allows.
 	 *
-	 * **A deliberate divergence from Codex**, which expresses the same idea as deny
-	 * rules appended to the end of the profile. Keeping them in their own field
-	 * means the translators cannot forget them: the ordering that makes them
-	 * effective ("a deny must come after every allow that could otherwise cover
-	 * it") is a property each backend has to re-establish, and a backend that
-	 * forgets is exactly the bug this shape makes hard to write. The tests assert
-	 * the ordering on each backend rather than trusting it.
+	 * **These are a field of their own rather than deny rules appended to the end
+	 * of the policy.** The alternative — express them as appended denies — pushes
+	 * the whole thing onto each translator: the ordering that makes them effective
+	 * ("a deny must come after every allow that could otherwise cover it") is then a
+	 * property every backend has to re-establish, and a backend that forgets is the
+	 * bug this shape exists to make hard to write. The tests assert the ordering on
+	 * each backend rather than trusting it.
 	 *
 	 * Today this carries `.git` directories. That is not decoration: the tool-layer
 	 * guard in `packages/tools/src/containment.ts` stops Edit and Write, and the
@@ -180,8 +177,7 @@ export interface BuildSandboxPolicyOptions {
 	/**
 	 * The network axis, which is **not** derived from `sandbox`.
 	 *
-	 * Codex keeps these separate too (`FileSystemSandboxPolicy` and
-	 * `NetworkSandboxPolicy` are independent fields), and collapsing them would
+	 * Collapsing the two axes into one would
 	 * mean `workspace-write` silently cut the network — breaking `npm install` and
 	 * `git fetch` for every user who picked the default. The field exists now
 	 * because the proxy in batch 4 needs somewhere to land; until that setting
@@ -274,12 +270,10 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
  * protected entry, so seatbelt emitted no `(deny file-write*)` for it and bwrap
  * emitted no `--ro-bind`: the session wrote `.git/config` and reported success.
  *
- * Codex derives the same paths rather than scanning for them —
- * `permissions.rs:2392-2415` builds `.git` / `.agents` / `.codex` per writable
- * root unconditionally — and the reason is the same: a security control that is
- * only as good as the scan's coverage is not a control on the path that matters.
- * Only `.git` is derived here, because `.git` is the one this build's docs, its
- * tool-layer guard and its tests all name.
+ * Deriving is unconditional rather than conditional, and the reason is that a
+ * security control only as good as the scan's coverage is not a control on the
+ * path that matters. Only `.git` is derived, because `.git` is the one this
+ * build's docs, its tool-layer guard and its tests all name.
  *
  * Deduplicated, because the scan will usually have found it: a workspace that is
  * a git repository lists `<workspace>/.git` in `protectedPaths` already, and a

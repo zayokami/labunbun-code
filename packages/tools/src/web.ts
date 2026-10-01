@@ -167,10 +167,10 @@ export const resolveHostWithDns: HostResolver = async (hostname) => {
  * that one is checked against one address and connected to another. This narrows
  * that window to the gap between two resolutions; it does not close it. Closing
  * it means connecting to the resolved address while presenting the original
- * `Host`/SNI, which is the same problem Codex solves with a MITM CA and an
- * attribution frame (`codex-rs/network-proxy/src/mitm.rs`) — a trade this build
- * has declined and documented at the top of `proxy.ts`, so the honest sentence
- * here is the narrow one rather than a claim about the backstop.
+ * `Host`/SNI, which needs a MITM CA and an attribution frame to keep the two
+ * apart — a trade this build has declined and documented at the top of
+ * `proxy.ts`, so the honest sentence here is the narrow one rather than a claim
+ * about the backstop.
  *
  * A lookup that fails is a refusal rather than a pass: not knowing where a name
  * points is not evidence that it points somewhere public, and the fail-closed

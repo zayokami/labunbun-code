@@ -7,8 +7,7 @@
  * permission system that only has the first one cannot tell a model that ran
  * `rm -rf /` from one that ran `bun test`.
  *
- * Ported from Codex's `codex-rs/shell-command/src/command_safety/`. The shape
- * is deliberately the same because the reasoning behind it is:
+ * Three decisions carry the whole design, and each is here for a reason:
  *
  * - **Wrappers are followed, not trusted.** `sudo rm -rf /`, `env FOO=bar rm -rf`
  *   and `bash -lc 'rm -rf /'` are the same command to the thing that will be
@@ -25,27 +24,16 @@
  *   function can see — and that gap is why the engine runs this **before** the
  *   allow rules and never lets an allow rule turn a match into a pass.
  *
- * One deliberate divergence from Codex: an explicit `allow` prefix rule
- * short-circuits its dangerous-command classification entirely, and that is not
- * copied here. The mechanism is not a decision variant — checked in
- * `codex-main/codex-rs/execpolicy/src/decision.rs:9-16`, `Decision` has exactly
- * three arms, `Allow`/`Prompt`/`Forbidden`, and there is no `Skip`. (There *is* an
- * `ExecApprovalRequirement::Skip` at `core/src/exec_policy.rs:440`, which is a
- * different enum one layer up and is reached from `Decision::Allow`.) What
- * happens instead is ordering: the classifier is not called first and consulted
- * later, it is the fallback. `render_decision_for_unmatched_command_for_platform`
- * at `core/src/exec_policy.rs:770-776` calls
- * `dangerous_command_match_for_origin`, and that function is passed in as
- * `heuristics_fallback` to `check_multiple_with_options`
- * (`execpolicy/src/policy.rs:265-288`) — which hands it to
- * `matches_for_command_with_options`, whose own doc at `:290-296` says it runs
- * the fallback "If no rules match". So one matching `allow` prefix rule is
- * enough for the classifier never to be called, and the command is decided by
- * that rule alone.
- *
- * That is not copied here. In this repo a `deny` rule is a floor the user wrote
- * on purpose, and a rule on the other side of the file being able to switch the
- * classifier off is a new way around it.
+ * **One deliberate divergence, recorded because it looks like an oversight and
+ * is not.** There is a design in which an explicit `allow` prefix rule
+ * short-circuits dangerous-command classification entirely: the classifier runs
+ * only as a *fallback*, consulted when no rule matched, so one matching `allow`
+ * prefix is enough for it never to be called and the command is decided by that
+ * rule alone. That is not what happens here and must not be "corrected" into
+ * being. In this repo a `deny` rule is a floor the user wrote on purpose, and
+ * an allow rule on the other side of the file being able to switch the
+ * classifier off is a new way around it. The classifier runs, and a match is a
+ * match.
  */
 
 import { splitShellCommands, tokenizeShell } from "./shell-tokens.ts";
@@ -417,8 +405,8 @@ const SHELL_SCAFFOLDING = new Set([
  * The command a segment's leading scaffolding introduces, or `undefined` when
  * the segment opens with the command already.
  *
- * This is not a shell parser and does not try to be one — Codex reads these
- * constructs with a tree-sitter parse, which this repo has no equivalent of.
+ * This is not a shell parser and does not try to be one — a real parse of these
+ * constructs needs a tree-sitter grammar, which this repo has no equivalent of.
  * It reads *leading* scaffolding only, which is the narrowest rule that catches
  * the evasions measured for this batch, and narrowing it is what keeps the
  * controls standing: a `{` or a `(` that is not the first character of a
@@ -820,9 +808,9 @@ function matchTokens(
 	// `eval "rm -rf /"` is `rm -rf /`, reached through a string instead of
 	// through the command line.
 	//
-	// It is not in Codex's table, and it is here anyway because it was measured:
-	// against a real `bash`, `eval "rm -rf D"`, `eval 'rm -rf D'` and
-	// `eval rm -rf /` all deleted the directory, and `eval "echo hi"` did not.
+	// This is here because it was measured, not because it was assumed: against a
+	// real `bash`, `eval "rm -rf D"`, `eval 'rm -rf D'` and `eval rm -rf /` all
+	// deleted the directory, and `eval "echo hi"` did not.
 	//
 	// The string is the script, so the readable case is a script read rather than
 	// a shape matched — the same treatment `su -c` and `sh -c` get — and
@@ -1359,10 +1347,10 @@ function namesForcedSignal(arg: string): boolean {
  * `pkill`/`killall` — this is the analogue of the Windows `Stop-Process` rule
  * above, which is why the forced form is the one caught and the polite form
  * (`pkill node`, a plain SIGTERM to a dev server) is not. `pkill` is not a
- * binary on this box — `type -a pkill` reports a shell *function* from the
- * Claude Code wrapper, which is exactly the kind of thing worth recording
- * rather than assuming, so the rule is written from POSIX spelling and not from
- * what this machine happens to have.
+ * binary on this box — `type -a pkill` reports a shell *function* installed by
+ * the wrapper this session runs under, which is exactly the kind of thing worth
+ * recording rather than assuming, so the rule is written from POSIX spelling and
+ * not from what this machine happens to have.
  *
  * `systemctl`/`launchctl`/`service` — the verbs that *persist* are caught
  * (stop, disable, mask, kill, unload, bootout) and `restart` is not: a service
@@ -1645,10 +1633,9 @@ const FETCH_CMDLETS = new Set([
  * `Write-Output iex` nor `Select-String iwr` matches: an alias that is an
  * argument is a pattern or a message, not a command.
  *
- * Codex's `windows_dangerous_commands.rs` has no rules for any of these three
- * — its PowerShell rules are the URL/launcher rules and the forced delete, and
- * nothing else — so this is a divergence from the file this is ported from,
- * not a port of it.
+ * Each of these three was added here rather than inherited: the PowerShell rules
+ * above them cover URL/launcher shapes and the forced delete, and none of these
+ * is either. They are listed separately so a reader can see which is which.
  */
 /**
  * The execution policies that stop checking whether a script should run.
@@ -1694,9 +1681,9 @@ function isUacValueName(token: string): boolean {
 /**
  * Cmdlets that turn a protection off, and nothing else.
  *
- * Not in Codex's table. Every name and parameter here was read off this
- * machine's own PowerShell 5.1 rather than recalled, because a rule written
- * against a parameter that does not exist guards nothing:
+ * Every name and parameter here was read off this machine's own PowerShell 5.1
+ * rather than recalled, because a rule written against a parameter that does not
+ * exist guards nothing:
  *
  *   * `Set-MpPreference` has thirty-four parameters beginning `Disable`, from
  *     `DisableRealtimeMonitoring` through `DisableTamperProtection`. They are
@@ -1897,10 +1884,10 @@ const CMD_SEPARATORS = new Set(["&", "&&", "|", "||"]);
 /**
  * The switches that introduce a CMD body, and that a body may itself open with.
  *
- * `/k` is here and not in Codex's list at
- * `windows_dangerous_commands.rs:105`. `/k` does not run the body and leave; it
- * runs the body and *then* leaves a prompt open, so everything `/c` would have
- * run, it runs first.
+ * `/k` is here alongside `/c` rather than after it, and the difference is worth
+ * stating because it is not a superset: `/k` does not run the body and leave,
+ * it runs the body and *then* leaves a prompt open, so everything `/c` would
+ * have run, it runs first.
  */
 const CMD_BODY_SWITCHES = new Set(["/c", "/k", "/r", "-c"]);
 
@@ -2061,11 +2048,9 @@ function directGuiLaunch(tokens: string[]): DangerousCommandMatch | null {
 /**
  * Windows-only checks.
  *
- * Codex reaches its PowerShell rules through a tree-sitter parse of the script
- * (`powershell_tree_sitter.rs`) and keeps the token scan below as the fallback
- * for a line that will not parse. There is no tree-sitter here, so this is the
- * fallback shape on its own — which is why the PowerShell entry point is
- * reached by tokenizing the whole invocation rather than parsing a script
+ * There is no PowerShell parser here. A real parse of these constructs needs a
+ * tree-sitter grammar, and this repo has no equivalent of one, so what follows is
+ * a token scan over the whole invocation rather than a walk of a parsed script
  * body. A constructed cmdlet (`& ("Remove-" + "Item") -Force`) is invisible to
  * it. That gap is a real limit of this function, not a bug in it, and it is
  * why the engine treats a match as something to stop and a non-match as only
@@ -2132,9 +2117,8 @@ function matchWindows(tokens: string[]): DangerousCommandMatch | null {
 /**
  * Windows administrative programs, and the verbs that make them destructive.
  *
- * These are not in Codex's table at all — Codex flags a forced `rm` and a URL
- * being launched, and nothing here. They are here because each one is a thing
- * that destroys a machine's state and can be undone by nothing the user has.
+ * Every program named here is here because each one destroys a machine's state
+ * and can be undone by nothing the user has.
  *
  * Almost none of them is dangerous in *every* form, which is why this is a
  * program and a verb rather than a program. `wevtutil el` lists the event log

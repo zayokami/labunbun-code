@@ -132,9 +132,10 @@ describe("resolveApiKey", () => {
 	});
 
 	test("the Kimi rows read the vendor's own variable as well", () => {
-		// Moonshot's docs name MOONSHOT_API_KEY on both platforms; KIMI_API_KEY is a
-		// name their Codex guide chose and this table had already adopted, so both
-		// have to work: a key exported under either name is the same key.
+		// Moonshot's docs name MOONSHOT_API_KEY on both platforms; KIMI_API_KEY is
+		// this table's own spelling for the same key and predates the vendor
+		// variable being read, so both have to work: a key exported under either
+		// name is the same key.
 		const model = resolveModel("kimi/kimi-k3");
 		if (!model) throw new Error("expected the built-in model to resolve");
 		expect(apiKeyEnvNames(model)).toEqual(["KIMI_API_KEY", "MOONSHOT_API_KEY"]);

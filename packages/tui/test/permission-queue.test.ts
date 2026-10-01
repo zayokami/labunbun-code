@@ -246,8 +246,9 @@ describe("scoped always-allow", () => {
  * The case that makes this necessary is a mode that moved. Everything queued was
  * raised under the mode in force when it was raised, and `EnterPlanMode` is
  * concurrency-safe: a grant made after it fires must not carry a `Write` that
- * plan mode now refuses. OpenCode gates its cascade the same way
- * (`core/src/permission.ts:266`, `if (denied(input, rules)) continue`).
+ * plan mode now refuses. What the tests below pin is the shape of the answer to
+ * that: a fresh refusal asks again, a fresh permission keeps the cascade, and a
+ * plain "yes, just this once" never consults the gate at all.
  */
 describe("the policy gate on the cascade", () => {
 	const CWD = "C:\\work\\proj";

@@ -672,13 +672,25 @@ export function collectPermissionRules(loaded: LoadedSettings): PermissionRule[]
  * sandbox. Returns the reason when a downgrade happened so the caller can tell
  * the user why the mode they asked for isn't the one they got.
  *
- * `disableBypassPermissionsMode` keeps its name and its meaning under the
- * rename: it is a Claude Code compatibility key, and in that product it turns
- * off the mode that neither asks nor confines. Here that mode is
- * `danger-full-access`, so the key downgrades that one axis and leaves the
- * approval policy alone — narrowing a machine's confinement without also
- * making it prompt for things it used to run silently is the smaller change,
- * and a policy file that wanted both can set them itself.
+ * `disableBypassPermissionsMode` keeps its name and its spelling across the
+ * rename. It is a policy-tier key — an admin writes it into the managed
+ * settings file, which is why `PROJECT_TIER_KEY_POLICY` denies it from every
+ * other tier — and renaming a key that lives in files we do not control breaks
+ * them quietly rather than loudly: the schema does not refuse a field it has
+ * never heard of, it strips it and reports success, so `loadSettings` prints no
+ * warning and the lockdown simply stops applying. A wrong *type* under a known
+ * key does fail the parse. A renamed key is the silent half.
+ *
+ * The name is a fossil of the old mode enum, where `bypassPermissions` was one
+ * value doing two jobs at once: never ask, and confine nothing. That value is
+ * gone — the two jobs are `permissionMode` and `sandbox`, asked separately (see
+ * `LEGACY_MODE_SUGGESTIONS`). Of the pair, only "confine nothing" is something a
+ * policy file can take away without also bringing an unattended run to a halt,
+ * so that is the axis this key moves: `danger-full-access` comes back as
+ * `workspace-write`, and the approval policy is left exactly as asked. Narrowing
+ * a machine's confinement without also making it prompt for things it used to
+ * run silently is the smaller change, and a policy file that wanted both can set
+ * them itself.
  */
 export function resolveMode(
 	requested: { mode: PermissionMode; sandbox: SandboxMode },

@@ -4,10 +4,9 @@
  * Pure, like `sandbox-policy.ts` next door and for the same reason: the proxy
  * that enforces this is the only part that touches a socket, so the decision
  * can be asserted on any machine, including the Windows one this was written
- * on. The shape follows Codex's `NetworkDomainPermission`
- * (`config/src/permissions_toml.rs:278`) — a table of pattern to `allow` or
- * `deny` — with the pieces this build does not have (unix sockets, remote
- * config, MITM) left out rather than stubbed.
+ * on. The shape is a table of host pattern to `allow` or `deny`, with the
+ * pieces this build does not have (unix sockets, remote config, MITM) left out
+ * rather than stubbed.
  *
  * ## What "enforced" means here, stated once
  *
@@ -39,9 +38,7 @@
  * sentence described a design rather than the build. Narrowing a seatbelt
  * profile to loopback is expressible; the equivalent is **not** available for
  * `--unshare-net`, whose namespace has no route to the host's loopback at all
- * without a userspace bridge (Codex pairs the two — `codex-rs/linux-sandbox/
- * README.md`: "the helper uses `--unshare-net` plus an internal TCP->UDS->TCP
- * routing bridge so tool traffic reaches only configured proxy endpoints").
+ * without a userspace routing bridge.
  * A loopback-narrowed macOS profile next to an unreachable-proxy Linux one
  * would be two behaviours under one setting, so neither is done and the
  * setting means what it does.
@@ -62,7 +59,7 @@ import { isIP } from "node:net";
  */
 export const NETWORK_DOMAIN_PERMISSIONS = ["allow", "deny"] as const;
 
-/** Per-pattern verdict. Mirrors Codex's `NetworkDomainPermissionToml`. */
+/** Per-pattern verdict. */
 export type NetworkDomainPermission = (typeof NETWORK_DOMAIN_PERMISSIONS)[number];
 
 export interface NetworkDomainRule {

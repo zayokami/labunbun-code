@@ -46,8 +46,8 @@ import { SIMULATED_SANDBOX_DISCLAIMER } from "./simulated.ts";
  * it. That direction is not a detail. A sandbox placed inside the command line
  * confines whatever the shell chooses to run, which on a POSIX line is anything
  * at all — `bash -c` re-execs, background jobs escape, and a wrapper that only
- * sees the outer shell's argv has already lost. Codex composes them the same way
- * (`sandboxing/src/seatbelt.rs`: `["-p", profile, …, "--", …command]`).
+ * sees the outer shell's argv has already lost. Both translators emit the command
+ * last, after a `--` separator, for the same reason.
  *
  * This type lives here rather than beside `ExecOperations` so that this module
  * does not have to import the one that calls it.
@@ -150,8 +150,8 @@ export function nativeSandboxProgram(platform: SandboxPlatform): string {
  * `sandbox-exec` is at a fixed absolute path on macOS and is part of the OS, so
  * that one is a single check. `bwrap` is a distribution package on Linux, so it
  * is a PATH scan — and the answer genuinely varies by machine, which is why
- * `MISSING_BWRAP_WARNING` is a real state Codex has to handle and not a
- * theoretical one.
+ * "bubblewrap is not installed here" is a real state the caller has to handle
+ * and not a theoretical one.
  */
 export function detectNativeBackend(platform: SandboxPlatform, env: NodeJS.ProcessEnv = process.env): boolean {
 	if (!hasNativeSandboxBackend(platform)) return false;
@@ -228,12 +228,13 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	// the boundary. That is a real option and it is deliberately not taken
 	// silently — it converts `restricted` from "the kernel denies it" into "a
 	// proxy the program can ignore", which is a different and weaker promise,
-	// and a user who set `restricted` chose the stronger one. Codex does have
-	// the bridge that makes both true at once (`codex-rs/linux-sandbox/
-	// README.md`: "the helper uses `--unshare-net` plus an internal TCP->UDS->TCP
-	// routing bridge so tool traffic reaches only configured proxy endpoints");
-	// this build has no bridge, so it has one of the two properties rather than
-	// both, and says which.
+	// and a user who set `restricted` chose the stronger one. Both can be true at
+	// once, but only with a routing bridge between them: keep `--unshare-net` for
+	// the kernel's refusal and hand the confined process's own traffic to a Unix
+	// socket, which a small forwarder carries out over TCP to the proxy that
+	// applies the domain list. That bridge is a helper program, and this build
+	// ships none — so it has one of the two properties rather than both, and says
+	// which.
 	if (policy.fileSystem.kind === "unrestricted") return { kind: "unconfined" };
 
 	if (!hasNativeSandboxBackend(platform)) {
@@ -276,8 +277,7 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	const exists = options.exists ?? ((path: string) => existsSync(path));
 	const present = presentEntries(policy, exists);
 
-	// Both translators return the argv *after* the program name — that is how
-	// Codex returns them too (`seatbelt.rs:1087`, `bwrap.rs:248`) — so the program
+	// Both translators return the argv *after* the program name, so the program
 	// is named here and nowhere else. Absolute for `sandbox-exec`, which must be
 	// the system binary: resolving it through `PATH` is how a wrapper gets
 	// substituted.

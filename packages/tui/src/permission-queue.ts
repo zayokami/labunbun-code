@@ -27,9 +27,14 @@ export interface PermissionRequestQueueOptions {
 	 * The queue knows *matching* — whether the rule just granted covers this
 	 * input. It does not know *policy*: the rules, the permission mode, or the
 	 * sandbox. Those live in the app layer, so the app layer answers, and the
-	 * answer is a fresh evaluation rather than a restatement of the match. This
-	 * is the shape of OpenCode's `if (denied(input, rules)) continue` before its
-	 * cascade (`core/src/permission.ts:266`).
+	 * answer is a fresh evaluation rather than a restatement of the match.
+	 *
+	 * Matching cannot stand in for that, because a queued request outlives the
+	 * policy that raised it: a turn's concurrency-safe tools run in parallel, so
+	 * a sibling can move the session into plan mode while an earlier `Write` is
+	 * still sitting on a dialog. Whether the rule covers this input is a claim
+	 * about the input; whether this session may run it *now* is a second question,
+	 * and the queue holds nothing that could answer it.
 	 *
 	 * Optional, and its absence is the safe direction: a queue with no policy
 	 * access keeps the old behaviour rather than guessing.

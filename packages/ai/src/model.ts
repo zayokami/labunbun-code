@@ -18,15 +18,15 @@ const GLM_BASE = "https://api.z.ai/api/paas/v4";
 const DEEPSEEK_BASE = "https://api.deepseek.com/v1";
 /** MiniMax's international host; `/chat/completions` on it is OpenAI's wire. */
 const MINIMAX_BASE = "https://api.minimax.io/v1";
-// OpenCode's two plans, on two wires each. The two spellings of one plan differ
+// The gateway's two plans, on two wires each. The two spellings of one plan differ
 // only by a path prefix, and the difference is the SDK's, not a convenience: the
 // Anthropic client appends `/v1/messages` to whatever base it is given, so it
 // needs the prefix *stripped*, while the OpenAI client appends
 // `/chat/completions` and needs it *kept*. The unversioned pair is therefore not
 // a typo to be tidied up — it is the value the Anthropic wire has to be given.
-/** OpenCode Zen, the pay-as-you-go plan, on the Anthropic wire. */
+/** The Zen plan, pay-as-you-go, on the Anthropic wire. */
 const OPENCODE_ZEN_BASE = "https://opencode.ai/zen";
-/** OpenCode Go, the $10/month subscription, on the Anthropic wire. */
+/** The Go plan, the $10/month subscription, on the Anthropic wire. */
 const OPENCODE_GO_BASE = "https://opencode.ai/zen/go";
 /** The same two, for the OpenAI-compatible wire. */
 const OPENCODE_ZEN_OAI_BASE = "https://opencode.ai/zen/v1";
@@ -269,10 +269,10 @@ function openAIResponsesModel(
 }
 
 /**
- * One model on one of the two OpenCode plans, transcribed once and materialized
+ * One model on one of the two gateway plans, transcribed once and materialized
  * onto both wires below.
  *
- * OpenCode sells the same catalog two ways: Zen, pay-as-you-go, and Go, a
+ * The gateway sells the same catalog two ways: Zen, pay-as-you-go, and Go, a
  * subscription. Each plan has its own key, its own host and its own price list,
  * and the two do not agree with each other on a model they share — which is what
  * stops this collapsing into one table. `deepseek-v4-pro` is $1.74/$3.84 on Zen
@@ -282,12 +282,14 @@ function openAIResponsesModel(
  * converting between them, so the two lists below are separate transcriptions
  * and neither is ever filled in from the other.
  *
- * The figures are models.dev's catalogue for its `opencode` and `opencode-go`
- * providers, swept 2026-09-28, filtered against the gateway's own unauthenticated
- * `/v1/models` listing the same day. Both halves are needed and neither is
- * sufficient, and each is wrong on its own: the gateway proves which ids can be
- * called and publishes no price and no limit; models.dev states the money and
- * the sizes but is hand-edited and drifts in both directions. The gateway serves
+ * The figures are transcribed from models.dev's catalogue entries for the two
+ * plans, swept 2026-09-28, filtered against the gateway's own unauthenticated
+ * `/v1/models` listing the same day. Every number below is a copy of a published
+ * price and must not be derived — see the cache rates below for what derivation
+ * gets wrong. Both halves are needed and neither is sufficient, and each is wrong
+ * on its own: the gateway proves which ids can be called and publishes no price
+ * and no limit; models.dev states the money and the sizes but is hand-edited and
+ * drifts in both directions. The gateway serves
  * 83 ids on Zen against the 78 priced here, and 43 on Go against 29 — while every
  * priced, undeprecated entry is served, so nothing we can state has been left
  * out. The ids the gateway serves that models.dev does not price are named at the
@@ -1118,8 +1120,8 @@ const BUILT_IN_MODELS: Model[] = [
 	// from "the newest model" — Mythos 5.1 is newer than the pair and runs none.
 	//
 	// The price is unchanged from Sonnet 5, and the vendor, models.dev's `anthropic`
-	// entry and models.dev's `opencode` entry all say the same four figures, so
-	// this is a copy of an agreement rather than a derivation. Its own default
+	// entry and models.dev's entry for the Zen plan all say the same four figures,
+	// so this is a copy of an agreement rather than a derivation. Its own default
 	// effort is `high`, which is what we send for a session that asked for nothing.
 	anthropicModel("claude-sonnet-5-5", "Claude Sonnet 5.5", {
 		contextWindow: 1_000_000,
@@ -1406,7 +1408,7 @@ const BUILT_IN_MODELS: Model[] = [
 	// M2 is the one row on the vendor's model list that states an output cap
 	// (128k, counting CoT) — which is not a number that transfers to a successor.
 	//
-	// OpenCode, last. Two plans, two wires, four provider ids, from the two
+	// The gateway, last. Two plans, two wires, four provider ids, from the two
 	// transcriptions above: a gateway is not a vendor, so one plan on one wire is
 	// one provider, and the base URL is the only thing that distinguishes them.
 	// Writing these out as four separate call sites would be 107 rows that differ
@@ -1448,7 +1450,7 @@ const BUILT_IN_MODELS: Model[] = [
 	// `deepseek-flash`, `glm-5`, `glm-5.1`, `grok-4.5`, `hy3-preview`,
 	// `kimi-k2.5`, `kimi-k2.6`, `mimo-v2-omni`, `mimo-v2-pro`, `minimax-m2.5`,
 	// `omen-alpha`, `qwen3.5-plus`, `qwen3.6-plus` and `qwen3.7-max`. A user who
-	// sees one of these in OpenCode's own picker is not seeing a mistake here, and
+	// sees one of these in the gateway's own picker is not seeing a mistake here, and
 	// an entry added for any of them would be a price invented to fill a gap.
 	//
 	// A fourth wire exists that some of a vendor's rows deliberately do not
@@ -1920,7 +1922,7 @@ export function resolveModel(reference: string): Model | undefined {
 	// host at a different price without anything having asked for that —
 	// `deepseek-v4-flash` is exactly the case: retired at DeepSeek in favour of
 	// `deepseek-flash`, and sold under its own name and its own rates by four
-	// OpenCode providers.
+	// gateway providers.
 	//
 	// And an id *no* first-party vendor carries resolves to nothing at all rather
 	// than to the gateway. `gpt-5-codex` is the case that shaped this: before the
@@ -1930,7 +1932,7 @@ export function resolveModel(reference: string): Model | undefined {
 	// OpenAI's, and the only symptom is a request that fails at the auth header.
 	// The rule the picker already follows is the one worth following here too: a
 	// model at a gateway is chosen by picking it, under the name it is offered
-	// under. Nothing about `gpt-5-codex` says "on OpenCode Zen".
+	// under. Nothing about `gpt-5-codex` says "on the Zen plan".
 	//
 	// A qualified reference is exempt from both, and has to be:
 	// `opencode-zen/deepseek-v4-flash` names the reseller, and resolving it to

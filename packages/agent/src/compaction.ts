@@ -383,9 +383,7 @@ export function compactionBoundary(
  * turns, and a stretch of work between the question and the summary is exactly
  * what a retelling leaves out. So the newest requests are carried beside it as
  * they were typed — newest first, to a budget, the one that does not fit
- * truncated rather than dropped, which is the rule Codex's own compaction uses
- * (`COMPACT_USER_MESSAGE_MAX_TOKENS`, newest-first accumulation, `truncate_text`
- * on the message that overruns it, then stop).
+ * truncated rather than dropped, and then the walk stops.
  *
  * The budget is what keeps a boundary a summary with an appendix rather than a
  * second copy of the transcript. What is not carried here is not lost: the

@@ -16,9 +16,7 @@
  * *discovering* directories nobody named, and each of them is a way for a
  * workspace that genuinely has a `.git` to end up with none protected.
  *
- * Codex derives the same paths rather than scanning for them
- * (`permissions.rs:2392-2415` builds `.git` / `.agents` / `.codex` per writable
- * root, unconditionally), and that is the model here.
+ * The paths are derived rather than left to the scan, and that is the model here.
  *
  * Every expectation is a **literal** in the canonical `/` spelling, and that is the
  * invariant rather than a workaround: the derivation normalises what it emits, so
@@ -99,8 +97,8 @@ describe("buildSandboxPolicy derives .git rather than waiting to find it", () =>
 	test("read-only roots are not given a `.git`, because nothing can write one", () => {
 		// A `read` entry never produces a writable mount, so a protected path inside
 		// it defends nothing that is not already defended — and every extra path is a
-		// mount bwrap has to make. Codex derives per *writable* root for the same
-		// reason (`permissions.rs:2392-2415` iterates the writable set).
+		// mount bwrap has to make. The derivation iterates the writable set, for
+		// exactly that reason.
 		const policy = buildSandboxPolicy({
 			sandbox: "workspace-write",
 			workspace: WORKSPACE,

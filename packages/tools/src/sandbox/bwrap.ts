@@ -10,9 +10,8 @@
  *
  * ## Shape
  *
- * The returned argv is the argument vector **after the program name**, matching
- * Codex's `BwrapArgs.args` (`codex-rs/linux-sandbox/src/bwrap.rs:248-402`), which
- * the caller prefixes with `bwrap`:
+ * The returned argv is the argument vector **after the program name**, which the
+ * caller prefixes with `bwrap`:
  *
  *     ["--new-session", "--die-with-parent", "--ro-bind", "/", "/", ...,
  *      "--unshare-user", "--unshare-pid", "--unshare-ipc", ["--unshare-net"],
@@ -47,13 +46,14 @@
  * kernel mount semantics from this machine, and it is load-bearing: if it is
  * wrong, this backend has a `.git`-relocation bypass and no test in this
  * repository would catch it, because the argv it produces is correct either way.
- * Codex emits the equivalent rules for the *seatbelt* backend
- * (`seatbelt.rs:912-935`, `:1064-1074`) and does not for its bwrap one, which is
- * the reference for the asymmetry. The cheap thing that would settle it is one
- * `bwrap` command on a real Linux box — `mv` a directory containing a `.git` out
- * from under its parent and see whether the repository survives — and that is a
- * manual smoke test, not something a unit test can do. Until it is run, treat
- * this as an assumption with a named owner rather than a property of the code.
+ * The asymmetry is not invented for this file: a backend that matches on
+ * pathnames has to carry those denies and a bind-mount backend does not, and
+ * this file is on the second side of that line. The cheap thing that would
+ * settle it is one `bwrap` command on a real Linux box — `mv` a directory
+ * containing a `.git` out from under its parent and see whether the repository
+ * survives — and that is a manual smoke test, not something a unit test can do.
+ * Until it is run, treat this as an assumption with a named owner rather than a
+ * property of the code.
  *
  * ## About `missingPathBehavior`
  *
@@ -84,8 +84,7 @@ import { canWrite, type SandboxPolicy } from "@labunbun/agent";
  *
  * The exception is an unconfined filesystem with `network: "restricted"`, which
  * still wraps: omitting `--unshare-net` there would silently discard a
- * restriction the caller asked for. Codex takes the same branch for the same
- * reason (`bwrap.rs:259-270`), and that branch is `bwrap --bind / /` plus the
+ * restriction the caller asked for. That branch is `bwrap --bind / /` plus the
  * namespace flags.
  *
  * `exists` is the one impure thing this function needs, and it is injected rather
@@ -105,14 +104,15 @@ export function buildBwrapArgs(
 	const writable = policy.fileSystem.entries.filter((entry) => canWrite(entry.access));
 	const denied = policy.fileSystem.entries.filter((entry) => entry.access === "deny").map((e) => e.path);
 	// Protected paths are read-only, not unreadable: `git status` has to read
-	// `.git`. Codex separates the two the same way
-	// (`permissions.rs:104-130`: `can_read` is `access !== Deny`).
+	// `.git`. Readable and writable are separate axes here, and a protected path
+	// is denied only the second — `canRead` in `@labunbun/agent` is
+	// `access !== "deny"`, so "protected" never reaches it.
 	const protectedPaths = policy.protected;
 
 	return [
 		"--new-session",
 		"--die-with-parent",
-		// Read baseline: readable everywhere, matching Codex's read-only mode.
+		// Read baseline: readable everywhere, matching this build's read-only mode.
 		// `read` entries are additions to this and so produce no mount at all,
 		// which is what `buildSandboxPolicy` means by "on the backends where the
 		// default is readable they are not emitted at all".
@@ -147,13 +147,13 @@ export function buildBwrapArgs(
  * moment `buildSandboxPolicy` began *deriving* `<root>/.git`, which is absent in
  * every workspace that is not a repository.
  *
- * The alternative is to mount an empty, read-only directory there instead, and it
- * is Codex's: `--perms 555 --tmpfs <path> --remount-ro <path>`
- * (`codex-rs/linux-sandbox/src/bwrap.rs:1198-1205`,
- * `append_empty_directory_args`). The path exists, it is empty, and it cannot be
- * written — so the protection holds for the directory that is not there yet as
- * well as the one that is, which is what a derived path needs and what a
- * scan-found path got for free.
+ * The alternative is to mount an empty, read-only directory there instead —
+ * `--perms 555 --tmpfs <path> --remount-ro <path>` — and it is the only third
+ * answer: neither binding a path that cannot be bound nor dropping a path that
+ * must not be writable. The path exists, it is empty, and it cannot be written —
+ * so the protection holds for the directory that is not there yet as well as the
+ * one that is, which is what a derived path needs and what a scan-found path got
+ * for free.
  *
  * `exists` defaults to "yes", which is the answer that reproduces the previous
  * argv exactly. It is not the right answer in production — the caller passes the
@@ -168,9 +168,9 @@ function readOnlyPathArgs(path: string, exists: (path: string) => boolean): stri
 }
 
 /**
- * The namespace flags, in Codex's order. The network flag is present **exactly**
- * when the policy restricts the network, and the filesystem has nothing to say
- * about it either way.
+ * The namespace flags. The network flag is present **exactly** when the policy
+ * restricts the network, and the filesystem has nothing to say about it either
+ * way.
  */
 function namespaceArgs(network: SandboxPolicy["network"]): string[] {
 	const args = [
