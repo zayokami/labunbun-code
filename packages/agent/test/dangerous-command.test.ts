@@ -2081,6 +2081,54 @@ describe("Windows: a protection that is switched off rather than used", () => {
 		["Add-MpPreference -ExclusionExtension .ps1", "excludes an extension"],
 		["Add-MpPreference -ExclusionProcess powershell", "excludes a process"],
 		["Add-MpPreference -ExclusionIpAddress 1.2.3.4", "excludes an address"],
+		// The carve-out parameters that do not start with `-exclusion`. Named from
+		// `(Get-Command Add-MpPreference).Parameters.Keys` on this machine rather
+		// than from the documentation, because the documentation's own name for the
+		// first of them — `AttackSurfaceReductionRules_Exclusions` — is not a
+		// parameter this build has. All four were null before: a `startsWith`
+		// test read the four `Exclusion*` parameters and none of the rest.
+		[
+			"Add-MpPreference -AttackSurfaceReductionRules_RuleSpecificExclusions 'C:\\Users\\bob\\Downloads'",
+			"excludes a path from attack-surface reduction, which does not start with -exclusion",
+		],
+		[
+			"Set-MpPreference -RemoteEncryptionProtectionExclusions C:\\x",
+			"and the same carve-out on the cmdlet that replaces the list",
+		],
+		["Add-MpPreference -BruteForceProtectionExclusions 'C:\\Program Files'", "a third family of the same shape"],
+		// The UAC value that is not UAC's own switch. Measured live: this machine
+		// reports `ConsentPromptBehaviorAdmin 0` under the UAC policy key, so the
+		// key is real and the value is the one an escalation payload writes.
+		[
+			"Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name ConsentPromptBehaviorAdmin -Value 0",
+			"elevates without prompting, with UAC itself left switched on",
+		],
+		[
+			'reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 0 /f',
+			"and the CMD spelling of the same write",
+		],
+		[
+			"Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name PromptOnSecureDesktop -Value 0",
+			"moves the consent dialog off the secure desktop, so a window can pose as it",
+		],
+		[
+			"Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name EnableInstallerDetection -Value 0",
+			"stops installers being detected at all — both of these read 0 on this machine",
+		],
+		// `Set-Item` and `New-Item` write a registry value as readily as the
+		// `*Property` cmdlets do, and both spellings of a startup entry were null.
+		[
+			"Set-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\evil' -Value 'calc.exe'",
+			"installs a logon entry without the word Property in the cmdlet",
+		],
+		[
+			"New-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run\\evil' -Value 'calc.exe' -Force",
+			"and the cmdlet that creates it",
+		],
+		[
+			"Set-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name ConsentPromptBehaviorAdmin -Value 0",
+			"which is also how the UAC value is written",
+		],
 		// `Set-MpPreference` carries the same four `-Exclusion*` parameters as
 		// `Add-MpPreference` (confirmed by `Get-Command Set-MpPreference` on this
 		// machine), so the two install the same carve-out into Defender. One act,
@@ -2164,7 +2212,21 @@ describe("Windows: a protection that is switched off rather than used", () => {
 		["Get-ExecutionPolicy", "reads it"],
 		["Get-ExecutionPolicy -List", "reads it per scope"],
 		["Set-MpPreference -ScanAvgCPULoadFactor 20", "a preference that is not a switch to disable"],
-		["Add-MpPreference -AttackSurfaceReductionRulesExclusions foo", "an exclusion that is not a scan exclusion"],
+		// `Add-MpPreference -AttackSurfaceReductionRulesExclusions foo` used to sit
+		// in this table, described as "an exclusion that is not a scan exclusion".
+		// It is not a parameter this build has — the real name is
+		// `AttackSurfaceReductionRules_RuleSpecificExclusions`, with an underscore —
+		// and the reason it was allowed was a distinction that does not hold: an ASR
+		// exclusion is a carve-out from a protection, exactly like a scan exclusion,
+		// and `Add-MpPreference` is the cmdlet that installs it. The row is now a
+		// positive row in the block above rather than a deletion, so the change of
+		// mind is visible instead of silent.
+		["Set-Item -Path C:\\temp\\x.txt -Value hello", "the commonest cmdlet there is, on an ordinary file"],
+		["New-Item -Path C:\\temp -ItemType Directory", "and creating a directory, which is not a registry write"],
+		[
+			"Set-Item -Path C:\\temp\\notes.md -Value 'EnableLUA is a UAC value'",
+			"a file whose content mentions a UAC value name",
+		],
 		["Get-MpPreference", "reads Defender's settings"],
 		["Get-MpComputerStatus", "reads Defender's status"],
 		["Start-MpScan", "runs a scan"],

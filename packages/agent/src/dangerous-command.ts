@@ -2249,9 +2249,28 @@ function isStartupFolderPath(token: string): boolean {
  * off when it is `1`. The leading `[:.-]` is so a parameter written the way
  * PowerShell accepts it — `-Name:EnableLUA` — is still recognised, and the `\b`
  * is what keeps `EnableLUAOld` from reading as this one.
+ *
+ * **The other value, which turns UAC off without touching UAC.** The switch
+ * that decides *how* an administrator is prompted is
+ * `ConsentPromptBehaviorAdmin`, and its default of `5` is "prompt with
+ * credentials"; `0` is "elevate without prompting", which is the setting a
+ * privilege-escalation payload writes. Measured on this machine:
+ * `Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'`
+ * reports `EnableLUA 1` and `ConsentPromptBehaviorAdmin 0`, so both spellings
+ * are live keys here. The other two are the same act a step down: `0` on
+ * `PromptOnSecureDesktop` moves the prompt off the secure desktop, so a
+ * malicious window can pose as the consent dialog, and `0` on
+ * `EnableInstallerDetection` stops installers being detected at all. Both read
+ * `0` on this machine, which is the downgraded state rather than the default.
+ *
+ * This is a *value* test and is always paired with {@link isUacPolicyKey}, so
+ * a parameter that merely mentions one of these names is not enough on its own.
  */
 function isUacValueName(token: string): boolean {
-	return /(?:^|[:.-])(?:enable|disable)lua\b/i.test(token);
+	return (
+		/(?:^|[:.-])(?:enable|disable)lua\b/i.test(token) ||
+		/consentpromptbehavioradmin|promptonsecuredesk|enableinstallerdetection/i.test(token)
+	);
 }
 
 /**
@@ -2421,10 +2440,23 @@ function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null
 		// list and one replacing it. That is one act spelled two ways, and the
 		// `Add-` branch below was written for the act, so both heads belong in it.
 		// `Set-MpPreference` is the stronger of the two because it overwrites.
-		if (
-			(head === "add-mppreference" || head === "set-mppreference") &&
-			segment.some((w) => w.startsWith("-exclusion"))
-		) {
+		//
+		// The test is `includes`, not a prefix, and the parameter list is why.
+		// Measured here with `(Get-Command Add-MpPreference).Parameters.Keys`: the
+		// four `Exclusion*` ones are the start of it, and the same command also
+		// takes `AttackSurfaceReductionRules_RuleSpecificExclusions`,
+		// `RemoteEncryptionProtectionExclusions` and `BruteForceProtectionExclusions`
+		// — all carve-outs, none of them starting with `-exclusion`. A prefix test
+		// read the first four and the rest were configured by the same cmdlet.
+		//
+		// `includes` over-matches exactly one parameter, `Set-MpPreference
+		// -QuickScanIncludeExclusions`, which asks a quick scan to *apply* the
+		// existing exclusions rather than adding one. It is a false positive on an
+		// obscure switch, and the trade is the one this file makes throughout: a
+		// prompt too many on a carve-out parameter beats a carve-out that reads as
+		// something else. The list is quoted above rather than summarised so a
+		// future reader can see which name is the odd one out.
+		if ((head === "add-mppreference" || head === "set-mppreference") && segment.some((w) => w.includes("exclusion"))) {
 			return { kind: "Other", rule: "PowerShell excluding a path from Defender scanning" };
 		}
 		if (head === "disable-localuser") {
@@ -2459,7 +2491,18 @@ function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null
 		// Two independent things, checked apart rather than as one conjunction:
 		// writing a value under the startup key does not mention UAC, and turning
 		// UAC off does not live under the startup key.
-		if (head === "set-itemproperty" || head === "new-itemproperty") {
+		//
+		// `Set-Item` and `New-Item` are here for the same reason as the two
+		// `*Property` cmdlets, and it is not a guess about which cmdlets can write a
+		// registry value: all four accept a `Registry::` provider path and all four
+		// create the value. `Set-Item -Path 'HKLM:\...\CurrentVersion\Run\evil' -Value
+		// 'calc.exe'` installs a logon entry exactly as `Set-ItemProperty` does, and
+		// it classified as nothing while the `*Property` spelling was caught. The
+		// target is still what decides — these are the two commonest cmdlets there
+		// are, and `Set-Item -Path C:\temp\x.txt -Value hello` must keep working,
+		// which it does because {@link isRunKeyPath} is a path test and not a
+		// program test.
+		if (head === "set-itemproperty" || head === "new-itemproperty" || head === "set-item" || head === "new-item") {
 			if (segment.some(isRunKeyPath)) {
 				return { kind: "Other", rule: "PowerShell writing a value to a key that runs at startup" };
 			}
