@@ -215,6 +215,78 @@ describe("evaluatePermissions", () => {
 		expect(evaluatePermissions("Read", { file_path: "a.txt" }, config).behavior).toBe("ask");
 	});
 
+	/**
+	 * A Bash call the classifier cannot read is refused rather than treated as an
+	 * ordinary command.
+	 *
+	 * Unreachable through the built-in Bash tool — the pipeline schema-validates
+	 * before `canUseTool`, so `command` is always a string by then. These rows are
+	 * here because the step-2 guarantee depends on that ordering, and the ordering
+	 * lives in `pipeline.ts` while the consequence lives here. If the schema were
+	 * ever relaxed, "no readable command" would silently become "not dangerous" and
+	 * `agent` mode's own answer below would allow it.
+	 */
+	describe("a Bash call with nothing for the classifier to read", () => {
+		// The shapes are table-driven because they take different routes to the
+		// same place: a non-string `command` fails the typeof check, a missing one
+		// and a non-object input fail the shape check, and all three used to land
+		// on the same silent `allow`.
+		test.each([
+			["a number", { command: 123 }],
+			["null", { command: null }],
+			["an array", { command: ["rm", "-rf", "/"] }],
+			["no command key at all", {}],
+			["a bare string", "rm -rf /"],
+			["null input", null],
+		])("is denied when the command is %s", (_label, input) => {
+			const config = { mode: "agent" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
+			const decision = evaluatePermissions("Bash", input, config);
+			if (decision.behavior !== "deny") throw new Error(`expected deny, got ${decision.behavior}`);
+			// A deny with no reason is indistinguishable from a bug, and the reason
+			// is what tells a reader this was a refusal to guess rather than a
+			// classification.
+			expect(decision.message).toContain("no readable string command");
+		});
+
+		test("and no allow rule can buy it back", () => {
+			// The bare `Bash` allow rule is the broadest thing a user can write, and
+			// it matching is exactly the case that would turn this back into a pass
+			// if the deny sat below the allow loop.
+			//
+			// Only an allow rule appears here. An earlier version of this row also
+			// listed a `Bash` deny, which made it pass for the wrong reason: step 1
+			// would have denied it before step 2 was reached, so the assertion held
+			// whether or not this branch existed. The message is what proves which
+			// step refused.
+			const config = {
+				mode: "agent" as const,
+				sandbox: SANDBOX,
+				rules: rules([["Bash", "allow"]]),
+				cwd: CWD,
+			};
+			const decision = evaluatePermissions("Bash", { command: 123 }, config);
+			if (decision.behavior !== "deny") throw new Error(`expected deny, got ${decision.behavior}`);
+			expect(decision.message).toContain("no readable string command");
+		});
+
+		test("a readable command is unaffected, in both directions", () => {
+			// The control for the table above: if the new branch fired on ordinary
+			// input, these would go with it.
+			const config = { mode: "agent" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
+			expect(evaluatePermissions("Bash", { command: "git status" }, config).behavior).toBe("allow");
+			expect(evaluatePermissions("Bash", { command: "rm -rf /" }, config).behavior).toBe("deny");
+		});
+
+		test("a non-Bash tool with no command is untouched", () => {
+			// Only Bash has a command to read. Applying the same refusal to every
+			// tool would refuse every call whose input is not shaped like a Bash
+			// call, which is all of them.
+			const config = { mode: "agent" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
+			expect(evaluatePermissions("Read", { file_path: "a.txt" }, config).behavior).toBe("allow");
+			expect(evaluatePermissions("Write", { file_path: "a.txt", content: "" }, config).behavior).toBe("allow");
+		});
+	});
+
 	test.each(["EnterPlanMode", "ExitPlanMode"])(
 		"plan mode permits %s to reach approval without bypassing denies",
 		(toolName) => {

@@ -197,6 +197,75 @@ describe("Write + Edit tools", () => {
 		expect(await Bun.file(join(dir, ".gitignore")).text()).toBe("dist\n");
 	});
 
+	// The test above would still pass if `write.ts` stopped calling
+	// `guardWritablePath`, because `buildSandboxPolicy` derives `<workspace>/.git`
+	// into `protected` whether or not a scan found it — so `decideWrite` refuses
+	// that path on its own. These two rows are the ones the derived list cannot
+	// produce, which makes them the only thing pinning the *call site* rather than
+	// the function underneath it. Delete the `guardWritablePath` line from either
+	// write.ts or edit.ts and both of these go red.
+	describe("the guard the policy cannot supply, reached through a real tool", () => {
+		test("a .git nested under node_modules is refused — the scan never walks there", async () => {
+			const dir = tempDir();
+			// `findProtectedPaths` does not descend into node_modules: measured at
+			// 76 ms against 1762 ms for a full walk, per `workspace-policy.ts`.
+			// So this repository is absent from `protected` no matter what the scan
+			// returns, and the tool-layer guard is the whole of the protection.
+			const nested = join(dir, "node_modules", "left-pad", ".git");
+			mkdirSync(nested, { recursive: true });
+			const config = join(nested, "config");
+			writeFileSync(config, "[core]\n");
+
+			const write = createWriteTool(dir, defaultOperations());
+			const result = await call(write, { file_path: config, content: "[core]\n\tevil = 1\n" });
+
+			expect(result.isError).toBe(true);
+			expect((result.content[0] as any).text).toContain("version-control metadata");
+			expect(await Bun.file(config).text()).toBe("[core]\n");
+
+			// The same refusal through Edit, because edit.ts carries its own
+			// `guardWritablePath` call and a guard only one of the two tools
+			// invokes is not a guard the other one has.
+			writeFileSync(config, "[core]\n\tbranch = main\n");
+			const edit = createEditTool(dir, defaultOperations());
+			const edited = await call(edit, { file_path: config, old_string: "main", new_string: "evil" });
+			expect(edited.isError).toBe(true);
+			expect(await Bun.file(config).text()).toBe("[core]\n\tbranch = main\n");
+		});
+
+		test("a .git spelled with a trailing space is refused — no policy entry can match it", async () => {
+			const dir = tempDir();
+			// On Windows this is a sibling *directory* named `".git "`, so nothing in
+			// the policy can refuse it: `protected` holds `<workspace>/.git`, and
+			// containment is a prefix match, so a different directory name is simply
+			// a different destination. On a share that strips trailing spaces it is
+			// the real repository, which is why refusing it costs nothing anywhere.
+			const sibling = join(dir, ".git ");
+			mkdirSync(sibling);
+			const config = join(sibling, "config");
+			writeFileSync(config, "[core]\n");
+
+			const write = createWriteTool(dir, defaultOperations());
+			const result = await call(write, { file_path: config, content: "[core]\n\tevil = 1\n" });
+
+			expect(result.isError).toBe(true);
+			expect((result.content[0] as any).text).toContain("version-control metadata");
+			expect(await Bun.file(config).text()).toBe("[core]\n");
+		});
+
+		test("and a directory that merely starts with .git is still writable", async () => {
+			// The other direction. A rule that matched on a prefix instead of a path
+			// segment would refuse this, and a workspace that cannot write its own
+			// `.github/` is not a workspace.
+			const dir = tempDir();
+			const ok = join(dir, ".github", "workflows");
+			mkdirSync(ok, { recursive: true });
+			const write = createWriteTool(dir, defaultOperations());
+			const result = await call(write, { file_path: join(ok, "ci.yml"), content: "on: push\n" });
+			expect(result.isError).toBeFalsy();
+		});
+	});
+
 	test("replace_all replaces every occurrence", async () => {
 		const dir = tempDir();
 		const file = join(dir, "r.txt");

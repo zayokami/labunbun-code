@@ -332,10 +332,35 @@ export function evaluatePermissions(
 	//    command, and the rules below are what an ordinary command gets.
 	if (toolName === "Bash") {
 		const command = readBashCommand(input);
-		if (command !== undefined) {
-			const match = classifyDangerousCommand(command, config.platform);
-			if (match) return decideDangerous(match, config.mode);
+		if (command === undefined) {
+			// Fail closed, and say so, rather than falling through to "not a
+			// dangerous command".
+			//
+			// **Unreachable through the built-in Bash tool today**, and this
+			// branch is here because of what it would mean if it were not. The
+			// pipeline parses tool input against the tool's schema *before* it
+			// calls `canUseTool` (`pipeline.ts`, the order is zod safeParse →
+			// validateInput → beforeToolCall → canUseTool), so a `command` that is
+			// not a string never reaches this function — the tool call already
+			// failed validation.
+			//
+			// But that guarantee lives in another file and is enforced by nothing
+			// that ties the two together. The alternative was to read "I could not
+			// find the command" as "the command is not dangerous", which is the
+			// one inference this whole step must never make: a classifier that is
+			// not consulted cannot report a match, and an `agent`-mode call with
+			// no allow rule would then be let through by the mode's own answer
+			// below. Relaxing the Bash schema from `z.string()` to `z.unknown()`
+			// is all it would take. Measured before the change:
+			// `evaluatePermissions("Bash", { command: 123 }, { mode: "agent", … })`
+			// returned `allow`, and so did `{ command: null }` and `{}`.
+			return {
+				behavior: "deny",
+				message: `Bash: the call carries no readable string command, so nothing can be classified. Refused rather than treated as safe — a call that is not shaped like a Bash call should have failed schema validation first.`,
+			};
 		}
+		const match = classifyDangerousCommand(command, config.platform);
+		if (match) return decideDangerous(match, config.mode);
 	}
 
 	// 3. `plan` is a deny, so it sits above the allow rules for the same
