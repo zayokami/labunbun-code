@@ -900,7 +900,10 @@ function matchTokens(
 		posixPermissionRules(tokens) ??
 		posixFindRules(tokens) ??
 		posixProcessRules(tokens) ??
-		posixProtectionRules(tokens)
+		posixProtectionRules(tokens) ??
+		posixSchedulingRules(tokens) ??
+		posixAccountRules(tokens) ??
+		posixSocketExecRules(tokens)
 	);
 }
 
@@ -1617,6 +1620,168 @@ function posixProcessRules(tokens: string[]): DangerousCommandMatch | null {
 	return null;
 }
 
+/**
+ * Accounts, and the capabilities attached to a program.
+ *
+ * Two families joined because both hand access to something that outlives the
+ * session — to a person in the first case and to a program in the second — and
+ * kept apart in the table's wording because what each one gives is different.
+ *
+ * **A program and not a verb, and the reason is that there is no read-only
+ * spelling to carve out.** `usermod -aG sudo bob` and `usermod -s /bin/bash bob`
+ * are the same program and only the first is privilege escalation, so a verb set
+ * would have to know which of `usermod`'s flags escalate in order to be right,
+ * and this file does not know. Windows came to the same conclusion about the
+ * same acts by a different route: `new-localuser`, `set-localuser` and
+ * `add-localgroupmember` are whole-program rules in `POWERSHELL_ADMIN_CMDLETS`
+ * with no flag test at all. Leaving the POSIX spelling of an act open while the
+ * Windows spelling is closed is how coverage comes to depend on which shell ran
+ * the command.
+ *
+ * **NOT MEASURED HERE, and the sentence above is the claim rather than a
+ * result** — the same position the `POSIX_PROTECTION_OFF` comment takes for
+ * itself. `command -v` on this machine finds none of these six programs (it is
+ * Windows with an MSYS userland), so there was no spelling to check and no
+ * behaviour to observe. What *is* checked is that each name is a program POSIX
+ * systems ship and that each is spelled the way its own documentation spells it.
+ *
+ * `adduser` is beside `useradd` for the reason `mke2fs` is beside `mkfs.ext4`
+ * in the disk rules above: on Debian it is a symlink to `useradd`, and
+ * `executableName` resolves neither name to the other, so a table keyed on one
+ * would leave the other out while looking complete.
+ *
+ * **What this costs.** `useradd` is what every account-provisioning script
+ * runs, including the ones that build the machine this file was written on.
+ * That is the cost `SERVICE_INSTALL_VERBS` already accepted and states in its
+ * own comment, and it is accepted here for the same reason: the account outlives
+ * the session, so the person who approved the command is not the person who
+ * will be living with it.
+ */
+const POSIX_ACCOUNT_PROGRAMS: ReadonlyMap<string, string> = new Map([
+	["useradd", "creates an account, which is a way back into this machine"],
+	["adduser", "creates an account, which is a way back into this machine"],
+	["usermod", "changes an account, which can hand it more than it had"],
+	["userdel", "deletes an account"],
+	["chpasswd", "sets account passwords, which can lock every account's owner out"],
+	// `setcap` is the file-capability spelling of the same grant: the bit stays on
+	// the file after its owner changes and after the set-user-ID bit is stripped,
+	// which is the property that makes it worth a rule rather than a `chmod u+s`
+	// note.
+	["setcap", "gives a file a capability it keeps without being set-user-ID"],
+]);
+
+function posixAccountRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+	const why = POSIX_ACCOUNT_PROGRAMS.get(program);
+	if (why === undefined) return null;
+	return { kind: "Other", rule: `\`${program}\`, which ${why}` };
+}
+
+/**
+ * `crontab`'s three spellings that do not install a job.
+ *
+ * The whole reason this table exists is that the other three are the ordinary
+ * ones: `-e` is where a person writes a crontab, `-l` prints one, and `-r`
+ * removes the current user's whole crontab.
+ */
+const CRONTAB_NON_INSTALLING_FLAGS: ReadonlySet<string> = new Set(["-e", "-l", "-r"]);
+
+/**
+ * Handing a command to a scheduler that will run it with nobody there.
+ *
+ * The cron half of this is the same act {@link posixStartupWrite} already covers
+ * by *path* — `cp /tmp/job /etc/cron.d/job` writes a file the scheduler runs on
+ * its own — reached through the program that installs a job rather than through
+ * the file it lands in. One door was covered and the other was not, and the gap
+ * is the shape of a rule filed under the wrong noun: nothing in this file said
+ * `crontab` was absent, only that `crontab` was not one of the ways it caught
+ * something.
+ *
+ * **NOT MEASURED HERE.** `command -v` finds neither `batch` nor `crontab` on this
+ * machine, so the three switch names in `CRONTAB_NON_INSTALLING_FLAGS` were read
+ * rather than run. **`at` is the third name and it is not absent**: `command -v at`
+ * answers `/c/Windows/system32/at`, which is the Windows Task Scheduler's `at` and
+ * not the POSIX `at(1)` these switches come from. So this one was checked and the
+ * answer was "a different program under the same name" — the same fact the
+ * `shutdown` comment in this group records.
+ *
+ * A bare `crontab` is in the rule on purpose: with no argument it reads the job
+ * on standard input and installs that, which is what `cat job | crontab` is.
+ */
+function posixSchedulingRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+	const args = tokens.slice(1);
+
+	if (program === "at" || program === "batch") {
+		// `at -l` lists the queue and installs nothing. `batch` has no listing
+		// switch, so `at` is the only one of the two this exemption can apply to.
+		if (program === "at" && args.includes("-l")) return null;
+		return {
+			kind: "Other",
+			rule: `\`${program}\`, which runs a command later, without anyone there to read what it did`,
+		};
+	}
+
+	if (program === "crontab") {
+		if (args.some((arg) => CRONTAB_NON_INSTALLING_FLAGS.has(arg))) return null;
+		return {
+			kind: "Other",
+			rule: "`crontab`, which installs a job the scheduler runs with no login needed",
+		};
+	}
+
+	return null;
+}
+
+/**
+ * The switches that make the netcat family run a program instead of reading one.
+ *
+ * Four spellings, and they are four rather than one because the three programs
+ * in this file's spelling of the family do not agree: `-e` is the netcat and
+ * ncat one, `--exec` and `--sh-exec` are its long spellings, and `-c` is the
+ * form that takes the command as one string and runs it through a shell.
+ *
+ * **NOT MEASURED, and that is a fact about this machine rather than a reason to
+ * leave the act uncovered.** `command -v` finds no `nc`, `ncat`, `netcat` or
+ * `socat` here, which is the same absence the `CREDENTIAL_SENDERS` comment
+ * records when it puts the same four names in that table. Nothing below was run.
+ */
+const NETCAT_EXEC_FLAGS: ReadonlySet<string> = new Set(["-e", "--exec", "--sh-exec", "-c"]);
+
+/**
+ * A socket tool that runs a program on the far end of its own connection.
+ *
+ * Neither program is dangerous because it is a network tool — `nc` and `socat`
+ * are in {@link CREDENTIAL_SENDERS} for being ordinary senders — and neither is
+ * dangerous because it listens. What is dangerous is the switch that turns it
+ * into `exec`: a listener with `-e` behind it is a shell waiting for a stranger
+ * to connect, and that shell is the payload whether or not it ever fires.
+ */
+function posixSocketExecRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+	const args = tokens.slice(1);
+
+	if (program === "socat") {
+		// The address type may be written `EXEC:` or `exec:` and may sit anywhere in
+		// a comma-separated address list, glued to its command:
+		// `socat EXEC:'/bin/bash -li',pty,stderr host:1`. So it is searched for
+		// anywhere in the token rather than anchored, and `SYSTEM:` — the other
+		// address type that spawns something — is deliberately not read here.
+		if (!args.some((arg) => arg.toLowerCase().includes("exec:"))) return null;
+		return { kind: "Other", rule: "`socat` with an `EXEC:` address, which runs a program on the far end" };
+	}
+
+	if (program !== "nc" && program !== "ncat" && program !== "netcat") return null;
+	if (!args.some((arg) => NETCAT_EXEC_FLAGS.has(arg.toLowerCase()))) return null;
+	return {
+		kind: "Other",
+		rule: `\`${program}\` with a program behind it, which runs that program instead of reading this side of the socket`,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Windows: PowerShell cmdlets, CMD builtins, and ShellExecute-style launches
 // ---------------------------------------------------------------------------
@@ -1923,6 +2088,56 @@ function isUacValueName(token: string): boolean {
  */
 function isUacPolicyKey(token: string): boolean {
 	return /\\policies\\system$/i.test(token);
+}
+
+/**
+ * Is this argument the root of a registry hive that holds credentials?
+ *
+ * The three are the machine's own: `SAM` is the Security Account Manager's copy
+ * of every local account, `SYSTEM` carries the LSA secrets, and `SECURITY`
+ * carries the policy — cached domain logons and Kerberos keys among them.
+ * `reg save` or `reg export` pointed at one of them writes a copy of that to a
+ * path the person running the command chooses, and a copy of it on a filesystem
+ * is not protected by anything the account's ACL would normally have enforced.
+ *
+ * Both spellings again, because both are real: `reg save HKLM\SAM …` from CMD
+ * and the same line typed in a PowerShell prompt, where the `HKLM\SAM` argument
+ * is just as often written `HKLM:\SAM` because that is the provider path the
+ * rest of the session uses. **There is no PowerShell *cmdlet* for this**, which
+ * `Get-Command Save-Hive` on this machine settles — it fails with
+ * `CommandNotFoundException`, while `Get-Command reg` resolves it as an
+ * Application. So the CMD spelling is not one of two doors here but the only
+ * one, and the two path spellings are the whole of what had to be read.
+ *
+ * The `$` at the end is {@link isUacPolicyKey}'s boundary exactly, and it is
+ * load-bearing in the same way. `\b` would get one of the two neighbouring
+ * shapes right and the other wrong — it does *not* fire between the `m` of
+ * `SAM` and the `E` of `SAMPLES`, so a sibling key named that is correctly
+ * rejected, but it *does* fire between the `m` of `SAM` and the `\` of
+ * `\Domains`, so a child key would read as the hive. `isRunKeyPath` *wants*
+ * that, because it is matching a Run key or anything under it.
+ *
+ * Here a child is a different and much larger thing. `HKLM\SYSTEM` is the
+ * machine's credentials; `HKLM\SYSTEM\CurrentControlSet` is its hardware and
+ * service configuration, which `reg save` is asked to back up as a matter of
+ * routine, and a rule that matched it would fire on ordinary system imaging.
+ *
+ * **`HKLM\SAM\Domains` and `HKLM\SYSTEM\Control\Lsa\Secrets` are real
+ * credential stores that this therefore does not catch**, and that is a known
+ * limit rather than an oversight: catching them means matching an open-ended set
+ * of credential paths, and the wider that set becomes the more this becomes the
+ * `reg add`-catches-everything rule beside it that its own comment argues
+ * against.
+ *
+ * **Not measured, and the reason is the point of the rule.** Every way of
+ * checking whether these three keys exist is `reg query` or `Test-Path` against
+ * them, which enumerates the very stores this predicate exists to flag. That is
+ * a fact about this machine's session and not a claim that the names are
+ * uncertain — `SAM`, `SYSTEM` and `SECURITY` are the hive names Windows itself
+ * prints in the `HKEY_LOCAL_MACHINE` list.
+ */
+function isCredentialHiveKey(token: string): boolean {
+	return /\\(?:sam|system|security)$/i.test(token);
 }
 
 /**
@@ -2396,18 +2611,77 @@ function hasCmdFlag(token: string, flag: string): boolean {
 	return pieces.includes(flag.slice(1));
 }
 
+/**
+ * Argument schemes that are *executed* rather than *fetched*.
+ *
+ * `looksLikeUrl` accepts only `http:` and `https:`, and that is the right rule
+ * for the launches above it — the point of those is handing a URL to something
+ * that fetches or renders it. A `javascript:` or `vbscript:` argument is the
+ * other thing entirely: there is no network fetch, nothing to review, and the
+ * payload is the argument. `mshta javascript:alert(document.domain)` runs the
+ * text in the command line, which is why it is on this list.
+ *
+ * The leading class is not decoration. These reach the classifier glued to the
+ * other punctuation PowerShell and CMD wrap a bareword in — whitespace, a quote,
+ * an opening parenthesis or bracket — for the same reason `URL_SHAPE_RE` above
+ * starts where it does, and a rule that anchored on the very first character
+ * would miss the quoted spelling, which is the more common one: an unquoted
+ * `javascript:alert(1)` is a syntax error in CMD.
+ *
+ * `data:text/html` is here for the same reason: it is the same handler reached
+ * by inlining the document rather than by naming a scheme that runs it. **The
+ * `data` alternative is split out rather than folded into the scheme group
+ * because the colon sits in the wrong place for it** — `data:` is the scheme and
+ * `text/html` is the media type, so `(?:javascript|vbscript|data)\s*:` would also
+ * match a `data:` argument carrying a PNG, which `mshta` renders as an image and
+ * which is not code execution. The type is therefore part of the alternative
+ * rather than a suffix on the group.
+ */
+const SCRIPT_URI_RE = /^[\s"'([]*(?:javascript|vbscript)\s*:|^[\s"'([]*data\s*:\s*text\/html\b/i;
+
+/** Does one of these arguments start a scheme the program will execute rather than fetch? */
+function hasScriptUri(args: string[]): boolean {
+	return args.some((arg) => SCRIPT_URI_RE.test(arg));
+}
+
 /** A GUI app or protocol handler launched directly with a URL in its argv. */
 function directGuiLaunch(tokens: string[]): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "windows");
 	if (program === undefined) return null;
 	const rest = tokens.slice(1);
 	const hasUrl = argsHaveUrl(rest);
+	const hasScript = hasScriptUri(rest);
 
 	if ((program === "explorer" || program === "explorer.exe") && hasUrl) {
 		return { kind: "Other", rule: "`explorer` with a URL" };
 	}
-	if ((program === "mshta" || program === "mshta.exe") && hasUrl) {
-		return { kind: "Other", rule: "`mshta` with a URL" };
+	// **Measured as far as this machine allows.** `mshta.exe` is 36864 bytes at
+	// `C:\Windows\System32\mshta.exe`, and its binary carries the string
+	// `RunHTMLApplication` and the COM class id
+	// `{25336920-03f9-11cf-8fd0-00aa00686f13}` — it is a shim whose entire job
+	// is to hand its argument to the HTML application host, which is why the
+	// existing rule above fires on `mshta http://…` without reading anything
+	// about the document.
+	//
+	// The scheme dispatch itself is **not** measured, and the reason is that
+	// `mshta` reports everything through a dialog: `mshta /?`,
+	// `mshta nosuchscheme://x` and `mshta vbscript:x` each wrote zero bytes to a
+	// redirected stdout and each exited 0. There is no observable difference
+	// between the three from a shell, so nothing here is claimed on the strength
+	// of having run one.
+	if ((program === "mshta" || program === "mshta.exe") && (hasUrl || hasScript)) {
+		return {
+			kind: "Other",
+			rule: hasScript ? "`mshta` with a script URI, which runs the text in the argument" : "`mshta` with a URL",
+		};
+	}
+	// `rundll32` is here for the same reason and reads the same way. Not measured
+	// either: `rundll32.exe` is 98304 bytes and its strings give up nothing about
+	// argument parsing — no switch names, no scheme table — so this rests on the
+	// program handing its argument to a handler rather than on anything observed
+	// here.
+	if ((program === "rundll32" || program === "rundll32.exe") && hasScript) {
+		return { kind: "Other", rule: "`rundll32` with a script URI, which runs the text in the argument" };
 	}
 	if (
 		(program === "rundll32" || program === "rundll32.exe") &&
@@ -2666,14 +2940,28 @@ function isShellHistoryPath(token: string): boolean {
  * fires on six read-only commands a person runs to *look* at the machine, and a
  * classifier like that gets switched off.
  *
- * Measured: every program named here exists on this machine under the spelling
- * the rule matches, and accepts the switch form written against it —
- * `format` (which answered "Required parameter missing" rather than "not
+ * Measured: every program named here except two exists on this machine under
+ * the spelling the rule matches, and accepts the switch form written against it
+ * — `format` (which answered "Required parameter missing" rather than "not
  * recognized"), `diskpart`, `reg`, `taskkill`, `vssadmin`, `bcdedit`,
  * `schtasks`, `net`, `sc`, `cipher`, `takeown`, `icacls`, `wevtutil`,
- * `bitsadmin`, `netsh`. They live in `C:\Windows\System32` with an `.exe`
- * extension, `format` excepted — it is a `.com`, which `executableName` already
- * strips alongside the others.
+ * `bitsadmin`, `netsh`, `certutil`, `robocopy`. They live in
+ * `C:\Windows\System32` with an `.exe` extension, `format` excepted — it is a
+ * `.com`, which `executableName` already strips alongside the others.
+ *
+ * **The two exceptions, and the sentence above used not to have any.** It read
+ * "Measured: every program named here exists on this machine", fifty lines above
+ * a comment saying that an `existsSync` over `C:\Windows\System32`,
+ * `C:\Windows\SysWOW64` and `C:\Windows` finds no `wmic.exe` in any of them
+ * because Windows 11 removed it. A header that contradicts its own table is
+ * worse than no header, because the reader who has just been given the exception
+ * will assume there are none and stop looking.
+ *
+ * The second is `comsvcs`, and it is the more interesting one: what is on this
+ * machine is `comsvcs.dll`, in both `System32` and `SysWOW64`, and there is no
+ * `comsvcs.exe` anywhere — and `executableName` does not strip `.dll`, so the
+ * spelling the rule matches is the bare name and not the file that carries it.
+ * See the entry below for what that costs.
  *
  * Not measured, deliberately: that any of them actually destroys anything. None
  * was run in its destructive form. `format C:` was not run because it would
@@ -2688,7 +2976,24 @@ const WINDOWS_ADMIN_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	// verb set is per-program here, so nothing would go wrong -- but `reg import`
 	// of a key is closer to `reg export` in shape than to `reg delete`, and
 	// leaving it out is the smaller claim.
-	["reg", new Set(["delete"])],
+	//
+	// `reg save` and `reg export` are NOT here for the same reason in the other
+	// direction, and it is worth spelling out because `reg delete` beside them
+	// makes the table look like it should be: both are ordinary backup verbs on an
+	// ordinary key — `reg export HKLM\SOFTWARE C:\before-a-regedit.reg` is what
+	// people do before a big registry change. What is not ordinary is the same
+	// verb pointed at a hive that holds credentials, so those two are read by
+	// *target* in `dangerousWindowsAdmin`, beside the `reg add` Run-key check,
+	// which is the identical shape and the reason `isCredentialHiveKey` sits
+	// there. `reg load`/`reg unload` *are* here: mounting a hive file into the
+	// live registry is not a thing anyone does to back one up.
+	//
+	// MEASURED that these four are operations of this program rather than shapes
+	// guessed from a name: `reg /?` on this machine prints `Operation  [ QUERY   |
+	// ADD    | DELETE  | COPY    |` and, on the next line, `SAVE    | LOAD   |
+	// UNLOAD  | RESTORE |` and then `COMPARE | EXPORT | IMPORT  | FLAGS ]`, with
+	// a worked example line `REG SAVE /?` for each.
+	["reg", new Set(["delete", "load", "unload"])],
 	["schtasks", new Set(["/delete", "/create", "/change", "/run"])],
 	["sc", new Set(["config", "stop", "delete", "create"])],
 	["vssadmin", new Set(["delete", "resize"])],
@@ -2718,7 +3023,57 @@ const WINDOWS_ADMIN_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	// because older builds and a great many scripts still use it, and "not
 	// installed here" is a fact about this machine rather than a reason to leave
 	// the act uncovered.
+	//
+	// **This entry is one of the two exceptions the table's own doc comment above
+	// now names.** That sentence used to read "every program named here exists on
+	// this machine", fifty lines above a comment saying one of them is not.
 	["wmic", new Set(["delete", "terminate"])],
+	// `certutil -urlcache` is the downloader half of a LOLBin: it fetches a URL and
+	// writes it to a file named on the command line, which is how a machine that
+	// has an allow-list for `curl` gets a payload anyway.
+	//
+	// **MEASURED, and this one is worth more than a spelling.** `certutil /?` on
+	// this machine lists the switch as `-URLCache` — and BOTH spellings are
+	// accepted, which is why the set carries the dash and the slash: running
+	// `certutil /urlcache` with nothing else printed this machine's whole URL
+	// cache, including the `Cookie:` entries for sites that had been visited. The
+	// cache is not a secret store, but a command line that dumps the browsing
+	// history of whoever is logged in is not one a permission prompt should wave
+	// through, and the same switch with `-f` in front of it is the download.
+	["certutil", new Set(["-urlcache", "/urlcache"])],
+	// `robocopy /MIR` and `/PURGE` delete what is at the destination and not at
+	// the source, which no other switch of either program does.
+	//
+	// **MEASURED, and the control is what makes it mean something.** In scratch
+	// directories under %TEMP%, with `a.txt` on the source side and `extra.txt`
+	// already sitting at the destination: `robocopy src dst /MIR` left `a.txt` and
+	// nothing else; `robocopy src dst /PURGE` did the same; and the same command
+	// without either switch left `a.txt` *and* `extra.txt`. So the deletion is
+	// what those two switches add and not a side effect of copying.
+	["robocopy", new Set(["/mir", "/purge"])],
+	// `comsvcs` is a signed inbox DLL host whose documented use on the command line
+	// is to write another process's memory to a file. The entry points are
+	// exported as barewords rather than as switches, which is why this is a verb
+	// set at all: `comsvcs MiniDump <pid> <file> <type>` and `comsvcs MiniDumpW
+	// …` are the two forms, and `verbMatches` compares a bare known word exactly.
+	//
+	// Not measured, and the reason is that measuring it means writing another
+	// process's memory out. Nothing was run.
+	//
+	// **MEASURED, and the measurement is a limitation rather than a
+	// confirmation.** What is on this machine is `comsvcs.dll` — 1732608 bytes in
+	// `C:\Windows\System32` and 1393152 in `C:\Windows\SysWOW64` — and there is no
+	// `comsvcs.exe` in either. `executableName` strips `.exe`, `.cmd`, `.bat` and
+	// `.com` on the Windows branch and **not** `.dll`, so `comsvcs.exe MiniDump …`
+	// and a bare `comsvcs MiniDump …` both match and `comsvcs.dll MiniDump …` does
+	// not. That is the one spelling this machine's own file has.
+	//
+	// Closing it means teaching `executableName` about `.dll`, which changes what
+	// every Windows rule in this file reads as a program name, and that is a much
+	// wider claim to take on for one entry. So it is written down here instead of
+	// closed, and the table's doc comment above names this entry as one of its two
+	// exceptions for the same reason.
+	["comsvcs", new Set(["minidump", "minidumpw"])],
 ]);
 
 /**
@@ -2727,11 +3082,37 @@ const WINDOWS_ADMIN_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
  * `format` reformats a volume whatever it is told, `diskpart` is a disk
  * partitioning tool whatever it is pointed at, and `takeown` hands ownership to
  * whoever runs it. There is no read-only spelling of any of the three.
+ *
+ * `regsvr32` is here for the same reason and is the fourth member: it loads a DLL
+ * and calls its registration entry point, and that call is arbitrary code
+ * running inside `regsvr32`'s own process.
+ *
+ * **Measured, and not the way this file usually measures.** `regsvr32.exe` is
+ * 90112 bytes at `C:\Windows\System32\regsvr32.exe`. Its `/?` help is *not*
+ * usable here: run through a batch file with both streams redirected it wrote
+ * zero bytes and exited 1 — it puts the usage text in a dialog box rather than on
+ * stdout — so the switch list is not cited below, and the rule deliberately does
+ * not read switches at all. What the binary does contain is the pair of export
+ * names it is built around, `DllRegisterServer` and `DllUnregisterServer`, which
+ * is the whole of why running the program is the act and not merely a request to
+ * run it.
+ *
+ * `mimikatz` is the fifth and is the outlier in this table for a reason worth
+ * stating: it is not an administrative program at all, it is a credential
+ * extraction tool, and every mode it has is an attack. It is in *this* table
+ * only because the table is the "the program name is the whole story" one, which
+ * is the true thing about it.
+ *
+ * **Not measured, and unlike `wmic` there is no "older builds still use it"
+ * defence to make.** `mimikatz.exe` is a single file anyone can drop anywhere on
+ * a machine, so its absence from this one is not evidence about any other.
  */
 const WINDOWS_ADMIN_ALWAYS: ReadonlyMap<string, string> = new Map([
 	["format", "reformats a volume, which cannot be undone"],
 	["diskpart", "runs a disk partitioning script, which can erase a volume"],
 	["takeown", "takes ownership of files away from whoever had it"],
+	["regsvr32", "registers a DLL as a COM server, which is arbitrary code that a later process loads"],
+	["mimikatz", "extracts credentials out of a running Windows, and every mode it has is that"],
 ]);
 
 /**
@@ -2967,6 +3348,45 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 		}
 	}
 
+	// `procdump` is a Sysinternals tool that writes another process's memory to a
+	// file. Any target is a memory dump; the one target that turns it into a
+	// credential theft rather than a debugging artifact is `lsass`, which is the
+	// process the Local Security Authority runs in and whose memory is where
+	// Windows keeps the logon credentials.
+	//
+	// The rule is narrow to that process name on purpose. `procdump -ma notepad.exe
+	// x.dmp` is what the tool is for and flagging it would be flagging its
+	// documentation — and `procdump` also has `-h` (hang) and `-c` (clamp) modes
+	// that are process management, not dumping at all, which a whole-program rule
+	// would have swept in with the dumping ones.
+	//
+	// **This sits above the verb lookup for the same reason `shutdown` does, and
+	// the reason is the `return null` two lines below:** `procdump` has no entry in
+	// `WINDOWS_ADMIN_VERBS` because it has no verb to recognise — the switch that
+	// makes it dump is `-ma`, and `-h` and `-c` are not dumps — so the early return
+	// would take this branch out of reach entirely.
+	//
+	// Every argument is scanned for the name rather than a fixed position, because
+	// the switch comes first: `procdump -ma lsass.exe dump.dmp`. The `.exe` is
+	// optional in the match for the ordinary reason — a command line names it
+	// either way and both are the same process.
+	//
+	// `procdump64` is the same program under the name its 64-bit build ships with,
+	// and it is not an `.exe` suffix `executableName` strips, so it has to be named
+	// here rather than falling out of the spelling. A 64-bit Windows running the
+	// 64-bit build is the ordinary case rather than the exotic one.
+	//
+	// Not measured, and measuring it means dumping a live process's memory — which
+	// is the act rather than a harmless sample of it.
+	if (program === "procdump" || program === "procdump64") {
+		if (tokens.slice(1).some((token) => /^lsass(\.exe)?$/i.test(token))) {
+			return {
+				kind: "Other",
+				rule: `\`${program}\` against \`lsass\`, whose memory is where Windows keeps logon credentials`,
+			};
+		}
+	}
+
 	const verbs = WINDOWS_ADMIN_VERBS.get(program);
 	if (verbs === undefined) return null;
 
@@ -3009,6 +3429,23 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 		// `Policies\System` the UAC switch rather than an unrelated name.
 		if (args.some(isUacValueName) && args.some(isUacPolicyKey)) {
 			return { kind: "Other", rule: "`reg add` writing `EnableLUA`, the value the UAC prompt reads" };
+		}
+	}
+
+	// `reg save` and `reg export` are ordinary verbs, so they are not in the verb
+	// set above and the set's own comment there says why. What makes them
+	// dangerous is the *target*, and this reads it the same way the `reg add`
+	// branch above reads its target — which is why both live here rather than one
+	// in the table and one in a function.
+	if (program === "reg") {
+		const verb = tokens[1]?.toLowerCase();
+		if (verb === "save" || verb === "export") {
+			if (tokens.slice(2).some(isCredentialHiveKey)) {
+				return {
+					kind: "Other",
+					rule: `\`reg ${verb}\`, which writes a copy of a registry hive holding account credentials`,
+				};
+			}
 		}
 	}
 	return null;
@@ -3153,6 +3590,121 @@ const PIPE_FORWARDING_PROGRAMS = new Set([
 	"uniq",
 	"yq",
 ]);
+
+/**
+ * The files `curl` or `wget` was told to write the download into.
+ *
+ * Five spellings of the same two switches, all of them real, all of them
+ * measured `null` against a first attempt that only handled the bare form:
+ * `-o FILE`, `-oFILE`, `--output FILE`, `--output=FILE`, and `-so FILE` with the
+ * flag bundled among others. wget adds `--output-document` and its own uppercase
+ * `-O`; curl's uppercase `-O` is *not* read, because it derives the filename
+ * from the URL rather than being given one, and wget's lowercase `-o` is not read
+ * either, because it names a log file and does not write the download at all.
+ * Getting that case distinction backwards would either miss every wget download
+ * or refuse every wget that logs.
+ *
+ * Shared by {@link posixStartupWrite} and {@link downloadedFileThenRun} for the
+ * reason {@link ddOutputTargets} is shared by the disk rule and the startup
+ * rule: the same option reaching two different questions is one reader. The
+ * program is re-derived here rather than taken as an argument, because the two
+ * callers disagree about what they are holding — one has tokens and one has a
+ * script — and neither of those is the program's name.
+ *
+ * **A target of `-` is a real answer and this function returns it.** `wget -O-`
+ * writes to standard output, which is the pipe that
+ * {@link fetchPipedIntoInterpreter} already covers; the caller below drops it and
+ * this one keeps it, because "wrote to stdout" is a fact about the command and
+ * not something this reader should decide is uninteresting.
+ */
+function fetchOutputTargets(tokens: string[]): string[] {
+	const program = executableName(tokens[0] ?? "", "posix");
+	if (program !== "curl" && program !== "wget") return [];
+	const targets: string[] = [];
+	const shortFlag = program === "curl" ? "o" : "O";
+	const bareLong = /^--output(?:-document)?$/;
+	const gluedLong = /^--output(?:-document)?=(.+)$/;
+	const bareShort = new RegExp(`^-[a-zA-Z]*${shortFlag}$`);
+	const gluedShort = new RegExp(`^-[a-zA-Z]*${shortFlag}(.+)$`);
+	const unquote = (token: string): string => token.replace(/^["']|["']$/g, "");
+	for (let index = 1; index < tokens.length; index++) {
+		const token = tokens[index];
+		// Greedy, so `-soFILE` resolves through the backtrack to `-s -o FILE`
+		// rather than reading the `o` inside some other flag's name.
+		const long = gluedLong.exec(token) ?? bareLong.exec(token);
+		if (long) {
+			const value = long[1] ?? tokens[index + 1];
+			if (value !== undefined) targets.push(unquote(value));
+			continue;
+		}
+		if (token.startsWith("--")) continue;
+		const short = gluedShort.exec(token);
+		if (short) {
+			targets.push(unquote(short[1]));
+			continue;
+		}
+		// The flag is bundled with others and takes the *next* argument.
+		if (bareShort.test(token) && tokens[index + 1] !== undefined) {
+			targets.push(unquote(tokens[index + 1]));
+		}
+	}
+	return targets;
+}
+
+/**
+ * A download written to a file, and a later command that runs that file.
+ *
+ * The comment on {@link fetchPipedIntoInterpreter} names this shape as the one
+ * a pipeline walk can never see, and it was right about the pipeline and wrong
+ * about the shape: `curl -o /tmp/x ; bash /tmp/x` downloads to a file and then
+ * runs it, and walking separators finds nothing because no bytes move between
+ * the two commands at all. The reason it is worth a rule anyway is the reason
+ * the pipe rule is: the program text was never on the command line, so nothing
+ * in this repository can read it, and the interpreter runs it before a user has
+ * anywhere to look.
+ *
+ * **The two halves have to be joined by name, and both have to be present.** A
+ * `curl -o` with no interpreter afterwards is a download, which is ordinary and
+ * is left alone, and an interpreter with no download before it is a person
+ * running a script they already have, which is the control the pipe rule states
+ * in its own comment. The name has to be the *same* name in both places: a
+ * download to `/tmp/x` and a `bash /tmp/y` is two unrelated commands, and
+ * matching on "some interpreter somewhere later on the line" would be the shape
+ * this file refuses to take everywhere else.
+ *
+ * `;`, `&&` and a newline qualify, because all three are a person saying "and
+ * then". `||` does not, for the same reason it is not a pipe in
+ * {@link fetchPipedIntoInterpreter}: it means the second command runs *instead*.
+ * `|` is excluded for a second reason — a fetch piped into an interpreter is the
+ * other function's job, and a `curl -o` next to a pipe is a contradiction rather
+ * than a shape.
+ *
+ * Not measured, and there is nothing here to measure on this machine: the rule is
+ * about two command lines a shell reads, and both halves are read as text.
+ */
+function downloadedFileThenRun(script: string): DangerousCommandMatch | null {
+	const segments = splitShellSegments(script);
+	for (let i = 0; i < segments.length; i++) {
+		const fetcher = segmentProgram(segments[i].text);
+		if (fetcher === undefined || !NETWORK_FETCH_PROGRAMS.has(fetcher)) continue;
+		if (segments[i].separator !== ";" && segments[i].separator !== "&&" && segments[i].separator !== "\n") continue;
+		for (const target of fetchOutputTargets(tokenizeShell(segments[i].text))) {
+			// Standard output, which is a pipe rather than a file, and the pipe is
+			// `fetchPipedIntoInterpreter`'s shape rather than this one.
+			if (target === "" || target === "-") continue;
+			for (let j = i + 1; j < segments.length; j++) {
+				const runner = segmentProgram(segments[j].text);
+				if (runner === undefined || !SCRIPT_INTERPRETERS.has(runner)) continue;
+				if (!tokenizeShell(segments[j].text).slice(1).includes(target)) continue;
+				return {
+					kind: "Other",
+					rule: `\`${fetcher}\` writing \`${target}\` and \`${runner}\` then running it, which runs a script nobody has read`,
+				};
+			}
+		}
+	}
+	return null;
+}
 
 /**
  * A download piped into an interpreter, with stages in between.
@@ -3656,47 +4208,13 @@ function posixStartupWrite(segment: string): DangerousCommandMatch | null {
 		targets.push(...ddOutputTargets(segment));
 	}
 	// `curl -o FILE` and `wget -O FILE` name the destination as the *value* of a
-	// switch rather than as a positional argument, so they need that value and
-	// not the last argument.
-	//
-	// Five spellings of the same two switches, all of them real, all of them
-	// measured `null` against a first attempt that only handled the bare form:
-	// `-o FILE`, `-oFILE`, `--output FILE`, `--output=FILE`, and `-so FILE` with
-	// the flag bundled among others. wget adds `--output-document` and its own
-	// uppercase `-O`; curl's uppercase `-O` is *not* read, because it derives the
-	// filename from the URL rather than being given one, and wget's lowercase
-	// `-o` is not read either, because it names a log file and does not write the
-	// download at all. Getting that case distinction backwards would either miss
-	// every wget download or refuse every wget that logs.
-	const unquote = (token: string): string => token.replace(/^["']|["']$/g, "");
-	if (program === "curl" || program === "wget") {
-		const shortFlag = program === "curl" ? "o" : "O";
-		const bareLong = /^--output(?:-document)?$/;
-		const gluedLong = /^--output(?:-document)?=(.+)$/;
-		const bareShort = new RegExp(`^-[a-zA-Z]*${shortFlag}$`);
-		const gluedShort = new RegExp(`^-[a-zA-Z]*${shortFlag}(.+)$`);
-		for (let index = 1; index < tokens.length; index++) {
-			const token = tokens[index];
-			// Greedy, so `-soFILE` resolves through the backtrack to `-s -o FILE`
-			// rather than reading the `o` inside some other flag's name.
-			const long = gluedLong.exec(token) ?? bareLong.exec(token);
-			if (long) {
-				const value = long[1] ?? tokens[index + 1];
-				if (value !== undefined) targets.push(unquote(value));
-				continue;
-			}
-			if (token.startsWith("--")) continue;
-			const short = gluedShort.exec(token);
-			if (short) {
-				targets.push(unquote(short[1]));
-				continue;
-			}
-			// The flag is bundled with others and takes the *next* argument.
-			if (bareShort.test(token) && tokens[index + 1] !== undefined) {
-				targets.push(unquote(tokens[index + 1]));
-			}
-		}
-	}
+	// switch rather than as a positional argument. All five spellings of those two
+	// switches are read by {@link fetchOutputTargets}, which is shared with
+	// {@link downloadedFileThenRun} rather than written out a second time — the same
+	// one-reader-two-callers shape {@link ddOutputTargets} has above, and for the same
+	// reason: with the parse inline here, the reasoning that produced it is a
+	// near-copy of the reasoning the second caller needs.
+	targets.push(...fetchOutputTargets(tokens));
 
 	for (const target of targets) {
 		// A remote destination is spelled `host:/path`, and every startup predicate
@@ -4112,6 +4630,11 @@ function matchScript(script: string, depth: number, platform: DangerousCommandPl
 		}
 		const piped = fetchPipedIntoInterpreter(script);
 		if (piped) return piped;
+		// The same act without the pipe: no bytes move between these two commands, so
+		// the walk above cannot see them. Asked on the whole script rather than per
+		// segment, because the pair spans two of them.
+		const downloadedThenRun = downloadedFileThenRun(script);
+		if (downloadedThenRun) return downloadedThenRun;
 	}
 	// `;` is a CMD switch separator and a command separator on every other platform,
 	// so a Windows line that means it as the first arrives here already cut in two.
@@ -4251,10 +4774,29 @@ function gitRules(tokens: string[], platform: DangerousCommandPlatform): Dangero
 	}
 
 	if (subcommand === "checkout") {
-		// The `--` is the whole signal: it is what separates "restore this path
-		// from the index" from "switch to this branch", which is why
+		// The `--` is one spelling of the signal: it is what separates "restore this
+		// path from the index" from "switch to this branch", which is why
 		// `git checkout main` and `git checkout -b feature` are left alone.
-		if (!args.includes("--")) return null;
+		//
+		// `.` is the other spelling, and it is the everyday one — `git checkout .` is
+		// what is typed when a person means "throw all of it away".
+		//
+		// **MEASURED, in a throwaway repo under %TEMP%, one spelling at a time.**
+		// With a committed file edited in the working copy, `git checkout .` printed
+		// `Updated 1 path from the index` and left the committed contents, `git
+		// checkout ./` did the same, and `git branch .` — the control that says the
+		// word cannot be a revision — answered `fatal: '.' is not a valid branch
+		// name` and exited 128. That last line is the whole reason the rule is safe:
+		// there is no branch of that name to switch to, so no invocation in which `.`
+		// means anything else exists.
+		//
+		// Anything longer is left alone for the reason the `--` rule is: `git checkout
+		// src` and `git checkout feature` are the same shape on a command line, and
+		// this file does not guess which one was meant.
+		if (!args.includes("--")) {
+			if (!args.some((arg) => arg === "." || arg === "./")) return null;
+			return { kind: "Other", rule: "`git checkout .`, which discards working-copy changes" };
+		}
 		return { kind: "Other", rule: "`git checkout --`, which discards working-copy changes" };
 	}
 
@@ -4320,15 +4862,45 @@ function containerToolRules(tokens: string[], platform: DangerousCommandPlatform
 	const program = executableName(tokens[0], platform);
 	const lower = tokens.slice(1).map((arg) => arg.toLowerCase());
 
-	if (program === "docker") {
-		const [group, verb] = lower;
+	// `docker-compose` is Compose V1's own program and `docker compose` is the V2
+	// plugin, and they run the same commands with the same flags — so the hyphen
+	// is folded into the plugin's own word here rather than being a second
+	// program with a second copy of every rule below. `podman-compose` and the
+	// `docker-compose.exe` spelling on Windows both resolve to the same two words
+	// through `executableName`, and neither is named: this file has no podman rule
+	// to share with either.
+	if (program === "docker" || program === "docker-compose") {
+		const [group, verb] = program === "docker-compose" ? ["compose", lower[0]] : lower;
 		// `docker prune` is not a subcommand — `docker prune --help` prints the
 		// whole root usage and exits 0 — so only the spelled-out forms count.
 		if (verb === "prune" && ["system", "image", "container", "network", "volume"].includes(group)) {
 			return { kind: "Other", rule: `\`docker ${group} prune\`, which deletes everything unused` };
 		}
-		if ((group === "rm" || group === "rmi") && (lower.includes("-f") || lower.includes("--force"))) {
-			return { kind: "Other", rule: `\`docker ${group} -f\`, which kills and deletes a running one` };
+		// Two rules rather than one, because the flag means opposite things on the
+		// two nouns. `-f` on `docker rm` kills a running container and then deletes
+		// it; `-f` on `docker rmi` force-removes an image, which is not running
+		// anything. The message used to be `docker ${group} -f`, which kills and
+		// deletes a running one` for both — a sentence about containers attached to
+		// an image deletion.
+		if (group === "rm" && (lower.includes("-f") || lower.includes("--force"))) {
+			return { kind: "Other", rule: "`docker rm -f`, which kills and deletes a running container" };
+		}
+		// `docker rmi` needs no flag for the same reason `docker volume rm` below
+		// does: the deletion is what the command is for, and the flag only changes
+		// what else has to go first. An image built locally is not in any registry,
+		// so there is nothing to pull it back from.
+		//
+		// `docker image rmi <name>` is the same act in a longer spelling and is not
+		// read here, because `image` is a group word whose second position is a verb
+		// everywhere else in this branch and treating it as a prefix would need a
+		// reading of every noun under `image` to be safe. The ordinary spelling is
+		// the short one, and a gap that is stated here is a gap the next reader can
+		// see rather than one they have to discover.
+		if (group === "rmi") {
+			return {
+				kind: "Other",
+				rule: "`docker rmi`, which deletes an image, and a locally built one cannot be pulled back",
+			};
 		}
 		if (group === "volume" && verb === "rm") {
 			// No force flag required, which looks like an oversight beside the
@@ -4403,6 +4975,42 @@ function containerToolRules(tokens: string[], platform: DangerousCommandPlatform
 			return { kind: "Other", rule: `\`${program} dist-tag rm\`, which moves a published version out of reach` };
 		}
 		return null;
+	}
+
+	/**
+	 * The three other package registries this file knows about, one verb each.
+	 *
+	 * A verb and not a program, for the reason the npm branch above gives: `gem
+	 * install` installs, `gem push` publishes, and a rule on the program would fire
+	 * on every dependency a Ruby or Python project installs.
+	 *
+	 * **What was measured and what was not is not the same for all three.** `cargo`
+	 * IS installed on this machine and `cargo publish --help` prints `-n,
+	 * --dry-run    Perform all checks without uploading`, which is what makes
+	 * `isDryRun` the exemption here rather than an assumption — and the same
+	 * command's `cargo yank --help` lists no such switch, so the exemption is
+	 * applied to `publish` and to nothing else. `gem` and `twine` are not installed
+	 * here, so their two verbs were read from each tool's documented usage and no
+	 * dry run is exempted for either, because none is known to exist.
+	 *
+	 * `cargo owner` and `cargo yank --undo` are out of scope here rather than
+	 * overlooked: the first adds somebody to a published crate and the second is
+	 * the undo of the second row below, and both are narrower than the publish.
+	 */
+	if (program === "cargo") {
+		if (lower[0] !== "publish" && lower[0] !== "yank") return null;
+		if (lower[0] === "publish" && isDryRun(lower)) return null;
+		return { kind: "Other", rule: `\`cargo ${lower[0]}\`, which changes what a published crate gives every install` };
+	}
+
+	if (program === "gem") {
+		if (lower[0] !== "push") return null;
+		return { kind: "Other", rule: "`gem push`, which publishes a gem every install can then fetch" };
+	}
+
+	if (program === "twine") {
+		if (lower[0] !== "upload") return null;
+		return { kind: "Other", rule: "`twine upload`, which publishes a package every install can then fetch" };
 	}
 
 	if (program === "gh") {
