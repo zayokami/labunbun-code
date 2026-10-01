@@ -1715,6 +1715,132 @@ describe("Windows: ending a process", () => {
 	});
 });
 
+describe("POSIX: destroying a disk", () => {
+	/**
+	 * Filesystems, partition tables and the tools that erase one.
+	 *
+	 * `mke2fs` is in the table next to `mkfs.ext4` because it is that program's
+	 * real name — `mkfs.ext4` is a symlink to it — so a table keyed on the `mkfs`
+	 * prefix would miss somebody calling the target directly.
+	 */
+	test.each([
+		["mkfs.ext4 /dev/sda1", "the commonest spelling"],
+		["mkfs -t xfs /dev/sda1", "with an explicit type"],
+		["mke2fs -t ext4 /dev/sdb1", "the real program name"],
+		["mkswap /dev/sdb1", "a swap area"],
+		["wipefs -a /dev/sda1", "erases the filesystem signatures"],
+		["sudo mkfs.ext4 /dev/sda1", "through sudo, which is the everyday case"],
+		["fdisk /dev/sda", "the interactive partition editor"],
+		["fdisk", "with no device at all, which opens the first one it finds"],
+		["sfdisk /dev/sda", "the scripted one"],
+		["sgdisk --zap-all /dev/sda", "wiping the table"],
+		["parted /dev/sda mklabel msdos", "relabelling the disk"],
+		["cfdisk /dev/sda", "the curses one"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * `dd` is the case where a rule on the program name would be worthless: it is
+	 * used all day to build a disk image. Only its *output* naming a block device
+	 * is a disk, so the reading and the writing halves have to agree.
+	 */
+	test.each([
+		["dd if=/dev/zero of=/dev/sda", "zero over a whole disk"],
+		["dd if=/dev/urandom of=/dev/nvme0n1", "onto NVMe"],
+		["dd of=/dev/mapper/vg-root", "onto an LVM volume, with no input at all"],
+		["dd if=/dev/zero of=/dev/sdb1 bs=1M", "onto a partition"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["dd if=/dev/sda of=image.img", "reads a disk to make an image"],
+		["dd if=/dev/zero of=image.img bs=1M count=64", "builds an image from zero"],
+		["dd if=/dev/zero of=/dev/null bs=1M", "writes to the sink, which is a character device"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * A redirect onto a disk needs no program at all — `echo x > /dev/sda` is
+	 * enough — and the no-space form has to be caught too, because the tokenizer
+	 * splits on whitespace and would hand `x>/dev/sda` over as a single token.
+	 * That is why this rule reads the segment's text rather than its tokens, and
+	 * why it is asserted on both spellings.
+	 */
+	test.each([
+		["echo x > /dev/sda", "with a space"],
+		["echo x >/dev/sda", "and with none"],
+		["echo x >> /dev/sdb1", "appending, which destroys the same way"],
+		["cat file > /dev/nvme0n1p2", "onto an NVMe partition"],
+		["sudo echo x > /dev/sda", "through sudo"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The redirects that run constantly. `> /dev/null` is on the end of a healthy
+	 * command, `2>&1` is how a pipe gets its error output back, and `/dev/zero`
+	 * and `/dev/urandom` are character devices rather than disks — which is the
+	 * whole reason the device list is spelled out instead of saying "under
+	 * `/dev`".
+	 */
+	test.each([
+		["echo x > /dev/null", "the commonest redirect there is"],
+		["cat /etc/passwd > /dev/null", "with a program in front of it"],
+		["echo x > /dev/zero", "a character device"],
+		["echo x 2>&1", "the stderr merge, whose target is not a path"],
+		["make test 2>&1 | tee log.txt", "a pipe, whose `2>&1` has no path"],
+		["make build > build.log", "a file in the working directory"],
+		["git log > /tmp/out.txt", "a file elsewhere"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `shred` is the one program here with no read-only spelling, and both halves
+	 * of what it does were run on this machine against a file the probe created:
+	 * `shred -u -n 1 -z` exited 0 and the file was gone.
+	 */
+	test.each([
+		["shred -u secrets.txt", "unlinking after the overwrite"],
+		["shred -n 3 -z log.txt", "three passes and a zero pass"],
+		["sudo shred /var/log/syslog", "on a file only root can write"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The partition tools print as much as they write, and those spellings print
+	 * and change nothing. `fdisk -l /dev/sda` names a disk and still only reads
+	 * it, which is why the exemption is on the flag and not on the argument.
+	 */
+	test.each([
+		["fdisk -l", "lists without naming a device"],
+		["fdisk -l /dev/sda", "names a device and still only reads it"],
+		["sfdisk --list /dev/sda", "the same, long form"],
+		["parted /dev/sda print", "and the bare `print` command"],
+		["parted -s /dev/sda print", "from a script"],
+		["sgdisk --print /dev/sda", "the GPT one"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * None of this may fire on a Windows line. `mkfs` and `dd` are ordinary
+	 * programs there and a path has no `/dev` in it, but the rule is reached from
+	 * the same function that decides the platform, so it is worth pinning rather
+	 * than assuming.
+	 */
+	test.each(["mkfs.ext4 C:\\x", "dd of=C:\\x", "echo x > C:\\dev\\sda", "shred -u secrets.txt"])(
+		"%s is not a Windows rule",
+		(command) => {
+			expect(windows(command)).toBeNull();
+		},
+	);
+});
+
 describe("the two platforms are not the same rules", () => {
 	/**
 	 * A Windows-only rule must not fire on a POSIX line and vice versa. If the

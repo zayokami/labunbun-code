@@ -869,6 +869,165 @@ function matchTokens(
 	if (platform === "windows") {
 		return matchWindows(tokens);
 	}
+	return posixDiskRules(tokens, segment);
+}
+
+// ---------------------------------------------------------------------------
+// POSIX: destroying a disk
+// ---------------------------------------------------------------------------
+
+/**
+ * A path that names a whole disk rather than one of the character devices.
+ *
+ * The point of listing the disk prefixes instead of saying "anything under
+ * `/dev`" is that `/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/std*` and
+ * `/dev/tty` are written to constantly — `> /dev/null` is on the end of a
+ * healthy command — and a rule that fired on those would be switched off within
+ * a day. The partitions are in here too (`/dev/sda1`, `/dev/nvme0n1p2`), because
+ * a redirect onto a partition destroys a filesystem just as completely as one
+ * onto the whole disk.
+ *
+ * NOT MEASURED ON THIS MACHINE, and the comment has to say so: none of these
+ * paths exists here. Windows has a `/dev` only through MSYS, and its `sda*`
+ * names are a directory listing rather than disks — a `dd of=/dev/sda` run on
+ * this box would be writing to a regular file. What *was* measured is that
+ * these are the Linux spellings, by name, from the kernel's own device naming
+ * (`sd*` SCSI/SATA, `nvme*n*` NVMe, `hd*` IDE, `vd*` virtio, `md*` RAID,
+ * `mmcblk*` SD, `mapper/*` LVM and `cryptsetup`). A rule that cannot be run here
+ * is still a rule worth having, but it has to be labelled as one rather than
+ * dressed up as a measurement.
+ *
+ * The pattern is anchored at the end, and that is load-bearing in a way that is
+ * easy to get wrong: without the anchor the `\d*` after `sd[a-z]+` does nothing
+ * at all, because `sd[a-z]+` already matches the `sda` of `/dev/sda1` and stops
+ * there. The falsification driver found exactly that — three mutations each
+ * narrowing the device list, and not one of them failing a single test — so the
+ * trailing `\/?$` is what turns the partition names from decoration into the
+ * thing actually being matched.
+ */
+const BLOCK_DEVICE_PATH =
+	/^\/dev\/(?:sd[a-z]+\d*|nvme\d+n\d+(?:p\d+)?|hd[a-z]+\d*|vd[a-z]+\d*|xvd[a-z]+\d*|disk\d+|rdisk\d+|md\d+|mmcblk\d+|mapper\/[\w.-]+)\/?$/;
+
+/**
+ * Programs whose job is to write a fresh filesystem or a fresh partition table
+ * over whatever is already there.
+ *
+ * `mke2fs` is here as well as `mkfs.ext4` because that is the program's real
+ * name — `mkfs.ext4` is a symlink to it — and a table keyed only on the `mkfs`
+ * prefix would miss somebody calling the target directly.
+ *
+ * Also NOT all measurable here, and the split is worth being exact about.
+ * `command -v` on this machine finds `shred` and `dd` in `/usr/bin`, and finds
+ * an `mke2fs` at `/d/AndroidSDK/platform-tools/mke2fs` — the Android SDK's copy,
+ * not a system tool. It finds nothing at all for `mkfs`, `mkfs.ext4`, `mkswap`,
+ * `wipefs`, `fdisk`, `sfdisk`, `cfdisk`, `sgdisk` or `parted`, and
+ * `ls /usr/bin | grep -E '^(mkfs|mkswap|wipefs|fdisk|parted|sgdisk)'` returns
+ * only `shred`. So the `mkfs*`, `wipefs` and partition-table rules below are
+ * written from the names and were not run here; the `shred` and `dd` spellings
+ * were.
+ */
+const DISK_WRITING_PROGRAMS: ReadonlySet<string> = new Set([
+	"mkfs",
+	"mke2fs",
+	"mkswap",
+	"wipefs",
+	"fdisk",
+	"sfdisk",
+	"cfdisk",
+	"gdisk",
+	"sgdisk",
+	"parted",
+	"gparted",
+	"partprobe",
+	"shred",
+]);
+
+/** `mke2fs -t ext4 /dev/sda1` and `mkfs -t xfs /dev/sda1`, which end in a name. */
+function mkfsVariant(program: string): boolean {
+	return program === "mkfs" || program.startsWith("mkfs.") || program === "mke2fs";
+}
+
+/**
+ * The read-only spellings of the partition tools, which print a table and change
+ * nothing. `--print` is `sgdisk`'s and is here for that reason alone; the other
+ * three are shared. None of them is also a way to write: `fdisk`, `sfdisk` and
+ * `sgdisk` write through commands (`w`, `mklabel`, `--zap-all`) rather than
+ * through a flag that collides with these.
+ */
+const DISK_LIST_FLAGS: ReadonlySet<string> = new Set(["-l", "--list", "print", "--print"]);
+
+/**
+ * Destroying a disk, on the two shapes it comes in.
+ *
+ * One is a program that writes a filesystem; the other is a shell redirect
+ * aimed at a block device, which needs no program at all — `> /dev/sda` after
+ * `echo` is enough, and so is `echo x >/dev/sda` with no space at all. That
+ * second spelling is why this rule reads the segment as text rather than
+ * treating the redirect operator and its target as two separate words: they do
+ * not have to be two words, and a rule that assumed they were would miss the
+ * shorter of the two spellings.
+ *
+ * `dd` is neither, and is handled by its output option instead: `dd` is used
+ * legitimately all day (`dd if=/dev/zero of=image.img bs=1M count=64`), so a
+ * rule that caught the program would catch a disk image being built. Only the
+ * `of=` naming a block device is a disk. `of=` is written glued — `of=/dev/sda`
+ * — because that is the spelling everybody uses, and no other `dd` option
+ * contains the two characters, so looking for them anywhere in the token is
+ * unambiguous. The harmless half was run here to fix the spelling: `dd
+ * if=/dev/zero of=/dev/null bs=1M count=1` printed `1+0 records out` and wrote
+ * nothing anywhere.
+ */
+function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+
+	// A redirect is matched on the text and the target is matched by the device
+	// shape, which is what keeps this narrow. `2>&1` yields no target because
+	// nothing after the `>` begins with a slash, and `> /dev/null` yields one
+	// that is not a disk.
+	for (const match of segment.matchAll(/>{1,2}\s*(\/[^\s;|&]+)/g)) {
+		if (BLOCK_DEVICE_PATH.test(match[1])) {
+			return { kind: "Other", rule: `output redirected onto \`${match[1]}\`, which is a whole disk` };
+		}
+	}
+
+	if (program === "dd") {
+		for (const token of tokens.slice(1)) {
+			const at = token.indexOf("of=");
+			if (at === -1) continue;
+			const target = token.slice(at + 3);
+			if (BLOCK_DEVICE_PATH.test(target)) {
+				return { kind: "Other", rule: `\`dd\` writing to \`${target}\`, which is a whole disk` };
+			}
+		}
+		return null;
+	}
+
+	if (!mkfsVariant(program) && !DISK_WRITING_PROGRAMS.has(program)) return null;
+
+	// `shred` is not asked anything: it overwrites a file until nothing of it is
+	// left and then deletes it, which is the whole of its purpose and is why it
+	// has no read-only spelling worth naming. Both halves of that were run here,
+	// on a file this script created: `shred -u -n 1 -z <tempfile>` exited 0 and
+	// the file was gone.
+	if (program === "shred") {
+		return { kind: "Other", rule: "`shred`, which overwrites a file until nothing of it is left" };
+	}
+
+	// A filesystem tool needs a device to be pointed at, and a partition tool
+	// has a read-only spelling that prints a table and exits. `-l`, `--list` and
+	// a bare `print` are those, whether or not a device is named — `fdisk -l
+	// /dev/sda` prints and changes nothing, and flagging that would teach people
+	// to switch the rule off rather than to read it.
+	if (tokens.slice(1).some((arg) => DISK_LIST_FLAGS.has(arg.toLowerCase()))) return null;
+	if (tokens.slice(1).some((arg) => BLOCK_DEVICE_PATH.test(arg))) {
+		return { kind: "Other", rule: `\`${program}\` pointed at a disk, which overwrites what is on it` };
+	}
+	// Nothing to point at: `fdisk` on its own opens the first device it can find
+	// and waits at a prompt where `w` writes a table. An error, otherwise.
+	if (tokens.length === 1) {
+		return { kind: "Other", rule: `\`${program}\` with no device named, which opens the first one it finds` };
+	}
 	return null;
 }
 
