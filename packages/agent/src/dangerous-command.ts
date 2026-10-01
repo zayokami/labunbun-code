@@ -434,6 +434,23 @@ function stripShellScaffolding(tokens: string[]): string[] | undefined {
 			while (rest.length > 0 && !rest[0].includes(")")) rest = rest.slice(1);
 			rest = rest.slice(1);
 		}
+		// `time` is the only word above that takes options of its own, and it
+		// takes exactly two. `-p` is the POSIX spelling and `--` ends the
+		// options; both then have the command behind them. Measured on this
+		// machine against a real `bash`: `time rm -rf D`, `time -p rm -rf D` and
+		// `time -- rm -rf D` all ran the delete, and `time -v`, `time -f x` and
+		// `time -o /dev/null` did *not* — the keyword stops at an option it does
+		// not know and tries to execute the option as the program, so the `rm` is
+		// never reached. Those three are therefore left as nulls on purpose;
+		// treating every `-x` after `time` as an option would flag commands that
+		// do not run.
+		if (keyword === "time") {
+			const flag = rest[0]?.toLowerCase();
+			if (flag === "-p" || flag === "--") {
+				rest = rest.slice(1);
+				stripped = true;
+			}
+		}
 	}
 	return rest;
 }
@@ -761,6 +778,32 @@ function matchTokens(
 	// thinks of — classified as nothing.
 	if (program === "sudo") {
 		return matchTokens(commandAfterOptions(tokens.slice(1), valueOptionsFor("sudo")), depth + 1, platform, segment);
+	}
+	// `eval "rm -rf /"` is `rm -rf /`, reached through a string instead of
+	// through the command line.
+	//
+	// It is not in Codex's table, and it is here anyway because it was measured:
+	// against a real `bash`, `eval "rm -rf D"`, `eval 'rm -rf D'` and
+	// `eval rm -rf /` all deleted the directory, and `eval "echo hi"` did not.
+	//
+	// The string is the script, so the readable case is a script read rather than
+	// a shape matched — the same treatment `su -c` and `sh -c` get — and
+	// `tokenizeShell` has already unwrapped the quotes, so the script is the
+	// words after `eval` rejoined.
+	//
+	// The unreadable case is the one worth being loud about. `$(...)` and a
+	// backtick are filled in when the shell gets there, so `eval "$(cat x.sh)"`
+	// runs whatever the file says and there is nothing here to classify. All
+	// three of those were measured to run. Reporting them as a match is the same
+	// trade this file already makes for `-enc`: one prompt too many is cheaper
+	// than a string nobody read running unsupervised.
+	if (program === "eval") {
+		const script = tokens.slice(1).join(" ");
+		if (script === "") return null;
+		if (/\$\(|`|\\\$\(/.test(script)) {
+			return { kind: "Other", rule: "`eval` on a string the shell fills in at run time" };
+		}
+		return matchScript(script, depth + 1, platform);
 	}
 	if (program === "env") {
 		// `env -S 'rm -rf /'` does not take a command after the options: it takes
@@ -1302,13 +1345,107 @@ function matchWindows(tokens: string[]): DangerousCommandMatch | null {
  * `null` means "nothing here was recognized as dangerous" — it is not a claim
  * that the command is safe, and the engine never widens access on it.
  */
+/**
+ * Programs that download something over the network.
+ *
+ * Only these. The point of the rule below is a program text that arrived from
+ * somewhere else and was handed straight to an interpreter, so a *local*
+ * producer is not the shape — `cat notes.txt | grep x` and `cat x | sh` are both
+ * ordinary, and flagging the second because it shares a pipe with the first is
+ * how a classifier teaches a user to switch it off.
+ */
+const NETWORK_FETCH_PROGRAMS = new Set(["curl", "wget"]);
+
+/**
+ * Programs that run the program text handed to them.
+ *
+ * `sh`, `bash`, `dash`, `python`, `python3`, `node` and `perl` were each piped a
+ * script on this machine and each one read and ran it. `zsh` and `ksh` are here
+ * on the same grounds — they are shells, and `zsh` is the default login shell on
+ * macOS, so leaving it out would leave a hole on the platform where it matters
+ * most — but neither is installed here and so neither was measured. `ruby` was
+ * not measured either and is left out rather than assumed.
+ */
+const SCRIPT_INTERPRETERS = new Set(["sh", "bash", "dash", "ksh", "zsh", "python", "python3", "node", "perl"]);
+
+/** The program a segment actually runs, past its scaffolding and its wrappers. */
+function segmentProgram(segment: string): string | undefined {
+	let tokens = tokenizeShell(segment);
+	const scaffolded = stripShellScaffolding(tokens);
+	if (scaffolded !== undefined) tokens = scaffolded;
+	// `curl … | sudo bash` puts a wrapper on the right-hand side of the pipe, and
+	// `sudo bash` still reads stdin — so the program that receives the download
+	// is `bash`, not `sudo`. The wrapper set and the option skipper are the ones
+	// the rest of this file already uses, rather than a second copy of both.
+	// `sudo` is named here separately because it is not in that set: it is a
+	// wrapper, but it has a branch of its own in `matchTokens` rather than being
+	// on the list, so a loop that only consults the list walks straight past it.
+	for (let hops = 0; hops < MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH; hops++) {
+		if (tokens.length === 0) return undefined;
+		const name = executableName(tokens[0], "posix");
+		if (name === undefined) return undefined;
+		if (name !== "sudo" && !COMMAND_PREFIX_PROGRAMS.has(name)) return name;
+		tokens = commandAfterOptions(tokens.slice(1), valueOptionsFor(name));
+	}
+	return undefined;
+}
+
+/**
+ * A download piped straight into an interpreter.
+ *
+ * This one is about the pipe rather than about either end: neither `curl` nor
+ * `sh` is dangerous on its own, and a rule for each of them separately would be
+ * two rules that fire on ordinary commands. What makes this one worth a prompt
+ * is that the text was never on the command line, so there is nothing else in
+ * the repository that can read it — and the interpreter will run it before any
+ * file is written where a user could look at it.
+ *
+ * Measured on this machine: `cat payload.sh | sh` and `| bash` both ran the
+ * script, and so did piping into each interpreter named above.
+ */
+function fetchPipedIntoInterpreter(segments: string[]): DangerousCommandMatch | null {
+	for (let i = 0; i + 1 < segments.length; i++) {
+		const left = segmentProgram(segments[i]);
+		const right = segmentProgram(segments[i + 1]);
+		if (left === undefined || right === undefined) continue;
+		if (!NETWORK_FETCH_PROGRAMS.has(left)) continue;
+		if (!SCRIPT_INTERPRETERS.has(right)) continue;
+		return {
+			kind: "Other",
+			rule: `\`${left}\` piped into \`${right}\`, which runs a script nobody has read`,
+		};
+	}
+	return null;
+}
+
+/**
+ * Classify a whole command line, one segment at a time.
+ *
+ * Shared with the `eval` branch above rather than written twice. It has to be
+ * this function and not `matchTokens`, because a string read out of a wrapper
+ * can hold a chain of its own: `eval "echo hi && rm -rf /"` is two commands, and
+ * calling `matchTokens` on the whole thing reads the program as `echo` and stops
+ * there.
+ */
+function matchScript(script: string, depth: number, platform: DangerousCommandPlatform): DangerousCommandMatch | null {
+	const segments = splitShellCommands(script);
+	// Only POSIX spells a pipe this way between two commands that are each
+	// ordinary on their own. Windows reads the same characters, but there the
+	// dangerous end of the pipe is already a rule of its own.
+	if (platform === "posix") {
+		const piped = fetchPipedIntoInterpreter(segments);
+		if (piped) return piped;
+	}
+	for (const segment of segments) {
+		const match = matchTokens(tokenizeShell(segment), depth, platform, segment);
+		if (match) return match;
+	}
+	return null;
+}
+
 export function classifyDangerousCommand(
 	command: string,
 	platform: DangerousCommandPlatform = process.platform === "win32" ? "windows" : "posix",
 ): DangerousCommandMatch | null {
-	for (const segment of splitShellCommands(command)) {
-		const match = matchTokens(tokenizeShell(segment), 0, platform, segment);
-		if (match) return match;
-	}
-	return null;
+	return matchScript(command, 0, platform);
 }
