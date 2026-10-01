@@ -155,6 +155,98 @@ function rmArgsIncludeForce(args: string[]): boolean {
 	return false;
 }
 
+/**
+ * The path arguments of an `rm`, and whether it was asked to recurse.
+ *
+ * A separate walk from {@link rmArgsIncludeForce} rather than a second argument
+ * to it, because the two questions stop in different places: the force test
+ * stops at `--` because everything past it is a path, and this one stops there
+ * because everything before it is an option. Reusing the same walk for both
+ * would have meant one function returning two answers, and the `--` boundary is
+ * exactly the kind of thing that gets honoured for one question and not the
+ * other.
+ *
+ * **Long options are read whole, not as clusters.** `-r` and `-R` are recursion
+ * and cluster with the other short flags, but `--recursive` has to match in
+ * full: `--version`, `--preserve-root` and `--help` each contain the letter `r`,
+ * and a cluster read that did not exclude the `--` forms would call all three
+ * of them recursion. GNU `rm` requires a long option in full, which is why
+ * there is no prefix handling here at all.
+ */
+function rmTargets(args: string[]): { paths: string[]; recursive: boolean } {
+	const paths: string[] = [];
+	let recursive = false;
+	let optionsEnded = false;
+	for (const arg of args) {
+		if (optionsEnded) {
+			paths.push(arg);
+		} else if (arg === "--") {
+			optionsEnded = true;
+		} else if (arg === "-") {
+			// The lone dash is standard input, which is a path to `rm` and not a flag.
+			paths.push(arg);
+		} else if (arg.startsWith("--")) {
+			if (arg === "--recursive") recursive = true;
+		} else if (arg.startsWith("-")) {
+			// Folded: `rm -R` recurses as surely as `rm -r` does. Folding cannot
+			// invent recursion here, because the comparison that decides anything
+			// below is on the path and a path does not gain a leading `-` by it.
+			if (arg.slice(1).toLowerCase().includes("r")) recursive = true;
+		} else {
+			paths.push(arg);
+		}
+	}
+	return { paths, recursive };
+}
+
+/**
+ * Whether an `rm` target is somewhere whose loss has no narrower form.
+ *
+ * Three families, and what they share is that pointing `rm -r` at them with
+ * recursion removes something the user cannot get back by re-running anything:
+ * a filesystem root, a home directory, and a repository's metadata.
+ *
+ * **Why recursion alone is enough, when the force rule is not.** `-f` decides
+ * whether `rm` *asks*; with a terminal attached that is the whole difference
+ * between `rm -r` and `rm -rf`. This product has no terminal: `exec` spawns
+ * with `stdio: ["ignore", "pipe", "pipe"]`, so stdin is not a tty and GNU `rm`
+ * prompts for nothing. Measured on this machine, stdin closed, no `-f`: a
+ * directory holding a mode-444 file was removed whole, that file included, exit
+ * 0. So `-r` here is as final as `-rf`, and a rule that only reads the force
+ * flag stops `rm -rf /` and not `rm -r /`.
+ *
+ * **What this deliberately leaves alone**, because a limit that is not written
+ * down is a limit someone discovers: `.` and `..`, `*`, and any path under a
+ * root rather than at one. `rm -r .` from a repository checkout is a real
+ * mistake, but the working tree is the one thing here with a backup — it is in
+ * git — and `rm -r ./*` is ordinary cleaning. Widening the list to cover them
+ * would cost a prompt on the most common command in the category.
+ */
+function isUnrecoverableRmTarget(path: string): boolean {
+	// `./.git` and `.git/` name the same directory as `.git`, and a rule that only
+	// compared the raw string would match neither spelling of the thing it exists
+	// for. Trailing slashes go first so `/` does not reduce to the empty string.
+	let target = path;
+	while (target.length > 1 && target.endsWith("/")) target = target.slice(0, -1);
+	while (target.startsWith("./")) target = target.slice(2);
+	if (target === "") target = "/";
+
+	if (target === "/") return true;
+	// biome-ignore lint/suspicious/noTemplateCurlyInString: these are the shell's spellings, not placeholders
+	if (target === "~" || target === "$HOME" || target === "${HOME}") return true;
+	// A top-level system directory, named rather than derived: `/usr` is one
+	// directory, `/usr/local` is not in the list, and matching on the first
+	// segment is what makes that the answer.
+	if (/^\/(?:bin|boot|dev|etc|home|lib|lib32|lib64|libx32|opt|proc|root|sbin|srv|sys|usr|var)(?:\/|$)/i.test(target)) {
+		return true;
+	}
+	// The last segment is what makes it repository metadata, so `foo/.git` and
+	// `/srv/repo/.git` match as readily as a top-level `.git` does.
+	const lastSlash = target.lastIndexOf("/");
+	const lastSegment = lastSlash < 0 ? target : target.slice(lastSlash + 1);
+	return lastSegment === ".git";
+}
+
 /** `NAME=value` — the assignments `env` consumes before the real command. */
 function isAssignment(arg: string): boolean {
 	const eq = arg.indexOf("=");
@@ -816,8 +908,16 @@ function matchTokens(
 	// be reached by unwrapping past them.
 	const tool = developmentToolRules(tokens, platform);
 	if (tool) return tool;
-	if (program === "rm" && rmArgsIncludeForce(tokens.slice(1))) {
-		return { kind: "ForcedRm", rule: "`rm` with a force option" };
+	if (program === "rm") {
+		const rmArgs = tokens.slice(1);
+		if (rmArgsIncludeForce(rmArgs)) return { kind: "ForcedRm", rule: "`rm` with a force option" };
+		const { paths, recursive } = rmTargets(rmArgs);
+		if (recursive && paths.some(isUnrecoverableRmTarget)) {
+			return {
+				kind: "Other",
+				rule: "`rm` with recursion, aimed at a filesystem root, a home directory or a repository, which has no narrower form",
+			};
+		}
 	}
 	// `sudo <cmd>` is `<cmd>`, run as someone else.
 	//

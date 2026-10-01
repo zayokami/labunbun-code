@@ -95,6 +95,106 @@ describe("POSIX: forced delete", () => {
 	});
 });
 
+/**
+ * Recursion aimed somewhere with no narrower form.
+ *
+ * The describe above is right that recursion is not part of the *force* rule, and
+ * this is not a disagreement with it: the question here is not whether `-f` is
+ * present but what the command is pointed at, and the two answers do not have to
+ * agree. `rm -rf /tmp/x` is a forced delete and an ordinary one; `rm -r /` is
+ * neither, and the describe above has nothing to say about it.
+ *
+ * **Why `-r` alone is enough here, measured rather than argued.** `-f` decides
+ * whether `rm` *asks*. With a terminal attached that is the whole difference
+ * between `rm -r` and `rm -rf`, which is what makes the force rule the right
+ * shape for an interactive shell. This product has no terminal: `exec` spawns
+ * with `stdio: ["ignore", "pipe", "pipe"]`, so stdin is not a tty and GNU `rm`
+ * prompts for nothing. Measured on this machine with stdin closed and no `-f`:
+ * a directory holding a mode-444 file was removed whole, that file included,
+ * exit 0. Before this, `rm -rf /` was refused and `rm -r /` was allowed.
+ */
+describe("POSIX: `rm -r` aimed at a root, a home or a repository", () => {
+	test.each([
+		["rm -r /", "the root itself"],
+		["rm -r / --no-preserve-root", "and after the option that lets it"],
+		["rm --recursive /", "the long spelling"],
+		["rm -R /", "the capital, which means the same thing"],
+		["rm -r //", "the doubled root"],
+		["rm -r /etc", "a top-level system directory"],
+		["rm -r /usr/", "with a trailing slash"],
+		["rm -r /var/log", "something under one — the point is that /var is not narrower"],
+		["rm -r /bin", "and another"],
+		["rm -r ~", "a home directory"],
+		["rm -r $HOME", "and the variable that names it"],
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: the shell's own spelling, not a placeholder
+		["rm -r ${HOME}", "in its braced spelling"],
+		["rm -r .git", "repository metadata"],
+		["rm -r ./.git", "behind a ./"],
+		["rm -r .git/", "with a trailing slash"],
+		["rm -r foo/.git", "nested, which is a submodule or a vendored checkout"],
+		["rm -r /srv/repo/.git", "under a system directory, so the .git is what names it"],
+		["rm -fr /", "the flags the other way round"],
+		// `r` is not the first letter, and no `f` is present to catch it on the way
+		// past — without this row the cluster read could start at the front and the
+		// `-fr` row above would still be dangerous, by the other rule.
+		["rm -vr /", "r not first, and nothing in the cluster for the force rule to find"],
+		["rm -ir /", "and the same with -i, which asks first and recurses anyway"],
+		["rm -r / -f", "and with the force after the target"],
+		["rm -r -- /", "past the options terminator, where the path is"],
+		["sudo rm -r /", "through sudo, which is the same command run as someone else"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * Which rule answers, for the two rows that could be either.
+	 *
+	 * The force rule is checked first, so `rm -rf /` is still `ForcedRm` — the
+	 * kind a caller switches on, and changing it would be a behaviour change
+	 * beyond closing the hole. The recursion rule is what answers the spelling
+	 * that has no force flag in it, and `Other` is its kind.
+	 */
+	test("the force rule keeps the forced spelling, and recursion answers the rest", () => {
+		expect(posix("rm -rf /")?.kind).toBe("ForcedRm");
+		expect(posix("rm -r /")?.kind).toBe("Other");
+		expect(posix("rm -r /tmp/x")).toBeNull();
+	});
+
+	/**
+	 * The other half, and the rows that keep the rule from eating ordinary work.
+	 *
+	 * Every one of these was measured or read off `rm`'s own option grammar: a
+	 * long option is matched in full by GNU `rm`, so `--version`,
+	 * `--preserve-root` and `--help` are not recursion even though each contains
+	 * the letter `r`. The `*.git` spelling is not `.git` and must stay allowed,
+	 * and `rm -r ./*` is the commonest cleaning command there is.
+	 *
+	 * `.` and `..` are allowed on purpose and the source says why: the working
+	 * tree is in git, and `rm -r ./*` must not cost a prompt. That is a limit
+	 * rather than an oversight, and it is written down in `isUnrecoverableRmTarget`
+	 * for the same reason.
+	 */
+	test.each([
+		["rm -r /tmp/x", "a temporary directory"],
+		["rm -r ./build", "a build directory"],
+		["rm -r node_modules", "the other build directory"],
+		["rm -r ./*", "the commonest cleaning command there is"],
+		["rm -r .", "and the stated limit, which the source gives reasons for"],
+		["rm -r ..", "its parent, for the same reasons"],
+		["rm --recursive -- /tmp/x", "recursion asked for and then the terminator"],
+		["rm --version /", "a long option that contains an r and is not recursion"],
+		["rm --preserve-root /", "another"],
+		["rm --help", "and one with no target at all"],
+		["rm -r /tmp/var", "a path with a system directory's name in the middle of it"],
+		["rm -r myfile", "and one with an r in it"],
+		["rm -- -r /", "where the -r is a path and there is no recursion at all"],
+		["farm -r /", "a program that ends in rm"],
+		["rm.exe -r /", "and rm is a different program on this platform"],
+	])("%s is not this rule — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+});
+
 describe("POSIX: shell scaffolding does not hide the command", () => {
 	/**
 	 * The words in front of a command are not the command.
