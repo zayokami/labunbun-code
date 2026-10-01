@@ -219,7 +219,8 @@ function wrapperScript(tokens: string[]): string | undefined {
  *   `-encodedco`, `-encodedcom`, `-encodedcomm`, `-encodedcomma`,
  *   `-encodedcomman` and `-encodedcommand` each ran it — thirteen of the
  *   fourteen prefixes, and every one of them but `-enc`.
- * - `-ec` ran it, in any case. It is not a prefix of anything here.
+ * - `-ec` ran it, in any case, and so did `/ec`. Neither is a prefix of anything
+ *   here, so neither can come out of the derivation and both are listed by hand.
  * - `-enc` did not run it — three runs on each build, every one of them waiting
  *   for input until it was killed — while its immediate neighbours `-en` and
  *   `-enco` both did. `-eco`, `-ecom` and `-econd` did not run it either.
@@ -227,11 +228,29 @@ function wrapperScript(tokens: string[]): string | undefined {
  *   `-executionpolicy` each took the body as their own value and ran nothing.
  * - `-nop` takes no value, so the body became the command.
  *
- * So the accepted set is every prefix of the name plus `-ec`, and it is derived
- * from that name rather than written out. The hand-kept list this replaces
+ * So the accepted set is every prefix of the name under **both** sigils, plus
+ * `-ec`, and it is derived from that name rather than written out. The
+ * hand-kept list this replaces
  * (`c|co|com|comm|comma|comman|command`) was exactly the prefixes of `command`,
  * so deriving it changes no answer and cannot drift when a switch is spelled
  * differently.
+ *
+ * **The `/` sigil was measured the same way and is accepted.** PowerShell takes
+ * `/` in front of a parameter name as well as `-`, and the marker file appeared
+ * for `/Command` and for `/EncodedCommand` on 5.1 and on 7.4 alike. Deriving
+ * both sigils from one call is the point: `command` and `encodedcommand` each
+ * gained their `/` forms from the same loop that gives them their `-` forms, so
+ * a third spelling added here costs one line rather than a new list.
+ *
+ * **The `name:value` spelling is deliberately not accepted, and codex accepts
+ * it.** Codex opens a body from `-command:` and from `/command:`. The marker
+ * measurement says both are inert here: on 5.1 and on 7.4, all four of
+ * `-command:`, `/command:`, `-encodedcommand:` and `/encodedcommand:` were
+ * refused as an unrecognised argument and wrote nothing — the same result as
+ * `-ex` above, which takes the body as its own value. Taking codex's arm would
+ * classify a command line that runs no body, and a rule for a spelling the
+ * machine refuses is a claim the machine contradicts. If a build is ever found
+ * where a colon form binds, the place to add it is this function.
  *
  * One spelling in the accepted set was measured *not* to run the body — `-enc` —
  * and it stays in. Keeping a spelling that does not work costs one prompt too
@@ -247,14 +266,19 @@ function wrapperScript(tokens: string[]): string | undefined {
  * `FORCE_PARAMETER_SPELLINGS`.
  */
 function switchPrefixes(name: string, shortest = 2): ReadonlySet<string> {
-	const full = `-${name.toLowerCase()}`;
+	const lower = name.toLowerCase();
 	const out = new Set<string>();
-	for (let n = shortest; n <= full.length; n++) out.add(full.slice(0, n));
+	for (const sigil of ["-", "/"]) {
+		const full = `${sigil}${lower}`;
+		for (let n = shortest; n <= full.length; n++) out.add(full.slice(0, n));
+	}
 	return out;
 }
 
 const POWERSHELL_COMMAND_SWITCH = switchPrefixes("command");
-const POWERSHELL_ENCODED_SWITCH = new Set([...switchPrefixes("encodedcommand"), "-ec"]);
+// `-ec` and `/ec` are the one spelling that is an abbreviation rather than a
+// prefix, so the loop below cannot produce either of them.
+const POWERSHELL_ENCODED_SWITCH = new Set([...switchPrefixes("encodedcommand"), "-ec", "/ec"]);
 
 /**
  * The script text of a `powershell -Command "…"` invocation.

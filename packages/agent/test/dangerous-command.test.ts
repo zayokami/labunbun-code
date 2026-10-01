@@ -895,6 +895,15 @@ describe("Windows: PowerShell", () => {
 		["Start-Process https://example.com", "a URL handed to a launcher"],
 		['powershell -c "Start-Process https://example.com"', "the same, in a script"],
 		["powershell -c \"Invoke-Item 'https://example.com'\"", "Invoke-Item with a URL, in a script"],
+		// The `/` sigil. MEASURED, marker file, on 5.1 and on 7.4: `/Command`
+		// wrote it. Every row here classified as nothing before, because the
+		// accepted set was derived from `-` alone.
+		['powershell /Command "Remove-Item C:\\x -Force"', "a forced delete behind a slash"],
+		['powershell /command "Remove-Item C:\\x -Force"', "and it lower-cased"],
+		['pwsh /Command "Remove-Item C:\\x -Force"', "through pwsh"],
+		['powershell -NoProfile /Command "Remove-Item C:\\x -Force"', "after another switch"],
+		['powershell /co "Remove-Item C:\\x -Force"', "an unambiguous prefix behind a slash"],
+		['powershell /Command "Start-Process https://example.com"', "a URL handed to a launcher behind a slash"],
 	])("%s is dangerous — %s", (command) => {
 		expect(windows(command)).not.toBeNull();
 	});
@@ -1023,6 +1032,17 @@ describe("Windows: -EncodedCommand is the same command, base64-encoded", () => {
 		["powershell -enc", rmScript, "a POSIX body, which is POSIX vocabulary"],
 		["powershell -enc", utf16("iex (iwr https://example.com/x)"), "fetch into eval"],
 		["powershell -enc", utf16("Remove-Item C:\\x -Forc"), "an abbreviated parameter in the body"],
+		// The `/` sigil. MEASURED, marker file, on 5.1 and on 7.4: `/Command` and
+		// `/EncodedCommand` both wrote it, so both are real spellings rather than
+		// theory. Before this, every row below classified as nothing.
+		["powershell /EncodedCommand", deleteScript, "the full name behind a slash"],
+		["powershell /encodedcommand", deleteScript, "and it lower-cased"],
+		["powershell /enco", deleteScript, "five letters"],
+		["powershell /en", deleteScript, "two letters"],
+		["powershell /e", deleteScript, "one letter"],
+		["powershell /ec", deleteScript, "measured to bind, like -ec and for the same reason"],
+		["pwsh /EncodedCommand", deleteScript, "through pwsh"],
+		["powershell -NoProfile /EncodedCommand", deleteScript, "after another switch"],
 	])("%s <base64 of %s> is dangerous — %s", (prefix, body, _why) => {
 		expect(windows(`${prefix} ${body}`)).not.toBeNull();
 	});
@@ -1052,6 +1072,51 @@ describe("Windows: -EncodedCommand is the same command, base64-encoded", () => {
 		const unread = prefixes.filter((p) => windows(`powershell ${p} ${deleteScript}`) === null);
 		expect(unread).toEqual([]);
 		expect(windows(`powershell -ec ${deleteScript}`)).not.toBeNull();
+	});
+
+	/**
+	 * The same derivation under the other sigil.
+	 *
+	 * `switchPrefixes` builds both from one loop, so the slash set is derived here
+	 * for the same reason the dash set is: a test that listed the `/` spellings by
+	 * hand would be the second list this describe exists to avoid. The count is
+	 * checked against the name for the same reason.
+	 */
+	test("every prefix of /EncodedCommand is accepted too", () => {
+		const name = "/encodedcommand";
+		const prefixes = [];
+		for (let n = 2; n <= name.length; n++) prefixes.push(name.slice(0, n));
+		// The same 14 as the dash set above, and that equality is the assertion:
+		// one sigil is one character, so the two names are the same length.
+		expect(prefixes).toHaveLength(14);
+
+		const unread = prefixes.filter((p) => windows(`powershell ${p} ${deleteScript}`) === null);
+		expect(unread).toEqual([]);
+		expect(windows(`powershell /ec ${deleteScript}`)).not.toBeNull();
+	});
+
+	/**
+	 * The `name:value` spelling, pinned as *allowed*, which is the opposite of
+	 * every other row here and is the point.
+	 *
+	 * Codex opens a PowerShell body from `-command:` and `/command:`, and this
+	 * file does not. That is a measured divergence rather than an omission: with
+	 * the marker body, on 5.1 and on 7.4 alike, all four of `-command:`,
+	 * `/command:`, `-encodedcommand:` and `/encodedcommand:` were refused as an
+	 * unrecognised argument and wrote nothing. A rule for a spelling that cannot
+	 * execute would be a claim the machine contradicts.
+	 *
+	 * Pinning the allowed answer is what makes that reasoning visible. The day a
+	 * build is found where a colon form binds, this row has to change — which is
+	 * the outcome a silent parity fix with codex would have produced without
+	 * anyone noticing that the premise had moved.
+	 */
+	test.each([
+		["powershell -Command:", "Remove-Item test -Force"],
+		["powershell /Command:", "Remove-Item test -Force"],
+		["powershell -command:", "Remove-Item test -Force"],
+	])("%s%s runs no body, so it is not dangerous", (prefix, body) => {
+		expect(windows(`${prefix}${body}`)).toBeNull();
 	});
 
 	/**
