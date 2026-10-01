@@ -2357,9 +2357,9 @@ describe("POSIX: ending processes, stopping services, powering off", () => {
 	});
 
 	/**
-	 * The verbs that *persist* are caught and `restart` is not: a service that is
-	 * back in five seconds is a disruption, and a service disabled across reboots
-	 * is a decision nobody made deliberately.
+	 * Survival across a reboot is the line, and it cuts both ways. Removing a
+	 * unit that would come back and adding one that starts without anyone there
+	 * are the same duration of consequence.
 	 */
 	test.each([
 		["systemctl stop sshd", "stopped now"],
@@ -2374,14 +2374,47 @@ describe("POSIX: ending processes, stopping services, powering off", () => {
 		expect(posix(command)).not.toBeNull();
 	});
 
+	/**
+	 * The installation half. These were `null` while the removal half above was
+	 * not, and the comment on the table claimed the persisting verbs were caught
+	 * — so this list exists to make the asymmetry impossible to reintroduce by
+	 * accident. The message is checked as well as the verdict: "stops a service"
+	 * would be a lie for `enable`.
+	 */
+	test.each([
+		["systemctl enable nginx", "starts at every boot"],
+		["systemctl enable --now evil.service", "with the combined spelling"],
+		["systemctl link /tmp/evil.service", "registering a unit from outside the search path"],
+		["systemctl --user enable evil", "the per-user half is the same act"],
+		["launchctl load ~/Library/LaunchAgents/x.plist", "the macOS one"],
+		["launchctl load -w /tmp/evil.plist", "with the obsolete -w still accepted"],
+		["launchctl bootstrap system /tmp/evil.plist", "and the modern spelling of load"],
+		["launchctl enable gui/501/com.evil", "and launchctl's own enable verb"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test("the install rule says what an install does, not that it stops something", () => {
+		const match = posix("systemctl enable nginx");
+		expect(match?.rule).toContain("every boot");
+		expect(match?.rule).not.toContain("stops a service");
+	});
+
+	/**
+	 * `start` and `restart` begin now and are gone with the session unless
+	 * something enabled the unit first — which is a different command, covered
+	 * above. `load`/`enable` are absent from this list on purpose: they are the
+	 * rows that used to be here with the reason "and loading, which adds".
+	 */
 	test.each([
 		["systemctl restart nginx", "a restart comes back by itself"],
+		["systemctl start nginx", "and a start does not outlive the session"],
 		["systemctl status nginx", "reading is not stopping"],
 		["systemctl list-units", "and this is a query with no verb at all"],
 		["systemctl daemon-reload", "which only re-reads configuration"],
 		["service --status-all", "the listing beside it"],
 		["launchctl list", "the macOS query"],
-		["launchctl load ~/Library/LaunchAgents/x.plist", "and loading, which adds"],
+		["launchctl start com.evil", "and the macOS equivalent of start"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(posix(command)).toBeNull();
 	});

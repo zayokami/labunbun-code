@@ -1352,15 +1352,50 @@ function namesForcedSignal(arg: string): boolean {
  * recording rather than assuming, so the rule is written from POSIX spelling and
  * not from what this machine happens to have.
  *
- * `systemctl`/`launchctl`/`service` — the verbs that *persist* are caught
- * (stop, disable, mask, kill, unload, bootout) and `restart` is not: a service
- * that comes back in five seconds is a disruption, and a service that has been
- * disabled across reboots is a decision nobody made deliberately.
+ * `systemctl`/`launchctl`/`service` — the line is **survival across a reboot**,
+ * in both directions. `stop`/`disable`/`mask`/`kill`/`unload`/`bootout` remove a
+ * unit that would otherwise come back; `enable`/`link`/`load`/`bootstrap` add
+ * one that starts without anyone being there to ask. `restart` is neither: a
+ * service that comes back in five seconds is a disruption, and `start` is the
+ * same — it begins now and dies with the session unless something enabled it
+ * first, which is a different command with its own rule.
+ *
+ * **This half was missing, and the comment above used to claim otherwise.** An
+ * earlier version of this doc said "the verbs that *persist* are caught" and
+ * listed only the removal verbs, which is true and beside the point: `systemctl
+ * enable` survives a reboot exactly as long as `systemctl disable` does, and it
+ * was `null` while the removal half was not. A test row pinned `launchctl load`
+ * as safe with the reason "and loading, which adds" — a phrase that describes
+ * what loading does without arguing why adding a job is safe.
+ *
+ * **What this costs.** Enabling a service you just built is ordinary work, and
+ * this rule will fire on it. That is the same false positive the `restart`
+ * exemption avoids, and it is accepted here for the reason the removal half was
+ * accepted: the act outlives the session, so the person who approved the
+ * command is not the person who will be living with it. A user who genuinely
+ * wants this can say so at the prompt.
  */
 const SERVICE_STOP_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
 	["systemctl", new Set(["stop", "disable", "mask", "kill"])],
 	["launchctl", new Set(["unload", "disable", "bootout"])],
 	["service", new Set(["stop"])],
+]);
+
+/**
+ * The other direction: verbs that put a unit where a boot will find it.
+ *
+ * Separate from {@link SERVICE_STOP_VERBS} rather than merged into it, because
+ * the rule *message* differs — "stops a service" is a lie for `enable` — and
+ * because keeping them apart is what lets a reader see that both halves exist.
+ * A single table would have hidden the asymmetry that hid the gap.
+ */
+const SERVICE_INSTALL_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	// `link` registers a unit file that lives outside the search path, so it is
+	// an install spelled differently rather than a different act.
+	["systemctl", new Set(["enable", "link"])],
+	// `bootstrap` is the modern spelling of `load`; the removal half above
+	// already carries `bootout`, which is `unload`'s modern spelling.
+	["launchctl", new Set(["load", "bootstrap", "enable"])],
 ]);
 
 /** Programs that stop the machine or the session, with no way to argue. */
@@ -1406,8 +1441,21 @@ function posixProcessRules(tokens: string[]): DangerousCommandMatch | null {
 				return { kind: "Other", rule: `\`${program} ${token}\`, which stops a service` };
 			}
 		}
-		return null;
 	}
+
+	const installs = SERVICE_INSTALL_VERBS.get(program);
+	if (installs !== undefined) {
+		for (const token of args) {
+			if (!token.startsWith("-") && installs.has(token.toLowerCase())) {
+				return {
+					kind: "Other",
+					rule: `\`${program} ${token}\`, which makes a service start at every boot, without anyone there to ask`,
+				};
+			}
+		}
+	}
+
+	if (verbs !== undefined) return null;
 
 	// `shutdown` is Windows' program on this machine. Measured: `type -a
 	// shutdown` and `which -a shutdown` both return only
