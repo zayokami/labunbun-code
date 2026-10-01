@@ -20,7 +20,7 @@ import { classifyDangerousCommand, MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH } from ".
 const posix = (command: string) => classifyDangerousCommand(command, "posix");
 const windows = (command: string) => classifyDangerousCommand(command, "windows");
 
-describe("POSIX: forced recursive delete", () => {
+describe("POSIX: forced delete", () => {
 	test.each([
 		["rm -rf /", "the plain case"],
 		["rm -fr /", "flags in the other order"],
@@ -56,9 +56,32 @@ describe("POSIX: forced recursive delete", () => {
 		expect(posix(command)?.kind).toBe("ForcedRm");
 	});
 
+	/**
+	 * Recursion is not part of the rule, and this is where that is pinned rather
+	 * than asserted in prose. `rmArgsIncludeForce` never asks whether `-r` is
+	 * present, so a forced delete of one file is the same rule as a forced
+	 * delete of a tree — and it is the kind, the doc comment and this
+	 * describe's name that all three have to agree about.
+	 */
+	test.each([
+		["rm -f notes.txt", "one file, by short flag"],
+		["rm --force notes.txt", "one file, by long flag"],
+		["rm -rf notes.txt", "one file, with recursion asked for too"],
+		["sudo rm -f /etc/passwd", "one file, through sudo"],
+	])("%s is a forced delete with no recursion in it — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
 	test.each([
 		"rm /tmp/x",
 		"rm -r /tmp/x",
+		// A path is case-folded on its way through `rmArgsIncludeForce` and has to
+		// stay harmless: the force comparison needs a leading `-`, and lowering
+		// the letters cannot produce one. `rm -rf /tmp/MyFile` never reaches the
+		// path at all — `-rf` returns on the previous argument — so the row that
+		// actually exercises the folding is this one, with no flag in front.
+		"rm /tmp/MyFile",
+		"rm ./MyFile.TXT",
 		"git status",
 		"bun test",
 		"ls -la",
@@ -749,6 +772,46 @@ describe("Windows: -EncodedCommand is the same command, base64-encoded", () => {
 		["powershell -enc", utf16("Remove-Item C:\\x -Forc"), "an abbreviated parameter in the body"],
 	])("%s <base64 of %s> is dangerous — %s", (prefix, body, _why) => {
 		expect(windows(`${prefix} ${body}`)).not.toBeNull();
+	});
+
+	/**
+	 * The whole accepted set, derived rather than enumerated.
+	 *
+	 * `switchPrefixes` builds the set from the switch name, so a test that lists
+	 * the spellings by hand is a second list to keep in step — and this file had
+	 * exactly that problem once: the prose above enumerated twelve runners of the
+	 * name's fourteen prefixes and omitted `-encodedco`, then two paragraphs
+	 * further down reported a count ("two spellings") that the measurement gives
+	 * as one. Re-deriving the set here means a spelling cannot be dropped from
+	 * the code without a row going red.
+	 *
+	 * Every prefix is expected to be *accepted*, `-enc` included. That one is the
+	 * spelling measured not to bind on either PowerShell build, and it stays in
+	 * the set anyway: keeping it costs one prompt too many, dropping it would
+	 * bet that no build honours it, and the two mistakes are not the same size.
+	 */
+	test("every prefix of -EncodedCommand is accepted, including the one that does not bind", () => {
+		const name = "-encodedcommand";
+		const prefixes = [];
+		for (let n = 2; n <= name.length; n++) prefixes.push(name.slice(0, n));
+		expect(prefixes).toHaveLength(14);
+
+		const unread = prefixes.filter((p) => windows(`powershell ${p} ${deleteScript}`) === null);
+		expect(unread).toEqual([]);
+		expect(windows(`powershell -ec ${deleteScript}`)).not.toBeNull();
+	});
+
+	/**
+	 * The two spellings the prose used to get wrong, pinned so that the count in
+	 * the comment is checked against a row rather than against whoever last
+	 * edited it: `-encodedco` is the neighbour of the non-binding one on the far
+	 * side and was left out of the list entirely, and `-enc` is the only one of
+	 * the fifteen that PowerShell does not actually honour.
+	 */
+	test("the two spellings the comment once got wrong", () => {
+		expect(windows(`powershell -encodedco ${deleteScript}`)).not.toBeNull();
+		expect(windows(`powershell -enc ${deleteScript}`)).not.toBeNull();
+		expect(windows(`pwsh -enc ${deleteScript}`)).not.toBeNull();
 	});
 
 	/**

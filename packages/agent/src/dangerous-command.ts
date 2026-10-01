@@ -47,7 +47,15 @@ export type DangerousCommandPlatform = "posix" | "windows";
 export const MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH = 8;
 
 export interface DangerousCommandMatch {
-	/** `ForcedRm` is a forced recursive delete; `Other` is any other rule. */
+	/**
+	 * `ForcedRm` is `rm` with a force option; `Other` is any other rule.
+	 *
+	 * Recursion is *not* part of it. `rm -f notes.txt` matches, and so does
+	 * `rm -rf /` — the name says "forced rm", not "forced recursive rm", and
+	 * both spellings are the same rule. Nothing branches on this member yet
+	 * (`decideDangerous` reads `rule` only); it is carried so the message can
+	 * say what it was if a caller ever wants to.
+	 */
 	kind: "ForcedRm" | "Other";
 	/** What matched, for the message the user is shown. */
 	rule: string;
@@ -113,12 +121,19 @@ function rmArgsIncludeForce(args: string[]): boolean {
 		// file literally called `-f`, and reading the `-f` as a flag would make
 		// an ordinary command look forced.
 		if (arg === "--") return false;
-		// Case-folded, and only here: a path argument never starts with `-`, so
-		// the two comparisons below cannot be reached by `rm -rf /tmp/MyFile` and
-		// its capital letters are never compared against anything. GNU and BSD
-		// `rm` reject `-F` outright, so `rm -RF` deletes nothing on either —
-		// folding it is not a claim about POSIX option syntax, it is this
-		// function refusing to depend on the local `rm` being the strict one.
+		// Case-folded, and only here. A path argument is folded too — `rm
+		// /tmp/MyFile` reaches this line with the capitals already lowered —
+		// and folding it is harmless because the second comparison below still
+		// requires a leading `-`, which a path cannot have gained by folding.
+		// That is the whole reason folding is safe, and it is a statement about
+		// the leading dash, not about the path never being compared: it is
+		// compared, and it loses. (`rm -rf /tmp/MyFile` never gets here at all,
+		// because `-rf` returns true one line below first.)
+		//
+		// GNU and BSD `rm` reject `-F` outright, so `rm -RF` deletes nothing on
+		// either — folding it is not a claim about POSIX option syntax, it is
+		// this function refusing to depend on the local `rm` being the strict
+		// one.
 		const lower = arg.toLowerCase();
 		if (lower === "--force") return true;
 		if (arg.startsWith("-") && !arg.startsWith("--") && lower.slice(1).includes("f")) return true;
@@ -178,7 +193,8 @@ function wrapperScript(tokens: string[]): string | undefined {
  * the documented order breaking a tie — which is why most prefixes of
  * `-EncodedCommand` reach it even though `-ExecutionPolicy` is also an `E`: `-e`
  * and `-en` match both at the same length and `-EncodedCommand` is documented
- * first, while `-ex` diverges at the second character and matches neither.
+ * first, while `-ex` diverges at the third character and reaches only
+ * `-ExecutionPolicy`, which is what makes it swallow the body below.
  *
  * The set was measured rather than reasoned about, because reasoning about it
  * gets two of the answers wrong. Each spelling below was run against a
@@ -186,8 +202,9 @@ function wrapperScript(tokens: string[]): string | undefined {
  * writes a marker file only the body itself can write:
  *
  * - `-e`, `-en`, `-enco`, `-encod`, `-encode`, `-encoded`, `-encodedc`,
- *   `-encodedcom`, `-encodedcomm`, `-encodedcomma`, `-encodedcomman` and
- *   `-encodedcommand` each ran it. Every prefix of the name but one.
+ *   `-encodedco`, `-encodedcom`, `-encodedcomm`, `-encodedcomma`,
+ *   `-encodedcomman` and `-encodedcommand` each ran it — thirteen of the
+ *   fourteen prefixes, and every one of them but `-enc`.
  * - `-ec` ran it, in any case. It is not a prefix of anything here.
  * - `-enc` did not run it — three runs on each build, every one of them waiting
  *   for input until it was killed — while its immediate neighbours `-en` and
@@ -202,13 +219,13 @@ function wrapperScript(tokens: string[]): string | undefined {
  * so deriving it changes no answer and cannot drift when a switch is spelled
  * differently.
  *
- * Two spellings in the accepted set were measured *not* to run the body, and
- * they stay in. Dropping them would be a bet on the user's PowerShell build, and
- * the cost of losing that bet is a destructive command running unsupervised
- * rather than one prompt too many. Nothing here explains why `-ec` binds, why
- * `-enc` does not, or why `-enco` does; that is recorded rather than guessed at,
- * because a rule whose comment explains more than was measured is worse than a
- * rule that says what it saw.
+ * One spelling in the accepted set was measured *not* to run the body — `-enc` —
+ * and it stays in. Keeping a spelling that does not work costs one prompt too
+ * many; dropping one that does work on some build costs a destructive command
+ * running unsupervised, and the two mistakes are not the same size. Nothing
+ * here explains why `-ec` binds, why `-enc` does not, or why `-enco` does; that
+ * is recorded rather than guessed at, because a rule whose comment explains more
+ * than was measured is worse than a rule that says what it saw.
  *
  * `shortest` exists for the one prefix-match rule that PowerShell does not apply
  * the same way: a *parameter* name binds only when it is unambiguous, so the
