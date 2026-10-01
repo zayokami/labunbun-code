@@ -22,7 +22,7 @@ export interface DoctorCheck {
 /**
  * The command paths this repo starts without handing them a sandbox policy.
  *
- * A policy is what buys a command two things: the wrapper `seatbelt-exec` /
+ * A policy is what buys a command two things: the wrapper `sandbox-exec` /
  * `bwrap`, and the proxy variables, which `Operations.exec` injects only when it
  * is given one. Every other spawn in this repo goes straight to `spawn` or to a
  * transport, so it gets neither — and on a native backend, where the row below

@@ -269,6 +269,41 @@ describe("startNetworkProxy", () => {
 		}
 	});
 
+	test("a per-tool proxy override is pinned to the policy's proxy, not left alone", async () => {
+		// The gap the standard keys do not close. `operations.ts` merges
+		// `{...process.env, ...env, ...proxyEnv}`, so an ambient `PIP_PROXY` or
+		// `npm_config_proxy` survives the merge and, because it is that tool's own
+		// option, outranks `HTTP_PROXY` inside it. Measured for pip: with
+		// `PIP_PROXY` at a closed port, `pip download` failed with
+		// `NewConnectionError ... host='127.0.0.1', port=9` while the same command
+		// without it downloaded normally — so an ambient value really does decide
+		// where a confined install goes.
+		//
+		// Pinned rather than deleted, and the assertion is that they are *equal* to
+		// the policy's URL: deleting `PIP_PROXY` would leave pip with no proxy
+		// setting at all and send it out directly, which is the same bypass.
+		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("example.com") });
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			for (const key of ["npm_config_proxy", "NPM_CONFIG_PROXY", "npm_config_https_proxy", "PIP_PROXY"]) {
+				expect(proxy.env[key]).toBe(proxy.httpUrl);
+			}
+			// The no-proxy half follows the same rule as `NO_PROXY`: empty, so an
+			// ambient list of local addresses cannot be inherited through the tool's
+			// own spelling of the option.
+			for (const key of ["npm_config_noproxy", "NPM_CONFIG_NOPROXY"]) {
+				expect(proxy.env[key]).toBe("");
+			}
+
+			// And the merge that consumes them keeps the policy last, so a caller
+			// passing `env: { PIP_PROXY: "http://elsewhere" }` cannot put its own
+			// back on top. This is the order, not the values.
+			expect({ ...{ PIP_PROXY: "http://elsewhere" }, ...proxy.env }.PIP_PROXY).toBe(proxy.httpUrl);
+		} finally {
+			await proxy.close();
+		}
+	});
+
 	test("close resolves and leaves both ports unconnectable", async () => {
 		// `server.close()` does not return until its connections end, so a
 		// teardown that forgets them hangs rather than fails. The test timeout is

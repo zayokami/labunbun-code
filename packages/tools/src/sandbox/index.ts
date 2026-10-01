@@ -190,8 +190,11 @@ export function detectRuntime(platform: SandboxPlatform = process.platform): San
  * `hasNativeBackend` is a parameter rather than a PATH probe so that every branch
  * here is reachable from a test on any machine. The real caller passes the
  * result of checking for the program, and the two are kept honest by
- * `operations.test.ts` asserting the wiring rather than this function asserting
- * its own inputs.
+ * `sandbox-wiring.test.ts` asserting the wiring rather than this function
+ * asserting its own inputs. That file is the one that exists and drives a real
+ * `exec`; an earlier version of this comment named `operations.test.ts`, which
+ * has never existed in this repository, so the assertion it claimed as the
+ * guard was in a file nobody could go and read.
  */
 export function resolveSandboxExecution(options: ResolveSandboxOptions): SandboxResolution {
 	const platform = options.platform ?? process.platform;
@@ -241,6 +244,20 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 		};
 	}
 
+	// Defaults to *installed*, and the direction is the point rather than an
+	// oversight. Guessing "not installed" would return `unavailable`, and a
+	// confined command would then run with no wrapper at all — the fail-open.
+	// Guessing "installed" makes a machine without `bwrap` fail to spawn it, so
+	// the command does not run; that is fail-closed, and it is the correct side
+	// to be wrong on. The cost is a command that fails with a spawn error naming
+	// a program the caller believed was installed, which is a legible failure.
+	//
+	// No production caller reaches this default: `operations.ts:370` passes
+	// `this.#runtime.hasNativeBackend`, which comes from `detectNativeBackend`.
+	// It is here for a hand-built call and for the tests, and it is documented
+	// because a bare `?? true` in a confinement decision is exactly the sort of
+	// thing a later reader "corrects" to `?? false` without asking which way the
+	// error runs.
 	const installed = options.hasNativeBackend ?? true;
 	if (!installed) {
 		return {
@@ -400,6 +417,20 @@ export function describeSandboxBackend(
 			// so "reads are unrestricted" would be one mechanism's answer wearing the
 			// other's name. "This mode does not narrow reads" is true of every policy
 			// `buildSandboxPolicy` produces, which is the only one this mode has.
+			//
+			// "Version-control metadata is refused for writing" carries the same
+			// exposure and was left unargued, which is the gap worth closing here: a
+			// hand-built `SandboxPolicy` with `protected: []` would render this exact
+			// sentence while emitting no protection at all. The argument is the same
+			// one, and it holds for the stronger claim: for `workspace-write`,
+			// `buildSandboxPolicy` returns through `protectedFor`, which adds
+			// `join(root, ".git")` for every writable root unconditionally — the scan
+			// only ever *adds* to the list, so no result it can produce removes a
+			// `.git`. The early return for `danger-full-access` is the one branch that
+			// yields an empty `protected`, and that mode never reaches this `case`.
+			// So the sentence is true of every policy this build produces and false
+			// only of one an embedder writes by hand, which is the same line already
+			// drawn for reads.
 			//
 			// The process-tree sentence is kept, and is a different claim from the one
 			// the bwrap header leaves open: it is about *descendants* keeping the

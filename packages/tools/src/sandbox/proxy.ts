@@ -170,18 +170,64 @@ export interface NetworkProxy {
  * a real gap — but that is from the upstream source, not from this box, and it
  * is left as the one known unknown rather than asserted either way.
  *
- * There is a second order to all of this that is worth stating because it is not
- * about which keys are set: `operations.ts` builds the child environment as
- * `{...process.env, ...env, ...proxyEnv}`, so these override what the caller had,
- * but an ambient `NPM_CONFIG_PROXY` or `PIP_PROXY` in the developer's own
- * environment is neither stripped nor pinned, and both of those *beat*
- * `HTTP_PROXY` inside the tool. The merge order protects against a caller naming
- * `HTTP_PROXY`; it does not protect against a caller naming the override.
+ * There is a second order to all of this, and it is the one that decides whether
+ * any of the above confines anything: a package manager's **own** proxy option
+ * outranks the standard variables inside that tool. `operations.ts` builds the
+ * child environment as `{...process.env, ...env, ...proxyEnv}`, so the merge
+ * order protects against a caller naming `HTTP_PROXY` — and does nothing at all
+ * about a caller naming the override. An ambient `PIP_PROXY` in the developer's
+ * own environment was enough to send a confined `pip install` somewhere the
+ * policy never sees. That is why `TOOL_PROXY_KEYS` below exists.
  */
 const HTTP_PROXY_KEYS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] as const;
 const SOCKS_PROXY_KEYS = ["ALL_PROXY", "all_proxy"] as const;
 const EXTRA_HTTP_PROXY_KEYS = ["WS_PROXY", "ws_proxy", "WSS_PROXY", "wss_proxy", "FTP_PROXY", "ftp_proxy"] as const;
 const NO_PROXY_KEYS = ["NO_PROXY", "no_proxy"] as const;
+
+/**
+ * Per-tool proxy overrides, pinned to this policy's destination.
+ *
+ * **Pinned, not stripped**, and the direction matters. Stripping `PIP_PROXY`
+ * would not make pip use `HTTP_PROXY` — it would remove pip's only proxy setting
+ * and send it out directly, which is the same bypass by the other road. There
+ * is no version of "remove the override" that is safe here; the tool has to be
+ * *told* where to go. So these are set to the same URL the standard variables
+ * carry, and the tool's own preference now points at the policy's proxy.
+ *
+ * What is measured, and what is not:
+ *
+ *   - **pip — measured.** `PIP_PROXY` is honoured: with it pointing at a closed
+ *     port, `pip download` failed with `NewConnectionError ... host='127.0.0.1',
+ *     port=9` and the identical command without it downloaded normally. That is
+ *     a behaviour, not a source reading, and it is the reason this set is not
+ *     empty.
+ *   - **npm — source evidence only.** `@npmcli/config/lib/index.js:332-346`
+ *     (`loadEnv`) maps every `npm_config_*` variable onto a config key, lowercased
+ *     and dash-converted, which outranks the defaults; and `npm config ls -l`
+ *     reports exactly three proxy options, `proxy`, `https-proxy` and
+ *     `noproxy`, so those are the three pinned. What could **not** be shown on
+ *     this machine is the end-to-end behaviour: every `npm view` here succeeded
+ *     through a deliberately closed proxy, with the variable, with `--proxy`, and
+ *     with neither, so something outside npm is serving registry reads and npm's
+ *     own path never engaged. The claim that npm reads these is from the source;
+ *     the claim that it ignores them here is not established.
+ *   - **yarn — unverified.** Not installed. Yarn Berry is reported to read
+ *     `YARN_HTTP_PROXY`/`YARN_HTTPS_PROXY`; nothing about that was run, so it is
+ *     left as a known gap rather than pinned on the strength of a blog post.
+ *
+ * Both casings are listed because npm's own filter is case-insensitive
+ * (`/^npm_config_/i`) and POSIX environment variables are case-sensitive while
+ * Windows ones are not — one spelling is not enough for both.
+ */
+const TOOL_PROXY_KEYS = [
+	"npm_config_proxy",
+	"NPM_CONFIG_PROXY",
+	"npm_config_https_proxy",
+	"NPM_CONFIG_HTTPS_PROXY",
+	"PIP_PROXY",
+] as const;
+/** The no-proxy half of the same override, pinned to the same empty value. */
+const TOOL_NO_PROXY_KEYS = ["npm_config_noproxy", "NPM_CONFIG_NOPROXY"] as const;
 
 /**
  * `NO_PROXY` is set to the **empty string**, deliberately, and that is worth
@@ -202,6 +248,10 @@ function proxyEnv(httpUrl: string, socksUrl: string): Record<string, string> {
 	for (const key of SOCKS_PROXY_KEYS) env[key] = socksUrl;
 	for (const key of EXTRA_HTTP_PROXY_KEYS) env[key] = httpUrl;
 	for (const key of NO_PROXY_KEYS) env[key] = "";
+	// After the standard keys, and only ever to the same values, so the merge
+	// order in `operations.ts` cannot put the caller's spelling back on top.
+	for (const key of TOOL_PROXY_KEYS) env[key] = httpUrl;
+	for (const key of TOOL_NO_PROXY_KEYS) env[key] = "";
 	return env;
 }
 
