@@ -115,13 +115,41 @@ export function guardWritablePath(inputPath: string, cwd: string, operation: str
 	// Containment above guarantees the prefix, so the slice is the workspace-
 	// relative path — including any nested repository's own .git.
 	const relative = folded === root ? "" : folded.slice(root.length + 1);
-	const protectedSegment = relative
-		.split("/")
-		.find((segment) => (PROTECTED_SEGMENTS as readonly string[]).includes(segment));
+	const protectedSegment = relative.split("/").find((segment) => {
+		if ((PROTECTED_SEGMENTS as readonly string[]).includes(segment)) return true;
+		// A segment that is `.git` once trailing dots and spaces are removed.
+		//
+		// **Measured, and the fix is the safe direction.** On this machine
+		// `guardWritablePath(".git /config")` and `(".git./config")` both passed
+		// the guard, because the comparison was exact string equality. On Windows
+		// those are *sibling directories* named `".git "` and `".git."` rather
+		// than aliases — writing them creates a new directory and leaves the real
+		// `.git` untouched, so on this platform the gap was a false negative
+		// rather than an escape. That is not true everywhere: SMB shares, tar and
+		// zip extraction, and the POSIX side of a WSL mount all strip trailing
+		// dots and spaces, and there the same path lands inside the real `.git`.
+		// Refusing the near-miss spelling is free on the platforms where it names
+		// a different directory and closes the gap on the ones where it does not.
+		//
+		// The alternative — stripping first and only then comparing — would be a
+		// different rule: it would refuse `git checkout` output paths that happen
+		// to end in a dot, which is a real pattern on Windows and is not an
+		// attack. Matching the name and *additionally* its trimmed form keeps
+		// that case allowed while closing this one.
+		const trimmed = segment.replace(/[. ]+$/, "");
+		return trimmed !== segment && (PROTECTED_SEGMENTS as readonly string[]).includes(trimmed);
+	});
 
 	if (protectedSegment !== undefined) {
+		// The *canonical* name in the message, not the spelling that was refused:
+		// `.git /config` reading "is inside .git /" is confusing in a way that
+		// matters, since the user has to act on this string. The canonical name is
+		// `PROTECTED_SEGMENTS` if the trimmed form matched and the raw one did not.
+		const named = (PROTECTED_SEGMENTS as readonly string[]).includes(protectedSegment)
+			? protectedSegment
+			: protectedSegment.replace(/[. ]+$/, "");
 		throw new Error(
-			`${operation}: '${inputPath}' is inside ${protectedSegment}/ — version-control metadata is not writable by the agent (${resolved})`,
+			`${operation}: '${inputPath}' is inside ${named}/ — version-control metadata is not writable by the agent (${resolved})`,
 		);
 	}
 

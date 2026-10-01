@@ -212,6 +212,58 @@ describe("guardWritablePath", () => {
 			expect(guardWritablePath(".GIT/config", CWD, "Write")).toBe(`${CWD}/.GIT/config`);
 		}
 	});
+
+	/**
+	 * A segment that is `.git` once trailing dots and spaces come off.
+	 *
+	 * This is not a case-conditional test the way the one above is, and the
+	 * asymmetry is deliberate. A case-variant spelling is refused only where the
+	 * filesystem would collapse it; these are refused everywhere. On Windows
+	 * `.git ` and `.git.` name *sibling directories* — writing them creates
+	 * something new and leaves the real `.git` alone — so on this platform the
+	 * old behaviour was a false negative rather than an escape. On an SMB share,
+	 * a tar or zip extraction, or the POSIX side of a WSL mount, those trailing
+	 * characters are stripped and the same path lands inside the real `.git`,
+	 * which is why refusing it unconditionally is the direction that is safe on
+	 * every platform rather than only the one this test runs on.
+	 */
+	test.each([
+		[".git /config", "a trailing space"],
+		[".git./config", "a trailing dot"],
+		[".git.../config", "several of them"],
+		["vendor/lib/.git /config", "and inside a nested repository"],
+		[".git /hooks/pre-commit", "on a hook"],
+	])("rejects %s — %s", (path) => {
+		expect(() => guardWritablePath(path, CWD, "Write")).toThrow(/version-control metadata/);
+	});
+
+	/**
+	 * The message has to name `.git`, not the spelling that was refused. A user
+	 * who has to act on the string should not be told they are writing inside
+	 * `.git /`, which is a directory that does not exist on their machine.
+	 */
+	test("the message names the canonical directory, not the near-miss spelling", () => {
+		let message = "";
+		try {
+			guardWritablePath(".git /config", CWD, "Write");
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain("inside .git/");
+		expect(message).not.toContain("inside .git /");
+	});
+
+	/**
+	 * The other direction, and it is the reason this is not "strip then compare":
+	 * a path that merely *ends* in a dot is ordinary on Windows and is not an
+	 * attempt to reach `.git`. Refusing those would be a false positive on a
+	 * real pattern.
+	 */
+	test("a filename that ends in a dot is not a .git near-miss", () => {
+		expect(guardWritablePath("build/output.", CWD, "Write")).toBe(`${CWD}/build/output.`);
+		expect(guardWritablePath("src/.gitignore", CWD, "Write")).toBe(`${CWD}/src/.gitignore`);
+		expect(guardWritablePath("src/x.git/config.ts", CWD, "Write")).toBe(`${CWD}/src/x.git/config.ts`);
+	});
 });
 
 // These use a real temporary tree because the point of resolveSymlinks is what
