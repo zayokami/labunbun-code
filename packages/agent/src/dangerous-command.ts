@@ -3075,8 +3075,55 @@ function isStartupPath(token: string): boolean {
 	// asking again, and the comment says so rather than letting the message carry
 	// a claim the code does not make.
 	const ssh = /(^|\/)\.ssh\/(authorized_keys2?|rc|environment)$/.test(lower);
-	const sudoers = /^\/etc\/sudoers$/.test(lower) || /^\/etc\/sudoers\.d\//.test(lower);
-	return homeFile || systemFile || directory || ssh || sudoers;
+	return homeFile || systemFile || directory || ssh || isCronPath(lower) || isLoaderPath(lower) || isSudoersPath(lower);
+}
+
+/**
+ * A file the cron daemon executes on its own schedule.
+ *
+ * Its own predicate rather than another row in {@link isStartupPath} because the
+ * *message* has to name it differently: a cron entry needs no login and no boot, so
+ * the "runs on every future login or boot" wording the shell files get would be an
+ * overclaim. One predicate shared by the matcher and the message is what keeps the
+ * two from drifting — a regex written twice is a regex that will be fixed in one
+ * place and not the other.
+ *
+ * `/var/spool/cron/` is a subtree match because the file name inside it
+ * (`crontabs/root`) is chosen by the system, not the user, and the `^/etc/` anchors
+ * keep a home-made `~/etc/cron.d/x` out of a rule about the system scheduler.
+ */
+function isCronPath(lower: string): boolean {
+	return (
+		/^\/etc\/cron\.d\//.test(lower) ||
+		/^\/etc\/cron\.(daily|hourly|weekly|monthly)\//.test(lower) ||
+		/^\/etc\/crontab$/.test(lower) ||
+		/\/spool\/cron\//.test(lower)
+	);
+}
+
+/**
+ * A file the dynamic linker reads for every dynamically linked process.
+ *
+ * The strongest of the startup families and the one needing the weakest conditions:
+ * `ld.so.preload` is read before `main()` runs and regardless of who is logged in,
+ * so a line there is code execution into every future program on the machine,
+ * setuid ones included. `ld.so.conf.d/` is the same door one level down — it points
+ * the loader at more library directories.
+ */
+function isLoaderPath(lower: string): boolean {
+	return (
+		/^\/etc\/ld\.so\.preload$/.test(lower) ||
+		/^\/etc\/ld\.so\.conf$/.test(lower) ||
+		/^\/etc\/ld\.so\.conf\.d\//.test(lower)
+	);
+}
+
+/**
+ * `sudoers` grants privilege rather than executing anything, which is why its
+ * message does not claim the line "runs".
+ */
+function isSudoersPath(lower: string): boolean {
+	return /^\/etc\/sudoers$/.test(lower) || /^\/etc\/sudoers\.d\//.test(lower);
 }
 
 /**
@@ -3114,18 +3161,29 @@ function posixStartupWrite(segment: string): DangerousCommandMatch | null {
 
 	for (const target of targets) {
 		if (!isStartupPath(target)) continue;
-		// Two different claims, and the message has to say which one it is making.
+		// Three different claims, and the message has to say which one it is making.
 		// "Runs on every future login" is exactly right for a shell startup file
 		// and for an SSH key file. For `sudoers` it would be a claim the code does
 		// not deliver: a sudoers line grants privilege without asking again, it
 		// does not execute. Saying so separately is cheaper than a message that is
 		// true for most rows and wrong for one.
-		const grants = /^\/etc\/sudoers(\.d\/)?/.test(target.toLowerCase());
+		//
+		// The same applies to the two families this batch added, in the other
+		// direction. A cron entry is not tied to a login at all, and `ld.so.preload`
+		// is not tied to a login *or* a boot — the linker reads it for every
+		// process. Reusing the login wording for those would be an overclaim in the
+		// same shape the sudoers row was avoiding, so each gets the sentence it
+		// actually earns.
+		const lower = target.toLowerCase();
 		return {
 			kind: "Other",
-			rule: grants
+			rule: isSudoersPath(lower)
 				? `\`${target}\` written to, which grants privilege without asking for a password again`
-				: `\`${target}\` written to, which runs on every future login or boot`,
+				: isLoaderPath(lower)
+					? `\`${target}\` written to, which the dynamic linker loads into every program on this machine`
+					: isCronPath(lower)
+						? `\`${target}\` written to, which the scheduler runs on its own, with no login needed`
+						: `\`${target}\` written to, which runs on every future login or boot`,
 		};
 	}
 	return null;

@@ -3142,6 +3142,75 @@ describe("POSIX: writing to a file that runs at the next login", () => {
 	});
 });
 
+describe("POSIX: the two startup families that need no login", () => {
+	/**
+	 * Cron and the dynamic linker, which the block above argued for and did not
+	 * finish. Every row here measured `null` before this change.
+	 *
+	 * `>>` is caught for the same reason it is caught for `~/.bashrc`: a startup
+	 * file *causes* what happens next time, and appending to it installs the line
+	 * exactly as much as truncating it does. That is the same argument the record
+	 * rules reject, and the asymmetry between the two is deliberate — there is no
+	 * attacker gain in appending to a log, and every gain in appending to a file
+	 * that is about to be read.
+	 */
+	test.each([
+		["echo x >> /etc/cron.d/backdoor", "a cron drop-in, appended"],
+		["echo x > /etc/cron.d/backdoor", "and truncated"],
+		["tee -a /etc/cron.d/e", "and via tee, which is not a redirect"],
+		["echo x > /etc/cron.daily/evil", "the run-daily directory"],
+		["echo x > /etc/cron.hourly/evil", "and hourly"],
+		["echo x >> /etc/crontab", "the system crontab itself"],
+		["echo x > /var/spool/cron/crontabs/root", "a user crontab in the spool"],
+		['sh -c "echo x >> /etc/cron.d/e"', "through a shell wrapper"],
+		['sudo sh -c "echo x >> /etc/cron.d/e"', "and through sudo"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["echo x >> /etc/ld.so.preload", "the preload file itself"],
+		["echo x > /etc/ld.so.preload", "and truncated"],
+		["tee -a /etc/ld.so.preload", "and via tee"],
+		["echo x > /etc/ld.so.conf.d/x.conf", "the loader's drop-in directory"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * Three messages for three mechanisms, and this is what stops them drifting.
+	 * The shell wording ("runs on every future login or boot") is *wrong* for both
+	 * families added here: a cron entry needs no login and no boot, and the linker
+	 * needs neither — it reads `ld.so.preload` for every process regardless of who
+	 * is logged in. Reusing the login sentence would be an overclaim in the same
+	 * shape the sudoers row was written to avoid.
+	 */
+	test("cron is described as running without a login, not on one", () => {
+		expect(posix("echo x >> /etc/cron.d/e")?.rule).toContain("no login needed");
+		expect(posix("echo x >> /etc/cron.d/e")?.rule).not.toContain("runs on every future login");
+	});
+
+	test("the loader is described as loaded into every program, not on a login", () => {
+		expect(posix("echo x >> /etc/ld.so.preload")?.rule).toContain("every program");
+		expect(posix("echo x >> /etc/ld.so.preload")?.rule).not.toContain("runs on every future login");
+	});
+
+	/**
+	 * The over-match side. These are the rows a loosened predicate would catch: a
+	 * backup file, a name that merely contains the words, and a `cron.d` a user
+	 * made inside their own home rather than the system scheduler's.
+	 */
+	test.each([
+		["echo hi > /etc/crontab.bak", "a backup of the crontab"],
+		["echo hi > /etc/ld.so.preload.txt", "a file that only starts with it"],
+		["echo hi > /etc/cron.log", "a name that merely contains cron"],
+		["echo hi > /project/cron.d/x", "a cron.d in a project, not the scheduler's"],
+		["echo hi > /home/dev/ld.so.preload", "the file's name in a home directory"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+});
+
 describe("POSIX: turning off the record of what ran", () => {
 	/**
 	 * Erasing a record that already exists, rather than suppressing the next one.
