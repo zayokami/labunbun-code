@@ -160,6 +160,147 @@ describe("POSIX: shell scaffolding does not hide the command", () => {
 	});
 });
 
+/**
+ * Wrappers in front of the command: eight programs whose whole job is to run
+ * something else, and one switch spelling that hid the script body.
+ *
+ * Every shape in the first three tables was measured as `null` before this
+ * batch — a real `rm -rf` behind a real wrapper, classified as nothing. The
+ * controls are not decoration: a wrapper rule that flagged every invocation
+ * would flag `command -v` and `nohup --help`, which are a lookup and a help
+ * screen, and a classifier that does that is one a user learns to switch off.
+ */
+describe("POSIX: a wrapper in front of the command is followed", () => {
+	test.each([
+		['bash --norc -c "rm -rf /"', "a long option, which is not the switch that carries the script"],
+		["zsh --no-rcs -c 'rm -rf /'", "the same on another shell"],
+		['bash --rcfile /tmp/x -c "rm -rf /"', "a long option with a value of its own"],
+		['bash --posix -c "rm -rf /"', "a long option with no value at all"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	/**
+	 * The bundling the rule above had to keep. `-lc`, `-lic` and `-e -c` are all
+	 * the same switch and all single-dashed. A rule of "starts with two dashes"
+	 * closes `--norc` and costs nothing; a rule of "equals `-c`" would close
+	 * `--norc` and break all three of these, which is the more obvious fix and
+	 * the wrong one.
+	 */
+	test.each([
+		['bash -c "rm -rf /"', "the plain switch"],
+		['bash -lc "rm -rf /"', "bundled with -l"],
+		['bash -lic "rm -rf /"', "bundled with -l and -i"],
+		['bash -e -c "rm -rf /"', "after a separate option"],
+		['sh -c "rm -rf /"', "another shell"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	test.each([
+		["command rm -rf /", "`command`, the builtin for running a name"],
+		["exec rm -rf /", "`exec`, which replaces the shell with it"],
+		["exec -a myname rm -rf /", "under a different argv[0]"],
+		["command -p /bin rm -rf /", "with a PATH in front of it"],
+		["command -- rm -rf /tmp/build", "after the end-of-options marker"],
+		["nohup rm -rf /", "in the background"],
+		["nice rm -rf /", "at another priority"],
+		["nice -n 10 rm -rf /", "with the adjustment as its own word"],
+		["nice -n10 rm -rf /", "with the adjustment glued to its flag"],
+		["doas rm -rf /", "`doas`"],
+		["doas -u root rm -rf /", "`doas` for another user"],
+		["doas -n rm -rf /", "`doas -n`, whose -n takes no value and so is not the command"],
+		["pkexec rm -rf /", "`pkexec`"],
+		["pkexec --user root rm -rf /", "`pkexec` for another user"],
+		["pkexec -u root rm -rf /", "the same, with the short spelling"],
+		['su -c "rm -rf /"', "`su`, whose -c carries the command the way `sh -c` does"],
+		['su root -c "rm -rf /"', "with the user in front of the flag"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	test.each([
+		"env -u PATH rm -rf /",
+		"env --unset=PATH rm -rf /",
+		"env -C /tmp rm -rf /",
+		'env -S "rm -rf /"',
+		"env -i rm -rf /",
+		"env FOO=bar rm -rf /",
+		"env -- rm -rf /",
+	])("%s is dangerous — an option of the wrapper is not the program", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	/**
+	 * Read `command -v rm` next to `command rm -rf /`: the words are the same and
+	 * only one of them runs anything. Same for `doas -n cat /etc/hosts` against
+	 * `doas -n rm -rf /` — the pair that is why the value-option lists are per
+	 * program, since a shared `-n` would have read the first as a command with a
+	 * value and the second as a command with none.
+	 */
+	test.each([
+		"command ls -la",
+		"command -v rm",
+		"command -V",
+		"command -- ls",
+		"command echo hi",
+		"exec ls",
+		"exec -a myname ls",
+		"nohup sleep 1",
+		"nohup --help",
+		"nohup -u x ls",
+		"nice -n 10 make",
+		"nice git status",
+		"doas true",
+		"doas -n cat /etc/hosts",
+		"doas echo hi",
+		"pkexec --version",
+		"su",
+		"su -",
+		'su -c "echo hi"',
+		"env",
+		"env -i",
+		"env -u PATH",
+		"env -S",
+		"env -v",
+		"env -a",
+		"env FOO=bar bun test",
+		"env -i PATH=/usr/bin ls",
+		'bash --norc -c "echo hi"',
+		"bash --version",
+		"bash --help",
+		"xargs --version",
+		"xargs -n 1 cat",
+		"xargs -0 rm -v",
+	])("%s is not dangerous", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * These are probes, not commands anyone types — `command -v rm -rf /` is not
+	 * valid usage, and the row is written anyway. They exist because a wrapper
+	 * told to print rather than run runs nothing, and that is a property worth
+	 * pinning even though no real command line can produce a violation.
+	 *
+	 * They are worth pinning because the property is not free. A query option is
+	 * shaped exactly like an ordinary flag, so the generic flag-skip below it
+	 * steps over `-v` and lands on the word after it. With this guard in place
+	 * the word is never read; without it, every row here classifies as a forced
+	 * recursive delete. The `command -v rm` row in the table above cannot tell
+	 * the two readings apart — there, both stop at `rm` with no force flag — so
+	 * without these rows the guard has no test at all.
+	 */
+	test.each([
+		"command -v rm -rf /",
+		"command -V rm -rf /",
+		"nohup --help rm -rf /",
+		"env -v rm -rf /",
+		"pkexec --version rm -rf /",
+	])("%s is a probe: a wrapper asked to print does not run what follows", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+});
+
 describe("POSIX: case folding on the command and on its flags", () => {
 	/**
 	 * Every ordering of the letters, in every case.

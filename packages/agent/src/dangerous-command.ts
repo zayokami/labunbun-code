@@ -54,6 +54,24 @@ export interface DangerousCommandMatch {
 }
 
 const SHELL_EXECUTABLES = new Set(["sh", "bash", "zsh", "ksh", "dash"]);
+
+/**
+ * Programs whose job is to run the command behind them, in the same sense as
+ * `sudo`: the words in front of it are the wrapper's, not the command's.
+ *
+ * Every one of these was a miss until now, and `command` is the sharpest — it
+ * is the POSIX builtin for running a name, so `command rm -rf /` is the delete
+ * with a word in front of it that this function has no other reason to know.
+ * `doas` and `pkexec` are `sudo` under another name on the systems that have
+ * them; `nice` and `nohup` are the ordinary spelling of "run this in the
+ * background, lower priority".
+ *
+ * `su` is not here. Its `-c` carries the command the way `sh -c` does, so it
+ * needs the script read out of the flag rather than the words after the
+ * options, and it gets its own branch for that.
+ */
+const COMMAND_PREFIX_PROGRAMS = new Set(["command", "exec", "nohup", "nice", "doas", "pkexec"]);
+
 const POWERSHELL_EXECUTABLES = new Set(["powershell", "powershell.exe", "pwsh", "pwsh.exe"]);
 const BROWSER_EXECUTABLES = new Set([
 	"chrome",
@@ -121,6 +139,16 @@ function wrapperScript(tokens: string[]): string | undefined {
 	for (let i = 1; i < tokens.length; i++) {
 		const arg = tokens[i];
 		if (!arg.startsWith("-")) continue;
+		// A long option is never the switch that carries the command, and this is
+		// the line that stops the substring test below from accepting one.
+		// `bash --norc -c 'rm -rf /'` is an ordinary invocation of a script that
+		// wants no rc-file; `--norc` contains a `c`, so the loop took it as the
+		// switch and returned the *next* token — the literal `-c` — as the script
+		// body. The body was never read, and `rm -rf /` inside it was classified
+		// as the command `-c`, which is nothing. No shell in `SHELL_EXECUTABLES`
+		// has a long option that takes a command: theirs are `--norc`,
+		// `--noprofile`, `--posix`, `--rcfile`, `--version`, `--help`.
+		if (arg.startsWith("--")) continue;
 		// Every spelling of "run this string": -c, -lc, -lic, -e -c.
 		if (!arg.includes("c")) continue;
 		const next = tokens[i + 1];
@@ -293,26 +321,95 @@ const XARGS_VALUE_OPTIONS = new Set([
 ]);
 
 /**
- * The command `xargs` will run, which is the first word that is not one of its
- * options.
+ * Options that consume the word after them, per wrapper.
  *
- * This function cannot run `xargs`, so the list of options that consume the
- * word after them is a list it has to be right about rather than one it can
- * ask. Getting it wrong moves the boundary one word either way, and the words
- * on either side of the boundary belong to `xargs` — an option, or the
- * argument of one — so the effect is on how often the command behind them is
- * found, not on what is found.
+ * `xargs` had this and the other six wrappers did not, which is the asymmetry
+ * that let `env -u PATH rm -rf /` and `nice -n 10 rm -rf /` through: `env`'s
+ * own skip knew `-i`, `--ignore-environment` and assignments, so every other
+ * real `env` option became the program name.
+ *
+ * **One set per program rather than one set for all of them**, and the reason is
+ * a collision rather than tidiness: `-n` is `nice`'s adjustment *and* `doas`'s
+ * "do not prompt", so a shared list would have `doas -n` swallow the command
+ * that follows it and turn `doas -n rm -rf /` back into a miss. These are
+ * different programs that happen to share a letter.
+ *
+ * It is a list this function has to be right about rather than one it can ask,
+ * because it cannot run any of these. Getting an entry wrong moves the boundary
+ * one word either way, and the words on either side of that boundary belong to
+ * the wrapper — an option, or the argument of one — so the cost is how often the
+ * command behind them is found, not what is found when it is.
  */
-function xargsCommand(args: string[]): string[] {
+const COMMAND_PREFIX_VALUE_OPTIONS = new Map<string, ReadonlySet<string>>([
+	// `command -p PATH` searches a PATH instead of the inherited one.
+	["command", new Set(["-p"])],
+	// `exec -a NAME` runs the command under a different argv[0].
+	["exec", new Set(["-a"])],
+	// `nice -n ADJUSTMENT`. Nothing else in this map reads `-n` as a value.
+	["nice", new Set(["-n", "--adjustment"])],
+	// `nohup` has options and none of them take a value.
+	["nohup", new Set()],
+	// `doas -u USER`. Its `-n`/`-s`/`-C` take nothing, and treating them as
+	// value options is the mistake the note above is about.
+	["doas", new Set(["-u", "--user"])],
+	["pkexec", new Set(["-u", "--user"])],
+	// `env -u NAME`, `-C DIR`, `-S STRING`, `--argv0 NAME`. `-i` and
+	// `--ignore-environment` are deliberately absent: they take no value.
+	["env", new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string", "--argv0"])],
+]);
+
+const EMPTY_VALUE_OPTIONS: ReadonlySet<string> = new Set();
+
+/** The value options for one program; a program absent from the map has none. */
+function valueOptionsFor(program: string): ReadonlySet<string> {
+	return COMMAND_PREFIX_VALUE_OPTIONS.get(program) ?? EMPTY_VALUE_OPTIONS;
+}
+
+/**
+ * Options that print and exit, so no command follows them.
+ *
+ * `command -v rm` is a lookup and `nohup --help` is help. Reading the word
+ * after one of these as the command would invent a match out of a question.
+ */
+const COMMAND_PREFIX_QUERY_OPTIONS = new Set(["-v", "-V", "--help", "--version"]);
+
+/**
+ * The command a wrapper will run: the first word that is not one of its
+ * options, the argument of one, or an assignment.
+ *
+ * `--` ends the options, which is what makes `env -- rm -rf /` and
+ * `xargs -- rm -rf /` the same command rather than one wrapped in a flag.
+ */
+function commandAfterOptions(
+	args: string[],
+	valueOptions: ReadonlySet<string>,
+	queryOptions: ReadonlySet<string> = COMMAND_PREFIX_QUERY_OPTIONS,
+): string[] {
 	let i = 0;
 	while (i < args.length) {
 		const arg = args[i];
+		// `--` ends the options. The branch is not load-bearing for any command
+		// anyone writes — the generic flag-skip below reaches the same answer,
+		// because the word after `--` is a program name and a program name does
+		// not begin with a dash — and a mutation that deletes this block does
+		// leave every test green. It is here for the one reading the fallthrough
+		// gets wrong: after `--`, a word *can* begin with a dash, and then it is
+		// the program's name rather than an option of the wrapper's.
 		if (arg === "--") {
 			i++;
 			break;
 		}
+		if (queryOptions.has(arg)) return [];
+		if (valueOptions.has(arg)) {
+			i += 2;
+			continue;
+		}
+		if (isAssignment(arg)) {
+			i++;
+			continue;
+		}
 		if (!arg.startsWith("-")) break;
-		i += XARGS_VALUE_OPTIONS.has(arg) ? 2 : 1;
+		i++;
 	}
 	return args.slice(i);
 }
@@ -343,26 +440,43 @@ function matchTokens(
 		return matchTokens(tokens.slice(1), depth + 1, platform, segment);
 	}
 	if (program === "env") {
-		let i = 1;
-		while (i < tokens.length) {
-			const arg = tokens[i];
-			if (arg === "--") {
-				i++;
-				break;
-			}
-			if (arg === "-i" || arg === "--ignore-environment" || isAssignment(arg)) {
-				i++;
-				continue;
-			}
-			break;
+		// `env -S 'rm -rf /'` does not take a command after the options: it takes
+		// a *string*, splits it the way a shell would, and runs the pieces. The
+		// words after `-S` are that string, so the shared skipper would step over
+		// the command and hand back nothing. Expanding it in place is what keeps
+		// this to one skipper for seven wrappers rather than seven near-copies.
+		let args = tokens.slice(1);
+		const at = args.findIndex((arg) => arg === "-S" || arg === "--split-string");
+		const split = at === -1 ? undefined : args[at + 1];
+		if (split !== undefined && split !== "-") {
+			args = [...args.slice(0, at), ...tokenizeShell(split), ...args.slice(at + 2)];
 		}
-		return matchTokens(tokens.slice(i), depth + 1, platform, segment);
+		return matchTokens(commandAfterOptions(args, valueOptionsFor("env")), depth + 1, platform, segment);
+	}
+	// `su -c 'rm -rf /'` is `sh -c` under another name — the flag carries the
+	// command, so this is a script read rather than options stepped over, and it
+	// gets its own branch for that reason rather than joining the list below.
+	// `su` also takes a user *before* the flag (`su root -c …`), which is why the
+	// flag is looked for anywhere rather than at a fixed offset. `su` with no
+	// `-c` starts an interactive login shell, which runs nothing of its own.
+	if (program === "su") {
+		const at = tokens.indexOf("-c");
+		const script = at === -1 ? undefined : tokens[at + 1];
+		if (script === undefined || script === "-") return null;
+		return matchTokens(["sh", "-c", script], depth + 1, platform, script);
 	}
 	// `xargs rm -rf` is `rm -rf` once per line of input: a wrapper in exactly
 	// the sense `sudo` and `env` are, and the reason `find … | xargs rm -rf` is
 	// the ordinary spelling of the delete this file exists to catch.
 	if (program === "xargs") {
-		return matchTokens(xargsCommand(tokens.slice(1)), depth + 1, platform, segment);
+		return matchTokens(commandAfterOptions(tokens.slice(1), XARGS_VALUE_OPTIONS), depth + 1, platform, segment);
+	}
+	// Programs that exist to run the command behind them, in the same sense as
+	// `sudo`. `command` and `exec` are the sharpest of these: they are POSIX
+	// builtins whose entire purpose is to run a name this function would not
+	// otherwise recognise, so `command rm -rf /` was classified as nothing at all.
+	if (program !== undefined && COMMAND_PREFIX_PROGRAMS.has(program)) {
+		return matchTokens(commandAfterOptions(tokens.slice(1), valueOptionsFor(program)), depth + 1, platform, segment);
 	}
 	// A trap's action is shell source sitting in the first operand.
 	if (program === "trap") {
