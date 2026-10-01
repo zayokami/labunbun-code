@@ -882,6 +882,194 @@ describe("Windows: CMD", () => {
 	);
 });
 
+describe("Windows: a control word in front of the command", () => {
+	/**
+	 * Every row here was run against a real `cmd.exe` on this machine: one
+	 * `cmd /c <line>` with a `rd /s /q` or a `del /f` behind the control word and
+	 * a scratch directory to delete, and the answer was whether the directory went
+	 * away. Every one of them read as `null` before.
+	 *
+	 * Not every one of them deletes, and that is the point rather than a
+	 * problem: `if defined FOO` and `if errorlevel 1` are false in a bare harness
+	 * and did not delete, and they are in the table anyway, because a classifier
+	 * cannot evaluate the condition and the person running the line may not have
+	 * meant what the harness happened to say. The rows that were measured true
+	 * are the ones this rule was written against.
+	 *
+	 * They are in one table because the rule that reads them is one rule, and
+	 * because what the table is about is the *shape* rather than the delete: a
+	 * condition, a clause, a nested shell and a `call` are four different ways for
+	 * the same two words to be in front of the program.
+	 */
+	test.each([
+		// `if` — the keyword form, the comparison form, and the one-word form.
+		["if exist C:\\x rd /s /q C:\\y", "a path test"],
+		["if exist C:\\x del /f C:\\y", "the same, with the other delete"],
+		["if not exist C:\\x\\nope rd /s /q C:\\y", "the negated path test"],
+		["if not exist C:\\x rd /s /q C:\\y", "the same with `not` in front of the test"],
+		["if errorlevel 0 rd /s /q C:\\y", "true at ERRORLEVEL 0"],
+		["if errorlevel 1 rd /s /q C:\\y", "false at ERRORLEVEL 0, and flagged anyway"],
+		["if defined FOO rd /s /q C:\\y", "a variable test"],
+		["if not defined FOO rd /s /q C:\\y", "the negated variable test"],
+		["if cmdextversion 1 rd /s /q C:\\y", "the version test"],
+		["if 1 gtr 0 rd /s /q C:\\y", "a comparison, which is three words of condition"],
+		["if 1 lss 2 rd /s /q C:\\y", "another operator"],
+		["if 1 neq 0 rd /s /q C:\\y", "and another"],
+		["if 1 equ 1 rd /s /q C:\\y", "and another"],
+		["if 1 leq 1 rd /s /q C:\\y", "and another"],
+		["if 1 geq 1 rd /s /q C:\\y", "and the last of the six"],
+		["if 1==1 del /f C:\\y", "a condition that parses as an assignment"],
+		['if "a"=="a" rd /s /q C:\\y', "the string form, one word"],
+		["if not exist C:\\x (rd /s /q C:\\y)", "a parenthesised body"],
+
+		// `for` — every form, and the one that has a `do` inside the set.
+		["for %f in (a b) do rd /s /q C:\\y", "a set of files"],
+		["for %f in (a b) do del /f C:\\y", "the same, with the other delete"],
+		["for %%f in (C:\\x) do rd /s /q C:\\y", "the doubled percent, which is a batch file's spelling"],
+		["for /f %i in (echo x) do rd /s /q C:\\y", "the /f form"],
+		['for /f "tokens=1" %a in (x) do del /f C:\\y', "an option between the /f and the body"],
+		["for /r C:\\ %i in (*) do rd /s /q C:\\y", "the /r form"],
+		["for %i in (do) do rd /s /q C:\\y", "a set whose only word is the one in front of the body"],
+		["for %i in (a do b) do rd /s /q C:\\y", "a set with a `do` of its own, and the body after another"],
+
+		// A nested shell. Each `cmd` runs whatever comes after it, and the quoted
+		// form is how a tool passes one.
+		["cmd /c cmd /c rd /s /q C:\\y", "a nested shell"],
+		["cmd /c cmd /c del /f C:\\y", "the same, with the other delete"],
+		["cmd /c cmd /k rd /s /q C:\\y", "the other switch"],
+		["cmd /c cmd.exe /c rd /s /q C:\\y", "the full name of the same program"],
+		['cmd /c "cmd /c rd /s /q C:\\y"', "quoted, which is how a tool passes it"],
+
+		// `call` runs the command behind it.
+		["call rd /s /q C:\\y", "run through a `call`"],
+		["cmd /c call rd /s /q C:\\y", "the same, after a /c"],
+		["cmd /c call del /f C:\\y", "and with the other delete"],
+		["cmd /c call rd /s /q C:\\y && echo done", "a chain, where the `call` is only in the first segment"],
+
+		// A control word behind a shell, which is where the two rules above meet.
+		["cmd /c if exist C:\\x rd /s /q C:\\y", "a condition inside a /c body"],
+		["cmd /c for /f %i in (x) do del /f C:\\y", "a loop inside a /c body"],
+		["cmd /c echo hi && if exist C:\\x rd /s /q C:\\y", "and in the segment that does not say `cmd`"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * A `call` in front of a *label* is not in front of a command, and this is
+	 * the reason `call` is not simply another word to take off. Measured the
+	 * same way as the table above, against a batch file with a `:cleanup` label:
+	 * `call :cleanup rd /s /q <dir>` left the directory alone and the separate
+	 * `rd` after it deleted it, because the words after a label are arguments to
+	 * a subroutine. `call` with no `:` is the delete.
+	 */
+	test("call in front of a label is not read as a call in front of a command", () => {
+		expect(windows("call :label rd /s /q C:\\y")).toBeNull();
+		expect(windows("call rd /s /q C:\\y")).not.toBeNull();
+	});
+
+	/**
+	 * A body of `cmd`s is nesting of the same kind as a body of `sudo`s, so it
+	 * spends the same budget — and past the budget the answer is "dangerous", not
+	 * "the last shell was not read". The rule string is what pins it, because at
+	 * this depth the answer is a real match with a real reason behind it, so a
+	 * chain that quietly stopped being followed would be a silent miss.
+	 *
+	 * The outermost `cmd` is the program rather than a wrapper, so a chain of
+	 * nine is eight levels of nesting and sits *at* the limit, and only the tenth
+	 * is past it. Both rows are here because the second one means nothing at all
+	 * unless the first is still read on its merits.
+	 */
+	test("a chain of shells deeper than the wrapper limit fails closed", () => {
+		const chain = (shells: number) => `${"cmd /c ".repeat(shells)}rd /s /q C:\\x`;
+		expect(windows(chain(9))?.rule).toBe("`rd /s /q` (silent recursive delete)");
+		expect(windows(chain(10))?.rule).toBe(`nested deeper than ${MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH} wrappers`);
+	});
+
+	/**
+	 * None of these is a delete, and the reason each is in this table is that a
+	 * rule of "take the control word off" would turn it into one.
+	 */
+	test.each([
+		["if exist C:\\x echo hi", "a condition in front of a command that does nothing"],
+		["if exist C:\\x del C:\\y", "`del` without the flag that takes the asking away"],
+		["if exist C:\\x rd C:\\y", "and `rd` without `/s /q`"],
+		["if errorlevel 1 rd C:\\y", "a condition in front of a delete that still prompts"],
+		["for %i in (a b) do echo hi", "a loop whose body does nothing"],
+		["for %i in (a b)", "a `for` with no body at all"],
+		["for %i in (a b) do", "a `for` whose body is the word `do` and nothing else"],
+		["exist C:\\x del /f C:\\y", "`exist` with no `if` in front of it"],
+		["defined FOO del /f C:\\y", "`defined` with no `if` in front of it"],
+		["errorlevel 1 rd /s /q C:\\y", "`errorlevel` with no `if` in front of it"],
+		["cmd /c ver", "a body that deletes nothing"],
+		["call echo hi", "a `call` in front of a command that does nothing"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * Three answers that were already given before this rule existed and are not
+	 * this rule's to change. `time` and `do` are in the platform-independent
+	 * scaffolding list, so they are taken off before any Windows rule is read —
+	 * and measured on this machine neither one deletes anything, because `time`
+	 * is CMD's own clock and `do` is not a CMD word at all. They are listed here
+	 * as the answers they are, rather than quietly left to a test that would not
+	 * notice either way.
+	 */
+	test.each([
+		["time rd /s /q C:\\x", "`time` is CMD's own clock"],
+		["do rd /s /q C:\\x", "`do` is not a CMD word at all"],
+		["if 1==1 del /f C:\\x", "the assignment strip still answers this one"],
+	])("%s keeps the answer it had — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * The two platforms do not share a control word, and a rule written for CMD's
+	 * `if` that leaked onto POSIX would start reading `if exist C:\x rm -rf /` as
+	 * a forced recursive delete — which is a POSIX construct nobody writes.
+	 */
+	test.each([
+		"if exist C:\\x rm -rf /",
+		"if not exist C:\\x rm -rf /",
+		"if errorlevel 1 rm -rf /",
+		"for %f in (a b) do rm -rf /",
+		"call rm -rf /",
+		"cmd /c rd /s /q C:\\x",
+		"exist C:\\x del /f C:\\y",
+	])("POSIX does not read %s through the CMD control words", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The same word in the shell that does own it, so the POSIX rows above are
+	 * not passing for the reason that nothing is matched on POSIX at all.
+	 */
+	test("POSIX reads its own `if` and `for`", () => {
+		expect(posix("if true; then rm -rf /; fi")?.kind).toBe("ForcedRm");
+		expect(posix("for f in a; do rm -rf /; done")?.kind).toBe("ForcedRm");
+	});
+
+	/**
+	 * PowerShell's `if` is the same word with the same arity, so the rule reads
+	 * it too — and it is what already caught `if ($x) { Remove-Item … -Force }`
+	 * before this rule existed, which is why that row is here rather than in the
+	 * table of newly-caught shapes. A loop keyword PowerShell does not spell the
+	 * CMD way is not read as one.
+	 */
+	test.each([
+		"if (Test-Path C:\\x) { Remove-Item C:\\x -Force }",
+		"if ($x) { Remove-Item C:\\x -Force }",
+		"foreach ($f in $g) { Remove-Item C:\\f -Force }",
+		"while ($x) { Remove-Item C:\\x -Force }",
+	])("PowerShell's own control structure is not disturbed — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test("a PowerShell `if` with nothing dangerous in it is still nothing", () => {
+		expect(windows("if ($x) { echo hi }")).toBeNull();
+	});
+});
+
 describe("Windows: PowerShell execution cmdlets", () => {
 	/**
 	 * Running a string as code, and running code that was fetched.

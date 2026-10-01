@@ -421,6 +421,128 @@ function stripShellScaffolding(tokens: string[]): string[] | undefined {
 	return rest;
 }
 
+/** How many times `char` appears in `word`, counted one character at a time. */
+function countOf(word: string, char: string): number {
+	let n = 0;
+	for (const c of word) {
+		if (c === char) n++;
+	}
+	return n;
+}
+
+/**
+ * The words that say which kind of `if` this is, and so how much condition is
+ * between the `if` and the command.
+ *
+ * Each was run against a real `cmd.exe` on this machine — one `cmd /c <line>`
+ * with a `rd /s /q` behind it and a scratch directory to delete. `if exist`,
+ * `if not exist`, `if errorlevel 0` and `if cmdextversion 1` each deleted it.
+ * `if defined FOO` did not, and `if not defined FOO` did, which is the same
+ * fact about the shell from both sides: `defined` is a keyword, and whether
+ * the command behind it runs is a question about the variable — which is the
+ * thing the rule below is careful not to answer.
+ */
+const CMD_IF_KEYWORDS = new Set(["exist", "errorlevel", "defined", "cmdextversion"]);
+
+/**
+ * The six comparison operators, each measured the same way with a condition
+ * that is true: `if 1 equ 1`, `if 1 neq 0`, `if 1 lss 2`, `if 1 leq 1`,
+ * `if 1 gtr 0` and `if 1 geq 1` each ran the delete behind them.
+ *
+ * A seventh spelling, `lsr`, was tried on the same harness with two conditions
+ * and did not delete on either, so it is not in this set.
+ */
+const CMD_IF_COMPARISONS = new Set(["equ", "neq", "lss", "leq", "gtr", "geq"]);
+
+/**
+ * The command a Windows control word introduces, or `undefined` when the words
+ * do not open with one.
+ *
+ * `stripShellScaffolding` above reads a control word as one word, which is
+ * right for a POSIX `if` and wrong for CMD's: `if` answers with a condition
+ * before it answers with a command, and `for` answers with a whole clause.
+ * Both hid the command behind them, and every shape measured for this batch came
+ * back `null` for it — `if exist C:\x rd /s /q C:\y`, `for %f in (a b) do rd
+ * /s /q C:\y`, `cmd /c call rd /s /q C:\y`.
+ *
+ * It is read from two places and the two are not interchangeable. From
+ * `matchTokens`, *before* the assignment and scaffolding strips, it is what
+ * lets a `for` be seen whole: `for` is in a platform-independent list, and
+ * those strips would take the word off before anything here could read the
+ * clause. From `dangerousCmdSegment` it is what reads the control words inside a
+ * `cmd /c` body, which neither strip ever sees, because a body is a word array
+ * handed straight to the CMD rules.
+ *
+ * No condition is evaluated and none could be: `if 1 lss 2` is true and
+ * `if 1 lss 0` is not, and a classifier that worked that out would be modelling
+ * a shell rather than reading a line. The point of flagging is that the person
+ * running it may not have meant to, which is true of every condition here.
+ *
+ * `undefined` — not the same array — for the reason it is the return above:
+ * the caller asks "did anything change?" with `!==`. Every pass takes at least
+ * one word, so the recursion terminates.
+ */
+function stripControlWords(tokens: string[]): string[] | undefined {
+	let rest = tokens;
+	let stripped = false;
+	while (rest.length > 0) {
+		const keyword = rest[0].toLowerCase();
+		let next = 1;
+
+		if (keyword === "if") {
+			if (rest[next]?.toLowerCase() === "not") next++;
+			const form = rest[next]?.toLowerCase();
+			if (form !== undefined && CMD_IF_KEYWORDS.has(form)) {
+				// `if exist <path> <cmd>`: the word that names the test, and the
+				// one word the test is about. One operand each, measured for all
+				// four of them.
+				next += 2;
+			} else {
+				// `if <cond> <cmd>` is one word of condition and `if <a> <op> <b>
+				// <cmd>` is three, and the operator is the only thing that tells
+				// them apart — so the condition is read one word and then extended
+				// only if what follows it is an operator.
+				next += 1;
+				const operator = rest[next]?.toLowerCase();
+				if (operator !== undefined && CMD_IF_COMPARISONS.has(operator)) next += 2;
+			}
+		} else if (keyword === "for") {
+			// `for %v in (set) do <cmd>`, with any number of options between the
+			// `for` and the body. The body starts after the `do`, and the `do` that
+			// counts is the one outside the parenthesised set: `for %i in (a do b)
+			// do rd /s /q C:\x` has a `do` inside the set and one after it, and
+			// only the second introduces the command. A `for` with no `do` is not a
+			// shape this reads, and a `for` whose clause runs off the end of the
+			// line is left exactly as it was.
+			let depth = 0;
+			while (next < rest.length) {
+				if (depth === 0 && rest[next].toLowerCase() === "do") break;
+				depth += countOf(rest[next], "(") - countOf(rest[next], ")");
+				next++;
+			}
+			if (next >= rest.length) return stripped ? rest : undefined;
+			next++;
+		} else if (keyword === "call") {
+			// `call` runs the command behind it — measured, `call rd /s /q <dir>`
+			// deleted the directory and so did `call del /f <file>`.
+			//
+			// It is taken off in front of a label as well, which costs nothing:
+			// the words after a label are arguments to a subroutine and are not a
+			// command — measured the same way against a batch file with a
+			// `:cleanup` label, where `call :cleanup rd /s /q <dir>` left the
+			// directory alone while a separate `rd` after it deleted it — so the
+			// label word becomes the head of the segment and no rule here matches
+			// it either way.
+		} else {
+			return stripped ? rest : undefined;
+		}
+
+		rest = rest.slice(next);
+		stripped = true;
+	}
+	return rest;
+}
+
 /** `xargs` options that consume the word after them. */
 const XARGS_VALUE_OPTIONS = new Set([
 	"-a",
@@ -579,6 +701,17 @@ function matchTokens(
 		return { kind: "Other", rule: `nested deeper than ${MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH} wrappers` };
 	}
 	if (tokens.length === 0) return null;
+
+	// Before both strips below, and on Windows only. They read `if` and `for` as
+	// one word each, which is right for a POSIX shell and wrong for CMD's, where
+	// `for` answers with a whole clause before it answers with a command. Order
+	// is the other half of it: run this second and `if 1==1 del /f C:\x` stops
+	// matching, because the assignment strip would take `1==1` first and leave
+	// `if del /f C:\x`, whose condition is then read as the program.
+	if (platform === "windows") {
+		const controlled = stripControlWords(tokens);
+		if (controlled !== undefined) return matchTokens(controlled, depth, platform, segment);
+	}
 
 	// `LC_ALL=C rm -rf /` sets an environment variable and then runs a command.
 	// A POSIX shell reads the assignment prefix as part of the command line, not
@@ -934,7 +1067,16 @@ const CMD_SEPARATORS = new Set(["&", "&&", "|", "||"]);
  */
 const CMD_BODY_SWITCHES = new Set(["/c", "/k", "/r", "-c"]);
 
-function dangerousCmd(tokens: string[]): DangerousCommandMatch | null {
+function dangerousCmd(tokens: string[], depth = 0): DangerousCommandMatch | null {
+	// A body may open with another `cmd`, and each one runs whatever comes after
+	// it: measured, `cmd /c cmd /c rd /s /q C:\x` and `cmd /c cmd /k rd /s /q
+	// C:\x` both deleted, and so did the quoted form `cmd /c "cmd /c rd /s /q
+	// C:\x"` — which is why this re-enters rather than being a second reading of
+	// the same words. The body has already been split above, so the words reaching
+	// here are the ones the next shell would see.
+	if (depth > MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH) {
+		return { kind: "Other", rule: `nested deeper than ${MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH} wrappers` };
+	}
 	if (tokens.length === 0) return null;
 	const program = executableName(tokens[0], "windows");
 	if (program !== "cmd" && program !== "cmd.exe") return null;
@@ -970,6 +1112,16 @@ function dangerousCmd(tokens: string[]): DangerousCommandMatch | null {
 	// `powershellScript` makes for `-Command`, and the same reason: an
 	// unrecognised shape is read against the rules of every shell that could be
 	// the one running it, never as "nothing here".
+	//
+	// A body that opens with `cmd` is the one shape this function could not read
+	// before: nothing below re-enters, so `cmd /c cmd /c del /f C:\x` was read
+	// as the word `cmd` and stopped. The depth is the same bound the wrappers
+	// use, because a body of `cmd`s is nesting of the same kind.
+	const nested = words.length > 0 ? executableName(words[0], "windows") : undefined;
+	if (nested === "cmd" || nested === "cmd.exe") {
+		const match = dangerousCmd(words, depth + 1);
+		if (match) return match;
+	}
 	return dangerousCmdBody(words) ?? dangerousPowershellWords(words);
 }
 
@@ -1011,6 +1163,14 @@ function dangerousCmdBody(words: string[]): DangerousCommandMatch | null {
 
 /** What one CMD segment's words match, or `null` for the ordinary ones. */
 function dangerousCmdSegment(segment: string[]): DangerousCommandMatch | null {
+	// A `cmd /c` body arrives here as a word array that the strips in
+	// `matchTokens` never touched, so a control word inside one is still sitting
+	// at the head of its segment: `cmd /c if exist C:\x rd /s /q C:\y` and
+	// `cmd /c for /f %i in (x) do del /f C:\y` both measured as running the
+	// delete, and both were read as the word `if` and the word `for`.
+	const controlled = stripControlWords(segment);
+	if (controlled !== undefined) return dangerousCmdSegment(controlled);
+
 	const head = segment[0]?.toLowerCase();
 	if (head === undefined) return null;
 	if (head === "start" && argsHaveUrl(segment)) {
