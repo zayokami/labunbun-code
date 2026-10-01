@@ -3303,6 +3303,72 @@ function posixStartupWrite(segment: string): DangerousCommandMatch | null {
 			if (!token.startsWith("-")) targets.push(token.replace(/^["']|["']$/g, ""));
 		}
 	}
+	// The other three ways the same byte reaches the same file, none of which is
+	// a redirect and none of which the row above would see.
+	//
+	// **Measured, every one of these returned `null` before it, and each is a
+	// bypass of a family that was already covered by a redirect**: `cp /tmp/x
+	// ~/.bashrc` and `curl -o ~/.ssh/authorized_keys <url>` write exactly what
+	// `echo x >> …` writes, to a file the predicate already recognises. The rule
+	// was covering the destination and not the act, which is the same mistake as
+	// keying a rule on `echo` instead of on the path.
+	//
+	// `cp` and `install` share a shape — sources then a destination — so both
+	// take the last argument that is not a flag. For `install` that skips past
+	// `-m 755` correctly only because the mode is not last: `install -m 755 SRC
+	// DEST` ends in DEST, and `755` never becomes the answer. `tee` above uses
+	// every non-flag argument rather than the last, because `tee` genuinely takes
+	// several targets; that difference is the programs' and not a shortcut.
+	if (program === "cp" || program === "install") {
+		for (let index = tokens.length - 1; index > 0; index--) {
+			const token = tokens[index];
+			if (token.startsWith("-")) continue;
+			targets.push(token.replace(/^["']|["']$/g, ""));
+			break;
+		}
+	}
+	// `curl -o FILE` and `wget -O FILE` name the destination as the *value* of a
+	// switch rather than as a positional argument, so they need that value and
+	// not the last argument.
+	//
+	// Five spellings of the same two switches, all of them real, all of them
+	// measured `null` against a first attempt that only handled the bare form:
+	// `-o FILE`, `-oFILE`, `--output FILE`, `--output=FILE`, and `-so FILE` with
+	// the flag bundled among others. wget adds `--output-document` and its own
+	// uppercase `-O`; curl's uppercase `-O` is *not* read, because it derives the
+	// filename from the URL rather than being given one, and wget's lowercase
+	// `-o` is not read either, because it names a log file and does not write the
+	// download at all. Getting that case distinction backwards would either miss
+	// every wget download or refuse every wget that logs.
+	const unquote = (token: string): string => token.replace(/^["']|["']$/g, "");
+	if (program === "curl" || program === "wget") {
+		const shortFlag = program === "curl" ? "o" : "O";
+		const bareLong = new RegExp(`^--output(?:-document)?$`);
+		const gluedLong = new RegExp(`^--output(?:-document)?=(.+)$`);
+		const bareShort = new RegExp(`^-[a-zA-Z]*${shortFlag}$`);
+		const gluedShort = new RegExp(`^-[a-zA-Z]*${shortFlag}(.+)$`);
+		for (let index = 1; index < tokens.length; index++) {
+			const token = tokens[index];
+			// Greedy, so `-soFILE` resolves through the backtrack to `-s -o FILE`
+			// rather than reading the `o` inside some other flag's name.
+			const long = gluedLong.exec(token) ?? bareLong.exec(token);
+			if (long) {
+				const value = long[1] ?? tokens[index + 1];
+				if (value !== undefined) targets.push(unquote(value));
+				continue;
+			}
+			if (token.startsWith("--")) continue;
+			const short = gluedShort.exec(token);
+			if (short) {
+				targets.push(unquote(short[1]));
+				continue;
+			}
+			// The flag is bundled with others and takes the *next* argument.
+			if (bareShort.test(token) && tokens[index + 1] !== undefined) {
+				targets.push(unquote(tokens[index + 1]));
+			}
+		}
+	}
 
 	for (const target of targets) {
 		if (!isStartupPath(target)) continue;
