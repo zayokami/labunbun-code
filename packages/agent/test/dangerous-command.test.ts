@@ -1691,9 +1691,18 @@ describe("Windows: ending a process", () => {
 
 	/**
 	 * WMI's read-only verbs, which is most of what `wmic` is used for, and the
-	 * commands that look at processes rather than end them. `Stop-Service` sits
-	 * here too and is deliberately *not* a rule: stopping a service is what a
-	 * service is for, and `Stop-Process` ends a program somebody was using.
+	 * commands that look at processes rather than end them.
+	 *
+	 * `Stop-Service` used to sit here too, on the reasoning that stopping a
+	 * service is what a service is for while `Stop-Process` ends a program
+	 * somebody was using. That reasoning is sound and it is not the same reason
+	 * twice: it would excuse POSIX `systemctl stop sshd` just as well, and that
+	 * *is* a rule, so keeping `Stop-Service` out would have meant the same act
+	 * flagged on one platform and not on the other. A service stop takes down a
+	 * capability the machine is relying on and an agent does it casually, so it
+	 * is flagged on both — and the row it used to occupy is the first entry of
+	 * `describe("Windows: stopping a service and powering the machine off")`,
+	 * where the reversal is visible rather than buried here.
 	 */
 	test.each([
 		["wmic process list", "lists the processes"],
@@ -1704,12 +1713,13 @@ describe("Windows: ending a process", () => {
 		["Get-Process -Name node", "reads a process"],
 		["Get-Process | Select-Object -First 5", "and lists them"],
 		["taskkill /im node.exe", "taskkill without /f only asks the window to close"],
-		["Stop-Service Spooler", "stopping a service is what a service is for"],
 		// The cmdlet has to be the head of its segment. A mutation that read it
 		// anywhere in the segment would leave both of these green, which is why
 		// they are here and not only in the prose above.
 		['Write-Host "Stop-Process -Name x"', "names the cmdlet in an argument"],
 		["Select-String Stop-Process", "and searches for it unquoted"],
+		['Write-Host "Stop-Service -Name x"', "the same, for the service cmdlet"],
+		["Select-String Stop-Service", "and searching for it unquoted"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(windows(command)).toBeNull();
 	});
@@ -2019,6 +2029,193 @@ describe("POSIX: deleting what a search found", () => {
 		"%s is not a Windows rule",
 		(command) => {
 			expect(windows(command)).toBeNull();
+		},
+	);
+});
+
+describe("POSIX: ending processes, stopping services, powering off", () => {
+	/**
+	 * MEASURED, and safely: signal 0 delivers nothing and exists only to ask "could
+	 * I signal this", so `kill -0 -1` on this box exited 0. That proves `-1` is
+	 * parsed as a PID and that it addresses processes this user can reach —
+	 * without sending anything to anything.
+	 */
+	test.each([
+		["kill -9 -1", "the short number"],
+		["kill -KILL -1", "and the name, which `kill -l` answers with 9"],
+		["kill -s KILL -1", "behind an explicit `-s`"],
+		["kill -1", "the default signal"],
+		["kill -- -1", "past the end of the options, which need no special case for `-1`"],
+		["sudo kill -9 -1", "and as root, which is all of them"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * A single PID is ordinary, and the reason is worth writing down rather than
+	 * leaving as an omission: `trap 'kill $child' TERM` is in every shell script
+	 * ever written. A rule that fires on the shape of that is a rule nobody keeps
+	 * switched on.
+	 */
+	test.each([
+		["kill -9 12345", "one process, forced"],
+		["kill 12345", "and the polite form"],
+		["kill -TERM $pid", "with the signal named"],
+		["kill -0 999999", "signal 0 asks and delivers nothing"],
+		["kill -l", "listing the signal names"],
+		["trap 'kill $child' TERM", "which is what a trap looks like in a script"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `pkill` is the analogue of the Windows `Stop-Process` rule, which is why the
+	 * forced form is the one caught. `pkill` is not a binary on this machine at
+	 * all — `type -a pkill` reports a shell *function* from the Claude Code
+	 * wrapper — so these spellings come from POSIX rather than from what this box
+	 * happens to have installed.
+	 */
+	test.each([
+		["pkill -9 node", "by name"],
+		["pkill -KILL -f 'npm run'", "matched against the whole command line"],
+		["killall -9 postgres", "the other name for it"],
+		["killall -SIGKILL java", "with the signal spelled out in full"],
+		["pkill -SIGKILL -u root sshd", "and a user to match on"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["pkill node", "a SIGTERM is a request, and a dev server is the usual target"],
+		["killall java", "the same"],
+		["pkill -f 'node --inspect'", "and the flags that are not signals"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The verbs that *persist* are caught and `restart` is not: a service that is
+	 * back in five seconds is a disruption, and a service disabled across reboots
+	 * is a decision nobody made deliberately.
+	 */
+	test.each([
+		["systemctl stop sshd", "stopped now"],
+		["systemctl disable nginx", "stopped across reboots"],
+		["systemctl mask apache2", "and masked against being started"],
+		["systemctl kill docker", "killed rather than asked"],
+		["service ssh stop", "the SysV spelling"],
+		["launchctl unload -w /Library/LaunchDaemons/ssh.plist", "the macOS one"],
+		["launchctl disable system/com.apple.smbd", "and the disable verb"],
+		["launchctl bootout system/com.apple.smbd", "and the modern spelling"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["systemctl restart nginx", "a restart comes back by itself"],
+		["systemctl status nginx", "reading is not stopping"],
+		["systemctl list-units", "and this is a query with no verb at all"],
+		["systemctl daemon-reload", "which only re-reads configuration"],
+		["service --status-all", "the listing beside it"],
+		["launchctl list", "the macOS query"],
+		["launchctl load ~/Library/LaunchAgents/x.plist", "and loading, which adds"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `shutdown` is Windows' program on this box — `type -a shutdown` resolves it
+	 * to `C:\Windows\system32\shutdown` — so these are POSIX switches, not the
+	 * behaviour of running one here would have.
+	 */
+	test.each([
+		["shutdown -h now", "halt"],
+		["shutdown -r now", "restart"],
+		["poweroff", "and its own name"],
+		["reboot", "which is another"],
+		["halt", "and another"],
+		["sudo shutdown -r now", "as root, which is the one that works"],
+		["init 0", "the SysV runlevel"],
+		["telinit 0", "under either of its two names"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["shutdown -c", "cancels a pending shutdown, which is the recovery"],
+		["shutdown --help", "and this one too"],
+		["init 3", "runlevel 3 is a normal boot"],
+		["init 1", "and so is single-user"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test.each(["kill -9 -1", "pkill -9 node", "systemctl stop sshd", "reboot", "shutdown -h now", "init 0"])(
+		"%s is not a Windows rule",
+		(command) => {
+			expect(windows(command)).toBeNull();
+		},
+	);
+});
+
+describe("Windows: stopping a service and powering the machine off", () => {
+	/**
+	 * MEASURED by `Get-Command` on this machine, and the list is four rather than
+	 * five because the check that fails is what gives the list meaning:
+	 * `Stop-Service`, `Stop-Computer`, `Restart-Computer` and `Stop-Process` all
+	 * resolve to a Cmdlet in Microsoft.PowerShell.Management, and
+	 * `Suspend-Computer` does not exist at all.
+	 */
+	test.each([
+		["Stop-Service sshd", "a system service"],
+		["Stop-Service -Name Docker -Force", "with the flag on"],
+		["Stop-Computer", "the machine itself"],
+		["Restart-Computer -Force", "restarted, and unignorable"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	test.each([
+		["Start-Service sshd", "starting is the opposite"],
+		["Get-Service", "reading is not stopping"],
+		["Get-Process", "and this is the query the Stop rules sit beside"],
+		["Stop-Job", "a job is something this session started"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * `shutdown /?` on this box printed the whole switch list. The prose around
+	 * them came back in the console's own code page and was unreadable, which does
+	 * not matter here: the rule reads the switch names, and those are ASCII.
+	 */
+	test.each([
+		["shutdown /s /t 0", "shut it down, immediately"],
+		["shutdown /r /f", "restart it, and close what is open to do it"],
+		["shutdown /p", "power it off"],
+		["shutdown /h", "hibernate it"],
+		["shutdown /hybrid", "the lid's way"],
+		["shutdown /fw", "straight into firmware"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * `/a` cancels a pending shutdown. A rule that flagged it would be flagging
+	 * the recovery, which is the exact shape of a rule that gets switched off.
+	 */
+	test.each([
+		["shutdown /a", "the undo"],
+		["shutdown /?", "and the help"],
+		["shutdown /l", "logging off ends the session but the machine is still up"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	test.each(["Stop-Service sshd", "Stop-Computer", "Restart-Computer", "shutdown /s /t 0"])(
+		"%s is not a POSIX rule",
+		(command) => {
+			expect(posix(command)).toBeNull();
 		},
 	);
 });

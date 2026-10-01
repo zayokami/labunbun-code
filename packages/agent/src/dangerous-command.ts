@@ -869,7 +869,12 @@ function matchTokens(
 	if (platform === "windows") {
 		return matchWindows(tokens);
 	}
-	return posixDiskRules(tokens, segment) ?? posixPermissionRules(tokens) ?? posixFindRules(tokens);
+	return (
+		posixDiskRules(tokens, segment) ??
+		posixPermissionRules(tokens) ??
+		posixFindRules(tokens) ??
+		posixProcessRules(tokens)
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,6 +1217,129 @@ function posixFindRules(tokens: string[]): DangerousCommandMatch | null {
 	return null;
 }
 
+/** Signals that leave a process no chance to save anything. */
+const FORCED_SIGNALS: ReadonlySet<string> = new Set(["9", "kill", "sigkill", "k"]);
+
+/**
+ * Does this argument name the signal `-s`/`--signal` was given, or is it itself
+ * the signal?
+ *
+ * Both spellings exist and both were measured: `kill -9 <pid>`, `kill -KILL
+ * <pid>`, `kill -s KILL <pid>`, and `kill -l` on this box's bash builtin answers
+ * `KILL  9`, so the two names really are the same signal under two spellings.
+ */
+function namesForcedSignal(arg: string): boolean {
+	// Both spellings are in the set rather than one being derived from the other:
+	// `KILL` and `SIGKILL` are two names for signal 9, and `kill -l` on this
+	// box's bash answers `KILL  9` for both. Stripping a `sig` prefix would have
+	// been the tidier way to say that, and a mutation driver caught that it
+	// changes nothing — so the set says both and the strip is not there.
+	const bare = arg.replace(/^-+/, "").toLowerCase();
+	return FORCED_SIGNALS.has(bare);
+}
+
+/**
+ * Ending processes, stopping services, and putting the machine away.
+ *
+ * Three families, and the reason each one is drawn where it is comes from a
+ * measurement rather than from an analogy:
+ *
+ * `kill -9 -1` — MEASURED, safely: signal 0 delivers nothing and exists only to
+ * ask "could I signal this", so `kill -0 -1` on this box exited 0, which proves
+ * `-1` is parsed as a PID and that it addresses processes this user can reach.
+ * A single `kill -9 <pid>` is NOT flagged, and the reason is worth writing down:
+ * `trap 'kill $child' TERM` is in every shell script ever written, and a rule
+ * that fires on the shape of that is a rule nobody can keep switched on.
+ *
+ * `pkill`/`killall` — this is the analogue of the Windows `Stop-Process` rule
+ * above, which is why the forced form is the one caught and the polite form
+ * (`pkill node`, a plain SIGTERM to a dev server) is not. `pkill` is not a
+ * binary on this box — `type -a pkill` reports a shell *function* from the
+ * Claude Code wrapper, which is exactly the kind of thing worth recording
+ * rather than assuming, so the rule is written from POSIX spelling and not from
+ * what this machine happens to have.
+ *
+ * `systemctl`/`launchctl`/`service` — the verbs that *persist* are caught
+ * (stop, disable, mask, kill, unload, bootout) and `restart` is not: a service
+ * that comes back in five seconds is a disruption, and a service that has been
+ * disabled across reboots is a decision nobody made deliberately.
+ */
+const SERVICE_STOP_VERBS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	["systemctl", new Set(["stop", "disable", "mask", "kill"])],
+	["launchctl", new Set(["unload", "disable", "bootout"])],
+	["service", new Set(["stop"])],
+]);
+
+/** Programs that stop the machine or the session, with no way to argue. */
+const POWER_PROGRAMS: ReadonlySet<string> = new Set(["reboot", "halt", "poweroff"]);
+
+/**
+ * `shutdown` switches that put a POSIX machine away.
+ *
+ * `-c` is not in it and never could be: it *cancels* a pending shutdown.
+ */
+const POSIX_SHUTDOWN_SWITCHES: ReadonlySet<string> = new Set(["-h", "-r", "-p", "--halt", "--reboot", "--poweroff"]);
+
+function posixProcessRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+	const args = tokens.slice(1);
+
+	if (program === "kill") {
+		// `--` gets no special handling, and that is a decision rather than an
+		// oversight: a mutation that stopped reading past it turned out to change
+		// nothing at all, because `-1` is a PID and never a flag or a signal, so
+		// it is found wherever it sits. Code that cannot be distinguished from its
+		// own deletion is not coverage.
+		if (!args.includes("-1")) return null;
+		return {
+			kind: "Other",
+			rule: "`kill` sent to `-1`, which is every process the user owns",
+		};
+	}
+
+	if (program === "pkill" || program === "killall") {
+		if (!args.some(namesForcedSignal)) return null;
+		return {
+			kind: "Other",
+			rule: `\`${program}\` with an unignorable signal, which ends every process it names`,
+		};
+	}
+
+	const verbs = SERVICE_STOP_VERBS.get(program);
+	if (verbs !== undefined) {
+		for (const token of args) {
+			if (!token.startsWith("-") && verbs.has(token.toLowerCase())) {
+				return { kind: "Other", rule: `\`${program} ${token}\`, which stops a service` };
+			}
+		}
+		return null;
+	}
+
+	// `shutdown` is Windows' program on this machine — `type -a shutdown`
+	// resolves it to `C:\Windows\system32\sutdown` — so its POSIX switches are
+	// taken from POSIX, not from what running it here would do.
+	if (program === "shutdown") {
+		if (!args.some((arg) => POSIX_SHUTDOWN_SWITCHES.has(arg))) {
+			return null;
+		}
+		return { kind: "Other", rule: "`shutdown`, which powers the machine off or restarts it" };
+	}
+
+	// `init 0` and `telinit 0` are the SysV spellings: the runlevel is the
+	// argument and 0 is halt.
+	if (program === "init" || program === "telinit") {
+		if (!args.some((arg) => arg === "0" || arg === "6")) return null;
+		return { kind: "Other", rule: `\`${program} ${args[0]}\`, which halts the machine` };
+	}
+
+	if (POWER_PROGRAMS.has(program)) {
+		return { kind: "Other", rule: `\`${program}\`, which powers the machine off or restarts it` };
+	}
+
+	return null;
+}
+
 // ---------------------------------------------------------------------------
 // Windows: PowerShell cmdlets, CMD builtins, and ShellExecute-style launches
 // ---------------------------------------------------------------------------
@@ -1509,8 +1637,29 @@ function powershellWeakeningRules(lower: string[]): DangerousCommandMatch | null
  */
 function powershellTerminationRules(lower: string[]): DangerousCommandMatch | null {
 	for (const segment of windowsSegments(lower)) {
+		// MEASURED by `Get-Command` on this machine, which is why the list is
+		// four and not five: `Stop-Service`, `Stop-Computer`, `Restart-Computer`
+		// and `Stop-Process` all resolve to a Cmdlet in
+		// Microsoft.PowerShell.Management, and `Suspend-Computer` does not exist
+		// at all — the check that fails is the one that makes the list mean
+		// something.
+		//
+		// `Stop-Job` is deliberately absent: a job is something this session
+		// started, and ending it discards that work and nothing else.
+		//
+		// `Stop-Service` is here, and it used not to be. The earlier reasoning —
+		// stopping a service is what a service is for — is sound, but it is the
+		// same reasoning that would excuse POSIX `systemctl stop sshd`, which
+		// IS a rule. Flagging one and not the other would mean the same act
+		// judged by different standards on different platforms, so both are in.
 		if (segment[0] === "stop-process") {
 			return { kind: "Other", rule: "PowerShell `Stop-Process`, which ends a process" };
+		}
+		if (segment[0] === "stop-service") {
+			return { kind: "Other", rule: "PowerShell `Stop-Service`, which stops a system service" };
+		}
+		if (segment[0] === "stop-computer" || segment[0] === "restart-computer") {
+			return { kind: "Other", rule: `PowerShell \`${segment[0]}\`, which powers the machine off or restarts it` };
 		}
 	}
 	return null;
@@ -1910,6 +2059,16 @@ function verbMatches(token: string, known: string): boolean {
 	return rest === "" || !/^[A-Za-z0-9]/.test(rest);
 }
 
+/**
+ * `shutdown.exe` switches that put the machine away.
+ *
+ * Read out of `shutdown /?` on this box: `/s` and `/sg` and `/g` shut it down,
+ * `/r` restarts it, `/p` and `/h` power it off and hibernate it, `/hybrid`
+ * closes the lid's way and `/fw` boots straight into firmware. `/i`, `/l`, `/a`,
+ * `/e`, `/o` and `/?` are left out, and `/a` most of all — it is the undo.
+ */
+const WINDOWS_SHUTDOWN_SWITCHES: readonly string[] = ["/s", "/sg", "/g", "/r", "/p", "/h", "/hybrid", "/fw"];
+
 /** The Windows administrative rules, applied to one command line. */
 function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "windows");
@@ -1918,6 +2077,30 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 	const always = WINDOWS_ADMIN_ALWAYS.get(program);
 	if (always !== undefined) {
 		return { kind: "Other", rule: `\`${program}\` — ${always}` };
+	}
+
+	// `shutdown` powers the machine off. Its switches are the whole grammar, and
+	// `shutdown /?` on this box printed them (the prose around them came back in
+	// the console's own code page and was unreadable, which does not matter: the
+	// switch names are ASCII and those are all this rule reads).
+	//
+	// `/a` is deliberately not here — it *cancels* a pending shutdown, and a rule
+	// that flagged it would flag the recovery. `/l` is not here either: logging off
+	// ends the session but the machine is still up and the user logs straight
+	// back in, which is a different act from putting the machine away.
+	//
+	// This sits above the verb lookup rather than below it: `shutdown` has no
+	// entry in `WINDOWS_ADMIN_VERBS`, and the `return null` there would have
+	// taken the whole branch out of reach. The probe is what found that — four
+	// rows reading NULL against a rule that was plainly in the file.
+	if (program === "shutdown") {
+		for (const token of tokens.slice(1)) {
+			for (const known of WINDOWS_SHUTDOWN_SWITCHES) {
+				if (verbMatches(token, known)) {
+					return { kind: "Other", rule: `\`shutdown ${known}\`, which powers the machine away` };
+				}
+			}
+		}
 	}
 
 	const verbs = WINDOWS_ADMIN_VERBS.get(program);
