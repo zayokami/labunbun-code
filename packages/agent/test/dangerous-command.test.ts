@@ -3838,6 +3838,126 @@ describe("POSIX: volume managers", () => {
 			'ssh host "rm -rf /var"',
 			"the other reading of the same token list: here the one token IS a command line, and re-quoting it would break this row",
 		],
+		// The seven carriers this table gained after docker, podman exec, nerdctl
+		// exec and compose. Each gets the rows the ones above get — the bare shape,
+		// a payload behind a value flag from that carrier's own table, and a payload
+		// behind the consumed positional — plus a boolean row, because the direction
+		// that costs a detection is a `BoolVar` put in a value set.
+		//
+		// `wsl` has no positional at all, so for that one the payload-behind-the-
+		// positional row is replaced by `--exec`, whose value *is* the payload. The
+		// measurement behind `positionals: 0` is the counterweight at the bottom.
+		["wsl rm -rf /", "wsl, whose first bare word is already the command"],
+		["wsl -d Ubuntu rm -rf /", "and -d, whose value is the distribution"],
+		[
+			"wsl --distribution-id 00000000-0000-0000-0000-000000000000 rm -rf /",
+			"and --distribution-id, the GUID spelling of the same flag",
+		],
+		["wsl --cd /tmp rm -rf /", "and --cd, whose value is a directory"],
+		["wsl --shell-type none rm -rf /", "and --shell-type"],
+		[
+			"wsl --system rm -rf /",
+			"--system is the one boolean on this carrier's own help page, so the command has to follow it directly; in the table it would eat `rm`",
+		],
+		[
+			"wsl --exec rm -rf /",
+			"and --exec, whose value IS the payload. It is the one flag here left out of a value set on purpose: the line runs `rm -rf /` without a shell, and listing `--exec` would read `rm` as its value and the command as `-rf /`",
+		],
+		["podman run --rm alpine rm -rf /", "podman run, whose positional is the image"],
+		["podman run alpine sh -c 'rm -rf /'", "and the image alone, with the command behind it"],
+		[
+			"podman run --name x alpine rm -rf /",
+			"and --name, which the run table has and the podman exec table does not — a row using --env could not tell the two carriers apart",
+		],
+		["podman run --env FOO=bar alpine rm -rf /", "and --env, registered by DefineCreateFlags"],
+		["podman run -e FOO=bar alpine rm -rf /", "and -e"],
+		[
+			"podman run --net host alpine rm -rf /",
+			"and --net, a spelling no registration line contains: AliasFlags (utils/alias.go:6-36) rewrites it onto --network before pflag looks the flag up",
+		],
+		[
+			"podman run --healthcheck-interval 5s alpine rm -rf /",
+			"and --healthcheck-interval, the same normalizer's other alias",
+		],
+		[
+			"podman run --signature-policy /x alpine rm -rf /",
+			"and --signature-policy, which create.go:523 registers inside the CreateMode branch. This is the row that fails if the comment saying that branch belongs to `container update` is believed instead of the code",
+		],
+		["podman run --cert-dir /x alpine rm -rf /", "and --cert-dir, registered by the call at create.go:529-533"],
+		[
+			"podman run --conmon-pidfile /tmp/p alpine rm -rf /",
+			"and --conmon-pidfile, whose name is chosen at runtime (create.go:817-834) and so appears in no registration line",
+		],
+		["podman run --entrypoint /bin/sh alpine rm -rf /", "and --entrypoint, the other of the two runtime-picked names"],
+		[
+			"podman run --rm --privileged --detach alpine rm -rf /",
+			"and three booleans in a row: any one of them in the table eats `alpine`, which is the direction that costs a detection",
+		],
+		["podman container run --name x alpine rm -rf /", "the same constructor under `podman container`"],
+		["nerdctl run myctr sh -c 'rm -rf /'", "nerdctl run, whose positional is the image"],
+		["nerdctl run --name web alpine rm -rf /", "and --name"],
+		["nerdctl run -v /srv:/srv alpine rm -rf /", "and -v"],
+		[
+			"nerdctl run --cgroup-conf x=y alpine rm -rf /",
+			"and --cgroup-conf, whose value is a key=value pair rather than a path, and which docker run does not register",
+		],
+		[
+			"nerdctl run --ipfs-address /ip4/1.2.3.4 alpine rm -rf /",
+			"and --ipfs-address, a flag only this one of the two engines has",
+		],
+		["nerdctl run --rm --detach --tty alpine rm -rf /", "and three booleans in a row, on the other engine's table"],
+		["limactl shell default rm -rf /", "limactl shell, whose positional is the instance"],
+		[
+			"limactl shell --instance default rm -rf /",
+			"and --instance, which *is* the instance — shell.go:95-96 makes every positional a command once it is set. This is the row that fails without containerlessOptions",
+		],
+		["limactl shell --workdir /tmp default rm -rf /", "and --workdir, an ordinary value flag"],
+		["limactl shell --sync true default rm -rf /", "and --sync, whose value is a boolean spelled as a string"],
+		["limactl shell --shell /bin/bash default rm -rf /", "and --shell, whose value is an interpreter"],
+		[
+			"limactl shell --start default rm -rf /",
+			"--start is a Bool (shell.go:75), so the instance has to follow it directly",
+		],
+		["multipass exec myvm rm -rf /", "multipass exec, whose positional is the instance"],
+		["multipass exec -d /tmp myvm rm -rf /", "and -d, whose value is a directory"],
+		[
+			"multipass exec --working-directory /tmp myvm rm -rf /",
+			"and the long spelling, which is the constant at exec.cpp:31 rather than anything in the QCommandLineOption",
+		],
+		[
+			"multipass exec -n myvm rm -rf /",
+			"and -n, the one QCommandLineOption in that file built without a value name (exec.cpp:215-216), so it takes nothing",
+		],
+		["machinectl shell default rm -rf /", "machinectl shell, whose positional is the machine"],
+		["machinectl shell --uid root default rm -rf /", "and --uid, whose value is a user"],
+		["machinectl shell -E FOO=bar default rm -rf /", "and -E, whose value is a VAR=VALUE pair"],
+		["machinectl shell --output json default rm -rf /", "and --output"],
+		[
+			"machinectl shell --quiet --system default rm -rf /",
+			"and two booleans, both registered with a NULL metavar (machinectl.c:2427 and :2575)",
+		],
+		[
+			"machinectl shell --verify no default rm -rf /",
+			"and --verify, which machinectl.c:2545 registers below the `Hidden options` banner and still gives a value to",
+		],
+		["docker-compose exec web rm -rf /", "compose V1 exec, whose positional is the service"],
+		["docker-compose exec -u root -e FOO=bar web rm -rf /", "and V1's own two value flags"],
+		[
+			"docker-compose exec --index 2 web rm -rf /",
+			"and --index, which has no shorthand in V1 (main.py:542) or in V2 (exec.go:83) — the same flag with the same spelling in both",
+		],
+		[
+			"docker-compose exec --detach web rm -rf /",
+			"--detach is a boolean in V1's docstring too, so the service follows it directly rather than being read as its value",
+		],
+		["docker-compose run web rm -rf /", "compose V1 run, whose positional is the service"],
+		[
+			"docker-compose run -e FOO=bar web rm -rf /",
+			"and -e, the only spelling V1's run docstring has (main.py:922) — the row that fails if `--env` is carried over from exec",
+		],
+		["docker-compose run --entrypoint /bin/sh web rm -rf /", "and --entrypoint, whose value is a program name"],
+		["docker-compose run --rm web rm -rf /", "and --rm, a boolean in the same docstring"],
+		["docker-compose run --name x web rm -rf /", "and --name, the plainest value flag in it"],
 	])("%s — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
 	});
@@ -3925,7 +4045,7 @@ describe("POSIX: volume managers", () => {
 		["podman exec -uroot web ls", "and the glued shorthand, where `-uroot` carries its value in the same token"],
 		[
 			"nerdctl exec --detach-keys ctrl-p web rm -rf /",
-			"the counterweight to the docker row above: `nerexec.go:45-56` registers no --detach-keys, so nerdctl rejects the line outright. Reading docker's table here would report a command that cannot run — a finding that is wrong rather than early",
+			"the counterweight to the docker row above: `cmd/nerdctl/container/container_exec.go:45-54` registers no --detach-keys, so nerdctl rejects the line outright. Reading docker's table here would report a command that cannot run — a finding that is wrong rather than early",
 		],
 		["docker run -it ubuntu ls", "an ordinary run"],
 		["docker run ubuntu", "an image and no command, which is a container that starts and exits"],
@@ -3946,6 +4066,42 @@ describe("POSIX: volume managers", () => {
 		["docker exec web bash -lc 'cd /srv && ls'", "and a compound but harmless one"],
 		["ssh host ls", "ssh itself, whose payload is still one word past the destination"],
 		["ssh host chroot /newroot ls", "and a nested carrier that is itself harmless"],
+		// The counterweight for the seven carriers above. The two that matter most
+		// are the ones a plausible implementation gets wrong in the quiet direction:
+		// `machinectl shell -M default rm -rf /` reads as dangerous under a
+		// containerless treatment of `-M` and cannot run at all under this one, and
+		// `docker-compose run --env FOO=bar web rm -rf /` is a line V1 refuses while
+		// a table carrying `--env` over from its exec would flag it.
+		["wsl", "wsl with no command line at all, which starts the default shell"],
+		["wsl -d Ubuntu", "and a distribution and no command, which is the same interactive shell"],
+		["wsl -d Ubuntu echo hello", "and an ordinary command, through a carrier that takes no positional"],
+		[
+			"wsl Ubuntu echo hello",
+			"and a distro name written as a bare word, which is **not** a positional: measured, wsl answers `Ubuntu: command not found`, because the first bare word is the command's own argv[0]. Reading it as a selector is what would make `positionals: 1` the wrong number",
+		],
+		["podman run alpine ls", "an ordinary podman run"],
+		["podman run --rm alpine ls", "and --rm in front of a harmless command"],
+		["podman run alpine", "an image and no command, which podman runs as the image's own"],
+		["podman run --env FOO=bar alpine ls", "and --env, an ordinary value flag in front of a harmless command"],
+		["nerdctl run alpine ls", "an ordinary nerdctl run"],
+		["nerdctl run -it alpine ls", "and -it, which are two booleans and not one flag that takes a value"],
+		["limactl shell default ls", "an ordinary limactl shell"],
+		["limactl shell --start default ls", "and --start, which starts the instance and then runs `ls`"],
+		["limactl shell default", "an instance and no command, which is an interactive shell"],
+		["multipass exec myvm ls", "an ordinary multipass exec"],
+		["multipass exec myvm", "an instance and no command, which exec.cpp:243-247 rejects outright"],
+		["machinectl shell default ls", "an ordinary machinectl shell"],
+		["machinectl shell default", "a machine and no command, which is an interactive shell"],
+		[
+			"machinectl shell -M default rm -rf /",
+			"and -M, whose value is the **transport**, not the positional: `parse_machine_uid` takes the machine from argv[1] (machinectl.c:1046) and parse_argv has already removed `-M default` from the positional list, so this line opens a machine named `rm` with `-rf` as its path and fails. Treating -M as the instance would make this a finding for a command that cannot run",
+		],
+		["docker-compose exec web ls", "an ordinary compose V1 exec"],
+		["docker-compose run web ls", "and an ordinary compose V1 run"],
+		[
+			"docker-compose run --env FOO=bar web rm -rf /",
+			"and --env, which V1's `run` does not have: docopt appends the unrecognised long option (docopt.py:312-315) but rebuilds the [options] shortcut from the doc afterwards (docopt.py:571-573), so the token is left over and the command prints its usage. The counterweight to the -e row above",
+		],
 	])("%s — %s, and stays quiet", (command) => {
 		expect(posix(command)).toBeNull();
 	});

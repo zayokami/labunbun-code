@@ -375,6 +375,26 @@ function wrapperScript(tokens: string[]): string | undefined {
  * `hostname host`, and `-D host` → `Bad dynamic forwarding specification
  * 'example.com'`, which is the parse refusing rather than swallowing the
  * destination silently.
+ *
+ * **`-Q` takes a value and is deliberately not in this set.** The usage output
+ * has a *second* synopsis line, `ssh [-Q query_option]`, and the paragraph above
+ * reads the first one; that is the whole of the omission, and it was a
+ * completeness claim rather than a guess — "the list is the complement of that
+ * cluster" is true of the bracketed cluster and quietly reads as true of the
+ * usage output, which is not the same thing. Measured on OpenSSH 10.2p1: bare
+ * `ssh -Q` answers `ssh: option requires an argument -- Q` and exits 255, so it
+ * is an ordinary required-argument option.
+ *
+ * Listing it would be a false positive rather than a miss, and the reason is
+ * worth writing down because "harmless" is not the same as "worth adding".
+ * `-Q` answers the query and exits before the destination is resolved at all:
+ * `ssh -Q cipher 127.0.0.1 rm -rf /tmp/x` exits 0 having run nothing, and
+ * `ssh -G -Q cipher 127.0.0.1` prints the cipher list and **no** `hostname`
+ * line, so it never even reached config resolution. A rule on a line that cannot
+ * run is the wrong kind of right — the same posture the counterweight rows in the
+ * test file take for `nerdctl exec --detach-keys`. An unknown `-Q` costs this
+ * table nothing either: it is skipped as a flag, and the destination is still
+ * the one positional.
  */
 const SSH_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 	"-b",
@@ -689,12 +709,29 @@ const SYSTEMD_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * both with `StringVar`, and `cmd.go:218-220` adds them to the root command's
  * **`PersistentFlags()`**, so `run` inherits them.
  *
- * **`oc`'s half of this table is not verified.** `["oc run"]` shares this set
- * (`REMOTE_COMMAND_CARRIERS`), and OpenShift's `oc` is a separate codebase that
- * was not read here, so the five rows above are what *kubectl's* sources say.
- * They cannot make a false positive — {@link remoteCommandScript} treats a flag it
- * does not know as a flag either way — but a missed `oc` flag is a miss that this
- * comment does not currently account for.
+ * **`oc`'s half of this table is kubectl's, and that is now read rather than
+ * assumed.** `["oc run"]` shares this set (`REMOTE_COMMAND_CARRIERS`), and
+ * OpenShift's `oc` is a separate codebase — so this used to say the `oc` half
+ * was "not verified" and only kubectl's sources were behind the five rows
+ * above. It is not a lookalike: `openshift/oc`
+ * `pkg/cli/kubectlwrappers/wrappers.go:160-161` is
+ *
+ * ```go
+ * func NewCmdRun(f kcmdutil.Factory, streams genericiooptions.IOStreams) *cobra.Command {
+ *         cmd := cmdutil.ReplaceCommandName("kubectl", "oc", templates.Normalize(run.NewCmdRun(f, streams)))
+ * ```
+ *
+ * and `run.NewCmdRun` is *the* `krun.go` every row above was read out of, so
+ * the subcommand flag set is literally the same object with the usage strings
+ * renamed. The wrapper for `exec` is the same shape at `:124-127`.
+ *
+ * **What is still not covered is `oc`'s own root flags**, which are a separate
+ * list layered on top of the shared constructor, and a miss there costs a
+ * detection and nothing else: {@link remoteCommandScript} treats a flag it does
+ * not know as a flag either way, so an unlisted `oc` global cannot make a false
+ * positive. `oc --loglevel 6 run x --image nginx rm -rf /` — a global before the
+ * verb — is not reachable by any key in the carrier table at all, for the same
+ * reason `docker compose --profile` is not.
  *
  * **The underscore spellings of every multi-word flag here are live and are
  * deliberately not listed.** kubectl sets a global normalizer twice —
@@ -775,12 +812,21 @@ const KUBECTL_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 /**
  * Options that swallow the word after them, for `docker exec`.
  *
- * `cli/command/container/exec.go` registers four value flags and four bare
- * booleans, and the split is the ordinary pflag one — `StringVar`/`Var` take the
- * next word, `BoolVarP` sets `NoOptDefVal = "true"` and never does. `--env` and
- * `--env-file` are `flags.VarP`/`flags.Var` over a custom `Value`, which pflag
- * treats as value-taking for the same reason: a `Var` registration has no
- * `NoOptDefVal`.
+ * `cli/command/container/exec.go:68-78` registers **five** value flags and four
+ * bare booleans, and the split is the ordinary pflag one — `StringVar`/`Var`
+ * take the next word, `BoolVarP` sets `NoOptDefVal = "true"` and never does.
+ * `--env` and `--env-file` are `flags.VarP`/`flags.Var` over a custom `Value`,
+ * which pflag treats as value-taking for the same reason: a `Var` registration
+ * has no `NoOptDefVal`.
+ *
+ * **This said four value flags and the source says five.** The five are
+ * `--detach-keys` (`:68`), `--user`/`-u` (`:72`), `--env`/`-e` (`:74`),
+ * `--env-file` (`:76`) and `--workdir`/`-w` (`:78`); the four booleans are
+ * `--interactive`/`-i`, `--tty`/`-t`, `--detach`/`-d` and `--privileged`
+ * (`:69-73`). Only the booleans were counted right, which is why the mistake read
+ * as a coincidence: eight set entries, four of them spelled `X`/`-x` pairs, and a
+ * reader counting pairs rather than registrations gets four. The set below was
+ * always the five; the prose undercounted what the set already did.
  *
  * There is no `NoOptDefVal` override anywhere in this command, which is the thing
  * worth stating because it is **not** true of the neighbouring `kubectl run`.
@@ -799,10 +845,23 @@ const DOCKER_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 /**
  * Options that swallow the word after them, for `nerdctl exec`.
  *
- * `cmd/nerdctl/exec.go:45-56` registers the same four booleans as docker under the
- * same spellings, and four value flags that are docker's minus `--detach-keys`.
- * The two comments at `exec.go:49` and `:51` say why `--env` is a `StringArrayP`
- * and `--env-file` a `StringSlice`, and neither of those changes arity.
+ * `cmd/nerdctl/container/container_exec.go:45-54` registers the same four booleans
+ * as docker under the same spellings — `tty`/`interactive`/`detach` at `:45-47`
+ * and `privileged` at `:53` — and four value flags at `:48, :50, :52, :54` that
+ * are docker's minus `--detach-keys`. The two comments at `:49` and `:51` say why
+ * `--env` is a `StringArrayP` and `--env-file` a `StringSlice`, and neither of
+ * those changes arity.
+ *
+ * **The file was `cmd/nerdctl/exec.go` and is not any more**; the `container/`
+ * package holds it now, beside `container_run.go`. The line numbers quoted were
+ * already the new file's and the comment above quoted them from the old one, so
+ * `exec.go:45-56` pointed at a file that has not existed for several releases
+ * while every line number in it stayed correct — which is the shape of citation
+ * drift that reads as verified. The registrations end at `:54`, not `:56`;
+ * `:55-56` are `return cmd` and the closing brace.
+ *
+ * `nerdctl run` moved in the same commit and lives beside it; see
+ * {@link NERDCTL_RUN_VALUE_OPTIONS}.
  */
 const NERDCTL_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 	"--workdir",
@@ -819,10 +878,10 @@ const NERDCTL_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  *
  * This is the largest flag set in the file and it is worth saying how it was
  * produced, because a list of this size copied by hand is a list of this size
- * with a mistake in it. `docker run`'s flags live in two files — `drun.go:58-77`
- * registers the nine that are not stored in `Config`/`HostConfig`, and
- * `copts = addFlags(flags)` at `drun.go:82` pulls in the other 99 from
- * `addFlags` in `cli/command/container/opts.go:150-329`. Both files were parsed
+ * with a mistake in it. `docker run`'s flags live in two files — `run.go:60-78`
+ * registers the ten that are not stored in `Config`/`HostConfig`, and
+ * `copts = addFlags(flags)` at `run.go:79` pulls in the other 98 from
+ * `addFlags` in `cli/command/container/opts.go:150-333`. Both files were parsed
  * mechanically, splitting on the registration function alone: pflag gives a
  * `NoOptDefVal` to `BoolVar`/`BoolVarP` and to nothing else (`bool.go:54-57`
  * against `flag.go:852-863`), so `Bool*` takes nothing and every other `*Var`
@@ -838,10 +897,27 @@ const NERDCTL_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * Three entries are here for a reason a reader would otherwise undo:
  *
  * - `--net` is `MarkHidden`'d at `opts.go:247` and hidden is not unregistered.
- * - `--kernel-memory` is registered over a stub at `opts.go:328` and
- *   `MarkDeprecated`'d at `:329`; deprecated still parses and still takes a value.
+ * - `--kernel-memory` is registered over a stub at `opts.go:329` and
+ *   `MarkDeprecated`'d at `:330`; deprecated still parses and still takes a value.
  * - **`--network` has no shorthand.** `-n` reads as one here and is not one;
  *   `opts.go:245-246` registers `--net` and `--network` with `Var` and no `P`.
+ *
+ * **Both citations above named files that have moved, and one of them named a
+ * range that had grown.** This said `drun.go:58-77` and `opts.go:150-329`; the
+ * command is `run.go` now — `drun.go` is a file that does not exist in
+ * `docker/cli` — and the `addFlags` body ends at `:333`, not `:329`. The grown
+ * range changes nothing, because `:330-333` are the `MarkDeprecated` and the
+ * closing lines and register no flag; the count is the same either way.
+ *
+ * The **totals** in the paragraph above survive all of that. The two per-file
+ * counts in it do not, and both were wrong here rather than merely stale:
+ * `run.go:60-78` holds **ten** registrations, four with a value and six without,
+ * and `opts.go:150-333` holds **ninety-eight**, eighty-nine with and nine
+ * without. 4 + 89 = 93 value options, ten shorthands and six + nine = fifteen
+ * booleans is what the list below has, so the sums closed by accident. Of the
+ * line references inside the bullets, `opts.go:245-247` and `:247` were re-read
+ * and still land where they are quoted; the kernel-memory pair was **not** — it
+ * was off by one, at `:328-329` for a registration at `:329-330`.
  */
 const DOCKER_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 	"--add-host",
@@ -1062,6 +1138,698 @@ const PODMAN_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Options that swallow the word after them, for `podman run`.
+ *
+ * `podman run` does not keep its flags in its own file the way `docker run` does,
+ * and the difference is worth stating because it is what makes this table 139
+ * long options and 10 shorthands rather than a readable hundred.
+ * `cmd/podman/containers/run.go:56-62` registers three of its own and then calls
+ * three helpers:
+ *
+ * | source | registers | contributes |
+ * | --- | --- | --- |
+ * | `runFlags` in `cmd/podman/containers/run.go:56-88` | directly | `--detach-keys` `--preserve-fd` `--preserve-fds` |
+ * | `common.DefineCreateFlags` (`cmd/podman/common/create.go:33-1129`) | via `createFlags` | 115 long, 9 short |
+ * | `common.DefineNetFlags` (`cmd/podman/common/netflags.go:19-107`) | via `flags` | 11 long, 1 short |
+ *
+ * **Podman names its flags in local variables rather than in string literals** —
+ * `annotationFlagName := "annotation"` on the line above the registration — so
+ * every literal in the create table was resolved through the local it is
+ * registered with, the way {@link PODMAN_EXEC_VALUE_OPTIONS} is. The count above
+ * is the result of parsing those registrations mechanically, by the
+ * registration function alone: `flag.go:957` of pflag gives a `NoOptDefVal`
+ * to exactly those values that answer `IsBoolFlag()` (`bool.go:15-20`), and
+ * across these three files those are the `BoolVar`/`BoolVarP`/`Bool`
+ * registrations and nothing else.
+ *
+ * Three corrections to that count are load-bearing, and each one is a flag a
+ * naive read gets wrong in the direction that misses a detection:
+ *
+ * - **`DefineCreateFlags` opens seven top-level mode branches and `podman run`
+ *   enters every one of them.** Their conditions are at `create.go:36`, `:551`,
+ *   `:717`, `:726`, `:916`, `:933` and `:988`; six of the seven name
+ *   `entities.CreateMode` outright and the seventh, `:933`, is
+ *   `if mode != entities.InfraMode`, which `CreateMode` satisfies too — and
+ *   `CreateMode` is the mode `runFlags` passes at `run.go:61`. So the whole body
+ *   is the create surface and no branch has to be subtracted from it.
+ *   That includes the `--signature-policy`/`--cert-dir` pair in the `else` at
+ *   `create.go:520-535`: the test above them is `if registry.IsRemote()` at
+ *   `:517`, a remote-vs-local test rather than a mode test, so on the default
+ *   local registry both are registered for `run` and both take a value.
+ *   `--signature-policy` is `MarkHidden`ed at `:526`, and hidden is not
+ *   unregistered — the same rule as `--wait` in
+ *   {@link PODMAN_EXEC_VALUE_OPTIONS}. This bullet used to say the opposite,
+ *   on the reading that a block indented under `if mode == entities.CreateMode`
+ *   at `:36` was the `else` of it; `create.go:550` is the `}` that closes that
+ *   branch, so `:520` is 430 lines inside it rather than outside.
+ * - **Two names are chosen at runtime and the extractor cannot see either.**
+ *   `create.go:817-834` picks `conmon-pidfile`/`infra-conmon-pidfile` and
+ *   `entrypoint`/`infra-command` on the same `mode == CreateMode` test the run
+ *   command passes, so `--conmon-pidfile` and `--entrypoint` are registered for
+ *   `run` and the `infra-` spellings are not. Both take a value.
+ * - **Ten of the entries are spellings no registration line contains.** `run.go:64`
+ *   sets `flags.SetNormalizeFunc(utils.AliasFlags)`, and
+ *   `cmd/podman/utils/alias.go:6-36` rewrites a name *before* pflag looks the
+ *   flag up, so `--dns-opt`, `--net`, `--override-arch`, `--override-os`,
+ *   `--override-variant` and the five `--healthcheck-*` names all reach a real
+ *   flag and all take its value. This is the same mechanism as compose's
+ *   `normalizeRunFlags` in {@link DOCKER_COMPOSE_RUN_VALUE_OPTIONS} and the same
+ *   reason it is worth carrying: a set built only from registration lines misses
+ *   the spellings the help text does not show. The other three cases in
+ *   `alias.go` (`--namespace`, `--storage`, `--notruncate`) are absent on
+ *   purpose: they normalise to `ns`, `external` and `no-trunc`, and none of the
+ *   four sources in the table above registers any of those three, so on `run`
+ *   they reach no flag and pflag rejects the line. Carrying one would make the
+ *   classifier swallow the word after it in a command the real podman never
+ *   runs.
+ *
+ * The boolean half is twenty-four long plus `-P -i -q -t -d`, and none of them is
+ * here: nineteen from the create table, two from the net table (`--no-hostname`,
+ * `--no-hosts`) and three from `runFlags` itself (`--detach`/`-d`, `--rmi`,
+ * `--sig-proxy`).
+ */
+const PODMAN_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--annotation",
+	"--arch",
+	"--attach",
+	"--authfile",
+	"--blkio-weight",
+	"--blkio-weight-device",
+	"--cap-add",
+	"--cap-drop",
+	"--cert-dir",
+	"--cgroup-conf",
+	"--cgroup-parent",
+	"--cgroupns",
+	"--cgroups",
+	"--chrootdirs",
+	"--cidfile",
+	"--conmon-pidfile",
+	"--cpu-period",
+	"--cpu-quota",
+	"--cpu-rt-period",
+	"--cpu-rt-runtime",
+	"--cpu-shares",
+	"--cpus",
+	"--cpuset-cpus",
+	"--cpuset-mems",
+	"--creds",
+	"--decryption-key",
+	"--device",
+	"--device-cgroup-rule",
+	"--device-read-bps",
+	"--device-read-iops",
+	"--device-write-bps",
+	"--device-write-iops",
+	"--dns-opt",
+	"--dns-option",
+	"--env",
+	"--entrypoint",
+	"--env-file",
+	"--env-merge",
+	"--expose",
+	"--gidmap",
+	"--gpus",
+	"--group-add",
+	"--group-entry",
+	"--health-cmd",
+	"--health-interval",
+	"--health-log-destination",
+	"--health-max-log-count",
+	"--health-max-log-size",
+	"--health-on-failure",
+	"--health-retries",
+	"--health-start-interval",
+	"--health-start-period",
+	"--health-startup-cmd",
+	"--health-startup-interval",
+	"--health-startup-retries",
+	"--health-startup-success",
+	"--health-startup-timeout",
+	"--health-timeout",
+	"--healthcheck-command",
+	"--healthcheck-interval",
+	"--healthcheck-retries",
+	"--healthcheck-start-period",
+	"--healthcheck-timeout",
+	"--hostname",
+	"--hostuser",
+	"--image-volume",
+	"--init-path",
+	"--ipc",
+	"--kernel-memory",
+	"--label",
+	"--label-file",
+	"--log-driver",
+	"--log-opt",
+	"--memory",
+	"--memory-reservation",
+	"--memory-swap",
+	"--memory-swappiness",
+	"--mount",
+	"--name",
+	"--net",
+	"--oom-score-adj",
+	"--os",
+	"--override-arch",
+	"--override-os",
+	"--override-variant",
+	"--passwd-entry",
+	"--personality",
+	"--pid",
+	"--pidfile",
+	"--pids-limit",
+	"--platform",
+	"--pod",
+	"--pod-id-file",
+	"--preserve-fd",
+	"--preserve-fds",
+	"--pull",
+	"--rdt-class",
+	"--requires",
+	"--restart",
+	"--retry",
+	"--retry-delay",
+	"--sdnotify",
+	"--seccomp-policy",
+	"--secret",
+	"--security-opt",
+	"--shm-size",
+	"--shm-size-systemd",
+	"--signature-policy",
+	"--stop-signal",
+	"--stop-timeout",
+	"--subgidname",
+	"--subuidname",
+	"--sysctl",
+	"--systemd",
+	"--timeout",
+	"--tmpfs",
+	"--tz",
+	"--uidmap",
+	"--ulimit",
+	"--umask",
+	"--unsetenv",
+	"--user",
+	"--userns",
+	"--uts",
+	"--variant",
+	"--volume",
+	"--volumes-from",
+	"--workdir",
+	// `common.DefineNetFlags`, `cmd/podman/common/netflags.go:19-107`.
+	"--add-host",
+	"--dns",
+	"--dns-search",
+	"--hosts-file",
+	"--ip",
+	"--ip6",
+	"--mac-address",
+	"--network",
+	"--network-alias",
+	"--publish",
+	// `runFlags`, `cmd/podman/containers/run.go:56-88`.
+	"--detach-keys",
+	"-a",
+	"-c",
+	"-e",
+	"-h",
+	"-l",
+	"-m",
+	"-p",
+	"-u",
+	"-v",
+	"-w",
+]);
+
+/**
+ * Options that swallow the word after them, for `nerdctl run`.
+ *
+ * `cmd/nerdctl/container/container_run.go:80-322` — the same file that holds
+ * `exec` (see {@link NERDCTL_EXEC_VALUE_OPTIONS}), one package level up from
+ * where it used to be. Ninety-three long and nine short, parsed mechanically by
+ * the registration function alone on the same rule as every other table here.
+ * `SetInterspersed(false)` at `:77` and `Args: cobra.MinimumNArgs(1)` at `:68`
+ * are what make the image the one positional.
+ *
+ * The fourteen `Bool`/`BoolP` registrations are the whole boolean half, because
+ * pflag's `flag.go:957` gives a `NoOptDefVal` to exactly the values answering
+ * `IsBoolFlag()` (`bool.go:15-20`) and no other value in this file is one. They
+ * are `--detach`/`-d`, `--help`, `--init`,
+ * `--interactive`/`-i`, `--no-healthcheck`, `--oom-kill-disable`, `--privileged`,
+ * `--publish-all`/`-P`, `--quiet`/`-q`, `--read-only`, `--rm`, `--rootfs`,
+ * `--sig-proxy` and `--tty`/`-t`.
+ *
+ * `nerdctl run` has **no `--kernel-memory` deprecation and no `--net` hiding**
+ * the way docker's does, but it does have flags docker's `run` does not —
+ * `--cgroup-conf`, `--cosign-*`, `--ipfs-address`, `--pidfile`, `--rdt-class`,
+ * `--systemd`, `--verify` and `--init-binary` — and every one of them takes the
+ * word after it. `--rootfs` at `:251` is the interesting shape rather than a
+ * spelling: it does not change what the first bare word means, it *is* that word
+ * ("the first argument is not an image but the rootfs to the exploded
+ * container"), and it is a `Bool`, so the payload starts one word later exactly
+ * as it would without it.
+ */
+const NERDCTL_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--add-host",
+	"--annotation",
+	"--attach",
+	"--blkio-weight",
+	"--blkio-weight-device",
+	"--cap-add",
+	"--cap-drop",
+	"--cgroup-conf",
+	"--cgroup-parent",
+	"--cgroupns",
+	"--cidfile",
+	"--cosign-certificate-identity",
+	"--cosign-certificate-identity-regexp",
+	"--cosign-certificate-oidc-issuer",
+	"--cosign-certificate-oidc-issuer-regexp",
+	"--cosign-key",
+	"--cpu-period",
+	"--cpu-quota",
+	"--cpu-rt-period",
+	"--cpu-rt-runtime",
+	"--cpu-shares",
+	"--cpus",
+	"--cpuset-cpus",
+	"--cpuset-mems",
+	"--detach-keys",
+	"--device",
+	"--device-read-bps",
+	"--device-read-iops",
+	"--device-write-bps",
+	"--device-write-iops",
+	"--dns",
+	"--dns-opt",
+	"--dns-option",
+	"--dns-search",
+	"--domainname",
+	"--entrypoint",
+	"--env",
+	"--env-file",
+	"--expose",
+	"--gpus",
+	"--group-add",
+	"--health-cmd",
+	"--health-interval",
+	"--health-retries",
+	"--health-start-period",
+	"--health-timeout",
+	"--hostname",
+	"--init-binary",
+	"--ip",
+	"--ip6",
+	"--ipc",
+	"--ipfs-address",
+	"--isolation",
+	"--kernel-memory",
+	"--label",
+	"--label-file",
+	"--log-driver",
+	"--log-opt",
+	"--mac-address",
+	"--memory",
+	"--memory-reservation",
+	"--memory-swap",
+	"--memory-swappiness",
+	"--mount",
+	"--name",
+	"--net",
+	"--network",
+	"--oom-score-adj",
+	"--pid",
+	"--pidfile",
+	"--pids-limit",
+	"--platform",
+	"--publish",
+	"--pull",
+	"--rdt-class",
+	"--restart",
+	"--runtime",
+	"--security-opt",
+	"--shm-size",
+	"--stop-signal",
+	"--stop-timeout",
+	"--sysctl",
+	"--systemd",
+	"--tmpfs",
+	"--ulimit",
+	"--umask",
+	"--user",
+	"--userns",
+	"--uts",
+	"--verify",
+	"--volume",
+	"--volumes-from",
+	"--workdir",
+	"-a",
+	"-e",
+	"-h",
+	"-l",
+	"-m",
+	"-p",
+	"-u",
+	"-v",
+	"-w",
+]);
+
+/**
+ * Options that swallow the word after them, for `limactl shell`.
+ *
+ * `cmd/limactl/shell.go:67-76` is the whole option table — seven entries, four of
+ * them strings. The other three (`--reconnect`, `--preserve-env`, `--start`) are
+ * `Bool` and take nothing.
+ *
+ * **`--instance` is in the value set *and* is the instance name**, which is the
+ * {@link RemoteCommandCarrier.containerlessOptions} shape and not an accident of
+ * the grammar. `shell.go:95-96` says so in the source:
+ *
+ * ```go
+ * // When --instance is specified, all positional args are treated as COMMAND.
+ * // Otherwise, the first positional arg is the instance name (backward compatible).
+ * ```
+ *
+ * and `:102-106` then prepends a placeholder instance name so the rest of the
+ * function works unchanged. So `limactl shell --instance default rm -rf /` has a
+ * command and **no** operand, and a fixed count of one would read `rm` as the
+ * instance and find nothing. It is `MarkHidden`'d at `:70` — hidden is not
+ * unregistered, and it is what the lima wrapper script uses — so it is on the
+ * set whether or not a human ever types it.
+ *
+ * `SetInterspersed(false)` at `:67` ends option parsing at the first bare word,
+ * which is the same rule every other carrier in this table is read under.
+ */
+const LIMACTL_SHELL_VALUE_OPTIONS: ReadonlySet<string> = new Set(["--instance", "--shell", "--sync", "--workdir"]);
+
+/**
+ * Options that swallow the word after them, for `multipass exec`.
+ *
+ * **The arg parser is public**, which is worth saying because the usual reason
+ * for keeping a table short here is that the client side is not: multipass is
+ * open source and `src/client/cli/cmd/exec.cpp:205-219` is where `exec`
+ * declares everything.
+ *
+ * ```cpp
+ * parser->addPositionalArgument("name", "Name of instance to execute the command on", "<name>");
+ * parser->addPositionalArgument("command", "Command to execute on the instance", "[--] <command>");
+ * QCommandLineOption workDirOption({"d", work_dir_option_name}, "Change to <dir> before execution", "dir");
+ * QCommandLineOption noDirMappingOption({"n", no_dir_mapping_option}, "Do not map the host execution path to a mounted path");
+ * ```
+ *
+ * Two options, one of them value-taking: `QCommandLineOption`'s third argument
+ * is the value name, and `-n/--no-map-working-directory` is the only
+ * `QCommandLineOption` here constructed without one. The two long spellings are
+ * not in the quoted registrations at all — they are the two constants at
+ * `exec.cpp:31-32`, `work_dir_option_name{"working-directory"}` and
+ * `no_dir_mapping_option{"no-map-working-directory"}`, which the braces above
+ * refer to by name. `-d` takes the next word; the glued `-d/tmp` form is Qt's,
+ * not the file's, and {@link remoteCommandScript} handles it through the sigil
+ * arm regardless.
+ *
+ * The instance is the one positional, and `exec.cpp:60-61` takes everything
+ * after it: `for (int i = 1; i < parser->positionalArguments().size(); ++i)`.
+ * `exec.cpp:243-247` rejects fewer than two positionals outright, so the bare
+ * `multipass exec` and the instance-with-no-command spelling are lines the tool
+ * refuses rather than lines with no payload.
+ *
+ * What a root command accepts before the verb is not recorded here, because it
+ * cannot be: this table is reached by a `"prog verb"` key, so an option written
+ * between the two makes the lookup miss whatever that option is. That is the
+ * same recorded miss as `docker compose --profile`, and it needs no upstream
+ * citation to be true of the classifier.
+ */
+const MULTIPASS_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set(["-d", "--working-directory"]);
+
+/**
+ * Options that swallow the word after them, for `machinectl shell`.
+ *
+ * systemd's option table is a macro list in which **the metavar field is the
+ * arity** — `src/shared/options.c` defines `option_takes_arg` as
+ * `return ASSERT_PTR(opt)->metavar;` — which is the same reading
+ * {@link SYSTEMD_RUN_VALUE_OPTIONS} is built on. `machinectl` holds one table
+ * for every verb (`src/machine/machinectl.c:2381-2581`, the `parse_argv` switch),
+ * so this set is the subset of that table with a metavar, and a flag that is
+ * real but belongs to another verb lands here too. `machinectl` accepts
+ * `OPTION_PARSER_RETURN_POSITIONAL_ARGS` until it has seen the verb and one more
+ * argument (`machinectl.c:2386-2391`), which is how `machinectl shell` gets
+ * `OPTION_PARSER_STOP_AT_FIRST_NONOPTION` (`:2401-2404`).
+ *
+ * The twenty-one, with the lines that register them:
+ *
+ * ```
+ * --property/-p   :2439    --kill-whom  :2462    --lines/-n   :2490    --verify   :2545
+ * -P              :2440    --signal/-s   :2466    --output/-o :2505    --format   :2555
+ * --uid           :2472    --setenv/-E  :2476    --runner    :2530
+ * --max-addresses :2496    -H/--host    options.h:138-139    -M/--machine  options.h:141-142
+ * ```
+ *
+ * `-H/--host` and `-M/--machine` are `OPTION_COMMON_*` from
+ * `src/shared/options.h` rather than from `machinectl.c`, and both carry a
+ * metavar (`"[USER@]HOST"` and `"CONTAINER"`), which is the same shape
+ * {@link SYSTEMD_RUN_VALUE_OPTIONS} records for `systemd-run`'s two.
+ *
+ * **They are in a table named for `shell` although the documented synopsis puts
+ * them before the verb** —
+ *
+ * > `machinectl [OPTIONS...] {COMMAND} [NAME...]`
+ *
+ * — and that looked like a mistake worth correcting, so it was checked against
+ * the man page rather than left as an assumption. They are correctly here:
+ * `machinectl`'s verb cases run under `OPTION_PARSER_STOP_AT_FIRST_NONOPTION`
+ * (`machinectl.c:2401-2404`), which stops at the first **non-option**, not at
+ * the verb. In `machinectl shell -M default rm -rf /` the `-M` is still an
+ * option when the parser reaches it, so it is parsed and `default` is consumed
+ * as its value. Treating it as an unknown flag instead — which is what "these
+ * are global options, not `shell` options" would license — makes this table
+ * read `/bin/rm` as the machine and `/` as the command, and the line comes back
+ * a **finding**. It cannot run: `parse_machine_uid` takes the machine from
+ * `argv[1]` (`machinectl.c:1046`) and the man page is explicit that the first
+ * post-`shell` word is the target even when `-M` has already named one. The
+ * man page also confirms the position is not what decides the arity, which is
+ * why this is worth a paragraph rather than a one-word edit.
+ *
+ * **The documented global spelling is still not matched at all**, and that is a
+ * real gap rather than an oversight:
+ * `machinectl -M NAME shell .host /bin/rm -rf /` puts its options ahead of the
+ * verb, and the carrier key here is the two-word `machinectl shell`, so nothing
+ * looks past them. Measured quiet. It is left open rather than closed with a
+ * guessed arity, because `shell [[NAME@]NAME [PATH [ARGUMENTS…]]]` makes the
+ * operand count depend on whether a machine was already selected globally, and
+ * a guess encoded into a security classifier is worse than a documented miss.
+ * Closing it needs `machinectl.c`'s verb switch read directly.
+ *
+ * `--verify` and `--format` sit below the `Hidden options` banner at
+ * `machinectl.c:2543` and belong to `machinectl import-tar`; hidden is not
+ * unregistered, they still parse, and they still take the word after them.
+ *
+ * **`machinectl shell` with no operand is quiet on purpose**, and so is the
+ * one-operand spelling: `machinectl.xml:201-217` documents the form as
+ * `shell [[NAME@]NAME [PATH [ARGUMENTS…]]]` and says a shell with no command
+ * "invok[es] the executed shell or command on the local host" — an interactive
+ * session, which is the same thing `chroot /newroot` and `sudo -i` already are
+ * here. A rule for the bare spelling would fire on `machinectl shell` and on
+ * nothing else worth catching.
+ */
+const MACHINECTL_SHELL_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"-E",
+	"-H",
+	"-M",
+	"-n",
+	"-o",
+	"-p",
+	"-P",
+	"-s",
+	"--format",
+	"--host",
+	"--kill-whom",
+	"--lines",
+	"--machine",
+	"--max-addresses",
+	"--output",
+	"--property",
+	"--runner",
+	"--setenv",
+	"--signal",
+	"--uid",
+	"--verify",
+]);
+
+/**
+ * Options that swallow the word after them, for the hyphenated
+ * `docker-compose exec` (Compose V1).
+ *
+ * **This is a different table from {@link DOCKER_COMPOSE_EXEC_VALUE_OPTIONS} and
+ * the two programs are not the same product.** `docker compose` is the V2
+ * plugin, written in Go against cobra/pflag; `docker-compose` is the standalone
+ * V1 binary, written in Python and parsed by docopt. Their `exec` surfaces are
+ * in fact much the same — `cmd/compose/exec.go:81-92` against
+ * `compose/cli/main.py:537-546` gives the same four value options
+ * (`--env`, `--index`, `--user`, `--workdir`) and the same three booleans
+ * (`--detach`, `--privileged`, `--no-tty`/`-T`), with V2 adding two
+ * `MarkHidden` booleans on top — and `run` is where the two part company: V1's
+ * `run` has no `--cap-add`, `--cap-drop`, `--pull`, `--env-from-file`,
+ * `--volumes` or `--labels`. The V1 tables are here because the V1 binary is
+ * still on developer machines, not because the two agree.
+ *
+ * The flag list is the `Options:` block of the command's own docstring, which
+ * **is** the parser: `compose/cli/main.py:530-547` on the `1.28.x` branch, the
+ * last V1 release, and the parser reads that same string.
+ *
+ * ```
+ * -d, --detach      Detached mode: Run command in the background.
+ * --privileged      Give extended privileges to the process.
+ * -u, --user USER   Run the command as this user.
+ * -T                Disable pseudo-tty allocation.
+ * --index=index     index of the container …
+ * -e, --env KEY=VAL Set environment variables …
+ * -w, --workdir DIR Path to workdir directory for this command.
+ * ```
+ *
+ * Three of those seven lines take no value (`-d/--detach`, `--privileged`,
+ * `-T`) and four do, spelling to the seven names in the set. `--index` carries
+ * a default of 1 rather than being required, and a default is still an
+ * argument-taking option in docopt — `--index 2` is the ordinary spelling. The
+ * service is the one positional: `main.py:565` is
+ * `command = [options['COMMAND']] + options['ARGS']`, with `SERVICE` read
+ * separately at `:550`.
+ *
+ * **`options_first=True` is why the positional model fits at all.**
+ * `compose/cli/docopt_command.py:40` parses each subcommand with
+ * `docopt_full_help(docstring, options['ARGS'], options_first=True)`, and
+ * docopt 0.6.2's `parse_argv` (`docopt.py:445-446`) returns the rest of `argv`
+ * as positional arguments the moment it meets one. Option parsing therefore
+ * stops at the service, which is the same rule `SetInterspersed(false)` gives
+ * the Go carriers — arrived at by a different road.
+ */
+const DOCKER_COMPOSE_V1_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--env",
+	"-e",
+	"--index",
+	"--user",
+	"-u",
+	"--workdir",
+	"-w",
+]);
+
+/**
+ * Options that swallow the word after them, for the hyphenated
+ * `docker-compose run` (Compose V1). See
+ * {@link DOCKER_COMPOSE_V1_EXEC_VALUE_OPTIONS} for why this is a separate table
+ * from the V2 one.
+ *
+ * `compose/cli/main.py:901-936` on the `1.28.x` branch, again the `Options:`
+ * block of the docstring that docopt parses. Eight of the fifteen take a value
+ * — `--name`, `--entrypoint`, `-e`, `-l/--label`, `-u/--user`, `-p/--publish`,
+ * `-v/--volume` and `-w/--workdir`, spelling to the thirteen names in the set —
+ * and seven do not: `-d/--detach`, `--no-deps`, `--rm`, `--service-ports`,
+ * `--use-aliases` and `-T`, plus the `--help` docopt adds on its own.
+ *
+ * **V2's spellings are deliberately absent, and the reason is stronger than
+ * "V1 refuses them".** `docker compose run` grows `--cap-add`, `--cap-drop`,
+ * `--pull`, `--env-from-file`, `--volumes` and `--labels`; none of the six is a
+ * V1 registration, and V1 turns all six away. `parse_long` does append an
+ * unrecognised long option to the runtime option list
+ * (`docopt.py:312-315`, `argcount = 1 if eq == '=' else 0`), which is what makes
+ * it look accepted — but the `[options]` shortcut's children are rebuilt from
+ * `parse_defaults(doc)`, the doc's own `Options:` block, at
+ * `docopt.py:571-573`, **after** `parse_argv` has already run at `:569`. The
+ * appended name is never among those children, the token is left over,
+ * `left == []` fails at `docopt.py:579`, and the command prints its usage and
+ * exits.
+ *
+ * That is what makes copying V2's table here an over-broad rule rather than a
+ * harmless extra: listing `--cap-add` would swallow `SYS_PTRACE` and push the
+ * service one word to the right, and `docker-compose run --cap-add SYS_PTRACE
+ * web rm -rf /` is a line V1 never starts — so the payload the classifier reads
+ * behind it is behind a command that never ran. **An entry that is wrong about
+ * a flag V1 does not have costs a detection; leaving it out costs nothing**,
+ * because the word after a rejected flag is still counted as the positional.
+ *
+ * **`-e` is a short-only option here and `--env` is deliberately absent**, even
+ * though {@link DOCKER_COMPOSE_V1_EXEC_VALUE_OPTIONS} has both and even though
+ * they are the same flag in the same binary. `run`'s line at `main.py:922` is
+ * `-e KEY=VAL` with no second spelling, and docopt builds an option's two halves
+ * out of one line (`docopt.py:187-202`): a token starting with `--` becomes the
+ * long, one starting with a single `-` becomes the short, and arity comes from
+ * a token that is neither. `exec`'s line at `main.py:544` is
+ * `-e, --env KEY=VAL`, which is why only that one gets a long. Carrying
+ * `--env` across on symmetry is the over-broad kind and for exactly the reason
+ * in the paragraph above: V1's `run` has no such flag, so
+ * `docker-compose run --env FOO=bar web rm -rf /` prints usage and exits, and a
+ * table listing `--env` would flag a line that never runs.
+ *
+ * The service is the one positional and the command is what follows:
+ * `main.py:946-951` is `command = [options['COMMAND']] + options['ARGS']` when
+ * there is a `COMMAND`, and `service.options.get('command')` when there is not.
+ */
+const DOCKER_COMPOSE_V1_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--entrypoint",
+	"-e",
+	"--label",
+	"-l",
+	"--name",
+	"--publish",
+	"-p",
+	"--user",
+	"-u",
+	"--volume",
+	"-v",
+	"--workdir",
+	"-w",
+]);
+
+/**
+ * Options that swallow the word after them, for `wsl`.
+ *
+ * Measured on **WSL 2.4.13.0** on this machine (`wsl.exe --help`, whose output is
+ * UTF-16LE, and one Ubuntu distribution actually run), because `wsl` has no
+ * public source. Only the flags of the **no-subcommand** form are listed: every
+ * other flag in that help output belongs to a subcommand — `--install`,
+ * `--list`, `--import`, `--export`, `--set-default`, `--terminate`, `--update` and
+ * the rest — and a subcommand runs nothing that this file is looking for. The
+ * default form's own block is:
+ *
+ * ```
+ * wsl.exe [Argument][Options...][CommandLine]
+ *    --exec, -e <CommandLine>     --shell-type <standard|login|none>
+ *    --cd <Directory>             --distribution, -d <DistroName>
+ *    --distribution-id <DistroGuid>  --user, -u <UserName>   --system
+ * ```
+ *
+ * Five of the six take a value and are in the set; `--system` is a bare switch
+ * and is not.
+ *
+ * **`--exec`/`-e` takes a value and is deliberately not in the set**, and this is
+ * the one place in this file where the rule in
+ * {@link RemoteCommandCarrier.valueOptions} inverts. Every other table is about
+ * words that are *not* the payload; `--exec`'s value **is** the payload, so
+ * swallowing it is the one thing the set must not do here. Listed, `wsl --exec
+ * rm -rf /` would read `--exec` as value-taking, eat `rm`, skip `-rf` as an
+ * unknown flag, and call `/` the command. Unlisted it is skipped as an ordinary
+ * flag and `rm` starts the payload, which is what runs. Measured both ways' input
+ * on the real binary: `wsl --exec echo M6` prints `M6` and `wsl echo M1` prints
+ * `M1`.
+ *
+ * **`positionals` is 0, and that is measured rather than read.** WSL 2.4's help
+ * prints `[Argument]` in its synopsis, which reads like a bare distro selector,
+ * and it is not one: `wsl Ubuntu echo M2` answers `/bin/bash: line 1: Ubuntu:
+ * command not found` — `Ubuntu` became the first word of the *command* in the
+ * default distribution. The distribution is only ever named by `--distribution`/
+ * `-d` or `--distribution-id`; there is no positional for it.
+ */
+const WSL_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--cd",
+	"--distribution",
+	"-d",
+	"--distribution-id",
+	"--shell-type",
+	"--user",
+	"-u",
+]);
+
+/**
  * Programs whose trailing words are a command line run on another machine.
  *
  * `ssh host "rm -rf /var"` and `ssh host rm -rf /var` are one command spelled two
@@ -1097,12 +1865,17 @@ const PODMAN_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * and `:159-163` does the same for `run`, so the grammar is identical and only the
  * program name in the usage strings differs.
  *
- * Still to be measured on their own source before they are written down:
- * `nerdctl run`, `podman run` (whose flags live in `pkg/specgen` rather than in
- * the command file), the hyphenated `docker-compose`,
- * `wsl` (whose bare form hands the rest to a login shell rather than exec'ing it,
- * so it is not this shape), `machinectl shell`, `multipass exec`,
- * `limactl shell`. A name that is not here is not followed at all.
+ * **The seven carriers this paragraph used to leave open are now measured**, and
+ * the two claims it made about them were both wrong in the direction that costs
+ * a detection. It said `podman run`'s flags "live in `pkg/specgen` rather than in
+ * the command file" — the *command* is built there
+ * (`pkg/specgenutil/specgen.go:355-360` is `inputCommand = args[1:]`, which is
+ * the positional count), but the *flags* live in `cmd/podman/common/create.go`
+ * and `netflags.go`, reached from `run.go:59-62`. And it said `wsl`'s "bare form
+ * hands the rest to a login shell rather than exec'ing it, so it is not this
+ * shape": that is true of `wsl` **alone** and false of `wsl rm -rf /`, which
+ * runs `rm -rf /` — measured, `wsl echo M1` prints `M1`. Each is spelled out at
+ * its own entry below; a name that is still not here is not followed at all.
  */
 const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new Map([
 	["ssh", { positionals: 1, valueOptions: SSH_VALUE_OPTIONS, localCommandOptions: new Set(["ProxyCommand"]) }],
@@ -1229,6 +2002,84 @@ const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new M
 			valueOptions: PODMAN_EXEC_VALUE_OPTIONS,
 		},
 	],
+	// The `run` half of podman, which is the same one-positional shape as
+	// `podman exec` with the **image** where the running container was. One
+	// constructor for both spellings, as with `exec`: `run.go:90-103` appends the
+	// same `runCommand` to the registry twice, once bare and once under
+	// `containerCmd`, and calls `runFlags` on each at `:95` and `:102` — so the
+	// two share a flag set and an argument rule rather than being two entries that
+	// can drift.
+	// The positional is settled upstream at
+	// `pkg/specgenutil/specgen.go:355-360` (`inputCommand = args[1:]`).
+	["podman run", { positionals: 1, valueOptions: PODMAN_RUN_VALUE_OPTIONS }],
+	["podman container run", { positionals: 1, valueOptions: PODMAN_RUN_VALUE_OPTIONS }],
+	// `nerdctl run` is the same shape against the same image, from the same
+	// package as `nerdctl exec`: `container_run.go:67` is
+	// `Use: "run [flags] IMAGE [COMMAND] [ARG...]"` with `SetInterspersed(false)`
+	// at `:77`, so everything from the first bare word after the image is the
+	// command.
+	["nerdctl run", { positionals: 1, valueOptions: NERDCTL_RUN_VALUE_OPTIONS }],
+	// `limactl shell` takes the **instance** as its one positional, and
+	// `--instance` is that name — `shell.go:95-96` says "When --instance is
+	// specified, all positional args are treated as COMMAND" and `:102-106`
+	// prepends a placeholder so the rest of the function is unchanged. That is
+	// the same `containerlessOptions` shape `podman exec --latest` has, and for
+	// the same reason: `limactl shell --instance default rm -rf /` has a command
+	// and no operand, and a fixed count of one would read `rm` as the instance.
+	// The flag is `MarkHidden`'d at `shell.go:70`, which is why it is not a flag
+	// anyone has seen in a help text and is easy to leave out.
+	[
+		"limactl shell",
+		{
+			positionals: 1,
+			containerlessOptions: new Set(["--instance"]),
+			valueOptions: LIMACTL_SHELL_VALUE_OPTIONS,
+		},
+	],
+	// `multipass exec` is `ssh` with the destination called a name:
+	// `exec.cpp:207` declares `<name>` as the first positional and `:208-210`
+	// declares the rest as the command, and `:60-61` copies everything past
+	// index 0 into the argv it hands to the instance. One value option,
+	// `-d/--working-directory`, from `exec.cpp:212-214`.
+	["multipass exec", { positionals: 1, valueOptions: MULTIPASS_EXEC_VALUE_OPTIONS }],
+	// `machinectl shell` has the same one-positional shape with the machine in
+	// the operand's place — `machinectl.c:1007-1008` is
+	// `VERB(verb_shell_machine, "shell", "[[USER@]NAME [COMMAND…]]\0", …)`, and
+	// `machinectl.c:1078` hands `argv + 2` to `OpenMachineShell` once there is
+	// more than a machine and one word.
+	//
+	// **A `machinectl shell` with no command, or with a machine and no command, is
+	// deliberately quiet**: `machinectl.xml:222-228` describes that case as
+	// opening an interactive session isolated from the originating one, which is
+	// what `chroot /newroot` and `sudo -i` already are here. A rule on the bare
+	// spelling would fire on the single most ordinary use of the command.
+	["machinectl shell", { positionals: 1, valueOptions: MACHINECTL_SHELL_VALUE_OPTIONS }],
+	// The hyphenated `docker-compose` is Compose **V1** — a Python binary whose
+	// docstrings are its parser — and it is not the same program as the `docker
+	// compose` entries above, which are the Go V2 plugin. It gets its own two
+	// entries and its own two tables because the two versions share a subcommand
+	// vocabulary and almost no flag surface; see
+	// {@link DOCKER_COMPOSE_V1_EXEC_VALUE_OPTIONS} for the spelling differences
+	// that make merging them wrong. Both take the **service** as their one
+	// positional, exactly as `docker compose exec`/`run` do.
+	["docker-compose exec", { positionals: 1, valueOptions: DOCKER_COMPOSE_V1_EXEC_VALUE_OPTIONS }],
+	["docker-compose run", { positionals: 1, valueOptions: DOCKER_COMPOSE_V1_RUN_VALUE_OPTIONS }],
+	// `wsl` is the one carrier here with **no positional at all**: the first bare
+	// word is already the command, because the distribution is only ever named by
+	// a flag. Measured on WSL 2.4.13.0, `wsl Ubuntu echo M2` answers
+	// `/bin/bash: line 1: Ubuntu: command not found` — `Ubuntu` became the first
+	// word of the *command*, not a distro selector — while `wsl -d Ubuntu echo M3`
+	// and `wsl --distribution-id <guid> echo M4` both run it.
+	//
+	// `--exec`/`-e` is the one option in this file whose value is the payload,
+	// so it is deliberately absent from {@link WSL_VALUE_OPTIONS}; see the note
+	// there for what listing it would do to `wsl --exec rm -rf /`.
+	//
+	// Bare `wsl` and `wsl -d Ubuntu` with no command are quiet, and for the same
+	// reason `chroot /newroot` is: WSL 2.4's own help says "if no command line is
+	// provided, wsl.exe will start the default shell", which is an interactive
+	// session rather than one of the commands this file looks for.
+	["wsl", { positionals: 0, valueOptions: WSL_VALUE_OPTIONS }],
 ]);
 
 /**
@@ -7622,12 +8473,24 @@ function containerToolRules(tokens: string[], platform: DangerousCommandPlatform
 	const lower = tokens.slice(1).map((arg) => arg.toLowerCase());
 
 	// `docker-compose` is Compose V1's own program and `docker compose` is the V2
-	// plugin, and they run the same commands with the same flags — so the hyphen
-	// is folded into the plugin's own word here rather than being a second
-	// program with a second copy of every rule below. `podman-compose` and the
-	// `docker-compose.exe` spelling on Windows both resolve to the same two words
-	// through `executableName`, and neither is named: this file has no podman rule
-	// to share with either.
+	// plugin, and they run the same **commands** — which is all the rules below
+	// need, because every one of them keys on a subcommand noun (`prune`, `rm`,
+	// `rmi`, `down`) rather than on a flag. The hyphen is folded into the plugin's
+	// own word here rather than being a second program with a second copy of
+	// every rule. `podman-compose` and the `docker-compose.exe` spelling on
+	// Windows both resolve to the same two words through `executableName`, and
+	// neither is named: this file has no podman rule to share with either.
+	//
+	// **It is not true that the two versions have "the same flags",** which is
+	// what this comment used to say. V1 is a Python binary parsed by docopt off
+	// its own docstrings and V2 is cobra/pflag, and their flag surfaces are
+	// nearly disjoint: `docker compose run` has `--cap-add`, `--cap-drop`,
+	// `--pull`, `--env-from-file`, `--volumes` and `--labels` and V1's has none of
+	// the six. That is fine here and not fine for the carrier table, which is why
+	// `REMOTE_COMMAND_CARRIERS` carries
+	// {@link DOCKER_COMPOSE_V1_EXEC_VALUE_OPTIONS} and
+	// {@link DOCKER_COMPOSE_V1_RUN_VALUE_OPTIONS} beside the V2 pair rather than
+	// sharing one.
 	if (program === "docker" || program === "docker-compose") {
 		const [group, verb] = program === "docker-compose" ? ["compose", lower[0]] : lower;
 		// `docker prune` is not a subcommand — `docker prune --help` prints the
