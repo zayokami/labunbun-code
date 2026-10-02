@@ -3257,6 +3257,175 @@ describe("POSIX: the LVM path shape, and a listing that was reading as a wipe", 
 	});
 });
 
+/**
+ * Volume managers: LVM, ZFS, and `blkdiscard`.
+ *
+ * None of these reached the classifier before this batch, and none of them is
+ * reachable by the device-shape rule above — for two different reasons, which is
+ * why they are a table of their own rather than more entries in
+ * `DISK_WRITING_PROGRAMS`. LVM names its objects rather than devices, so there is
+ * no path on the command line to match; ZFS and `blkdiscard` do name a device or
+ * a dataset, but dispatch on a subcommand or an option grammar that the existing
+ * rule does not model.
+ */
+describe("POSIX: volume managers", () => {
+	/**
+	 * The message is asserted, not just the verdict, because three of these
+	 * programs do something the word "delete" would get wrong. `zfs rollback`
+	 * discards work rather than removing anything, and `blkdiscard` discards
+	 * sectors rather than overwriting them — a message claiming it "overwrites
+	 * what is on it" would be the kind of comment this codebase treats as its
+	 * most expensive error, and the row below is what keeps it honest.
+	 */
+	test.each([
+		["lvremove vg0/lvol0", "removes one or more logical volumes", "without `-f`, which is about prompting"],
+		["lvremove -f vg0/lvol0", "removes one or more logical volumes", "with it"],
+		["lvremove -ff /dev/vg0/lvol0", "removes one or more logical volumes", "`-ff`, for a damaged volume"],
+		["vgremove vg0", "removes a volume group", "and the volumes inside it"],
+		["vgremove -f vg0", "removes a volume group", "with the force flag"],
+		["pvremove /dev/sdb", "removes a physical volume", "the physical volume underneath"],
+		["sudo lvremove vg0/data", "removes one or more logical volumes", "through sudo, which is the everyday case"],
+	])("%s — %s, %s", (command, expected) => {
+		expect(posix(command)?.rule).toContain(expected);
+	});
+
+	test.each([
+		["zfs destroy tank/data", "destroys the named dataset", "a plain destroy"],
+		["zfs destroy -r tank/data", "destroys the named dataset", "`-r` also takes the children"],
+		["zfs destroy -R tank/data", "destroys the named dataset", "`-R` also takes dependents outside the hierarchy"],
+		[
+			"zfs destroy -R tank/data@snap%mon",
+			"destroys the named dataset",
+			"the second synopsis form, whose operand carries a clone origin",
+		],
+		[
+			"zfs rollback tank/data@monday",
+			"discards everything written since that snapshot was taken",
+			"which is not a deletion and must not be described as one",
+		],
+		["zpool destroy tank", "destroys the named pool", "a pool rather than a dataset"],
+		["zpool destroy -f tank", "destroys the named pool", "with the only option the synopsis lists"],
+	])("%s — %s, %s", (command, expected) => {
+		expect(posix(command)?.rule).toContain(expected);
+	});
+
+	/**
+	 * The verb slot, and only the verb slot.
+	 *
+	 * A dataset may be *named* after a verb, and creating one is not removing
+	 * one, so `zfs create tank/destroy` has to stay quiet. That is the reason the
+	 * rule reads the verb positionally rather than searching the line, and these
+	 * rows are what hold the position rather than leaving it to the note.
+	 *
+	 * The other half of the same claim is above: `zfs destroy -r …` puts a switch
+	 * between the verb and the operand and is still found. That is safe only
+	 * because every option the three documented destructive verbs accept is a
+	 * switch taking no separate word, which is why `zfs -H destroy tank/data` is
+	 * **not** here — `zfs(8)` documents no global option, so that is not a
+	 * spelling anyone can type. An earlier version of this block asserted it
+	 * anyway and its `-o` sibling returned null; the row was wrong about ZFS, not
+	 * the rule.
+	 *
+	 * `zpool create tank destroy` and the `-o` row are here because they put
+	 * bare words in the operand area, which is the shape that would break a
+	 * positional read if the verb ever moved behind a value-taking option.
+	 * Whether `zfs create` itself accepts `-o` is **not** established here; what
+	 * these rows establish is the narrower thing, that a bare word following the
+	 * program is an operand and never the verb.
+	 */
+	test.each([
+		["zfs create tank/destroy", "a dataset named after the verb"],
+		["zfs list tank/rollback", "another"],
+		["zfs create -o mountpoint=/mnt tank/rollback", "with a value-taking option shape"],
+		["zpool create tank destroy", "and a bare word after a pool create"],
+		["zpool rollback tank@snap", "and a command OpenZFS does not ship"],
+	])("%s — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * A long option is never split into letters.
+	 *
+	 * `--non` is **not** a ZFS option — `zfs-destroy(8)` documents the cluster
+	 * `[-Rfnprv]` and nothing else — so this row asserts nothing about ZFS. What it
+	 * pins is the parser: the dry-run check expands `-nv` into `-n` and `-v`, and
+	 * must not do the same to a `--` spelling, or any future long option containing
+	 * an `n` would silently become a dry run.
+	 */
+	test("a long option is not read as a cluster of short ones", () => {
+		expect(posix("zfs destroy --non tank/data")).not.toBeNull();
+	});
+
+	/**
+	 * `blkdiscard`'s device is matched by shape rather than by position.
+	 *
+	 * The synopsis is `blkdiscard [options] [-o offset] [-l length] device`, so
+	 * `-o` and `-l` take their values as separate words and the first bare word is
+	 * the offset. Measured before the fix: `blkdiscard -o 1024 -l 2048 /dev/sdb`
+	 * reported that it "discards the sectors of `1024`" — a number, named as a
+	 * device. These rows are the reason the fix is a shape test.
+	 */
+	test.each([
+		["blkdiscard /dev/sdb", "/dev/sdb"],
+		["blkdiscard -o 1024 -l 2048 /dev/sdb", "/dev/sdb"],
+		["blkdiscard -o 1024 /dev/sdb", "/dev/sdb"],
+		["blkdiscard /dev/mapper/vg0-lv0", "/dev/mapper/vg0-lv0"],
+	])("%s names %s and not an option's value", (command, expected) => {
+		expect(posix(command)?.rule).toContain(expected);
+	});
+
+	/**
+	 * The read-only half, and the reason this is a list of three verbs rather
+	 * than a prefix. ZFS and LVM both have many more verbs than these, and every
+	 * one of the rest only reads or reports.
+	 */
+	test.each([
+		["lvs", "the read-only LVM sibling"],
+		["vgs", "another"],
+		["pvs", "and another"],
+		["lvdisplay -v vg0", "`lvdisplay` is not `lvremove`"],
+		["zfs list", "`list` is not `destroy`"],
+		["zfs list -o name,used", "with options"],
+		["zfs get all tank/data", "`get`"],
+		["zfs status tank", "`status`"],
+		["zpool list", "`zpool list`"],
+		["zpool status tank", "`zpool status`"],
+		["zpool scrub tank", "and `scrub`, which is the opposite act"],
+		["blkdiscard", "no device named satisfies nothing in the synopsis"],
+		["blkdiscard -o 1024", "and an offset with no device behind it"],
+	])("%s — %s, so not a rule", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The one dry run, and it is `zfs destroy`'s alone.
+	 *
+	 * `zfs-destroy(8)` documents `-n` as "Do a dry-run ("No-op") deletion. No data
+	 * will be deleted." `zpool destroy`'s synopsis is `zpool destroy [-f] pool`
+	 * with `-f` the only option and no dry run documented, so the exemption is not
+	 * claimed there and `zpool destroy -n` still fires. The last row is what makes
+	 * that asymmetry deliberate rather than an oversight: if a future change
+	 * extends the exemption to `zpool` without a documented dry run, this goes red.
+	 */
+	test("`zfs destroy -n` is a dry run and deletes nothing", () => {
+		expect(posix("zfs destroy -n tank/data")).toBeNull();
+		expect(posix("zfs destroy tank/data@snap -n")).toBeNull();
+		expect(posix("zfs destroy -nv tank/data")).toBeNull();
+	});
+
+	test("`zpool destroy -n` still fires, because no dry run is documented for it", () => {
+		expect(posix("zpool destroy -n tank")).not.toBeNull();
+	});
+
+	test.each([
+		["echo zfs destroy", "the words in a string are not the subcommand"],
+		["grep -r destroy .", "nor in a search"],
+		["man lvremove", "and reading the manual is not removing anything"],
+	])("%s — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+});
+
 describe("POSIX: destroying a disk", () => {
 	/**
 	 * Filesystems, partition tables and the tools that erase one.

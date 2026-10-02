@@ -1355,6 +1355,7 @@ function matchTokens(
 	}
 	return (
 		posixDiskRules(tokens, segment) ??
+		posixVolumeRules(tokens) ??
 		posixPermissionRules(tokens) ??
 		posixFindRules(tokens) ??
 		posixProcessRules(tokens) ??
@@ -1816,6 +1817,174 @@ function hasSetIdBit(tokens: string[]): boolean {
  * at a fixed offset — which is the same reason `dangerousWindowsAdmin` scans
  * every argument rather than the first.
  */
+/**
+ * Volume managers: LVM, ZFS, and the discard tool that erases a whole device.
+ *
+ * None of these are reachable by the device-shape rule above, and the reason
+ * differs per family, which is why they are here rather than added to
+ * `DISK_WRITING_PROGRAMS`:
+ *
+ * - **LVM names its objects, not devices.** `lvremove vg0/lvol0` takes two
+ *   names in one argument and never writes `/dev/...` on the command line, so
+ *   there is no path to match. There is also no read-only spelling to spare:
+ *   `lvremove(8)`'s synopsis is `lvremove position_args [ option_args ]` and its
+ *   description is "lvremove removes one or more LVs", with `-f, --force`
+ *   documented as "Override various checks, confirmations and protections" —
+ *   that is about interactivity, not about whether anything is destroyed. So a
+ *   bare `lvremove` destroys after a prompt and a rule that waited for `-f`
+ *   would miss it. The read-only siblings are different programs (`lvs`, `vgs`,
+ *   `pvs`, `lvdisplay`), which is what keeps this a program-name table.
+ *
+ * - **ZFS dispatches on a subcommand**, and the destructive three are a small
+ *   minority of the verbs: `zfs destroy`, `zfs rollback`, `zpool destroy`
+ *   against `zfs list`, `zfs get`, `zpool list`, `zpool status`. Naming the
+ *   three rather than listing the safe ones means a verb added to ZFS later is
+ *   quiet by default instead of dangerous by default.
+ *
+ * - **`blkdiscard`** is `blkdiscard [options] [-o offset] [-l length] device`:
+ *   the device is a positional and the manual offers no list-only mode, warning
+ *   "All data in the discarded region on the device will be lost!". It discards
+ *   rather than overwrites, so the message says discard and does not claim the
+ *   data was overwritten — the act is not the act `wipefs` performs.
+ *
+ * **The `-n` exemption is `zfs destroy`'s alone.** `zfs destroy(8)` documents
+ * `-n` as "Do a dry-run ("No-op") deletion. No data will be deleted." The
+ * synopsis of `zpool destroy` is `zpool destroy [-f] pool` with `-f` the only
+ * option and no dry run documented, so no exemption is claimed for it and
+ * `zpool destroy -n` still fires — the conservative direction for a flag whose
+ * meaning is not established here.
+ *
+ * **`zfs rollback` is in this table and is not a deletion**, which is the point
+ * of listing it separately in the messages. `zfs-rollback(8)`'s synopsis is
+ * `zfs rollback [-Rfr] snapshot` and its two range options are described as
+ * destroying what came later — `-R` "destroys later snapshots, bookmarks, and
+ * their clones", `-r` "destroys snapshots and bookmarks later than the specified
+ * one" — so the act is discarding everything written since that snapshot, and
+ * there is no undo that is not another rollback. The message says that rather
+ * than calling it a delete.
+ *
+ * **`zpool rollback` is deliberately absent, because it is not a command.**
+ * It was in this table until it was measured rather than assumed: OpenZFS ships
+ * no `zpool-rollback.8`, `man/man8/zpool.8` mentions `destroy` eight times and
+ * `rollback` not at all, `cmd/zpool/` has no rollback source, and a code search
+ * of the whole repository for the string `zpool rollback` returns zero hits. An
+ * entry for a command that cannot be run is a claim about a program that does
+ * not exist, so it is removed rather than left to look thorough. `zpool
+ * rollback tank@snap` is therefore quiet, and the row that holds that is in the
+ * test file.
+ */
+const LVM_DESTRUCTIVE_PROGRAMS: ReadonlyMap<string, string> = new Map([
+	["lvremove", "`lvremove`, which removes one or more logical volumes"],
+	["vgremove", "`vgremove`, which removes a volume group and its logical volumes"],
+	["pvremove", "`pvremove`, which removes a physical volume from a volume group"],
+]);
+
+/**
+ * The ZFS and Zpool verbs that destroy, and what each one actually does.
+ *
+ * `destroy` reads differently between the two programs — a dataset is removed,
+ * a pool "frees up any devices for other use" — so the phrase names the program
+ * rather than being shared. `rollback` is separate for the reason in the note
+ * above: it is not a deletion and must not be described as one.
+ *
+ * Three entries, and the third is the absence of `zpool rollback`. See the note:
+ * that command does not exist, so it is not here.
+ */
+const ZFS_DESTRUCTIVE_VERBS: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map([
+	[
+		"zfs",
+		new Map([
+			["destroy", "destroys the named dataset"],
+			["rollback", "discards everything written since that snapshot was taken"],
+		]),
+	],
+	["zpool", new Map([["destroy", "destroys the named pool and frees its devices for other use"]])],
+]);
+
+/** A `-n` dry run, which `zfs destroy(8)` documents as deleting nothing. */
+const ZFS_DRY_RUN_FLAGS: ReadonlySet<string> = new Set(["-n"]);
+
+function posixVolumeRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+
+	const byProgram = LVM_DESTRUCTIVE_PROGRAMS.get(program);
+	if (byProgram !== undefined) return { kind: "Other", rule: byProgram };
+
+	const rest = tokens.slice(1).filter((token) => !token.startsWith("-"));
+	const flags = tokens.slice(1).filter((token) => token.startsWith("-"));
+
+	if (program === "blkdiscard") {
+		// No read-only spelling exists to exempt, so a device path is the whole
+		// test. It is matched by *shape* rather than by position because the
+		// synopsis is `blkdiscard [options] [-o offset] [-l length] device`: `-o` and
+		// `-l` take their values as separate words, so the first bare word is the
+		// offset and not the device. Measured before this was changed to a shape
+		// test: `blkdiscard -o 1024 -l 2048 /dev/sdb` reported that it "discards the
+		// sectors of `1024`", naming a number as a device. Requiring `/dev/` also
+		// means no long-form spelling of an option can make its value look like the
+		// target, which position-counting could not guarantee.
+		const device = rest.find((token) => token.startsWith("/dev/"));
+		return device === undefined
+			? null
+			: {
+					kind: "Other",
+					rule: `\`blkdiscard\`, which discards the sectors of \`${device}\` so the data on them is gone`,
+				};
+	}
+
+	if (program !== "zfs" && program !== "zpool") return null;
+
+	// The verb is the first bare word, and reading it positionally rather than
+	// searching the whole line is deliberate: a dataset may be *named* after a
+	// verb, and `zfs create tank/destroy` creates a dataset rather than removing
+	// one. So only the slot right after the program is consulted.
+	//
+	// Position is safe for these three verbs because every option any of them
+	// documents is a switch that takes no separate word — `zfs destroy` is
+	// `[-Rfnprv]` / `[-Rdnprv]`, `zfs rollback` is `[-Rfr]`, `zpool destroy` is
+	// `[-f]` — and `zfs(8)` documents no global option, so the options of a
+	// destructive verb sit after it and the first bare word is the verb in every
+	// real spelling. The value-taking options that do exist belong to other
+	// subcommands: `-o`, `-s`, `-i` and `-d` are documented under `zfs get`,
+	// `zfs allow`, `zfs send` and `zfs receive`, none of which is in this table.
+	// A future destructive verb that took a value word would need the next token
+	// skipped, and the `-o` shape above is what it would have to skip.
+	const verb = rest[0];
+	if (verb === undefined) return null;
+	const phrase = ZFS_DESTRUCTIVE_VERBS.get(program)?.get(verb);
+	if (phrase === undefined) return null;
+
+	// Only `zfs destroy`'s dry run is exempted. See the note on the table.
+	if (program === "zfs" && verb === "destroy" && hasZfsDryRunFlag(flags)) return null;
+
+	return { kind: "Other", rule: `\`${program} ${verb}\`, which ${phrase}` };
+}
+
+/**
+ * Is `-n` among these flags, counting POSIX option bundling?
+ *
+ * `zfs-destroy(8)`'s synopsis is `zfs destroy [-Rfnprv] filesystem|volume` — one
+ * bracketed cluster of single letters — so `-nv` is two flags, `-n` and `-v`,
+ * and it is the same dry run as `-n` alone. Measured before this helper existed:
+ * a token-wise `flags.has("-n")` let `zfs destroy -nv tank/data` through as a
+ * real destroy, which is the wrong direction for an exemption.
+ *
+ * A long option is not split, because `--` names one option and its letters are
+ * not flags — and ZFS has long forms of its own, `--dryrun` among them, which is
+ * deliberately **not** in the table. The synopsis documents only the cluster, so
+ * only the cluster is claimed.
+ */
+function hasZfsDryRunFlag(flags: string[]): boolean {
+	return flags.some(
+		(flag) =>
+			ZFS_DRY_RUN_FLAGS.has(flag) ||
+			(flag.startsWith("--") === false &&
+				flag.length > 2 &&
+				[...flag.slice(1)].some((letter) => ZFS_DRY_RUN_FLAGS.has(`-${letter}`))),
+	);
+}
+
 function posixPermissionRules(tokens: string[]): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "posix");
 	if (program === undefined) return null;
