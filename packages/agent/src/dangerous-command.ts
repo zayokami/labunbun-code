@@ -357,6 +357,206 @@ function wrapperScript(tokens: string[]): string | undefined {
 }
 
 /**
+ * The `ssh` options that swallow the word after them, from the usage block of
+ * `ssh --help` on OpenSSH 10.2p1 — `-B bind_interface`, `-b bind_address`,
+ * `-c cipher_spec`, `-D [bind_address:]port`, `-E log_file`, `-e escape_char`,
+ * `-F configfile`, `-I pkcs11`, `-i identity_file`, `-J destination`,
+ * `-L address`, `-l login_name`, `-m mac_spec`, `-O ctl_cmd`, `-o option`,
+ * `-P tag`, `-p port`, `-R address`, `-S ctl_path`, `-W host:port`,
+ * `-w local_tun[:remote_tun]`. Everything else in the bracketed cluster
+ * (`-4 -6 -A -a -C -f -G -g -K -k -M -N -n -q -s -T -t -V -v -X -x -Y -y`) takes
+ * no value, so the list is the complement of that cluster rather than a guess.
+ *
+ * `-D` is the one that looks optional in the usage line and is not: the brackets
+ * are around the *bind address inside the one argument*, and `ssh -G -D` answers
+ * `ssh: option requires an argument -- D`. Measured with `-G`, which prints the
+ * resolved configuration and connects to nothing, so each of these settles
+ * whether the destination is still found after the option: `-D 1080 host` →
+ * `hostname host`, and `-D host` → `Bad dynamic forwarding specification
+ * 'example.com'`, which is the parse refusing rather than swallowing the
+ * destination silently.
+ */
+const SSH_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"-b",
+	"-B",
+	"-c",
+	"-D",
+	"-e",
+	"-E",
+	"-F",
+	"-i",
+	"-I",
+	"-J",
+	"-l",
+	"-L",
+	"-m",
+	"-o",
+	"-O",
+	"-p",
+	"-P",
+	"-R",
+	"-S",
+	"-w",
+	"-W",
+]);
+
+/** One program that runs a command line somewhere this machine cannot see. */
+interface RemoteCommandCarrier {
+	/**
+	 * Words between the options and the command that name *what* is being run on.
+	 * `ssh` has exactly one — the destination — and everything after it is the
+	 * command, whatever it looks like.
+	 */
+	readonly positionals: number;
+	/** Options that swallow the word after them; see {@link SSH_VALUE_OPTIONS}. */
+	readonly valueOptions: ReadonlySet<string>;
+	/**
+	 * `-o` values whose text after the `=` is a command line run on **this**
+	 * machine. `ProxyCommand` is the only one, and it runs before the destination
+	 * is even resolved; see {@link sshLocalCommandOption}.
+	 */
+	readonly localCommandOptions?: ReadonlySet<string>;
+}
+
+/**
+ * The local command line inside an `ssh -o` value, or `undefined`.
+ *
+ * `ProxyCommand` is the one option whose value is a command: ssh runs it to reach
+ * the host, so it runs whatever is in it whether or not the connection succeeds.
+ * Measured with a marker file that only the value itself could write —
+ * `ssh -o "ProxyCommand=touch /tmp/pc1" -o ConnectTimeout=1 127.0.0.1` writes it,
+ * where the same line without the option never reaches a proxy command at all: the
+ * failure changes from `connect to host 127.0.0.1 port 22: Connection timed out`
+ * to `Connection closed by UNKNOWN port 65535`.
+ *
+ * **The value is a program and its arguments, not a shell line.**
+ * `ProxyCommand=touch /tmp/pc1 /tmp/pc2` writes both files, and
+ * `ProxyCommand=touch /tmp/pc1 && echo x > /tmp/pc2` writes only the first — the
+ * `&&` is an argument, not an operator. So the value is tokenized as argv and read
+ * with this file's rules, which is exactly what ssh does; handing it to
+ * `matchScript` instead would split on `&&` and read the tail as a second command
+ * that ssh never runs.
+ *
+ * Only the value that arrives as **one token** is read, and both sigils deliver
+ * that: `-o "ProxyCommand=touch /tmp/pc1"` and `-oProxyCommand="touch /tmp/pc1"`
+ * are the same value with the sigil separated or glued, and both run it
+ * (measured, marker file written by either). What is *not* a carrier is the glued
+ * sigil with an unquoted single word — `ssh -oProxyCommand=touch /tmp/pc2 …`
+ * leaves `proxycommand touch` and makes `/tmp/pc2` the **destination**, per
+ * `ssh -G`, so the words after the sigil are not part of the option at all and
+ * there is nothing there to read. That is also why this reads a value token
+ * rather than a run of words: `ssh -G -oProxyCommand=rm -rf / host` answers
+ * `ssh: unknown option -- r` (exit 255) and never connects at all, so the line
+ * that *looks* like a glued delete is a line ssh refuses.
+ */
+function sshLocalCommandOption(value: string): string | undefined {
+	const command = /^ProxyCommand=(.+)$/i.exec(value)?.[1].trim();
+	return command === undefined || command === "" ? undefined : command;
+}
+
+/**
+ * Programs whose trailing words are a command line run on another machine.
+ *
+ * `ssh host "rm -rf /var"` and `ssh host rm -rf /var` are one command spelled two
+ * ways, and `tokenizeShell` has already taken the quotes off — so the quoted form
+ * arrives as a **single token holding spaces**. The command is therefore the
+ * trailing tokens joined back together, not the next one; reading only the next
+ * one sees the word `rm` and stops there.
+ *
+ * The two spellings differ in whether a flag after the destination is a flag or
+ * an argument, which is why the option scan has to *stop* at the destination and
+ * take the rest verbatim rather than continuing to classify switches: in
+ * `ssh host rm -rf /var` the `-rf` is an argument to `rm`, and a scanner that
+ * kept looking for options would read it as one.
+ *
+ * This table is the one place to add the programs that share the shape. Queued
+ * behind `ssh`, each still to be measured on its own `--help` before it is
+ * written down: `docker exec`/`docker run`/`docker compose run` (the container
+ * name is the one positional), `kubectl exec` (the pod, and `--` is mandatory
+ * before the command), `podman`, `oc`, `nerdctl`, `wsl.exe` (no positional — the
+ * command is the first bare word), `chroot`, `nsenter`, `systemd-run`,
+ * `machinectl shell`, `multipass exec`, `limactl shell`. None of them is in this
+ * table yet, and a name that is not here is not followed at all.
+ */
+const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new Map([
+	["ssh", { positionals: 1, valueOptions: SSH_VALUE_OPTIONS, localCommandOptions: new Set(["ProxyCommand"]) }],
+]);
+
+/**
+ * The command line `tokens` hands to another machine, read with this file's own
+ * rules; `undefined` when there is nothing dangerous to say about it.
+ *
+ * Two payloads are read, and they are read *differently on purpose*:
+ *
+ * - The command after the destination runs on the **remote**, whose shell is not
+ *   knowable from here, so it is read against **both** platforms. Reading it once
+ *   as POSIX would miss `ssh fileserver "Remove-Item C:\ -Force"`, which is an
+ *   ordinary line in a Windows shop; reading it once as Windows would miss the far
+ *   more common `ssh host "rm -rf /var"`. This is the rule a `cmd /c` body
+ *   already follows — a body is read against every shell that could be the one
+ *   running it, never as "nothing here" — and it costs a prompt on the payloads
+ *   that name a command the other platform does not have.
+ * - A `ProxyCommand` value runs on **this** machine, so it is read once, as the
+ *   platform this call was handed. Guessing the other shell there would be a
+ *   claim about this machine, which we can read instead.
+ */
+function remoteCommandScript(
+	program: string,
+	tokens: string[],
+	platform: DangerousCommandPlatform,
+	depth: number,
+): DangerousCommandMatch | undefined {
+	const carrier = REMOTE_COMMAND_CARRIERS.get(program);
+	if (carrier === undefined) return undefined;
+	let positionals = 0;
+	for (let i = 1; i < tokens.length; i++) {
+		const arg = tokens[i];
+		if (arg.startsWith("-") && arg !== "-") {
+			// A POSIX short option takes its value either as the next word or glued
+			// to the sigil, and ssh accepts both: `-p 2222`, `-p2222`, `-o Foo=bar`,
+			// `-oFoo=bar`. Reading only the separated form would make `-p2222` look
+			// like a flag, leave `2222` to be counted as the destination, and read
+			// the *command* as the destination — which is how a rule meant to catch
+			// `rm -rf /` ends up matching the word `host` instead.
+			let value: string | undefined;
+			if (carrier.valueOptions.has(arg)) {
+				value = tokens[i + 1];
+				i++;
+			} else {
+				const sigil = arg.slice(0, 2);
+				if (sigil.startsWith("-") && carrier.valueOptions.has(sigil)) value = arg.slice(2);
+			}
+			// A quiet `-o` must not end the scan: the rest of the line is still a
+			// remote command, so a miss falls through rather than returning.
+			if (value !== undefined && carrier.localCommandOptions !== undefined) {
+				const local = sshLocalCommandOption(value);
+				if (local !== undefined) {
+					// `tokenizeShell`, not `matchScript`: the value is argv, so an
+					// operator inside it is an argument and not a separator. Handing it
+					// to `matchScript` would split on `&&` and read the tail as a second
+					// command that ssh never runs — a rule for a command that cannot
+					// run, which is the wrong kind of right.
+					const match = matchTokens(tokenizeShell(local), depth + 1, platform, local);
+					if (match) return match;
+				}
+			}
+			continue;
+		}
+		// The word after the last positional is the first word of the command.
+		if (++positionals > carrier.positionals) {
+			const command = tokens.slice(i).join(" ");
+			if (command === "") return undefined;
+			for (const remotePlatform of ["posix", "windows"] as const) {
+				const match = matchScript(command, depth + 1, remotePlatform);
+				if (match) return match;
+			}
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+/**
  * PowerShell's own spelling of the same idea: the script lives in one argument.
  *
  * `powershell.exe` matches its own switches by prefix, longest match first, with
@@ -1131,6 +1331,13 @@ function matchTokens(
 		if (payload === undefined) return null;
 		return matchScript(payload, depth + 1, platform);
 	}
+
+	// `ssh host "rm -rf /var"` runs that command on another machine, and `ssh` is
+	// already named in `CREDENTIAL_SENDERS` — the file knows the program and never
+	// treated it as a carrier. Measured `null` on both platforms: `ssh host
+	// "rm -rf /"` on `posix` and `ssh.exe host "rm -rf /var"` on `windows`.
+	const remote = program === undefined ? undefined : remoteCommandScript(program, tokens, platform, depth + 1);
+	if (remote !== undefined) return remote;
 
 	// Follow every wrapper this segment contains, each one a level deeper.
 	const scripts = [wrapperScript(tokens), powershellScript(tokens), ...substitutionScripts(segment)].filter(

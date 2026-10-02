@@ -337,6 +337,147 @@ describe("POSIX: shell scaffolding does not hide the command", () => {
  * would flag `command -v` and `nohup --help`, which are a lookup and a help
  * screen, and a classifier that does that is one a user learns to switch off.
  */
+describe("ssh: the command after the destination runs on another machine", () => {
+	/**
+	 * The sharpest gap this file had, and it was not a missing program name —
+	 * `ssh` was already in `CREDENTIAL_SENDERS`, so the file knew the program and
+	 * never treated it as a carrier. `ssh host "rm -rf /var"` read as `null` on
+	 * both platforms.
+	 *
+	 * The grammar is `ssh [options] destination [command [argument ...]]`, from
+	 * the usage block of `ssh --help` on OpenSSH 10.2p1. The command is the
+	 * trailing words, and it is read **joined back together**, because
+	 * `tokenizeShell` has already taken the quotes off: `ssh host "rm -rf /var"`
+	 * arrives as one token holding spaces, and reading only the next word would
+	 * see `rm` and stop there.
+	 */
+	test.each([
+		['ssh host "rm -rf /var"', "the quoted spelling"],
+		["ssh host rm -rf /var", "the same command unquoted — one word each"],
+		['ssh host "rm -rf /"', "aimed at the root"],
+		['ssh host "rm -rf ~"', "aimed at the home directory"],
+		["ssh user@host rm -rf /var", "with a user in the destination"],
+		["ssh -t deploy@server rm -rf /srv", "with the pseudo-terminal flag"],
+		['ssh -p 2222 host "rm -rf /var"', "a port option with its value as a separate word"],
+		["ssh -p2222 host rm -rf /var", "the same port glued to its sigil"],
+		['ssh -o BatchMode=yes host "rm -rf /var"', "an `-o` option with a value"],
+		['ssh -i ~/.ssh/id host "rm -rf /var"', "an identity file"],
+		['ssh -D 1080 host "rm -rf /var"', "a dynamic forward, whose value is optional-looking and is not"],
+		['ssh -J jump.example.com host "rm -rf /var"', "a jump host"],
+		['ssh -L 8080:localhost:80 host "rm -rf /var"', "a local forward"],
+		["ssh -46AaCfGgKkMNnqsTtVvXxYy host rm -rf /var", "every no-value flag at once"],
+		['ssh host "bash -c \'rm -rf /var\'"', "a shell inside the payload, followed one level deeper"],
+		['ssh host "ssh otherhost \'rm -rf /var\'"', "another `ssh` inside the payload"],
+		["ssh host dd if=/dev/zero of=/dev/sda", "a raw device write on the far end"],
+		["ssh host mkfs.ext4 /dev/sdb", "a filesystem written on the far end"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The remote's shell is not knowable from this machine, so the payload is read
+	 * against both platforms. Reading it once as POSIX would miss the first two of
+	 * these, and reading it once as Windows would miss the far more common
+	 * `ssh host "rm -rf /var"` above.
+	 */
+	test.each([
+		['ssh fileserver "Remove-Item C:\\x -Force"', "a PowerShell body on a Windows host"],
+		['ssh fileserver "del /f C:\\x"', "a CMD body on a Windows host"],
+		['ssh fileserver "rd /s /q C:\\x"', "a recursive CMD delete on a Windows host"],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/** `ssh.exe` is the same program: `executableName` strips the sigil on Windows. */
+	test("the Windows spelling of the same program is followed too", () => {
+		expect(windows('ssh.exe host "rm -rf /var"')).not.toBeNull();
+	});
+
+	/**
+	 * What the option list has to survive, and what it must leave alone.
+	 *
+	 * `-p` is here because it is the option a real line always has, and because a
+	 * value the reader does not step over turns into the *destination* — which then
+	 * makes the command look like a second positional and the delete go unread. The
+	 * two `-D` rows are the pair that settles the option whose usage line reads
+	 * `[bind_address:]port` and looks optional: `ssh -G -D 1080 example.com` prints
+	 * `hostname example.com`, and `ssh -G -D example.com` answers `Bad dynamic
+	 * forwarding specification 'example.com'`, so `-D` always swallows its value.
+	 *
+	 * `ssh -p` alone is the case where the value option has nothing after it, and
+	 * `ssh -Q cipher` is the usage line where there is no destination at all.
+	 */
+	test.each([
+		["ssh", "the program alone"],
+		["ssh host", "a destination and no command"],
+		["ssh uptime", "a command that only reads"],
+		["ssh user@host tail -n 100 /var/log/syslog", "a command with flags of its own after the destination"],
+		["ssh host ls -la /tmp", "another harmless one"],
+		["ssh -t deploy@server systemctl restart nginx", "a service restart on the far end is not this file's act"],
+		["ssh -V", "the version flag, which prints and exits"],
+		["ssh -Q cipher", "the query flag: no destination, no command"],
+		["ssh -o BatchMode=yes git@github.com", "options and a destination and nothing else"],
+		["ssh -p", "a value option with nothing after it"],
+		["scp file.txt host:/tmp/", "`scp` moves a path, it does not run a command"],
+		["sftp host", "`sftp` opens a prompt"],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `ProxyCommand` is the one `ssh` option whose *value* is a command, and ssh
+	 * runs it **on this machine** to reach the host — so it runs whether or not the
+	 * connection succeeds. Measured with a marker file that only the value itself
+	 * could write.
+	 *
+	 * **The value is a program and its arguments, not a shell line.**
+	 * `ProxyCommand=touch /tmp/pc1 /tmp/pc2` writes both files, and
+	 * `ProxyCommand=touch /tmp/pc1 && echo x > /tmp/pc2` writes only the first: the
+	 * `&&` is an argument, not an operator. That is why these rows are matched as
+	 * a word list rather than as a shell line — it is what ssh does, not a
+	 * convenient approximation of it.
+	 */
+	test.each([
+		['ssh -o "ProxyCommand=rm -rf /" host', "the separated sigil"],
+		['ssh -oProxyCommand="rm -rf /" host', "the glued sigil, same value"],
+		['ssh -o "ProxyCommand=/bin/rm -rf /" -p 2222 user@host', "with other options around it"],
+		['ssh -o "ProxyCommand=mkfs.ext4 /dev/sda" host', "a filesystem written locally"],
+		['ssh -o "ProxyCommand=rm -rf /var" host uptime', "the remote command is harmless; the proxy command is not"],
+		[
+			'ssh -o "ProxyCommand=nc -X connect -x proxy:3128 %h %p" host "rm -rf /var"',
+			"a quiet ProxyCommand must not end the scan — the remote command is still read",
+		],
+	])("%s is dangerous — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		['ssh -o "ProxyCommand=nc -X connect -x proxy:3128 %h %p" host', "the ordinary proxy spelling"],
+		['ssh -o "ProxyCommand=touch /tmp/pc1" 127.0.0.1', "a marker write"],
+		['ssh -o "ProxyCommand=" host', "an empty value"],
+		['ssh -o "Port=2222" -o "StrictHostKeyChecking=no" git@github.com', "options that are not commands"],
+		["ssh -o ProxyCommand=rm host", "`rm` with no target: not the act this file names"],
+		[
+			'ssh -o "ProxyCommand=echo hi && rm -rf /" host',
+			"`&&` is an argv entry, so the tail is an argument to `echo` and never runs",
+		],
+	])("%s is not dangerous — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The glued sigil with an **unquoted** single word is not a carrier, and the
+	 * reason is measured rather than argued: `ssh -G -oProxyCommand=rm -rf / host`
+	 * answers `ssh: unknown option -- r` and exits 255 without connecting, because
+	 * `-rf` is ssh's own option parser's business. So the line that looks most like
+	 * a glued delete is a line ssh refuses, and reading it would cost a prompt on a
+	 * command that cannot run.
+	 */
+	test("the unquoted glued form is a line ssh refuses, so it is not dangerous", () => {
+		expect(posix("ssh -oProxyCommand=rm -rf / host")).toBeNull();
+	});
+});
+
 describe("POSIX: a wrapper in front of the command is followed", () => {
 	test.each([
 		['bash --norc -c "rm -rf /"', "a long option, which is not the switch that carries the script"],
