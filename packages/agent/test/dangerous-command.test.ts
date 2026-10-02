@@ -2432,6 +2432,190 @@ describe("Windows: an administrative program that destroys machine state", () =>
 	});
 });
 
+describe("Windows: four tools whose grammar is deeper than one switch", () => {
+	/**
+	 * None of these four fits `WINDOWS_ADMIN_VERBS`, and saying so is the point.
+	 * That table is a verb set, which is right for `netsh` and wrong here:
+	 * `fsutil`'s destructive commands are `file setEOF` and `usn deleteJournal`,
+	 * two words and three, so a set of switch names cannot name either.
+	 *
+	 * Every grammar below was read out of the tool's own help on this machine —
+	 * `fsutil file setEOF /?`, `fsutil usn deleteJournal /?`, `cacls /?`,
+	 * `manage-bde /?`, `manage-bde -protectors -delete /?`, `wbadmin /?`,
+	 * `wbadmin delete catalog /?` and `net share /?` — and the tests that quote
+	 * them are the ones that hold the code to what the tool actually accepts.
+	 */
+	describe("fsutil: the length is the whole of the difference", () => {
+		test.each([
+			["fsutil file seteof C:\\x 0", "length zero"],
+			["fsutil file SetEOF C:\\x 0", "the command in the case the usage line prints"],
+			["fsutil file seteof C:\\x 00", "zero written with padding"],
+			["fsutil file seteof C:\\x -0", "zero written with a sign"],
+		])("%s — %s — truncates", (command) => {
+			expect(windows(command)?.rule).toContain("truncates");
+		});
+
+		test.each([
+			// The usage line's own example is `setEOF C:\testfile.txt 1000`.
+			["fsutil file seteof C:\\x 1000", "moving the marker up, which is not a deletion"],
+			["fsutil file seteof C:\\x", "no length at all, so nothing happens"],
+			["fsutil file queryvaliddata C:\\x", "a different subcommand of the same group"],
+			["fsutil file setshortname C:\\x LONGNA~1", "another"],
+		])("%s is quiet — %s", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+
+		test("the USN journal is deleted with `/D`, which is what the usage line prints", () => {
+			// MEASURED: `Usage: fsutil usn deleteJournal <flags> <volume pathname>`
+			// with `<Flags>` being exactly two entries, `/D : Delete` and
+			// `/N : Notify`, and `Eg : usn deleteJournal /D C:`.
+			//
+			// **`/C` is not a flag of this command**, and an audit handed me `/c` as
+			// the spelling to match. A rule written for it would guard a line that
+			// cannot be typed, which is a rule that looks like coverage and is not.
+			for (const command of [
+				"fsutil usn deletejournal /d D:",
+				"fsutil usn deleteJournal /D D:",
+				"fsutil usn deletejournal /Delete D:",
+			]) {
+				expect(windows(command)?.rule).toContain("change journal");
+			}
+			for (const command of [
+				"fsutil usn deletejournal /n D:",
+				"fsutil usn queryjournal D:",
+				"fsutil usn createjournal D:",
+			]) {
+				expect(windows(command)).toBeNull();
+			}
+		});
+	});
+
+	describe("cacls: the switches that write and the ones that only decorate", () => {
+		// MEASURED from `cacls /?`:
+		//   CACLS filename [/T] [/M] [/L] [/S[:SDDL]] [/E] [/C] [/G user:perm]
+		//              [/R user [...]] [/P user:perm [...]] [/D user [...]]
+		test.each([
+			["cacls C:\\x /G Everyone:F", "grant"],
+			["cacls C:\\x /R bob", "revoke"],
+			["cacls C:\\x /P bob:F", "replace a user's rights"],
+			["cacls C:\\x /D bob", "deny"],
+			['cacls C:\\x /S:"O:AOG:SYD:(A;;FA;;;WD)"', "replace the whole ACL, argument and all"],
+			["cacls C:\\x /T /E /C /G Everyone:F", "modifiers beside the write"],
+		])("%s — %s", (command) => {
+			expect(windows(command)?.rule).toContain("access control lists");
+		});
+
+		test.each([
+			["cacls C:\\x", "the listing form, which is how anyone reads an ACL"],
+			["cacls C:\\x /S", "a bare /S prints the DACL as SDDL"],
+			["cacls C:\\x /T", "a modifier alone"],
+			["cacls C:\\x /L /C", "two more"],
+		])("%s is quiet — %s", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+
+		test("`icacls` keeps its own rule; this batch did not merge the two programs", () => {
+			expect(windows("icacls C:\\x /grant Everyone:F")).not.toBeNull();
+			expect(windows("cacls C:\\x /grant Everyone:F")).toBeNull();
+		});
+	});
+
+	describe("manage-bde: the switches that weaken a volume", () => {
+		test.each([
+			["manage-bde -off C:", "decrypts the volume"],
+			["manage-bde -lock C:", "prevents access to the data"],
+			["manage-bde -changepassword C:", "changes the secret that unlocks it"],
+			["manage-bde -changepin C:", "changes the PIN"],
+			["manage-bde -changekey C:", "changes the startup key"],
+			["manage-bde -wipefreespace C:", "wipes the free space"],
+			["manage-bde -w C:", "the short spelling of the same"],
+		])("%s — %s", (command) => {
+			expect(windows(command)?.rule).toContain("weakens the encryption");
+		});
+
+		test("`-protectors -delete` is read as the two words it is, and named as such", () => {
+			for (const command of ["manage-bde -protectors -delete C:", "manage-bde -protectors -delete C: -Type TPM"]) {
+				const rule = windows(command)?.rule;
+				expect(rule).toContain("-protectors -delete");
+				expect(rule).toContain("key protectors");
+			}
+		});
+
+		test("a help switch cancels the line, whichever side of the command it is on", () => {
+			// The usage blocks write `{-?|/?}` and `{-Help|-h}`, so all four are
+			// measured spellings. The order matters: the destructive switch comes
+			// first in the first row.
+			for (const command of [
+				"manage-bde -changepassword -help",
+				"manage-bde -changepassword /?",
+				"manage-bde -protectors -delete -?",
+				"manage-bde -off C: -?",
+			]) {
+				expect(windows(command)).toBeNull();
+			}
+		});
+
+		test.each([
+			["manage-bde -on C:", "turning encryption on is a repair"],
+			["manage-bde -status", "reading"],
+			["manage-bde -protectors -get C:", "reading the protectors is how you find out which to keep"],
+			["manage-bde -unlock E: -RecoveryKey F:\\key.bek", "unlocking is the recovery"],
+			["manage-bde -pause", "pausing is reversible"],
+		])("%s is quiet — %s", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+	});
+
+	describe("wbadmin: the three things `delete` can mean", () => {
+		test.each([
+			["wbadmin delete catalog", "catalog", "which makes the stored backups unreachable"],
+			["wbadmin delete catalog -quiet", "catalog", "the same, with the prompt off"],
+			["wbadmin delete systemstatebackup", "system state backup", "which removes the bare-metal recovery image"],
+			["wbadmin delete systemstatebackup -keepVersions:0", "system state backup", "keeping no versions"],
+			["wbadmin delete backup -backupTarget:D:", "backups", "which cannot be restored from"],
+		])("%s is a %s deletion — %s", (command, expected) => {
+			expect(windows(command)?.rule.toLowerCase()).toContain(expected);
+		});
+
+		test.each([
+			["wbadmin get versions", "listing"],
+			["wbadmin get items", "listing"],
+			["wbadmin get status", "listing"],
+			["wbadmin start backup -backupTarget:D:", "taking a backup is not deleting one"],
+			["wbadmin enable backup -schedule:daily", "scheduling"],
+			["wbadmin disable backup", "turning a schedule off is not deleting what it wrote"],
+			["wbadmin stop job", "stopping the run in progress"],
+		])("%s is quiet — %s", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+	});
+
+	describe("net: three nouns whose destructive form carries no switch the loop reads", () => {
+		test.each([
+			["net stop Spooler", "stops a service, which `sc stop` already covers"],
+			['net stop "Windows Search"', "a service name with a space in it"],
+			["net share C /delete", "removes the share"],
+			["net share D: /delete", "removes a drive share"],
+			["net share Sales \\\\fileserver /delete", "removes it from another machine"],
+			["net localgroup Admins /delete", "deletes the group"],
+		])("%s — %s", (command) => {
+			expect(windows(command)).not.toBeNull();
+		});
+
+		test.each([
+			["net share", "listing"],
+			["net share C", "listing"],
+			["net view \\\\host", "listing"],
+			["net stop", "no service named, so nothing is stopped"],
+			["net share stop C:\\x", "a share *named* `stop` — this is why the noun is read and not a bareword verb"],
+			["net use Z: /delete", "disconnecting a mapped drive deletes nothing"],
+			["net session", "listing"],
+		])("%s is quiet — %s", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+	});
+});
+
 describe("Windows: a protection that is switched off rather than used", () => {
 	/**
 	 * None of these is a `rm` and none of them destroys a file, which is why they

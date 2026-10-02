@@ -3932,6 +3932,184 @@ function verbMatches(token: string, known: string): boolean {
  */
 const WINDOWS_SHUTDOWN_SWITCHES: readonly string[] = ["/s", "/sg", "/g", "/r", "/p", "/h", "/hybrid", "/fw"];
 
+/** `cacls` switches that change an ACL rather than print one. */
+const CACLS_WRITE_SWITCHES: ReadonlySet<string> = new Set(["/g", "/r", "/p", "/d"]);
+
+/**
+ * `cacls`, the deprecated twin of `icacls`, which is already a rule.
+ *
+ * **MEASURED**, from `cacls /?` on this machine, which prints:
+ *
+ * ```text
+ * CACLS filename [/T] [/M] [/L] [/S[:SDDL]] [/E] [/C] [/G user:perm]
+ *            [/R user [...]] [/P user:perm [...]] [/D user [...]]
+ * ```
+ *
+ * So `/G` grants, `/R` revokes, `/P` replaces a user's rights, `/D` denies, and
+ * `/S:SDDL` replaces the whole ACL with a string. `/T`, `/M`, `/L` and `/C` are
+ * modifiers — they change *how* the ACL is read or written and are never the
+ * write themselves — and a bare `/S` prints the DACL as SDDL. A bare
+ * `cacls C:\x` is therefore the listing form and stays quiet, which is the half
+ * of this program a person runs to look at a machine.
+ *
+ * `/S:` is read as a prefix rather than put in the table because it carries its
+ * argument in the same token, and `verbMatches` deliberately refuses a prefix
+ * that runs straight into an alphanumeric character.
+ */
+function dangerousCacls(tokens: string[]): DangerousCommandMatch | null {
+	for (const token of tokens.slice(1)) {
+		const lower = token.toLowerCase();
+		if (CACLS_WRITE_SWITCHES.has(lower) || lower.startsWith("/s:")) {
+			return { kind: "Other", rule: "`cacls` changing access control lists, which is what `icacls /grant` does too" };
+		}
+	}
+	return null;
+}
+
+/**
+ * `fsutil`, whose grammar is `<group> <command>` and whose destructive commands
+ * are therefore three or four words deep rather than one switch deep.
+ *
+ * Both rules here are measured from the tool's own usage lines.
+ */
+function dangerousFsutil(tokens: string[]): DangerousCommandMatch | null {
+	const group = tokens[1]?.toLowerCase();
+	const command = tokens[2]?.toLowerCase();
+
+	// `fsutil file setEOF <filename> <length>` — measured: `Usage: fsutil file
+	// setEOF <filename> <length>`, and the file subcommand list describes setEOF
+	// as "Sets the end of file marker for a file".
+	//
+	// **The length is read, because zero is the whole of the difference.**
+	// Moving the marker to 0 truncates the file and the bytes past it are gone;
+	// moving it up only makes the file logically longer. Nothing was run in either
+	// form — the second is claimed from the usage line's own example
+	// (`fsutil file setEOF C:\testfile.txt 1000`) and the first from what an end-
+	// of-file marker at zero is.
+	if (group === "file" && command === "seteof") {
+		// `<filename> <length>` — the length is the fifth word, not the fourth.
+		const length = tokens[4];
+		if (length !== undefined && /^-?0+$/.test(length)) {
+			return { kind: "Other", rule: "`fsutil file setEOF` moving the end of a file to zero, which truncates it" };
+		}
+	}
+
+	// `fsutil usn deleteJournal <flags> <volume>` — measured: the usage line prints
+	// `<Flags>` as `/D : Delete` and `/N : Notify`, with `Eg : usn deleteJournal /D C:`.
+	//
+	// **`/C` is not a flag of this command**, and an audit of this file handed me
+	// `/c` as the spelling to match. Measured: `/? is an invalid parameter` and the
+	// flag list is two entries long. A rule written for `/c` would have been a rule
+	// for a command line that cannot be typed.
+	//
+	// **The subcommand guard is not held by any test, and the driver says so.**
+	// Deleting `command === "deletejournal"` and matching `/D` anywhere under `usn`
+	// leaves the whole suite green, which was measured rather than assumed: of the
+	// seven USN subcommands (`createJournal`, `deleteJournal`, `enableRangeTracking`,
+	// `enumData`, `queryJournal`, `readJournal`, `readData`), only `deleteJournal`
+	// prints a `/D` flag, so no other line exists for the guard to catch. It stays
+	// because it names the command the rule is *about*, and a rule that says "any
+	// `/D` under `usn` deletes something" is true today by accident and would stop
+	// being true the day another subcommand grew the flag. What would catch that day
+	// is a row here for the new flag, and the comment above is where to look.
+	if (group === "usn" && command === "deletejournal") {
+		for (const token of tokens.slice(3)) {
+			const lower = token.toLowerCase();
+			if (lower === "/d" || lower === "/delete") {
+				return { kind: "Other", rule: "`fsutil usn deleteJournal /D`, which deletes the change journal" };
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * `manage-bde`, which turns a drive's disk encryption off and manages the keys
+ * that make it readable.
+ *
+ * **MEASURED**, from `manage-bde /?` on this machine, which prints a parameter
+ * list where every one of these is a sentence:
+ *
+ * - `-off` — "Decrypts the volume and turns BitLocker protection off."
+ * - `-lock` — "Prevents access to BitLocker-encrypted data."
+ * - `-changepassword` / `-changepin` / `-changekey` — change the secret that
+ *   unlocks the volume, so the old one stops working.
+ * - `-WipeFreeSpace` (`-w`) — "Wipes the free space on the volume."
+ *
+ * `-delete` is in the set for `-protectors -delete`, which `manage-bde
+ * -protectors -delete /?` measures as "Deletes key protection methods. All key
+ * protectors are removed unless optional parameters are used. To allow continued
+ * access to BitLocker-encrypted data, deleting the last protector disables all
+ * key protectors." There is no bare `manage-bde -delete`, so the switch cannot
+ * match anything else.
+ *
+ * Left alone: `-on` (encryption on is a repair), `-status`, `-pause`, `-resume`,
+ * `-unlock`, `-autounlock`, `-KeyPackage`.
+ */
+function dangerousManageBde(tokens: string[]): DangerousCommandMatch | null {
+	const destructive = new Set([
+		"-off",
+		"-lock",
+		"-changepassword",
+		"-changepin",
+		"-changekey",
+		"-wipefreespace",
+		"-w",
+		"-delete",
+	]);
+	const help = new Set(["-?", "/?", "-help", "-h", "/h", "--help"]);
+	const rest = tokens.slice(1);
+	// A help switch cancels the whole line: `manage-bde -changepassword /?`
+	// prints the syntax for changing a password and changes nothing. Both
+	// spellings are measured — the usage blocks write `{-?|/?}` and `{-Help|-h}`
+	// — and a rule that fires on the help is a rule that fires when someone is
+	// reading how to do the thing.
+	//
+	// Scanned over every word before the destructive one is looked for, because
+	// `manage-bde -changepassword /?` puts them the other way round.
+	for (const token of rest) {
+		if (help.has(token.toLowerCase())) return null;
+	}
+	for (const token of rest) {
+		const lower = token.toLowerCase();
+		if (!destructive.has(lower)) continue;
+		if (lower === "-delete") {
+			return {
+				kind: "Other",
+				rule: "`manage-bde -protectors -delete`, which removes the key protectors — and the last one is what makes a volume readable at all",
+			};
+		}
+		return { kind: "Other", rule: `\`manage-bde ${lower}\`, which weakens the encryption on a volume` };
+	}
+	return null;
+}
+
+/**
+ * `wbadmin`, the Windows Backup administration tool.
+ *
+ * **MEASURED**: `wbadmin /?` on this machine prints a command list whose
+ * deletion entries are `DELETE BACKUP -- Deletes one or more backups`, and
+ * `wbadmin delete catalog /?` prints its own syntax block — `WBADMIN DELETE
+ * CATALOG [-quiet]`, "Deletes the backup catalog that is stored on the local
+ * computer" — with the remark that after deleting it you cannot access the
+ * backups. `wbadmin delete systemstatebackup` is the third of the family and is
+ * the one that removes the bare-metal recovery image.
+ *
+ * So the verb is `delete` and the subcommand after it is named in the message,
+ * because "which backup" is the difference between yesterday's and last month's.
+ */
+function dangerousWbadmin(tokens: string[]): DangerousCommandMatch | null {
+	if (tokens[1]?.toLowerCase() !== "delete") return null;
+	const target = tokens[2]?.toLowerCase() ?? "backups";
+	if (target === "catalog") {
+		return { kind: "Other", rule: "`wbadmin delete catalog`, which makes the stored backups unreachable" };
+	}
+	if (target === "systemstatebackup") {
+		return { kind: "Other", rule: "`wbadmin delete systemstatebackup`, which removes the system state backup" };
+	}
+	return { kind: "Other", rule: "`wbadmin delete backup`, which deletes backups that cannot be restored from" };
+}
+
 /** The Windows administrative rules, applied to one command line. */
 function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "windows");
@@ -3941,6 +4119,17 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 	if (always !== undefined) {
 		return { kind: "Other", rule: `\`${program}\` — ${always}` };
 	}
+
+	// The four programs below are *not* in the verb table, because each needs its
+	// own reading rather than a set of switch names — and this branch sits above
+	// `verbs === undefined` precisely so they can reach it. A verb set is right
+	// for `netsh`, where `add` and `delete` mean the same thing across every noun.
+	// It is wrong for `fsutil`, whose `deleteJournal` is a two-word subcommand and
+	// whose `file setEOF` is three.
+	if (program === "fsutil") return dangerousFsutil(tokens);
+	if (program === "cacls") return dangerousCacls(tokens);
+	if (program === "manage-bde") return dangerousManageBde(tokens);
+	if (program === "wbadmin") return dangerousWbadmin(tokens);
 
 	// `shutdown` powers the machine off. Its switches are the whole grammar, and
 	// `shutdown /?` on this box printed them (the prose around them came back in
@@ -4071,6 +4260,37 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 			if (verbMatches(token, known)) {
 				return { kind: "Other", rule: `\`${program} ${known}\`, which destroys machine state` };
 			}
+		}
+	}
+
+	// The other `net` nouns that destroy something. `net /?` on this machine
+	// prints the whole verb list — `ACCOUNTS | COMPUTER | CONFIG | … | SHARE |
+	// START | STATISTICS | STOP | TIME | USE | USER | VIEW` — and three of those
+	// nouns have a destructive form that carries no switch this loop reads.
+	//
+	// `stop` is `sc stop` under another name, and `sc stop` is already a rule
+	// above; `net share <name> /DELETE` and `net localgroup <name> /DELETE` are
+	// measured from `net share /?`, which prints
+	// `{sharename | devicename | drive:path} /DELETE` and `sharename \\computername /DELETE`.
+	//
+	// The noun is read rather than matched as a switch because a bareword verb set
+	// would fire on `net share stop C:\x` — a share *named* `stop`. The second
+	// token is what makes these three commands, and reading it cannot confuse a
+	// name for a verb.
+	if (program === "net") {
+		const noun = tokens[1]?.toLowerCase();
+		const deletes = tokens.slice(2).some((token) => token.toLowerCase() === "/delete");
+		if (noun === "stop") {
+			// `net stop` with no name is a usage error, not an act; `net stop /?`
+			// prints the syntax. A third word is what makes it a command.
+			if (tokens.length < 3) return null;
+			return { kind: "Other", rule: "`net stop`, which stops a service, the same act as `sc stop`" };
+		}
+		if (noun === "share" && deletes) {
+			return { kind: "Other", rule: "`net share <name> /DELETE`, which removes the share" };
+		}
+		if (noun === "localgroup" && deletes) {
+			return { kind: "Other", rule: "`net localgroup <name> /DELETE`, which deletes the group" };
 		}
 	}
 
