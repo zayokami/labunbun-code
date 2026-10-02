@@ -606,6 +606,177 @@ export function normalizeClaudeHooks(raw: unknown): NormalizedHooks {
 }
 
 /**
+ * A parameter name whose **last** segment names a credential.
+ *
+ * **Last segment, whole words, no substrings** — three separate narrowing rules,
+ * each buying a different false positive back:
+ *
+ *   - *Whole words.* The obvious implementation is {@link looksLikeSecretName},
+ *     which matches `KEY` as a substring and would flag `?monkey=1`,
+ *     `?keyboard=…` and `?hockey=…`.
+ *   - *Split on separators and camelCase too*, so `accessToken` becomes
+ *     `access`/`Token` while `monkey` stays whole and is not caught.
+ *   - **Last segment only**, which is the one that separates a credential from
+ *     the noun it modifies: `?key_count=3`, `?token_type=bearer` and
+ *     `?signature_version=4` are all a credential word used as an adjective, and
+ *     none of their values is a secret. A qualifier in front of the credential
+ *     word (`sortKey`, `public_key`, `hasToken`) is still flagged — there is no
+ *     way to tell those from `access_token` by name alone, and the direction of
+ *     that error is deliberate; see {@link urlCredentialProblem}.
+ *
+ * `sig`, `signature`, `auth`, `authz`, `bearer` and `jwt` are here and not in
+ * {@link looksLikeSecretName}'s list because they are what a signed-URL service
+ * actually uses, and they are the spellings a user pastes out of a vendor's
+ * dashboard.
+ */
+const CREDENTIAL_URL_SEGMENTS: ReadonlySet<string> = new Set([
+	"token",
+	"key",
+	"secret",
+	"password",
+	"passwd",
+	"pwd",
+	"credential",
+	"credentials",
+	"sig",
+	"signature",
+	"auth",
+	"authz",
+	"authorization",
+	"bearer",
+	"jwt",
+]);
+
+/**
+ * Whole names that are one segment after the split and so need no camelCase
+ * boundary: `accessToken` splits, `accesstoken` does not.
+ *
+ * These are the credential words with their usual prefixes already glued on. The
+ * prefixes are the same ones the segment rule catches — `access_token`,
+ * `client_secret`, `private_key` all end in a bare segment — so this table is
+ * the lowercase spelling of that rule rather than a second opinion about which
+ * words are credentials.
+ */
+const CREDENTIAL_URL_NAMES: ReadonlySet<string> = new Set([
+	"apikey",
+	"apisecret",
+	"apitoken",
+	"accesskey",
+	"accesstoken",
+	"idtoken",
+	"refreshtoken",
+	"usertoken",
+	"authtoken",
+	"sessiontoken",
+	"bearertoken",
+	"clientsecret",
+	"clientkey",
+	"secretkey",
+	"privatekey",
+	"accesscode",
+	"authcode",
+]);
+
+/** `[a-b_c.d]` and `camelCase` both become separate segments. */
+function nameSegments(name: string): string[] {
+	return name
+		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+		.split(/[^A-Za-z0-9]+/)
+		.filter((segment) => segment !== "");
+}
+
+/** `decodeURIComponent` that answers with the input rather than throwing. */
+function safeDecode(text: string): string {
+	try {
+		return decodeURIComponent(text);
+	} catch {
+		return text;
+	}
+}
+
+/** The one fixed phrase for each shape. Neither contains any of the value. */
+const URL_USERINFO = "it carries a `name:password@` part in front of the address";
+const URL_PARAMETER = "one of its `?`/`#` parameter names is a credential word";
+
+/**
+ * Why a URL is carrying a credential, or `null` when it is not.
+ *
+ * **An MCP server's URL is the one credential channel this repository's importers
+ * copied without looking at, and every one of them copied it.** A name-based
+ * credential scan cannot see it, because the credential is not under a
+ * secret-shaped *key* — it is inside the one string every importer treats as a
+ * safe identifier. Two shapes carry one:
+ *
+ *   - **Userinfo.** `https://alice:hunter2@host/sse` is RFC 3986 §3.2.3, and every
+ *     MCP client in existence accepts it. The password is not a substring of the
+ *     URL the way a token in a query is; it is the thing before the `@`.
+ *   - **A credential-named parameter.** `?access_token=…`, `?api_key=…`, `?sig=…`
+ *     — the signing schemes people copy out of a vendor's dashboard.
+ *
+ * The report says `containsSecret: false` for a server it copied, so a URL like
+ * this is not merely a secret on disk: it is the importer asserting the opposite
+ * of the truth about it, which is the failure this repository treats as the
+ * expensive one.
+ *
+ * **This parses the string by hand and never calls `new URL`.** That is the whole
+ * design, and it was written the other way round first: a `URL`-based version
+ * measured 11 of 16 cases wrong, because the parser is *least* useful exactly
+ * where a credential is most likely to be. It rejects a space in the host, a port
+ * above 65535, an unclosed bracket, and a scheme-relative `//user:pass@host` —
+ * and every one of those is a hand-edited URL, which is what a pasted credential
+ * URL is. "The parser rejected it" is not "it is safe", so nothing here depends on
+ * the parser's opinion; a structural scan reaches the same answer on both
+ * `https://alice:hunter2@host/sse` and `https://alice:hunter2@ho st/sse`.
+ * Measured on the `URL` version: scheme-relative URLs, URLs with a space in the
+ * host and URLs with an out-of-range port all returned "no problem" while
+ * carrying a working password.
+ *
+ * **It over-flags, on purpose.** The cost matrix is not symmetric: a false
+ * positive costs a user one server, and they are told which one and why, so they
+ * can add it back by hand; a false negative writes a live token into
+ * `~/.labunbun/.mcp.json` under a report line that says nothing in it is a secret.
+ * So `?sortKey=updatedAt` is flagged and `?public_key=` is flagged, because there
+ * is no way to tell those from `?access_token=` by name alone and guessing the
+ * other way is guessing about credentials.
+ *
+ * The **value is never returned** — only {@link URL_USERINFO} or
+ * {@link URL_PARAMETER} — so this can go in a report line.
+ */
+export function urlCredentialProblem(url: string): string | null {
+	// Strip the scheme, then the `//` that introduces the authority. Both are
+	// optional and the order matters: `https://x` has its first `/` at the index
+	// after the colon, so taking the authority before stripping the scheme reads
+	// `"https:"` and finds no `@` in it.
+	let rest = url.trim();
+	const scheme = rest.match(/^[A-Za-z][A-Za-z0-9+.-]*:/);
+	if (scheme !== null) rest = rest.slice(scheme[0].length);
+	if (rest.startsWith("//")) rest = rest.slice(2);
+
+	// Userinfo is the authority up to the first path, query or fragment
+	// delimiter. `https://host/a@b` has its `@` in the *path*, past the first `/`,
+	// and is not a credential.
+	const authority = rest.split(/[/?#]/, 1)[0] ?? "";
+	if (authority.includes("@")) return URL_USERINFO;
+
+	// Both the query and the fragment. HTTP never sends a fragment, so a token
+	// there authenticates nothing — but it is still copied verbatim into a file
+	// on disk, and the value of the fragment is the user's to paste.
+	for (const section of rest.split(/[?#]/).slice(1)) {
+		for (const pair of section.split(/[&;]/)) {
+			// Decoded first: `?access%5Ftoken=x` is `access_token` to every server
+			// that reads it, so segmenting the raw text would miss it.
+			const name = safeDecode(pair.split("=", 1)[0] ?? "").trim();
+			if (name === "") continue;
+			const segments = nameSegments(name);
+			const last = segments[segments.length - 1];
+			if (last !== undefined && CREDENTIAL_URL_SEGMENTS.has(last.toLowerCase())) return URL_PARAMETER;
+			if (CREDENTIAL_URL_NAMES.has(name.toLowerCase())) return URL_PARAMETER;
+		}
+	}
+	return null;
+}
+
+/**
  * One line naming the keys that were neither imported nor explained.
  *
  * Silence is the one thing a migration report may not do: a key the user set is
