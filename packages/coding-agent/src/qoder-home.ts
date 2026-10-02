@@ -526,6 +526,34 @@ export function qoderProjectMemoryDir(configDir: string, cwd: string): string {
 }
 
 /**
+ * `<configDir>/AGENTS.md` — Qoder's standing instruction document.
+ *
+ * **The name is attested; this location is a choice, and the difference matters.**
+ * The product builds its candidate list as
+ * `[...new Set(["AGENTS.override.md", "AGENTS.md", ...fallbackFilenames])]`, so
+ * `AGENTS.md` is in the list whatever `contextFileName` is set to — that much is
+ * read off bytes, from `dist/_worker/qoder-worker-runtime.obf.mjs`. Nothing in
+ * that same walk pins the document to the config root: it iterates directories
+ * **upward from the project boundary**, with `scope:"user"` and `scope:"project"`
+ * entries at each level, and gates the whole thing on
+ * `isTrustedFolder() && (!scopeFilter || scopeFilter.includes("project"))`.
+ * The scopes are the same `user`/`project`/`local` trio the settings merge uses.
+ *
+ * So the copy that actually reaches most sessions is the one **beside the code**,
+ * and this helper names the config root. That is the shape the other ten importers
+ * in this repository use, and it is the safe half of the ambiguity: a config root
+ * with no `AGENTS.md` returns a path that is not there, {@link RawQoder.agentsMd}
+ * comes back `null`, and the importer reports nothing at all.
+ *
+ * **Not in `dist/index.js`.** The plain SDK bundle contains zero occurrences of the
+ * string `AGENTS.md`, which makes it a reliable source of the opposite conclusion —
+ * a self-consistent "Qoder has no `AGENTS.md`" that the shipped worker contradicts.
+ */
+export function qoderAgentsMdPath(configDir: string): string {
+	return join(configDir, "AGENTS.md");
+}
+
+/**
  * The pattern a memory **entry** file matches, verbatim: `/^\d{4}-\d{2}-\d{2}\.md$/u`.
  *
  * This is the discriminator the product itself uses to tell an entry from an

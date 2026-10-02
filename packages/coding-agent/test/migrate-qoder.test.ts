@@ -30,7 +30,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { runMigration } from "../src/migrate.ts";
 import { listHistory } from "../src/migrate-history.ts";
 import { detectSources, MIGRATION_SOURCE_IDS, MIGRATION_SOURCE_LABELS, SOURCE_ROOTS } from "../src/migrate-types.ts";
@@ -1058,6 +1058,111 @@ test("a model and a theme are reported as absent from the file rather than dropp
 	const item = result.plan.items.find((one) => one.detail.includes("no model and no theme"));
 	expect(item?.detail).toContain("chatSession.builtInBrowserHosts");
 	expect(item?.detail).toContain("Set them with /model and /theme");
+});
+
+// ---------------------------------------------------------------------------
+// The standing instruction document
+// ---------------------------------------------------------------------------
+
+test("AGENTS.md is imported as a rule file, and the report names the file it came from", () => {
+	// **The evidence is not in the bundle a reader would reach for first.**
+	// `dist/index.js` — the plain SDK bundle, 210 KB, the one every settings fact in
+	// this source was read out of — contains zero occurrences of the string
+	// "AGENTS.md". Building from it alone supports a confident "Qoder has no such
+	// document", and the shipped worker contradicts that. What settles the name is
+	// `dist/_worker/qoder-worker-runtime.obf.mjs`, where the candidate list is
+	// literally `["AGENTS.override.md", "AGENTS.md", ...fallbackFilenames]` — so the
+	// document is in the list whatever `contextFileName` is set to, which is the part
+	// this importer relies on and the only part it claims.
+	//
+	// **Where it is read from is a choice, not an attestation.** That same walk goes
+	// *upward from the project boundary*, so the copy that reaches most sessions sits
+	// beside the code rather than at the config root. The config root is the shape the
+	// other ten importers use and it fails safe: no file there means nothing is
+	// imported and no line is written.
+	const { home, cwd } = qoderFixture({ files: { "AGENTS.md": "# house rules\n\nBe brief.\n" } });
+	expect(readQoder(home, cwd, {}).agentsMd).toBe("# house rules\n\nBe brief.\n");
+
+	const result = runMigration({ home, cwd, from: "qoder", only: ["assets"], apply: false });
+	const write = result.plan.writes.find(
+		(one) => one.path === join(home, ".labunbun", "rules", "imported-qoder-agents.md"),
+	);
+	expect(write?.kind).toBe("rule");
+	// Verbatim. A rule file is re-read at the top of every session, so a reformat here
+	// would be the importer quietly editing the user's instructions.
+	expect(write?.content).toBe("# house rules\n\nBe brief.\n");
+	const item = result.plan.items.find((one) => one.to.endsWith("imported-qoder-agents.md"));
+	expect(item?.action).toBe("map");
+	// The source is named with `tildePath`, so the assertion is written with `/`
+	// separators rather than `join` — on Windows those are different strings and the
+	// test would be asserting the wrong one.
+	expect(item?.from).toBe(`~/${QODER_DEFAULT_DIR}/AGENTS.md`);
+});
+
+test("a home with no AGENTS.md gets no line about one", () => {
+	// The contract every other importer keeps, and the reason this test exists in
+	// both directions: an absent document is not an error, so the report says nothing
+	// at all about it. A row per Qoder report for the majority of users is the noise
+	// that teaches a reader to skip the rows that matter. Asserted over the whole
+	// plan rather than over one item's absence, because "no line" is the claim.
+	const { home, cwd } = qoderFixture({ files: { "memory/2026-01-02.md": "remembered\n" } });
+	expect(readQoder(home, cwd, {}).agentsMd).toBeNull();
+
+	const result = runMigration({ home, cwd, from: "qoder", only: ["assets"], apply: false });
+	expect(JSON.stringify(result.plan.items)).not.toContain("AGENTS");
+	expect(result.plan.writes.some((one) => one.path.includes("imported-qoder-agents"))).toBe(false);
+});
+
+test("the memory directory and AGENTS.md stay two files, each holding its own content", () => {
+	// The failure guarded against is not a crash but a plausible substitution: reading
+	// the memory *index* and reporting it as the standing instructions. `MEMORY.md` is
+	// a list of what the agent was told to remember; `AGENTS.md` is what it is told at
+	// the top of every session. Under one name the result reads like an instruction
+	// and contains an index, and the report would say otherwise.
+	const { home, cwd } = qoderFixture({
+		files: {
+			"AGENTS.md": "# house rules\n",
+			"memory/MEMORY.md": "- [earlier](2026-01-02.md)\n",
+			"memory/2026-01-02.md": "remembered\n",
+		},
+	});
+	const rules = new Map(
+		runMigration({ home, cwd, from: "qoder", only: ["assets"], apply: false })
+			.plan.writes.filter((one) => one.kind === "rule")
+			.map((one) => [basename(one.path), one.content]),
+	);
+	expect(rules.get("imported-qoder-agents.md")).toBe("# house rules\n");
+	expect(rules.get("imported-qoder-MEMORY.md")).toBe("- [earlier](2026-01-02.md)\n");
+	expect(rules.get("imported-qoder-2026-01-02.md")).toBe("remembered\n");
+});
+
+test("an AGENTS.md that is only whitespace lands nowhere, and the reader still saw it", () => {
+	// The reader is verbatim and the planner decides. Keeping the two apart is what
+	// makes the fixture above meaningful: if the reader trimmed, "the reader returns
+	// the file" and "the file is worth importing" would be the same assertion, and a
+	// future trim in the wrong place would pass every other test in this section.
+	const { home, cwd } = qoderFixture({ files: { "AGENTS.md": "   \n\n" } });
+	expect(readQoder(home, cwd, {}).agentsMd).toBe("   \n\n");
+
+	const result = runMigration({ home, cwd, from: "qoder", only: ["assets"], apply: false });
+	expect(result.plan.writes.some((one) => one.path.endsWith("imported-qoder-agents.md"))).toBe(false);
+	expect(result.plan.items.some((one) => one.from.includes("AGENTS.md"))).toBe(false);
+});
+
+test("a directory named AGENTS.md is reported, not thrown on", () => {
+	// The same case the settings document already has a sentence for, and a real one:
+	// a user who made `AGENTS.md` a directory gets a line that says which thing was
+	// found rather than an exception out of the reader.
+	const home = makeDir("lbb-qoder-home-");
+	const cwd = makeDir("lbb-qoder-proj-");
+	mkdirSync(join(home, QODER_DEFAULT_DIR, "AGENTS.md"), { recursive: true });
+	const raw = readQoder(home, cwd, {});
+	expect(raw.agentsMd).toBeNull();
+	expect(
+		raw.skipped.some(
+			(entry) => entry.name.endsWith("AGENTS.md") && entry.reason.includes("a directory where a file was expected"),
+		),
+	).toBe(true);
 });
 
 // ---------------------------------------------------------------------------

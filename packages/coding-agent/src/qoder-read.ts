@@ -55,6 +55,7 @@ import {
 	QODER_PROTOTYPE_KEYS,
 	type QoderEnv,
 	type QoderSettingsSource,
+	qoderAgentsMdPath,
 	qoderConfigDir,
 	qoderDesktopStorePath,
 	qoderDirNameRejection,
@@ -208,6 +209,34 @@ export interface RawQoder {
 	 * rather than a silent loss.
 	 */
 	hooks: unknown;
+	/**
+	 * `<configDir>/AGENTS.md` — the standing instruction document — or `null`.
+	 *
+	 * **This is not the memory directory.** Qoder has both, they are different
+	 * files, and collapsing them would assert that an index is an instruction:
+	 * {@link RawQoder.memory} is the dated entries under `<configDir>/memory`,
+	 * and this one document is what the product injects whatever project it is
+	 * run in.
+	 *
+	 * **What is verified, and where the citation comes from.** The list the product
+	 * builds is literally `["AGENTS.override.md", "AGENTS.md", ...fallbackFilenames]`
+	 * — so `AGENTS.md` is in it whatever `contextFileName` is set to, which is the
+	 * part this field relies on. That array, the three `user`/`project`/`local`
+	 * scopes, and the `projectDocMaxBytes` size policy all come from
+	 * `dist/_worker/qoder-worker-runtime.obf.mjs` in the installed package.
+	 *
+	 * **They are not in `dist/index.js`, which has zero occurrences of the
+	 * string.** That is the same trap as the settings keys: the plain SDK bundle
+	 * supports a confident "Qoder has no `AGENTS.md`" that the product contradicts.
+	 *
+	 * **What is not verified.** The runtime walks *up from the project boundary*,
+	 * so the copy that reaches most sessions is the one beside the code, not one at
+	 * the config root; whether Qoder also keeps a user-scope document at this path
+	 * could not be established from the bundle. Reading it is the shape the other
+	 * ten importers use, and it is safe either way: a config root with no
+	 * `AGENTS.md` yields `null` and the field costs nothing.
+	 */
+	agentsMd: string | null;
 	/**
 	 * Memory entries from `<home>/memory`, as {@link RawFile}s, plus the index.
 	 *
@@ -510,6 +539,32 @@ function readQoderMemory(configDir: string, home: string, skipped: QoderSkipped[
 		});
 	}
 	return files;
+}
+
+/**
+ * `<configDir>/AGENTS.md`, or `null` when there is nothing to import.
+ *
+ * **Absent is silent, and that is the whole contract.** Every other read in this
+ * file distinguishes three states; this one returns two, because the ten other
+ * importers in this repository all made the same choice for the same file: a
+ * document that was never written is not an error and does not get a report line.
+ * A test pins it.
+ *
+ * **This is not {@link RawQoder.memory}.** That field is the dated entries under
+ * `<configDir>/memory` plus the index beside them; this is the one standing
+ * instruction document. They are different files with different meanings, and
+ * reading the directory instead of the document would import an index and call it
+ * an instruction.
+ */
+function readQoderAgentsMd(configDir: string, home: string, skipped: QoderSkipped[]): string | null {
+	const path = qoderAgentsMdPath(configDir);
+	const content = readQoderText(path);
+	if (content.kind === "absent") return null;
+	if (content.kind !== "text") {
+		skipped.push({ name: tildePath(home, path), reason: content.reason });
+		return null;
+	}
+	return content.value;
 }
 
 /**
@@ -948,6 +1003,7 @@ export function readQoder(
 	const hooks = settings === null ? undefined : settings.hooks;
 
 	const memory = readQoderMemory(configDir, home, skipped);
+	const agentsMd = readQoderAgentsMd(configDir, home, skipped);
 	const { assets, collisions } = readQoderSkills(configDir, home, skipped);
 	const { sessions, projects } = countQoderSessions(configDir, skipped);
 
@@ -986,6 +1042,7 @@ export function readQoder(
 		projectMcpPath: cwd === undefined ? null : qoderProjectMcpPath(cwd),
 		mcpServers,
 		hooks,
+		agentsMd,
 		memory,
 		assets,
 		assetCollisions: collisions,

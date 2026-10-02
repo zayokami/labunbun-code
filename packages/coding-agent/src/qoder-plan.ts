@@ -78,7 +78,13 @@ import {
 	urlCredentialProblem,
 } from "./migrate-core.ts";
 import type { ClaimHooks, ClaimModePair, MigrationItem, MigrationSourceId, PlannedWrite } from "./migrate-types.ts";
-import { QODER_HOOK_EVENTS, QODER_MEMORY_INDEX_NAME, qoderMemoryDir, qoderOtherConfigDir } from "./qoder-home.ts";
+import {
+	QODER_HOOK_EVENTS,
+	QODER_MEMORY_INDEX_NAME,
+	qoderAgentsMdPath,
+	qoderMemoryDir,
+	qoderOtherConfigDir,
+} from "./qoder-home.ts";
 import type { RawQoder } from "./qoder-read.ts";
 import { qoderSettingsOrigin, qoderSettingsSubkeyOrigin } from "./qoder-read.ts";
 
@@ -922,6 +928,32 @@ function planQoderAssets(raw: RawQoder, force: boolean, items: MigrationItem[], 
 				"memory directory and no index format to keep, so what pointed at what is now the file names",
 			containsSecret: false,
 		});
+	}
+
+	// The standing instruction document, as a rule file.
+	//
+	// **A rule file and not a memory entry**, for the reason `planMemoryAsRule`'s
+	// own detail line already states: this build merges rule files with the
+	// memory it has instead of replacing it, which is what a document the agent
+	// re-reads at the top of every session wants. The name is
+	// `imported-qoder-agents.md` and not one of the `imported-qoder-<basename>.md`
+	// names above, so an `AGENTS.md` cannot collide with an `agents.md` memory
+	// entry — and if a user has both, the two stay two files.
+	//
+	// **No report line when there is no document**, which is the same contract the
+	// ten other importers have: a `null` here is not a failure and is not worth a
+	// row. A test pins that, in both directions.
+	if (raw.agentsMd?.trim()) {
+		planMemoryAsRule(
+			SOURCE,
+			tildePath(raw.home, qoderAgentsMdPath(raw.configDir)),
+			raw.home,
+			raw.agentsMd,
+			"imported-qoder-agents.md",
+			force,
+			items,
+			writes,
+		);
 	}
 }
 
