@@ -277,6 +277,29 @@ export function planCodex(
 				});
 				continue;
 			}
+			// `base_url` is the same credential channel an MCP server's `url` is, under
+			// another name: the password is inside the one string this importer treats
+			// as a safe identifier, not under a secret-shaped key, so a name-based scrub
+			// walking keys walks straight past it. A provider entry has no half to keep
+			// — the same address with its userinfo or its `?access_token=` stripped is a
+			// different address pointing at nothing — so the whole entry is left off and
+			// the report says why. `env_key` below is *not* this channel: it names a
+			// variable and never holds its value.
+			const baseUrlProblem = urlCredentialProblem(baseUrl);
+			if (baseUrlProblem !== null) {
+				items.push({
+					source: "codex",
+					from: `${configAt} → model_providers.${name}`,
+					to: "—",
+					action: "skip",
+					detail:
+						`left off — model_providers.${name}.base_url ${baseUrlProblem}; there is no way to drop the ` +
+						"credential and keep the address, so nothing was written. Point a provider entry at a clean address " +
+						"here and read the key from your environment.",
+					containsSecret: true,
+				});
+				continue;
+			}
 			// The credential variable is named by the source, not guessed: `env_key`
 			// is the only place Codex records which variable holds the key. The
 			// synthesized fallback is for entries that expect no key at all.
@@ -319,7 +342,7 @@ export function planCodex(
 					from: `${configAt} → model_providers.${name}`,
 					to: `settings.json → providers.openaiCompatible[${name}]`,
 					action: "map",
-					detail: `base_url carried over; ${credentialNote}`,
+					detail: `base_url carried over, and it carries no credential of its own; ${credentialNote}`,
 					containsSecret: false,
 				});
 			}

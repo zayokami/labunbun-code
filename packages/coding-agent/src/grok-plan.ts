@@ -934,11 +934,21 @@ export function planGrokBuild(
 	// endpoint is one table over, and reading only `[model.<id>]` reports "no
 	// endpoint of its own" about a model that has one.
 	const providerTable = isRecord(raw.config.model_providers) ? raw.config.model_providers : {};
-	/** What a model entry can inherit from the provider it names. */
+	/** What a model entry can inherit from the provider it names.
+	 *
+	 * `endpointProblem` is why `endpoint` carries a credential, or `null`. It is
+	 * kept beside the endpoint rather than folded into it: an endpoint dropped at
+	 * this table would reach the model loop as a provider that "defines neither
+	 * base_url nor api_base_url", which is false — it defines one, and this importer
+	 * refuses it. `endpointField` names which of the two spellings answered, so the
+	 * model's report line can point at the field rather than at the table.
+	 */
 	const providers = new Map<
 		string,
 		{
 			endpoint: string | undefined;
+			endpointProblem: string | null;
+			endpointField: string | undefined;
 			contextWindow: number | undefined;
 			envKey: string | undefined;
 			inlineKey: boolean;
@@ -993,8 +1003,16 @@ export function planGrokBuild(
 				containsSecret: false,
 			});
 		}
+		// Two spellings for one thing, and the field is recorded because a model
+		// inheriting this endpoint has to name where it came from. `env_key` is not a
+		// credential channel here: it names a variable and its value is never read.
+		const ownBase = firstGrokString(value.base_url);
+		const ownAlt = firstGrokString(value.api_base_url);
+		const endpoint = ownBase ?? ownAlt;
 		providers.set(id, {
-			endpoint: firstGrokString(value.base_url) ?? firstGrokString(value.api_base_url),
+			endpoint,
+			endpointProblem: endpoint === undefined ? null : urlCredentialProblem(endpoint),
+			endpointField: ownBase !== undefined ? "base_url" : ownAlt !== undefined ? "api_base_url" : undefined,
 			contextWindow: positiveInteger(value.context_window),
 			envKey: firstGrokString(value.env_key),
 			inlineKey: firstGrokString(value.api_key) !== undefined,
@@ -1028,6 +1046,7 @@ export function planGrokBuild(
 		const baseUrl = firstGrokString(value.base_url);
 		const altBase = firstGrokString(value.api_base_url);
 		const ownEndpoint = baseUrl ?? altBase;
+		const ownField = baseUrl !== undefined ? "base_url" : altBase !== undefined ? "api_base_url" : undefined;
 		const providerId = firstGrokString(value.model_provider);
 		const provider = providerId !== undefined ? providers.get(providerId) : undefined;
 		if (providerId !== undefined) namedProviders.add(providerId);
@@ -1051,6 +1070,40 @@ export function planGrokBuild(
 							} — grok resolves this model with no endpoint of its own, and so does this importer`
 						: "an override of a model grok already knows; it names no endpoint of its own to register here",
 				containsSecret: false,
+			});
+			continue;
+		}
+		// The endpoint is the same credential channel an MCP server's `url` is, under
+		// another name, and it reaches a provider entry through two shapes: the
+		// model's own `base_url` / `api_base_url`, or the provider table's when this
+		// model states none. Both are checked here, after the merge, so neither
+		// spelling can drift past the other. There is no half to keep — the same
+		// address with its userinfo or its `?access_token=` stripped is a different
+		// address pointing at nothing — so the model is left off rather than written
+		// under a line saying nothing in it is a secret.
+		const endpointProblem =
+			ownEndpoint !== undefined ? urlCredentialProblem(ownEndpoint) : (provider?.endpointProblem ?? null);
+		// `endpoint` is defined above, so exactly one of these two is: the model's own
+		// field, or the provider's. The last branch cannot be reached, and it names the
+		// table rather than guessing a field — a line that printed a field it did not
+		// read would be the kind of claim this report is not allowed to make.
+		const endpointFrom =
+			ownEndpoint !== undefined
+				? `model.${alias}.${ownField}`
+				: provider?.endpointField !== undefined
+					? `model_providers.${providerId}.${provider.endpointField}`
+					: `model_providers.${providerId}`;
+		if (endpointProblem !== null) {
+			items.push({
+				source: "grok-build",
+				from: label,
+				to: "—",
+				action: "skip",
+				detail:
+					`left off — ${endpointFrom} ${endpointProblem}; there is no way to drop the credential and keep the ` +
+					"address, so nothing was written. Register the endpoint again here with a clean address and read the " +
+					"key from your environment.",
+				containsSecret: true,
 			});
 			continue;
 		}

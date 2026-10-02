@@ -401,6 +401,27 @@ export function planDeepSeekHarness(
 				});
 				continue;
 			}
+			// `baseURL` is the same credential channel an MCP server's `url` is, under
+			// another name: the value is inside the one string this importer treats as a
+			// safe identifier, and the name-based scan walks keys, so it never sees it.
+			// `apiKeyEnv` below is not that channel — it names a variable. A provider
+			// entry has no half to keep, so the route is left off and named.
+			const baseUrlProblem = urlCredentialProblem(baseUrl);
+			if (baseUrlProblem !== null) {
+				routeNotes.set(route, "its baseURL carries a credential, so no entry is registered for it");
+				items.push({
+					source: "deepseek-harness",
+					from: label,
+					to: "—",
+					action: "skip",
+					detail:
+						`left off — llm-pi-ai.providers.${route}.baseURL ${baseUrlProblem}; there is no way to drop the ` +
+						"credential and keep the address, so nothing was written. Add a providers.openaiCompatible entry " +
+						"with a clean baseUrl by hand and read the key from your environment.",
+					containsSecret: true,
+				});
+				continue;
+			}
 			if (apiKeyEnv === "") {
 				routeNotes.set(route, "it names no apiKeyEnv to read the key from");
 				items.push({
@@ -473,6 +494,11 @@ export function planDeepSeekHarness(
 		const label = `${settingsLabel} → llm-deepseek`;
 		const protocol = typeof deepseekSection.protocol === "string" ? deepseekSection.protocol.trim() : "";
 		const baseUrl = typeof deepseekSection.baseURL === "string" ? deepseekSection.baseURL.trim() : "";
+		// Why the endpoint carries a credential, or `null` — the same channel an MCP
+		// server's `url` is, read here off a section whose `apiKeyEnv` names a variable
+		// and never holds one. `null` for an absent baseURL because that branch below
+		// reports the absence and has nothing else to say about it.
+		const baseUrlProblem = baseUrl === "" ? null : urlCredentialProblem(baseUrl);
 		const namedApiKeyEnv = typeof deepseekSection.apiKeyEnv === "string" ? deepseekSection.apiKeyEnv.trim() : "";
 		const declared = dshModelEntries(deepseekSection.models);
 		reportDshWindowMismatches(items, declared, `${label}.models → window`);
@@ -518,6 +544,24 @@ export function planDeepSeekHarness(
 					"$DEEPSEEK_BASE_URL when its environment exports one, and this build's own DeepSeek provider reads that same " +
 					"variable — so no entry is registered for it; export DEEPSEEK_BASE_URL here if this deployment points elsewhere",
 				containsSecret: false,
+			});
+		} else if (baseUrlProblem !== null) {
+			// Checked after the protocol, not before it: a section on the wrong
+			// protocol is already left off with that stated, and that line prints no
+			// endpoint, so the credential never reaches a report either way. The
+			// reason here is what the user reads when the protocol was the only other
+			// thing wrong.
+			routeNotes.set(DSH_DEEPSEEK_ROUTE, "its baseURL carries a credential, so no entry is registered for it");
+			items.push({
+				source: "deepseek-harness",
+				from: label,
+				to: "—",
+				action: "skip",
+				detail:
+					`left off — llm-deepseek.baseURL ${baseUrlProblem}; there is no way to drop the credential and keep ` +
+					"the address, so nothing was written. Register a providers.openaiCompatible entry with a clean baseUrl " +
+					"by hand and read the key from your environment.",
+				containsSecret: true,
 			});
 		} else {
 			const apiKeyEnv = namedApiKeyEnv === "" ? DSH_DEEPSEEK_DEFAULT_API_KEY_ENV : namedApiKeyEnv;
@@ -617,17 +661,29 @@ export function planDeepSeekHarness(
 			// here would send the run to a host the user did not name.
 			const resolved = resolveModelReference(modelId);
 			const servedAt = resolved === undefined ? undefined : resolveModel(resolved)?.baseUrl;
-			const harnessEndpoint = typeof deepseekSection?.baseURL === "string" ? deepseekSection.baseURL.trim() : "";
+			const declaredEndpoint = typeof deepseekSection?.baseURL === "string" ? deepseekSection.baseURL.trim() : "";
+			// Comparing and printing are two questions, and only printing is affected by
+			// a credential in the address. The comparisons below run against
+			// `declaredEndpoint`, which is what the harness actually says — a credential
+			// changes no part of whether two endpoints agree. A URL carrying one is not
+			// echoed into a report line anywhere else in this importer, and printing it
+			// here would be the exception; `sectionNote` already says the section was
+			// refused and why, so nothing is lost by not repeating the address.
+			const declaredEndpointProblem = declaredEndpoint === "" ? null : urlCredentialProblem(declaredEndpoint);
+			const harnessEndpointLabel =
+				declaredEndpointProblem === null
+					? declaredEndpoint
+					: "the address its llm-deepseek section declares, which carries a credential and is not printed here";
 			const deepseekRegistered = dshRegisteredModels(settingsPatch, deepseekProviderId);
 			const sectionNote = routeNotes.get(DSH_DEEPSEEK_ROUTE);
-			if (resolved !== undefined && (harnessEndpoint === "" || harnessEndpoint === servedAt)) {
+			if (resolved !== undefined && (declaredEndpoint === "" || declaredEndpoint === servedAt)) {
 				claimScalar(
 					"deepseek-harness",
 					"model",
 					resolved,
 					from,
 					`resolved to ${resolved} — the harness serves it over ${
-						harnessEndpoint === "" ? "its own DeepSeek endpoint" : harnessEndpoint
+						declaredEndpoint === "" ? "its own DeepSeek endpoint" : harnessEndpointLabel
 					}, which is where this build sends the same id${
 						sectionNote === undefined ? "" : ` (the section itself is not carried: ${sectionNote})`
 					}`,
@@ -638,7 +694,7 @@ export function planDeepSeekHarness(
 					from,
 					to: "—",
 					action: "skip",
-					detail: `"${modelId}" is served here from ${servedAt}, while the harness serves it from ${harnessEndpoint} — the same id on another endpoint is that endpoint's model, so the name is not carried; set model to "${deepseekProviderId}/${modelId}" to run it there through the entry registered above`,
+					detail: `"${modelId}" is served here from ${servedAt}, while the harness serves it from ${harnessEndpointLabel} — the same id on another endpoint is that endpoint's model, so the name is not carried; set model to "${deepseekProviderId}/${modelId}" to run it there through the entry registered above`,
 					containsSecret: false,
 				});
 			} else if (deepseekRegistered?.has(modelId)) {

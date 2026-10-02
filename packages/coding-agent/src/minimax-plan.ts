@@ -484,6 +484,27 @@ function planMinimaxProviders(
 			});
 			continue;
 		}
+		// `options.baseURL` is the same credential channel an MCP server's `url` is, under
+		// another name: the value is inside the one string this importer treats as a safe
+		// identifier, and the name-based scan walks keys, so it never reaches it. The
+		// `env[]` list below is not that channel — it holds variable *names*. A provider
+		// entry has no half to keep, so the provider is left off and the report says
+		// why; nothing was written, and `containsSecret` says the line is about one.
+		const baseUrlProblem = urlCredentialProblem(baseUrl);
+		if (baseUrlProblem !== null) {
+			items.push({
+				source: "minimax-code",
+				from: label,
+				to: "—",
+				action: "skip",
+				detail:
+					`left off — custom_provider.${key}.options.baseURL ${baseUrlProblem}; there is no way to drop the ` +
+					"credential and keep the address, so nothing was written. Add a custom provider here with a clean " +
+					"endpoint and read the key from your environment.",
+				containsSecret: true,
+			});
+			continue;
+		}
 		const id = `minimax-${key}`;
 		// `env[]` holds variable *names*, so this is a name to read and not a value
 		// to copy. The fallback is this build's convention for a provider whose key
