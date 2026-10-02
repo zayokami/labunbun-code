@@ -3136,6 +3136,127 @@ describe("Windows: ending a process", () => {
 	});
 });
 
+/**
+ * Two corrections to rules that were already shipped, both of which a probe of
+ * the running classifier found rather than a reading of the source.
+ *
+ * The first is a false negative on the path format LVM tells you to use. The
+ * second is a rule that could not tell a listing from a wipe.
+ */
+describe("POSIX: the LVM path shape, and a listing that was reading as a wipe", () => {
+	/**
+	 * `dd` and `wipefs` against `/dev/<volume group>/<logical volume>`.
+	 *
+	 * `lvm(8)` recommends this shape and says `/dev/mapper` is "intended only for
+	 * internal use", so a rule built on `mapper/` covers the spelling LVM tells you
+	 * not to use. Measured before the change: `of=/dev/vg0/lvol0` and
+	 * `of=/dev/vg-root/lv-data` both returned no match.
+	 */
+	test.each([
+		["dd if=/dev/zero of=/dev/vg0/lvol0", "the group and volume in two segments"],
+		["dd if=/dev/zero of=/dev/vg-root/lv-data", "with dashes and a hyphenated volume"],
+		["dd if=/dev/urandom of=/dev/vg0/swap", "a source that is not `/dev/zero`"],
+		["wipefs -a /dev/vg0/data", "`wipefs` erasing a volume"],
+		["dd if=/dev/zero of=/dev/mapper/vg0-lvol0", "the `mapper/` spelling, which was already covered"],
+	])("%s — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The over-match is real and is pinned in both directions, because a rule that
+	 * over-blocks fails in the direction nobody watches: a user who is prompted
+	 * for `dd … of=/dev/shm/scratch` learns to dismiss the whole rule, and the
+	 * next prompt is the one that mattered.
+	 *
+	 * The quiet rows are the load-bearing half. Each is a spelling that reaches
+	 * *past* `posixDiskRules` entirely — none of these programs is in
+	 * `DISK_WRITING_PROGRAMS` — so if a future change moves this test to a place
+	 * that is consulted for every command, these rows go red rather than the
+	 * change shipping silently.
+	 */
+	test.each([
+		["cat /dev/shm/scratch", "`cat` is not a disk-writing program"],
+		["cp /dev/shm/a /tmp/b", "nor is `cp`"],
+		["> /dev/null", "a redirect onto `/dev/null`, which is not two segments"],
+		["dd if=/dev/zero of=/dev/null", "`dd` onto `/dev/null`"],
+		["dd if=/dev/zero of=image.img", "an ordinary image file"],
+	])("%s — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * `wipefs` distinguishes listing from erasing, and before this it could not.
+	 *
+	 * Measured before: `wipefs /dev/sda`, `wipefs -a /dev/sda` and `wipefs -o 2048
+	 * /dev/sda` all returned the identical string. Two of the three erase nothing,
+	 * and `wipefs /dev/sda` is the command you run to find out what is on a disk —
+	 * the read-only spelling this file's other exemptions exist to protect.
+	 *
+	 * Both flags are checked in both spellings, because `-a` is single-dash and
+	 * `--all` is double and a script writes the long one. The single-row case
+	 * below is the one that is easy to get wrong: bare `wipefs` lists *every*
+	 * filesystem it can see, so it must not fall through to the "opens the first
+	 * one it finds" row either.
+	 */
+	test.each([
+		["wipefs -a /dev/sda", "single-dash `-a`"],
+		["wipefs --all /dev/sda", "the long spelling, which is what a script writes"],
+		["wipefs -o 2048 /dev/sda", "erasing one signature at an offset"],
+		["wipefs --offset 2048 /dev/sda", "and its long spelling"],
+	])("%s — %s, so it erases", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	test.each([
+		["wipefs /dev/sda", "a device with no erasing flag is the diagnostic form"],
+		["wipefs --all", "no device named and no flag is a listing of everything"],
+		["wipefs -t ext4 /dev/sda", "`-t` only narrows what `-a` erases; on its own it erases nothing"],
+		// The two rows below are the ones a `toLowerCase()` would break, and they
+		// are the only reason the branch does not have one. `wipefs(8)`'s option list
+		// contains exactly one pair that differs only by case: `-o, --offset` erases a
+		// signature and `-O, --output` picks an output format. Lower-casing would map
+		// the read-only flag onto the erasing one, so `wipefs -O /dev/sda` — which
+		// prints — would be reported as overwriting the disk. The second row is the
+		// same fact for a flag that does not exist at all; both are here because a
+		// future edit that "consistently" adds the `toLowerCase()` its two sibling
+		// tables use must make one of them red.
+		["wipefs -O /dev/sda", "`-O` is `--output`, the read-only half of the `-o`/`-O` pair"],
+		["wipefs -A /dev/sda", "`-A` is not a wipefs option, so it is not `-a`"],
+	])("%s — %s, so it lists", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The boundary at the end of the pattern, which the two-segment alternative
+	 * inherits from the one above it.
+	 *
+	 * The trailing `\/?$` is load-bearing in the way the note on the constant says:
+	 * without it a three-segment path matches, because `[\w.-]+` stops at the second
+	 * slash on its own. These rows are here because the driver found nothing held
+	 * them — the alternative went in with rows for the two-segment shape and nothing
+	 * for either edge of it.
+	 */
+	test("a trailing slash is still the same volume", () => {
+		expect(posix("dd if=/dev/zero of=/dev/vg0/lvol0/")).not.toBeNull();
+	});
+
+	test.each([
+		["dd if=/dev/zero of=/dev/vg0/", "one segment is not a volume path"],
+		["dd if=/dev/zero of=/dev/vg0/lvol0/extra", "a third segment is neither"],
+		["dd if=/dev/zero of=/tmp/vg0/lvol0", "and the shape only counts under `/dev`"],
+		// The `^` row, and the only call site where it can be reached: the redirect
+		// case captures from a `/` that the regex itself required, so a match there
+		// always begins at the start of the string. `dd`'s `of=` value is free-form,
+		// so a *relative* path is the case that distinguishes anchored from
+		// unanchored — writing to `./dev/sda` is a file in the working directory, not
+		// a device, and without the `^` the pattern finds `/dev/sda` inside it.
+		["dd if=/dev/zero of=./dev/sda", "a relative path that merely contains the shape"],
+		["dd if=/dev/zero of=./dev/vg0/lvol0", "and the same for the two-segment form"],
+	])("%s — %s, so the pattern stops at it", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+});
+
 describe("POSIX: destroying a disk", () => {
 	/**
 	 * Filesystems, partition tables and the tools that erase one.

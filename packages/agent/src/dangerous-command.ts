@@ -1415,9 +1415,38 @@ function matchTokens(
  * narrowing the device list, and not one of them failing a single test — so the
  * trailing `\/?$` is what turns the partition names from decoration into the
  * thing actually being matched.
+ *
+ * The last alternative is `/dev/<one>/<one>`, and it was added because the
+ * alternative above it does not cover the form LVM itself recommends. From
+ * `lvm(8)`: "A directory bearing the name of each Volume Group is created under
+ * /dev when any of its Logical Volumes are activated", and the recommended path
+ * is `/dev/VolumeGroupName/LogicalVolumeName` — the same sentence the existing
+ * note above quotes to explain why `mapper/` is over-matched, which is the
+ * sign that `mapper/` was added as an example of the shape rather than as the
+ * shape itself. `lvm(8)` also says "Links or nodes in /dev/mapper are intended
+ * only for internal use", so a rule built on `/dev/mapper` alone covers the
+ * spelling LVM tells you not to use. Measured before the change, against this
+ * pattern: `dd if=/dev/zero of=/dev/vg0/lvol0` and `of=/dev/vg-root/lv-data`
+ * both returned no match, while `of=/dev/mapper/vg0-lvol0` matched.
+ *
+ * **This over-matches, deliberately, in the direction the note above already
+ * chose.** The two-segment shape cannot separate a volume group from `shm`,
+ * `pts`, `fd` or `mqueue`, because those are directories too. What bounds the
+ * cost is that all four call sites only consult this pattern for a redirect onto
+ * a device, `dd`'s output target, or a program already in
+ * `DISK_WRITING_PROGRAMS`. Measured after the change, the newly-caught rows that
+ * are **not** devices are exactly these three: `dd … of=/dev/shm/scratch`,
+ * `dd … of=/dev/pts/0`, `dd … of=/dev/mqueue/mails`, and `wipefs -a
+ * /dev/shm/blob` after that exemption was added below. Against them the change
+ * adds `dd … of=/dev/vg0/lvol0` and `of=/dev/vg-root/lv-data`, which erase a
+ * volume. And the rows that must not move did not: `cat /dev/shm/scratch`,
+ * `cp /dev/shm/a /tmp/b`, `> /dev/null`, `dd … of=/dev/null` and `of=image.img`
+ * are all still quiet, because none of them reaches this pattern. Same trade as
+ * `mapper/`, same stated direction: a prompt on the harmless case rather than
+ * silence on the destructive one.
  */
 const BLOCK_DEVICE_PATH =
-	/^\/dev\/(?:sd[a-z]+\d*|nvme\d+n\d+(?:p\d+)?|hd[a-z]+\d*|vd[a-z]+\d*|xvd[a-z]+\d*|disk\d+|rdisk\d+|md\d+|mmcblk\d+|mapper\/[\w.-]+|cryptsetup\/[\w.-]+)\/?$/;
+	/^\/dev\/(?:sd[a-z]+\d*|nvme\d+n\d+(?:p\d+)?|hd[a-z]+\d*|vd[a-z]+\d*|xvd[a-z]+\d*|disk\d+|rdisk\d+|md\d+|mmcblk\d+|mapper\/[\w.-]+|cryptsetup\/[\w.-]+|[\w.-]+\/[\w.-]+)\/?$/;
 
 /**
  * Programs whose job is to write a fresh filesystem or a fresh partition table
@@ -1545,6 +1574,34 @@ function ddOutputTargets(segment: string): string[] {
 	return targets;
 }
 
+/**
+ * The `wipefs` flags that erase rather than list.
+ *
+ * Four spellings for two options, and the short/long split is from the manual
+ * rather than from habit: `-a` is single-dash, `--all` is double, and the same
+ * for `-o` and `--offset`. Reading only one spelling of each would let
+ * `wipefs --all /dev/sda` through, which is the spelling a script writes.
+ *
+ * Both quotes are from `wipefs(8)`: "Erase all available signatures" for
+ * `-a, --all`, and `-o, --offset` specifies "the location (in bytes) of the
+ * signature which should be erased from the device".
+ *
+ * **`-t` is deliberately absent.** The manual says the set erased by `-a` "can
+ * be restricted with the -t option", so `wipefs -t ext4 /dev/sda` still erases
+ * something — it is narrower, not inert — and it is already caught by the fact
+ * that `-t`'s value is not what makes the branch pass: without `-a` or `-o`
+ * there is nothing to erase. Anything that passes this table is treated as
+ * erasing, so leaving `-t` out cannot make the rule miss; it can only mean
+ * `wipefs -t ext4` alone, which is a listing, stays quiet.
+ *
+ * **`-O` is deliberately absent, and its absence is load-bearing.** `wipefs(8)`
+ * lists `-O, --output` alongside `-o, --offset`, and they differ only in case:
+ * the first chooses an output format, the second names a signature to erase. The
+ * set is matched case-sensitively at the call site for exactly that reason, so
+ * this table must not grow `-O` or `--OUTPUT`.
+ */
+const WIPEFS_ERASING_FLAGS: ReadonlySet<string> = new Set(["-a", "--all", "-o", "--offset"]);
+
 function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "posix");
 	if (program === undefined) return null;
@@ -1590,6 +1647,39 @@ function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatc
 	// moment a writing flag is on it. `sgdisk -p /dev/sda --zap-all` printed the
 	// table and then erased it.
 	const rest = tokens.slice(1);
+	// `wipefs` is the one program here whose **whole purpose** is to print when it
+	// is not given a flag to erase with, so the device-shape rule below cannot be
+	// the test. From `wipefs(8)`: with no options it "lists all visible
+	// filesystems and the offsets of their basic signatures"; `-a, --all` is
+	// "Erase all available signatures"; `-o, --offset` names "the location (in
+	// bytes) of the signature which should be erased". Both flags are single-dash
+	// short and double-dash long and both are listed here.
+	//
+	// Measured before this branch: `wipefs /dev/sda`, `wipefs -a /dev/sda` and
+	// `wipefs -o 2048 /dev/sda` all returned the identical string "pointed at a
+	// disk, which overwrites what is on it". Two of those three erase nothing, and
+	// `wipefs /dev/sda` is a routine diagnostic — it is the command you run to
+	// *find out* what is on a disk. Prompting on it teaches people to dismiss the
+	// rule, which is the failure the read-only exemptions further down this
+	// function exist to avoid.
+	//
+	// **The `arg.toLowerCase()` that both tables below use is deliberately absent
+	// here, and it is a correctness difference rather than an inconsistency.**
+	// `wipefs(8)`'s option list contains one pair that differs only by case:
+	// `-o, --offset` erases a signature and `-O, --output` chooses an output
+	// format. Lower-casing maps the read-only flag onto the erasing one, so
+	// `wipefs -O /dev/sda` — which prints — would take the branch below and be
+	// reported as overwriting the disk. Options on a POSIX program are
+	// case-sensitive, so reading them case-sensitively is also simply what the
+	// program does. If this ever gains a `toLowerCase()` to match its neighbours,
+	// `wipefs -O` is the row that goes red.
+	//
+	// The bare `wipefs` with no device is covered by the same test rather than by
+	// the "opens the first one it finds" row at the bottom: with nothing to erase
+	// and nothing named, it lists every filesystem it can see.
+	if (program === "wipefs" && !rest.some((arg) => WIPEFS_ERASING_FLAGS.has(arg))) {
+		return null;
+	}
 	if (rest.some((arg) => DISK_DESTRUCTIVE_FLAGS.has(arg.toLowerCase()))) {
 		if (rest.some((arg) => BLOCK_DEVICE_PATH.test(arg)) || program === "sgdisk") {
 			return {
