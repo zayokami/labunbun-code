@@ -408,6 +408,20 @@ interface RemoteCommandCarrier {
 	 * command, whatever it looks like.
 	 */
 	readonly positionals: number;
+	/**
+	 * Options that stand in for the first positional rather than sitting beside it,
+	 * so their presence drops the count by one.
+	 *
+	 * `podman exec` is the only command here with this shape, and it is worth
+	 * spelling out because a fixed count cannot express it. `podman exec` normally
+	 * takes a container name as its first bare word, but `--latest` and
+	 * `--cidfile` both *are* that name — one of them names the most recent
+	 * container, the other reads the name out of a file — so
+	 * `podman exec --latest rm -rf /` has a command and **no** operand. Read with
+	 * `positionals: 1` it puts `rm` first and finds no command at all, which is the
+	 * quiet side of a line that really does run.
+	 */
+	readonly containerlessOptions?: ReadonlySet<string>;
 	/** Options that swallow the word after them; see {@link SSH_VALUE_OPTIONS}. */
 	readonly valueOptions: ReadonlySet<string>;
 	/**
@@ -627,6 +641,14 @@ const SYSTEMD_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * (`kubectl -n foo run …`) builds the key `"kubectl -n"` and is not a carrier at
  * all — see {@link remoteCarrierFor}.
  *
+ * `--username` and `--password` are the one pair here whose presence is
+ * conditional: `config_flags.go:397-402` registers them only inside
+ * `if f.Username != nil` / `if f.Password != nil`, and `NewConfigFlags` leaves both
+ * fields nil, so they are reachable only from a caller that opted in with
+ * `WithDeprecatedPasswordFlag`. Whether kubectl does is **not** settled here, and
+ * the entry is kept anyway because an unknown flag makes pflag abort before
+ * anything runs — a line that cannot execute is not worth a rule either way.
+ *
  * Being incomplete here costs a missed detection and nothing else: every way this
  * table can be wrong makes the payload start at a word pflag did not skip, and the
  * scanner then reads a flag or a flag's value as the command's head word. There is
@@ -635,7 +657,6 @@ const SYSTEMD_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 const KUBECTL_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 	// `addRunFlags`, `krun.go:191-212`.
 	"--annotations",
-	"--detach-keys",
 	"--env",
 	"--image",
 	"--image-pull-policy",
@@ -682,6 +703,117 @@ const KUBECTL_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Options that swallow the word after them, for `docker exec`.
+ *
+ * `cli/command/container/exec.go` registers four value flags and four bare
+ * booleans, and the split is the ordinary pflag one — `StringVar`/`Var` take the
+ * next word, `BoolVarP` sets `NoOptDefVal = "true"` and never does. `--env` and
+ * `--env-file` are `flags.VarP`/`flags.Var` over a custom `Value`, which pflag
+ * treats as value-taking for the same reason: a `Var` registration has no
+ * `NoOptDefVal`.
+ *
+ * There is no `NoOptDefVal` override anywhere in this command, which is the thing
+ * worth stating because it is **not** true of the neighbouring `kubectl run`.
+ */
+const DOCKER_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--detach-keys",
+	"--user",
+	"-u",
+	"--env",
+	"-e",
+	"--env-file",
+	"--workdir",
+	"-w",
+]);
+
+/**
+ * Options that swallow the word after them, for `nerdctl exec`.
+ *
+ * `cmd/nerdctl/exec.go:45-56` registers the same four booleans as docker under the
+ * same spellings, and four value flags that are docker's minus `--detach-keys`.
+ * The two comments at `exec.go:49` and `:51` say why `--env` is a `StringArrayP`
+ * and `--env-file` a `StringSlice`, and neither of those changes arity.
+ */
+const NERDCTL_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--workdir",
+	"-w",
+	"--env",
+	"-e",
+	"--env-file",
+	"--user",
+	"-u",
+]);
+
+/**
+ * Options that swallow the word after them, for `docker compose exec`.
+ *
+ * `docker/compose` `cmd/compose/exec.go:81-92`, which is a different repository
+ * from `docker/cli`: docker/cli keeps no compose command at all any more, so
+ * `docker compose` is the compose binary reached through docker's plugin loader
+ * and the flag set has to be read from `docker/compose` rather than from wherever
+ * `docker exec` came from.
+ *
+ * `-i/--interactive` and `-t/--tty` are registered and then immediately
+ * `MarkHidden`ed (`:90`, `:92`); hidden is not unregistered, and both are
+ * `BoolVarP`/`BoolP`, so both are booleans and neither is in this set.
+ */
+const DOCKER_COMPOSE_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--env",
+	"-e",
+	"--index",
+	"--user",
+	"-u",
+	"--workdir",
+	"-w",
+]);
+/**
+ * Options that swallow the word after them, for `podman exec`.
+ *
+ * `cmd/podman/containers/exec.go` names its flags in local variables rather than
+ * in string literals, so each literal below is quoted from the assignment on the
+ * line above the registration — `exec.go:66-102`, nine of them:
+ *
+ * ```go
+ * detachKeysFlagName := "detach-keys"   // :66   StringVar
+ * cidfileFlagName     := "cidfile"      // :70   StringVar
+ * envFlagName         := "env"          // :74   StringArrayVarP, -e
+ * envFileFlagName     := "env-file"     // :78   StringArrayVar
+ * userFlagName        := "user"         // :86   StringVarP, -u
+ * preserveFdsFlagName := "preserve-fds" // :90   UintVar
+ * preserveFdFlagName  := "preserve-fd"  // :94   UintSliceVar
+ * workdirFlagName     := "workdir"      // :98   StringVarP, -w
+ * waitFlagName        := "wait"         // :102  Int32,          MarkHidden at :104
+ * ```
+ *
+ * The locals exist so that `cmd.RegisterFlagCompletionFunc(<same var>, …)` can
+ * reuse the name on the next line, not because the flag names are generated.
+ *
+ * **`--wait` is not in the shape anybody expects** and is the reason this list is
+ * quoted rather than summarised: it is an `Int32`, it is `MarkHidden`ed at
+ * `:104`, and hidden is not unregistered, so it still takes the word after it.
+ * `--preserve-fds` is `MarkHidden`ed too but only inside `if registry.IsRemote()`
+ * at `:110-112`, so hiddenness there is a runtime mode rather than a property of
+ * the flag — either way it takes its value, which is all this table records.
+ *
+ * `--detach`, `--interactive`, `--privileged`, `--tty`, `--no-session` and
+ * `--latest` are all `BoolVar`/`BoolVarP` and take nothing.
+ */
+const PODMAN_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--detach-keys",
+	"--cidfile",
+	"--env",
+	"-e",
+	"--env-file",
+	"--user",
+	"-u",
+	"--preserve-fds",
+	"--preserve-fd",
+	"--workdir",
+	"-w",
+	"--wait",
+]);
+
+/**
  * Programs whose trailing words are a command line run on another machine.
  *
  * `ssh host "rm -rf /var"` and `ssh host rm -rf /var` are one command spelled two
@@ -718,7 +850,7 @@ const KUBECTL_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * program name in the usage strings differs.
  *
  * Still to be measured on their own source before they are written down:
- * `docker exec`/`docker run`/`docker compose run`, `podman`, `nerdctl`,
+ * `docker run`/`docker container run`/`docker compose run`, `podman exec`,
  * `wsl` (whose bare form hands the rest to a login shell rather than exec'ing it,
  * so it is not this shape), `machinectl shell`, `multipass exec`,
  * `limactl shell`. A name that is not here is not followed at all.
@@ -770,6 +902,60 @@ const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new M
 	// serves both. `oc`'s **own** global flags are a separate list layered on top;
 	// see {@link KUBECTL_RUN_VALUE_OPTIONS} for what that costs if one is missed.
 	["oc run", { positionals: 1, valueOptions: KUBECTL_RUN_VALUE_OPTIONS }],
+	// Container engines. All four take one positional before the command — the
+	// container for the plain spellings, the **service** for compose — and all four
+	// set `SetInterspersed(false)`, so everything from the first bare word onward is
+	// the command and its arguments.
+	//
+	// **`docker exec` needs no `--` and `kubectl exec` requires one**, and the
+	// difference is the whole reason these are not `mandatorySeparator`:
+	// `dexec.go:49` is `cli.RequiresMinArgs(2)` with `options.Command = args[1:]`
+	// at `:52`, so `docker exec ctr rm -rf /` runs; `exec.go:243-249` rejects
+	// `kubectl exec pod rm -rf /` outright. Reading both the same way would have to
+	// choose, and either choice misses one of them.
+	["docker exec", { positionals: 1, valueOptions: DOCKER_EXEC_VALUE_OPTIONS }],
+	// `docker container exec` is not a lookalike: `cli/command/container/cmd.go:53`
+	// adds the *same* `newExecCommand` to the `container` parent that `cmd.go:12`
+	// registers at the top level, so both spellings share one constructor, one flag
+	// set and one argument rule. A three-word key is what reaches it.
+	["docker container exec", { positionals: 1, valueOptions: DOCKER_EXEC_VALUE_OPTIONS }],
+	["nerdctl exec", { positionals: 1, valueOptions: NERDCTL_EXEC_VALUE_OPTIONS }],
+	["docker compose exec", { positionals: 1, valueOptions: DOCKER_COMPOSE_EXEC_VALUE_OPTIONS }],
+	// `podman exec` is the only carrier whose positional count is not a constant.
+	// `exec.go:227-236` reads:
+	//
+	// ```go
+	// if len(args) == 0 && !latestSpecified && !execCidFileProvided { return "", nil, errors.New("exec requires …") }
+	// command = args
+	// if !latestSpecified {
+	//     if !execCidFileProvided {
+	//         command = args[1:]      // the first bare word was the container's name
+	//         nameOrID = strings.TrimPrefix(args[0], "/")
+	//     } else { nameOrID = <read out of the cidfile> }
+	// }
+	// ```
+	//
+	// so `--latest` (a `BoolVarP`, `cmd/podman/validate/latest.go:11`) and
+	// `--cidfile` each **are** the container name, and the command starts one word
+	// earlier than it otherwise would. `containerlessOptions` is what lets a fixed
+	// count express that; without it `podman exec --latest rm -rf /` counts `rm`
+	// as the container and finds no command, which is quiet on a line that runs.
+	[
+		"podman exec",
+		{
+			positionals: 1,
+			containerlessOptions: new Set(["--latest", "-l", "--cidfile"]),
+			valueOptions: PODMAN_EXEC_VALUE_OPTIONS,
+		},
+	],
+	[
+		"podman container exec",
+		{
+			positionals: 1,
+			containerlessOptions: new Set(["--latest", "-l", "--cidfile"]),
+			valueOptions: PODMAN_EXEC_VALUE_OPTIONS,
+		},
+	],
 ]);
 
 /**
@@ -793,11 +979,11 @@ const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new M
 /**
  * The carrier for this line and where its operands start, or `undefined`.
  *
- * A key may name a verb (`kubectl exec`), in which case the operand region
- * begins after it; a key that is only the program begins after that. Longest
- * first is not a choice — a one-word key that also existed would make the verb
- * unreachable — so the bare program is tried before the two-word form and each
- * lookup is exact.
+ * A key may name a verb (`kubectl exec`) or a verb under a noun (`docker compose
+ * exec`), in which case the operand region begins after it; a key that is only
+ * the program begins after that. Longest first is not a choice — a one-word key
+ * that also existed would make the verb unreachable — so the bare program is
+ * tried first and each lookup after that is exact, one word longer than the last.
  */
 function remoteCarrierFor(
 	program: string,
@@ -810,10 +996,56 @@ function remoteCarrierFor(
 	// what rejects it. That is deliberate rather than incidental — an earlier
 	// version tested `verb.startsWith("-")` here and a mutation survived, because
 	// with the current table the two spellings cannot be told apart at all.
-	const verb = tokens[1];
-	if (verb === undefined) return undefined;
-	const keyed = REMOTE_COMMAND_CARRIERS.get(`${program} ${verb}`);
-	return keyed === undefined ? undefined : { carrier: keyed, operandStart: 2 };
+	const first = tokens[1];
+	if (first === undefined) return undefined;
+	const keyed = REMOTE_COMMAND_CARRIERS.get(`${program} ${first}`);
+	if (keyed !== undefined) return { carrier: keyed, operandStart: 2 };
+	// Three words is not speculative: `docker container exec` and
+	// `docker compose exec` are both real spellings, and the first is the same
+	// constructor as `docker exec`, so it is the same carrier under a longer key
+	// rather than a second entry that could drift from it.
+	const second = tokens[2];
+	if (second === undefined) return undefined;
+	const nested = REMOTE_COMMAND_CARRIERS.get(`${program} ${first} ${second}`);
+	return nested === undefined ? undefined : { carrier: nested, operandStart: 3 };
+}
+
+/**
+ * The payload read both ways it can be, because the token list cannot say which
+ * of its words were one quoted argument.
+ *
+ * `tokenizeShell` has already taken the quotes off, so `sh -c 'rm -rf /'` has
+ * arrived here as **one token holding a space**. Joining with a plain space gives
+ * `sh -c rm -rf /`, where the script body is the word `rm` and the rest is three
+ * inert arguments — which is why every carrier was quiet on
+ * `ssh host sh -c 'rm -rf /'` and on `chroot /newroot sh -c "rm -rf /"`, while the
+ * identical line typed directly was not.
+ *
+ * Re-quoting the token on the way back does not work either, and was tried: it
+ * makes `tokenizeShell` hand the payload through whole, so the other reading —
+ * `ssh host "rm -rf /var"`, where the single token *is* a command line — stops
+ * matching. Neither string can carry both facts, because the facts are about
+ * tokenisation and a string is read again.
+ *
+ * So both readings are taken and the first hit wins, with the plain join first so
+ * that a match found before this bug existed keeps the same rule it always
+ * reported. This is the same posture the rest of the file takes when a body's
+ * shell is unknowable: read it as every shell that could be running it rather
+ * than decide which one is right.
+ *
+ * **There is deliberately no `platform` parameter.** The caller's platform is
+ * exactly the thing that is unknowable here — the payload runs wherever the
+ * carrier sends it — so taking it would invite a future edit to filter on it and
+ * quietly halve what this finds.
+ */
+function matchCarrierPayload(tokens: string[], depth: number): DangerousCommandMatch | undefined {
+	for (const remotePlatform of ["posix", "windows"] as const) {
+		const joined = matchScript(tokens.join(" "), depth + 1, remotePlatform);
+		if (joined) return joined;
+		const asTokens = matchTokens(tokens, depth + 1, remotePlatform, tokens.join(" "));
+		if (asTokens) return asTokens;
+	}
+	return undefined;
 }
 
 function remoteCommandScript(
@@ -837,18 +1069,39 @@ function remoteCommandScript(
 		// No separator means upstream never hands a payload to the container —
 		// see {@link RemoteCommandCarrier.mandatorySeparator}.
 		if (dash === -1) return undefined;
-		const separated = tokens.slice(dash + 1).join(" ");
-		if (separated === "") return undefined;
-		for (const remotePlatform of ["posix", "windows"] as const) {
-			const match = matchScript(separated, depth + 1, remotePlatform);
-			if (match) return match;
-		}
-		return undefined;
+		const separated = tokens.slice(dash + 1);
+		if (separated.length === 0) return undefined;
+		return matchCarrierPayload(separated, depth);
 	}
 	let positionals = 0;
+	let containerless = false;
 	for (let i = operandStart; i < tokens.length; i++) {
 		const arg = tokens[i];
+		if (arg === "--") {
+			// pflag **does** end option parsing here: `parseArgs` (`flag.go:1131-1135`)
+			// consumes the separator, records `argsLenAtDash` and files the rest as
+			// positional, so a word past a `--` can never be a flag again. Modelling that
+			// faithfully was tried and reverted, because it *costs* detections rather
+			// than adding them: `docker exec web -- --user root sh -c 'rm -rf /'` would
+			// then be read as the command `--user root sh -c 'rm -rf /'`, whose head
+			// word matches nothing, where skipping `--` and carrying on finds `sh` and
+			// reads the script body behind `-c`. Reading more of the payload is not
+			// the same as classifying more of it.
+			continue;
+		}
 		if (arg.startsWith("-") && arg !== "-") {
+			// Whether this option *is* the container is settled before whether it
+			// swallows the next word, because the two answers are independent:
+			// `--latest` stands in for the name and takes nothing, `--cidfile`
+			// stands in for the name **and** takes a value.
+			// Both spellings live in the set rather than one being derived from the
+			// other, and there is deliberately no sigil test here the way
+			// `valueOptions` has one. `--latest`'s shorthand is `-l` and it is a
+			// `Bool`, so unlike `-uroot` it has no glued form to catch: a sigil check
+			// would only ever re-find an entry the exact match has already found.
+			// That is not a guess — a mutation that replaced this with a sigil test
+			// survived, because `-l` is listed in the set and so is caught above.
+			if (carrier.containerlessOptions?.has(arg) === true) containerless = true;
 			// A POSIX short option takes its value either as the next word or glued
 			// to the sigil, and ssh accepts both: `-p 2222`, `-p2222`, `-o Foo=bar`,
 			// `-oFoo=bar`. Reading only the separated form would make `-p2222` look
@@ -879,15 +1132,14 @@ function remoteCommandScript(
 			}
 			continue;
 		}
-		// The word after the last positional is the first word of the command.
-		if (++positionals > carrier.positionals) {
-			const command = tokens.slice(i).join(" ");
-			if (command === "") return undefined;
-			for (const remotePlatform of ["posix", "windows"] as const) {
-				const match = matchScript(command, depth + 1, remotePlatform);
-				if (match) return match;
-			}
-			return undefined;
+		// The word after the last positional is the first word of the command. An
+		// option that stood in for the container is why the count is read here and
+		// not baked into the table: `podman exec --latest rm -rf /` has no operand
+		// at all, and `podman exec web rm -rf /` has exactly one.
+		if (++positionals > carrier.positionals - (containerless ? 1 : 0)) {
+			const command = tokens.slice(i);
+			if (command.length === 0) return undefined;
+			return matchCarrierPayload(command, depth);
 		}
 	}
 	return undefined;

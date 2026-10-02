@@ -3678,6 +3678,74 @@ describe("POSIX: volume managers", () => {
 		// ssh itself, unchanged: the port is the next word and is skipped, the
 		// destination is the one operand, and `rm -rf /var` is read as the payload.
 		["ssh -p 2222 host rm -rf /var", "with a port, whose value is the next word"],
+		// Container engines. The load-bearing difference from `kubectl exec` is that
+		// **none of these wants a `--`**: `dexec.go:49` is `RequiresMinArgs(2)` with
+		// `options.Command = args[1:]` at `:52`, so `docker exec ctr rm -rf /` runs.
+		// Treating these like the kubectl carriers would go quiet on all of them.
+		["docker exec -it web rm -rf /", "docker exec, whose container is the one positional"],
+		["docker exec web rm -rf /var", "and with no flags at all"],
+		["docker exec --user root -w /srv web rm -rf /", "two value flags before the container"],
+		["docker container exec -it web rm -rf /", "the same constructor under `docker container`"],
+		["nerdctl exec -it web rm -rf /", "nerdctl, which is docker's flag set minus --detach-keys"],
+		["docker compose exec web rm -rf /", "compose, where the positional is the service"],
+		["docker compose exec -u root -e FOO=bar web rm -rf /", "with compose's own value flags"],
+		[
+			"docker compose exec -t web rm -rf /",
+			"and -t, which compose registers and then MarkHidden's — hidden is not unregistered, and it is still a boolean",
+		],
+		// `podman exec` is the one carrier here whose operand count is not a constant.
+		// `determineTargetCtrAndCmd` (`exec.go:223-247`) drops the name-or-ID only when
+		// neither `--latest` nor `--cidfile` was given, so with either of them the first
+		// bare word is already the command and a fixed count of one eats it.
+		["podman exec -it web rm -rf /", "podman exec, whose container is the one positional"],
+		[
+			"podman exec --latest rm -rf /",
+			"with --latest, which *is* the container: the command is the first bare word, and this row is the one that fails without containerlessOptions",
+		],
+		[
+			"podman exec --cidfile /tmp/id rm -rf /",
+			"and --cidfile, which is the container by way of a file **and** takes a value — so it both drops the count and swallows a word",
+		],
+		["podman container exec --latest rm -rf /", "the same constructor under `podman container`"],
+		["podman exec --preserve-fds 4 web rm -rf /", "and --preserve-fds, whose value is an fd number rather than a name"],
+		["podman exec --wait 30 web rm -rf /", "and --wait, which podman hides at exec.go:104 and still gives a value to"],
+		// One row per value flag that is *not* reachable through the flags already
+		// listed above. Each of these fails if its entry leaves the table, which is
+		// the only reason the entries are in the table.
+		[
+			"docker exec --detach-keys ctrl-p web rm -rf /",
+			"docker's own value flag, which nerdctl does not have — see the counterweight below",
+		],
+		["nerdctl exec -u root web rm -rf /", "nerdctl's -u, whose value is the next word"],
+		["docker compose exec --index 2 web rm -rf /", "compose's --index, an IntVar at cexec.go:83"],
+		[
+			"podman exec -l rm -rf /",
+			"and -l, which both proves the shorthand arm of the containerless check and stops `rm` from being read as the container's name",
+		],
+		// A `--` is optional for all of these but legal. It is **skipped**, not
+		// treated as the end of option parsing, because pflag's real behaviour there
+		// costs detections — see the note in `remoteCommandScript`. What that buys is
+		// visible only when a post-separator word is itself a value flag.
+		["docker exec web -- rm -rf /", "with the separator, which is skipped like any other flag"],
+		[
+			"docker exec web -- --user root sh -c 'rm -rf /'",
+			"and a post-separator word that looks like a value flag, which is exactly the case the note is about",
+		],
+		// A payload token that *holds* a space. `tokenizeShell` has taken the quotes
+		// off, so `'rm -rf /'` is one token, and putting it back together with a plain
+		// space reads the script body as the single word `rm`. Every carrier had this.
+		["ssh host sh -c 'rm -rf /'", "a script body as one quoted argument"],
+		['chroot /newroot sh -c "rm -rf /"', "and the double-quoted spelling, through another carrier"],
+		["nsenter -t 1 bash -lc 'rm -rf /'", "and a combined short option"],
+		["docker exec web bash -lc 'rm -rf /'", "and through a container engine"],
+		[
+			'kubectl exec pod -- sh -c "rm -rf /"',
+			"and past a mandatory separator, which is a different code path from the operand slice",
+		],
+		[
+			'ssh host "rm -rf /var"',
+			"the other reading of the same token list: here the one token IS a command line, and re-quoting it would break this row",
+		],
 	])("%s — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
 	});
@@ -3735,6 +3803,32 @@ describe("POSIX: volume managers", () => {
 		["kubectl exec pod --", "a separator with nothing after it"],
 		["kubectl exec pod rm -rf /", "no separator, which exec.go:243-249 rejects before a container sees it"],
 		["docker run -it ubuntu rm -rf /", "docker is not in the carrier table yet, and is not borrowed from ssh"],
+		["docker exec -it web ls", "an ordinary exec"],
+		["docker exec web", "a container and no command, which docker rejects"],
+		["docker compose exec web ls", "an ordinary compose exec"],
+		[
+			"podman exec --user root web ls",
+			"a podman exec whose container is still there: --user is an ordinary value flag, and one that dropped the count anyway would read `--user` as the command",
+		],
+		["podman exec --latest", "--latest with no command at all, which exec.go:227 rejects"],
+		["podman exec --cidfile /tmp/id", "and --cidfile with no command, which is the same rejection"],
+		[
+			"podman exec -l ls",
+			"and -l, which is --latest under its shorthand: it *is* the container, so `ls` is the whole command",
+		],
+		["podman exec -uroot web ls", "and the glued shorthand, where `-uroot` carries its value in the same token"],
+		[
+			"nerdctl exec --detach-keys ctrl-p web rm -rf /",
+			"the counterweight to the docker row above: `nerexec.go:45-56` registers no --detach-keys, so nerdctl rejects the line outright. Reading docker's table here would report a command that cannot run — a finding that is wrong rather than early",
+		],
+		["docker ps", "and docker on its own still runs nothing anywhere"],
+		["ssh host --", "a separator with nothing after it, which the `--` rule has to agree with"],
+		[
+			"ssh host sh -c 'echo hello'",
+			"a script body that is harmless, which is what the quoting fix must not turn into a finding",
+		],
+		["ssh host 'ls -la /tmp'", "a quoted command line that only lists"],
+		["docker exec web bash -lc 'cd /srv && ls'", "and a compound but harmless one"],
 		["ssh host ls", "ssh itself, whose payload is still one word past the destination"],
 		["ssh host chroot /newroot ls", "and a nested carrier that is itself harmless"],
 	])("%s — %s, and stays quiet", (command) => {
