@@ -22,6 +22,7 @@ import { GROK_DEFAULT_DIR, grokRoot } from "./grok-home.ts";
 import { KIMI_CODE_DEFAULT_DIR, kimiRoot } from "./kimi-home.ts";
 import { MINIMAX_DATA_DIR_BASENAME, minimaxRoot } from "./minimax-home.ts";
 import { opencodeRoots } from "./opencode-home.ts";
+import { QODER_CN_DEFAULT_DIR, QODER_DEFAULT_DIR, qoderConfigDir } from "./qoder-home.ts";
 import { STEPCODE_DEFAULT_DIR, stepRoot } from "./step-home.ts";
 import { T3_DEFAULT_DIR, t3Root, t3StateDirs } from "./t3-home.ts";
 import { traeDetectionRoots, traeEdition, traeGlobalRulesDir } from "./trae-home.ts";
@@ -45,7 +46,8 @@ export type MigrationSourceId =
 	| "cursor"
 	| "trae"
 	| "t3-code"
-	| "antigravity";
+	| "antigravity"
+	| "qoder";
 
 /**
  * Ordered as the picker and `--from` list them. New sources are appended: the
@@ -67,6 +69,7 @@ export const MIGRATION_SOURCE_IDS: MigrationSourceId[] = [
 	"trae",
 	"t3-code",
 	"antigravity",
+	"qoder",
 ];
 
 /** Display names for the picker; the ids themselves are the CLI switches. */
@@ -85,6 +88,7 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	trae: "Trae",
 	"t3-code": "T3 Code",
 	antigravity: "Antigravity",
+	qoder: "Qoder",
 };
 
 /**
@@ -133,6 +137,14 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	// and detection that looked here would offer those users a source with nothing
 	// to read. `detectionRoots` looks inside instead. See `sourceRoot`.
 	antigravity: ".gemini",
+	// `~/.qoder`, and unlike `~/.gemini` above this one is **not** shared with a
+	// foreign tool: the Qoder CLI's home is `~/.qoder` too — `$QODER_CLI_HOME`
+	// defaults to the user's home and the directory name is appended to it — so
+	// anything in here was written by Qoder and only by Qoder. That is why this
+	// entry can be a plain relative spelling while `sourceRoot` still has a branch
+	// for the id: the *override* is what moves the tree, not a second tool. See
+	// `sourceRoot`.
+	qoder: QODER_DEFAULT_DIR,
 };
 
 /**
@@ -195,6 +207,18 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	// `??` is the fallback for a label rendered against a tree nothing was read
 	// from, which is the same state `detectionRoots` reports as absent.
 	if (id === "t3-code") return t3Root(home) ?? t3StateDirs(home)[0];
+	// Qoder's tree moves for two reasons the plain `join` below cannot express: a
+	// whole-path override (`$QODER_CONFIG_DIR`, which wins outright and is used
+	// verbatim) and a directory *name* the user chose (`$QODER_CONFIG_DIR_NAME`,
+	// applied under `$QODER_CLI_HOME` or the home). Both are the product's own
+	// precedence — `qoderConfigDir` quotes it — so calling it here means detection
+	// and the reader cannot disagree about which tree the source is.
+	//
+	// `qoderConfigDir` reads `process.env` directly, as `codexRoot` and `t3Root`
+	// do. That is the same trade those two make and it has one consequence worth
+	// naming: a developer with `QODER_CONFIG_DIR` set gets that tree, which is the
+	// correct answer for their machine.
+	if (id === "qoder") return qoderConfigDir(home);
 	// Antigravity needs no branch, and the fallthrough being correct is itself the
 	// interesting part: `~/.gemini` is a plain home-relative join, so this source is
 	// the first whose *tree* is unambiguous while its *detection* is not. What it
@@ -285,6 +309,22 @@ function detectionRoots(id: MigrationSourceId, home: string): string[] {
 	// something that is not Antigravity's. That is why `config` is last and not
 	// first — a home with any data root at all is detected by the first two.
 	if (id === "antigravity") return [...antigravityDataDirs(home), antigravityConfigDir(home)];
+	// **Qoder is the first source whose detection needs no special case, and that
+	// is a fact rather than an omission.** `~/.qoder` is not shared with a foreign
+	// tool the way `~/.gemini` is: the Qoder CLI writes its own state under the
+	// same directory (`$QODER_CLI_HOME` defaults to the home and `.qoder` is
+	// appended to it), so anything in there is Qoder's. A CLI-only home with skills
+	// and memory but no `settings.json` is a real state and worth offering — it is
+	// not a Gemini CLI home that happens to be busy.
+	//
+	// Two roots are checked anyway, and both are Qoder spellings: the resolved one
+	// (`sourceRoot`, which honours the two environment overrides) and the
+	// **China build's default**, because a `.qoder-cn` home is an install this
+	// importer reads settings from under a different name. `QODER_CN_DEFAULT_DIR`
+	// is a constant rather than a build-time lookup — the product picks its build
+	// at start-up and a process cannot see both, so listing the two spellings is
+	// what makes a machine holding either detectable.
+	if (id === "qoder") return [sourceRoot(id, home), join(home, QODER_CN_DEFAULT_DIR)];
 	return [sourceRoot(id, home)];
 }
 

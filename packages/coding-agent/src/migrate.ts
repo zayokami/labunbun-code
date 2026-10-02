@@ -41,6 +41,12 @@
  *                skills, workflows + global_workflows, brain/<id>/.system_generated/
  *                logs/transcript.jsonl. `~/.gemini` itself is *not* a detection
  *                root: the Gemini CLI shares it.
+ *   qoder         $QODER_CONFIG_DIR when set, else <$QODER_CLI_HOME or home>/
+ *                $QODER_CONFIG_DIR_NAME (default `.qoder`) — settings.json
+ *                (hooks, mcpServers, enabledPlugins, pluginConfigs and
+ *                chatSession.builtInBrowserHosts are the *only* fields the desktop
+ *                reads by name), skills, memory, projects/<slug>/<id>.jsonl.
+ *                `%APPDATA%/com.qoder.app.stable/main.sqlite` is named, not read.
  *
  * Structure: read (I/O) → plan (pure) → apply (I/O). The planning step is where
  * every mapping decision lives, so the decisions are testable without touching
@@ -131,6 +137,9 @@ import { readMinimaxCode } from "./minimax-read.ts";
 import { planOpencode, planOpencodeAssets } from "./opencode-plan.ts";
 import type { RawOpencode } from "./opencode-read.ts";
 import { readOpencode } from "./opencode-read.ts";
+import { planQoder } from "./qoder-plan.ts";
+import type { RawQoder } from "./qoder-read.ts";
+import { readQoder } from "./qoder-read.ts";
 import { mergeSettings, type RawSettingsInput } from "./settings.ts";
 import { planStepAssets, planStepCode } from "./step-plan.ts";
 import type { RawStepCode } from "./step-read.ts";
@@ -161,6 +170,7 @@ export interface RawSources {
 	trae: RawTrae;
 	t3Code: RawT3Code;
 	antigravity: RawAntigravity;
+	qoder: RawQoder;
 }
 
 /**
@@ -197,6 +207,7 @@ export function readSources(home: string, cwd: string): RawSources {
 		trae: readTrae(home, cwd),
 		t3Code: readT3Code(home),
 		antigravity: readAntigravity(home),
+		qoder: readQoder(home, cwd),
 	};
 }
 
@@ -915,6 +926,33 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
+	// Qoder has all three categories too, and for the same reason Antigravity's arm
+	// is one arm per category: `planQoder` claims a mode, MCP servers, hooks,
+	// skills and rule files, and a run that asked only for assets must still reach
+	// the skills and memory without passing through a settings gate.
+	//
+	// The one shape difference is the opposite of Antigravity's: there is no
+	// `wants("history")` branch, because `planQoder` deliberately claims nothing
+	// from the sessions and reports the count in its leftover lines instead. See
+	// `qoder-session.ts` for why reading them is a separate batch.
+	if (only.includes("qoder") && raw.qoder.present) {
+		if (wants("settings") || wants("assets")) {
+			planQoder(
+				raw.qoder,
+				items,
+				writes,
+				claimModePair,
+				claimHooks,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				force,
+			);
+		}
+	}
+
 	if (options.historyScope === "none" && wants("history")) {
 		items.push({
 			source: only[0] ?? "claude-code",
@@ -1463,6 +1501,16 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	// own "one of the two roots holds something" answer, and asking it here means
 	// this gate cannot drift from the reader the way a `present` arm would.
 	if (source === "antigravity") return raw.antigravity.present && raw.antigravity.dataDir !== null;
+
+	// Qoder's gate is the one that can be answered honestly. A Qoder install with
+	// a `settings.json`, a skills tree or a memory directory is worth offering; one
+	// with none of those has nothing to import and offering it would be a question
+	// whose only possible answer still costs the user a read and a keystroke.
+	//
+	// **`present` is deliberately not `settings !== null`.** A Qoder CLI-only home
+	// has skills and memory and no settings document, and that is a real state with
+	// things in it — the same argument `t3-code`'s arm makes about a dev build.
+	if (source === "qoder") return raw.qoder.present;
 
 	return raw.agents.present;
 }

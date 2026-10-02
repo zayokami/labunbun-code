@@ -52,6 +52,7 @@ import {
 	readOpencodeSessions,
 } from "./opencode-db.ts";
 import { opencodeDatabasePath, opencodePromptHistoryFile, opencodeRoots } from "./opencode-home.ts";
+import { listQoderHistory, QODER_HISTORY_NOT_IMPORTED } from "./qoder-session.ts";
 import { listStepSessions, readStepSession } from "./step-session.ts";
 import { t3BaseDir } from "./t3-home.ts";
 import { t3SessionMessages, t3SessionRows } from "./t3-read.ts";
@@ -2369,6 +2370,27 @@ export function readPromptHistory(
 				"their sessions",
 		};
 	}
+	// Qoder's sentence is a weaker claim than Step's or MiniMax's, and it is worded
+	// to match what was actually established. There is no cross-session prompt list
+	// named anywhere in the desktop bundle — no `promptHistory`, no `history.json`,
+	// no `recentPrompts`, no completions store — and the only per-session record the
+	// product keeps is the transcript tree this source already counts and does not
+	// read. So the ↑ list gets nothing here, and saying so is better than the
+	// silent empty the fall-through below would give: a user who pressed ↑ in Qoder
+	// is owed the distinction between "there was nothing" and "nothing came across".
+	if (source === "qoder") {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"Qoder keeps no cross-session prompt list this import can find — its bundle names no prompt history file of any kind, and the " +
+				"only per-session record it keeps is the transcript tree, which is reported separately and is not read here — so nothing was " +
+				"added to the ↑ recall list",
+		};
+	}
 	return { seen: 0, entries: [], notes: [], overLimit: 0, truncated: false };
 }
 
@@ -2670,7 +2692,9 @@ export function listHistory(
 												? listT3History(home)
 												: source === "antigravity"
 													? listAntigravityHistory(home, options)
-													: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
+													: source === "qoder"
+														? listQoderHistory(home)
+														: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
 	return narrowCandidates(listed, options);
 }
 
@@ -2810,6 +2834,15 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 					continue;
 				}
 				converted = read;
+			} else if (source === "qoder") {
+				// Unreachable today: `listQoderHistory` returns no candidates, so a
+				// selection cannot produce one. It is here rather than left to the
+				// fall-through `else continue` below because that fall-through is
+				// silent — a source whose *list* half starts returning sessions and
+				// whose read half was never wired would drop every one of them without
+				// a word, where this branch says why.
+				notes.push({ reason: QODER_HISTORY_NOT_IMPORTED, count: 1 });
+				continue;
 			} else continue;
 		} catch {
 			failed += 1;

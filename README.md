@@ -185,7 +185,7 @@ Already configured another agent tool? Copy over what has an equivalent:
 
 ```bash
 bun run dev yoshi                      # dry run: report only, writes nothing
-bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | t3-code | opencode | cursor | trae | antigravity | all
+bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | t3-code | opencode | cursor | trae | antigravity | qoder | all
 bun run dev yoshi --only settings      # categories: settings | assets | history | all
 bun run dev yoshi --apply              # write it
 bun run dev yoshi --apply --force      # also overwrite values that exist
@@ -226,6 +226,24 @@ recorded. Its agent permission preset is a seven-valued enum whose members are
 all real strings and whose *meanings* are documented nowhere in the product, so
 the value is reported by name and nothing is claimed for it: guessing would move
 a permission setting in the one direction it must not be guessed in.
+
+Qoder's settings are a **merge of three files** rather than a document — user,
+project and local, the product's default `settingSources` — so reading
+`~/.qoder/settings.json` alone would import a file Qoder is not running. Six
+keys merge one level deep and the rest replace wholesale, and each migrated key
+reports which of the three files it came from. `QODER_CONFIG_DIR_NAME` is a path
+segment the product validates, so a home using one it rejects is reported rather
+than quietly read as `~/.qoder`. Four of its six permission modes name a posture
+this build has no word for and one of those is `default` — importing it would
+write a mode you never chose, so it is named and skipped. **No credential comes
+across.** `headers` and `env` *values* are dropped and their names reported, and
+a server `url` that carries one in its `user:password@` part or in a parameter
+named like a credential is not migrated at all: unlike a header or an
+environment variable there is no way to drop the credential and keep the
+address, so the server is left for you to add by hand. Transcripts live in
+`projects/<slug>/*.jsonl`; they are counted and reported, never opened, and
+their directory is named rather than recorded because a Qoder transcript has no
+working directory of its own.
 
 Anything without an equivalent is reported as skipped with a reason rather than
 dropped silently, keys the importer does not know included: they are listed by

@@ -121,10 +121,17 @@ function transcriptRelative(id: string): string {
 // ---------------------------------------------------------------------------
 
 test("it is appended, so the thirteen before it keep their places", () => {
-	expect(MIGRATION_SOURCE_IDS[MIGRATION_SOURCE_IDS.length - 1]).toBe("antigravity");
-	expect(MIGRATION_SOURCE_IDS.length).toBe(14);
-	expect(MIGRATION_SOURCE_IDS).toContain("t3-code");
+	// **Not last any more, and the reason is worth stating.** Qoder was appended
+	// after Antigravity, which is the rule this test exists to enforce — a new
+	// source goes on the end rather than being slotted in. So the assertion is
+	// "Antigravity holds the place it was given, and the ids before it are
+	// untouched", not "Antigravity is the newest", which is a claim about the
+	// registry's history and would have to be rewritten by every later source.
+	expect(MIGRATION_SOURCE_IDS[MIGRATION_SOURCE_IDS.length - 2]).toBe("antigravity");
+	expect(MIGRATION_SOURCE_IDS[MIGRATION_SOURCE_IDS.length - 1]).toBe("qoder");
+	expect(MIGRATION_SOURCE_IDS.length).toBe(15);
 	expect(MIGRATION_SOURCE_IDS.indexOf("claude-code")).toBe(0);
+	expect(MIGRATION_SOURCE_IDS.indexOf("antigravity")).toBe(13);
 	expect(MIGRATION_SOURCE_LABELS.antigravity).toBe("Antigravity");
 	expect(new Set(Object.keys(MIGRATION_SOURCE_LABELS))).toEqual(new Set(MIGRATION_SOURCE_IDS));
 });
