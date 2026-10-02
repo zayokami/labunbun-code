@@ -613,6 +613,8 @@ const SYSTEMD_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * | `pkg/cmd/util/helpers.go` | `helpers.go:517` | `--pod-running-timeout` |
  * | `cmddelete.DeleteFlags`, `PrintFlags`, `RecordFlags` | `krun.go:177-179` | `--field-selector` `--grace-period` `--timeout` `--raw` `-o/--output` |
  * | `genericclioptions.ConfigFlags` | `config_flags.go:374-440` | the twenty globals below |
+ * | `component-base/logs`, reached through `cli.Run` | `cmd/kubectl/kubectl.go:40` → `component-base/cli/run.go:117` → `logs/logs.go:46-49` | `-v/--v` `--vmodule` `--log-flush-frequency` |
+ * | `kubectl/pkg/cmd/profiling.go` | `kubectl/pkg/cmd/cmd.go:220` | `--profile` `--profile-output` |
  *
  * The last row's literals are the resolved `const` block at `config_flags.go:42-62`,
  * not the identifiers at the call sites — `flagBearerToken` is `"token"`, and
@@ -648,6 +650,63 @@ const SYSTEMD_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * `WithDeprecatedPasswordFlag`. Whether kubectl does is **not** settled here, and
  * the entry is kept anyway because an unknown flag makes pflag abort before
  * anything runs — a line that cannot execute is not worth a rule either way.
+ *
+ * **The logging globals arrive by a route that does not go through `ConfigFlags`
+ * at all, and `-v` takes a value even though it reads like a level.** kubectl's
+ * `main` calls `cli.RunNoErrOutput(command)`
+ * (`cmd/kubectl/kubectl.go:40`); `cli.Run` does
+ * `logs.AddFlags(cmd.PersistentFlags())` (`component-base/cli/run.go:117`); and
+ * `logs.AddFlags` copies whatever is in `packageFlags`
+ * (`component-base/logs/logs.go:87-88`). `packageFlags` is built in that file's
+ * own `init()` from `klogflags.Init` plus exactly one `DurationVar`
+ * (`logs/logs.go:46-49`), and `klogflags.Init` filters klog's own set through
+ * `switch f.Name { case "v", "vmodule": … }` (`logs/klogflags/klogflags.go:36-38`).
+ * So **`-v`, `--vmodule` and `--log-flush-frequency` are the whole of it.** That
+ * is why `--log-text-split-stream`, `--log-text-info-buffer-size` and
+ * `--logging-format` are not here: `packageFlags` provably cannot contain them,
+ * whatever `logs/api/v1/options.go` registers for the components that use it.
+ *
+ * Why `-v` swallows the next word took two files to establish. `logs.AddFlags`
+ * hands each Go flag to `pflag.PFlagFromGoFlag`
+ * (`vendor/github.com/spf13/pflag/golangflag.go:74`), which gives any
+ * one-character name a shorthand of its own (`:85-86` — so `-v` and `--v` are
+ * **one** flag with two spellings, which is why both are listed) and sets
+ * `NoOptDefVal` **only** for a wrapped value that implements `IsBoolFlag()`
+ * (`:89`). klog's `severityValue` (`vendor/k8s.io/klog/v2/klog.go:137`) is a plain
+ * `flag.Value` — `get`/`set`/`String`/`Get`/`Set` and nothing else — so
+ * `NoOptDefVal` stays empty and pflag takes the next word.
+ *
+ * **What that was costing, measured rather than argued:**
+ * `kubectl run web -v 6 --image nginx rm -rf /` was quiet. `-v` matched nothing,
+ * so `6` fell through to the operand count as the second positional, and the
+ * payload was read as `6 --image nginx rm -rf /` — whose head word is `6`, so the
+ * line was **missed**, not mis-attributed. The glued `-v6` was never affected,
+ * because there the level lives inside the flag token and there is nothing left
+ * to mis-count; that asymmetry is the ordinary shape of the failure this table's
+ * last paragraph describes, and it is why the sigil arm exists.
+ *
+ * `--profile` and `--profile-output` are plainer: `profiling.go:36-39` registers
+ * both with `StringVar`, and `cmd.go:218-220` adds them to the root command's
+ * **`PersistentFlags()`**, so `run` inherits them.
+ *
+ * **`oc`'s half of this table is not verified.** `["oc run"]` shares this set
+ * (`REMOTE_COMMAND_CARRIERS`), and OpenShift's `oc` is a separate codebase that
+ * was not read here, so the five rows above are what *kubectl's* sources say.
+ * They cannot make a false positive — {@link remoteCommandScript} treats a flag it
+ * does not know as a flag either way — but a missed `oc` flag is a miss that this
+ * comment does not currently account for.
+ *
+ * **The underscore spellings of every multi-word flag here are live and are
+ * deliberately not listed.** kubectl sets a global normalizer twice —
+ * `cliflag.WarnWordSepNormalizeFunc` at `cmd.go:216`, then
+ * `cliflag.WordSepNormalizeFunc` at `:364` ("Stop warning about normalization of
+ * flags") — and the later call wins, so both rewrite `_` to `-`
+ * (`component-base/cli/flag/flags.go:30-35`, `:38-46`). `--image_pull_policy`
+ * therefore reaches the same flag as `--image-pull-policy` and would be read here
+ * as an unknown flag. Listing every such pair would double the table for spellings
+ * upstream calls "not supported" in its own warning text (`flags.go:42`) and that
+ * nobody types; the hyphen form is the documented one. This is a deliberate
+ * omission with a measured mechanism behind it, not an unmeasured gap.
  *
  * Being incomplete here costs a missed detection and nothing else: every way this
  * table can be wrong makes the payload start at a word pflag did not skip, and the
@@ -700,6 +759,17 @@ const KUBECTL_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 	"--token",
 	"--request-timeout",
 	"--proxy-url",
+	// `component-base/logs` via `cli.Run`, `cmd/kubectl/kubectl.go:40` →
+	// `component-base/cli/run.go:117` → `logs/logs.go:46-49` → `klogflags.go:36-38`.
+	// `--v` is not a separate flag from `-v`: `PFlagFromGoFlag` gives a
+	// one-character name its own shorthand (`golangflag.go:85-86`).
+	"-v",
+	"--v",
+	"--vmodule",
+	"--log-flush-frequency",
+	// `profiling.go:36-39`, added at `cmd.go:220` to the root's PersistentFlags.
+	"--profile",
+	"--profile-output",
 ]);
 
 /**

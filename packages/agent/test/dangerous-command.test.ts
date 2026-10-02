@@ -3657,6 +3657,39 @@ describe("POSIX: volume managers", () => {
 			'`--token` because kubectl\'s constant is `flagBearerToken = "token"`; the identifier would have suggested `--bearer-token`, which does not exist',
 		],
 		["oc run x --image nginx rm -rf /", "the oc spelling in the separated form"],
+		[
+			"kubectl run x --image nginx --log-text-split-stream rm -rf /",
+			'a flag kubectl does not register — `packageFlags` is `klogflags.Init`\'s `case "v", "vmodule"` plus one `DurationVar` (`klogflags.go:36-38`, `logs.go:46-49`) — and it still fires, because a flag this scanner does not know takes no word and so leaves the payload exactly where it was. An unknown flag is not a reason to stop reading.',
+		],
+		// The logging globals, which reach kubectl by a route that does not go through
+		// `ConfigFlags`: `cli.RunNoErrOutput` → `cli.Run` → `logs.AddFlags`, and
+		// `packageFlags` is `klogflags.Init`'s `switch f.Name { case "v", "vmodule" }`
+		// plus one `DurationVar`. Each of these was quiet before its row existed.
+		[
+			"kubectl run x -v 6 --image nginx rm -rf /",
+			"`-v` takes a value: `PFlagFromGoFlag` sets NoOptDefVal only for a value implementing `IsBoolFlag()`, and klog's `severityValue` does not. Without the row, `6` was counted as the second operand and the payload read as `6 --image nginx rm -rf /`.",
+		],
+		[
+			"kubectl run x -v6 --image nginx rm -rf /",
+			"and the glued form, which never needed the row — the level is inside the token, so there is no second operand to mis-count",
+		],
+		[
+			"kubectl run x --v 6 --image nginx rm -rf /",
+			"`--v` is not a separate flag from `-v`: a one-character name gets its own shorthand (`golangflag.go:85-86`)",
+		],
+		["kubectl run x --vmodule f=6 --image nginx rm -rf /", "`--vmodule`, the other half of that switch"],
+		[
+			"kubectl run x --log-flush-frequency 5s --image nginx rm -rf /",
+			"and `--log-flush-frequency`, the `DurationVar` beside it in `logs.go:48`",
+		],
+		[
+			"kubectl run x --profile cpu --image nginx rm -rf /",
+			"`--profile`, a `StringVar` at `profiling.go:37` added to the root's PersistentFlags at `cmd.go:220`",
+		],
+		[
+			"kubectl run x --profile-output /tmp/p --image nginx rm -rf /",
+			"and `--profile-output`, which reaches `run` by that same inheritance",
+		],
 		// The other direction, and the reason the table is a *set* rather than every
 		// string-typed flag: a bool, or a string given a NoOptDefVal, leaves the very
 		// next word alone, so the dangerous word is the command.
@@ -3853,6 +3886,21 @@ describe("POSIX: volume managers", () => {
 		[
 			"kubectl run x --image nginx --cascade background rm -rf /",
 			"the other NoOptDefVal flag, and the subtler half of the same rule: `--cascade` does not take the word after it, so `background` is not consumed — pflag's `parseArgs` (`flag.go:1137`) files it under the positional args and it becomes the container's argv[0] at `run.go:327-330`. Putting `--cascade` in the table would read `rm -rf /` as *its* value and miss the payload",
+		],
+		// Recorded misses rather than hidden ones. The reason each is quiet is a fact
+		// about **this** scanner, not about whether the spelling exists upstream: an
+		// unknown flag is skipped and the word after it is still counted as an operand.
+		[
+			"kubectl run x --image nginx --loglevel 6 rm -rf /",
+			"`--loglevel` is not a flag anywhere — the name belongs to a `logLevel` variable — and the `6` after it is counted as a second operand, so the payload reads as `6 rm -rf /` and its head word matches nothing",
+		],
+		[
+			"kubectl run x --image nginx --kuberc enable rm -rf /",
+			"and `KUBECTL_KUBERC` is a FeatureGate constant (`kubectl/pkg/cmd/util/helpers.go:433`), not a flag, so `enable` is the spurious operand here",
+		],
+		[
+			"kubectl run x --log_flush_frequency 5s --image nginx rm -rf /",
+			"the underscore spelling is live — `WordSepNormalizeFunc` (`component-base/cli/flag/flags.go:30-35`) rewrites it — and is deliberately not in the table; the `5s` is the spurious operand, and listing the spelling would turn this row into a fire",
 		],
 		["kubectl exec pod --", "a separator with nothing after it"],
 		["kubectl exec pod rm -rf /", "no separator, which exec.go:243-249 rejects before a container sees it"],
