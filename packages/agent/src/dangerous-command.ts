@@ -3500,19 +3500,60 @@ function posixSchedulingRules(tokens: string[]): DangerousCommandMatch | null {
 }
 
 /**
- * The switches that make the netcat family run a program instead of reading one.
+ * The switches that make one of the netcat family run a program instead of
+ * reading one — one row per program, because the three names do not agree and a
+ * single shared set is wrong in the expensive direction. It was one shared set
+ * until this was measured, and the shared set fired on `nc -c example.com 443`,
+ * which is a TLS probe on the implementation most commonly installed as `nc`.
  *
- * Four spellings, and they are four rather than one because the three programs
- * in this file's spelling of the family do not agree: `-e` is the netcat and
- * ncat one, `--exec` and `--sh-exec` are its long spellings, and `-c` is the
- * form that takes the command as one string and runs it through a shell.
+ * Every row below is read out of the program, not out of a man page or a memory
+ * of one. Nothing below was run; see the closing paragraph.
+ *
+ * - **`ncat`** is nmap's, and it is the only one of the three with long options.
+ *   `ncat/ncat_main.c:245` registers `{"exec", required_argument, NULL, 'e'}` and
+ *   `:246` registers `{"sh-exec", required_argument, NULL, 'c'}`; the usage
+ *   string at `:596` reads
+ *   `-c, --sh-exec <command>    Executes the given command via /bin/sh`. All four
+ *   spellings here exec.
+ * - **`nc`** is two programs wearing the same name, and they disagree with each
+ *   other, not merely with `netcat`. OpenBSD's (`usr/bin/nc/netcat.c`, `v1.239
+ *   2026/09/20`) has `case 'c': usetls = 1; break;` at `:204-205` — **`-c` is
+ *   "use TLS"** — and `case 'e': tls_expectname = optarg; break;` at `:210-211`,
+ *   where **`-e` is the certificate name to require**. Neither runs anything.
+ *   busybox's (`networking/nc.c:136-137`) builds its optstring as
+ *   `"" IF_NC_SERVER("lp:") IF_NC_EXTRA("w:i:f:e:")`, so it has **no `-c` at
+ *   all** and has `-e` only in a build with `NC_EXTRA`. Hence `-c` is off this
+ *   row: on one implementation it is a TLS switch, on the other it does not
+ *   exist. Worth knowing that OpenBSD's own two disagree with each other about
+ *   that: `nc.1` lists `-c` among the flags that take nothing while the optstring
+ *   at `netcat.c:177` spells it `C:c:` with a colon. It is not this file's
+ *   business which of the two is right; either way `-c` execs nothing.
+ * - **`netcat`** is netcat-traditional, and it is the one where the two spellings
+ *   mean the same act. `netcat.c:1525` reads
+ *   `getopt (argc, argv, "abc:e:g:G:hi:klno:p:q:rs:T:tuvw:zC")`, `:1534` is
+ *   `case 'c'` with the source's own comment "shell commands to exec", and
+ *   `:1538` is `case 'e'` with "filename to exec". Both exec here — the
+ *   opposite of the `nc`
+ *   row, which is the whole reason this is a map and not a set.
+ *
+ * **`-e` stays on the `nc` row even though OpenBSD's `nc` does not exec it**, and
+ * that is a judgement rather than a measurement. The command line cannot say
+ * which `nc` is installed, and the two errors are not the same size: a miss here
+ * is a live shell on a listening socket, a false positive is one TLS probe that
+ * now asks. What it costs is `nc -e <name> host port` — `nc.1`'s "Only accept the
+ * TLS peer certificate if it contains the name" — which is a shape nobody types
+ * by accident.
  *
  * **NOT MEASURED, and that is a fact about this machine rather than a reason to
  * leave the act uncovered.** `command -v` finds no `nc`, `ncat`, `netcat` or
  * `socat` here, which is the same absence the `CREDENTIAL_SENDERS` comment
  * records when it puts the same four names in that table. Nothing below was run.
  */
-const NETCAT_EXEC_FLAGS: ReadonlySet<string> = new Set(["-e", "--exec", "--sh-exec", "-c"]);
+const NETCAT_EXEC_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	["ncat", new Set(["-e", "--exec", "-c", "--sh-exec"])],
+	["nc", new Set(["-e"])],
+	["netcat", new Set(["-e", "-c"])],
+]);
 
 /**
  * A socket tool that runs a program on the far end of its own connection.
@@ -3522,6 +3563,10 @@ const NETCAT_EXEC_FLAGS: ReadonlySet<string> = new Set(["-e", "--exec", "--sh-ex
  * dangerous because it listens. What is dangerous is the switch that turns it
  * into `exec`: a listener with `-e` behind it is a shell waiting for a stranger
  * to connect, and that shell is the payload whether or not it ever fires.
+ *
+ * Which switch that is depends on which program is named, which is why
+ * {@link NETCAT_EXEC_FLAGS} is a map keyed by program rather than one set
+ * shared by three names.
  */
 function posixSocketExecRules(tokens: string[]): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "posix");
@@ -3538,8 +3583,11 @@ function posixSocketExecRules(tokens: string[]): DangerousCommandMatch | null {
 		return { kind: "Other", rule: "`socat` with an `EXEC:` address, which runs a program on the far end" };
 	}
 
-	if (program !== "nc" && program !== "ncat" && program !== "netcat") return null;
-	if (!args.some((arg) => NETCAT_EXEC_FLAGS.has(arg.toLowerCase()))) return null;
+	// The lookup is also the guard: a name that is not a key is not a netcat, and
+	// there is no second list of names to fall out of step with this one.
+	const execFlags = NETCAT_EXEC_FLAGS.get(program);
+	if (execFlags === undefined) return null;
+	if (!args.some((arg) => execFlags.has(arg.toLowerCase()))) return null;
 	return {
 		kind: "Other",
 		rule: `\`${program}\` with a program behind it, which runs that program instead of reading this side of the socket`,
