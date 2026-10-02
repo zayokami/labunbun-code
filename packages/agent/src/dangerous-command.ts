@@ -416,6 +416,33 @@ interface RemoteCommandCarrier {
 	 * is even resolved; see {@link sshLocalCommandOption}.
 	 */
 	readonly localCommandOptions?: ReadonlySet<string>;
+	/**
+	 * The payload starts **after** a `--`, and there is no payload without one.
+	 *
+	 * This is the `kubectl exec` shape and it is deliberately the opposite of a
+	 * positional count: because the separator is a thing that must be *present*,
+	 * the command is anchored at it and the options before it are never parsed.
+	 * `kubectl exec.go:243-249` reads
+	 *
+	 * ```go
+	 * if argsLenAtDash == 0 || argsLenAtDash == 1 {
+	 * 		o.Command = argsIn[argsLenAtDash:]
+	 * } else if len(argsIn) > 1 || ... {
+	 * 		return nil, fmt.Errorf("exec [POD] [COMMAND] is not supported anymore. ...")
+	 * }
+	 * ```
+	 *
+	 * and pflag initialises `argsLenAtDash` to `-1` and only ever assigns it inside
+	 * the branch that consumes a literal `--`. So with no `--` the value is `-1`,
+	 * which is neither `0` nor `1`, and a line with more than one bare word is
+	 * **rejected** — `kubectl exec pod rm -rf /` never reaches a container. A rule
+	 * on that spelling would be a rule for a command that cannot run, which is the
+	 * wrong kind of right; the anchor is also what makes the option set before it
+	 * irrelevant, so the twenty-odd value-taking kubectl globals
+	 * (`k8s.io/cli-runtime/pkg/genericclioptions/config_flags.go:374-440`) do not
+	 * have to be copied here and cannot go stale.
+	 */
+	readonly mandatorySeparator?: boolean;
 }
 
 /**
@@ -455,6 +482,110 @@ function sshLocalCommandOption(value: string): string | undefined {
 }
 
 /**
+ * Options that swallow the word after them, for `chroot`.
+ *
+ * GNU coreutils `src/chroot.c:54-62` declares the whole option table, and it has
+ * **no short options at all** — the getopt string at `:243` is `"+"` and nothing
+ * more. Two entries take a value; the rest take none:
+ *
+ * ```c
+ *   {"groups", required_argument, NULL, GROUPS},
+ *   {"userspec", required_argument, NULL, USERSPEC},
+ *   {"skip-chdir", no_argument, NULL, SKIP_CHDIR},
+ * ```
+ */
+const CHROOT_VALUE_OPTIONS: ReadonlySet<string> = new Set(["--groups", "--userspec"]);
+
+/**
+ * Options that swallow the word after them, for `nsenter`.
+ *
+ * util-linux `sys-utils/nsenter.c:689` is the authority and the distinction that
+ * matters is between `:` and `::` in the getopt string, because it decides
+ * whether the word after the flag is that flag's value or the **command**:
+ *
+ * ```c
+ * getopt_long(argc, argv, "+ahVt:m::u::i::n::N:p::C::U::T::S:G:r::w::W::ecFZ", longopts, NULL)
+ * ```
+ *
+ * `-t`, `-N`, `-S` and `-G` carry a single colon and take the next word; every
+ * other flag carrying an argument carries a **double** colon and takes it only
+ * glued or after `=`. The long table at `:635-649` agrees — `--target`,
+ * `--net-socket`, `--setuid` and `--setgid` are `required_argument`, and
+ * `--mount`, `--uts`, `--ipc`, `--net`, `--pid`, `--user`, `--cgroup`, `--time`,
+ * `--root`, `--wd` and `--wdns` are `optional_argument`.
+ *
+ * Listing one of the optional ones here would be a miss dressed as a rule:
+ * `nsenter -W rm -rf /` has no `-W` value, so a scanner that believed otherwise
+ * reads `rm` as the value, `-rf /` as the command, and finds nothing in it.
+ */
+const NSENTER_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"-t",
+	"--target",
+	"-N",
+	"--net-socket",
+	"-S",
+	"--setuid",
+	"-G",
+	"--setgid",
+]);
+
+/**
+ * Options that swallow the word after them, for `systemd-run`.
+ *
+ * systemd's option table is a macro list in which **the metavar field is the
+ * arity**: `src/shared/options.c` defines `option_takes_arg` as
+ * `return ASSERT_PTR(opt)->metavar;`, and `OPTION_LONG(name, NULL, ...)` is a
+ * flag while `OPTION_LONG(name, "METAVAR", ...)` takes the next word. This set is
+ * that table read out of `src/run/run.c`, not transcribed from the manual.
+ *
+ * `-H/--host` and `-M/--machine` come from `src/shared/options.h:138-142`
+ * (`OPTION_COMMON_HOST`, `OPTION_COMMON_MACHINE`) rather than from `run.c`'s own
+ * list, and both carry a metavar.
+ *
+ * **`run.c` holds two tables and they disagree**, which is why this was extracted
+ * by line range rather than grepped: `run.c:779` opens a second parser for
+ * `run0`, and there `-u` is `--user` while in `systemd-run`'s table `-u` is
+ * `--unit`. Merging the two would put `-u` in both sets and neither meaning
+ * would survive. `area`, `chdir`, `group`, `lightweight`, `machine`,
+ * `shell-prompt-prefix` and `user` are `run0`'s alone and are deliberately absent.
+ */
+const SYSTEMD_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"-C",
+	"--capsule",
+	"-E",
+	"--setenv",
+	"-H",
+	"--host",
+	"-M",
+	"--machine",
+	"-p",
+	"--property",
+	"-u",
+	"--unit",
+	"--background",
+	"--description",
+	"--expand-environment",
+	"--gid",
+	"--job-mode",
+	"--nice",
+	"--on-active",
+	"--on-boot",
+	"--on-calendar",
+	"--on-startup",
+	"--on-unit-active",
+	"--on-unit-inactive",
+	"--output",
+	"--path-property",
+	"--root-directory",
+	"--service-type",
+	"--slice",
+	"--socket-property",
+	"--timer-property",
+	"--uid",
+	"--working-directory",
+]);
+
+/**
  * Programs whose trailing words are a command line run on another machine.
  *
  * `ssh host "rm -rf /var"` and `ssh host rm -rf /var` are one command spelled two
@@ -469,17 +600,61 @@ function sshLocalCommandOption(value: string): string | undefined {
  * `ssh host rm -rf /var` the `-rf` is an argument to `rm`, and a scanner that
  * kept looking for options would read it as one.
  *
- * This table is the one place to add the programs that share the shape. Queued
- * behind `ssh`, each still to be measured on its own `--help` before it is
- * written down: `docker exec`/`docker run`/`docker compose run` (the container
- * name is the one positional), `kubectl exec` (the pod, and `--` is mandatory
- * before the command), `podman`, `oc`, `nerdctl`, `wsl.exe` (no positional — the
- * command is the first bare word), `chroot`, `nsenter`, `systemd-run`,
- * `machinectl shell`, `multipass exec`, `limactl shell`. None of them is in this
- * table yet, and a name that is not here is not followed at all.
+ * The key may name a verb, as `kubectl exec` does, because the program on its own
+ * is not a carrier: `kubectl get pods` and `docker ps` run nothing anywhere.
+ *
+ * Each of the four added here ends option parsing at the first bare word, so the
+ * command starts there and every word after it is an argument — the same shape
+ * `ssh` has, which is why `chroot`'s `NEWROOT` and `systemd-run`'s first command
+ * word are both counted as positionals rather than being special-cased. The
+ * sources are GNU coreutils `src/chroot.c:243` and `:276-282` (getopt `"+"`,
+ * `argv[optind]` is the root, `argv += optind + 1` starts the command),
+ * util-linux `sys-utils/nsenter.c:689` and `:1032-1034` (getopt `"+"`, then
+ * `execvp(argv[optind], argv + optind)`), and systemd `src/run/run.c:203`
+ * (`OPTION_PARSER_STOP_AT_FIRST_NONOPTION`, documented at
+ * `src/shared/options.h:196-197` as "only parse options before the first
+ * positional argument") with `.argspec = "COMMAND [ARGUMENTS…]"` at `run.c:150`.
+ *
+ * `oc exec` and `oc run` are **the same commands**, not lookalikes:
+ * `openshift/oc/pkg/cli/kubectlwrappers/wrappers.go:124-127` returns
+ * `cmdutil.ReplaceCommandName("kubectl", "oc", templates.Normalize(exec.NewCmdExec(f, streams)))`
+ * and `:159-163` does the same for `run`, so the grammar is identical and only the
+ * program name in the usage strings differs.
+ *
+ * Still to be measured on their own source before they are written down:
+ * `docker exec`/`docker run`/`docker compose run`, `podman`, `nerdctl`,
+ * `wsl` (whose bare form hands the rest to a login shell rather than exec'ing it,
+ * so it is not this shape), `machinectl shell`, `multipass exec`,
+ * `limactl shell`. A name that is not here is not followed at all.
  */
 const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new Map([
 	["ssh", { positionals: 1, valueOptions: SSH_VALUE_OPTIONS, localCommandOptions: new Set(["ProxyCommand"]) }],
+	// GNU coreutils. `chroot /newroot` with no command runs `$SHELL -i` **inside
+	// the new root** (`chroot.c:336-345`), and `nsenter -t 1` with no command runs
+	// a login shell after entering the namespaces (`nsenter.c:1036`). Both are
+	// deliberately quiet, and for the reason the same table already treats
+	// `sudo -i`, `su -` and `sudo bash` as quiet: an interactive shell with no
+	// command line on it is not one of the commands this file is looking for, and
+	// a rule for the bare spelling would fire on `chroot /newroot ls` — the
+	// ordinary, entirely harmless use — along with everything else an operator
+	// types.
+	["chroot", { positionals: 1, valueOptions: CHROOT_VALUE_OPTIONS }],
+	// Every operand is an option, so the command is the first bare word.
+	["nsenter", { positionals: 0, valueOptions: NSENTER_VALUE_OPTIONS }],
+	["systemd-run", { positionals: 0, valueOptions: SYSTEMD_RUN_VALUE_OPTIONS }],
+	// `oc exec` is `exec.NewCmdExec` with the name swapped, so one carrier serves
+	// both spellings rather than two that can drift.
+	["kubectl exec", { positionals: 1, valueOptions: new Set(), mandatorySeparator: true }],
+	["oc exec", { positionals: 1, valueOptions: new Set(), mandatorySeparator: true }],
+	// `kubectl run` is the one case where the `--` is **not** mandatory.
+	// `run.go:293-295` rejects only `len(args) == 0 || o.ArgsLenAtDash == 0`, and
+	// a missing `--` leaves `ArgsLenAtDash` at `-1`, which is neither; the words
+	// are then taken silently at `run.go:327-330` (`name := args[0]`,
+	// `arguments = args[1:]`) and land in the container at `run.go:635-640`.
+	// So the payload is simply everything after the NAME, and anchoring on a
+	// separator that need not be there would miss the spelling that works.
+	["kubectl run", { positionals: 1, valueOptions: new Set() }],
+	["oc run", { positionals: 1, valueOptions: new Set() }],
 ]);
 
 /**
@@ -500,16 +675,63 @@ const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new M
  *   platform this call was handed. Guessing the other shell there would be a
  *   claim about this machine, which we can read instead.
  */
+/**
+ * The carrier for this line and where its operands start, or `undefined`.
+ *
+ * A key may name a verb (`kubectl exec`), in which case the operand region
+ * begins after it; a key that is only the program begins after that. Longest
+ * first is not a choice — a one-word key that also existed would make the verb
+ * unreachable — so the bare program is tried before the two-word form and each
+ * lookup is exact.
+ */
+function remoteCarrierFor(
+	program: string,
+	tokens: string[],
+): { carrier: RemoteCommandCarrier; operandStart: number } | undefined {
+	const bare = REMOTE_COMMAND_CARRIERS.get(program);
+	if (bare !== undefined) return { carrier: bare, operandStart: 1 };
+	// A flag in second position is simply not a key: `kubectl -n kube-system get`
+	// builds the string `"kubectl -n"`, which no entry can be, and the lookup is
+	// what rejects it. That is deliberate rather than incidental — an earlier
+	// version tested `verb.startsWith("-")` here and a mutation survived, because
+	// with the current table the two spellings cannot be told apart at all.
+	const verb = tokens[1];
+	if (verb === undefined) return undefined;
+	const keyed = REMOTE_COMMAND_CARRIERS.get(`${program} ${verb}`);
+	return keyed === undefined ? undefined : { carrier: keyed, operandStart: 2 };
+}
+
 function remoteCommandScript(
 	program: string,
 	tokens: string[],
 	platform: DangerousCommandPlatform,
 	depth: number,
 ): DangerousCommandMatch | undefined {
-	const carrier = REMOTE_COMMAND_CARRIERS.get(program);
-	if (carrier === undefined) return undefined;
+	const found = remoteCarrierFor(program, tokens);
+	if (found === undefined) return undefined;
+	const { carrier, operandStart } = found;
+	// A `--`-anchored carrier resolves **before** the operand scan, not inside
+	// it. `kubectl exec -n kube-system pod -- rm -rf /` has three bare words
+	// before the separator, so a loop that counts operands reaches `pod` — the
+	// second one, one past the pod — and reads the command as `pod -- rm -rf /`
+	// without ever arriving at the `--`. Anchoring up front is also what makes
+	// the flags before the separator irrelevant: only `--` matters, so this
+	// never has to know whether `-n` swallows the word after it.
+	if (carrier.mandatorySeparator === true) {
+		const dash = tokens.indexOf("--", operandStart);
+		// No separator means upstream never hands a payload to the container —
+		// see {@link RemoteCommandCarrier.mandatorySeparator}.
+		if (dash === -1) return undefined;
+		const separated = tokens.slice(dash + 1).join(" ");
+		if (separated === "") return undefined;
+		for (const remotePlatform of ["posix", "windows"] as const) {
+			const match = matchScript(separated, depth + 1, remotePlatform);
+			if (match) return match;
+		}
+		return undefined;
+	}
 	let positionals = 0;
-	for (let i = 1; i < tokens.length; i++) {
+	for (let i = operandStart; i < tokens.length; i++) {
 		const arg = tokens[i];
 		if (arg.startsWith("-") && arg !== "-") {
 			// A POSIX short option takes its value either as the next word or glued
@@ -1336,7 +1558,19 @@ function matchTokens(
 	// already named in `CREDENTIAL_SENDERS` — the file knows the program and never
 	// treated it as a carrier. Measured `null` on both platforms: `ssh host
 	// "rm -rf /"` on `posix` and `ssh.exe host "rm -rf /var"` on `windows`.
-	const remote = program === undefined ? undefined : remoteCommandScript(program, tokens, platform, depth + 1);
+	//
+	// **`depth`, not `depth + 1`.** The wrappers below (`sudo`, `env`, `xargs`,
+	// a shell body) each re-enter `matchTokens` one level down, and this call is
+	// the same kind of step: `remoteCommandScript` does its own `depth + 1` on
+	// the way into the payload. Adding one here as well made every carrier hop
+	// cost two, so `MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH` — which reads as a count
+	// of wrappers, and is documented as one — admitted nine `sudo` hops but only
+	// five `ssh` ones. Measured on both spellings: `sudo` classified ForcedRm
+	// through 8 hops and `ssh h` only through 4, and both then failed closed with
+	// "nested deeper than 8 wrappers", which described a six-hop `ssh` chain in
+	// terms of eight. Nothing was let through by it — the fail-closed answer is
+	// still a block — but the number in the message did not count what it claimed.
+	const remote = program === undefined ? undefined : remoteCommandScript(program, tokens, platform, depth);
 	if (remote !== undefined) return remote;
 
 	// Follow every wrapper this segment contains, each one a level deeper.

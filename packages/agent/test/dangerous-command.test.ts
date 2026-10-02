@@ -1154,6 +1154,23 @@ describe("the depth bound fails closed", () => {
 		expect(match?.kind).toBe("Other");
 		expect(match?.rule).toContain(String(MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH));
 	});
+
+	/**
+	 * The same bound through a `--`-separated carrier, which recurses by a
+	 * different route: it resolves the separator up front instead of counting
+	 * operands. A depth arithmetic slip there would shorten the chain without
+	 * changing any single row, which is exactly what a mutation of `depth + 1`
+	 * to `depth + 2` does — so the bound is asserted at both ends.
+	 */
+	test("the bound counts a -- separated carrier as one level per hop", () => {
+		const hop = "kubectl exec pod -- ";
+		for (let depth = 0; depth <= MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH; depth++) {
+			expect(posix(`${hop.repeat(depth)}rm -rf /`)?.kind).toBe("ForcedRm");
+		}
+		const past = posix(`${hop.repeat(MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH + 1)}rm -rf /`);
+		expect(past?.kind).toBe("Other");
+		expect(past?.rule).toContain(String(MAX_DANGEROUS_COMMAND_WRAPPER_DEPTH));
+	});
 });
 
 describe("Windows: PowerShell", () => {
@@ -3547,6 +3564,133 @@ describe("POSIX: volume managers", () => {
 		["groupadd dev", "which creates the group rather than removing it"],
 		["groups", "a listing"],
 		["newgrp dev", "which joins a group for this shell only"],
+	])("%s — %s, and stays quiet", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * The carriers whose command runs somewhere other than where the line was typed.
+	 *
+	 * Each of these takes a command as its trailing words and runs it somewhere the
+	 * rest of this file cannot see: another filesystem root, another namespace, a
+	 * unit systemd starts, a container, a pod. The classifier reads the payload the
+	 * way it reads any other command, so `chroot /newroot rm -rf /` is the same
+	 * finding as `rm -rf /` and says so.
+	 *
+	 * The rows are grouped by the thing that would break if it were wrong — an
+	 * option that swallows the word after it, or one that does not — because that is
+	 * where the interesting failures are. A rule that ignored `-n` in nsenter, or
+	 * honoured `-W`, would still pass every plain row in the table and would miss
+	 * every real one.
+	 */
+	test.each([
+		// chroot: one operand, the new root, and no `--` — getopt's `"+"` stops at it.
+		["chroot /newroot rm -rf /", "the plain spelling"],
+		["chroot /newroot mkfs.ext4 /dev/sda1", "a filesystem being written over a disk"],
+		["chroot --userspec root:root /newroot dd if=/dev/zero of=/dev/sda", "--userspec takes the next word"],
+		["chroot --groups=root /newroot rm -rf /", "--groups with the value glued on"],
+		["chroot --skip-chdir /newroot rm -rf /", "--skip-chdir takes no value, so the root is still the first operand"],
+		// nsenter: every operand is an option, so the command is the first bare word.
+		["nsenter -t 1 rm -rf /", "-t takes the next word"],
+		["nsenter --target 1 mkfs.ext4 /dev/sda1", "and the long spelling of the same"],
+		["nsenter -t 1 -n rm -rf /", "two flags, the second of which takes no value"],
+		["nsenter -N 3 rm -rf /", "-N is required_argument, so it does take the next word"],
+		// These three are the rows the getopt string earns. `-n`, `-W` and `-m` carry
+		// a **double** colon (`n::`, `W::`, `m::`) and `--net`, `--wdns` and `--mount`
+		// are `optional_argument`, so the word after them is the command. A scanner
+		// that treated them as value-taking would read `rm` as a value and go on to
+		// classify `-rf /`, in which there is nothing to find.
+		["nsenter -n rm -rf /", "-n is optional_argument, so `rm` is the command and not its value"],
+		[
+			"nsenter -W rm -rf /",
+			"-W is optional_argument too, and this is the spelling that catches a table built from the long-option names alone",
+		],
+		["nsenter -m rm -rf /", "and -m"],
+		["nsenter -r rm -rf /", "and -r, which is the one that also chroots"],
+		// systemd-run: also zero operands; `-u` is --unit here and --user in run0's
+		// table, which is why the value set is scoped to systemd-run's own table.
+		["systemd-run rm -rf /", "the bare spelling"],
+		["systemd-run --unit foo rm -rf /", "--unit takes the next word"],
+		["systemd-run -u foo dd if=/dev/zero of=/dev/sda", "and -u does too, in this command"],
+		["systemd-run --scope rm -rf /", "--scope takes no value, so the command is still the first bare word"],
+		[
+			"systemd-run -p x rm -rf /",
+			"-p takes the next word — and the value here is deliberately not `NAME=VALUE`-shaped, because `Description=x rm -rf /` is read as an environment assignment by another rule and would fire either way, which is what let a mutation of this row survive once",
+		],
+		[
+			"systemd-run -M container rm -rf /",
+			"-M comes from OPTION_COMMON_MACHINE rather than run.c's own table, and still takes a value",
+		],
+		["systemd-run -r rm -rf /", "-r is --remain-after-exit and takes no value"],
+		// kubectl/oc exec: the payload is anchored at a `--` that upstream requires,
+		// so the flags before it are never read — which is why `-n` is here without
+		// being in any value table.
+		["kubectl exec pod -- rm -rf /", "the plain spelling"],
+		[
+			"kubectl exec -n kube-system pod -- rm -rf /",
+			"three bare words before the separator, and the operand count must not stop on the second",
+		],
+		["kubectl exec -it pod -- rm -rf /", "combined short flags, which take no value"],
+		["kubectl exec pod -c webapp -- rm -rf /", "-c takes the next word"],
+		["oc exec pod -- rm -rf /", "and the oc spelling, which is the same command"],
+		["oc exec -n ns pod -- rm -rf /", "with a namespace"],
+		// kubectl/oc run: the one case where `--` is not required, so the payload is
+		// everything after the NAME and both spellings have to be caught.
+		["kubectl run nginx --image=nginx -- rm -rf /", "with the separator"],
+		["kubectl run nginx --image=nginx rm -rf /", "and without it, which upstream takes silently"],
+		["oc run demo --image=demo -- rm -rf /", "and the oc spelling"],
+		["sudo nsenter -t 1 rm -rf /", "behind sudo, which unwraps to the same line"],
+		["ssh host chroot /newroot rm -rf /", "one carrier inside another"],
+		// ssh itself, unchanged: the port is the next word and is skipped, the
+		// destination is the one operand, and `rm -rf /var` is read as the payload.
+		["ssh -p 2222 host rm -rf /var", "with a port, whose value is the next word"],
+	])("%s — %s", (command) => {
+		expect(posix(command)).not.toBeNull();
+	});
+
+	/**
+	 * The counterweight. Every one of these is a line the carrier has to read
+	 * correctly *not* to fire on, and the two that matter most are the ones where a
+	 * plausible implementation goes wrong:
+	 *
+	 * - `nsenter -W rm -rf /` is in the table above as a positive. Its mirror,
+	 *   `nsenter -W /var/run/netns/foo ls`, is here: if `-W` wrongly took the next
+	 *   word, the payload would become `ls`, which is harmless, so nothing above
+	 *   would notice. This row is the one that notices.
+	 * - `kubectl exec pod rm -rf /` is quiet **on purpose**. `exec.go:243-249`
+	 *   rejects it outright, so the line never reaches a container and flagging it
+	 *   would be a rule for a command that cannot run.
+	 */
+	test.each([
+		// Carriers with no payload on the line at all. An interactive shell with no
+		// command line is what `sudo -i` and `su -` already are, and those are quiet.
+		["chroot /newroot", "which runs `$SHELL -i` in the new root"],
+		["nsenter -t 1", "which enters the namespaces and runs a login shell"],
+		["systemd-run --scope", "which makes a scope unit"],
+		["chroot /newroot ls", "an ordinary, harmless use"],
+		["nsenter -t 1 ls", "likewise"],
+		["systemd-run --unit foo --scope", "with no command either"],
+		// An optional-argument flag with its value glued on: nothing is swallowed,
+		// so `ls` is still the command.
+		["nsenter -n=/var/run/netns/foo ls", "-n= takes no next word, so the command is still `ls`"],
+		["nsenter --net=/var/run/netns/foo ls", "and the long spelling"],
+		// Carriers asked for information, and programs that merely share the word.
+		["chroot --help", "help output"],
+		["nsenter --version", "a version"],
+		["systemd-run --help", "help output"],
+		["kubectl version", "a version"],
+		["kubectl get pods", "kubectl on its own is not a carrier — this runs nothing anywhere"],
+		[
+			"kubectl -n kube-system exec pod -- rm -rf /",
+			"and a flag in second place is not a verb either, so the namespace flag does not turn `kubectl` into a carrier",
+		],
+		["kubectl delete pod x", "and neither is `kubectl delete`"],
+		["kubectl run nginx --image=nginx", "a run with no command at all"],
+		["kubectl exec pod --", "a separator with nothing after it"],
+		["kubectl exec pod rm -rf /", "no separator, which exec.go:243-249 rejects before a container sees it"],
+		["docker run -it ubuntu rm -rf /", "docker is not in the carrier table yet, and is not borrowed from ssh"],
+		["ssh host ls", "ssh itself, whose payload is still one word past the destination"],
+		["ssh host chroot /newroot ls", "and a nested carrier that is itself harmless"],
 	])("%s — %s, and stays quiet", (command) => {
 		expect(posix(command)).toBeNull();
 	});
