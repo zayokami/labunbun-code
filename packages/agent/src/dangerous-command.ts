@@ -2568,6 +2568,84 @@ function isUacPolicyKey(token: string): boolean {
 }
 
 /**
+ * Is this argument one of the two Windows Defender policy keys that hold a
+ * protection switch?
+ *
+ * **Both keys and all four of their values were enumerated on this machine** by
+ * walking the `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender` subtree
+ * read-only. The subtree holds exactly two keys. `Real-Time Protection` holds
+ * exactly one value, `DisableRealtimeMonitoring`. `SmartScreen` holds exactly
+ * three: `EnableSmartScreen`, `ConfigureAppInstallControl` and
+ * `ConfigureAppInstallControlEnabled`. A third key one might expect,
+ * `Exclusions`, does not exist here — the exclusions a defender adds at runtime
+ * are not written to the policy hive, so a rule naming it would be a rule for a
+ * key this machine has never had.
+ *
+ * That enumeration is what makes the key the rule rather than the value name,
+ * unlike the UAC row above: four values, all four of them switches that turn a
+ * protection down, so a rule naming each one individually would be four chances
+ * to forget the fifth. It is a measured fact about these two keys, not a claim
+ * about the subtree in general.
+ *
+ * The end-of-path boundary is the same one `isUacPolicyKey` uses and for the
+ * same reason: `…\Windows Defender\Real-Time Protection\Backup` is a different
+ * key that happens to sit underneath this one, and `\b` cannot tell them apart
+ * because `\` is not a word character.
+ *
+ * **This only matches a key that arrives as one token, and that is not a gap.**
+ * Both key names contain a space, so the unquoted spelling splits in the shell
+ * and the rule cannot see a whole path — measured, not assumed. But the split
+ * means `reg` never gets a whole path either: `reg query` on the unquoted form
+ * answers `ERROR: Invalid syntax.` and writes nothing, because the second word
+ * lands where the grammar has no positional to put it. `reg add` takes the same
+ * leading `KeyName` positional (`REG ADD KeyName [/v ValueName …]`), so the
+ * unquoted form of the dangerous command fails the same way. Quoted — which is
+ * the only spelling that executes at all — the key arrives whole and matches.
+ * Written down because "the unquoted form does not match" otherwise reads as a
+ * hole on the next read, and it is the opposite.
+ */
+function isDefenderPolicyKey(token: string): boolean {
+	return /\\policies\\microsoft\\windows defender\\(?:real-time protection|smartscreen)$/i.test(token);
+}
+
+/**
+ * Is this argument the `Start` value of a service key?
+ *
+ * `sc config <name> start= disabled` is already a rule elsewhere in this file.
+ * Writing `Start` under `HKLM\SYSTEM\CurrentControlSet\Services\<name>` is the
+ * same act in the registry spelling, and leaving the second one out made the
+ * coverage depend on which shell was used — the identical argument the
+ * `EnableLUA` row above makes.
+ *
+ * Matched on the value name alone, because any service can be disabled this way
+ * and the interesting question is which one, not what the value is called.
+ * `WinDefend` is the one this build cares about most, and the pairing was
+ * confirmed read-only on this machine: `reg query …\Services\WinDefend /v Start`
+ * and `/v BFE /v Start` both answer with the value, while a service name that
+ * does not exist answers `ERROR: The system was unable to find the specified
+ * registry key or value.` `WinDefend`'s own `Start` is `0x3`, the normal
+ * demand-start — this rule is about the write, not about the current setting.
+ * The other route to that same number is a Defender policy key covered above.
+ *
+ * The `/i` is measured rather than stylistic: registry value names are
+ * case-insensitive, and `reg query … /v start` returns the same `0x3` as
+ * `/v Start`. `StartX` does not resolve, so the `$` boundary is doing the work
+ * the `X` proves it is doing.
+ *
+ * **No leading-backslash tolerance here, on purpose.** An earlier version of
+ * this predicate stripped a leading `\` from the value name and so fired on
+ * `reg add … /v \Start`. Measured: `reg query … /v \Start` answers *not found*
+ * where `/v Start` answers with the value, because the backslash is part of the
+ * name. So `/v \Start` writes a second, inert value and changes no service's
+ * start mode — the rule would have cried wolf on a command with no effect, in
+ * exchange for covering a spelling nobody types. Removed rather than kept as
+ * defensive reach, and the negative case is pinned by a test row.
+ */
+function isServiceStartValue(token: string): boolean {
+	return /^start$/i.test(token);
+}
+
+/**
  * Is this argument the root of a registry hive that holds credentials?
  *
  * The three are the machine's own: `SAM` is the Security Account Manager's copy
@@ -3700,12 +3778,15 @@ const WINDOWS_ADMIN_ALWAYS: ReadonlyMap<string, string> = new Map([
  * `Clear-EventLog -LogName Security` empty the same log.
  *
  * **Measured by `Get-Command` on this machine**, which is why the list is what
- * it is: twenty-five of the twenty-six entries resolve to a Cmdlet or Function,
- * and the exception is noted at its own row. `Remove-Disk` — the cmdlet this
- * table was once written with — does not exist at all, and a check that fails is
- * what makes the rest of the list mean something. `Get-Command` also reports
- * many of these as *Functions* rather than *Cmdlets* on this box, which is why
- * the rule reads the name and not the command type.
+ * it is: thirty-four of the thirty-five entries resolve to a Cmdlet or Function,
+ * and the one that does not is noted at its own row. The count is re-measured
+ * rather than transcribed — a docstring claiming "every one was confirmed to
+ * resolve" is what this file's own history says falsely once already, below at
+ * `set-autologon`. `Remove-Disk` — the cmdlet this table was once written with —
+ * does not exist at all, and a check that fails is what makes the rest of the
+ * list mean something. `Get-Command` also reports many of these as *Functions*
+ * rather than *Cmdlets* on this box, which is why the rule reads the name and
+ * not the command type.
  *
  * Not measured: that any of them destroys anything, on purpose. `Clear-Disk`
  * with `-RemoveData` would erase a volume; `Clear-EventLog` empties a log;
@@ -3747,6 +3828,45 @@ const POWERSHELL_ADMIN_CMDLETS: ReadonlyMap<string, string> = new Map([
 	// stricter. A table entry would have fired on the strictest policies there
 	// are, which is the exact failure this file is written to avoid.
 	["disable-windowsoptionalfeature", "removes a Windows feature"],
+	// The nine `Disable-*` cmdlets that turn a control off. **Not** a rule on the
+	// name, and the reason is measured rather than argued: this machine resolves
+	// **118** distinct `Disable-*` cmdlets, and nine of them weaken anything. A
+	// blanket `Disable-*` rule would fire on `Disable-PSRemoting`,
+	// `Disable-PSBreakpoint` and `Disable-RunspaceDebug`, all of which *reduce*
+	// attack surface, and on all 42 `Disable-Azure*` cmdlets, which act on a cloud
+	// subscription rather than on this machine.
+	//
+	// The trap that made this worth measuring is `Disable-SmbDelegation`: the name
+	// reads like a boundary cmdlet and the implementation is the opposite. Its own
+	// definition, read with `Get-Command`, builds `$delegationPrinciples` from the
+	// accounts allowed to act on the server's behalf and then calls
+	// `Set-ADComputer -PrincipalsAllowedToDelegateToAccount $delegationPrinciples`.
+	// Supplying `-SmbClient` writes that list back minus the one named; **omitting
+	// it skips the accumulation entirely**, so the list it writes back is the empty
+	// one it was initialised with and every delegation grant is cleared. So the
+	// write is real, and it is still not this table's business, for two reasons
+	// that are facts about the cmdlet rather than about its name. It writes to
+	// `Get-ADComputer`'s view of a **directory object on another host** — the
+	// premise of every row here is that the command weakens *this* machine. And it
+	// removes delegation, which is the standard hardening move: SMB delegation is
+	// the classic route from a domain credential to a privileged ticket, so
+	// clearing it takes capability away rather than granting it. A rule that
+	// flagged it would train a user to dismiss the table, in exchange for covering
+	// an Active Directory write from a machine that is not the target.
+	//
+	// Each row therefore states what the act is rather than what it is called, and
+	// each was confirmed to resolve on this machine by `Get-Command`. The
+	// read-only siblings that keep this from being a verb rule — `Get-NetFirewallRule`,
+	// `Get-WmiObject` — are not in the table and never would be.
+	["disable-bitlocker", "removes the volume's key protectors and starts decrypting it"],
+	["disable-bitlockerautounlock", "removes the automatic unlocking keys, so the OS volume stops unlocking itself"],
+	["disable-computerrestore", "turns off System Restore, so a damaged machine can no longer be rolled back"],
+	["disable-netfirewallrule", "deactivates a firewall rule, which opens whatever that rule was allowing"],
+	["disable-netfirewallhypervrule", "deactivates a Hyper-V firewall rule, which opens what it was allowing"],
+	["disable-netipsecrule", "deactivates an IPsec rule, which drops the protection it applied"],
+	["disable-netipsecmainmoderule", "deactivates an IPsec main mode rule, which drops the protection it applied"],
+	["disable-tpmautoprovisioning", "stops the TPM from being provisioned, so BitLocker cannot use it"],
+	["disable-vmtpm", "turns off the virtual TPM, so the guest loses the key storage it depends on"],
 	["set-localuser", "changes a local account, including its password"],
 	// `set-autologon` is the one entry in this table that `Get-Command` did not
 	// resolve on the machine it was measured on — it is a third-party module
@@ -4349,6 +4469,43 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 		if (args.some(isUacValueName) && args.some(isUacPolicyKey)) {
 			return { kind: "Other", rule: "`reg add` writing `EnableLUA`, the value the UAC prompt reads" };
 		}
+		// The same shape one level over. `Set-MpPreference -DisableRealtimeMonitoring
+		// $true` is already a rule by way of its parameter name; the registry key
+		// that setting writes is `…\Windows Defender\Real-Time Protection`, and both
+		// keys were measured on this machine rather than recalled — see
+		// `isDefenderPolicyKey`. Before this, `reg add` against either one was
+		// `null` while the PowerShell spelling of the identical act was not, which
+		// is the coverage gap the two rows above were written to close.
+		if (args.some(isDefenderPolicyKey)) {
+			return { kind: "Other", rule: "`reg add` writing a Windows Defender protection switch" };
+		}
+		// The registry spelling of `sc config <name> start= disabled`, which is a
+		// rule in this file. Same act, same reasoning, and the other spelling was
+		// the one that was already covered.
+		if (args.some(isServiceStartValue) && args.some((token) => /\\services\\/i.test(token))) {
+			return {
+				kind: "Other",
+				rule: "`reg add` writing a service's `Start`, which is `sc config … start= disabled` in registry form",
+			};
+		}
+	}
+
+	// `reg import` is the one write whose content cannot be read off the command
+	// line. Measured usage, whole: `REG IMPORT FileName[/reg:32 | /reg:64]` —
+	// there is no key, no value name and no switch to inspect, so a rule here is
+	// a rule on the file rather than on what the file says, and a `.reg` file can
+	// carry the Run key and the Defender policy above along with everything else.
+	//
+	// The two verbs next to it are deliberately *not* treated the same way.
+	// `reg save` and `reg export` are in the branch below and are narrow, because
+	// the danger is the *target* hive and the target is on the command line.
+	// `reg restore` is in the verb table above for the same reason: it names its
+	// key. `reg import` names none.
+	if (program === "reg" && tokens[1]?.toLowerCase() === "import") {
+		return {
+			kind: "Other",
+			rule: "`reg import`, which applies an unexamined file of registry writes to whatever keys it names",
+		};
 	}
 
 	// `reg save` and `reg export` are ordinary verbs, so they are not in the verb

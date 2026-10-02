@@ -2235,6 +2235,189 @@ describe("Windows: an administrative program that destroys machine state", () =>
 	});
 
 	/**
+	 * The nine `Disable-*` cmdlets that turn a control off, listed one at a time
+	 * rather than as a rule on the verb.
+	 *
+	 * The reason this is a table and not a `^Disable-` prefix is measured, not
+	 * stylistic: this machine resolves **118** distinct `Disable-*` cmdlets, and
+	 * nine of them weaken anything. A prefix rule would fire on all of them, among
+	 * them `Disable-PSRemoting`, `Disable-PSBreakpoint` and `Disable-RunspaceDebug`
+	 * — each of which *removes* attack surface — and on all 42 `Disable-Azure*`
+	 * cmdlets, which act on a cloud subscription rather than on this machine. The
+	 * five negative rows below are what hold that decision in place.
+	 *
+	 * `Disable-SmbDelegation` is the row that made the table worth writing down
+	 * rather than just typing. The name reads like a boundary cmdlet; read with
+	 * `Get-Command`, its definition writes back
+	 * `Set-ADComputer -PrincipalsAllowedToDelegateToAccount` with the list minus the
+	 * one named, and with `-SmbClient` omitted it writes back the *empty* list it was
+	 * initialised with. So the write is real and the cmdlet is still not a rule —
+	 * the target is a directory object on another host, and removing delegation is
+	 * hardening. Those two facts come from reading the cmdlet's own definition and
+	 * cannot come from a test, because a test cannot read this machine's cmdlets;
+	 * the probe that read it is named at the table in `dangerous-command.ts`.
+	 */
+	describe("the `Disable-*` cmdlets that turn a control off", () => {
+		test.each([
+			["Disable-BitLocker -MountPoint C:", "removes the volume's key protectors"],
+			["Disable-BitLockerAutoUnlock -MountPoint C:", "removes the automatic unlocking keys"],
+			["Disable-ComputerRestore -Drive C:", "turns off System Restore"],
+			["Disable-NetFirewallRule -DisplayName X", "deactivates a firewall rule"],
+			["Disable-NetFirewallHyperVRule -DisplayName X", "deactivates a Hyper-V firewall rule"],
+			["Disable-NetIPsecRule -DisplayName X", "deactivates an IPsec rule"],
+			["Disable-NetIPsecMainModeRule -DisplayName X", "deactivates an IPsec main mode rule"],
+			["Disable-TpmAutoProvisioning", "stops the TPM from being provisioned"],
+			["Disable-VmTpm -VMName X", "turns off the virtual TPM"],
+		])("%s — %s, so the message states the act", (command, act) => {
+			expect(windows(command)?.rule).toContain(act);
+		});
+
+		// The five that make this a table rather than a prefix rule. Each is a real
+		// `Disable-*` cmdlet on this machine, so a blanket rule would have been caught
+		// by these rows as loudly as a missing rule is by the ones above.
+		test.each([
+			["Disable-PSRemoting", "removes a remoting listener"],
+			["Disable-PSBreakpoint", "removes the debugging hooks"],
+			["Disable-RunspaceDebug", "stops runspaces being debugged"],
+			["Disable-SmbDelegation -SmbServer X", "writes to a directory object on another host"],
+			["Disable-AzureADApplication -ObjectId X", "acts on a cloud subscription"],
+		])("%s — %s, so not a rule", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+
+		test("the table has nine distinct entries, so dropping a row is a deliberate act", () => {
+			// Both numbers come from `Get-Command -Name Disable-*` on this machine: 118
+			// resolve, and these nine are the ones that weaken something on it. Not
+			// re-derived here, because the suite must not depend on one build's module
+			// set — a machine without NetSecurity would change the answer for reasons
+			// that have nothing to do with the rule.
+			const weakening = [
+				"Disable-BitLocker",
+				"Disable-BitLockerAutoUnlock",
+				"Disable-ComputerRestore",
+				"Disable-NetFirewallRule",
+				"Disable-NetFirewallHyperVRule",
+				"Disable-NetIPsecRule",
+				"Disable-NetIPsecMainModeRule",
+				"Disable-TpmAutoProvisioning",
+				"Disable-VmTpm",
+			];
+			expect(weakening).toHaveLength(9);
+			// A duplicate would silently collapse the table into fewer rules while still
+			// firing, which a length check on its own would not notice.
+			expect(new Set(weakening).size).toBe(weakening.length);
+		});
+	});
+
+	/**
+	 * `reg add` against the two Defender policy keys, and against a service's
+	 * `Start`. Both are the CMD spellings of acts that were already rules in
+	 * PowerShell — `Set-MpPreference -DisableRealtimeMonitoring` by way of its
+	 * parameter name, and `sc config <name> start= disabled` outright — so before
+	 * these rows the coverage of each act depended on which shell ran it.
+	 *
+	 * The negative rows are the point of the block. `reg add` is how every installer
+	 * on the machine writes a registry value, so the key has to be narrow: an
+	 * ordinary write under `HKLM\SOFTWARE\Vendor` and a write of `ImagePath` under a
+	 * real service key both have to stay quiet.
+	 *
+	 * The Defender key can only be written **quoted**, and that is measured rather
+	 * than a limitation of the rule. Both key names contain a space, so the
+	 * unquoted form splits in the shell, `reg` never receives a whole path, and it
+	 * answers `ERROR: Invalid syntax.` and writes nothing. That is recorded because
+	 * "the unquoted form does not match" otherwise reads as a hole on the next read,
+	 * and it is the opposite.
+	 */
+	describe("`reg add` writing a Defender switch, or a service's `Start`", () => {
+		const DEFENDER = "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender";
+		const RT = `${DEFENDER}\\Real-Time Protection`;
+		const SMARTSCREEN = `${DEFENDER}\\SmartScreen`;
+		const WINDEFEND = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend";
+
+		test.each([
+			[`reg add "${RT}" /v DisableRealtimeMonitoring /t REG_DWORD /d 1 /f`, "Defender protection switch"],
+			[`reg add "${SMARTSCREEN}" /v EnableSmartScreen /t REG_DWORD /d 0 /f`, "Defender protection switch"],
+			// The measured value list under `SmartScreen` is three names and all three
+			// are switches, so the key is the rule rather than the value. None of the
+			// three is named in the message, which is why this row checks the rule
+			// rather than the value it happens to carry.
+			[`reg add "${SMARTSCREEN}" /v ConfigureAppInstallControl /t REG_DWORD /d 1 /f`, "Defender protection switch"],
+			[
+				`reg add "${SMARTSCREEN}" /v ConfigureAppInstallControlEnabled /t REG_DWORD /d 1 /f`,
+				"Defender protection switch",
+			],
+			[`reg add ${WINDEFEND} /v Start /t REG_DWORD /d 4 /f`, "start= disabled"],
+			[`reg add "${WINDEFEND}" /v Start /t REG_DWORD /d 4 /f`, "start= disabled"],
+			// The PowerShell provider spelling of the same path.
+			[`reg add HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WinDefend /v Start /d 4 /f`, "start= disabled"],
+			// Lowercase resolves to the same value: registry value names are
+			// case-insensitive, which is why the predicate carries `/i`.
+			[`reg add ${WINDEFEND} /v start /t REG_DWORD /d 4 /f`, "start= disabled"],
+		])("%s — %s", (command, expected) => {
+			expect(windows(command)?.rule).toContain(expected);
+		});
+
+		test.each([
+			["reg add HKLM\\SOFTWARE\\Vendor\\Thing /v Version /t REG_SZ /d 1.0 /f", "an ordinary registry write"],
+			[`reg add "${WINDEFEND}" /v ImagePath /t REG_EXPAND_SZ /d x`, "another value of the same service"],
+			[`reg add "${WINDEFEND}" /v DependOnService /t REG_MULTI_SZ /d RpcSs`, "and another"],
+			["reg add HKLM\\SOFTWARE\\Contoso\\Settings /v Start /t REG_DWORD /d 4 /f", "`Start` outside `Services\\`"],
+			// A child key is a different key, and `\` is not a word character so `\b`
+			// cannot draw that boundary — the same reason `isUacPolicyKey` is anchored.
+			[`reg add "${RT}\\Backup" /v DisableRealtimeMonitoring /d 1 /f`, "a child key of the policy key"],
+			[`reg add "${DEFENDER}\\Exclusions" /v Paths /d C:\\Users`, "a key absent from this machine"],
+			// Measured: `reg query … /v \Start` answers *not found* where `/v Start`
+			// answers with the value, so the backslash is part of the name. Writing it
+			// changes no service's start mode, so flagging it would be crying wolf. The
+			// strip that used to tolerate it was removed; this row holds that in place.
+			[`reg add "${WINDEFEND}" /v \\Start /t REG_DWORD /d 4 /f`, "`\\Start`, a different value name"],
+		])("%s — %s, so not a rule", (command) => {
+			expect(windows(command)).toBeNull();
+		});
+
+		test("the unquoted Defender key is not a rule, because `reg` refuses to run it", () => {
+			// If this ever starts firing, the reason the rule needs a whole token has gone
+			// and the comment above has become false.
+			expect(windows(`reg add ${RT} /v DisableRealtimeMonitoring /d 1 /f`)).toBeNull();
+		});
+	});
+
+	/**
+	 * `reg import`, which is the one registry write whose content is not on the
+	 * command line. Measured usage, whole: `REG IMPORT FileName[/reg:32 | /reg:64]`
+	 * — no key, no value name, no switch to inspect — so there is nothing on the
+	 * line for the rules above to match against.
+	 *
+	 * The verbs next to it are deliberately not treated the same way, and the quiet
+	 * rows are what hold that distinction in place. `reg save`, `reg export` and
+	 * `reg restore` all name their target key, which is why they can be narrow:
+	 * `save`/`export` are rules only for the credential hives, and both quiet rows
+	 * below are non-credential targets. `reg import` names no key at all.
+	 */
+	describe("`reg import`", () => {
+		test.each([
+			["reg import C:\\evil.reg", "a path with an extension"],
+			["reg import \\\\attacker\\share\\keys.reg", "a UNC path"],
+			["reg import C:\\keys.reg /reg:32", "the 32-bit view"],
+			["reg import C:\\keys.reg /reg:64", "the 64-bit view"],
+		])("%s — the file's contents are not on the command line", (command) => {
+			expect(windows(command)).not.toBeNull();
+		});
+
+		test.each([
+			["reg export HKLM\\SOFTWARE\\Contoso C:\\dump.reg", "`export` of a non-credential hive"],
+			["reg save HKLM\\Contoso C:\\dump.hiv", "`save` of a non-credential hive"],
+			["reg query HKLM\\SOFTWARE\\Microsoft\\Windows Defender", "`query`"],
+			["reg delete HKLM\\SOFTWARE\\Contoso /f", "an ordinary delete, a rule for other reasons"],
+		])("%s — %s, so not this rule", (command) => {
+			// `reg delete` is already a rule in this file, so only the rule *string* can
+			// separate it here; asserting null would fail on the pre-existing verb rule
+			// rather than on anything this batch added.
+			expect(windows(command)?.rule ?? "").not.toContain("reg import");
+		});
+	});
+
+	/**
 	 * The same boundary, on the rule that was already here.
 	 *
 	 * These three rows are the reason this block exists. The PowerShell rule
