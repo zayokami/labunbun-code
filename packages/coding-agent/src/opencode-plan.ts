@@ -21,6 +21,7 @@ import {
 	reportUnhandledKeys,
 	summarizeNames,
 	tildePath,
+	urlCredentialProblem,
 } from "./migrate-core.ts";
 import type { AddPermissionRules, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
 import { looksLikeSecretName, resolveModelReference } from "./migrate-types.ts";
@@ -1011,6 +1012,34 @@ export function planOpencode(
 					containsSecret: false,
 				});
 				continue;
+			}
+			// `url` is the one credential channel a name-based scan cannot reach: the
+			// token is inside the one string every importer treats as a safe
+			// identifier, not under a secret-shaped key. A `local` entry that also
+			// carries one has it named as uncarried, so this only fires for a
+			// `remote` server whose address is the thing being written. There is no
+			// half to keep — the same address with its userinfo or its
+			// `?access_token=` stripped is a different address pointing at nothing —
+			// so nothing is written, and the OAuth block below the copy is the
+			// alternative to point at. `containsSecret` is `true` even so, because
+			// the value this line is about was one; no `markMcpSecret` runs because no
+			// file receives it.
+			const url = normalized.config.url;
+			if (typeof url === "string" && url !== "") {
+				const problem = urlCredentialProblem(url);
+				if (problem !== null) {
+					items.push({
+						source: "opencode",
+						from: label,
+						to: "—",
+						action: "skip",
+						detail:
+							`left off, because its url ${problem} — unlike headers or environment there is no way to drop the ` +
+							"credential and keep the address, so nothing was written; add the server again here and authorize it there",
+						containsSecret: true,
+					});
+					continue;
+				}
 			}
 			if (!force && name in existingMcpServers) {
 				items.push({

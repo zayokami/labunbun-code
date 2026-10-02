@@ -21,12 +21,18 @@
  * and it is the most important line this file writes.
  *
  * **The permission mode is read anyway, because the key is real.** The SDK's
- * settings writer sets `general.defaultPermissionMode` — one attested occurrence
- * in the SDK, zero in the desktop, and it comes from *this build's* mode names
- * translated by `toQoderDefaultPermissionMode`. So the key exists, the SDK can
- * write it, and a user who installed the CLI side may have one. It is claimed when
- * present and the report says that a desktop-only install will not have it. That
- * is the opposite of the tempting alternative, which is to skip the key because
+ * settings writer sets `general.defaultPermissionMode`. It occurs **twice** in the
+ * SDK bundle, **35 bytes apart inside one expression** — `o !== undefined &&
+ * s.defaultPermissionMode === undefined && (s.defaultPermissionMode = o)` at byte
+ * 12207 and 12242 — so it is one site, not two: a read followed by a write of the
+ * same key. There is no third occurrence, and **none in the desktop bundle**. The
+ * one site is the *outbound* direction (this build's `t.defaultMode`, translated by
+ * `toQoderDefaultPermissionMode`), which is weaker evidence than it looks: it
+ * proves the SDK can *write* the key, and says nothing about where Qoder *reads*
+ * it, because no read site is attested anywhere we can see. So the key exists, and
+ * a user who installed the CLI side may have one. It is claimed when present and
+ * the report says that a desktop-only install will not have it. That is the
+ * opposite of the tempting alternative, which is to skip the key because
  * "the desktop doesn't read it" and leave a CLI user's mode behind.
  *
  * **The settings are a merge of three files, and this planner reads the merge.**

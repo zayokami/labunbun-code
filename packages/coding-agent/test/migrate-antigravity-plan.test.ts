@@ -596,6 +596,49 @@ describe("the MCP servers", () => {
 		expect(reportText(planned)).not.toContain(value);
 	});
 
+	test("a serverUrl carrying a credential is not carried across, and a clean one still is", () => {
+		// `serverUrl` is the only field here that says which host to talk to, so a
+		// credential inside it is the credential — and no name-based scan reaches
+		// it, because it is not under a secret-shaped key. `env` can be dropped whole
+		// and leave a working server; a URL cannot, since the same address with its
+		// userinfo or its `?access_token=` stripped points at nothing. So the server is
+		// left off rather than written under a line saying nothing in it is a secret.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const home = agHome();
+		writeMcp(home, {
+			mcpServers: {
+				withUserinfo: { serverUrl: `https://alice:${userinfoPassword}@mcp.example.invalid/sse` },
+				withQuery: { serverUrl: `https://mcp.example.invalid/mcp?access_token=${queryToken}` },
+				clean: { serverUrl: "https://mcp.example.invalid/mcp" },
+			},
+		});
+
+		const planned = plan(home);
+		const text = reportText(planned);
+		expect(text).not.toContain(userinfoPassword);
+		expect(text).not.toContain(queryToken);
+
+		// Per-entry, not a gate on the whole file: one credential must not cost the
+		// user the servers beside it.
+		expect(planned.mcpServers.clean).toEqual({ type: "http", url: "https://mcp.example.invalid/mcp" });
+		expect(planned.mcpServers.withUserinfo).toBeUndefined();
+		expect(planned.mcpServers.withQuery).toBeUndefined();
+
+		for (const name of ["withUserinfo", "withQuery"]) {
+			const skipped = lineAbout(planned, `mcpServers.${name}`);
+			expect(skipped?.action).toBe("skip");
+			expect(skipped?.to).toBe("—");
+			// Nothing was written for these and no file is marked for it — but the
+			// value this line is about *was* a credential, and a reader filtering items
+			// for one should not have to read the detail to find that out.
+			expect(skipped?.containsSecret).toBe(true);
+		}
+		// The reason names the shape, and prints neither the value nor the address.
+		expect(lineAbout(planned, "mcpServers.withUserinfo")?.detail).toContain("name:password@");
+		expect(lineAbout(planned, "mcpServers.withQuery")?.detail).toContain("parameter names is a credential word");
+	});
+
 	test("a non-string environment entry loses the variable, not the server", () => {
 		// The production line that would have to be wrong: the
 		// `if (typeof value === "string") env[key] = value;` filter. Losing the

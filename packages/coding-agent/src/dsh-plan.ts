@@ -22,6 +22,7 @@ import {
 	positiveInteger,
 	summarizeNames,
 	tildePath,
+	urlCredentialProblem,
 } from "./migrate-core.ts";
 import type { ClaimModePair, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
 import { resolveModelReference } from "./migrate-types.ts";
@@ -765,6 +766,32 @@ export function planDeepSeekHarness(
 				containsSecret: false,
 			});
 			continue;
+		}
+		// `url` is the one credential channel a name-based scan cannot reach: the
+		// token is inside the one string every importer treats as a safe identifier,
+		// not under a secret-shaped key. `headers` and `env` are dropped whole and
+		// the server survives; a URL cannot be — the same address with its userinfo
+		// or its `?access_token=` stripped is a different address pointing at
+		// nothing — so nothing is written. `containsSecret` is `true` even so,
+		// because the value this line is about was one, and no `markMcpSecret` runs
+		// because no file receives it.
+		const url = prepared.config.url;
+		if (typeof url === "string" && url !== "") {
+			const problem = urlCredentialProblem(url);
+			if (problem !== null) {
+				items.push({
+					source: "deepseek-harness",
+					from,
+					to: "—",
+					action: "skip",
+					detail:
+						`left off, because its url ${problem} — unlike its headers or its environment there is no way to drop the ` +
+						"credential and keep the address, so nothing was written; add the server again here with the credential in " +
+						"your environment instead",
+					containsSecret: true,
+				});
+				continue;
+			}
 		}
 		if (server.name in existingMcpServers && !force) {
 			items.push({

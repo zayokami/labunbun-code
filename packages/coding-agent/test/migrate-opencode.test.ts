@@ -974,6 +974,56 @@ describe("opencode: providers, MCP and permissions", () => {
 		);
 	});
 
+	test("a URL that carries a credential is not carried across, and a clean one still is", () => {
+		// A `local` entry carrying a `url` has it named as uncarried, so this only
+		// fires for a `remote` server — whose address is the thing being written. A
+		// URL has no out-of-band door: the credential is inside the address, and the
+		// same address with its userinfo or its `?access_token=` stripped points at
+		// nothing. So the server is left off rather than written under a line saying
+		// nothing in it is a secret, and the `oauth` block is the way to supply one.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		withHome(
+			{
+				".config/opencode/opencode.json": JSON.stringify({
+					mcp: {
+						withUserinfo: { type: "remote", url: `https://alice:${userinfoPassword}@mcp.invalid/sse` },
+						withQuery: { type: "remote", url: `https://mcp.invalid/mcp?access_token=${queryToken}` },
+						clean: { type: "remote", url: "https://mcp.invalid/mcp" },
+					},
+				}),
+			},
+			(home) => {
+				const result = runMigration({ home });
+				expect(JSON.stringify(result.plan)).not.toContain(userinfoPassword);
+				expect(JSON.stringify(result.plan)).not.toContain(queryToken);
+
+				// Per-entry, not a gate on the whole file: one credential must not cost
+				// the user the servers beside it.
+				const servers = (planOutput(result).mcp as { mcpServers: Record<string, unknown> }).mcpServers;
+				expect(servers.clean).toEqual({ type: "http", url: "https://mcp.invalid/mcp" });
+				expect(servers.withUserinfo).toBeUndefined();
+				expect(servers.withQuery).toBeUndefined();
+
+				for (const name of ["withUserinfo", "withQuery"]) {
+					const skipped = result.plan.items.find((i) => i.from.includes(`mcp.${name}`));
+					expect(skipped?.action).toBe("skip");
+					// Nothing was written for these, and no file is marked for it — but
+					// the value this line is about *was* a credential, and a reader
+					// filtering items for one should not have to read the detail to find
+					// that out.
+					expect(skipped?.containsSecret).toBe(true);
+				}
+				// The reason names the shape, and prints neither the value nor the
+				// address.
+				const first = result.plan.items.find((i) => i.from.includes("mcp.withUserinfo"));
+				const second = result.plan.items.find((i) => i.from.includes("mcp.withQuery"));
+				expect(first?.detail).toContain("name:password@");
+				expect(second?.detail).toContain("parameter names is a credential word");
+			},
+		);
+	});
+
 	test("a permission that stops to ask is counted and written as neither an allow nor a deny", () => {
 		// There is no ask tier here, and an allow would run exactly the calls the
 		// user meant to be prompted for. The same call grok's plan makes for its own

@@ -54,6 +54,7 @@ import {
 	reportUnhandledKeys,
 	summarizeNames,
 	tildePath,
+	urlCredentialProblem,
 } from "./migrate-core.ts";
 import {
 	type ClaimHooks,
@@ -596,7 +597,33 @@ function planCursorMcp(
 				});
 				continue;
 			}
-			const record = config as { headers?: Record<string, string>; env?: Record<string, string> };
+			const record = config as { headers?: Record<string, string>; env?: Record<string, string>; url?: unknown };
+			// The record is copied below exactly as it was read, `url` included, and a
+			// URL is the one credential channel a name-based scan cannot reach: the
+			// token is inside the one string every importer treats as a safe
+			// identifier, not under a secret-shaped key. `headers` and `env` can be
+			// dropped whole and leave a working server; a URL cannot — the same
+			// address with its userinfo or its `?access_token=` stripped is a
+			// different address pointing at nothing — so nothing is written.
+			// `containsSecret` is `true` even so, because the value this line is about
+			// was one, and no `markMcpSecret` runs because no file receives it.
+			if (typeof record.url === "string") {
+				const problem = urlCredentialProblem(record.url);
+				if (problem !== null) {
+					items.push({
+						source: "cursor",
+						from: `${from}.${name}`,
+						to: "—",
+						action: "skip",
+						detail:
+							`left off, because its url ${problem} — unlike a header or an environment variable there is no way to drop ` +
+							"the credential and keep the address, so nothing was written; add the server again here with the credential " +
+							"in your environment instead",
+						containsSecret: true,
+					});
+					continue;
+				}
+			}
 			const secret =
 				Object.keys(record.headers ?? {}).length > 0 ||
 				Object.keys(record.env ?? {}).some((key) => looksLikeSecretName(key));

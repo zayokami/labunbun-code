@@ -571,6 +571,50 @@ describe("trae mcp", () => {
 		expect(item?.from).toContain(tail);
 	});
 
+	test("a URL that carries a credential is not carried across, and a clean one still is", () => {
+		// The record is copied verbatim here, `url` included, and a URL is the one
+		// credential channel a name-based scan cannot reach: the token is inside the
+		// one string every importer treats as a safe identifier. `headers` and `env`
+		// can be dropped whole and leave a working server; a URL cannot — the same
+		// address with its userinfo or its `?access_token=` stripped points at nothing
+		// — so it is left off rather than written under a line saying nothing in it is
+		// a secret.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const planned = plan({}, (home) =>
+			seedProfile(home, "Trae", {
+				mcpServers: {
+					withUserinfo: { type: "http", url: `https://alice:${userinfoPassword}@mcp.invalid/sse` },
+					withQuery: { type: "http", url: `https://mcp.invalid/mcp?access_token=${queryToken}` },
+					clean: { type: "http", url: "https://mcp.invalid/mcp" },
+				},
+			}),
+		);
+		expect(JSON.stringify(planned)).not.toContain(userinfoPassword);
+		expect(JSON.stringify(planned)).not.toContain(queryToken);
+
+		// Per-entry, not a gate on the whole file: one credential must not cost the
+		// user the servers beside it.
+		const written = writeAt(planned, "~/.labunbun/.mcp.json")?.content ?? "";
+		expect(written).toContain('https://mcp.invalid/mcp"');
+		expect(written).not.toContain(userinfoPassword);
+		expect(line(planned, "mcpServers.withUserinfo")?.action).toBe("skip");
+		expect(line(planned, "mcpServers.withQuery")?.action).toBe("skip");
+		expect(written).not.toContain("withUserinfo");
+		expect(written).not.toContain("withQuery");
+
+		for (const name of ["withUserinfo", "withQuery"]) {
+			const skipped = line(planned, `mcpServers.${name}`);
+			// Nothing was written for these, and no file is marked for it — but the
+			// value this line is about *was* a credential, and a reader filtering items
+			// for one should not have to read the detail to find that out.
+			expect(skipped?.containsSecret).toBe(true);
+		}
+		// The reason names the shape, and prints neither the value nor the address.
+		expect(line(planned, "mcpServers.withUserinfo")?.detail).toContain("name:password@");
+		expect(line(planned, "mcpServers.withQuery")?.detail).toContain("parameter names is a credential word");
+	});
+
 	test("all four product directories are probed, and the one that answered is named", () => {
 		// Not hedging: these are four separate products sharing a codebase, and the
 		// directory name is the product's `nameShort` inherited from VS Code. A

@@ -349,6 +349,64 @@ describe("migrate: DeepSeek Harness MCP reader", () => {
 			expect(item?.action).toBe("map");
 		});
 	});
+
+	// 8.
+	test("a URL that carries a credential is not carried across, and a clean one still is", () => {
+		// `headers` and `env` are dropped whole and the server survives; a URL cannot
+		// be treated that way — the credential is inside the address, and the same
+		// address with its userinfo or its `?access_token=` stripped is a different
+		// address pointing at nothing. So the server is left off rather than written
+		// under a line that says nothing in it is a credential.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const patch = [
+			"- insert:",
+			"    - id: mcp-userinfo",
+			"      name: '@deepseek-ai/dsh-mcp-client'",
+			"      config:",
+			"        serverName: withUserinfo",
+			"        transport: streamable-http",
+			`        url: https://alice:${userinfoPassword}@mcp.example/sse`,
+			"    - id: mcp-query",
+			"      name: '@deepseek-ai/dsh-mcp-client'",
+			"      config:",
+			"        serverName: withQuery",
+			"        transport: streamable-http",
+			`        url: https://mcp.example/mcp?access_token=${queryToken}`,
+			"    - id: mcp-clean",
+			"      name: '@deepseek-ai/dsh-mcp-client'",
+			"      config:",
+			"        serverName: clean",
+			"        transport: streamable-http",
+			"        url: https://mcp.example/mcp",
+			"",
+		].join("\n");
+		withHarnessHome({ "cordis.patch.yml": patch }, (home) => {
+			const result = runMigration({ home });
+			const text = JSON.stringify(result.plan);
+			for (const secret of [userinfoPassword, queryToken]) expect(text).not.toContain(secret);
+
+			// Per-entry, not a gate on the whole file: one credential must not cost the
+			// user the servers beside it.
+			const write = result.plan.writes.find((w) => w.path.endsWith(".mcp.json"));
+			const written = (JSON.parse(write?.content ?? "{}") as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
+			expect(written.clean).toEqual({ type: "http", url: "https://mcp.example/mcp" });
+			expect(written.withUserinfo).toBeUndefined();
+			expect(written.withQuery).toBeUndefined();
+
+			for (const name of ["withUserinfo", "withQuery"]) {
+				const skipped = result.plan.items.find((i) => i.from.includes(`"${name}"`));
+				expect(skipped?.action).toBe("skip");
+				// Nothing was written for these and no file is marked for it — but the
+				// value this line is about *was* a credential, and a reader filtering
+				// items for one should not have to read the detail to find that out.
+				expect(skipped?.containsSecret).toBe(true);
+			}
+			// The reason names the shape, and prints neither the value nor the address.
+			expect(text).toContain("it carries a `name:password@` part in front of the address");
+			expect(text).toContain("one of its `?`/`#` parameter names is a credential word");
+		});
+	});
 });
 
 /**

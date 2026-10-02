@@ -724,6 +724,50 @@ describe("cursor mcp", () => {
 		const malformed = plan({ ".cursor/mcp.json": JSON.stringify({ mcpServers: ["node"] }) });
 		expect(line(malformed, "mcpServers")?.detail).toContain("not a table of servers");
 	});
+
+	test("a URL that carries a credential is not carried across, and a clean one still is", () => {
+		// The record is copied verbatim here, `url` included, and a URL is the one
+		// credential channel a name-based scan cannot reach: the token is inside the
+		// one string every importer treats as a safe identifier. `headers` and `env`
+		// can be dropped whole and leave a working server; a URL cannot — the same
+		// address with its userinfo or its `?access_token=` stripped points at nothing
+		// — so it is left off rather than written under a line saying nothing in it is
+		// a secret.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const planned = plan({
+			".cursor/mcp.json": JSON.stringify({
+				mcpServers: {
+					withUserinfo: { type: "http", url: `https://alice:${userinfoPassword}@mcp.example/sse` },
+					withQuery: { type: "http", url: `https://mcp.example/mcp?access_token=${queryToken}` },
+					clean: { type: "http", url: "https://mcp.example/mcp" },
+				},
+			}),
+		});
+		expect(JSON.stringify(planned)).not.toContain(userinfoPassword);
+		expect(JSON.stringify(planned)).not.toContain(queryToken);
+
+		// Per-entry, not a gate on the whole file: one credential must not cost the
+		// user the servers beside it.
+		const written = JSON.parse(writeAt(planned, "~/.labunbun/.mcp.json")?.content ?? "{}") as {
+			mcpServers: Record<string, unknown>;
+		};
+		expect(written.mcpServers.clean).toEqual({ type: "http", url: "https://mcp.example/mcp" });
+		expect(written.mcpServers.withUserinfo).toBeUndefined();
+		expect(written.mcpServers.withQuery).toBeUndefined();
+
+		for (const name of ["withUserinfo", "withQuery"]) {
+			const skipped = line(planned, `mcpServers.${name}`);
+			expect(skipped?.action).toBe("skip");
+			// Nothing was written for these, and no file is marked for it — but the
+			// value this line is about *was* a credential, and a reader filtering items
+			// for one should not have to read the detail to find that out.
+			expect(skipped?.containsSecret).toBe(true);
+		}
+		// The reason names the shape, and prints neither the value nor the address.
+		expect(line(planned, "mcpServers.withUserinfo")?.detail).toContain("name:password@");
+		expect(line(planned, "mcpServers.withQuery")?.detail).toContain("parameter names is a credential word");
+	});
 });
 
 // ---------------------------------------------------------------------------

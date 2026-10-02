@@ -21,6 +21,7 @@ import {
 	placeholderNote,
 	reportUnhandledKeys,
 	summarizeNames,
+	urlCredentialProblem,
 } from "./migrate-core.ts";
 import type {
 	ClaimEnv,
@@ -407,7 +408,33 @@ export function planClaudeCode(
 				});
 				continue;
 			}
-			const record = config as { headers?: Record<string, string>; env?: Record<string, string> };
+			const record = config as { headers?: Record<string, string>; env?: Record<string, string>; url?: unknown };
+			// The whole record is copied below, `url` included, and a URL is the one
+			// credential channel a name-based scan cannot reach: the token is not under
+			// a secret-shaped key, it is inside the one string every importer treats as
+			// a safe identifier. `headers` and `env` are dropped whole and the server
+			// survives; a URL cannot be — `https://alice:pw@host/sse` with the userinfo
+			// removed is a different address pointing at nothing — so the server is not
+			// carried across. `containsSecret` is `true` although nothing is written:
+			// the value this line is about was one. No `markMcpSecret`, because no file
+			// receives it.
+			if (typeof record.url === "string") {
+				const problem = urlCredentialProblem(record.url);
+				if (problem !== null) {
+					items.push({
+						source: "claude-code",
+						from: `~/.claude.json → mcpServers.${name}`,
+						to: "—",
+						action: "skip",
+						detail:
+							`left off, because its url ${problem} — unlike a header or an environment variable there is no way to drop ` +
+							"the credential and keep the address, so nothing was written; add the server again here with the credential " +
+							"in your environment instead",
+						containsSecret: true,
+					});
+					continue;
+				}
+			}
 			const secret =
 				Object.keys(record.headers ?? {}).length > 0 ||
 				Object.keys(record.env ?? {}).some((key) => looksLikeSecretName(key));

@@ -17,6 +17,7 @@ import {
 	reportUnhandledKeys,
 	summarizeNames,
 	tildePath,
+	urlCredentialProblem,
 } from "./migrate-core.ts";
 import type { ClaimModePair, ClaimScalar, MigrationItem, PlannedWrite } from "./migrate-types.ts";
 import { looksLikeSecretName, resolveModelReference } from "./migrate-types.ts";
@@ -962,6 +963,33 @@ export function planStepCode(
 			continue;
 		}
 		stepMcpNotes(value, normalized.downgrades);
+		// `url` is the one credential channel a name-based scan cannot reach: the
+		// token is inside the one string every importer treats as a safe identifier,
+		// not under a secret-shaped key. Step supplies a credential without storing
+		// one through `bearer_token_env_var` and `env_http_headers`, which name
+		// variables — so that is the alternative to point at here. There is no half to
+		// keep: the same address with its userinfo or its `?access_token=` stripped is
+		// a different address pointing at nothing, so nothing is written.
+		// `containsSecret` is `true` even so, because the value this line is about
+		// was one, and no `markMcpSecret` runs because no file receives it.
+		const url = normalized.config.url;
+		if (typeof url === "string" && url !== "") {
+			const problem = urlCredentialProblem(url);
+			if (problem !== null) {
+				items.push({
+					source: "step-code",
+					from: label,
+					to: "—",
+					action: "skip",
+					detail:
+						`left off, because its url ${problem} — unlike a header or an environment variable there is no way to drop ` +
+						"the credential and keep the address, so nothing was written; add the server again here with the credential " +
+						"in your environment instead",
+					containsSecret: true,
+				});
+				continue;
+			}
+		}
 		if (name in existingMcpServers && !force) {
 			items.push({
 				source: "step-code",

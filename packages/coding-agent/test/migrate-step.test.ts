@@ -1003,6 +1003,46 @@ describe("mcp_servers", () => {
 		const forced = plan(home, {}, true);
 		expect(mcpWritten(forced).docs).toMatchObject({ command: "npx" });
 	});
+
+	test("a URL that carries a credential is not carried across, and a clean one still is", () => {
+		// Step supplies a credential without storing one through
+		// `bearer_token_env_var` and `env_http_headers`, which name variables this
+		// importer reads by name only. A URL has no such door — the credential is
+		// inside the address, and the address with it removed points at nothing — so
+		// the server is left off rather than written under a line claiming nothing in
+		// it is a secret.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const { home } = stepHome({
+			"config.toml":
+				`[mcp_servers.withUserinfo]\nurl = "https://alice:${userinfoPassword}@mcp.example.invalid/sse"\n\n` +
+				`[mcp_servers.withQuery]\nurl = "https://mcp.example.invalid/mcp?access_token=${queryToken}"\n\n` +
+				'[mcp_servers.clean]\nurl = "https://mcp.example.invalid/mcp"\n',
+		});
+		const planned = plan(home);
+		expect(JSON.stringify(planned)).not.toContain(userinfoPassword);
+		expect(JSON.stringify(planned)).not.toContain(queryToken);
+
+		// Per-entry, not a gate on the whole file: one credential must not cost the
+		// user the servers beside it.
+		expect(mcpWritten(planned).clean).toEqual({ type: "http", url: "https://mcp.example.invalid/mcp" });
+		expect(mcpWritten(planned).withUserinfo).toBeUndefined();
+		expect(mcpWritten(planned).withQuery).toBeUndefined();
+
+		for (const name of ["withUserinfo", "withQuery"]) {
+			// Matched on `from`: a skip names `mcpServers.<name>` as its subject and
+			// writes nowhere, so there is no `to` to look it up by.
+			const skipped = itemsOf(planned).find((item) => item.from.includes(`mcp_servers.${name}`));
+			expect(skipped?.action).toBe("skip");
+			// Nothing was written for these, and no file is marked for it — but the
+			// value this line is about *was* a credential, and a reader filtering items
+			// for one should not have to read the detail to find that out.
+			expect(skipped?.containsSecret).toBe(true);
+		}
+		// The reason names the shape, and prints neither the value nor the address.
+		expect(detailsMatching(planned, /name:password@/)).toHaveLength(1);
+		expect(detailsMatching(planned, /parameter names is a credential word/)).toHaveLength(1);
+	});
 });
 
 describe("keys with no counterpart, and the closing report", () => {

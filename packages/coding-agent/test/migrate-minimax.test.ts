@@ -1380,6 +1380,47 @@ describe("mcp.json", () => {
 		expect(detail).toContain("stdio or StreamableHTTP only");
 	});
 
+	test("a URL that carries a credential is not carried across, and a clean one still is", () => {
+		// MiniMax keeps a server's credentials in an `auth` block this importer
+		// "neither reads nor carries" — that is the out-of-band door a URL has no
+		// equivalent of. The credential is inside the address, and the same address
+		// with its userinfo or its `?access_token=` stripped points at nothing, so the
+		// server is left off rather than written under a line saying nothing in it is
+		// a secret.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const { home } = minimaxHome({
+			"mcp.json": servers({
+				withUserinfo: { type: "http", url: `https://alice:${userinfoPassword}@example.invalid/sse` },
+				withQuery: { type: "http", url: `https://example.invalid/mcp?access_token=${queryToken}` },
+				clean: { type: "http", url: "https://example.invalid/mcp" },
+			}),
+		});
+		const planned = plan(home);
+		expect(JSON.stringify(planned)).not.toContain(userinfoPassword);
+		expect(JSON.stringify(planned)).not.toContain(queryToken);
+
+		// Per-entry, not a gate on the whole file: one credential must not cost the
+		// user the servers beside it.
+		expect(mcpWritten(planned).clean).toEqual({ type: "http", url: "https://example.invalid/mcp" });
+		expect(mcpWritten(planned).withUserinfo).toBeUndefined();
+		expect(mcpWritten(planned).withQuery).toBeUndefined();
+
+		for (const name of ["withUserinfo", "withQuery"]) {
+			// Matched on `from`: a skip names the server as its subject and writes
+			// nowhere, so there is no `to` to look it up by.
+			const skipped = itemsOf(planned).find((item) => item.from.endsWith(` → ${name}`));
+			expect(skipped?.action).toBe("skip");
+			// Nothing was written for these, and no file is marked for it — but the
+			// value this line is about *was* a credential, and a reader filtering items
+			// for one should not have to read the detail to find that out.
+			expect(skipped?.containsSecret).toBe(true);
+		}
+		// The reason names the shape, and prints neither the value nor the address.
+		expect(detailsMatching(planned, /name:password@/)).toHaveLength(1);
+		expect(detailsMatching(planned, /parameter names is a credential word/)).toHaveLength(1);
+	});
+
 	test("MiniMax's own bookkeeping for a server is named, key by key", () => {
 		// `timeout`, `description`, `metadata` and `tools` are the vendor's own
 		// fields for a server, and a `tools` list that narrows what a server may

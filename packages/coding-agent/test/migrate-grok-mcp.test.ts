@@ -202,6 +202,51 @@ describe("grok MCP servers", () => {
 		expect(line(planned, "mcp_servers.nothing")?.detail).toContain("does not match the supported stdio/http shapes");
 		expect(writtenMcp(planned)).toEqual({});
 	});
+
+	test("a URL that carries a credential is not carried across, and a clean one still is", () => {
+		// grok supplies a credential without storing one through
+		// `bearer_token_env_var` and `env_http_headers`, which name variables this
+		// importer reads by name only. A URL has no such door — the credential is
+		// inside the address, and the address with it removed points at nothing — so
+		// the server is left off rather than written under a line claiming nothing in
+		// it is a secret.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const planned = plan({
+			"config.toml": [
+				"[mcp_servers.withUserinfo]",
+				`url = "https://alice:${userinfoPassword}@mcp.example/sse"`,
+				"",
+				"[mcp_servers.withQuery]",
+				`url = "https://mcp.example/mcp?access_token=${queryToken}"`,
+				"",
+				"[mcp_servers.clean]",
+				'url = "https://mcp.example/mcp"',
+				"",
+			].join("\n"),
+		});
+		const text = planText(planned);
+		for (const secret of [userinfoPassword, queryToken]) expect(text).not.toContain(secret);
+
+		// Per-entry, not a gate on the whole file: one credential must not cost the
+		// user the servers beside it.
+		const servers = writtenMcp(planned);
+		expect(servers.clean).toEqual({ type: "http", url: "https://mcp.example/mcp" });
+		expect(servers.withUserinfo).toBeUndefined();
+		expect(servers.withQuery).toBeUndefined();
+
+		for (const name of ["withUserinfo", "withQuery"]) {
+			const skipped = line(planned, `mcp_servers.${name}`);
+			expect(skipped?.action).toBe("skip");
+			// Nothing was written for these, and no file is marked for it — but the
+			// value this line is about *was* a credential, and a reader filtering items
+			// for one should not have to read the detail to find that out.
+			expect(skipped?.containsSecret).toBe(true);
+		}
+		// The reason names the shape, and prints neither the value nor the address.
+		expect(text).toContain("it carries a `name:password@` part in front of the address");
+		expect(text).toContain("one of its `?`/`#` parameter names is a credential word");
+	});
 });
 
 describe("grok model endpoints", () => {

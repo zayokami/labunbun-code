@@ -83,6 +83,7 @@ import {
 	reportUnhandledKeys,
 	summarizeNames,
 	tildePath,
+	urlCredentialProblem,
 } from "./migrate-core.ts";
 import {
 	type ClaimScalar,
@@ -354,6 +355,34 @@ function planAntigravityMcp(
 				containsSecret: false,
 			});
 			continue;
+		}
+
+		// The one credential channel a name-based scan cannot reach, and the one
+		// place this source can put it: `serverUrl` is the only field that says
+		// which host to talk to, so a credential in it is the credential. There is
+		// no half to keep — an address with its userinfo or its `?access_token=`
+		// stripped is a different address pointing at nothing — so the server is
+		// not carried across, and the reason names the shape without printing any
+		// of it. `containsSecret` is `true` although nothing was written: the value
+		// this line is about was one, and a reader filtering items for "was
+		// anything here a secret?" should not have to re-derive that from this
+		// comment. No `markMcpSecret` call, because no file receives it.
+		if (command === "" && serverUrl !== "") {
+			const problem = urlCredentialProblem(serverUrl);
+			if (problem !== null) {
+				items.push({
+					source: SOURCE,
+					from,
+					to: "—",
+					action: "skip",
+					detail:
+						`left off, because its serverUrl ${problem} — Antigravity has no field to put a credential in besides the ` +
+						"address itself, and unlike a header or an environment variable there is no way to drop the credential and keep " +
+						"the address, so nothing was written; add the server again here with the credential in your environment instead",
+					containsSecret: true,
+				});
+				continue;
+			}
 		}
 
 		const downgrades: string[] = [];

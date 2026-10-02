@@ -383,6 +383,49 @@ describe("mapping", () => {
 		});
 	});
 
+	test("a server url that carries a credential is not carried, and a clean one still is", () => {
+		// The record is copied verbatim here, `url` included, and a URL is the one
+		// credential channel a name-based scan cannot reach: the token is inside the
+		// one string every importer treats as a safe identifier. `headers` and `env`
+		// can be dropped whole and leave a working server; a URL cannot — the same
+		// address with its userinfo or its `?access_token=` stripped points at nothing
+		// — so it is left off rather than written under a line saying nothing in it is
+		// a secret.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const state = JSON.stringify({
+			mcpServers: {
+				withUserinfo: { type: "http", url: `https://alice:${userinfoPassword}@mcp.example/sse` },
+				withQuery: { type: "http", url: `https://mcp.example/mcp?access_token=${queryToken}` },
+				clean: { type: "http", url: "https://mcp.example/mcp" },
+			},
+		});
+		withHome({ ".claude/settings.json": "{}", ".claude.json": state }, (home) => {
+			const plan = planMigration(readSources(home, home), {}, { only: ["claude-code"] });
+			expect(JSON.stringify(plan)).not.toContain(userinfoPassword);
+			expect(JSON.stringify(plan)).not.toContain(queryToken);
+
+			// Per-entry, not a gate on the whole file: one credential must not cost the
+			// user the servers beside it.
+			const servers = JSON.parse(plan.writes.find((w) => w.kind === "mcp")?.content ?? "{}").mcpServers;
+			expect(servers.clean).toEqual({ type: "http", url: "https://mcp.example/mcp" });
+			expect(servers.withUserinfo).toBeUndefined();
+			expect(servers.withQuery).toBeUndefined();
+
+			for (const name of ["withUserinfo", "withQuery"]) {
+				const skipped = plannedItem(plan, `mcpServers.${name}`);
+				expect(skipped?.action).toBe("skip");
+				// Nothing was written for these, and no file is marked for it — but the
+				// value this line is about *was* a credential, and a reader filtering
+				// items for one should not have to read the detail to find that out.
+				expect(skipped?.containsSecret).toBe(true);
+			}
+			// The reason names the shape, and prints neither the value nor the address.
+			expect(plannedItem(plan, "mcpServers.withUserinfo")?.detail).toContain("name:password@");
+			expect(plannedItem(plan, "mcpServers.withQuery")?.detail).toContain("parameter names is a credential word");
+		});
+	});
+
 	test("the plugin line names what is enabled instead of claiming coverage", () => {
 		const settings = JSON.stringify({ enabledPlugins: { "some-plugin": true, "off-plugin": false } });
 		withHome({ ".claude/settings.json": settings }, (home) => {

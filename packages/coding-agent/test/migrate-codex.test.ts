@@ -266,6 +266,51 @@ describe("codex MCP servers", () => {
 			expect(result.report).not.toContain("header-token");
 		});
 	});
+
+	test("a URL that carries a credential is not carried across, and a clean one still is", () => {
+		// `bearer_token_env_var` and `env_http_headers` are how Codex supplies a
+		// credential without storing one, and this importer reads their variable
+		// *names* only. A URL has no such door: the credential is inside the address,
+		// and the address with it removed points at nothing. So the server is left off
+		// rather than written under a line that says no secret was in it.
+		const userinfoPassword = "sk-url-pass-VALUE";
+		const queryToken = "sk-url-token-VALUE";
+		const planned = planConfig(
+			codexConfig({
+				tail: [
+					"[mcp_servers.withUserinfo]",
+					`url = "https://alice:${userinfoPassword}@mcp.example/sse"`,
+					"",
+					"[mcp_servers.withQuery]",
+					`url = "https://mcp.example/mcp?access_token=${queryToken}"`,
+					"",
+					"[mcp_servers.clean]",
+					'url = "https://mcp.example/mcp"',
+				],
+			}),
+		);
+		const text = JSON.stringify(planned);
+		for (const secret of [userinfoPassword, queryToken]) expect(text).not.toContain(secret);
+
+		// Per-entry, not a gate on the whole file: one credential must not cost the
+		// user the servers beside it.
+		const servers = plannedServers(planned);
+		expect(servers.clean).toEqual({ type: "http", url: "https://mcp.example/mcp" });
+		expect(servers.withUserinfo).toBeUndefined();
+		expect(servers.withQuery).toBeUndefined();
+
+		for (const name of ["withUserinfo", "withQuery"]) {
+			const skipped = item(planned, `mcp_servers.${name}`);
+			expect(skipped?.action).toBe("skip");
+			// Nothing was written, and no file carries `containsSecret` because of it —
+			// but the value this line is about was one, and a reader filtering items
+			// for one should not have to read the detail to find that out.
+			expect(skipped?.containsSecret).toBe(true);
+		}
+		// The reason names the shape and prints neither the value nor the address.
+		expect(text).toContain("it carries a `name:password@` part in front of the address");
+		expect(text).toContain("one of its `?`/`#` parameter names is a credential word");
+	});
 });
 
 describe("codex surfaces that are reported but not carried", () => {
