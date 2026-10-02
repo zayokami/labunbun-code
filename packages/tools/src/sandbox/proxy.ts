@@ -136,13 +136,31 @@ export interface NetworkProxy {
  *
  * The six URL keys in the table below are the standard spellings, and they are
  * not the whole of what is in circulation: ten per-tool variables are read by
- * the package managers that have a proxy option of their own, and none of them
- * is set here — `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, `NPM_CONFIG_HTTP_PROXY`,
+ * the package managers that have a proxy option of their own —
+ * `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, `NPM_CONFIG_HTTP_PROXY`,
  * `NPM_CONFIG_HTTPS_PROXY`, `NPM_CONFIG_PROXY`, `BUNDLE_HTTP_PROXY`,
  * `BUNDLE_HTTPS_PROXY`, `PIP_PROXY`, `DOCKER_HTTP_PROXY` and
- * `DOCKER_HTTPS_PROXY`. Those ten are the gap, and whether they are a hole was
- * measured per family rather than assumed. Of the four families they serve,
- * three read the standard variables this build already sets:
+ * `DOCKER_HTTPS_PROXY`.
+ *
+ * **Seven of those ten are the gap. The other three are set, and this paragraph
+ * used to say none of them was** — it predates `TOOL_PROXY_KEYS` below, which
+ * pins `NPM_CONFIG_PROXY`, `NPM_CONFIG_HTTPS_PROXY` and `PIP_PROXY` to this
+ * policy's URL. The three are listed here in the same breath as the seven that
+ * are missing, so the list above reads as one gap and is two. The gap is
+ * `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, `NPM_CONFIG_HTTP_PROXY`,
+ * `BUNDLE_HTTP_PROXY`, `BUNDLE_HTTPS_PROXY`, `DOCKER_HTTP_PROXY` and
+ * `DOCKER_HTTPS_PROXY`.
+ *
+ * **What follows is a per-family reading of each tool's own source, not a
+ * measurement, and this paragraph used to say the opposite.** Nothing here was
+ * run: no proxy decision was exercised end to end for any of the five families.
+ * Two of them could not have been — `yarn` and `podman` are not installed on
+ * the machine this was written on. Read the bullets for what they are: an
+ * argument from a file path and a line number, not an observation.
+ *
+ * Those ten serve **five** families, not four — yarn, npm, bundler, pip and
+ * docker — and only four have a verdict below. Three read the standard
+ * variables this build already sets:
  *
  *   * npm: `node_modules/@npmcli/agent/lib/proxy.js:13` builds `PROXY_ENV_KEYS`
  *     as `{https_proxy, http_proxy, proxy, no_proxy}` and lower-cases every
@@ -166,6 +184,16 @@ export interface NetworkProxy {
  * a real gap — but that is from the upstream source, not from this box, and it
  * is left as the one known unknown rather than asserted either way.
  *
+ * **Bundler had no verdict at all, which is why the count above says five and
+ * the verdicts say four.** `BUNDLE_HTTP_PROXY`/`BUNDLE_HTTPS_PROXY` were listed
+ * in the inventory and then never adjudicated, so a reader following the
+ * citations found nothing there. It is recorded here as an **open question, not
+ * a finding**: Bundler's documented per-application proxy setting is
+ * `BUNDLE_*_PROXY`, and whether it also honours the standard variables is not
+ * established by anything in this repository. Until someone reads Bundler's own
+ * source, treat it as a possible second gap alongside yarn, and do not read the
+ * absence of a bullet as a verdict that it is fine.
+ *
  * There is a second order to all of this, and it is the one that decides whether
  * any of the above confines anything: a package manager's **own** proxy option
  * outranks the standard variables inside that tool. `operations.ts` builds the
@@ -177,6 +205,22 @@ export interface NetworkProxy {
  */
 const HTTP_PROXY_KEYS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] as const;
 const SOCKS_PROXY_KEYS = ["ALL_PROXY", "all_proxy"] as const;
+/**
+ * WebSocket and FTP spellings, set alongside the standard ones.
+ *
+ * These six were set by `proxyEnv` but named nowhere in the doc block above,
+ * which counted "the six URL keys in the table below" and then discussed only
+ * the per-tool variables — so the inventory a reader auditing "what does this
+ * inject into a child" was reading six keys and hearing about none of these.
+ *
+ * **Counted, not summed by hand: `proxyEnv` sets twenty-one keys — seventeen
+ * carrying a URL and four set to the empty string.** The seventeen are these
+ * six, the four in `HTTP_PROXY_KEYS`, the two in `SOCKS_PROXY_KEYS` and the
+ * five in `TOOL_PROXY_KEYS` below. This comment said twelve on its first
+ * draft, which counted the first three groups and then listed the fourth and
+ * the no-proxy keys as though they were included; a test now measures the
+ * number rather than trusting it.
+ */
 const EXTRA_HTTP_PROXY_KEYS = ["WS_PROXY", "ws_proxy", "WSS_PROXY", "wss_proxy", "FTP_PROXY", "ftp_proxy"] as const;
 const NO_PROXY_KEYS = ["NO_PROXY", "no_proxy"] as const;
 
@@ -348,10 +392,20 @@ async function handleConnect(
 /**
  * Absolute-form `GET http://host/path` — the shape `HTTP_PROXY` clients use.
  *
- * A client that ignores the proxy environment sends origin-form here instead
- * (`GET /path`), which is not a URL this can place and fails as a malformed
- * host. That is the right answer for it: it was never going through the proxy,
- * and the OS sandbox is what bounds it.
+ * A request in origin-form (`GET /path`) reaches this listener when the client
+ * *is* using a proxy but wrote the request line in the direct form, or connected
+ * here by hand. It is not a URL this can place, so `new URL` throws and it
+ * fails as a malformed host. Failing is right — there is no host to decide
+ * against, and inventing one would be the dangerous move.
+ *
+ * **It is worth being precise about what bounds such a client, because the
+ * obvious answer is wrong on two of three platforms.** A client that ignores
+ * `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` does not reach this listener at all —
+ * it opens its own socket, and this proxy is not in that path. Where an OS
+ * sandbox backend is actually installed it closes that gap; where none is —
+ * Windows, or Linux without bubblewrap — **nothing in this build does**, and
+ * the connection is simply direct. This file says so at the top, and this
+ * paragraph used to imply the opposite without a platform qualifier.
  */
 async function handleHttp(options: NetworkProxyOptions, req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const target = new URL(req.url ?? "");

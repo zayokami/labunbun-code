@@ -67,15 +67,26 @@ import { canWrite, type SandboxPolicy } from "@labunbun/agent";
  * lives in the network section, which is emitted only when the policy enables
  * the network.
  *
- * **Operation names are literals; there is no wildcard in that position.** A
- * `*` there is not "every operation under this prefix", it is an unbound
- * variable — `sandbox-exec` refuses to compile the profile and exits 65, so
- * the symptom is a command that never runs carrying a parser backtrace instead
- * of a program. This file carried `(allow ipc-posix-sysv*)` for a while, and
- * that is not a real operation: the three SysV shared-memory operations are
- * named individually above (`ipc-posix-shm-read-data`, `...-write-create`,
- * `...-write-unlink`) and there is no `ipc-posix-sysv*` form to fall back on.
- * Only the macOS job could find it, because nothing outside a Mac parses SBPL.
+ * **Operation names accept a trailing `*`, and this file depends on it.** The
+ * `(allow process-info*)`, `(allow file-read*)` and `(allow file-write*)` below
+ * and in `READ_BASELINE` are the reason an unlisted path is readable and
+ * unwritable rather than unreadable under `(deny default)` — replacing them with
+ * an enumeration would widen or break the sandbox, so this paragraph used to
+ * say the opposite and was wrong. Chromium's own profile has shipped
+ * `(allow file-read* (subpath (param "USER_HOME_DIR")))`
+ * (`chromium/sandbox/mac/seatbelt_sandbox_design.md:177`).
+ *
+ * What does *not* work is a prefix that names no operation. This file carried
+ * `(allow ipc-posix-sysv*)` for a while, and there is no such family: the SysV
+ * operations hang off `ipc-sysv*`, and the POSIX shared-memory ones are named
+ * individually above (`ipc-posix-shm-read-data`, `...-write-create`,
+ * `...-write-unlink`). An unknown name is an unbound variable —
+ * `sandbox-exec` refuses to compile the profile, so the symptom is a command
+ * that never runs carrying a parser backtrace instead of a program.
+ *
+ * Note what could not have caught either one: the tests here compare generated
+ * strings, and only a Mac parses SBPL, so a name this profile would reject is
+ * invisible to the whole suite.
  */
 const BASE_POLICY = `(version 1)
 (deny default)
@@ -382,16 +393,24 @@ function ancestorsUpTo(path: string, root: string): string[] {
 }
 
 /**
- * The containing directory of an absolute path, with `/` at the root.
+ * The containing directory of an absolute path.
  *
- * It returns `/` there rather than `undefined`, and the type says so — an
- * earlier version of this comment claimed an `undefined` that the signature did
- * not permit, which left a reader looking for a caller that had to handle a case
- * the code could not produce. `ancestorsUpTo` below is where that fiction had
- * already propagated: it declared `string | undefined` and looped on
- * `current !== undefined`, an arm no input could reach, so the walk's real
- * termination condition is `isAtOrBelow` and nothing else. Both are now the
- * shape they actually are.
+ * The return type is `string`, never `undefined` — an earlier version of this
+ * comment claimed an `undefined` the signature did not permit, which left a
+ * reader hunting for a caller that had to handle a case the code could not
+ * produce. `ancestorsUpTo` below is where that fiction had propagated: it
+ * declared `string | undefined` and looped on `current !== undefined`, an arm no
+ * input could reach, so the walk's real termination condition is `isAtOrBelow`
+ * and nothing else. Both are now the shape they actually are.
+ *
+ * **What the root actually yields is `""`, not `/`, and this comment used to say
+ * `/`.** `"/".replace(/\/+$/, "")` is `""`, `lastIndexOf("/")` on that is `-1`,
+ * and the function returns the empty string. Every other input behaves as a
+ * reader would expect — `parentOf("/a")` is `/` — which is why the exception
+ * survived a read. It is not theoretical: the guard in `ancestorsUpTo` carries an
+ * explicit `parent === ""` arm, and that arm exists for this input and no other.
+ * No writable root in this build is `/`, so nothing depends on which of the two
+ * it returns today.
  */
 function parentOf(path: string): string {
 	const trimmed = path.replace(/\/+$/, "");

@@ -269,6 +269,55 @@ describe("startNetworkProxy", () => {
 		}
 	});
 
+	test("the child environment carries every proxy key the doc block inventories", async () => {
+		// The doc block above `HTTP_PROXY_KEYS` once described "the six URL keys"
+		// and then, in a later edit, "twelve" — a number produced by summing three
+		// of the four key groups and listing the fourth as though it were counted.
+		// `proxyEnv` sets twenty-one keys. This pins the inventory's *shape* so the
+		// count in the comment cannot rot, and pins the one thing a count cannot
+		// express: which URL each key carries.
+		//
+		// **The seventeen names are deliberately not listed here.** An assertion that
+		// repeats the same strings as the code proves only that someone typed them
+		// twice; the tool-specific five are already pinned by name in the test below,
+		// which is where a renamed key would actually be caught. What this adds is
+		// the arithmetic the prose now quotes.
+		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("example.com") });
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			const all = Object.keys(proxy.env);
+			// Underscore-insensitive, because the two families are spelled
+			// `NO_PROXY` and `NOPROXY` and a `/nop?roxy/i` test silently matches
+			// only the second — which counts two keys into the wrong bucket and
+			// reports a number that is wrong by exactly those two.
+			const isNoProxyKey = (key: string) => key.replace(/_/g, "").toLowerCase().endsWith("noproxy");
+			const noProxyKeys = all.filter(isNoProxyKey);
+			const urlKeys = all.filter((key) => !isNoProxyKey(key));
+
+			expect(all).toHaveLength(21);
+			expect(urlKeys).toHaveLength(17);
+			// `NO_PROXY`, `no_proxy`, and the two npm spellings. The empty value is
+			// the whole point of setting them at all — see the note on `NO_PROXY_KEYS`
+			// — so a populated one is a fail-open bug, not a cosmetic drift.
+			expect(new Set(noProxyKeys)).toEqual(
+				new Set(["NO_PROXY", "no_proxy", "npm_config_noproxy", "NPM_CONFIG_NOPROXY"]),
+			);
+			for (const key of noProxyKeys) {
+				if (proxy.env[key] !== "") throw new Error(`${key} is set to a value, which exempts hosts from the decision`);
+			}
+			// Exactly two keys carry the SOCKS URL. Everything else — including the
+			// tool overrides, which a caller may believe outranks the standard keys —
+			// has to carry the HTTP URL, or the override points somewhere the policy
+			// never judges.
+			for (const key of urlKeys) {
+				const expected = key === "ALL_PROXY" || key === "all_proxy" ? proxy.socksUrl : proxy.httpUrl;
+				if (proxy.env[key] !== expected) throw new Error(`${key} does not carry ${expected}`);
+			}
+		} finally {
+			await proxy.close();
+		}
+	});
+
 	test("a per-tool proxy override is pinned to the policy's proxy, not left alone", async () => {
 		// The gap the standard keys do not close. `operations.ts` merges
 		// `{...process.env, ...env, ...proxyEnv}`, so an ambient `PIP_PROXY` or
@@ -285,7 +334,13 @@ describe("startNetworkProxy", () => {
 		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("example.com") });
 		if (!proxy) throw new Error("expected a proxy");
 		try {
-			for (const key of ["npm_config_proxy", "NPM_CONFIG_PROXY", "npm_config_https_proxy", "PIP_PROXY"]) {
+			for (const key of [
+				"npm_config_proxy",
+				"NPM_CONFIG_PROXY",
+				"npm_config_https_proxy",
+				"NPM_CONFIG_HTTPS_PROXY",
+				"PIP_PROXY",
+			]) {
 				expect(proxy.env[key]).toBe(proxy.httpUrl);
 			}
 			// The no-proxy half follows the same rule as `NO_PROXY`: empty, so an

@@ -103,10 +103,29 @@ export function buildBwrapArgs(
 
 	const writable = policy.fileSystem.entries.filter((entry) => canWrite(entry.access));
 	const denied = policy.fileSystem.entries.filter((entry) => entry.access === "deny").map((e) => e.path);
-	// Protected paths are read-only, not unreadable: `git status` has to read
-	// `.git`. Readable and writable are separate axes here, and a protected path
-	// is denied only the second — `canRead` in `@labunbun/agent` is
-	// `access !== "deny"`, so "protected" never reaches it.
+	// **`denied` is weaker here than it is on the other two backends, and this is
+	// the whole reason a `deny` entry is not what its name says on Linux.**
+	// `FileSystemAccessMode` documents `deny` as "a path nothing may read"
+	// (`sandbox-policy.ts`), and `canRead` there is `access !== "deny"`. Seatbelt
+	// honours that — `(deny file-read* file-write* (subpath ...))` — and so does
+	// the simulated backend, whose `decideRead` refuses. Bubblewrap has no deny
+	// rule at all: it is purely constructive, arranging mounts, so `--ro-bind` is
+	// the strongest expression available and it leaves the path **readable**.
+	//
+	// There is no ordering or mount trick that fixes this. `--ro-bind / /` above
+	// is recursive, so omitting a subtree does not hide it, and `--tmpfs` would
+	// change what the path appears to be rather than hide it.
+	//
+	// **It is unreachable today and that is checked, not assumed:**
+	// `buildSandboxPolicy` emits only `"write"` and `"read"` (`sandbox-policy.ts`
+	// pushes those two and nothing else), so no policy this build constructs
+	// carries a `deny`. The tests reach one by hand, which is how this was found.
+	// If a caller ever starts building one, this line is where the gap lives and
+	// the fix has to happen in the policy, not here.
+	//
+	// Protected paths are a different case and are correct: read-only, not
+	// unreadable, because `git status` has to read `.git`. `canRead` never sees
+	// them, because they arrive as `policy.protected` and never as a `deny` entry.
 	const protectedPaths = policy.protected;
 
 	return [
@@ -127,6 +146,8 @@ export function buildBwrapArgs(
 		// an earlier one at the same path, and this is the ordering that protects
 		// `.git`. See the file header.
 		...writable.flatMap((entry) => ["--bind", entry.path, entry.path]),
+		// Readable, not hidden — see the note on `denied` above. This is the
+		// strongest thing bubblewrap can say, and it is not what `deny` means.
 		...denied.flatMap((path) => ["--ro-bind", path, path]),
 		...protectedPaths.flatMap((path) => readOnlyPathArgs(path, exists)),
 		...namespaceArgs(policy.network),

@@ -66,6 +66,19 @@ export type FileSystemSandboxKind = "restricted" | "unrestricted";
  * `write` implies `read`: a path nothing may read is expressed as `deny`
  * rather than as an entry that is simply absent, because "absent" and "denied"
  * mean different things to a backend and only the second is unambiguous.
+ *
+ * **`deny` is unambiguous on two of the three backends, and the third cannot
+ * express it.** Seatbelt emits `(deny file-read* file-write* (subpath ...))`
+ * and the simulated backend's `decideRead` refuses outright, so both match
+ * `canRead` below. Bubblewrap is purely constructive — it arranges mounts and
+ * has no deny rule — so it can only bind such a path read-only, leaving it
+ * readable. That is the strongest expression the backend offers and it is
+ * **not** what `deny` means; the gap is documented where it happens, in
+ * `packages/tools/src/sandbox/bwrap.ts`.
+ *
+ * Nothing this build constructs reaches it: `buildSandboxPolicy` emits only
+ * `"write"` and `"read"`. The distinction is recorded here because a caller
+ * that hand-builds a policy would otherwise reasonably believe otherwise.
  */
 export type FileSystemAccessMode = "read" | "write" | "deny";
 
