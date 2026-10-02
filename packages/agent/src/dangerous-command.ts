@@ -2618,6 +2618,10 @@ const POSIX_ACCOUNT_PROGRAMS: ReadonlyMap<string, string> = new Map([
 	["adduser", "creates an account, which is a way back into this machine"],
 	["usermod", "changes an account, which can hand it more than it had"],
 	["userdel", "deletes an account"],
+	// The group half of the same act, and here for the reason `adduser` is beside
+	// `useradd`: a table that named the account half and left this out would look
+	// complete and would be half of it.
+	["groupdel", "deletes a group"],
 	["chpasswd", "sets account passwords, which can lock every account's owner out"],
 	// `setcap` is the file-capability spelling of the same grant: the bit stays on
 	// the file after its owner changes and after the set-user-ID bit is stripped,
@@ -6736,7 +6740,51 @@ function containerToolRules(tokens: string[], platform: DangerousCommandPlatform
 }
 
 function developmentToolRules(tokens: string[], platform: DangerousCommandPlatform): DangerousCommandMatch | null {
-	return gitRules(tokens, platform) ?? containerToolRules(tokens, platform);
+	return gitRules(tokens, platform) ?? containerToolRules(tokens, platform) ?? syncToolRules(tokens);
+}
+
+/**
+ * `rsync`'s deletion flag — the one thing on the line that decides whether the
+ * command is a copy or a removal.
+ *
+ * Upstream `rsync.1.md` gives `--delete` as "delete extraneous files from the
+ * receiving side (those that don't exist on the sending side), but only for the
+ * directories that are being synchronized", and its own warning is "This option
+ * can be dangerous if used incorrectly!".
+ *
+ * The test is the `--delete` **prefix** rather than an enumeration, because the
+ * same file documents seven spellings today — `--delete`, `--delete-before`,
+ * `--delete-during`, `--delete-delay`, `--delete-after`, `--delete-excluded`,
+ * `--delete-missing-args`, plus `--del` as a documented synonym for
+ * `--delete-during` — and every one of them deletes. A list would be a second
+ * thing to fall behind a new flag. `--del` is the exception the prefix cannot
+ * reach and is named because the manual names it.
+ *
+ * `--dry-run` is the exemption and it is the manual's own: "It is a very good
+ * idea to first try a run using the `--dry-run` (`-n`) option to see what files
+ * are going to be deleted." {@link isDryRun} already knows both spellings, and
+ * its short-option branch cannot mistake `--delete-during` for a dry run, since
+ * that branch skips anything starting with `--`.
+ *
+ * What this deliberately does **not** require is the `-r`/`-d` the same
+ * document names as the condition for `--delete` to have any effect ("This
+ * option has no effect unless either `--recursive` or `--dirs` is enabled").
+ * Honouring it would mean expanding `-a`, which implies `-r` — a second grammar
+ * to keep right, to save a warning on a line where rsync itself would have
+ * deleted nothing.
+ */
+function syncToolRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program !== "rsync") return null;
+
+	const args = tokens.slice(1);
+	if (!args.some((arg) => arg.startsWith("--delete") || arg === "--del")) return null;
+	if (isDryRun(args)) return null;
+
+	return {
+		kind: "Other",
+		rule: "`rsync --delete`, which deletes the files at the destination that are not at the source",
+	};
 }
 
 /**

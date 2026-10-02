@@ -3469,6 +3469,89 @@ describe("POSIX: volume managers", () => {
 	});
 
 	/**
+	 * `rsync --delete` is a copy until that flag is on the line, and the rows
+	 * below are the eight documented spellings of it.
+	 *
+	 * The test is the `--delete` prefix rather than an enumeration, so what these
+	 * rows hold is that **every** spelling in `rsync.1.md` is caught — including
+	 * `--del`, which the prefix cannot reach and which is named because the manual
+	 * names it. A prefix that matched something harmless would be caught here too;
+	 * there is no `--delete-*` in the manual that does not delete.
+	 */
+	test.each([
+		["rsync -a --delete src/ dst/", "the flag itself"],
+		["rsync --delete src/ dst/", "with no other options at all"],
+		["rsync -av --delete user@host:/var/ /var/", "onto a remote target"],
+		["rsync -a --delete-before src/ dst/", "--delete-before"],
+		["rsync -a --delete-during src/ dst/", "--delete-during"],
+		["rsync -a --del src/ dst/", "the manual's own synonym for --delete-during"],
+		["rsync -a --delete-delay src/ dst/", "--delete-delay"],
+		[
+			"rsync --delete-delay src/ dst/",
+			"and that one on its own, which is the spelling a prefix alone would still catch",
+		],
+		["rsync -a --delete-after src/ dst/", "--delete-after"],
+		["rsync -a --delete-excluded src/ dst/", "--delete-excluded"],
+		["rsync -a --delete-missing-args src/ dst/", "--delete-missing-args"],
+		["rsync -a --delete --delete-delay src/ dst/", "the combination rsync's own docs suggest"],
+		["rsync --delete-before --recursive src/ dst/", "with the --recursive the manual names as its precondition"],
+	])("%s — %s", (command) => {
+		expect(posix(command)?.rule).toContain("deletes the files at the destination");
+	});
+
+	/**
+	 * The dry run is the manual's own recommendation — "It is a very good idea to
+	 * first try a run using the `--dry-run` (`-n`) option to see what files are
+	 * going to be deleted" — and both spellings have to be honoured.
+	 *
+	 * `--delete-during` is here as the counterweight: it is a deletion flag whose
+	 * own name contains `n`, so a dry-run check that scanned short options for an
+	 * `n` without first excluding the `--` spellings would exempt it.
+	 */
+	test.each([
+		["rsync -n --delete src/ dst/", "the short spelling"],
+		["rsync -a --dry-run --delete src/ dst/", "and the long one"],
+		["rsync -a src/ dst/", "a plain copy, which is the ordinary case"],
+		["rsync -av src/ dst/", "with verbosity"],
+		// A filter whose *value* says delete. `--exclude=delete-me` is an ordinary
+		// rsync line — excluding a path called `delete-me` is not deleting anything —
+		// and it is what separates the `--delete` **prefix** from a substring test:
+		// `includes("delete")` fires on all three of these and the prefix fires on
+		// none, so these rows are what hold the difference.
+		["rsync -a --exclude=delete-me src/ dst/", "an --exclude whose value says delete"],
+		["rsync -a --exclude delete-me src/ dst/", "and the same value as its own word"],
+		["rsync -a --filter=':- delete-me' src/ dst/", "inside a filter rule"],
+		["rsync --version", "and no transfer at all"],
+	])("%s — %s, and stays quiet", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	test("`scp` is not `rsync`", () => {
+		expect(posix("scp file host:/tmp/x")).toBeNull();
+	});
+
+	/**
+	 * `groupdel` is the group half of what `userdel` already covers, and it is here
+	 * for the reason `adduser` sits beside `useradd`: a table that named the
+	 * account half and left this out would look complete and be half of it.
+	 */
+	test.each([
+		["groupdel dev", "the plain spelling"],
+		["groupdel -f dev", "with the force flag, which changes only the complaints"],
+		["sudo groupdel dev", "behind sudo"],
+	])("%s — %s", (command) => {
+		expect(posix(command)?.rule).toBe("`groupdel`, which deletes a group");
+	});
+
+	test.each([
+		["groupadd dev", "which creates the group rather than removing it"],
+		["groups", "a listing"],
+		["newgrp dev", "which joins a group for this shell only"],
+	])("%s — %s, and stays quiet", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
 	 * `blkdiscard`'s device is matched by shape rather than by position.
 	 *
 	 * The synopsis is `blkdiscard [options] [-o offset] [-l length] device`, so
