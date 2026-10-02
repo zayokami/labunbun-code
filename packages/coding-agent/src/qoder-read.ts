@@ -271,6 +271,47 @@ const MAX_CREDENTIAL_SCAN_DEPTH = 8;
 const QODER_SECRET_KEY = /authorization/i;
 
 /**
+ * Settings keys whose value is a **map from a user-chosen name to an entry**.
+ *
+ * **The distinction this set exists to draw is between a key that names a slot and
+ * a key that names a thing.** `headers.authorization` is a slot: the credential is
+ * under it, and deleting it removes the credential and nothing else.
+ * `mcpServers.keyboard-mcp` is not a slot — it is the *name of an MCP server the
+ * user created*, and deleting it deletes the server, its command, its arguments
+ * and its working directory, none of which is a secret. A server called
+ * `keyboard-mcp` is an ordinary thing to want; `looksLikeSecretName` matches `KEY`
+ * inside it and the naive walk took that as a finding.
+ *
+ * **So the scrub's job is to drop credential-shaped keys *inside* an entry and
+ * never the entry itself**, and that is what the recursion below does for these
+ * keys: the map's own keys are walked through, each entry's contents are scrubbed
+ * normally, and the name is left alone. `headers.authorization` and
+ * `env.API_TOKEN` still go, each with its own `skipped` line carrying the full
+ * path — which is the guarantee `planQoderMcp` depends on, and why its "a name
+ * that reads as a credential was already gone" comment stays true of `env`'s
+ * *contents* while no longer being true of the server's own name.
+ *
+ * **The membership is derived rather than guessed, from two facts in the product.**
+ *
+ *   - The six {@link QODER_MERGE_SHALLOW} keys are the keys the SDK's own merge
+ *     treats as one level deep (`Object.assign` over the top-level map rather than
+ *     a walk into each value). A key the product merges *by its own names* is a
+ *     map the user keys by hand, which is the property this set needs.
+ *   - `hooks` is map-shaped too and is not in that list: the merge concatenates
+ *     each event's group arrays (`path.length === 2 && path[0] === "hooks"`),
+ *     which is a per-name merge by a different rule. It belongs here for the same
+ *     reason, and the reader's own note that `hGr` takes *any* key of `hooks` as
+ *     an event name makes it the sharpest case: an event named
+ *     `StopSessionSecret` would otherwise take its handlers with it.
+ *
+ * Nothing attested in Qoder's eighteen `QODER_HOOK_EVENTS` matches a credential
+ * word today — checked name by name against both matchers — so this is not a live
+ * loss for the hooks block. But the names are the user's, the product does not
+ * enumerate them, and the exemption costs nothing.
+ */
+const QODER_ENTRY_MAP_KEYS: ReadonlySet<string> = new Set([...QODER_MERGE_SHALLOW, "hooks"]);
+
+/**
  * Remove every credential-shaped key from a parsed document, recording each by
  * path and never touching the value.
  *
@@ -279,6 +320,12 @@ const QODER_SECRET_KEY = /authorization/i;
  * than a step — and it is written as one because a guard nobody can see is not a
  * guard. The names go into `skipped`; the values are dropped on the floor, so a
  * credential can never reach a planner, a plan, a report or a written file.
+ *
+ * **The one thing this function gets wrong is a map treated as a generic object**,
+ * and {@link QODER_ENTRY_MAP_KEYS} is what it gets right: below one of those keys
+ * the immediate children are names the user chose, so they are stepped over and
+ * only the entries' own keys are matched. Everything else about the walk is
+ * unchanged — same depth cap, same `skipped` labels, same reason string.
  *
  * Depth-limited at {@link MAX_CREDENTIAL_SCAN_DEPTH}, documented there because
  * the depth is where this function could be wrong.
@@ -297,6 +344,18 @@ function scrubQoderCredentials(value: Record<string, unknown>, into: QoderSkippe
 					reason: "looks like a credential — name only, value never read",
 				});
 				delete node[key];
+				continue;
+			}
+			// A map keyed by a name the user chose. The key above was still tested and
+			// still deleted if it matched — `mcpServers` does not, and a settings file
+			// whose top level carried `apiKey` still loses it. What is exempt is the
+			// *next* level: these are the map's own keys, so each is stepped over and
+			// only the entry's contents are scrubbed.
+			if (QODER_ENTRY_MAP_KEYS.has(key)) {
+				if (!isRecord(nested)) continue;
+				for (const [entryName, entry] of Object.entries(nested)) {
+					walk(entry, [...path, key, entryName], depth + 1);
+				}
 				continue;
 			}
 			walk(nested, [...path, key], depth + 1);
