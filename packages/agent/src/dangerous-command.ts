@@ -901,6 +901,49 @@ const DOCKER_COMPOSE_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 	"--workdir",
 	"-w",
 ]);
+
+/**
+ * Options that swallow the word after them, for `docker compose run`.
+ *
+ * `docker/compose` `cmd/compose/run.go:227-249`, twenty-five flags of which
+ * twelve take a value. The thirteen that do not are `--build`, `--detach`/`-d`,
+ * `--interactive`/`-i`, `--no-deps`, `--no-tty`/`-T`, `--quiet`/`-q`,
+ * `--quiet-build`, `--quiet-pull`, `--remove-orphans`, `--rm`,
+ * `--service-ports`/`-P`, `--tty`/`-t` and `--use-aliases`; `-t/--tty` is
+ * `MarkHidden`ed at `:253` and hidden is not unregistered, and it is still a
+ * `BoolP`.
+ *
+ * **`--volumes` and `--labels` are here and there is no registration for
+ * either.** `run.go:255` sets `flags.SetNormalizeFunc(normalizeRunFlags)`, and
+ * that function rewrites a plural to its singular before pflag looks the flag
+ * up (`volumes`→`volume`, `labels`→`label`, `no-TTY`→`no-tty`), so both
+ * spellings are live and both take the next word. A set built only from the
+ * registration lines misses the plurals, which are the spelling the help text
+ * does not show.
+ */
+const DOCKER_COMPOSE_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--cap-add",
+	"--cap-drop",
+	"--entrypoint",
+	"--env",
+	"-e",
+	"--env-from-file",
+	"--label",
+	"-l",
+	"--labels",
+	"--name",
+	"--publish",
+	"-p",
+	"--pull",
+	"--user",
+	"-u",
+	"--volume",
+	"--volumes",
+	"-v",
+	"--workdir",
+	"-w",
+]);
+
 /**
  * Options that swallow the word after them, for `podman exec`.
  *
@@ -985,7 +1028,8 @@ const PODMAN_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * program name in the usage strings differs.
  *
  * Still to be measured on their own source before they are written down:
- * `docker compose run`, `nerdctl run`, `podman run`,
+ * `nerdctl run`, `podman run` (whose flags live in `pkg/specgen` rather than in
+ * the command file), the hyphenated `docker-compose`,
  * `wsl` (whose bare form hands the rest to a login shell rather than exec'ing it,
  * so it is not this shape), `machinectl shell`, `multipass exec`,
  * `limactl shell`. A name that is not here is not followed at all.
@@ -1056,6 +1100,18 @@ const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new M
 	["docker container exec", { positionals: 1, valueOptions: DOCKER_EXEC_VALUE_OPTIONS }],
 	["nerdctl exec", { positionals: 1, valueOptions: NERDCTL_EXEC_VALUE_OPTIONS }],
 	["docker compose exec", { positionals: 1, valueOptions: DOCKER_COMPOSE_EXEC_VALUE_OPTIONS }],
+	// `docker compose run` is the same one-positional shape with the **service** in
+	// the operand's place — `run.go:171` is `options.Service = args[0]` with
+	// `options.Command = args[1:]` at `:173` — and `SetInterspersed(false)` at `:256`.
+	//
+	// It is reachable only when the subcommand is the **first** word after `compose`.
+	// Compose's project-wide flags (`--profile`, `-f/--file`, `-p/--project-name`)
+	// are attached to the root command's *local* set at `compose.go:577`
+	// (`opts.addProjectFlags(c.Flags())`, not `PersistentFlags()`), so cobra does
+	// not inherit them and `docker compose --profile x run web rm -rf /` is not a
+	// line this table can see: `remote compose --profile` is not a key. That is a
+	// miss, recorded here rather than papered over.
+	["docker compose run", { positionals: 1, valueOptions: DOCKER_COMPOSE_RUN_VALUE_OPTIONS }],
 	// `docker run` is the same one-positional shape as `docker exec` — the operand
 	// is the **image** rather than a running container — and it is worth its own
 	// carrier mostly because its flag set is ninety-three entries long. Without that

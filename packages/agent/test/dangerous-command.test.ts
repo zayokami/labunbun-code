@@ -3762,6 +3762,20 @@ describe("POSIX: volume managers", () => {
 			"docker run --kernel-memory 100m ubuntu rm -rf /",
 			"and --kernel-memory, registered over a stub and deprecated, which still parses and still eats a word",
 		],
+		["docker compose run --rm web rm -rf /", "compose run, whose positional is the service"],
+		[
+			"docker compose run --volumes /srv:/srv web rm -rf /",
+			"and --volumes, which is not a registration anywhere: `normalizeRunFlags` rewrites the plural onto `--volume` before pflag looks it up",
+		],
+		["docker compose run --labels a=b web rm -rf /", "and --labels, the other spelling that normalizer invents"],
+		[
+			"docker compose run --env-from-file .env web rm -rf /",
+			"and --env-from-file, which is compose's own spelling; docker run's is `--env-file`",
+		],
+		[
+			"docker compose run --entrypoint /bin/sh web rm -rf /",
+			"and --entrypoint, whose value is a program name rather than a setting",
+		],
 		// A `--` is optional for all of these but legal. It is **skipped**, not
 		// treated as the end of option parsing, because pflag's real behaviour there
 		// costs detections — see the note in `remoteCommandScript`. What that buys is
@@ -3865,6 +3879,11 @@ describe("POSIX: volume managers", () => {
 		["docker run -it --rm ubuntu bash", "and a shell, which is the ordinary thing the flags above are written for"],
 		["docker run -it ubuntu sh -c 'cd /srv && ls'", "and a quoted script body, through the newest table"],
 		["docker ps", "and docker on its own still runs nothing anywhere"],
+		[
+			"docker compose --profile prod run web rm -rf /",
+			"a compose global flag *before* the subcommand, which no key in the table can reach: `compose.go:577` attaches the project flags to the root's local set rather than to its persistent one, so the lookup reads `docker compose --profile` and stops. Recorded as a miss rather than hidden",
+		],
+		["docker compose run web ls", "an ordinary compose run"],
 		["ssh host --", "a separator with nothing after it, which the `--` rule has to agree with"],
 		[
 			"ssh host sh -c 'echo hello'",
