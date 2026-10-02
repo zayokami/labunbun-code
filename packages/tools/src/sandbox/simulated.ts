@@ -98,6 +98,36 @@ export function caseInsensitiveSandboxPaths(platform: string = process.platform)
  * with no filesystem access. It is the right answer when the caller has
  * already canonicalised and the two platforms' case rules agree, and it is
  * not consulted here because the layer that *has* a filesystem should use it.
+ *
+ * **What the `.git` protection here actually is, measured rather than
+ * assumed.** The first loop below refuses `policy.protected`, and that is a
+ * *list*, not a rule about path shapes. For every policy
+ * `buildSandboxPolicy` produces in `workspace-write` the list is never empty:
+ * `protectedFor` adds `join(root, ".git")` for every writable root
+ * unconditionally, so `.git/config` is refused here on its own — a claim that
+ * was false of an earlier version of this comment and of `write.ts` beside it,
+ * and is asserted in `sandbox-simulated.test.ts` against a policy built with
+ * no `protectedPaths` passed at all, so it is the derivation doing the work
+ * rather than a test fixture supplying the answer.
+ *
+ * So this function is **not** a second copy of `guardWritablePath`'s rule, and
+ * it is deliberately not made into one. It cannot answer for a `.git` the list
+ * does not carry: one under `node_modules`, one deeper than the scan's four
+ * segments, or one spelled `".git "` / `".git."` (the trim the guard added for
+ * shares that strip trailing dots and spaces — `containment.ts:139-140`, and
+ * `findProtectedPaths` matches the exact name, so none of the three reaches
+ * `protected`). And under `danger-full-access` it runs no rule at all, by the
+ * branch below and by `describeSimulatedSandbox`, whose one-line summary tells
+ * the user every path including `.git` is writable.
+ *
+ * Giving it the guard's shape would therefore cost a second source of truth,
+ * break a documented and tested meaning of the mode that turns the sandbox
+ * off, and make `decideRead` the odd one out — it applies no protected list at
+ * all, on purpose, because reading history is ordinary work. Both write call
+ * sites run `guardWritablePath` first and unconditionally (`write.ts:55`,
+ * `edit.ts:40`), and the cases only that guard can catch are driven through a
+ * real Write and Edit in `tools.test.ts`, so deleting either call there goes
+ * red.
  */
 export function decideWrite(
 	policy: SandboxPolicy,
@@ -183,9 +213,12 @@ export function decideWrite(
  * Kept beside the write decision rather than in the caller because the two
  * answer different questions about the same entry, and a caller that derived
  * "readable" from "writable" would refuse to read a read-only root — the one
- * place a read-only root is useful. The `.git` rule is *not* applied here:
- * reading history, diffs, and logs is ordinary work, which is why
- * `guardWritablePath` refuses it for writes and leaves reads alone too.
+ * place a read-only root is useful. The `.git` protection is *not* applied
+ * here: reading history, diffs, and logs is ordinary work, which is why the
+ * write side refuses it — twice over, by `policy.protected` here and by
+ * `guardWritablePath`'s path match beside it — and the read side leaves it
+ * alone. A `read` entry naming `.git` is what would make it readable *and*
+ * unreachable through this function; nothing builds one.
  */
 export function decideRead(
 	policy: SandboxPolicy,

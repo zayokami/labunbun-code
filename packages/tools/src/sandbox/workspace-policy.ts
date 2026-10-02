@@ -40,13 +40,13 @@ import { findProtectedPaths } from "./protected-paths.ts";
  * process cannot list loses every repository, and the policy that comes back
  * protects nothing at all." That is false, and false in the direction that
  * matters most for a reader deciding whether they are protected. `protectedFor`
- * in `sandbox-policy.ts:258-266` adds `join(root, ".git")` for every writable
+ * in `sandbox-policy.ts:304-315` adds `join(root, ".git")` for every writable
  * root unconditionally, after the scan result is in hand — so the top-level
  * repository is derived, not found, and a scan that returns nothing still leaves
  * it in the policy. Two tests assert it from opposite directions:
  * `sandbox-policy.test.ts:34-50` ("derives `.git` rather than waiting to find
  * it" — two cases, an empty scan and a second writable root) against the policy
- * itself, and `sandbox-simulated.test.ts:353-357` from the layer that consumes
+ * itself, and `sandbox-simulated.test.ts:443-447` from the layer that consumes
  * it.
  *
  * What the scan *is* for is repositories **below** the root, and it is narrower
@@ -66,8 +66,10 @@ import { findProtectedPaths } from "./protected-paths.ts";
  *     `bwrap` and `sandbox-exec` protecting the workspace's own `.git` and
  *     nothing else — the kernel confinement is real and what it confines is
  *     partly missing.
- *   - **Write and Edit** are unaffected by this list entirely, because
- *     `containment.ts` matches on the path and never consults one.
+ *   - **Write and Edit** are unaffected by this list: `decideWrite` reads it,
+ *     but `guardWritablePath` in front of it matches the path and refuses
+ *     every `.git` whatever the list says, so an empty scan cannot change
+ *     what either tool does.
  *   - `rm -rf .git` is still refused, by the dangerous-command classifier, which
  *     is also a list — but one that is not this list.
  */

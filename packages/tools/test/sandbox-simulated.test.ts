@@ -151,6 +151,96 @@ describe("decideWrite: the denials name a rule and a resolved path", () => {
 	});
 });
 
+// Every test above names `protectedPaths` explicitly, so every one of them is
+// answered by a fixture the caller supplied. These build the policy the way
+// production does — `buildSandboxPolicy`, no `protectedPaths` — and ask what
+// `decideWrite` says with **no `guardWritablePath` in front of it**.
+//
+// That is the case an audit of this function kept getting backwards: it read
+// `guardWritablePath` as the only `.git` check and reported `decideWrite` as
+// allowing `.git/config`. It does not. `protectedFor`
+// (`sandbox-policy.ts:307-313`) adds `join(root, ".git")` for every writable
+// root unconditionally, so the derivation alone refuses it with no scan and no
+// fixture — measured, and the rows below are the measurement. A comment in
+// `write.ts` and another here both asserted the opposite for a while, and a
+// false comment about who protects what is worse than no comment: it sends the
+// next reader to re-derive a protection that already exists.
+describe("decideWrite alone, on the policy production builds, with no guard in front of it", () => {
+	const policy = buildSandboxPolicy({ sandbox: "workspace-write", workspace: WORKSPACE });
+
+	// The control, and the reason the derivation is what is being measured: with
+	// no scan and no explicit list, this policy still carries exactly one
+	// protected path, and it is the workspace's own `.git`.
+	test("the derivation alone puts the workspace's .git in protected", () => {
+		expect(policy.protected).toEqual([`${WORKSPACE}/.git`]);
+	});
+
+	test("refuses .git/config, .git itself, and a hook, with no scan and no fixture", () => {
+		for (const candidate of [".git/config", ".git", ".git/hooks/pre-commit"]) {
+			const decision = decideWrite(policy, candidate, WORKSPACE);
+			expect(decision.allowed).toBe(false);
+			expect(decision.reason).toContain("version-control metadata");
+			expect(decision.reason).toContain(`${WORKSPACE}/.git`);
+		}
+	});
+
+	// Canonicalisation, so the claim covers the spellings rather than the one
+	// literal. `sub/../.git/config` is the shape that reaches the same directory
+	// by a different route, and `.GIT` is the one that only the platform
+	// parameter can answer: a case-sensitive filesystem has two different
+	// directories there, and folding on one of them would refuse more than it
+	// should. Both platforms are asserted because the file this is not can only
+	// be checked on the machine it names.
+	test("refuses the same directory spelled through a .., and through case where the platform folds", () => {
+		expect(decideWrite(policy, "sub/../.git/config", WORKSPACE).allowed).toBe(false);
+		expect(decideWrite(policy, `${WORKSPACE}/.GIT/config`, WORKSPACE, { platform: "win32" }).allowed).toBe(false);
+		expect(decideWrite(policy, `${WORKSPACE}/.GIT/config`, WORKSPACE, { platform: "darwin" }).allowed).toBe(false);
+		expect(decideWrite(policy, `${WORKSPACE}/.GIT/config`, WORKSPACE, { platform: "linux" }).allowed).toBe(true);
+	});
+
+	// The over-block side, which rots silently and is easy to cause. Every one of
+	// these spells `.git` and is a real thing to write: a GitHub workflow is the
+	// whole reason this repository has CI, `.gitignore` and `.gitattributes` are
+	// ordinary source, and `src/x.git/config.ts` is a directory with `.git` in its
+	// name rather than a repository. A rule that swallowed any of them would
+	// still pass every refusal above.
+	test("still writes the things whose names merely start with .git", () => {
+		for (const candidate of [
+			".github/workflows/ci.yml",
+			".gitignore",
+			".gitattributes",
+			".gitmodules",
+			"src/.gitignore",
+			"src/x.git/config.ts",
+			"build/output.",
+		]) {
+			expect(decideWrite(policy, candidate, WORKSPACE).allowed).toBe(true);
+		}
+	});
+
+	// The other half, pinned so the two comments above are checkable rather than
+	// aspirational. These are real and are asserted as ALLOW on purpose: the
+	// protected list is a scan plus a derivation, and none of these three reaches
+	// it — `node_modules` is where the scan stops, four segments is how deep it
+	// goes, and the trim that catches `".git "` exists only in
+	// `guardWritablePath`, which matches the path and needs no list.
+	//
+	// If someone gives `decideWrite` the guard's shape, these three go red and
+	// say so, which is the intended way to find out: it is a real behaviour
+	// change, not a silent tightening. `tools.test.ts` covers the same three
+	// through real Write and Edit calls, so the guard is still what stops them.
+	test("allows the three shapes the list cannot carry, which is what the guard is for", () => {
+		expect(decideWrite(policy, ".git /config", WORKSPACE).allowed).toBe(true);
+		expect(decideWrite(policy, ".git./config", WORKSPACE).allowed).toBe(true);
+		expect(decideWrite(policy, "node_modules/left-pad/.git/config", WORKSPACE).allowed).toBe(true);
+		// Depth, past `DEFAULT_PROTECTED_SCAN_DEPTH`. Named here rather than
+		// imported so the row fails if the bound moves and the comment does not.
+		expect(decideWrite(policy, "a/b/c/d/e/f/.git/config", WORKSPACE).allowed).toBe(true);
+		// And the control for the row above: the same depth, no `.git`.
+		expect(decideWrite(policy, "a/b/c/d/e/f/config", WORKSPACE).allowed).toBe(true);
+	});
+});
+
 describe("decideWrite: the candidate is canonicalised, not string-matched", () => {
 	const TRAVERSAL: Array<[given: string, label: string, expected: string]> = [
 		["sub/../.git/config", "a .. that lands in .git", `${WORKSPACE}/.git/config`],
