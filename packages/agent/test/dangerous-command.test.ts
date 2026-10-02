@@ -3639,6 +3639,40 @@ describe("POSIX: volume managers", () => {
 		["kubectl run nginx --image=nginx -- rm -rf /", "with the separator"],
 		["kubectl run nginx --image=nginx rm -rf /", "and without it, which upstream takes silently"],
 		["oc run demo --image=demo -- rm -rf /", "and the oc spelling"],
+		// `run`'s value flags, in the form that actually distinguishes them. The
+		// glued `--image=nginx` above is a single token and needs no table at all,
+		// which is exactly why an empty table passed those rows and shipped.
+		// The separated form is what a person types and what the value table is for.
+		[
+			"kubectl run x --image nginx rm -rf /",
+			"--image is MarkFlagRequired, so this table is on every run that reaches a payload at all",
+		],
+		["kubectl run x --labels app=web --image nginx rm -rf /", "two value flags, in order"],
+		["kubectl run x -n kube-system --image nginx rm -rf /", "a global flag between the name and the payload"],
+		["kubectl run x --overrides '{}' --image nginx rm -rf /", "and another"],
+		["kubectl run x --image nginx -o yaml rm -rf /", "a value flag *after* the image, from the shared print flags"],
+		["kubectl run x --image nginx --timeout 5s rm -rf /", "and one from the shared delete flags"],
+		[
+			"kubectl run x --token hunter2 --image nginx rm -rf /",
+			'`--token` because kubectl\'s constant is `flagBearerToken = "token"`; the identifier would have suggested `--bearer-token`, which does not exist',
+		],
+		["oc run x --image nginx rm -rf /", "the oc spelling in the separated form"],
+		// The other direction, and the reason the table is a *set* rather than every
+		// string-typed flag: a bool, or a string given a NoOptDefVal, leaves the very
+		// next word alone, so the dangerous word is the command.
+		[
+			"kubectl run x --image nginx --rm rm -rf /",
+			"--rm is BoolVar, so it swallows nothing and the payload is right there",
+		],
+		["kubectl run x --image nginx --privileged rm -rf /", "--privileged likewise"],
+		[
+			"kubectl run x --image nginx -i rm -rf /",
+			"and -i, which is --stdin here, not the delete command's --interactive",
+		],
+		[
+			"kubectl run x --image nginx --dry-run rm -rf /",
+			'--dry-run is StringVar but is given NoOptDefVal="unchanged", so pflag takes the default and leaves `rm` alone',
+		],
 		["sudo nsenter -t 1 rm -rf /", "behind sudo, which unwraps to the same line"],
 		["ssh host chroot /newroot rm -rf /", "one carrier inside another"],
 		// ssh itself, unchanged: the port is the next word and is skipped, the
@@ -3686,6 +3720,18 @@ describe("POSIX: volume managers", () => {
 		],
 		["kubectl delete pod x", "and neither is `kubectl delete`"],
 		["kubectl run nginx --image=nginx", "a run with no command at all"],
+		[
+			"kubectl run x --image nginx ls",
+			"a run with a harmless command, which is the ordinary use of the one flag `run` requires",
+		],
+		[
+			"kubectl run x --image nginx --dry-run ls",
+			"and with a string flag that has a NoOptDefVal in front of a harmless command",
+		],
+		[
+			"kubectl run x --image nginx --cascade background rm -rf /",
+			"the other NoOptDefVal flag, and the subtler half of the same rule: `--cascade` does not take the word after it, so `background` is not consumed — pflag's `parseArgs` (`flag.go:1137`) files it under the positional args and it becomes the container's argv[0] at `run.go:327-330`. Putting `--cascade` in the table would read `rm -rf /` as *its* value and miss the payload",
+		],
 		["kubectl exec pod --", "a separator with nothing after it"],
 		["kubectl exec pod rm -rf /", "no separator, which exec.go:243-249 rejects before a container sees it"],
 		["docker run -it ubuntu rm -rf /", "docker is not in the carrier table yet, and is not borrowed from ssh"],

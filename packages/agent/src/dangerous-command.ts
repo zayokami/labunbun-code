@@ -586,6 +586,102 @@ const SYSTEMD_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Options that swallow the word after them, for `kubectl run` and `oc run`.
+ *
+ * This is the one table here that is not a simple read-out of a single option
+ * list, because cobra assembles `run`'s flags from five places, and each one was
+ * read separately rather than merged by name:
+ *
+ * | source | registered at | contributes |
+ * | --- | --- | --- |
+ * | `pkg/cmd/run/krun.go` `addRunFlags` | `krun.go:191-212` | `--annotations` `--image` `--image-pull-policy` `--env` `--port` `-l/--labels` `--restart` `--detach-keys` `--field-manager` |
+ * | `pkg/cmd/util/override_options.go` | `override_options.go:50-51` | `--overrides` `--override-type` |
+ * | `pkg/cmd/util/helpers.go` | `helpers.go:517` | `--pod-running-timeout` |
+ * | `cmddelete.DeleteFlags`, `PrintFlags`, `RecordFlags` | `krun.go:177-179` | `--field-selector` `--grace-period` `--timeout` `--raw` `-o/--output` |
+ * | `genericclioptions.ConfigFlags` | `config_flags.go:374-440` | the twenty globals below |
+ *
+ * The last row's literals are the resolved `const` block at `config_flags.go:42-62`,
+ * not the identifiers at the call sites — `flagBearerToken` is `"token"`, and
+ * transcribing the identifier would have written a `--bearer-token` that does not
+ * exist and left the real one out.
+ *
+ * **Two value-typed flags are deliberately absent, and both absences are the
+ * interesting part.** `--dry-run` (`helpers.go:500`) and `--cascade`
+ * (`delete_flags.go:140`) are registered as strings and then given a
+ * `NoOptDefVal`, and pflag v1.0.10 treats that as "this flag may appear with no
+ * value" — `parseLongArg` (`flag.go:980+`) tests `flag.NoOptDefVal != ""` *before*
+ * it reaches the `len(a) > 0` branch that would take the next word, and
+ * `parseSingleShortArg` does the same. So `kubectl run x --image nginx --dry-run
+ * rm -rf /` leaves `rm -rf /` as the payload, and a table that believed
+ * `--dry-run` swallowed a word would read `-rf /` as the command and find nothing
+ * in it. **A flag's declared type is not its arity; the `NoOptDefVal` override is.**
+ *
+ * The word *after* such a flag is not discarded either — `parseArgs` (`flag.go:1137`)
+ * files it under the positional args — so `kubectl run x --image nginx --cascade
+ * background rm -rf /` runs `background` as the container's `argv[0]`
+ * (`run.go:327-330`), which is the payload head and matches nothing. Absent from
+ * the table is what makes both of these behave like the plain flags they are.
+ *
+ * The globals only matter in the order `kubectl run NAME [flags] COMMAND`, where
+ * they sit between the name and the command. A global *before* the verb
+ * (`kubectl -n foo run …`) builds the key `"kubectl -n"` and is not a carrier at
+ * all — see {@link remoteCarrierFor}.
+ *
+ * Being incomplete here costs a missed detection and nothing else: every way this
+ * table can be wrong makes the payload start at a word pflag did not skip, and the
+ * scanner then reads a flag or a flag's value as the command's head word. There is
+ * no spelling that makes one of these entries fire on something harmless.
+ */
+const KUBECTL_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	// `addRunFlags`, `krun.go:191-212`.
+	"--annotations",
+	"--detach-keys",
+	"--env",
+	"--image",
+	"--image-pull-policy",
+	"--labels",
+	"-l",
+	"--port",
+	"--restart",
+	"--field-manager",
+	// `OverrideOptions.AddOverrideFlags`, `override_options.go:50-51`.
+	"--overrides",
+	"--override-type",
+	// `cmdutil.AddPodRunningTimeoutFlag`, `helpers.go:517`.
+	"--pod-running-timeout",
+	// `cmddelete.DeleteFlags` via `krun.go:177`, plus `PrintFlags` via `:178`.
+	"--field-selector",
+	"--grace-period",
+	"--timeout",
+	"--raw",
+	"-o",
+	"--output",
+	// `genericclioptions.ConfigFlags.AddFlags`, `config_flags.go:374-440`.
+	"--kubeconfig",
+	"--cache-dir",
+	"--client-certificate",
+	"--client-key",
+	"--as",
+	"--as-uid",
+	"--as-group",
+	"--as-user-extra",
+	"--username",
+	"--password",
+	"--cluster",
+	"--user",
+	"-n",
+	"--namespace",
+	"--context",
+	"-s",
+	"--server",
+	"--tls-server-name",
+	"--certificate-authority",
+	"--token",
+	"--request-timeout",
+	"--proxy-url",
+]);
+
+/**
  * Programs whose trailing words are a command line run on another machine.
  *
  * `ssh host "rm -rf /var"` and `ssh host rm -rf /var` are one command spelled two
@@ -643,7 +739,11 @@ const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new M
 	["nsenter", { positionals: 0, valueOptions: NSENTER_VALUE_OPTIONS }],
 	["systemd-run", { positionals: 0, valueOptions: SYSTEMD_RUN_VALUE_OPTIONS }],
 	// `oc exec` is `exec.NewCmdExec` with the name swapped, so one carrier serves
-	// both spellings rather than two that can drift.
+	// both spellings rather than two that can drift. `valueOptions` is empty
+	// **because it is unreachable, not because `kubectl exec` has no value flags**:
+	// `mandatorySeparator` returns from every branch of `remoteCommandScript`
+	// before the operand loop, so the payload is always the words after the `--`
+	// and no flag between the pod and the separator is ever inspected.
 	["kubectl exec", { positionals: 1, valueOptions: new Set(), mandatorySeparator: true }],
 	["oc exec", { positionals: 1, valueOptions: new Set(), mandatorySeparator: true }],
 	// `kubectl run` is the one case where the `--` is **not** mandatory.
@@ -653,8 +753,23 @@ const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new M
 	// `arguments = args[1:]`) and land in the container at `run.go:635-640`.
 	// So the payload is simply everything after the NAME, and anchoring on a
 	// separator that need not be there would miss the spelling that works.
-	["kubectl run", { positionals: 1, valueOptions: new Set() }],
-	["oc run", { positionals: 1, valueOptions: new Set() }],
+	//
+	// `--image` is `MarkFlagRequired` (`krun.go:196`), so the flag set below is on
+	// every invocation that gets as far as the payload at all — which is why this
+	// row once carried `valueOptions: new Set()` and was a live miss:
+	// `kubectl run x --image nginx rm -rf /` counted `nginx` as a second operand
+	// and read the command as `nginx rm -rf /`.
+	//
+	// `--filename`/`-f` are **not** in {@link KUBECTL_RUN_VALUE_OPTIONS} because
+	// `run` does not register them at all: `krun.go:181-182` calls
+	// `MarkDeprecated("filename", …)` on a flag that does not exist and discards
+	// the error with `_ =`.
+	["kubectl run", { positionals: 1, valueOptions: KUBECTL_RUN_VALUE_OPTIONS }],
+	// `oc run` is `run.NewCmdRun` with the name swapped (`wrappers.go:159-163`),
+	// so the subcommand flags are literally the same ones and the same table
+	// serves both. `oc`'s **own** global flags are a separate list layered on top;
+	// see {@link KUBECTL_RUN_VALUE_OPTIONS} for what that costs if one is missed.
+	["oc run", { positionals: 1, valueOptions: KUBECTL_RUN_VALUE_OPTIONS }],
 ]);
 
 /**
