@@ -3357,6 +3357,118 @@ describe("POSIX: volume managers", () => {
 	});
 
 	/**
+	 * The three subcommand tools that dispatch on a verb: `nvme`, `cryptsetup`
+	 * and `btrfs`.
+	 *
+	 * Each is out of reach of the program-name and device-shape rules for its own
+	 * reason, and every row below is a spelling one of those reasons would have
+	 * missed: `nvme` puts global options *before* the verb, `cryptsetup` spells
+	 * its actions in mixed case, and `btrfs` needs two words before the operand.
+	 *
+	 * The expected fragments are quoted from the tools' own manuals rather than
+	 * paraphrased, because three of the messages must **not** describe what the
+	 * command does as an overwrite: `cryptsetup-erase.8.adoc` says "The *erase*
+	 * does not wipe or overwrite the data area" and `cryptsetup-luksFormat.8.adoc`
+	 * says luksFormat does not either. A rule that called either one a wipe would
+	 * be telling the reader something the manual explicitly denies, and the rows
+	 * that carry that text are what hold the wording to the source.
+	 */
+	test.each([
+		["nvme format /dev/nvme0n1", "irrevocably erase data on an unintended device", "a namespace"],
+		["nvme format /dev/nvme0", "irrevocably erase data on an unintended device", "the controller handle"],
+		["nvme sanitize /dev/nvme0", "requesting that the user data be purged", "the documented example device"],
+		["nvme sanitize --preq /dev/nvme0", "requesting that the user data be purged", "with --preq"],
+		// The only documented global that takes a separate word is `-o <fmt>`, and
+		// its value must not be read as the verb.
+		["nvme -o json format /dev/nvme0n1", "irrevocably erase data", "past a value-taking global"],
+		// `--force` is "Just send the command immediately without warning of the
+		// implications" — a confirmation skipped, not a command not run.
+		["nvme format --force /dev/nvme0n1", "irrevocably erase data", "with --force, which is not a dry run"],
+		["nvme format -v /dev/nvme0n1", "irrevocably erase data", "with a switch global"],
+		["nvme format /dev/nvme0n1p2", "irrevocably erase data", "a namespace partition"],
+		["cryptsetup luksFormat /dev/sdb1", "permanently irretrievable", "a new LUKS header over old data"],
+		// `executableName` lower-cases only the program name, so `luksFormat`
+		// arrives with its capital and `luksformat` without one. Both are covered.
+		["cryptsetup luksformat /dev/sdb1", "permanently irretrievable", "the lowercase spelling"],
+		[
+			"cryptsetup erase /dev/sdb1",
+			"does not wipe or overwrite the data area",
+			"the key is removed, the ciphertext stays",
+		],
+		["cryptsetup luksErase /dev/sdb1", "does not wipe or overwrite the data area", "the LUKS spelling"],
+		["cryptsetup lukserase /dev/sdb1", "does not wipe or overwrite the data area", "its lowercase spelling"],
+		["btrfs subvolume delete /mnt/data/sub", "removes the subvolume from the filesystem", "a plain delete"],
+		["btrfs subvolume delete -R /mnt/data/sub", "removes the subvolume", "with the 6.12+ -R"],
+		["btrfs subvolume delete --recursive /mnt/sub", "removes the subvolume", "and its long spelling"],
+		["btrfs device remove /dev/sdb", "takes the device out of the filesystem", "the documented removal"],
+		["btrfs device delete /dev/sdb", "alias of `remove`", "the alias the manual documents"],
+		["btrfs filesystem resize -1G /mnt", "decreases", "a bare negative size"],
+		["btrfs filesystem resize 1:-1G /mnt", "decreases", "the same behind a devid"],
+		["btrfs filesystem resize -1024 /mnt", "decreases", "with no unit designator"],
+		// Wrapper recursion, which the verb read has to survive.
+		["sudo btrfs subvolume delete /mnt/sub", "removes the subvolume", "behind sudo"],
+	])("%s — %s, %s", (command, expected) => {
+		expect(posix(command)?.rule).toContain(expected);
+	});
+
+	/**
+	 * Everything the three tables must leave alone, including the four commands
+	 * this batch checked and then did not write a rule for.
+	 *
+	 * `btrfs filesystem delete` is the interesting one: it does not exist, so a row
+	 * asserting it stays quiet would be asserting nothing about btrfs. It is here
+	 * as a **marker** — if a future btrfs version ships a `filesystem delete`, this
+	 * row goes red and the table has to grow an entry, rather than the command
+	 * passing silently.
+	 */
+	test.each([
+		["nvme dim /dev/nvme0", "the Fabrics discovery command, which is not a format"],
+		["nvme list", "an ordinary listing"],
+		["nvme id-ctrl /dev/nvme0", "and another"],
+		["nvme format --dry-run /dev/nvme0n1", "the documented dry run, after the verb"],
+		["nvme --dry-run format /dev/nvme0n1", "and before it, because --dry-run is global"],
+		["nvme format", "a format with no device to do it to"],
+		["nvme format /dev/sda", "a device that is not an NVMe device"],
+		["nvme format /dev/nvme", "and one missing its digits"],
+		// These two hold the `-o` value skip: `format` here is an output format.
+		["nvme -o format /dev/nvme0n1", "`format` as the -o value"],
+		["nvme -o json list", "a listing behind the same value"],
+		// `close` and its aliases unmap a volume and wipe the *key* from memory;
+		// `luksRemoveKey` does the same. None of them destroys the volume.
+		["cryptsetup close /dev/mapper/data", "unmapping a volume"],
+		["cryptsetup luksClose /dev/mapper/data", "its LUKS spelling"],
+		["cryptsetup remove /dev/mapper/data", "and the alias the manual gives it"],
+		["cryptsetup plainClose /dev/mapper/data", "and the plain alias"],
+		["cryptsetup luksRemoveKey /dev/mapper/data", "which also only drops a key"],
+		["cryptsetup status /dev/mapper/data", "a status query"],
+		["cryptsetup open --type luks /dev/sdb1 data", "which creates a mapping"],
+		["cryptsetup luksDump /dev/sdb1", "and one that only reads a header"],
+		// The gap the source comment names: cryptsetup's global options are not
+		// enumerated by any source fetched here, so the verb is read from the first
+		// bare word only and this spelling is not covered.
+		["cryptsetup --key-file k luksFormat /dev/sdb", "a verb behind an unmodelled global option"],
+		["cryptsetup luksFormat", "an action with no device"],
+		["btrfs subvolume create /mnt/sub", "which creates a subvolume"],
+		["btrfs subvolume snapshot /mnt/a /mnt/b", "and one that copies one"],
+		["btrfs subvolume list /mnt", "and one that lists them"],
+		["btrfs filesystem delete /mnt", "a command btrfs does not ship — a marker, not a claim"],
+		["btrfs device add /dev/sdb /mnt", "which adds a device rather than taking one out"],
+		["btrfs filesystem resize +1G /mnt", "a growth"],
+		["btrfs filesystem resize max /mnt", "the growth the manual spells out"],
+		["btrfs filesystem resize 1:max /mnt", "the same behind a devid"],
+		["btrfs filesystem resize --offline max /mnt", "and that flag, which only increases"],
+		["btrfs filesystem show /mnt", "a show"],
+		["btrfs device", "and a bare program name"],
+		// These two hold the operand requirement for `btrfs` specifically. Nothing
+		// above them does: every other row in this table fails on the *verb*, so
+		// without these a rule that dropped the operand check would still be green.
+		["btrfs subvolume delete", "a real verb with no subvolume named"],
+		["btrfs filesystem resize -1G", "and a real shrink with no path given"],
+	])("%s — %s", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
 	 * `blkdiscard`'s device is matched by shape rather than by position.
 	 *
 	 * The synopsis is `blkdiscard [options] [-o offset] [-l length] device`, so

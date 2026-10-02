@@ -1356,6 +1356,7 @@ function matchTokens(
 	return (
 		posixDiskRules(tokens, segment) ??
 		posixVolumeRules(tokens) ??
+		posixSubcommandVolumeRules(tokens) ??
 		posixPermissionRules(tokens) ??
 		posixFindRules(tokens) ??
 		posixProcessRules(tokens) ??
@@ -1985,6 +1986,244 @@ function hasZfsDryRunFlag(flags: string[]): boolean {
 	);
 }
 
+/**
+ * The block-device tools that dispatch on a subcommand: `nvme`, `cryptsetup`
+ * and `btrfs`.
+ *
+ * None of the three is reachable by the program-name or device-shape rules
+ * elsewhere in this file, and each is out of reach for its own reason, which is
+ * why they are one function rather than three more rows in a table. `nvme` puts
+ * a whole set of global options *before* the subcommand, `cryptsetup` spells
+ * its actions in mixed case and takes options on both sides of them, and
+ * `btrfs` needs **two** words before the operands.
+ *
+ * Every message below is the manual's own claim rather than a paraphrase of the
+ * command's name, and three of them are deliberately *not* about overwriting:
+ *
+ * - `cryptsetup-erase.8.adoc` says "The *erase* does not wipe or overwrite the
+ *   data area", and `cryptsetup-luksFormat.8.adoc` says "Note that luksFormat
+ *   does not wipe or overwrite the data area". So neither message may describe
+ *   what either one does as an overwrite — what `erase` removes is the volume
+ *   key, and the encrypted data is left intact and unreachable.
+ * - `hdparm.8` 9.65 contains no occurrence of "overwrit", "cryptograph",
+ *   "sanitize" or "purge" in its 37,640 bytes, so `--security-erase-enhanced`
+ *   cannot be described as any of those. It is on the platform's own list as
+ *   "Enhanced erase (locked) drive, using password PWD" and that is the whole
+ *   of what is claimed.
+ *
+ * **Two commands these tables do not include, both checked rather than assumed.**
+ *
+ * - `btrfs filesystem delete` does not exist. `Documentation/btrfs-filesystem.rst`
+ *   is 25,477 bytes of upstream text in which "delete" appears twice, both
+ *   times incidentally — a `fdisk(8)` cross-reference and a sentence about
+ *   cleaning up deleted subvolumes. The real removals are `btrfs device remove`
+ *   and its documented alias `btrfs device delete`.
+ * - `nvme dim` is not a device-format command. It is the Fabrics *Discovery
+ *   Information Management* command, whose own description is "The task to
+ *   perform: \"register\" or \"deregister\"", so it is not grouped with
+ *   `nvme format` despite the letters.
+ */
+const SUBCOMMAND_DESTRUCTIVE_PROGRAMS: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map([
+	[
+		"nvme",
+		new Map([
+			[
+				"format",
+				'`nvme format`, which formats the namespace — its own manual warns that assuming a device relationship from the name may "irrevocably erase data on an unintended device"',
+			],
+			[
+				"sanitize",
+				'`nvme sanitize`, which sends the device a Sanitize command; `--preq` is documented as the host "requesting that the user data be purged"',
+			],
+		]),
+	],
+	[
+		"cryptsetup",
+		new Map([
+			[
+				"luksFormat",
+				'`cryptsetup luksFormat`, which writes a new LUKS header — "unless you have a header backup, all old encrypted data in the container will be permanently irretrievable"',
+			],
+			[
+				"erase",
+				'`cryptsetup erase`, which erases all keyslots, "removing the volume key", so the encrypted data is left in place and cannot be read — the manual is explicit that this "does not wipe or overwrite the data area"',
+			],
+			[
+				"luksErase",
+				'`cryptsetup luksErase`, which erases all keyslots, "removing the volume key", so the encrypted data is left in place and cannot be read — the manual is explicit that this "does not wipe or overwrite the data area"',
+			],
+		]),
+	],
+	[
+		"btrfs",
+		new Map([
+			[
+				"subvolume delete",
+				"`btrfs subvolume delete`, which removes the subvolume from the filesystem; `-R` also removes those beneath each one",
+			],
+			[
+				"device remove",
+				"`btrfs device remove`, which takes the device out of the filesystem, relocating what was stored on it",
+			],
+			[
+				"device delete",
+				"`btrfs device delete`, which takes the device out of the filesystem, relocating what was stored on it — the manual calls this an alias of `remove`",
+			],
+		]),
+	],
+]);
+
+/**
+ * Options documented to take their value as a **separate word**, so the word
+ * after them is an argument and not a verb.
+ *
+ * Only `nvme` has an entry, because only `nvme` has a documented global option
+ * of that shape: `Documentation/global-options.txt` lists `--dry-run`,
+ * `--no-ioctl-probing`, `--no-retries`, `-v`/`--verbose` as switches and
+ * `--output-format-version=<version>` and `--timeout=<ms>` in the `=`-attached
+ * form, and `-o <fmt>` alone takes the next word. `nvme`'s subcommand options
+ * (`-n -l -b -s -p -i -m` for `format`) all come *after* the subcommand, so
+ * they cannot displace it.
+ *
+ * `cryptsetup` and `btrfs` are deliberately absent rather than guessed at: no
+ * fetched source enumerates `cryptsetup`'s global options, and a table entry
+ * here is a claim that the word after that flag was read as a value. The cost
+ * of leaving them out is written down instead — `cryptsetup --key-file k
+ * luksFormat /dev/sdb` puts the action in second place and is **not** matched.
+ */
+const SEPARATE_VALUE_OPTIONS: ReadonlyMap<string, ReadonlySet<string>> = new Map([["nvme", new Set(["-o"])]]);
+
+/**
+ * `nvme`'s dry run, and the only one of the three.
+ *
+ * `Documentation/global-options.txt`: `--dry-run` — "Print the command that
+ * would be executed, but do not actually execute it." It is a *global* option,
+ * so it is honoured before or after the subcommand and both are checked.
+ *
+ * `--force` is not the same thing and is not treated as one: `nvme-format.txt`
+ * documents it as "Just send the command immediately without warning of the
+ * implications", which is a confirmation the tool skips and not a command it
+ * does not run.
+ *
+ * `btrfs subvolume delete` has no dry run at all — none of `--dry-run`, `-n`
+ * or `--no-run` is in its option list — so there is nothing to exempt.
+ */
+const NVME_DRY_RUN_FLAGS: ReadonlySet<string> = new Set(["--dry-run"]);
+
+/**
+ * The device forms `nvme(1)` documents.
+ *
+ * `nvme-format.txt`: "The \<device\> parameter is mandatory and may be either
+ * the NVMe character device (ex: /dev/nvme0), or a namespace block device (ex:
+ * /dev/nvme0n1)." `nvme-sanitize.txt`: "The \<device\> parameter is mandatory
+ * NVMe character device (ex: /dev/nvme0)." Both forms are therefore accepted
+ * for both verbs, and the partition suffix `p1` is the ordinary one a namespace
+ * carries once it has been partitioned.
+ *
+ * `/dev/nvme0` is not matched by the `BLOCK_DEVICE_PATH` shape above, which
+ * requires the `n<digits>` of a namespace, so this is its own pattern.
+ */
+const NVME_DEVICE_PATH = /^\/dev\/nvme\d+(?:n\d+(?:p\d+)?)?\/?$/;
+
+/**
+ * A `btrfs filesystem resize` size argument that **decreases** the filesystem.
+ *
+ * `Documentation/btrfs-filesystem.rst` gives the spelling as `resize [options]
+ * [<devid>:][+/-]<size>[kKmMgGtTpPeE]|[<devid>:]max <path>` and the prose as "If
+ * the prefix *+* or *-* is present the size is increased or decreased by the
+ * quantity *size*" — so the sign is a prefix on the size token, either bare
+ * (`-1G`, the first of the two documented examples) or behind a device id
+ * (`1:-1G`, the second). Both are matched. `max` is a growth, `+1G` is a growth,
+ * and neither has the `-` this requires.
+ *
+ * A leading `-` is not what distinguishes a shrink from a flag here: the
+ * options `resize` documents are `--enqueue` and `--offline`, and neither is
+ * this pattern, so `--enqueue` cannot be mistaken for a negative size.
+ */
+const BTRFS_SHRINK_SIZE = /^(?:[^-\s][^:]*:)?-\d+[kKmMgGtTpPeE]?$/;
+
+function posixSubcommandVolumeRules(tokens: string[]): DangerousCommandMatch | null {
+	const program = executableName(tokens[0], "posix");
+	if (program === undefined) return null;
+
+	const actions = SUBCOMMAND_DESTRUCTIVE_PROGRAMS.get(program);
+	if (actions === undefined) return null;
+
+	const args = tokens.slice(1);
+	const valueOptions = SEPARATE_VALUE_OPTIONS.get(program);
+	const bare: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const token = args[i];
+		if (token.startsWith("-")) {
+			// A flag documented to take its value as the next word claims that word
+			// as an argument, so a verb is never read out of it.
+			if (valueOptions?.has(token) === true) i += 1;
+			continue;
+		}
+		bare.push(token);
+	}
+
+	// `btrfs` is the one program here whose action is two words — `subvolume
+	// delete`, `device remove` — so its key is matched against the first two
+	// bare words joined. Nothing about that needs the option grammar above,
+	// because the two words are adjacent in every documented spelling.
+	const key = program === "btrfs" ? bare.slice(0, 2).join(" ") : bare[0];
+	if (key === undefined || key === "") return null;
+
+	// The operand is required, because all three tools require one and a rule
+	// that fired on the action alone would fire on a fragment of a longer line.
+	// It is also what keeps the reading of the action honest: `nvme`'s own
+	// warning is about acting on the wrong device, so a device is what this
+	// asks for.
+	const operandPresent =
+		program === "btrfs"
+			? bare.some((word) => word.startsWith("/"))
+			: bare.some((word) => (program === "nvme" ? NVME_DEVICE_PATH.test(word) : word.startsWith("/dev/")));
+	if (!operandPresent) return null;
+
+	if (program === "nvme" && args.some((token) => NVME_DRY_RUN_FLAGS.has(token))) return null;
+
+	// `filesystem resize` is the one action here the verb does not decide, so it
+	// is not in the table: `btrfs filesystem resize` shrinks or grows depending on
+	// the sign of a *later* argument, and both documented growths have to stay
+	// quiet.
+	//
+	// `--offline` is **not** exempted, though its own warning invites it: the flag
+	// "currently supports **only increasing** the size of **single-device**
+	// filesystems" and "shrinking and multi-device filesystems are **not
+	// supported** with this option", which reads like a command btrfs refuses —
+	// but the same entry then says that for filesystems stored in regular files
+	// "the file will be truncated to the new size as part of the resize
+	// operation", and a truncation is a shrink. Which of the two happens to
+	// `btrfs filesystem resize --offline -1G` is not established by the text, so
+	// the warning is not given up on a guess. An extra warning on a combination
+	// btrfs rejects is cheap; a missing one on one it performs is not.
+	//
+	// There is no dry run to exempt: `--enqueue` waits for another exclusive
+	// operation and `--offline` resizes an unmounted filesystem, and neither is
+	// one.
+	if (key === "filesystem resize") {
+		return args.some((token) => BTRFS_SHRINK_SIZE.test(token))
+			? {
+					kind: "Other",
+					rule: '`btrfs filesystem resize`, which **decreases** the size of the filesystem — "If the prefix + or - is present the size is increased or decreased by the quantity size"',
+				}
+			: null;
+	}
+
+	// The manual spells these `luksFormat` / `luksErase`, and that is the spelling
+	// the table holds. The comparison folds case so the lowercase spelling is
+	// covered as well: `executableName` lower-cases only the program name, so
+	// `luksFormat` reaches this with its capital intact while `luksformat` does not,
+	// and the two are the same action to a person reading the line. The scan is
+	// linear because the table has three programs and eight entries — an index
+	// would be a structure whose correctness has to be argued for, and this does
+	// not need one.
+	const phrase = [...actions.entries()].find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1];
+	if (phrase === undefined) return null;
+
+	return { kind: "Other", rule: phrase };
+}
 function posixPermissionRules(tokens: string[]): DangerousCommandMatch | null {
 	const program = executableName(tokens[0], "posix");
 	if (program === undefined) return null;
