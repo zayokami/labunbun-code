@@ -323,11 +323,38 @@ export function evaluatePermissions(
 		}
 	}
 
-	// 2. The dangerous-command classifier, above every mode and above the
-	//    sandbox setting both ways. A match is terminal: it returns here, so no
-	//    allow rule below can turn it into a pass. A non-match grants nothing on
-	//    its own — it has no opinion — and the decision carries on below, where an
-	//    allow rule or `agent` mode may still say yes. That is the limit worth
+	// 2. `plan` is a deny, and it sits ABOVE the classifier as well as above the
+	//    allow rules, for the same reason step 1 does: an allow rule must not buy
+	//    a write in a mode whose whole promise is that there are none.
+	//
+	//    **Above the classifier is the half that was missing, and it had the mode
+	//    backwards.** `Bash` is not in `PLAN_MODE_READ_ONLY_TOOLS`, so this check
+	//    denies every shell command under `plan` — but the classifier returned
+	//    first, and `decideDangerous` only made `agent` terminal, so `plan` fell
+	//    through to `ask`. Measured with the engine called directly, before this
+	//    move:
+	//
+	//        plan  rm -rf /     => ask    Blocked as a dangerous command: `rm` with a force option
+	//        plan  git status   => deny   Plan mode: Bash is not allowed (read-only mode)
+	//
+	//    The safe command was hard-denied and only the destructive one reached a
+	//    human, in the one mode whose promise is no shell at all. Answering that
+	//    dialog let a shell command run while the session was in plan mode, and it
+	//    took no user rule to reach — the ordering alone did it.
+	//
+	//    Hoisting changes nothing else, and that is checked rather than hoped: the
+	//    classifier is gated on `toolName === "Bash"`, and `Bash` is exactly what
+	//    this check denies, so every other tool already arrived here with the same
+	//    answer it gets now.
+	if (config.mode === "plan" && !isReadOnlyTool(toolName)) {
+		return { behavior: "deny", message: `Plan mode: ${toolName} is not allowed (read-only mode)` };
+	}
+
+	// 3. The dangerous-command classifier, above every mode still standing and
+	//    above the sandbox setting both ways. A match is terminal: it returns here,
+	//    so no allow rule below can turn it into a pass. A non-match grants nothing
+	//    on its own — it has no opinion — and the decision carries on below, where
+	//    an allow rule or `agent` mode may still say yes. That is the limit worth
 	//    stating: what this classifier does not recognise becomes an ordinary
 	//    command, and the rules below are what an ordinary command gets.
 	if (toolName === "Bash") {
@@ -361,13 +388,6 @@ export function evaluatePermissions(
 		}
 		const match = classifyDangerousCommand(command, config.platform);
 		if (match) return decideDangerous(match, config.mode);
-	}
-
-	// 3. `plan` is a deny, so it sits above the allow rules for the same
-	//    reason step 1 does: an allow rule must not buy a write in a mode whose
-	//    whole promise is that there are none.
-	if (config.mode === "plan" && !isReadOnlyTool(toolName)) {
-		return { behavior: "deny", message: `Plan mode: ${toolName} is not allowed (read-only mode)` };
 	}
 
 	// 4. Among allows, the first match decides. Which one that is depends on the

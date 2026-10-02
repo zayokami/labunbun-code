@@ -184,7 +184,18 @@ describe("evaluatePermissions", () => {
 			// `ask` still reaches a person. Neither answer is `allow`, and which one
 			// it is matters: a test that only asserted "not allow" would pass on a
 			// build that had quietly turned every dangerous command into a prompt.
-			expect(result.behavior).toBe(mode === "agent" ? "deny" : "ask");
+			//
+			// **`plan` is in the deny arm now, and it used to be in the `ask` arm.**
+			// This row described observed behaviour rather than intended behaviour,
+			// which is how it came to pin a defect: the paragraph above it reasoned
+			// about `agent` and `ask` and never said what `plan` should be, so the
+			// binary answer absorbed `plan` by default. It was `ask`, because the
+			// classifier returned before the plan check and `decideDangerous` only
+			// made `agent` terminal — so under `plan` the safe command was denied
+			// and the destructive one was offered to a person, in the one mode that
+			// promises no shell at all. The plan check now sits above the
+			// classifier, so `plan` denies with `agent`, and this row follows.
+			expect(result.behavior).toBe(mode === "agent" || mode === "plan" ? "deny" : "ask");
 		},
 	);
 
@@ -316,6 +327,53 @@ describe("evaluatePermissions", () => {
 		for (const toolName of ["Write", "Edit", "Bash", "NotebookEdit", "mcp__server__mutate"]) {
 			expect(evaluatePermissions(toolName, {}, config).behavior).toBe("deny");
 		}
+		// **`Bash` in the loop above is answered by the unreadable-command branch,
+		// not by the plan check.** `{}` has no `command`, so `readBashCommand`
+		// returns undefined and the call denies at the fail-closed branch — which
+		// now sits *below* the plan check but did not sit above the classifier
+		// either. The assertion is real, and it is not the one the test is named
+		// for. The test below passes a real command string for exactly this reason.
+	});
+
+	test("plan mode denies a dangerous command outright, because it runs no shell at all", () => {
+		// **This is the row whose absence let the ordering defect survive.** With
+		// `Bash` absent from `PLAN_MODE_READ_ONLY_TOOLS`, the plan check does deny
+		// it — but the classifier returned first and `decideDangerous` only made
+		// `agent` terminal, so `plan` fell through to `ask`. Measured with the
+		// engine called directly, before the check was hoisted above the
+		// classifier:
+		//
+		//     plan  rm -rf /    => ask    Blocked as a dangerous command: `rm` with a force option
+		//     plan  git status  => deny   Plan mode: Bash is not allowed (read-only mode)
+		//
+		// The safe command hard-denied and only the destructive one was offered to
+		// a human, in the one mode that promises no shell at all. Answering that
+		// dialog ran a shell command in plan mode, and no user rule was needed to
+		// reach it — the ordering alone did it.
+		const config = { mode: "plan" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
+		// Both halves, because either alone would pass against the old ordering
+		// for a different reason: the dangerous one used to ask, and the ordinary
+		// one is here so this cannot be satisfied by "plan mode denies everything".
+		for (const command of ["rm -rf /", "sudo rm -rf /", "git status", "ls"]) {
+			const decision = evaluatePermissions("Bash", { command }, config);
+			// Narrowed rather than asserted twice: `PermissionResult`'s `allow` arm
+			// carries no `message`, so reaching for one before knowing the behaviour
+			// would not compile — and the throw says which command regressed.
+			if (decision.behavior !== "deny") {
+				throw new Error(`expected deny under plan, got ${decision.behavior} for "${command}"`);
+			}
+			// The reason too: a deny naming the dangerous command would be the
+			// other bug, and it is the one this ordering is most likely to drift to.
+			expect(decision.message).toContain("Plan mode");
+		}
+
+		// The control, and the reason this is a claim about *ordering* rather than
+		// about plan mode being strict: the same command still reaches a human
+		// under `ask`, where catching it is the classifier's job. If this ever
+		// denies, the fix has become "plan mode denies more" and the two have
+		// stopped saying anything about each other.
+		const asking = { mode: "ask" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
+		expect(evaluatePermissions("Bash", { command: "rm -rf /" }, asking).behavior).toBe("ask");
 	});
 
 	test("deny wins over allow regardless of order", () => {
