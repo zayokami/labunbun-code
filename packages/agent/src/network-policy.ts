@@ -335,10 +335,12 @@ export function isBlockedAddress(address: string): boolean {
 	const literal = canonicalIpLiteral(address);
 	if (literal === null) return false;
 
-	// An IPv4-mapped IPv6 address reaches the same interface as the IPv4 it
-	// carries, so it is handed back as dotted and one range table answers for
-	// both families. Reading the two hextets is what makes the *hex* spelling
-	// work, which the dotted-only recursion this replaces did not.
+	// An IPv6 literal that carries an IPv4 address reaches the same destination
+	// as that address does, so it is handed back as dotted and one range table
+	// answers for both families. Reading the groups is what makes the *hex*
+	// spelling work, which the dotted-only recursion this replaces did not — and
+	// it is what makes NAT64 and 6to4 work at all, since those are routes to an
+	// IPv4 destination rather than ways of writing one.
 	const mapped = embeddedIpv4(literal);
 	if (mapped !== null) return isBlockedAddress(mapped);
 
@@ -354,10 +356,37 @@ export function isBlockedAddress(address: string): boolean {
 		if (a === 100 && b >= 64 && b <= 127) return true; // shared address space (CGNAT)
 		return false;
 	}
-	const lower = literal.toLowerCase();
-	if (lower === "::1") return true; // loopback
-	if (lower.startsWith("fe80:")) return true; // link-local
-	if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // unique local
+	// Everything reaching here is IPv6. `canonicalIpLiteral` returns the output of
+	// a URL parser for a string `isIP` accepted, and the IPv4 branch above has
+	// taken the IPv4, so `isIP(literal) === 6` is a property of the two lines
+	// above rather than a check this line repeats.
+	const groups = ipv6Groups(literal);
+	const first = groups?.[0];
+	if (first === undefined) return true;
+
+	// 0000::/8. RFC 4291 §2.6.2 reserves the whole /8 and says it is to be used
+	// only as the source of a request that has not yet chosen a source, so
+	// nothing legitimate is a destination there. `::` and `::1` are both inside
+	// it, which is why neither needs a line of its own.
+	if (first === 0) return true;
+	// fc00::/7 — unique local. `fc` and `fd` are the two halves of one /7, and
+	// the mask says so where two string prefixes only appeared to.
+	if ((first & 0xfe00) === 0xfc00) return true;
+	// fe80::/10 — link local, and this one was a real defect. The check read
+	// `startsWith("fe80:")`, which is a single /16 of a /10: fe80::/10 runs
+	// through febf, and `fe81::1` through `febf::1` — seven of the sixteen
+	// link-local blocks — came back unblocked. Measured on all eight before this
+	// line changed, not reasoned about. The mask is the range.
+	if ((first & 0xffc0) === 0xfe80) return true;
+	// fec0::/10 — site local. Deprecated by RFC 3879 and superseded by the
+	// unique-local range above, but a network that never migrated still routes
+	// it, and it reaches a LAN, which is the reason the private ranges are
+	// refused at all.
+	if ((first & 0xffc0) === 0xfec0) return true;
+	// ff00::/8 — multicast — is deliberately **not** here. Every caller in this
+	// build reaches a destination over TCP, where a multicast group is not a
+	// destination, so adding it would refuse nothing and read as coverage. A
+	// caller that opens a UDP socket would need it and would have to add it.
 	return false;
 }
 
@@ -395,19 +424,109 @@ export function isBlockedNetworkHost(host: string): boolean {
 }
 
 /**
- * The IPv4 address an IPv4-mapped IPv6 literal carries, in dotted form, or `null`
- * when it carries none. `::ffff:7f00:1` and `::ffff:127.0.0.1` are the same
- * address written two ways, and canonicalisation reduces the first to the second
- * shape — which is exactly why the reduction has to be undone here rather than
- * left to the range table.
+ * The eight 16-bit groups of an IPv6 literal, most significant first, or `null`
+ * when the string is not one this can read.
+ *
+ * WHATWG URL parsing — which `canonicalIpLiteral` runs every input through —
+ * hands back the *compressed* spelling, so `2002:7f00:1::` arrives as three
+ * groups followed by `::` and `::1` as one group after it. A range check that
+ * assumed eight would be right for one of those and wrong for the other, so the
+ * elided run is expanded here rather than special-cased at each use. That is the
+ * whole function: the two halves of a compressed literal, and however many zero
+ * groups stood between them.
+ */
+function ipv6Groups(literal: string): number[] | null {
+	const halves = literal.toLowerCase().split("::");
+	if (halves.length > 2) return null;
+	const parse = (part: string): number[] | null => {
+		if (part === "") return [];
+		const groups: number[] = [];
+		for (const piece of part.split(":")) {
+			if (!/^[0-9a-f]{1,4}$/.test(piece)) return null;
+			groups.push(Number.parseInt(piece, 16));
+		}
+		return groups;
+	};
+	if (halves.length === 1) {
+		const groups = parse(halves[0]);
+		return groups !== null && groups.length === 8 ? groups : null;
+	}
+	const head = parse(halves[0]);
+	const tail = parse(halves[1]);
+	if (head === null || tail === null) return null;
+	// `::` stands for at least one group, which is why this is `< 1` and not
+	// `< 0` — `1:2:3:4:5:6:7::` names nine groups and is not an address.
+	const elided = 8 - head.length - tail.length;
+	if (elided < 1) return null;
+	return [...head, ...new Array<number>(elided).fill(0), ...tail];
+}
+
+/**
+ * The two groups at `index`, or `null` when the literal is shorter than that.
+ *
+ * Written as a function rather than an index because this file compiles under
+ * `noUncheckedIndexedAccess`, and the ways out of a `number | undefined` are all
+ * worse than the question: a non-null assertion the linter forbids, and a
+ * `?? 0` that answers with a plausible group for an address that has none.
+ */
+function pairAt(groups: number[], index: number): [number, number] | null {
+	const high = groups[index];
+	const low = groups[index + 1];
+	return high === undefined || low === undefined ? null : [high, low];
+}
+
+/** Two 16-bit groups as the dotted quad they spell: `7f00`,`1` is `127.0.0.1`. */
+function dottedQuad(high: number, low: number): string {
+	return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+}
+
+/**
+ * The IPv4 address an IPv6 literal carries inside it, in dotted form, or `null`
+ * when it carries none. Three prefixes, and each puts the 32 bits somewhere
+ * different — every offset below is quoted from the RFC, not worked out:
+ *
+ *   - `::ffff:a.b.c.d`, IPv4-mapped, RFC 4291 §2.5.5.2. Five zero groups, then
+ *     `ffff`, then the IPv4.
+ *   - `64:ff9b::/96`, the NAT64 well-known prefix, RFC 6052 §3.1: "When the
+ *     prefix is 96 bits long, the IPv4 address is encoded in positions 96 to
+ *     127", with `64:ff9b::192.0.2.33` as the worked example. Also the last two
+ *     groups.
+ *   - `2002::/16`, 6to4, RFC 3056 §2.1, whose example is `2002:c001:0203::`
+ *     for `192.1.2.3`. Here the IPv4 is the two groups straight after the
+ *     prefix, not the last two.
+ *
+ * The two newer ones matter because each is a *route to an IPv4 destination*,
+ * which is exactly what the range table refuses: `64:ff9b::7f00:1` reaches
+ * `127.0.0.1` and `64:ff9b::a9fe:a9fe` reaches the cloud metadata address, on
+ * any host with a NAT64 translator. Measured before this existed — all of those,
+ * and `2002:7f00:1::`, came back `false`.
+ *
+ * **Network-specific NAT64 prefixes are not decoded.** RFC 6052 §2.1 moves the
+ * IPv4 to a different offset for every prefix length but 96, and marks it with a
+ * reserved `u` octet at bits 64–71; covering those is a second table with four
+ * more bit positions, and a NAT64 deployment using one is a real gap rather than
+ * a hypothetical. The well-known prefix is what a public NAT64 deployment uses.
+ * The limit is written here rather than left to be found.
  */
 function embeddedIpv4(literal: string): string | null {
-	if (!literal.startsWith("::ffff:")) return null;
-	const groups = literal.slice("::ffff:".length).split(":");
-	if (groups.length !== 2 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
-	const high = Number.parseInt(groups[0], 16);
-	const low = Number.parseInt(groups[1], 16);
-	return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+	const groups = ipv6Groups(literal);
+	if (groups === null) return null;
+	const tail = pairAt(groups, 6);
+	if (tail === null) return null;
+	// `::ffff:0:0/96` — five zero groups, then `ffff`, then the address.
+	if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
+		return dottedQuad(tail[0], tail[1]);
+	}
+	// `64:ff9b::/96` — the NAT64 well-known prefix, then four zero groups.
+	if (groups[0] === 0x0064 && groups[1] === 0xff9b && groups.slice(2, 6).every((group) => group === 0)) {
+		return dottedQuad(tail[0], tail[1]);
+	}
+	// `2002::/16` — 6to4, whose address sits in groups one and two.
+	if (groups[0] === 0x2002) {
+		const embedded = pairAt(groups, 1);
+		return embedded === null ? null : dottedQuad(embedded[0], embedded[1]);
+	}
+	return null;
 }
 
 /**

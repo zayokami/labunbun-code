@@ -221,6 +221,142 @@ describe("an address has more spellings than a hostname does", () => {
 		});
 	});
 
+	/**
+	 * The IPv6 half of the table, which was four string prefixes where it should
+	 * have been four ranges.
+	 *
+	 * `startsWith("fe80:")` reads as "block link-local" and blocks a sixteenth of
+	 * it: `fe80::/10` runs through `febf`, and `fe81::1` to `febf::1` — seven of
+	 * the sixteen blocks — came back unblocked. Every row below was measured on
+	 * this box against the code as it stood before the change, not reasoned about.
+	 */
+	describe("an IPv6 range is a range, not a spelling", () => {
+		const withFirstHextet = (hextet: number): string => `${hextet.toString(16)}::1`;
+		const from = (low: number, high: number): number[] => {
+			const out: number[] = [];
+			for (let hextet = low; hextet <= high; hextet++) out.push(hextet);
+			return out;
+		};
+
+		test.each(from(0xfe80, 0xfebf))("refuses the link-local block %s (fe80::/10)", (hextet) => {
+			expect(isBlockedAddress(withFirstHextet(hextet))).toBe(true);
+		});
+
+		// The row that was broken, named one by one. A range walk above would still
+		// pass if the mask were narrowed back to a /16, but only if it were narrowed
+		// to exactly this one; these are the spellings a caller actually receives.
+		test.each(["fe81::1", "fe90::1", "fea0::1", "feb0::1", "febf::1"])(
+			'refuses %s, which startsWith("fe80:") did not cover',
+			(address) => {
+				expect(isBlockedAddress(address)).toBe(true);
+			},
+		);
+
+		test.each(from(0xfc00, 0xfdff))("refuses the unique-local block %s (fc00::/7)", (hextet) => {
+			expect(isBlockedAddress(withFirstHextet(hextet))).toBe(true);
+		});
+
+		test.each(from(0xfec0, 0xfeff))("refuses the site-local block %s (fec0::/10)", (hextet) => {
+			expect(isBlockedAddress(withFirstHextet(hextet))).toBe(true);
+		});
+
+		test("the blocks on either side of fe80::/10 stay reachable, or the mask is too wide", () => {
+			// `fe7f` is the last block below the range and `ff00` is multicast. A mask
+			// widened to /9 would take `fe00` and `fe01` with it, and a mask widened to
+			// /8 would take every global unicast address this build must be able to
+			// reach. Both boundaries are asserted, because a range test that only
+			// checks the inside cannot tell a correct mask from a large one.
+			expect(isBlockedAddress("fe7f::1")).toBe(false);
+			expect(isBlockedAddress("fe00::1")).toBe(false);
+			expect(isBlockedAddress("2606:4700:4700::1111")).toBe(false);
+			expect(isBlockedAddress("2001:db8::1")).toBe(false);
+		});
+
+		test("0000::/8 is refused whole, which is what puts :: and ::1 in it", () => {
+			// RFC 4291 §2.6.2 reserves the /8 for the source of a request that has
+			// not chosen a source, so nothing legitimate is a destination there. Both
+			// loopback spellings are inside it, which is why neither needs its own line
+			// in the table any more.
+			expect(isBlockedAddress("::")).toBe(true);
+			expect(isBlockedAddress("::1")).toBe(true);
+			expect(isBlockedAddress("::127.0.0.1")).toBe(true);
+			expect(isBlockedAddress("::7f00:1")).toBe(true);
+		});
+
+		test("multicast is not on the list, and that is a decision rather than an omission", () => {
+			// Asserted so the exclusion is visible: every caller in this build reaches
+			// its destination over TCP, where a multicast group is not a destination,
+			// so refusing it would stop nothing and read as coverage. A caller that
+			// opens a UDP socket needs `ff00::/8` here and has to add it deliberately.
+			expect(isBlockedAddress("ff02::1")).toBe(false);
+		});
+	});
+
+	/**
+	 * The three IPv6 prefixes that carry an IPv4 address inside them.
+	 *
+	 * The first is the one that was already here. The other two are routes to an
+	 * IPv4 *destination*, which is what the table above refuses — so on a host with
+	 * a NAT64 translator, `64:ff9b::a9fe:a9fe` is the cloud metadata address and
+	 * `2002:7f00:1::` is loopback. All six rows below answered `false` before this
+	 * change, measured rather than argued.
+	 */
+	describe("an IPv6 literal can carry an IPv4 destination, and then it is one", () => {
+		test.each([
+			// IPv4-mapped, RFC 4291 §2.5.5.2. Five zero groups, then `ffff`.
+			["::ffff:a9fe:a9fe", "mapped cloud metadata, hex spelling"],
+			["::ffff:169.254.169.254", "mapped cloud metadata, dotted"],
+			["::ffff:a00:1", "mapped 10.0.0.1, hex"],
+			// NAT64 well-known prefix, RFC 6052 §3.1 — "the IPv4 address is encoded
+			// in positions 96 to 127" — with `64:ff9b::192.0.2.33` as the example.
+			["64:ff9b::a9fe:a9fe", "NAT64 carrying the metadata address"],
+			["64:ff9b::a00:1", "NAT64 carrying 10.0.0.1"],
+			["64:ff9b::ac10:1", "NAT64 carrying 172.16.0.1"],
+			["64:ff9b::7f00:1", "NAT64 carrying 127.0.0.1"],
+			// 6to4, RFC 3056 §2.1 — the address sits in groups one and two, not the
+			// last two, and the RFC's own example is `2002:c001:0203::`.
+			["2002:a9fe:a9fe::", "6to4 carrying the metadata address"],
+			["2002:a00:1::", "6to4 carrying 10.0.0.1"],
+			["2002:7f00:1::", "6to4 carrying 127.0.0.1"],
+		])("refuses %s (%s)", (address) => {
+			expect(isBlockedAddress(address)).toBe(true);
+		});
+
+		// The other direction, and the one that decides whether the rule is a filter
+		// or a denial-of-service. A NAT64 or 6to4 address wrapping a *public* IPv4 is
+		// a real destination on an IPv6-only network; refusing it would break the
+		// networks this build is most often used on, to close a hole that is not
+		// there for them.
+		test.each([
+			["::ffff:8.8.8.8", "mapped, the spelling that has to keep working"],
+			["64:ff9b::8.8.8.8", "NAT64 carrying a public resolver"],
+			["64:ff9b::c000:221", "the RFC 6052 example, 192.0.2.33"],
+			["2002:808:808::", "6to4 carrying 8.8.8.8"],
+			["2002:c001:203::", "the RFC 3056 example, 192.1.2.3"],
+		])("does not refuse %s (%s)", (address) => {
+			expect(isBlockedAddress(address)).toBe(false);
+		});
+
+		test("the socket-facing entry point refuses the bracketed form a CONNECT client sends", () => {
+			// `normalizeHost` has to strip the brackets and the port before the range
+			// table sees anything, or the table is reading `[64:ff9b::a9fe:a9fe]:443`
+			// and finding neither the prefix nor the address.
+			expect(normalizeHost("[64:ff9b::a9fe:a9fe]:443")).toBe("64:ff9b::a9fe:a9fe");
+			expect(isBlockedNetworkHost("[64:ff9b::a9fe:a9fe]:443")).toBe(true);
+			expect(isBlockedNetworkHost("[2002:7f00:1::]:443")).toBe(true);
+		});
+
+		test("a NAT64 prefix that is not the well-known one is not decoded, and says so", () => {
+			// RFC 6052 §2.1 moves the IPv4 to a different offset for every prefix
+			// length but 96 and marks it with a reserved `u` octet. Those are not
+			// covered, which is a real gap rather than a hypothetical one, and the
+			// point of this test is that the gap is a decision on the record: if a
+			// network-specific prefix is ever decoded, this goes red and has to be
+			// rewritten rather than quietly becoming true.
+			expect(isBlockedAddress("2001:db8:122:344::a9fe:a9fe")).toBe(false);
+		});
+	});
+
 	describe("isBlockedNetworkHost, the one the socket-facing callers use", () => {
 		/**
 		 * The whole reason this function exists is that it answers a different
