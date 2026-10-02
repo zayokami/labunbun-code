@@ -366,8 +366,8 @@ describe("ssh: the command after the destination runs on another machine", () =>
 		['ssh -J jump.example.com host "rm -rf /var"', "a jump host"],
 		['ssh -L 8080:localhost:80 host "rm -rf /var"', "a local forward"],
 		["ssh -46AaCfGgKkMNnqsTtVvXxYy host rm -rf /var", "every no-value flag at once"],
-		['ssh host "bash -c \'rm -rf /var\'"', "a shell inside the payload, followed one level deeper"],
-		['ssh host "ssh otherhost \'rm -rf /var\'"', "another `ssh` inside the payload"],
+		["ssh host \"bash -c 'rm -rf /var'\"", "a shell inside the payload, followed one level deeper"],
+		["ssh host \"ssh otherhost 'rm -rf /var'\"", "another `ssh` inside the payload"],
 		["ssh host dd if=/dev/zero of=/dev/sda", "a raw device write on the far end"],
 		["ssh host mkfs.ext4 /dev/sdb", "a filesystem written on the far end"],
 	])("%s is dangerous — %s", (command) => {
@@ -1567,7 +1567,7 @@ describe("Windows: `forfiles` runs a command line once per file it finds", () =>
 		['forfiles /p C:\\ /s /c "cmd /c rd /s /q @path"', "a silent recursive delete per file"],
 		['forfiles /p C:\\ /s /c "del /f @path"', "the delete without the `cmd /c` in front"],
 		['forfiles /p C:\\ /s /c "cmd /c Remove-Item C:\\x -Force"', "a PowerShell body behind a CMD program"],
-		['forfiles /p C:\\ /s /c:"cmd /c rd /s /q @path"', "the glued `/c:\"…\"` spelling"],
+		['forfiles /p C:\\ /s /c:"cmd /c rd /s /q @path"', 'the glued `/c:"…"` spelling'],
 		['forfiles /c "cmd /c del /f @path" /p C:\\', "the payload before the path, which is the other real order"],
 		['FORFILES /P C:\\ /S /C "CMD /C DEL /F @path"', "the whole line in capitals"],
 	])("%s is dangerous — %s", (command) => {
@@ -2267,24 +2267,167 @@ describe("Windows: an administrative program that destroys machine state", () =>
 	 * that neutered it left the whole suite green. So the branch is pinned here,
 	 * on the rows that reach it and the one that must not reach it.
 	 *
-	 * The last row is the boundary. `-DefaultInboundAction` is not a disabling
-	 * parameter and the cmdlet still fires — on its name, which is the reading
-	 * this file takes deliberately. What must not happen is the message claiming
-	 * a disabling act that was not in the command.
+	 * The rows below are the ones `Get-Command` reports on this machine. The list
+	 * is a table rather than a regex because no regex boundary survived being
+	 * measured — the source comment sets out all three attempts — and because the
+	 * caller lowercases every token before this branch runs, so a boundary on the
+	 * case of the letter after the stem is not available at all.
+	 *
+	 * The second group is the other side of that table: the two parameters that
+	 * do carry a stem and are *not* disabling acts. The cmdlets still fire — on
+	 * their names, which is the reading this file takes deliberately. What must
+	 * not happen is the message claiming a disabling act that was not in the
+	 * command.
 	 */
 	describe("a disabling parameter on a cmdlet that is not named for it", () => {
 		test.each([
-			["Set-LocalUser -Name x -NoPassword", "`-NoPassword`, which is a `No*` parameter"],
-			["Set-NetFirewallRule -DisplayName x -Disabled True", "`-Disabled`, the past-tense form of the same"],
-			["Remove-NetFirewallRule -DisplayName x -RemoveAll", "the cmdlet name and the parameter agreeing"],
+			["New-LocalUser -Name x -NoPassword", "`NoPassword`, `No` followed by an uppercase letter"],
+			["New-LocalUser -Name x -Disabled", "`Disabled`, the bare word that no stem covers"],
+			["Clear-Disk -Number 1 -RemoveData", "`RemoveData`"],
+			["Clear-Disk -Number 1 -RemoveOEM", "`RemoveOEM`"],
+			["Format-Volume -DriveLetter D -DisableHeatGathering", "`DisableHeatGathering`, the long form of the stem"],
+			["Format-Volume -DriveLetter D -NoTrim", "`NoTrim`"],
+			["Disable-WindowsOptionalFeature -Online -FeatureName X -Remove", "`Remove`, the stem bare"],
+			["Disable-WindowsOptionalFeature -Online -FeatureName X -NoRestart", "`NoRestart`, beside bare `-Remove`"],
+			[
+				"Set-Acl -Path C:\\x -ClearCentralAccessPolicy",
+				"`ClearCentralAccessPolicy` — `Clear` plus the rest of the sentence",
+			],
 		])("%s — %s, so the message names the parameter", (command) => {
 			expect(windows(command)?.rule).toContain("disabling parameter");
 		});
 
-		test("a parameter that is not a disabling one does not produce that message", () => {
-			const match = windows("Set-NetFirewallProfile -All -DefaultInboundAction Block");
+		test("the two stem parameters `Get-Command` reports are not read as disabling", () => {
+			// The table is nine entries and the machine reports 633 parameters across
+			// the table's twenty-five resolving cmdlets, eleven of which carry a stem.
+			// The other two are named here so that a future edit that adds them is a
+			// deliberate act rather than a quiet widening.
+			for (const command of [
+				"Set-NetFirewallProfile -NotifyOnListen -Profile Domain",
+				"Set-NetFirewallProfile -DisabledInterfaceAliases Ethernet -Profile Domain",
+			]) {
+				const match = windows(command);
+				expect(match).not.toBeNull();
+				expect(match?.rule).not.toContain("disabling parameter");
+			}
+		});
+
+		test.each([
+			[
+				"Set-NetFirewallProfile -NotifyOnListen -Profile Domain",
+				"`NotifyOnListen` — `No` followed by a lowercase letter",
+			],
+			[
+				"Set-NetFirewallProfile -DisabledInterfaceAliases Ethernet -Profile Domain",
+				"`DisabledInterfaceAliases` — `Disable` + `d`",
+			],
+			[
+				"Set-NetFirewallProfile -All -DefaultInboundAction Block",
+				"`Block` is the *value* of another parameter, not a switch — the caller cannot tell them apart, so the table has to hold it out",
+			],
+		])("%s does not produce that message (%s)", (command) => {
+			const match = windows(command);
 			expect(match).not.toBeNull();
 			expect(match?.rule).not.toContain("disabling parameter");
+		});
+
+		test("a cmdlet with no stem parameter at all cannot reach the message either", () => {
+			// `Get-Command Remove-NetFirewallRule` reports no parameter starting with
+			// disable/no/remove/uninstall/clear/block, so this row is not "a parameter
+			// that looks like one" — there is nothing to mistake.
+			const match = windows("Remove-NetFirewallRule -DisplayName x -Enabled True");
+			expect(match).not.toBeNull();
+			expect(match?.rule).not.toContain("disabling parameter");
+		});
+	});
+
+	/**
+	 * What `-Enabled` asks for, in the three readings.
+	 *
+	 * This branch used to be two mirror booleans whose comments argued opposite
+	 * things about the same input, and the code did a third: `-Enabled maybe` read
+	 * as *not* off in one helper, as *on* in the other, and the caller acted on the
+	 * second — so a typo on the command whose whole purpose is turning the firewall
+	 * off classified as nothing at all. Measured `null` before this change.
+	 *
+	 * `unreadable` is its own answer rather than being folded into either boolean,
+	 * because it is neither: PowerShell will reject the value and change nothing.
+	 * The line is still flagged, and the message says which of the two happened,
+	 * because "the firewall is off" would be a lie about a command that never ran.
+	 */
+	describe("Set-NetFirewallProfile reads the value of -Enabled", () => {
+		test.each([
+			["Set-NetFirewallProfile -Enabled False -Profile Domain", "turning the firewall off"],
+			["Set-NetFirewallProfile -Enabled:$false", "the value glued to the parameter"],
+			["Set-NetFirewallProfile -NotEnabled", "the negated parameter name"],
+			["Set-NetFirewallProfile -Enabled 0", "the numeric spelling"],
+			["Set-NetFirewallProfile -Enabled off", "the word spelling"],
+			// `-Enabled` with nothing usable after it must not be read as the first
+			// bare `-notenabled` further along by a scan that gave up early.
+			["Set-NetFirewallProfile -Enabled -NotEnabled", "the value came after the switch that had none"],
+		])("%s is %s", (command) => {
+			expect(windows(command)?.rule).toContain("turning the firewall off");
+		});
+
+		test.each([
+			["Set-NetFirewallProfile -Enabled maybe -Profile Domain", "separate"],
+			["Set-NetFirewallProfile -Enabled:$maybe", "glued"],
+		])("%s — %s — is read as unreadable, and the message says so", (command) => {
+			const match = windows(command);
+			expect(match).not.toBeNull();
+			expect(match?.rule).toContain("will not accept");
+			// The thing it must NOT claim is that the firewall actually went off.
+			expect(match?.rule).not.toContain("turning the firewall off");
+		});
+
+		test("a value that turns it on is a repair and is left alone", () => {
+			expect(windows("Set-NetFirewallProfile -Enabled True -Profile Domain")).toBeNull();
+			expect(windows("Set-NetFirewallProfile -Enabled:$true")).toBeNull();
+			expect(windows("Set-NetFirewallProfile -Enabled 1")).toBeNull();
+			expect(windows("Set-NetFirewallProfile -Enabled yes")).toBeNull();
+		});
+
+		test("an absent value falls through to the cmdlet-name rule, not to either reading", () => {
+			// "use the current default" is a change of nothing in particular, so the
+			// message has to be the cmdlet's own rather than either of these two.
+			for (const command of [
+				"Set-NetFirewallProfile -Enabled",
+				"Set-NetFirewallProfile -Enabled -Profile Domain",
+				"Set-NetFirewallProfile -Profile Domain",
+			]) {
+				const match = windows(command);
+				expect(match?.rule).toBe(
+					"PowerShell `set-netfirewallprofile`, which changes a firewall profile, including turning it off",
+				);
+			}
+		});
+	});
+
+	/**
+	 * `net user` names three different acts in four words, and the rule used to
+	 * call all three a password reset. `net user /?` on this machine prints
+	 * `username [password | *] [options]`, `username {password | *} /ADD` and
+	 * `username [/DELETE]`, which is where the three come from.
+	 */
+	describe("net user names the act it found", () => {
+		test.each([
+			["net user bob hunter2", "resets a password", "a bare fourth word is the password"],
+			["net user bob /delete", "deletes the account", "`/delete` is not a password"],
+			["net user bob /active:yes", "changes that account's settings", "`/active:` is not a password"],
+			["net user bob /expires:never", "changes that account's settings", "`/expires:` is not a password"],
+		])("%s — %s (%s)", (command, expected) => {
+			expect(windows(command)?.rule).toContain(expected);
+		});
+
+		test("`/add` never reaches that rule, so the message it gets is the generic one", () => {
+			// The verb scan above matches `/add` on any argument and returns first.
+			// An arm for it here would be dead code that reads as coverage.
+			expect(windows("net user bob /add")?.rule).toBe("`net /add`, which destroys machine state");
+		});
+
+		test("two and three words are listings and stay quiet", () => {
+			expect(windows("net user")).toBeNull();
+			expect(windows("net user bob")).toBeNull();
 		});
 	});
 });
@@ -4275,6 +4418,13 @@ describe("Windows: the acts whose sc and net twins are already rules", () => {
 	 * which is what the table's docstring requires and what makes the list mean
 	 * something: `Set-LocalGroupMember` does *not* exist, so it is absent rather
 	 * than claimed, and the read-only siblings resolve too and are excluded.
+	 *
+	 * The one exception is the last row. `Set-Autologon` does not resolve here
+	 * either — it is a third-party module — and a comment in this file used to say
+	 * "every one was confirmed to resolve", which was false of it. It is kept on
+	 * the same `wmic` precedent the table's docstring states twice: not installed
+	 * here is a fact about the machine the file was written on, not a reason to
+	 * leave an act uncovered.
 	 */
 	test.each([
 		["New-Service -Name Svc -BinaryPathName C:\\evil.exe", "installs a service, the `sc create` twin"],
@@ -4286,6 +4436,7 @@ describe("Windows: the acts whose sc and net twins are already rules", () => {
 		["Clear-RecycleBin -Force", "makes a delete permanent"],
 		["Add-LocalGroupMember -Group Administrators -Member evil", "grants administrators membership"],
 		["New-LocalGroup -Name Admins2 -GroupType Administrators", "creates an administrators group"],
+		["Set-Autologon -Password hunter2", "the one row `Get-Command` does not resolve, kept deliberately"],
 	])("%s is dangerous — %s", (command) => {
 		expect(windows(command)).not.toBeNull();
 	});

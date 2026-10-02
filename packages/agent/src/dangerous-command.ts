@@ -1912,8 +1912,8 @@ const POSIX_SHUTDOWN_SWITCHES: ReadonlySet<string> = new Set(["-h", "-r", "-p", 
  * So `disable` and `reset` are caught on `ufw` while `enable` and `status` are
  * not, and `iptables` is caught on the verbs that empty a table or open a default
  * policy rather than on the program. Turning a protection *on* is a repair and is
- * left alone here for the same reason `firewallEnabledTrue` leaves it alone on
- * Windows.
+ * left alone here for the same reason `firewallEnabledReading` reads `"on"` on
+ * Windows and the caller walks away from it.
  *
  * `iptables -A INPUT -p tcp --dport 8080 -j ACCEPT` is deliberately not a rule:
  * adding one allow rule is not the same act as emptying the table, and a rule
@@ -3331,12 +3331,26 @@ function powershellAdminCmdletRules(lower: string[]): DangerousCommandMatch | nu
 			// has to give the same answer. Absent means "use the current default",
 			// which is not necessarily off — so absent is *not* treated as a
 			// disabling value, and the cmdlet-name rule below covers that case
-			// instead. A value PowerShell would not accept (`-Enabled maybe`) is
-			// treated as off, because the only way to reach it is a typo on a
-			// command that was meant to disable something.
+			// instead.
 			if (head === "set-netfirewallprofile") {
-				if (isFirewallEnabledFalse(segment)) {
+				const reading = firewallEnabledReading(segment);
+				if (reading === "off") {
 					return { kind: "Other", rule: "PowerShell `Set-NetFirewallProfile` turning the firewall off" };
+				}
+				// A value PowerShell would not accept (`-Enabled maybe`). This is the
+				// reading the two mirror booleans used to *disagree* on, and they lost
+				// the line: `isFirewallEnabledFalse` called it off and
+				// `firewallEnabledTrue` called it on, the caller acted on the second,
+				// and `Set-NetFirewallProfile -Enabled maybe` classified as nothing —
+				// measured `null`. It is read as off here, deliberately, and with a
+				// message that says so rather than claiming the firewall was turned
+				// off, because nothing was: the command is a typo and will be rejected.
+				// What the user needs to be told is that the line was aimed at this.
+				if (reading === "unreadable") {
+					return {
+						kind: "Other",
+						rule: "PowerShell `Set-NetFirewallProfile` aiming the firewall at a value PowerShell will not accept, which it will reject before changing anything",
+					};
 				}
 				// `Set-NetFirewallProfile -Enabled True` turns the firewall **on**,
 				// which is a repair. Flagging it is the failure mode this whole
@@ -3348,16 +3362,20 @@ function powershellAdminCmdletRules(lower: string[]): DangerousCommandMatch | nu
 				// policy tightening as often as loosening, and reading which one
 				// this invocation picked is a rule that has to earn itself.
 				//
-				// A `-Enabled` with no value at all still falls through to the
-				// cmdlet-name rule below: "use the current default" is a change of
-				// nothing in particular, and leaving it unflagged is the reading
+				// A `-Enabled` with no value at all (`undefined`) still falls through
+				// to the cmdlet-name rule below: "use the current default" is a change
+				// of nothing in particular, and leaving it unflagged is the reading
 				// this file takes elsewhere.
-				if (firewallEnabledTrue(segment)) continue;
+				if (reading === "on") continue;
 			}
 			// A `Disable*`/`No*` parameter is the act whatever the cmdlet is, and it is
 			// read so that the message says what was done rather than naming the
-			// cmdlet: `Set-NetFirewallProfile -NoLockdown` and
-			// `Set-LocalUser -NoPassword` both say so in their own right.
+			// cmdlet. The two this comment used to cite do not exist —
+			// `Set-NetFirewallProfile` has no `-NoLockdown` and `Set-LocalUser` has no
+			// `-NoPassword`, both measured against the real cmdlets. The real ones are
+			// on other cmdlets in the same table: `New-LocalUser -NoPassword` clears
+			// the password, `Clear-Disk -RemoveData` empties the disk,
+			// `Disable-WindowsOptionalFeature -Remove` unregisters the feature.
 			//
 			// It does **not** make a `Set-*` cmdlet with no disabling parameter safe —
 			// those fall to the name rule below, which is the deliberate choice:
@@ -3413,24 +3431,50 @@ function isHistoryRedirect(segment: string[]): boolean {
 }
 
 /**
- * Does this segment explicitly turn the firewall **on**?
+ * What `-Enabled` asks for in this segment, or `undefined` when there is no
+ * `-Enabled` at all.
  *
- * The mirror of `isFirewallEnabledFalse`, and it exists so that the caller can
- * decline to flag a repair. A value PowerShell would reject counts as *not* a
- * deliberate "on" — the reasoning being that a typo means the command will not
- * run at all, so there is no act to flag.
+ * **This replaces a pair of mirror booleans that could disagree, and they did.**
+ * `isFirewallEnabledFalse` said in its own comment that a value PowerShell would
+ * reject is treated as off — "guessing 'off' is the safe side" — while
+ * `firewallEnabledTrue` said in its own comment, ten lines away, that the same
+ * value is not a deliberate "on", because "a typo means the command will not run
+ * at all, so there is no act to flag". Two comments, opposite conclusions, same
+ * input. Neither matched the code either: the first returned `false` for an
+ * unrecognized value and the second returned `true`, and the caller acted on the
+ * second. So `Set-NetFirewallProfile -Enabled maybe` **left the classifier
+ * entirely** — measured `null` while `-Enabled False` returned a match. A typo on
+ * the one command whose whole purpose is turning the firewall off went unread, and
+ * the code did the opposite of what both comments claimed.
+ *
+ * Three readings rather than two booleans, because "I cannot read this" is not
+ * the same answer as either "on" or "off", and flattening it into one of them is
+ * precisely what dropped the line.
  */
-function firewallEnabledTrue(segment: string[]): boolean {
+function firewallEnabledReading(segment: string[]): FirewallEnabledReading | undefined {
 	for (let i = 0; i < segment.length; i++) {
 		const token = segment[i].toLowerCase();
+		// Glued: `-Enabled:$false`.
 		const glued = /^-(?:not)?enabled:(.+)$/.exec(token);
-		if (glued !== null) return !POWERSHELL_FALSE_VALUES.has(glued[1].trim());
+		if (glued !== null) return readFirewallValue(glued[1]);
+		// The negated name on its own: `-NotEnabled`.
+		if (token === "-notenabled") return "off";
+		// Separate: `-Enabled False`. The next word has to be a value, so a
+		// following parameter name means the value was left out.
 		if (token === "-enabled") {
 			const next = segment[i + 1]?.toLowerCase();
-			if (next !== undefined && !next.startsWith("-")) return !POWERSHELL_FALSE_VALUES.has(next);
+			if (next !== undefined && !next.startsWith("-")) return readFirewallValue(next);
 		}
 	}
-	return false;
+	return undefined;
+}
+
+/** One `-Enabled` value, in the three readings. */
+function readFirewallValue(value: string): FirewallEnabledReading {
+	const trimmed = value.trim();
+	if (POWERSHELL_FALSE_VALUES.has(trimmed)) return "off";
+	if (POWERSHELL_TRUE_VALUES.has(trimmed)) return "on";
+	return "unreadable";
 }
 
 /**
@@ -3656,12 +3700,12 @@ const WINDOWS_ADMIN_ALWAYS: ReadonlyMap<string, string> = new Map([
  * `Clear-EventLog -LogName Security` empty the same log.
  *
  * **Measured by `Get-Command` on this machine**, which is why the list is what
- * it is: `Clear-EventLog`, `Set-NetFirewallProfile`, `Register-ScheduledTask`,
- * `Clear-Disk`, `Initialize-Disk` and `Set-ExecutionPolicy` all resolve to a
- * Cmdlet or Function, and `Remove-Disk` does not exist at all — a check that
- * fails is what makes the rest of the list mean something. `Get-Command` also
- * reports these as *Functions* rather than *Cmdlets* on this box, which is
- * why the rule reads the name and not the command type.
+ * it is: twenty-five of the twenty-six entries resolve to a Cmdlet or Function,
+ * and the exception is noted at its own row. `Remove-Disk` — the cmdlet this
+ * table was once written with — does not exist at all, and a check that fails is
+ * what makes the rest of the list mean something. `Get-Command` also reports
+ * many of these as *Functions* rather than *Cmdlets* on this box, which is why
+ * the rule reads the name and not the command type.
  *
  * Not measured: that any of them destroys anything, on purpose. `Clear-Disk`
  * with `-RemoveData` would erase a volume; `Clear-EventLog` empties a log;
@@ -3704,17 +3748,26 @@ const POWERSHELL_ADMIN_CMDLETS: ReadonlyMap<string, string> = new Map([
 	// are, which is the exact failure this file is written to avoid.
 	["disable-windowsoptionalfeature", "removes a Windows feature"],
 	["set-localuser", "changes a local account, including its password"],
+	// `set-autologon` is the one entry in this table that `Get-Command` did not
+	// resolve on the machine it was measured on — it is a third-party module
+	// (`Autologon`), not part of the box. It stays, on the `wmic` and `ufw`
+	// precedent stated twice in this file: "not installed here is a fact about the
+	// machine the file was written on, not a reason to leave an act uncovered."
+	// Writing a password into `HKLM\...\Winlogon` in default-user form is a real
+	// act on a machine that has the module. The comment above this table used to
+	// say "every one was confirmed to resolve", which was false of this row.
 	["set-autologon", "configures automatic logon"],
 	// Service and account cmdlets whose `sc` and `net` twins are already rules
 	// elsewhere in this file. `sc create` and `net user /add` are covered, and each
 	// of these is the same act spelled the PowerShell way — a gap of the exact kind
 	// this table's own docstring says was closed once already.
 	//
-	// Every one was confirmed to resolve by `Get-Command` on this machine, which is
-	// what makes the list mean something: `Set-LocalGroupMember` does *not* exist,
-	// so it is absent rather than asserted, and the read-only siblings
-	// (`Get-LocalUser`, `Get-Service`, `Get-LocalGroup`) resolve too and are
-	// excluded by the same "no harmless sibling" rule the docstring states.
+	// All six of these were re-measured by `Get-Command` on this machine and every
+	// one resolves, as do the read-only siblings (`Get-LocalUser`, `Get-Service`,
+	// `Get-LocalGroup`) that the "no harmless sibling" rule keeps out. The check
+	// that fails is what makes the rest mean something: `Set-LocalGroupMember` does
+	// *not* exist, which is why the group-membership row reads `Add-` — adding a
+	// member is the act, and there is no `Set-` spelling of it to cover as well.
 	//
 	// `Add-LocalGroupMember` is the sharpest of these. Membership of an
 	// Administrators group *is* privilege escalation, and `net localgroup
@@ -3755,66 +3808,101 @@ const POWERSHELL_ADMIN_CMDLETS: ReadonlyMap<string, string> = new Map([
 const POWERSHELL_FALSE_VALUES: ReadonlySet<string> = new Set(["false", "0", "$false", "off", "no", "not"]);
 
 /**
- * Does this segment turn the firewall off?
- *
- * Three spellings reach here in real scripts and all three are the same act:
- * the value glued to the parameter (`-Enabled:$false`), the value as the next
- * word (`-Enabled False`), and the negated parameter name (`-NotEnabled`). All
- * three are read, because reading only the glued one misses the most common
- * form and reading only the separate one misses the form a script generates.
- *
- * **A bare `-Enabled` with nothing after it is not a match.** It means "use the
- * current default", which is not the same as off, and treating it as off would
- * invent a disabling act nobody asked for. The cmdlet-name rule covers the
- * case where the caller changed *something* about the profile; this one covers
- * the case where they turned it off.
- *
- * An unrecognized value (`-Enabled maybe`) counts as off. PowerShell would
- * reject it, so the only way to reach this line with one is a typo on a command
- * that was meant to disable something, and guessing "off" is the safe side.
+ * The nine disabling parameters `isDisablingParameter`'s own comment names, as
+ * data. Kept next to that function rather than inside it because a set is a thing
+ * this file measures and a regex is a thing it guesses — and the whole reason
+ * that function stopped being a regex is a `Get-Command` run over 633 parameters.
  */
-function isFirewallEnabledFalse(segment: string[]): boolean {
-	for (let i = 0; i < segment.length; i++) {
-		const token = segment[i].toLowerCase();
-		// Glued: `-Enabled:$false`.
-		const glued = /^-(?:not)?enabled:(.+)$/.exec(token);
-		if (glued !== null) return POWERSHELL_FALSE_VALUES.has(glued[1].trim());
-		// The negated name on its own: `-NotEnabled`.
-		if (token === "-notenabled") return true;
-		// Separate: `-Enabled False`. The next word has to be a value, so a
-		// following parameter name means the value was left out.
-		if (token === "-enabled") {
-			const next = segment[i + 1]?.toLowerCase();
-			return next !== undefined && POWERSHELL_FALSE_VALUES.has(next);
-		}
-	}
-	return false;
-}
+const POWERSHELL_DISABLING_PARAMETERS: ReadonlySet<string> = new Set([
+	"disabled",
+	"nopassword",
+	"removedata",
+	"removeoem",
+	"remove",
+	"norestart",
+	"disableheatgathering",
+	"notrim",
+	"clearcentralaccesspolicy",
+]);
+
+/** The other half of `POWERSHELL_FALSE_VALUES`. */
+const POWERSHELL_TRUE_VALUES: ReadonlySet<string> = new Set(["true", "1", "$true", "on", "yes"]);
+
+/** What one `-Enabled` asks for. `undefined` is "there is no `-Enabled` here". */
+type FirewallEnabledReading = "off" | "on" | "unreadable";
 
 /**
- * Parameters that turn a `Set-*` into a `Disable-*`.
+ * Parameters that turn a `Set-*` into a `Disable-*`, measured rather than guessed.
  *
- * **A prefix match, deliberately, and this is the one place in the file where
- * that choice had to be argued rather than copied.** `Set-MpPreference`'s own
- * rule uses `startsWith("-disable")` and has done since it was written, because
- * PowerShell's real parameter is `-DisableRealtimeMonitoring` — one word. A
- * boundary was tried here first, on the reasoning that `-nologo` should not
- * match `no`, and the measurement killed it: with `(?:$|[-:0-9])` after the
- * stem, **not one real PowerShell parameter matches**, because every one of them
- * continues with a letter (`-NoPassword`, `-Disabled`, `-RemoveAll`,
- * `-DisableRealtimeMonitoring`). The branch was dead and green, which is the
- * state a private function nobody tests reaches.
+ * **Three attempts at a boundary, all measured, all wrong, and the table is what
+ * is left.** `Set-MpPreference`'s own rule uses `startsWith("-disable")` and has
+ * done since it was written, because PowerShell's real parameter is
+ * `-DisableRealtimeMonitoring` — one word. The reasoning for a boundary here is
+ * the same as there: `-nologo` should not match `no`.
  *
- * So the prefix stands. What it costs: `-NoLockdown` and `-NotSigned` both match,
- * and both do disable something, so the two spellings that matter are covered
- * rather than merely the tidy one.
+ * 1. `(?:$|[-:0-9])` after the stem. **Matches none of the 633 parameters.** Every
+ *    real one continues with a letter. Dead and green — the state a private
+ *    function nobody tests reaches.
+ * 2. `(?![a-z])`, on a raw token. Reads the case, which is the only thing that
+ *    distinguishes `-RemoveData` from `-Removedata`… except `/i` makes the
+ *    lookahead case-insensitive too, so `D` is rejected. Two of 633.
+ * 3. The same, without `/i`, against a lowercased token. Lowercasing has already
+ *    turned `D` into `d`. Two of 633, in the other direction.
+ *
+ * Attempt 3 is also not available here in principle: the caller segments
+ * `windowsSegments(lower)`, so **every token arrives lowercased** and the casing a
+ * case-boundary needs is gone before this function is called.
+ *
+ * So there is no boundary to be had, and a table is the honest shape. Every entry
+ * is a parameter `Get-Command` reports on this machine, for the twenty-five
+ * cmdlets in `POWERSHELL_ADMIN_CMDLETS` that resolve — 633 parameters scanned,
+ * eleven of which carry one of the five stems, and these are the nine that
+ * actually disable something:
+ *
+ * | parameter | cmdlet | what it disables |
+ * | --- | --- | --- |
+ * | `-Disabled` | `New-LocalUser` | the account cannot log on |
+ * | `-NoPassword` | `New-LocalUser` | the account has no password |
+ * | `-RemoveData` | `Clear-Disk` | the volume's contents |
+ * | `-RemoveOEM` | `Clear-Disk` | the OEM partition |
+ * | `-Remove` | `Disable-WindowsOptionalFeature` | the feature registration |
+ * | `-NoRestart` | `Disable-WindowsOptionalFeature` | the reboot, so the removal is half-done |
+ * | `-DisableHeatGathering` | `Format-Volume` | the wear leveller |
+ * | `-NoTrim` | `Format-Volume` | TRIM |
+ * | `-ClearCentralAccessPolicy` | `Set-Acl` | the central access policy on the file |
+ *
+ * And the two the stems would have caught wrongly, which are what the old prefix
+ * rule caught wrongly:
+ *
+ * | parameter | cmdlet | why it is not a disabling act |
+ * | --- | --- | --- |
+ * | `-NotifyOnListen` | `Set-NetFirewallProfile` | asks it to *report* traffic |
+ * | `-DisabledInterfaceAliases` | `Set-NetFirewallProfile` | an interface alias *name*, as a string |
+ *
+ * `Set-LocalUser` has no stem parameter at all, measured — it takes `-Password`
+ * where `New-LocalUser` takes `-NoPassword`. A comment in this file used to cite
+ * `Set-LocalUser -NoPassword` as an example; the cmdlet has no such parameter.
+ *
+ * **What this gives up, stated rather than hidden.** A disabling parameter on a
+ * cmdlet that is not on this box, or on a Windows version this box does not have,
+ * is not read. Adding one means adding it to the table with a `Get-Command` run
+ * behind it, which is the only way this list can be trusted at all.
+ *
+ * **The bare-stem arm that would have covered that was cut, and its failure is
+ * the reason.** "No measured parameter is spelled exactly `-Remove`, so matching
+ * the bare stems costs nothing here" — measured, and true of the *parameters*,
+ * and irrelevant: this function cannot tell a parameter from an argument, so
+ * `Set-NetFirewallProfile -DefaultInboundAction Block` ends with a token that is
+ * exactly `Block`, and it matched. The caller's own comment says that line is
+ * not a disabling parameter and it is right, so the arm was wrong and the table
+ * stands alone.
  *
  * The value is not consulted, for the reason the Defender rule gives: reading it
  * means handling three spellings and an absent case, and absent means "use the
  * default", which for a parameter named `Disable*` is the disabling one.
  */
 function isDisablingParameter(token: string): boolean {
-	return /^-(?:disable|no|remove|uninstall|clear|block)/i.test(token);
+	return POWERSHELL_DISABLING_PARAMETERS.has(token.toLowerCase().replace(/^-+/, ""));
 }
 
 /**
@@ -3989,7 +4077,33 @@ function dangerousWindowsAdmin(tokens: string[]): DangerousCommandMatch | null {
 	// `net user <name> <password>` resets a password and carries no `/add` to
 	// recognise it by. It is exactly four words -- `net`, `user`, the name, the
 	// password -- and the two listings beside it are two and three.
+	//
+	// **`net user /?` on this machine also prints `username [/DELETE]`, which is
+	// the same four words.** The rule used to report that as a password reset,
+	// which is the opposite of what it does: `/delete` removes the account. The
+	// act was flagged either way, but a message naming the wrong act is worse
+	// than no message, because the user reads it and learns nothing. So the
+	// fourth word is read, and the two are named separately.
 	if (program === "net" && tokens.length === 4 && tokens[1].toLowerCase() === "user") {
+		const fourth = tokens[3].toLowerCase();
+		if (fourth === "/delete") {
+			return { kind: "Other", rule: "`net user <name> /delete`, which deletes the account" };
+		}
+		// Every other four-word `net user` is an option, not a password. `net user /?`
+		// prints `/TIMES:`, `/ACTIVE:`, `/COMMENT:`, `/EXPIRES:` and `/DOMAIN`, and
+		// each of those is a change to an existing account rather than a reset of
+		// its password. Saying "resets a password" about one of them is the same
+		// defect as saying it about `/delete`: the line is flagged, so nothing runs
+		// unguarded, but the user reads a description of an act they did not ask
+		// for and learns nothing about the one they did.
+		//
+		// `/add` is not read here because it cannot reach this line: the verb scan
+		// above matches `/add` on any argument and returns first, so `net user bob
+		// /add` reports ``net /add``. An arm for it would be dead code that reads
+		// as coverage.
+		if (fourth.startsWith("/")) {
+			return { kind: "Other", rule: `\`net user <name> ${fourth}\`, which changes that account's settings` };
+		}
 		return { kind: "Other", rule: "`net user <name> <password>`, which resets a password" };
 	}
 
