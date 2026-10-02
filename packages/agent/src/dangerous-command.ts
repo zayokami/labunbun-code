@@ -745,6 +745,141 @@ const NERDCTL_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Options that swallow the word after them, for `docker run`.
+ *
+ * This is the largest flag set in the file and it is worth saying how it was
+ * produced, because a list of this size copied by hand is a list of this size
+ * with a mistake in it. `docker run`'s flags live in two files — `drun.go:58-77`
+ * registers the nine that are not stored in `Config`/`HostConfig`, and
+ * `copts = addFlags(flags)` at `drun.go:82` pulls in the other 99 from
+ * `addFlags` in `cli/command/container/opts.go:150-329`. Both files were parsed
+ * mechanically, splitting on the registration function alone: pflag gives a
+ * `NoOptDefVal` to `BoolVar`/`BoolVarP` and to nothing else (`bool.go:54-57`
+ * against `flag.go:852-863`), so `Bool*` takes nothing and every other `*Var`
+ * takes the next word. Ninety-three flags and ten shorthands take a value;
+ * these fifteen do not:
+ *
+ * ```
+ * --detach  --disable-content-trust  --help  --init  --interactive
+ * --no-healthcheck  --oom-kill-disable  --privileged  --publish-all
+ * --quiet  --read-only  --rm  --sig-proxy  --tty  --use-api-socket
+ * ```
+ *
+ * Three entries are here for a reason a reader would otherwise undo:
+ *
+ * - `--net` is `MarkHidden`'d at `opts.go:247` and hidden is not unregistered.
+ * - `--kernel-memory` is registered over a stub at `opts.go:328` and
+ *   `MarkDeprecated`'d at `:329`; deprecated still parses and still takes a value.
+ * - **`--network` has no shorthand.** `-n` reads as one here and is not one;
+ *   `opts.go:245-246` registers `--net` and `--network` with `Var` and no `P`.
+ */
+const DOCKER_RUN_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+	"--add-host",
+	"--annotation",
+	"--attach",
+	"-a",
+	"--blkio-weight",
+	"--blkio-weight-device",
+	"--cap-add",
+	"--cap-drop",
+	"--cgroup-parent",
+	"--cgroupns",
+	"--cidfile",
+	"--cpu-count",
+	"--cpu-percent",
+	"--cpu-period",
+	"--cpu-quota",
+	"--cpu-rt-period",
+	"--cpu-rt-runtime",
+	"--cpu-shares",
+	"-c",
+	"--cpus",
+	"--cpuset-cpus",
+	"--cpuset-mems",
+	"--detach-keys",
+	"--device",
+	"--device-cgroup-rule",
+	"--device-read-bps",
+	"--device-read-iops",
+	"--device-write-bps",
+	"--device-write-iops",
+	"--dns",
+	"--dns-opt",
+	"--dns-option",
+	"--dns-search",
+	"--domainname",
+	"--entrypoint",
+	"--env",
+	"-e",
+	"--env-file",
+	"--expose",
+	"--gpus",
+	"--group-add",
+	"--health-cmd",
+	"--health-interval",
+	"--health-retries",
+	"--health-start-interval",
+	"--health-start-period",
+	"--health-timeout",
+	"--hostname",
+	"-h",
+	"--io-maxbandwidth",
+	"--io-maxiops",
+	"--ip",
+	"--ip6",
+	"--ipc",
+	"--isolation",
+	"--kernel-memory",
+	"--label",
+	"-l",
+	"--label-file",
+	"--link",
+	"--link-local-ip",
+	"--log-driver",
+	"--log-opt",
+	"--mac-address",
+	"--memory",
+	"-m",
+	"--memory-reservation",
+	"--memory-swap",
+	"--memory-swappiness",
+	"--mount",
+	"--name",
+	"--net",
+	"--net-alias",
+	"--network",
+	"--network-alias",
+	"--oom-score-adj",
+	"--pid",
+	"--pids-limit",
+	"--platform",
+	"--publish",
+	"-p",
+	"--pull",
+	"--restart",
+	"--runtime",
+	"--security-opt",
+	"--shm-size",
+	"--stop-signal",
+	"--stop-timeout",
+	"--storage-opt",
+	"--sysctl",
+	"--tmpfs",
+	"--ulimit",
+	"--umask",
+	"--user",
+	"-u",
+	"--userns",
+	"--uts",
+	"--volume",
+	"-v",
+	"--volume-driver",
+	"--volumes-from",
+	"--workdir",
+	"-w",
+]);
+
+/**
  * Options that swallow the word after them, for `docker compose exec`.
  *
  * `docker/compose` `cmd/compose/exec.go:81-92`, which is a different repository
@@ -850,7 +985,7 @@ const PODMAN_EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * program name in the usage strings differs.
  *
  * Still to be measured on their own source before they are written down:
- * `docker run`/`docker container run`/`docker compose run`, `podman exec`,
+ * `docker compose run`, `nerdctl run`, `podman run`,
  * `wsl` (whose bare form hands the rest to a login shell rather than exec'ing it,
  * so it is not this shape), `machinectl shell`, `multipass exec`,
  * `limactl shell`. A name that is not here is not followed at all.
@@ -921,6 +1056,18 @@ const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new M
 	["docker container exec", { positionals: 1, valueOptions: DOCKER_EXEC_VALUE_OPTIONS }],
 	["nerdctl exec", { positionals: 1, valueOptions: NERDCTL_EXEC_VALUE_OPTIONS }],
 	["docker compose exec", { positionals: 1, valueOptions: DOCKER_COMPOSE_EXEC_VALUE_OPTIONS }],
+	// `docker run` is the same one-positional shape as `docker exec` — the operand
+	// is the **image** rather than a running container — and it is worth its own
+	// carrier mostly because its flag set is ninety-three entries long. Without that
+	// table `docker run -e FOO=bar ubuntu rm -rf /` reads `FOO=bar` as the image and
+	// `ubuntu` as the head of the command, so it is quiet on a line that runs; the
+	// plain `docker run ubuntu rm -rf /` was never at risk, which is why this is a
+	// miss and not a hole.
+	["docker run", { positionals: 1, valueOptions: DOCKER_RUN_VALUE_OPTIONS }],
+	// One constructor for both spellings, as with `exec`: `ccmd.go:11` registers
+	// `newRunCommand` at the top level and `ccmd.go:62` adds the same call to the
+	// `container` parent, so the two share a flag set and an argument rule.
+	["docker container run", { positionals: 1, valueOptions: DOCKER_RUN_VALUE_OPTIONS }],
 	// `podman exec` is the only carrier whose positional count is not a constant.
 	// `exec.go:227-236` reads:
 	//

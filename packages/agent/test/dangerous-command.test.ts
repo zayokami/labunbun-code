@@ -3722,6 +3722,46 @@ describe("POSIX: volume managers", () => {
 			"podman exec -l rm -rf /",
 			"and -l, which both proves the shorthand arm of the containerless check and stops `rm` from being read as the container's name",
 		],
+		// `docker run` is the same one-positional shape with the image in the
+		// operand's place. These rows are all about the flag set rather than the
+		// shape: without the table each of them reads the flag's **value** as the
+		// image and the image as the head of the command.
+		["docker run -it ubuntu rm -rf /", "docker run, whose positional is the image"],
+		["docker run ubuntu rm -rf /", "and with no flags at all, which the table is not what makes work"],
+		["docker container run -it ubuntu rm -rf /", "the same constructor under `docker container`"],
+		[
+			"docker run -e FOO=bar ubuntu rm -rf /",
+			"with a value flag before the image — the row that fails if `--env` leaves the table",
+		],
+		[
+			"docker run --name web -v /srv:/srv -p 8080:80 ubuntu rm -rf /",
+			"and three of the shorthands at once, where a missed `-v` reads `/srv:/srv` as the image",
+		],
+		["docker run --mount type=bind,src=/srv,dst=/srv ubuntu rm -rf /", "and --mount, which is a `Var` at opts.go:261"],
+		[
+			"docker run --restart always --network host ubuntu rm -rf /",
+			"and --network, which takes a value and has **no** shorthand: `-n` is not one",
+		],
+		// The two rows that pin the table's *other* error direction. Putting a
+		// `BoolVar` in a value set makes the word after it get eaten, so each of
+		// these goes quiet if `--rm` or `--privileged` is ever added to the table.
+		["docker run --rm ubuntu rm -rf /", "--rm, which is a plain BoolVar at opts.go:212"],
+		[
+			"docker run --privileged ubuntu rm -rf /",
+			"and --privileged, a BoolVar at opts.go:217 that is nowhere near the value set — the image has to follow it directly, or the eaten word is a flag and nothing shifts",
+		],
+		// The three that only a flag the *run* table has and the *exec* table does
+		// not can reach. `--name` rather than `-e` on purpose: both tables have
+		// `--env`, so a row using it could not tell the two apart.
+		[
+			"docker container run --name web ubuntu rm -rf /",
+			"and the same constructor under `docker container`, with a flag exec has no entry for",
+		],
+		["docker run --net host ubuntu rm -rf /", "and --net, hidden at opts.go:247 and still taking its value"],
+		[
+			"docker run --kernel-memory 100m ubuntu rm -rf /",
+			"and --kernel-memory, registered over a stub and deprecated, which still parses and still eats a word",
+		],
 		// A `--` is optional for all of these but legal. It is **skipped**, not
 		// treated as the end of option parsing, because pflag's real behaviour there
 		// costs detections — see the note in `remoteCommandScript`. What that buys is
@@ -3802,7 +3842,6 @@ describe("POSIX: volume managers", () => {
 		],
 		["kubectl exec pod --", "a separator with nothing after it"],
 		["kubectl exec pod rm -rf /", "no separator, which exec.go:243-249 rejects before a container sees it"],
-		["docker run -it ubuntu rm -rf /", "docker is not in the carrier table yet, and is not borrowed from ssh"],
 		["docker exec -it web ls", "an ordinary exec"],
 		["docker exec web", "a container and no command, which docker rejects"],
 		["docker compose exec web ls", "an ordinary compose exec"],
@@ -3821,6 +3860,10 @@ describe("POSIX: volume managers", () => {
 			"nerdctl exec --detach-keys ctrl-p web rm -rf /",
 			"the counterweight to the docker row above: `nerexec.go:45-56` registers no --detach-keys, so nerdctl rejects the line outright. Reading docker's table here would report a command that cannot run — a finding that is wrong rather than early",
 		],
+		["docker run -it ubuntu ls", "an ordinary run"],
+		["docker run ubuntu", "an image and no command, which is a container that starts and exits"],
+		["docker run -it --rm ubuntu bash", "and a shell, which is the ordinary thing the flags above are written for"],
+		["docker run -it ubuntu sh -c 'cd /srv && ls'", "and a quoted script body, through the newest table"],
 		["docker ps", "and docker on its own still runs nothing anywhere"],
 		["ssh host --", "a separator with nothing after it, which the `--` rule has to agree with"],
 		[
