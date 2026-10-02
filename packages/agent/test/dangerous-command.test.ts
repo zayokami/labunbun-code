@@ -1407,6 +1407,92 @@ describe("Windows: CMD", () => {
 	);
 });
 
+describe("Windows: `forfiles` runs a command line once per file it finds", () => {
+	/**
+	 * A bypass, not a gap in the vocabulary. Every row below contains a literal
+	 * `del /f` or `rd /s /q` and read as nothing before this rule, because
+	 * `dangerousCmdSegment` reads the program off the head of the segment and the
+	 * head was `forfiles`.
+	 *
+	 * The rule hands the payload to `matchScript` rather than matching a shape of
+	 * its own, which is why the last row fires without a word about `forfiles`
+	 * appearing in it: the payload is a command line, and a command line is what
+	 * everything else in this file already knows how to read. `forfiles` is not the
+	 * only CMD program that takes a command string — see the audit queued behind
+	 * this — but it is the one that walks a whole tree with it.
+	 */
+	test.each([
+		['forfiles /p C:\\Users /s /c "cmd /c del /f @path"', "the standard mass delete"],
+		['forfiles /p C:\\ /s /c "cmd /c rd /s /q @path"', "a silent recursive delete per file"],
+		['forfiles /p C:\\ /s /c "del /f @path"', "the delete without the `cmd /c` in front"],
+		['forfiles /p C:\\ /s /c "cmd /c Remove-Item C:\\x -Force"', "a PowerShell body behind a CMD program"],
+		['forfiles /p C:\\ /s /c:"cmd /c rd /s /q @path"', "the glued `/c:\"…\"` spelling"],
+		['forfiles /c "cmd /c del /f @path" /p C:\\', "the payload before the path, which is the other real order"],
+		['FORFILES /P C:\\ /S /C "CMD /C DEL /F @path"', "the whole line in capitals"],
+	])("%s is dangerous — %s", (command) => {
+		expect(windows(command)).not.toBeNull();
+	});
+
+	/**
+	 * Plain `rd` is not a covered shape, and the row that would have been wrong to
+	 * guess at is measured rather than assumed.
+	 *
+	 * `forfiles /c "cmd /c rd @path"` is `forfiles` doing exactly what this rule
+	 * follows — the payload runs, and it holds no flag that takes the asking away.
+	 * Whether that deletes anything was **run against a real `cmd.exe` on this
+	 * machine**, and nothing was deleted in any of the three cases:
+	 *
+	 * - `rd` on a directory with a file in it → exit 145, directory still there
+	 *   ("目录不是空的" — the directory is not empty).
+	 * - `rd` on a *file*, which is what `@path` actually expands to → exit 267,
+	 *   file still there ("目录名称无效" — the directory name is invalid; `rd` will
+	 *   not take a file).
+	 * - `rd` on a path that does not exist → exit 2, "系统找不到指定的文件".
+	 *
+	 * So this line deletes nothing and is allowed, which is the same answer
+	 * `rd C:\x` gets one table up. Had the payload been `rd /s /q @path` it would
+	 * delete the file — and that is the first row of the table above.
+	 */
+	test.each([
+		['forfiles /p C:\\ /s /c "cmd /c rd @path"', "plain `rd` on a file: exit 267, file survives"],
+		['forfiles /p C:\\logs /s /c "cmd /c type @path"', "reads the files"],
+		['forfiles /p C:\\logs /m *.txt /c "cmd /c notepad @path"', "opens them"],
+		["forfiles /p C:\\logs /s", "no `/c` at all — it lists files and runs nothing"],
+		["forfiles", "the program with no arguments"],
+		['forfiles /p C:\\logs /c ""', "an empty payload"],
+		[
+			'forfiles /c "cmd /c type @path" /c "cmd /c del /f @path"',
+			"a repeated `/c`: forfiles refuses the whole line (exit 1), and the first is the one read",
+		],
+	])("%s is not dangerous — %s", (command) => {
+		expect(windows(command)).toBeNull();
+	});
+
+	/**
+	 * `forfiles` is a CMD program and does not exist on POSIX, so a line read for
+	 * the POSIX platform has nothing to follow.
+	 *
+	 * The two rows below are here for two different reasons and it is worth saying
+	 * which is which, because the first one is *not* the one it looks like. For
+	 * `cmd /c del /f @path` the POSIX reading is `null` even with this branch's
+	 * `platform` guard removed, because `cmd` is not in `SHELL_EXECUTABLES` and
+	 * nothing follows a payload no POSIX shell would run either — a mutation that
+	 * deleted the guard left that row green. The second row is the one that holds
+	 * the guard: `rm -rf /` is a platform-agnostic rule, so the only thing standing
+	 * between that line and `ForcedRm` on POSIX is the `platform === "windows"` on
+	 * this branch, and taking it off turns the second row red.
+	 */
+	test("the payload is followed on the platform that has the program", () => {
+		const cmdBody = 'forfiles /p C:\\Users /s /c "cmd /c del /f @path"';
+		expect(windows(cmdBody)).not.toBeNull();
+		expect(posix(cmdBody)).toBeNull();
+
+		const posixRule = 'forfiles /p / /s /c "rm -rf /"';
+		expect(windows(posixRule)).not.toBeNull();
+		expect(posix(posixRule)).toBeNull();
+	});
+});
+
 describe("Windows: a control word in front of the command", () => {
 	/**
 	 * Every row here was run against a real `cmd.exe` on this machine: one

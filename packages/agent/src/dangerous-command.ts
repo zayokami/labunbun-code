@@ -1068,6 +1068,69 @@ function matchTokens(
 		}
 		return null;
 	}
+	// `forfiles /c "cmdstring"` runs a whole command line once per file found, and
+	// it is the standard CMD spelling of a mass delete. This is a *bypass* rather
+	// than a gap in the vocabulary: `forfiles /p C:\Users /s /c "cmd /c del /f
+	// @path"` contains a literal `del /f` and classified as nothing, because
+	// `dangerousCmdSegment` reads the program off `segment[0]` and `segment[0]` is
+	// `forfiles`.
+	//
+	// Read the way `eval` reads — the payload is a script, so it is handed to
+	// `matchScript` rather than matched as a shape. The recursion is what makes
+	// this general: the payload is a CMD line, so whatever this file already
+	// knows about `del`, `rd` and `cmd /c` applies to it without being named
+	// here. `forfiles` with no `/c` only lists files and runs nothing, so it
+	// returns nothing.
+	//
+	// NOT MEASURED by running a delete, and the reason is not caution. Whether the
+	// payload removes anything was measured, with `cmd.exe` on this machine and a
+	// scratch tree: `rd` on a directory holding a file answers exit 145 and the
+	// directory survives, and `rd` on a *file* — which is what `@path` expands to —
+	// answers exit 267 ("目录名称无效") and the file survives too, because `rd` takes
+	// a directory and refuses a file. So `forfiles /c "cmd /c rd @path"` runs and
+	// deletes nothing, and it is allowed for the same reason `rd C:\x` is.
+	// `rd /s /q @path` *does* remove the file, which is why that spelling is in the
+	// dangerous table and this one is not.
+	//
+	// What the payload reads as is therefore not a claim about `forfiles` at all: it
+	// goes back through `matchScript`, so `forfiles /p C:\ /s /c "rm -rf /"` is
+	// `ForcedRm` even on the `windows` platform. That is the platform-agnostic `rm`
+	// rule doing what it does on a top-level line, not this branch widening a
+	// platform — the same string is `null` under `ssh`, because `ssh` is not in
+	// `SHELL_EXECUTABLES` and nothing follows its argument at all.
+	//
+	// The loop stops at the first `/c`, and **that is not a claim about which one
+	// wins**: `forfiles` answers a repeated `/c` by refusing the line outright —
+	// `forfiles /p %TEMP%\t /m a.txt /c "cmd /c echo A" /c "cmd /c echo B"`
+	// prints `错误: 无效语法。'/c' 选项不应重复 '1' 次。` ("invalid syntax; the '/c'
+	// option must not be repeated") and runs nothing, measured with an `echo`
+	// payload so that nothing could be deleted either way. So there is no "winning"
+	// `/c` to read: reading the first one flags a line that cannot execute, which
+	// costs one prompt too many. That is the smaller of the two mistakes this file
+	// takes elsewhere, and it is taken on purpose here — which is why
+	// `forfiles /c "cmd /c type @path" /c "cmd /c del /f @path"` is an *allowed*
+	// row in the tests, and not a dangerous one.
+	//
+	// `payload === ""` used to be in the guard below and was removed, because
+	// nothing held it: a mutation that deleted the clause left the suite green.
+	// `tokenizeShell` really does hand the empty payload over as a token —
+	// `forfiles /p C:\logs /c ""` arrives as `["forfiles","/p","C:\logs","/c",""]` —
+	// so the input is real; `matchScript("")` is simply `null`, which is why
+	// `forfiles /c ""` is allowed either way.
+	if (platform === "windows" && program === "forfiles") {
+		let payload: string | undefined;
+		for (let i = 1; i < tokens.length; i++) {
+			const arg = tokens[i];
+			if (/^\/c:/i.test(arg)) {
+				payload = arg.slice(3);
+			} else if (/^\/c$/i.test(arg)) {
+				payload = tokens[i + 1];
+			}
+			if (payload !== undefined) break;
+		}
+		if (payload === undefined) return null;
+		return matchScript(payload, depth + 1, platform);
+	}
 
 	// Follow every wrapper this segment contains, each one a level deeper.
 	const scripts = [wrapperScript(tokens), powershellScript(tokens), ...substitutionScripts(segment)].filter(
