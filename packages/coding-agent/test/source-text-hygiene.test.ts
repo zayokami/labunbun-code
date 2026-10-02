@@ -94,9 +94,18 @@ const MUST_REACH = "packages/agent/src/dangerous-command.ts";
  * Scope is the C0 range, deliberately. `0x7F` (DEL) is a control character in
  * the abstract but is ordinary valid UTF-8, does not make a file binary, and
  * does not stop `grep` — flagging it would be claiming more than the failure
- * this exists to prevent. Carriage return is allowed because this repo checks
- * out with `core.autocrlf = true` and thirteen files carry CRLF; that is the
- * project's documented state, and a guard that cries wolf about it gets deleted.
+ * this exists to prevent.
+ *
+ * **Carriage return is allowed because it is a line ending, not a defect**, and
+ * this guard is about bytes that have no business in source at all. It used to
+ * say otherwise for a reason that has since stopped being true — the repo
+ * checked out with `core.autocrlf = true` and CRLF files were the norm, so the
+ * tolerance was load-bearing. `.gitattributes` now pins `eol=lf` in every
+ * checkout, and that sentence would have been a claim about a state that no
+ * longer exists. The tolerance stays anyway, and not out of deference to the old
+ * comment: line endings are the one entry on this list whose correct value is
+ * somebody else's tooling decision, and a hygiene guard that fails on them is a
+ * guard that gets deleted the first time it cries wolf.
  */
 function firstDisallowedControl(text: string): number {
 	for (let i = 0; i < text.length; i++) {
