@@ -77,11 +77,80 @@ const SHELL_EXECUTABLES = new Set(["sh", "bash", "zsh", "ksh", "dash"]);
  * them; `nice` and `nohup` are the ordinary spelling of "run this in the
  * background, lower priority".
  *
+ * **Every entry added here is a payload *concealer*, not a payload *relocator*.**
+ * That is the line this list is drawn on, and the test for it is one question:
+ * can the payload land in a different mount namespace, or on a different host?
+ * `timeout 5 rm -rf /` runs `rm` in the caller's own filesystem as the caller's
+ * own user; that is why it belongs here. `chroot /jail rm -rf /` cannot — the
+ * root changes — which is why `chroot` is in {@link REMOTE_COMMAND_CARRIERS} and
+ * not here, and the same goes for `nsenter` and `systemd-run`. Adding a
+ * relocator to this list would not be a second line of defence; it would be
+ * reading a payload with the wrong platform grammar, because
+ * {@link remoteCommandScript} resolves the command it finds against **both** the
+ * posix and the windows shapes, which is right for a name that could be either
+ * and wrong for one that is always running on this machine.
+ *
  * `su` is not here. Its `-c` carries the command the way `sh -c` does, so it
  * needs the script read out of the flag rather than the words after the
- * options, and it gets its own branch for that.
+ * options, and it gets its own branch for that. `script` is not here for the
+ * same reason and for the same reason it gets its own branch — see the note on
+ * `script.c:1066` there.
+ *
+ * The list is **not** "every program that runs something". Two exclusions are
+ * deliberate rather than oversights, and each costs a detection:
+ *
+ * - `at` and `batch` are already covered whole by `posixSchedulingRules`, which
+ *   fires on the program name without reading a payload at all. Putting `at`
+ *   here would *shadow* that rule: this branch runs first and, finding nothing
+ *   after `at`, would return `null` and the scheduling rule would never be
+ *   reached. The BSD sources also say the payload does not come from argv —
+ *   `parsetime()` ends in `expect(EOF)`, so `at 13:00 rm -rf /` is rejected
+ *   rather than run — so there is nothing here to unwrap.
+ * - `at`-adjacent schedulers that take the command from **stdin** (`echo 'rm -rf
+ *   /' | at now`) are out of scope for the same reason `eval "$(cat x.sh)"`
+ *   is only partly handled: the words are in a pipe, not in this token list.
+ *
+ * **Being on this list is necessary but not sufficient.** Membership says where
+ * the payload *is*; it does not say how many wrapper words stand in front of it.
+ * `commandAfterOptions` answers "the first word that is not an option", and for
+ * `timeout`, `taskset`, `flock` and `chrt` that word is an operand of the
+ * wrapper rather than the command — `timeout 5 rm -rf /` starts with a
+ * DURATION. A program listed here without a row in
+ * {@link COMMAND_PREFIX_OPERANDS}, a row in
+ * {@link COMMAND_PREFIX_VALUE_OPTIONS} and a row in
+ * {@link COMMAND_PREFIX_QUERY_OPTIONS_BY_PROGRAM} is not half-configured on
+ * purpose: the first two would read the operand as the command, and the third
+ * would read the payload as the argument of a flag that is not one. Every
+ * program added to this set below has all three, and each of the three maps
+ * cites the source its row was read out of, because that is the only thing that
+ * makes an unverifiable row checkable later.
  */
-const COMMAND_PREFIX_PROGRAMS = new Set(["command", "exec", "nohup", "nice", "doas", "pkexec"]);
+const COMMAND_PREFIX_PROGRAMS = new Set([
+	"command",
+	"exec",
+	"nohup",
+	"nice",
+	"doas",
+	"pkexec",
+	// The entries below were added together, and each one has a row in
+	// `COMMAND_PREFIX_VALUE_OPTIONS` naming the source it was read from. Only
+	// `timeout` and `stdbuf` could be checked against the binary on this
+	// machine; the rest are GNU coreutils, util-linux, procps-ng, runit, Linux
+	// strace and busybox sources, none of which is installed here.
+	"timeout",
+	"stdbuf",
+	"setsid",
+	"setpriv",
+	"taskset",
+	"flock",
+	"chrt",
+	"ionice",
+	"runuser",
+	"watch",
+	"strace",
+	"chpst",
+	"busybox",
+]);
 
 const POWERSHELL_EXECUTABLES = new Set(["powershell", "powershell.exe", "pwsh", "pwsh.exe"]);
 const BROWSER_EXECUTABLES = new Set([
@@ -1859,6 +1928,21 @@ const WSL_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  * `src/shared/options.h:196-197` as "only parse options before the first
  * positional argument") with `.argspec = "COMMAND [ARGUMENTS…]"` at `run.c:150`.
  *
+ * **Those citations fix the grammar and nothing else.** Reading the words after
+ * the destination as a command line is what this table does on every platform,
+ * and that is a parse, not an execution: it does not depend on whether the `ssh`
+ * or `chroot` or `nsenter` being described is the one on `PATH`, and it does not
+ * claim to confine anything. Two of the entries want that separating out
+ * explicitly, because "it runs that command line over there" is easy to read as
+ * "and only over there". `chroot` is the sharpest — on win32 the `chroot` on
+ * `PATH` is an MSYS2 program that imposes no kernel-level root at all, so there
+ * the rule is entirely about recognising the command line; the measurements and
+ * the non-discriminating probes are written out at that entry rather than
+ * here. The others do confine in the ordinary case and are left alone: `ssh`
+ * names a host, and `systemd-run` and `nsenter` put the command in a unit or a
+ * namespace that belongs to whatever is actually running — systemd, a container
+ * runtime — which is not this file to decide.
+ *
  * `oc exec` and `oc run` are **the same commands**, not lookalikes:
  * `openshift/oc/pkg/cli/kubectlwrappers/wrappers.go:124-127` returns
  * `cmdutil.ReplaceCommandName("kubectl", "oc", templates.Normalize(exec.NewCmdExec(f, streams)))`
@@ -1879,15 +1963,46 @@ const WSL_VALUE_OPTIONS: ReadonlySet<string> = new Set([
  */
 const REMOTE_COMMAND_CARRIERS: ReadonlyMap<string, RemoteCommandCarrier> = new Map([
 	["ssh", { positionals: 1, valueOptions: SSH_VALUE_OPTIONS, localCommandOptions: new Set(["ProxyCommand"]) }],
-	// GNU coreutils. `chroot /newroot` with no command runs `$SHELL -i` **inside
-	// the new root** (`chroot.c:336-345`), and `nsenter -t 1` with no command runs
-	// a login shell after entering the namespaces (`nsenter.c:1036`). Both are
-	// deliberately quiet, and for the reason the same table already treats
-	// `sudo -i`, `su -` and `sudo bash` as quiet: an interactive shell with no
-	// command line on it is not one of the commands this file is looking for, and
-	// a rule for the bare spelling would fire on `chroot /newroot ls` — the
-	// ordinary, entirely harmless use — along with everything else an operator
-	// types.
+	// **The grammar here is GNU coreutils'. The containment is a separate claim,
+	// and on Windows this entry delivers none.** Both halves are needed, because
+	// the first is true on every platform and only the second is worth anything.
+	//
+	// The *grammar* — no short options at all, `NEWROOT` is the first positional,
+	// the rest is the command — is GNU coreutils `src/chroot.c:54-62` and `:243`,
+	// cited because the argument shape is what this table encodes and it is the
+	// same shape in the `chroot` this runs against. On that grammar, `chroot
+	// /newroot` with no command runs `$SHELL -i` inside the new root
+	// (`chroot.c:336-345`).
+	//
+	// The *jail* is what the coreutils citation can be read as implying, and on
+	// win32 it is not there. Measured on this machine: `/usr/bin/chroot` is a
+	// `PE32+ executable for MS Windows 5.02 (console), x86-64`, 43648 bytes — an
+	// MSYS2 program, not a native binary — while `chroot --version` reports
+	// `chroot (GNU coreutils) 8.32`, so it is coreutils compiled for MSYS and its
+	// root is a userspace emulation of one. The probe that decides it is a process
+	// that does not go through that emulation: a native `findstr.exe` copied
+	// *into* a new root and launched from inside `chroot` read a file outside that
+	// root by Win32 absolute path and printed its contents, exit 0, with nothing
+	// outside the root refusing. Win32 has no `chroot` call for it to be bound by.
+	// So on win32 this entry recognises the command line and nothing more — the
+	// rule is about the grammar, not about containment, and a Windows reader
+	// should not come away from this comment believing `chroot` confines anything
+	// there. On posix it is the real article: `chroot(2)` is a kernel call, and
+	// there the rule does buy a jail.
+	//
+	// Two probes would have supported the false version and must not be cited
+	// alongside the one above: `chroot / pwd` prints `/`, and so does `chroot
+	// $NEWROOT /bin/pwd`, because MSYS emulates the root for MSYS programs and a
+	// shell inside it never notices. A discriminator has to be something the
+	// emulation does not cover.
+	//
+	// Bare `chroot /newroot`, and `nsenter -t 1` with no command
+	// (`nsenter.c:1036`), are deliberately quiet, for the reason the same table
+	// already treats `sudo -i`, `su -` and `sudo bash` as quiet: an interactive
+	// shell with no command line on it is not one of the commands this file is
+	// looking for, and a rule for the bare spelling would fire on `chroot
+	// /newroot ls` — the ordinary, entirely harmless use — along with everything
+	// else an operator types.
 	["chroot", { positionals: 1, valueOptions: CHROOT_VALUE_OPTIONS }],
 	// Every operand is an option, so the command is the first bare word.
 	["nsenter", { positionals: 0, valueOptions: NSENTER_VALUE_OPTIONS }],
@@ -2771,6 +2886,192 @@ const COMMAND_PREFIX_VALUE_OPTIONS = new Map<string, ReadonlySet<string>>([
 			"--type",
 		]),
 	],
+	// Everything below was read out of the source named in its comment, or
+	// measured on this machine where the binary exists. Each one says which,
+	// because a list of flags that only looks plausible is the failure mode this
+	// map is written to avoid.
+	//
+	// `timeout` — measured here against GNU coreutils 8.32 (`timeout --help`).
+	// `--preserve-status` and `--foreground` take nothing and are absent. `-h`
+	// and `-V` are rejected outright by this coreutils (measured: `timeout -h`
+	// prints `unknown option -- h`), so nothing claims they are queries. `-v` is
+	// `--verbose` — measured, `timeout -v 1 echo hi` printed `hi` and ran the
+	// command — which is why it appears in neither this list nor the query
+	// override below.
+	["timeout", new Set(["-k", "--kill-after", "-s", "--signal"])],
+	// `stdbuf` — measured here, same coreutils (`stdbuf --help`). The MODE is a
+	// separate word rather than an attached `-oL`, measured: `stdbuf -o echo hi`
+	// prints `invalid mode 'echo'` and exits 125 without running anything.
+	["stdbuf", new Set(["-i", "--input", "-o", "--output", "-e", "--error"])],
+	// `setsid` — util-linux, `setsid.c:73`, getopt string `"+Vhcfw"`. No option
+	// in it takes a value, so the empty list is the fact rather than an omission.
+	// Read from source; `setsid` is not installed on this machine.
+	["setsid", new Set()],
+	// `setpriv` — util-linux, `setpriv.c:948` (getopt `"+dhV"`) and the
+	// `longopts[]` table at `setpriv.c:888`. All nineteen `required_argument`
+	// rows are long and all are listed. The `no_argument` rows — `--dump`,
+	// `--nnp`, `--no-new-privs`, `--list-caps`, `--clear-groups`, `--keep-groups`,
+	// `--init-groups`, `--landlock-support`, `--list-landlock-access`,
+	// `--reset-env`, `--help`, `--version` — are deliberately absent; listing
+	// `--init-groups` here would make `setpriv --init-groups rm -rf /` step over
+	// `rm` and read `-rf /` instead. Read from source; not installed here.
+	[
+		"setpriv",
+		new Set([
+			"--inh-caps",
+			"--ambient-caps",
+			"--ruid",
+			"--euid",
+			"--rgid",
+			"--egid",
+			"--reuid",
+			"--regid",
+			"--groups",
+			"--bounding-set",
+			"--securebits",
+			"--pdeathsig",
+			"--ptracer",
+			"--selinux-label",
+			"--apparmor-profile",
+			"--landlock-access",
+			"--landlock-rule",
+			"--list-landlock-rights",
+			"--seccomp-filter",
+		]),
+	],
+	// `taskset` — util-linux, `taskset.c:183`, getopt string `"+apchV"`, and
+	// every row of its `longopts[]` at `taskset.c:167` is `0` (no_argument).
+	// There is no option that takes a value anywhere in it; the cpu list is a
+	// leading operand, which is why `taskset` has an entry in
+	// {@link COMMAND_PREFIX_OPERANDS}. Read from source; not installed here.
+	["taskset", new Set()],
+	// `flock` — util-linux, `flock.c:274` (getopt `"+:sexnoFuw:E:hV?"`) and
+	// `long_options[]` at `flock.c:236`. `-s`, `-x`, `-u`, `-n`, `-o`, `-F`,
+	// `--verbose` and `--fcntl` are `no_argument` and absent; `--start` and
+	// `--length` are `required_argument` in this version and are listed. `-c` /
+	// `--command` is handled by `IS_COMMAND_OPT` (`flock.c:58`) before getopt
+	// ever sees it, so it is absent from both tables and gets its own branch.
+	// Read from source; `flock` is not installed on this machine.
+	["flock", new Set(["-w", "--timeout", "--wait", "-E", "--conflict-exit-code", "--start", "--length", "--fd"])],
+	// `chrt` — util-linux, `chrt.c:480`, getopt string
+	// `"+abdD:efiphmoOP:T:rRU:X:GvV"`; D, P, T, R, U and X are the only
+	// value-taking shorts. `longopts[]` is at `chrt.c:450` and is read the same
+	// way. Read from source; `chrt` is not installed on this machine.
+	["chrt", new Set(["-D", "-P", "-T", "-R", "-U", "-X"])],
+	// `ionice` — util-linux, `ionice.c:157` (getopt `"+n:c:p:P:u:tVh"`) and
+	// `longopts[]` at `ionice.c:140`, which pairs `--classdata` with `-n`,
+	// `--class` with `-c`, `--pid` with `-p`, `--pgid` with `-P` and `--uid`
+	// with `-u`. `-t` and `-V` take nothing. Read from source; not installed here.
+	["ionice", new Set(["-n", "--classdata", "-c", "--class", "-p", "--pid", "-P", "--pgid", "-u", "--uid"])],
+	// `runuser` — util-linux, `su-common.c:1050` (getopt `"c:fg:G:lmpPTs:u:hVw:"`)
+	// and `longopts[]` at `su-common.c:1017`, the table `runuser` shares with
+	// `su`. `-f`, `-l`, `-p`, `-P` and `-T` take nothing. Read from source; not
+	// installed on this machine.
+	[
+		"runuser",
+		new Set([
+			"-c",
+			"--command",
+			"-C",
+			"--session-command",
+			"-s",
+			"--shell",
+			"-g",
+			"--group",
+			"-G",
+			"--supp-group",
+			"-u",
+			"--user",
+			"-w",
+			"--whitelist-environment",
+		]),
+	],
+	// `watch` — procps-ng, `watch.c:1179` (getopt `"+bCcefd::ghq:n:prs:twvx"`)
+	// and `longopts[]` at `watch.c:1134`, which pairs `--interval` with `-n`,
+	// `--equexit` with `-q` and `--shotsdir` with `-s`. `-d` is `d::` — an
+	// *optional* argument — so it is deliberately absent: `watch -d rm -rf /`
+	// really does run `rm`, and treating `-d` as a value option would step over
+	// it. Read from source; `watch` is not installed on this machine.
+	["watch", new Set(["-n", "--interval", "-q", "--equexit", "-s", "--shotsdir"])],
+	// `chpst` — runit, `chpst.c:289`, getopt string
+	// `"u:U:b:e:m:d:o:p:f:c:r:t:/:n:l:L:vP012V"`. chpst parses with plain `getopt`
+	// and has no long options at all, so these shorts are the whole list.
+	// Read from source; `chpst` is not installed on this machine.
+	["chpst", new Set(["-u", "-U", "-b", "-e", "-m", "-d", "-o", "-p", "-f", "-c", "-r", "-t", "-/", "-n", "-l", "-L"])],
+	// `strace` — Linux strace, `src/strace.c:2434`, getopt string
+	// `"+a:Ab:cCdDe:E:fFhiI:knNo:O:p:P:qrs:S:tTu:U:vVwxX:yYzZ"`. Reading that
+	// string left to right, the shorts that take a value are a, b, e, E, I, o,
+	// O, p, P, s, S, T, u, U and X — the colon follows the letter, so the `knNo:`
+	// run is `-k`, `-n`, `-N` and `-o` *with a value*. Two that are easy to get
+	// backwards: `-f` takes nothing (the colon that belongs with the `-o` beside
+	// it is three characters earlier), and `-o` is the one whose absence from
+	// this list would make `strace -o log rm -rf /` read `log` as the command.
+	// The long options below are the `required_argument` rows of `longopts[]` at
+	// `strace.c:2471` — a deliberate subset, because strace has upwards of a
+	// hundred of them and this list exists to stop `--output log` from reading
+	// `log` as the command, not to be exhaustive.
+	//
+	// **Not measured here, and not measurable here**: the `strace` on this
+	// machine is Cygwin strace 3.6.5 (`strace --version`), a PE32+ Windows
+	// binary whose option set has nothing to do with the table above. The list
+	// is Linux strace's because that is the strace a payload is hidden behind in
+	// practice; a Windows user running the Cygwin build gets the common shapes
+	// right by accident rather than by rule.
+	[
+		"strace",
+		new Set([
+			"-a",
+			"--columns",
+			"-b",
+			"--detach-on",
+			"-e",
+			"--env",
+			"-E",
+			"--interruptible",
+			"-I",
+			"--stack-trace-frame-limit",
+			"--syscall-limit",
+			"-o",
+			"--output",
+			"-O",
+			"--summary-syscall-overhead",
+			"-p",
+			"--attach",
+			"-P",
+			"--trace-path",
+			"-s",
+			"--string-limit",
+			"-S",
+			"--summary-sort-by",
+			"-u",
+			"--user",
+			"-U",
+			"--summary-columns",
+			"-X",
+			"--const-print-style",
+			"--argv0",
+			"--color",
+			"--trace",
+			"--trace-fds",
+			"--abbrev",
+			"--verbose",
+			"--raw",
+			"--signals",
+			"--status",
+			"--read",
+			"--write",
+			"--fault",
+			"--inject",
+			"--kvm",
+			"--decode-pids",
+		]),
+	],
+	// `busybox` — `libbb/appletlib.c`. busybox itself has no option that takes a
+	// value: `busybox_main` tests `argv[1]` against `--show` (`:838`), `--list`
+	// (`:850`), `--install` (`:868`) and `--help` (`:892`), and anything else is
+	// an applet *name* — a positional, taken at `:911-916` as `argv++` and then
+	// `argv[0]`. Read from source; busybox is not installed on this machine.
+	["busybox", new Set()],
 ]);
 
 const EMPTY_VALUE_OPTIONS: ReadonlySet<string> = new Set();
@@ -2778,6 +3079,73 @@ const EMPTY_VALUE_OPTIONS: ReadonlySet<string> = new Set();
 /** The value options for one program; a program absent from the map has none. */
 function valueOptionsFor(program: string): ReadonlySet<string> {
 	return COMMAND_PREFIX_VALUE_OPTIONS.get(program) ?? EMPTY_VALUE_OPTIONS;
+}
+
+/**
+ * Bare words that belong to the wrapper and sit *between* its options and the
+ * command it runs, so that the command is not the first word left over.
+ *
+ * {@link commandAfterOptions} answers "the first word that is not an option",
+ * and for `env`, `sudo` and `xargs` that word is the command. For a growing
+ * number of wrappers it is an *operand* of the wrapper and the command comes
+ * after it: `timeout 5 rm -rf /` has the DURATION first, `flock /tmp/l rm -rf
+ * /` the file, `taskset 0,1 rm -rf /` the cpu list. Adding those programs to
+ * {@link COMMAND_PREFIX_PROGRAMS} without this map does not catch them — it
+ * reads the operand as the command and finds a program called `5`. That is the
+ * whole reason this map exists, and it is why "add it to the set" was only half
+ * of the fix.
+ *
+ * Each entry says whether the operand is mandatory, because that is the case
+ * where skipping is unambiguous, and where the entry above it is honest:
+ *
+ * - `timeout`'s DURATION is mandatory and first — measured: `timeout echo hi`
+ *   prints `invalid time interval 'echo'` and exits 125 without running
+ *   anything, so a missing DURATION is a usage error rather than a command.
+ * - `taskset`'s cpu list is mandatory and first (`taskset.c:183`, optstring
+ *   `"+apchV"`, with every long option in `taskset.c:167` a `no_argument`, so
+ *   the list can only be the operand). Read from source; `taskset` is not
+ *   installed on this machine.
+ * - `flock`'s file is mandatory and first — the usage block at `flock.c:69-71`
+ *   spells the order as `[options] <file>|<directory> <command> [<argument>...]`.
+ *   Read from source; `flock` is not installed on this machine.
+ * - `chrt`'s priority is **optional**: `chrt.c` consumes `argv[optind]` only
+ *   when it is all digits (`isdigit_string`, `chrt.c:611`). One is therefore
+ *   skipped unconditionally, which catches `chrt -f 1 rm -rf /` and leaves
+ *   `chrt -o rm -rf /` a miss — a miss, not a false positive, and the direction
+ *   the note above prefers. Read from source; `chrt` is not installed here.
+ *
+ * `runuser` is **not** in this map even though it also takes a user before the
+ * command, because its operand is conditional rather than mandatory: the user
+ * is a positional only when `-u`/`--user` is absent (`su-common.c:1017` marks
+ * it "runuser only"). Skipping one word unconditionally would break the common
+ * `runuser -u root -- rm -rf /`, which the branch below catches. The cost is
+ * that `runuser root rm -rf /` — the user as a bare word — stays a miss. That is
+ * the trade this map documents rather than hides.
+ */
+const COMMAND_PREFIX_OPERANDS = new Map<string, number>([
+	["timeout", 1],
+	["taskset", 1],
+	["flock", 1],
+	["chrt", 1],
+]);
+
+/**
+ * How many leading operands this wrapper takes before the command.
+ *
+ * `args` is the wrapper's own argument list, because one operand count is not
+ * unconditional: `flock` fills the same slot from inside an option when `--fd`
+ * is given. Its usage block (`flock.c:69-74`) lists both
+ * `[options] <file>|<directory> <command> [<argument>...]` and
+ * `[options] --fd <file descriptor number> <command> [<argument>...]`, so with
+ * `--fd` the file descriptor is consumed as a *value option* and the positional
+ * slot is empty. Counting one anyway would step over the command and make
+ * `flock --fd 3 rm -rf /` a miss. Read from source; `flock` is not installed on
+ * this machine.
+ */
+function operandsFor(program: string, args: readonly string[]): number {
+	const count = COMMAND_PREFIX_OPERANDS.get(program) ?? 0;
+	if (count > 0 && program === "flock" && args.includes("--fd")) return 0;
+	return count;
 }
 
 /**
@@ -2789,8 +3157,64 @@ function valueOptionsFor(program: string): ReadonlySet<string> {
 const COMMAND_PREFIX_QUERY_OPTIONS = new Set(["-v", "-V", "--help", "--version"]);
 
 /**
+ * Wrappers whose `-v` or `-V` is **not** a query, so they cannot share
+ * {@link COMMAND_PREFIX_QUERY_OPTIONS}.
+ *
+ * The shared set is right for most of them, and getting it wrong is not a false
+ * positive — a flag that only prints a version and exits cannot be hiding a
+ * payload, so returning `[]` for it is correct even when the program has no such
+ * flag (`watch -V` and `stdbuf -v` are usage errors, and the scanner treating
+ * them as queries reaches the same answer by accident). It is the other
+ * direction that costs detection, and these four are the ones where `-v` or
+ * `-V` goes on to run the command:
+ *
+ * - `timeout` — measured against GNU coreutils 8.32: `-v` is `--verbose` in
+ *   `timeout --help`, and `timeout -v 1 echo hi` printed `hi`. Reading the word
+ *   after `-v` as a query would make `timeout -v 5 rm -rf /` a miss. `-h` and
+ *   `-V` are rejected by this coreutils outright, so they are not claimed here.
+ * - `chrt` — util-linux `chrt.c:564`, `case 'v': ctl->verbose = 1;`. Its `-V`
+ *   is the real version flag.
+ * - `chpst` — runit `chpst.c:322`, `case 'v': verbose = 1;`. Its `-V` warns
+ *   with the $Id and then falls through to `case '?': usage()` (`chpst.c:327`),
+ *   which is `strerr_die4x(100, …)` at `chpst.c:39` and does not return. `--help`
+ *   and `--version` reach that same `usage()` through the getopt `?` case,
+ *   because chpst has no long options of its own.
+ * - `strace` — Linux `src/strace.c:2756`, `case 'v': qualify_abbrev("none")`,
+ *   and `:2759`, `case 'V': increase_version_verbosity()`, which at
+ *   `strace.c:2320` only bumps a counter and does not exit. `--version` maps to
+ *   that same `'V'`, so it is not a query either. `-h` and `--help` are
+ *   (`strace.c:2618` calls `usage()`), and `strace.c:2485` marks `--help`
+ *   `no_argument`.
+ *
+ * The three util-linux and runit entries were read from source, not measured:
+ * none of `chrt`, `chpst` or Linux `strace` is installed on this machine.
+ */
+const COMMAND_PREFIX_QUERY_OPTIONS_BY_PROGRAM = new Map<string, ReadonlySet<string>>([
+	["timeout", new Set(["--help", "--version"])],
+	["chrt", new Set(["-V", "--help", "--version"])],
+	["chpst", new Set(["-V", "--help", "--version"])],
+	["strace", new Set(["-h", "--help"])],
+	// busybox has no `-v` or `-V` at all; the four words it does read out of
+	// `argv[1]` are `libbb/appletlib.c:838` (`--show`), `:850` (`--list`),
+	// `:868` (`--install`) and `:892` (`--help`). `--list` and `--install` are
+	// matched there as *prefixes* (`is_prefixed_with`), so the longer spellings
+	// are not in this set — they run nothing either way, but a longer spelling
+	// is left to the positional scan below rather than matched here.
+	["busybox", new Set(["--help", "--list", "--install", "--show"])],
+]);
+
+/**
+ * The options that print and exit for this particular program, which are not
+ * always the ones for the program named {@link COMMAND_PREFIX_QUERY_OPTIONS}.
+ */
+function queryOptionsFor(program: string): ReadonlySet<string> {
+	return COMMAND_PREFIX_QUERY_OPTIONS_BY_PROGRAM.get(program) ?? COMMAND_PREFIX_QUERY_OPTIONS;
+}
+
+/**
  * The command a wrapper will run: the first word that is not one of its
- * options, the argument of one, or an assignment.
+ * options, the argument of one, or an assignment, less any leading operands the
+ * wrapper claims for itself (see {@link COMMAND_PREFIX_OPERANDS}).
  *
  * `--` ends the options, which is what makes `env -- rm -rf /` and
  * `xargs -- rm -rf /` the same command rather than one wrapped in a flag.
@@ -2799,6 +3223,7 @@ function commandAfterOptions(
 	args: string[],
 	valueOptions: ReadonlySet<string>,
 	queryOptions: ReadonlySet<string> = COMMAND_PREFIX_QUERY_OPTIONS,
+	operands = 0,
 ): string[] {
 	let i = 0;
 	while (i < args.length) {
@@ -2826,7 +3251,7 @@ function commandAfterOptions(
 		if (!arg.startsWith("-")) break;
 		i++;
 	}
-	return args.slice(i);
+	return args.slice(i + operands);
 }
 
 function matchTokens(
@@ -2958,6 +3383,59 @@ function matchTokens(
 		if (script === undefined || script === "-") return null;
 		return matchTokens(["sh", "-c", script], depth + 1, platform, script);
 	}
+	// `runuser` answers to `-c` in exactly the way `su` does, and for the same
+	// reason and from the same source: `su-common.c:1017` pairs
+	// `{"command", required_argument, NULL, 'c'}`, assigned at `:1054`. But unlike
+	// `su`, having no `-c` does not mean it starts a login shell and runs nothing
+	// — it means the command is spelled out as words, so this branch has to *fall
+	// through* to the list below rather than answer `null` the way `su`'s does.
+	// Getting that wrong is not a near miss; it is `runuser -u root -- rm -rf /`
+	// classified as nothing at all, which is the whole example this work started
+	// from.
+	if (program === "runuser" && tokens.includes("-c")) {
+		const script = tokens[tokens.indexOf("-c") + 1];
+		if (script === undefined || script === "-") return null;
+		return matchTokens(["sh", "-c", script], depth + 1, platform, script);
+	}
+	// `script` is here rather than in the list below for two reasons that are
+	// both in its source. The first is that its command rides in a flag: usage is
+	// `script [options] [file]`, `-c`/`--command` takes the command as a separate
+	// argument (`script.c:847` optstring `"aB:c:eE:fI:O:o:qm:T:t::Vh"`), and
+	// `script.c:1066` runs it as `execlp(shname, shname, "-c", ctl.command, NULL)`
+	// — the exact `sh -c` shape, so it is read as a script here for the same
+	// reason `su -c` is. The second is that its first positional is *not* a
+	// command: `script.c:193` and `:944` take the first bare word as the output
+	// log file, and `script.c:970-972` dies when it is missing. `script /tmp/log
+	// rm -rf /` therefore logs an interactive session and runs nothing, and
+	// treating that positional as a command would be a false positive on an
+	// ordinary thing. Only `-- command`, which is the documented way to say it.
+	// Read from source; `script` is not installed on this machine.
+	if (program === "script") {
+		const at = tokens.findIndex((arg) => arg === "-c" || arg === "--command");
+		const carried = at === -1 ? undefined : tokens[at + 1];
+		if (carried !== undefined && carried !== "-") {
+			return matchTokens(["sh", "-c", carried], depth + 1, platform, carried);
+		}
+		const separator = tokens.indexOf("--");
+		if (separator === -1) return null;
+		return matchTokens(tokens.slice(separator + 1), depth + 1, platform, segment);
+	}
+	// `flock`'s `-c`/`--command` is the same shape, and it is handled before
+	// getopt ever sees it: `flock.c:58` defines
+	// `#define IS_COMMAND_OPT(s) (!strcmp((s), "-c") || !strcmp((s), "--command"))`
+	// and `flock.c:335-337` breaks out of the option loop on it, which is why the
+	// option is in neither the getopt string (`flock.c:274`) nor
+	// `long_options[]` (`flock.c:236`) and why listing it as a value option in
+	// {@link COMMAND_PREFIX_VALUE_OPTIONS} would be reading a flag that does not
+	// appear in the tables at all. Read from source; `flock` is not installed here.
+	if (program === "flock") {
+		const at = tokens.findIndex((arg) => arg === "-c" || arg === "--command");
+		if (at !== -1) {
+			const carried = tokens[at + 1];
+			if (carried === undefined || carried === "-") return null;
+			return matchTokens(["sh", "-c", carried], depth + 1, platform, carried);
+		}
+	}
 	// `xargs rm -rf` is `rm -rf` once per line of input: a wrapper in exactly
 	// the sense `sudo` and `env` are, and the reason `find … | xargs rm -rf` is
 	// the ordinary spelling of the delete this file exists to catch.
@@ -2969,7 +3447,17 @@ function matchTokens(
 	// builtins whose entire purpose is to run a name this function would not
 	// otherwise recognise, so `command rm -rf /` was classified as nothing at all.
 	if (program !== undefined && COMMAND_PREFIX_PROGRAMS.has(program)) {
-		return matchTokens(commandAfterOptions(tokens.slice(1), valueOptionsFor(program)), depth + 1, platform, segment);
+		return matchTokens(
+			commandAfterOptions(
+				tokens.slice(1),
+				valueOptionsFor(program),
+				queryOptionsFor(program),
+				operandsFor(program, tokens.slice(1)),
+			),
+			depth + 1,
+			platform,
+			segment,
+		);
 	}
 	// A trap's action is shell source sitting in the first operand.
 	if (program === "trap") {
@@ -6954,7 +7442,15 @@ function segmentProgram(segment: string, platform: DangerousCommandPlatform = "p
 		const name = executableName(tokens[0], platform);
 		if (name === undefined) return undefined;
 		if (name !== "sudo" && !COMMAND_PREFIX_PROGRAMS.has(name)) return name;
-		tokens = commandAfterOptions(tokens.slice(1), valueOptionsFor(name));
+		// The same three lookups `matchTokens` uses, and for the same reason: a
+		// wrapper whose operand or query flags differ has to be unwrapped the same
+		// way here, or `curl … | timeout 5 bash` names the program `5`.
+		tokens = commandAfterOptions(
+			tokens.slice(1),
+			valueOptionsFor(name),
+			queryOptionsFor(name),
+			operandsFor(name, tokens.slice(1)),
+		);
 	}
 	return undefined;
 }

