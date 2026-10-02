@@ -1,0 +1,16 @@
+# LF in the repository, LF in every checkout.
+#
+# This file exists because the absence of it made a gate platform-dependent.
+# With only `core.autocrlf=true` set and nothing here, a Windows checkout writes
+# CRLF into the working tree while a Linux CI checkout writes the committed LF,
+# and biome's formatter then wants to delete every `\r` it finds. Measured on
+# this machine: `packages/ai/src/cache.ts` is 25601 bytes in the blob and
+# 26187 in the working tree — a difference of exactly one `\r` per line, 586 of
+# them — and `bun x biome check --error-on-warnings .` failed on it while the
+# same commit passed all eight CI jobs. `.github/workflows/ci.yml` says biome
+# "reads the working tree rather than the machine", which was false here.
+#
+# `text=auto` leaves git's binary detection in charge, so nothing is mangled by
+# being mistaken for text; `eol=lf` is what puts LF in the working tree on
+# Windows rather than only in the index.
+* text=auto eol=lf
