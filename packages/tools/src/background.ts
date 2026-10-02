@@ -172,6 +172,41 @@ export class BackgroundShellManager {
 		return this.#entries.get(id)?.info;
 	}
 
+	/**
+	 * Resolve once a shell has ended, with its exit code.
+	 *
+	 * A caller has no way to learn that a shell finished except by reading
+	 * `status`, so the only available technique is polling — and polling means
+	 * choosing a budget, which is an assertion about how fast the machine is that
+	 * nothing enforces. Measured on macOS CI: a test that waited on
+	 * `50 × 100 ms` exhausted the whole budget with the shell still `running` and
+	 * failed, while the very next test in the same file, spawning and polling the
+	 * same way, passed in 113 ms.
+	 *
+	 * The process already announces its own end, and `start` installs the handler
+	 * that marks the shell `completed` before this can be called, so this hands
+	 * that over rather than guessing at it. A shell that has already ended
+	 * resolves immediately instead of waiting for an event that already fired.
+	 *
+	 * A shell that never ends still hangs here, and that is deliberate: the
+	 * caller owns the timeout, so a hang fails the caller rather than being read
+	 * as a slow machine. An unknown id resolves with `null`, matching `get`.
+	 */
+	completed(id: string): Promise<number | null> {
+		const entry = this.#entries.get(id);
+		if (!entry) return Promise.resolve(null);
+		if (entry.info.status !== "running") return Promise.resolve(entry.info.exitCode);
+		return new Promise((resolve) => {
+			entry.proc.once("close", (code) => resolve(entry.info.exitCode ?? code ?? 0));
+			// `start`'s own handler marks a spawn that never produced a process
+			// completed with 127, so this listens for that too and takes whichever
+			// arrives first rather than waiting on a `close` this shell may never
+			// reach. Which event Node emits first for a failed spawn is not claimed
+			// here — only that this cannot hang on one.
+			entry.proc.once("error", () => resolve(entry.info.exitCode));
+		});
+	}
+
 	list(): BackgroundShell[] {
 		return [...this.#entries.values()].map((e) => e.info);
 	}

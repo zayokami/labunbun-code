@@ -115,10 +115,13 @@ describe("background shells (real spawn)", () => {
 		const manager = new BackgroundShellManager();
 		const shell = await manager.start("echo hello-bg", process.cwd());
 
-		// Wait for completion.
-		for (let i = 0; i < 50 && shell.status === "running"; i++) {
-			await new Promise((r) => setTimeout(r, 100));
-		}
+		// Wait for completion by waiting for the process, not by guessing how long
+		// it takes. This row used to poll `50 × 100 ms` and then assert the status,
+		// which reads as "completes within five seconds" rather than "completes":
+		// it failed on macOS CI at 5120 ms with the shell still running, while the
+		// next test in this file — same spawn, same poll — passed in 113 ms. The
+		// timeout below still applies, so a shell that hangs fails here.
+		await manager.completed(shell.id);
 		expect(shell.status).toBe("completed");
 		const output = manager.output(shell.id);
 		expect(output).toContain("hello-bg");
@@ -131,9 +134,7 @@ describe("background shells (real spawn)", () => {
 		// log is, and that this is not it.
 		const manager = new BackgroundShellManager();
 		const shell = await manager.start("echo one-two-three-four-five", process.cwd());
-		for (let i = 0; i < 50 && shell.status === "running"; i++) {
-			await new Promise((r) => setTimeout(r, 100));
-		}
+		await manager.completed(shell.id);
 		const whole = manager.output(shell.id);
 		// The exit code is the manager's last append, with no newline after it.
 		expect(whole.endsWith("[exit code: 0]")).toBe(true);
@@ -145,6 +146,46 @@ describe("background shells (real spawn)", () => {
 		);
 		expect(tail).toContain(shell.outputFile);
 		expect(tail.slice(tail.indexOf("\n") + 1)).toBe(whole.slice(-8));
+	}, 10_000);
+
+	/**
+	 * `completed` has a contract of its own, and the two rows above use it as a
+	 * means rather than as the thing under test — a `completed` that always
+	 * resolved `0` would leave both of them green. So the three claims it makes
+	 * are asserted here:
+	 *
+	 * - it resolves **with** the exit code, not merely when the shell ends;
+	 * - a shell that has already ended resolves at once, rather than waiting on a
+	 *   `close` event that has already fired — a second call hanging is the
+	 *   failure mode that would otherwise be invisible;
+	 * - an unknown id resolves rather than hanging or throwing, matching `get`.
+	 */
+	test("`completed` resolves with the exit code, twice, and for an id that is not there", async () => {
+		const manager = new BackgroundShellManager();
+		const shell = await manager.start("exit 3", process.cwd());
+
+		expect(await manager.completed(shell.id)).toBe(3);
+
+		// The second call is the "already ended" path, and it is raced rather than
+		// awaited because awaiting it is how this suite used to be able to hang:
+		// a promise that never settles does not time out on its own here, it takes
+		// the whole run with it. Reproduced with three lines and none of the
+		// project's code — `bun test` v1.3.5 on Windows printed its banner and spun
+		// at 100% CPU until an external 40 s cap killed it, with a 2 s per-test
+		// timeout set on the hanging test.
+		//
+		// So the rejection is the assertion, and the window can only be reached by
+		// a promise that never settles at all — never by a slow one, which resolves
+		// on its own and wins the race.
+		const alreadyEnded = await Promise.race([
+			manager.completed(shell.id),
+			new Promise<never>((_, reject) =>
+				setTimeout(() => reject(new Error("`completed` never settled for a shell that had already ended")), 1_000),
+			),
+		]);
+		expect(alreadyEnded).toBe(3);
+
+		expect(await manager.completed("shell_does_not_exist")).toBeNull();
 	}, 10_000);
 
 	test("kill terminates a running shell", async () => {
