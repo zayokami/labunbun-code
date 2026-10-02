@@ -2369,10 +2369,23 @@ function mkfsVariant(program: string): boolean {
  * write through commands (`w`, `mklabel`, `--zap-all`) rather than through a
  * flag that collides with these.
  *
- * `-p` is `sgdisk`'s and `parted`'s short form of `--print` and it was missing
- * here, which made `sgdisk -p /dev/sda` and `parted -p /dev/sda` the two
- * false positives in this whole rule — the same commands spelled out long are
- * not flagged, so the difference was the length of a flag and nothing else.
+ * `-p` is `sgdisk`'s short form of `--print` and it was missing here, which made
+ * `sgdisk -p /dev/sda` a false positive in this whole rule — the same command
+ * spelled out long is not flagged, so the difference was the length of a flag and
+ * nothing else.
+ *
+ * **This sentence used to say `-p` was `sgdisk`'s *and `parted`'s*, and the
+ * `parted` half is false.** GNU `parted` has no `-p` and no `--print`: its whole
+ * option table (`parted/parted.c:122-132`) is `help`, `list`, `machine`, `json`,
+ * `script`, `fix`, `version`, `align` and `-pretend-input-tty`, and its
+ * `getopt_long` call at `:2377` passes the optstring `"hlmjsfva:"` with no `p` in
+ * it. `print` is a *command* there — `parted /dev/sda print` — which the bare
+ * `print` entry above already covers. `parted -p /dev/sda` exits with
+ * `parted: invalid option -- 'p'`, so the exemption it bought was dead weight for
+ * a command that cannot run. Dead weight in this direction is the safe one, which
+ * is why `-p` stayed; **the false claim is what did not stay.** The `sgdisk` half
+ * is NOT verified here — every gdisk mirror reachable from this box 404s — so
+ * `-p` rests on it without a citation, and that is said rather than implied.
  *
  * NOT MEASURED HERE, and the sentence above is the claim rather than a result:
  * none of these five programs exists on this machine, so it cannot be. What is
@@ -2384,6 +2397,53 @@ function mkfsVariant(program: string): boolean {
  * `-p` that writes, this table is where that becomes a false negative.
  */
 const DISK_LIST_FLAGS: ReadonlySet<string> = new Set(["-l", "--list", "-p", "print", "--print"]);
+
+/**
+ * Read-only spellings that belong to one program and cannot go in the shared
+ * table above, because a program the table does not know from here has a writing
+ * flag of the same letter.
+ *
+ * **`-F` is the reason this is keyed by program.** `mke2fs -F` is
+ * `mke2fs`'s own "force" — a real writing flag, and one people type on a disk
+ * that "will not format otherwise". Putting sfdisk's `--list-free` short form
+ * (`sfdisk.c:2295`, `{"list-free", no_argument, NULL, 'F'}`) into a list every
+ * `mkfs*` variant is tested against would make `mke2fs -F /dev/sda` quiet. A
+ * shared read-only table stops being safe the moment one program in it has a
+ * destructive spelling of a letter another program reads as a listing.
+ *
+ * Every entry is read out of `util-linux/disk-utils/sfdisk.c` on master:
+ *
+ * | spelling | registration | help line |
+ * | --- | --- | --- |
+ * | `-d`, `--dump` | `:2288` `{"dump", no_argument, NULL, 'd'}` | `:2168` "dump partition table (usable for later input)" |
+ * | `-J`, `--json` | `:2291` `{"json", no_argument, NULL, 'J'}` | `:2169` "dump partition table in JSON format" |
+ * | `-g`, `--show-geometry` | `:2307` `{"show-geometry", no_argument, NULL, 'g'}` | `:2171` "list geometry of all or specified devices" |
+ * | `-F`, `--list-free` | `:2295` `{"list-free", no_argument, NULL, 'F'}` | `:2173` "list unpartitioned free areas of each device" |
+ * | `-V`, `--verify` | `:2309` `{"verify", no_argument, NULL, 'V'}` | `:2177` "test whether partitions seem correct" |
+ *
+ * `command_dump` even says so in its own source: `:1065` is
+ * `assign_device(sf, devname, 1);` with the comment "read-only" on it.
+ *
+ * **`--delete` is deliberately not here and `-d` is not its short form.**
+ * `sfdisk.c:2287` registers `{"delete", no_argument, NULL, OPT_DELETE}` under the
+ * long name only, and `:2288` binds the very next line to `{"dump", ... 'd'}`. So
+ * `sfdisk --delete /dev/sda` writes and `sfdisk -d /dev/sda` prints; an earlier
+ * comment here had them as one flag, which is the whole of the false positive.
+ *
+ * **Three read-only sfdisk spellings are still flagged, and this is the honest
+ * reason rather than a gap nobody noticed.** `--part-type <dev> <part> [<type>]`
+ * (`:2182`), `--part-uuid <dev> <part> [<uuid>]` (`:1242`, "read-only if uuid not
+ * given") and `--part-label <dev> <part> [<name>]` (`:1297`, "read-only if name not
+ * given") each print when the optional third word is omitted and write when it is
+ * present. Telling those apart needs the argument count, which this function does
+ * not model — it reads flags, not arity. They are flagged rather than exempted
+ * because exempting them would exempt the writing form too, and the writing form
+ * is the one worth a prompt. That is a deliberate choice recorded so a reader does
+ * not have to rediscover it.
+ */
+const DISK_PROGRAM_READ_ONLY_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+	["sfdisk", new Set(["-d", "--dump", "-J", "--json", "-g", "--show-geometry", "-F", "--list-free", "-V", "--verify"])],
+]);
 
 /**
  * The flags that write, for the same programs.
@@ -2553,6 +2613,20 @@ function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatc
 	// The bare `wipefs` with no device is covered by the same test rather than by
 	// the "opens the first one it finds" row at the bottom: with nothing to erase
 	// and nothing named, it lists every filesystem it can see.
+	// `-n`/`--no-act` is `wipefs`'s dry run and it was the one caller of
+	// {@link isDryRun} this rule never consulted. `misc-utils/wipefs.c:631`
+	// prints the help line verbatim — `-n, --no-act    do everything except the
+	// actual write() call` — and `:669` binds `{"no-act", no_argument, NULL, 'n'}`.
+	// `wipefs -n -a /dev/sda` is the "what would this erase?" question, and it
+	// was flagged for erasing.
+	//
+	// Both spellings are named rather than the short cluster being scanned for an
+	// `n`, because `isDryRun` only knows `--dry-run` and the `-n` cluster shape:
+	// `--no-act` carries no `n` in a short flag at all. From `wipefs.c:692`'s
+	// optstring `"ab::fhiJnO:o:pqt:V"` the letter `n` does appear nowhere else, so
+	// a cluster read would be safe here — but naming both is what makes the row
+	// readable, and this rule already has a case-sensitivity note two lines down.
+	if (program === "wipefs" && (rest.includes("-n") || rest.includes("--no-act"))) return null;
 	if (program === "wipefs" && !rest.some((arg) => WIPEFS_ERASING_FLAGS.has(arg))) {
 		return null;
 	}
@@ -2565,6 +2639,12 @@ function posixDiskRules(tokens: string[], segment: string): DangerousCommandMatc
 		}
 	}
 	if (rest.some((arg) => DISK_LIST_FLAGS.has(arg.toLowerCase()))) return null;
+	// After the shared list, after the destructive-flag check, and for the same
+	// reason the destructive check runs first: the exemption is a claim about the
+	// whole command line. `sfdisk -d /dev/sda` prints and `sfdisk -d /dev/sda
+	// --relabel gpt` does not, and only the ordering tells those apart.
+	const programReadOnly = DISK_PROGRAM_READ_ONLY_FLAGS.get(program);
+	if (programReadOnly !== undefined && rest.some((arg) => programReadOnly.has(arg))) return null;
 	if (rest.some((arg) => BLOCK_DEVICE_PATH.test(arg))) {
 		return { kind: "Other", rule: `\`${program}\` pointed at a disk, which overwrites what is on it` };
 	}
@@ -3312,11 +3392,34 @@ const POSIX_PROTECTION_OFF: ReadonlyMap<string, ReadonlySet<string>> = new Map([
  * `-A`/`-I` are absent on purpose, and the reasoning is the same as the table's:
  * adding one rule is ordinary firewall work, and a rule broad enough to catch
  * `-A INPUT ... -j ACCEPT` catches every rule anyone has ever written.
+ *
+ * **The two short switches here are matched case-sensitively, and this rule used
+ * to fold case.** It did `tokens[i].toLowerCase()` and then compared against `"-f"`
+ * and `"-p"`, which caught the real `-F` and `-P` by accident and also caught
+ * two switches that mean something else entirely. iptables' own option table
+ * binds them the other way round — `iptables/iptables.c:84` is
+ * `{.name = "flush", .has_arg = 2, .val = 'F'}` and `:104` is
+ * `{.name = "fragments", .has_arg = 0, .val = 'f'}`, while `:89` is
+ * `{.name = "policy", .has_arg = 1, .val = 'P'}` and `:94` is
+ * `{.name = "protocol", .has_arg = 1, .val = 'p'}` (read from two independent
+ * mirrors of the same tree, byte for byte identical). getopt_long is
+ * case-sensitive, so `iptables -A INPUT -f -j ACCEPT` — the ordinary
+ * "accept fragmented packets" rule — was reported as emptying a ruleset.
+ *
+ * The `-p` half was worse than a false positive in the other direction: it made
+ * `--protocol`'s own spelling the one this rule looked for, and it could only
+ * ever fire when `tokens[policy + 2]` was literally `accept`, which no valid
+ * `iptables` spelling produces without an intervening `-j`. So `iptables -p tcp
+ * -P INPUT ACCEPT` — a real policy opening — was missed while `iptables -A INPUT
+ * -p tcp -j ACCEPT` was the only thing the entry could see. It was dead in the
+ * direction that mattered and live in the direction that did not.
  */
 function iptablesFlushesOrOpensPolicy(tokens: string[]): DangerousCommandMatch | null {
 	for (let i = 1; i < tokens.length; i++) {
-		const token = tokens[i].toLowerCase();
-		if (token === "-f" || token === "--flush") {
+		// No `toLowerCase()`: `-F` and `-f` are different switches, and this is
+		// `wipefs -O`/`-o` all over again, for the same reason.
+		const token = tokens[i];
+		if (token === "-F" || token === "--flush") {
 			return {
 				kind: "Other",
 				rule: "`iptables` emptying a ruleset, which removes every rule that was filtering traffic",
@@ -3325,7 +3428,7 @@ function iptablesFlushesOrOpensPolicy(tokens: string[]): DangerousCommandMatch |
 	}
 	// `-P <chain> <target>`. Only ACCEPT opens it; DROP and REJECT are the
 	// tightening directions and belong to a rule that does not exist.
-	const policy = tokens.findIndex((t) => t.toLowerCase() === "-p" || t.toLowerCase() === "--policy");
+	const policy = tokens.findIndex((t) => t === "-P" || t === "--policy");
 	if (policy !== -1 && tokens[policy + 2]?.toLowerCase() === "accept") {
 		return {
 			kind: "Other",
@@ -7228,15 +7331,28 @@ const GIT_FORCE_PUSH_FLAGS: readonly string[] = ["--force", "-f", "--force-with-
  * `Would remove`, and each left the untracked file, the ignored file and the
  * untracked directory on disk.
  *
- * Reading the cluster is only safe because no flag of either caller carries the
- * letter `n` and no long option can reach here. `git clean` takes
- * `-f -d -x -X -q -e` and the long `--exclude`/`--dry-run`, and
- * `npm publish --help` / `npm unpublish --help` on
- * this machine list `--tag --access --otp --dry-run --provenance -w -ws` and
+ * Reading the cluster is only safe because the letter `n` is the dry run on
+ * every caller, and because no long option can reach here. That is a different
+ * claim from the one this comment used to make, and the old one was false: it
+ * said "no flag of either caller carries the letter `n`", which is not true of
+ * `git clean`. Its own usage line (`builtin/clean.c:36`) is `git clean [-d] [-f]
+ * [-i] [-n] [-q] [-e <pattern>] [-x | -X] [--] [<pathspec>...]` — `-n` is
+ * right there, and `-i` was missing from the list as well. The conclusion
+ * survived because the reason was inverted: `-n` is *present*, and on `git
+ * clean` it means the dry run and nothing else, which is exactly the property
+ * the scan relies on. The claim as written would have led a reader to add a
+ * caller whose `-n` meant something else, on the strength of a premise that
+ * does not hold anywhere.
+ *
+ * `npm publish --help` / `npm unpublish --help` on this machine list
+ * `--tag --access --otp --dry-run --provenance -w -ws` and
  * `--dry-run -f -w -ws` respectively — every short one of those is `-w`, `-ws`
- * or `-f`. The `--` exclusion is load-bearing rather than tidiness, and not
- * only for those two callers: `git clean -f --exclude=node_modules` has an `n`
- * in it and still deletes everything it did not exclude, measured.
+ * or `-f`. `git push` is the third caller: `builtin/push.c`'s table registers
+ * exactly four single-letter switches, `-d` (`:714`), `-n` (`:716`), `-f`
+ * (`:718`) and `-u` (`:730`), and `n` is only the dry run. The `--` exclusion
+ * is load-bearing rather than tidiness, and not only for those callers:
+ * `git clean -f --exclude=node_modules` has an `n` in it and still deletes
+ * everything it did not exclude, measured.
  */
 function isDryRun(args: string[]): boolean {
 	if (args.includes("--dry-run")) return true;
@@ -7438,6 +7554,18 @@ function gitRules(tokens: string[], platform: DangerousCommandPlatform): Dangero
 	}
 
 	if (subcommand === "push") {
+		// `--dry-run` and `-n` are checked first, and for the same reason `git clean`
+		// below checks them first: the flag is about stopping the act, so reading it
+		// before the act's own flags is what lets `--force --dry-run` be quiet. git's
+		// own registration is `OPT_BIT('n', "dry-run", &flags, N_("dry run"),
+		// TRANSPORT_PUSH_DRY_RUN)` at `builtin/push.c:716`, and `:566-567` forwards it
+		// to the transport as a real dry run rather than dropping it.
+		//
+		// The cluster read is safe for this program, measured: `builtin/push.c`'s
+		// option table registers exactly four single-letter switches — `-d` (`:714`),
+		// `-n` (`:716`), `-f` (`:718`) and `-u` (`:730`) — and `n` is only ever the
+		// dry run among them.
+		if (isDryRun(args)) return null;
 		// NOT EXECUTED against any remote, ever. The spellings come from
 		// `git push -h` (`-f, --force`, `--force-with-lease[=<refname>:<expect>]`,
 		// `--force-if-includes`) and from git-push.adoc on this box, which gives
@@ -7580,7 +7708,31 @@ function containerToolRules(tokens: string[], platform: DangerousCommandPlatform
 		}
 		// `kubectl delete pod web-1` is an ordinary ops command and stays quiet;
 		// what is caught is the spelling that means "all of them".
-		const sweeping = ["--all", "-a", "--all-namespaces", "--force", "--now"].some((flag) => rest.includes(flag));
+		//
+		// **This list was five entries and two of them were wrong, and one did not
+		// exist.** Read from `kubectl/pkg/cmd/delete/delete_flags.go` on master:
+		// `:126` is `cmd.Flags().BoolVar(f.All, "all", ...)` — `--all` with **no
+		// shorthand at all**, so the `-a` that used to be here cannot be typed;
+		// `:129` is `BoolVarP(f.AllNamespaces, "all-namespaces", "A", ...)`, whose
+		// shorthand is the capital `A`, not a lowercase one. `--force` (`:132`,
+		// "immediately remove resources from API and bypass graceful deletion") and
+		// `--now` (`:143`, "resources are signaled for immediate shutdown (same as
+		// --grace-period=1)") are both `BoolVar` acting on **the named object**.
+		// `kubectl delete pod web-1 --force` is how a pod stuck in `Terminating`
+		// gets cleared, and it was reported as deleting a whole set.
+		//
+		// A force delete still deserves a look, but it deserves its own rule and
+		// its own message; folding it in here made the message lie, which is worse
+		// than not catching it.
+		//
+		// `-A` is read from `tokens` and **not** from `lower`, and that is the whole
+		// reason the entry could be right at all. `rest` is the lower-cased tail, so
+		// an `-A` in it has already become `-a` — the very spelling upstream does not
+		// register, since `delete_flags.go:126` gives `--all` no shorthand at all.
+		// Matching against the folded array would reintroduce that dead entry under a
+		// description that claims to mean something else.
+		const sweeping =
+			["--all", "--all-namespaces"].some((flag) => rest.includes(flag)) || tokens.slice(1).includes("-A");
 		if (!sweeping) return null;
 		return { kind: "Other", rule: "`kubectl delete` over a whole set rather than one object" };
 	}

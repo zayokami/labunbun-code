@@ -3239,6 +3239,11 @@ describe("POSIX: the LVM path shape, and a listing that was reading as a wipe", 
 		// tables use must make one of them red.
 		["wipefs -O /dev/sda", "`-O` is `--output`, the read-only half of the `-o`/`-O` pair"],
 		["wipefs -A /dev/sda", "`-A` is not a wipefs option, so it is not `-a`"],
+		[
+			"wipefs -n -a /dev/sda",
+			'and the dry run: `wipefs.c:631` prints `-n, --no-act    do everything except the actual write() call`, which is the "what would this erase?" question and erases nothing',
+		],
+		["wipefs --no-act -a /dev/sda", "the long spelling of the same, which no cluster scan would have found"],
 	])("%s — %s, so it lists", (command) => {
 		expect(posix(command)).toBeNull();
 	});
@@ -4033,9 +4038,21 @@ describe("POSIX: destroying a disk", () => {
 		["fdisk /dev/sda", "the interactive partition editor"],
 		["fdisk", "with no device at all, which opens the first one it finds"],
 		["sfdisk /dev/sda", "the scripted one"],
+		[
+			"mke2fs -F /dev/sda",
+			"and the row that keeps sfdisk's `-F` out of the shared read-only table: here `-F` is mke2fs's own force, a real write, and putting `--list-free`'s short form where every mkfs variant is tested against would have made this quiet",
+		],
+		[
+			"sfdisk --delete /dev/sda",
+			'the writing half of sfdisk\'s own `-d` pair: `sfdisk.c:2287` registers `{"delete", no_argument, NULL, OPT_DELETE}` under the long name only, and `:2288` binds `d` to `dump`. Same program, same letter, opposite acts',
+		],
 		["sgdisk --zap-all /dev/sda", "wiping the table"],
 		["parted /dev/sda mklabel msdos", "relabelling the disk"],
 		["cfdisk /dev/sda", "the curses one"],
+		[
+			"sfdisk -d /dev/sda --zap-all",
+			"the ordering guard for the new per-program exemption: it is a claim about the whole command line, so `--zap-all` on it wins and this still writes",
+		],
 	])("%s is dangerous — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
 	});
@@ -4125,8 +4142,29 @@ describe("POSIX: destroying a disk", () => {
 		["parted -s /dev/sda print", "from a script"],
 		["sgdisk --print /dev/sda", "the GPT one"],
 		["sgdisk -p /dev/sda", "the GPT one, short form"],
-		["parted -p /dev/sda", "and parted's short form of the same flag"],
+		[
+			"parted -p /dev/sda",
+			"which used to be described as parted's short form of `--print` and is not one — `parted/parted.c:122-132` has no `print` in its option table and `:2377` passes the optstring `\"hlmjsfva:\"` with no `p` in it, so this line exits with `parted: invalid option -- 'p'` and the exemption is dead weight for a command that cannot run",
+		],
 		["sgdisk -p", "short form without naming a device"],
+		// sfdisk's own read-only spellings. These are NOT in the shared
+		// `DISK_LIST_FLAGS`, and the reason they could not go there is the row below:
+		// `-F` is `mke2fs`'s own "force", so a table every mkfs variant is tested
+		// against would make `mke2fs -F /dev/sda` quiet.
+		[
+			"sfdisk -d /dev/sda",
+			'the partition-table dump, which is how people back one up — `sfdisk.c:2288` binds `{"dump", no_argument, NULL, \'d\'}` and `:1065` annotates the function it reaches "read-only"',
+		],
+		["sfdisk --dump /dev/sda", "the long form of the same"],
+		["sfdisk -J /dev/sda", "the JSON dump (`:2291`)"],
+		["sfdisk --json /dev/sda", "and its long form"],
+		["sfdisk -g /dev/sda", '`--show-geometry`, which "list[s] geometry of all or specified devices" (`:2307`)'],
+		["sfdisk --list-free /dev/sda", "`--list-free`, which lists unpartitioned free areas (`:2295`)"],
+		[
+			"sfdisk -F /dev/sda",
+			"its short form, and the row that is only here because of `mke2fs -F` above: if this letter had gone into the shared table, that row would be quiet",
+		],
+		["sfdisk -V /dev/sda", '`--verify`, which "test[s] whether partitions seem correct" (`:2309`)'],
 	])("%s is not dangerous — %s", (command) => {
 		expect(posix(command)).toBeNull();
 	});
@@ -4808,6 +4846,20 @@ describe("git: throwing away work", () => {
 		["git push origin main", "with a refspec"],
 		["git push origin feature", "to a branch of somebody else's work"],
 		["git push --dry-run origin main", "and the dry run"],
+		// The rows this batch added. `git clean` has had a dry-run exemption all
+		// along (`git push -h`'s own counterpart being `-n`, `builtin/push.c:716`),
+		// and `git push` did not — so `git push --force --dry-run` was the one
+		// spelling that is the *safer* form of a force push and still prompted.
+		[
+			"git push --force --dry-run origin main",
+			"a force push as a dry run, which is the check people run before doing it",
+		],
+		["git push -f --dry-run origin main", "and the short force with the dry run"],
+		["git push --dry-run --delete origin main", "a delete as a dry run too"],
+		[
+			"git push -n --force origin main",
+			"`-n` is push's own short spelling of `--dry-run` (`OPT_BIT('n', \"dry-run\", ...)`)",
+		],
 		["git push --no-delete origin main", "the negative spelling of a delete"],
 		["git push --prune origin main", "prune removes refs already deleted locally, so it is not the act"],
 	])("%s is not dangerous — %s", (command) => {
@@ -4986,17 +5038,31 @@ describe("containers, clusters, registries and forges", () => {
 	});
 
 	/**
-	 * `kubectl delete --help` prints `--all=false:`,
-	 * `-A, --all-namespaces=false:`, `--force=false:` and `--now`. One named pod
-	 * is ordinary operations work and stays quiet; what is caught is the spelling
-	 * that means all of them.
+	 * One named object is ordinary operations work and stays quiet; what is
+	 * caught is the spelling that means all of them.
+	 *
+	 * **Two rows used to be here that are now in the quiet table below, and the
+	 * comment this block replaced is the reason they were.** It quoted
+	 * `kubectl delete --help`'s own output — `--all=false:`,
+	 * `-A, --all-namespaces=false:`, `--force=false:` and `--now` — and treated
+	 * *appearing in that output* as *meaning every one of them*. Help text lists
+	 * every switch a command has, including the ones that do the opposite of the
+	 * rule. Read from `kubectl/pkg/cmd/delete/delete_flags.go` instead:
+	 * `:126` is `--all` with **no shorthand**, `:129` gives `--all-namespaces` the
+	 * shorthand `A`, and `--force` (`:132`) and `--now` (`:143`) are `BoolVar`s
+	 * that act on the object the line names.
+	 *
+	 * The `-a` that this rule used to list was in neither: `--all` has no short
+	 * form, so `kubectl delete -a` cannot run at all.
 	 */
 	test.each([
 		["kubectl delete pods --all", "every pod of a type"],
 		["kubectl delete pods --all -A", "in every namespace"],
 		["kubectl delete deployment --all --all-namespaces", "spelled out"],
-		["kubectl delete pods --force", "forced"],
-		["kubectl delete pod foo --now", "and immediate"],
+		[
+			"kubectl delete pods -A",
+			"and the namespace shorthand on its own, which is the capital `A` of `delete_flags.go:129`",
+		],
 		["kubectl delete namespace prod", "a namespace and everything in it"],
 		["kubectl drain node-1", "which evicts everything running on a node"],
 	])("%s is dangerous — %s", (command) => {
@@ -5008,6 +5074,27 @@ describe("containers, clusters, registries and forges", () => {
 		["kubectl get pods", "getting lists"],
 		["kubectl get pods -A", "across namespaces, and still only lists"],
 		["kubectl delete pods -l app=web", "a label selector picks some, not all"],
+		// The two rows that moved. Both are `BoolVar` over the *named* object
+		// (`delete_flags.go:132` and `:143`), and clearing a pod stuck in
+		// `Terminating` is what `--force` is for.
+		[
+			"kubectl delete pods --force",
+			"`--force` bypasses graceful deletion of what is named, and was reported as deleting a whole set",
+		],
+		["kubectl delete pod foo --now", "and `--now` is `--grace-period=1` on the same one object"],
+		[
+			"kubectl delete pod web-1 --force --grace-period=0",
+			"the form people actually type when a namespace is stuck terminating",
+		],
+		// The row that pins the case-fold decision, and the reason it needed
+		// pinning: `delete_flags.go:129` gives `--all-namespaces` the shorthand `A`
+		// and `:126` gives `--all` none, so upstream's own help prints
+		// `--all=false:` with no `-a` beside it and `kubectl delete pods -a` exits
+		// with "unknown shorthand flag: 'a'". Nothing is deleted. Reading the
+		// lower-cased tail instead of `tokens` is what would resurrect `-a` as a
+		// sweep, and no other row tells the two apart — `kubectl delete pods -A`
+		// is caught under either reading.
+		["kubectl delete pods -a", "the lowercase spelling is not registered by kubectl, so this deletes nothing at all"],
 		["kubectl rollout restart deployment/web", "a rollout is not a delete"],
 	])("%s is not dangerous — %s", (command) => {
 		expect(posix(command)).toBeNull();
@@ -5243,6 +5330,14 @@ describe("POSIX: switching a host protection off", () => {
 		["iptables -F INPUT", "emptying one named chain"],
 		["sudo iptables -F", "behind sudo"],
 		["iptables -P INPUT ACCEPT", "and a default policy that lets everything unmatched through"],
+		[
+			"iptables -p tcp -P INPUT ACCEPT",
+			"with `--protocol` in front of it, which the old `-p`-for-`--policy` reading could not see: it stopped at the first `n`-shaped token and never reached the `ACCEPT`",
+		],
+		[
+			"iptables -A INPUT -F -j ACCEPT",
+			"and the mixed case, which is genuinely destructive upstream — `-F` flushes whatever is named and then the rule is added",
+		],
 		["ip6tables -F", "the IPv6 half"],
 	])("%s is dangerous — %s", (command) => {
 		expect(posix(command)).not.toBeNull();
@@ -5260,6 +5355,17 @@ describe("POSIX: switching a host protection off", () => {
 		["ufw status verbose", "and the long form"],
 		["iptables -L -n", "listing the rules"],
 		["iptables -S", "and the other listing spelling"],
+		// The rows that were false before this batch. Both switches are the ones
+		// iptables binds the *other* way: `iptables.c:84` is `"flush" → 'F'` and
+		// `:104` is `"fragments" → 'f'`, `:89` is `"policy" → 'P'` and `:94` is
+		// `"protocol" → 'p'`. The rule folded case, so it caught the right letters
+		// by accident and the wrong ones on purpose.
+		[
+			"iptables -A INPUT -f -j ACCEPT",
+			"accepting fragmented packets, which is the ordinary rule and reads `-f` as `--fragments`",
+		],
+		["ip6tables -A INPUT -f -j ACCEPT", "and the IPv6 half of the same"],
+		["iptables -A INPUT -f -s 10.0.0.0/8 -j ACCEPT", "with a source, still just a match extension"],
 		["nft list ruleset", "reading nftables"],
 		["getenforce", "and asking SELinux what it is doing"],
 		["iptables -A INPUT -p tcp --dport 8080 -j ACCEPT", "adding one rule is ordinary firewall work"],
