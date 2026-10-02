@@ -18,6 +18,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -941,6 +942,175 @@ describe("the tool hands the background spawn a confined policy", () => {
 			// command just as well and leave this false — two listeners, and only
 			// one of them reachable to be closed.
 			expect(exec.networkProxyRunning).toBe(true);
+		} finally {
+			await exec.close();
+		}
+	});
+});
+
+/**
+ * The proxy belongs to the policy that built it.
+ *
+ * `ChildProcessExecOperations` caches its proxy so a session runs one listener
+ * rather than a fresh port per command, and the cache used to be a single slot
+ * keyed on nothing. A proxy closes over the rules it was started with, so the
+ * first restricted command of a session decided the destination policy for
+ * every command after it: narrowing the allowlist mid-session changed nothing,
+ * because the narrowing policy was never consulted. It fails **open** — the
+ * policy that survives the collision is the older one and usually the broader.
+ *
+ * Reachable in the app, not just in theory: `bash.ts` rebuilds the policy for
+ * every call from the context, so `/mode` and an allowlist edit both produce a
+ * new policy under a session whose proxy slot is already full.
+ *
+ * The two destinations below are `.invalid` names (RFC 2606) on purpose. The
+ * proxy decides before it resolves or dials, so a refused request here cannot
+ * touch the network — and the alternative, a real host that the first policy
+ * allows, would make the test's own failure mode an outbound connection to
+ * somewhere. What makes each assertion decisive is the **reason**, not merely
+ * the 403: `domain_denied` and `no_matching_allow_rule` are different decisions
+ * from different rule tables, so a caller handed the wrong proxy reports the
+ * wrong one and fails.
+ */
+describe("the proxy is keyed by the policy that built it", () => {
+	const DENIED = "denied.invalid";
+	const UNMATCHED = "unmatched.invalid";
+
+	/** One `CONNECT host:443`, answered with the response head. */
+	function connectVia(port: number, host: string): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const socket = connect({ host: "127.0.0.1", port }, () => {
+				socket.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}\r\n\r\n`);
+			});
+			let seen = "";
+			socket.setEncoding("latin1");
+			socket.on("data", (chunk: string) => {
+				seen += chunk;
+				const end = seen.indexOf("\r\n\r\n");
+				if (end >= 0) {
+					resolve(seen.slice(0, end));
+					socket.destroy();
+				}
+			});
+			socket.on("error", reject);
+			// The proxy answers every refused request, but a listener that vanished
+			// under us ends here with half a response, which is a failure to report
+			// rather than a refusal to assert on.
+			socket.on("close", () => resolve(seen));
+		});
+	}
+
+	const portOf = (env: Record<string, string> | undefined): number => {
+		if (!env) throw new Error("expected a confined policy to inject a proxy");
+		return Number(new URL(env.HTTP_PROXY ?? "").port);
+	};
+
+	/** Whether nothing is listening on `port` any more. */
+	function refused(port: number): Promise<boolean> {
+		return new Promise((resolve) => {
+			const socket = connect({ host: "127.0.0.1", port }, () => {
+				socket.destroy();
+				resolve(false);
+			});
+			socket.on("error", () => resolve(true));
+		});
+	}
+
+	const denyHost = (cwd: string) => netPolicy(cwd, "restricted", [{ pattern: DENIED, permission: "deny" }]);
+
+	test("a second policy gets its own proxy and its own decision", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const first = await exec.networkEnvFor(denyHost(cwd));
+			// The narrowing: the same axis, an allowlist that no longer names the
+			// host. This is what a session does when the user edits its rules.
+			const second = await exec.networkEnvFor(netPolicy(cwd, "restricted", []));
+
+			// Two policies, two listeners. Without the key there is one slot, so
+			// this is the assertion that fails first when the key is dropped.
+			expect(portOf(second)).not.toBe(portOf(first));
+
+			// Each proxy answers with the reason from *its own* table. Sharing one
+			// would give both of these the same string, and the second one is the
+			// one that matters: it is the narrowing policy going unenforced.
+			expect(await connectVia(portOf(first), DENIED)).toContain("X-LBB-Denial: domain_denied");
+			expect(await connectVia(portOf(second), UNMATCHED)).toContain("X-LBB-Denial: no_matching_allow_rule");
+
+			// And the reverse order, because the old bug was "whoever came first
+			// wins" and a fix that only handled the widening would still leave the
+			// narrowing half in place when the session starts narrow.
+			const third = new ChildProcessExecOperations(FAKE_LINUX);
+			try {
+				const narrowFirst = await third.networkEnvFor(netPolicy(cwd, "restricted", []));
+				const wideAfter = await third.networkEnvFor(
+					netPolicy(cwd, "restricted", [{ pattern: DENIED, permission: "deny" }]),
+				);
+				expect(portOf(wideAfter)).not.toBe(portOf(narrowFirst));
+				expect(await connectVia(portOf(wideAfter), DENIED)).toContain("X-LBB-Denial: domain_denied");
+			} finally {
+				await third.close();
+			}
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("one policy is one listener, however many commands ask for it", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const first = portOf(await exec.networkEnvFor(denyHost(cwd)));
+			// A fresh policy object with the same content, which is what every
+			// command produces — `bash.ts` rebuilds it each call. Equal content has
+			// to mean equal key, or this drops a listener per command and breaks the
+			// sharing `run_in_background` depends on.
+			expect(portOf(await exec.networkEnvFor(denyHost(cwd)))).toBe(first);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("two callers arriving together share one listener, and close takes it away", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		// Both calls are made before either can await, which is the only way to be
+		// *in* the race rather than merely testing the cache afterwards.
+		const [first, second] = await Promise.all([exec.networkEnvFor(denyHost(cwd)), exec.networkEnvFor(denyHost(cwd))]);
+		const port = portOf(first);
+		expect(portOf(second)).toBe(port);
+
+		// The consequence, which is the part that matters: a second listener would
+		// have been overwritten in the map rather than closed, so it would still be
+		// listening on a port nothing holds a handle to. Asserting the URL equality
+		// alone would leave that leak unguarded.
+		await exec.close();
+		expect(await refused(port)).toBe(true);
+	});
+
+	test("a start still in flight when close runs does not outlive it", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		// Deliberately not awaited before `close`: `close` runs synchronously up to
+		// its own first await, so it lands while the listener is still being opened.
+		const starting = exec.networkEnvFor(denyHost(cwd));
+		const closing = exec.close();
+		const env = await starting;
+		await closing;
+
+		// `close` cleared the map, and a start that finishes afterwards must not
+		// put itself back — otherwise quitting during a slow listen leaves a socket
+		// open on a port nothing will ever close.
+		expect(portOf(env)).toBeGreaterThan(0);
+		expect(await refused(portOf(env))).toBe(true);
+	});
+
+	test("a policy that confines nothing starts nothing, and says so once", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			expect(await exec.networkEnvFor(netPolicy(cwd, "enabled", []))).toBeUndefined();
+			expect(exec.networkProxyRunning).toBe(false);
 		} finally {
 			await exec.close();
 		}

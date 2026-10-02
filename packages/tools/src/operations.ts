@@ -91,9 +91,12 @@ export interface ExecOperations {
 	 * `run_in_background: true` was a one-word way around the whole network axis
 	 * while every foreground command looked correctly confined.
 	 *
-	 * The lifecycle — one listener, shared between concurrent callers, closed
-	 * once — lives here, so a second spawner joins the existing proxy rather than
-	 * opening a second one nobody closes.
+	 * The lifecycle — one listener **per policy**, shared between concurrent
+	 * callers, all closed together — lives here, so a second spawner joins the
+	 * existing proxy rather than opening a second one nobody closes. "Per policy"
+	 * is not padding: a single shared listener would be one set of rules for the
+	 * whole session, which is the hole that made the first restricted command
+	 * decide destinations for every command after it.
 	 *
 	 * Optional because a fake or an embedder's own executor may confine nothing
 	 * and have nothing to share, not because a missing answer may be read
@@ -244,6 +247,33 @@ export function detectShell(): { command: string; args: (cmd: string) => string[
 	return { command: "/bin/bash", args: (cmd) => ["-c", cmd] };
 }
 
+/**
+ * Everything a proxy is built from, as one comparable string.
+ *
+ * A proxy closes over the rules it was started with, so this string is the whole
+ * question "may I reuse the proxy I have?" — and the reason the answer has to
+ * include the rules is the hole it closes: without it, the first restricted
+ * command of a session decided the destination policy for every command after
+ * it, and narrowing an allowlist mid-session silently did nothing.
+ *
+ * JSON rather than a hand-joined string, because a joined one is ambiguous.
+ * Join each rule as `permission:pattern` with a space between rules and
+ * `[{allow,"x"},{allow,"y"}]` and `[{allow,"x allow:y"}]` both render
+ * `allow:x allow:y` — two different allowlists, one key, and the second one
+ * would be run under the first one's rules. That needs an odd pattern to reach,
+ * but the cost of the unambiguous form is one `JSON.stringify` per command and
+ * the cost of the other one is a policy that is not the policy.
+ *
+ * Rules are left in order, **not sorted**. Sorting would make two tables that
+ * differ only in order collide, and whether the decision function cares about
+ * order is not this file's to assume — a needless rebuild costs one listener, a
+ * missed one costs enforcement. Same reasoning for not normalising case or
+ * trimming.
+ */
+function proxyPolicyKey(policy: SandboxPolicy): string {
+	return JSON.stringify([policy.network, (policy.networkRules ?? []).map((rule) => [rule.permission, rule.pattern])]);
+}
+
 export class ChildProcessExecOperations implements ExecOperations {
 	#shell = detectShell();
 	/**
@@ -259,64 +289,150 @@ export class ChildProcessExecOperations implements ExecOperations {
 	readonly #runtime: SandboxRuntime;
 
 	/**
-	 * The proxy, started on the first command that needs one and kept until
-	 * {@link close}.
+	 * One proxy per policy a session has run under, keyed by `proxyPolicyKey`.
 	 *
-	 * A single instance rather than one per command: the rules and the listening
-	 * port belong to the session, and a fresh proxy per command would mean a fresh
-	 * loopback port per command — which reads to a child process as "my network
-	 * configuration is changing underneath me", and breaks anything that caches
-	 * the proxy URL. It is created lazily because the common case (`network:
-	 * enabled`, no rules) must not pay for a listening socket, and `close` exists
-	 * because a proxy nobody tears down is a socket nobody owns.
+	 * A single shared instance rather than one per command: the rules and the
+	 * listening port belong to the session, and a fresh proxy per command would
+	 * mean a fresh loopback port per command — which reads to a child process as
+	 * "my network configuration is changing underneath me", and breaks anything
+	 * that caches the proxy URL. It is created lazily because the common case
+	 * (`network: enabled`, no rules) must not pay for a listening socket, and
+	 * `close` exists because a proxy nobody tears down is a socket nobody owns.
+	 *
+	 * **Keyed by the policy, and the key is the fix.** It used to be a single
+	 * unkeyed slot, and that made the first restricted command of a session the
+	 * authority on destinations for every command after it: the proxy closes over
+	 * the rules it was built with, so narrowing an allowlist mid-session changed
+	 * nothing, because the narrowing policy was never consulted. The direction is
+	 * the bad one — the policy that survives is the older and usually the broader
+	 * of the two, so this fails open. `sandbox-wiring.test.ts` measures it.
+	 *
+	 * A `null` value is a remembered *answer*, not a missing one: `network: enabled`
+	 * with no rules starts nothing, so an unrestricted session would otherwise
+	 * re-enter `startNetworkProxy` — and re-ask `needsNetworkProxy` — once per
+	 * command. **That is an optimisation with no observable difference**, and it is
+	 * written here as one so that nobody later builds an assertion on it: there is
+	 * no injection seam that could count the calls, and `networkProxyRunning` is
+	 * false either way. Removing the `null` costs one function call per command and
+	 * breaks nothing.
+	 *
+	 * Every proxy stays live until {@link close} rather than being retired when a
+	 * newer one arrives, because `NetworkProxy.close` destroys every connection
+	 * the proxy has open and a command started under the previous policy may still
+	 * be running with that port in its environment. Keeping them all also means a
+	 * session that flips between two policies twice does not churn four listeners.
+	 *
+	 * The map grows with the number of *distinct* policies, which is one per
+	 * allowlist edit rather than one per command. That is a resource characteristic,
+	 * not a bound, and it is written down here rather than hidden behind an eviction
+	 * rule — eviction would have to close a proxy something may still be using,
+	 * which is the problem the previous paragraph is about.
 	 */
-	#proxy: NetworkProxy | undefined;
+	#proxies = new Map<string, NetworkProxy | null>();
 	#starting: Promise<NetworkProxy | undefined> | undefined;
+	/**
+	 * Bumped by {@link close}, so a start that was already in flight when close
+	 * ran can tell that it is late.
+	 *
+	 * `close` clears the map, but it cannot un-start a listener that has not been
+	 * listening yet. Without this the late start installs itself into the empty map
+	 * and there is a proxy on a port nothing will ever close — the same leak `close`
+	 * exists to prevent, reachable by quitting during a slow listen.
+	 */
+	#epoch = 0;
 
 	constructor(runtime: SandboxRuntime = detectRuntime()) {
 		this.#runtime = runtime;
 	}
 
-	/** Whether a proxy is listening right now. For tests and for `/doctor`. */
+	/**
+	 * Whether a proxy is listening right now.
+	 *
+	 * Skips the remembered `null` answers, because this asks "is a socket open",
+	 * not "is the cache warm". The tests read it to assert that a confined command
+	 * left exactly one listener behind and that `close` took it away; nothing in
+	 * the running app reads it. It used to claim `/doctor` does, which was not true
+	 * of any code in this repo.
+	 */
 	get networkProxyRunning(): boolean {
-		return this.#proxy !== undefined;
+		for (const proxy of this.#proxies.values()) if (proxy) return true;
+		return false;
 	}
 
 	/**
-	 * Stop the proxy, if one was ever started.
+	 * Stop every proxy this executor ever started.
 	 *
-	 * Called on shutdown. Safe to call twice and safe to call when no command
-	 * ever needed one.
+	 * Called on shutdown. Safe to call twice and safe to call when no command ever
+	 * needed one. All of them, not just the newest: leaving one listening would
+	 * keep the process alive on a port nothing is going to close.
 	 */
 	async close(): Promise<void> {
-		const proxy = this.#proxy;
-		this.#proxy = undefined;
+		const proxies = [...this.#proxies.values()].filter((proxy) => proxy !== null);
+		this.#proxies.clear();
 		this.#starting = undefined;
-		await proxy?.close();
+		this.#epoch++;
+		await Promise.all(proxies.map((proxy) => proxy.close()));
 	}
 
 	/**
 	 * The proxy for `policy`, or `undefined` when the policy confines nothing.
 	 *
-	 * Two callers racing here must not start two listeners, so the in-flight
-	 * promise is shared rather than each awaiting its own `startNetworkProxy`.
-	 * A start that fails clears the slot: leaving a rejected promise cached
-	 * would turn one transient `EADDRNOTAVAIL` into a permanently broken
-	 * `exec`, and the next command would retry the same way the first did.
+	 * Two callers arriving together under the same policy must not start two
+	 * listeners, so the in-flight promise is shared. A start that fails clears
+	 * the slot: leaving a rejected promise cached would turn one transient
+	 * `EADDRNOTAVAIL` into a permanently broken `exec`, and the next command
+	 * would retry the same way the first did.
+	 *
+	 * Callers under *different* policies are serialised rather than run
+	 * concurrently. Letting them overlap would mean two writers racing to fill
+	 * the map, and the loser's proxy would be installed by whichever start
+	 * resolved last — the entry would then name a port built from rules the
+	 * next caller's policy did not ask for. Waiting costs one start's latency
+	 * in a case that happens once per allowlist edit.
 	 */
 	async #proxyFor(policy: SandboxPolicy): Promise<NetworkProxy | undefined> {
-		if (this.#proxy) return this.#proxy;
-		this.#starting ??= startNetworkProxy({
+		const key = proxyPolicyKey(policy);
+		const cached = this.#proxies.get(key);
+		if (cached !== undefined) return cached ?? undefined;
+
+		// A start already in flight is for *some* policy. Waiting for it costs one
+		// listener's startup on a policy change and buys the one property that is
+		// hard to get back otherwise: at most one caller is inside `startNetworkProxy`
+		// at a time, so two policies cannot race to install and whichever resolves
+		// last does not overwrite the other's entry.
+		if (this.#starting) {
+			try {
+				await this.#starting;
+			} catch {
+				// That start failed and its own caller has already been told so. This
+				// one retries under its own key rather than inheriting a dead promise,
+				// which is what would make one transient `EADDRNOTAVAIL` permanent.
+			}
+			const afterWaiting = this.#proxies.get(key);
+			if (afterWaiting !== undefined) return afterWaiting ?? undefined;
+		}
+
+		const epoch = this.#epoch;
+		const starting = startNetworkProxy({
 			network: policy.network,
 			rules: policy.networkRules,
-		}).then((proxy) => {
-			this.#proxy = proxy;
-			return proxy;
 		});
+		this.#starting = starting;
 		try {
-			return await this.#starting;
+			const proxy = await starting;
+			// `close` ran while this was starting. The caller still needs what it
+			// asked for, but caching it would put a listener on a port past the
+			// point everything was torn down, so it is closed instead.
+			if (this.#epoch !== epoch) {
+				await proxy?.close();
+				return proxy;
+			}
+			// `null` for a start that produced nothing, so the unrestricted case is
+			// answered from the map rather than re-asked every command.
+			this.#proxies.set(key, proxy ?? null);
+			return proxy;
 		} finally {
-			this.#starting = undefined;
+			if (this.#starting === starting) this.#starting = undefined;
 		}
 	}
 
@@ -452,7 +568,10 @@ export class ChildProcessExecOperations implements ExecOperations {
  * has to observe the proxy under test cannot, if the object it holds is not the
  * one running commands. It also keeps one listener: everything routed through
  * the returned object shares the executor's proxy rather than each part opening
- * its own.
+ * its own. **That is one listener per policy**, which is what makes it safe — a
+ * single listener for the whole session would be one set of rules for every
+ * command in it, and the first restricted command would decide destinations for
+ * all the rest.
  *
  * The executor's own answers are forwarded rather than recomputed here. They
  * used to be dropped, and the drop was invisible in both directions at once:
