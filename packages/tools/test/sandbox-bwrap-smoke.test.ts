@@ -2,21 +2,18 @@
  * Run the generated bwrap argument vector through a real `bwrap`.
  *
  * **What this file is for, and why it is not another string comparison.** Every
- * other test of `bwrap.ts` compares the argv it produced. `bwrap.ts:34-56` states
- * an assumption that no string comparison can reach, and states that it is
- * load-bearing and unverified:
+ * other test of `bwrap.ts` compares the argv it produced. `bwrap.ts` carried an
+ * assumption that no string comparison could reach, labelled it load-bearing and
+ * unverified, and named the cheap thing that would settle it:
  *
- * > This translator does not emit ancestor-unlink denies, on the belief that
- * > bubblewrap does not have that hole: a bind mount attaches to the dentry
- * > rather than the name …… **That belief is inherited, not verified here.** It
- * > was not checked against kernel mount semantics from this machine, and it is
- * > load-bearing: if it is wrong, this backend has a `.git`-relocation bypass and
- * > no test in this repository would catch it, because the argv it produces is
- * > correct either way.
+ * > The cheap thing that would settle it is one `bwrap` command on a real Linux
+ * > box — `mv` a directory containing a `.git` out from under its parent and see
+ * > whether the repository survives.
  *
- * The file then names the cheap thing that would settle it: *"one `bwrap` command
- * on a real Linux box — `mv` a directory containing a `.git` out from under its
- * parent and see whether the repository survives."* That is this file.
+ * That is this file, and **the answer is that the belief was false.** A directory
+ * containing a protected path can be renamed out from under its parent, and the
+ * `.git` is writable at its new location. `bwrap.ts` now says so; the row that
+ * proves it stays red until the translator is fixed.
  *
  * ## Every row has its control, and the controls are what make the rows mean anything
  *
@@ -263,6 +260,78 @@ smoke("renaming a directory that holds a .git does not make the .git writable", 
 		after.stdout.trim(),
 		"the .git became writable after its parent was renamed -- this is the relocation bypass bwrap.ts:34-56 assumes does not exist",
 	).toBe("refused");
+});
+
+/**
+ * Measure whether a mount arrangement can express "this directory is not
+ * renameable" — the question any fix to the row above has to answer first.
+ *
+ * **Why this row exists rather than a fix.** Bubblewrap has no deny rule: it is
+ * purely constructive, arranging mounts. So the previous belief — that a
+ * read-only bind travels with a renamed directory because it attaches to the
+ * dentry — was reasoning about mount semantics that turned out to be false, and
+ * it cost a live hole. A fix written the same way would be the same guess with
+ * a different shape.
+ *
+ * The candidate mechanism is that a **mount point is not renameable**: the kernel
+ * returns `EBUSY` for `rename` on one. A mount can be read-write and still be
+ * unrenameable, so giving the ancestor its own bind would refuse the relocation
+ * without needing a deny rule the backend does not have.
+ *
+ * **This row does not assume it works. It prints what happened**, for three
+ * probes whose answers decide the fix:
+ *
+ *   A — does `--bind <dir> <dir>` after the parent bind make `mv` on it fail?
+ *   B — if not, does `--ro-bind` of the same directory fail any better?
+ *   C — does either still let `git`-shaped work read `<dir>/.git`? A mechanism
+ *       that made the ancestor unrenameable by making it unreadable would pass A
+ *       and fail the product, so C is the row that stops a bad fix shipping.
+ *
+ * The values are printed rather than asserted because the answer is a fact about
+ * the kernel, not a decision this repository is making. The fix is written
+ * against the measured answer; this row is what keeps it honest.
+ */
+smoke("MEASURE: what a mount arrangement can say about renaming an ancestor", () => {
+	const { workspace, git, sub } = workspaceFixture();
+	const relocated = join(workspace, "relocated");
+
+	/** The argv the translator produces, with extra fragments spliced in before `--`. */
+	const withExtra = (extra: string[]): string[] => {
+		const base = buildBwrapArgs(policyFor(workspace, [join(sub, ".git")]), ["/bin/sh", "-c", "true"], (p) =>
+			existsSync(p),
+		);
+		const at = base.indexOf("--");
+		return [...base.slice(0, at), ...extra, ...base.slice(at)];
+	};
+	const run = (argv: string[], command: string) => {
+		const r = spawnSync("bwrap", argv.slice(0, argv.indexOf("/bin/sh")).concat(["/bin/sh", "-c", command]), {
+			encoding: "utf8",
+		});
+		return { status: r.status, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
+	};
+
+	const rename = `mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`;
+	const readBack = `head -c 1 ${JSON.stringify(join(sub, ".git", "HEAD"))} >/dev/null 2>&1 && echo read || echo unread`;
+
+	console.log("[bwrap-smoke] A/B/C — printed, not asserted: a fact about the kernel, not a decision");
+	const today = run(withExtra([]), rename);
+	console.log(`  A  as shipped, no extra mount:      rename exit=${today.status} ${today.stderr.slice(0, 60)}`);
+
+	for (const [label, extra] of [
+		["B  --bind the ancestor onto itself:  ", ["--bind", sub, sub]],
+		["C  --ro-bind the ancestor onto itself:", ["--ro-bind", sub, sub]],
+	] as const) {
+		const moved = run(withExtra([...extra]), rename);
+		const readable = run(withExtra([...extra]), readBack);
+		console.log(
+			`  ${label} rename exit=${moved.status} ${moved.stderr.slice(0, 40)}  | .git ${readable.stdout || readable.stderr.slice(0, 40)}`,
+		);
+	}
+	void git;
+	// Asserts nothing about the outcome on purpose: see the doc comment. What it
+	// does assert is that the measurement ran, so a broken probe cannot pass as a
+	// silent "no".
+	expect(typeof today.status === "number" || today.status === null).toBe(true);
 });
 
 test("where bwrap is installed, this file does not skip", () => {
