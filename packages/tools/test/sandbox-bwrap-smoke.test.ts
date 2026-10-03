@@ -78,6 +78,31 @@ if (!CAPABILITY.ok) console.warn(`[bwrap-smoke] skipped: ${CAPABILITY.why}`);
 
 const smoke = CAPABILITY.ok ? test : test.skip;
 
+/**
+ * Run `command` with no sandbox at all, which is what a control has to be.
+ *
+ * **The first version of these controls passed an `unrestricted` policy to
+ * `buildBwrapArgs`, and that argv is broken.** It is `--bind / /` plus the
+ * namespace flags with no read baseline, and on a real Linux box it fails with
+ * `bwrap: execvp /bin/sh: No such file or directory` — so every control row
+ * errored on the harness and the file went red for a reason that had nothing to
+ * do with confinement.
+ *
+ * It is broken *and unreachable*: `resolveSandboxExecution` short-circuits on
+ * `fileSystem.kind === "unrestricted"` and returns `{kind: "unconfined"}` before
+ * calling the translator, so nothing in this build produces that argv. Reaching
+ * it required calling the translator directly, which is what a control must not
+ * do — a control that exercises a code path the product never takes is
+ * measuring the wrong thing.
+ *
+ * The honest control is the plain shell with no wrapper at all, which is what
+ * `danger-full-access` actually does at runtime.
+ */
+function runUnconfined(command: string): { status: number | null; stdout: string; stderr: string } {
+	const result = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8" });
+	return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
 /** Temporary trees this file made, swept when the run ends. */
 const made: string[] = [];
 afterAll(() => {
@@ -141,19 +166,14 @@ smoke("the generated argv compiles and starts a process", () => {
 	expect(run.stdout.trim()).toBe("alive");
 });
 
-smoke("CONTROL: the same write outside the workspace succeeds with no policy", () => {
+smoke("CONTROL: the same write outside the workspace succeeds with no sandbox", () => {
 	// The control for the row below. Unwrapped, this write works; wrapped, it
 	// cannot. If the control failed, the refusal would be attributable to
-	// something other than the sandbox.
+	// something other than the sandbox. `runUnconfined`, not an unrestricted
+	// policy: see its doc comment for why that argv is the wrong control.
 	const { outside } = workspaceFixture();
 	const target = join(outside, "control.txt");
-	const unrestricted: SandboxPolicy = {
-		fileSystem: { kind: "unrestricted", entries: [] },
-		network: "enabled",
-		networkRules: [],
-		protected: [],
-	};
-	const run = runUnder(unrestricted, touchPayload(target));
+	const run = runUnconfined(touchPayload(target));
 	expect(run.status, run.stderr.slice(0, 300)).toBe(0);
 	expect(run.stdout.trim()).toBe("WROTE");
 });
@@ -182,15 +202,9 @@ smoke("a write to the protected path is refused", () => {
 	expect(run.stdout.trim(), `the protected path was writable: ${run.stderr.slice(0, 300)}`).toBe("refused");
 });
 
-smoke("CONTROL: the same write to the protected path succeeds with no policy", () => {
+smoke("CONTROL: the same write to the protected path succeeds with no sandbox", () => {
 	const { git } = workspaceFixture();
-	const unrestricted: SandboxPolicy = {
-		fileSystem: { kind: "unrestricted", entries: [] },
-		network: "enabled",
-		networkRules: [],
-		protected: [],
-	};
-	const run = runUnder(unrestricted, touchPayload(join(git, "HEAD")));
+	const run = runUnconfined(touchPayload(join(git, "HEAD")));
 	expect(run.stdout.trim(), run.stderr.slice(0, 300)).toBe("WROTE");
 });
 
@@ -216,21 +230,15 @@ smoke("CONTROL: renaming a directory that holds a .git leaves it writable, unsan
 	const { workspace, sub } = workspaceFixture();
 	expect(existsSync(sub)).toBe(true);
 	// `mv sub relocated` is the move the sandboxed row repeats.
-	const unrestricted: SandboxPolicy = {
-		fileSystem: { kind: "unrestricted", entries: [] },
-		network: "enabled",
-		networkRules: [],
-		protected: [],
-	};
 	const relocated = join(workspace, "relocated");
-	const run = runUnder(unrestricted, `mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`);
+	const run = runUnconfined(`mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`);
 	expect(
 		run.status,
 		`the control rename failed, so the sandboxed row would measure the filesystem: ${run.stderr.slice(0, 300)}`,
 	).toBe(0);
 	// The moved `.git` is writable when nothing protects it. This is the answer
 	// the sandboxed row is compared against.
-	const after = runUnder(unrestricted, touchPayload(join(relocated, ".git", "HEAD")));
+	const after = runUnconfined(touchPayload(join(relocated, ".git", "HEAD")));
 	expect(
 		after.stdout.trim(),
 		"the control could not write the moved .git, so the sandboxed refusal would prove nothing",
