@@ -57,6 +57,7 @@ import {
 } from "../src/mimocode-home.ts";
 import { MIMOCODE_PERMISSION_TOOLS, planMiMoCode } from "../src/mimocode-plan.ts";
 import { type MiMoCodeSettingsLayer, mergeMiMoCodeSettings, readMiMoCode } from "../src/mimocode-read.ts";
+import { borrowSourceEnv, releaseEnv } from "./source-env.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -64,8 +65,31 @@ import { type MiMoCodeSettingsLayer, mergeMiMoCodeSettings, readMiMoCode } from 
 
 const made: string[] = [];
 afterEach(() => {
+	releaseEnv();
 	for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+/**
+ * Clear every relocation variable before a fixture runs, and put them back after.
+ *
+ * **This file was written without it and 32 of its tests failed on
+ * `test (ubuntu-latest)` while passing on Windows and on macOS.** The cause is
+ * that MiMo Code is the one source here whose roots come from `XDG_*`: the
+ * fixtures build a home with `mimocodeRoots(home, {})` — an empty environment —
+ * while `runMigration` calls `readMiMoCode(home, cwd)` with no environment
+ * argument, so the reader falls through to its `process.env` default. On a
+ * developer's machine `XDG_CONFIG_HOME` is usually unset and the two agree; a
+ * GitHub Linux runner has it set, the fixture writes into `~/.config/mimocode`
+ * and the reader looks somewhere else, and 32 assertions see an empty plan.
+ *
+ * `borrowSourceEnv()` clears all of `MIGRATION_ENV_VARS`, which already lists
+ * the four `XDG_*` names. The alternative — passing `{}` through `runMigration`
+ * — is not available: it does not take an environment, and every other source
+ * here has the same shape, so the hermetic seam is the borrowed environment.
+ */
+function borrowEnvForFixture(): void {
+	borrowSourceEnv();
+}
 
 function makeDir(prefix: string): string {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -115,6 +139,7 @@ function mimocodeFixture(
 		project?: unknown;
 	} = {},
 ): MiMoCodeFixture {
+	borrowEnvForFixture();
 	const home = makeDir("lbb-mimocode-home-");
 	const cwd = makeDir("lbb-mimocode-proj-");
 	const roots = mimocodeRoots(home, options.env ?? {});
@@ -255,6 +280,7 @@ test("MIMOCODE_HOME replaces all four roots, and a relative one is refused and r
 });
 
 test("the roots that are read are the product's, weakest first", () => {
+	borrowEnvForFixture();
 	const home = makeDir("lbb-mimocode-home-");
 	const cwd = join(home, "code", "app");
 	const roots = mimocodeRoots(home, {});
@@ -278,6 +304,7 @@ test("the roots that are read are the product's, weakest first", () => {
 // ---------------------------------------------------------------------------
 
 test("a home whose only populated root is the data one is still detected", () => {
+	borrowEnvForFixture();
 	// **The case a single detection root gets wrong.** `config` gets a starter
 	// `mimocode.jsonc` written on first run (config/config.ts:656-662) so it is
 	// non-empty early; `data` is where every session and `auth.json` live and is
@@ -1063,6 +1090,7 @@ test("the four trees it harvests are named, and the three that are another sourc
 });
 
 test("a `~/.agents` skill is written exactly once, by the source that owns it", () => {
+	borrowEnvForFixture();
 	// **The bug this test exists to prevent is a double import that looks clean.**
 	// `~/.agents` is a tree this repository already migrates, as its `agents`
 	// source, and MiMo Code harvests it for skills by default — so a reader that
