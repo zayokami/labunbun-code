@@ -490,6 +490,86 @@ smoke("MEASURE: which ancestor mount order keeps the workspace writable", () => 
 	}
 });
 
+/**
+ * The last untried primitive, and the one the mount arrangements do not use:
+ * **a permission bit rather than a mount.**
+ *
+ * D through G share a shape — read-only the ancestor as a mount — and they
+ * bracket the answer between two failures. Read-only after the writable bind and
+ * the workspace goes read-only (D, E). Read-only plus a writable rebind and the
+ * `.git` becomes writable again, because the rebind lands on the ancestor too
+ * (F, G). **Every mount arrangement is one of those two**, so the arrangement is
+ * not the thing to vary; the primitive is.
+ *
+ * `--perms` is not a mount. It sets the mode on the next operation's target, so
+ * `rmdir`/`rename` on a directory whose own bits lack `w` fails on the directory
+ * inode — the ancestor — while everything *inside* it keeps its own permissions.
+ * That is exactly the shape of the requirement: the ancestor is not renameable,
+ * the contents are not touched.
+ *
+ * **It has an obvious dependency, and that is what the probes separate.** The
+ * rename needs write on the ancestor, and under `--unshare-user` the sandboxed
+ * process is the *owner* of everything it sees, so an owner may rename its own
+ * directory regardless of the mode unless the kernel honours the write bit
+ * strictly. So the row asks directly rather than assuming: does `--perms 555` on
+ * the ancestor refuse the rename, while a sibling directory and a file inside the
+ * ancestor stay writable.
+ */
+smoke("MEASURE: a permission bit on the ancestor, which is not a mount", () => {
+	const probePerms = (perms: string | null) => {
+		const { workspace, sub } = workspaceFixture();
+		const base = buildBwrapArgs(policyFor(workspace, [join(sub, ".git")]), ["/bin/sh", "-c", "true"], (p) =>
+			existsSync(p),
+		);
+		// The ancestor bind comes from the translator; this row varies only whether a
+		// `--perms` precedes it, so the difference between the two columns is that one
+		// flag and nothing else.
+		const ancestorAt = base.indexOf("--ro-bind", base.indexOf("--"));
+		const argv = perms === null ? base : [...base.slice(0, ancestorAt), "--perms", perms, ...base.slice(ancestorAt)];
+
+		const writableIn = join(workspace, "in-workspace.md");
+		const insideAncestor = join(sub, "written.md");
+		const siblingDir = join(workspace, "sib");
+		const relocated = join(workspace, "relocated");
+
+		const one = (command: string) => {
+			const r = spawnSync("bwrap", [...argv.slice(0, argv.indexOf("--")), "--", "/bin/sh", "-c", command], {
+				encoding: "utf8",
+			});
+			return { status: r.status, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
+		};
+		return {
+			workspaceLanded: existsSync(writableIn),
+			insideLanded: existsSync(insideAncestor),
+			rename: one(`mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`),
+			// A write INSIDE the ancestor is what a build does; if the permission bit
+			// reaches past the directory's own inode, this is the row that says so.
+			insideWrite: one(touchPayload(insideAncestor)),
+			siblingMkdir: one(`mkdir -p ${JSON.stringify(siblingDir)} && echo ok`),
+			gitWrite: one(touchPayload(join(sub, ".git", "HEAD"))),
+			gitRead: one(
+				`head -c 1 ${JSON.stringify(join(sub, ".git", "HEAD"))} >/dev/null 2>&1 && echo read || echo unread`,
+			),
+		};
+	};
+
+	console.log("[bwrap-smoke] H/I — printed, not asserted: a permission bit, which is not a mount");
+	for (const [label, perms] of [
+		["H  no --perms, ancestor ro-bind only (today): ", null],
+		["I  --perms 555 before the ancestor ro-bind:   ", "555"],
+	] as const) {
+		const r = probePerms(perms);
+		console.log(
+			`  ${label}` +
+				` in-ws(landed=${r.workspaceLanded})` +
+				`  inside-ancestor=${r.insideWrite.stdout || r.insideWrite.stderr.slice(0, 16)}(landed=${r.insideLanded})` +
+				`  sibling-mkdir=${r.siblingMkdir.stdout || r.siblingMkdir.stderr.slice(0, 14)}` +
+				`  rename exit=${r.rename.status}` +
+				`  .git write=${r.gitWrite.stdout || r.gitWrite.stderr.slice(0, 16)} read=${r.gitRead.stdout || r.gitRead.stderr.slice(0, 16)}`,
+		);
+	}
+});
+
 test("where bwrap is installed, this file does not skip", () => {
 	// The control for the gate. A skip is the honest answer to "can this machine
 	// answer the question" and a terrible answer to "did the check run", and the
