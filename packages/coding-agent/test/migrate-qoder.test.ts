@@ -124,14 +124,21 @@ function layer(
 // Registration
 // ---------------------------------------------------------------------------
 
-test("it is registered as the fourteenth source, on the end of the list", () => {
-	expect(MIGRATION_SOURCE_IDS[MIGRATION_SOURCE_IDS.length - 1]).toBe("qoder");
-	expect(MIGRATION_SOURCE_IDS).toHaveLength(15);
+test("it holds the place it was appended at", () => {
+	// **Not on the end any more, and the reason is worth stating.** MiMo Code was
+	// appended after Qoder, which is the rule this test exists to enforce — a new
+	// source goes on the end rather than being slotted in. So the assertion is
+	// "Qoder is where it was put and the ids before it are untouched", by index,
+	// rather than "Qoder is the newest", which is a claim about the registry's
+	// history and would have to be rewritten by every later source.
+	expect(MIGRATION_SOURCE_IDS.indexOf("qoder")).toBe(14);
+	expect(MIGRATION_SOURCE_IDS.length).toBeGreaterThan(15);
 	expect(MIGRATION_SOURCE_LABELS.qoder).toBe("Qoder");
 	expect(SOURCE_ROOTS.qoder).toBe(".qoder");
 	// Appended, never slotted in: the id before it keeps its place, so a source
 	// added later cannot change which of two sources providing the same file wins.
-	expect(MIGRATION_SOURCE_IDS[MIGRATION_SOURCE_IDS.length - 2]).toBe("antigravity");
+	expect(MIGRATION_SOURCE_IDS.indexOf("antigravity")).toBe(13);
+	expect(MIGRATION_SOURCE_IDS.indexOf("claude-code")).toBe(0);
 });
 
 // ---------------------------------------------------------------------------

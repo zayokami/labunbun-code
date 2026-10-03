@@ -30,8 +30,10 @@ import {
 	userMessage,
 } from "@labunbun/ai";
 import { caseInsensitivePaths } from "@labunbun/tools";
+import { listAlmaHistory, readAlmaConversation } from "./alma-session.ts";
 import { antigravityDataDirs, antigravityTreeHasContent } from "./antigravity-home.ts";
 import { listAntigravityConversations, readAntigravityConversation } from "./antigravity-session.ts";
+import { listCodewhaleSessions, readCodewhaleSession } from "./codewhale-session.ts";
 import { codexRoot } from "./codex-home.ts";
 import { cursorPromptHistoryFile, cursorPromptHistoryPath } from "./cursor-home.ts";
 import { dshRoot } from "./dsh-home.ts";
@@ -42,8 +44,17 @@ import { kimiInputHistoryDir, kimiInputHistoryFile, kimiRoot } from "./kimi-home
 import { listKimiSessions, readKimiSession } from "./kimi-session.ts";
 import { readText, tildePath } from "./migrate-core.ts";
 import type { MigrationSourceId } from "./migrate-types.ts";
+import { mimocodeDatabasePath, mimocodeRoots } from "./mimocode-home.ts";
+import {
+	type MiMoCodePartRow,
+	readMiMoCodeConversation,
+	readMiMoCodeMessageScope,
+	readMiMoCodeSessions,
+} from "./mimocode-session.ts";
 import { minimaxRoot } from "./minimax-home.ts";
 import { listMinimaxSessions, readMinimaxSession } from "./minimax-session.ts";
+import { openclawStateDir } from "./openclaw-home.ts";
+import { openclawAgentDbPath, readOpenClawEvents, readOpenClawSessionWindows } from "./openclaw-session.ts";
 import {
 	type OpencodePartRow,
 	type OpencodeSessionMessageRow,
@@ -1534,6 +1545,284 @@ function readOpencodeSession(sourceId: string, home: string): { entries: History
 }
 
 // ---------------------------------------------------------------------------
+// MiMo Code
+// ---------------------------------------------------------------------------
+
+/**
+ * The database this install reads, resolved once for the same reason
+ * `opencodeDbPathFor` resolves one.
+ *
+ * `$MIMOCODE_DB` can put it anywhere and `:memory:` puts it nowhere at all, and the
+ * channel filename for a nightly is a build-time constant no reader can know — so
+ * a listing that re-derived the path differently from the reader would report a
+ * source as holding transcripts the read phase then finds nowhere.
+ */
+function miMoCodeDbPathFor(home: string): string | null {
+	return mimocodeDatabasePath(mimocodeRoots(home, process.env).data, process.env);
+}
+
+/**
+ * MiMo Code's sessions, as history candidates.
+ *
+ * **A subagent session (`parent_id` set) is counted and skipped**, for OpenCode's
+ * reason: it is a task the primary ran, not a conversation the user had, and
+ * importing it would replay the subagent's turns as though the user had typed them.
+ *
+ * **An archived session is imported with the flag rather than skipped.** This is a
+ * stronger statement than OpenCode's needs to be: `session.time_archived` is a
+ * first-class column on the session row
+ * (`session/session.sql.ts:41-44`) and the product keeps archiving to it, so an
+ * archived session is a real conversation the user chose to put away — and
+ * "archived" is a property the target records too.
+ */
+function listMiMoCodeHistory(home: string): HistoryListing {
+	const candidates: HistoryCandidate[] = [];
+	let children = 0;
+	const dbPath = miMoCodeDbPathFor(home);
+	if (dbPath === null) return { candidates, notes: [] };
+	for (const session of readMiMoCodeSessions(dbPath)) {
+		if (session.parentId) {
+			children += 1;
+			continue;
+		}
+		candidates.push({
+			source: "mimocode-code",
+			sourceId: session.id,
+			// `session.directory` is `notNull()` and has been since the first
+			// migration, so this is never a fallback — it is the answer.
+			cwd: session.directory,
+			title: session.title,
+			startedAt: session.timeCreated,
+			path: dbPath,
+			...(session.timeArchived > 0 ? { archived: true } : {}),
+		});
+	}
+	const notes: HistoryNote[] = [];
+	if (children > 0) notes.push({ reason: "subagent session", count: children });
+	return { candidates, notes };
+}
+
+/** Why a compaction's summary arrives empty, when it does. */
+const MIMOCODE_MISSING_SUMMARY = "(compaction recorded by MiMo Code; its summary is not in this database)";
+
+/**
+ * One MiMo Code session's main thread, as history entries.
+ *
+ * **The record shape is not inferred, and the strongest evidence is that MiMo
+ * Code ships a reader for it.** `session/opencode-import.ts` opens an upstream
+ * `opencode.db` through `openReadonly` (`storage/read-sqlite.bun.ts:7-13`) and
+ * reads `session` -> `message` -> `part`, `JSON.parse`-ing each `data` column
+ * (`:219` and `:236`) into the same `MessageV2` union this function reads. So the
+ * `data` blobs below are `MessageV2.Info` and `MessageV2.Part` — `role` of
+ * `"user"` (`session/message-v2.ts:527`) or `"assistant"` (`:577`), `parentID`
+ * (`:597`) and `summary: boolean` (`:609`); and a part discriminated on `type`
+ * with `text` (`:187`), `reasoning` (`:204`), `tool` (`:484`), `compaction`
+ * (`:319`) and the step/patch/file family around them.
+ *
+ * **The one filter this adds is `agent_id = 'main'`**, because MiMo Code's
+ * `message` table carries a column an opencode v1 database does not
+ * (`session/session.sql.ts:94`). See `mimocode-session.ts`'s header for why a
+ * reader that omits it duplicates the main thread with the subagent's work.
+ */
+function readMiMoCodeSession(sourceId: string, home: string): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const dbPath = miMoCodeDbPathFor(home);
+	if (dbPath === null) return { entries: [], notes: [] };
+	const { messages, parts } = readMiMoCodeConversation(dbPath, sourceId);
+	const notes: HistoryNote[] = [];
+	let synthetic = 0;
+	let ignored = 0;
+	let emptyOutputs = 0;
+	let summaries = 0;
+
+	const partsByMessage = new Map<string, MiMoCodePartRow[]>();
+	for (const part of parts) {
+		const list = partsByMessage.get(part.messageId);
+		if (list) list.push(part);
+		else partsByMessage.set(part.messageId, [part]);
+	}
+
+	// A compaction is split across **two** messages joined by a link rather than by
+	// order: the user's own message gains a `compaction` part
+	// (`session/message-v2.ts:319`) and a separate assistant message carries
+	// `summary: true` and names the user message in its `parentID`. Matching on
+	// adjacency instead would pair the summary with whichever user message happened
+	// to be written before it, which is a different message whenever anything
+	// landed in between.
+	const compactionHeads = new Set<string>();
+	const summaryByHead = new Map<string, string>();
+	for (const message of messages) {
+		const role = asText(message.data.role);
+		const own = partsByMessage.get(message.id) ?? [];
+		if (role === "user") {
+			if (own.some((part) => part.type === "compaction")) compactionHeads.add(message.id);
+			continue;
+		}
+		// `summary` is `true` on an assistant and an *object* on a user
+		// (`session/message-v2.ts:532` against `:609`), so the comparison below is
+		// also what keeps a user's own session summary from being read as one.
+		if (role === "assistant" && message.data.summary === true) {
+			const parent = asText(message.data.parentID);
+			if (parent) summaryByHead.set(parent, miMoCodeSummaryText(own));
+		}
+	}
+
+	const collected: AgentMessage[] = [];
+	const markers: Array<{ after: number; entry: HistoryEntry }> = [];
+	for (const message of messages) {
+		const role = asText(message.data.role);
+		const created = asRecord(message.data.time)?.created;
+		const timestamp = typeof created === "number" ? created : message.timeCreated;
+		const own = [...(partsByMessage.get(message.id) ?? [])].sort((a, b) => a.timeCreated - b.timeCreated);
+
+		if (role === "user") {
+			const texts: string[] = [];
+			for (const part of own) {
+				if (part.type === "text") {
+					// Injected by the tool itself (file contents, reminders) rather than
+					// typed by the user.
+					if (part.data.synthetic === true) {
+						synthetic += 1;
+						continue;
+					}
+					const text = asText(part.data.text);
+					if (text) texts.push(text);
+					continue;
+				}
+				if (part.type === "compaction") continue;
+				if (part.type !== "step-start" && part.type !== "step-finish") ignored += 1;
+			}
+			if (texts.length > 0) collected.push(userMessage(texts.join("\n\n"), timestamp));
+			if (compactionHeads.has(message.id)) {
+				summaries += 1;
+				markers.push({
+					after: collected.length,
+					entry: {
+						kind: "compaction",
+						summary: summaryByHead.get(message.id) || MIMOCODE_MISSING_SUMMARY,
+						// A compaction part records no token count and neither does a
+						// guess: zero reads as "not recorded", where an estimate would
+						// read as a measurement this importer never took.
+						preTokens: 0,
+					},
+				});
+			}
+			continue;
+		}
+		if (role !== "assistant") {
+			ignored += own.length;
+			continue;
+		}
+		// The assistant half of a compaction: the summary text is already in the
+		// marker, so emitting the message would put it in the transcript twice.
+		if (message.data.summary === true) continue;
+
+		const content: AssistantContent[] = [];
+		const results: AgentMessage[] = [];
+		for (const part of own) {
+			if (part.type === "text") {
+				const text = asText(part.data.text);
+				if (text) content.push(textContent(text));
+				continue;
+			}
+			if (part.type === "reasoning") {
+				const thinking = asText(part.data.text);
+				if (thinking) content.push({ type: "thinking", thinking });
+				continue;
+			}
+			if (part.type === "tool") {
+				// `state` is a four-way union discriminated on `status`
+				// (`session/message-v2.ts:395,407,422,443`), and which field holds the
+				// answer depends on the arm: `output` once completed, `error` once it
+				// failed, and neither while pending or running. `input` is a record on
+				// all four arms, so it is stringified rather than parsed.
+				const state = asRecord(part.data.state) ?? {};
+				const callId = asText(part.data.callID);
+				if (!callId) {
+					ignored += 1;
+					continue;
+				}
+				const name = asText(part.data.tool) || UNKNOWN_TOOL_NAME;
+				const status = asText(state.status);
+				content.push({
+					type: "toolCall",
+					id: callId,
+					name,
+					arguments: JSON.stringify(asRecord(state.input) ?? {}),
+				});
+				const output = asText(state.output) || asText(state.error);
+				if (!output) emptyOutputs += 1;
+				results.push(toolResultMessage(callId, name, resultContent(output), status === "error", timestamp));
+				continue;
+			}
+			if (part.type !== "step-start" && part.type !== "step-finish") ignored += 1;
+		}
+		if (content.length > 0) {
+			const calls = content.some((block) => block.type === "toolCall");
+			collected.push(assistantMessage({ content, timestamp, stopReason: calls ? "toolUse" : "stop" }));
+			collected.push(...results);
+		} else if (results.length > 0) {
+			// Results without their call cannot be replayed, and the repair pass below
+			// would drop them anyway; counting them is more honest.
+			ignored += results.length;
+		}
+	}
+
+	// Rows the `agent_id = 'main'` filter removed. Reported rather than folded into
+	// `ignored`, because "your subagent's turns were left behind" and "parts of a
+	// shape this importer does not carry" are different sentences, and a user who
+	// ran subagents deserves the first.
+	const scope = readMiMoCodeMessageScope(dbPath, sourceId);
+	const { entries, dropped } = assembleMiMoCodeEntries(collected, markers);
+	if (scope.subagent > 0) {
+		notes.push({ reason: "subagent turn (a message whose `agent_id` is not `main`)", count: scope.subagent });
+	}
+	if (synthetic > 0) notes.push({ reason: "tool-injected text part", count: synthetic });
+	if (ignored > 0) notes.push({ reason: "unsupported part", count: ignored });
+	if (emptyOutputs > 0) notes.push({ reason: "tool call with no recorded output", count: emptyOutputs });
+	if (summaries > 0) notes.push({ reason: "compaction summary", count: summaries });
+	if (dropped > 0) notes.push({ reason: "unpaired tool call or result", count: dropped });
+	return { entries, notes };
+}
+
+/**
+ * A compaction's summary text: text parts alone, each trimmed, blanks dropped,
+ * joined by a blank line, and the whole trimmed again.
+ */
+function miMoCodeSummaryText(parts: MiMoCodePartRow[]): string {
+	return parts
+		.filter((part) => part.type === "text")
+		.map((part) => asText(part.data.text).trim())
+		.filter(Boolean)
+		.join("\n\n")
+		.trim();
+}
+
+/**
+ * Pair the repaired message stream with the compaction markers, in that order.
+ *
+ * A marker's position is an index into `collected`, and a repair pass that dropped
+ * something invalidates it — so when anything was dropped the markers all move to
+ * the end rather than land at positions that no longer mean what they said.
+ */
+function assembleMiMoCodeEntries(
+	collected: AgentMessage[],
+	markers: Array<{ after: number; entry: HistoryEntry }>,
+): { entries: HistoryEntry[]; dropped: number } {
+	const repaired = repairToolPairing(collected);
+	const entries: HistoryEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
+	if (markers.length > 0) {
+		if (repaired.dropped === 0) {
+			for (const marker of [...markers].sort((a, b) => b.after - a.after)) {
+				entries.splice(Math.min(marker.after, entries.length), 0, marker.entry);
+			}
+		} else {
+			entries.push(...markers.map((marker) => marker.entry));
+		}
+	}
+	return { entries, dropped: repaired.dropped };
+}
+
+// ---------------------------------------------------------------------------
 // DeepSeek Harness
 // ---------------------------------------------------------------------------
 
@@ -2391,6 +2680,91 @@ export function readPromptHistory(
 				"added to the ↑ recall list",
 		};
 	}
+	// Alma has no cross-session prompt list either, and the reason here is
+	// structural rather than a search: the prompts *are* the message rows. Every
+	// user message this importer converts already arrives with the thread it was
+	// typed in and the timestamp it was typed at, so a recall list would be the
+	// sessions' own first user turns read a second time. Saying so beats the
+	// silent empty the fall-through below would give — a user who pressed ↑ in
+	// Alma is owed the difference between "there was nothing" and "nothing came
+	// across", and here the truth is the second.
+	if (source === "alma") {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"Alma keeps no cross-session prompt list this import can find — its prompts are the `chat_messages` rows themselves, which arrive " +
+				"with their sessions and are imported as those sessions' first user turns, so nothing was added separately to the ↑ recall list",
+		};
+	}
+	// Codewhale's recall list has no home of its own, and the reason is a fact about
+	// the product rather than a gap in the search: every user message this importer
+	// converts already arrives with the directory it was typed in and the timestamp
+	// it was typed at, so the prompts come across **as the sessions' first user
+	// turns** rather than as a second, separately-sourced list. Reading them twice
+	// would put every prompt in the recall list twice, so nothing is read here and
+	// the report says where they came from instead.
+	if (source === "codewhale") {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"Codewhale keeps no separate prompt-history file — its ↑ recall list is the user turns inside the session transcripts, and those come " +
+				"across with the sessions below, each with the directory and the moment it was typed recorded — so nothing was added to the ↑ recall " +
+				"list here and nothing was lost",
+		};
+	}
+	// MiMo Code's recall list is inside its sessions rather than beside them, so the
+	// up-arrow list gets nothing while the prompts it does know about come across with
+	// the transcripts. That is worth one sentence rather than the silent empty the
+	// fall-through would give: a user who pressed up-arrow in MiMo Code is owed the
+	// distinction between "there was nothing" and "nothing came across here".
+	//
+	// **It is not a case of a file this importer failed to find.** MiMo Code is an
+	// opencode fork, and the opencode it forked writes
+	// `<state>/prompt-history.jsonl`; MiMo Code's TUI has no such file and its prompts
+	// live as `user` messages in the same `message`/`part` rows this importer already
+	// reads as transcripts.
+	if (source === "mimocode-code") {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"MiMo Code keeps no cross-session prompt list — unlike the opencode it forked, it writes no prompt-history " +
+				"file, and its prompts live as user messages inside the sessions that are imported as transcripts — so nothing " +
+				"was added to the up-arrow recall list, and the prompts you sent come across with their sessions",
+		};
+	}
+	// OpenClaw's recall list is its transcripts, so the sentence is the same shape as
+	// MiMo Code's above — but the *reason* is a stronger claim than "no file was
+	// found", and the wording matches what was established rather than what was
+	// looked for. OpenClaw keeps one authoritative store
+	// (`<stateDir>/agents/<id>/agent/openclaw-agent.sqlite`) and every prompt is a
+	// `user`-role message inside it, which this importer already reads as
+	// transcripts. A user who pressed up-arrow in OpenClaw is owed the distinction
+	// between "there was nothing" and "nothing came across here".
+	if (source === "openclaw") {
+		return {
+			seen: 0,
+			entries: [],
+			notes: [],
+			overLimit: 0,
+			truncated: false,
+			absent:
+				"OpenClaw keeps no cross-session prompt list — its one authoritative store is the agent SQLite database, and every " +
+				"prompt is a user-role message inside it, which this importer reads as transcripts — so nothing was added to the up-arrow " +
+				"recall list, and the prompts you sent come across with their sessions",
+		};
+	}
 	return { seen: 0, entries: [], notes: [], overLimit: 0, truncated: false };
 }
 
@@ -2662,6 +3036,384 @@ function readAntigravityHistory(
 	};
 }
 
+// ---------------------------------------------------------------------------
+// OpenClaw
+// ---------------------------------------------------------------------------
+
+/**
+ * Where OpenClaw's agent store is for this home.
+ *
+ * The state directory is resolved with the product's own precedence — including
+ * the `~/.clawdbot` fallback (`state-dir.ts:33-43`) — so an upgraded install whose
+ * state never moved is found rather than reported absent. `env` defaults to
+ * `process.env` for the same reason every other source's does; every test passes
+ * one explicitly.
+ */
+function openclawDbPathFor(home: string, env: NodeJS.ProcessEnv = process.env): string {
+	const stateDir = openclawStateDir(home, env);
+	return openclawAgentDbPath(stateDir, "main");
+}
+
+/**
+ * Every OpenClaw session, as candidates.
+ *
+ * **The working directory comes from the transcript header, not from a column.**
+ * Neither `session_windows` nor `session_nodes` has one; it is in the header event
+ * (`{type: "session", …, cwd}`, `transcript-header.ts:18-27`) and in optional
+ * `entry_json` fields that are **absent on a session that was not spawned**. The
+ * header is read for every session for that reason — it is unconditional, whereas
+ * the `entry_json` fields are not.
+ *
+ * **A session with no directory at all is still offered**, with the state
+ * directory as its `cwd`, for the reason `listT3History` gives in its own words: a
+ * conversation the user can see in OpenClaw and that this importer reports as
+ * missing is the worse outcome. `narrowCandidates` then decides what the scope
+ * means for it.
+ */
+function listOpenClawHistory(home: string, options: { env?: NodeJS.ProcessEnv } = {}): HistoryListing {
+	const dbPath = openclawDbPathFor(home, options.env);
+	const windows = readOpenClawSessionWindows(dbPath);
+	const candidates: HistoryCandidate[] = [];
+	const notes: HistoryNote[] = [];
+	let withoutCwd = 0;
+	let compressed = 0;
+	let unreadable = 0;
+	for (const window of windows) {
+		// A spawned session's transcript belongs to the conversation it was spawned
+		// for; importing both would duplicate the parent's turns. Counted, not read.
+		if (window.spawnedBy !== null) {
+			unreadable += 1;
+			continue;
+		}
+		let cwd = "";
+		let title = window.displayName ?? "";
+		let startedAt = 0;
+		for (const event of readOpenClawEvents(dbPath, window.sessionId)) {
+			if (event.compressed) compressed += 1;
+			const header = event.json;
+			if (header.type === "session") {
+				if (typeof header.cwd === "string" && header.cwd !== "") cwd = header.cwd;
+				if (!startedAt) {
+					const stamped = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : Number.NaN;
+					if (Number.isFinite(stamped)) startedAt = stamped;
+				}
+				// `seq = 0` is the header and it is written unconditionally
+				// (`transcript-header.ts:18-27`), so there is nothing after it that
+				// can move the session's start.
+				continue;
+			}
+			if (title !== "") continue;
+			const message = asRecord(header.message);
+			if (message?.role !== "user") continue;
+			const first = firstMessageText(message);
+			if (first !== "") title = first;
+		}
+		if (cwd === "") {
+			withoutCwd += 1;
+			cwd = join(home, ".openclaw");
+		}
+		candidates.push({
+			source: "openclaw",
+			sourceId: window.sessionId,
+			cwd,
+			title,
+			startedAt: startedAt || window.createdAt || window.updatedAt,
+			path: dbPath,
+		});
+	}
+	if (compressed > 0) {
+		notes.push({
+			reason:
+				"transcript event stored zstd-compressed rather than as text — this build decompressed and read it, because a reader that only took the text column would have reported a truncated history as the whole one",
+			count: compressed,
+		});
+	}
+	if (withoutCwd > 0) {
+		notes.push({ reason: "session file with no working directory", count: withoutCwd });
+	}
+	if (unreadable > 0) {
+		notes.push({ reason: "spawned session (kept out of the parent conversation)", count: unreadable });
+	}
+	return { candidates, notes };
+}
+
+/**
+ * Convert one OpenClaw session.
+ *
+ * **The dispatch is on `message.role`, not on the event's `type`** — and that is
+ * the whole reason this is not `readClaudeCodeSession`. Claude Code puts the role
+ * on the event; OpenClaw puts it on the payload and has **three** roles where
+ * Claude Code has two, `toolResult` being a first-class message rather than a
+ * block inside a user turn (`packages/llm-core/src/types.ts:369-372,387-395,
+ *425-433`). Handing an OpenClaw transcript to the Claude reader makes every line
+ * fail its `type` test, be counted as a "non-conversation entry", and import
+ * **zero messages while the report claims the file was read**. See the header of
+ * `openclaw-session.ts`.
+ *
+ * The content-block vocabulary *is* the same, which is why the three helpers below
+ * are near-copies of `claudeEntriesFromUser` / `claudeAssistant` /
+ * `claudeResultContent` rather than something new: `TextContent`, `ThinkingContent`,
+ * `ToolCall` and `ImageContent` (`types.ts:264-313`) are the same four shapes.
+ */
+function readOpenClawSession(
+	home: string,
+	candidate: HistoryCandidate,
+	options: { env?: NodeJS.ProcessEnv } = {},
+): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const notes: HistoryNote[] = [];
+	const dbPath = openclawDbPathFor(home, options.env);
+	const events = readOpenClawEvents(dbPath, candidate.sourceId);
+	const collected: AgentMessage[] = [];
+	let malformed = 0;
+	let ignored = 0;
+	let compressed = 0;
+	for (const event of events) {
+		if (event.compressed) compressed += 1;
+		const header = event.json;
+		if (header.type !== "message") {
+			// The session header is the one non-message event, and it is counted as
+			// its own reason rather than as junk: seeing "1 per session" tells a
+			// reader the header was found, which is what the `cwd` came from.
+			ignored += 1;
+			continue;
+		}
+		const message = asRecord(header.message);
+		if (!message) {
+			malformed += 1;
+			continue;
+		}
+		const rawTime = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : Number.NaN;
+		const timestamp = Number.isFinite(rawTime) ? rawTime : candidate.startedAt;
+		if (message.role === "user") {
+			collected.push(...claudeEntriesFromUser(message.content, timestamp));
+			continue;
+		}
+		if (message.role === "toolResult") {
+			const toolCallId = asText(message.toolCallId);
+			if (!toolCallId) {
+				malformed += 1;
+				continue;
+			}
+			collected.push(
+				toolResultMessage(
+					toolCallId,
+					asText(message.toolName) || UNKNOWN_TOOL_NAME,
+					claudeResultContent(message.content),
+					message.isError === true,
+					timestamp,
+				),
+			);
+			continue;
+		}
+		if (message.role !== "assistant") {
+			ignored += 1;
+			continue;
+		}
+		const assistant = openclawAssistant(message, timestamp);
+		if (assistant) collected.push(assistant);
+	}
+	const repaired = repairToolPairing(rewriteToolNames(collected));
+	if (malformed > 0) notes.push({ reason: "malformed line", count: malformed });
+	if (ignored > 0) notes.push({ reason: "non-conversation entry", count: ignored });
+	if (compressed > 0) {
+		notes.push({ reason: "zstd-compressed transcript event", count: compressed });
+	}
+	if (repaired.dropped > 0) notes.push({ reason: "unpaired tool call or result", count: repaired.dropped });
+	return { entries: repaired.messages.map((message) => ({ kind: "message", message })), notes };
+}
+
+/**
+ * One assistant turn, from OpenClaw's `AssistantMessage`
+ * (`packages/llm-core/src/types.ts:387-422`).
+ *
+ * Structurally `claudeAssistant` with one difference worth naming: **OpenClaw's
+ * `stopReason` includes `error` and `aborted`** (`:357`) where Claude Code's has
+ * three values, so those two fall through to the tool-call-or-stop default rather
+ * than being dropped.
+ */
+function openclawAssistant(message: Record<string, unknown>, timestamp: number): AgentMessage | null {
+	const raw = Array.isArray(message.content) ? message.content : [];
+	const content: AssistantContent[] = [];
+	for (const entry of raw) {
+		const block = asRecord(entry);
+		if (!block) continue;
+		if (block.type === "text") {
+			const text = asText(block.text);
+			if (text) content.push(textContent(text));
+			continue;
+		}
+		if (block.type === "thinking") {
+			const thinking = asText(block.thinking);
+			if (thinking) content.push({ type: "thinking", thinking });
+			continue;
+		}
+		if (block.type !== "toolCall") continue;
+		const id = asText(block.id);
+		const name = asText(block.name);
+		if (!id || !name) continue;
+		// `arguments` is a real object here (`:310`), not Claude Code's pre-serialized
+		// string, so it is serialized rather than parsed.
+		content.push({ type: "toolCall", id, name, arguments: JSON.stringify(block.arguments ?? {}) });
+	}
+	if (content.length === 0) return null;
+	const usage = asRecord(message.usage);
+	const hasToolCall = content.some((block) => block.type === "toolCall");
+	return assistantMessage({
+		content,
+		model: asText(message.model),
+		usage: {
+			input: Number(usage?.input ?? 0) || 0,
+			output: Number(usage?.output ?? 0) || 0,
+			cacheRead: Number(usage?.cacheRead ?? 0) || 0,
+			cacheWrite: Number(usage?.cacheWrite ?? 0) || 0,
+		} satisfies Usage,
+		stopReason: OPENCLAW_STOP_REASONS[asText(message.stopReason)] ?? (hasToolCall ? "toolUse" : "stop"),
+		timestamp,
+	});
+}
+
+/** OpenClaw's `StopReason` (`types.ts:357`), narrowed to this build's three. */
+const OPENCLAW_STOP_REASONS: Record<string, "stop" | "toolUse" | "length"> = {
+	stop: "stop",
+	toolUse: "toolUse",
+	length: "length",
+};
+
+/** A user turn's leading text, for the session title; `""` when there is none. */
+function firstMessageText(message: Record<string, unknown>): string {
+	const content = message.content;
+	if (typeof content === "string") return firstText(content);
+	if (!Array.isArray(content)) return "";
+	for (const entry of content) {
+		const block = asRecord(entry);
+		if (block?.type !== "text") continue;
+		const text = asText(block.text);
+		if (text) return firstText(text);
+	}
+	return "";
+}
+
+// ---------------------------------------------------------------------------
+// Codewhale
+// ---------------------------------------------------------------------------
+
+/**
+ * Every Codewhale session, as candidates.
+ *
+ * **This is the one history listing in this file whose `cwd` is not a
+ * substitute or a hash lookup.** `SessionMetadata.workspace` is a `PathBuf` with
+ * the serde name `workspace` (`crates/tui/src/session_manager.rs:342-343`), so a
+ * Codewhale transcript records the directory it ran in — and the on-disk fixture
+ * confirms the key is really there, nested under `metadata`
+ * (`crates/tui/tests/fixtures/work_graph_session_v1_reader.json:12`).
+ *
+ * That is why nothing here sets {@link HistoryCandidate.cwdSubstitute}: the
+ * default `--history-scope cwd` genuinely narrows, where for most sources it
+ * silently keeps everything.
+ *
+ * **The listing reads a bounded head of each file, not the whole thing.** The
+ * envelope is pretty-printed JSON with `metadata` opening second, so a 256 KB
+ * window finds every field this function needs without paying for a conversation
+ * the user has not chosen yet. See `codewhale-session.ts`.
+ */
+function listCodewhaleHistory(home: string): HistoryListing {
+	const listed = listCodewhaleSessions(home);
+	const counts = new Map<string, number>();
+	for (const skip of listed.skipped) counts.set(skip.reason, (counts.get(skip.reason) ?? 0) + 1);
+	return {
+		candidates: listed.sessions.map((session) => ({
+			source: "codewhale",
+			sourceId: session.id,
+			// `metadata.workspace` when the session states one, `""` when it states
+			// none — a scope filter is a question about a directory, and `""` is not
+			// one. Same convention as kimi, step and MiniMax.
+			cwd: session.cwd ?? "",
+			title: session.title ?? "",
+			startedAt: session.startedAt,
+			path: session.path,
+		})),
+		notes: [...counts].map(([reason, count]) => ({ reason, count })),
+	};
+}
+
+/**
+ * Read one chosen Codewhale session.
+ *
+ * The listing read a bounded head and this reads the whole file; the session is
+ * looked up again by path rather than rebuilt from it, so a file that went away
+ * between the two phases is reported rather than reconstructed — the same
+ * convention `readStepHistory` and `readMinimaxHistory` follow.
+ */
+function readCodewhaleHistory(
+	home: string,
+	candidate: HistoryCandidate,
+): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const session = listCodewhaleSessions(home).sessions.find((found) => found.path === candidate.path);
+	if (!session) return { entries: [], notes: [{ reason: "session is no longer on disk", count: 1 }] };
+	const read = readCodewhaleSession(session);
+	if ("error" in read) return { entries: [], notes: [{ reason: read.error, count: 1 }] };
+	// Same rule as its neighbours: a session whose every message was dropped is
+	// reported by why rather than counted as a session that was empty. "Nothing to
+	// import" is a claim about the user's conversation, and this reader is in no
+	// position to make it when the reason it holds nothing is a file it could not
+	// open.
+	if (read.entries.length === 0) {
+		if (read.notes.length > 0) return { entries: [], notes: read.notes };
+		return { entries: [], notes: [{ reason: "session transcript with no convertible message", count: 1 }] };
+	}
+	return { entries: read.entries, notes: read.notes };
+}
+
+/**
+ * Read one chosen Alma thread.
+ *
+ * **Alma's conversations are rows, not files**, so this is a second query rather
+ * than a second read of something already in hand — the same shape as the
+ * SQLite-backed sources and unlike the file-backed ones.
+ *
+ * **The one Alma-specific fact is the working directory, and it is already
+ * settled before this runs.** `chat_threads` has no directory column and
+ * `metadata` is not one either — the application writes `metadata: {}` when it
+ * creates a thread — so the path comes from `workspace_id → workspaces.path`.
+ * When that link is gone, `listAlmaHistory` has already filed the candidate under
+ * the configuration root and set `cwdSubstitute`, and the report says the
+ * directory was assumed rather than recorded. **This function never invents
+ * one**: a wrong `cwd` files a conversation under a project it was never had in,
+ * which is the one error the rest of the pipeline cannot recover from.
+ */
+function readAlmaHistory(candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const conversation = readAlmaConversation(candidate.sourceId);
+	if (conversation === null) {
+		return {
+			entries: [],
+			notes: [
+				{
+					reason:
+						"thread that was offered and could not be read — the database moved, or Alma was running and held it. Re-run with the app closed",
+					count: 1,
+				},
+			],
+		};
+	}
+	if (conversation.messages.length === 0) {
+		if (conversation.notes.length > 0) return { entries: [], notes: conversation.notes };
+		return {
+			entries: [],
+			notes: [
+				{
+					reason:
+						"thread with no message rows — not the same as a thread with nothing to say: Alma records a tool call as its own message row, and only `text` parts become a turn here",
+					count: 1,
+				},
+			],
+		};
+	}
+	return {
+		entries: conversation.messages.map((message) => ({ kind: "message" as const, message })),
+		notes: conversation.notes,
+	};
+}
+
 /** What a source offers, narrowed to the requested scope. */
 export function listHistory(
 	source: MigrationSourceId,
@@ -2694,7 +3446,15 @@ export function listHistory(
 													? listAntigravityHistory(home, options)
 													: source === "qoder"
 														? listQoderHistory(home)
-														: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
+														: source === "mimocode-code"
+															? listMiMoCodeHistory(home)
+															: source === "openclaw"
+																? listOpenClawHistory(home)
+																: source === "codewhale"
+																	? listCodewhaleHistory(home)
+																	: source === "alma"
+																		? listAlmaHistory(home)
+																		: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
 	return narrowCandidates(listed, options);
 }
 
@@ -2843,6 +3603,50 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 				// a word, where this branch says why.
 				notes.push({ reason: QODER_HISTORY_NOT_IMPORTED, count: 1 });
 				continue;
+			} else if (source === "codewhale") {
+				const read = readCodewhaleHistory(home, candidate);
+				// Same rule as its neighbours: a conversation that could not be read is
+				// reported by why, rather than counted as a session that was empty.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "mimocode-code") {
+				const read = readMiMoCodeSession(candidate.sourceId, home);
+				// Same rule as its neighbours: a conversation that could not be read is
+				// reported by why, rather than counted as a session that was empty.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "openclaw") {
+				const read = readOpenClawSession(home, candidate);
+				// Same rule as its neighbours: a conversation that could not be read is
+				// reported by why, rather than counted as a session that was empty.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "alma") {
+				const read = readAlmaHistory(candidate);
+				// Same rule as its neighbours: a conversation that could not be read is
+				// reported by why, rather than counted as a session that was empty. For
+				// Alma that covers a thread whose every message was a tool call or an
+				// image, which is a real state — `chat_messages.message` holds a JSON
+				// blob whose `parts` are filtered to `type === "text"`, so an Alma
+				// conversation that was nothing but edits imports as nothing and says so.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
 			} else continue;
 		} catch {
 			failed += 1;

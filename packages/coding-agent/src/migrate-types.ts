@@ -14,13 +14,17 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
 import { resolveModel } from "@labunbun/ai";
+import { almaConfigDir, almaDetectionRoots } from "./alma-home.ts";
 import { antigravityConfigDir, antigravityDataDirs } from "./antigravity-home.ts";
+import { CODEWHALE_DEFAULT_DIR, codewhaleDefaultRoots, resolveCodewhaleHome } from "./codewhale-home.ts";
 import { codexRoot } from "./codex-home.ts";
 import { cursorDetectionRoots, cursorUserRoot } from "./cursor-home.ts";
 import { DSH_DEFAULT_DIR, dshRoot } from "./dsh-home.ts";
 import { GROK_DEFAULT_DIR, grokRoot } from "./grok-home.ts";
 import { KIMI_CODE_DEFAULT_DIR, kimiRoot } from "./kimi-home.ts";
+import { mimocodeRoots } from "./mimocode-home.ts";
 import { MINIMAX_DATA_DIR_BASENAME, minimaxRoot } from "./minimax-home.ts";
+import { OPENCLAW_DEFAULT_DIR, openclawStateDir, openclawStateRoots } from "./openclaw-home.ts";
 import { opencodeRoots } from "./opencode-home.ts";
 import { QODER_CN_DEFAULT_DIR, QODER_DEFAULT_DIR, qoderConfigDir } from "./qoder-home.ts";
 import { STEPCODE_DEFAULT_DIR, stepRoot } from "./step-home.ts";
@@ -47,7 +51,11 @@ export type MigrationSourceId =
 	| "trae"
 	| "t3-code"
 	| "antigravity"
-	| "qoder";
+	| "qoder"
+	| "codewhale"
+	| "mimocode-code"
+	| "openclaw"
+	| "alma";
 
 /**
  * Ordered as the picker and `--from` list them. New sources are appended: the
@@ -70,6 +78,10 @@ export const MIGRATION_SOURCE_IDS: MigrationSourceId[] = [
 	"t3-code",
 	"antigravity",
 	"qoder",
+	"codewhale",
+	"mimocode-code",
+	"openclaw",
+	"alma",
 ];
 
 /** Display names for the picker; the ids themselves are the CLI switches. */
@@ -89,6 +101,10 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	"t3-code": "T3 Code",
 	antigravity: "Antigravity",
 	qoder: "Qoder",
+	codewhale: "Codewhale",
+	"mimocode-code": "MiMo Code",
+	openclaw: "OpenClaw",
+	alma: "Alma",
 };
 
 /**
@@ -145,6 +161,41 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	// for the id: the *override* is what moves the tree, not a second tool. See
 	// `sourceRoot`.
 	qoder: QODER_DEFAULT_DIR,
+	// `~/.codewhale`, and this one is the **first source whose root is not a single
+	// directory**: Codewhale is a rename of DeepSeek-TUI and `~/.deepseek` is a
+	// live fallback root for some of its readers and not for others
+	// (`CODEWHALE_LEGACY_FALLBACK` in `codewhale-home.ts` records which is which).
+	// The spelling here is the canonical half; `sourceRoot` and `detectionRoots`
+	// resolve both.
+	codewhale: CODEWHALE_DEFAULT_DIR,
+	// **Also not a single segment, and for the same reason as OpenCode's entry
+	// above.** MiMo Code is an opencode fork whose `packages/shared/src/global.ts`
+	// imports `xdg-basedir` with no platform branch, so the tree lives under the
+	// XDG bases and on Windows this is `~/.config/mimocode` rather than
+	// `%LOCALAPPDATA%`. **The product's own README disagrees** — it claims
+	// `%LOCALAPPDATA%\mimocode\` (`README.md:385`) and
+	// `~/Library/Application Support/mimocode/` (`:422`), and neither path is
+	// anywhere in the tree. Like OpenCode's, this exists to render a label; see
+	// `sourceRoot`, which is what finds the tree.
+	"mimocode-code": ".config/mimocode",
+	// `.openclaw`, and the entry exists only to render a label. **Three spellings
+	// are live and they disagree**: `resolveStateDir` falls back to `.clawdbot`
+	// when `.openclaw` is absent (`state-dir.ts:33-43`), `OPENCLAW_PROFILE` puts a
+	// named profile in `.openclaw-<name>` (`cli/profile-utils.ts:35-37`), and
+	// `OPENCLAW_STATE_DIR` replaces the root outright. A plain relative spelling is
+	// therefore wrong for two of the three ways this source installs itself, which
+	// is why both `sourceRoot` and `detectionRoots` have branches for it. See
+	// `openclaw-home.ts`, which is where all five resolvers are quoted.
+	openclaw: OPENCLAW_DEFAULT_DIR,
+	// `.config/alma`, and this is **the only one of Alma's four roots that this
+	// importer reads a file from**. Alma writes to Electron's `userData`
+	// (`%APPDATA%\alma`, holding `chat_threads.db`), to `~/.alma` (binaries, an
+	// npm cache, screenshots) and to `~/alma` — no leading dot, the browser
+	// extension's stable copy and `worktrees/`. Three roots for one source is the
+	// record so far, so the label names the configuration root and both
+	// `sourceRoot` and `detectionRoots` have branches for the rest. See
+	// `alma-home.ts`, which is where all four are quoted.
+	alma: ".config/alma",
 };
 
 /**
@@ -183,6 +234,17 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	// `detectionRoots`. See `opencodeRoots`, which is what the reader uses for all
 	// three.
 	if (id === "opencode") return opencodeRoots(home).config;
+	// MiMo Code's config root, from the same derivation OpenCode's uses and for the
+	// same reason: four XDG bases rather than one home-relative directory, so
+	// `join(home, SOURCE_ROOTS[id])` would be wrong for a user who has moved any of
+	// them. `mimocodeRoots` also honours `$MIMOCODE_HOME`, which replaces all four.
+	//
+	// It reads `process.env` through its `env` parameter, as `opencodeRoots` does
+	// directly and for the same reason: a developer with `MIMOCODE_HOME` set gets
+	// that tree, which is the correct answer for their machine. A reader that takes
+	// the block as an argument (`readMiMoCode`) is what the tests point at a
+	// fixture with.
+	if (id === "mimocode-code") return mimocodeRoots(home, process.env).config;
 	// Neither of these is a home-relative join. Both are VS Code forks whose state
 	// lives outside the home, and both have a first-class path derivation worth
 	// calling rather than spelling out again here.
@@ -219,6 +281,36 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	// naming: a developer with `QODER_CONFIG_DIR` set gets that tree, which is the
 	// correct answer for their machine.
 	if (id === "qoder") return qoderConfigDir(home);
+	// Codewhale's tree moves for one reason — `$CODEWHALE_HOME` — and it is a
+	// **whole-directory** override, unlike Qoder's `$QODER_CONFIG_DIR`. Two things
+	// are reproduced here rather than left to a plain `join`, and both are the
+	// product's own rules from `crates/paths/src/lib.rs`:
+	//
+	//   - an unusable override is *refused*, not used: a relative value raises
+	//     `PathOverrideErrorKind::Relative` in the product, so falling back to
+	//     `~/.codewhale` silently would import a tree Codewhale itself rejected
+	//     (the same argument Qoder's branch makes);
+	//   - `~/.deepseek` is a live second root, so the *detection* below needs both.
+	//
+	// `resolveCodewhaleHome` reads `process.env` through its defaulted parameter,
+	// which is the same trade `qoderConfigDir` and `codexRoot` make.
+	if (id === "codewhale") return resolveCodewhaleHome(home).root;
+	// OpenClaw resolves **three** spellings and they disagree, so this is the
+	// product's own precedence rather than a `join`: `$OPENCLAW_STATE_DIR` wins
+	// outright, else `.openclaw` if it exists, else `.clawdbot`
+	// (`src/config/state-dir.ts:21-43`), and `OPENCLAW_HOME` moves the whole
+	// thing. `openclawStateDir` quotes all three; `process.env` is passed as an
+	// argument rather than read inside that module, which is the same trade
+	// `qoderConfigDir` makes above and for the same reason — a developer with the
+	// variable set gets that tree, which is the correct answer for their machine.
+	if (id === "openclaw") return openclawStateDir(home, process.env);
+	// Alma's configuration root, which is the only one of its four that a report
+	// points a user at for something they can edit. There is no environment
+	// variable to honour — `alma-home.ts` records that Alma reads none anywhere in
+	// its bundle — so this is a plain home-relative join and the branch exists
+	// only to say so, in the one place a reader looks for the reason a source did
+	// not fall through.
+	if (id === "alma") return almaConfigDir(home);
 	// Antigravity needs no branch, and the fallthrough being correct is itself the
 	// interesting part: `~/.gemini` is a plain home-relative join, so this source is
 	// the first whose *tree* is unambiguous while its *detection* is not. What it
@@ -325,6 +417,91 @@ function detectionRoots(id: MigrationSourceId, home: string): string[] {
 	// at start-up and a process cannot see both, so listing the two spellings is
 	// what makes a machine holding either detectable.
 	if (id === "qoder") return [sourceRoot(id, home), join(home, QODER_CN_DEFAULT_DIR)];
+	// **Codewhale is the first source whose two roots are two *eras* rather than two
+	// builds.** `~/.deepseek` is the pre-rename tree and the product still reads it
+	// — `resolve_state_dir` (`crates/config/src/lib.rs:6158`) and
+	// `default_user_state_path_from_environment`
+	// (`crates/tui/src/config/paths.rs:240-263`) both fall back to it — so a home
+	// that used Codewhale under its old name has its whole tree there and nothing
+	// under `.codewhale`. Looking only at the canonical root would report those
+	// users as having no Codewhale at all.
+	//
+	// The reverse is handled rather than assumed away: a user who has run Codewhale
+	// since the rename has `~/.codewhale` and, for the paths that still fall back,
+	// **also** a stale `~/.deepseek`. Both are therefore read, and the per-path
+	// resolution in `codewhale-home.ts` decides which one answers — detection only
+	// has to say the source is here at all.
+	//
+	// **`CODEWHALE_HOME` narrows this to one root**, and that is the product's own
+	// rule rather than a choice here: an explicit home "is an isolation boundary:
+	// state/config resolvers must not fall back to ambient legacy `~/.deepseek`
+	// data outside that root" (`crates/config/src/lib.rs:6105-6111`). Falling back
+	// from an isolated profile would read exactly the data the user isolated
+	// themselves from.
+	if (id === "codewhale") return codewhaleDefaultRoots(home);
+	// **OpenClaw is the first source whose detection roots are three spellings of
+	// one tree rather than distinct trees**, and all three are live because the
+	// product's own resolver moves between them: `resolveStateDir` falls back to
+	// the pre-rename `~/.clawdbot` when `.openclaw` is absent
+	// (`src/config/state-dir.ts:33-43`), and a named profile puts the tree in
+	// `~/.openclaw-<name>` (`src/cli/profile-utils.ts:35-37`).
+	//
+	// **A detector that looked only at `.openclaw` would report "no OpenClaw" for
+	// every user who upgraded from the pre-rename build**, whose entire history
+	// lives in `.clawdbot` — which is the failure `SOURCE_ROOTS`'s entry describes
+	// and the reason that entry cannot be used for detection even though it is a
+	// plain relative spelling.
+	//
+	// What this cannot rule out is a profile directory with no `OPENCLAW_PROFILE`
+	// set now: a profile name is only discoverable from the variable, so a home
+	// that ran `openclaw --profile work` once and never exported it has a
+	// `~/.openclaw-work` this never looks at. Stated rather than papered over.
+	if (id === "openclaw") return openclawStateRoots(home, process.env);
+	// **Alma is the first source in this repository whose home is four *unrelated*
+	// roots rather than four of anything else.** `detectionRoots` needs all four,
+	// and the reason is not tidiness: each of the other three is the *only* one
+	// that answers for some real user.
+	//
+	// `~/.config/alma` holds the identity documents, `mcp.json`, `hooks.json` and
+	// the personal `skills/`. `%APPDATA%/alma` holds `chat_threads.db` — every
+	// conversation — plus `plugin-storage/`, and a user who installed Alma and
+	// never opened the settings has it and nothing else. `~/.alma` holds `bin/`,
+	// an npm cache, screenshots and a cache directory, none of it importable, all
+	// of it written by the CLI rather than the desktop app. And `~/alma` — **with
+	// no leading dot**, a different directory from `~/.alma` — holds the browser
+	// extension's stable copy and `worktrees/`.
+	//
+	// **The leading dot is the single most-missed path in the product.** A
+	// detector that looked for `~/.alma` and `~/.config/alma` would report "no
+	// Alma" for every user who has only ever run the CLI, and for every user who
+	// runs the browser relay.
+	//
+	// The `userData` root is `null` on macOS and Linux, where this importer does
+	// not guess at `~/Library/Application Support` or the XDG data base, and it is
+	// simply absent from the list there. **A path this source names but did not
+	// read is better than one it names wrongly**, and the report says which
+	// platform it is on.
+	if (id === "alma") return almaDetectionRoots(home, process.env);
+	// **MiMo Code is the first source whose tree is four sibling directories rather
+	// than one, and that is the whole reason this branch exists.**
+	// `resolveMimocodeHome` (`packages/shared/src/global.ts:26-50`) answers four
+	// bases — `xdgConfig`, `xdgData`, `xdgState`, `xdgCache`, each with `mimocode`
+	// appended — or, under `$MIMOCODE_HOME`, `<root>/{config,data,state,cache}`.
+	// Neither shape nests the others, so there is no single directory whose being
+	// non-empty means "MiMo Code is here".
+	//
+	// **Two of the four would be wrong on their own and one is the sharp case.**
+	// `config` gets a starter `mimocode.jsonc` written on first run
+	// (`config/config.ts:656-662`), so it is non-empty early. `data` is where every
+	// session and `auth.json` live and is frequently empty for a user who has run
+	// the TUI without keeping a conversation. `state` and `cache` hold nothing this
+	// importer reads. Looking at `config` alone would call the source absent on
+	// exactly the machines whose history is the thing being migrated, so all four
+	// are checked and the order puts the two that carry content first.
+	if (id === "mimocode-code") {
+		const roots = mimocodeRoots(home, process.env);
+		return [roots.config, roots.data, roots.state, roots.cache];
+	}
 	return [sourceRoot(id, home)];
 }
 

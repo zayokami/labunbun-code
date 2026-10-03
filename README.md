@@ -185,7 +185,7 @@ Already configured another agent tool? Copy over what has an equivalent:
 
 ```bash
 bun run dev yoshi                      # dry run: report only, writes nothing
-bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | t3-code | opencode | cursor | trae | antigravity | qoder | all
+bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | t3-code | opencode | cursor | trae | antigravity | qoder | codewhale | mimocode-code | openclaw | alma | all
 bun run dev yoshi --only settings      # categories: settings | assets | history | all
 bun run dev yoshi --apply              # write it
 bun run dev yoshi --apply --force      # also overwrite values that exist
@@ -244,6 +244,79 @@ address, so the server is left for you to add by hand. Transcripts live in
 `projects/<slug>/*.jsonl`; they are counted and reported, never opened, and
 their directory is named rather than recorded because a Qoder transcript has no
 working directory of its own.
+
+Codewhale is **a rename of DeepSeek-TUI**, and the report says so before it says
+anything else: `~/.deepseek` is a live second root, read for the paths whose own
+resolvers still fall back to it (`config.toml`, `permissions.toml`, `mcp.json`,
+`skills`, `settings.toml`, `tui.toml`, `sessions`) and not for the ones that do
+not (`agents/`, `fleets/`, `plugins/`, `themes/`, `workflows/`, `audit.log`,
+`prompts/constitution.md`). Every state document is reported with the root it was
+found under, and a document that is under neither is listed as absent rather than
+passed over — the three are different facts and one sentence would hide two of
+them. `$CODEWHALE_HOME` narrows all of it to one root, which is the product's own
+rule rather than a choice here: an explicit home is an isolation boundary, so
+nothing falls back out of it.
+
+There are **five settings documents, not one**, and only `config.toml` has a
+project layer — there is no project `settings.toml` and no project `mcp.json`,
+and the CLI refuses a project-scoped settings write outright. `sandbox_mode`
+needs no translation: `read-only`/`workspace-write`/`danger-full-access` are the
+same strings this build uses, minus `read-only`, which has no counterpart here and
+is **named rather than approximated** — claiming the nearest sandbox would widen a
+confinement setting on the user's behalf. `approval_policy` is read apart from
+it, because `config.toml` and `settings.toml` use *different vocabularies* for
+that key and the product says so: `never` maps to nothing, since it both never
+asks and denies what it would not approve, and no mode here does both.
+
+**No credential comes across, and four of the shapes are ones no name-based scan
+can see.** `api_key`, `webhook_token` and `sandbox_api_key` match on their names
+and go; `base_url` can carry one in a URL's userinfo or query, and `http_headers`
+holds bearer tokens under a key that is not itself credential-shaped — the product
+classifies those header names as credential-bearing itself. Both are dropped
+whole and reported by name. MCP `headers`, `env` and `env_headers` lose their
+values the same way, and a server `url` carrying a credential loses the whole
+server, because a URL with it removed points at nothing. Codewhale also ships its
+own `/import-claude`, which moves `~/.claude/CLAUDE.md` into
+`~/.codewhale/instructions.md` — a competing path this run saw and did not take,
+and one that changes what the import above reads if you have already run it.
+
+Transcripts *do* come across: each is one `<id>.json` whose metadata records the
+working directory it ran in, so `--history-scope` filters them honestly rather
+than filing every conversation under the project you are importing into.
+
+OpenClaw resolves **five paths five different ways, and they disagree**, so its
+tree is read from every root that can hold it: `$OPENCLAW_STATE_DIR` when set,
+else `~/.openclaw`, else the pre-rename `~/.clawdbot` an upgraded install never
+moved out of; `OPENCLAW_PROFILE` puts a named profile in `~/.openclaw-<name>`;
+and `OPENCLAW_HOME` moves the whole thing. The *configuration* directory is a
+second resolver with different precedence — it honours `OPENCLAW_CONFIG_PATH`
+and has no `.clawdbot` fallback — so on a real install the two are frequently
+different paths and both are read. Its settings are **two unrelated documents**
+rather than one: `openclaw.json` is the product configuration and
+`<agentDir>/settings.json` is a separate forked Claude Code settings manager,
+and **your model, theme and thinking level may be in the second and not the
+first** — so both are read and neither is merged into the other. `openclaw.json`
+is read with `$include` resolved before anything else, because the product layers
+included files over the root one and reading the root alone imports a document
+OpenClaw is not running; a missing or broken include is a gap this report names
+rather than passes over. **No credential comes across**, and one channel is
+invisible to a key-name scan: `mcp.servers[].url` is validated only as http/https,
+so `https://user:token@host/mcp` is a working server to OpenClaw with the
+credential inside the address — unlike a header or an environment variable there
+is no way to drop it and keep the server, so that one is left for you to add by
+hand. A configuration carrying any of the **ten keys OpenClaw's own MCP schema
+hard-rejects** fails to load *entirely*, so the whole map is refused rather than
+partly imported against a file the product refuses. Six workspace bootstrap
+documents are looked for in the **workspace** rather than the state directory:
+`AGENTS.md` comes across, and the other five are named — "this build has no
+equivalent" and "we did not look" are different claims. Its transcripts are read
+from the agent's SQLite store, including the events stored zstd-compressed
+rather than as text. Two things a migration that bypasses OpenClaw leaves behind
+are named in the report: the macOS Keychain entries for **Codex** and **Claude
+Code** credentials (read-only, never written), and OpenClaw's **own** importer —
+`MigrationProviderPlugin` with `extensions/migrate-claude/`,
+`extensions/codex/src/migration/` and `extensions/migrate-hermes/` — which
+imports *into* OpenClaw and may already have run.
 
 Anything without an equivalent is reported as skipped with a reason rather than
 dropped silently, keys the importer does not know included: they are listed by

@@ -47,6 +47,45 @@
  *                chatSession.builtInBrowserHosts are the *only* fields the desktop
  *                reads by name), skills, memory, projects/<slug>/<id>.jsonl.
  *                `%APPDATA%/com.qoder.app.stable/main.sqlite` is named, not read.
+ *   codewhale     $CODEWHALE_HOME when set, else ~/.codewhale — with ~/.deepseek as a
+ *                live second root (Codewhale is a rename of DeepSeek-TUI), so config.toml,
+ *                permissions.toml, settings.toml, tui.toml, mcp.json, skills,
+ *                ~/.agents/AGENTS.md + instructions.md, <workspace>/.codewhale/config.toml
+ *                and rules/*.md, sessions/<id>.json. secrets/secrets.json, credentials/,
+ *                keyring-locks/ and state.db are named, not read.
+ *   mimocode-code $MIMOCODE_HOME when set (must be absolute), else the four XDG
+ *                bases — `~/.config/mimocode` is the config root and
+ *                `~/.local/share/mimocode` the data root, on **every** platform
+ *                including Windows, because `packages/shared/src/global.ts` has no
+ *                `process.platform` branch. (The product's own README claims
+ *                `%LOCALAPPDATA%` and `~/Library/Application Support`; neither is
+ *                in its code.) config.json, mimocode.json and mimocode.jsonc are
+ *                merged **in that order**, all JSONC; project .mimocode/mimocode.json(c),
+ *                AGENTS.md, memory, skill(s)/agent(s)/mode(s)/command(s)/plugin(s),
+ *                and <data>/mimocode.db
+ *   openclaw       $OPENCLAW_STATE_DIR when set, else ~/.openclaw, else the
+ *                pre-rename ~/.clawdbot; $OPENCLAW_PROFILE moves the root to
+ *                ~/.openclaw-<name> and OPENCLAW_HOME moves it anywhere
+ *                (`state-dir.ts:21-43`, `cli/profile-utils.ts:35-37`). The
+ *                *config* directory is a second resolver with different
+ *                precedence (`infra/config-dir.ts:7-20`), so the two disagree on
+ *                a real install and both are read: openclaw.json / clawdbot.json
+ *                with `$include` resolved, mcp.servers, hooks, managed
+ *                skills/ + plugin-skills/, the separate
+ *                <agentDir>/settings.json, the six workspace bootstrap
+ *                documents, and agents/<id>/agent/openclaw-agent.sqlite
+ *   alma          **four unrelated roots.** ~/.config/alma is the only one read
+ *                for files — SOUL.md, USER.md, MEMORY.md, SECURITY.md,
+ *                HEARTBEAT.md, skills/, mcp.json, hooks.json, memory/; the
+ *                Electron userData root (%APPDATA%\alma on Windows) holds the
+ *                only real database, chat_threads.db, and is opened read-only
+ *                for `app_settings.settings_data`, `providers` and the thread
+ *                count; ~/.alma holds bin/, npm-cache/, activity-records/ and
+ *                cache/; and ~/alma — **no leading dot** — holds the browser
+ *                extension's stable copy and worktrees/. Settings are a SQLite
+ *                row, not a file: `chat.defaultModel`, `general.theme` and
+ *                `security.autoApproveToolRequests` are the three keys read, out
+ *                of a blob this importer whitelists rather than scrubs
  *
  * Structure: read (I/O) → plan (pure) → apply (I/O). The planning step is where
  * every mapping decision lives, so the decisions are testable without touching
@@ -65,12 +104,18 @@ import { join } from "node:path";
 import { parseRuleText } from "@labunbun/agent";
 import type { RawAgents } from "./agents-read.ts";
 import { readAgents } from "./agents-read.ts";
+import { planAlma } from "./alma-plan.ts";
+import type { RawAlma } from "./alma-read.ts";
+import { readAlma } from "./alma-read.ts";
 import { planAntigravity } from "./antigravity-plan.ts";
 import type { RawAntigravity } from "./antigravity-read.ts";
 import { readAntigravity } from "./antigravity-read.ts";
 import { planClaudeCode } from "./claude-plan.ts";
 import type { RawClaudeCode } from "./claude-read.ts";
 import { readClaudeCode } from "./claude-read.ts";
+import { planCodewhale } from "./codewhale-plan.ts";
+import type { RawCodewhale } from "./codewhale-read.ts";
+import { readCodewhale } from "./codewhale-read.ts";
 import { planCodex, planCodexRules } from "./codex-plan.ts";
 import type { RawCodex } from "./codex-read.ts";
 import { readCodex } from "./codex-read.ts";
@@ -131,9 +176,15 @@ import {
 	targetMcpPath,
 	targetSettingsPath,
 } from "./migrate-types.ts";
+import { planMiMoCode } from "./mimocode-plan.ts";
+import type { RawMiMoCode } from "./mimocode-read.ts";
+import { readMiMoCode } from "./mimocode-read.ts";
 import { planMinimaxAssets, planMinimaxCode } from "./minimax-plan.ts";
 import type { RawMinimaxCode } from "./minimax-read.ts";
 import { readMinimaxCode } from "./minimax-read.ts";
+import { planOpenClaw } from "./openclaw-plan.ts";
+import type { RawOpenClaw } from "./openclaw-read.ts";
+import { readOpenClaw } from "./openclaw-read.ts";
 import { planOpencode, planOpencodeAssets } from "./opencode-plan.ts";
 import type { RawOpencode } from "./opencode-read.ts";
 import { readOpencode } from "./opencode-read.ts";
@@ -171,6 +222,10 @@ export interface RawSources {
 	t3Code: RawT3Code;
 	antigravity: RawAntigravity;
 	qoder: RawQoder;
+	codewhale: RawCodewhale;
+	mimocodeCode: RawMiMoCode;
+	openclaw: RawOpenClaw;
+	alma: RawAlma;
 }
 
 /**
@@ -208,6 +263,20 @@ export function readSources(home: string, cwd: string): RawSources {
 		t3Code: readT3Code(home),
 		antigravity: readAntigravity(home),
 		qoder: readQoder(home, cwd),
+		codewhale: readCodewhale(home, cwd),
+		mimocodeCode: readMiMoCode(home, cwd),
+		// `process.env` is passed rather than read inside the module, which is the
+		// same trade `readQoder` makes for `$QODER_CONFIG_DIR`: this resolver honours
+		// `$OPENCLAW_STATE_DIR`, `$OPENCLAW_CONFIG_PATH`, `$OPENCLAW_PROFILE` and
+		// `$OPENCLAW_HOME`, and a developer with any of them set gets that tree, which
+		// is the correct answer for their machine. Every test passes an explicit one.
+		openclaw: readOpenClaw(home, cwd, process.env),
+		// Alma reads no project half from `cwd` — its project-scoped skills hang off
+		// *its own* workspace, which comes out of its database — so `cwd` has no
+		// argument to pass. `process.env` is passed for the same reason as OpenClaw's
+		// above: `APPDATA` is how Alma's `userData` root is reached on Windows, and a
+		// developer with a live install should get their own tree.
+		alma: readAlma(home, process.env),
 	};
 }
 
@@ -953,6 +1022,129 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
+	// Codewhale is the first source here whose gate is two roots rather than one,
+	// and the reason is its own history rather than its shape: it is a rename of
+	// DeepSeek-TUI and `~/.deepseek` is still a live fallback for some of its
+	// readers, so `RawCodewhale.present` is true when **either** tree holds
+	// something. The reader decided that; the gate asks it the same question
+	// rather than re-deriving it, which is the property `antigravity`'s and
+	// `t3-code`'s arms have.
+	//
+	// One arm rather than one per category for Qoder's reason: `planCodewhale`
+	// claims two mode axes, permission rules, hooks, MCP servers, skills and rule
+	// files, and a run that asked only for assets must still reach the skills and the
+	// instruction documents without passing through a settings gate. **No
+	// `claimModePair`**, because Codewhale states `approval_policy` and
+	// `sandbox_mode` as two separate root keys and the pair is claimed per field —
+	// see `planCodewhale`'s own header for why, which is the same argument
+	// `antigravity`'s arm makes.
+	if (only.includes("codewhale") && raw.codewhale.present) {
+		if (wants("settings") || wants("assets")) {
+			planCodewhale(
+				raw.codewhale,
+				items,
+				writes,
+				claimScalar,
+				claimHooks,
+				claimPermissionList,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				force,
+			);
+		}
+	}
+
+	// MiMo Code has settings and assets, and no hooks, so this is Qoder's shape
+	// rather than Antigravity's: one arm per category is not needed because
+	// `planMiMoCode` reaches its skills and memory through no settings gate — the
+	// gate is on the call, not on the parts.
+	//
+	// **There is no `claimModePair` and no `claimHooks`, and both absences are the
+	// product's, not an oversight.** MiMo Code's `permission` is a rule map whose
+	// unmatched default is `ask`, with no mode key anywhere in its 41-key document,
+	// so there is no mode+sandbox pair to claim and no posture to write. See the
+	// header of `mimocode-plan.ts`.
+	if (only.includes("mimocode-code") && raw.mimocodeCode.present) {
+		if (wants("settings") || wants("assets")) {
+			planMiMoCode(
+				raw.mimocodeCode,
+				items,
+				writes,
+				claimScalar,
+				addPermissionRules,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				force,
+			);
+		}
+	}
+
+	// OpenClaw has all three categories, and the arm is gated per category for the
+	// reason Qoder's and MiMo Code's are: `planOpenClaw` claims a mode, MCP servers,
+	// hooks, managed skills and the workspace instruction document, and a run that
+	// asked only for assets must still reach the skills without passing through a
+	// settings gate that happens to be empty.
+	//
+	// **Unlike Qoder's, this one does reach `openclaw-session.ts`** — the transcript
+	// format is established, so the `wants("history")` branch below is the path
+	// that converts a chosen session rather than a count.
+	if (only.includes("openclaw") && raw.openclaw.present) {
+		if (wants("settings") || wants("assets")) {
+			planOpenClaw(
+				raw.openclaw,
+				items,
+				writes,
+				claimModePair,
+				claimHooks,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				force,
+			);
+		}
+	}
+
+	// Alma claims a model, a theme, a mode pair, MCP servers, hooks, skills and
+	// memory, so the arm is Qoder's shape rather than Antigravity's: the gate is on
+	// the call, not on the parts, because `planAlmaAssets` reaches the skills and
+	// the memory through no settings gate of its own.
+	//
+	// **`present` rather than `settings !== null`, and that is deliberate.** Alma
+	// with a `skills/` tree, a `mcp.json` or four identity documents and no
+	// settings row is a real state with things in it, and it is the state of a
+	// user who installed the CLI and never opened the desktop app.
+	//
+	// **The conversation half is `wants("history")` below**, through
+	// `alma-session.ts`: Alma's transcripts are rows in a SQLite table and the
+	// record shape is established, so unlike Qoder's this source converts chosen
+	// sessions rather than counting them.
+	if (only.includes("alma") && raw.alma.present) {
+		if (wants("settings") || wants("assets")) {
+			planAlma(
+				raw.alma,
+				items,
+				writes,
+				claimScalar,
+				claimModePair,
+				claimHooks,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				force,
+			);
+		}
+	}
+
 	if (options.historyScope === "none" && wants("history")) {
 		items.push({
 			source: only[0] ?? "claude-code",
@@ -1512,6 +1704,63 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	// things in it — the same argument `t3-code`'s arm makes about a dev build.
 	if (source === "qoder") return raw.qoder.present;
 
+	// Codewhale's history arm is its transcripts, so the gate is the reader's own
+	// count of `<id>.json` files rather than `present`. The distinction is a real
+	// state rather than a nicety: a home with settings and skills and no session
+	// has nothing for `--history-scope` to fetch, and running the history phase
+	// anyway would produce an empty listing that reads as "you had no sessions".
+	// `sessionCount` counts files and reads none of them, so the gate costs
+	// nothing — and it counts whichever root the product would read, so a home
+	// whose sessions were never migrated off `~/.deepseek` still passes it.
+	if (source === "codewhale") return raw.codewhale.sessionCount > 0;
+
+	// MiMo Code's gate is `present`, which its reader answers as "any of the four
+	// roots holds something" — the question this source needs, because its config
+	// and data roots are **siblings** rather than nested and either one alone can be
+	// the only populated one. A user who has run the TUI without keeping a
+	// conversation has an empty `<data>` and a populated `<config>`, and a user who
+	// imported a conversation elsewhere has the reverse; asking for either specific
+	// root would call the source absent on half the machines that have it.
+	//
+	// **This arm is load-bearing in a way the reader's tests cannot see.** Without
+	// it the function falls through to `raw.agents.present`, which is another
+	// source's flag: a MiMo Code install with no `~/.agents` tree would plan zero
+	// MiMo Code sessions and every test of the session reader — which calls
+	// `listHistory`/`readHistory` directly — would still pass. Same failure as the
+	// `t3-code` arm's, which is where the comment about it came from.
+	if (source === "mimocode-code") return raw.mimocodeCode.present;
+
+	// **OpenClaw's gate asks its reader two questions, and both have bitten a
+	// migration that asked only one.** `present` alone would offer a home whose
+	// state directory exists but is empty — which is what a first run leaves, and
+	// `resolveConfigDir` creates nothing, so "the directory is there" is not
+	// evidence. `configDir` alone would miss an install whose configuration is
+	// elsewhere, which is the *normal* case for a `.clawdbot` user and for anyone
+	// with `OPENCLAW_CONFIG_PATH` set — the two resolvers disagree by design
+	// (`state-dir.ts:33-43` against `config-dir.ts:7-20`).
+	//
+	// Either root answering is enough, and both are asked, so a home with history
+	// but no settings and a home with settings but no history are both offered.
+	if (source === "openclaw") return raw.openclaw.present;
+
+	// **Alma's gate asks two questions, and the second is the one that matters.**
+	//
+	// `present` alone is not enough: it is true for a home holding only `~/.alma`
+	// (a CLI install's `bin/` and npm cache), only `~/alma` (the browser relay),
+	// or a `~/.config/alma` holding nothing importable. None of those has a
+	// conversation, and offering one costs the user a read and a keystroke.
+	//
+	// `threadCount` alone is not enough either, and this is the failure the T3
+	// comment above describes: without an arm here the function falls through to
+	// `raw.agents.present`, which is **another source's flag**, so an Alma install
+	// with no `~/.agents` tree would plan zero Alma sessions while every test of
+	// `alma-session.ts` — which calls `listAlmaHistory` directly — still passed.
+	//
+	// So it is `present || threadCount > 0`: a home with settings but no
+	// conversations, and a home with conversations and no settings, are both
+	// offered, and neither is offered because a directory exists.
+	if (source === "alma") return raw.alma.present || raw.alma.threadCount > 0;
+
 	return raw.agents.present;
 }
 
@@ -1627,8 +1876,12 @@ export function runMigration(options: RunMigrationOptions = {}): RunMigrationRes
 }
 export type { RawAgents } from "./agents-read.ts";
 export { readAgents } from "./agents-read.ts";
+export type { AlmaSettings, AlmaSkipped, RawAlma } from "./alma-read.ts";
+export { readAlma } from "./alma-read.ts";
 export type { RawClaudeCode } from "./claude-read.ts";
 export { readClaudeCode } from "./claude-read.ts";
+export type { CodewhalePermissionRule, CodewhaleSkipped, RawCodewhale } from "./codewhale-read.ts";
+export { readCodewhale } from "./codewhale-read.ts";
 export type { RawCodex, RawRuleFile } from "./codex-read.ts";
 export { readCodex } from "./codex-read.ts";
 export type { RawDeepSeekHarness } from "./dsh-read.ts";
@@ -1669,8 +1922,12 @@ export {
 	MIGRATION_SOURCE_LABELS,
 	resolveModelReference,
 } from "./migrate-types.ts";
+export type { MiMoCodeSettingsLayer, RawMiMoCode } from "./mimocode-read.ts";
+export { readMiMoCode } from "./mimocode-read.ts";
 export type { MinimaxPermissions, MinimaxRuleDrop, MinimaxRuleDropReason, RawMinimaxCode } from "./minimax-read.ts";
 export { readMinimaxCode } from "./minimax-read.ts";
+export type { OpenClawBootstrapDoc, OpenClawSkipped, RawOpenClaw } from "./openclaw-read.ts";
+export { readOpenClaw } from "./openclaw-read.ts";
 export type { RawStepCode } from "./step-read.ts";
 export { readStepCode } from "./step-read.ts";
 export type { RawZcode } from "./zcode-read.ts";
