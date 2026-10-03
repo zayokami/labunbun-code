@@ -1,21 +1,51 @@
 /**
  * The Windows filesystem sandbox — which is not a sandbox, and says so.
  *
- * A real Windows confinement layer compiles two helper binaries and registers a
- * Windows service; the shell then goes through that service, which holds the
- * real handle and applies the real ACLs. This build does none of that — the
- * user ruled a helper program out — and there is no user-mode equivalent of
- * macOS `seatbelt`.
+ * **What this module is not, stated precisely.** It is not OS-level enforcement.
+ * A subprocess started outside the tools is not subject to it, and nothing here
+ * should ever be described as if it were. Read the result of this module as "the
+ * Write/Edit tool call was refused by this process", never as "the write could
+ * not have happened".
  *
- * So what this module is: **a decision this process makes about calls that
- * arrive through the tools.** A subprocess that goes around the tools is not
- * subject to it, and nothing here should ever be described as if it were. Read
- * the result of this module as "the Write/Edit tool call was refused by this
- * process", never as "the write could not have happened".
+ * ## It used to also claim there was nowhere else to go
  *
- * What it buys is that the decision is *made and said out loud*, in one place,
- * from a policy value that can be asserted. Before this existed the `.git`
- * guard lived only in the tool layer and the policy was never consulted;
+ * This header said a real Windows confinement layer "compiles two helper
+ * binaries and registers a Windows service", that this build does none of that,
+ * "and there is no user-mode equivalent of macOS `seatbelt`". The first half is
+ * about one design. The second half was **false, and false in the expensive
+ * direction**: it named a missing capability that exists, and it was being read
+ * as the reason the Windows half is thin.
+ *
+ * Verified against the Windows SDK 10.0.26100.0 headers on this machine:
+ *
+ *   - `userenv.h:1398`  `CreateAppContainerProfile`
+ *   - `userenv.h:1550`  `DeriveAppContainerSidFromAppContainerName`
+ *   - `WinBase.h:3591`  `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
+ *   - `winnt.h:12671`    `SECURITY_CAPABILITIES`
+ *
+ * All four are documented, user-mode, and need neither a driver nor a service
+ * nor elevation. An AppContainer child gets a package SID the kernel checks on
+ * every file access, which is a real write boundary.
+ *
+ * **What is genuinely absent here is the wiring, not the mechanism.** Nothing in
+ * this build calls those four functions, so the sentence that describes the
+ * module's own behaviour was true and the sentence about the platform was not.
+ *
+ * One thing that *is* true and worth keeping, because it is the trap: a Job
+ * Object cannot do this. `winnt.h:12052` carries
+ * `// N.B. The JOBOBJECT_SECURITY_LIMIT_INFORMATION information class is no
+ * longer supported.` — Microsoft removed the only job flag that ever constrained
+ * a token, so no `JOB_OBJECT_LIMIT_*` takes a path or an access mask. Job
+ * objects remain useful for process and memory ceilings, and useless as a
+ * filesystem boundary. That distinction is the whole reason AppContainer and not
+ * a job is the mechanism to reach for.
+ *
+ * The "helper program out of scope" constraint is a separate fact and still
+ * stands; it is not what makes this module thin.
+ *
+ * What this module buys is that the decision is *made and said out loud*, in one
+ * place, from a policy value that can be asserted. Before this existed the
+ * `.git` guard lived only in the tool layer and the policy was never consulted;
  * `rm .git/config` through Bash was `allow` in `agent` mode, measured.
  *
  * The rule every function here obeys: **a wrong answer may narrow access, never
