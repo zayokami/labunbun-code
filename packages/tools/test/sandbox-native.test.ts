@@ -626,6 +626,13 @@ describe("buildBwrapArgs", () => {
 			"--bind",
 			"/w/.cache/labunbun",
 			"/w/.cache/labunbun",
+			// The ancestor mount, before the protected path it exists to protect.
+			// See bwrap.ts's header for the measurement that made this necessary:
+			// without it a directory carrying a `.git` can be renamed out from under
+			// its parent and the `.git` is writable at its new location.
+			"--ro-bind",
+			"/w/repo",
+			"/w/repo",
 			"--ro-bind",
 			"/w/repo/.git",
 			"/w/repo/.git",
@@ -652,6 +659,69 @@ describe("buildBwrapArgs", () => {
 		expect(mounts[0].flag).toBe("--ro-bind");
 	});
 
+	/**
+	 * The ancestor mount exists because of a measured bypass, and this is the row
+	 * that keeps it from being deleted as noise.
+	 *
+	 * **`test (bwrap on PATH)` found the hole**: a directory carrying a protected
+	 * path could be renamed out from under its parent, and the `.git` was writable
+	 * at its new location. The argv produced before the fix is *correct in both
+	 * worlds*, so every other row in this file passed while the backend had the
+	 * hole — which is why this asserts the argv shape rather than repeating the
+	 * bypass, and why the bypass itself lives in `sandbox-bwrap-smoke.test.ts`
+	 * where a real bwrap runs it.
+	 *
+	 * The shape has two halves and both are load-bearing:
+	 *
+	 * - **The ancestor is present.** Without it, the rename succeeds.
+	 * - **The ancestor is `--ro-bind`, not `--bind`.** Measured: `--bind` also
+	 *   refuses the rename and also leaves the contained `.git` **writable**, so it
+	 *   closes the relocation and does nothing about the protection. This assertion
+	 *   is the difference, and it is the half a plausible-looking fix would get
+	 *   wrong.
+	 *
+	 * The root is included on purpose: renaming the writable root moves a
+	 * protected directory just as effectively as renaming an intermediate one.
+	 */
+	test("a protected path's ancestors are mounted read-only, the writable root included", () => {
+		const nested: SandboxPolicy = { ...POLICY, protected: ["/w/repo/sub/.git"] };
+		const mounts = mountsOf(buildBwrapArgs(nested, COMMAND));
+
+		const ancestors = mounts.filter(
+			(mount) => mount.flag === "--ro-bind" && (mount.source === "/w/repo/sub" || mount.source === "/w/repo"),
+		);
+		expect(ancestors.map((mount) => mount.source).sort()).toEqual(["/w/repo", "/w/repo/sub"]);
+		// Not merely present — read-only. `--bind` here would refuse the rename and
+		// leave the `.git` writable, which is the near miss measured on a real
+		// bwrap and the reason this is not written as "the ancestor is mounted".
+		expect(ancestors.every((mount) => mount.flag === "--ro-bind")).toBe(true);
+
+		// And the ancestor lands BEFORE the path it protects: a later mount shadows
+		// an earlier one at the same path, so the reverse order would leave the `.git`
+		// bind on top and the directory renameable again.
+		const subIndex = mounts.findIndex((mount) => mount.source === "/w/repo/sub");
+		const gitIndex = mounts.findIndex((mount) => mount.source === "/w/repo/sub/.git");
+		expect(subIndex).toBeGreaterThanOrEqual(0);
+		expect(gitIndex).toBeGreaterThan(subIndex);
+	});
+
+	test("a protected path outside every writable root claims no ancestor", () => {
+		// The walk is bounded by the writable root, and a protected path with no
+		// writable root above it is the case where an unbounded walk would climb to
+		// `/` and read-only-bind the whole filesystem. That is a real failure shape
+		// rather than a hypothetical one: `parentOf("/")` is `""` and `parentOf("")`
+		// is `""`, so an unbounded walk oscillates between `""` forever.
+		const outside: SandboxPolicy = {
+			...POLICY,
+			protected: ["/elsewhere/.git"],
+		};
+		const mounts = mountsOf(buildBwrapArgs(outside, COMMAND));
+		expect(mounts.some((mount) => mount.flag === "--ro-bind" && mount.source === "/elsewhere")).toBe(false);
+		// The protected path itself is still protected — the ancestor walk declining
+		// to claim one must not cost the path its own mount.
+		expect(mounts.some((mount) => mount.flag === "--ro-bind" && mount.source === "/elsewhere/.git")).toBe(true);
+	});
+
 	test("every read-only protection comes after the writable bind that could cover it", () => {
 		const mounts = mountsOf(buildBwrapArgs(POLICY, COMMAND));
 		// A later mount shadows an earlier one, so a protection that lands before
@@ -666,8 +736,16 @@ describe("buildBwrapArgs", () => {
 			),
 		);
 
-		expect(protections.map((mount) => mount.source)).toEqual([GIT]);
+		// Two protections now, and the order matters between them: the ancestor
+		// `/w/repo` has to land before the `.git` it exists to protect, or the
+		// `.git` bind would shadow it and the directory would be renameable again.
+		// Both are `--ro-bind`, so this is not the writable-shadowing case above —
+		// it is that a protection may not be shadowed by another protection.
+		expect(protections.map((mount) => mount.source)).toEqual([WORKSPACE, GIT]);
 		expect(defeated).toEqual([]);
+		const ancestor = protections.findIndex((mount) => mount.source === WORKSPACE);
+		const git = protections.findIndex((mount) => mount.source === GIT);
+		expect(ancestor).toBeLessThan(git);
 	});
 
 	test("a path nothing may read is bound read-only, after the root that allows it", () => {
@@ -892,9 +970,14 @@ describe("buildBwrapArgs on a protected path that is not there", () => {
 
 		expect(protectionOf(neither, GIT)).toBe("empty-dir");
 		expect(protectionOf(neither, "/w/repo/sub/.git")).toBe("empty-dir");
-		// Two tmpfs mounts and no stray ro-bind for either path, so neither fell
-		// through to the recipe that would have failed.
-		expect(neither.filter((arg) => arg === "--tmpfs")).toHaveLength(2);
+		// **Four** tmpfs mounts now, not two: the two protected paths plus the two
+		// ancestors of them. `/w/repo/sub` and `/w/repo` are both absent under
+		// `() => false`, and both go through the same recipe for the same reason — a
+		// `--ro-bind` of a source that is not there makes bubblewrap refuse to start,
+		// which would turn a narrow policy into a shell that does not run. The count
+		// was two before ancestor mounts existed and the assertion below is what
+		// makes the change visible rather than silent.
+		expect(neither.filter((arg) => arg === "--tmpfs")).toHaveLength(4);
 		expect(mountsOf(neither).some((mount) => mount.source === GIT)).toBe(false);
 		// And the split case: one present, one absent, each getting its own recipe. A
 		// single boolean for "does this policy have an absent path" would give both

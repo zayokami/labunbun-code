@@ -31,22 +31,21 @@
  * `/w/repo/.git` read-only when `/w/repo` is writable. Moving them above the
  * writable binds would silently unprotect `.git`.
  *
- * ## Why there are no ancestor-unlink denies here — and why that is now known wrong
+ * ## Why there are ancestor mounts here, and what it cost to find out
  *
- * The seatbelt translator has to emit them, because seatbelt matches on
- * pathnames and `mv /w/repo/sub /w/repo/x` relocates a protected
- * `/w/repo/sub/.git` out from under its own deny. This translator does not emit
- * them, on the belief that bubblewrap does not have that hole: a bind mount
- * attaches to the dentry rather than the name, so the read-only bind is expected
- * to travel with the directory when its parent is renamed, and the rename is
- * expected to fail because unlinking a mountpoint needs a write the read-only
- * bind forbids.
+ * The seatbelt translator emits ancestor-unlink denies because it matches on
+ * pathnames, and `mv /w/repo/sub /w/repo/x` relocates a protected
+ * `/w/repo/sub/.git` out from under its own deny. This translator used to emit
+ * nothing, on the belief that bubblewrap has no such hole: a bind mount attaches
+ * to the dentry rather than the name, so the read-only bind travels with the
+ * directory when its parent is renamed, and the rename itself fails because
+ * unlinking a mountpoint needs a write the read-only bind forbids.
  *
- * **That belief was inherited, and it has been measured false.**
- * `test (bwrap on PATH)` in CI — the leg that installs bubblewrap and gates on
- * a namespace actually starting — runs
- * `packages/tools/test/sandbox-bwrap-smoke.test.ts`, which does the one thing
- * this paragraph used to say needed a manual smoke test:
+ * **That belief was inherited and it was false.** `test (bwrap on PATH)` — the CI
+ * leg that installs bubblewrap and gates on a namespace really starting — runs
+ * `sandbox-bwrap-smoke.test.ts`, which does the one thing this paragraph used to
+ * say needed a manual smoke test. With a `.git` protected under `sub/` and `sub`
+ * inside a writable workspace:
  *
  * ```console
  * (pass) CONTROL: renaming a directory that holds a .git leaves it writable, unsandboxed
@@ -54,20 +53,39 @@
  *        Expected: "refused"   Received: "WROTE"
  * ```
  *
- * The control is what makes that a finding and not an observation: the same
- * rename performed outside the sandbox leaves the moved `.git` writable, so the
- * two hypotheses — "the sandbox refused" and "the filesystem refused" — produce
- * different output and the assertion can tell them apart.
+ * The control is what makes that a finding: outside the sandbox the same rename
+ * leaves the moved `.git` writable, so the two hypotheses differ and the
+ * assertion can tell them apart. The argv this translator produces is correct
+ * either way, which is why no string comparison in `sandbox-native.test.ts` could
+ * have found it.
  *
- * **So this backend has a `.git`-relocation bypass today**, and the argv it
- * produces is correct either way, which is exactly why no string comparison in
- * `sandbox-native.test.ts` could ever have found it. The fix belongs in this
- * translator and not in the test: a directory carrying a protected path has to
- * be unrenameable from inside, the way seatbelt already arranges.
+ * **Bubblewrap has no deny rule** — it is purely constructive, arranging mounts —
+ * so the fix cannot be a rule. It has to be an arrangement, and the arrangement
+ * was measured rather than reasoned about, because reasoning about mount
+ * semantics is what produced the wrong belief in the first place. Same machine,
+ * same run, three probes (`sandbox-bwrap-smoke.test.ts`, the row named MEASURE):
  *
- * The line was here first as an assumption with a named owner, which is what the
- * preceding paragraph is worth keeping: it said in advance what would falsify it
- * and how, and the cheap thing it proposed turned out to be the thing that did.
+ * ```console
+ * A  as shipped, no extra mount:        rename exit=0                       <- the bypass
+ * B  --bind the ancestor onto itself:    rename exit=1   read=read  write=WROTE
+ * C  --ro-bind the ancestor onto itself:  rename exit=1   read=read  write=refused
+ * ```
+ *
+ * B is why this is not a one-liner: it refuses the rename and leaves the
+ * contained `.git` writable, so it closes the hole and does nothing about the
+ * thing the hole was about. A test asserting only "the rename was refused" would
+ * have shipped it. C refuses the rename, keeps `.git` readable, and makes it
+ * unwritable — which is the whole requirement, because `git status` has to read
+ * the thing it must not write.
+ *
+ * **The cost of C is a narrowing, and it is deliberate.** A read-only bind of the
+ * ancestor shadows everything beneath it, so anything under a protected path's
+ * parent that was writable is now read-only. That fails closed, which is the right
+ * direction, and it is a real cost — see {@link ancestorArgs}.
+ *
+ * The line was here first as an assumption with a named owner, and that is what
+ * the preceding paragraph is worth keeping: it said in advance what would falsify
+ * it and how, and the cheap thing it proposed turned out to be the thing that did.
  *
  * ## About `missingPathBehavior`
  *
@@ -141,6 +159,10 @@ export function buildBwrapArgs(
 	// unreadable, because `git status` has to read `.git`. `canRead` never sees
 	// them, because they arrive as `policy.protected` and never as a `deny` entry.
 	const protectedPaths = policy.protected;
+	const ancestors = protectedAncestors(
+		policy,
+		writable.map((entry) => entry.path),
+	);
 
 	return [
 		"--new-session",
@@ -163,6 +185,10 @@ export function buildBwrapArgs(
 		// Readable, not hidden — see the note on `denied` above. This is the
 		// strongest thing bubblewrap can say, and it is not what `deny` means.
 		...denied.flatMap((path) => ["--ro-bind", path, path]),
+		// Ancestors of a protected path, read-only, so a directory carrying one
+		// cannot be renamed out from under its parent. See the file header for the
+		// measurement that settled this — it is not a guess and it is not free.
+		...ancestors.flatMap((path) => ancestorArgs(path, exists)),
 		...protectedPaths.flatMap((path) => readOnlyPathArgs(path, exists)),
 		...namespaceArgs(policy.network),
 		"--cap-drop",
@@ -200,6 +226,98 @@ export function buildBwrapArgs(
 function readOnlyPathArgs(path: string, exists: (path: string) => boolean): string[] {
 	if (exists(path)) return ["--ro-bind", path, path];
 	return ["--perms", "555", "--tmpfs", path, "--remount-ro", path];
+}
+
+/**
+ * The mount that makes one ancestor of a protected path unrenameable.
+ *
+ * `--ro-bind` onto itself, and **that is the only shape that works**: a writable
+ * bind of the same directory refuses the rename just as well but leaves the
+ * contained `.git` writable, which is the protection doing nothing while looking
+ * like it worked. Both answers are in the measurement row of
+ * `sandbox-bwrap-smoke.test.ts`, measured on a runner with a real bwrap:
+ *
+ * ```console
+ * A  as shipped, no extra mount:       rename exit=0                       <- the bypass
+ * B  --bind the ancestor onto itself:   rename exit=1   read=read  write=WROTE
+ * C  --ro-bind the ancestor onto itself: rename exit=1   read=read  write=refused
+ * ```
+ *
+ * B is the near miss worth keeping in this comment: it closes the relocation and
+ * leaves the `.git` writable through the same path, so a test asserting only
+ * "the rename was refused" would have shipped it.
+ *
+ * **The cost is real and it is not small.** A read-only bind of the ancestor
+ * shadows everything under it, so a nested `.git` that `protected` listed is
+ * covered twice and a nested one it did *not* list is now read-only too. That is
+ * a narrowing: `mv` of a sibling directory, or a build writing under a protected
+ * path's parent, stops working. It fails closed, which is the right direction,
+ * and it is a cost a user of `workspace-write` will feel.
+ *
+ * `--ro-bind` needs the source to exist. An absent ancestor of a derived `.git`
+ * is unusual — `<root>` exists whenever it is a writable root — but the
+ * `--tmpfs` fallback is the same shape {@link readOnlyPathArgs} uses, and
+ * skipping it would make one input shape fail with a spawn error instead of
+ * narrowing.
+ */
+function ancestorArgs(path: string, exists: (path: string) => boolean = () => true): string[] {
+	if (exists(path)) return ["--ro-bind", path, path];
+	return ["--perms", "555", "--tmpfs", path, "--remount-ro", path];
+}
+
+/**
+ * Every directory between a protected path and its writable root, the root
+ * included.
+ *
+ * **The root is included on purpose.** Renaming the writable root moves a
+ * protected directory just as effectively as renaming an intermediate one, so a
+ * walk that stopped below the root would leave the same bypass one level up.
+ *
+ * This mirrors `protectedAncestors` in `seatbelt.ts`, which exists for the same
+ * reason against pathnames rather than against mounts, and the two have to agree
+ * about which directories are at stake — a policy confined on macOS and not on
+ * Linux would be a policy whose meaning depends on the machine.
+ *
+ * Sorted, so the argv is a function of the policy and not of `Set` insertion
+ * order.
+ */
+function protectedAncestors(policy: SandboxPolicy, writableRoots: string[]): string[] {
+	const carved = [
+		...policy.protected,
+		...policy.fileSystem.entries.filter((entry) => entry.access === "deny").map((entry) => entry.path),
+	];
+	const ancestors = new Set<string>();
+	for (const path of carved) {
+		const root = writableRoots.find((candidate) => isAtOrBelow(parentOf(path), candidate));
+		if (root === undefined) continue;
+		// The no-progress guard is load-bearing. With a writable root of `/`,
+		// `isAtOrBelow` matches everything and `parentOf("/")` is `""`, which
+		// `parentOf("")` also returns, so the walk oscillates between `""` forever.
+		// Measured before this guard elsewhere: a chain that never terminated.
+		let current = parentOf(path);
+		while (current !== "" && !ancestors.has(current)) {
+			ancestors.add(current);
+			if (current === root) break;
+			const next = parentOf(current);
+			if (next === current) break;
+			current = next;
+		}
+	}
+	return [...ancestors].sort();
+}
+
+/** `path` without its last segment; `/` for a top-level path. */
+function parentOf(path: string): string {
+	const trimmed = path.replace(/\/+$/, "");
+	const index = trimmed.lastIndexOf("/");
+	if (index < 0) return trimmed;
+	return index === 0 ? "/" : trimmed.slice(0, index);
+}
+
+/** Whether `candidate` is `root` or sits inside it, on canonical absolute paths. */
+function isAtOrBelow(candidate: string, root: string): boolean {
+	const normalizedRoot = root.replace(/\/+$/, "");
+	return candidate === normalizedRoot || candidate.startsWith(`${normalizedRoot}/`);
 }
 
 /**
