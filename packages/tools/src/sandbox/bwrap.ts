@@ -31,7 +31,7 @@
  * `/w/repo/.git` read-only when `/w/repo` is writable. Moving them above the
  * writable binds would silently unprotect `.git`.
  *
- * ## Why there are no ancestor-unlink denies here
+ * ## Why there are no ancestor-unlink denies here — and why that is now known wrong
  *
  * The seatbelt translator has to emit them, because seatbelt matches on
  * pathnames and `mv /w/repo/sub /w/repo/x` relocates a protected
@@ -42,18 +42,32 @@
  * expected to fail because unlinking a mountpoint needs a write the read-only
  * bind forbids.
  *
- * **That belief is inherited, not verified here.** It was not checked against
- * kernel mount semantics from this machine, and it is load-bearing: if it is
- * wrong, this backend has a `.git`-relocation bypass and no test in this
- * repository would catch it, because the argv it produces is correct either way.
- * The asymmetry is not invented for this file: a backend that matches on
- * pathnames has to carry those denies and a bind-mount backend does not, and
- * this file is on the second side of that line. The cheap thing that would
- * settle it is one `bwrap` command on a real Linux box — `mv` a directory
- * containing a `.git` out from under its parent and see whether the repository
- * survives — and that is a manual smoke test, not something a unit test can do.
- * Until it is run, treat this as an assumption with a named owner rather than a
- * property of the code.
+ * **That belief was inherited, and it has been measured false.**
+ * `test (bwrap on PATH)` in CI — the leg that installs bubblewrap and gates on
+ * a namespace actually starting — runs
+ * `packages/tools/test/sandbox-bwrap-smoke.test.ts`, which does the one thing
+ * this paragraph used to say needed a manual smoke test:
+ *
+ * ```console
+ * (pass) CONTROL: renaming a directory that holds a .git leaves it writable, unsandboxed
+ * (fail) renaming a directory that holds a .git does not make the .git writable
+ *        Expected: "refused"   Received: "WROTE"
+ * ```
+ *
+ * The control is what makes that a finding and not an observation: the same
+ * rename performed outside the sandbox leaves the moved `.git` writable, so the
+ * two hypotheses — "the sandbox refused" and "the filesystem refused" — produce
+ * different output and the assertion can tell them apart.
+ *
+ * **So this backend has a `.git`-relocation bypass today**, and the argv it
+ * produces is correct either way, which is exactly why no string comparison in
+ * `sandbox-native.test.ts` could ever have found it. The fix belongs in this
+ * translator and not in the test: a directory carrying a protected path has to
+ * be unrenameable from inside, the way seatbelt already arranges.
+ *
+ * The line was here first as an assumption with a named owner, which is what the
+ * preceding paragraph is worth keeping: it said in advance what would falsify it
+ * and how, and the cheap thing it proposed turned out to be the thing that did.
  *
  * ## About `missingPathBehavior`
  *
