@@ -30,7 +30,7 @@
  * passes an explicit `env` so the developer's own `MIMOCODE_HOME` cannot leak in.
  */
 
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -64,29 +64,39 @@ import { borrowSourceEnv, releaseEnv } from "./source-env.ts";
 // ---------------------------------------------------------------------------
 
 const made: string[] = [];
+
+/**
+ * Every test runs with no relocation variable set, and gets them back after.
+ *
+ * **This is a `beforeEach` and not a fixture call, and the difference is the whole
+ * bug.** MiMo Code is the one source here whose roots come from `XDG_*`, and this
+ * file builds its homes two ways: the `mimocodeFixture` helper and thirteen
+ * hand-rolled `makeDir` calls. It also calls `readMiMoCode(home, cwd, {})` twenty
+ * times with an explicit empty environment, because that is how you test a
+ * resolver — while `runMigration` takes no environment at all and falls through
+ * to `process.env`.
+ *
+ * So the file contained **two worlds**: a fixture that resolved against `{}` and
+ * a migration that resolved against the real environment. On a developer machine
+ * `XDG_CONFIG_HOME` is usually unset and the two agree, which is why it passed
+ * locally. A GitHub Linux runner has it set, the fixture writes into one
+ * directory and the reader looks in another, and 32 assertions saw an empty plan
+ * on `test (ubuntu-latest)` and 5 on `test (macos-latest)`.
+ *
+ * Borrowing per-fixture fixed most of it and left five failing, because those five
+ * reach `runMigration` through a hand-rolled home. One hook, before anything runs,
+ * is the seam that cannot be bypassed — a test that forgets to call it is green
+ * locally and red on a runner, which is the property that has to not exist.
+ */
+beforeEach(() => {
+	borrowSourceEnv();
+});
 afterEach(() => {
 	releaseEnv();
 	for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/**
- * Clear every relocation variable before a fixture runs, and put them back after.
- *
- * **This file was written without it and 32 of its tests failed on
- * `test (ubuntu-latest)` while passing on Windows and on macOS.** The cause is
- * that MiMo Code is the one source here whose roots come from `XDG_*`: the
- * fixtures build a home with `mimocodeRoots(home, {})` — an empty environment —
- * while `runMigration` calls `readMiMoCode(home, cwd)` with no environment
- * argument, so the reader falls through to its `process.env` default. On a
- * developer's machine `XDG_CONFIG_HOME` is usually unset and the two agree; a
- * GitHub Linux runner has it set, the fixture writes into `~/.config/mimocode`
- * and the reader looks somewhere else, and 32 assertions see an empty plan.
- *
- * `borrowSourceEnv()` clears all of `MIGRATION_ENV_VARS`, which already lists
- * the four `XDG_*` names. The alternative — passing `{}` through `runMigration`
- * — is not available: it does not take an environment, and every other source
- * here has the same shape, so the hermetic seam is the borrowed environment.
- */
+/** Kept as a name so a reader can see why the hook above exists. */
 function borrowEnvForFixture(): void {
 	borrowSourceEnv();
 }
