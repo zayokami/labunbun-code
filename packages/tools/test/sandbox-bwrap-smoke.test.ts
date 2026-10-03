@@ -281,57 +281,84 @@ smoke("renaming a directory that holds a .git does not make the .git writable", 
  * **This row does not assume it works. It prints what happened**, for three
  * probes whose answers decide the fix:
  *
- *   A — does `--bind <dir> <dir>` after the parent bind make `mv` on it fail?
- *   B — if not, does `--ro-bind` of the same directory fail any better?
- *   C — does either still let `git`-shaped work read `<dir>/.git`? A mechanism
- *       that made the ancestor unrenameable by making it unreadable would pass A
- *       and fail the product, so C is the row that stops a bad fix shipping.
+ *   A — the argv as shipped, which is the known bypass.
+ *   B — does `--bind <ancestor> <ancestor>` after the parent bind refuse the rename?
+ *   C — does `--ro-bind` of the same directory do better or worse?
+ *   and each reports whether `<ancestor>/.git` is still **readable** and still
+ *   **writable**, because a mechanism that made the ancestor unrenameable by
+ *   making its contents unreadable would pass the rename check and break every
+ *   `git` command in the product.
  *
  * The values are printed rather than asserted because the answer is a fact about
  * the kernel, not a decision this repository is making. The fix is written
  * against the measured answer; this row is what keeps it honest.
  */
 smoke("MEASURE: what a mount arrangement can say about renaming an ancestor", () => {
-	const { workspace, git, sub } = workspaceFixture();
-	const relocated = join(workspace, "relocated");
-
-	/** The argv the translator produces, with extra fragments spliced in before `--`. */
-	const withExtra = (extra: string[]): string[] => {
+	/**
+	 * **A fresh tree per probe, and that is not tidiness.**
+	 *
+	 * The first version took one fixture and ran A, B and C against it. Probe A
+	 * renames the ancestor, so by the time B ran the path was gone and bwrap
+	 * answered `Can't find source path /tmp/lbb-bwrap-smoke-...` — which the row
+	 * printed as if it were a finding about bind mounts. **A measurement that
+	 * consumes its own subject measures the consumption, not the mechanism.**
+	 *
+	 * That failure shape is one this repository already knows: `bwrap.ts:62-64`
+	 * warns that `--bind` of a source that is not there makes bubblewrap refuse
+	 * to start, and the warning is about exactly this — a vanished path reads as
+	 * a policy decision when it is a missing input.
+	 */
+	const probe = (extra: (sub: string) => string[]) => {
+		const { workspace, git, sub } = workspaceFixture();
+		const relocated = join(workspace, "relocated");
 		const base = buildBwrapArgs(policyFor(workspace, [join(sub, ".git")]), ["/bin/sh", "-c", "true"], (p) =>
 			existsSync(p),
 		);
 		const at = base.indexOf("--");
-		return [...base.slice(0, at), ...extra, ...base.slice(at)];
+		const argv = [...base.slice(0, at), ...extra(sub), ...base.slice(at)];
+		const runOne = (command: string) => {
+			const r = spawnSync("bwrap", [...argv.slice(0, argv.indexOf("--")), "--", "/bin/sh", "-c", command], {
+				encoding: "utf8",
+			});
+			return { status: r.status, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
+		};
+		void git;
+		return {
+			rename: runOne(`mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`),
+			readBack: runOne(
+				`head -c 1 ${JSON.stringify(join(sub, ".git", "HEAD"))} >/dev/null 2>&1 && echo read || echo unread`,
+			),
+			writeBack: runOne(
+				`echo x > ${JSON.stringify(join(sub, ".git", "HEAD"))} 2>/dev/null && echo WROTE || echo refused`,
+			),
+		};
 	};
-	const run = (argv: string[], command: string) => {
-		const r = spawnSync("bwrap", argv.slice(0, argv.indexOf("/bin/sh")).concat(["/bin/sh", "-c", command]), {
-			encoding: "utf8",
-		});
-		return { status: r.status, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
-	};
-
-	const rename = `mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`;
-	const readBack = `head -c 1 ${JSON.stringify(join(sub, ".git", "HEAD"))} >/dev/null 2>&1 && echo read || echo unread`;
 
 	console.log("[bwrap-smoke] A/B/C — printed, not asserted: a fact about the kernel, not a decision");
-	const today = run(withExtra([]), rename);
-	console.log(`  A  as shipped, no extra mount:      rename exit=${today.status} ${today.stderr.slice(0, 60)}`);
-
-	for (const [label, extra] of [
-		["B  --bind the ancestor onto itself:  ", ["--bind", sub, sub]],
-		["C  --ro-bind the ancestor onto itself:", ["--ro-bind", sub, sub]],
-	] as const) {
-		const moved = run(withExtra([...extra]), rename);
-		const readable = run(withExtra([...extra]), readBack);
+	const rows: [string, ReturnType<typeof probe>][] = [
+		["A  as shipped, no extra mount:      ", probe(() => [])],
+		["B  --bind the ancestor onto itself:  ", probe((s) => ["--bind", s, s])],
+		["C  --ro-bind the ancestor onto itself:", probe((s) => ["--ro-bind", s, s])],
+	];
+	for (const [label, r] of rows) {
+		// A probe whose source path is gone is a broken probe, and it must not be
+		// printed in the same shape as a verdict. "Can't find source path" is
+		// named as what it is.
+		const broken = r.rename.stderr.includes("Can't find source path");
 		console.log(
-			`  ${label} rename exit=${moved.status} ${moved.stderr.slice(0, 40)}  | .git ${readable.stdout || readable.stderr.slice(0, 40)}`,
+			`  ${label} rename exit=${r.rename.status}` +
+				`${broken ? "  PROBE BROKEN (source path missing)" : `  ${r.rename.stderr.slice(0, 40)}`}` +
+				`  | .git read=${r.readBack.stdout || r.readBack.stderr.slice(0, 30)} write=${r.writeBack.stdout || r.writeBack.stderr.slice(0, 30)}`,
 		);
 	}
-	void git;
-	// Asserts nothing about the outcome on purpose: see the doc comment. What it
-	// does assert is that the measurement ran, so a broken probe cannot pass as a
-	// silent "no".
-	expect(typeof today.status === "number" || today.status === null).toBe(true);
+
+	// Asserts nothing about the mechanism on purpose — see the doc comment. It
+	// asserts that probe A ran and that its rename actually succeeded, because A is
+	// the known bypass and a version of this file where A stopped reproducing it
+	// means the translator changed and this row needs re-reading.
+	const known = rows[0]?.[1];
+	expect(known, "probe A did not run, so nothing was measured").toBeDefined();
+	expect(known?.rename.status, `probe A did not reproduce the bypass: ${known?.rename.stderr.slice(0, 200)}`).toBe(0);
 });
 
 test("where bwrap is installed, this file does not skip", () => {
