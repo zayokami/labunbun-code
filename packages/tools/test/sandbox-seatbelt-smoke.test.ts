@@ -49,13 +49,37 @@ const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 /**
  * Whether a real `sandbox-exec` can run here, and why not when it cannot.
  *
- * The probe command is `/usr/bin/true` under a minimal profile. It asks the
- * narrowest question that still proves the mechanism works: can this machine
- * compile a profile and start a process inside it at all.
+ * **This profile grants `process-exec`, and the first version of it did not.**
+ * That is not a detail — it is what made the gate lie.
+ *
+ * The probe used `(deny default)(allow file-read*)` and `/usr/bin/true`. On
+ * `macos-latest` that returned non-zero with
+ * `execvp() of '/usr/bin/true' failed: Operation not permitted`, so every row in
+ * this file skipped and **the CI job was green having checked nothing at all**.
+ * `deny default` covers `process-exec`, so a profile that grants reads and
+ * nothing else refuses to start any program — and the probe was reading its own
+ * refusal as "this machine cannot run sandbox-exec".
+ *
+ * The lesson is the one this file exists to apply: **a probe that fails for a
+ * reason of its own making is indistinguishable from a machine that cannot
+ * answer the question.** A gate that is wrong in the skipping direction does not
+ * announce itself; it reports green. So the probe's profile has to be one the
+ * mechanism is actually expected to accept, which is the minimum that starts a
+ * process: read, exec, and the process control needed to reach them.
  */
 function probeSandboxExec(): { ok: boolean; why: string } {
 	if (process.platform !== "darwin") return { ok: false, why: `not macOS (this is ${process.platform})` };
-	const result = spawnSync(SANDBOX_EXEC, ["-p", "(version 1)(deny default)(allow file-read*)", "--", "/usr/bin/true"], {
+	const PROBE_PROFILE = [
+		"(version 1)",
+		"(deny default)",
+		"(allow process-fork)",
+		"(allow process-exec)",
+		"(allow signal (target same-sandbox))",
+		"(allow sysctl-read)",
+		"(allow file-read*)",
+		'(allow file-ioctl (literal "/dev/null"))',
+	].join("\n");
+	const result = spawnSync(SANDBOX_EXEC, ["-p", PROBE_PROFILE, "--", "/usr/bin/true"], {
 		encoding: "utf8",
 	});
 	if (result.error) return { ok: false, why: `${SANDBOX_EXEC} could not be run: ${result.error.message}` };
@@ -72,6 +96,37 @@ const CAPABILITY = probeSandboxExec();
 if (!CAPABILITY.ok) console.warn(`[seatbelt-smoke] skipped: ${CAPABILITY.why}`);
 
 const smoke = CAPABILITY.ok ? test : test.skip;
+
+/**
+ * On macOS a skip means this file checked nothing, and that must not be green.
+ *
+ * **The first version of this gate shipped exactly that way.** `macos-latest`
+ * reported success on all eight jobs while every row here skipped, because the
+ * probe profile lacked `process-exec` and so refused to start its own command.
+ * A skip is the honest answer to "can this machine answer the question", but it
+ * is a terrible answer to "did the check run", and the two are not the same
+ * question.
+ *
+ * `test (macos-latest)` has a real `/usr/bin/sandbox-exec` — the path is fixed
+ * and it ships with the OS — so a skip *there* means the probe is wrong, not the
+ * machine. This row is that assertion. It is the control for the gate: without
+ * it, the gate can only ever report success by skipping.
+ *
+ * Non-macOS platforms still skip: there is no `sandbox-exec` to compare against,
+ * and `sandbox-native.test.ts` is the file that runs everywhere.
+ */
+test("on macOS this file does not skip", () => {
+	if (process.platform !== "darwin") {
+		console.warn(
+			`[seatbelt-smoke] not macOS (this is ${process.platform}); there is no sandbox-exec to compare against`,
+		);
+		return;
+	}
+	expect(
+		CAPABILITY.ok,
+		`every row in this file skipped on a platform that HAS sandbox-exec, so the job was green having checked nothing: ${CAPABILITY.why}`,
+	).toBe(true);
+});
 
 /** Temporary trees this file made, swept when the run ends. */
 const made: string[] = [];
