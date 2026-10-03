@@ -36,6 +36,7 @@ import { ChildProcessExecOperations, defaultOperations, type ExecResult, type Op
 import { createReadTool } from "../src/read.ts";
 import {
 	describeSandboxBackend,
+	detectNativeBackend,
 	policyFor,
 	resolveSandboxExecution,
 	type SandboxRuntime,
@@ -106,38 +107,115 @@ function capturingOps(sink: { last?: { sandbox?: unknown } }): Operations {
 	};
 }
 
+/**
+ * Whether a real `bwrap` is on this machine's PATH.
+ *
+ * **The two tests below used to assume it is not**, and that assumption is the
+ * whole reason this probe exists. They proved the wrapper was applied by
+ * asserting that the spawn failed naming a program that is not installed — which
+ * is true, and which stops being true the moment anyone installs bubblewrap. A
+ * runner image that gained it would have turned both red while testing nothing.
+ *
+ * The replacement signal has to **differ between "wrapped" and "unwrapped"**,
+ * because the obvious one does not. With bubblewrap present, `echo hi` runs to
+ * completion *either way* — wrapped it prints `hi` and exits 0, unwrapped it
+ * prints `hi` and exits 0. Identical output, so an assertion on stdout would be
+ * the no-discrimination probe this repository keeps warning about.
+ *
+ * So the branch that runs when bubblewrap is installed asserts something the
+ * wrapper *changes*: a write outside the workspace fails inside it and succeeds
+ * outside it. That pair differs under the two hypotheses, which is the only
+ * property that makes the assertion worth having.
+ */
+const BWRAP_INSTALLED = detectNativeBackend("linux");
+
 describe("the sandbox reaches the foreground spawn", () => {
-	test("a confined command is handed to bwrap, which is not installed here", async () => {
-		const cwd = workspace();
-		const exec = new ChildProcessExecOperations(FAKE_LINUX);
-		const result = await exec.exec({ command: "echo hi", cwd, sandbox: policy("workspace-write", cwd) });
+	test(
+		BWRAP_INSTALLED
+			? "a confined command is confined: it cannot write outside the workspace"
+			: "a confined command is handed to bwrap, which is not installed here",
+		async () => {
+			const cwd = workspace();
+			const outside = mkdtempSync(join(tmpdir(), "lbb-outside-"));
+			const exec = new ChildProcessExecOperations(FAKE_LINUX);
+			try {
+				if (!BWRAP_INSTALLED) {
+					const result = await exec.exec({ command: "echo hi", cwd, sandbox: policy("workspace-write", cwd) });
+					// The proof is the error naming a program that is not there. If the
+					// wrapper were not applied the command would print `hi` and exit 0, so
+					// this assertion fails the moment the wiring is removed — which is the
+					// line a reader would otherwise have to take on trust.
+					expect(result.exitCode).not.toBe(0);
+					expect(result.stderr).toContain("bwrap");
+					return;
+				}
+				// Bubblewrap is here, so the wrapper runs. What changes is the
+				// filesystem: `--ro-bind / /` makes everything outside the writable
+				// roots read-only, so this write the unwrapped shell would do is refused.
+				const target = join(outside, "escaped.txt");
+				const result = await exec.exec({
+					command: `echo x > ${JSON.stringify(target)}`,
+					cwd,
+					sandbox: policy("workspace-write", cwd),
+				});
+				expect(result.exitCode, `the write outside the workspace succeeded: ${result.stderr}`).not.toBe(0);
+				expect(existsSync(target)).toBe(false);
+			} finally {
+				await exec.close();
+				rmSync(outside, { recursive: true, force: true });
+			}
+		},
+	);
 
-		// The proof is the error naming a program that is not there. If the
-		// wrapper were not applied the command would print `hi` and exit 0, so
-		// this assertion fails the moment the wiring is removed — which is the
-		// line a reader would otherwise have to take on trust.
-		expect(result.exitCode).not.toBe(0);
-		expect(result.stderr).toContain("bwrap");
-	});
-
-	test("the control: the same executor runs the same command when the policy is unrestricted", async () => {
-		// A control that cannot fail is not a control. This one differs from the
-		// test above only in the sandbox axis, and the two must not agree — so if
-		// the assertion above ever starts passing for the wrong reason, this one
-		// is what notices.
-		const cwd = workspace();
-		const exec = new ChildProcessExecOperations(FAKE_LINUX);
-		const result = await exec.exec({ command: "echo hi", cwd, sandbox: policy("danger-full-access", cwd) });
-		expect(result.exitCode).toBe(0);
-		expect(result.stdout.trim()).toBe("hi");
-	});
+	test(
+		BWRAP_INSTALLED
+			? "CONTROL: the same write outside the workspace is allowed with no policy"
+			: "the control: the same executor runs the same command when the policy is unrestricted",
+		async () => {
+			// A control that cannot fail is not a control. This one differs from the
+			// test above only in the sandbox axis, and the two must not agree — so if
+			// the assertion above ever starts passing for the wrong reason, this one
+			// is what notices.
+			const cwd = workspace();
+			const exec = new ChildProcessExecOperations(FAKE_LINUX);
+			try {
+				if (!BWRAP_INSTALLED) {
+					const result = await exec.exec({ command: "echo hi", cwd, sandbox: policy("danger-full-access", cwd) });
+					expect(result.exitCode).toBe(0);
+					expect(result.stdout.trim()).toBe("hi");
+					return;
+				}
+				const outside = mkdtempSync(join(tmpdir(), "lbb-outside-ctl-"));
+				const target = join(outside, "allowed.txt");
+				try {
+					const result = await exec.exec({
+						command: `echo x > ${JSON.stringify(target)}`,
+						cwd,
+						sandbox: policy("danger-full-access", cwd),
+					});
+					// Unwrapped, the same command succeeds. If it did not, the refusal
+					// above would be attributable to something other than the sandbox.
+					expect(result.exitCode, result.stderr).toBe(0);
+					expect(existsSync(target)).toBe(true);
+				} finally {
+					rmSync(outside, { recursive: true, force: true });
+				}
+			} finally {
+				await exec.close();
+			}
+		},
+	);
 
 	test("no policy at all is the plain shell, exactly as it was", async () => {
 		const cwd = workspace();
 		const exec = new ChildProcessExecOperations(FAKE_LINUX);
-		const result = await exec.exec({ command: "echo hi", cwd });
-		expect(result.exitCode).toBe(0);
-		expect(result.stdout.trim()).toBe("hi");
+		try {
+			const result = await exec.exec({ command: "echo hi", cwd });
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout.trim()).toBe("hi");
+		} finally {
+			await exec.close();
+		}
 	});
 });
 
@@ -145,30 +223,50 @@ describe("the sandbox reaches the background spawn too", () => {
 	// The bypass this closes was invisible: `run_in_background: true` would have
 	// spawned the shell directly, so the sandbox would have looked like it worked
 	// for every command a user ran in the foreground.
-	test("a backgrounded command is wrapped the same way a foreground one is", async () => {
-		const cwd = workspace();
-		const exec = new ChildProcessExecOperations(FAKE_LINUX);
-		const manager = new BackgroundShellManager(FAKE_LINUX, exec);
-		const shell = await manager.start("echo hi", cwd, policy("workspace-write", cwd));
+	test(
+		BWRAP_INSTALLED
+			? "a backgrounded command is confined the same way a foreground one is"
+			: "a backgrounded command is wrapped the same way a foreground one is",
+		async () => {
+			const cwd = workspace();
+			const outside = mkdtempSync(join(tmpdir(), "lbb-outside-bg-"));
+			const exec = new ChildProcessExecOperations(FAKE_LINUX);
+			const manager = new BackgroundShellManager(FAKE_LINUX, exec);
+			try {
+				// The signal is the same one the foreground row uses, and for the same
+				// reason: with bubblewrap installed, "it ran" is identical whether or
+				// not the wrapper was applied. A write outside the workspace is not.
+				const target = join(outside, "escaped.txt");
+				const command = BWRAP_INSTALLED ? `echo x > ${JSON.stringify(target)}` : "echo hi";
+				const shell = await manager.start(command, cwd, policy("workspace-write", cwd));
 
-		const exited = await new Promise<boolean>((resolve) => {
-			const poll = setInterval(() => {
-				const info = manager.get(shell.id);
-				if (info && info.status !== "running") {
-					clearInterval(poll);
-					resolve(true);
+				const exited = await new Promise<boolean>((resolve) => {
+					const poll = setInterval(() => {
+						const info = manager.get(shell.id);
+						if (info && info.status !== "running") {
+							clearInterval(poll);
+							resolve(true);
+						}
+					}, 25);
+					setTimeout(() => {
+						clearInterval(poll);
+						resolve(false);
+					}, 15_000);
+				});
+
+				expect(exited).toBe(true);
+				if (BWRAP_INSTALLED) {
+					expect(existsSync(target), "the background path let a write escape the workspace").toBe(false);
+				} else {
+					expect(manager.get(shell.id)?.exitCode).not.toBe(0);
+					expect(manager.output(shell.id)).toContain("bwrap");
 				}
-			}, 25);
-			setTimeout(() => {
-				clearInterval(poll);
-				resolve(false);
-			}, 15_000);
-		});
-
-		expect(exited).toBe(true);
-		expect(manager.get(shell.id)?.exitCode).not.toBe(0);
-		expect(manager.output(shell.id)).toContain("bwrap");
-	});
+			} finally {
+				await exec.close();
+				rmSync(outside, { recursive: true, force: true });
+			}
+		},
+	);
 
 	test("the control: unrestricted runs in the background as well", async () => {
 		const cwd = workspace();
@@ -761,17 +859,35 @@ describe("the network axis reaches the background spawn too", () => {
 	 * is `cmd.exe` and `$HTTP_PROXY` is a literal string. */
 	const PROBE = `node -e "process.stdout.write(String(process.env.HTTP_PROXY||'(none)'))"`;
 
+	/**
+	 * Poll budget: **shorter than the 5 s test timeout, on purpose.**
+	 *
+	 * This loop used to be 400 iterations at 25 ms — a 10,000 ms window inside a
+	 * 5,000 ms budget. So a command that never finished could not be reported as
+	 * "gave up": the harness killed the test first, and the failure was a bare
+	 * `timed out after 5000ms` with no signal about which step hung. Measured on
+	 * this machine: the probe itself starts and exits in ~156 ms median, so
+	 * nothing here is waiting for a slow process — the window was simply longer
+	 * than the room it had.
+	 *
+	 * 2,000 ms is ~12× the median probe and still under half the budget, so the
+	 * loop can report "the child never completed" as a fact rather than the
+	 * harness reporting a timeout that says nothing.
+	 */
+	const BACKGROUND_POLL_ATTEMPTS = 80;
+	const BACKGROUND_POLL_INTERVAL_MS = 25;
+
 	/** Run one command to completion in the background and read what it saw. */
 	async function runBackground(
 		manager: BackgroundShellManager,
 		cwd: string,
 		policy: SandboxPolicy | undefined,
-	): Promise<{ exitCode: number | null; stdout: string }> {
+	): Promise<{ exitCode: number | null; stdout: string; completed: boolean }> {
 		const shell = await manager.start(PROBE, cwd, policy);
-		for (let i = 0; i < 400; i++) {
+		for (let i = 0; i < BACKGROUND_POLL_ATTEMPTS; i++) {
 			const info = manager.get(shell.id);
 			if (info && info.status !== "running") break;
-			await Bun.sleep(25);
+			await Bun.sleep(BACKGROUND_POLL_INTERVAL_MS);
 		}
 		return {
 			exitCode: manager.get(shell.id)?.exitCode ?? null,
@@ -780,6 +896,8 @@ describe("the network axis reaches the background spawn too", () => {
 				.output(shell.id)
 				.replace(/\n?\[exit code: -?\d+\]\s*$/, "")
 				.trim(),
+			/** Whether the child actually finished inside the poll budget. */
+			completed: manager.get(shell.id)?.status !== "running",
 		};
 	}
 
@@ -791,6 +909,14 @@ describe("the network axis reaches the background spawn too", () => {
 			const foreground = await exec.exec({ command: PROBE, cwd, sandbox: restricted });
 			const background = await runBackground(new BackgroundShellManager(FAKE_LINUX, exec), cwd, restricted);
 
+			// Named before anything else, so a failure says the child never finished
+			// rather than reporting four downstream symptoms of the same thing. The
+			// proxy is still holding a socket when this fails, so the message has to
+			// be the assertion's own.
+			expect(
+				background.completed,
+				`the background child did not finish inside ${BACKGROUND_POLL_ATTEMPTS * BACKGROUND_POLL_INTERVAL_MS} ms; what it printed was: ${background.stdout}`,
+			).toBe(true);
 			expect(foreground.exitCode).toBe(0);
 			expect(background.exitCode).toBe(0);
 			// The *same* port, not merely a proxy-shaped URL. A background path that

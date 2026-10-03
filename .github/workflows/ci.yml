@@ -114,6 +114,41 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
 
+  # A Linux leg with bubblewrap actually on it.
+  #
+  # **ubuntu-latest does not ship bubblewrap** — the runner image's installed-apt
+  # table has no such entry — which is load-bearing for a test that used to assert
+  # the wrapper was applied by proving the spawn failed naming a program that is
+  # not installed. Those rows now branch on `detectNativeBackend("linux")`, so
+  # without this leg the confined branch never runs anywhere and nobody finds out.
+  #
+  # **The gate step is the point of the job.** Ubuntu 24.04 sets
+  # `kernel.apparmor_restrict_unprivileged_userns=1`, so an unprivileged bwrap
+  # fails with "No permissions to creating new namespace". A step that installs
+  # the package and hopes is a green job that tested nothing, which is the same
+  # failure this repo treats as the expensive one — a run that could not compare
+  # has not earned a pass. It is the `exit 77 = did not compare` convention from
+  # the vim differential suite, applied to the sandbox.
+  test-bwrap:
+    name: test (bwrap on PATH)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      - run: pnpm install --frozen-lockfile
+      - name: install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
+      - name: bwrap can create a namespace here
+        run: |
+          bwrap --unshare-user --unshare-pid --ro-bind / / -- /bin/echo ok
+      - run: pnpm test
+
   # All three, because "this compiles into a standalone binary on each of them"
   # is a claim the repo has only ever verified on Windows: README says the
   # node-hid prebuild embed was checked there and says nothing about the other
