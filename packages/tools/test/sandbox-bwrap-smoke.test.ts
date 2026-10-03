@@ -381,45 +381,74 @@ smoke("MEASURE: what a mount arrangement can say about renaming an ancestor", ()
  * collides with, so the implementation copied C's fragment without asking what
  * else lands at that path. This row is the question that was missing.
  *
- * Three orders, each on its own tree, each reporting the same three facts: can
- * the workspace still be written, is the rename refused, and is `.git` still
- * readable. A fix needs all three; the first implementation had two of three in
- * the wrong direction.
+ * Four arrangements, each on its own tree, each reporting four facts: can the
+ * workspace still be written, can a **sibling** of the protected path still be
+ * written, is the rename refused, and is `.git` readable and unwritable. A fix
+ * needs all four; the first implementation had two of four in the wrong
+ * direction.
  */
 smoke("MEASURE: which ancestor mount order keeps the workspace writable", () => {
 	/**
 	 * Build an argv with the ancestor bind spliced at a chosen depth, so the
 	 * probes genuinely differ.
 	 *
-	 * **The first version of this row had no discriminating power and I would not
-	 * have known from its output.** It took the translator's argv, sliced at `--`,
-	 * and appended the ancestor bind — so "before the workspace bind" and "after
-	 * the workspace bind" both landed after it, and printed the same numbers for
-	 * different labels. A probe whose two hypotheses produce the same output
-	 * decides nothing, and two rows with identical output under different names
-	 * look like agreement.
+	 * **Two earlier versions of this row had no discriminating power, and the
+	 * second one I would not have caught from its output either.**
 	 *
-	 * So the position is an explicit index here, and each order is spliced at the
-	 * index it names.
+	 * The first took the translator's argv, sliced at `--`, and appended — so
+	 * "before the workspace bind" and "after it" both landed after it and printed
+	 * the same numbers under different labels. Three identical rows look like
+	 * agreement.
+	 *
+	 * The second fixed the position and still measured nothing useful, because the
+	 * question was wrong. It asked *where* to put the ancestor bind, and the answer
+	 * is that no position works: a read-only bind before the writable one is
+	 * shadowed by it, so the ancestor is no longer a mount point and the rename
+	 * succeeds again. **Two arrangements, both plausible, both dead — and the
+	 * measurement showed it only because the workspace-write probe was reported
+	 * alongside the rename probe.** A row that only asked "is the rename refused"
+	 * would have said D and E were both fixes.
+	 *
+	 * So the arrangement has to change rather than move, and G is the one that
+	 * should work: read-only the ancestor, then bind the workspace writable *over*
+	 * it, so the writable mount is not the ancestor and the ancestor is still a
+	 * mount point. The extra `sibling` probe is there because a fix that made the
+	 * whole workspace read-only would pass the rename check and fail the product.
 	 */
-	const argvWith = (
-		workspace: string,
-		ancestor: string,
-		insertAt: "before-writable" | "after-writable" | "re-bind-after",
-	) => {
-		const base = buildBwrapArgs(policyFor(workspace, [join(ancestor, ".git")]), ["/bin/sh", "-c", "true"], (p) =>
+	const probe = (insertAt: "after-writable" | "before-writable" | "re-bind-after" | "rebind-children") => {
+		const { workspace, sub } = workspaceFixture();
+		const base = buildBwrapArgs(policyFor(workspace, [join(sub, ".git")]), ["/bin/sh", "-c", "true"], (p) =>
 			existsSync(p),
 		);
-		const firstBind = base.indexOf("--bind");
-		const insert = base.indexOf("--", firstBind) === -1 ? base.length : base.indexOf("--");
-		const at = insertAt === "before-writable" ? firstBind : insert;
-		return [...base.slice(0, at), "--ro-bind", ancestor, ancestor, ...base.slice(at)];
-	};
+		// The anchor is the last `--` the translator emitted; everything the translator
+		// put after the writable binds is the protection section.
+		const tail = base.indexOf("--");
+		const head = [...base.slice(0, tail)];
+		const dropIn = (extra: string[]) => [...head, ...extra, ...base.slice(tail)];
 
-	const probe = (insertAt: "before-writable" | "after-writable" | "re-bind-after") => {
-		const { workspace, sub } = workspaceFixture();
-		const argv = argvWith(workspace, sub, insertAt);
+		/** The workspace bind as the translator emits it, for orders that re-apply it. */
+		const wsBind = ["--bind", workspace, workspace];
+		const argv =
+			insertAt === "after-writable"
+				? dropIn(["--ro-bind", sub, sub])
+				: insertAt === "before-writable"
+					? [
+							...head.slice(0, head.indexOf("--bind")),
+							"--ro-bind",
+							sub,
+							sub,
+							...head.slice(head.indexOf("--bind")),
+							...base.slice(tail),
+						]
+					: insertAt === "re-bind-after"
+						? dropIn(["--ro-bind", sub, sub, ...wsBind])
+						: // The one that should work and the earlier probes did not try:
+							// read-only the ancestor, then re-bind the workspace WRITABLE
+							// over it, so the ancestor is not where the writable bind is.
+							dropIn(["--ro-bind", sub, sub, "--bind", workspace, workspace]);
+
 		const writableIn = join(workspace, "in-workspace.md");
+		const sibling = join(workspace, "sibling.md");
 		const relocated = join(workspace, "relocated");
 
 		const one = (command: string) => {
@@ -429,10 +458,12 @@ smoke("MEASURE: which ancestor mount order keeps the workspace writable", () => 
 			return { status: r.status, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
 		};
 		return {
-			workspaceWrite: one(touchPayload(writableIn)),
 			// Whether the file is really there, which is the half stdout cannot say: a
 			// shell can print WROTE and have written nothing.
 			landed: existsSync(writableIn),
+			siblingLanded: existsSync(sibling),
+			workspaceWrite: one(touchPayload(writableIn)),
+			siblingWrite: one(touchPayload(sibling)),
 			rename: one(`mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`),
 			gitWrite: one(touchPayload(join(sub, ".git", "HEAD"))),
 			gitRead: one(
@@ -441,18 +472,20 @@ smoke("MEASURE: which ancestor mount order keeps the workspace writable", () => 
 		};
 	};
 
-	console.log("[bwrap-smoke] D/E/F — printed, not asserted: which order keeps all three properties");
+	console.log("[bwrap-smoke] D/E/F/G — printed, not asserted: which arrangement keeps all three properties");
 	for (const [label, at] of [
-		["D  ancestor ro-bind AFTER the workspace bind (today): ", "after-writable"],
-		["E  ancestor ro-bind BEFORE the workspace bind:        ", "before-writable"],
-		["F  ancestor ro-bind after, workspace bind re-applied:", "re-bind-after"],
+		["D  ancestor ro-bind after the workspace bind (today): ", "after-writable"],
+		["E  ancestor ro-bind before the workspace bind:        ", "before-writable"],
+		["F  ancestor ro-bind after, workspace bind re-applied: ", "re-bind-after"],
+		["G  ancestor ro-bind after, workspace re-bound LAST:   ", "rebind-children"],
 	] as const) {
 		const r = probe(at);
 		console.log(
 			`  ${label}` +
-				` workspace-write=${r.workspaceWrite.stdout || r.workspaceWrite.stderr.slice(0, 24)} (landed=${r.landed})` +
+				` in-ws=${r.workspaceWrite.stdout || r.workspaceWrite.stderr.slice(0, 20)}(landed=${r.landed})` +
+				` sibling=${r.siblingWrite.stdout || r.siblingWrite.stderr.slice(0, 14)}(landed=${r.siblingLanded})` +
 				`  rename exit=${r.rename.status}` +
-				`  .git write=${r.gitWrite.stdout || r.gitWrite.stderr.slice(0, 20)} read=${r.gitRead.stdout || r.gitRead.stderr.slice(0, 20)}`,
+				`  .git write=${r.gitWrite.stdout || r.gitWrite.stderr.slice(0, 18)} read=${r.gitRead.stdout || r.gitRead.stderr.slice(0, 18)}`,
 		);
 	}
 });
