@@ -257,13 +257,23 @@ smoke("renaming a directory that holds a .git does not make the .git writable", 
 	).toBe("refused");
 });
 
-test("on Linux this file does not skip", () => {
+test("where bwrap is installed, this file does not skip", () => {
 	// The control for the gate. A skip is the honest answer to "can this machine
 	// answer the question" and a terrible answer to "did the check run", and the
 	// first version of the seatbelt smoke file learned that the hard way: a green
 	// job in which every row skipped.
-	if (process.platform !== "linux") {
-		console.warn(`[bwrap-smoke] not Linux (this is ${process.platform}); there is no bwrap to compare against`);
+	//
+	// **The condition is the presence of bwrap, not the platform, and the first
+	// version got that wrong** — it asserted on Linux, and `test (ubuntu-latest)`
+	// went red because ubuntu has no bubblewrap, which is the entire reason this
+	// file's own CI leg exists. A platform is the wrong precondition here in a way
+	// it is not for the seatbelt file: `/usr/bin/sandbox-exec` ships with macOS, so
+	// on macOS "is it there" and "is it macOS" agree, and bubblewrap is a package
+	// on both Linux and macOS. **Where a sentinel is present the two hypotheses
+	// coincide; where it is not they do not, and asserting on the wrong one
+	// produces a red that says nothing about the code.**
+	if (!BWRAP_ON_PATH) {
+		console.warn(`[bwrap-smoke] bwrap is not installed here, so there is nothing to compare against`);
 		return;
 	}
 	expect(

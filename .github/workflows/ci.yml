@@ -144,9 +144,34 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: install bubblewrap
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
-      - name: bwrap can create a namespace here
+      # Ubuntu 24.04 sets kernel.apparmor_restrict_unprivileged_userns=1, and the
+      # runner is 24.04, so an unprivileged bwrap fails with
+      #   bwrap: setting up uid map: Permission denied
+      # This step was measured failing exactly that way before it existed.
+      #
+      # **An AppArmor profile for bwrap, not a sysctl change.** Flipping the
+      # sysctl back to 0 would lift the restriction for every unprivileged binary
+      # on the runner, which is the wrong trade for a job whose whole purpose is
+      # to prove a sandbox holds. The profile grants the userns operation to one
+      # path and leaves the system-wide restriction exactly as Ubuntu ships it.
+      - name: let bwrap create a user namespace
         run: |
-          bwrap --unshare-user --unshare-pid --ro-bind / / -- /bin/echo ok
+          sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+            include if exists <local/bwrap>
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+      # The gate. If the profile did not take, or the kernel refuses for another
+      # reason, the job stops here with the real error rather than running a suite
+      # in which every sandbox row skipped — which is a green job that tested
+      # nothing, and the exact failure this leg exists to prevent.
+      - name: bwrap can create a namespace here
+        run: bwrap --unshare-user --unshare-pid --ro-bind / / -- /bin/echo ok
       - run: pnpm test
 
   # All three, because "this compiles into a standalone binary on each of them"
