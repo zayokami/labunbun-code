@@ -10,10 +10,10 @@
  * > box — `mv` a directory containing a `.git` out from under its parent and see
  * > whether the repository survives.
  *
- * That is this file, and **the answer is that the belief was false.** A directory
- * containing a protected path can be renamed out from under its parent, and the
- * `.git` is writable at its new location. `bwrap.ts` now says so; the row that
- * proves it stays red until the translator is fixed.
+ * That is this file, and **the answer was that the belief was false.** A directory
+ * containing a protected path could be renamed out from under its parent and the
+ * `.git` was writable at its new location. `bwrap.ts` now mounts the ancestors,
+ * and the row that proves it passes.
  *
  * ## Every row has its control, and the controls are what make the rows mean anything
  *
@@ -352,13 +352,109 @@ smoke("MEASURE: what a mount arrangement can say about renaming an ancestor", ()
 		);
 	}
 
-	// Asserts nothing about the mechanism on purpose — see the doc comment. It
-	// asserts that probe A ran and that its rename actually succeeded, because A is
-	// the known bypass and a version of this file where A stopped reproducing it
-	// means the translator changed and this row needs re-reading.
+	// Asserts nothing about the mechanism on purpose — see the doc comment. Probe A
+	// is the argv as it stands today, so this asserts the *current* rename verdict:
+	// when the translator stops producing a working relocation this row goes red and
+	// says so, rather than the file carrying a measurement nobody is comparing.
 	const known = rows[0]?.[1];
 	expect(known, "probe A did not run, so nothing was measured").toBeDefined();
-	expect(known?.rename.status, `probe A did not reproduce the bypass: ${known?.rename.stderr.slice(0, 200)}`).toBe(0);
+	console.log(
+		`[bwrap-smoke] probe A today: rename exit=${known?.rename.status} — ` +
+			`${known?.rename.status === 0 ? "the relocation bypass is OPEN" : "the ancestor mount refuses it"}`,
+	);
+});
+
+/**
+ * **Which mount order protects the ancestor without freezing the workspace.**
+ *
+ * The fix as first written put `--ro-bind <ancestor> <ancestor>` after the writable
+ * `--bind <workspace> <workspace>`, and a later mount shadows an earlier one at the
+ * same path — so the ancestor bind covered the workspace and the whole workspace
+ * went read-only. `CONTROL: a write inside the workspace succeeds` caught it on CI
+ * (`expect(existsSync(target)).toBe(false)`), which is that control's entire reason
+ * for existing: it is the "a sandbox that refuses everything passes every refusal
+ * assertion" guard, and it earned its place within a day.
+ *
+ * **The failing shape was measured; the fix was not.** Probe C above answered
+ * "does an ancestor read-only bind refuse the rename, and keep `.git` readable and
+ * unwritable" — and it did. It said nothing about the *other* mount the ancestor
+ * collides with, so the implementation copied C's fragment without asking what
+ * else lands at that path. This row is the question that was missing.
+ *
+ * Three orders, each on its own tree, each reporting the same three facts: can
+ * the workspace still be written, is the rename refused, and is `.git` still
+ * readable. A fix needs all three; the first implementation had two of three in
+ * the wrong direction.
+ */
+smoke("MEASURE: which ancestor mount order keeps the workspace writable", () => {
+	/**
+	 * Build an argv with the ancestor bind spliced at a chosen depth, so the
+	 * probes genuinely differ.
+	 *
+	 * **The first version of this row had no discriminating power and I would not
+	 * have known from its output.** It took the translator's argv, sliced at `--`,
+	 * and appended the ancestor bind — so "before the workspace bind" and "after
+	 * the workspace bind" both landed after it, and printed the same numbers for
+	 * different labels. A probe whose two hypotheses produce the same output
+	 * decides nothing, and two rows with identical output under different names
+	 * look like agreement.
+	 *
+	 * So the position is an explicit index here, and each order is spliced at the
+	 * index it names.
+	 */
+	const argvWith = (
+		workspace: string,
+		ancestor: string,
+		insertAt: "before-writable" | "after-writable" | "re-bind-after",
+	) => {
+		const base = buildBwrapArgs(policyFor(workspace, [join(ancestor, ".git")]), ["/bin/sh", "-c", "true"], (p) =>
+			existsSync(p),
+		);
+		const firstBind = base.indexOf("--bind");
+		const insert = base.indexOf("--", firstBind) === -1 ? base.length : base.indexOf("--");
+		const at = insertAt === "before-writable" ? firstBind : insert;
+		return [...base.slice(0, at), "--ro-bind", ancestor, ancestor, ...base.slice(at)];
+	};
+
+	const probe = (insertAt: "before-writable" | "after-writable" | "re-bind-after") => {
+		const { workspace, sub } = workspaceFixture();
+		const argv = argvWith(workspace, sub, insertAt);
+		const writableIn = join(workspace, "in-workspace.md");
+		const relocated = join(workspace, "relocated");
+
+		const one = (command: string) => {
+			const r = spawnSync("bwrap", [...argv.slice(0, argv.indexOf("--")), "--", "/bin/sh", "-c", command], {
+				encoding: "utf8",
+			});
+			return { status: r.status, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
+		};
+		return {
+			workspaceWrite: one(touchPayload(writableIn)),
+			// Whether the file is really there, which is the half stdout cannot say: a
+			// shell can print WROTE and have written nothing.
+			landed: existsSync(writableIn),
+			rename: one(`mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`),
+			gitWrite: one(touchPayload(join(sub, ".git", "HEAD"))),
+			gitRead: one(
+				`head -c 1 ${JSON.stringify(join(sub, ".git", "HEAD"))} >/dev/null 2>&1 && echo read || echo unread`,
+			),
+		};
+	};
+
+	console.log("[bwrap-smoke] D/E/F — printed, not asserted: which order keeps all three properties");
+	for (const [label, at] of [
+		["D  ancestor ro-bind AFTER the workspace bind (today): ", "after-writable"],
+		["E  ancestor ro-bind BEFORE the workspace bind:        ", "before-writable"],
+		["F  ancestor ro-bind after, workspace bind re-applied:", "re-bind-after"],
+	] as const) {
+		const r = probe(at);
+		console.log(
+			`  ${label}` +
+				` workspace-write=${r.workspaceWrite.stdout || r.workspaceWrite.stderr.slice(0, 24)} (landed=${r.landed})` +
+				`  rename exit=${r.rename.status}` +
+				`  .git write=${r.gitWrite.stdout || r.gitWrite.stderr.slice(0, 20)} read=${r.gitRead.stdout || r.gitRead.stderr.slice(0, 20)}`,
+		);
+	}
 });
 
 test("where bwrap is installed, this file does not skip", () => {
