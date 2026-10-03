@@ -916,19 +916,42 @@ export function mimocodeReadRoots(
 	return [...new Set(found.filter((dir) => dir !== ""))];
 }
 
-/** Every `.mimocode` from `start` up to and including `start` itself. */
+/**
+ * Every `<name>` directory from `start` up to and including `start` itself.
+ *
+ * **The absolute-path root has to be carried explicitly, and losing it is a real
+ * bug this shipped with for one commit.** The first version filtered the empty
+ * segments away and then asked whether `parts[0] === ""` to detect a POSIX root —
+ * but the filter had already removed it, so the test was false for every POSIX
+ * path and `join("tmp", "x", ".mimocode")` came back as a **relative** path with
+ * the leading `/` gone.
+ *
+ * It passed on Windows, where the drive letter is a real segment and survives,
+ * and it failed on `test (ubuntu-latest)` and `test (macos-latest)` with the
+ * evidence sitting in the assertion output: the expected `/tmp/lbb-.../code/app/
+ * .mimocode` against a received `"tmp/lbb-.../code/app/.mimocode"`.
+ *
+ * So the root is detected **before** the filter, from the text itself.
+ */
 function walkUp(start: string, name: string): string[] {
-	const parts = start
-		.replace(/\\/g, "/")
-		.split("/")
-		.filter((part) => part !== "");
+	const normalized = start.replace(/\\/g, "/");
+	// A POSIX absolute path starts with `/` and a Windows one with a drive letter
+	// plus a separator. Either way the root is not a directory that can hold a
+	// child, so the walk starts one level below it.
+	const posixRoot = normalized.startsWith("/");
+	const windowsRoot = /^[a-zA-Z]:[\\/]/.test(normalized);
+	const parts = normalized.split("/").filter((part) => part !== "");
 	if (parts.length === 0) return [];
-	// A leading `/` (or a Windows drive letter, which survives as the first part)
-	// is not a directory that can hold one, so the walk starts one level below it.
-	const from = parts[0] === "" || /^[a-zA-Z]:$/.test(parts[0]) ? 1 : 0;
+	// `from` is the index of the first segment that is a real directory. For a
+	// POSIX root it is 1, because the `tmp` in `/tmp/...` is below the root; for a
+	// Windows root the drive letter is `parts[0]` and `Users` is `parts[1]`, so it
+	// is 1 as well; for a relative path nothing is above the first segment, so 0.
+	const from = posixRoot || windowsRoot ? 1 : 0;
 	const out: string[] = [];
 	for (let i = parts.length; i > from; i -= 1) {
-		out.push(join(...parts.slice(0, i), name));
+		// The root prefix is re-attached, or every result is relative.
+		const prefix = posixRoot ? ["/"] : [];
+		out.push(join(...prefix, ...parts.slice(0, i), name));
 	}
 	return out;
 }

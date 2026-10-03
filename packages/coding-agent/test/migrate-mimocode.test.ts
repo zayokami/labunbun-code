@@ -309,6 +309,44 @@ test("the roots that are read are the product's, weakest first", () => {
 	expect(mimocodeReadRoots(home, roots, undefined, {})).toEqual([roots.config, join(home, ".mimocode")]);
 });
 
+/**
+ * The walk keeps an absolute path absolute, and this says so in a way that does
+ * not follow the host's separator.
+ *
+ * **The rows above could not catch this, which is why they did not.** They
+ * compare against `join(cwd, …)`, so on Windows they compare backslashes to
+ * backslashes and on Linux slashes to slashes — and both pass while the resolver
+ * is dropping the leading `/`. The bug was visible only in CI's output, as
+ * `Expected to contain: "/tmp/…/code/app/.mimocode"` against
+ * `Received: "tmp/…/code/app/.mimocode"`.
+ *
+ * So this builds the expectation from **POSIX text** and normalises the resolver's
+ * answer before comparing. The normalisation is what makes the assertion
+ * separator-independent: a path that lost its root is missing the `/` after
+ * normalisation too, so it still fails.
+ */
+test("a POSIX absolute cwd keeps its root and does not walk above it", () => {
+	borrowEnvForFixture();
+	const posixHome = "/tmp/lbb-mimocode-posix-home";
+	const posixCwd = `${posixHome}/code/app`;
+	const roots = mimocodeRoots(posixHome, {});
+	const found = mimocodeReadRoots(posixHome, roots, posixCwd, {});
+
+	// Normalised to `/` so the assertion is about the ROOT, not the separator.
+	const asPosix = (value: string): string => value.replace(/\\/g, "/");
+	expect(found.map(asPosix)).toContain(`${posixCwd}/.mimocode`);
+	expect(found.map(asPosix)).toContain(`${posixHome}/.mimocode`);
+
+	// The half the rows above could never see: the old walk filtered the empty
+	// segments away and then tested `parts[0] === ""`, which the filter had
+	// already made false, so `from` was always 0 and the walk climbed past the
+	// root. It produced `/tmp/.mimocode` and `/` — a reader that honours
+	// `$MIMOCODE_CONFIG_DIR` would then have been joined by two directories the
+	// user never configured.
+	expect(found.map(asPosix)).not.toContain("/tmp/.mimocode");
+	expect(found.map(asPosix)).not.toContain("/.mimocode");
+});
+
 // ---------------------------------------------------------------------------
 // Detection
 // ---------------------------------------------------------------------------
