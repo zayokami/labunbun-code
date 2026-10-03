@@ -1,17 +1,23 @@
 /**
- * DeepSeek harness state: `settings.yaml`, `AGENTS.md`, skills, the cordis
- * patches that declare MCP servers, `.agent-presets`, and sessions.
+ * DeepSeek harness state: the cordis patch rows that carry both its settings and
+ * its MCP servers, `AGENTS.md`, skills, and sessions.
  *
- * `DSH_SETTINGS_FILES` is private to this reader, and that is the only reason
- * it is here rather than shared: it names this harness's own files.
+ * **There is no settings document.** The reader used to open
+ * `<root>/settings.yaml` (plus `settings.yml` and `settings.json`), and all
+ * three names are wrong for the current product: `settings.yaml` is retired —
+ * `settings/settings/src/index.ts:238` calls it "the removed `settings.yaml`"
+ * and only renames it to `.imported` on a one-shot upgrade import — and the
+ * other two have zero occurrences anywhere in the shipped tree. Reading them
+ * found nothing on every current install, so every settings-driven branch of the
+ * planner was silently unreachable. See {@link readDshSettingsRows}.
  */
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { DshMcpRead } from "./dsh-cordis.ts";
-import { readDshMcpServers } from "./dsh-cordis.ts";
+import { readDshMcpServers, readDshSettingsRows } from "./dsh-cordis.ts";
 import { dshRoot } from "./dsh-home.ts";
-import { isRecord, readSkillDirs, readText } from "./migrate-core.ts";
+import { readSkillDirs, readText } from "./migrate-core.ts";
 import type { RawFile } from "./migrate-types.ts";
 
 /**
@@ -27,12 +33,13 @@ export interface RawDeepSeekHarness {
 	/** <root>/AGENTS.md */
 	memory: string | null;
 	skills: RawFile[];
-	/** Top-level sections of the settings document; its keys are settings namespaces. */
+	/** Cordis settings rows, keyed by entry id; the values are their `config` blocks. */
 	settings: Record<string, unknown>;
 	/**
-	 * The settings document that was read, when there was one: its file name, and —
-	 * when it could not be parsed — the fact that is worth reporting. Absent when
-	 * the root holds no settings file, which is why the plan says nothing about one.
+	 * The composition the settings rows were folded out of, when there was one:
+	 * the file that carried them, or how many layers there were. Absent when no
+	 * patch layer carried a row, which is why the plan says nothing about one.
+	 * `error` is set when a layer existed but would not parse.
 	 */
 	settingsSource?: { file: string; error?: string };
 	/** MCP servers declared by the root's cordis patches, as the sibling reader found them. */
@@ -51,8 +58,54 @@ export interface RawDeepSeekHarness {
 	storagesPresent: boolean;
 }
 
-/** Settings documents the harness reads, in the order it looks for one. */
-const DSH_SETTINGS_FILES = ["settings.yaml", "settings.yml", "settings.json"];
+/**
+ * The settings rows out of the harness home, keyed by entry id.
+ *
+ * **The `settings` field is the whole settings model, and there is no file
+ * behind it.** The planner indexes it by id (`raw.settings["llm-pi-ai"]`,
+ * `raw.settings["llm-deepseek"]`, `raw.settings["agent-default-model"]`,
+ * `raw.settings.permission`) — which is what it has always done and is exactly
+ * the shape a Cordis patch row composes to — so the repair was entirely on this
+ * side: read the rows out of the patch layers instead of opening three filenames
+ * the product does not use.
+ */
+function readDshSettings(root: string): {
+	settings: Record<string, unknown>;
+	settingsSource?: { file: string; error?: string };
+} {
+	const read = readDshSettingsRows(root);
+	// Every row's config block, keyed by id. A row with no `config` folds to `{}`,
+	// which is the harness's own meaning for "the row exists and sets nothing".
+	const settings: Record<string, unknown> = { ...read.rows };
+	const entries = Object.entries(read.sources);
+
+	if (entries.length === 0) {
+		// No patch layer carried a row. That is an honest absence and the plan
+		// says nothing about settings, exactly as it says nothing about a missing
+		// `settings.json` used to — but the reason is now the composition, and
+		// naming it costs one line and tells a user where to look.
+		if (read.notes.length > 0) {
+			return { settings, settingsSource: { file: "cordis.patch.yml", error: read.notes[0]?.reason } };
+		}
+		return { settings };
+	}
+
+	// The file that carried the most rows is the one to name. When a home has
+	// several layers this is a summary rather than a single answer, and the plan
+	// only uses the name to point at "where the settings are", so the summary is
+	// the honest thing to print.
+	const files = [...new Set(entries.map(([, file]) => file))];
+	// `files.length === 1` is the only way `files[0]` is read, so the empty case
+	// cannot reach it — but a non-null assertion says "prove it", and the claim is
+	// one character from being wrong. Spelled out instead.
+	const only = files.length === 1 ? files[0] : undefined;
+	return { settings, settingsSource: { file: only === undefined ? `${files.length} patch layers` : basenameOf(only) } };
+}
+
+function basenameOf(path: string): string {
+	const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+	return cut === -1 ? path : path.slice(cut + 1);
+}
 
 export function readDeepSeekHarness(home: string): RawDeepSeekHarness {
 	const root = dshRoot(home);
@@ -76,36 +129,6 @@ export function readDeepSeekHarness(home: string): RawDeepSeekHarness {
 		attachmentsPresent: existsSync(join(root, "attachments")),
 		storagesPresent: existsSync(join(root, "storages")),
 	};
-}
-
-/**
- * The harness's settings document, as one namespace-keyed object.
- *
- * `Bun.YAML.parse` reads JSON too, so one call covers all three spellings. Only
- * the first file that exists is read: the harness composes exactly one settings
- * document, so a second one beside it is not a second settings source.
- *
- * A document that will not parse migrates nothing and is reported as such. The
- * harness itself refuses to start on one, so there is a file for the user to fix;
- * aborting the whole migration over it would also drop the sources that are fine.
- * The reason is a fixed phrase rather than the parser's own message, which can
- * quote the line it choked on — and that line is often a credential.
- */
-function readDshSettings(
-	root: string,
-): { settings: Record<string, unknown> } & Pick<RawDeepSeekHarness, "settingsSource"> {
-	for (const file of DSH_SETTINGS_FILES) {
-		const text = readText(join(root, file));
-		if (text === null) continue;
-		try {
-			const parsed: unknown = Bun.YAML.parse(text);
-			// A document with no mapping at its root has no sections to read.
-			return { settings: isRecord(parsed) ? parsed : {}, settingsSource: { file } };
-		} catch {
-			return { settings: {}, settingsSource: { file, error: "is not parseable as YAML or JSON" } };
-		}
-	}
-	return { settings: {} };
 }
 
 /**

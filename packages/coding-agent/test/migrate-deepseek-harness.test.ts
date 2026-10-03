@@ -20,6 +20,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveModel } from "@labunbun/ai";
+import { readDshSettingsRows } from "../src/dsh-cordis.ts";
 import { DSH_SHIPPED_PRESETS } from "../src/dsh-plan.ts";
 import { detectSources, runMigration } from "../src/migrate.ts";
 import { borrowSourceEnv } from "./source-env.ts";
@@ -207,43 +208,65 @@ const FLAT_SKILL_MD = [
 ].join("\n");
 
 /**
- * A harness `settings.yaml` with the sections the importer reads: the default
- * model, two providers, and a permission preset that is the one shape with an
- * equivalent here.
+ * A harness composition carrying the rows the importer reads: the default model,
+ * two providers, and a permission preset that is the one shape with an equivalent
+ * here.
+ *
+ * **This is a Cordis patch layer, and it is the only settings shape the product
+ * has.** The fixtures used to be a `settings.yaml` mapping, which stopped being
+ * one: `settings/settings/src/index.ts:238` names it "the removed
+ * `settings.yaml`" and keeps it only to rename it to `.imported` on a one-shot
+ * upgrade import. A test written against the old document kept passing while the
+ * importer read nothing at all, which is the failure the rewrite exists to stop.
+ *
+ * The row shape is the shipped one — `- insert:` holding `- id:` entries, each
+ * with a `config` block — so a typo in a row id fails here rather than in a home.
  */
 const DSH_SETTINGS = [
-	"agent-default-model:",
+	"- insert:",
+	"    - id: agent-default-model",
+	"      name: '@deepseek-ai/dsh-agent-default-model'",
+	"      config:",
 	// `deepseek-official` is the route the harness's own composition mounts; the
-	// document names it rather than declaring an endpoint for it.
-	"  provider: deepseek-official",
-	"  model: deepseek-v4-pro",
-	"  reasoningEffort: high",
-	"llm-pi-ai:",
-	"  providers:",
-	"    gateway:",
-	"      apiKeyEnv: GATEWAY_API_KEY",
-	"      api: openai-completions",
-	"      baseURL: https://gateway.example/v1",
-	"      models:",
-	"        - id: gateway-chat",
-	"          contextWindow: 131072",
-	"          maxTokens: 4096",
-	"llm-deepseek:",
-	"  apiKeyEnv: DEEPSEEK_API_KEY",
-	"  baseURL: https://api.deepseek.com/v1",
-	"  protocol: chat-completions",
-	"  models:",
-	"    - id: deepseek-v4-pro",
-	"      contextWindow: 1000000",
-	"      maxTokens: 384000",
+	// row names it rather than declaring an endpoint for it.
+	"        provider: deepseek-official",
+	"        model: deepseek-v4-pro",
+	"        reasoningEffort: high",
+	"",
+	"    - id: llm-pi-ai",
+	"      name: '@deepseek-ai/dsh-llm-pi-ai'",
+	"      config:",
+	"        providers:",
+	"          gateway:",
+	"            apiKeyEnv: GATEWAY_API_KEY",
+	"            api: openai-completions",
+	"            baseURL: https://gateway.example/v1",
+	"            models:",
+	"              - id: gateway-chat",
+	"                contextWindow: 131072",
+	"                maxTokens: 4096",
+	"",
+	"    - id: llm-deepseek",
+	"      name: '@deepseek-ai/dsh-llm-deepseek-api-key'",
+	"      config:",
+	"        apiKeyEnv: DEEPSEEK_API_KEY",
+	"        baseURL: https://api.deepseek.com/v1",
+	"        protocol: chat-completions",
+	"        models:",
+	"          - id: deepseek-v4-pro",
+	"            contextWindow: 1000000",
+	"            maxTokens: 384000",
 	"",
 ].join("\n");
 
-/** A settings.yaml whose default model no labunbun table entry answers to. */
+/** A composition whose default model no labunbun table entry answers to. */
 const UNRESOLVABLE_SETTINGS = [
-	"agent-default-model:",
-	"  provider: deepseek-official",
-	"  model: deepseek-v5-ultra",
+	"- insert:",
+	"    - id: agent-default-model",
+	"      name: '@deepseek-ai/dsh-agent-default-model'",
+	"      config:",
+	"        provider: deepseek-official",
+	"        model: deepseek-v5-ultra",
 	"",
 ].join("\n");
 
@@ -251,16 +274,19 @@ const UNRESOLVABLE_SETTINGS = [
 const TABLE_CONTEXT_WINDOW = 1_000_000;
 const DRIFT_CONTEXT_WINDOW = 262_144;
 
-/** The DeepSeek catalog declaring a model the table knows with numbers it does not. */
+/** A composition row declaring a model the table knows with numbers it does not. */
 const DRIFT_SETTINGS = [
-	"llm-deepseek:",
-	"  apiKeyEnv: DEEPSEEK_API_KEY",
-	"  baseURL: https://api.deepseek.com/v1",
-	"  protocol: chat-completions",
-	"  models:",
-	"    - id: deepseek-v4-pro",
-	`      contextWindow: ${DRIFT_CONTEXT_WINDOW}`,
-	"      maxTokens: 384000",
+	"- insert:",
+	"    - id: llm-deepseek",
+	"      name: '@deepseek-ai/dsh-llm-deepseek-api-key'",
+	"      config:",
+	"        apiKeyEnv: DEEPSEEK_API_KEY",
+	"        baseURL: https://api.deepseek.com/v1",
+	"        protocol: chat-completions",
+	"        models:",
+	"          - id: deepseek-v4-pro",
+	`            contextWindow: ${DRIFT_CONTEXT_WINDOW}`,
+	"            maxTokens: 384000",
 	"",
 ].join("\n");
 
@@ -301,11 +327,21 @@ function permissionSettings(
 	defaultPreset: string,
 	presets: Record<string, { sandbox: string; approval: string }> = DSH_SHIPPED_PRESETS,
 ): string {
-	const lines = ["permission:", `  defaultPreset: ${defaultPreset}`];
+	const lines = [
+		"- insert:",
+		"    - id: permission",
+		"      name: '@deepseek-ai/dsh-permission-presets'",
+		"      config:",
+		`        defaultPreset: ${defaultPreset}`,
+	];
 	if (Object.keys(presets).length > 0) {
-		lines.push("  presets:");
+		lines.push("        presets:");
 		for (const [name, spec] of Object.entries(presets)) {
-			lines.push(`    ${name}:`, `      sandbox: ${spec.sandbox}`, `      approval: ${spec.approval}`);
+			lines.push(
+				`          ${name}:`,
+				`            sandbox: ${spec.sandbox}`,
+				`            approval: ${spec.approval}`,
+			);
 		}
 	}
 	lines.push("");
@@ -315,7 +351,7 @@ function permissionSettings(
 /** A full harness home: memory, both skill shapes, settings, and the named leftovers. */
 const FULL_TREE: SourceTree = {
 	".dsh/AGENTS.md": AGENTS_MD,
-	".dsh/settings.yaml": DSH_SETTINGS,
+	".dsh/cordis.patch.yml": DSH_SETTINGS,
 	".dsh/skills/release-notes/SKILL.md": SKILL_MD,
 	".dsh/skills/changelog.md": FLAT_SKILL_MD,
 	".dsh/.agent-presets/reviewer.md": "---\nname: reviewer\n---\n\nReview the diff.\n",
@@ -342,12 +378,94 @@ describe("migrate: DeepSeek Harness source", () => {
 		});
 	});
 
+	/**
+	 * The retired settings filenames carry nothing, even when a file is there.
+	 *
+	 * **This test exists because a mutation proved the suite could not see the
+	 * repair.** Pointing the reader back at `settings.yaml` — the file
+	 * `settings/settings/src/index.ts:238` calls "the removed `settings.yaml`" —
+	 * left every test green. That is the whole failure this source had: it read a
+	 * document the product does not use, found nothing, and reported a clean
+	 * import. A regression test that only exercises the new happy path cannot see
+	 * it coming back, so this one writes a *complete, valid, old-shaped* settings
+	 * document and asserts that nothing in it is carried across.
+	 *
+	 * `settings.yml` and `settings.json` are in the same assertion and for a
+	 * stronger reason: **neither name has ever existed** in the shipped tree —
+	 * zero occurrences repo-wide — so a reader listing them was listing two
+	 * inventions. A file under either name today is a user's own, not the
+	 * harness's, and reading it would be the importer inventing configuration.
+	 */
+	test("the retired settings filenames carry nothing even when a document is there", () => {
+		const legacy = ["agent-default-model:", "  provider: deepseek-official", "  model: deepseek-v4-pro", ""].join("\n");
+		withHome(
+			{
+				".dsh/settings.yaml": legacy,
+				".dsh/settings.yml": legacy,
+				".dsh/settings.json": JSON.stringify({ "agent-default-model": { model: "deepseek-v4-pro" } }),
+			},
+			(home) => {
+				const rows = readDshSettingsRows(join(home, ".dsh")).rows;
+				// No row came from any of the three. `{}` is the answer both for
+				// "the file is not there" and for "the file is not one of ours",
+				// and the report says nothing either way.
+				expect(Object.keys(rows)).toEqual([]);
+
+				// And the run is silent about them rather than importing a model the
+				// user never had configured in this build.
+				const result = runMigration({ home });
+				expect(settingsJson(result)).toEqual({});
+				expect(result.plan.items.filter((i) => i.detail.includes("deepseek-v4-pro"))).toEqual([]);
+			},
+		);
+	});
+
+	/**
+	 * A row in two layers resolves the way the harness resolves it: **last write
+	 * wins**, because a patch replaces the targeted row's whole `config` rather
+	 * than merging into it (`packages/bundle/base/cordis.patch.yml`, header
+	 * comment: "the last write winning per row").
+	 *
+	 * **This test exists because a mutation proved nothing covered it.** Flipping
+	 * the fold to first-write-wins left the suite green — a settings importer that
+	 * kept the *bundle's* default instead of the user's own override would have
+	 * shipped without a single red test, which is the one failure mode worth a
+	 * test that no other test would catch.
+	 *
+	 * The two layers are ordered the way the reader walks them: the home-level
+	 * patch first, then each profile's own. So the profile row here is the
+	 * override, and it must win.
+	 */
+	test("a profile layer overrides the home-level row for the same id", () => {
+		const override = [
+			"- insert:",
+			"    - id: agent-default-model",
+			"      name: '@deepseek-ai/dsh-agent-default-model'",
+			"      config:",
+			"        provider: deepseek-official",
+			"        model: deepseek-v4-pro",
+			"        reasoningEffort: low",
+			"",
+		].join("\n");
+		withHome(
+			{
+				// The home layer sets `reasoningEffort: high`, the profile layer
+				// overrides the same row with `low`. Both declare the same `id`.
+				".dsh/cordis.patch.yml": DSH_SETTINGS,
+				".dsh/profiles/default/cordis.patch.yml": override,
+			},
+			(home) => {
+				expect(readDshSettingsRows(join(home, ".dsh")).rows["agent-default-model"]?.reasoningEffort).toBe("low");
+			},
+		);
+	});
+
 	// 2.
 	test("the harness home is found at ~/.dsh and at $DSH_HOME", () => {
-		withHome({ ".dsh/settings.yaml": DSH_SETTINGS }, (home) => {
+		withHome({ ".dsh/cordis.patch.yml": DSH_SETTINGS }, (home) => {
 			expect(detectSources(home)).toContain("deepseek-harness");
 		});
-		withMovedRoot({}, { "settings.yaml": DSH_SETTINGS, "AGENTS.md": AGENTS_MD }, ({ home }) => {
+		withMovedRoot({}, { "cordis.patch.yml": DSH_SETTINGS, "AGENTS.md": AGENTS_MD }, ({ home }) => {
 			// The home has no `.dsh` at all: everything comes from the moved root,
 			// for detection, for reading, and for the report's own labels.
 			expect(detectSources(home)).toContain("deepseek-harness");
@@ -366,7 +484,7 @@ describe("migrate: DeepSeek Harness source", () => {
 	test("a blank $DSH_HOME means unset", () => {
 		for (const blank of ["", "   ", "\t"]) {
 			withHome(
-				{ ".dsh/settings.yaml": DSH_SETTINGS },
+				{ ".dsh/cordis.patch.yml": DSH_SETTINGS },
 				(home) => {
 					expect(detectSources(home)).toContain("deepseek-harness");
 				},
@@ -377,7 +495,7 @@ describe("migrate: DeepSeek Harness source", () => {
 		// `.dsh` at all, and the populated root it does not name is never found.
 		withMovedRoot(
 			{},
-			{ "settings.yaml": DSH_SETTINGS },
+			{ "cordis.patch.yml": DSH_SETTINGS },
 			({ home }) => {
 				expect(detectSources(home)).toEqual([]);
 			},
@@ -475,7 +593,7 @@ describe("migrate: DeepSeek Harness source", () => {
 
 	// 6.
 	test("a resolvable default model becomes settings.model", () => {
-		withHome({ ".dsh/settings.yaml": DSH_SETTINGS }, (home) => {
+		withHome({ ".dsh/cordis.patch.yml": DSH_SETTINGS }, (home) => {
 			const result = runMigration({ home });
 			const model = settingsJson(result).model;
 			expect(typeof model).toBe("string");
@@ -486,7 +604,7 @@ describe("migrate: DeepSeek Harness source", () => {
 	});
 
 	test("an unresolvable default model is a skip naming provider and model", () => {
-		withHome({ ".dsh/settings.yaml": UNRESOLVABLE_SETTINGS }, (home) => {
+		withHome({ ".dsh/cordis.patch.yml": UNRESOLVABLE_SETTINGS }, (home) => {
 			const result = runMigration({ home });
 			const item = result.plan.items.find((i) => i.action === "skip" && i.detail.includes("deepseek-v5-ultra"));
 			expect(item?.source).toBe("deepseek-harness");
@@ -499,7 +617,7 @@ describe("migrate: DeepSeek Harness source", () => {
 
 	// 7.
 	test("providers merge into settings.providers with apiKeyEnv carried as a name", () => {
-		withHome({ ".dsh/settings.yaml": DSH_SETTINGS }, (home) => {
+		withHome({ ".dsh/cordis.patch.yml": DSH_SETTINGS }, (home) => {
 			const result = runMigration({ home });
 			const providers = (settingsJson(result).providers ?? {}) as {
 				openaiCompatible?: Array<{ id?: string; baseUrl?: string; apiKeyEnv?: string }>;
@@ -525,7 +643,7 @@ describe("migrate: DeepSeek Harness source", () => {
 		// lands as both keys. Reading the name as the mode would write
 		// `permissionMode: "workspace-write"`, which is a sandbox value in a mode
 		// slot, and skip the half that actually confines the process.
-		withHome({ ".dsh/settings.yaml": permissionSettings("workspace-write") }, (home) => {
+		withHome({ ".dsh/cordis.patch.yml": permissionSettings("workspace-write") }, (home) => {
 			const result = runMigration({ home });
 			const written = settingsJson(result);
 			expect(written.permissionMode).toBe("ask");
@@ -543,7 +661,7 @@ describe("migrate: DeepSeek Harness source", () => {
 		// entry behind it is what the user actually gets.
 		withHome(
 			{
-				".dsh/settings.yaml": permissionSettings("trusted", {
+				".dsh/cordis.patch.yml": permissionSettings("trusted", {
 					trusted: { sandbox: "danger-full-access", approval: "never" },
 				}),
 			},
@@ -559,7 +677,7 @@ describe("migrate: DeepSeek Harness source", () => {
 		// for approval while their configuration confines writes and does ask.
 		withHome(
 			{
-				".dsh/settings.yaml": permissionSettings("danger-full-access", {
+				".dsh/cordis.patch.yml": permissionSettings("danger-full-access", {
 					"danger-full-access": { sandbox: "read-only", approval: "ask" },
 				}),
 			},
@@ -594,7 +712,7 @@ describe("migrate: DeepSeek Harness source", () => {
 	test.each(DSH_SHIPPED_PRESET_CLAIMS)(
 		'a document stating the "%s" preset imports it as mode %s and sandbox %s',
 		(preset, mode, sandbox, approval) => {
-			withHome({ ".dsh/settings.yaml": permissionSettings(preset) }, (home) => {
+			withHome({ ".dsh/cordis.patch.yml": permissionSettings(preset) }, (home) => {
 				const result = runMigration({ home });
 				const written = settingsJson(result);
 				// Both halves, on every row. A mode-only assertion passes for a mapper
@@ -603,7 +721,7 @@ describe("migrate: DeepSeek Harness source", () => {
 				expect(written.permissionMode).toBe(mode);
 				expect(written.sandbox).toBe(sandbox);
 
-				const from = `settings.yaml → permission.defaultPreset ("${preset}")`;
+				const from = `cordis.patch.yml → permission.defaultPreset ("${preset}")`;
 				const modeItem = itemWriting(result, "permissionMode");
 				expect(modeItem?.action).toBe("map");
 				expect(modeItem?.from).toBe(from);
@@ -653,7 +771,7 @@ describe("migrate: DeepSeek Harness source", () => {
 		// document never asked for. Neither is a posture the source described.
 		withHome(
 			{
-				".dsh/settings.yaml": permissionSettings(
+				".dsh/cordis.patch.yml": permissionSettings(
 					"danger-full-access",
 					presets as Record<string, { sandbox: string; approval: string }>,
 				),
@@ -687,7 +805,7 @@ describe("migrate: DeepSeek Harness source", () => {
 			// ships. That is the whole reason the name can be trusted here — and only
 			// here: a document that states a table owns its own names, which is why
 			// the table-driven row above reads the bundle and never the name.
-			withHome({ ".dsh/settings.yaml": permissionSettings(preset, {}) }, (home) => {
+			withHome({ ".dsh/cordis.patch.yml": permissionSettings(preset, {}) }, (home) => {
 				const result = runMigration({ home });
 				expect(settingsJson(result).permissionMode).toBe(mode);
 				expect(settingsJson(result).sandbox).toBe(sandbox);
@@ -709,7 +827,7 @@ describe("migrate: DeepSeek Harness source", () => {
 		// documents failed to define it.
 		withHome(
 			{
-				".dsh/settings.yaml": permissionSettings(
+				".dsh/cordis.patch.yml": permissionSettings(
 					"yolo",
 					presets as Record<string, { sandbox: string; approval: string }>,
 				),
@@ -733,7 +851,7 @@ describe("migrate: DeepSeek Harness source", () => {
 
 	// 9.
 	test("a model whose context window differs from the table is reported, never written", () => {
-		withHome({ ".dsh/settings.yaml": DRIFT_SETTINGS }, (home) => {
+		withHome({ ".dsh/cordis.patch.yml": DRIFT_SETTINGS }, (home) => {
 			const result = runMigration({ home });
 			// The drifted number is the signal: no other item has a reason to print it.
 			const skip = result.plan.items.find(

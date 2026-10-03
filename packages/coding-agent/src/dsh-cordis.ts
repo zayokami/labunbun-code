@@ -111,6 +111,91 @@ export function readDshMcpServers(dshHome: string): DshMcpRead {
 }
 
 /**
+ * The settings namespaces a harness home carries, keyed the way the planner reads
+ * them: `llm-pi-ai`, `llm-deepseek`, `agent-default-model`, `permission`.
+ *
+ * ## Why this exists, and what it replaces
+ *
+ * The reader used to open `<root>/settings.yaml`, with `settings.yml` and
+ * `settings.json` as two more spellings. **All three are wrong for the current
+ * product.** `settings.yaml` is retired: `settings/settings/src/index.ts:238`
+ * names it "the removed `settings.yaml`" and its only remaining use is a one-shot
+ * import that renames the file to `settings.yaml.imported` before the first
+ * write. The other two names have **zero occurrences anywhere in the shipped
+ * tree** — they were never files.
+ *
+ * So on any current install that reader found nothing, `settings` came back `{}`,
+ * and every provider/model/permission branch in the planner was silently
+ * unreachable — with no report line, because an absent settings document is
+ * correctly reported as nothing to say. That is the expensive failure this
+ * comment exists to prevent: the report reads normally while importing none of it.
+ *
+ * ## The shape is not a mapping
+ *
+ * Settings are Cordis patch rows now — an `- id:` addressed list, later layers
+ * overwriting a row's whole `config` rather than merging into it. So this is a
+ * **last-write-wins fold over rows keyed by id**, and it is the same files
+ * {@link readDshMcpServers} already reads, in the same order, with the same YAML
+ * handling. Only the selection and the fold are new.
+ */
+export interface DshSettingsRead {
+	/** Entry id → its `config` block, as the harness would compose it. */
+	rows: Record<string, Record<string, unknown>>;
+	/** The file each folded row's winning value came from. */
+	sources: Record<string, string>;
+	notes: Array<{ from: string; reason: string }>;
+}
+
+/**
+ * Read the settings rows out of the same composition files the MCP reader walks.
+ *
+ * Reuses {@link readCompositionFile}'s file handling by walking the same list —
+ * reading the files twice is cheaper than a second YAML implementation, and two
+ * parsers over one format is how the two drift.
+ */
+export function readDshSettingsRows(dshHome: string): DshSettingsRead {
+	const state: ReadState = { servers: [], notes: [], filesRead: [], claimed: new Map() };
+	const rows: Record<string, Record<string, unknown>> = {};
+	const sources: Record<string, string> = {};
+
+	for (const file of compositionFiles(dshHome)) {
+		const document = readCompositionFile(file, state);
+		// A file that could not be read or parsed returns `undefined` and carries a
+		// note; its rows are absent rather than zero, which is the honest state.
+		if (document === undefined) continue;
+		for (const row of collectRows(document)) {
+			const id = row.id;
+			if (typeof id !== "string" || id === "") continue;
+			rows[id] = isRecord(row.config) ? row.config : {};
+			sources[id] = file;
+		}
+	}
+
+	return { rows, sources, notes: state.notes };
+}
+
+/**
+ * Every `{ id, name?, config? }` object in a document, at any depth.
+ *
+ * The depth matters: a patch is normally `- insert:` holding a list, but a row
+ * may also arrive through a merge or an alias, and the harness applies them all.
+ * Anchoring on `id` rather than on position is what makes that work.
+ */
+function collectRows(
+	node: unknown,
+	rows: Array<Record<string, unknown>> = [],
+	ancestors = new Set<object>(),
+): Array<Record<string, unknown>> {
+	if (typeof node !== "object" || node === null || ancestors.has(node)) return rows;
+	if (!Array.isArray(node) && !isRecord(node)) return rows;
+	ancestors.add(node);
+	if (isRecord(node) && typeof node.id === "string") rows.push(node);
+	for (const value of Array.isArray(node) ? node : Object.values(node)) collectRows(value, rows, ancestors);
+	ancestors.delete(node);
+	return rows;
+}
+
+/**
  * The files of a harness home that may declare MCP rows, in reading order.
  *
  * The home-level patch applies to every profile and outranks each profile's own
@@ -140,15 +225,23 @@ function compositionFiles(dshHome: string): string[] {
 	return files;
 }
 
-/** Read one patch file and add whatever rows it declares. */
-function readCompositionFile(file: string, state: ReadState): void {
-	if (!existsSync(file)) return;
+/**
+ * Read one patch file and add whatever rows it declares.
+ *
+ * Returns the parsed document when the file was read and parsed, so a caller
+ * that wants something other than MCP rows can fold them out of the same parse.
+ * The MCP reader ignores it; the settings reader depends on it. **One parser over
+ * one format**: two YAML readers over the same files is how the two start
+ * disagreeing about which file parsed.
+ */
+function readCompositionFile(file: string, state: ReadState): unknown {
+	if (!existsSync(file)) return undefined;
 	let text: string;
 	try {
 		text = readFileSync(file, "utf8");
 	} catch (error) {
 		state.notes.push({ from: file, reason: `could not be read — ${errorText(error)}` });
-		return;
+		return undefined;
 	}
 	let document: unknown;
 	try {
@@ -164,12 +257,12 @@ function readCompositionFile(file: string, state: ReadState): void {
 					"not parsed — the document leaves a flow collection (`{` or `[`) open past the end of its line, " +
 					"which the YAML parser here crashes on rather than rejecting; keep each flow collection on one line",
 			});
-			return;
+			return undefined;
 		}
 		document = Bun.YAML.parse(sanitized);
 	} catch (error) {
 		state.notes.push({ from: file, reason: `not valid YAML — ${errorText(error)}` });
-		return;
+		return undefined;
 	}
 	// Read, and parsed: whether it held anything is what `servers` and `notes`
 	// say, so the report can name every file it got through.
@@ -179,15 +272,19 @@ function readCompositionFile(file: string, state: ReadState): void {
 		// so anything else is a file this reader cannot interpret rather than a
 		// composition with a different shape. Saying what was found is the
 		// difference between "wrong file" and "empty file".
+		//
+		// The document is still returned: the settings rows are collected by
+		// walking for `id`, and a mapping at the root is a shape that walk handles.
 		state.notes.push({
 			from: file,
 			reason: `root is not a YAML list of composition rows — found ${documentKind(document)}`,
 		});
-		return;
+		return document;
 	}
 	const rows: Array<Record<string, unknown>> = [];
 	collectMcpRows(document, rows, new Set());
 	for (const [index, row] of rows.entries()) addRow(row, index, file, state);
+	return document;
 }
 
 /**

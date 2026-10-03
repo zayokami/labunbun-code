@@ -352,7 +352,14 @@ export function planDeepSeekHarness(
 	existingMcpServers: Record<string, unknown>,
 	force: boolean,
 ): void {
-	const settingsLabel = raw.settingsSource?.file ?? "settings.yaml";
+	// The name is only ever used to point at "where the settings are", and it was
+	// a hardcoded `settings.yaml` — **a file the product retired**
+	// (`settings/settings/src/index.ts:238` calls it "the removed
+	// `settings.yaml`"), so on a home whose rows came from a patch layer and
+	// carried no parse failure this printed a filename that does not exist. The
+	// reader supplies the real name whenever there is one; the fallback is only
+	// reachable when there is nothing to point at, and it says so.
+	const settingsLabel = raw.settingsSource?.file ?? "the patch layers (no composition carried a settings row)";
 	if (raw.settingsSource?.error !== undefined) {
 		items.push({
 			source: "deepseek-harness",

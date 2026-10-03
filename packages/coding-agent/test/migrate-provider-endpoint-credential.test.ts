@@ -361,30 +361,42 @@ describe("grok — a model endpoint, in either spelling and from either table", 
 // deepseek-harness — `llm-pi-ai.providers.<route>.baseURL`, `llm-deepseek.baseURL`
 // ---------------------------------------------------------------------------
 
-/** A harness `settings.yaml` with the routes the importer reads. */
+/**
+ * A harness composition carrying the routes the importer reads.
+ *
+ * A Cordis patch layer, not a `settings.yaml` mapping: the settings document was
+ * retired (`settings/settings/src/index.ts:238` calls it "the removed
+ * `settings.yaml`") and the routes now live in rows addressed by `- id:`.
+ */
 function dshYaml(gatewayBaseUrl: string, deepseekBaseUrl?: string): string {
 	const out = [
-		"llm-pi-ai:",
-		"  providers:",
-		"    gateway:",
-		"      apiKeyEnv: GATEWAY_API_KEY",
-		"      api: openai-completions",
-		`      baseURL: ${gatewayBaseUrl}`,
-		"      models:",
-		"        - id: gateway-chat",
-		"          contextWindow: 131072",
-		"          maxTokens: 4096",
+		"- insert:",
+		"    - id: llm-pi-ai",
+		"      name: '@deepseek-ai/dsh-llm-pi-ai'",
+		"      config:",
+		"        providers:",
+		"          gateway:",
+		"            apiKeyEnv: GATEWAY_API_KEY",
+		"            api: openai-completions",
+		`            baseURL: ${gatewayBaseUrl}`,
+		"            models:",
+		"              - id: gateway-chat",
+		"                contextWindow: 131072",
+		"                maxTokens: 4096",
 	];
 	if (deepseekBaseUrl !== undefined) {
 		out.push(
-			"llm-deepseek:",
-			"  apiKeyEnv: DEEPSEEK_API_KEY",
-			`  baseURL: ${deepseekBaseUrl}`,
-			"  protocol: chat-completions",
-			"  models:",
-			"    - id: deepseek-v4-pro",
-			"      contextWindow: 1000000",
-			"      maxTokens: 384000",
+			"",
+			"    - id: llm-deepseek",
+			"      name: '@deepseek-ai/dsh-llm-deepseek-api-key'",
+			"      config:",
+			"        apiKeyEnv: DEEPSEEK_API_KEY",
+			`        baseURL: ${deepseekBaseUrl}`,
+			"        protocol: chat-completions",
+			"        models:",
+			"          - id: deepseek-v4-pro",
+			"            contextWindow: 1000000",
+			"            maxTokens: 384000",
 		);
 	}
 	return `${out.join("\n")}\n`;
@@ -395,7 +407,7 @@ describe("deepseek-harness — the two baseURL fields", () => {
 		["userinfo", () => userinfo("gw.example.invalid"), PW],
 		["query token", () => queryToken("gw.example.invalid"), TOKEN],
 	])("a route baseURL carrying a %s is not written", (_shape, make, sentinel) => {
-		withPlan("lbb-plan-cred-dsh-", { ".dsh/settings.yaml": dshYaml(make()) }, "deepseek-harness", (planned) => {
+		withPlan("lbb-plan-cred-dsh-", { ".dsh/cordis.patch.yml": dshYaml(make()) }, "deepseek-harness", (planned) => {
 			expectRefused(planned, "providers.gateway", "dsh-gateway", sentinel);
 			expect(refusal(planned, "providers.gateway").detail).toContain("llm-pi-ai.providers.gateway.baseURL");
 		});
@@ -407,7 +419,7 @@ describe("deepseek-harness — the two baseURL fields", () => {
 	])("an llm-deepseek baseURL carrying a %s is not written", (_shape, make, sentinel) => {
 		withPlan(
 			"lbb-plan-cred-dsh-",
-			{ ".dsh/settings.yaml": dshYaml("https://gw.example.invalid/v1", make()) },
+			{ ".dsh/cordis.patch.yml": dshYaml("https://gw.example.invalid/v1", make()) },
 			"deepseek-harness",
 			(planned) => {
 				expectRefused(planned, "llm-deepseek", "dsh-deepseek-official", sentinel);
@@ -419,7 +431,7 @@ describe("deepseek-harness — the two baseURL fields", () => {
 	test("both clean baseURLs still migrate, and neither apiKeyEnv is flagged", () => {
 		withPlan(
 			"lbb-plan-cred-dsh-",
-			{ ".dsh/settings.yaml": dshYaml("https://gw.example.invalid/v1", "https://api.deepseek.invalid/v1") },
+			{ ".dsh/cordis.patch.yml": dshYaml("https://gw.example.invalid/v1", "https://api.deepseek.invalid/v1") },
 			"deepseek-harness",
 			(planned) => {
 				expect(providerById(planned, "dsh-gateway")[0]?.baseUrl).toBe("https://gw.example.invalid/v1");
@@ -442,18 +454,23 @@ describe("deepseek-harness — the two baseURL fields", () => {
 		withPlan(
 			"lbb-plan-cred-dsh-",
 			{
-				".dsh/settings.yaml": [
-					"agent-default-model:",
-					"  provider: deepseek-official",
-					"  model: deepseek-v4-pro",
-					"llm-deepseek:",
-					"  apiKeyEnv: DEEPSEEK_API_KEY",
-					`  baseURL: ${userinfo("api.deepseek.invalid")}`,
-					"  protocol: chat-completions",
-					"  models:",
-					"    - id: deepseek-v4-pro",
-					"      contextWindow: 1000000",
-					"      maxTokens: 384000",
+				".dsh/cordis.patch.yml": [
+					"- insert:",
+					"    - id: agent-default-model",
+					"      name: '@deepseek-ai/dsh-agent-default-model'",
+					"      config:",
+					"        provider: deepseek-official",
+					"        model: deepseek-v4-pro",
+					"    - id: llm-deepseek",
+					"      name: '@deepseek-ai/dsh-llm-deepseek-api-key'",
+					"      config:",
+					"        apiKeyEnv: DEEPSEEK_API_KEY",
+					`        baseURL: ${userinfo("api.deepseek.invalid")}`,
+					"        protocol: chat-completions",
+					"        models:",
+					"          - id: deepseek-v4-pro",
+					"            contextWindow: 1000000",
+					"            maxTokens: 384000",
 					"",
 				].join("\n"),
 			},
