@@ -63,12 +63,15 @@ const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
  * quietly passed against an empty history would be worse than one that does not
  * run, so it stays a skip until somebody decides the history is worth fetching.
  */
-const HISTORY = spawnSync("git", ["cat-file", "-e", "e24c8a6^{commit}"], { cwd: REPO_ROOT, stdio: "ignore" }).status === 0
-	? test
-	: test.skip;
+const HISTORY =
+	spawnSync("git", ["cat-file", "-e", "e24c8a6^{commit}"], { cwd: REPO_ROOT, stdio: "ignore" }).status === 0
+		? test
+		: test.skip;
 
 if (HISTORY === test.skip) {
-	console.warn("[benchmark-runner] history rows skipped: this checkout is shallow (actions/checkout defaults to depth 1)");
+	console.warn(
+		"[benchmark-runner] history rows skipped: this checkout is shallow (actions/checkout defaults to depth 1)",
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -408,51 +411,75 @@ describe("discoverCandidates", () => {
 		return discovery;
 	}
 
-	HISTORY("keeps e24c8a6, whose test file predates the commit", async () => {
-		const found = await candidates();
-		const kept = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
-		expect(kept).toBeDefined();
-		expect(kept?.srcFiles).toContain("packages/agent/src/dangerous-command.ts");
-		expect(kept?.testFile).toBe("packages/agent/test/dangerous-command.test.ts");
-		// The parent is what a task checks out, so it has to be the commit *before*.
-		expect(kept?.parent).not.toBe(kept?.hash);
-		expect(kept?.kept).toBe(true);
-	}, 120_000);
-	HISTORY("drops 14983d4, whose test file is new at that commit", async () => {
-		// **Named on purpose.** This is the commit where the "a new test file cannot
-		// be an oracle" rule is worth arguing with: `verify` measures this exact
-		// commit as 16 failing assertions — a real RED oracle — despite the exclusion.
-		// The rule is implemented as specified; this test is what keeps the cost of
-		// the rule visible.
-		const found = await candidates();
-		const dropped = found.dropped.find((c) => c.hash.startsWith("14983d4"));
-		expect(dropped).toBeDefined();
-		expect(dropped?.kept).toBe(false);
-		expect(dropped?.reason).toContain("new at this commit");
-		expect(dropped?.testFiles).toContain("packages/coding-agent/test/migrate-qoder-credential-scope.test.ts");
-		expect(found.kept.some((c) => c.hash.startsWith("14983d4"))).toBe(false);
-	}, 120_000);
-	HISTORY("drops a3d94d4 too, for the same reason", async () => {
-		const found = await candidates();
-		const dropped = found.dropped.find((c) => c.hash.startsWith("a3d94d4"));
-		expect(dropped?.reason).toContain("new at this commit");
-	}, 120_000);
-	HISTORY("every drop carries a reason a person can act on", async () => {
-		for (const candidate of (await candidates()).dropped) {
-			expect(candidate.reason.length).toBeGreaterThan(10);
-		}
-	}, 120_000);
-	HISTORY("no merge commit survives", async () => {
-		for (const candidate of (await candidates()).kept) {
-			expect(candidate.reason).not.toContain("merge");
-		}
-	}, 120_000);
-	HISTORY("every kept task has a parent that is not itself", async () => {
-		for (const candidate of (await candidates()).kept) {
-			expect(candidate.parent).not.toBe("");
-			expect(candidate.parent).not.toBe(candidate.hash);
-		}
-	}, 120_000);
+	HISTORY(
+		"keeps e24c8a6, whose test file predates the commit",
+		async () => {
+			const found = await candidates();
+			const kept = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
+			expect(kept).toBeDefined();
+			expect(kept?.srcFiles).toContain("packages/agent/src/dangerous-command.ts");
+			expect(kept?.testFile).toBe("packages/agent/test/dangerous-command.test.ts");
+			// The parent is what a task checks out, so it has to be the commit *before*.
+			expect(kept?.parent).not.toBe(kept?.hash);
+			expect(kept?.kept).toBe(true);
+		},
+		120_000,
+	);
+	HISTORY(
+		"drops 14983d4, whose test file is new at that commit",
+		async () => {
+			// **Named on purpose.** This is the commit where the "a new test file cannot
+			// be an oracle" rule is worth arguing with: `verify` measures this exact
+			// commit as 16 failing assertions — a real RED oracle — despite the exclusion.
+			// The rule is implemented as specified; this test is what keeps the cost of
+			// the rule visible.
+			const found = await candidates();
+			const dropped = found.dropped.find((c) => c.hash.startsWith("14983d4"));
+			expect(dropped).toBeDefined();
+			expect(dropped?.kept).toBe(false);
+			expect(dropped?.reason).toContain("new at this commit");
+			expect(dropped?.testFiles).toContain("packages/coding-agent/test/migrate-qoder-credential-scope.test.ts");
+			expect(found.kept.some((c) => c.hash.startsWith("14983d4"))).toBe(false);
+		},
+		120_000,
+	);
+	HISTORY(
+		"drops a3d94d4 too, for the same reason",
+		async () => {
+			const found = await candidates();
+			const dropped = found.dropped.find((c) => c.hash.startsWith("a3d94d4"));
+			expect(dropped?.reason).toContain("new at this commit");
+		},
+		120_000,
+	);
+	HISTORY(
+		"every drop carries a reason a person can act on",
+		async () => {
+			for (const candidate of (await candidates()).dropped) {
+				expect(candidate.reason.length).toBeGreaterThan(10);
+			}
+		},
+		120_000,
+	);
+	HISTORY(
+		"no merge commit survives",
+		async () => {
+			for (const candidate of (await candidates()).kept) {
+				expect(candidate.reason).not.toContain("merge");
+			}
+		},
+		120_000,
+	);
+	HISTORY(
+		"every kept task has a parent that is not itself",
+		async () => {
+			for (const candidate of (await candidates()).kept) {
+				expect(candidate.parent).not.toBe("");
+				expect(candidate.parent).not.toBe(candidate.hash);
+			}
+		},
+		120_000,
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -465,33 +492,37 @@ describe("worktree teardown", () => {
 	// a real commit and a shallow checkout has none. **The `finally` it exercises is
 	// not otherwise covered on a shallow clone**, which is worth stating rather
 	// than leaving as a silent gap.
-	HISTORY("a run that throws still removes the worktree", async () => {
-		// The `finally` is the whole reason to test this path: an exception between
-		// `worktree add` and the end of the task must not leave a directory that git
-		// still has registered, because the next run would then report a stale
-		// worktree that no one can account for.
-		// A real candidate, not a synthetic one: `verifyCandidate` reads the child's
-		// test file out of git before it calls `afterSetup`, so an invented hash
-		// would fail earlier for an unrelated reason and the throw this test is
-		// about would never be reached.
-		const found = await discoverCandidates({ repoRoot: REPO_ROOT, limit: 250 });
-		const candidate = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
-		expect(candidate).toBeDefined();
+	HISTORY(
+		"a run that throws still removes the worktree",
+		async () => {
+			// The `finally` is the whole reason to test this path: an exception between
+			// `worktree add` and the end of the task must not leave a directory that git
+			// still has registered, because the next run would then report a stale
+			// worktree that no one can account for.
+			// A real candidate, not a synthetic one: `verifyCandidate` reads the child's
+			// test file out of git before it calls `afterSetup`, so an invented hash
+			// would fail earlier for an unrelated reason and the throw this test is
+			// about would never be reached.
+			const found = await discoverCandidates({ repoRoot: REPO_ROOT, limit: 250 });
+			const candidate = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
+			expect(candidate).toBeDefined();
 
-		const dir = worktreeDir(candidate?.hash ?? "");
-		const outcome = await verifyCandidate(candidate as Candidate, {
-			repoRoot: REPO_ROOT,
-			install: false,
-			afterSetup: async () => {
-				throw new Error("deliberate failure after setup");
-			},
-		});
-		expect(outcome.error).toBe("deliberate failure after setup");
-		expect(outcome.cleanedUp).toBe(true);
-		expect(existsSync(dir)).toBe(false);
-		// And git's own record of it is gone, not just the directory.
-		expect((await staleWorktrees(REPO_ROOT)).some((w) => w.path === dir)).toBe(false);
-	}, 180_000);
+			const dir = worktreeDir(candidate?.hash ?? "");
+			const outcome = await verifyCandidate(candidate as Candidate, {
+				repoRoot: REPO_ROOT,
+				install: false,
+				afterSetup: async () => {
+					throw new Error("deliberate failure after setup");
+				},
+			});
+			expect(outcome.error).toBe("deliberate failure after setup");
+			expect(outcome.cleanedUp).toBe(true);
+			expect(existsSync(dir)).toBe(false);
+			// And git's own record of it is gone, not just the directory.
+			expect((await staleWorktrees(REPO_ROOT)).some((w) => w.path === dir)).toBe(false);
+		},
+		180_000,
+	);
 });
 
 // ---------------------------------------------------------------------------
@@ -499,62 +530,66 @@ describe("worktree teardown", () => {
 // ---------------------------------------------------------------------------
 
 describe("a real verify of one known task", () => {
-	HISTORY("classifies e24c8a6 as RED and leaves the main tree exactly as it found it", async () => {
-		// **This is the test that can only be believed by running it.**
-		//
-		// Two observations are made deterministic and compared exactly: HEAD (a
-		// "checkout" in the main tree moves it) and the worktree list (a leaked
-		// worktree shows up there, and nothing else in this repo churns it during a
-		// single test).
-		//
-		// `git status` proper cannot be compared exactly here, and it is worth saying
-		// why rather than tuning the assertion until it passes: three other agents are
-		// working in this tree at the same time. Two runs of this test each failed on a
-		// difference the runner did not make — first a new untracked
-		// `packages/coding-agent/test/writable-roots-wiring.test.ts` appearing between
-		// the two samples, then another agent modifying
-		// `packages/tools/test/sandbox-bwrap-smoke.test.ts`. So the equality is
-		// attempted, and a difference is reported loudly and attributed rather than
-		// papered over: the runner's own footprint is the worktree list and the
-		// %TEMP% workspace, neither of which can show up in `git status`.
-		const status = async (): Promise<string> =>
-			(await run(["git", "status", "--porcelain"], { cwd: REPO_ROOT })).stdout;
-		const worktrees = async (): Promise<string> =>
-			(await run(["git", "worktree", "list", "--porcelain"], { cwd: REPO_ROOT })).stdout;
-		const head = async (): Promise<string> => (await run(["git", "rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout;
+	HISTORY(
+		"classifies e24c8a6 as RED and leaves the main tree exactly as it found it",
+		async () => {
+			// **This is the test that can only be believed by running it.**
+			//
+			// Two observations are made deterministic and compared exactly: HEAD (a
+			// "checkout" in the main tree moves it) and the worktree list (a leaked
+			// worktree shows up there, and nothing else in this repo churns it during a
+			// single test).
+			//
+			// `git status` proper cannot be compared exactly here, and it is worth saying
+			// why rather than tuning the assertion until it passes: three other agents are
+			// working in this tree at the same time. Two runs of this test each failed on a
+			// difference the runner did not make — first a new untracked
+			// `packages/coding-agent/test/writable-roots-wiring.test.ts` appearing between
+			// the two samples, then another agent modifying
+			// `packages/tools/test/sandbox-bwrap-smoke.test.ts`. So the equality is
+			// attempted, and a difference is reported loudly and attributed rather than
+			// papered over: the runner's own footprint is the worktree list and the
+			// %TEMP% workspace, neither of which can show up in `git status`.
+			const status = async (): Promise<string> =>
+				(await run(["git", "status", "--porcelain"], { cwd: REPO_ROOT })).stdout;
+			const worktrees = async (): Promise<string> =>
+				(await run(["git", "worktree", "list", "--porcelain"], { cwd: REPO_ROOT })).stdout;
+			const head = async (): Promise<string> => (await run(["git", "rev-parse", "HEAD"], { cwd: REPO_ROOT })).stdout;
 
-		const before = { status: await status(), worktrees: await worktrees(), head: await head() };
+			const before = { status: await status(), worktrees: await worktrees(), head: await head() };
 
-		const found = await discoverCandidates({ repoRoot: REPO_ROOT, limit: 250 });
-		const candidate = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
-		expect(candidate).toBeDefined();
+			const found = await discoverCandidates({ repoRoot: REPO_ROOT, limit: 250 });
+			const candidate = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
+			expect(candidate).toBeDefined();
 
-		const result = await verifyCandidate(candidate as Candidate, { repoRoot: REPO_ROOT });
+			const result = await verifyCandidate(candidate as Candidate, { repoRoot: REPO_ROOT });
 
-		// The oracle itself, which is the point of the whole exercise.
-		console.log(`    e24c8a6 => ${result.verdict}: ${result.reason}`);
-		expect(result.error).toBeUndefined();
-		expect(result.cleanedUp).toBe(true);
-		expect(result.verdict satisfies Verdict).toBe("RED");
-		expect(result.failLines).toBeGreaterThan(0);
+			// The oracle itself, which is the point of the whole exercise.
+			console.log(`    e24c8a6 => ${result.verdict}: ${result.reason}`);
+			expect(result.error).toBeUndefined();
+			expect(result.cleanedUp).toBe(true);
+			expect(result.verdict satisfies Verdict).toBe("RED");
+			expect(result.failLines).toBeGreaterThan(0);
 
-		const after = { status: await status(), worktrees: await worktrees(), head: await head() };
-		expect(after.head).toBe(before.head);
-		expect(after.worktrees).toBe(before.worktrees);
+			const after = { status: await status(), worktrees: await worktrees(), head: await head() };
+			expect(after.head).toBe(before.head);
+			expect(after.worktrees).toBe(before.worktrees);
 
-		// The runner's own leftovers are the assertion that matters, and it is exact.
-		expect((await staleWorktrees(REPO_ROOT)).map((w) => w.path)).toEqual([]);
-		expect(existsSync(worktreeDir(result.candidate.hash))).toBe(false);
+			// The runner's own leftovers are the assertion that matters, and it is exact.
+			expect((await staleWorktrees(REPO_ROOT)).map((w) => w.path)).toEqual([]);
+			expect(existsSync(worktreeDir(result.candidate.hash))).toBe(false);
 
-		// The status comparison, reported rather than assumed.
-		const beforeLines = new Set(before.status.split("\n").filter((l) => l.trim() !== ""));
-		const added = after.status.split("\n").filter((l) => l.trim() !== "" && !beforeLines.has(l));
-		if (added.length > 0) {
-			console.log(
-				`    NOTE: main-tree status changed during the run by another agent, not by the runner:\n${added
-					.map((l) => `      ${l}`)
-					.join("\n")}`,
-			);
-		}
-	}, 600_000);
+			// The status comparison, reported rather than assumed.
+			const beforeLines = new Set(before.status.split("\n").filter((l) => l.trim() !== ""));
+			const added = after.status.split("\n").filter((l) => l.trim() !== "" && !beforeLines.has(l));
+			if (added.length > 0) {
+				console.log(
+					`    NOTE: main-tree status changed during the run by another agent, not by the runner:\n${added
+						.map((l) => `      ${l}`)
+						.join("\n")}`,
+				);
+			}
+		},
+		600_000,
+	);
 });
