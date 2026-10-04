@@ -9,9 +9,10 @@
  * a large context window spent on one turn's tool output.
  *
  * Cutting is lossy, so both limits cut through {@link cutText}, which keeps the
- * one line that makes a cut recoverable — the path to the spilled file — and
- * keeps the notice honest about how much is missing, cumulatively, when the
- * same result is cut twice: once by its tool's limit, once by the round budget.
+ * two ends of the output — what was run, and where it ended up — plus the one
+ * line that makes a cut recoverable, the path to the spilled file, and a notice
+ * that stays honest about how much is missing, cumulatively, when the same
+ * result is cut twice: once by its tool's limit, once by the round budget.
  */
 import type { ToolResultContent, ToolResultMessage } from "@labunbun/ai";
 
@@ -44,14 +45,19 @@ export type SpillWriter = (request: SpillRequest) => string | null;
 const SPILL_HEADER = /^\[full output: \d+ chars → ([^\]]+)\]\n/;
 
 /**
- * Last line of a result that was cut, carrying how many characters of its
- * output are not shown here.
+ * The notice a cut leaves at the point where it cut, carrying how many
+ * characters of the output are not shown here.
+ *
+ * Matched wherever it sits rather than only at the end, because a cut that keeps
+ * both ends puts it in the middle. The price of that is a body that literally
+ * contains this sentence mid-string being misread on a second cut — the same
+ * exposure the end-anchored form had, widened from the last line to any line.
  *
  * Plain digits on purpose: the marker is read back by {@link cutText} on a
  * second cut, and a locale-grouped "1.234.567" parses as 1.234 in half of
  * Europe. (It is never shown to a person — the model reads it as a number.)
  */
-const CUT_MARKER = /\n\.\.\. \[truncated (\d+) chars of output\]$/;
+const CUT_MARKER = /\n\.\.\. \[truncated (\d+) chars of output\](?:\n|$)/;
 
 interface Cuttable {
 	/** The text as it stands, without a spill header or an earlier cut marker. */
@@ -62,6 +68,18 @@ interface Cuttable {
 	omitted: number;
 }
 
+/**
+ * Take a possibly-already-cut result back apart.
+ *
+ * The notice and both of the line breaks that hold it are removed, and the two
+ * ends are rejoined across the gap it stood in. Taking the trailing break with
+ * it is not tidiness: the two breaks replaced the middle that is gone, so
+ * keeping either one would leave a character in `body` that no original text
+ * had, and `body.length + omitted` has to stay equal to the length the text had
+ * before any cut touched it. A second cut measures its notice against that
+ * identity, so anything left behind here is counted twice — once as text the
+ * model is being shown and once as text that is missing.
+ */
 function takeApart(text: string): Cuttable {
 	const headerMatch = SPILL_HEADER.exec(text);
 	const header = headerMatch?.[0] ?? "";
@@ -69,7 +87,7 @@ function takeApart(text: string): Cuttable {
 	const markerMatch = CUT_MARKER.exec(rest);
 	if (!markerMatch) return { body: rest, header, omitted: 0 };
 	return {
-		body: rest.slice(0, markerMatch.index),
+		body: rest.slice(0, markerMatch.index) + rest.slice(markerMatch.index + markerMatch[0].length),
 		header,
 		omitted: Number(markerMatch[1]),
 	};
@@ -77,6 +95,11 @@ function takeApart(text: string): Cuttable {
 
 /**
  * Cut `text` down to `limit` characters, saying what is missing.
+ *
+ * The middle goes, not the end: the head says what was run and the first lines
+ * of the file being edited, the tail says what the build said about it and which
+ * test failed, and a reader who has only one of the two cannot tell which case
+ * they are in. The notice stands at the cut between them.
  *
  * A result that is cut for the first time and has somewhere to spill is written
  * out in full first, and the path goes on the *first* line: it is the only part
@@ -103,11 +126,35 @@ export function cutText(text: string, limit: number, spill?: SpillWriter, reques
 		}
 		if (path) pointer = `[full output: ${body.length} chars → ${path}]\n`;
 	}
+	// What the result may keep of the output it was given. The pointer line and
+	// the notice are both charged on top of this, not out of it, as they always
+	// were: a notice that spent part of the text budget would be reporting a
+	// missing count that depends on how the notice itself renders, and the same
+	// output would then be reported as differently truncated at two budgets.
 	const keep = Math.max(0, limit - pointer.length);
-	const missing = omitted + Math.max(0, body.length - keep);
-	const head = body.slice(0, keep);
+	// Split evenly, with the odd character going to the head and the tail taking
+	// the floor. That is the whole of the deviation from a plain half each, and
+	// it buys the smallest cases for free: at one character of budget — or none
+	// — there is nothing to divide, the tail gets nothing, and the cut is exactly
+	// the head-only one it used to be. A cut result with an empty head has thrown
+	// away the part that was not already at the end.
+	const tailChars = body.length > keep ? Math.floor(keep / 2) : 0;
+	const head = body.slice(0, keep - tailChars);
+	const tail = body.slice(body.length - tailChars);
+	// Counted from what survived rather than from `keep`, because `keep` can be
+	// larger than the body — a second cut can be asked for more than is left —
+	// and because that is the only way the number stays put when the shape of the
+	// cut changes. Head and tail together keep exactly `keep` characters, so this
+	// is the same total the head-only cut reported for the same input, and a
+	// result cut twice by two different limits is still short by one number.
+	const missing = omitted + Math.max(0, body.length - head.length - tail.length);
 	const marker = `... [truncated ${missing} chars of output]`;
-	return head ? `${pointer}${head}\n${marker}` : `${pointer}${marker}`;
+	// The notice is its own line rather than glued onto the line the cut lands in.
+	// The head is often half a source file and the tail a stack trace, and a
+	// notice appended to either would run into it mid-token.
+	if (!head) return `${pointer}${marker}`;
+	if (!tail) return `${pointer}${head}\n${marker}`;
+	return `${pointer}${head}\n${marker}\n${tail}`;
 }
 
 /** Bounded by `limit`, spread across the text blocks of one result. */

@@ -21,11 +21,144 @@ function keeper() {
 
 const request = { callId: "call_1", toolName: "Bash", text: "" };
 
+/** Output with a first and a last line, so a cut result can be read for both. */
+function lines(count: number): string {
+	return Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
+}
+
+/** What a cut result says is missing, or NaN when it was never cut. */
+function omittedOf(text: string): number {
+	return Number(/truncated (\d+) chars of output/.exec(text)?.[1]);
+}
+
+/** The notice itself, so a budget can be stated net of it. */
+function noticeOf(text: string): string {
+	return /\.\.\. \[truncated \d+ chars of output\]/.exec(text)?.[0] ?? "";
+}
+
+/**
+ * What a head-only cut of `text` to `limit` would have reported as missing: it
+ * kept `limit` of the body and told the reader the rest was gone. The number the
+ * head-and-tail cut has to produce for the same input — keeping the tail is not
+ * a reason to tell the reader that less is missing.
+ */
+function headOnlyMissing(text: string, limit: number): number {
+	return text.length - Math.min(limit, text.length);
+}
+
 describe("cutText", () => {
-	test("keeps the head and says how much of the output is missing", () => {
-		const text = cutText("a".repeat(1_000), 100);
-		expect(text.startsWith("a".repeat(100))).toBe(true);
-		expect(text).toContain("... [truncated 900 chars of output]");
+	test("keeps both ends of the output and says how much of the middle is missing", () => {
+		const full = lines(500);
+		const text = cutText(full, 200);
+		// The head is what says what was run; the tail is where a build says what
+		// went wrong. A cut result with only one of them cannot say which case it is.
+		expect(text.startsWith("line 1\n")).toBe(true);
+		expect(text.endsWith("line 500")).toBe(true);
+		// The middle is what the cut was for.
+		expect(text).not.toContain("line 250");
+		expect(omittedOf(text)).toBe(headOnlyMissing(full, 200));
+	});
+
+	test("the notice stands at the cut, and both halves spend the whole budget", () => {
+		const full = lines(500);
+		const text = cutText(full, 400);
+		const [before, after] = text.split(noticeOf(text));
+		// Head, notice, tail — and nothing of the middle in between.
+		expect(before).not.toBe("");
+		expect(after?.startsWith("\n")).toBe(true);
+		expect(text).not.toContain("line 250");
+		// What is shown of the output is the budget, all of it, and split so that
+		// neither end is a preview of the other. The ratio itself is a decision;
+		// what is asserted is that no half is starved, and that they are near equals.
+		const headChars = (before?.length ?? 0) - 1;
+		const tailChars = (after?.length ?? 0) - 1;
+		expect(headChars + tailChars).toBe(400);
+		expect(Math.abs(headChars - tailChars)).toBeLessThanOrEqual(1);
+	});
+
+	test("the notice is charged on top of the limit, not out of it", () => {
+		// A notice whose length depends on the number it reports cannot also be
+		// part of the budget that produced it: charging it there would make one
+		// output be reported as differently truncated at two budgets.
+		for (const limit of [120, 4_000, 30_000]) {
+			const text = cutText(lines(500), limit);
+			expect(text.length - noticeOf(text).length - 2).toBeLessThanOrEqual(limit);
+		}
+	});
+
+	test("the missing total is what a head-only cut would have reported", () => {
+		// The accounting trap. `missing` is a promise to whoever reads the result,
+		// and the round budget adds to it on the second cut. Dropping the middle
+		// instead of the tail must not move the number.
+		const full = lines(500);
+		const limits = [1, 2, 40, 401, 2_000, full.length - 1, full.length, full.length + 1];
+		for (const limit of limits) {
+			const cut = cutText(full, limit);
+			// At or above the body's own length nothing is cut, so there is nothing
+			// to be honest about and no notice to give.
+			expect(omittedOf(cut)).toBe(limit >= full.length ? NaN : headOnlyMissing(full, limit));
+		}
+	});
+
+	test("a second cut of a cut result reports one cumulative total", () => {
+		// The round budget runs after the tool's own limit, so this is the normal
+		// case for a spilled result, not an edge one: the same text is cut twice,
+		// and the second cut has to add to the first rather than restate it.
+		const full = lines(500);
+		const once = cutText(full, 4_000);
+		expect(omittedOf(once)).toBe(headOnlyMissing(full, 4_000));
+
+		const twice = cutText(once, 300);
+		expect(omittedOf(twice)).toBe(headOnlyMissing(full, 300));
+		// One notice, not two: the old one was taken apart, not kept and answered.
+		expect(twice.match(/truncated/g)).toHaveLength(1);
+		// And the ends still come from the ends of the original.
+		expect(twice.startsWith("line 1")).toBe(true);
+		expect(twice.endsWith("line 500")).toBe(true);
+	});
+
+	test("a cut of a cut result is bounded by the budget it was given", () => {
+		const full = lines(500);
+		const twice = cutText(cutText(full, 4_000), 300);
+		expect(twice.length - noticeOf(twice).length - 2).toBeLessThanOrEqual(300);
+	});
+
+	test("a budget too small to divide falls back to the head, in budget and honest", () => {
+		const full = lines(500);
+		// Nothing to divide: what is shown is the head and nothing else, which is
+		// what a cut of this size used to be.
+		for (const limit of [0, 1]) {
+			const text = cutText(full, limit);
+			expect(text.startsWith(full.slice(0, limit))).toBe(true);
+			expect(omittedOf(text)).toBe(headOnlyMissing(full, limit));
+		}
+		// Small enough that a half is one character or two, but a tail exists:
+		// the head is never the one that gets emptied.
+		for (const limit of [2, 3, 7, 11]) {
+			const text = cutText(full, limit);
+			expect(text.startsWith(full.slice(0, 1))).toBe(true);
+			expect(omittedOf(text)).toBe(headOnlyMissing(full, limit));
+			expect(text.length - noticeOf(text).length - 2).toBeLessThanOrEqual(limit);
+			expect(text.match(/truncated/g)).toHaveLength(1);
+		}
+	});
+
+	test("a short body is cut at both of its ends, not through a token", () => {
+		const text = cutText("hello world", 5);
+		expect(text.startsWith("hel")).toBe(true);
+		expect(text.endsWith("ld")).toBe(true);
+		expect(text).toContain("... [truncated 6 chars of output]");
+		expect(text).not.toContain("o wor");
+	});
+
+	test("a body of nothing but whitespace is cut without inventing anything", () => {
+		const full = "   \n  \n\t\n ";
+		const text = cutText(full, 4);
+		expect(text.match(/truncated/g)).toHaveLength(1);
+		expect(omittedOf(text)).toBe(headOnlyMissing(full, 4));
+		expect(text.length - noticeOf(text).length - 2).toBeLessThanOrEqual(4);
+		// Whatever survived is the body's own characters; the cut added no filler.
+		expect(text.replace(noticeOf(text), "").replaceAll("\n", "")).toBe("  \n ".replaceAll("\n", ""));
 	});
 
 	test("spilled text keeps its full form on disk and a path in the result", () => {
@@ -33,9 +166,22 @@ describe("cutText", () => {
 		const text = cutText("b".repeat(5_000), 100, writer, request);
 		expect(written).toEqual(["b".repeat(5_000)]);
 		expect(text.startsWith("[full output: 5000 chars → /spill/Bash-call_1.txt]\n")).toBe(true);
-		// The head still fits the budget once the pointer is accounted for: the
-		// pointer is part of what the model is being given.
+		// What is shown of the output still fits the budget once the pointer is
+		// accounted for: the pointer is part of what the model is being given.
 		expect(text.length).toBeLessThan(100 + 60);
+	});
+
+	test("the pointer is still the first line when both ends are shown", () => {
+		const full = lines(500);
+		const { writer } = keeper();
+		const pointer = `[full output: ${full.length} chars → /spill/Bash-call_1.txt]\n`;
+		const text = cutText(full, 2_000, writer, request);
+		expect(text.startsWith(pointer)).toBe(true);
+		// The head follows the pointer and the tail closes the result — the
+		// pointer does not move into the middle to make room for the tail.
+		expect(text.slice(pointer.length)).toMatch(/^line 1\n/);
+		expect(text.endsWith("line 500")).toBe(true);
+		expect(text.length - noticeOf(text).length - 2).toBeLessThanOrEqual(2_000);
 	});
 
 	test("a second cut keeps the pointer and counts both of them together", () => {
@@ -46,10 +192,13 @@ describe("cutText", () => {
 		const once = cutText("c".repeat(5_000), 1_000, writer, request);
 		const twice = cutText(once, 200);
 		expect(twice).toContain("[full output: 5000 chars → /spill/Bash-call_1.txt]");
-		const missing = Number(/truncated (\d+) chars of output/.exec(twice)?.[1]);
+		const missing = omittedOf(twice);
 		// 5000 written, of which ~200 are shown (less the pointer's own length).
 		expect(missing).toBeGreaterThan(4_700);
 		expect(missing).toBeLessThan(5_000);
+		// The pointer still leads, and the notice is the only one left.
+		expect(twice.startsWith("[full output: 5000 chars → /spill/Bash-call_1.txt]\n")).toBe(true);
+		expect(twice.match(/truncated/g)).toHaveLength(1);
 	});
 
 	test("a writer that fails leaves a cut result, not a failed tool", () => {
