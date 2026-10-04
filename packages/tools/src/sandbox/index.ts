@@ -50,6 +50,7 @@ import {
 	type NetworkConfinement,
 	type SandboxMode,
 	type SandboxPolicy,
+	type WritableRoot,
 } from "@labunbun/agent";
 import { buildBwrapArgs } from "./bwrap.ts";
 import { buildSeatbeltArgs } from "./seatbelt.ts";
@@ -122,7 +123,15 @@ export function policyFor(options: {
 	workspace: string;
 	protectedPaths?: string[];
 	readOnlyRoots?: string[];
-	writableRoots?: string[];
+	/**
+	 * Directories the policy may write, each tagged with what it is.
+	 *
+	 * The tag is not decoration: `protectedFor` derives a `.git` only under a
+	 * `project` root, because a cache directory is not a repository and a derived
+	 * read-only mount inside `%TEMP%` is a directory that appears for nobody.
+	 * A bare `string[]` cannot carry that, which is why this is not one.
+	 */
+	writableRoots?: WritableRoot[];
 	/** The network axis. Both halves, or the caller has to say why it has none. */
 	network?: NetworkAxis;
 }): SandboxPolicy {

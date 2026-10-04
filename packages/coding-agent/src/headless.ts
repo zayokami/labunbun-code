@@ -144,7 +144,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// Spilling applies here too: a `-p` run reads a repository like any other
 	// session, and a build log that does not fit is no more reproducible for
 	// being unattended.
-	const tools = createAllTools(cwd, { readOnlyRoots: [toolOutputRoot(cwd)] });
+	const tools = createAllTools(cwd, {
+		readOnlyRoots: [toolOutputRoot(cwd)],
+		// The Bash tool builds its policy from these. Without `home` the resolver
+		// gets nothing and returns no roots, which is the safe direction but means
+		// `workspace-write` still cannot reach the temp directory or a package cache
+		// — the usability defect these roots exist to close.
+		home,
+		writableRoots: loadedSettings.settings.permissions.additionalDirectories,
+	});
 	const store = options.noSession ? undefined : SessionStore.startNew(cwd, home);
 	pruneToolOutput(cwd);
 	const rules = collectPermissionRules(loadedSettings);

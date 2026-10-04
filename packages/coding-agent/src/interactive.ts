@@ -316,6 +316,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		operations: ops,
 		backgroundShells,
 		readOnlyRoots: [toolOutputRoot(cwd, home)],
+		// The Bash tool builds its policy from these. Without `home` the resolver
+		// gets nothing and returns no roots, which is the safe direction but means
+		// `workspace-write` still cannot reach the temp directory or a package cache
+		// — the usability defect these roots exist to close.
+		home,
+		writableRoots: loadedSettings.settings.permissions.additionalDirectories,
 	});
 	// Best effort, and before anything can spill: an expired file is one the
 	// context cannot be pointing at, since nothing has run yet this session.

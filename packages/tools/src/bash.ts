@@ -3,6 +3,7 @@ import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import type { BackgroundShellManager } from "./background.ts";
 import type { Operations } from "./operations.ts";
+import { resolveWritableRoots } from "./sandbox/default-writable-roots.ts";
 import { workspacePolicy } from "./sandbox/workspace-policy.ts";
 
 /** How much output the live preview keeps — the tail of it, and not the result. */
@@ -47,7 +48,12 @@ export function createTailBuffer(maxChars: number): { push(chunk: string): void;
 	};
 }
 
-export function createBashTool(cwd: string, ops: Operations, background?: BackgroundShellManager): AnyTool {
+export function createBashTool(
+	cwd: string,
+	ops: Operations,
+	background?: BackgroundShellManager,
+	options?: { home?: string; tempDir?: string; writableRoots?: readonly string[] },
+): AnyTool {
 	return buildTool({
 		name: "Bash",
 		description:
@@ -79,7 +85,27 @@ export function createBashTool(cwd: string, ops: Operations, background?: Backgr
 			// would keep applying the old one. Built before the branch because the
 			// background path is spawned by the manager, not by `exec`, and leaving
 			// it out would make `run_in_background: true` the way around the sandbox.
-			const policy = await workspacePolicy(cwd, { sandbox: ctx.sandbox, network: ctx.network });
+			const policy = await workspacePolicy(cwd, {
+				sandbox: ctx.sandbox,
+				network: ctx.network,
+				// **`writableRoots` is what this line was missing**, and without it the
+				// policy was "the workspace and nothing else" — so `mktemp` could not
+				// create its directory and `npm install` could not write its cache, under
+				// the mode every user gets by default. Nothing leaked; the policy was
+				// exactly as narrow as it was built.
+				//
+				// `home` and `tempDir` are passed in rather than read here. The temp
+				// directory and the package caches are per-USER paths, and this
+				// repository's rule is that a reader takes its home as an argument:
+				// `os.homedir()` reads only the Win32 environment block, so a reader
+				// that calls it reads the developer's real config on linux and macOS,
+				// which is a defect CI already caught once (see `source-env-coverage`).
+				writableRoots: resolveWritableRoots({
+					home: options?.home,
+					tempDir: options?.tempDir,
+					configured: options?.writableRoots,
+				}),
+			});
 
 			if (input.run_in_background) {
 				if (!background) {

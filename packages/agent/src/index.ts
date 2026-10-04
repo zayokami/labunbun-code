@@ -105,6 +105,8 @@ export {
 	NETWORK_SANDBOX_POLICIES,
 	type NetworkSandboxPolicy,
 	type SandboxPolicy,
+	type WritableRoot,
+	type WritableRootKind,
 } from "./sandbox-policy.ts";
 // Session loop
 export { AgentSession, type AgentSessionOptions } from "./session.ts";
