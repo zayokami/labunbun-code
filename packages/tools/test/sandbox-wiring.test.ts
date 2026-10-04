@@ -17,7 +17,7 @@
  * control a control.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -387,6 +387,61 @@ describe("the policy refuses a write inside protected metadata", () => {
 		expect(built.protected.some((p) => p.includes("/sub/.git"))).toBe(true);
 		expect(decideWrite(built, join(cwd, "sub", ".git", "config"), cwd).allowed).toBe(false);
 		expect(decideWrite(built, join(cwd, "sub", "notes.md"), cwd).allowed).toBe(true);
+	});
+
+	/**
+	 * The two-step hole, on any platform and without bubblewrap.
+	 *
+	 * `sandbox-bwrap-smoke.test.ts` has the row that measures this on a real `bwrap`,
+	 * and it needs one: the rename and the write are two `spawnSync` calls, so the
+	 * second re-derives its mounts from the list the first produced. That is the
+	 * shape of the bug and it is worth having measured against a kernel — but it
+	 * only runs where `bwrap` is installed, so on a machine without it the row
+	 * **skips** and the defect is unguarded. This is the property underneath it,
+	 * stated so it can be checked anywhere: after the directory holding a `.git`
+	 * moves, the list names where the `.git` **is**.
+	 *
+	 * **The assertion is on the second list naming the new location, and that is
+	 * the whole test.** Asserting only that the workspace's own `.git` is still
+	 * protected would pass against the broken code — `protectedFor` derives that
+	 * one unconditionally, so it is present whether or not the scan is cached. It
+	 * is asserted below anyway, in both directions, because a re-derivation that
+	 * returned the right *new* root while losing `.git` entirely would be a second
+	 * bug wearing the first one's clothes.
+	 */
+	test("a renamed repository is protected at its new location, not the one it left", async () => {
+		const cwd = workspace();
+		mkdirSync(join(cwd, ".git"), { recursive: true });
+		mkdirSync(join(cwd, "sub", ".git"), { recursive: true });
+		writeFileSync(join(cwd, "sub", ".git", "HEAD"), "ref: refs/heads/main\n");
+
+		const before = await workspacePolicy(cwd, { sandbox: "workspace-write" });
+		expect(before.protected.some((p) => p.endsWith("/sub/.git"))).toBe(true);
+
+		// Step one. A Bash command moving the directory, with no sandbox involved:
+		// this test is about what the *next* call derives, and a rename the sandbox
+		// refused would prove nothing about re-derivation.
+		const relocated = join(cwd, "relocated");
+		renameSync(join(cwd, "sub"), relocated);
+
+		// Step two. A later call — a later Bash command, which is a separate spawn.
+		const after = await workspacePolicy(cwd, { sandbox: "workspace-write" });
+
+		// The stale entry is gone *and* the new one is present. Checking only the
+		// second would also pass against a cache that merely appended, and the
+		// first is the half that says the list was re-derived rather than extended.
+		expect(after.protected.some((p) => p.endsWith("/sub/.git"))).toBe(false);
+		expect(after.protected.some((p) => p.endsWith("/relocated/.git"))).toBe(true);
+
+		// The decision, not just the string: this is what a Bash command consults.
+		expect(decideWrite(after, join(relocated, ".git", "config"), cwd).allowed).toBe(false);
+		// The workspace's own `.git` survives the whole sequence — see the doc comment
+		// for why this is asserted rather than assumed.
+		expect(after.protected.some((p) => p.endsWith("/.git"))).toBe(true);
+		expect(decideWrite(after, join(cwd, ".git", "config"), cwd).allowed).toBe(false);
+		// And the control: a policy that refused everything would pass all of the
+		// above, so an ordinary file beside the relocated repository must still write.
+		expect(decideWrite(after, join(relocated, "notes.md"), cwd).allowed).toBe(true);
 	});
 
 	test("a narrower entry nested inside a wider one wins, whichever direction", async () => {

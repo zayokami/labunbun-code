@@ -78,21 +78,34 @@
  * else.** A read-only bind attaches to the dentry, and `vfs_rename` renames the
  * directory dentry in place, so `…/relocated/.git` still resolves onto the same
  * dentry and is still read-only. What the two-process row actually caught is that
- * `protectedPathsFor` in `workspace-policy.ts` caches the scan **for the life of
- * the process**, so the next command re-derives its mounts from a list naming a
- * path that no longer exists and mounts nothing where the `.git` now is.
+ * `protectedPathsFor` in `workspace-policy.ts` **cached the scan for the life of
+ * the process**, so the next command re-derived its mounts from a list naming a
+ * path that no longer existed, and mounted nothing where the `.git` now was.
  *
- * That is a real hole and a different one, and it is worth being precise about
- * its shape: **it needs a directory to be renamed and then a later command to
- * run.** The rename alone protects nothing; the stale cache is what loses the
- * protection. `guardWritablePath` covers Edit/Write at any depth independently,
- * and the dangerous-command classifier still refuses `rm -rf .git` — so the
- * exposure is Bash, and it is a Bash command that moves a `.git` and then writes
- * through the new location.
+ * That was a real hole and a different one. Its shape is worth stating exactly:
+ * **it needs a directory to be renamed and then a later command to run.** The
+ * rename alone protected nothing; the stale cache lost the protection.
+ * `guardWritablePath` covers Edit/Write at any depth independently, and the
+ * dangerous-command classifier still refuses `rm -rf .git` — so the exposure was
+ * Bash, and only a command that moves a `.git` and then writes through the new
+ * location.
  *
- * The fix is in that cache, not here: re-derive before each spawn. This
- * translator is already correct for both behaviours, which is why no argv change
- * accompanies the finding.
+ * **Fixed: the cache is gone**, so the walk is re-derived before each spawn. The
+ * cost is one `findProtectedPaths` per Bash call, measured at 152 ms on this
+ * machine with the `node_modules` skip in place against ~74 ms for a bare process
+ * creation — about two process spawns, affordable against a hole. An mtime guard
+ * was measured and rejected: it catches the reported shape (`mv <ws>/sub …`,
+ * which changes the root's mtime) and misses the same defect one level down
+ * (`mv <ws>/a/b … <ws>/a/c`), which would have looked like a fix.
+ *
+ * This translator needed no change: it was correct for both behaviours, which is
+ * why no argv change accompanies the finding and why no string comparison could
+ * have separated them.
+ *
+ * **The residual gap is reach, not staleness.** A `mv` can carry a protected
+ * `.git` past the scan's depth-4 bound, and a `.git` under `node_modules` is
+ * never found by a scan that skips it. What re-deriving guarantees is exactly:
+ * **a repository the scan can see is protected where it currently is.**
  *
  * **Every arrangement measured costs the workspace instead.** Bubblewrap has
  * no deny rule — it is purely constructive, arranging mounts — so a fix had to be

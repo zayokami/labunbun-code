@@ -25,8 +25,13 @@
  * So the inherited belief was **right**, and the red row was measuring a
  * different bug: `protectedPathsFor` in `workspace-policy.ts` caches the scan for
  * the life of the process, so the next command mounts nothing where the `.git`
- * moved to. That row stays red deliberately — it is the regression test for the
- * cache, and the cache is not fixed yet.
+ * moved to.
+ *
+ * **That second bug is now fixed** — `protectedPathsFor` no longer caches for the
+ * life of the process — so the row that was red is expected to go green on this
+ * leg. If it does not, the mechanism is not the one reasoned about here and this
+ * file's comment is wrong; the row is the thing that would say so, which is why it
+ * is kept rather than deleted.
  *
  * ## Every row has its control, and the controls are what make the rows mean anything
  *
