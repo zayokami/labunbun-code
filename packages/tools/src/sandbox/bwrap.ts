@@ -31,23 +31,22 @@
  * `/w/repo/.git` read-only when `/w/repo` is writable. Moving them above the
  * writable binds would silently unprotect `.git`.
  *
- * ## The `.git` relocation bypass: measured, and unfixable with bwrap's primitives
+ * ## The `.git` relocation bypass: an open question, not a measured one
  *
- * **This is a known gap, not a fixed one.** Read it before trusting this backend
- * with a repository whose `.git` must not be tampered with.
+ * **Read this before trusting this backend with a repository.** What follows was
+ * first written as a settled finding and then turned out to rest on a test that
+ * could not support it. It is kept because the history is the lesson, not because
+ * the answer is known.
  *
  * The seatbelt translator emits ancestor-unlink denies because it matches on
- * pathnames, and `mv /w/repo/sub /w/repo/x` relocates a protected
+ * pathnames, and `mv /w/repo/sub /w/repo/x` would relocate a protected
  * `/w/repo/sub/.git` out from under its own deny. This translator emits nothing,
  * on a belief it inherited: that a bind mount attaches to the dentry rather than
  * the name, so the read-only bind travels with the directory when its parent is
  * renamed, and the rename fails because unlinking a mountpoint needs a write the
  * read-only bind forbids.
  *
- * **That belief was false.** `test (bwrap on PATH)` — the CI leg that installs
- * bubblewrap and gates on a namespace really starting — runs
- * `sandbox-bwrap-smoke.test.ts`, which does the one thing this paragraph used to
- * say needed a manual smoke test:
+ * **`test (bwrap on PATH)` produced a row saying that belief was false:**
  *
  * ```console
  * (pass) CONTROL: renaming a directory that holds a .git leaves it writable, unsandboxed
@@ -55,12 +54,27 @@
  *        Expected: "refused"   Received: "WROTE"
  * ```
  *
- * The control is what makes it a finding: outside the sandbox the same rename
- * leaves the moved `.git` writable, so the two hypotheses differ. The argv this
- * translator produces is correct either way, which is why no string comparison in
- * `sandbox-native.test.ts` could have found it.
+ * The control is real: outside the sandbox the same rename leaves the moved
+ * `.git` writable. But **the failing row spawns one `bwrap` for the rename and a
+ * second for the write** (`runUnder` is a fresh `spawnSync` per call), so the two
+ * are different mount namespaces. The second re-derives every mount from paths
+ * that no longer describe reality, and the protected path it was told about is not
+ * where anything now lives. So the row does not establish what it appears to
+ * establish, and two very different bugs produce it:
  *
- * **Every arrangement that closes it costs the workspace instead.** Bubblewrap has
+ * - **the bind stopped travelling with a renamed directory** — the inherited
+ *   belief is false and this backend has a relocation bypass; or
+ * - **the bind travels fine** and the row is measuring re-derivation from the
+ *   process-lifetime cache in `workspace-policy.ts`, which hands the next command
+ *   a list naming a path that no longer exists.
+ *
+ * `sandbox-bwrap-smoke.test.ts` now carries a second row that does the rename
+ * **and** the write in one `bwrap` process, which separates them. It has not yet
+ * run on a real bwrap, so **this file does not claim to know which it is.** The
+ * argv produced here is correct in both worlds either way, which is why no string
+ * comparison in `sandbox-native.test.ts` can distinguish them.
+ *
+ * **Every arrangement measured costs the workspace instead.** Bubblewrap has
  * no deny rule — it is purely constructive, arranging mounts — so a fix had to be
  * an arrangement, and the arrangements were measured rather than reasoned about,
  * because reasoning about mount semantics is what produced the wrong belief in
@@ -68,20 +82,29 @@
  * runner with a real bwrap; `in-ws` is a write into the workspace itself:
  *
  * ```console
- * A  no extra mount:                        rename exit=0  in-ws=ok    <- the bypass
+ * A  no extra mount:                        rename exit=0  in-ws=ok    <- rename succeeds
  * D  ancestor --ro-bind after the writable: rename exit=1  in-ws=refused
  * E  ancestor --ro-bind before the writable:rename exit=1  in-ws=refused
  * F  ancestor --ro-bind, workspace re-bound:rename exit=1  in-ws=ok    .git write=WROTE
  * G  as F, reordered:                       rename exit=1  in-ws=ok    .git write=WROTE
- * H/I  --perms 555 instead of a mount:      rename exit=1  in-ws=refused
  * ```
  *
- * Read the table as two columns of failure. **D, E and H freeze the workspace** —
+ * Read the table as two columns of failure. **D and E freeze the workspace** —
  * `workspace-write` stops writing anything, which is not a narrower sandbox but a
  * broken one, and it is the direction the house rule says to prefer only when the
  * alternative is a hole rather than a cost paid by every user. **F and G restore
  * the workspace and make the `.git` writable again**, because the rebind lands on
- * the ancestor too. `--perms` is not a different answer: it changes nothing.
+ * the ancestor too.
+ *
+ * **What `--perms` does is NOT in this table, because the row that measured it was
+ * broken and has been deleted rather than kept as a second opinion.** The row
+ * located the ancestor mount with `indexOf("--ro-bind", indexOf("--"))`, and
+ * after the ancestor mount was removed there is no `--ro-bind` after the
+ * separator, so that index was `-1`; the splice then appended `--perms 555` at
+ * index 23, which is **after** the `--`, making it an argument to `/bin/sh -c`
+ * rather than a flag to bwrap. Reproduced and quoted in the commit that removed
+ * the row. **So any claim here or in a sibling file that `--perms` was measured
+ * and found not to help is unsupported.** It is unmeasured, not disproved.
  *
  * **So no arrangement satisfies both, and none was shipped.** An ancestor mount
  * was in the tree for one commit and removed: it closed the relocation and made
@@ -200,7 +223,8 @@ export function buildBwrapArgs(
 		// arrangement that closes the relocation was measured on a runner with a real
 		// bwrap and every one of them costs the workspace instead: read-only after
 		// the writable bind freezes the workspace, and read-only plus a writable
-		// rebind makes the protected path writable again. `--perms` changes nothing.
+		// rebind makes the protected path writable again. `--perms` is unmeasured —
+		// the row that claimed otherwise was broken (header).
 		// There is no mount arrangement that both refuses the rename and keeps the
 		// rest of the workspace writable, so this translator emits none and the
 		// relocation bypass stands as a known, measured gap rather than as a fix that

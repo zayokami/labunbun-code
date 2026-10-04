@@ -10,10 +10,15 @@
  * > box — `mv` a directory containing a `.git` out from under its parent and see
  * > whether the repository survives.
  *
- * That is this file, and **the answer was that the belief was false.** A directory
- * containing a protected path could be renamed out from under its parent and the
- * `.git` was writable at its new location. `bwrap.ts` now mounts the ancestors,
- * and the row that proves it passes.
+ * That is this file. **It produced a red row, and the red row was itself
+ * ambiguous, so the file now carries both readings.** See the two rows named
+ * "does not make the .git writable" and "ONE PROCESS": the first spawns a new
+ * `bwrap` for the rename and a second for the write, so it cannot distinguish
+ * "the read-only bind stopped travelling with the directory" from "a new process
+ * re-derived its mounts from a path that no longer exists". The second does both
+ * in one process and settles it. **Until that row has run on a real bwrap,
+ * neither reading is established**, and `bwrap.ts` records the ambiguity rather
+ * than the earlier confident answer.
  *
  * ## Every row has its control, and the controls are what make the rows mean anything
  *
@@ -263,6 +268,51 @@ smoke("renaming a directory that holds a .git does not make the .git writable", 
 });
 
 /**
+ * The same operation with the rename and the write **inside one bwrap process**.
+ *
+ * **The row above cannot tell the two candidate causes apart**, and that is a
+ * defect in the row above, not a fact about the product. `runUnder` is a fresh
+ * `spawnSync("bwrap", …)` per call, so lines 249 and 258 are **two mount
+ * namespaces**. The second one re-derives every mount from paths that no longer
+ * describe reality: after the rename, `exists("…/sub/.git")` is false, so
+ * `readOnlyPathArgs` emits the empty-read-only recipe at a path nothing uses, while
+ * `…/relocated/.git` receives no mount at all. So `Received: "WROTE"` there is
+ * evidence about re-derivation from a stale list, **not** evidence that a
+ * read-only bind stops travelling with a renamed directory.
+ *
+ * Those are different bugs with different fixes, and only this row separates them:
+ *
+ * - **prints `refused`** ⇒ the bind does travel with the dentry, the belief at
+ *   `bwrap.ts:34-56` holds, and the hole is the process-lifetime cache in
+ *   `workspace-policy.ts` that hands the next command a list naming a path that no
+ *   longer exists.
+ * - **prints `WROTE`** ⇒ the belief is false, and the ancestor-mount arrangements
+ *   that were measured and reverted are worth revisiting.
+ *
+ * Until this runs on a real bwrap, `bwrap.ts` states one of these as a measured
+ * gap and this file cannot confirm which.
+ */
+smoke("ONE PROCESS: rename and write together, so nothing is re-derived between them", () => {
+	const { workspace, sub } = workspaceFixture();
+	const relocated = join(workspace, "relocated");
+	const policy = policyFor(workspace, [join(sub, ".git")]);
+	const target = join(relocated, ".git", "HEAD");
+	const run = runUnder(
+		policy,
+		`mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)} 2>/dev/null; ${touchPayload(target)}`,
+	);
+
+	expect(run.stdout.trim(), `combined rename+write: ${run.stderr.slice(0, 200)}`).toBe("refused");
+	console.log(
+		`[bwrap-smoke] ONE-PROCESS verdict: ${
+			run.stdout.trim() === "refused"
+				? "the read-only bind travels with the renamed directory; the row above is measuring re-derivation"
+				: "the bind does NOT travel; the relocation bypass is real within one namespace"
+		}`,
+	);
+});
+
+/**
  * Measure whether a mount arrangement can express "this directory is not
  * renameable" — the question any fix to the row above has to answer first.
  *
@@ -491,84 +541,30 @@ smoke("MEASURE: which ancestor mount order keeps the workspace writable", () => 
 });
 
 /**
- * The last untried primitive, and the one the mount arrangements do not use:
- * **a permission bit rather than a mount.**
+ * `--perms` was tried here once and the row was **wrong**, so it is gone rather
+ * than kept as a second opinion.
  *
- * D through G share a shape — read-only the ancestor as a mount — and they
- * bracket the answer between two failures. Read-only after the writable bind and
- * the workspace goes read-only (D, E). Read-only plus a writable rebind and the
- * `.git` becomes writable again, because the rebind lands on the ancestor too
- * (F, G). **Every mount arrangement is one of those two**, so the arrangement is
- * not the thing to vary; the primitive is.
+ * The row located the ancestor mount with `indexOf("--ro-bind", indexOf("--"))`.
+ * After the ancestor mount was removed there is no `--ro-bind` after the
+ * separator, so that index was `-1`, and the splice appended `--perms 555` past
+ * the `--` — where bwrap does not read it and `/bin/sh -c` does:
  *
- * `--perms` is not a mount. It sets the mode on the next operation's target, so
- * `rmdir`/`rename` on a directory whose own bits lack `w` fails on the directory
- * inode — the ancestor — while everything *inside* it keeps its own permissions.
- * That is exactly the shape of the requirement: the ancestor is not renameable,
- * the contents are not touched.
+ * ```console
+ * row I argv tail:  … "--", "/bin/sh", "-c", "--perms", "555", "true"
+ * ```
  *
- * **It has an obvious dependency, and that is what the probes separate.** The
- * rename needs write on the ancestor, and under `--unshare-user` the sandboxed
- * process is the *owner* of everything it sees, so an owner may rename its own
- * directory regardless of the mode unless the kernel honours the write bit
- * strictly. So the row asks directly rather than assuming: does `--perms 555` on
- * the ancestor refuse the rename, while a sibling directory and a file inside the
- * ancestor stay writable.
+ * **Both printed rows therefore reported the un-permsed behaviour**, and the
+ * "`--perms` changes nothing" conclusion that reached `bwrap.ts` had no
+ * measurement behind it. That conclusion has been corrected to "unmeasured" in
+ * the translator, and the two table lines for it are gone from its header too.
+ *
+ * `--perms` remains a plausible thing to try: it sets the mode on the next
+ * operation's target, so `rename` on a directory whose own bits lack `w` would
+ * fail on that directory's inode without touching its contents — the shape of the
+ * requirement. **If it is tried again, the flag has to be spliced BEFORE the `--`
+ * and the row has to print the argv it ran**, because the failure mode here was
+ * silent: the numbers looked plausible and measured nothing.
  */
-smoke("MEASURE: a permission bit on the ancestor, which is not a mount", () => {
-	const probePerms = (perms: string | null) => {
-		const { workspace, sub } = workspaceFixture();
-		const base = buildBwrapArgs(policyFor(workspace, [join(sub, ".git")]), ["/bin/sh", "-c", "true"], (p) =>
-			existsSync(p),
-		);
-		// The ancestor bind comes from the translator; this row varies only whether a
-		// `--perms` precedes it, so the difference between the two columns is that one
-		// flag and nothing else.
-		const ancestorAt = base.indexOf("--ro-bind", base.indexOf("--"));
-		const argv = perms === null ? base : [...base.slice(0, ancestorAt), "--perms", perms, ...base.slice(ancestorAt)];
-
-		const writableIn = join(workspace, "in-workspace.md");
-		const insideAncestor = join(sub, "written.md");
-		const siblingDir = join(workspace, "sib");
-		const relocated = join(workspace, "relocated");
-
-		const one = (command: string) => {
-			const r = spawnSync("bwrap", [...argv.slice(0, argv.indexOf("--")), "--", "/bin/sh", "-c", command], {
-				encoding: "utf8",
-			});
-			return { status: r.status, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
-		};
-		return {
-			workspaceLanded: existsSync(writableIn),
-			insideLanded: existsSync(insideAncestor),
-			rename: one(`mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`),
-			// A write INSIDE the ancestor is what a build does; if the permission bit
-			// reaches past the directory's own inode, this is the row that says so.
-			insideWrite: one(touchPayload(insideAncestor)),
-			siblingMkdir: one(`mkdir -p ${JSON.stringify(siblingDir)} && echo ok`),
-			gitWrite: one(touchPayload(join(sub, ".git", "HEAD"))),
-			gitRead: one(
-				`head -c 1 ${JSON.stringify(join(sub, ".git", "HEAD"))} >/dev/null 2>&1 && echo read || echo unread`,
-			),
-		};
-	};
-
-	console.log("[bwrap-smoke] H/I — printed, not asserted: a permission bit, which is not a mount");
-	for (const [label, perms] of [
-		["H  no --perms, ancestor ro-bind only (today): ", null],
-		["I  --perms 555 before the ancestor ro-bind:   ", "555"],
-	] as const) {
-		const r = probePerms(perms);
-		console.log(
-			`  ${label}` +
-				` in-ws(landed=${r.workspaceLanded})` +
-				`  inside-ancestor=${r.insideWrite.stdout || r.insideWrite.stderr.slice(0, 16)}(landed=${r.insideLanded})` +
-				`  sibling-mkdir=${r.siblingMkdir.stdout || r.siblingMkdir.stderr.slice(0, 14)}` +
-				`  rename exit=${r.rename.status}` +
-				`  .git write=${r.gitWrite.stdout || r.gitWrite.stderr.slice(0, 16)} read=${r.gitRead.stdout || r.gitRead.stderr.slice(0, 16)}`,
-		);
-	}
-});
 
 test("where bwrap is installed, this file does not skip", () => {
 	// The control for the gate. A skip is the honest answer to "can this machine
