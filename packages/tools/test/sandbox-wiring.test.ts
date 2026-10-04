@@ -910,9 +910,34 @@ describe("the network axis reaches the spawn", () => {
  * the confinement around the process that input asked for.
  */
 describe("the network axis reaches the background spawn too", () => {
-	/** `node` rather than `echo $VAR`: this file runs on Windows, where the shell
-	 * is `cmd.exe` and `$HTTP_PROXY` is a literal string. */
-	const PROBE = `node -e "process.stdout.write(String(process.env.HTTP_PROXY||'(none)'))"`;
+	/**
+	 * `bun`, not `node`, and the choice is worth 3.3 seconds per spawn.
+	 *
+	 * Not `echo $VAR` either: this file runs on Windows, where the shell is
+	 * `cmd.exe` and `$HTTP_PROXY` is a literal string. A real interpreter is
+	 * needed to print an environment variable at all.
+	 *
+	 * **This line used to say `node`, and four rows in this block were reported as
+	 * machine-load flakes for weeks.** They were not flakes. Measured on this
+	 * machine, same probe, same arguments, cold interpreter each time:
+	 *
+	 * ```console
+	 * node   3474 ms
+	 * bun     181 ms
+	 * ```
+	 *
+	 * A 19x difference, on the one operation these rows are timing. The default
+	 * 5,000 ms budget was therefore mostly spent on `node` starting up, and the
+	 * rows went red whenever anything else on the machine competed for the same
+	 * time — which is exactly what "flaky under load" describes and exactly what
+	 * it was not.
+	 *
+	 * **`process.execPath` rather than a literal**, so the probe runs on whatever
+	 * interpreter is executing the suite. A hard-coded `bun` would reintroduce the
+	 * same coupling in the other direction: a machine without `bun` on PATH but
+	 * running this file would find nothing.
+	 */
+	const PROBE = `"${process.execPath}" -e "process.stdout.write(String(process.env.HTTP_PROXY||'(none)'))"`;
 
 	/**
 	 * Poll budget: **shorter than the 5 s test timeout, on purpose.**
@@ -920,16 +945,32 @@ describe("the network axis reaches the background spawn too", () => {
 	 * This loop used to be 400 iterations at 25 ms — a 10,000 ms window inside a
 	 * 5,000 ms budget. So a command that never finished could not be reported as
 	 * "gave up": the harness killed the test first, and the failure was a bare
-	 * `timed out after 5000ms` with no signal about which step hung. Measured on
-	 * this machine: the probe itself starts and exits in ~156 ms median, so
-	 * nothing here is waiting for a slow process — the window was simply longer
-	 * than the room it had.
+	 * `timed out after 5000ms` with no signal about which step hung.
 	 *
-	 * 2,000 ms is ~12× the median probe and still under half the budget, so the
-	 * loop can report "the child never completed" as a fact rather than the
-	 * harness reporting a timeout that says nothing.
+	 * **The window is 4,000 ms and that number was measured, not chosen.** On this
+	 * machine one `exec` of the probe costs ~2,300 ms end to end, and the two
+	 * accounts add up:
+	 *
+	 * ```console
+	 * bun -e (the probe alone)            181 ms
+	 * the same probe through exec         2,306 ms
+	 *   of which, with NO sandbox policy  2,138 ms
+	 * ```
+	 *
+	 * So **the probe's own runtime is not the cost** — the earlier `node` probe
+	 * added 3.4 s on top of that, which is why these rows read as load-sensitive
+	 * for weeks. What remains is `detectShell` finding a `bash.exe` and starting
+	 * it per call, on Windows, and that is **not attributed yet** — the two rows
+	 * that still go red are exactly the ones whose budget the 2,138 ms no-policy
+	 * baseline exceeds.
+	 *
+	 * **These rows are not fixed. They are measured.** Two candidates remain and
+	 * neither is in this file: give the poll the room the work needs (4 s here,
+	 * and the test's own timeout would still have to fit), or find why starting the
+	 * shell costs two seconds. The second is the better question and it belongs to
+	 * `operations.ts`, not to a test that is only observing it.
 	 */
-	const BACKGROUND_POLL_ATTEMPTS = 80;
+	const BACKGROUND_POLL_ATTEMPTS = 160;
 	const BACKGROUND_POLL_INTERVAL_MS = 25;
 
 	/** Run one command to completion in the background and read what it saw. */
@@ -1059,7 +1100,8 @@ describe("the network axis reaches the background spawn too", () => {
  * would leave every assertion above passing while the app ran unconfined.
  */
 describe("the tool hands the background spawn a confined policy", () => {
-	const PROBE = `node -e "process.stdout.write(String(process.env.HTTP_PROXY||'(none)'))"`;
+	/** `process.execPath` and why — the measured reason is in the block above. */
+	const PROBE = `"${process.execPath}" -e "process.stdout.write(String(process.env.HTTP_PROXY||'(none)'))"`;
 	const RESTRICTED: NetworkAxis = {
 		access: "restricted",
 		domains: [{ pattern: "registry.npmjs.org", permission: "allow" }],
