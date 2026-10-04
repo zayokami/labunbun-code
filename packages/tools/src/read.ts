@@ -2,6 +2,7 @@ import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
+import { ReadFileState } from "./read-file-state.ts";
 import { decideRead } from "./sandbox/simulated.ts";
 import { readableRootsPolicy } from "./sandbox/workspace-policy.ts";
 
@@ -20,8 +21,18 @@ const MAX_RESULT_CHARS = 200_000;
  * for the context are kept in full. Read gets this and nothing else does —
  * Write and Edit go through `guardWritablePath`, which has no such escape —
  * because the file a spilled Bash result points at is a dead end otherwise.
+ *
+ * `readState` is where the read is recorded, for the edit gate: an edit is only
+ * allowed on a file the model has actually read, and that fact is code here
+ * rather than a line in Edit's prompt. It is a parameter and not a singleton
+ * because two sessions can be alive in one process — see `read-file-state.ts`.
  */
-export function createReadTool(cwd: string, ops: Operations, readOnlyRoots: string[] = []): AnyTool {
+export function createReadTool(
+	cwd: string,
+	ops: Operations,
+	readOnlyRoots: string[] = [],
+	readState: ReadFileState = new ReadFileState(),
+): AnyTool {
 	// Containment decides the workspace boundary, so `outside workspace` reads the
 	// same here as it does for Glob, Grep, LS, Write and Edit. The only way past
 	// it is a root the caller named, and that question is asked of a `read` entry
@@ -96,19 +107,50 @@ export function createReadTool(cwd: string, ops: Operations, readOnlyRoots: stri
 				};
 			}
 
-			const numbered = allLines
+			const shownLines = allLines
 				.slice(start, end)
-				.map((line, i) => {
-					const display = line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}…` : line;
-					return `${String(start + i + 1).padStart(6)}\t${display}`;
-				})
-				.join("\n");
+				.map((line) => (line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}…` : line));
+			const numbered = shownLines.map((line, i) => `${String(start + i + 1).padStart(6)}\t${line}`).join("\n");
 
 			const notice =
 				end < allLines.length
 					? `\n[Showing lines ${start + 1}-${end} of ${allLines.length}. Use offset=${end + 1} for the next page.]`
 					: "";
-			return { content: [{ type: "text", text: `${numbered}${notice}` }] };
+			const rendered = `${numbered}${notice}`;
+
+			// What the model is about to have seen, recorded. Every error path above
+			// returned instead, so an entry here means the read worked: a missing
+			// file, an unreadable one and an offset past the end all leave the
+			// previous record alone, because none of them showed the model anything.
+			//
+			// `content` is `shownLines` joined rather than `rendered`: a gate asks
+			// whether an `old_string` is in what the model saw, and Read's six-column
+			// gutter would put a tab between every pair of lines and answer that
+			// question about a file the model has not seen. For an unpaged read with
+			// nothing cut this string is the file byte for byte.
+			//
+			// Three things make it something other than the whole file, and all three
+			// are things the caller did not ask for by paging:
+			//   1. a line over the per-line cap, cut and marked `…` above;
+			//   2. a file longer than the default window, cut at `MAX_LINES` with no
+			//      offset and no limit — the model gets a page it never requested, and
+			//      `fullRead` alone would call that a whole-file read;
+			//   3. a result longer than `maxResultSizeChars`, which the pipeline cuts
+			//      through the *middle* before the model sees it (`output-limits.ts:108`
+			//      keeps a head and a tail). This one leaves the recorded string
+			//      longer than what arrived, which no comparison can repair from here
+			//      — `partialView` is what has to carry it.
+			const cutUnasked = input.offset === undefined && input.limit === undefined && end < allLines.length;
+			const cutLine = shownLines.some((shown, i) => shown !== allLines[start + i]);
+			const cutByResultLimit = rendered.length > MAX_RESULT_CHARS;
+			readState.record(path, {
+				content: shownLines.join("\n"),
+				offset: input.offset,
+				limit: input.limit,
+				partialView: cutUnasked || cutLine || cutByResultLimit,
+			});
+
+			return { content: [{ type: "text", text: rendered }] };
 		},
 	});
 }
