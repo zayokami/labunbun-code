@@ -10,28 +10,78 @@
  *
  * So this is shared, and the `.git` discovery behind it is shared too.
  */
-import type { NetworkAxis, SandboxMode, SandboxPolicy } from "@labunbun/agent";
+import type { NetworkAxis, SandboxMode, SandboxPolicy, WritableRoot } from "@labunbun/agent";
 import { policyFor } from "./index.ts";
 import { findProtectedPaths } from "./protected-paths.ts";
 
 /**
- * `.git` directories inside a workspace, discovered once per workspace.
+ * `.git` directories inside a workspace, **re-derived on every call**.
  *
- * Keyed rather than a single module-level promise because tests build tools for
- * several temporary directories in one process, and a cache that answered for
- * the first workspace would hand the rest of them a list of paths that are not
- * theirs. A `.git` created *after* the first call is not picked up either,
- * which is stated rather than papered over: re-walking the tree on every tool
- * call would cost more than it is worth, and the tool-layer guard in
- * `containment.ts` covers the common case regardless — it matches on the path
- * rather than on a list, so it needs no scan.
+ * **This was a cache, and the cache was the hole.** `protectedPathsFor` used to
+ * memoise the walk per workspace for the life of the process, so the sequence
+ * below handed the next spawn a list naming a path that no longer described
+ * reality:
  *
- * A failed scan resolves to an empty list rather than rejecting. The caller is a
- * tool that is about to do something the user asked for, and a permission error
- * in one subtree is a worse reason to refuse a write than the narrower coverage
- * it costs — but the narrower coverage is real and nobody is told. The one
- * function that formats the count is `describeSimulatedSandbox`, and nothing in
- * production calls it, so a scan that came back empty is silent.
+ *   1. a Bash command runs `mv /w/repo/sub /w/repo/relocated`, where `sub/.git`
+ *      was protected. The cached list still names `/w/repo/sub/.git`.
+ *   2. a later Bash call spawns. `resolveSandboxExecution` re-derives every
+ *      mount from that list, `exists("/w/repo/sub/.git")` is false, the
+ *      protection lands on a path nothing uses, and `/w/repo/relocated/.git`
+ *      receives **no mount at all**. A write through the new location succeeds
+ *      inside the sandbox.
+ *
+ * **Both steps are required and neither is sufficient alone** — the rename
+ * protects nothing by itself, and the stale list is what loses the protection.
+ * The exposure is Bash and only Bash: `guardWritablePath` in `containment.ts`
+ * matches `.git` at any depth for Edit and Write regardless of this list, and
+ * the dangerous-command classifier still refuses `rm -rf .git`.
+ *
+ * **The backend was never the problem, and this is measured.** A real `bwrap`
+ * (CI leg `test (bwrap on PATH)`) printed:
+ *
+ * ```console
+ * [bwrap-smoke] ONE-PROCESS verdict: the read-only bind travels with the renamed
+ *              directory; the row above is measuring re-derivation
+ * ```
+ *
+ * The bind attaches to the dentry and `vfs_rename` renames in place, so
+ * `…/relocated/.git` still resolves onto the same dentry and is still read-only
+ * within the namespace that made the move. No argv change belongs here.
+ * `sandbox-bwrap-smoke.test.ts` keeps the two-process row deliberately red as
+ * the regression test for exactly this function.
+ *
+ * **Re-derive, not invalidate — the numbers are this machine's, measured, not
+ * quoted.** The 76 ms below was measured elsewhere; these were re-taken here on
+ * Windows against this repository as the workspace:
+ *
+ *   - one `findProtectedPaths` call, `node_modules` skipped: **152 ms** median
+ *     over 5 runs (149.6–158.4). A trivial spawn on the same machine is 74 ms,
+ *     so this is about two process creations, once per Bash call, on the
+ *     largest tree anyone is plausibly to open this on.
+ *   - with the skip removed: **3111 ms**. The skip stays, and its cost is the
+ *     reason the walk is affordable at all.
+ *
+ * Invalidation was rejected because it fixes the reported instance and not the
+ * class. Stat-ing the workspace root and re-walking when its mtime moves
+ * detects the rename above — measured `true` — and **misses** `mv <ws>/a/b
+ * <ws>/a/c` and `mv <ws>/src/deep <ws>/vendor/deep`, both measured `false`,
+ * because neither changes the *root's* mtime, only the subtree's. A TTL is the
+ * same guess in slower clothing: it answers "enough time has passed", never "a
+ * rename happened one level down". Re-deriving has no such blind spot, and the
+ * failure being fixed is the silent kind — a stale list produces a narrower
+ * sandbox that reports success.
+ *
+ * A failed scan resolves to an empty list rather than rejecting, and there is
+ * now **no previous answer to fall back to**: the last good list is precisely
+ * the stale one this change exists to stop handing out, so reusing it would
+ * reintroduce the hole on the error path. `findProtectedPaths` already skips an
+ * unreadable subtree and keeps walking, so the `catch` below covers only a
+ * failure of the walk as a whole. The caller is a tool about to do something
+ * the user asked for, and a walk that cannot complete is a worse reason to
+ * refuse that than the narrower coverage it costs — but the narrower coverage is
+ * real and nobody is told. The one function that formats the count is
+ * `describeSimulatedSandbox`, and nothing in production calls it, so a scan
+ * that came back empty is silent.
  *
  * **What an empty list costs is the nested repositories, not the one you are
  * standing in.** An earlier version of this paragraph said the opposite — that
@@ -52,11 +102,12 @@ import { findProtectedPaths } from "./protected-paths.ts";
  * What the scan *is* for is repositories **below** the root, and it is narrower
  * than "below": `findProtectedPaths` stops at
  * `DEFAULT_PROTECTED_SCAN_DEPTH` = 4 segments (`protected-paths.ts:52-59`) and
- * does not descend into `node_modules` at all (`:74`, for the measured 76 ms vs
- * 1762 ms). Nothing else finds those, so the failure this file can actually
- * have is "a repository nested deeper than four segments, or under
- * `node_modules`, or on a machine where the walk threw, goes unprotected" — and
- * the top-level one is safe regardless of the scan.
+ * does not descend into `node_modules` at all (`:74` — re-measured on this
+ * machine at 152 ms with the skip and 3111 ms without it, against the 76 ms /
+ * 1762 ms originally quoted from another one). Nothing else finds those, so the
+ * failure this file can actually have is "a repository nested deeper than four
+ * segments, or under `node_modules`, or on a machine where the walk threw, goes
+ * unprotected" — and the top-level one is safe regardless of the scan.
  *
  * This is not Windows-only, and the residual exposure is worth being exact
  * about, because the backends fail differently:
@@ -72,16 +123,18 @@ import { findProtectedPaths } from "./protected-paths.ts";
  *     what either tool does.
  *   - `rm -rf .git` is still refused, by the dangerous-command classifier, which
  *     is also a list — but one that is not this list.
+ *
+ * **The residual gap left here, stated so it is not rediscovered as a surprise.**
+ * Re-deriving fixes the *staleness*, not the *reach*: a `mv` can carry a
+ * protected `.git` to a depth the four-segment bound does not examine, and a
+ * `.git` under `node_modules` is never found by a scan that skips it. That is a
+ * separate, narrower hole and it is deliberately not fixed here — widening the
+ * depth cap or the skip set is a cost decision, and the cost was measured above
+ * for the skip. What re-deriving guarantees is the exact one: **a repository the
+ * scan can see is protected at the place it currently is.**
  */
-const protectedPathsCache = new Map<string, Promise<string[]>>();
-
 function protectedPathsFor(workspace: string): Promise<string[]> {
-	let found = protectedPathsCache.get(workspace);
-	if (found === undefined) {
-		found = findProtectedPaths(workspace).catch(() => [] as string[]);
-		protectedPathsCache.set(workspace, found);
-	}
-	return found;
+	return findProtectedPaths(workspace).catch(() => [] as string[]);
 }
 
 export interface WorkspacePolicyOptions {
@@ -89,8 +142,14 @@ export interface WorkspacePolicyOptions {
 	sandbox: SandboxMode;
 	/** Directories outside the workspace Read may still open (the spill dir). */
 	readOnlyRoots?: string[];
-	/** Directories outside the workspace that may be written. */
-	writableRoots?: string[];
+	/**
+	 * Directories outside the workspace that may be written.
+	 *
+	 * Each one carries whether it is a `project` or a `data` place, which is what
+	 * decides whether `<root>/.git` is derived as protected. `resolveWritableRoots`
+	 * in `default-writable-roots.ts` is what fills this in for the shell.
+	 */
+	writableRoots?: WritableRoot[];
 	/**
 	 * The network axis. Read per call alongside `sandbox` for the same reason:
 	 * `/mode` can change the session and a tool holding the value it was built

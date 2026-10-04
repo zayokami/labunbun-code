@@ -83,6 +83,50 @@ export type FileSystemSandboxKind = "restricted" | "unrestricted";
 export type FileSystemAccessMode = "read" | "write" | "deny";
 
 /**
+ * What kind of place a writable root is, which is the only thing that decides
+ * whether `<root>/.git` is derived as a protected path.
+ *
+ *   `project`  somewhere a repository could plausibly live — a checkout, a
+ *              worktree, a directory a user named by hand. `<root>/.git` is
+ *              derived whether or not it is there.
+ *   `data`     somewhere the machine keeps regenerable state that no repository
+ *              owns: a temp directory, a package-manager cache. No `.git` is
+ *              derived for it.
+ *
+ * **The distinction is carried by the caller, never read off the path.** A
+ * cache directory can live anywhere — `XDG_CACHE_HOME`, `/var/cache/<user>`, a
+ * build directory under the workspace — so a rule that recognised one by its
+ * name would be wrong the first time it met an unusual one, and it would be a
+ * rule whose failure mode is invisible. The app knows what it added and why, so
+ * it says so; a caller that does not know says `"project"`, which is the
+ * conservative answer and the one this build had for every root before the two
+ * kinds existed.
+ */
+export type WritableRootKind = "project" | "data";
+
+/**
+ * A writable root, spelled either as a bare path or with the kind that decides
+ * its `.git` derivation.
+ *
+ * **A bare string means `project`, and that is deliberate.** Every caller that
+ * existed before this type named a directory and got `<root>/.git` derived for
+ * it unconditionally; reading a bare string as anything else would silently drop
+ * a protection from a hand-built policy, which is a widening that looks like a
+ * refactor.
+ */
+export type WritableRoot = string | { path: string; kind: WritableRootKind };
+
+/** The two fields the builders below need, whichever spelling arrived. */
+export interface NormalizedWritableRoot {
+	path: string;
+	kind: WritableRootKind;
+}
+
+export function normalizeWritableRoot(root: WritableRoot): NormalizedWritableRoot {
+	return typeof root === "string" ? { path: root, kind: "project" } : { path: root.path, kind: root.kind };
+}
+
+/**
  * The network axis values, as a value so the settings schema can derive its
  * enum from them — the `PERMISSION_MODES` lesson (F1), applied to the second
  * axis: a hand-written `z.enum(["enabled", "restricted"])` in the settings file
@@ -183,8 +227,14 @@ export interface BuildSandboxPolicyOptions {
 	 * filesystem I/O and belongs in the layer that is allowed to do I/O.
 	 */
 	protectedPaths?: string[];
-	/** Directories outside the workspace that may be written (a build cache, say). */
-	writableRoots?: string[];
+	/**
+	 * Directories outside the workspace that may be written (a build cache, say).
+	 *
+	 * Each one says whether it is a `project` or `data` place, and that label is
+	 * read here for exactly one thing: whether `<root>/.git` is derived. A bare
+	 * string counts as `project`, which is what every caller before this type got.
+	 */
+	writableRoots?: WritableRoot[];
 	/** Outside the workspace, readable but not writable (the tool-output spill dir). */
 	readOnlyRoots?: string[];
 	/**
@@ -250,8 +300,12 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
 		// exist is a broken session, not a policy to be skipped past.
 		{ path: canonicalPolicyPath(workspace), access: "write" },
 	];
-	for (const root of options.writableRoots ?? []) {
-		entries.push({ path: canonicalPolicyPath(root), access: "write", missingPathBehavior: "skip" });
+	// Normalised once, here, so the entry list and the `.git` derivation below are
+	// two readings of one answer. Reading `options.writableRoots` twice would be
+	// two places that have to agree about which spelling a bare string means.
+	const writableRoots = (options.writableRoots ?? []).map(normalizeWritableRoot);
+	for (const root of writableRoots) {
+		entries.push({ path: canonicalPolicyPath(root.path), access: "write", missingPathBehavior: "skip" });
 	}
 	for (const root of options.readOnlyRoots ?? []) {
 		// Read-only roots are additions to an already read-everything baseline, so
@@ -265,7 +319,16 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
 		fileSystem: { kind: "restricted", entries },
 		network: options.network ?? "enabled",
 		networkRules: [...(options.networkRules ?? [])],
-		protected: protectedFor(options, [workspace, ...(options.writableRoots ?? [])]),
+		protected: protectedFor(options, [
+			workspace,
+			// Only the roots that said they are a project get a derived `.git`. The
+			// workspace always does — it is one by definition. A `data` root is a
+			// cache or a scratch directory; deriving `<root>/.git` for one puts a
+			// read-only mount at a path no repository is going to use, and on Linux
+			// `readOnlyPathArgs` *creates* an empty read-only directory there when the
+			// path is absent, so the cost is a directory that appears for nobody.
+			...writableRoots.filter((root) => root.kind === "project").map((root) => root.path),
+		]),
 	};
 }
 
@@ -275,13 +338,19 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
  *
  * **The derived `.git` is the point of this function.** Everything in
  * `protectedPaths` arrives from `findProtectedPaths`, which walks the tree to
- * depth 4, skips `node_modules`, is cached per workspace for the life of the
- * process, and resolves to `[]` if it fails. Those are reasonable limits for
- * *discovering* directories nobody told us about — but they are the wrong limits
- * for the one directory everybody knows is there. A repository created after the
- * first Bash call, or one whose `.git` sits five levels down, produced no
- * protected entry, so seatbelt emitted no `(deny file-write*)` for it and bwrap
- * emitted no `--ro-bind`: the session wrote `.git/config` and reported success.
+ * depth 4, skips `node_modules`, and resolves to `[]` if it fails. Those are
+ * reasonable limits for *discovering* directories nobody told us about — but they
+ * are the wrong limits for the one directory everybody knows is there. A
+ * repository created after the first Bash call, or one whose `.git` sits five
+ * levels down, produced no protected entry, so seatbelt emitted no
+ * `(deny file-write*)` for it and bwrap emitted no `--ro-bind`: the session wrote
+ * `.git/config` and reported success.
+ *
+ * **The scan used to be cached for the life of the process, and that was a hole
+ * of its own** — measured, not reasoned. `workspace-policy.ts` memoized the walk
+ * per workspace, so a `.git` that *moved* was still listed at the path it left,
+ * and the next command mounted nothing where it now was. The cache is gone; the
+ * two limits above are unchanged and remain the residual gap.
  *
  * Deriving is unconditional rather than conditional, and the reason is that a
  * security control only as good as the scan's coverage is not a control on the
@@ -300,11 +369,19 @@ export function buildSandboxPolicy(options: BuildSandboxPolicyOptions): SandboxP
  * read-only mount at the path instead is both harmless when it is absent and the
  * stronger answer when it appears later — an empty `.git` cannot be written into
  * either.
+ *
+ * **`gitRoots` is the set that asked for a `.git`, not every writable root.** The
+ * caller filters on `WritableRootKind` before this runs, so nothing here has to
+ * know what a package cache is — the caller knows, and the two cannot disagree
+ * because there is only one place the label is read. `WorkspacePolicyOptions`
+ * passes the temp directory and the per-user package caches as `data`, so a
+ * policy built for `mktemp` and `npm install` protects the workspace's repository
+ * and no longer claims `~/.npm/.git` is a repository.
  */
-function protectedFor(options: BuildSandboxPolicyOptions, writableRoots: string[]): string[] {
+function protectedFor(options: BuildSandboxPolicyOptions, gitRoots: string[]): string[] {
 	const found = options.protectedPaths ?? [];
 	const out = new Set(found.map(canonicalPolicyPath));
-	for (const root of writableRoots) {
+	for (const root of gitRoots) {
 		if (root === "") continue;
 		// `join` first, then canonicalise. The other order loses: `join` is what
 		// puts a `\` into the string on Windows, and `canonicalPolicyPath` after it
