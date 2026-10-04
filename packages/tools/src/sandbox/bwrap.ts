@@ -31,13 +31,11 @@
  * `/w/repo/.git` read-only when `/w/repo` is writable. Moving them above the
  * writable binds would silently unprotect `.git`.
  *
- * ## The `.git` relocation bypass: an open question, not a measured one
+ * ## The `.git` relocation: the bind travels, and the loss is a stale cache
  *
  * **Read this before trusting this backend with a repository.** What follows was
- * first written as a settled finding and then turned out to rest on a test that
- * could not support it. It is kept because the history is the lesson, not because
- * the answer is known.
- *
+ * written three times: as an inherited belief, as a measured bypass, and as the
+ * thing it actually is. The history is the lesson; the answer is below.
  * The seatbelt translator emits ancestor-unlink denies because it matches on
  * pathnames, and `mv /w/repo/sub /w/repo/x` would relocate a protected
  * `/w/repo/sub/.git` out from under its own deny. This translator emits nothing,
@@ -69,10 +67,32 @@
  *   a list naming a path that no longer exists.
  *
  * `sandbox-bwrap-smoke.test.ts` now carries a second row that does the rename
- * **and** the write in one `bwrap` process, which separates them. It has not yet
- * run on a real bwrap, so **this file does not claim to know which it is.** The
- * argv produced here is correct in both worlds either way, which is why no string
- * comparison in `sandbox-native.test.ts` can distinguish them.
+ * **and** the write in one `bwrap` process, and it has run on a real bwrap:
+ *
+ * ```console
+ * [bwrap-smoke] ONE-PROCESS verdict: the read-only bind travels with the renamed
+ *              directory; the row above is measuring re-derivation
+ * ```
+ *
+ * **So the inherited belief was right and the red row was measuring something
+ * else.** A read-only bind attaches to the dentry, and `vfs_rename` renames the
+ * directory dentry in place, so `…/relocated/.git` still resolves onto the same
+ * dentry and is still read-only. What the two-process row actually caught is that
+ * `protectedPathsFor` in `workspace-policy.ts` caches the scan **for the life of
+ * the process**, so the next command re-derives its mounts from a list naming a
+ * path that no longer exists and mounts nothing where the `.git` now is.
+ *
+ * That is a real hole and a different one, and it is worth being precise about
+ * its shape: **it needs a directory to be renamed and then a later command to
+ * run.** The rename alone protects nothing; the stale cache is what loses the
+ * protection. `guardWritablePath` covers Edit/Write at any depth independently,
+ * and the dangerous-command classifier still refuses `rm -rf .git` — so the
+ * exposure is Bash, and it is a Bash command that moves a `.git` and then writes
+ * through the new location.
+ *
+ * The fix is in that cache, not here: re-derive before each spawn. This
+ * translator is already correct for both behaviours, which is why no argv change
+ * accompanies the finding.
  *
  * **Every arrangement measured costs the workspace instead.** Bubblewrap has
  * no deny rule — it is purely constructive, arranging mounts — so a fix had to be

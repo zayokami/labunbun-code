@@ -10,15 +10,23 @@
  * > box — `mv` a directory containing a `.git` out from under its parent and see
  * > whether the repository survives.
  *
- * That is this file. **It produced a red row, and the red row was itself
- * ambiguous, so the file now carries both readings.** See the two rows named
- * "does not make the .git writable" and "ONE PROCESS": the first spawns a new
- * `bwrap` for the rename and a second for the write, so it cannot distinguish
- * "the read-only bind stopped travelling with the directory" from "a new process
- * re-derived its mounts from a path that no longer exists". The second does both
- * in one process and settles it. **Until that row has run on a real bwrap,
- * neither reading is established**, and `bwrap.ts` records the ambiguity rather
- * than the earlier confident answer.
+ * That is this file, and **it answered in the opposite direction from what the
+ * first red row said.** The row named "does not make the .git writable" runs
+ * the rename and the write in **two** `bwrap` processes, so it could not tell
+ * "the bind stopped travelling" from "a new process re-derived its mounts from
+ * a path that no longer exists". The ONE-PROCESS row does both in one namespace
+ * and settles it:
+ *
+ * ```console
+ * [bwrap-smoke] ONE-PROCESS verdict: the read-only bind travels with the renamed
+ *              directory; the row above is measuring re-derivation
+ * ```
+ *
+ * So the inherited belief was **right**, and the red row was measuring a
+ * different bug: `protectedPathsFor` in `workspace-policy.ts` caches the scan for
+ * the life of the process, so the next command mounts nothing where the `.git`
+ * moved to. That row stays red deliberately — it is the regression test for the
+ * cache, and the cache is not fixed yet.
  *
  * ## Every row has its control, and the controls are what make the rows mean anything
  *
