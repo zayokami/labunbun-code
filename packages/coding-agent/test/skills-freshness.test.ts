@@ -61,13 +61,15 @@ function skillFiles(): Array<{ name: string; text: string }> {
  * way by getting them wrong first:
  *
  * - `readdirSync(…, { recursive: true })` walks `node_modules` as well as
- *   source. Measured on this tree: 20,288 files / 180 MB unfiltered versus 372
- *   files / 5.4 MB filtered, and 10,036 ms versus 183 ms to index. The test
- *   timed out at 5 s before the filter and is not close to the limit after it.
- *   The filter is a substring test rather than a segment split on purpose —
+ *   source. Measured on this tree: 20,288 files / 180 MB unfiltered versus 465
+ *   files / 9.2 MB filtered, and 10,036 ms versus 425 ms to build the token
+ *   index outside `bun test`. The test timed out at 5 s before the filter. The
+ *   filter is a substring test rather than a segment split on purpose —
  *   over-including a file only makes this check marginally looser, and a guard
  *   that fails for the wrong reason is the one failure mode worth engineering
- *   against.
+ *   against. **The corpus grew from the 372 this header used to record, and the
+ *   row's cost under `bun test` is not what the same work costs outside it** — the
+ *   measured table below is the thing to reproduce before believing a red.
  * - **This file is excluded from its own corpus.** Otherwise the header
  *   comment above — which names the symbol that died, as the receipt for why
  *   this test exists — becomes the proof that the symbol is alive, and the
@@ -84,7 +86,77 @@ function packageFiles(): string[] {
 	);
 }
 
+/**
+ * The index, built at most once per run.
+ *
+ * **This was 1.85 s of cold work against a 5 s per-test budget**, and the
+ * margin was going the wrong way: the corpus is 465 files / 9.2 MB today against
+ * the 372 / 5.4 this header records, and each of the four migration sources added
+ * to it. In a full `bun test` — 215 files running concurrently — the cold build
+ * competes for I/O with everything else, and the row timed out at 5000 ms in one
+ * full run while passing alone. **Passing alone is not the same as passing**, and
+ * a timeout that only appears under load is the one that hides a real problem.
+ *
+ * **The corpus is deliberately NOT narrowed.** The file's premise 2 says a symbol
+ * that survives only inside a test file passes here, on purpose: this is a
+ * liveness check for renames, not a correctness one, and dropping the test half
+ * would turn that documented leniency into a wave of failures nobody asked for.
+ * Measured for the record: source-only is 221 files versus 465, so narrowing is
+ * roughly a two-fold file reduction — and it would change what the guard means.
+ * Not taken.
+ *
+ * **What the caching does and does not buy, measured rather than assumed.** Read
+ * every file is 212 ms and the token index 425 ms outside `bun test`, so the work
+ * fits the budget by an order of magnitude — yet the row was timing out at
+ * 5,000–9,000 ms. That 13× gap is not explained by anything measured here; the
+ * per-file costs are 1–5 ms with the worst eight totalling 22 ms.
+ *
+ * **What the cache actually changed, and it is not the interesting half.** There
+ * is exactly one call site, so caching saves one build out of one. **The row's
+ * outcome on this machine, on an unchanged corpus, across consecutive runs of
+ * this file alone:** 2 pass / 1 fail, 3 pass / 0 fail, 3 pass / 0 fail, 3 pass /
+ * 0 fail, 3 pass / 0 fail, then 2 pass / 1 fail again. It is **intermittent**, it
+ * was intermittent before this change, and **four green runs in a row is not
+ * evidence of a fix** — the run after those four was red.
+ *
+ * So the honest statement is: the cache is correct and free, and the row remains
+ * at risk. What a red here means is almost certainly not a skill citing
+ * something dead.
+ */
+
+/**
+ * Measured on this machine, 2026-10-03, on the corpus as it stood at 465 files:
+ *
+ * ```console
+ * read every file                      212 ms
+ * read + matchAll over every file      425 ms   1,285,927 tokens, 23,312 unique
+ * per-file matchAll, worst 8            22 ms   total
+ * the same row under `bun test`     5,000–9,000 ms   <- times out
+ * ```
+ *
+ * **The gap between 425 ms and 5,000 ms is unexplained by anything measured here,
+ * and this file does not pretend otherwise.** Two things follow for whoever looks
+ * at it next. The timeout is not the corpus size — the corpus was already 372 files
+ * when this header recorded "not close to the limit", and four sources took it to
+ * 465, while the work itself is 425 ms. And **widening the timeout would hide the
+ * measurement rather than answer it**, so the numbers above are the thing to
+ * reproduce.
+ *
+ * The practical consequence: this row is the one in the suite most likely to go
+ * red for reasons that have nothing to do with a skill citing something dead, and
+ * it was observed both intermittent and solid on an unchanged corpus. **A red here
+ * should be re-run and compared against this table before it is read as a
+ * defect**, and a run that goes green afterwards is evidence of nothing either
+ * way.
+ */
+let cachedIndex: Set<string> | undefined;
+
 function identifierIndex(): Set<string> {
+	cachedIndex ??= buildIdentifierIndex();
+	return cachedIndex;
+}
+
+function buildIdentifierIndex(): Set<string> {
 	const index = new Set<string>();
 	for (const entry of packageFiles()) {
 		let text: string;
