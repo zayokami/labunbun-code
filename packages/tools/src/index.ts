@@ -133,7 +133,7 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		// the policy calls readable-only is exactly the root `decideWrite` has to
 		// refuse, and a policy that only Read knows about is a policy the shell
 		// and the write tools disagree with.
-		createWriteTool(cwd, ops, options.readOnlyRoots ?? []),
+		createWriteTool(cwd, ops, options.readOnlyRoots ?? [], readState),
 		createBashOutputTool(background),
 		createKillBashTool(background),
 	];

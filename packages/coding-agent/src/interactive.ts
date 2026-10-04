@@ -66,6 +66,7 @@ import {
 	createAllTools,
 	defaultOperations,
 	describeSandboxBackend,
+	describeWritableRoots,
 	detectRuntime,
 	networkConfinement,
 	type Operations,
@@ -321,7 +322,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// `workspace-write` still cannot reach the temp directory or a package cache
 		// — the usability defect these roots exist to close.
 		home,
-		writableRoots: loadedSettings.settings.permissions.additionalDirectories,
+		writableRoots: settings.permissions.additionalDirectories,
 	});
 	// Best effort, and before anything can spill: an expired file is one the
 	// context cannot be pointing at, since nothing has run yet this session.
@@ -1623,6 +1624,20 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					session.network.domains,
 					networkConfinement(ctx.sandboxBackend, session.sandbox, session.network.access),
 				),
+				// The writable roots, **and this line is why the row above can be
+				// believed**: the sandbox sentence says a boundary is enforced, and
+				// this is what the boundary is made of. A user who cannot see the
+				// paths cannot tell a temp directory from a whole disk, and
+				// `permissions.additionalDirectories` is a setting that widens the
+				// write surface — one nobody can inspect is one nobody trusts.
+				//
+				// The sentence comes from the same resolver the policy is built
+				// from, so what is printed here is what the argv carries rather
+				// than a second account of it that can drift.
+				describeWritableRoots({
+					home: ctx.home,
+					configured: ctx.settings.permissions.additionalDirectories,
+				}),
 				`Rules (${rules.length}):`,
 				...rules.map(
 					(r) =>

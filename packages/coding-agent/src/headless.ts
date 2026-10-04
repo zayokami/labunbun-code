@@ -151,7 +151,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// `workspace-write` still cannot reach the temp directory or a package cache
 		// — the usability defect these roots exist to close.
 		home,
-		writableRoots: loadedSettings.settings.permissions.additionalDirectories,
+		writableRoots: settings.permissions.additionalDirectories,
 	});
 	const store = options.noSession ? undefined : SessionStore.startNew(cwd, home);
 	pruneToolOutput(cwd);

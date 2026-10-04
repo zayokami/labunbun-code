@@ -118,8 +118,13 @@ describe("/permissions shows the writable roots", () => {
 		// below come from `@labunbun/tools`, which is where `resolveWritableRoots`
 		// and `describeWritableRoots` both live.
 		const window = callSite(join(SRC, "..", "..", "tools", "src", "bash.ts"), "writableRoots: resolveWritableRoots({");
-		expect(window).toContain("home: options.home");
-		expect(window).toContain("configured: options.writableRoots");
+		// **`options?.home`, not `options.home`.** The parameter is optional, so
+		// reading it unguarded is a type error — the first version of this row asked
+		// for the unguarded spelling and the compiler was right. What the row is
+		// actually for is that the value comes from the caller's option rather than
+		// from a constant, and `?.` says that as well as `.` does.
+		expect(window).toContain("home: options?.home");
+		expect(window).toContain("configured: options?.writableRoots");
 	});
 
 	test("the control: the sentence builder is imported, so the call above cannot be a free variable", () => {

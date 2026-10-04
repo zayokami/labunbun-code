@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { resolveCanonical } from "../src/containment.ts";
 import {
 	createAllTools,
 	createEditTool,
@@ -15,6 +16,7 @@ import {
 	defaultOperations,
 	detectShell,
 	type Operations,
+	ReadFileState,
 } from "../src/index.ts";
 
 function tempDir(): string {
@@ -53,6 +55,22 @@ async function call(tool: any, input: unknown) {
 	return tool.call(input, ctx());
 }
 
+/**
+ * Read and Edit over one `ReadFileState`.
+ *
+ * Edit's first gate is a *recorded read*, so an Edit case that does not go
+ * through Read on the same store is testing the gate rather than the edit. This
+ * is the shape `createAllTools` builds (`index.ts:100-107`), which is what
+ * makes these rows a test of the wiring and not only of the guard.
+ */
+function readEditPair(dir: string): { edit: any; read: any } {
+	const readState = new ReadFileState();
+	return {
+		edit: createEditTool(dir, defaultOperations(), readState),
+		read: createReadTool(dir, defaultOperations(), [], readState),
+	};
+}
+
 describe("Read tool", () => {
 	test("numbers lines and pages", async () => {
 		const dir = tempDir();
@@ -82,6 +100,29 @@ describe("Read tool", () => {
 		const tool = createReadTool(tempDir(), defaultOperations());
 		expect(tool.overflow).toBe("truncate");
 		expect(Number.isFinite(tool.maxResultSizeChars)).toBe(true);
+	});
+
+	test("a read that worked is recorded, and one that did not is not", async () => {
+		// The record an edit gate consults, from here rather than from the class's
+		// own tests: the tool has to leave it, and an error result must not — a
+		// refused read shows the model nothing, and a record claiming otherwise is
+		// a licence to edit a file nobody opened.
+		const dir = tempDir();
+		const file = join(dir, "recorded.txt");
+		writeFileSync(file, "one\ntwo\n");
+		const state = new ReadFileState();
+		const tool = createReadTool(dir, defaultOperations(), [], state);
+		// Under the key the gate looks up with: Edit resolves its own path the same
+		// way, and on macOS a temp dir has a second canonical spelling.
+		const key = resolveCanonical(file, dir);
+
+		const missing = join(dir, "never-existed.txt");
+		expect((await call(tool, { file_path: missing })).isError).toBe(true);
+		expect(state.getState(resolveCanonical(missing, dir))).toBeUndefined();
+
+		expect((await call(tool, { file_path: file })).isError).toBeUndefined();
+		expect(state.getState(key)?.content).toBe("one\ntwo\n");
+		expect(state.getState(key)?.fullRead).toBe(true);
 	});
 });
 
@@ -152,17 +193,18 @@ describe("Write + Edit tools", () => {
 		const dir = tempDir();
 		const file = join(dir, "code.ts");
 		writeFileSync(file, "const a = 1;\nconst b = 2;\nconst a2 = 3;\n");
-		const tool = createEditTool(dir, defaultOperations());
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
 
-		const ok = await call(tool, { file_path: file, old_string: "const b = 2;", new_string: "const b = 20;" });
+		const ok = await call(edit, { file_path: file, old_string: "const b = 2;", new_string: "const b = 20;" });
 		expect(ok.isError).toBeFalsy();
 		expect(await Bun.file(file).text()).toContain("const b = 20;");
 
-		const ambiguous = await call(tool, { file_path: file, old_string: "const a", new_string: "x" });
+		const ambiguous = await call(edit, { file_path: file, old_string: "const a", new_string: "x" });
 		expect(ambiguous.isError).toBe(true);
 		expect((ambiguous.content[0] as any).text).toContain("appears 2 times");
 
-		const missing = await call(tool, { file_path: file, old_string: "nope", new_string: "x" });
+		const missing = await call(edit, { file_path: file, old_string: "nope", new_string: "x" });
 		expect(missing.isError).toBe(true);
 	});
 
@@ -176,7 +218,7 @@ describe("Write + Edit tools", () => {
 		writeFileSync(join(gitDir, "config"), "[core]\n");
 
 		const write = createWriteTool(dir, defaultOperations());
-		const edit = createEditTool(dir, defaultOperations());
+		const edit = createEditTool(dir, defaultOperations(), new ReadFileState());
 
 		const wrote = await call(write, { file_path: join(gitDir, "config"), content: "[core]\n\tevil = 1\n" });
 		expect(wrote.isError).toBe(true);
@@ -227,7 +269,7 @@ describe("Write + Edit tools", () => {
 			// `guardWritablePath` call and a guard only one of the two tools
 			// invokes is not a guard the other one has.
 			writeFileSync(config, "[core]\n\tbranch = main\n");
-			const edit = createEditTool(dir, defaultOperations());
+			const edit = createEditTool(dir, defaultOperations(), new ReadFileState());
 			const edited = await call(edit, { file_path: config, old_string: "main", new_string: "evil" });
 			expect(edited.isError).toBe(true);
 			expect(await Bun.file(config).text()).toBe("[core]\n\tbranch = main\n");
@@ -270,8 +312,9 @@ describe("Write + Edit tools", () => {
 		const dir = tempDir();
 		const file = join(dir, "r.txt");
 		writeFileSync(file, "x x x");
-		const tool = createEditTool(dir, defaultOperations());
-		const result = await call(tool, {
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+		const result = await call(edit, {
 			file_path: file,
 			old_string: "x",
 			new_string: "y",

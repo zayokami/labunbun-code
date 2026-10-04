@@ -131,8 +131,18 @@ describe("a spilled result, end to end through the real tools", () => {
 		expect(path).toBeTruthy();
 		expect(cut).toContain("truncated");
 		expect(cut.length).toBeLessThan(31_000);
-		// What the model sees stops early...
-		expect(cut).not.toContain("line 4000");
+		// The head **and** the tail survive, and the tail is the point: the line a
+		// build ends on is where it says what went wrong, which is exactly what a
+		// head-only cut threw away. This assertion used to be
+		// `not.toContain("line 4000")` — the behaviour before the cut moved to the
+		// middle, and the comment two lines up already explained why losing it was
+		// the defect. The line still exists below, checking the spill file holds
+		// everything, which is a separate promise and still holds.
+		expect(cut).toContain("line 1");
+		expect(cut).toContain("line 4000");
+		// And the middle is what went: a line from the middle of a 4,000-line output
+		// must NOT be present, or nothing was cut at all.
+		expect(cut).not.toContain("line 2000");
 
 		const read = tools.find((tool) => tool.name === "Read");
 		const readFrom = (input: unknown) =>
@@ -212,7 +222,15 @@ describe("a spilled result, end to end through the real tools", () => {
 			text: "",
 		});
 		expect(bounded.length).toBeLessThan(limit + 100);
-		expect(bounded).not.toContain(last);
+		// The last line survives, which is the whole reason the cut moved to the
+		// middle. It was `not.toContain(last)` before, asserting that a cut throws
+		// away the failure summary — and this row's own `last` is a test-failure
+		// line. The line before it already says a head-only cut loses "where a build
+		// says what went wrong"; this is that sentence becoming an assertion.
+		expect(bounded).toContain(last);
+		// The middle is still what was cut. Without this the row would pass on a
+		// `cutText` that keeps everything.
+		expect(bounded).not.toContain("line 200 x");
 		const path = /\[full output: \d+ chars → ([^\]]+)\]/.exec(bounded)?.[1];
 		expect(path).toBeTruthy();
 		expect(readFileSync(path as string, "utf8")).toContain(last);

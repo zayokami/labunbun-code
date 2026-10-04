@@ -3,10 +3,16 @@ import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
 import { guardWritablePath } from "./containment.ts";
 import type { Operations } from "./operations.ts";
+import type { ReadFileState } from "./read-file-state.ts";
 import { decideWrite } from "./sandbox/simulated.ts";
 import { workspacePolicy } from "./sandbox/workspace-policy.ts";
 
-export function createWriteTool(cwd: string, ops: Operations, readOnlyRoots: string[] = []): AnyTool {
+export function createWriteTool(
+	cwd: string,
+	ops: Operations,
+	readOnlyRoots: string[] = [],
+	readState?: ReadFileState,
+): AnyTool {
 	return buildTool({
 		name: "Write",
 		description:
@@ -62,6 +68,13 @@ export function createWriteTool(cwd: string, ops: Operations, readOnlyRoots: str
 			try {
 				await ops.mkdir(dirname(path));
 				await ops.writeTextFileAtomic(path, input.content);
+				// A Write is the one case where a file the model never read is still a
+				// file whose whole content it knows: it just authored all of it. Without
+				// this the Edit gate refuses the next edit to a file the session created
+				// itself, which is the shape of every "create then fix" task. The
+				// record is what `ReadFileState` documents; this is its only production
+				// writer, and until it existed the documented rule had no caller.
+				readState?.record(path, { content: input.content });
 				return {
 					content: [{ type: "text", text: `Wrote ${input.content.length} chars to ${path}` }],
 				};
