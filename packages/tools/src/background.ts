@@ -3,6 +3,12 @@
  * started by the Bash tool with run_in_background, or adopted by it when a
  * foreground command outlives its timeout. Output streams to a temp file;
  * BashOutput tails it, KillBash terminates the process tree.
+ *
+ * A shell that finishes on its own is announced through `onComplete`, so an
+ * app can be woken instead of polling, and its record stays pollable until the
+ * retained set outgrows {@link MAX_RETAINED_SHELLS} — a session that starts a
+ * watcher per hour should not accumulate a record per command for the life of
+ * the process.
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
@@ -14,6 +20,9 @@ import { detectRuntime, resolveSandboxExecution, type SandboxRuntime } from "./s
 
 /** How much of a shell's log one read may bring back. */
 const MAX_SHELL_OUTPUT_CHARS = 30_000;
+
+/** How many ended shells the manager keeps pollable before evicting the oldest. */
+const MAX_RETAINED_SHELLS = 16;
 
 /**
  * The last `maxChars` characters of a file, without reading the whole thing.
@@ -58,6 +67,8 @@ export interface BackgroundShell {
 interface ShellEntry {
 	info: BackgroundShell;
 	proc: ChildProcess;
+	/** When the process was seen to end; the eviction key. Unset while running. */
+	endedAt?: number;
 }
 
 let shellCounter = 0;
@@ -79,6 +90,8 @@ function logAppender(outputFile: string): (chunk: Buffer | string) => void {
 
 export class BackgroundShellManager {
 	readonly #entries = new Map<string, ShellEntry>();
+	/** Who to tell when a shell finishes on its own; see `onComplete`. */
+	readonly #exitHandlers = new Set<(shell: BackgroundShell) => void>();
 	readonly #shell = detectShell();
 	/** Injected for the same reason as `ChildProcessExecOperations`'s: so a test on
 	 * one platform can exercise the wrapping branch for another. */
@@ -94,21 +107,82 @@ export class BackgroundShellManager {
 
 	/**
 	 * The completion handlers every shell gets, whichever path started it: mark
-	 * the shell ended — unless a kill already did — record the exit code, and put
+	 * the shell ended — unless a kill already did — record the exit code, put
 	 * the code in the log, so a reader who only ever saw the file learns how it
-	 * ended and not only what it printed along the way.
+	 * ended and not only what it printed along the way, and hand the end to
+	 * {@link #onEnded}, which is what announces and bounds it.
 	 */
 	#attachExit(entry: ShellEntry, append: (chunk: Buffer | string) => void): void {
 		entry.proc.on("error", (error) => {
 			append(`\n[spawn error: ${error.message}]`);
 			if (entry.info.status !== "killed") entry.info.status = "completed";
 			entry.info.exitCode = 127;
+			this.#onEnded(entry);
 		});
 		entry.proc.on("close", (code) => {
 			if (entry.info.status !== "killed") entry.info.status = "completed";
 			entry.info.exitCode = code ?? 0;
 			append(`\n[exit code: ${entry.info.exitCode}]`);
+			this.#onEnded(entry);
 		});
+	}
+
+	/**
+	 * The first end event a shell reports, and the only one acted on.
+	 *
+	 * A failed spawn can surface twice — an `error` and, on some platforms, the
+	 * `close` behind it — so the stamp decides: whoever arrives first stops the
+	 * clock and does the work, and a second event only updates the record. A
+	 * killed shell is deliberately not a completion: the user asked for it to
+	 * stop, so nothing is woken to say that it did — but its record is still
+	 * stamped, because an ended shell is an eviction candidate however it ended.
+	 */
+	#onEnded(entry: ShellEntry): void {
+		if (entry.endedAt !== undefined) return;
+		entry.endedAt = Date.now();
+		if (entry.info.status === "completed") {
+			for (const handler of this.#exitHandlers) {
+				try {
+					handler(entry.info);
+				} catch {
+					// A subscriber's bug (a UI, a session) must not take the shell
+					// record down with it — the same stance as `AgentSession`'s
+					// event dispatch.
+				}
+			}
+		}
+		this.#evictEnded();
+	}
+
+	/**
+	 * Keep the ended shells bounded.
+	 *
+	 * Every shell stays pollable after it ends — that is what BashOutput reads,
+	 * and it is how a caller who missed the announcement catches up — but the
+	 * map would otherwise keep a record per command for the life of the process.
+	 * Ended shells are kept newest-first up to {@link MAX_RETAINED_SHELLS} and
+	 * the oldest beyond that are dropped. A running shell is never a candidate:
+	 * its record is the only handle that can still kill it.
+	 */
+	#evictEnded(): void {
+		const ended = [...this.#entries.entries()].filter(([, entry]) => entry.endedAt !== undefined);
+		if (ended.length <= MAX_RETAINED_SHELLS) return;
+		ended.sort((a, b) => (a[1].endedAt ?? 0) - (b[1].endedAt ?? 0));
+		for (const [id] of ended.slice(0, ended.length - MAX_RETAINED_SHELLS)) {
+			this.#entries.delete(id);
+		}
+	}
+
+	/**
+	 * Subscribe to shells that finish on their own — the hook behind "tell me
+	 * when it is done" rather than "poll it". A killed shell is not a
+	 * completion; see {@link #onEnded}. Called synchronously from the process's
+	 * own end event, before any eviction, so the log is still where the
+	 * subscriber last saw it. Returns the unsubscribe.
+	 */
+	onComplete(handler: (shell: BackgroundShell) => void): () => void {
+		this.#exitHandlers.add(handler);
+		return () => this.#exitHandlers.delete(handler);
 	}
 
 	/**

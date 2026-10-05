@@ -231,6 +231,17 @@ export const SettingsSchema = z.object({
 	 * or metered machine should not have to firewall a startup chat.
 	 */
 	modelDiscovery: z.boolean().optional(),
+	/**
+	 * Wake the session when a background shell finishes on its own.
+	 *
+	 * On by default: the notice is what lets a long command run in the
+	 * background without the model polling for it — the session is told once,
+	 * with the exit code and the end of the log, and decides what to say. The
+	 * message travels the follow-up queue, so a completion during a turn waits
+	 * for the turn's natural end. Set false to leave completions to BashOutput
+	 * polling and spend no turn on them.
+	 */
+	backgroundShellNotifications: z.boolean().optional(),
 	permissions: z
 		.object({
 			allow: z.array(z.string()).default([]),
@@ -448,6 +459,11 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	// Not a lockdown but the same rule: whether this startup asks the network a
 	// question is the user's decision, not the repository's.
 	modelDiscovery: "denied",
+	// The same class as `modelDiscovery`: whether a finished command spends a
+	// turn and sends the end of the log to the provider is the user's decision,
+	// and a repository that re-enabled silenced notices would be spending on its
+	// own checkout's behalf.
+	backgroundShellNotifications: "denied",
 	gamepad: "denied",
 	allowManagedPermissionRulesOnly: "denied",
 	disableBypassPermissionsMode: "denied",

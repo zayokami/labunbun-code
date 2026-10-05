@@ -94,6 +94,7 @@ import {
 	resolveShellId,
 	shellPickerItems,
 } from "./background-commands.ts";
+import { attachShellNotices } from "./background-notifications.ts";
 import { cacheStatusLine, formatCacheReport } from "./cache-report.ts";
 import {
 	builtInCommands,
@@ -1145,6 +1146,23 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	shellPoll.unref();
 	publishShells();
 
+	// And the other half of that status row: when a shell finishes on its own,
+	// the session is told instead of being polled for it. `getSession` rather
+	// than the session itself because a `/resume` swaps it, and the setting is
+	// read per completion for the same reason — the value in force is the one
+	// at the moment there is something to report. A completion also publishes
+	// the row immediately, so "finished" appears when it happens rather than at
+	// the next tick, matching the kill path.
+	const detachShellNotices = attachShellNotices({
+		manager: backgroundShells,
+		getSession: () => sessionRef,
+		enabled: () => settings.backgroundShellNotifications !== false,
+		onNotice: (text) => {
+			publishShells();
+			pushInfo(handle, text);
+		},
+	});
+
 	// SessionStart ran before the REPL existed, so its failures surface now.
 	reportHookErrors(handle, startupHookErrors);
 	// Silently running in a weaker mode than the one asked for would be the
@@ -1170,6 +1188,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// process open after the user has quit.
 	catalogAbort.abort();
 	unsubTasks();
+	detachShellNotices();
 	clearInterval(shellPoll);
 	// Same reason, and one more: an open HID handle outlives the event loop's
 	// interest in it, so a pad left open would keep the process from exiting.

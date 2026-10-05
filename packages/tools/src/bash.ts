@@ -62,7 +62,7 @@ export function createBashTool(
 			"shell when available (Git Bash on Windows), otherwise cmd.exe. " +
 			"Use for git, builds, test runners, and other CLI work. " +
 			"Set run_in_background for long-running processes (dev servers, watchers) — you get a " +
-			"shell id immediately and can read output later with BashOutput. " +
+			"shell id immediately, read progress with BashOutput, and are told when it finishes. " +
 			"A foreground command that hits its timeout is moved to the background, not killed.",
 		inputSchema: z.object({
 			command: z.string().describe("The shell command to run"),
@@ -80,7 +80,8 @@ export function createBashTool(
 			"- Prefer dedicated tools over shell where they exist (Read/Grep/Glob instead of cat/grep/find).\n" +
 			"- Chain dependent steps with && ; avoid interactive commands.\n" +
 			"- Provide a short `description` so the user can follow along.\n" +
-			"- Use run_in_background for servers/watchers; check with BashOutput.\n" +
+			"- Use run_in_background for servers/watchers — a finished shell notifies you; " +
+			"use BashOutput only for progress in between.\n" +
 			"- A foreground command that exceeds its timeout keeps running in the background — " +
 			"the result names its shell id; poll it instead of re-running the command.",
 		isReadOnly: () => false,
