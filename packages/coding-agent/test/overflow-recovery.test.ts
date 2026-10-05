@@ -124,6 +124,10 @@ async function run(steps: string, options: { writeSettings?: (home: string) => v
 	};
 }
 
+// Each of these spawns a whole app boot; the explicit 30s is the child-process
+// class's budget (same as continue.test.ts), not bun's 5s default — a loaded CI
+// runner has crossed that default on the first, coldest spawn while answering in
+// under a second on the next one.
 describe("recovering from a refusal for size", () => {
 	test("the refused prompt is compacted and sent again, without being asked twice", async () => {
 		const { requests, replies, counts, infos, activity } = await run(
@@ -158,7 +162,7 @@ describe("recovering from a refusal for size", () => {
 		expect(
 			infos.filter((info) => /^Context compacted \(overflow\): [\d.]+k → [\d.]+k tokens\.$/.test(info)),
 		).toHaveLength(1);
-	});
+	}, 30_000);
 
 	test("a vetoing PreCompact hook cannot send the request it just refused", async () => {
 		// A hook may defer compaction the estimate asked for. It may not defer one
@@ -186,7 +190,7 @@ describe("recovering from a refusal for size", () => {
 		// And the status row never claimed a summary was running, because none was:
 		// the veto is answered before the manager is asked anything at all.
 		expect(activity).toEqual([]);
-	});
+	}, 30_000);
 
 	test("the breaker announces itself once, and only when it trips", async () => {
 		// Silent, a tripped breaker looks like a session that simply stopped
@@ -244,5 +248,5 @@ describe("recovering from a refusal for size", () => {
 		// The turns themselves still ran: a compaction that fails is a loss of
 		// headroom, not a broken session, as long as the request still fits.
 		expect(replies).toEqual(["completed", "completed", "completed", "completed", "completed"]);
-	});
+	}, 30_000);
 });
