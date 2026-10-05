@@ -54,6 +54,20 @@ const SLOW_WITH_OUTPUT =
 /** Runs long enough that only a kill ends it inside a test's lifetime. */
 const LONG_RUNNING = process.platform === "win32" ? "ping -n 30 127.0.0.1 > nul" : "sleep 30";
 
+/**
+ * How far a wall-clock lower bound may fall short of the nominal window.
+ *
+ * The clock assertions below ask "did the recorded start happen a full timeout
+ * window ago, or at the handoff just now?" — ~600ms against ~0ms. The exact
+ * bound is not the property, and the measurement is not exact: CI clocks are
+ * quantized (Windows' system timer granularity is coarse) and libuv timers may
+ * fire a hair early, so a window that really took 600ms read as 597 on the
+ * windows runner and failed a `>= 600`. The tolerance absorbs the
+ * measurement's error; the reading a wrong clock produces is nowhere near the
+ * bound either way.
+ */
+const CLOCK_TOLERANCE_MS = 50;
+
 const toolCtx = (cwd: string) => ({
 	callId: "t1",
 	signal: new AbortController().signal,
@@ -139,7 +153,7 @@ describe("exec timeout handoff", () => {
 		expect(handoff.child.killed).toBe(false);
 		// The clock the adopter shows starts where the command did, not where the
 		// wait ended.
-		expect(Date.now() - handoff.startedAt).toBeGreaterThanOrEqual(600);
+		expect(Date.now() - handoff.startedAt).toBeGreaterThanOrEqual(600 - CLOCK_TOLERANCE_MS);
 
 		// An abort after the handoff fires into a listener the handoff removed:
 		// whether this process lives is the adopter's call now, and the
@@ -209,7 +223,7 @@ describe("a timed-out Bash call (real spawn)", () => {
 		// The shell's clock starts at the spawn, not at the adoption: a poll that
 		// showed "0s ago" for a command that had already run for the timeout would
 		// be reporting the handoff, and callers read it as the command.
-		expect(Date.now() - shell.startTime).toBeGreaterThanOrEqual(600);
+		expect(Date.now() - shell.startTime).toBeGreaterThanOrEqual(600 - CLOCK_TOLERANCE_MS);
 
 		// Output keeps landing after the call returned: the exec listeners still
 		// read the pipes, and what they emit is forwarded to the log. Asserted as
