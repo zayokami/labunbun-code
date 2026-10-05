@@ -401,6 +401,46 @@ describe("Write + Edit tools", () => {
 	});
 });
 
+/**
+ * A tree that exercises each `.gitignore` rule once, with `TOKEN` in every
+ * file — so a rule that stops working shows up as an extra or missing path,
+ * not as a different-looking line.
+ */
+function ignoreFixture(): string {
+	const dir = tempDir();
+	writeFileSync(
+		join(dir, ".gitignore"),
+		["# build output", "", "*.log", "!keep.log", "build/", "cached/", "/root-only.txt", "src/gen", "logs/**", ""].join(
+			"\n",
+		),
+	);
+	writeFileSync(join(dir, "a.log"), "TOKEN in a log\n");
+	writeFileSync(join(dir, "keep.log"), "TOKEN in a kept log\n");
+	writeFileSync(join(dir, "real.txt"), "TOKEN real\n");
+	writeFileSync(join(dir, "root-only.txt"), "TOKEN root only\n");
+	writeFileSync(join(dir, "cached"), "TOKEN a file named like a directory rule\n");
+	mkdirSync(join(dir, "sub"), { recursive: true });
+	writeFileSync(join(dir, "sub", "b.log"), "TOKEN nested log\n");
+	writeFileSync(join(dir, "sub", "root-only.txt"), "TOKEN nested root-only\n");
+	mkdirSync(join(dir, "build"), { recursive: true });
+	writeFileSync(join(dir, "build", "out.txt"), "TOKEN in build\n");
+	mkdirSync(join(dir, "src", "gen"), { recursive: true });
+	writeFileSync(join(dir, "src", "gen", "z.txt"), "TOKEN generated\n");
+	mkdirSync(join(dir, "logs", "deep"), { recursive: true });
+	writeFileSync(join(dir, "logs", "deep", "d.txt"), "TOKEN logged\n");
+	return dir;
+}
+
+/** The paths a Grep result covers, sorted: the header line is dropped and each `path:N:` line is cut at the colon. */
+function pathsOf(text: string): string[] {
+	return text
+		.trim()
+		.split("\n")
+		.slice(1)
+		.map((line) => line.slice(0, line.indexOf(":")))
+		.sort();
+}
+
 describe("Grep tool", () => {
 	test("finds pattern with line numbers, skips node_modules", async () => {
 		const dir = tempDir();
@@ -429,6 +469,86 @@ describe("Grep tool", () => {
 		const ci = await call(tool, { pattern: "hello", include: "*.ts", case_insensitive: true });
 		expect((ci.content[0] as any).text).toContain("a.ts:1");
 	});
+
+	test("gitignored files are skipped — by each rule — and the kept ones are searched", async () => {
+		const dir = ignoreFixture();
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN" });
+		// real.txt and keep.log (the `!` re-include) survive; sub/root-only.txt
+		// survives because `/root-only.txt` is anchored; `cached` survives because
+		// the file is not a directory. Everything else — the plain `*.log`, the
+		// directory rule, the path rule and `logs/**` — is out.
+		expect(pathsOf((result.content[0] as any).text)).toEqual(["cached", "keep.log", "real.txt", "sub/root-only.txt"]);
+	});
+
+	test("a deeper .gitignore overrides the ones above it", async () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, ".gitignore"), "*.tmp\nonly-here.txt\n");
+		mkdirSync(join(dir, "sub"), { recursive: true });
+		writeFileSync(join(dir, "sub", ".gitignore"), "!wanted.tmp\n");
+		writeFileSync(join(dir, "sub", "wanted.tmp"), "TOKEN wanted\n");
+		writeFileSync(join(dir, "sub", "other.tmp"), "TOKEN other\n");
+		writeFileSync(join(dir, "sub", "only-here.txt"), "TOKEN only here\n");
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN" });
+		expect(pathsOf((result.content[0] as any).text)).toEqual(["sub/wanted.tmp"]);
+	});
+
+	test("include is matched against the path relative to the search root", async () => {
+		const dir = tempDir();
+		mkdirSync(join(dir, "src"), { recursive: true });
+		writeFileSync(join(dir, "main.ts"), "NEEDLE at the root\n");
+		writeFileSync(join(dir, "src", "main.ts"), "NEEDLE in src\n");
+		writeFileSync(join(dir, "src", "main.md"), "NEEDLE in markdown\n");
+		const tool = createGrepTool(dir, defaultOperations());
+
+		// The old include matched only the basename, so `src/*.ts` silently
+		// matched nothing at all — the pattern could never contain a slash.
+		const srcOnly = await call(tool, { pattern: "NEEDLE", include: "src/*.ts" });
+		expect(pathsOf((srcOnly.content[0] as any).text)).toEqual(["src/main.ts"]);
+
+		// Glob semantics, as the description says: `*.ts` does not cross a slash.
+		const topOnly = await call(tool, { pattern: "NEEDLE", include: "*.ts" });
+		expect(pathsOf((topOnly.content[0] as any).text)).toEqual(["main.ts"]);
+
+		const deep = await call(tool, { pattern: "NEEDLE", include: "**/*.ts" });
+		expect(pathsOf((deep.content[0] as any).text)).toEqual(["main.ts", "src/main.ts"]);
+	});
+
+	test("a CRLF line is matched and quoted without the carriage return", async () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "crlf.txt"), "first\r\nTOKEN end\r\n");
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "end$" });
+		const text = (result.content[0] as any).text as string;
+		// `$` anchors at the line's end, not at the `\r`, and the quoted line
+		// carries no invisible control character.
+		expect(text).toContain("crlf.txt:2: TOKEN end");
+		expect(JSON.stringify(text)).not.toContain("\\r");
+	});
+
+	test("the quoted line keeps its indentation", async () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "indented.py"), "def f():\n    return TOKEN\n");
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN" });
+		// The old code `.trim()`ed the line: the result quoted a string the file
+		// does not contain, so a model copying it back out could never match.
+		expect((result.content[0] as any).text).toContain("indented.py:2:     return TOKEN");
+	});
+
+	test("an explicitly named file is searched even when a rule ignores it", async () => {
+		const dir = ignoreFixture();
+		const tool = createGrepTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "TOKEN", path: join(dir, "a.log") });
+		expect((result.content[0] as any).text).toContain("a.log:1: TOKEN in a log");
+	});
+
+	test("the description claims the subset that is implemented, not ripgrep", () => {
+		const tool = createGrepTool(process.cwd(), defaultOperations());
+		expect(tool.description).toContain(".gitignore");
+		expect(tool.description).not.toContain("ripgrep");
+	});
 });
 
 describe("Glob tool", () => {
@@ -445,6 +565,23 @@ describe("Glob tool", () => {
 		expect(text).toContain("a.test.ts");
 		expect(text).toContain("b.test.ts");
 		expect(text).not.toContain("c.ts");
+	});
+
+	test("gitignored files are left out of the listing", async () => {
+		const dir = ignoreFixture();
+		const tool = createGlobTool(dir, defaultOperations());
+		const result = await call(tool, { pattern: "**/*.txt" });
+		const prefix = `${dir.split("\\").join("/")}/`;
+		const paths = ((result.content[0] as any).text as string)
+			.trim()
+			.split("\n")
+			.map((line: string) => line.slice(prefix.length))
+			.sort();
+		// Glob and Grep run the same walk, so the same four rules decide what a
+		// `.txt` listing contains: the anchored rule spares sub/root-only.txt,
+		// the directory and path rules drop build/ and src/gen, and `logs/**`
+		// drops the file without pruning its parent.
+		expect(paths).toEqual(["real.txt", "sub/root-only.txt"]);
 	});
 });
 

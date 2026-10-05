@@ -10,7 +10,7 @@ export {
 export { caseInsensitivePaths } from "./containment.ts";
 export { createEditTool } from "./edit.ts";
 export { createGlobTool, type FileWalkerOps, walkProjectFiles } from "./glob.ts";
-export { createGrepTool, globToRegExp } from "./grep.ts";
+export { createGrepTool } from "./grep.ts";
 export { createLsTool } from "./ls.ts";
 export type {
 	DirentInfo,
