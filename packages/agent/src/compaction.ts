@@ -6,6 +6,11 @@
  * - Hard limit: contextWindow − 3k → caller should abort with an error
  * - Summary prompt: 8 structured sections (request/concepts/files/errors/
  *   solving/pending/current/next)
+ * - Cache-aligned request: the summary is requested through the session's own
+ *   system prompt and tool list, over the transcript as the last request sent
+ *   it, so the unchanged prefix reads from the prompt cache. The cheaper
+ *   rungs — old tool results previewed, then the oldest round dropped — run
+ *   only after the provider refuses the full request for size.
  * - After compaction, up to 5 recently-touched files are re-injected
  *   (50k char total budget) so active work continues seamlessly
  * - Summarizer: the session's own model, passed in by the caller. The summary
@@ -492,6 +497,17 @@ export interface CompactionManagerDeps {
 	summarizerModel: Model;
 	/** Watch a summarization happen. Never consulted for a decision. */
 	onPhase?: (phase: CompactionPhase) => void;
+	/**
+	 * Called immediately before each summarization request is sent.
+	 *
+	 * The request goes out over the session's own prefix, so the cache report
+	 * reads it as a step of that conversation — and when the retained suffix
+	 * pulled the prefix back (a pass that runs mid-turn), the report would
+	 * otherwise show it as a rewind nothing declared. Declared per attempt,
+	 * because each attempt is its own request and the tracker consumes one
+	 * cause per request.
+	 */
+	onSummarizeRequest?: () => void;
 }
 
 export class CompactionManager {
@@ -660,7 +676,7 @@ export class CompactionManager {
 			// it announces has not started, and the wait is the whole point of saying
 			// it — a summary is a full-prefix request that can take half a minute.
 			this.#deps.onPhase?.({ kind: "start" });
-			const { summary, model } = await this.#summarize(prefix, options.focus);
+			const { summary, model } = await this.#summarize(context, prefix, options.focus);
 			const reinjected = this.#reinjectFiles(prefix);
 			const boundary = compactionBoundary(summary, { reinjected, retainedRequests: retainedRequests(prefix) });
 			const messages = [boundary, ...suffix];
@@ -718,24 +734,54 @@ export class CompactionManager {
 	 * Write the summary.
 	 *
 	 * The request it sends is the whole conversation minus a little — which is
-	 * exactly the size that just overflowed the window. So the summary request is
-	 * the one call that is too big by construction, and it is also the only way
-	 * out of that state: it must not be able to fail for the reason it exists to
-	 * fix. Hence two protections. The old tool results are replaced by a preview
-	 * before the first send — they are the bulk of a long transcript and the least
-	 * of what a summary needs, since a summary is about what was learned, not the
-	 * bytes it was learned from. And if the provider still refuses for size, the
-	 * oldest whole round is dropped and the request sent again.
+	 * exactly the size that just overflowed the window, so this is the one call
+	 * that is too big by construction and also the only way out of that state:
+	 * it must not be able to fail for the reason it exists to fix. Two
+	 * protections, and the order between them matters. The transcript goes over
+	 * as the session's own request first — same system prompt, same tools, the
+	 * same bytes the last main-loop request just put in the cache — because the
+	 * unchanged prefix is then read back instead of paid for again. Only after
+	 * the provider refuses it for size does the ladder give up bytes: previews
+	 * of the old tool results first (the bulk of a long transcript and the least
+	 * of what a summary needs, since a summary is about what was learned, not
+	 * the bytes it was learned from), then the oldest whole round. And the
+	 * request carries an explicit output cap, because the prompt and the answer
+	 * have to fit the window together — at its largest is exactly when this
+	 * runs.
 	 */
-	async #summarize(messages: AgentMessage[], focus?: string): Promise<{ summary: string; model: string }> {
+	async #summarize(
+		context: Context,
+		prefix: AgentMessage[],
+		focus?: string,
+	): Promise<{ summary: string; model: string }> {
 		const instruction = focus?.trim() ? `${SUMMARY_PROMPT}\n\nFocus especially on: ${focus.trim()}` : SUMMARY_PROMPT;
-		let history = microcompact(messages, SUFFIX_KEEP_LAST_TOOL_RESULTS);
-		for (let retries = 0; ; retries++) {
+		// The ladder in the order the trade goes — cache first, bytes only under
+		// a refusal. The raw transcript is the rung that reads the cache; each
+		// step below it rewrites bytes and forfeits that, so none is worth
+		// taking before the provider says the full request does not fit.
+		const ladder: AgentMessage[][] = [prefix];
+		const previewed = microcompact(prefix, SUFFIX_KEEP_LAST_TOOL_RESULTS);
+		if (previewed !== prefix) ladder.push(previewed);
+
+		for (let retries = 0, level = 0; ; retries++) {
+			const history = ladder[level] ?? prefix;
 			const summarizeRequest: Context = {
-				systemPrompt: "You are a precise summarizer. Follow the requested output format exactly.",
+				systemPrompt: context.systemPrompt,
 				messages: [...history, userMessage(instruction)],
-				tools: [],
+				tools: context.tools,
 			};
+			// The floor keeps this a request that can be sent at all; an input
+			// that cannot leave room even for it is what the provider's refusal —
+			// and the next rung — are for.
+			const maxOutputTokens = Math.min(
+				MAX_OUTPUT_TOKENS_RESERVE_CAP,
+				this.#deps.summarizerModel.maxOutputTokens,
+				Math.max(1_024, this.#config.contextWindow - estimateContextUsage(summarizeRequest) - HARD_LIMIT_RESERVE),
+			);
+			// Before the send, not after: the tracker reads the cause the next
+			// recorded request consumes, and for this attempt that request is the
+			// one about to go out.
+			this.#deps.onSummarizeRequest?.();
 
 			const model = this.#deps.summarizerModel;
 			let text = "";
@@ -743,7 +789,10 @@ export class CompactionManager {
 			// Whether the provider refused this attempt for size. Anything else that
 			// goes wrong is a real failure and keeps its own meaning.
 			let tooBig = false;
-			for await (const event of this.#deps.streamFn(model, summarizeRequest, { thinkingLevel: "off" })) {
+			for await (const event of this.#deps.streamFn(model, summarizeRequest, {
+				thinkingLevel: "off",
+				maxOutputTokens,
+			})) {
 				if (event.type === "text_delta") text += event.delta;
 				// The stream may be fallback-wrapped: report whoever answered.
 				if (event.type === "done" && event.message.model) servedBy = event.message.model;
@@ -760,14 +809,20 @@ export class CompactionManager {
 				return { summary: stripAnalysis(text), model: servedBy };
 			}
 
-			// Every retry sends strictly less, so this terminates — at the bound or
-			// at the point where only one round is left. Giving up is the honest
-			// outcome: the alternative is a summary of a conversation the model was
-			// never able to read.
+			// Every step down sends strictly less, so this terminates — at the
+			// bound or at the point where only one round is left. Giving up is the
+			// honest outcome: the alternative is a summary of a conversation the
+			// model was never able to read.
 			if (retries >= MAX_SUMMARY_OVERFLOW_RETRIES) break;
+			const next = ladder[level + 1];
+			if (next) {
+				level++;
+				continue;
+			}
 			const shorter = dropOldestRound(history);
 			if (!shorter) break;
-			history = shorter;
+			ladder.push(shorter);
+			level++;
 		}
 		throw new Error(
 			"the conversation is too large to summarize: it does not fit the summarizer's window even reduced to its most recent round",

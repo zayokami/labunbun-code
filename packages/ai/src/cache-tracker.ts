@@ -5,9 +5,9 @@
  * reads nothing may be a cold start (nobody had written the prefix yet), a TTL
  * that expired, a genuine prefix rewind (the bytes changed somewhere in the
  * middle, so everything after that point was charged at full price), or a
- * different conversation entirely — a subagent, a compaction summary, a model
- * fallback. This module answers that question by remembering the wire-visible
- * bytes of each request and comparing the next one against them.
+ * different conversation entirely — a subagent, a model fallback. This module
+ * answers that question by remembering the wire-visible bytes of each request
+ * and comparing the next one against them.
  *
  * It is a `StreamFn` wrapper rather than part of the agent session, and that is
  * deliberate: the session sees only its own loop, while compaction and subagent
@@ -40,9 +40,9 @@ import type { AgentMessage, Context, Model, StreamFn, StreamOptions } from "./ty
 
 /**
  * How many families to remember. One per model-plus-prompt shape in play: the
- * main loop, a compaction summary, and a handful of subagent flavours is the
- * realistic ceiling, and a family that falls out of the window simply starts
- * over (its next request is a cold start, which is what it would have been).
+ * main loop and a handful of subagent flavours is the realistic ceiling, and a
+ * family that falls out of the window simply starts over (its next request is a
+ * cold start, which is what it would have been).
  */
 const MAX_FAMILIES = 8;
 

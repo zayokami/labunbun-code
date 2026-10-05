@@ -750,9 +750,11 @@ describe("CompactionManager", () => {
 	test("the summary request itself shrinks instead of failing when it is too large", async () => {
 		// The summary request is the conversation it is summarizing: the one call
 		// that is too big by construction, and the only way out of that state. It
-		// may not fail for the reason it exists to fix. Two protections, in order:
-		// the old tool results are previews before the first send, and a refusal
-		// after that drops the oldest whole round.
+		// may not fail for the reason it exists to fix. Three protections, in
+		// order: the transcript goes over as the session's own request first — the
+		// attempt whose unchanged prefix reads the cache back — then, behind a
+		// refusal, previews of the old tool results, then dropping the oldest
+		// whole round.
 		const sent: AgentMessage[][] = [];
 		let calls = 0;
 		const overflowingThenOk: StreamFn = async function* (model, context, options) {
@@ -784,17 +786,21 @@ describe("CompactionManager", () => {
 		expect(calls).toBe(2);
 		expect(result.messages[0].role).toBe("user");
 
-		// The first attempt already carried previews instead of the old tool output.
+		// The first attempt is the transcript as the session last sent it — whole
+		// tool results and all. That is the attempt that reads the cache back, so
+		// it goes first; rewriting bytes the cache is keyed on is a price only a
+		// refusal may ask for.
 		const first = JSON.stringify(sent[0]);
-		expect(first).toContain("truncated by microcompact");
+		expect(first).not.toContain("truncated by microcompact");
 		expect(first).toContain("oldest request");
-		// The retry carried less still: the oldest round is gone, and what is left
-		// is still a conversation — it starts on a user turn.
+		// The refusal buys the cheap rung: the retry carries previews of the old
+		// tool output and is smaller for it — and still a conversation, starting
+		// on a user turn.
 		const second = JSON.stringify(sent[1] as AgentMessage[]);
+		expect(second).toContain("truncated by microcompact");
+		expect(second).toContain("oldest request");
 		expect(second.length).toBeLessThan(first.length);
-		expect(second).not.toContain("oldest request");
 		expect((sent[1] as AgentMessage[])[0]?.role).toBe("user");
-		expect(second).toContain("second request");
 	});
 
 	test("a summary request that stays too large drops rounds, then gives up out loud", async () => {

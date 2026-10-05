@@ -161,7 +161,11 @@ describe("which rung runs at the threshold", () => {
 
 		const summarized = wiring({ trimOldToolResults: false });
 		await summarized.check({ systemPrompt: "", messages: overThreshold() });
-		expect(summarized.causes).toEqual(["compaction"]);
+		// Two declarations, because a summarized pass sends two kinds of request
+		// that replace part of the prefix: the summary's own (declared before each
+		// attempt, since mid-turn it arrives over a pulled-back prefix) and the one
+		// after the rewrite. Each is consumed by the request it was made for.
+		expect(summarized.causes).toEqual(["compaction", "compaction"]);
 	});
 
 	test("nothing over the threshold registers nothing", async () => {

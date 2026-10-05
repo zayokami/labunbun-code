@@ -121,6 +121,14 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				summarizerModel: forModel,
 				readFile: options.readFile,
 				onPhase: phase,
+				// The summary goes out over the session's own prefix, so the cache
+				// report reads it as a step of that conversation — but a pass that ran
+				// mid-turn pulled its prefix back, and the report would otherwise show
+				// that as a rewind nothing declared. Declared per attempt, because each
+				// attempt is its own request and the tracker consumes one cause per
+				// request. The note after `check` returns stays where it is: that one
+				// covers the request that follows the rewrite, not the summary's own.
+				onSummarizeRequest: () => options.noteRewrite?.(rewriteCause("compact")),
 			},
 		);
 	};
