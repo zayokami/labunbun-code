@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { sanitizeCwd } from "@labunbun/agent";
+import { type AgentDeps, type AnyTool, runToolPipeline, sanitizeCwd } from "@labunbun/agent";
 import {
 	approveMcpServer,
 	connectAllMcpServers,
@@ -17,6 +17,47 @@ import {
 const TEST_DIR = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const FIXTURE_SERVER = join(TEST_DIR, "fixture-server.ts");
 const STALLING_SERVER = join(TEST_DIR, "fixture-stalling-server.ts");
+
+function callCtx(overrides: { signal?: AbortSignal; onUpdate?: (update: any) => void } = {}) {
+	return {
+		callId: "t1",
+		signal: overrides.signal ?? new AbortController().signal,
+		cwd: process.cwd(),
+		sandbox: "workspace-write" as const,
+		network: { access: "enabled" as const, domains: [] },
+		onUpdate: overrides.onUpdate ?? (() => {}),
+	};
+}
+
+// The pipeline never reaches streamFn in these tests; a throwing placeholder
+// proves it (the same minimal deps the agent's own pipeline tests use).
+const NO_STREAM: AgentDeps = {
+	streamFn: () => {
+		throw new Error("streamFn must not be called by the pipeline");
+	},
+};
+
+function pipelineCall(tool: AnyTool, rawInput: unknown) {
+	return runToolPipeline({
+		callId: "t1",
+		tool,
+		rawInput,
+		deps: NO_STREAM,
+		ctx: callCtx(),
+		permissionContext: {
+			mode: "ask" as const,
+			sandbox: "workspace-write" as const,
+			toolName: tool.name,
+			input: rawInput,
+			cwd: process.cwd(),
+		},
+		onUpdate: () => {},
+	});
+}
+
+function resultText(message: { content: any[] }): string {
+	return message.content.map((block) => (block.type === "text" ? String(block.text ?? "") : "")).join("");
+}
 
 describe("McpServerConfigSchema", () => {
 	test("stdio and http variants", () => {
@@ -38,7 +79,12 @@ describe("connectMcpServer (fixture stdio server)", () => {
 			throw new Error(`fixture failed: ${connection.error}`);
 		}
 
-		expect(connection.tools.map((t) => t.name).sort()).toEqual(["mcp__fixture__echo", "mcp__fixture__sleep"]);
+		expect(connection.tools.map((t) => t.name).sort()).toEqual([
+			"mcp__fixture__big",
+			"mcp__fixture__echo",
+			"mcp__fixture__shape",
+			"mcp__fixture__sleep",
+		]);
 		const tool = connection.tools.find((t) => t.name === "mcp__fixture__echo");
 		if (!tool) throw new Error("fixture echo tool missing");
 
@@ -147,6 +193,104 @@ describe("connect timeout", () => {
 	}, 30_000);
 });
 
+describe("call timeout", () => {
+	test("a call the server never answers is bounded, naming the server and tool", async () => {
+		const connection = await connectMcpServer(
+			"fixture",
+			{ command: process.execPath, args: [FIXTURE_SERVER] },
+			{ callTimeoutMs: 300 },
+		);
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		const sleepTool = connection.tools.find((t) => t.name === "mcp__fixture__sleep");
+		if (!sleepTool) throw new Error("fixture sleep tool missing");
+
+		const updates: Array<Record<string, unknown>> = [];
+		const started = Date.now();
+		const result = await sleepTool.call(
+			{ ms: 5_000 },
+			callCtx({ onUpdate: (update: Record<string, unknown>) => updates.push(update) }),
+		);
+
+		expect(Date.now() - started).toBeLessThan(3_000);
+		expect(result.isError).toBe(true);
+		expect((result.content[0] as any).text).toBe("MCP call failed: fixture/sleep timed out after 300ms");
+		expect(String(updates[0]?.mcpError)).toContain("timed out");
+
+		// The connection survives the timeout — later calls still go through.
+		const after = await sleepTool.call({ ms: 1 }, callCtx());
+		expect(after.isError).toBeFalsy();
+		expect((after.content[0] as any).text).toBe("slept 1ms");
+	}, 20_000);
+
+	test("a run cancelled before the call starts never reaches the server", async () => {
+		const connection = await connectMcpServer(
+			"fixture",
+			{ command: process.execPath, args: [FIXTURE_SERVER] },
+			{ callTimeoutMs: 5_000 },
+		);
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		const sleepTool = connection.tools.find((t) => t.name === "mcp__fixture__sleep");
+		if (!sleepTool) throw new Error("fixture sleep tool missing");
+
+		const controller = new AbortController();
+		controller.abort();
+		const started = Date.now();
+		const result = await sleepTool.call({ ms: 4_000 }, callCtx({ signal: controller.signal }));
+
+		// Immediate: the request never goes out, so nothing sits through the sleep.
+		expect(Date.now() - started).toBeLessThan(1_000);
+		expect(result.isError).toBe(true);
+		expect((result.content[0] as any).text).toBe("Tool execution aborted");
+	}, 20_000);
+});
+
+describe("MCP results share the agent budget pipeline", () => {
+	test("an oversized result comes back cut with the standard marker", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		const big = connection.tools.find((t) => t.name === "mcp__fixture__big");
+		if (!big) throw new Error("fixture big tool missing");
+
+		const result = await pipelineCall(big, {});
+
+		expect(result.isError).toBeFalsy();
+		// The tool declares no budget of its own, so the pipeline default applies
+		// (30k chars) and the standard marker says what is gone: the fixture
+		// returned 45,000 characters, so 15,000 are missing.
+		expect(resultText(result)).toContain("... [truncated 15000 chars of output]");
+		expect(resultText(result).length).toBeLessThan(31_000);
+	}, 20_000);
+
+	test("undeclared arguments survive validation (passthrough, not strip)", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		const shapeTool = connection.tools.find((t) => t.name === "mcp__fixture__shape");
+		if (!shapeTool) throw new Error("fixture shape tool missing");
+
+		// The server echoes its arguments: a schema that stripped undeclared
+		// keys would hand the server a different call than the one requested.
+		const result = await pipelineCall(shapeTool, { mode: "fast", extra: "kept" });
+		expect(result.isError).toBeFalsy();
+		expect(resultText(result)).toContain('"extra":"kept"');
+	}, 20_000);
+
+	test("the wire schema validates like the mapping promises", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		const shapeTool = connection.tools.find((t) => t.name === "mcp__fixture__shape");
+		if (!shapeTool) throw new Error("fixture shape tool missing");
+
+		const accepts = (input: unknown) => shapeTool.inputSchema.safeParse(input).success;
+		expect(accepts({ mode: "fast" })).toBe(true);
+		expect(accepts({})).toBe(false);
+		expect(accepts({ mode: "turbo" })).toBe(false);
+		expect(accepts({ mode: "slow", level: null, tag: 3, note: false, nums: [1, 2], pair: ["a", 1] })).toBe(true);
+		expect(accepts({ mode: "slow", level: "high" })).toBe(false);
+		expect(accepts({ mode: "slow", nums: ["a"] })).toBe(false);
+		expect(accepts({ mode: "slow", pair: [1, "a"] })).toBe(false);
+	}, 20_000);
+});
+
 describe("sanitizeMcpError", () => {
 	const stdioConfig = {
 		type: "stdio" as const,
@@ -214,8 +358,25 @@ describe("sanitizeMcpError", () => {
 
 describe("loadMcpConfig", () => {
 	test("returns empty object when no config files exist", () => {
-		const configs = loadMcpConfig("/nonexistent-path-xyz");
-		expect(Object.keys(configs)).toHaveLength(0);
+		// Half the lookup is the home-scope file, and on a developer's machine
+		// that is a real `~/.labunbun/.mcp.json` full of real servers — the
+		// "no config files" premise only holds with the environment pointed at
+		// somewhere empty. Restored afterwards, because the rest of the suite
+		// (and the runner) share this process's environment.
+		const saved = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
+		const emptyHome = join(tmpdir(), "lbb-mcp-empty-home-does-not-exist");
+		process.env.USERPROFILE = emptyHome;
+		process.env.HOME = emptyHome;
+		try {
+			const configs = loadMcpConfig("/nonexistent-path-xyz");
+			expect(Object.keys(configs)).toHaveLength(0);
+		} finally {
+			for (const key of ["USERPROFILE", "HOME"] as const) {
+				const value = saved[key];
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
 	});
 });
 

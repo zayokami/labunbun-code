@@ -1,7 +1,9 @@
 /**
- * Minimal MCP stdio fixture server for tests: exposes `echo` and a deliberately
- * slow `sleep` tool (the slow one is what cancellation tests abort against).
- * Run directly — it speaks JSON-RPC over stdio via the MCP SDK.
+ * Minimal MCP stdio fixture server for tests: exposes `echo`, a deliberately
+ * slow `sleep` (what cancellation and timeout tests race against), `big` (a
+ * result far past the pipeline's per-result budget) and `shape` (one input
+ * schema per JSON Schema construct the client's mapping supports). Run
+ * directly — it speaks JSON-RPC over stdio via the MCP SDK.
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -29,6 +31,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 				required: ["ms"],
 			},
 		},
+		{
+			name: "big",
+			description: "Returns 45,000 characters, far past the per-result budget",
+			inputSchema: { type: "object", properties: {} },
+		},
+		{
+			name: "shape",
+			description: "Echoes its arguments back as JSON; exercises the schema mapping",
+			inputSchema: {
+				type: "object",
+				properties: {
+					mode: { type: "string", enum: ["fast", "slow"] },
+					level: { type: ["integer", "null"] },
+					tag: { oneOf: [{ type: "string" }, { type: "number" }] },
+					note: { anyOf: [{ type: "string" }, { type: "boolean" }] },
+					nums: { type: "array", items: { type: "number" } },
+					pair: { type: "array", items: [{ type: "string" }, { type: "number" }] },
+				},
+				required: ["mode"],
+			},
+		},
 	],
 }));
 
@@ -41,6 +64,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 		const ms = Number((request.params.arguments as { ms?: number })?.ms ?? 0);
 		await new Promise((resolve) => setTimeout(resolve, ms));
 		return { content: [{ type: "text", text: `slept ${ms}ms` }] };
+	}
+	if (request.params.name === "big") {
+		return { content: [{ type: "text", text: "b".repeat(45_000) }] };
+	}
+	if (request.params.name === "shape") {
+		return { content: [{ type: "text", text: JSON.stringify(request.params.arguments ?? {}) }] };
 	}
 	return { content: [{ type: "text", text: `unknown tool ${request.params.name}` }], isError: true };
 });

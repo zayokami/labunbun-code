@@ -15,7 +15,10 @@ import { z } from "zod";
 export const McpServerConfigSchema = z.union([
 	z.object({
 		type: z.literal("stdio").default("stdio"),
-		command: z.string(),
+		// Non-empty: a bare `command: ""` used to pass validation and fail at
+		// spawn, where the platform's shell answered instead of the config
+		// error that actually names the problem.
+		command: z.string().min(1),
 		args: z.array(z.string()).default([]),
 		env: z.record(z.string(), z.string()).optional(),
 		cwd: z.string().optional(),
@@ -31,6 +34,13 @@ export type McpServerConfig = z.input<typeof McpServerConfigSchema>;
 
 /** How long a server gets to complete connect + capability discovery. */
 export const CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * How long one `tools/call` may take. Connect was bounded but a call was not:
+ * a server that accepts a request and never answers froze the whole tool batch
+ * (and the run) until the user gave up on it, with nothing naming the culprit.
+ */
+export const CALL_TIMEOUT_MS = 60_000;
 
 /**
  * Strip secret *values* out of a message, keeping key names.
@@ -67,27 +77,109 @@ export interface McpConnection {
 	error?: string;
 }
 
-/** Convert a JSON Schema object to a zod schema for tool input validation. */
-function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodType {
-	// MCP tools declare JSON Schema; we validate structurally with a passthrough
-	// object schema so unknown-but-valid shapes still flow through.
-	if (schema.type === "object") {
+/**
+ * Wrap `base` so it also accepts null when the schema spells nullability
+ * either way it is spelled in the wild: `nullable: true` (OpenAPI 3.0 style,
+ * which servers copy into MCP schemas) or `"null"` among `type`'s values.
+ */
+function withNullable(schema: Record<string, unknown>, base: z.ZodType): z.ZodType {
+	const typeArray = Array.isArray(schema.type) ? schema.type : [];
+	return schema.nullable === true || typeArray.includes("null") ? base.nullable() : base;
+}
+
+/** Map a single JSON Schema `type` name to a zod schema. */
+function singleJsonType(type: string, schema: Record<string, unknown>): z.ZodType {
+	if (type === "object") {
 		const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
 		const required = new Set((schema.required as string[] | undefined) ?? []);
 		const shape: Record<string, z.ZodType> = {};
 		for (const [key, prop] of Object.entries(properties)) {
-			shape[key] = jsonSchemaToZod(prop).optional();
-			if (required.has(key)) {
-				shape[key] = jsonSchemaToZod(prop);
-			}
+			const mapped = jsonSchemaToZod(prop);
+			shape[key] = required.has(key) ? mapped : mapped.optional();
 		}
+		// Passthrough rather than strip: the server may accept properties it did
+		// not declare, and a parsed input that silently dropped keys the model
+		// sent would hand the server a different call than the one requested.
 		return z.object(shape).passthrough();
 	}
-	if (schema.type === "string") return z.string();
-	if (schema.type === "number" || schema.type === "integer") return z.number();
-	if (schema.type === "boolean") return z.boolean();
-	if (schema.type === "array") return z.array(z.unknown());
+	if (type === "string") return z.string();
+	// `integer` maps to the same validator as `number` on purpose: JSON draws no
+	// line between the two, and a server that declares `integer` and emits `2.0`
+	// is within the format — rejecting it would be a false positive on the
+	// server's own declared shape.
+	if (type === "number" || type === "integer") return z.number();
+	if (type === "boolean") return z.boolean();
+	if (type === "null") return z.null();
+	if (type === "array") {
+		const items = schema.items;
+		// Draft 2020-12 tuple form: one schema per position.
+		if (Array.isArray(items)) {
+			if (items.length === 0) return z.array(z.unknown());
+			return z.tuple(
+				items.map((item) => jsonSchemaToZod(item as Record<string, unknown>)) as [z.ZodType, ...z.ZodType[]],
+			);
+		}
+		if (items && typeof items === "object") return z.array(jsonSchemaToZod(items as Record<string, unknown>));
+		return z.array(z.unknown());
+	}
 	return z.unknown();
+}
+
+/**
+ * Convert a JSON Schema object to a zod schema for tool input validation.
+ *
+ * This is the only description of a tool's input the model ever sees the
+ * validation of, so the mapping is as faithful as JSON Schema allows: an enum
+ * validates as that enum, a union accepts either branch, a nullable field
+ * accepts null, and array items validate their element type. Only shapes with
+ * no faithful equivalent — an enum whose values include objects, an unknown
+ * `type` — fall back to `z.unknown()`, which validates nothing; that fallback
+ * used to be the answer for most of this list.
+ */
+export function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodType {
+	// oneOf/anyOf describe the whole value, so they are consulted before
+	// `type`. A single-member union is just that member.
+	const members = (Array.isArray(schema.oneOf) ? schema.oneOf : schema.anyOf) as unknown[] | undefined;
+	if (Array.isArray(members) && members.length > 0) {
+		const mapped = members.map((member) => jsonSchemaToZod(member as Record<string, unknown>));
+		const base: z.ZodType =
+			mapped.length === 1 ? (mapped[0] as z.ZodType) : z.union(mapped as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+		return withNullable(schema, base);
+	}
+	if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+		const values = schema.enum;
+		// `z.enum` is the faithful form when every value is a string.
+		if (values.every((value) => typeof value === "string")) {
+			return withNullable(schema, z.enum(values as [string, ...string[]]));
+		}
+		// Otherwise literals cover the primitives. An object or array value has
+		// no literal form, and accepting it as part of a union with `unknown`
+		// would accept everything — so a mixed enum falls back whole.
+		if (values.every((value) => value === null || ["string", "number", "boolean"].includes(typeof value))) {
+			const literals = values.map((value): z.ZodType => z.literal(value as string | number | boolean | null));
+			const base: z.ZodType =
+				literals.length === 1
+					? (literals[0] as z.ZodType)
+					: z.union(literals as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+			return withNullable(schema, base);
+		}
+		return z.unknown();
+	}
+	// `type` is a single string in draft-07 and an array in draft 2020-12;
+	// "null" among the values is nullability, and the rest names the value.
+	const rawTypes = Array.isArray(schema.type)
+		? schema.type.filter((type): type is string => typeof type === "string")
+		: typeof schema.type === "string"
+			? [schema.type]
+			: [];
+	if (rawTypes.length === 0) return z.unknown();
+	const types = rawTypes.filter((type) => type !== "null");
+	if (types.length === 0) return z.null();
+	const base =
+		types.length === 1
+			? singleJsonType(types[0] as string, schema)
+			: z.union(types.map((type) => singleJsonType(type, schema)) as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+	return withNullable(schema, base);
 }
 
 /**
@@ -118,6 +210,8 @@ async function withTimeout<T>(work: Promise<T>, onTimeout: () => void, timeoutMs
 export interface ConnectMcpOptions {
 	/** Connect + discovery budget. Defaults to CONNECT_TIMEOUT_MS. */
 	timeoutMs?: number;
+	/** Budget for one `tools/call`. Defaults to CALL_TIMEOUT_MS. */
+	callTimeoutMs?: number;
 }
 
 /** Connect to one MCP server and adapt its tools. Never throws. */
@@ -166,6 +260,7 @@ export async function connectMcpServer(
 			options?.timeoutMs ?? CONNECT_TIMEOUT_MS,
 		);
 
+		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
 		const tools: AnyTool[] = (toolList.tools ?? []).map((mcpTool) =>
 			buildTool({
 				name: `mcp__${serverName}__${mcpTool.name}`,
@@ -175,18 +270,36 @@ export async function connectMcpServer(
 				) as z.ZodType,
 				isReadOnly: () => false,
 				isConcurrencySafe: () => true,
+				// No maxResultSizeChars override on purpose: the result flows
+				// through the same pipeline budget as every other tool, so a
+				// server cannot outgrow the conversation by answering over the
+				// wire, and the same truncation marker says what was cut.
 				call: async (input, ctx): Promise<ToolResult> => {
+					// A run cancelled before the call starts must not reach the server:
+					// an abort event does not replay for listeners added after it, so
+					// the already-aborted case is handled rather than subscribed to.
+					if (ctx.signal.aborted) {
+						return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
+					}
+					// Two ways out of a call, two signals: the run's (Esc) and this
+					// call's own timer (a server that accepts the request and never
+					// answers). Aborting the request — rather than racing a timeout
+					// promise — is also what tells the server the call is off: the
+					// SDK turns it into notifications/cancelled.
+					const controller = new AbortController();
+					let timedOut = false;
+					const forward = () => controller.abort();
+					ctx.signal.addEventListener("abort", forward, { once: true });
+					const timer = setTimeout(() => {
+						timedOut = true;
+						controller.abort();
+					}, callTimeoutMs);
 					try {
-						// Forward the run's cancel signal: without it an Esc leaves the
-						// request in flight until the server answers, blocking the parent's
-						// tool batch (and the "Running tools…" spinner) for as long as the
-						// server takes. The SDK turns the abort into a notifications/cancelled
-						// to the server as well as rejecting the pending request.
 						const result = await client.callTool(
 							{ name: mcpTool.name, arguments: input as Record<string, unknown> },
 							undefined,
 							{
-								signal: ctx.signal,
+								signal: controller.signal,
 							},
 						);
 						const content = Array.isArray(result.content)
@@ -198,6 +311,17 @@ export async function connectMcpServer(
 							: [{ type: "text" as const, text: JSON.stringify(result) }];
 						return { content, isError: Boolean(result.isError) };
 					} catch (error) {
+						// Checked before the run's signal: both paths end in an abort, and
+						// when the timer is what fired, "the server never answered" is the
+						// cause worth naming.
+						if (timedOut) {
+							const message = `${serverName}/${mcpTool.name} timed out after ${callTimeoutMs}ms`;
+							ctx.onUpdate({ mcpError: message });
+							return {
+								content: [{ type: "text", text: `MCP call failed: ${message}` }],
+								isError: true,
+							};
+						}
 						// The SDK rejects the pending request when the signal aborts — that
 						// is the run being cancelled, not an MCP server failure.
 						if (ctx.signal.aborted) {
@@ -209,6 +333,9 @@ export async function connectMcpServer(
 							content: [{ type: "text", text: `MCP call failed: ${message}` }],
 							isError: true,
 						};
+					} finally {
+						clearTimeout(timer);
+						ctx.signal.removeEventListener("abort", forward);
 					}
 				},
 			}),
