@@ -1425,12 +1425,17 @@ const BUILT_IN_MODELS: Model[] = [
 	// less than the same model reached directly, and `thinkingMode` is left off
 	// on purpose rather than set optimistically.
 	//
-	// One hazard is left open rather than papered over. `thinkingLevel` from the
-	// session wins over `model.reasoning` in the adapter, so a session that picks
-	// a thinking level overrides this and sends the budget shape to the gateway —
-	// a 400 against a 4.6-or-later Claude row, and a field the gateway may not
-	// understand against any other. Nothing here can prevent that from the row
-	// alone; it would take a flag the provider layer does not carry today.
+	// The one hazard this arrangement used to leave open is closed in the
+	// adapter, not on these rows. `thinkingLevel` from the session used to win
+	// over `model.reasoning` there, so a session that picked a level sent the
+	// budget shape through the gateway — a 400 against a 4.6-or-later Claude
+	// row. `buildAnthropicRequest` now honours a session level only on a row
+	// that declares a thinking shape (`reasoning: true` or a `thinkingMode`),
+	// and these rows declare neither, so whatever the session asks for they go
+	// out with no thinking field at all. `anthropic.test.ts` pins that answer
+	// against a row of exactly this shape, and the partition in
+	// `model-pricing.test.ts` keeps every one of these rows on the no-thinking
+	// side.
 	//
 	// `toolReasoningEffort` reaches only the two OpenAI-wire providers, and that
 	// is where the two ids that need it are. The field is read in exactly one

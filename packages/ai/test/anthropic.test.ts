@@ -52,6 +52,21 @@ const HAIKU: Model = {
  * of them is pinned in `model-pricing.test.ts`; this stands for the behaviour. */
 const BINDING_MODEL: Model = { ...MODEL, id: "claude-opus-5-5", thinkingBlockBinding: true };
 
+/**
+ * The shape every reseller row ships with: on the Anthropic wire, claiming no
+ * thinking at all. `reasoning: false` plus no `thinkingMode` is how the registry
+ * writes a gateway — a `reasoning: true` row would send the budget shape to a
+ * 4.6-or-later Claude id behind it (a 400), and nothing documents that the
+ * gateway forwards the adaptive shape either.
+ */
+const GATEWAY: Model = {
+	...MODEL,
+	id: "claude-opus-5-5",
+	provider: "opencode-zen",
+	reasoning: false,
+	thinkingMode: undefined,
+};
+
 function ctx(overrides: Partial<Context> = {}): Context {
 	return { systemPrompt: "You are helpful.", messages: [], tools: undefined, ...overrides };
 }
@@ -132,6 +147,29 @@ describe("buildAnthropicRequest", () => {
 		// below the 1024 minimum, thinking is dropped entirely
 		const tiny = buildAnthropicRequest(HAIKU, ctx(), { thinkingLevel: "low", maxOutputTokens: 1024 });
 		expect(tiny.thinking).toBeUndefined();
+	});
+
+	test("thinking: a row that declares no thinking shape is sent none, whatever the session asks", () => {
+		// The declaration is the gate, not the model's name. On a row that has
+		// neither `reasoning` nor a `thinkingMode`, a session level used to sail
+		// through and put the budget shape on the wire — the 400 against a
+		// 4.6-or-later Claude row reached through a gateway, which is why those
+		// rows ship without a thinking shape in the first place.
+		for (const level of ["off", "minimal", "low", "medium", "high"] as ThinkingLevel[]) {
+			const params = buildAnthropicRequest(GATEWAY, ctx(), { thinkingLevel: level });
+			expect(params.thinking).toBeUndefined();
+			expect(params.output_config).toBeUndefined();
+		}
+		// With no level at all the row was already silent, and stays so.
+		const silent = buildAnthropicRequest(GATEWAY, ctx());
+		expect(silent.thinking).toBeUndefined();
+		expect(silent.output_config).toBeUndefined();
+
+		// A row that does declare one still listens to the session: the gate is
+		// the declaration, and nothing else changed.
+		const declared = buildAnthropicRequest(MODEL, ctx(), { thinkingLevel: "high" });
+		expect(declared.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(declared.output_config).toEqual({ effort: "high" });
 	});
 
 	test("thinking: display is asked for, or the blocks come back empty", () => {

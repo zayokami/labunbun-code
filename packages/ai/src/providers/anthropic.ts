@@ -115,9 +115,9 @@ const THINKING_BUDGETS: Record<Exclude<ThinkingLevel, "off">, number> = {
  * the lowest effort. `minimal` joins `low` for the same reason — the scale has
  * no rung below it.
  *
- * The two rungs above `high` are deliberately unreachable here: this codebase
- * has no UI for choosing a thinking level beyond these four, so mapping a level
- * onto them would be inventing a setting nobody asked for.
+ * The two rungs above `high` are deliberately unreachable here: the session's
+ * `ThinkingLevel` is exactly these four plus `off`, and mapping a level onto
+ * anything beyond it would be inventing a setting nobody asked for.
  */
 const THINKING_EFFORT: Record<ThinkingLevel, "low" | "medium" | "high"> = {
 	off: "low",
@@ -330,7 +330,17 @@ export function buildAnthropicRequest(
 	// on the oldest row, `adaptive` with an effort on everything from 4.7 on.
 	// The wrong one is a 400 on the first request, which is why the choice is a
 	// per-model capability rather than a default with an exception.
-	const thinking = options?.thinkingLevel ?? (model.reasoning ? "medium" : "off");
+	//
+	// The session's level is honoured only on a row that declares a thinking
+	// shape — `reasoning: true` or a `thinkingMode`. A row that declares neither
+	// is saying this endpoint was not observed to think, and a level handed to
+	// it anyway puts a `thinking` field the model can refuse on the request: on
+	// a gateway row carrying a 4.6-or-later Claude id, `{type: "enabled",
+	// budget_tokens}` is exactly the 400 this path exists to avoid. Forcing
+	// `off` there sends no thinking field at all, which for those rows is the
+	// only request known to work.
+	const declaresThinking = model.reasoning || model.thinkingMode !== undefined;
+	const thinking = declaresThinking ? (options?.thinkingLevel ?? (model.reasoning ? "medium" : "off")) : "off";
 	if (model.thinkingMode === "adaptive") {
 		params.thinking = {
 			type: "adaptive",
