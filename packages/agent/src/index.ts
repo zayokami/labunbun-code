@@ -69,6 +69,8 @@ export {
 export {
 	capRoundResults,
 	cutText,
+	formatCutMarker,
+	formatSpillHeader,
 	MAX_ROUND_RESULT_CHARS,
 	MIN_ROUND_RESULT_CHARS,
 	type SpillRequest,

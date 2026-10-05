@@ -6,7 +6,6 @@ export {
 	createBashOutputTool,
 	createBashTool,
 	createKillBashTool,
-	createTailBuffer,
 } from "./bash.ts";
 export { caseInsensitivePaths } from "./containment.ts";
 export { createEditTool } from "./edit.ts";
@@ -22,6 +21,13 @@ export type {
 	Operations,
 } from "./operations.ts";
 export { ChildProcessExecOperations, defaultOperations, detectShell, NodeFileSystemOperations } from "./operations.ts";
+export {
+	createStreamCapture,
+	createTailBuffer,
+	nextSpillPath,
+	type OverflowSink,
+	type StreamCapture,
+} from "./output-capture.ts";
 export { createReadTool } from "./read.ts";
 export {
 	ReadFileState,
@@ -78,6 +84,16 @@ export interface CreateAllToolsOptions {
 	/** Directories outside the workspace Read may still open (the spill dir). */
 	readOnlyRoots?: string[];
 	/**
+	 * Where tools that bound their own output write what did not fit — Bash's
+	 * exec overflow, a Glob match list past its cap.
+	 *
+	 * Meant to be under a `readOnlyRoots` entry (a spill the model cannot read
+	 * back is a file for nobody) and under tool-output's root, so the same
+	 * retention sweep prunes it. Unset, Bash still spills at the pipeline and
+	 * Glob falls back to a count.
+	 */
+	spillDir?: string;
+	/**
 	 * Where Read records what it showed, for the edit gate to read back.
 	 *
 	 * Left out, one is made here and used for nothing else, so a caller who
@@ -120,12 +136,13 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 			home: options.home,
 			tempDir: options.tempDir,
 			writableRoots: options.writableRoots,
+			spillDir: options.spillDir,
 		}),
 		// Edit's first gate reads the same store Read writes: an edit is refused on
 		// a file this session never read, so the two tools have to be looking at one
 		// store or the gate refuses everything.
 		createEditTool(cwd, ops, readState),
-		createGlobTool(cwd, ops),
+		createGlobTool(cwd, ops, { spillDir: options.spillDir }),
 		createGrepTool(cwd, ops),
 		createLsTool(cwd, ops),
 		createReadTool(cwd, ops, options.readOnlyRoots ?? [], readState),

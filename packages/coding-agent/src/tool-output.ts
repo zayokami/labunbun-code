@@ -40,6 +40,21 @@ export function toolOutputDir(cwd: string, sessionId: string | undefined, home?:
 }
 
 /**
+ * The reserved directory for tools that bound their own output — the shell's
+ * exec capture, a Glob list past its cap.
+ *
+ * A subdirectory of the root rather than the root itself, and that part is
+ * load-bearing: {@link pruneToolOutput} reads every child of the root as a
+ * session directory, so a file sitting at the root's top level is not swept by
+ * anything — a leak the retention policy could not see. Under `spill/` it ages
+ * out like the rest, and the root is already inside Read's roots, so the path a
+ * tool result points at is a path Read opens.
+ */
+export function toolSpillDir(cwd: string, home?: string): string {
+	return join(toolOutputRoot(cwd, home), "spill");
+}
+
+/**
  * Strip the separators a call id must not put into a file name. Ids are
  * provider-generated (`call_abc123`, `toolu_01…`), so this is a guard against
  * one that is not, rather than a transformation of the ones that are. Dots go

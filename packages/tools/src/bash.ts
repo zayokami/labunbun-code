@@ -1,8 +1,9 @@
-import { type AnyTool, buildTool } from "@labunbun/agent";
+import { type AnyTool, buildTool, formatSpillHeader } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import type { BackgroundShellManager } from "./background.ts";
 import type { Operations } from "./operations.ts";
+import { createTailBuffer } from "./output-capture.ts";
 import { resolveWritableRoots } from "./sandbox/default-writable-roots.ts";
 import { workspacePolicy } from "./sandbox/workspace-policy.ts";
 
@@ -19,40 +20,11 @@ const MAX_PREVIEW_CHARS = 30_000;
  */
 export const BASH_UPDATE_INTERVAL_MS = 100;
 
-/**
- * Holds the last `maxChars` of a stream without rejoining it on every chunk.
- *
- * Chunks are dropped whole from the front once enough have accumulated, so the
- * set retained stays near the cap instead of growing with the command's total
- * output; only `read()` joins, and it is called once per emission rather than
- * once per chunk. The tail can therefore overshoot the cap by at most the length
- * of one chunk, which `read()` trims.
- */
-export function createTailBuffer(maxChars: number): { push(chunk: string): void; read(): string } {
-	const chunks: string[] = [];
-	let size = 0;
-	return {
-		push(chunk: string): void {
-			if (!chunk) return;
-			chunks.push(chunk);
-			size += chunk.length;
-			while (chunks.length > 1 && size - chunks[0].length >= maxChars) {
-				size -= chunks[0].length;
-				chunks.shift();
-			}
-		},
-		read(): string {
-			const joined = chunks.join("");
-			return joined.length > maxChars ? joined.slice(-maxChars) : joined;
-		},
-	};
-}
-
 export function createBashTool(
 	cwd: string,
 	ops: Operations,
 	background?: BackgroundShellManager,
-	options?: { home?: string; tempDir?: string; writableRoots?: readonly string[] },
+	options?: { home?: string; tempDir?: string; writableRoots?: readonly string[]; spillDir?: string },
 ): AnyTool {
 	return buildTool({
 		name: "Bash",
@@ -61,6 +33,8 @@ export function createBashTool(
 			"Output streams live while the command runs. Commands run through a POSIX-compatible " +
 			"shell when available (Git Bash on Windows), otherwise cmd.exe. " +
 			"Use for git, builds, test runners, and other CLI work. " +
+			"Very long output is cut to a head and a tail with a count of what is missing; the " +
+			"full output is written to a file and the result's first line names its path. " +
 			"Set run_in_background for long-running processes (dev servers, watchers) — you get a " +
 			"shell id immediately, read progress with BashOutput, and are told when it finishes. " +
 			"A foreground command that hits its timeout is moved to the background, not killed.",
@@ -148,6 +122,12 @@ export function createBashTool(
 				timeoutMs,
 				signal: ctx.signal,
 				sandbox: policy,
+				// The executor is the only party that sees every chunk, so it is the
+				// one that keeps the output bounded — a window in memory and the whole
+				// stream on disk. Absent (an embedder's own tool set), accumulation is
+				// exactly what it always was and `overflow: "spill"` below is the only
+				// bound.
+				spillDir: options?.spillDir,
 				onOutput: (chunk) => {
 					if (adoptedId !== undefined) {
 						background?.append(adoptedId, chunk);
@@ -192,6 +172,10 @@ export function createBashTool(
 							`The command exceeded its ${timeoutMs}ms timeout and was moved to the background as ${adoptedId} — the same process, not a restart.\n` +
 								`Command: ${input.command}\n` +
 								(shell ? `Output file: ${shell.outputFile}\n` : "") +
+								// The background log opens with what had been captured, and a
+								// bounded capture opens it with a notice — this is where the
+								// rest of it lives.
+								(result.spill ? `Output before the handoff: ${result.spill.path}\n` : "") +
 								`Poll with BashOutput(shell_id="${adoptedId}"); stop with KillBash.`,
 						),
 					],
@@ -199,16 +183,27 @@ export function createBashTool(
 				};
 			}
 
-			// The whole output goes to the model, uncut: `overflow: "spill"` above is
-			// a promise that what does not fit is written out in full and pointed at,
-			// and a cut here would have kept it to a head the model already had —
-			// the spill file would hold exactly what the conversation showed.
+			// Nothing is cut here. The executor bounded the capture — it is the only
+			// party that saw every chunk — and a cut at this layer could only keep
+			// what the conversation already had while dropping output no file holds:
+			// `overflow: "spill"` above promises that what does not fit is written
+			// out in full, and the pointer below is where this result said it went.
+			//
+			// Both streams over the bound at once puts two truncation notices in one
+			// result, and the pipeline's cut reads only the first — so a further cut
+			// would keep the first stream's count and let the second's go stale.
+			// Accepted: the file holds every character either way, and a marker
+			// format with ordinals is not worth the rare case that needs it.
 			const output = [result.stdout, result.stderr].filter((s) => s.length > 0).join("\n--- stderr ---\n");
-			// The verdict leads. A long result is cut at the head on its way into the
-			// conversation, and the one line worth keeping through any cut is the one
-			// that says whether the command worked.
+			// The pointer leads, and the verdict right behind it: a long result is
+			// cut at both ends on its way into the conversation, and the two lines
+			// that have to survive any cut are the path to the rest of the output
+			// and whether the command worked. The pipeline's cut recognizes the
+			// header and reuses the file the executor already wrote instead of
+			// spilling a second copy of what is shown here regardless.
+			const header = result.spill ? formatSpillHeader(result.spill.path, result.spill.chars) : "";
 			const status = result.killed ? "[command timed out or was killed]\n" : "";
-			const text = `[exit code: ${result.exitCode}]\n${status}${output}`;
+			const text = `${header}[exit code: ${result.exitCode}]\n${status}${output}`;
 			return { content: [{ type: "text", text }], isError: result.exitCode !== 0 };
 		},
 	});

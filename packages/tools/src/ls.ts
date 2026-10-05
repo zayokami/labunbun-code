@@ -4,13 +4,25 @@ import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
+/**
+ * How many entries a listing shows before it says the rest were cut.
+ *
+ * The same figure as Glob's, because it answers the same question — how much
+ * of a directory listing is worth carrying in a conversation — and the notice
+ * is a count with no file, unlike Glob's: what a caller does with a listing of
+ * thousands of names is go find something by pattern, and Glob is the tool
+ * that finds it.
+ */
+const MAX_ENTRIES = 200;
+
 /** Directory listing with sizes and type markers. */
 export function createLsTool(cwd: string, ops: Operations): AnyTool {
 	return buildTool({
 		name: "LS",
 		description:
 			"Lists a directory's contents with entry types and sizes. Use Glob/Grep to find files " +
-			"by pattern instead of listing large trees.",
+			"by pattern instead of listing large trees. " +
+			"A long listing is cut with a count of the entries not shown.",
 		inputSchema: z.object({
 			path: z.string().describe("Directory path to list"),
 		}),
@@ -36,20 +48,24 @@ export function createLsTool(cwd: string, ops: Operations): AnyTool {
 				return { content: [{ type: "text", text: "(empty directory)" }] };
 			}
 
+			// Sorted before the cut so the shown set is the alphabetical head, not
+			// whichever entries readdir happened to return first; only the shown
+			// rows are stat'd, so the cap bounds the stat calls too.
+			entries.sort((a, b) => a.name.localeCompare(b.name));
+			const shown = entries.slice(0, MAX_ENTRIES);
 			const rows = await Promise.all(
-				entries
-					.sort((a, b) => a.name.localeCompare(b.name))
-					.map(async (entry) => {
-						if (entry.isDirectory) return `${entry.name}/`;
-						try {
-							const s = await ops.stat(join(dir, entry.name));
-							return `${entry.name} (${formatSize(s.size)})`;
-						} catch {
-							return entry.name;
-						}
-					}),
+				shown.map(async (entry) => {
+					if (entry.isDirectory) return `${entry.name}/`;
+					try {
+						const s = await ops.stat(join(dir, entry.name));
+						return `${entry.name} (${formatSize(s.size)})`;
+					} catch {
+						return entry.name;
+					}
+				}),
 			);
-			return { content: [{ type: "text", text: rows.join("\n") }] };
+			const suffix = entries.length > MAX_ENTRIES ? `\n[+${entries.length - MAX_ENTRIES} more entries]` : "";
+			return { content: [{ type: "text", text: `${rows.join("\n")}${suffix}` }] };
 		},
 	});
 }

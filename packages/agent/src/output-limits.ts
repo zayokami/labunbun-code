@@ -41,8 +41,20 @@ export interface SpillRequest {
  */
 export type SpillWriter = (request: SpillRequest) => string | null;
 
-/** First line of a result whose full text was written to a file. */
+/** First line of a result whose full text was written to a file. {@link formatSpillHeader}. */
 const SPILL_HEADER = /^\[full output: \d+ chars → ([^\]]+)\]\n/;
+
+/**
+ * Write that first line.
+ *
+ * Shared with callers that bound their own output before the pipeline sees it —
+ * a shell captures a head and a tail and writes the whole stream out itself —
+ * so the header a second cut recognizes is the header the first one wrote, and
+ * spilling finds an existing pointer instead of making a second file.
+ */
+export function formatSpillHeader(path: string, chars: number): string {
+	return `[full output: ${chars} chars → ${path}]\n`;
+}
 
 /**
  * The notice a cut leaves at the point where it cut, carrying how many
@@ -58,6 +70,18 @@ const SPILL_HEADER = /^\[full output: \d+ chars → ([^\]]+)\]\n/;
  * Europe. (It is never shown to a person — the model reads it as a number.)
  */
 const CUT_MARKER = /\n\.\.\. \[truncated (\d+) chars of output\](?:\n|$)/;
+
+/**
+ * Write that notice — one line, no newlines of its own; whoever joins a head
+ * and a tail around it supplies those, the same way this module's own cuts do.
+ *
+ * Shared the same way {@link formatSpillHeader} is: a caller that drops a
+ * middle before the pipeline ever cuts writes a marker this module parses, so
+ * the cumulative count survives a second cut instead of being reset by it.
+ */
+export function formatCutMarker(missing: number): string {
+	return `... [truncated ${missing} chars of output]`;
+}
 
 interface Cuttable {
 	/** The text as it stands, without a spill header or an earlier cut marker. */
@@ -124,7 +148,7 @@ export function cutText(text: string, limit: number, spill?: SpillWriter, reques
 		} catch {
 			path = null;
 		}
-		if (path) pointer = `[full output: ${body.length} chars → ${path}]\n`;
+		if (path) pointer = formatSpillHeader(path, body.length);
 	}
 	// What the result may keep of the output it was given. The pointer line and
 	// the notice are both charged on top of this, not out of it, as they always
@@ -148,7 +172,7 @@ export function cutText(text: string, limit: number, spill?: SpillWriter, reques
 	// is the same total the head-only cut reported for the same input, and a
 	// result cut twice by two different limits is still short by one number.
 	const missing = omitted + Math.max(0, body.length - head.length - tail.length);
-	const marker = `... [truncated ${missing} chars of output]`;
+	const marker = formatCutMarker(missing);
 	// The notice is its own line rather than glued onto the line the cut lands in.
 	// The head is often half a source file and the tail a stack trace, and a
 	// notice appended to either would run into it mid-token.

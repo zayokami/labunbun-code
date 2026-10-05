@@ -172,7 +172,7 @@ import {
 	resolveTheme,
 	selectableThemeNames,
 } from "./theme-file.ts";
-import { pruneToolOutput, toolOutputRoot, writeToolOutput } from "./tool-output.ts";
+import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
 import { persistModelChoice, writeUserSettingsNestedPatch, writeUserSettingsPatch } from "./user-settings.ts";
 import { runWizard, shouldRunWizard } from "./wizard.ts";
 
@@ -322,6 +322,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		operations: ops,
 		backgroundShells,
 		readOnlyRoots: [toolOutputRoot(cwd, home)],
+		// Under the root Read is already allowed into, so every pointer a tool
+		// result carries is a path Read can open.
+		spillDir: toolSpillDir(cwd, home),
 		// The Bash tool builds its policy from these. Without `home` the resolver
 		// gets nothing and returns no roots, which is the safe direction but means
 		// `workspace-write` still cannot reach the temp directory or a package cache

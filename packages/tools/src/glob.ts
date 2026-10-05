@@ -3,6 +3,7 @@ import { type AnyTool, buildTool } from "@labunbun/agent";
 import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
+import { nextSpillPath } from "./output-capture.ts";
 
 const MAX_RESULTS = 200;
 
@@ -60,12 +61,19 @@ export async function walkProjectFiles(
 }
 
 /** Filename pattern search (Bun.Glob over a directory walk). */
-export function createGlobTool(cwd: string, ops: Operations): AnyTool {
+export function createGlobTool(
+	cwd: string,
+	ops: Operations,
+	/** `spillDir`: where the whole match list goes when the shown list is cut. */
+	options?: { spillDir?: string },
+): AnyTool {
 	return buildTool({
 		name: "Glob",
 		description:
 			"Finds files by glob pattern (e.g. '**/*.test.ts', 'src/**/*.json'). Returns absolute paths " +
-			"sorted by modification time, newest first.",
+			"sorted by modification time, newest first. " +
+			"A long list is cut with a count of what is missing; the full list is written to a file " +
+			"and the last line names its path.",
 		inputSchema: z.object({
 			pattern: z.string().describe("Glob pattern relative to `path`"),
 			path: z.string().optional().describe("Directory to search (default cwd)"),
@@ -90,7 +98,26 @@ export function createGlobTool(cwd: string, ops: Operations): AnyTool {
 				return { content: [{ type: "text", text: "No files matched." }] };
 			}
 			const shown = matches.slice(0, MAX_RESULTS);
-			const suffix = matches.length > MAX_RESULTS ? `\n[+${matches.length - MAX_RESULTS} more]` : "";
+			let suffix = "";
+			if (matches.length > MAX_RESULTS) {
+				const more = matches.length - MAX_RESULTS;
+				// A count alone says the list was cut and nothing about what went;
+				// the list is already in hand, so it goes to a file the Read tool
+				// can open (the caller points the spill directory inside Read's
+				// roots). A failed write falls back to the count — the result
+				// still says the list is incomplete, which is the important half.
+				let path: string | null = null;
+				if (options?.spillDir) {
+					try {
+						await ops.mkdir(options.spillDir);
+						path = nextSpillPath(options.spillDir, "glob");
+						await ops.writeTextFile(path, matches.join("\n"));
+					} catch {
+						path = null;
+					}
+				}
+				suffix = path ? `\n[+${more} more → ${path}]` : `\n[+${more} more]`;
+			}
 			return {
 				content: [{ type: "text", text: `${shown.join("\n")}${suffix}` }],
 			};

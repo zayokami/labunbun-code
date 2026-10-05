@@ -6,10 +6,11 @@
  * remote/container backend slot in without touching tool logic.
  */
 import { type ChildProcess, spawn } from "node:child_process";
-import { statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
+import { createStreamCapture, nextSpillPath } from "./output-capture.ts";
 import {
 	detectRuntime,
 	resolveSandboxExecution,
@@ -47,6 +48,21 @@ export interface FileSystemOperations {
 	move(from: string, to: string): Promise<void>;
 }
 
+/**
+ * How much of a captured stream stays in memory: a head and a tail of this many
+ * characters each. Past that the middle is dropped from the window, and from
+ * the first drop on the whole stream is written to the spill file — so this is
+ * a memory bound, not a loss: everything the window let go is in the file.
+ *
+ * A hundred and twenty thousand characters at the very worst (both streams at
+ * both caps), against the unbounded string this used to be. The size matches
+ * the pipeline's default result limit so the two cuts agree about what "too
+ * long" means; the pipeline cuts what arrives here down to the model's share
+ * of it, and finds the file pointer rather than writing a second copy.
+ */
+const CAPTURE_HEAD_CHARS = 30_000;
+const CAPTURE_TAIL_CHARS = 30_000;
+
 export interface ExecResult {
 	stdout: string;
 	stderr: string;
@@ -62,6 +78,17 @@ export interface ExecResult {
 	 * process over instead of the timeout killing it. `exitCode` is `null` then.
 	 */
 	handedOff?: boolean;
+	/**
+	 * Set when the output outgrew the capture bound (`spillDir` was given) and
+	 * the whole stream was written to a file.
+	 *
+	 * `chars` is that file's exact length — every character both streams
+	 * emitted, interleaved as it arrived, which is the only order a capture can
+	 * preserve and the order the command actually produced. The bounded `stdout`
+	 * and `stderr` say how much of each stream the result itself is missing
+	 * (`... [truncated N chars of output]`); this says where all of it is.
+	 */
+	spill?: { path: string; chars: number };
 }
 
 /** A live process, handed to the caller at the moment its wait expired. */
@@ -71,7 +98,11 @@ export interface ExecHandoff {
 	killTree: () => void;
 	/** When the process was spawned; elapsed time counts from here, not from the handoff. */
 	startedAt: number;
-	/** What the command had printed by the moment of the handoff. */
+	/**
+	 * What the command had printed by the moment of the handoff — bounded text
+	 * when the call had a capture (`spillDir`), with `ExecResult.spill` naming
+	 * where the rest went; the adopter opens its log with exactly these.
+	 */
 	stdout: string;
 	stderr: string;
 }
@@ -113,6 +144,22 @@ export interface ExecOperations {
 		 * cases where the answer is "none, and here is why".
 		 */
 		sandbox?: SandboxPolicy;
+		/**
+		 * Where to write a command's output once it outgrows the in-memory
+		 * capture — and, just by being present, the switch that turns that
+		 * capture on.
+		 *
+		 * Unset, accumulation is exactly what it always was: one unbounded string
+		 * per stream. That is the right default for an embedder's own executor and
+		 * a bad one for a tool a model can point at `yes`, which is why the tool
+		 * set threads its spill directory through. Set, each stream keeps a head
+		 * and a tail in memory and the whole output — interleaved in arrival
+		 * order, the only order a stream has — goes to a file under this
+		 * directory once the middle stops fitting; `ExecResult.spill` then names
+		 * that file. The directory is created if missing. A capture that could
+		 * not write reports no spill rather than a path to a half-written file.
+		 */
+		spillDir?: string;
 	}): Promise<ExecResult>;
 
 	/**
@@ -310,6 +357,103 @@ function proxyPolicyKey(policy: SandboxPolicy): string {
 	return JSON.stringify([policy.network, (policy.networkRules ?? []).map((rule) => [rule.permission, rule.pattern])]);
 }
 
+/**
+ * The bounded capture `exec` runs when it was given a spill directory.
+ *
+ * Three windows over the same chunks: one per stream, whose text becomes the
+ * result, and a combined one, which is the only writer to disk. Combined is the
+ * writer because it is the only one whose bound is guaranteed to cross first —
+ * it sees every chunk both streams emit, so it can never overflow later than
+ * either single stream, and the file therefore exists with a lossless seed
+ * (`OverflowSink.overflow` is handed the un-dropped stream) before either
+ * result stream has let go of a character.
+ */
+function createExecCapture(dir: string) {
+	let file: { fd: number; path: string } | null = null;
+	let broken = false;
+
+	const open = (prefix: string) => {
+		try {
+			mkdirSync(dir, { recursive: true });
+			const path = nextSpillPath(dir, "exec");
+			const fd = openSync(path, "w");
+			file = { fd, path };
+			writeSync(fd, prefix);
+		} catch {
+			// No file, or one not worth pointing at. The result reports no spill
+			// and carries the bounded text, which is all that can honestly be
+			// said; a path to a half-written file would be worse than none.
+			broken = true;
+		}
+	};
+
+	const append = (chunk: string) => {
+		if (!file || broken) return;
+		try {
+			writeSync(file.fd, chunk);
+		} catch {
+			broken = true;
+		}
+	};
+
+	const out = createStreamCapture(CAPTURE_HEAD_CHARS, CAPTURE_TAIL_CHARS);
+	const err = createStreamCapture(CAPTURE_HEAD_CHARS, CAPTURE_TAIL_CHARS);
+	const combined = createStreamCapture(CAPTURE_HEAD_CHARS, CAPTURE_TAIL_CHARS, {
+		overflow: open,
+		chunk: append,
+	});
+
+	return {
+		pushOut(chunk: string): void {
+			combined.push(chunk);
+			out.push(chunk);
+		},
+		pushErr(chunk: string): void {
+			combined.push(chunk);
+			err.push(chunk);
+		},
+		/**
+		 * Ends the capture: closes the file and decides whether it is worth
+		 * keeping. One call per outcome — the timeout snapshot and the final
+		 * settlement share one — because closing a file is not repeatable.
+		 */
+		assemble(): { stdout: string; stderr: string; spill?: ExecResult["spill"] } {
+			const outResult = out.finish();
+			const errResult = err.finish();
+			const closed = file;
+			file = null;
+			if (!closed) return { stdout: outResult.text, stderr: errResult.text };
+			try {
+				closeSync(closed.fd);
+			} catch {
+				// Nothing left to do about an fd that will not close; the content
+				// question is decided below either way.
+			}
+			if (!broken && (outResult.dropped > 0 || errResult.dropped > 0)) {
+				return {
+					stdout: outResult.text,
+					stderr: errResult.text,
+					spill: { path: closed.path, chars: outResult.total + errResult.total },
+				};
+			}
+			// Deleted for one of two reasons, and the difference matters: both
+			// streams fitting their windows means the combined capture opened a
+			// file for output the text already holds whole (each stream past half
+			// the shared bound is enough to trip it) — a stray file nobody needs,
+			// with the pipeline's own cut free to spill as it would for any
+			// result. A broken file is deleted for the opposite reason: the only
+			// thing worse than a missing pointer is one that points at a maimed
+			// file. Either way this is best effort; the spill directory ages out.
+			try {
+				unlinkSync(closed.path);
+			} catch {
+				// Leftover for the retention sweep, not an error worth failing on.
+			}
+			return { stdout: outResult.text, stderr: errResult.text };
+		},
+	};
+}
+
 export class ChildProcessExecOperations implements ExecOperations {
 	#shell = detectShell();
 	/**
@@ -504,8 +648,9 @@ export class ChildProcessExecOperations implements ExecOperations {
 		onOutput?: (chunk: string) => void;
 		onTimeout?: (handoff: ExecHandoff) => void;
 		sandbox?: SandboxPolicy;
+		spillDir?: string;
 	}): Promise<ExecResult> {
-		const { command, cwd, timeoutMs = 120_000, signal, env, onOutput, onTimeout, sandbox } = options;
+		const { command, cwd, timeoutMs = 120_000, signal, env, onOutput, onTimeout, sandbox, spillDir } = options;
 		const { command: shellCommand, args } = this.#shell;
 
 		// The shell is named here and nowhere else, so this is the only place the
@@ -545,11 +690,15 @@ export class ChildProcessExecOperations implements ExecOperations {
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 
+			// The unbounded strings, kept only when there is no capture; the capture
+			// is what a spilled call accumulates into instead, and the two never
+			// both fill.
 			let stdout = "";
 			let stderr = "";
 			let killed = false;
 			let settled = false;
 			let timer: ReturnType<typeof setTimeout> | null = null;
+			const capture = spillDir ? createExecCapture(spillDir) : null;
 
 			const killTree = () => {
 				if (process.platform === "win32" && child.pid) {
@@ -574,7 +723,15 @@ export class ChildProcessExecOperations implements ExecOperations {
 				resolve(result);
 			};
 
-			const finish = (exitCode: number) => settle({ stdout, stderr, exitCode, killed });
+			// The guard in front is about the capture, not about `settle`: the
+			// argument is built before `settle` can look at it, and assembling
+			// ends a capture (closes its file), so a second call — the error
+			// event's finish after a timeout already settled, say — must not
+			// reach it.
+			const finish = (exitCode: number) => {
+				if (settled) return;
+				settle(capture ? { ...capture.assemble(), exitCode, killed } : { stdout, stderr, exitCode, killed });
+			};
 
 			if (timeoutMs > 0) {
 				timer = setTimeout(() => {
@@ -588,8 +745,12 @@ export class ChildProcessExecOperations implements ExecOperations {
 					// between the two. `settle` detaches the abort listener in the same
 					// turn: a process an embedder has adopted must not die when some
 					// later turn's signal fires.
-					onTimeout({ child, killTree, startedAt, stdout, stderr });
-					settle({ stdout, stderr, exitCode: null, killed: false, handedOff: true });
+					//
+					// One snapshot, used twice: the adopter's log opens with exactly
+					// what the result carries, and a capture is assembled exactly once.
+					const snapshot = capture ? capture.assemble() : { stdout, stderr };
+					onTimeout({ child, killTree, startedAt, stdout: snapshot.stdout, stderr: snapshot.stderr });
+					settle({ ...snapshot, exitCode: null, killed: false, handedOff: true });
 				}, timeoutMs);
 			}
 
@@ -599,16 +760,29 @@ export class ChildProcessExecOperations implements ExecOperations {
 				// Once handed off, this call's windows on the streams belong to the
 				// adopter's log: chunks still forward through `onOutput`, but
 				// accumulating them here would grow without bound for the life of a
-				// server nobody is waiting on anymore.
-				if (!settled) stdout += chunk;
+				// server nobody is waiting on anymore. A settled capture is frozen
+				// the same way — the adopter owns the stream past the handoff.
+				if (!settled) {
+					if (capture) capture.pushOut(chunk);
+					else stdout += chunk;
+				}
 				onOutput?.(chunk);
 			});
 			child.stderr.on("data", (chunk: string) => {
-				if (!settled) stderr += chunk;
+				if (!settled) {
+					if (capture) capture.pushErr(chunk);
+					else stderr += chunk;
+				}
 				onOutput?.(chunk);
 			});
 			child.on("error", (error) => {
-				stderr += String(error);
+				const note = String(error);
+				// Through the capture when there is one, so the error lands in the
+				// spill file in arrival order like everything else — and so the
+				// result's own text shows it with the marker if the window let it
+				// go.
+				if (capture) capture.pushErr(note);
+				else stderr += note;
 				finish(127);
 			});
 			child.on("close", (code) => finish(killed ? 124 : (code ?? 0)));

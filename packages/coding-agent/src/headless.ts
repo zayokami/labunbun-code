@@ -39,7 +39,7 @@ import {
 import { loadSkills, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
 import { createSubagentTools, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
-import { pruneToolOutput, toolOutputRoot, writeToolOutput } from "./tool-output.ts";
+import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
 
 export type OutputFormat = "text" | "json" | "stream-json";
 
@@ -146,6 +146,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// being unattended.
 	const tools = createAllTools(cwd, {
 		readOnlyRoots: [toolOutputRoot(cwd)],
+		// Under the root Read is already allowed into, so every pointer a tool
+		// result carries is a path Read can open.
+		spillDir: toolSpillDir(cwd),
 		// The Bash tool builds its policy from these. Without `home` the resolver
 		// gets nothing and returns no roots, which is the safe direction but means
 		// `workspace-write` still cannot reach the temp directory or a package cache
