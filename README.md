@@ -89,6 +89,16 @@ labunbun                                # interactive REPL
 - **Subagents** — the Task tool runs nested agent sessions; a finished subagent
   keeps its conversation in memory and can be continued with SendMessage or
   cancelled with TaskStop. Custom agents via frontmatter `.md` files.
+- **Beetle band** — `/beetle <task>` puts four members on it — John, Paul,
+  George and Ringo — each with a role and its own model, working the task over
+  a message bus: a wake-up *is* the schedule, so a band that has gone quiet is
+  costing nothing, and only `/beetle off` disbands. Which model each member
+  runs is asked once, four pickers saved as `beetle.models` (user-tier only)
+  and reconfigurable with `/beetle models`; `/beetle status` reads the band as
+  it stands, and `/beetle say <member> <text>` or `@name <text>` reaches one
+  member — the latter while the main session is idle. Esc interrupts the main
+  session, not the band. The members share your working tree, and `/rewind`
+  does not cover their edits.
 - **Skills** — `SKILL.md` folders become prompt-expanding slash commands.
 - **Plan mode** — read-only research then plan approval before mutations. The
   pair that was in force before you entered is the pair that comes back, so
