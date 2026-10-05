@@ -19,6 +19,7 @@ export {
 // Compaction
 export {
 	COMPACTION_DISABLED_NOTICE,
+	COMPACTION_REFILLING_NOTICE,
 	type CompactionConfig,
 	CompactionManager,
 	type CompactionManagerDeps,

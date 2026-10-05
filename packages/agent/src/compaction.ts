@@ -17,7 +17,9 @@
  *   request needs a credential and an endpoint, and those live on the model —
  *   a fabricated one has neither, so it fails 401 and takes compaction with it
  * - Circuit breaker: 3 consecutive failures disable autocompact until the
- *   estimated context drops back under the threshold
+ *   estimated context drops back under the threshold, and 3 compactions that
+ *   each refilled within 3 requests do the same — one breaker is about the
+ *   mechanism, the other about a conversation it cannot hold
  */
 import type { AgentMessage, AssistantMessage, Context, Model, StreamFn, Usage, UserMessage } from "@labunbun/ai";
 import { textContent, userMessage } from "@labunbun/ai";
@@ -68,6 +70,18 @@ const HARD_LIMIT_RESERVE = 3_000;
 const MAX_OUTPUT_TOKENS_RESERVE_CAP = 20_000;
 const DEFAULT_RESERVE = 13_000;
 const MAX_CONSECUTIVE_FAILURES = 3;
+/**
+ * How soon after a compaction another one says the last one bought nothing.
+ *
+ * A summary that freed real space is followed by requests that fit; the
+ * threshold is a line the next turns grow back toward, and reaching it again
+ * takes more than three requests unless something in them is enormous. A
+ * window refilled that fast is the signature of a single oversized tool
+ * result or file read, not of a long conversation.
+ */
+const RAPID_REFILL_CHECKS = 3;
+/** Consecutive refills that fast before automatic compaction is switched off. */
+const MAX_RAPID_REFILLS = 3;
 /** How much of the current turn survives a compaction verbatim. */
 const SUFFIX_TOKEN_BUDGET = 20_000;
 /** What one over-budget text in that turn is cut down to, head and tail kept. */
@@ -544,6 +558,18 @@ export class CompactionManager {
 	#deps: CompactionManagerDeps;
 	#config: CompactionConfig;
 	#consecutiveFailures = 0;
+	/**
+	 * Checks since the last compaction, and the run of rapid refills it feeds.
+	 *
+	 * Kept for the same reason the failure count is: a session can be unable to
+	 * make progress with every compaction succeeding — each one's space is gone
+	 * again before the next few turns are done — and the fix for that one is
+	 * about the conversation, not the mechanism. Starts above the rapid line
+	 * because the distance to a compaction recorded in the session file is
+	 * unknown until this manager runs one, and only a refill it watched counts.
+	 */
+	#checksSinceCompact = RAPID_REFILL_CHECKS + 1;
+	#rapidRefills = 0;
 	/** Size the context was left at by the last compaction, or null if none ran. */
 	#lastPostTokens: number | null = null;
 
@@ -565,7 +591,7 @@ export class CompactionManager {
 	}
 
 	get isTripped(): boolean {
-		return this.#consecutiveFailures >= MAX_CONSECUTIVE_FAILURES;
+		return this.#consecutiveFailures >= MAX_CONSECUTIVE_FAILURES || this.#rapidRefills >= MAX_RAPID_REFILLS;
 	}
 
 	/**
@@ -592,6 +618,11 @@ export class CompactionManager {
 	 * `check()` is the only shape the loop asks for.
 	 */
 	async #pass(context: Context, options: { force?: boolean } = {}): Promise<CompactionPass | null> {
+		// Every ask counts, including the ones answered "not yet": what the refill
+		// record measures is distance — how many turns of context went by between
+		// one compaction and the next — and a turn that was turned away is one of
+		// them.
+		this.#checksSinceCompact++;
 		const tokens = estimateContextUsage(context);
 		const threshold = compactionThreshold(this.#config);
 		if (this.#config.microcompactFirst && tokens >= threshold) {
@@ -716,6 +747,19 @@ export class CompactionManager {
 			// contradicted. This is also what makes /compact the way out of a tripped
 			// breaker rather than a command that reports success to no effect.
 			this.#consecutiveFailures = 0;
+			// The refill record beside it: a summary this soon after the last one was
+			// given no room to hold. Manual is the user's own call and clears the run
+			// — the same reason it is the way out of the failure breaker — while one
+			// that follows its predecessor after a real gap resets it, because a
+			// session that went a while between compactions is not stuck.
+			if (trigger === "manual") {
+				this.#rapidRefills = 0;
+			} else if (this.#checksSinceCompact <= RAPID_REFILL_CHECKS) {
+				this.#rapidRefills++;
+			} else {
+				this.#rapidRefills = 0;
+			}
+			this.#checksSinceCompact = 0;
 			this.#lastPostTokens = estimateContextUsage({ ...context, messages });
 			this.#deps.store?.appendCompaction({
 				boundary,
@@ -750,6 +794,20 @@ export class CompactionManager {
 	 * session is stuck.
 	 */
 	blockedMessage(): string {
+		// The refill trip is checked first and told in its own words: the summaries
+		// worked, and the transcript walked back over them, so "failed N times"
+		// would be a false report of a working mechanism — and the advice has to
+		// lead with the conversation, because summarizing it the same way again
+		// refills the same way.
+		if (this.#rapidRefills >= MAX_RAPID_REFILLS) {
+			return (
+				`The context refilled within ${RAPID_REFILL_CHECKS} requests of each of the last ${MAX_RAPID_REFILLS} compactions, so automatic compaction is switched off for this session, ` +
+				`and the conversation no longer fits in this model's ${this.#config.contextWindow.toLocaleString()} token window. ` +
+				"A single oversized tool result or file read can refill a window that fast; reading it in pieces avoids it. " +
+				"Run /compact to summarize it now, /trim to drop old tool results for free, " +
+				"or exit and start a new session."
+			);
+		}
 		const cause = this.isTripped
 			? `Automatic compaction failed ${MAX_CONSECUTIVE_FAILURES} times and is switched off for this session`
 			: "Automatic compaction could not free enough space";
@@ -758,6 +816,19 @@ export class CompactionManager {
 			"Run /compact to summarize it now, /trim to drop old tool results for free, " +
 			"or exit and start a new session."
 		);
+	}
+
+	/**
+	 * The notice for whichever breaker is tripped, in that breaker's own words.
+	 *
+	 * The two trips look identical from outside — autocompact quietly stops —
+	 * but they are different news: one says the summarizer is failing, the other
+	 * says it is working and the conversation keeps undoing it. The refill story
+	 * is picked when both hold, because it is the more specific diagnosis: it
+	 * names this conversation's shape rather than the mechanism's state.
+	 */
+	disabledNotice(): string {
+		return this.#rapidRefills >= MAX_RAPID_REFILLS ? COMPACTION_REFILLING_NOTICE : COMPACTION_DISABLED_NOTICE;
 	}
 
 	/**
@@ -950,4 +1021,17 @@ export type { AssistantMessage };
  */
 export const COMPACTION_DISABLED_NOTICE =
 	`Automatic compaction failed ${MAX_CONSECUTIVE_FAILURES} times and is switched off for this session. ` +
+	"Run /compact to try it once more (a success re-enables it), or /trim to free space without a summary.";
+
+/**
+ * The refill trip's own notice, because "failed N times" would be a false
+ * report of a mechanism that worked: every one of these summaries freed space,
+ * and the turns after each one filled it back up. What is wrong is the size of
+ * something being read into the conversation, so the advice leads with that;
+ * /compact remains the way out because a manual summary still clears the run.
+ */
+export const COMPACTION_REFILLING_NOTICE =
+	`The context refilled within ${RAPID_REFILL_CHECKS} requests of each of the last ${MAX_RAPID_REFILLS} compactions, ` +
+	"and automatic compaction is switched off for this session. " +
+	"A single oversized tool result or file read can refill a window that fast; reading it in pieces avoids it. " +
 	"Run /compact to try it once more (a success re-enables it), or /trim to free space without a summary.";

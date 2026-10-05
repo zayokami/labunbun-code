@@ -6,20 +6,15 @@
  * the question the loop asks before every request ("does this need to be made
  * smaller first?") has one correct answer for a given model, store and settings.
  * This module is that answer: the manager, the cheap rung that runs before a
- * summary is paid for, the breaker and its notice, and the cache bookkeeping
- * that tells a rewrite the app meant to make from one nothing declared.
+ * summary is paid for, the breakers and their notices, and the cache
+ * bookkeeping that tells a rewrite the app meant to make from one nothing
+ * declared.
  *
  * It lived inline in `runInteractive` until a `-p` run and a subagent turned out
  * to have no compaction at all: the machinery existed, the wiring was in one
  * function nobody else could reach.
  */
-import {
-	type AgentDeps,
-	COMPACTION_DISABLED_NOTICE,
-	CompactionManager,
-	type CompactionPhase,
-	type SessionStore,
-} from "@labunbun/agent";
+import { type AgentDeps, CompactionManager, type CompactionPhase, type SessionStore } from "@labunbun/agent";
 import type { Model, StreamFn } from "@labunbun/ai";
 import { rewriteCause } from "./cache-report.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE, formatTokens } from "./context-report.ts";
@@ -172,7 +167,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				const tripped = compaction.isTripped;
 				if (tripped !== breakerWarned) {
 					breakerWarned = tripped;
-					if (tripped) options.report(COMPACTION_DISABLED_NOTICE);
+					if (tripped) options.report(compaction.disabledNotice());
 				}
 				return decision;
 			} catch {

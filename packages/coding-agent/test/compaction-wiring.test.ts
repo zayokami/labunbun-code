@@ -11,7 +11,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { COMPACTION_DISABLED_NOTICE, type CompactionPhase, SessionStore } from "@labunbun/agent";
+import {
+	COMPACTION_DISABLED_NOTICE,
+	COMPACTION_REFILLING_NOTICE,
+	type CompactionPhase,
+	SessionStore,
+} from "@labunbun/agent";
 import {
 	type AgentMessage,
 	FAUX_MODEL,
@@ -192,6 +197,22 @@ describe("what the wiring says", () => {
 		expect(harness.reports.filter((text) => text === COMPACTION_DISABLED_NOTICE)).toHaveLength(1);
 		await harness.check(context);
 		expect(harness.reports.filter((text) => text === COMPACTION_DISABLED_NOTICE)).toHaveLength(1);
+	});
+
+	test("a refill trip announces itself in the refill's own words", async () => {
+		// The two trips look identical from outside — autocompact quietly stops —
+		// and the notices must not share words: "failed 3 times" about three
+		// summaries that worked is a false report, and the news is different (the
+		// conversation, not the mechanism).
+		const harness = wiring({ trimOldToolResults: false });
+
+		// Each check brings a context that has filled back up: the shape a single
+		// oversized read leaves behind, and the fourth such compaction trips it.
+		for (let i = 0; i < 4; i++) await harness.check({ systemPrompt: "", messages: overThreshold() });
+
+		expect(harness.summaries()).toBe(4);
+		expect(harness.reports.filter((text) => text === COMPACTION_REFILLING_NOTICE)).toHaveLength(1);
+		expect(harness.reports).not.toContain(COMPACTION_DISABLED_NOTICE);
 	});
 
 	test("a summarizer that cannot be sent is not the session's problem", async () => {

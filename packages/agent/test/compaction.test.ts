@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type { AgentMessage, Context, Model, StreamFn } from "@labunbun/ai";
 import { assistantMessage, FAUX_MODEL, fauxProvider, textContent, toolResultMessage, userMessage } from "@labunbun/ai";
 import {
+	COMPACTION_DISABLED_NOTICE,
+	COMPACTION_REFILLING_NOTICE,
 	CompactionManager,
 	compactionBoundary,
 	compactionThreshold,
@@ -768,6 +770,121 @@ describe("CompactionManager", () => {
 		}
 		expect(manager.isTripped).toBe(true);
 		await expect(manager.compact(context)).rejects.toThrow();
+	});
+
+	/** An over-threshold context arriving on a later check, freshly measured. */
+	function refilledContext(): Context {
+		// Timestamps pinned ahead of any boundary this test writes. The estimator
+		// trusts a usage record only if it postdates the newest boundary, and one
+		// written in the same millisecond cannot be proven newer — a fixture left to
+		// the clock would flip this suite between green and red.
+		const at = Date.now() + 60_000;
+		return {
+			systemPrompt: "",
+			messages: [
+				userMessage("do the thing", at),
+				assistantMessage({
+					usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+					timestamp: at + 1,
+				}),
+				userMessage("and now this", at + 2),
+			],
+		};
+	}
+
+	/** A turn that adds nothing: under the threshold, so it is answered "not yet". */
+	function quietContext(): Context {
+		return { systemPrompt: "", messages: [userMessage("short")] };
+	}
+
+	test("three compactions that each refilled within three checks trip the breaker", async () => {
+		// The other shape of stuck: every summary works, and the space is gone again
+		// before the next few turns are done. Left alone it buys a full
+		// summarization call every turn or two, each freeing nearly the same nothing
+		// the last one did — and unlike a failing summarizer, nothing in the
+		// session looks broken while it happens.
+		const manager = makeManager("<summary>1. Request: x</summary>");
+
+		// The first is free: the distance to any compaction recorded before this
+		// manager existed is unknown, and only a refill it watched counts.
+		expect(await checked(manager, refilledContext())).not.toBeNull();
+		// The third check after a compaction is still inside the window, and that
+		// boundary is the claim, so it is pinned with quiet checks rather than left
+		// to whenever a refill happens to arrive.
+		expect(await checked(manager, quietContext())).toBeNull();
+		expect(await checked(manager, quietContext())).toBeNull();
+		expect(await checked(manager, refilledContext())).not.toBeNull(); // refill 1, at distance 3
+		expect(await checked(manager, refilledContext())).not.toBeNull(); // refill 2
+		expect(await checked(manager, refilledContext())).not.toBeNull(); // refill 3 — trips
+		expect(manager.isTripped).toBe(true);
+		// Automatic asks are turned away now; the way out is the user's.
+		expect(await checked(manager, refilledContext())).toBeNull();
+		// Forced recovery is not stopped, same reasoning as the failure trip: the
+		// refusal already on record is a fact about this request, not a guess.
+		expect(await checked(manager, refilledContext(), { force: true })).not.toBeNull();
+	});
+
+	test("a compaction after a real gap resets the refill run", async () => {
+		// Three rapid refills in a row is the trip; the same refills with unbroken
+		// stretches between them are compactions doing their job, and the count has
+		// to be consecutive or a long session would trip on its third compaction
+		// ever.
+		const manager = makeManager("<summary>1. Request: x</summary>");
+		expect(await checked(manager, refilledContext())).not.toBeNull(); // free
+		expect(await checked(manager, refilledContext())).not.toBeNull(); // refill 1
+		expect(await checked(manager, refilledContext())).not.toBeNull(); // refill 2
+		// Three quiet checks: the next compaction lands on the fourth check after
+		// the last one, past the window, so it follows growth rather than the last
+		// summary — the other side of the distance-3 boundary above.
+		for (let i = 0; i < 3; i++) {
+			expect(await checked(manager, quietContext())).toBeNull();
+		}
+		expect(await checked(manager, refilledContext())).not.toBeNull(); // distance 4 — resets
+		// The run starts over: two more refills are not a third.
+		expect(await checked(manager, refilledContext())).not.toBeNull();
+		expect(await checked(manager, refilledContext())).not.toBeNull();
+		expect(manager.isTripped).toBe(false);
+	});
+
+	test("a successful manual compaction clears the refill run", async () => {
+		// Same reasoning as the failure breaker: /compact is the escape hatch, and a
+		// summary the user asked for and got is the contradiction that clears the
+		// count — otherwise a tripped refill session could never get its
+		// automatic compaction back.
+		const manager = makeManager("<summary>1. Request: x</summary>");
+		for (let i = 0; i < 4; i++) await checked(manager, refilledContext());
+		expect(manager.isTripped).toBe(true);
+
+		await manager.compact(refilledContext(), { trigger: "manual" });
+		expect(manager.isTripped).toBe(false);
+		// And the automatic path answers again.
+		expect(await checked(manager, refilledContext())).not.toBeNull();
+	});
+
+	test("a refill trip is told as a conversation problem, not a failed mechanism", async () => {
+		// The summaries all worked, so "failed N times" would be a false report —
+		// and the advice differs: /compact alone summarizes the same way again,
+		// while the cause is the size of something being read into the transcript.
+		const manager = makeManager("<summary>1. Request: x</summary>");
+		for (let i = 0; i < 4; i++) await checked(manager, refilledContext());
+		expect(manager.isTripped).toBe(true);
+
+		const blocked = manager.blockedMessage();
+		expect(blocked).toContain("refilled");
+		expect(blocked).toContain("reading it in pieces");
+		expect(blocked).toContain("/trim");
+		expect(blocked).not.toContain("failed");
+		expect(manager.disabledNotice()).toBe(COMPACTION_REFILLING_NOTICE);
+
+		// The failure trip still gets its own words.
+		const failing = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ throwError: new Error("provider down") }]).streamFn,
+			summarizerModel: SUMMARIZER,
+		});
+		for (let i = 0; i < 3; i++) {
+			await expect(failing.compact({ systemPrompt: "", messages: [userMessage("x")] })).rejects.toThrow();
+		}
+		expect(failing.disabledNotice()).toBe(COMPACTION_DISABLED_NOTICE);
 	});
 
 	test("summarizes with the session's own model, and says who answered", async () => {

@@ -9,7 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { COMPACTION_DISABLED_NOTICE, CompactionManager } from "@labunbun/agent";
+import { COMPACTION_DISABLED_NOTICE, COMPACTION_REFILLING_NOTICE, CompactionManager } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { helpText } from "@labunbun/tui";
 import { builtInCommands, completeCommands } from "../src/commands.ts";
@@ -111,6 +111,7 @@ describe("advice about a context that is full", () => {
 		return [
 			manager.blockedMessage(),
 			COMPACTION_DISABLED_NOTICE,
+			COMPACTION_REFILLING_NOTICE,
 			lowContextWarning(1_600, 2_000),
 			COMPACTION_ACCURACY_NOTICE,
 			// The two startup notices that say a project tier is being held back: the
@@ -146,6 +147,9 @@ describe("advice about a context that is full", () => {
 		// The summary is what stopped working when the breaker tripped, so a
 		// message that offers only /compact offers only the thing that failed.
 		expect(COMPACTION_DISABLED_NOTICE).toContain("/trim");
+		// The refill trip's summaries worked and were undone, so repeating one is
+		// not a fix on its own either — the free lever has to be named here too.
+		expect(COMPACTION_REFILLING_NOTICE).toContain("/trim");
 	});
 });
 
