@@ -5,7 +5,7 @@
  * which makes them unit-testable with in-memory fakes and lets a future
  * remote/container backend slot in without touching tool logic.
  */
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -50,8 +50,30 @@ export interface FileSystemOperations {
 export interface ExecResult {
 	stdout: string;
 	stderr: string;
-	exitCode: number;
+	/**
+	 * The exit code, or `null` for a call that ended without the command ending —
+	 * a process handed over at its timeout. A decoy `0` here would say the
+	 * command succeeded, and what it went on to do is the adopter's to report.
+	 */
+	exitCode: number | null;
 	killed: boolean;
+	/**
+	 * True when the timeout elapsed and the caller's `onTimeout` took the live
+	 * process over instead of the timeout killing it. `exitCode` is `null` then.
+	 */
+	handedOff?: boolean;
+}
+
+/** A live process, handed to the caller at the moment its wait expired. */
+export interface ExecHandoff {
+	child: ChildProcess;
+	/** Kills the whole process tree — the same function the timeout would have called. */
+	killTree: () => void;
+	/** When the process was spawned; elapsed time counts from here, not from the handoff. */
+	startedAt: number;
+	/** What the command had printed by the moment of the handoff. */
+	stdout: string;
+	stderr: string;
 }
 
 export interface ExecOperations {
@@ -66,6 +88,20 @@ export interface ExecOperations {
 		signal?: AbortSignal;
 		env?: Record<string, string>;
 		onOutput?: (chunk: string) => void;
+		/**
+		 * Take the process over when `timeoutMs` elapses, instead of killing it.
+		 *
+		 * Opt-in, and it is the only difference between a wait that kills and one
+		 * that hands over: a foreground timeout says the caller stopped waiting,
+		 * which is not a statement that the command should die — a test suite a
+		 * second past its budget is a candidate for the background, not for a
+		 * process-tree kill. When provided, the timeout calls this with the live
+		 * child and settles the promise immediately; the abort listener is
+		 * detached in the same breath, because a process an embedder has adopted
+		 * should not die when some later turn's signal fires. Without it the
+		 * timeout kills, exactly as before.
+		 */
+		onTimeout?: (handoff: ExecHandoff) => void;
 		/**
 		 * A confinement policy to put around the shell, or `undefined` for none.
 		 *
@@ -466,9 +502,10 @@ export class ChildProcessExecOperations implements ExecOperations {
 		signal?: AbortSignal;
 		env?: Record<string, string>;
 		onOutput?: (chunk: string) => void;
+		onTimeout?: (handoff: ExecHandoff) => void;
 		sandbox?: SandboxPolicy;
 	}): Promise<ExecResult> {
-		const { command, cwd, timeoutMs = 120_000, signal, env, onOutput, sandbox } = options;
+		const { command, cwd, timeoutMs = 120_000, signal, env, onOutput, onTimeout, sandbox } = options;
 		const { command: shellCommand, args } = this.#shell;
 
 		// The shell is named here and nowhere else, so this is the only place the
@@ -500,6 +537,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 		const childEnv = { ...process.env, ...env, ...proxyEnv };
 
 		return new Promise((resolve) => {
+			const startedAt = Date.now();
 			const child = spawn(program, programArgs, {
 				cwd,
 				windowsHide: true,
@@ -511,6 +549,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 			let stderr = "";
 			let killed = false;
 			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | null = null;
 
 			const killTree = () => {
 				if (process.platform === "win32" && child.pid) {
@@ -520,36 +559,52 @@ export class ChildProcessExecOperations implements ExecOperations {
 				}
 			};
 
-			const timer =
-				timeoutMs > 0
-					? setTimeout(() => {
-							killed = true;
-							killTree();
-						}, timeoutMs)
-					: null;
-
 			const onAbort = () => {
 				killed = true;
 				killTree();
 			};
 			signal?.addEventListener("abort", onAbort, { once: true });
 
-			const finish = (exitCode: number) => {
+			/** The one exit from this call: whichever path arrives first decides, the rest are no-ops. */
+			const settle = (result: ExecResult) => {
 				if (settled) return;
 				settled = true;
 				if (timer) clearTimeout(timer);
 				signal?.removeEventListener("abort", onAbort);
-				resolve({ stdout, stderr, exitCode, killed });
+				resolve(result);
 			};
+
+			const finish = (exitCode: number) => settle({ stdout, stderr, exitCode, killed });
+
+			if (timeoutMs > 0) {
+				timer = setTimeout(() => {
+					if (!onTimeout) {
+						killed = true;
+						killTree();
+						return;
+					}
+					// The handoff runs before the promise settles, so the callback owns
+					// the process by the time the caller resumes and no chunk falls
+					// between the two. `settle` detaches the abort listener in the same
+					// turn: a process an embedder has adopted must not die when some
+					// later turn's signal fires.
+					onTimeout({ child, killTree, startedAt, stdout, stderr });
+					settle({ stdout, stderr, exitCode: null, killed: false, handedOff: true });
+				}, timeoutMs);
+			}
 
 			child.stdout.setEncoding("utf8");
 			child.stderr.setEncoding("utf8");
 			child.stdout.on("data", (chunk: string) => {
-				stdout += chunk;
+				// Once handed off, this call's windows on the streams belong to the
+				// adopter's log: chunks still forward through `onOutput`, but
+				// accumulating them here would grow without bound for the life of a
+				// server nobody is waiting on anymore.
+				if (!settled) stdout += chunk;
 				onOutput?.(chunk);
 			});
 			child.stderr.on("data", (chunk: string) => {
-				stderr += chunk;
+				if (!settled) stderr += chunk;
 				onOutput?.(chunk);
 			});
 			child.on("error", (error) => {

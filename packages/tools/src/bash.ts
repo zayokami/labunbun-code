@@ -62,10 +62,17 @@ export function createBashTool(
 			"shell when available (Git Bash on Windows), otherwise cmd.exe. " +
 			"Use for git, builds, test runners, and other CLI work. " +
 			"Set run_in_background for long-running processes (dev servers, watchers) — you get a " +
-			"shell id immediately and can read output later with BashOutput.",
+			"shell id immediately and can read output later with BashOutput. " +
+			"A foreground command that hits its timeout is moved to the background, not killed.",
 		inputSchema: z.object({
 			command: z.string().describe("The shell command to run"),
-			timeout: z.number().int().min(1).max(600_000).optional().describe("Timeout in ms (default 120000, max 600000)"),
+			timeout: z
+				.number()
+				.int()
+				.min(1)
+				.max(600_000)
+				.optional()
+				.describe("Timeout in ms before a foreground command moves to the background (default 120000, max 600000)"),
 			description: z.string().optional().describe("One-line description of what this does"),
 			run_in_background: z.boolean().optional().describe("Start without waiting; poll via BashOutput"),
 		}),
@@ -73,7 +80,9 @@ export function createBashTool(
 			"- Prefer dedicated tools over shell where they exist (Read/Grep/Glob instead of cat/grep/find).\n" +
 			"- Chain dependent steps with && ; avoid interactive commands.\n" +
 			"- Provide a short `description` so the user can follow along.\n" +
-			"- Use run_in_background for servers/watchers; check with BashOutput.",
+			"- Use run_in_background for servers/watchers; check with BashOutput.\n" +
+			"- A foreground command that exceeds its timeout keeps running in the background — " +
+			"the result names its shell id; poll it instead of re-running the command.",
 		isReadOnly: () => false,
 		isConcurrencySafe: () => false,
 		// Command output happens once. A failing build ends its report with the
@@ -125,22 +134,69 @@ export function createBashTool(
 				};
 			}
 
+			const timeoutMs = input.timeout ?? 120_000;
 			const buffer = createTailBuffer(MAX_PREVIEW_CHARS);
 			let lastUpdateAt = 0;
+			// Set the moment a timed-out command is adopted. Chunks after that are the
+			// shell's log, not this call's preview — pushing them toward an `onUpdate`
+			// whose tool call has already returned would be a preview of nothing.
+			let adoptedId: string | undefined;
 			const result = await ops.exec({
 				command: input.command,
 				cwd,
-				timeoutMs: input.timeout ?? 120_000,
+				timeoutMs,
 				signal: ctx.signal,
 				sandbox: policy,
 				onOutput: (chunk) => {
+					if (adoptedId !== undefined) {
+						background?.append(adoptedId, chunk);
+						return;
+					}
 					buffer.push(chunk);
 					const now = Date.now();
 					if (now - lastUpdateAt < BASH_UPDATE_INTERVAL_MS) return;
 					lastUpdateAt = now;
 					ctx.onUpdate({ partialOutput: buffer.read() });
 				},
+				// Opt-in, and only when there is somewhere to hand the process to: a
+				// command that outlives the wait is adopted rather than killed, so a
+				// long build or test run survives the timeout that gave up on it. It is
+				// the same process, not a restart — which is the difference between
+				// continuing the work and doing it twice. With no manager (an
+				// embedder's own tool set) the timeout keeps killing, because there is
+				// no shell id to point a poll at.
+				onTimeout: background
+					? (handoff) => {
+							const shell = background.adopt({
+								child: handoff.child,
+								command: input.command,
+								cwd,
+								startTime: handoff.startedAt,
+								stdout: handoff.stdout,
+								stderr: handoff.stderr,
+							});
+							adoptedId = shell.id;
+						}
+					: undefined,
 			});
+
+			// `adoptedId` and `handedOff` are set together — the id in `onTimeout`,
+			// the flag when the same timer settles the promise — so this branch is
+			// the handoff, and the narrowing is the pairing, not a guess.
+			if (result.handedOff && adoptedId !== undefined) {
+				const shell = background?.get(adoptedId);
+				return {
+					content: [
+						textContent(
+							`The command exceeded its ${timeoutMs}ms timeout and was moved to the background as ${adoptedId} — the same process, not a restart.\n` +
+								`Command: ${input.command}\n` +
+								(shell ? `Output file: ${shell.outputFile}\n` : "") +
+								`Poll with BashOutput(shell_id="${adoptedId}"); stop with KillBash.`,
+						),
+					],
+					details: { backgroundShellId: adoptedId },
+				};
+			}
 
 			// The whole output goes to the model, uncut: `overflow: "spill"` above is
 			// a promise that what does not fit is written out in full and pointed at,

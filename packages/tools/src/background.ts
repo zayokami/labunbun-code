@@ -1,7 +1,8 @@
 /**
  * Background shell manager: long-running commands (dev servers, watchers)
- * started by the Bash tool with run_in_background. Output streams to a temp
- * file; BashOutput tails it, KillBash terminates the process tree.
+ * started by the Bash tool with run_in_background, or adopted by it when a
+ * foreground command outlives its timeout. Output streams to a temp file;
+ * BashOutput tails it, KillBash terminates the process tree.
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
@@ -61,6 +62,21 @@ interface ShellEntry {
 
 let shellCounter = 0;
 
+/**
+ * A best-effort log writer. A shell's output is diagnostic: failing to append a
+ * chunk must not take the shell down, and letting the error surface from an
+ * event handler would do exactly that — worse than a gap in a log.
+ */
+function logAppender(outputFile: string): (chunk: Buffer | string) => void {
+	return (chunk) => {
+		try {
+			appendFileSync(outputFile, typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+		} catch {
+			// best-effort logging
+		}
+	};
+}
+
 export class BackgroundShellManager {
 	readonly #entries = new Map<string, ShellEntry>();
 	readonly #shell = detectShell();
@@ -74,6 +90,25 @@ export class BackgroundShellManager {
 	constructor(runtime: SandboxRuntime = detectRuntime(), operations: ExecOperations = defaultOperations()) {
 		this.#runtime = runtime;
 		this.#operations = operations;
+	}
+
+	/**
+	 * The completion handlers every shell gets, whichever path started it: mark
+	 * the shell ended — unless a kill already did — record the exit code, and put
+	 * the code in the log, so a reader who only ever saw the file learns how it
+	 * ended and not only what it printed along the way.
+	 */
+	#attachExit(entry: ShellEntry, append: (chunk: Buffer | string) => void): void {
+		entry.proc.on("error", (error) => {
+			append(`\n[spawn error: ${error.message}]`);
+			if (entry.info.status !== "killed") entry.info.status = "completed";
+			entry.info.exitCode = 127;
+		});
+		entry.proc.on("close", (code) => {
+			if (entry.info.status !== "killed") entry.info.status = "completed";
+			entry.info.exitCode = code ?? 0;
+			append(`\n[exit code: ${entry.info.exitCode}]`);
+		});
 	}
 
 	/**
@@ -143,33 +178,76 @@ export class BackgroundShellManager {
 		const entry: ShellEntry = { info, proc };
 		this.#entries.set(id, entry);
 
-		const append = (chunk: Buffer | string) => {
-			try {
-				appendFileSync(outputFile, typeof chunk === "string" ? chunk : chunk.toString("utf8"));
-			} catch {
-				// best-effort logging
-			}
-		};
+		const append = logAppender(outputFile);
 		proc.stdout?.setEncoding("utf8");
 		proc.stderr?.setEncoding("utf8");
 		proc.stdout?.on("data", append);
 		proc.stderr?.on("data", append);
-		proc.on("error", (error) => {
-			append(`\n[spawn error: ${error.message}]`);
-			if (info.status !== "killed") info.status = "completed";
-			info.exitCode = 127;
-		});
-		proc.on("close", (code) => {
-			if (info.status !== "killed") info.status = "completed";
-			info.exitCode = code ?? 0;
-			append(`\n[exit code: ${info.exitCode}]`);
-		});
+		this.#attachExit(entry, append);
+
+		return info;
+	}
+
+	/**
+	 * Register a process that was already running — the shape a foreground
+	 * command arrives in when it outlives its timeout and the executor hands it
+	 * over rather than killing it.
+	 *
+	 * Everything the class already offers works on the adopted process from
+	 * here: `output` tails the log, `kill` stops the tree, `completed` resolves
+	 * with the exit code. The one thing not re-attached is output: the exec
+	 * call's own listeners keep reading both pipes — a process caught
+	 * mid-stream has no clean point to switch readers without racing one
+	 * against the other — and they forward what they read through `append`.
+	 * Whatever had been buffered before the handoff is written first, so the
+	 * log opens with what the command had already printed.
+	 */
+	adopt(input: {
+		child: ChildProcess;
+		command: string;
+		cwd: string;
+		startTime: number;
+		stdout: string;
+		stderr: string;
+	}): BackgroundShell {
+		shellCounter += 1;
+		const id = `shell_${shellCounter}`;
+		const outputFile = join(tmpdir(), `lbb-${id}.log`);
+		writeFileSync(outputFile, input.stdout + input.stderr);
+
+		const info: BackgroundShell = {
+			id,
+			command: input.command,
+			cwd: input.cwd,
+			outputFile,
+			startTime: input.startTime,
+			status: "running",
+			exitCode: null,
+		};
+		const entry: ShellEntry = { info, proc: input.child };
+		this.#entries.set(id, entry);
+		this.#attachExit(entry, logAppender(outputFile));
 
 		return info;
 	}
 
 	get(id: string): BackgroundShell | undefined {
 		return this.#entries.get(id)?.info;
+	}
+
+	/**
+	 * Append a chunk to a shell's log.
+	 *
+	 * The adopted shell's write path: the exec call that started the process
+	 * owns its pipes to the end, so the manager is handed what those listeners
+	 * read rather than attaching a second reader to a stream already being read.
+	 * An unknown id is ignored — the same best-effort stance as the log write
+	 * itself, for a chunk whose process has no other reader to lose it to.
+	 */
+	append(id: string, chunk: string): void {
+		const entry = this.#entries.get(id);
+		if (!entry) return;
+		logAppender(entry.info.outputFile)(chunk);
 	}
 
 	/**
