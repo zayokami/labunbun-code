@@ -47,8 +47,12 @@ import { findProtectedPaths } from "./protected-paths.ts";
  * The bind attaches to the dentry and `vfs_rename` renames in place, so
  * `…/relocated/.git` still resolves onto the same dentry and is still read-only
  * within the namespace that made the move. No argv change belongs here.
- * `sandbox-bwrap-smoke.test.ts` keeps the two-process row deliberately red as
- * the regression test for exactly this function.
+ * `sandbox-bwrap-smoke.test.ts` runs the two-command sequence against a real
+ * `bwrap` with each command deriving its own policy through `workspacePolicy`,
+ * so reintroducing a cache here turns that row red. (Before its rewrite the row
+ * was red for a different reason — it built one policy by hand and reused it
+ * across the move, asking this function nothing, so no fix here could ever make
+ * it green. The smoke file's header keeps that story.)
  *
  * **Re-derive, not invalidate — the numbers are this machine's, measured, not
  * quoted.** The 76 ms below was measured elsewhere; these were re-taken here on

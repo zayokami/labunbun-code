@@ -23,15 +23,22 @@
  * ```
  *
  * So the inherited belief was **right**, and the red row was measuring a
- * different bug: `protectedPathsFor` in `workspace-policy.ts` caches the scan for
- * the life of the process, so the next command mounts nothing where the `.git`
- * moved to.
+ * different bug: `protectedPathsFor` in `workspace-policy.ts` cached the scan
+ * for the life of the process, so the next command mounted nothing where the
+ * `.git` moved to. That bug is fixed — the scan is re-derived on every call.
  *
- * **That second bug is now fixed** — `protectedPathsFor` no longer caches for the
- * life of the process — so the row that was red is expected to go green on this
- * leg. If it does not, the mechanism is not the one reasoned about here and this
- * file's comment is wrong; the row is the thing that would say so, which is why it
- * is kept rather than deleted.
+ * **The row then stayed red, and the runs that followed said why.** It was
+ * building its own policy by hand: one list, made before the move, handed to
+ * both spawns. A stale list the test wrote itself is not something any fix to
+ * `workspacePolicy` can reach, so the row was measuring its own construction —
+ * exactly the possibility the previous version of this comment named ("if it
+ * does not, the mechanism is not the one reasoned about here"). The mechanism
+ * was right; the row was not asking the product. It now derives a policy per
+ * command through `workspacePolicy`, the way a Bash call does, in this one
+ * process — so it is green on the re-deriving code and red again if the cache
+ * ever returns. `sandbox-wiring.test.ts` ("a renamed repository is protected at
+ * its new location") holds the same property where no `bwrap` is installed;
+ * this row is where it is checked against a real kernel.
  *
  * ## Every row has its control, and the controls are what make the rows mean anything
  *
@@ -60,6 +67,7 @@ import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
 import { buildBwrapArgs } from "../src/sandbox/bwrap.ts";
 import { detectNativeBackend } from "../src/sandbox/index.ts";
+import { workspacePolicy } from "../src/sandbox/workspace-policy.ts";
 
 /**
  * Whether a real bwrap can start a namespace here.
@@ -224,22 +232,24 @@ smoke("CONTROL: the same write to the protected path succeeds with no sandbox", 
 });
 
 /**
- * The assumption `bwrap.ts:34-56` states and cannot test.
- *
- * The translator emits no ancestor-unlink denies, on the belief that a bind
- * mount attaches to the dentry rather than the name — so renaming a directory
- * that *contains* a protected path carries the read-only bind with it, and the
- * `.git` stays read-only at its new location. If that belief is wrong, the
- * backend has a relocation bypass and nothing else in this repository would see
- * it.
+ * The product's own sequence, end to end: one command moves a repository and a
+ * later command writes through the new location. Both policies come from
+ * `workspacePolicy`, so this row is where re-derivation is measured against a
+ * real kernel — the same property `sandbox-wiring.test.ts` ("a renamed
+ * repository is protected at its new location") holds on machines without
+ * `bwrap`.
  *
  * **The control is what makes the row mean anything.** The same rename performed
  * outside the sandbox must leave the moved `.git` writable; if it did not, the
  * refusal below would be a fact about the filesystem rather than about the
  * sandbox, and a verdict of "safe" would be measuring the wrong thing.
  *
- * **If this row comes back writable, that is a live bypass** and the fix belongs
- * in the translator, not here.
+ * **If this row comes back writable, the product lost the protection** — read
+ * its list assertion first (that names the derivation half) and the ONE-PROCESS
+ * row second (that separates the kernel half). Whether a read-only bind travels
+ * with a renamed directory is measured there, not here: this row's two
+ * `spawnSync` calls are two mount namespaces, and nothing in it can see the
+ * difference.
  */
 smoke("CONTROL: renaming a directory that holds a .git leaves it writable, unsandboxed", () => {
 	const { workspace, sub } = workspaceFixture();
@@ -260,11 +270,17 @@ smoke("CONTROL: renaming a directory that holds a .git leaves it writable, unsan
 	).toBe("WROTE");
 });
 
-smoke("renaming a directory that holds a .git does not make the .git writable", () => {
+smoke("renaming a directory that holds a .git does not make the .git writable", async () => {
 	const { workspace, sub } = workspaceFixture();
 	const relocated = join(workspace, "relocated");
-	const policy = policyFor(workspace, [join(sub, ".git")]);
-	const run = runUnder(policy, `mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`);
+	// Each command derives its own policy, the way a Bash call does, in this one
+	// process: the derivation that runs *before* the move is what a
+	// process-lifetime cache poisons, and the one that runs *after* it has to
+	// see the `.git` where it now is. A row that built one policy by hand and
+	// reused it across the move could never go green and never asked
+	// `workspacePolicy` anything — see the header.
+	const before = await workspacePolicy(workspace, { sandbox: "workspace-write" });
+	const run = runUnder(before, `mv ${JSON.stringify(sub)} ${JSON.stringify(relocated)}`);
 	if (run.status !== 0) {
 		// The rename itself being refused is the safe answer, and it is a
 		// different mechanism from the one below — both are worth knowing apart.
@@ -273,37 +289,40 @@ smoke("renaming a directory that holds a .git does not make the .git writable", 
 		);
 		return;
 	}
-	const after = runUnder(policy, touchPayload(join(relocated, ".git", "HEAD")));
+	const after = await workspacePolicy(workspace, { sandbox: "workspace-write" });
+	// The list is half the claim and the mount is the other. Asserting the list
+	// first means a `WROTE` here is about the mount, not the scan.
 	expect(
-		after.stdout.trim(),
-		"the .git became writable after its parent was renamed -- this is the relocation bypass bwrap.ts:34-56 assumes does not exist",
+		after.protected.some((path) => path.endsWith(join("relocated", ".git"))),
+		`the second derivation did not name the relocated .git: ${after.protected.join(", ")}`,
+	).toBe(true);
+	const write = runUnder(after, touchPayload(join(relocated, ".git", "HEAD")));
+	expect(
+		write.stdout.trim(),
+		"the .git was writable at its new location -- the derivation did not reach it, or the read-only bind did not take",
 	).toBe("refused");
 });
 
 /**
  * The same operation with the rename and the write **inside one bwrap process**.
  *
- * **The row above cannot tell the two candidate causes apart**, and that is a
- * defect in the row above, not a fact about the product. `runUnder` is a fresh
- * `spawnSync("bwrap", …)` per call, so lines 249 and 258 are **two mount
- * namespaces**. The second one re-derives every mount from paths that no longer
- * describe reality: after the rename, `exists("…/sub/.git")` is false, so
- * `readOnlyPathArgs` emits the empty-read-only recipe at a path nothing uses, while
- * `…/relocated/.git` receives no mount at all. So `Received: "WROTE"` there is
- * evidence about re-derivation from a stale list, **not** evidence that a
- * read-only bind stops travelling with a renamed directory.
+ * **Why these two spawns, and why it took a rewrite of the row above to say
+ * what each of them measures.** The row above runs the rename and the write as
+ * two `spawnSync` calls, which are two mount namespaces by construction — and a
+ * namespace mounts by path, so the question "does a read-only bind travel with a
+ * renamed directory" cannot arise there at all. This row is the only one where
+ * rename and write share a namespace, so it is the only one where the belief at
+ * `bwrap.ts:34-56` does any work:
  *
- * Those are different bugs with different fixes, and only this row separates them:
+ * - **prints `refused`** ⇒ the bind travels with the dentry, the belief holds,
+ *   and a `WROTE` from the row above can only come from its derivation.
+ * - **prints `WROTE`** ⇒ the belief is false, and the ancestor-mount
+ *   arrangements that were measured and reverted are worth revisiting.
  *
- * - **prints `refused`** ⇒ the bind does travel with the dentry, the belief at
- *   `bwrap.ts:34-56` holds, and the hole is the process-lifetime cache in
- *   `workspace-policy.ts` that hands the next command a list naming a path that no
- *   longer exists.
- * - **prints `WROTE`** ⇒ the belief is false, and the ancestor-mount arrangements
- *   that were measured and reverted are worth revisiting.
- *
- * Until this runs on a real bwrap, `bwrap.ts` states one of these as a measured
- * gap and this file cannot confirm which.
+ * The first answer is the one a real `bwrap` printed; the file's header quotes
+ * the run. This row keeps its hand-built policy on purpose: the bind has to sit
+ * on `sub/.git` at the moment of the move for the question to mean anything,
+ * and the derivation half is the row above's.
  */
 smoke("ONE PROCESS: rename and write together, so nothing is re-derived between them", () => {
 	const { workspace, sub } = workspaceFixture();
@@ -327,14 +346,14 @@ smoke("ONE PROCESS: rename and write together, so nothing is re-derived between 
 
 /**
  * Measure whether a mount arrangement can express "this directory is not
- * renameable" — the question any fix to the row above has to answer first.
+ * renameable" — the hardening question, asked before anything was written
+ * against it, and answered below by measurement rather than reasoning.
  *
  * **Why this row exists rather than a fix.** Bubblewrap has no deny rule: it is
- * purely constructive, arranging mounts. So the previous belief — that a
- * read-only bind travels with a renamed directory because it attaches to the
- * dentry — was reasoning about mount semantics that turned out to be false, and
- * it cost a live hole. A fix written the same way would be the same guess with
- * a different shape.
+ * purely constructive, arranging mounts. The red row was read as a live bypass —
+ * mount semantics reasoned about, from a row that could not tell two causes
+ * apart — and a fix written the same way would have been the same guess with a
+ * different shape.
  *
  * The candidate mechanism is that a **mount point is not renameable**: the kernel
  * returns `EBUSY` for `rename` on one. A mount can be read-write and still be
@@ -342,9 +361,11 @@ smoke("ONE PROCESS: rename and write together, so nothing is re-derived between 
  * without needing a deny rule the backend does not have.
  *
  * **This row does not assume it works. It prints what happened**, for three
- * probes whose answers decide the fix:
+ * probes whose answers decide whether the arrangement is worth taking further:
  *
- *   A — the argv as shipped, which is the known bypass.
+ *   A — the argv as shipped: the baseline. Its rename is allowed and its
+ *   protection is the travelling bind (the ONE-PROCESS row above); its rename
+ *   verdict is pinned below, because the rows above depend on it.
  *   B — does `--bind <ancestor> <ancestor>` after the parent bind refuse the rename?
  *   C — does `--ro-bind` of the same directory do better or worse?
  *   and each reports whether `<ancestor>/.git` is still **readable** and still
@@ -352,9 +373,11 @@ smoke("ONE PROCESS: rename and write together, so nothing is re-derived between 
  *   making its contents unreadable would pass the rename check and break every
  *   `git` command in the product.
  *
- * The values are printed rather than asserted because the answer is a fact about
- * the kernel, not a decision this repository is making. The fix is written
- * against the measured answer; this row is what keeps it honest.
+ * The answers are printed rather than asserted because they are facts about the
+ * kernel, not decisions this repository is making — the pin on A is the one
+ * exception, and it exists because everything above assumes it. The tables below
+ * are where these answers led; no arrangement satisfied all the properties, so
+ * none was shipped.
  */
 smoke("MEASURE: what a mount arrangement can say about renaming an ancestor", () => {
 	/**
@@ -415,15 +438,28 @@ smoke("MEASURE: what a mount arrangement can say about renaming an ancestor", ()
 		);
 	}
 
-	// Asserts nothing about the mechanism on purpose — see the doc comment. Probe A
-	// is the argv as it stands today, so this asserts the *current* rename verdict:
-	// when the translator stops producing a working relocation this row goes red and
-	// says so, rather than the file carrying a measurement nobody is comparing.
+	// Asserts nothing about the *mechanism* on purpose — see the doc comment —
+	// but it does pin the shipped verdict, which the rest of this file leans on.
+	// As shipped, the rename is allowed; what protects the moved `.git` is the
+	// travelling bind, measured by the row above in one namespace. If the
+	// translator ever starts refusing the rename, the two-process row would
+	// quietly take its "rename refused" exit and stop testing anything — and
+	// exit=0 would stop meaning what the rows above assume it means. This is
+	// the line that turns either change into a red someone reads.
+	//
+	// The earlier version of this message called the as-shipped exit=0 "the
+	// relocation bypass is OPEN", which never became true again once the
+	// ONE-PROCESS verdict landed — the bypass was the stale list, fixed in
+	// `workspace-policy.ts`. The word "bypass" here would have kept pointing at
+	// a hole that is not open.
 	const known = rows[0]?.[1];
 	expect(known, "probe A did not run, so nothing was measured").toBeDefined();
+	expect(
+		known?.rename.status,
+		`the as-shipped argv no longer performs the relocation (exit ${known?.rename.status}): ${known?.rename.stderr.slice(0, 200)}`,
+	).toBe(0);
 	console.log(
-		`[bwrap-smoke] probe A today: rename exit=${known?.rename.status} — ` +
-			`${known?.rename.status === 0 ? "the relocation bypass is OPEN" : "the ancestor mount refuses it"}`,
+		`[bwrap-smoke] probe A today: rename exit=${known?.rename.status} — allowed; the moved .git is protected by the travelling bind, not by refusing the move`,
 	);
 });
 
@@ -477,6 +513,12 @@ smoke("MEASURE: which ancestor mount order keeps the workspace writable", () => 
 	 * it, so the writable mount is not the ancestor and the ancestor is still a
 	 * mount point. The extra `sibling` probe is there because a fix that made the
 	 * whole workspace read-only would pass the rename check and fail the product.
+	 *
+	 * **On the runner, G did not work either** — the rebind lands on the ancestor
+	 * too, so F and G both leave the `.git` writable (`bwrap.ts`'s table reads
+	 * `G … .git write=WROTE`). The "should work" above is the hypothesis this row
+	 * exists to check, and the printed table below is that check; no arrangement
+	 * satisfying all the properties is why none of them shipped.
 	 */
 	const probe = (insertAt: "after-writable" | "before-writable" | "re-bind-after" | "rebind-children") => {
 		const { workspace, sub } = workspaceFixture();
