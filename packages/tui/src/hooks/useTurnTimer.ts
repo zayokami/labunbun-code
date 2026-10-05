@@ -36,3 +36,17 @@ export function useTurnTimer({ busy, frozen }: { busy: boolean; frozen: boolean 
 
 	return elapsedMs;
 }
+
+/**
+ * Wall-clock length of the current thinking span, for the status row's word
+ * ladder.
+ *
+ * The same clock as the turn, counting a narrower span: it starts when the
+ * phase rises into thinking, zeroes when the phase leaves it, and pauses while
+ * a dialog waits on the user — so the ladder climbs on time the model spent
+ * thinking, not on time the row spent frozen. Neither caller needs a second
+ * timer; the 500ms tick above already drives both numbers.
+ */
+export function useThinkingSegment({ thinking, frozen }: { thinking: boolean; frozen: boolean }): number {
+	return useTurnTimer({ busy: thinking, frozen });
+}

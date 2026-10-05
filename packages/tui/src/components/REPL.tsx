@@ -5,7 +5,9 @@ import { Box, Text, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WHEEL_ROWS, wheelEntries, wheelMove } from "../command-wheel.ts";
 import { type EditorKind, resolveEditingMode } from "../editing-mode.ts";
-import { useTurnTimer } from "../hooks/useTurnTimer.ts";
+import { advanceTimer, IDLE_TIMER, type TimerState } from "../elapsed.ts";
+import { formatDoneLine, pickDoneVerb } from "../flavor.ts";
+import { useThinkingSegment, useTurnTimer } from "../hooks/useTurnTimer.ts";
 import { type LastNotification, type NotifyKind, notificationSequence, shouldNotify } from "../notify.ts";
 import { type PadPromptHandle, type PadPromptRef, usePadAction, usePadStatus } from "../pad.ts";
 import { shortcutGroups } from "../shortcuts.ts";
@@ -235,6 +237,13 @@ export function REPL({
 	/** Keys for the queued-message previews; text alone can repeat. */
 	const queuedIdRef = useRef(0);
 	const elapsedMs = useTurnTimer({ busy: statusPhase !== "idle", frozen: awaitingUser });
+	// The span the thinking label's word ladder climbs. Counts exactly while the
+	// label would be the thinking phase's own word: an `activity` (a compaction)
+	// holds the label instead, and is not a thought however long it takes.
+	const thinkingMs = useThinkingSegment({
+		thinking: statusPhase === "thinking" && !contextActivity,
+		frozen: awaitingUser,
+	});
 	// Idle Ctrl+C confirmation state: the timestamp of the first press and the
 	// hint line shown until the window lapses.
 	const lastCtrlCAtRef = useRef(0);
@@ -739,6 +748,7 @@ export function REPL({
 							elapsedMs={elapsedMs}
 							contextInfo={contextInfo}
 							activity={contextActivity}
+							thinkingMs={thinkingMs}
 							outputEstimate={estimateOutputTokens(streamingText.length)}
 							pad={padStatus}
 						/>
@@ -900,4 +910,53 @@ export function connectSessionToStore(session: AgentSession, store: Store<UiStat
 	return session.on((event: AgentEvent) => {
 		store.set((state) => reduceEvent(state, event));
 	});
+}
+
+/**
+ * Give every run that finished a footer line, and no other run anything.
+ *
+ * `♪ Composed for 12s`, with the verb picked once per run and the duration
+ * taken from the status row's own clock — a second instance of it, sampled on
+ * every store write, so a run that spent a minute frozen on a dialog reports
+ * the time the model actually worked, the same number the row was just
+ * showing. Only `completed` earns the mark: a run the user stopped, one that
+ * errored, or one out of turns has its own line in the transcript already, and
+ * a flourish on top of it would be the wrong note.
+ *
+ * Wired where `connectSessionToStore` is wired, and rebound wherever that one
+ * is: an in-app /resume swaps the session, and the footer must follow the new
+ * one or a swapped-out session's last breath would write the first event of
+ * the new transcript.
+ */
+export function connectTurnFooter(
+	session: AgentSession,
+	store: Store<UiState>,
+	options: { random?: () => number; now?: () => number } = {},
+): () => void {
+	const random = options.random ?? Math.random;
+	const now = options.now ?? Date.now;
+	let clock: TimerState = IDLE_TIMER;
+	let workingMs = 0;
+	const sample = (): void => {
+		const state = store.get();
+		const busy = state.statusPhase !== "idle";
+		const frozen = state.dialog !== null || state.question !== null || state.picker !== null;
+		clock = advanceTimer(clock, now(), { busy, frozen });
+		if (busy) workingMs = clock.elapsedMs;
+	};
+	const unsubscribeStore = store.subscribe(sample);
+	const unsubscribeSession = session.on((event) => {
+		if (event.type !== "agent_end" || event.reason !== "completed") return;
+		// `workingMs`, not this event's own moment: the reducer's agent_end has
+		// already reset the phase to idle by the time another session listener
+		// runs, and the clock's last busy sample is the run's real length.
+		store.set((state) => ({
+			...state,
+			entries: [...state.entries, { kind: "info", text: formatDoneLine(pickDoneVerb(random), workingMs) }],
+		}));
+	});
+	return () => {
+		unsubscribeSession();
+		unsubscribeStore();
+	};
 }

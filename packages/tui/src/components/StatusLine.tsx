@@ -2,6 +2,7 @@ import { DS4_BATTERY_FULL, type Ds4Battery, type PadServiceStatus, padBatteryLow
 import { Text } from "ink";
 import { useEffect, useState } from "react";
 import { formatElapsed } from "../elapsed.ts";
+import { thinkingWord } from "../flavor.ts";
 import { useTheme } from "../theme.ts";
 import type { PendingTool, StatusPhase, UiBackgroundShell } from "../ui-state.ts";
 
@@ -54,7 +55,9 @@ function BatterySegment({ pad }: { pad: PadServiceStatus | undefined }) {
 
 const PHASE_LABEL: Record<StatusPhase, string> = {
 	idle: "",
-	thinking: "Thinking…",
+	// The base rung of the word ladder — flavor.ts owns the wording, and the
+	// thinking label itself goes through `thinkingWord` so the row can climb.
+	thinking: thinkingWord(0),
 	responding: "Responding…",
 	tools: "Running tools…",
 };
@@ -97,6 +100,7 @@ export function StatusLine({
 	contextInfo,
 	outputEstimate,
 	activity,
+	thinkingMs,
 	pad,
 }: {
 	phase: StatusPhase;
@@ -111,6 +115,13 @@ export function StatusLine({
 	 * turn, so the time and the model are still the ones on the screen.
 	 */
 	activity?: string;
+	/**
+	 * How long the current thinking span has run, for the word ladder. Only the
+	 * thinking label climbs it, and only while no `activity` holds the label —
+	 * a compaction is not a thought, however long it takes. Absent means the
+	 * span just started: the base word.
+	 */
+	thinkingMs?: number;
 	/** The controller's status, when there is a controller. */
 	pad?: PadServiceStatus;
 }) {
@@ -158,9 +169,11 @@ export function StatusLine({
 		);
 	}
 	const outputPart = outputEstimate && outputEstimate > 0 ? ` · ~${formatTokens(outputEstimate)} out` : "";
+	// The thinking label climbs the word ladder; every other phase has one word.
+	const label = activity ?? (phase === "thinking" ? thinkingWord(thinkingMs ?? 0) : PHASE_LABEL[phase]);
 	return (
 		<Text color={theme.accent}>
-			{FRAMES[frame]} {activity ?? PHASE_LABEL[phase]}{" "}
+			{FRAMES[frame]} {label}{" "}
 			<Text dimColor>
 				({formatElapsed(elapsedMs)} · {modelName}
 				{outputPart}

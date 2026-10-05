@@ -11,6 +11,7 @@ import { sealCount } from "./components/MessageList.tsx";
 import {
 	CLEAR_SCREEN,
 	connectSessionToStore,
+	connectTurnFooter,
 	type PromptSubmitResult,
 	type PromptSubmitVerdict,
 	REPL,
@@ -235,6 +236,10 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	 */
 	const sessionHolder = { current: options.session };
 	let unsubscribeSession = connectSessionToStore(sessionHolder.current, store);
+	// The finished-run footer, second listener on the same session: subscribed
+	// after the reducer so its line lands after whatever `agent_end` committed
+	// to the transcript.
+	let unsubscribeFooter = connectTurnFooter(sessionHolder.current, store);
 
 	// exitOnCtrlC: false hands Ctrl+C to the REPL's own handler, which aborts a
 	// running turn first and requires a second press when idle. Ink's default
@@ -278,6 +283,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		waitUntilExit: async () => {
 			await instance.waitUntilExit();
 			unsubscribeSession();
+			unsubscribeFooter();
 		},
 		requestPermission: permissionQueue.request,
 		setContextInfo: (info) => {
@@ -335,7 +341,9 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		setSession: (next) => {
 			sessionHolder.current = next;
 			unsubscribeSession();
+			unsubscribeFooter();
 			unsubscribeSession = connectSessionToStore(next, store);
+			unsubscribeFooter = connectTurnFooter(next, store);
 			// Transient transcript state belongs to the old session; dialogs and
 			// the theme belong to the app and survive. The mode label does **not**
 			// survive, and is the one thing here that has to be re-read rather than

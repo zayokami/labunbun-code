@@ -165,6 +165,40 @@ describe("StatusLine", () => {
 		unmount();
 	});
 
+	test("a long thought climbs the ladder, on its own clock", () => {
+		// Two numbers, two spans: the parenthesis keeps counting the turn, the
+		// label counts the thinking run inside it.
+		const { lastFrame, unmount } = render(
+			withTheme(<StatusLine phase="thinking" modelName="test-model" elapsedMs={60_000} thinkingMs={50_000} />),
+		);
+		const frame = flatFrame(lastFrame() ?? "");
+		expect(frame).toContain("Deep in the groove");
+		expect(frame).not.toContain("Thinking…");
+		expect(frame).toContain("1m 00s");
+		unmount();
+	});
+
+	test("a thought under the first threshold — or without a clock at all — reads the base word", () => {
+		const young = render(
+			withTheme(<StatusLine phase="thinking" modelName="test-model" elapsedMs={2_000} thinkingMs={9_999} />),
+		);
+		expect(flatFrame(young.lastFrame() ?? "")).toContain("Thinking…");
+		young.unmount();
+		const missing = render(withTheme(<StatusLine phase="thinking" modelName="test-model" elapsedMs={2_000} />));
+		expect(flatFrame(missing.lastFrame() ?? "")).toContain("Thinking…");
+		missing.unmount();
+	});
+
+	test("the ladder is the thinking label's alone", () => {
+		const { lastFrame, unmount } = render(
+			withTheme(<StatusLine phase="tools" modelName="test-model" elapsedMs={60_000} thinkingMs={50_000} />),
+		);
+		const frame = flatFrame(lastFrame() ?? "");
+		expect(frame).toContain("Running tools…");
+		expect(frame).not.toContain("Deep in the groove");
+		unmount();
+	});
+
 	test("and at an idle prompt it still spins, without promising Esc", () => {
 		// `/compact` typed at a prompt that is not running anything: the row would
 		// otherwise be the dim idle one, which says nothing while a summarization
