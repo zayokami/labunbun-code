@@ -16,9 +16,10 @@
  * here can only see names that answer to a tool: a name with nothing behind it
  * is a mode admitting a capability that does not exist.
  *
- * The Task tool is deliberately not in the set: it is built from a live
- * session's context. It declares no `isReadOnly`, so it fails closed to
- * "mutating" and the mode denies it — which is what its own declaration says.
+ * The subagent tools (Task, SendMessage, TaskStop) are deliberately not in the
+ * set: they are built from a live session's context. None declares
+ * `isReadOnly`, so they fail closed to "mutating" and the mode denies them —
+ * which is what their own declarations say.
  */
 import { describe, expect, test } from "bun:test";
 import { type AnyTool, evaluatePermissions, PLAN_MODE_READ_ONLY_TOOLS } from "@labunbun/agent";

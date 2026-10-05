@@ -27,7 +27,7 @@ import {
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { z } from "zod";
 import { networkAxisFrom, PROJECT_TIER_KEY_POLICY, SettingsSchema } from "../src/settings.ts";
-import { createTaskTool } from "../src/subagents.ts";
+import { createSubagentTools } from "../src/subagents.ts";
 
 describe("the network keys in a settings file", () => {
 	test("a rule is a bare string or an object, and both survive the parse", () => {
@@ -120,7 +120,7 @@ describe("what a subagent inherits", () => {
 	test("the parent's axis reaches the subagent's own tool calls", async () => {
 		const seen: NetworkAxis[] = [];
 		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "inside" } }] }, { text: "SUB DONE" }]);
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [recordingTool(seen)],
@@ -155,7 +155,7 @@ describe("what a subagent inherits", () => {
 		// machines that need the network.
 		const seen: NetworkAxis[] = [];
 		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "inside" } }] }, { text: "SUB DONE" }]);
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [recordingTool(seen)],

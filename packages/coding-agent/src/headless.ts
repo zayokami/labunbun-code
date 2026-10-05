@@ -37,7 +37,7 @@ import {
 	resolveMode,
 } from "./settings.ts";
 import { loadSkills, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
-import { createTaskTool, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
+import { createSubagentTools, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { pruneToolOutput, toolOutputRoot, writeToolOutput } from "./tool-output.ts";
 
@@ -231,7 +231,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// Read at the call, like the REPL's: the definition list is a getter because a
 	// definition approved mid-session joins it, and the store because a sidechain
 	// belongs to whichever session is live.
-	const taskTool = createTaskTool({
+	const subagentTools = createSubagentTools({
 		streamFn: transport.streamFn,
 		model: () => model,
 		resolveModel,
@@ -259,7 +259,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// MCP servers are deliberately not connected here: `-p` has no dialog to
 	// approve a project-defined server with, and an unapproved one must not be
 	// reachable just because nobody was watching.
-	const allTools = [...tools, taskTool];
+	const allTools = [...tools, ...subagentTools];
 
 	// A `-p` run is a session like any other, and one that runs out of room
 	// unattended has nobody to type `/compact`: before this it ended on the

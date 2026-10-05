@@ -155,7 +155,7 @@ import { createShellPassthrough } from "./shell-passthrough.ts";
 import { loadSkills, type Skill, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
 import {
 	type AgentDefinition,
-	createTaskTool,
+	createSubagentTools,
 	GENERAL_PURPOSE,
 	loadAgentDefinitions,
 	withheldProjectAgents,
@@ -494,7 +494,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 */
 	let thinkingLevel: ThinkingLevel | undefined = settings.thinkingLevel;
 	const agentDefinitions = loadAgentDefinitions(cwd);
-	const taskTool = createTaskTool({
+	const subagentTools = createSubagentTools({
 		streamFn,
 		// Read through the session, not captured: /model swaps the model and
 		// /resume swaps the session a sidechain is written into, and a subagent
@@ -540,7 +540,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		askUser: (questions, signal) => (handle ? askUserOrAbort(handle, questions, signal) : Promise.resolve(null)),
 	});
 
-	const allTools = [...tools, ...mcpTools, taskTool, ...planTools, askUserTool];
+	const allTools = [...tools, ...mcpTools, ...subagentTools, ...planTools, askUserTool];
 
 	const systemPrompt = buildSystemPrompt(allTools, {
 		cwd,

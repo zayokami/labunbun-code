@@ -1,13 +1,16 @@
 /**
- * Subagents: agent definitions (frontmatter .md) + the Task tool that runs
- * nested AgentSessions. Subagent transcripts persist as sidechain entries in
- * the parent's session tree, and the final assistant text returns to the
- * parent as the tool result.
+ * Subagents: agent definitions (frontmatter .md) + the tools that run nested
+ * AgentSessions — Task spawns one, SendMessage continues or nudges one,
+ * TaskStop cancels one. A subagent's conversation lives in this process only:
+ * what reaches the parent's session file is a start/end entry around each run,
+ * with the final report text. The conversation itself is not written down, so
+ * a subagent cannot be revived after the process ends.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+	type AgentEndReason,
 	AgentSession,
 	type AnyTool,
 	buildTool,
@@ -17,6 +20,7 @@ import {
 	type PermissionRule,
 	type SandboxMode,
 	type SessionStore,
+	type ToolResult,
 } from "@labunbun/agent";
 import type { Model, StreamFn, ThinkingLevel } from "@labunbun/ai";
 import { textContent } from "@labunbun/ai";
@@ -209,14 +213,139 @@ export function agentCatalogue(definitions: AgentDefinition[]): string {
 		.join("\n");
 }
 
-/** Create the Task tool: spawns a nested AgentSession per invocation. */
-export function createTaskTool(ctx: TaskToolContext): AnyTool {
-	return buildTool({
+/**
+ * How many finished subagents a session keeps addressable.
+ *
+ * A finished handle holds a whole nested conversation in memory — that is the
+ * point, since continuing it is what SendMessage is for — so the registry is
+ * capped. The number is memory first and aging second: a run that finished
+ * eight subagents ago is history in every sense.
+ */
+const MAX_RETAINED_SUBAGENTS = 8;
+
+/** Where a subagent is in its life: running, ready to continue, or cancelled. */
+type SubagentState = "live" | "finished" | "stopped";
+
+interface SubagentHandle {
+	sidechainId: string;
+	agentType: string;
+	/**
+	 * The nested session, kept alive after its first run so that a continuation
+	 * continues the same conversation. That is the whole difference between
+	 * SendMessage and a second Task call, so the session must outlive the call
+	 * that spawned it.
+	 */
+	session: AgentSession;
+	/** What its own context management did, accumulated across runs. */
+	notes: string[];
+	state: SubagentState;
+	/** Finish order, for eviction; larger ended later. 0 while live. */
+	endedAt: number;
+}
+
+/**
+ * The subagent tools, sharing one registry, in a fixed order: Task, then
+ * SendMessage, then TaskStop.
+ *
+ * They are created together because the id a Task call returns is the only way
+ * back to the session behind it: an id nobody holds a map for is an id that
+ * means nothing, so the three tools must see the same map.
+ */
+export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
+	/** Finished handles, addressable until evicted. */
+	const handles = new Map<string, SubagentHandle>();
+	let endSeq = 0;
+
+	/** Drop the oldest non-live handles down to the cap; never a live one. */
+	const evictOldest = (): void => {
+		const ended = [...handles.values()].filter((handle) => handle.state !== "live");
+		if (ended.length <= MAX_RETAINED_SUBAGENTS) return;
+		ended.sort((a, b) => a.endedAt - b.endedAt);
+		for (const handle of ended.slice(0, ended.length - MAX_RETAINED_SUBAGENTS)) {
+			handles.delete(handle.sidechainId);
+		}
+	};
+
+	/**
+	 * Run one prompt on a handle, and mark where the run left it.
+	 *
+	 * Shared by Task and SendMessage so the mechanics cannot drift: in both
+	 * cases the caller's cancel has to stop the nested session, or of the two
+	 * things Esc means only the outer one happens — the reported bug was a
+	 * subagent that kept streaming after the user cancelled, holding the
+	 * parent's tool batch open.
+	 */
+	const runPrompt = async (
+		handle: SubagentHandle,
+		text: string,
+		signal: AbortSignal,
+	): Promise<{ reason: AgentEndReason; events: string[] }> => {
+		const events: string[] = [];
+		const unsubscribe = handle.session.on((event) => {
+			if (event.type === "tool_execution_end") {
+				events.push(`${event.toolName}: ${event.result.isError ? "error" : "ok"}`);
+			}
+		});
+		const onAbort = () => handle.session.abort();
+		handle.state = "live";
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			const promptPromise = handle.session.prompt(text);
+			// The cancel can land before prompt() created its controller, where
+			// abort() is a no-op on a null controller; re-check now that one exists.
+			if (signal.aborted) handle.session.abort();
+			return { reason: await promptPromise, events };
+		} finally {
+			signal.removeEventListener("abort", onAbort);
+			unsubscribe();
+			// A TaskStop during the run has already moved the state, and its
+			// verdict — never resumed — outranks the run simply ending.
+			if (handle.state === "live") {
+				handle.state = "finished";
+				handle.endedAt = ++endSeq;
+				evictOldest();
+			}
+		}
+	};
+
+	/** The subagent's last piece of prose: what the parent reads as the result. */
+	const finalReport = (session: AgentSession): string => {
+		const finalAssistant = [...session.messages].reverse().find((m) => m.role === "assistant");
+		return finalAssistant && finalAssistant.role === "assistant"
+			? finalAssistant.content
+					.filter((b) => b.type === "text")
+					.map((b) => b.text)
+					.join("\n")
+			: "(no response)";
+	};
+
+	/**
+	 * The line that makes a result addressable. A tool result is the only
+	 * channel the parent model reads — an id kept anywhere else would be an id
+	 * the model has never seen — so every result that ran or ended a subagent
+	 * carries it, and SendMessage and TaskStop take it as their argument.
+	 */
+	const idLine = (sidechainId: string): string => `[subagent id: ${sidechainId}]`;
+
+	const unknownHandle = (sidechainId: string): ToolResult => ({
+		content: [
+			textContent(
+				`Unknown or expired subagent: ${sidechainId}. Only the last ${MAX_RETAINED_SUBAGENTS} finished ` +
+					"subagents stay addressable, and their conversations are not written down — a subagent " +
+					"cannot be revived; start a new Task instead.",
+			),
+		],
+		isError: true,
+	});
+
+	/** Spawn: a nested AgentSession per invocation, addressable by its id line. */
+	const task = buildTool({
 		name: "Task",
 		description:
 			"Launch a subagent to handle a self-contained task. The subagent has its own context window " +
-			"and returns its final report as the tool result. Use for parallel research or isolating " +
-			"context-heavy work from the main conversation.\n\nAgent types (pass the name as subagent_type):\n" +
+			"and returns its final report as the tool result, ending with its id line — pass that id to " +
+			"SendMessage to continue the subagent, or to TaskStop to cancel it. Use for parallel research " +
+			"or isolating context-heavy work from the main conversation.\n\nAgent types (pass the name as subagent_type):\n" +
 			agentCatalogue(ctx.definitions()),
 		inputSchema: z.object({
 			description: z.string().describe("A short (3-5 word) description of the task"),
@@ -227,7 +356,8 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 		prompt:
 			"- Launch subagents for context-heavy, self-contained work (research, broad searches).\n" +
 			"- Always include a complete, self-contained prompt — subagents don't see this conversation.\n" +
-			"- Multiple Task calls run concurrently when safe.",
+			"- Multiple Task calls run concurrently when safe.\n" +
+			"- Every result ends with a [subagent id: …] line — the handle SendMessage and TaskStop take.",
 		isConcurrencySafe: () => true,
 		call: async (input, toolCtx) => {
 			const definitions = [GENERAL_PURPOSE, ...ctx.definitions()];
@@ -257,7 +387,8 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 			}
 			const model = resolved ?? ctx.model();
 
-			/** What the subagent did to its own context, to report with its end. */
+			/** What the subagent did to its own context; lives on its handle so
+			 *  continuations can record what each run added. */
 			const notes: string[] = [];
 			// A subagent has a context window of its own and can fill it: a research
 			// task that reads a repository is exactly the shape that does. It has no
@@ -316,64 +447,180 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 
 			// Sidechain persistence: record start + final transcript in the parent tree.
 			const sidechainId = `sidechain-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+			const handle: SubagentHandle = {
+				sidechainId,
+				agentType: definition.agentType,
+				session: subSession,
+				notes,
+				state: "live",
+				endedAt: 0,
+			};
+			handles.set(sidechainId, handle);
 			store?.appendCustom("subagent_start", { sidechainId, agentType: definition.agentType, prompt: input.prompt });
 
-			const events: string[] = [];
-			const unsubscribe = subSession.on((event) => {
-				if (event.type === "tool_execution_end") {
-					events.push(`${event.toolName}: ${event.result.isError ? "error" : "ok"}`);
-				}
+			const { reason, events } = await runPrompt(handle, input.prompt, toolCtx.signal);
+			const finalText = finalReport(subSession);
+			store?.appendCustom("subagent_end", {
+				sidechainId,
+				reason,
+				toolCalls: events,
+				messages: subSession.messages.length,
+				notes,
+				report: finalText,
 			});
 
-			// A parent interrupt (Esc) must stop the nested session too. Without this
-			// the subagent keeps streaming after the user cancels, and the parent's
-			// tool batch — plus its "Running tools…" spinner — stays blocked until the
-			// subagent finishes on its own, which reads as Esc doing nothing.
-			const onAbort = () => subSession.abort();
-			toolCtx.signal.addEventListener("abort", onAbort, { once: true });
-
-			try {
-				const promptPromise = subSession.prompt(input.prompt);
-				// The cancel can land before prompt() created its controller, where
-				// abort() is a no-op on a null controller; re-check now that one exists.
-				if (toolCtx.signal.aborted) subSession.abort();
-				const reason = await promptPromise;
-				const finalAssistant = [...subSession.messages].reverse().find((m) => m.role === "assistant");
-				const finalText =
-					finalAssistant && finalAssistant.role === "assistant"
-						? finalAssistant.content
-								.filter((b) => b.type === "text")
-								.map((b) => b.text)
-								.join("\n")
-						: "(no response)";
-
-				store?.appendCustom("subagent_end", {
-					sidechainId,
-					reason,
-					toolCalls: events,
-					messages: subSession.messages.length,
-					notes,
-				});
-
-				// Interrupted subagents report the interruption, not a summary that
-				// happens to trail off mid-thought.
-				if (toolCtx.signal.aborted) {
-					return {
-						content: [textContent("Tool execution aborted")],
-						isError: true,
-						details: { sidechainId, agentType: definition.agentType, reason },
-					};
-				}
-
-				const summary = reason === "completed" ? finalText : `${finalText}\n\n[subagent ended: ${reason}]`;
+			// Interrupted subagents report the interruption, not a summary that
+			// happens to trail off mid-thought. The id line rides along so the
+			// conversation can be picked back up: an interrupted run keeps its
+			// messages, and SendMessage continues from them.
+			if (toolCtx.signal.aborted) {
 				return {
-					content: [textContent(summary)],
+					content: [textContent(`Tool execution aborted\n\n${idLine(sidechainId)}`)],
+					isError: true,
 					details: { sidechainId, agentType: definition.agentType, reason },
 				};
-			} finally {
-				toolCtx.signal.removeEventListener("abort", onAbort);
-				unsubscribe();
 			}
+
+			const summary = reason === "completed" ? finalText : `${finalText}\n\n[subagent ended: ${reason}]`;
+			return {
+				content: [textContent(`${summary}\n\n${idLine(sidechainId)}`)],
+				details: { sidechainId, agentType: definition.agentType, reason },
+			};
 		},
 	});
+
+	/**
+	 * Continue or nudge: the same conversation, addressed by its id line.
+	 *
+	 * A finished handle runs the message as a new prompt on its retained
+	 * session, so the subagent still knows everything its first run learned; a
+	 * live one has the message steered into its running loop, delivered at its
+	 * next turn, because a second prompt() cannot start while one is running.
+	 */
+	const sendMessage = buildTool({
+		name: "SendMessage",
+		description:
+			"Continue a subagent that a Task call started, or leave a note for one still running. The " +
+			"subagent keeps its whole conversation, so a follow-up continues where its report left off " +
+			"instead of starting over, and the new report returns as this call's result. Address the " +
+			"subagent by the id line at the end of its Task result. A subagent stopped with TaskStop is " +
+			"not resumed — that stop cancels its work — and an evicted or unknown id is an error.",
+		inputSchema: z.object({
+			sidechain_id: z.string().describe("The subagent id from the [subagent id: …] line of a Task result"),
+			message: z
+				.string()
+				.describe("The follow-up: the next step, a question about the report, or a note for a running subagent"),
+		}),
+		prompt:
+			"- Continue a subagent when its work needs a follow-up; it already has the whole task in context.\n" +
+			"- A running subagent gets the message at its next turn; a finished one runs it as a new prompt.",
+		call: async (input, toolCtx) => {
+			const handle = handles.get(input.sidechain_id);
+			if (!handle) return unknownHandle(input.sidechain_id);
+			if (handle.state === "stopped") {
+				return {
+					content: [
+						textContent(
+							`Subagent ${input.sidechain_id} was stopped and is not resumed — treat its work as ` +
+								"cancelled. Start a new Task instead.",
+						),
+					],
+					isError: true,
+				};
+			}
+			if (handle.state === "live") {
+				handle.session.steer(input.message);
+				return {
+					content: [
+						textContent(
+							`Subagent ${input.sidechain_id} is still running; the message is queued for its next ` +
+								"turn, and the report of the run it is in comes back with the call waiting on it.",
+						),
+					],
+					details: { sidechainId: input.sidechain_id, queued: true },
+				};
+			}
+
+			// The axes are read again, not remembered: a mode or a plan entered
+			// since the spawn applies to this continuation exactly as it would to
+			// a fresh Task call, and a continued subagent that kept writing after
+			// its parent was confined would be one place the user's choice did
+			// not reach.
+			const mode = ctx.permissionMode?.();
+			const sandbox = ctx.sandbox?.();
+			if (mode !== undefined || sandbox !== undefined) {
+				handle.session.setMode(mode ?? handle.session.permissionMode, sandbox);
+			}
+			const network = ctx.network?.();
+			if (network !== undefined) handle.session.setNetwork(network);
+
+			const store = ctx.store?.();
+			const notesBefore = handle.notes.length;
+			const { reason, events } = await runPrompt(handle, input.message, toolCtx.signal);
+			const finalText = finalReport(handle.session);
+			store?.appendCustom("subagent_end", {
+				sidechainId: handle.sidechainId,
+				reason,
+				toolCalls: events,
+				messages: handle.session.messages.length,
+				notes: handle.notes.slice(notesBefore),
+				report: finalText,
+			});
+
+			if (toolCtx.signal.aborted) {
+				return {
+					content: [textContent(`Tool execution aborted\n\n${idLine(handle.sidechainId)}`)],
+					isError: true,
+					details: { sidechainId: handle.sidechainId, agentType: handle.agentType, reason },
+				};
+			}
+			const summary = reason === "completed" ? finalText : `${finalText}\n\n[subagent ended: ${reason}]`;
+			return {
+				content: [textContent(`${summary}\n\n${idLine(handle.sidechainId)}`)],
+				details: { sidechainId: handle.sidechainId, agentType: handle.agentType, reason },
+			};
+		},
+	});
+
+	/**
+	 * Cancel: abort a running subagent, or mark a finished one so it is never
+	 * continued. Stopping does not undo anything the subagent already did —
+	 * its side effects stand, and its partial report stays where it was
+	 * returned — so the tool exists to end the work, not to erase it.
+	 */
+	const taskStop = buildTool({
+		name: "TaskStop",
+		description:
+			"Stop a subagent started with Task and cancel its work. A running subagent is interrupted; " +
+			"a finished one is marked stopped, so SendMessage will refuse it. What the subagent already " +
+			"did is not undone — stop it when its work is no longer needed.",
+		inputSchema: z.object({
+			sidechain_id: z.string().describe("The subagent id from the [subagent id: …] line of a Task result"),
+		}),
+		prompt: "- Only for cancelling a subagent; stopping one that finished keeps its report where it was returned.",
+		call: async (input) => {
+			const handle = handles.get(input.sidechain_id);
+			if (!handle) return unknownHandle(input.sidechain_id);
+			if (handle.state === "stopped") {
+				return { content: [textContent(`Subagent ${input.sidechain_id} was already stopped.`)] };
+			}
+			const wasLive = handle.state === "live";
+			handle.state = "stopped";
+			handle.endedAt = ++endSeq;
+			evictOldest();
+			if (wasLive) handle.session.abort();
+			return {
+				content: [
+					textContent(
+						wasLive
+							? `Subagent ${input.sidechain_id} was stopped; it will not be resumed.`
+							: `Subagent ${input.sidechain_id} had already finished; it is now marked stopped and will not be continued.`,
+					),
+				],
+				details: { sidechainId: input.sidechain_id, stopped: true },
+			};
+		},
+	});
+
+	return [task, sendMessage, taskStop];
 }

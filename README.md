@@ -86,8 +86,9 @@ labunbun                                # interactive REPL
   `SessionStart` … command hooks with a JSON stdin/stdout contract.
 - **MCP client** — stdio + StreamableHTTP servers from `.mcp.json`; tools merge
   into the registry as `mcp__server__tool`.
-- **Subagents** — the Task tool runs nested agent sessions (sidechain
-  transcripts persisted); custom agents via frontmatter `.md` files.
+- **Subagents** — the Task tool runs nested agent sessions; a finished subagent
+  keeps its conversation in memory and can be continued with SendMessage or
+  cancelled with TaskStop. Custom agents via frontmatter `.md` files.
 - **Skills** — `SKILL.md` folders become prompt-expanding slash commands.
 - **Plan mode** — read-only research then plan approval before mutations. The
   pair that was in force before you entered is the pair that comes back, so

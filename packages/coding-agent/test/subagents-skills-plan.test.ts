@@ -16,7 +16,7 @@ import { z } from "zod";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanApprovalUi } from "../src/plan-mode.ts";
 import { approveProjectDefinitions } from "../src/project-trust.ts";
 import { loadSkills, skillsAsCommands } from "../src/skills.ts";
-import { agentSystemPrompt, createTaskTool, loadAgentDefinitions } from "../src/subagents.ts";
+import { agentSystemPrompt, createSubagentTools, loadAgentDefinitions } from "../src/subagents.ts";
 
 function echoTool(): AnyTool {
 	return buildTool({
@@ -93,7 +93,7 @@ describe("Task tool (subagents)", () => {
 			definitions: () => [],
 			store: () => store,
 		};
-		return { taskTool: createTaskTool(ctx), ctx };
+		return { taskTool: createSubagentTools(ctx)[0], ctx };
 	}
 
 	test("runs a nested session and returns its final report", async () => {
@@ -124,7 +124,7 @@ describe("Task tool (subagents)", () => {
 			{ text: "<summary>1. Primary Request: do the thing</summary>" },
 			{ text: "SUBAGENT FINAL REPORT" },
 		]);
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
@@ -164,7 +164,7 @@ describe("Task tool (subagents)", () => {
 			"---\nname: researcher\ndescription: Deep research agent\n---\nYou dig.\n",
 		);
 		const definitions = loadAgentDefinitions(process.cwd(), home);
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: fauxProvider([]).streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [],
@@ -178,7 +178,7 @@ describe("Task tool (subagents)", () => {
 	});
 
 	test("a definition with no description is still listed by name", () => {
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: fauxProvider([]).streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [],
@@ -243,7 +243,7 @@ describe("Task tool (subagents)", () => {
 			sandbox: () => "workspace-write" as const,
 			getPermissionRules: () => [],
 		};
-		const taskTool = createTaskTool(ctx);
+		const [taskTool] = createSubagentTools(ctx);
 		const result = await taskTool.call(
 			{ description: "run sub", prompt: "do the thing" },
 			{
@@ -275,7 +275,7 @@ describe("Task tool (subagents)", () => {
 			sandbox: () => "workspace-write" as const,
 			getPermissionRules: () => [{ toolName: "echo", behavior: "allow" as const, source: "session" as const }],
 		};
-		const taskTool = createTaskTool(ctx);
+		const [taskTool] = createSubagentTools(ctx);
 		const result = await taskTool.call(
 			{ description: "run sub", prompt: "do the thing" },
 			{
@@ -310,7 +310,7 @@ describe("Task tool (subagents)", () => {
 
 	test("a definition's body reaches the subagent system prompt", async () => {
 		const subFaux = fauxProvider([{ text: "done" }]);
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
@@ -334,7 +334,7 @@ describe("Task tool (subagents)", () => {
 
 	test("systemPromptFor still overrides the definition body", async () => {
 		const subFaux = fauxProvider([{ text: "done" }]);
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
@@ -393,7 +393,7 @@ describe("Task tool (subagents)", () => {
 				{ toolCalls: [{ id: "s1", name: "stall", arguments: {} }] },
 				{ text: "subagent continued anyway" },
 			]);
-			const taskTool = createTaskTool({
+			const [taskTool] = createSubagentTools({
 				streamFn: subFaux.streamFn,
 				model: () => FAUX_MODEL,
 				allTools: [stallingTool(() => entered.resolve())],
@@ -418,7 +418,11 @@ describe("Task tool (subagents)", () => {
 			expect(result).not.toBe("timeout");
 			if (result === "timeout") return;
 			expect(result.isError).toBe(true);
-			expect((result.content[0] as any).text).toBe("Tool execution aborted");
+			const text = (result.content[0] as any).text as string;
+			expect(text.startsWith("Tool execution aborted")).toBe(true);
+			// The id line rides along on an interrupted run too: the conversation
+			// keeps its messages, so a SendMessage can pick the work back up.
+			expect(text).toContain("[subagent id: sidechain-");
 			expect(result.details).toMatchObject({ reason: "aborted" });
 			// The subagent must not have been handed another turn after the cancel.
 			expect(subFaux.receivedContexts).toHaveLength(1);
@@ -429,7 +433,7 @@ describe("Task tool (subagents)", () => {
 			// spinner on "Running tools…" until the subagent finished on its own.
 			const entered = Promise.withResolvers<void>();
 			const subFaux = fauxProvider([{ toolCalls: [{ id: "s1", name: "stall", arguments: {} }] }, { text: "sub done" }]);
-			const taskTool = createTaskTool({
+			const [taskTool] = createSubagentTools({
 				streamFn: subFaux.streamFn,
 				model: () => FAUX_MODEL,
 				allTools: [stallingTool(() => entered.resolve())],
@@ -458,7 +462,7 @@ describe("Task tool (subagents)", () => {
 			const results = session.messages.filter((m) => m.role === "toolResult");
 			expect(results).toHaveLength(1);
 			expect(results[0].isError).toBe(true);
-			expect((results[0].content[0] as { text: string }).text).toBe("Tool execution aborted");
+			expect((results[0].content[0] as { text: string }).text.startsWith("Tool execution aborted")).toBe(true);
 			expect(parentFaux.receivedContexts).toHaveLength(1);
 			expect(session.isRunning).toBe(false);
 		});
@@ -506,7 +510,7 @@ describe("what the Task tool reads at the call", () => {
 		const subFaux = fauxProvider([{ text: "sub done" }]);
 		let current: Model = FAUX_MODEL;
 		const { models, streamFn } = recordedModels(subFaux);
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn,
 			model: () => current,
 			allTools: [echoTool()],
@@ -532,7 +536,7 @@ describe("what the Task tool reads at the call", () => {
 			mkdtempSync(join(tmpdir(), "lbb-side-h-")),
 		);
 		let store: SessionStore | undefined = before;
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
@@ -569,7 +573,7 @@ describe("what the Task tool reads at the call", () => {
 			mkdtempSync(join(tmpdir(), "lbb-mode-home-")),
 		);
 		let mode: PermissionMode = "ask";
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
 			allTools: [echoTool()],
@@ -599,7 +603,7 @@ describe("what the Task tool reads at the call", () => {
 		const subFaux = fauxProvider([{ text: "sub done" }]);
 		const { models, streamFn } = recordedModels(subFaux);
 		const reported: string[] = [];
-		const taskTool = createTaskTool({
+		const [taskTool] = createSubagentTools({
 			streamFn,
 			model: () => FAUX_MODEL,
 			resolveModel: (ref) => (ref === "other-model" ? OTHER : undefined),
