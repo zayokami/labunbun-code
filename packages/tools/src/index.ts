@@ -96,9 +96,12 @@ export interface CreateAllToolsOptions {
 	/**
 	 * Where Read records what it showed, for the edit gate to read back.
 	 *
-	 * Left out, one is made here and used for nothing else, so a caller who
-	 * forgets to pass the same instance to the Edit tool gets a gate that always
-	 * refuses — the safe direction to fail in, and one a test finds.
+	 * A caller passes its own when something outside the tool set has to act on
+	 * it: the app clears it with the session swap, because the tool array crosses
+	 * a `/resume` unchanged (`interactive.ts:875`). Left out, one is made here —
+	 * fine for a caller with a single session, and the only way the pair can ever
+	 * split is a caller who hand-builds the tools and hands Read and Edit
+	 * different stores, which the gate answers by refusing.
 	 */
 	readState?: ReadFileState;
 	/**
@@ -125,11 +128,13 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 	// The same executor, so a backgrounded command joins the proxy the foreground
 	// one uses instead of opening a second listener that nothing would close.
 	const background = options.backgroundShells ?? new BackgroundShellManager(detectRuntime(), ops);
-	// One per tool set, which is one per session: `createAllTools` runs once at
-	// startup in both entry points (`interactive.ts:315`, `headless.ts:147`), so a
-	// second conversation in the same process is a second call and a second store.
-	// A module-level singleton would be readable from any conversation, which is
-	// the leak this constructor exists to prevent.
+	// One per tool set: `createAllTools` runs once at startup in both entry
+	// points (`interactive.ts:325`, `headless.ts:147`), so a second tool set in
+	// the same process is a second call and a second store. A module-level
+	// singleton would be readable from any conversation — and a tool set that
+	// outlives its conversation (`/resume` inherits the array) is why the app
+	// passes its own and clears it (`interactive.ts:875`) rather than leaning on
+	// a per-call store to stay correct.
 	const readState = options.readState ?? new ReadFileState();
 	const coreTools: AnyTool[] = [
 		createBashTool(cwd, ops, background, {

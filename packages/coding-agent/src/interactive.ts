@@ -72,6 +72,7 @@ import {
 	detectRuntime,
 	networkConfinement,
 	type Operations,
+	ReadFileState,
 	type SandboxBackend,
 	TaskStore,
 } from "@labunbun/tools";
@@ -307,6 +308,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// from the plan the last one left, and every change after that is recorded.
 	// Read through `store` (not the value it holds now) so `/resume` takes effect.
 	bindTaskStore(taskStore, () => store);
+	// Read's record of what it has shown, held here for the same reason as the
+	// task store above: `hotSwapSession` has to be able to forget it, and the
+	// tools it forgets on are the ones `createAllTools` builds from this instance.
+	const readState = new ReadFileState();
 	// One shared Operations instance: the "!" shell passthrough and the Bash
 	// tool must resolve shells and kill process trees identically.
 	const ops: Operations = defaultOperations();
@@ -319,6 +324,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Read is allowed back into this directory to fetch them.
 	const tools = createAllTools(cwd, {
 		taskStore,
+		readState,
 		operations: ops,
 		backgroundShells,
 		readOnlyRoots: [toolOutputRoot(cwd, home)],
@@ -860,6 +866,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// brings its own list, and the store stopped being bound to the one being
 		// left when `store` was reassigned above.
 		restoreTasks(taskStore, loaded.store);
+		// The tool array crosses the swap unchanged (`tools: [...current.tools]`
+		// above), so without this the incoming conversation would inherit the
+		// outgoing one's Read records and its Edit gate would accept a file *this*
+		// conversation was never shown. Cleared with the task list, for the same
+		// reason: the new conversation starts from what it itself knows, and the
+		// safe direction is a re-read.
+		readState.clear();
 		handle.setTasks(taskStore.summary());
 		handle.setSession(next);
 		attachSessionListeners(next);

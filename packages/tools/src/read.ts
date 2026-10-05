@@ -83,10 +83,17 @@ export function createReadTool(
 					isError: true,
 				};
 			}
-			const text = await ops.readTextFile(path).catch(() => null);
-			if (text === null) {
+			// The rejection is the failure, and it is kept rather than folded into a
+			// boolean: the errno on it is the difference between a wrong path, a
+			// directory, and a permission problem — three different next moves the
+			// old single message ("does not exist or cannot be read") named as one.
+			// `typeof` rather than `instanceof Error` because a rejection value is
+			// whatever the executor treats as one, and this branch has to hold for a
+			// string rejection too.
+			const text = await ops.readTextFile(path).catch((error: unknown) => error);
+			if (typeof text !== "string") {
 				return {
-					content: [{ type: "text", text: `File does not exist or cannot be read: ${path}` }],
+					content: [{ type: "text", text: describeReadFailure(path, text) }],
 					isError: true,
 				};
 			}
@@ -153,4 +160,33 @@ export function createReadTool(
 			return { content: [{ type: "text", text: rendered }] };
 		},
 	});
+}
+
+/**
+ * Which failure a Read hit, said in the terms the model can act on.
+ *
+ * The message this replaced — "File does not exist or cannot be read" — was
+ * three answers under one name: a typo'd path, a directory, and a permission
+ * problem all read identically, so the model's next move (fix the path? use LS?
+ * give up?) was a guess. The codes below are Node's, carried through both
+ * `Operations` implementations untouched, and `EISDIR` is measured on Windows
+ * as well as POSIX — a directory read is not a POSIX-only nicety.
+ */
+function describeReadFailure(path: string, error: unknown): string {
+	const raw = (error as { code?: unknown } | null | undefined)?.code;
+	const code = typeof raw === "string" ? raw : undefined;
+	switch (code) {
+		case "ENOENT":
+		case "ENOTDIR":
+			return `File does not exist: ${path}`;
+		case "EISDIR":
+			return `Path is a directory, not a file: ${path}. Use LS to list its contents.`;
+		case "EACCES":
+		case "EPERM":
+			return `File exists but cannot be read (permission denied): ${path}`;
+		default:
+			// EMFILE, EBUSY and the like say nothing about whether the file exists
+			// — so this branch claims nothing beyond not being readable right now.
+			return `Could not read ${path}${code ? ` (${code})` : ""}`;
+	}
 }

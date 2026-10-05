@@ -597,6 +597,104 @@ describe("explainMiss", () => {
 		expect(readFileSync(file, "utf8")).toBe("function f() {\n  const a = 2;\n}\n");
 	});
 
+	test("an old_string that spells out its escapes is respelled from the file", () => {
+		// Direction one: the model double-escaped — `\n` as the two characters
+		// backslash and `n` — where the file has a real line break. The miss is a
+		// spelling, not a content difference, and the suggestion is the file's own
+		// text, which the detector had to find exactly once before firing.
+		const content = "const a = 1;\nconst b = 2;\n";
+		const diagnostic = explainMiss(content, "const a = 1;\\nconst b = 2;");
+
+		expect(diagnostic.suggestion).toBe("const a = 1;\nconst b = 2;");
+		expect(diagnostic.declined).toBeNull();
+		expect(diagnostic.notes.join("\n")).toContain("spells line breaks or tabs as the two-character escape sequences");
+	});
+
+	test("an escaped old_string, once respelled by the diagnostic, edits the file", async () => {
+		const body = "const a = 1;\nconst b = 2;\n";
+		const dir = tempDir();
+		const file = write(dir, "escaped.ts", body);
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const miss = await call(edit, {
+			file_path: file,
+			old_string: "const a = 1;\\nconst b = 2;",
+			new_string: "const a = 3;\nconst b = 4;",
+		});
+		expect(miss.isError).toBe(true);
+		expect(textOf(miss)).toContain("Send this old_string back unchanged");
+		const suggestion = explainMiss(readFileSync(file, "utf8"), "const a = 1;\\nconst b = 2;").suggestion;
+		expect(suggestion).not.toBeNull();
+
+		const retried = await call(edit, {
+			file_path: file,
+			old_string: suggestion as string,
+			new_string: "const a = 3;\nconst b = 4;",
+		});
+		expect(retried.isError).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toBe("const a = 3;\nconst b = 4;\n");
+	});
+
+	test("a file that spells out its escapes is matched from the real characters", () => {
+		// Direction two: the file itself contains the two characters — a source
+		// literal *about* escapes — and the model unescaped when it copied. The
+		// suggestion is again the file's text, this time with the escapes intact.
+		const content = 'const msg = "line1\\nline2";\n';
+		const diagnostic = explainMiss(content, 'const msg = "line1\nline2";');
+
+		expect(diagnostic.suggestion).toBe('const msg = "line1\\nline2";');
+		expect(diagnostic.notes.join("\n")).toContain(
+			"the file spells line breaks or tabs as the two-character escape sequences",
+		);
+	});
+
+	test("a tab spelled as an escape is respelled too", () => {
+		const content = "first\tsecond\n";
+		const diagnostic = explainMiss(content, "first\\tsecond");
+		expect(diagnostic.suggestion).toBe("first\tsecond");
+	});
+
+	test("an escape with no unique match is reported as an ordinary miss", () => {
+		// The bar the detector does not lower: a `\n` written as two characters is
+		// not evidence on its own. Here the respelled block occurs nowhere, so
+		// nothing is offered and nothing claims an escape caused the miss.
+		const content = "const a = 1;\n";
+		const diagnostic = explainMiss(content, "nothing\\nlike\\nthis");
+		expect(diagnostic.suggestion).toBeNull();
+		expect(diagnostic.notes.join("\n")).not.toContain("escape");
+	});
+
+	test("an escape that would land in two places is declined like any other ambiguity", () => {
+		// Uniqueness is the bar for the respelled text exactly as it is for an
+		// indentation rescue: a correction the real matcher finds twice would be
+		// refused by Edit's own uniqueness rule, so it is not offered at all. The
+		// two copies are separated by an island line — three identical lines in a
+		// row would overlap, and the matcher counts non-overlapping matches only.
+		const content = "const a = 1;\nconst a = 1;\n--\nconst a = 1;\nconst a = 1;\n";
+		const diagnostic = explainMiss(content, "const a = 1;\\nconst a = 1;");
+		expect(diagnostic.suggestion).toBeNull();
+		expect(diagnostic.notes.join("\n")).not.toContain("escape");
+	});
+
+	test("and the suggestion is rendered even when no anchor was found", async () => {
+		// The render path without a region line: the escaped spelling is too short
+		// to anchor anywhere, yet the respelled block matches the file uniquely —
+		// so the corrected text, not the generic "read it again" advice, is what
+		// the model gets.
+		const dir = tempDir();
+		const file = write(dir, "short.ts", 'x = "a\\nb"\n');
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const result = await call(edit, { file_path: file, old_string: 'x = "a\nb"', new_string: 'x = "c"' });
+		expect(result.isError).toBe(true);
+		const text = textOf(result);
+		expect(text).toContain("Send this old_string back unchanged");
+		expect(text).toContain("the file spells line breaks or tabs");
+		expect(text).not.toContain("No line of old_string resembles anything");
+	});
+
 	test("a CRLF-only drift is offered the file's own CRLF text back", () => {
 		// Same class as the row above, one platform over: the file uses CRLF and
 		// the model's `old_string` was typed with `\n`. `edit.ts` documents this

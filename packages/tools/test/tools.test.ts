@@ -126,6 +126,82 @@ describe("Read tool", () => {
 	});
 });
 
+describe("a Read failure says which failure it was", () => {
+	// The three causes the old single message — "File does not exist or cannot be
+	// read" — folded together, plus the fallback for anything else. A model's
+	// next move differs per cause (fix the path; use LS; stop retrying the same
+	// string), so each wording is pinned on its own, and each pins that it does
+	// NOT carry the other causes' claims.
+
+	test("a path that is not there is named as missing, and as nothing else", async () => {
+		const dir = tempDir();
+		const tool = createReadTool(dir, defaultOperations());
+		const result = await call(tool, { file_path: join(dir, "never-created.txt") });
+		expect(result.isError).toBe(true);
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain("File does not exist: ");
+		expect(text).not.toContain("cannot be read");
+		expect(text).not.toContain("directory");
+	});
+
+	test("a directory is named as one, with the tool that lists it", async () => {
+		const dir = tempDir();
+		const sub = join(dir, "folder");
+		mkdirSync(sub);
+		const tool = createReadTool(dir, defaultOperations());
+		const result = await call(tool, { file_path: sub });
+		expect(result.isError).toBe(true);
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain("Path is a directory, not a file");
+		expect(text).toContain("LS");
+		expect(text).not.toContain("does not exist");
+	});
+
+	test("a permission refusal is named as one", async () => {
+		// The refusal is faked at the operations boundary rather than with a
+		// chmod fixture: a read-only bit does not deny reading on Windows, so a
+		// real unreadable file is not constructible on every platform this suite
+		// runs on. The branch reads the code, so the code is what the fixture
+		// supplies — through the same `Operations` seam the app uses.
+		const dir = tempDir();
+		const file = join(dir, "denied.txt");
+		writeFileSync(file, "secret");
+		const ops: Operations = {
+			...defaultOperations(),
+			readTextFile: async () => {
+				throw Object.assign(new Error("EACCES: permission denied, open"), { code: "EACCES" });
+			},
+		};
+		const result = await call(createReadTool(dir, ops), { file_path: file });
+		expect(result.isError).toBe(true);
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain("File exists but cannot be read");
+		expect(text).toContain("permission denied");
+		expect(text).not.toContain("does not exist");
+	});
+
+	test("a failure code the tool does not know claims only what it can see", async () => {
+		const dir = tempDir();
+		const file = join(dir, "busy.txt");
+		writeFileSync(file, "held");
+		const ops: Operations = {
+			...defaultOperations(),
+			readTextFile: async () => {
+				throw Object.assign(new Error("EBUSY: resource busy or locked, open"), { code: "EBUSY" });
+			},
+		};
+		const result = await call(createReadTool(dir, ops), { file_path: file });
+		expect(result.isError).toBe(true);
+		const text = (result.content[0] as any).text as string;
+		// The code rides along so the cause survives to the model; existence is
+		// not claimed either way, because EBUSY says nothing about it.
+		expect(text).toContain("Could not read");
+		expect(text).toContain("(EBUSY)");
+		expect(text).not.toContain("does not exist");
+		expect(text).not.toContain("cannot be read");
+	});
+});
+
 describe("Read and the spill directory", () => {
 	/**
 	 * A spilled Bash result lives outside the workspace, and the path in it is a

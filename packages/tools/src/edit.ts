@@ -124,7 +124,7 @@ export function createEditTool(cwd: string, ops: Operations, readState: ReadFile
 			"- Read the file with Read first — Edit refuses a file this session has not read, and a ranged read is not enough.\n" +
 			"- `old_string` must be unique in the file — include enough surrounding context, or set replace_all.\n" +
 			"- Copy `old_string` out of the file verbatim: its indentation, spacing and line endings are the match.\n" +
-			"- On failure the result names the lines that differ and, when the only difference is indentation or line endings, an `old_string` you can send back unchanged. Send that one back; if it says the file changed, Read it again first.",
+			"- On failure the result names the lines that differ and, when the mismatch is only indentation, line endings, or escape sequences spelled out as two characters (`\\n`), an `old_string` you can send back unchanged. Send that one back; if it says the file changed, Read it again first.",
 		isConcurrencySafe: () => false,
 		validateInput: async (input) => {
 			if (input.old_string === input.new_string) {
@@ -654,11 +654,35 @@ export interface MissDiagnostic {
  * literally a slice of the file, so it is correct by construction. Every other
  * cause of a miss — a wrong line, a renamed symbol, a stale read — is declined
  * and reported as line numbers instead.
+ *
+ * One cause is answered by a **second route** rather than by these four
+ * conditions: a block that is the file's text modulo written-out escape
+ * sequences — a literal `\n` (backslash and letter) where the file has a real
+ * line break, or the reverse. There the anchors cannot line up (the block has
+ * the wrong number of lines, or one line where the file has two, before
+ * anything is compared), so {@link detectEscapedMiss} respells the block first,
+ * and the suggestion is that respelled text — which still has to pass the
+ * uniqueness check the four conditions end with. Escapes are **reported, never
+ * silently unescaped**: a matcher that guessed which backslashes the model
+ * meant would land plausible-but-wrong edits, the same footing this file
+ * refuses whitespace normalisation for.
  */
 export function explainMiss(content: string, oldString: string): MissDiagnostic {
 	const oldLines = oldString.split("\n");
+	// The second route is computed up front because it decides the outcome on
+	// its own: when it fires, the anchor-and-compare machinery below describes
+	// the *escaping*, not the file, and its verdicts are neither use nor truth.
+	const escaped = detectEscapedMiss(content, oldString);
 	const anchor = locateAnchor(content, oldLines);
-	if (!anchor) return { anchor: null, differences: [], suggestion: null, declined: "no-anchor", notes: [] };
+	if (!anchor) {
+		return {
+			anchor: null,
+			differences: [],
+			suggestion: escaped?.corrected ?? null,
+			declined: escaped ? null : "no-anchor",
+			notes: escaped ? [escaped.note] : [],
+		};
+	}
 
 	const eol = detectLineEnding(content);
 	const crlf = eol === "crlf";
@@ -728,7 +752,13 @@ export function explainMiss(content: string, oldString: string): MissDiagnostic 
 	// old_string is offered (the lines differ by more than indentation and line
 	// endings)" — telling the model both, and sending it down the wrong path. A note
 	// that contradicts the sentence under it is worse than no note.
-	if (recoverable && complete) {
+	//
+	// The escape note takes precedence over both: the comparisons above were made
+	// against the escaped spelling, so "whitespace only" or "CRLF" would be
+	// verdicts about a string the model did not mean to send.
+	if (escaped) {
+		notes.push(escaped.note);
+	} else if (recoverable && complete) {
 		if (crOnly && !indentOnly) {
 			notes.push(`the file uses ${eol.toUpperCase()} line endings and your old_string did not`);
 		} else if (indentOnly) {
@@ -738,7 +768,14 @@ export function explainMiss(content: string, oldString: string): MissDiagnostic 
 
 	let suggestion: string | null = null;
 	let declined: MissDiagnostic["declined"] = null;
-	if (!complete) {
+	if (escaped) {
+		// Correct by construction and by check: `detectEscapedMiss` only fires
+		// when the respelled block occurs exactly once, verified with the real
+		// matcher — the same condition the indentation route below ends with. The
+		// anchor window's `complete`/`recoverable` verdicts do not apply, because
+		// they were computed against the escaped spelling.
+		suggestion = escaped.corrected;
+	} else if (!complete) {
 		declined = "line-count-differs";
 	} else if (!anyDiffers || !recoverable) {
 		declined = "not-indentation-only";
@@ -757,6 +794,67 @@ export function explainMiss(content: string, oldString: string): MissDiagnostic 
 
 function stripIndent(line: string): string {
 	return line.replace(/^[ \t]*/, "");
+}
+
+interface EscapedMiss {
+	/** The block respelled as the file spells it — a slice of the file, unique in it. */
+	corrected: string;
+	/** Which way the spelling went, phrased for the model. */
+	note: string;
+}
+
+/**
+ * The miss that is a spelling of line breaks and tabs.
+ *
+ * Both directions exist and both lose turns in a coding session:
+ *
+ * - the model wrote an escape **too literally** — `\n` as the two characters
+ *   backslash and `n` in a JSON string it double-escaped — where the file has a
+ *   real line break;
+ * - the model wrote one **too rarely** — a real newline where the file contains
+ *   the two characters, which is what happens when the text being matched is
+ *   *itself* about escapes (this repository's own test fixtures are full of
+ *   them), or when the model unescaped something it copied out of Read.
+ *
+ * Firing requires the respelled block to occur **exactly once** — checked with
+ * the real matcher, and then checked again on the slice itself, because under
+ * quote normalisation the matched text can be the file's spelling rather than
+ * the needle. That bar is what keeps this from guessing: a miss with one
+ * plausible respelling anywhere in the file is reported, and a miss with none
+ * falls through to the indentation machinery unchanged.
+ */
+function detectEscapedMiss(content: string, oldString: string): EscapedMiss | null {
+	if (/\\[nrt]/.test(oldString)) {
+		const real = oldString.replace(/\\r/g, "\r").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+		const corrected = uniqueSlice(content, real);
+		if (corrected !== null) {
+			return {
+				corrected,
+				note: "your old_string spells line breaks or tabs as the two-character escape sequences (`\\n`, `\\t`); the file has the real characters there",
+			};
+		}
+	}
+	if (/[\n\r\t]/.test(oldString)) {
+		const written = oldString.replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
+		const corrected = uniqueSlice(content, written);
+		if (corrected !== null) {
+			return {
+				corrected,
+				note: "the file spells line breaks or tabs as the two-character escape sequences (`\\n`, `\\t`); your old_string has the real characters there",
+			};
+		}
+	}
+	return null;
+}
+
+/** The file's own text for `needle` when it occurs exactly once, else `null`. */
+function uniqueSlice(content: string, needle: string): string | null {
+	const plan = findMatches(content, needle);
+	if (plan.indices.length !== 1) return null;
+	// The suggestion contract's last condition, on the slice itself: sending a
+	// string the matcher finds twice back would be refused by Edit's own
+	// uniqueness rule, so it is not offered here either.
+	return findMatches(content, plan.texts[0]).indices.length === 1 ? plan.texts[0] : null;
 }
 
 /**
@@ -839,7 +937,12 @@ function commonPrefixLength(a: string, b: string): number {
 function renderMiss(path: string, diagnostic: MissDiagnostic): string {
 	const lines: string[] = [`old_string not found in ${path}.`];
 
-	if (!diagnostic.anchor) {
+	// Without an anchor there is no region to point at and the generic advice is
+	// the whole message — unless the escape diagnostic respelled the block, in
+	// which case that corrected text is the useful part and the advice would be
+	// wrong about it ("no line resembles the file": one does, once the escapes
+	// are read as the file spells them).
+	if (!diagnostic.anchor && diagnostic.suggestion === null) {
 		lines.push(
 			"",
 			"No line of old_string resembles anything in the file. Either the code changed since you read it,",
@@ -849,21 +952,25 @@ function renderMiss(path: string, diagnostic: MissDiagnostic): string {
 	}
 
 	const { anchor } = diagnostic;
-	lines.push(
-		"",
-		`Closest region: ${path}:${anchor.line}, located by ${HOW[anchor.how]}: ${quoteForDisplay(anchor.text.trim())}`,
-	);
+	if (anchor) {
+		lines.push(
+			"",
+			`Closest region: ${path}:${anchor.line}, located by ${HOW[anchor.how]}: ${quoteForDisplay(anchor.text.trim())}`,
+		);
+	}
 	for (const note of diagnostic.notes) lines.push(`  ${note}`);
 
-	if (diagnostic.differences.length > 0) {
-		lines.push("", "These lines differ:");
-		for (const d of diagnostic.differences) {
-			lines.push(`  line ${d.line}`);
-			lines.push(`    expected: ${quoteForDisplay(d.expected)}`);
-			lines.push(`    actual:   ${quoteForDisplay(d.actual)}`);
+	if (anchor) {
+		if (diagnostic.differences.length > 0) {
+			lines.push("", "These lines differ:");
+			for (const d of diagnostic.differences) {
+				lines.push(`  line ${d.line}`);
+				lines.push(`    expected: ${quoteForDisplay(d.expected)}`);
+				lines.push(`    actual:   ${quoteForDisplay(d.actual)}`);
+			}
+		} else {
+			lines.push("", "The lines at that offset are byte-identical; the block around them is not contiguous.");
 		}
-	} else {
-		lines.push("", "The lines at that offset are byte-identical; the block around them is not contiguous.");
 	}
 
 	if (diagnostic.suggestion !== null) {

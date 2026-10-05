@@ -11,13 +11,15 @@
  * ## Why an instance rather than a module-level singleton
  *
  * More than one session is alive in a single process: `/resume` builds a second
- * `AgentSession` around the *same* tool array (`interactive.ts:805`), and every
+ * `AgentSession` around the *same* tool array (`interactive.ts:840`), and every
  * test case that wants a tool set builds its own. A module-level `let` would
  * hand the gate content that a *different* conversation was shown, which is
- * exactly the hole the gate is closing. So this is an ordinary object,
- * `createAllTools` constructs one per tool set, and `createReadTool` receives
- * the same instance the Edit tool is given. Nothing here is reachable without a
- * caller passing it in.
+ * exactly the hole the gate is closing. So this is an ordinary object:
+ * `createAllTools` makes one per tool set unless the caller passes its own —
+ * the app passes its own precisely so the `/resume` swap can call
+ * {@link ReadFileState.clear} (`interactive.ts:875`) — and `createReadTool`
+ * receives the same instance the Edit tool is given. Nothing here is reachable
+ * without a caller passing it in.
  *
  * ## The API an edit tool imports
  *
@@ -176,9 +178,11 @@ export class ReadFileState {
 	 * Forget everything.
 	 *
 	 * For a session swap: `/resume` reuses the tool array it already built
-	 * (`interactive.ts:805`), so the incoming conversation would otherwise start
-	 * able to "recall" reads from the one being left. Nothing calls this yet —
-	 * the resume path is `coding-agent`'s file, not this package's.
+	 * (`interactive.ts:840`), so the incoming conversation would otherwise start
+	 * able to "recall" reads from the one being left — and its Edit gate would
+	 * accept a file *that* conversation was never shown. `hotSwapSession` calls
+	 * this next to `restoreTasks` (`interactive.ts:875`), the other piece of
+	 * session state that must follow the conversation rather than the process.
 	 */
 	clear(): void {
 		this.#reads.clear();
