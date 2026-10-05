@@ -48,7 +48,7 @@ export {
 	type SandboxBackend,
 	sandboxBackendFor,
 } from "./sandbox/index.ts";
-export { type AgentTask, createTaskTools, type TaskStatus, TaskStore } from "./tasks.ts";
+export { type AgentTask, createTaskTools, TASK_BOARD_TOOL_NAMES, type TaskStatus, TaskStore } from "./tasks.ts";
 export {
 	createWebFetchTool,
 	createWebSearchTool,

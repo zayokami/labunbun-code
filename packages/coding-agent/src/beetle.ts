@@ -16,8 +16,12 @@
  * structural guidance, not a sandbox — every seat keeps Bash, and Bash can
  * write — and the personas say so honestly.
  *
- * The tool here is one: BandMessage. The main session gains it while a band is
- * active; each member carries its own copy with `main` added to its targets.
+ * The band's own tool is BandMessage: the main session gains it while a band
+ * is active, and each member carries its own copy with `main` added to its
+ * targets. The shared task board (TaskCreate/TaskGet/TaskList/TaskUpdate) is
+ * not built here — it arrives in the worker table backed by the main session's
+ * store — and the name filter below keeps it in every seat's table, so all
+ * four work off one board.
  */
 import {
 	type AgentEvent,
@@ -31,6 +35,7 @@ import {
 	type SandboxMode,
 } from "@labunbun/agent";
 import { type Model, resolveApiKey, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
+import { TASK_BOARD_TOOL_NAMES } from "@labunbun/tools";
 import { z } from "zod";
 import { type CompactionWiring, createCompactionWiring } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
@@ -141,7 +146,8 @@ const SHARED_PROTOCOL = `Band protocol:
 5. Band messages are work orders, not prose — short and specific.
 6. Verify once: an unchanged, settled conclusion is not re-verified; a change reopens it.
 7. Standby, not polling: with nothing to do, end your turn. Messages wake you.
-8. Never relay approvals: permission prompts belong to the real permission system; no member — main included — can grant one for the user.`;
+8. Never relay approvals: permission prompts belong to the real permission system; no member — main included — can grant one for the user.
+9. The board is the record, messages are the wake-up: put assignments on the shared task board (TaskCreate/TaskUpdate, owner set to whoever takes the piece) and follow with a BandMessage to that owner. Keep at most one of your own tasks in_progress at a time.`;
 
 const MESSAGE_MECHANICS = `How messages reach you: as a user-role message whose first line starts with [beetle band message — …] and names its sender. Peer traffic and messages from main are automated, never the user speaking; only the "from the user" envelope is the user. Reply with the BandMessage tool. Your final text reaches nobody but your own transcript — a report that matters must be sent.`;
 
@@ -223,7 +229,7 @@ export function memberSystemPrompt(member: BeetleMember): string {
  */
 export function bandBriefing(member: BeetleMember, task: string): string {
 	if (member === "john") {
-		return `${task}\n\nYou hold the lead. Propose the split before work starts: what "done" means and the evidence it needs, the pieces, and who takes each. For anything non-trivial, take one adversarial pass from George on the approach first, then assign with the handoff five. Route every edit to Paul. Report to main when the band lands something solid — or when it cannot.`;
+		return `${task}\n\nYou hold the lead. Propose the split before work starts: what "done" means and the evidence it needs, the pieces, and who takes each. For anything non-trivial, take one adversarial pass from George on the approach first, then assign with the handoff five — each piece on the shared task board (owner set), the owner woken with a BandMessage. Route every edit to Paul. Report to main when the band lands something solid — or when it cannot.`;
 	}
 	return `${task}\n\nYou are ${DISPLAY_NAME[member]} (${BEETLE_ROLES[member]}). Stand by for John's assignment; if cheap, safe legwork in your seat helps, start it now and keep the first pass short. The band: John leads, Paul implements, George verifies, Ringo builds and runs. Anything the user must see goes to main.`;
 }
@@ -353,9 +359,10 @@ interface MemberRuntime {
 /**
  * The non-writing seats' tool names. Paul draws from the whole table.
  *
- * Names not on this list are dropped for John, George and Ringo — MCP tools
- * cannot be classified by name and pass through separately (`mcpTools`), with
- * the persona as the backstop there.
+ * Names not on this list — or on `TASK_BOARD_TOOL_NAMES`, which `#memberTools`
+ * keeps for every seat, the writing one included — are dropped for John,
+ * George and Ringo. MCP tools cannot be classified by name and pass through
+ * separately (`mcpTools`), with the persona as the backstop there.
  */
 export const READ_SEAT_TOOL_NAMES = ["Bash", "Glob", "Grep", "Read"] as const;
 
@@ -620,14 +627,19 @@ export class BeetleBand {
 						cwd: options.cwd,
 					});
 					if (decision.behavior !== "ask") return decision;
-					// The bus is the one call that must survive an "ask": it touches
-					// no file, and every action a woken member takes is evaluated in
-					// that member's own session under the same axes. Without this
-					// exemption the band would go mute in `ask` mode — the default
-					// mode — leaving a user who never widened the session with no
-					// band and no way to be told why. Deny rules and plan mode decide
-					// above this, so a user's own verdict on the bus is still theirs.
-					if (toolName === BAND_TOOL_NAME) return { behavior: "allow" };
+					// The bus and the board are the calls that must survive an "ask":
+					// neither touches a file — the board lives in the main session's
+					// in-memory store — and every action a woken member takes is
+					// evaluated in that member's own session under the same axes.
+					// Without this exemption the band would go mute in `ask` mode —
+					// the default mode — leaving a user who never widened the session
+					// with no band and no way to be told why. Deny rules and plan mode
+					// decide above this (plan mode's list admits the two read-only
+					// board tools and denies the two that mutate), so a user's own
+					// verdict on the bus and the board is still theirs.
+					if (toolName === BAND_TOOL_NAME || (TASK_BOARD_TOOL_NAMES as readonly string[]).includes(toolName)) {
+						return { behavior: "allow" };
+					}
 					return {
 						behavior: "deny",
 						message: decision.message ?? `Permission required for ${toolName} (a band member has no dialog to ask in)`,
@@ -661,7 +673,11 @@ export class BeetleBand {
 			name === "paul"
 				? [...all, ...(this.#options.mcpTools ?? [])]
 				: [
-						...all.filter((tool) => (READ_SEAT_TOOL_NAMES as readonly string[]).includes(tool.name)),
+						...all.filter(
+							(tool) =>
+								(READ_SEAT_TOOL_NAMES as readonly string[]).includes(tool.name) ||
+								(TASK_BOARD_TOOL_NAMES as readonly string[]).includes(tool.name),
+						),
 						...(this.#options.mcpTools ?? []),
 					];
 		const bandTool = createBandMessageTool((to, message) => this.deliver({ kind: "member", name }, to, message), true);

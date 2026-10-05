@@ -978,6 +978,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			toolChangeLatch.arm(cause);
 		},
 		setStatusCard: (card) => handle?.setStatusCard({ title: card.title, details: card.details }),
+		// The same store the board tools (and so every member) already write
+		// through — status reads the work, not a copy of it.
+		taskBoard: () => taskStore.summary(),
 		initialModels: settings.beetle?.models ?? null,
 	});
 

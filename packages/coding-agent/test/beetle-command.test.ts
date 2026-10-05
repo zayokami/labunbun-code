@@ -16,7 +16,13 @@ import { AgentSession } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider, type Model } from "@labunbun/ai";
 import { createStore } from "@labunbun/tui";
 import { beetleUsage } from "../src/beetle.ts";
-import { type BeetleSurface, createBeetleSurface, createToolChangeLatch } from "../src/beetle-commands.ts";
+import {
+	type BeetleSurface,
+	type BoardTask,
+	boardLine,
+	createBeetleSurface,
+	createToolChangeLatch,
+} from "../src/beetle-commands.ts";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
 
 /** Rows the picker offers after "Follow the session model" — `provider/id` refs. */
@@ -39,6 +45,8 @@ interface Harness {
 	/** Every tool-block-change cause the surface armed. */
 	toolChanges: string[];
 	cards: Array<{ title: string; details: Array<[string, string]> }>;
+	/** The shared board the surface reads — push rows to seed `/beetle status`. */
+	boardTasks: BoardTask[];
 	bandToolNames: () => string[];
 	savedModels: () => Record<string, string> | null;
 }
@@ -58,6 +66,7 @@ function makeHarness(
 	const opened: Harness["opened"] = [];
 	const toolChanges: string[] = [];
 	const cards: Harness["cards"] = [];
+	const boardTasks: BoardTask[] = [];
 	const answers = [...(options.picks ?? [])];
 	const byRef = new Map(ROWS.map((model) => [`${model.provider}/${model.id}`, model]));
 	// One provider for every model: these tests assert on flow and lines, never
@@ -95,6 +104,7 @@ function makeHarness(
 		getPermissionRules: () => [],
 		noteToolChange: (cause) => toolChanges.push(cause),
 		setStatusCard: (card) => cards.push(card),
+		taskBoard: () => boardTasks,
 		initialModels: options.initial ?? null,
 	});
 	const settingsPath = join(home, ".labunbun", "settings.json");
@@ -107,6 +117,7 @@ function makeHarness(
 		home,
 		toolChanges,
 		cards,
+		boardTasks,
 		bandToolNames: () => session.tools.filter((tool) => tool.name === "BandMessage").map((tool) => tool.name),
 		savedModels: () => {
 			if (!existsSync(settingsPath)) return null;
@@ -294,11 +305,12 @@ describe("starting a band", () => {
 		expect(harness.notices).toEqual(["No band yet — start one with /beetle <task>."]);
 		harness.surface.start("status me");
 		// Poll until the members' one-step scripts have finished: 0 running is the
-		// only deterministic summary, and it is reached within a few ticks.
+		// only deterministic summary, and it is reached within a few ticks. The
+		// board line trails the tally, so the tally is second-to-last.
 		for (let i = 0; i < 50; i++) {
 			await tick();
 			harness.surface.status();
-			if ((harness.notices.at(-1) ?? "").startsWith("Band: 0/4 running")) break;
+			if ((harness.notices.at(-2) ?? "").startsWith("Band: 0/4 running")) break;
 		}
 		expect(harness.cards.at(-1)?.title).toBe("Beetle band");
 		expect(harness.cards.at(-1)?.details.map(([label]) => label)).toEqual([
@@ -310,7 +322,29 @@ describe("starting a band", () => {
 		// One briefing turn each, faux rows have no price: the tail is exact (the
 		// model name leads the row and lastActivity may trail it).
 		expect(harness.cards.at(-1)?.details[0]?.[1]).toMatch(/ · idle · 1 turns · \$0\.0000 unpriced( · .+)?$/);
-		expect(harness.notices.at(-1)).toBe("Band: 0/4 running · 4 turns · $0.0000");
+		expect(harness.notices.at(-2)).toBe("Band: 0/4 running · 4 turns · $0.0000");
+		expect(harness.notices.at(-1)).toBe("Board: no tasks yet.");
+	});
+
+	test("status adds the board summary as its last line", async () => {
+		const harness = makeHarness();
+		harness.surface.start("board test");
+		// The board line needs a band (status reads the work alongside the band);
+		// poll past the first start, then seed and read.
+		for (let i = 0; i < 50; i++) {
+			await tick();
+			harness.surface.status();
+			if (harness.notices.some((line) => line.startsWith("Band: "))) break;
+		}
+		harness.boardTasks.push(
+			{ id: "1", subject: "Wire the bridge", status: "in_progress", owner: "paul" },
+			{ id: "2", subject: "Mix the tape", status: "pending" },
+			{ id: "3", subject: "Ship it", status: "completed", owner: "ringo" },
+		);
+		harness.surface.status();
+		expect(harness.notices.at(-1)).toBe(
+			"Board: 3 tasks · in_progress: #1 Wire the bridge (paul) · 1 pending · 1 completed",
+		);
 	});
 
 	test("a mention routes to the member when a band is on stage and passes through when not", async () => {
@@ -328,6 +362,46 @@ describe("starting a band", () => {
 		harness.surface.stop();
 		expect(harness.surface.handleMention("@john one more")).toBe(false);
 		expect(harness.userEntries).toEqual(["@john take a look"]);
+	});
+});
+
+describe("boardLine", () => {
+	test.each([
+		["an empty board", [], "Board: no tasks yet."],
+		[
+			"a single task reads singular",
+			[{ id: "1", subject: "Tune the kit", status: "pending" }],
+			"Board: 1 task · 1 pending · 0 completed",
+		],
+		[
+			"in_progress leads, owner in parentheses",
+			[
+				{ id: "2", subject: "Wire the bridge", status: "in_progress", owner: "paul" },
+				{ id: "3", subject: "Mix the tape", status: "pending" },
+				{ id: "4", subject: "Book the hall", status: "completed" },
+			],
+			"Board: 3 tasks · in_progress: #2 Wire the bridge (paul) · 1 pending · 1 completed",
+		],
+		[
+			"an ownerless in_progress task renders without parentheses",
+			[{ id: "5", subject: "Soundcheck", status: "in_progress" }],
+			"Board: 1 task · in_progress: #5 Soundcheck · 0 pending · 0 completed",
+		],
+		[
+			"several in progress list in board order",
+			[
+				{ id: "1", subject: "Drums", status: "in_progress", owner: "ringo" },
+				{ id: "2", subject: "Bass", status: "in_progress", owner: "paul" },
+			],
+			"Board: 2 tasks · in_progress: #1 Drums (ringo), #2 Bass (paul) · 0 pending · 0 completed",
+		],
+		[
+			"nothing in progress leaves the segment out",
+			[{ id: "1", subject: "Done", status: "completed" }],
+			"Board: 1 task · 0 pending · 1 completed",
+		],
+	] as Array<[string, BoardTask[], string]>)("renders %s", (_label, tasks, expected) => {
+		expect(boardLine(tasks)).toBe(expected);
 	});
 });
 

@@ -30,6 +30,31 @@ export interface BeetleStatusCard {
 	details: Array<[string, string]>;
 }
 
+/** The board slice the summary line reads — `TaskStore.summary()`'s shape. */
+export interface BoardTask {
+	id: string;
+	subject: string;
+	status: "pending" | "in_progress" | "completed";
+	owner?: string;
+}
+
+/**
+ * The board's one-line summary for `/beetle status`. Pure, so the shapes —
+ * empty, nothing in progress, several in progress — are test rows rather than
+ * whatever a live store happens to hold.
+ */
+export function boardLine(tasks: BoardTask[]): string {
+	if (tasks.length === 0) return "Board: no tasks yet.";
+	const parts = [`${tasks.length} task${tasks.length === 1 ? "" : "s"}`];
+	const active = tasks
+		.filter((task) => task.status === "in_progress")
+		.map((task) => `#${task.id} ${task.subject}${task.owner ? ` (${task.owner})` : ""}`);
+	if (active.length > 0) parts.push(`in_progress: ${active.join(", ")}`);
+	parts.push(`${tasks.filter((task) => task.status === "pending").length} pending`);
+	parts.push(`${tasks.filter((task) => task.status === "completed").length} completed`);
+	return `Board: ${parts.join(" · ")}`;
+}
+
 export interface BeetleSurfaceDeps {
 	/** One transcript line. */
 	notify: (line: string) => void;
@@ -66,6 +91,8 @@ export interface BeetleSurfaceDeps {
 	noteToolChange: (cause: string) => void;
 	/** `/beetle status` draws its table here; absent when nothing can. */
 	setStatusCard?: (card: BeetleStatusCard) => void;
+	/** The shared task board, read at the call — `TaskStore.summary()` in the app. */
+	taskBoard?: () => BoardTask[];
 	/** The seeded config from settings; null = never configured. */
 	initialModels: Partial<BeetleModels> | null;
 }
@@ -292,6 +319,11 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			deps.notify(
 				`Band: ${running}/${members.length} running · ${turns} turns · $${cost.toFixed(4)}${current.active ? "" : " · disbanded"}`,
 			);
+			// The board last: the tally line is about the band, the board line is
+			// about the work — and the two read together are what "how is it going"
+			// means. Absent when no board is wired (a test surface, headless).
+			const board = deps.taskBoard?.();
+			if (board) deps.notify(boardLine(board));
 		},
 
 		handleMention(text) {

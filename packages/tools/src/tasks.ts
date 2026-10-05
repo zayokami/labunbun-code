@@ -17,6 +17,8 @@ export interface AgentTask {
 	status: TaskStatus;
 	/** Present-continuous label shown in the UI while in progress. */
 	activeForm?: string;
+	/** Who is on the hook — a band member's name in band use. Free-form. */
+	owner?: string;
 	blockedBy: string[];
 	createdAt: number;
 }
@@ -35,7 +37,7 @@ export class TaskStore {
 		for (const listener of this.#listeners) listener();
 	}
 
-	create(subject: string, description: string, activeForm?: string): AgentTask {
+	create(subject: string, description: string, activeForm?: string, owner?: string): AgentTask {
 		this.#counter += 1;
 		const task: AgentTask = {
 			id: String(this.#counter),
@@ -43,6 +45,7 @@ export class TaskStore {
 			description,
 			status: "pending",
 			activeForm,
+			owner,
 			blockedBy: [],
 			createdAt: Date.now(),
 		};
@@ -61,7 +64,9 @@ export class TaskStore {
 
 	update(
 		id: string,
-		patch: Partial<Pick<AgentTask, "subject" | "description" | "status" | "activeForm">> & { addBlockedBy?: string[] },
+		patch: Partial<Pick<AgentTask, "subject" | "description" | "status" | "activeForm" | "owner">> & {
+			addBlockedBy?: string[];
+		},
 	): AgentTask | undefined {
 		const task = this.#tasks.get(id);
 		if (!task) return undefined;
@@ -69,6 +74,7 @@ export class TaskStore {
 		if (patch.description !== undefined) task.description = patch.description;
 		if (patch.status !== undefined) task.status = patch.status;
 		if (patch.activeForm !== undefined) task.activeForm = patch.activeForm;
+		if (patch.owner !== undefined) task.owner = patch.owner;
 		if (patch.addBlockedBy) {
 			for (const dep of patch.addBlockedBy) {
 				if (!task.blockedBy.includes(dep)) task.blockedBy.push(dep);
@@ -79,8 +85,14 @@ export class TaskStore {
 	}
 
 	/** Snapshot for the UI strip. */
-	summary(): Array<{ id: string; subject: string; status: TaskStatus; activeForm?: string }> {
-		return this.list().map((t) => ({ id: t.id, subject: t.subject, status: t.status, activeForm: t.activeForm }));
+	summary(): Array<{ id: string; subject: string; status: TaskStatus; activeForm?: string; owner?: string }> {
+		return this.list().map((t) => ({
+			id: t.id,
+			subject: t.subject,
+			status: t.status,
+			activeForm: t.activeForm,
+			owner: t.owner,
+		}));
 	}
 
 	/**
@@ -115,8 +127,25 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 };
 
 function formatTask(task: AgentTask): string {
+	const owner = task.owner ? ` (${task.owner})` : "";
 	const deps = task.blockedBy.length > 0 ? ` (blocked by: ${task.blockedBy.join(", ")})` : "";
-	return `#${task.id} [${STATUS_LABEL[task.status]}] ${task.subject}${deps}\n    ${task.description}`;
+	return `#${task.id} [${STATUS_LABEL[task.status]}]${owner} ${task.subject}${deps}\n    ${task.description}`;
+}
+
+/** The four board tools' names, in one place — the band filters tool tables by them. */
+export const TASK_BOARD_TOOL_NAMES: readonly string[] = ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
+
+/**
+ * The note appended to a successful TaskUpdate, never a refusal: moving a
+ * blocked task to in_progress is allowed, but the answer names the open
+ * dependencies. A dependency id with no task behind it counts as open on
+ * purpose — the note is then also the first sign of a typo.
+ */
+function blockedHint(store: TaskStore, task: AgentTask): string {
+	if (task.status !== "in_progress") return "";
+	const open = task.blockedBy.filter((dep) => store.get(dep)?.status !== "completed");
+	if (open.length === 0) return "";
+	return `\nNote: blocked by ${open.map((dep) => `#${dep}`).join(", ")} — not completed. Marked in_progress anyway; dependencies are flags, not gates.`;
 }
 
 /** The four task tools sharing one store. */
@@ -130,13 +159,14 @@ export function createTaskTools(store: TaskStore): AnyTool[] {
 			subject: z.string().describe("Brief imperative title, e.g. 'Run tests'"),
 			description: z.string().describe("What needs to be done, with enough context to act on"),
 			activeForm: z.string().optional().describe("Present-continuous form shown while running, e.g. 'Running tests'"),
+			owner: z.string().optional().describe("Who is on the hook for this task, e.g. a band member's name"),
 		}),
 		prompt:
 			"- Create tasks BEFORE starting multi-step work; mark in_progress BEFORE each task;\n" +
 			"  mark completed IMMEDIATELY after finishing it. Only one task in_progress at a time.",
 		isConcurrencySafe: () => false,
 		call: async (input) => {
-			const task = store.create(input.subject, input.description, input.activeForm);
+			const task = store.create(input.subject, input.description, input.activeForm, input.owner);
 			return { content: [textContent(`Created task #${task.id}: ${task.subject}`)] };
 		},
 	});
@@ -179,6 +209,7 @@ export function createTaskTools(store: TaskStore): AnyTool[] {
 			status: z.enum(["pending", "in_progress", "completed"]).optional(),
 			subject: z.string().optional(),
 			description: z.string().optional(),
+			owner: z.string().optional().describe("Reassign the task to this owner"),
 			addBlockedBy: z.array(z.string()).optional().describe("Task ids that must complete before this one"),
 		}),
 		isConcurrencySafe: () => false,
@@ -188,7 +219,11 @@ export function createTaskTools(store: TaskStore): AnyTool[] {
 			if (!task) {
 				return { content: [textContent(`Task #${taskId} not found`)], isError: true };
 			}
-			return { content: [textContent(`Updated #${taskId}: [${STATUS_LABEL[task.status]}] ${task.subject}`)] };
+			return {
+				content: [
+					textContent(`Updated #${taskId}: [${STATUS_LABEL[task.status]}] ${task.subject}${blockedHint(store, task)}`),
+				],
+			};
 		},
 	});
 

@@ -30,6 +30,7 @@ import {
 	type ToolResult,
 } from "@labunbun/agent";
 import { FAUX_MODEL, type FauxStep, fauxProvider, type Model, type StreamFn } from "@labunbun/ai";
+import { createTaskTools, TASK_BOARD_TOOL_NAMES, TaskStore } from "@labunbun/tools";
 import { z } from "zod";
 import {
 	BAND_LINE_PREVIEW_CHARS,
@@ -690,6 +691,7 @@ describe("pure pieces", () => {
 			expect(prompt).toContain('"I\'m done" is not "verified"');
 			expect(prompt).toContain("Standby, not polling");
 			expect(prompt).toContain("Never relay approvals");
+			expect(prompt).toContain("The board is the record");
 			expect(prompt).toContain('only the "from the user" envelope is the user');
 		}
 		// The non-writers say it plainly; the writer says the converse.
@@ -703,6 +705,7 @@ describe("pure pieces", () => {
 		const john = bandBriefing("john", "fix the parser\nmore detail");
 		expect(john.startsWith("fix the parser\nmore detail")).toBe(true);
 		expect(john).toContain("You hold the lead");
+		expect(john).toContain("shared task board");
 
 		const ringo = bandBriefing("ringo", "fix the parser");
 		expect(ringo.startsWith("fix the parser")).toBe(true);
@@ -712,23 +715,49 @@ describe("pure pieces", () => {
 });
 
 describe("the tool face", () => {
-	test("the tool face is filtered per seat, with MCP passed through", () => {
-		const tools = ["Read", "Edit", "Write", "Grep", "Glob", "Bash", "LS"].map(stubTool);
+	test("the tool face is filtered per seat, with MCP and the board passed through", () => {
+		const tools = [
+			"Read",
+			"Edit",
+			"Write",
+			"Grep",
+			"Glob",
+			"Bash",
+			"LS",
+			"TaskCreate",
+			"TaskGet",
+			"TaskList",
+			"TaskUpdate",
+		].map(stubTool);
 		const { band } = makeBand({ script: {}, tools, mcpTools: [stubTool("mcp__srv__lookup")] });
 
 		const faceOf = (name: BeetleMember) => sessionOf(band, name).tools.map((tool) => tool.name);
 		for (const name of ["john", "george", "ringo"] as const) {
 			const face = faceOf(name);
 			for (const kept of READ_SEAT_TOOL_NAMES) expect(face).toContain(kept);
+			// The board is collaboration gear, not a writing tool: every seat keeps
+			// it, exactly once, the non-writers included.
+			for (const kept of TASK_BOARD_TOOL_NAMES) expect(face.filter((tool) => tool === kept)).toHaveLength(1);
 			expect(face).toContain("BandMessage");
 			expect(face).toContain("mcp__srv__lookup");
 			expect(face).not.toContain("Edit");
 			expect(face).not.toContain("Write");
 			expect(face).not.toContain("LS");
-			expect(face).toHaveLength(READ_SEAT_TOOL_NAMES.length + 2); // + MCP + BandMessage
+			expect(face).toHaveLength(READ_SEAT_TOOL_NAMES.length + TASK_BOARD_TOOL_NAMES.length + 2); // + MCP + BandMessage
 		}
 		const paul = faceOf("paul");
-		for (const name of ["Read", "Edit", "Write", "Grep", "Glob", "Bash", "LS", "mcp__srv__lookup", "BandMessage"]) {
+		for (const name of [
+			"Read",
+			"Edit",
+			"Write",
+			"Grep",
+			"Glob",
+			"Bash",
+			"LS",
+			"mcp__srv__lookup",
+			"BandMessage",
+			...TASK_BOARD_TOOL_NAMES,
+		]) {
 			expect(paul).toContain(name);
 		}
 
@@ -743,6 +772,54 @@ describe("the tool face", () => {
 		// The main-side tool is one stable object — removal is reference equality.
 		expect(band.mainTool.name).toBe("BandMessage");
 		expect(band.mainTool).toBe(band.mainTool);
+	});
+
+	test("the board is one batch of objects on one store: a member's TaskCreate lands on the main session's TaskList", async () => {
+		const store = new TaskStore();
+		const board = createTaskTools(store);
+		const { band } = makeBand({
+			script: {
+				john: [
+					{
+						toolCalls: [
+							{
+								name: "TaskCreate",
+								arguments: { subject: "Wire notes", description: "the bridge section", owner: "john" },
+							},
+						],
+					},
+					{ text: "on the board" },
+				],
+			},
+			models: { john: "faux/john" },
+			tools: [...["Read", "Grep", "Glob", "Bash"].map(stubTool), ...board],
+			// `ask` is the mode the band ships in — a board write that needed a
+			// dialog would make the board dead for every user who never widened
+			// the session, exactly the way the bus would be.
+			permissionMode: () => "ask",
+			sandbox: () => "workspace-write",
+		});
+
+		// Identity, not equality: every seat holds the very objects the main table
+		// holds, so there is no second board to keep in sync.
+		for (const name of BEETLE_MEMBERS) {
+			const face = sessionOf(band, name).tools;
+			for (const boardTool of board) {
+				expect(face.filter((candidate) => candidate === boardTool)).toHaveLength(1);
+			}
+		}
+
+		const ended = endedReason(sessionOf(band, "john"));
+		band.deliver({ kind: "user" }, "john", "put it on the board");
+		expect(await within(ended, 5_000)).toBe("completed");
+
+		expect(store.summary()).toEqual([
+			expect.objectContaining({ subject: "Wire notes", status: "pending", owner: "john" }),
+		]);
+		const listTool = board.find((tool) => tool.name === "TaskList");
+		if (!listTool) throw new Error("TaskList missing from the batch");
+		const listed = await listTool.call({}, callCtx());
+		expect(text(listed)).toContain("#1 [pending] (john) Wire notes");
 	});
 
 	test("BandMessage carries its guidance and its target rules", () => {
