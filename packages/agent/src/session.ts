@@ -352,6 +352,10 @@ export class AgentSession {
 				const streamOptions: StreamOptions = {
 					signal: this.#abortController.signal,
 					maxOutputTokens: escalatedOnce ? Math.min(this.#model.maxOutputTokens * 2, MAX_OUTPUT_TOKENS_CAP) : undefined,
+					// Read per request, not captured at construction: the host's reader can
+					// answer differently after a mid-session change, and the next call is
+					// meant to see the new answer.
+					thinkingLevel: this.#deps.thinkingLevel?.(),
 					// The wrapper awaits this before it sleeps, so the announcement lands
 					// ahead of the wait it describes. Subscribers get it as an event like
 					// anything else the loop reports; nothing in the loop reacts to it.

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clearCustomModels, clearPricingOverrides, resolveModel } from "@labunbun/ai";
+import { clearCustomModels, clearPricingOverrides, resolveModel, THINKING_LEVELS } from "@labunbun/ai";
 import { CostTracker, formatCostState } from "../src/cost-tracker.ts";
 import { appendHistory, loadHistory } from "../src/history.ts";
 import { applyCatalogSettings, mergeSettings, type RawSettingsInput, SettingsSchema } from "../src/settings.ts";
@@ -74,6 +74,18 @@ describe("SettingsSchema", () => {
 		expect(SettingsSchema.safeParse({ cache: { ttl: "2h" } }).success).toBe(false);
 		expect(SettingsSchema.safeParse({ cache: { promptCacheKey: "yes" } }).success).toBe(false);
 		expect(SettingsSchema.safeParse({ cache: { promptCacheRetention: "1h" } }).success).toBe(false);
+	});
+
+	test("the thinking level is one of the levels the session can ask for", () => {
+		// Every member of the list, not a sample: the schema derives from
+		// `THINKING_LEVELS`, and this is the statement that the derivation covers
+		// the whole list rather than the values someone remembered to write down.
+		for (const level of THINKING_LEVELS) {
+			expect(SettingsSchema.parse({ thinkingLevel: level }).thinkingLevel).toBe(level);
+		}
+		// Unset is a state, not a missing key: nothing is sent on its behalf.
+		expect(SettingsSchema.parse({}).thinkingLevel).toBeUndefined();
+		expect(SettingsSchema.safeParse({ thinkingLevel: "turbo" }).success).toBe(false);
 	});
 
 	test("prices can be declared for a whole catalog, per provider or as an override", () => {

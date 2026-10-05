@@ -710,7 +710,10 @@ function stepMcpNotes(entry: Record<string, unknown>, downgrades: string[]): voi
 
 /** Text the CLI and the report use for a source whose settings document is one TOML file. */
 const STEP_UNMIGRATED_KEYS: Array<[key: string, reason: string]> = [
-	["defaultThinkingLevel", "a thinking level this build has no setting for"],
+	[
+		"defaultThinkingLevel",
+		"a default thinking level; the equivalent here is one session-wide setting — set it with /think",
+	],
 	["transport", "which transport the model client uses; this build picks its own"],
 	["compat", "a Pi compatibility block for extensions this build does not load"],
 	["extensions", "Pi extensions, which this build has no loader for"],

@@ -45,6 +45,7 @@ describe("the project tier's key policy", () => {
 			"pricing",
 			"cache",
 			"trimOldToolResults",
+			"thinkingLevel",
 			"modelDiscovery",
 			"gamepad",
 			"allowManagedPermissionRulesOnly",

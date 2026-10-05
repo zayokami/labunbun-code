@@ -248,6 +248,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// tool result with no line anywhere saying why.
 		sandbox: () => effectiveSandbox,
 		network: () => effectiveNetwork,
+		// A `-p` run has no `/think` to move it mid-run, so this answers the same
+		// thing every time — but it is still the reader shape, so a subagent's
+		// requests travel the same seam as the session's.
+		thinkingLevel: () => settings.thinkingLevel,
 		getPermissionRules: () => rules,
 		trimOldToolResults: settings.trimOldToolResults,
 		report: (text) => console.error(text),
@@ -297,6 +301,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		network: effectiveNetwork,
 		deps: {
 			streamFn: transport.streamFn,
+			// Constant in a `-p` run — nothing moves it mid-run — but read per request
+			// like the REPL's, so the settings value lands on the wire through the
+			// same seam in both modes.
+			thinkingLevel: () => settings.thinkingLevel,
 			checkCompaction: compactionWiring.checkCompaction,
 			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
 			// Headless has no interactive dialog, so an unresolved "ask" fails

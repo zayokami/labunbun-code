@@ -49,6 +49,8 @@ function makeCtx(options: { cwd?: string; sessionId?: string } = {}) {
 		theme: { theme: { name: "nord" }, available: ["dark", "nord"], problems: [] },
 		hotSwapSession: async () => {},
 		switchModel: () => false,
+		thinkingLevel: () => undefined,
+		setThinkingLevel: () => {},
 	} as unknown as AppCommandContext;
 
 	return { ctx, store, cards };
@@ -78,7 +80,7 @@ describe("/status", () => {
 		expect(card?.permissions).toBe("Ask");
 		expect(card?.session).toBe("abcdef01");
 		expect(card?.context).toEqual({ usedTokens: 42_000, threshold: 200_000 });
-		expect(card?.details.map(([label]) => label)).toEqual(["Cost", "Cache", "Theme", "MCP"]);
+		expect(card?.details.map(([label]) => label)).toEqual(["Cost", "Cache", "Thinking", "Theme", "MCP"]);
 		// Both totals on one row: a single number here would be read as whichever of
 		// the two the reader assumed, and the two differ by an order of magnitude.
 		expect(card?.details[0]?.[1]).toContain("$0.0567 this session");
@@ -86,7 +88,12 @@ describe("/status", () => {
 		// A context with no tracker behind it says so rather than showing a number
 		// nobody measured.
 		expect(card?.details[1]?.[1]).toBe("not tracked");
-		expect(card?.details[2]?.[1]).toContain("nord");
+		// The knob behind "why is it answering like this", beside the two rows that
+		// say what the answering costs. Unset is stated rather than left blank: an
+		// empty row reads as a missing value, and here the value is the model's own
+		// call — which is a choice, not an absence.
+		expect(card?.details[2]?.[1]).toBe("unset — each model's own default");
+		expect(card?.details[3]?.[1]).toContain("nord");
 	});
 
 	// The editor is the store's, not the settings file's: /vim and /emacs may have
@@ -101,15 +108,15 @@ describe("/status", () => {
 	test("reports the editor the prompt is actually in", () => {
 		const h = makeCtx();
 		handleAppCommand("/status", h.ctx);
-		expect(h.cards[0]?.details[2]?.[1]).toContain("no editor");
+		expect(h.cards[0]?.details[3]?.[1]).toContain("no editor");
 
 		h.store.set((s) => ({ ...s, vim: true }));
 		handleAppCommand("/status", h.ctx);
-		expect(h.cards[1]?.details[2]?.[1]).toContain("Vim");
+		expect(h.cards[1]?.details[3]?.[1]).toContain("Vim");
 
 		h.store.set((s) => ({ ...s, vim: false, emacs: true }));
 		handleAppCommand("/status", h.ctx);
-		expect(h.cards[2]?.details[2]?.[1]).toContain("Emacs");
+		expect(h.cards[2]?.details[3]?.[1]).toContain("Emacs");
 	});
 
 	// Reachable only by hand-editing a settings file, since the commands clear the
@@ -119,7 +126,7 @@ describe("/status", () => {
 		const h = makeCtx();
 		h.store.set((s) => ({ ...s, vim: true, emacs: true }));
 		handleAppCommand("/status", h.ctx);
-		expect(h.cards[0]?.details[2]?.[1]).toContain("Emacs (vimMode also set)");
+		expect(h.cards[0]?.details[3]?.[1]).toContain("Emacs (vimMode also set)");
 	});
 
 	test("an unpersisted session says so instead of showing a blank id", () => {

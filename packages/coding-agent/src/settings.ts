@@ -32,7 +32,7 @@ import {
 	SANDBOX_MODES,
 	type SandboxMode,
 } from "@labunbun/agent";
-import { registerOpenAICompatibleProvider, setPricingOverride } from "@labunbun/ai";
+import { registerOpenAICompatibleProvider, setPricingOverride, THINKING_LEVELS } from "@labunbun/ai";
 import { z } from "zod";
 import { stripBom } from "./json-text.ts";
 
@@ -136,6 +136,18 @@ export const SettingsSchema = z.object({
 	model: z.string().optional(),
 	/** Model references tried in order when the primary errors before streaming. */
 	fallbackModels: z.array(z.string()).optional(),
+	/**
+	 * How hard the model should think, for every request this session makes.
+	 *
+	 * Unset leaves the choice to the model itself. Where it is set, it is still
+	 * bounded by what each model declares: a row that declares no thinking shape
+	 * is sent none, whatever this says — that answer belongs to the adapter,
+	 * which can see the row, and is pinned by its tests.
+	 *
+	 * Derived from `THINKING_LEVELS` rather than restating the list, so a level
+	 * added to the type is a level this file accepts by construction.
+	 */
+	thinkingLevel: z.enum(THINKING_LEVELS).optional(),
 	permissionMode: PermissionModeSchema.optional(),
 	/**
 	 * The other axis: what the process may touch, as opposed to what asks.
@@ -429,6 +441,10 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	pricing: "denied",
 	cache: "denied",
 	trimOldToolResults: "denied",
+	// The same cost class as `cache` and `trimOldToolResults`: it decides how much
+	// the model chews on the user's own conversation — what the turns are billed,
+	// and how fast the context fills — and a repo has no business choosing that.
+	thinkingLevel: "denied",
 	// Not a lockdown but the same rule: whether this startup asks the network a
 	// question is the user's decision, not the repository's.
 	modelDiscovery: "denied",
@@ -499,7 +515,7 @@ export function formatIgnoredKeysNotice(ignored: IgnoredSettingsKey[]): string |
 }
 
 /** The settings a command persists for the user, which another tier can override. */
-export type UserChoiceKey = "theme" | "model" | "vimMode" | "emacsMode" | "gamepad";
+export type UserChoiceKey = "theme" | "model" | "vimMode" | "emacsMode" | "gamepad" | "thinkingLevel";
 
 /** Tiers that outrank the user's own file, highest first. */
 const OVERRIDING_TIERS = ["flag", "policy", "local", "project"] as const;

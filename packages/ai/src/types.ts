@@ -174,7 +174,14 @@ export function textContent(text: string): TextContent {
  * it does not accept.
  */
 export type ApiId = "anthropic-messages" | "openai-completions" | "openai-responses";
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high";
+
+/**
+ * The thinking levels a session can ask for, as a runtime list. Anything that
+ * has to validate a level — the settings schema is one — derives its set from
+ * here rather than restating it, so the two cannot drift apart.
+ */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 /** Minimal structural type for a JSON Schema object (tool parameters). */
 export interface JsonSchemaObject {

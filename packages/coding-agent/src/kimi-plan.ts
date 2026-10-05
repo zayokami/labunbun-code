@@ -546,7 +546,7 @@ const KIMI_UNMIGRATED_SECTIONS: Array<[key: string, reason: string]> = [
 	],
 	[
 		"thinking",
-		"the reasoning effort kimi's own catalogue uses, where this build sets effort per request from its own rows",
+		"the reasoning effort kimi's own catalogue uses; the equivalent here is one session-wide setting — set it with /think",
 	],
 	["tools", "a per-tool enable list, which has no switch here"],
 	["secondaryModel", "a second model kimi falls back to, where this build takes one"],

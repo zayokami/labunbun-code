@@ -14,6 +14,7 @@ import type {
 	Context,
 	JsonSchemaObject,
 	StreamFn,
+	ThinkingLevel,
 	ToolResultContent,
 	ToolResultMessage,
 	WireTool,
@@ -420,6 +421,17 @@ export interface AgentDeps {
 	 * to decide again.
 	 */
 	checkCompaction?: (context: Context, options?: { force?: boolean }) => Promise<CompactionCheck | null>;
+	/**
+	 * How hard the model should think, read per request so a change made
+	 * mid-session lands on the next model call rather than the next session.
+	 *
+	 * A reader rather than a value because the choice belongs to the host: the
+	 * settings layer that holds it lives in the app package, and this one takes
+	 * the answer as a closure instead of importing that layer. Returning
+	 * `undefined` means the settings key is unset, which leaves the default to
+	 * the adapter — it is the one that knows what each model row declares.
+	 */
+	thinkingLevel?: () => ThinkingLevel | undefined;
 	/**
 	 * Where a tool result too large for the context is kept in full, supplied by
 	 * the app layer because the agent has no filesystem of its own. Returns the

@@ -133,7 +133,7 @@ const MINIMAX_UNMIGRATED_SECTIONS: Array<[key: string, reason: string]> = [
 	["defaultModelVariant", "a variant of the default model — this build has no variant dimension"],
 	[
 		"defaultModelThinking",
-		"the thinking depth MiniMax applies to the default model — thinking is set here when a model is asked for, not in settings",
+		"the thinking depth MiniMax applies to the default model — the equivalent here is one session-wide setting; set it with /think",
 	],
 	[
 		"defaultModelContextWindow",

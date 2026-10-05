@@ -39,6 +39,8 @@ import {
 	refreshModelCatalog,
 	resolveApiKey,
 	resolveModel,
+	THINKING_LEVELS,
+	type ThinkingLevel,
 	withModelFallback,
 } from "@labunbun/ai";
 import {
@@ -483,6 +485,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- subagents, skills, plan mode ----
 	/** The live session. Declared before the tools that read it through a getter. */
 	let sessionRef: AgentSession | null = null;
+	/**
+	 * How hard the model should think, seeded from settings and moved by
+	 * `/think`. Declared before the session and the Task tool for the same reason
+	 * the session is: both read it through a getter, and a change is meant to
+	 * land on the very next request either one makes — including requests a
+	 * subagent makes while it is still running.
+	 */
+	let thinkingLevel: ThinkingLevel | undefined = settings.thinkingLevel;
 	const agentDefinitions = loadAgentDefinitions(cwd);
 	const taskTool = createTaskTool({
 		streamFn,
@@ -498,6 +508,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
 		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
 		network: () => sessionRef?.network ?? effectiveNetwork,
+		thinkingLevel: () => thinkingLevel,
 		getPermissionRules: () => [...baseRules, ...sessionRules],
 		trimOldToolResults: settings.trimOldToolResults,
 		report: (text) => pushInfo(handle, text),
@@ -545,6 +556,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 */
 	const sessionDeps: AgentDeps = {
 		streamFn,
+		// Read through the holder on every request, so `/think` lands on the next
+		// one rather than the next session.
+		thinkingLevel: () => thinkingLevel,
 		// Read through the holder rather than a captured id: /resume swaps the
 		// session, and the spills belong to whichever one is live.
 		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId: sessionIdHolder.current, home }),
@@ -884,6 +898,29 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		return true;
 	}
 
+	/**
+	 * Move the session's thinking level (/think). Writes the holder the session
+	 * reads on every request, and the user settings file the way `/model`
+	 * persists its choice — including the notice when a higher tier sets the
+	 * same key and will win at the next startup.
+	 */
+	function setThinkingLevel(level: ThinkingLevel): void {
+		thinkingLevel = level;
+		try {
+			writeUserSettingsPatch({ thinkingLevel: level }, home);
+		} catch (error) {
+			// Already in effect; only the write failed. Said in the same shape as
+			// every other settings write in this file.
+			pushInfo(
+				handle,
+				`Thinking level: ${level} — not saved: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		const shadowed = shadowedChoiceNotice(loadedSettings, "thinkingLevel", (path) => shortenHome(path, home));
+		pushInfo(handle, `Thinking level: ${level} — takes effect on the next request${shadowed ? ` (${shadowed})` : ""}`);
+	}
+
 	attachSessionListeners(session);
 	// Before the first turn: the system prompt and the tool schemas are already
 	// part of every request, and a resumed conversation arrives with its history.
@@ -1041,6 +1078,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				memory: memory.content,
 				hotSwapSession,
 				switchModel,
+				thinkingLevel: () => thinkingLevel,
+				setThinkingLevel,
 			}),
 	});
 
@@ -1377,6 +1416,10 @@ interface AppCommandContext {
 	memory?: string;
 	hotSwapSession(summary: SessionSummary): Promise<void>;
 	switchModel(ref: string): boolean;
+	/** The thinking level in force, read at dispatch time — `/status` and bare `/think` show it. */
+	thinkingLevel(): ThinkingLevel | undefined;
+	/** Set it (/think): the holder the session reads, and the user file. */
+	setThinkingLevel(level: ThinkingLevel): void;
 }
 
 function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
@@ -1459,6 +1502,15 @@ function choiceForMode(mode: string): (typeof MODE_CHOICES)[number] | undefined 
 const describeAxes = describeModeChoice;
 
 /**
+ * What `/think` and `/status` say when no level is set. One phrasing because
+ * the two answer the same question, and a card disagreeing with a command
+ * about the same state is a bug report about state, not about wording.
+ */
+function describeThinkingLevel(level: ThinkingLevel | undefined): string {
+	return level ?? "unset — each model's own default";
+}
+
+/**
  * Tell the prompt which mode it is in, if there is a prompt to tell.
  *
  * The method is required on `ReplAppHandle`, and it is still called optionally
@@ -1504,6 +1556,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/status", "Show model, context usage, cost, and settings at a glance"],
 		["/stop", "Stop a background shell: /stop [id]"],
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
+		["/think", `Show or set how hard the model thinks: /think [${THINKING_LEVELS.join("|")}]`],
 		["/tree", "Show the session branch tree"],
 		["/vim", "Turn modal vim editing in the prompt on or off: /vim [on|off]"],
 	];
@@ -1702,6 +1755,23 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			})();
 			return true;
 		}
+		case "/think": {
+			const arg = text.split(/\s+/)[1]?.toLowerCase() ?? "";
+			if (!arg) {
+				pushInfo(ctx.handle, `Thinking level: ${describeThinkingLevel(ctx.thinkingLevel())}`);
+				return true;
+			}
+			const level = THINKING_LEVELS.find((candidate) => candidate === arg);
+			if (!level) {
+				pushInfo(
+					ctx.handle,
+					`Usage: /think [${THINKING_LEVELS.join("|")}] — with no argument it shows the current level`,
+				);
+				return true;
+			}
+			ctx.setThinkingLevel(level);
+			return true;
+		}
 		case "/status": {
 			if (!session) return true;
 			const store = ctx.handle?.store;
@@ -1731,6 +1801,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					// Beside the cost, because that is what it explains: a hit rate is
 					// the reason a bill is what it is, and the two are read together.
 					["Cache", ctx.cache?.statusLine() ?? "not tracked"],
+					["Thinking", describeThinkingLevel(ctx.thinkingLevel())],
 					["Theme", `${ctx.theme.theme.name} · ${describeEditor(editor)}`],
 					[
 						"MCP",

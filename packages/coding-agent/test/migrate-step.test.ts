@@ -1046,7 +1046,7 @@ describe("mcp_servers", () => {
 });
 
 describe("keys with no counterpart, and the closing report", () => {
-	test("each key the build has no setting for is one line with its reason", () => {
+	test("each key the import does not carry is one line with its reason", () => {
 		const { home } = stepHome({
 			"config.toml":
 				'defaultThinkingLevel = "high"\ndefaultTools = "all"\n' +
@@ -1054,7 +1054,7 @@ describe("keys with no counterpart, and the closing report", () => {
 		});
 		const planned = plan(home);
 		for (const fragment of [
-			"a thinking level this build has no setting for",
+			"a default thinking level; the equivalent here is one session-wide setting",
 			"which transport the model client uses; this build picks its own",
 			"Pi extensions, which this build has no loader for",
 			"Pi packages, the same",

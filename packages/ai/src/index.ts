@@ -147,6 +147,7 @@ export type {
 } from "./types.ts";
 export {
 	assistantMessage,
+	THINKING_LEVELS,
 	textContent,
 	toolResultMessage,
 	userMessage,

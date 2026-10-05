@@ -808,11 +808,11 @@ describe("migrate: ZCode source", () => {
 		});
 	});
 
-	test("the reasoning level is skipped: it is chosen per request here", () => {
+	test("the reasoning level is skipped, and the line says where the setting now lives", () => {
 		withHome({ ".zcode/v2/config.json": "{}" }, (home) => {
 			seedDb(home);
 			const item = runMigration({ home }).plan.items.find((i) => i.from.includes("reasoningLevel"));
-			expect(item?.detail).toContain("chosen per request");
+			expect(item?.detail).toContain("session-wide");
 		});
 	});
 

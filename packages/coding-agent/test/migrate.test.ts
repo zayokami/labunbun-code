@@ -340,7 +340,7 @@ describe("mapping", () => {
 	});
 
 	test.each([
-		["effortLevel", "reasoning-effort"],
+		["effortLevel", "one session-wide setting"],
 		["enabledPlugins", "plugin system"],
 		// Named change: `projects` used to be reported as "usage statistics …
 		// not configuration" beside the telemetry keys. It holds each project's
@@ -449,7 +449,7 @@ describe("mapping", () => {
 	});
 
 	test.each([
-		["model_reasoning_effort", "reasoning-effort"],
+		["model_reasoning_effort", "one session-wide setting"],
 		["trust_level", "directory trust"],
 		["windows.sandbox", "sandbox"],
 	])("codex %s is skipped with a stated reason", (key, reason) => {

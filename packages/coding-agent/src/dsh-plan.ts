@@ -611,8 +611,8 @@ export function planDeepSeekHarness(
 			to: "—",
 			action: "skip",
 			detail:
-				"thinking-effort defaults are recorded for the harness and not carried: this build chooses the effort per " +
-				"request, so a stored default would describe something it does not do",
+				"thinking-effort defaults are recorded for the harness and not carried: the equivalent here is one " +
+				"session-wide setting — set it with /think",
 			containsSecret: false,
 		});
 	}

@@ -556,7 +556,7 @@ export function planCodex(
 			from: `${configAt} → model_reasoning_effort`,
 			to: "—",
 			action: "skip",
-			detail: "no reasoning-effort setting exists here; thinking level is chosen per request",
+			detail: "thinking level here is one session-wide setting — set it with /think; this value is not carried",
 			containsSecret: false,
 		});
 	}

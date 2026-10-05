@@ -67,7 +67,10 @@ const GROK_ASSUMED_CONTEXT_WINDOW = 128_000;
  * a refusal that explains itself is worth more than a name in a list.
  */
 const GROK_UNMIGRATED_MODEL_KEYS: Array<[key: string, reason: string]> = [
-	["default_reasoning_effort", "thinking level is chosen per request here, so there is no session-wide default to set"],
+	[
+		"default_reasoning_effort",
+		"thinking level here is one session-wide setting — set it with /think; this per-model default is not carried",
+	],
 	["allowed_models", "a picker allowlist; the models offered here are the built-in catalogue plus your providers"],
 	["hidden_models", "picker visibility only — nothing here hides a model"],
 	["disabled_models", "removes rows from grok's own catalogue, which is not the catalogue here"],

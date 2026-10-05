@@ -18,7 +18,7 @@ import {
 	type SandboxMode,
 	type SessionStore,
 } from "@labunbun/agent";
-import type { Model, StreamFn } from "@labunbun/ai";
+import type { Model, StreamFn, ThinkingLevel } from "@labunbun/ai";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import { createCompactionWiring } from "./compaction-wiring.ts";
@@ -161,6 +161,15 @@ export interface TaskToolContext {
 	 * implementation detail of a tool call.
 	 */
 	network?: () => NetworkAxis | undefined;
+	/**
+	 * How hard the subagent should think, read at the same moment as the axes
+	 * above and inherited for the same reason: a subagent is an implementation
+	 * detail of a tool call, and a session the user set to `high` that quietly
+	 * ran its research at the model's default would be deciding that per call
+	 * rather than per user. `undefined` leaves it to the model, exactly as on
+	 * the parent.
+	 */
+	thinkingLevel?: () => ThinkingLevel | undefined;
 	/** Resolved fresh per call so session-scoped allow rules added mid-conversation apply to new subagents. */
 	getPermissionRules?: () => PermissionRule[];
 	/**
@@ -277,6 +286,10 @@ export function createTaskTool(ctx: TaskToolContext): AnyTool {
 				network,
 				deps: {
 					streamFn: ctx.streamFn,
+					// The parent's reader, not its current answer: a `/think` that lands
+					// while the subagent runs is seen by the subagent's next request,
+					// which is the same call-time shape the axes above travel by.
+					thinkingLevel: ctx.thinkingLevel,
 					checkCompaction: subagentWiring.checkCompaction,
 					// Subagents inherit the parent's rules but have no dialog of their
 					// own to resolve an "ask" — fail closed rather than hang or auto-allow.
