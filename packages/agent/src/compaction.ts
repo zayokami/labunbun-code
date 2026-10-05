@@ -133,17 +133,40 @@ function promptTokens(usage: Usage): number {
 /**
  * Rough token estimate: last known API usage anchors the prefix; later
  * messages estimated at ~4 chars/token.
+ *
+ * An anchor is worth what it measured. Usage on a message records the request
+ * that produced it, so it stands for the transcript as it was then — and a
+ * compaction rewrites everything above the messages it keeps. A record the
+ * rewrite left standing (it was inside the retained suffix) then measures a
+ * prefix that no longer exists, and anchoring on it reports the size from
+ * before the rewrite for the transcript after it: a compaction that took a
+ * context from ninety thousand tokens to two would report both ends the same,
+ * and every reader of that number — the threshold, the cheap rung, the
+ * anti-thrash floor — would be working from a transcript that is not there.
+ * So a record that predates the newest boundary is passed over — wherever it
+ * sits relative to the boundary's own position in the list — and with no
+ * anchor the character count answers instead, measured on the transcript that
+ * is actually there.
  */
 export function estimateContextTokens(messages: AgentMessage[]): number {
+	const boundary = messages.find(isCompactionBoundary);
 	let anchorTokens = 0;
 	let anchorIndex = -1;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
-		if (message.role === "assistant" && (message.usage.promptTotal !== undefined || message.usage.input > 0)) {
-			anchorTokens = promptTokens(message.usage) + message.usage.output;
-			anchorIndex = i;
-			break;
-		}
+		if (message.role !== "assistant") continue;
+		const measured = message.usage.promptTotal !== undefined || message.usage.input > 0;
+		// The recording timestamp is what tells a retained record from a new one:
+		// a boundary is written after the summary call returns, so usage that is
+		// older than it cannot have carried the boundary in its request. "Older"
+		// includes "written in the same millisecond": a test's fixtures and its
+		// compaction can share one, and a record that cannot be proven newer is
+		// treated as outlived — the fallback is close to the truth either way,
+		// while a stale anchor is off by the whole summarized prefix.
+		if (!measured || (boundary && message.timestamp <= boundary.timestamp)) continue;
+		anchorTokens = promptTokens(message.usage) + message.usage.output;
+		anchorIndex = i;
+		break;
 	}
 	if (anchorIndex === -1) {
 		return Math.ceil(totalChars(messages) / 4);
@@ -344,10 +367,11 @@ function elideText(text: string, budget = SUFFIX_ELISION_CHARS): string {
 /**
  * What every boundary message opens with.
  *
- * Named because two pieces of code have to agree on it: the boundary that is
- * written, and the rule that decides what counts as a user's own request — a
+ * Named because three pieces of code have to agree on it: the boundary that
+ * is written, the rule that decides what counts as a user's own request — a
  * boundary is a summary wearing a user's clothes, and retaining one verbatim
- * would put a summary inside a summary.
+ * would put a summary inside a summary — and the estimator's rule against
+ * anchoring on usage a rewrite has outlived.
  */
 const COMPACTION_BOUNDARY_LEAD =
 	"[Conversation compacted to stay within the context window. The summary below preserves everything important.]";
@@ -415,12 +439,18 @@ export function retainedRequests(messages: AgentMessage[], budget = RETAINED_REQ
 	return kept;
 }
 
+/** A summary wearing a user's clothes: the message a compaction rewrote the transcript onto. */
+function isCompactionBoundary(message: AgentMessage | undefined): boolean {
+	if (message?.role !== "user") return false;
+	return userText(message).trim().startsWith(COMPACTION_BOUNDARY_LEAD);
+}
+
 /** A user message's own words, or null for the messages that only look like them. */
 function requestText(message: AgentMessage | undefined): string | null {
 	if (message?.role !== "user") return null;
 	const text = userText(message).trim();
 	if (text.length === 0) return null;
-	if (text.startsWith(COMPACTION_BOUNDARY_LEAD) || text.startsWith(LENGTH_RECOVERY_MESSAGE)) return null;
+	if (isCompactionBoundary(message) || text.startsWith(LENGTH_RECOVERY_MESSAGE)) return null;
 	return text;
 }
 

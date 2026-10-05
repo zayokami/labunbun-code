@@ -27,12 +27,13 @@ function bigContext(): Context {
 	const messages: AgentMessage[] = [
 		userMessage("do the thing"),
 		assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
-		// Ending on a user turn, and it matters: the estimator anchors on the last
-		// usage record, so a conversation that ends on the assistant turn keeps its
-		// anchor inside the suffix a compaction retains — and then the size before
-		// and the size after are the same number, whichever one the manager reports.
-		// That shape is worth testing for its own sake, but not here: what this
-		// fixture is for is telling the two apart.
+		// Ending on a user turn, and it still matters: the estimator anchors on the
+		// last usage record, so keeping that record inside the prefix the summary
+		// replaces is the shortest way to make the size before and the size after
+		// two different numbers. (A conversation that ends on the assistant turn
+		// keeps the record inside the retained suffix instead — the estimator
+		// passes such records over, and that shape has its own test below rather
+		// than being smuggled into this fixture.)
 		userMessage("and now this"),
 	];
 	return { systemPrompt: "", messages };
@@ -110,6 +111,30 @@ describe("the three phases of a summarization", () => {
 		// that disagree about how big the context was are both wrong.
 		expect(done.postTokens).toBe(store.compactions()[0]?.postTokens);
 		expect(done.trigger).toBe("auto");
+	});
+
+	test("a retained anchor does not erase the reduction the done phase reports", async () => {
+		// The assistant-tail shape: the transcript ends on the reply, so keepSuffix
+		// retains it — and the usage record it carries — below the new boundary.
+		// That record measured the request that carried the whole old conversation,
+		// and an estimate fixing on it reports ninety-five thousand tokens for a
+		// transcript that is now a summary and two messages: pre and post come out
+		// equal, and the phase says a summarization moved nothing.
+		const store = newStore();
+		const harness = watcher({ store });
+		const messages: AgentMessage[] = [
+			userMessage("do the thing"),
+			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+			userMessage("and now this"),
+			assistantMessage({ usage: { input: 95_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+		];
+		for (const message of messages) store.appendMessage(message);
+
+		await harness.manager.compact({ systemPrompt: "", messages });
+
+		const done = harness.phases[1];
+		if (done?.kind !== "done") throw new Error("expected a done phase");
+		expect(done.preTokens).toBeGreaterThan(done.postTokens ?? Number.POSITIVE_INFINITY);
 	});
 
 	/**

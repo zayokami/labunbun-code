@@ -103,6 +103,70 @@ describe("estimateContextTokens", () => {
 		const legacy = assistantMessage({ usage: { input: 300, output: 200, cacheRead: 80_000, cacheWrite: 0 } });
 		expect(estimateContextTokens([legacy])).toBe(80_500);
 	});
+
+	test("a record the newest boundary predates is passed over, not anchored on", () => {
+		// The shape a mid-turn compaction leaves behind: the retained suffix holds
+		// the last usage record, and that record measured the prefix the summary
+		// just replaced. Anchoring on it reports the old size for the new
+		// transcript — the sizes before and after the rewrite come out equal — and
+		// every reader of that number (the threshold, the cheap rung, the
+		// anti-thrash floor) then works from a transcript that is not there. The
+		// record written in the boundary's own millisecond is in here too: it
+		// cannot be proven to have carried the boundary, so it counts as outlived.
+		const compactedAt = 1_000_000;
+		const boundary = compactionBoundary("summary of the earlier work", { timestamp: compactedAt });
+		const ask = userMessage("and now this", compactedAt + 1_000);
+		const stale = assistantMessage({
+			usage: { input: 95_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			timestamp: compactedAt - 60_000,
+		});
+		const sameMs = assistantMessage({
+			usage: { input: 94_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			timestamp: compactedAt,
+		});
+		const boundaryText = typeof boundary.content === "string" ? boundary.content : "";
+		// Exactly what the transcript weighs without an anchor: the boundary's own
+		// text, the question under it, and the two records' empty content lists.
+		expect(estimateContextTokens([boundary, ask, stale, sameMs])).toBe(
+			Math.ceil((boundaryText.length + "and now this".length + "[]".length + "[]".length) / 4),
+		);
+	});
+
+	test("an anchor recorded after the newest boundary still anchors", () => {
+		// The record a compaction leaves valid: the first response after it was
+		// sent over the boundary, so its usage measures the transcript that
+		// stands. The timestamp is what tells the two apart.
+		const compactedAt = 1_000_000;
+		const boundary = compactionBoundary("summary", { timestamp: compactedAt });
+		const answer = assistantMessage({
+			usage: { input: 20_000, output: 500, cacheRead: 0, cacheWrite: 0 },
+			timestamp: compactedAt + 60_000,
+		});
+		expect(estimateContextTokens([boundary, userMessage("go on", compactedAt + 30_000), answer])).toBe(20_500);
+	});
+
+	test("a record above the newest boundary does not anchor either", () => {
+		// A summary replaces everything above it, so a usage record up there
+		// measured yet another prefix — the one now folded into the boundary — and
+		// its own timestamp is older than the boundary's for the same reason a
+		// retained record's is. With none below it the character count answers,
+		// over everything the list still carries.
+		const compactedAt = 1_000_000;
+		const boundary = compactionBoundary("summary", { timestamp: compactedAt });
+		const messages: AgentMessage[] = [
+			userMessage("old request", compactedAt - 5_000),
+			assistantMessage({
+				usage: { input: 80_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+				timestamp: compactedAt - 60_000,
+			}),
+			boundary,
+			userMessage("new request", compactedAt + 1_000),
+		];
+		const boundaryText = typeof boundary.content === "string" ? boundary.content : "";
+		expect(estimateContextTokens(messages)).toBe(
+			Math.ceil((boundaryText.length + "old request".length + "new request".length + "[]".length) / 4),
+		);
+	});
 });
 
 describe("estimateContextUsage", () => {
