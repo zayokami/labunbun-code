@@ -88,6 +88,19 @@ describe("SettingsSchema", () => {
 		expect(SettingsSchema.safeParse({ thinkingLevel: "turbo" }).success).toBe(false);
 	});
 
+	test("a beetle block holds one model ref per member", () => {
+		const parsed = SettingsSchema.parse({
+			beetle: { models: { john: "session", paul: "one/m1", george: "two/m3", ringo: "session" } },
+		});
+		expect(parsed.beetle?.models).toEqual({ john: "session", paul: "one/m1", george: "two/m3", ringo: "session" });
+		// Absent, and a hand-made empty block, are the same state: the next
+		// `/beetle <task>` reads `models` and asks.
+		expect(SettingsSchema.parse({}).beetle).toBeUndefined();
+		expect(SettingsSchema.parse({ beetle: {} }).beetle?.models).toBeUndefined();
+		// Refs are strings — a numeric ref is a typo, caught at load time.
+		expect(SettingsSchema.safeParse({ beetle: { models: { john: 4 } } }).success).toBe(false);
+	});
+
 	test("prices can be declared for a whole catalog, per provider or as an override", () => {
 		const parsed = SettingsSchema.parse({
 			providers: {

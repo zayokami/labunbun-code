@@ -335,6 +335,21 @@ export const SettingsSchema = z.object({
 	 * the point, because a gateway, a negotiated rate or a repriced model makes
 	 * the published number wrong for the bill it is meant to describe.
 	 */
+	/**
+	 * The /beetle band: which model each of the four members runs.
+	 *
+	 * Honored from the user's own tiers only (see {@link PROJECT_TIER_KEY_POLICY}):
+	 * the choice decides what the user's money is spent on, which is the same
+	 * class as `model`. A member set to `"session"` follows whichever model the
+	 * session is using. A saved `models` map is what makes a later `/beetle
+	 * <task>` skip the picker; without one — the block is absent, or a hand edit
+	 * left it empty — the next start asks again.
+	 */
+	beetle: z
+		.object({
+			models: z.record(z.string(), z.string()).optional(),
+		})
+		.optional(),
 	pricing: z.record(z.string(), ModelPricingSchema).optional(),
 	hooks: z.record(z.string(), z.array(z.unknown())).optional(),
 	mcpServers: z.record(z.string(), z.unknown()).optional(),
@@ -465,6 +480,9 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	// own checkout's behalf.
 	backgroundShellNotifications: "denied",
 	gamepad: "denied",
+	// The same money question as `model`: the band's four members spend the
+	// user's budget per request, and which models they run is the user's call.
+	beetle: "denied",
 	allowManagedPermissionRulesOnly: "denied",
 	disableBypassPermissionsMode: "denied",
 	// Cosmetic, no reach beyond the user's own terminal.

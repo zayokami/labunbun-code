@@ -95,6 +95,8 @@ import {
 	shellPickerItems,
 } from "./background-commands.ts";
 import { attachShellNotices } from "./background-notifications.ts";
+import { beetleUsage, parseBeetleCommand } from "./beetle.ts";
+import { type BeetleSurface, createBeetleSurface, createToolChangeLatch } from "./beetle-commands.ts";
 import { cacheStatusLine, formatCacheReport } from "./cache-report.ts";
 import {
 	builtInCommands,
@@ -731,6 +733,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		let contextLowWarned = false;
 		detachSessionListeners?.();
 		detachSessionListeners = target.on(async (event) => {
+			// The band's setTools rewrite, registered on the main session's own next
+			// turn — the latch explains why it cannot register where the change does.
+			toolChangeLatch.observe(event);
 			if (event.type === "turn_end") {
 				costTracker.recordUsage(event.message.provider, event.message.model, event.message.usage);
 				costTracker.persist();
@@ -888,6 +893,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		if (sessionRef) refreshContextInfo(sessionRef);
 		const shadowed = shadowedChoiceNotice(loadedSettings, "model", (path) => shortenHome(path, home));
 		pushInfo(handle, `Model: ${ref} — takes effect on the next prompt${shadowed ? ` (${shadowed})` : ""}`);
+
 		// Said after the switch rather than used to refuse it. The picker already
 		// hides this row, so reaching it means the user named it deliberately — and
 		// a model that cannot call tools is a legitimate thing to want for talking
@@ -921,6 +927,43 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		const shadowed = shadowedChoiceNotice(loadedSettings, "thinkingLevel", (path) => shortenHome(path, home));
 		pushInfo(handle, `Thinking level: ${level} — takes effect on the next request${shadowed ? ` (${shadowed})` : ""}`);
 	}
+
+	// ---- the band (/beetle) ----
+	// The band's setTools rewrites go through the latch (see its doc in
+	// beetle-commands.ts): armed where the change happens, registered on the
+	// main session's own next turn_start.
+	const toolChangeLatch = createToolChangeLatch((cause) => cacheTracker.note(cause));
+	const beetleSurface = createBeetleSurface({
+		notify: (line) => pushInfo(handle, line),
+		pushUserEntry: (text) => {
+			handle?.store.set((s) => ({ ...s, entries: [...s.entries, { kind: "user", text }] }));
+		},
+		getSession: () => sessionRef,
+		pick: (title, items, initialIndex) =>
+			handle ? handle.pickFromList(title, items, { initialIndex }) : Promise.resolve(null),
+		home,
+		cwd,
+		// The worker table, MCP apart — the split BeetleBandOptions documents; a
+		// table that included MCP and the separate list both would hand every
+		// seat its MCP tools twice.
+		allTools: tools,
+		mcpTools,
+		streamFn,
+		model: () => sessionRef?.model ?? model,
+		resolveModel,
+		canRunModel: (candidate) => Boolean(resolveApiKey(candidate)),
+		thinkingLevel: () => thinkingLevel,
+		trimOldToolResults: settings.trimOldToolResults,
+		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
+		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
+		network: () => sessionRef?.network ?? effectiveNetwork,
+		getPermissionRules: () => [...baseRules, ...sessionRules],
+		noteToolChange: (cause) => {
+			toolChangeLatch.arm(cause);
+		},
+		setStatusCard: (card) => handle?.setStatusCard({ title: card.title, details: card.details }),
+		initialModels: settings.beetle?.models ?? null,
+	});
 
 	attachSessionListeners(session);
 	// Before the first turn: the system prompt and the tool schemas are already
@@ -1015,6 +1058,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				if (handle) await shellPassthrough.run(text.slice(1).trim(), handle.store);
 				return { handled: true };
 			}
+			// A line addressed to a member while a band is on stage is the user
+			// talking to that member — the bus is already the relay, and routing it
+			// through the main model would make it two hops and a paraphrase. The
+			// surface pushes the user's own line (a handled verdict suppresses the
+			// REPL's push) and delivers; hooks do not run for it, because it is not
+			// a prompt to this session. Nothing intercepts when no band is active.
+			if (beetleSurface.handleMention(text)) return { handled: true };
 			if (!hooksRuntime.has("UserPromptSubmit")) return undefined;
 			const outcome = await hooksRuntime.run("UserPromptSubmit", {
 				prompt: text,
@@ -1081,6 +1131,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				switchModel,
 				thinkingLevel: () => thinkingLevel,
 				setThinkingLevel,
+				beetle: beetleSurface,
 			}),
 	});
 
@@ -1190,6 +1241,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	unsubTasks();
 	detachShellNotices();
 	clearInterval(shellPoll);
+	// A band member mid-request is an in-flight request like any other, and
+	// nothing is waiting for its answer once the user has quit.
+	beetleSurface.shutdown();
 	// Same reason, and one more: an open HID handle outlives the event loop's
 	// interest in it, so a pad left open would keep the process from exiting.
 	padWatch.stop();
@@ -1439,6 +1493,12 @@ interface AppCommandContext {
 	thinkingLevel(): ThinkingLevel | undefined;
 	/** Set it (/think): the holder the session reads, and the user file. */
 	setThinkingLevel(level: ThinkingLevel): void;
+	/**
+	 * The /beetle surface. Optional because a context built by hand — a test, an
+	 * embedder without the REPL — has no band behind it, and `/beetle` has to
+	 * answer rather than throw.
+	 */
+	beetle?: BeetleSurface;
 }
 
 function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
@@ -1557,6 +1617,10 @@ export function appCommandTable(): Array<[string, string]> {
 	return [
 		["/activity", "Show a heatmap of the days you used this, and the streak: /activity [7d|30d|all]"],
 		["/agents", "List agent definitions, and load this project's: /agents [approve]"],
+		[
+			"/beetle",
+			"Run a four-agent band that works until stopped: /beetle [<task>|status|off|models|say <member> <text>]",
+		],
 		["/cache", "Show prompt-cache hit rate, its ceiling, and any prefix rewinds"],
 		["/context", "Show what the context window is made of, and what is left"],
 		["/cost", "Show token usage and cost for this conversation, then for this project"],
@@ -1658,6 +1722,28 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				);
 			}
 			pushInfo(ctx.handle, `Agent definitions:\n${lines.join("\n")}`);
+			return true;
+		}
+		case "/beetle": {
+			const surface = ctx.beetle;
+			if (!surface) {
+				pushInfo(ctx.handle, "No band in this context — /beetle lives in the interactive REPL.");
+				return true;
+			}
+			const command = parseBeetleCommand(text.split(/\s+/).slice(1).join(" "));
+			if (command.kind === "usage") {
+				pushInfo(ctx.handle, beetleUsage());
+			} else if (command.kind === "start") {
+				surface.start(command.task);
+			} else if (command.kind === "off") {
+				surface.stop();
+			} else if (command.kind === "status") {
+				surface.status();
+			} else if (command.kind === "models") {
+				surface.configure();
+			} else {
+				surface.say(command.target, command.text);
+			}
 			return true;
 		}
 		case "/cache": {

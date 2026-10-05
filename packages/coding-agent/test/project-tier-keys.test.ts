@@ -48,6 +48,7 @@ describe("the project tier's key policy", () => {
 			"thinkingLevel",
 			"modelDiscovery",
 			"gamepad",
+			"beetle",
 			"allowManagedPermissionRulesOnly",
 			"disableBypassPermissionsMode",
 		]) {
