@@ -96,7 +96,8 @@ const MAX_SCAN_LINES = 50_000;
 const MAX_SCAN_ANCHORS = 32;
 
 /**
- * Slop between the file's mtime and the instant the read was recorded.
+ * Slop between the file's mtime and the instant the read was recorded, for the
+ * fallback comparison used when a record carries no mtime of its own.
  *
  * One millisecond, which absorbs the float rounding between two clocks and
  * nothing else. The asymmetry is deliberate: a false "changed" costs the model
@@ -310,7 +311,13 @@ export function createEditTool(cwd: string, ops: Operations, readState: ReadFile
 			// The record has to be refreshed or the *second* edit in a conversation
 			// fails against the first one's own output — `read-file-state.ts:46-48`
 			// says so explicitly, and it is right: we know the new content exactly.
-			readState.record(path, { content: onDisk });
+			// The fresh mtime is part of the same refresh — a cut-view record whose
+			// baseline predates this write would refuse the next edit as changed.
+			let editedAt: number | undefined;
+			try {
+				editedAt = (await ops.stat(path)).mtimeMs;
+			} catch {}
+			readState.record(path, { content: onDisk, mtime: editedAt });
 
 			const summary = `Edited ${path}: ${input.replace_all ? plan.indices.length : 1} replacement(s) applied.`;
 			const lines: string[] = [summary];
@@ -352,20 +359,27 @@ function errorResult(text: string): EditToolResult {
  *    nothing on the common path.
  *
  * 2. **mtime, when there is nothing to compare** — a read that was cut, so
- *    `seen.content` is a prefix rather than the file. `seen.timestamp` is the
- *    instant of the read rather than an mtime sampled at read time; that is
- *    strictly weaker, and it is why the direction is set to refuse.
+ *    `seen.content` is a prefix rather than the file. The baseline is the
+ *    file's own mtime as recorded with the read, so the question "did anything
+ *    touch it" is asked in one clock: the file's against itself. Comparing the
+ *    file's mtime against the instant the read happened was the old rule, and
+ *    it refuses in both directions the two clocks can disagree — a file whose
+ *    mtime runs ahead (skew, coarse timestamps, a runner mid time-sync) is
+ *    "changed" with nothing having touched it, which Windows CI produced live.
+ *    Falls back to the read instant when no mtime was recorded; there, a small
+ *    positive tolerance absorbs float rounding, and the direction stays refuse.
  */
 async function stalenessOf(
 	path: string,
 	ops: Operations,
 	seen: ReadFileStateEntry,
 	content: string,
-): Promise<"content no longer matches what you read" | "mtime is newer than your read" | null> {
+): Promise<"content no longer matches what you read" | "mtime no longer matches your read" | null> {
 	const comparable = seen.fullRead && !seen.partialView;
 	if (comparable) return seen.content === content ? null : "content no longer matches what you read";
 	const stat = await ops.stat(path);
-	return stat.mtimeMs > seen.timestamp + MTIME_TOLERANCE_MS ? "mtime is newer than your read" : null;
+	if (seen.mtime !== undefined) return stat.mtimeMs === seen.mtime ? null : "mtime no longer matches your read";
+	return stat.mtimeMs > seen.timestamp + MTIME_TOLERANCE_MS ? "mtime no longer matches your read" : null;
 }
 
 // ---------------------------------------------------------------------------

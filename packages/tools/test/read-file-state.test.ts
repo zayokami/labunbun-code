@@ -155,6 +155,19 @@ describe("re-recording after an edit", () => {
 		expect(entry?.partialView).toBe(false);
 	});
 
+	test("an mtime is carried the same way — a content-only re-record does not clear it", () => {
+		// Same safe direction as the flags above: a caller that only knows the new
+		// content must not silently drop the baseline the staleness check compares
+		// a cut view against. A caller that *wrote* the file passes a fresh mtime
+		// (that is the edit/write re-record), and that one replaces the old value.
+		const state = new ReadFileState();
+		state.record("/tmp/x.ts", { content: "before", mtime: 111 });
+		state.record("/tmp/x.ts", { content: "after" });
+		expect(state.getState("/tmp/x.ts")?.mtime).toBe(111);
+		state.record("/tmp/x.ts", { content: "written", mtime: 222 });
+		expect(state.getState("/tmp/x.ts")?.mtime).toBe(222);
+	});
+
 	test("a file the model wrote rather than read is a full read it may edit", () => {
 		const state = new ReadFileState();
 		state.record("/tmp/new.ts", { content: "what I just wrote" });

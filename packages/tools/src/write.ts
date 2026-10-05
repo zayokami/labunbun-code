@@ -74,7 +74,15 @@ export function createWriteTool(
 				// itself, which is the shape of every "create then fix" task. The
 				// record is what `ReadFileState` documents; this is its only production
 				// writer, and until it existed the documented rule had no caller.
-				readState?.record(path, { content: input.content });
+				//
+				// The fresh mtime rides along for the same reason as the content: a
+				// pre-write baseline on a record that now describes post-write bytes
+				// would refuse the next edit as changed-since-read.
+				let writtenAt: number | undefined;
+				try {
+					writtenAt = (await ops.stat(path)).mtimeMs;
+				} catch {}
+				readState?.record(path, { content: input.content, mtime: writtenAt });
 				return {
 					content: [{ type: "text", text: `Wrote ${input.content.length} chars to ${path}` }],
 				};

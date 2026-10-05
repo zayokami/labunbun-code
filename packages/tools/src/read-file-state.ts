@@ -24,7 +24,7 @@
  * ## The API an edit tool imports
  *
  * ```ts
- * record(path, { content, offset?, limit?, partialView? }): ReadFileStateEntry
+ * record(path, { content, offset?, limit?, partialView?, mtime? }): ReadFileStateEntry
  * getState(path): ReadFileStateEntry | undefined
  * forget(path): boolean
  * paths(): string[]
@@ -63,6 +63,16 @@ export interface ReadFileStateEntry {
 	readonly content: string;
 	/** `Date.now()` when the read was recorded, for a staleness rule of the gate's choosing. */
 	readonly timestamp: number;
+	/**
+	 * The file's own modification time when it was read, when the recorder could
+	 * stat it. This is the baseline a staleness rule compares against for a read
+	 * that cannot be compared by content: the file's clock against itself. The
+	 * {@link timestamp} on its own compares two clocks that need not agree — a
+	 * file whose mtime runs ahead of this process's clock (checkout from a
+	 * machine with skew, coarser filesystem timestamps, a CI runner mid
+	 * time-sync) reads as "changed" on a file nothing has touched.
+	 */
+	readonly mtime?: number;
 	/** Neither `offset` nor `limit` was passed: the read was not asked to be a page. */
 	readonly fullRead: boolean;
 	/**
@@ -93,6 +103,13 @@ export interface RecordReadInput {
 	 * `false` otherwise. Pass it explicitly to widen a record or to clear one.
 	 */
 	partialView?: boolean;
+	/**
+	 * The file's modification time as observed when this content was seen or
+	 * written. Defaults to the previous entry's value the same way `partialView`
+	 * does; a caller that just wrote the file must pass a fresh one rather than
+	 * let the pre-write baseline ride along.
+	 */
+	mtime?: number;
 }
 
 interface Tracked extends ReadFileStateEntry {
@@ -148,6 +165,7 @@ export class ReadFileState {
 			path,
 			content: view.content,
 			timestamp: Date.now(),
+			mtime: view.mtime ?? previous?.mtime,
 			fullRead: paged ? false : (previous?.fullRead ?? true),
 			partialView: view.partialView ?? previous?.partialView ?? false,
 		};

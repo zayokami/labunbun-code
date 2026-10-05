@@ -150,11 +150,20 @@ export function createReadTool(
 			const cutUnasked = input.offset === undefined && input.limit === undefined && end < allLines.length;
 			const cutLine = shownLines.some((shown, i) => shown !== allLines[start + i]);
 			const cutByResultLimit = rendered.length > MAX_RESULT_CHARS;
+			// The file's own mtime, the baseline the staleness check compares for a
+			// view it cannot compare by content (see `ReadFileStateEntry.mtime`). A
+			// stat losing a race with a deletion costs only the baseline — the
+			// content the model saw is still what gets recorded.
+			let mtime: number | undefined;
+			try {
+				mtime = (await ops.stat(path)).mtimeMs;
+			} catch {}
 			readState.record(path, {
 				content: shownLines.join("\n"),
 				offset: input.offset,
 				limit: input.limit,
 				partialView: cutUnasked || cutLine || cutByResultLimit,
+				mtime,
 			});
 
 			return { content: [{ type: "text", text: rendered }] };

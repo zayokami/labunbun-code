@@ -148,7 +148,10 @@ describe("gate 1: the file must have been read this session", () => {
 			new_string: "FIRST_UNIQUE_LINE_EDITED",
 		});
 
-		expect(result.isError).toBeUndefined();
+		// The refusal text rides the assertion: when this failed on Windows CI the
+		// log showed only `Received: true`, and *which* refusal fired was not
+		// recoverable from it.
+		expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
 		expect(readFileSync(file, "utf8")).toContain("FIRST_UNIQUE_LINE_EDITED\n");
 	});
 });
@@ -224,8 +227,8 @@ describe("the Windows carve-out: mtime alone does not make a file stale", () => 
 	test("where there is nothing to compare, an mtime bump does refuse", async () => {
 		// The other half of the pair, so the row above cannot be green because the
 		// mtime rule stopped existing. `partialView` means `seen.content` is a
-		// prefix rather than the file, so mtime is the only evidence available and
-		// the direction is set to refuse.
+		// prefix rather than the file, so the file's own mtime is the only
+		// evidence available — and it moved, so something wrote the file.
 		const dir = tempDir();
 		const file = write(dir, "long.ts", overTheReadWindow());
 		const { edit, read } = readEditPair(dir);
@@ -241,8 +244,84 @@ describe("the Windows carve-out: mtime alone does not make a file stale", () => 
 		});
 
 		expect(result.isError).toBe(true);
-		expect(textOf(result)).toContain("mtime is newer than your read");
+		expect(textOf(result)).toContain("mtime no longer matches your read");
 		expect(readFileSync(file, "utf8")).toContain("FIRST_UNIQUE_LINE\n");
+	});
+
+	test("an mtime moved backwards is a write too — it refuses the same way", async () => {
+		// The bump's symmetric case, and a strengthening: the old rule compared
+		// the file's mtime against the instant of the read, so a file whose mtime
+		// moved *back* (a restore from backup, an archive unpacked with stored
+		// times) read as "untouched". Against a same-clock baseline, any change
+		// at all is evidence the file was written.
+		const dir = tempDir();
+		const file = write(dir, "back.ts", overTheReadWindow());
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const earlier = new Date(Date.now() - 60_000);
+		utimesSync(file, earlier, earlier);
+
+		const result = await call(edit, {
+			file_path: file,
+			old_string: "FIRST_UNIQUE_LINE",
+			new_string: "FIRST_UNIQUE_LINE_EDITED",
+		});
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("mtime no longer matches your read");
+	});
+
+	test("an mtime ahead of the reading process's clock is not a change", async () => {
+		// mtime is the file's clock; the read instant is this process's. They need
+		// not agree — a checkout from a machine with skew, a filesystem with
+		// coarser timestamps, a CI runner mid time-sync — and a rule comparing one
+		// against the other refuses edits on files nothing has touched. Measured
+		// live: Windows CI refused this edit on a file written milliseconds
+		// earlier in the same test. The baseline is the file's own mtime at read
+		// time, so "did anything touch it" is asked in one clock, not two.
+		const dir = tempDir();
+		const file = write(dir, "ahead.ts", overTheReadWindow());
+		const ahead = new Date(Date.now() + 60_000);
+		utimesSync(file, ahead, ahead);
+		const { edit, read, state } = readEditPair(dir);
+		await call(read, { file_path: file });
+		expect(state.getState(resolveCanonical(file, dir))?.partialView).toBe(true);
+
+		const result = await call(edit, {
+			file_path: file,
+			old_string: "FIRST_UNIQUE_LINE",
+			new_string: "FIRST_UNIQUE_LINE_EDITED",
+		});
+
+		expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toContain("FIRST_UNIQUE_LINE_EDITED\n");
+	});
+
+	test("a cut read that was edited keeps its staleness baseline current", async () => {
+		const dir = tempDir();
+		const file = write(dir, "two-edits.ts", overTheReadWindow());
+		const { edit, read } = readEditPair(dir);
+		await call(read, { file_path: file });
+
+		const first = await call(edit, {
+			file_path: file,
+			old_string: "FIRST_UNIQUE_LINE",
+			new_string: "FIRST_UNIQUE_LINE_ONE",
+		});
+		expect(first.isError, first.isError ? textOf(first) : undefined).toBeUndefined();
+
+		// No re-read: the successful edit re-recorded the file. If that record
+		// carried the pre-edit mtime, this second edit — against the first one's
+		// own output — would be refused as changed-since-read.
+		const second = await call(edit, {
+			file_path: file,
+			old_string: "FIRST_UNIQUE_LINE_ONE",
+			new_string: "FIRST_UNIQUE_LINE_TWO",
+		});
+
+		expect(second.isError, second.isError ? textOf(second) : undefined).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toContain("FIRST_UNIQUE_LINE_TWO\n");
 	});
 });
 
@@ -308,6 +387,35 @@ describe("a file the model wrote is a file it may edit", () => {
 		const result = await call(edit, { file_path: file, old_string: "const a = 1;", new_string: "const a = 2;" });
 
 		expect(result.isError).toBeUndefined();
+		expect(readFileSync(file, "utf8")).toBe("const a = 2;\n");
+	});
+
+	test("writing over a cut read refreshes the baseline the next edit uses", async () => {
+		// The cut view's `partialView` is carried through the Write's re-record
+		// (the record still says the model never saw those bytes), so the next
+		// edit's staleness rule is mtime — and the mtime that matters is the one
+		// the write just produced. A pre-write baseline would read the write
+		// itself as "changed since your read".
+		const dir = tempDir();
+		const file = join(dir, "rewritten.ts");
+		const { read, state } = readEditPair(dir);
+		writeFileSync(file, overTheReadWindow());
+		await call(read, { file_path: file });
+
+		const write = createWriteTool(dir, defaultOperations(), [], state);
+		const edited = createEditTool(dir, defaultOperations(), state);
+		const wrote = await call(write, { file_path: file, content: "const a = 1;\n" });
+		expect(wrote.isError).toBeFalsy();
+		// The premise of the row: the cut-view flag really did ride through.
+		expect(state.getState(resolveCanonical(file, dir))?.partialView).toBe(true);
+
+		const result = await call(edited, {
+			file_path: file,
+			old_string: "const a = 1;",
+			new_string: "const a = 2;",
+		});
+
+		expect(result.isError, result.isError ? textOf(result) : undefined).toBeUndefined();
 		expect(readFileSync(file, "utf8")).toBe("const a = 2;\n");
 	});
 });
