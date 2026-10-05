@@ -25,6 +25,7 @@ import { describe, expect, test } from "bun:test";
 import { type AnyTool, evaluatePermissions, PLAN_MODE_READ_ONLY_TOOLS } from "@labunbun/agent";
 import { createAllTools, defaultOperations, TaskStore } from "@labunbun/tools";
 import { createAskUserQuestionTool } from "../src/ask-user.ts";
+import { createBandMessageTool } from "../src/beetle.ts";
 import { createPlanModeTools, type PlanModeCallbacks } from "../src/plan-mode.ts";
 
 const CWD = process.cwd();
@@ -40,6 +41,10 @@ function appTools(): AnyTool[] {
 		...createAllTools(CWD, { taskStore: new TaskStore(), operations: defaultOperations() }),
 		...createPlanModeTools(callbacks),
 		createAskUserQuestionTool({ askUser: async () => null }),
+		// Built only while a band is active, but it is the same tool object the
+		// band hands out then — and the mode's list admits it by name, so the
+		// walk has to see it. The send is never invoked here.
+		createBandMessageTool(() => ({ ok: true, receipts: [] }), true),
 	];
 }
 

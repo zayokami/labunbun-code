@@ -481,10 +481,14 @@ function ruleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd
  *
  * AskUserQuestion is here because asking changes nothing, and plan mode is
  * exactly where a guess would otherwise be made — a plan built on an assumed
- * goal costs the user a whole approval cycle to reject. WebFetch/WebSearch are
- * here for the same reason Read is: research that touches no file of the
- * workspace. Bash is not, and that is the mode's promise: no shell at all, not
- * even a read-only one.
+ * goal costs the user a whole approval cycle to reject. BandMessage is here
+ * for the same shape of reason: it wakes and informs other sessions, and
+ * whatever a woken session then does is evaluated in that session under the
+ * same mode — the bus cannot buy a write the mode promised does not exist,
+ * while a bus left off the list is a whole subsystem silently switched off
+ * rather than gated. WebFetch/WebSearch are here for the same reason Read is:
+ * research that touches no file of the workspace. Bash is not, and that is the
+ * mode's promise: no shell at all, not even a read-only one.
  *
  * Exported for that test: the reverse direction cannot be checked through
  * `evaluatePermissions`, which answers "deny" for a name it does not know and
@@ -500,6 +504,7 @@ export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
 	"WebSearch",
 	"TaskList",
 	"TaskGet",
+	"BandMessage",
 	"AskUserQuestion",
 	"EnterPlanMode",
 	"ExitPlanMode",
