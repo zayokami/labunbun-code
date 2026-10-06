@@ -24,7 +24,7 @@ import {
 } from "../cache.ts";
 import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
 import { type DiscoveredModel, resolveApiKey } from "../model.ts";
-import type { AssistantMessageEvent, Context, Model, StreamOptions, WireTool } from "../types.ts";
+import type { AssistantMessageEvent, Context, Model, StopReason, StreamOptions, WireTool } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // Raw wire types (structural subset, local so tests use plain fixtures)
@@ -207,13 +207,21 @@ export function convertMessages(context: Context): Array<Record<string, unknown>
 // Stream mapping
 // ---------------------------------------------------------------------------
 
-const FINISH_REASON_MAP: Record<string, "stop" | "toolUse" | "length"> = {
+const FINISH_REASON_MAP: Record<string, "stop" | "toolUse" | "length" | "refusal"> = {
 	stop: "stop",
 	tool_calls: "toolUse",
 	function_call: "toolUse",
 	length: "length",
 	max_tokens: "length",
-	content_filter: "stop",
+	// A filtered response is a refusal, the same turn the Anthropic wire names
+	// with its own stop reason. "stop" would file the model's refusal as a
+	// successful turn that happened to say nothing.
+	content_filter: "refusal",
+	// Real terminal values from TGI-style clones. Every unmapped reason is an
+	// error now, so these entries are what keeps the strictness from misfiring
+	// on a provider that was working.
+	eos: "stop",
+	eos_token: "stop",
 };
 
 interface OpenToolCallState {
@@ -318,7 +326,27 @@ export async function* mapOpenAIStream(
 
 	// Determine terminal stop reason BEFORE emitting toolcall_end events so the
 	// finalized partial carries the right stopReason.
-	const stop = finishReason ? (FINISH_REASON_MAP[finishReason] ?? "stop") : "stop";
+	//
+	// Three outcomes, told apart on purpose:
+	//  - a reason the map knows is respected;
+	//  - a reason it does not is not a normal finish, and defaulting to "stop"
+	//    files an unknown outcome as a successful turn. Sealed as an error and
+	//    named, the same call the Anthropic adapter makes;
+	//  - no reason at all keeps the "stop" guess, and it is a guess: the SDK
+	//    consumes the `[DONE]` sentinel before this mapper sees it, so a clean
+	//    end and a proxy that dropped the connection after the last content
+	//    chunk are indistinguishable here. "stop" is what the sentinel would
+	//    have confirmed, and the content that did arrive is real either way.
+	let stop: StopReason = "stop";
+	if (finishReason) {
+		const mapped = FINISH_REASON_MAP[finishReason];
+		if (mapped) {
+			stop = mapped;
+		} else {
+			stop = "error";
+			builder.message.errorMessage = `Unrecognized finish reason: ${finishReason}`;
+		}
+	}
 	builder.message.stopReason = stop;
 
 	const sorted = [...openCalls.values()].sort((a, b) => a.index - b.index);

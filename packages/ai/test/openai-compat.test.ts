@@ -397,6 +397,70 @@ describe("mapOpenAIStream", () => {
 		});
 	});
 
+	test("an unrecognized finish reason is named as an error, not passed off as a stop", async () => {
+		// A reason the map does not know is not a normal finish. Filing it as
+		// "stop" reports an unknown outcome as a successful turn; naming the
+		// value is what turns a mystery into a bug report.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { content: "partial answer" } }] },
+					{ choices: [{ delta: {}, finish_reason: "some_future_reason" }] },
+				]),
+				"deepseek",
+				"deepseek-chat",
+			),
+		);
+		const done = events.at(-1) as any;
+		expect(done.type).toBe("done");
+		expect(done.message.stopReason).toBe("error");
+		expect(done.message.errorMessage).toBe("Unrecognized finish reason: some_future_reason");
+	});
+
+	test("a content-filtered response is a refusal, not a silent stop", async () => {
+		// Same turn the Anthropic wire names with its own stop reason: no
+		// content, and the reason is the only thing that keeps it from being
+		// read as an empty successful reply.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([{ choices: [{ delta: {}, finish_reason: "content_filter" }] }]),
+				"deepseek",
+				"deepseek-chat",
+			),
+		);
+		expect((events.at(-1) as any).message.stopReason).toBe("refusal");
+	});
+
+	test("eos and eos_token are normal stops, not unknown reasons", async () => {
+		// Real terminal values from TGI-style clones. Every unmapped reason is
+		// an error now, so these entries are what keeps the strictness from
+		// misfiring on a provider that was working.
+		const eos = await collect(
+			mapOpenAIStream(
+				raw([{ choices: [{ delta: { content: "done" } }] }, { choices: [{ delta: {}, finish_reason: "eos" }] }]),
+				"tgi-clone",
+				"llama",
+			),
+		);
+		expect((eos.at(-1) as any).message.stopReason).toBe("stop");
+
+		const eosToken = await collect(
+			mapOpenAIStream(raw([{ choices: [{ delta: {}, finish_reason: "eos_token" }] }]), "tgi-clone", "llama"),
+		);
+		expect((eosToken.at(-1) as any).message.stopReason).toBe("stop");
+	});
+
+	test("a stream that never states a finish reason keeps the documented stop guess", async () => {
+		// Not an oversight. The SDK consumes the `[DONE]` sentinel before the
+		// mapper sees it, so a clean end and a proxy that dropped the
+		// connection after the last content chunk look identical here. "stop"
+		// is what the sentinel would have confirmed, and the content arrived.
+		const events = await collect(
+			mapOpenAIStream(raw([{ choices: [{ delta: { content: "ok" } }] }]), "deepseek", "deepseek-chat"),
+		);
+		expect((events.at(-1) as any).message.stopReason).toBe("stop");
+	});
+
 	test("empty stream yields terminal error event", async () => {
 		const events = await collect(mapOpenAIStream(raw([]), "deepseek", "deepseek-chat"));
 		expect(events.map((e) => e.type)).toEqual(["start", "error"]);

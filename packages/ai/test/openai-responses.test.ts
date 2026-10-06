@@ -292,6 +292,29 @@ describe("mapResponsesStream", () => {
 		expect(events.at(-1).message.errorMessage).toContain("no events");
 	});
 
+	test("a stream that ends without a terminal event is an error, and its half-written call is not dispatched", async () => {
+		// The events that came through hold a call whose arguments stopped
+		// mid-JSON. Closing it as resolved would hand the loop a tool call the
+		// model never finished writing; the missing status is the lie detector.
+		const events = await collect(
+			mapResponsesStream(
+				raw([
+					{
+						type: "response.output_item.added",
+						output_index: 0,
+						item: { id: "item_1", type: "function_call", call_id: "call_1", name: "echo" },
+					},
+					{ type: "response.function_call_arguments.delta", item_id: "item_1", delta: '{"text":"par' },
+				]),
+				"openai",
+				MODEL.id,
+			),
+		);
+		expect(events.at(-1).type).toBe("error");
+		expect(events.at(-1).message.errorMessage).toContain("terminal event");
+		expect(events.filter((e) => e.type === "toolcall_end")).toHaveLength(0);
+	});
+
 	test("a failed response carries the provider's own message", async () => {
 		const events = await collect(
 			mapResponsesStream(
@@ -329,7 +352,7 @@ describe("resolveStopReason", () => {
 		["incomplete for another reason", "incomplete", "content_filter", 0, "length"],
 		["failed", "failed", undefined, 0, "error"],
 		["cancelled", "cancelled", undefined, 0, "error"],
-		["no terminal event at all", undefined, undefined, 0, "stop"],
+		["no terminal event at all", undefined, undefined, 0, "error"],
 	] as const)("%s", (_name, status, reason, calls, expected) => {
 		expect(resolveStopReason(status, reason, calls)).toBe(expected);
 	});

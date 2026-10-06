@@ -432,6 +432,16 @@ export async function* mapResponsesStream(
 		return;
 	}
 
+	// A stream that ends without ever naming a status is not a finished turn.
+	// The events that came through may hold a call whose arguments stopped
+	// mid-JSON; closing it as resolved would dispatch a tool call the model
+	// never finished writing. The terminal events above are the only way a
+	// status gets set, so its absence is the lie detector.
+	if (status === undefined) {
+		yield builder.error("Responses stream ended without a terminal event");
+		return;
+	}
+
 	if (thinkingIndex !== -1) {
 		yield builder.thinkingEnd(thinkingIndex, encrypted);
 	}
@@ -484,6 +494,10 @@ export function resolveStopReason(
 	incompleteReason: string | undefined,
 	toolCallCount: number,
 ): "stop" | "toolUse" | "length" | "error" {
+	// No terminal event at all: the stream ended without saying how. The mapper
+	// rejects this before ever reaching here; the function keeps the same
+	// answer so its contract does not depend on the caller remembering that.
+	if (status === undefined) return "error";
 	if (status === "incomplete" && incompleteReason === "max_output_tokens") return "length";
 	if (status === "failed" || status === "cancelled") return "error";
 	if (status === "incomplete") return "length";
