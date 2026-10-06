@@ -514,6 +514,15 @@ export class AgentSession {
 					break;
 				}
 
+				// A turn the provider finished with nothing in it is not a
+				// completed turn: the transcript would gain a message with no
+				// answer and the run would report `completed` for a reply that
+				// never arrived. Sealed as an error, it flows through the error
+				// branch below and the run ends saying what happened.
+				if (assistant.stopReason === "stop" && !hasVisibleContent(assistant)) {
+					assistant = { ...assistant, stopReason: "error", errorMessage: "The model returned an empty response" };
+				}
+
 				// ---- persist the finalized assistant message ----
 				this.messages.push(assistant);
 				this.#store?.appendMessage(assistant);
@@ -906,6 +915,19 @@ export class AgentSession {
 			this.#store?.appendMessage(orphan);
 		}
 	}
+}
+
+/**
+ * Whether a finalized turn holds anything a transcript can carry: a tool call
+ * to answer, a thought, or text that is not only whitespace. An empty content
+ * array is invisible by the same measure — there is nothing in it to see.
+ */
+function hasVisibleContent(message: AssistantMessage): boolean {
+	return message.content.some((block) => {
+		if (block.type === "toolCall") return true;
+		if (block.type === "thinking") return block.thinking.trim().length > 0;
+		return block.text.trim().length > 0;
+	});
 }
 
 /**

@@ -137,7 +137,12 @@ export async function runToolPipeline(options: PipelineRunOptions): Promise<Tool
 			// Bounded like any other result: what a hook returns is still going into
 			// the context, and an unbounded replacement would be a way to put a
 			// megabyte there that no limit in this file can see.
-			if (replaced) resultMessage = bound(replaced, tool, deps.spillOutput);
+			//
+			// The id is re-pinned on the way: a hook owns the message's content,
+			// not which call it answers. A replacement keyed to another id would
+			// be dropped when the round is assembled from the assistant's calls,
+			// orphaning the tool_use it was meant to pair with.
+			if (replaced) resultMessage = bound({ ...replaced, toolCallId: callId }, tool, deps.spillOutput);
 		}
 		return resultMessage;
 	} catch (error) {

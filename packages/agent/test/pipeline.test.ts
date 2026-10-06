@@ -195,6 +195,26 @@ describe("runToolPipeline stages", () => {
 		expect((result.content[0] as any).text).toBe("[redacted]");
 	});
 
+	test("a replacement keyed to another call id is re-pinned to this call", async () => {
+		// The hook owns the message's content, not which call it answers: a
+		// replacement keyed to some other id would be dropped when the round is
+		// paired with the assistant's calls, and the call it was meant to answer
+		// would end as an orphan.
+		const result = await run(
+			echoTool(),
+			{ text: "x" },
+			{
+				hooks: {
+					afterToolCall: async (_name, _input, resultMessage) => ({
+						...resultMessage,
+						toolCallId: "some-other-id",
+					}),
+				},
+			},
+		);
+		expect(result.toolCallId).toBe("t1");
+	});
+
 	test("results truncate at maxResultSizeChars with a notice", async () => {
 		const tool = echoTool({ maxResultSizeChars: 50 });
 		const result = await run(tool, { text: "z".repeat(500) });

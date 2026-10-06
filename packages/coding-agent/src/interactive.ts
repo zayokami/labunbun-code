@@ -31,12 +31,14 @@ import {
 	windowStartFor,
 } from "@labunbun/agent";
 import {
+	type AgentMessage,
 	apiKeyEnvNames,
 	createTrackedStreamFn,
 	formatCatalogNotice,
 	gatewayProvidersFor,
 	type Model,
 	refreshModelCatalog,
+	repairToolPairing,
 	resolveApiKey,
 	resolveModel,
 	THINKING_LEVELS,
@@ -271,6 +273,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	let store: SessionStore | undefined;
 	/** Said out loud below: a resumed conversation that is missing messages. */
 	let damageNotice: string | undefined;
+	// The repaired transcript `loadSessionForResume` handed back, kept beside
+	// the store so the session below starts from it rather than re-reading the
+	// same file raw.
+	let resumedMessages: AgentMessage[] | undefined;
 	if (options.resumeSessionId) {
 		const resumeId = options.resumeSessionId;
 		const sessions = listSessions(cwd);
@@ -282,14 +288,20 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		}
 		const loaded = loadSessionForResume(match.path);
 		store = loaded?.store;
-		if (loaded) damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
+		if (loaded) {
+			damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
+			resumedMessages = loaded.messages;
+		}
 	} else if (options.continueLast) {
 		// --resume wins when both are given; this is the shorthand.
 		const target = resolveContinueTarget(cwd);
 		if (target) {
 			const loaded = loadSessionForResume(target.path);
 			store = loaded?.store;
-			if (loaded) damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
+			if (loaded) {
+				damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
+				resumedMessages = loaded.messages;
+			}
 		}
 		if (!store) {
 			console.error("No previous session to continue — starting a new one.");
@@ -719,8 +731,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Restore the selected store's transcript for both --resume and --continue.
 	// A newly created store simply has no messages yet. A compacted session
 	// resumes from its boundary, not from the transcript the summary replaced.
+	// When the store came from a file, the repaired read is what goes in: half
+	// of a tool call is a request the provider rejects, and the damage notice
+	// above has already said that message is gone.
 	if (store) {
-		session.messages.push(...store.contextMessages());
+		session.messages.push(...(resumedMessages ?? store.contextMessages()));
 	}
 
 	// ---- cost tracking + context indicator + session-scoped listeners ----
@@ -2183,8 +2198,19 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// genuine miss from the branch point down; the user asked for it, and the
 			// registration is what says so.
 			ctx.cache?.note?.("fork");
-			forkSession.messages = forkStore.contextMessages();
-			pushInfo(ctx.handle, `Branched from ${arg.slice(0, 8)}. New messages continue on this branch.`);
+			// A fork point can sit right after a tool_use whose result lives on
+			// the branch being left — the same half-pair a damaged line leaves
+			// behind, and a request the provider rejects. Repaired here, the last
+			// point the structure is still in hand, exactly as a resumed file is.
+			const forkContext = forkStore.contextMessages();
+			const forkRepaired = repairToolPairing(forkContext);
+			forkSession.messages = forkRepaired.messages;
+			const forkRemoved = forkContext.length - forkRepaired.messages.length;
+			pushInfo(
+				ctx.handle,
+				`Branched from ${arg.slice(0, 8)}. New messages continue on this branch.` +
+					(forkRemoved > 0 ? ` ${forkRemoved} message${forkRemoved === 1 ? "" : "s"} removed with its tool call.` : ""),
+			);
 			return true;
 		}
 		case "/rewind": {

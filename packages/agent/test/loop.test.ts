@@ -100,6 +100,24 @@ describe("AgentSession loop", () => {
 		expect(events.at(-1)?.type).toBe("agent_end");
 	});
 
+	test("a turn that ends with no content is an error, not a completed reply", async () => {
+		// A provider can end a stream without ever saying anything: an empty text
+		// block, no tool call, no thought. Left alone, the loop would persist the
+		// vacuous turn and report `completed` — a lost answer presented as an
+		// empty one. It is sealed as an error instead.
+		const blank = await runHarness([{ text: "" }]);
+		expect(blank.reason).toBe("error");
+		const end = blank.events.at(-1);
+		expect(end?.type).toBe("agent_end");
+		if (end?.type === "agent_end") expect(end.errorMessage).toBe("The model returned an empty response");
+		const assistants = blank.session.messages.filter((m) => m.role === "assistant") as any[];
+		expect(assistants.at(-1)?.stopReason).toBe("error");
+
+		// Whitespace is not an answer either.
+		const spaces = await runHarness([{ text: "   " }]);
+		expect(spaces.reason).toBe("error");
+	});
+
 	test("tool roundtrip: call → result → final answer", async () => {
 		const calls: unknown[] = [];
 		const tool = echoTool({
@@ -121,6 +139,33 @@ describe("AgentSession loop", () => {
 		expect(results).toHaveLength(1);
 		expect(results[0].content[0]).toEqual({ type: "text", text: "echo:hi" });
 		expect(results[0].isError).toBe(false);
+	});
+
+	test("a hook's replacement still answers the call it replaced", async () => {
+		// The round is assembled by matching result ids to call ids. When a hook
+		// hands back a message keyed to a different id, the replacement used to be
+		// filtered out — and the persisted tool_use ended as an orphan settled by
+		// the synthesizer, with the hook's edit nowhere in the transcript.
+		const { session, reason } = await runHarness(
+			[{ toolCalls: [{ id: "t1", name: "echo", arguments: { text: "hi" } }] }, { text: "done" }],
+			{
+				tools: [echoTool()],
+				depsOverrides: {
+					hooks: {
+						afterToolCall: async (_name, _input, resultMessage) => ({
+							...resultMessage,
+							toolCallId: "not-the-call",
+							content: [{ type: "text" as const, text: "rewritten by the hook" }],
+						}),
+					},
+				},
+			},
+		);
+		expect(reason).toBe("completed");
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0].toolCallId).toBe("t1");
+		expect((results[0].content[0] as any).text).toBe("rewritten by the hook");
 	});
 
 	test("one round's tool results are bounded together, not just one by one", async () => {

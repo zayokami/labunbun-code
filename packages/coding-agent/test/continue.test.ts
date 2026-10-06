@@ -595,4 +595,46 @@ describe("a session file that lost a line", () => {
 			{ role: "user", content: "new question", timestamp: expect.any(Number) },
 		]);
 	}, 30_000);
+
+	test("continue on a file that lost a tool result sends no unpaired call", async () => {
+		// The test above loses a line that broke no pairing. This one loses a
+		// tool result: a raw read leaves an assistant turn holding a tool_use
+		// whose result is gone, and the provider rejects the first request of
+		// the resumed conversation. The notice already says the message was
+		// removed — what the session sends has to agree with it.
+		const { home, cwd } = fixture();
+		const store = SessionStore.startNew(cwd, home);
+		const request = userMessage("run it");
+		const newest = userMessage("the newest question");
+		store.appendMessage(request);
+		store.appendMessage(
+			assistantMessage({
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "t1", name: "Read", arguments: '{"file_path":"a.txt"}' }],
+			}),
+		);
+		store.appendMessage({
+			role: "toolResult",
+			toolCallId: "t1",
+			toolName: "Read",
+			isError: false,
+			content: [{ type: "text", text: "contents" }],
+			timestamp: 1,
+		});
+		store.appendMessage(newest);
+		damageLine(store.path, 4); // the result's line
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain("1 damaged line and 1 message removed with its tool call");
+		// The first request carries the repaired transcript: the half that lost
+		// its other half is not sent, because a rejected first request makes the
+		// resumed conversation unusable from the moment it opens.
+		expect(result.requests[0]).toEqual([
+			request,
+			newest,
+			{ role: "user", content: "new question", timestamp: expect.any(Number) },
+		]);
+	}, 30_000);
 });

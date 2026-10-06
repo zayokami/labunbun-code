@@ -13,7 +13,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { AgentSession, CompactionManager, SessionStore } from "@labunbun/agent";
-import { type Context, userMessage } from "@labunbun/ai";
+import { type AgentMessage, assistantMessage, type Context, userMessage } from "@labunbun/ai";
 import { createStore, initialUiState, type UiState } from "@labunbun/tui";
 import { rewriteCause } from "../src/cache-report.ts";
 import { builtInCommands } from "../src/commands.ts";
@@ -178,8 +178,7 @@ describe("/trim", () => {
 });
 
 describe("/fork", () => {
-	function forkStore(known: string): SessionStore {
-		const restored = [userMessage("from the branch")];
+	function forkStore(known: string, restored: AgentMessage[] = [userMessage("from the branch")]): SessionStore {
 		return {
 			branch: (id: string) => id === known,
 			contextMessages: () => restored,
@@ -213,5 +212,26 @@ describe("/fork", () => {
 		expect(notes.causes).toEqual([]);
 		// The transcript is untouched: an id that matched nothing is not a rewrite.
 		expect(userTexts(ctx)).toEqual(["kept"]);
+	});
+
+	test("an unpaired tool call on the incoming branch is repaired before it goes live", () => {
+		// A fork point can sit right after a tool_use whose result lives on the
+		// branch being left — the same half-pair a damaged line leaves behind.
+		// Taken raw it would be the transcript's next request, which the provider
+		// rejects; the repair drops both halves like every other read back.
+		const notes: Notes = { causes: [] };
+		const branchMsg = userMessage("from the branch");
+		const orphaned = assistantMessage({
+			stopReason: "toolUse",
+			content: [{ type: "toolCall", id: "t9", name: "Read", arguments: "{}" }],
+		});
+		const ctx = makeCtx(notes, {
+			session: { messages: [userMessage("on the old branch")] },
+			sessionStore: () => forkStore("abc12345", [branchMsg, orphaned]),
+		});
+
+		expect(handleAppCommand("/fork abc12345", ctx)).toBe(true);
+
+		expect(ctx.getSession()?.messages).toEqual([branchMsg]);
 	});
 });
