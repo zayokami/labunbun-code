@@ -117,6 +117,7 @@ export {
 	statusCodeOf,
 	withRetry,
 } from "./retry.ts";
+export { type StallTimeoutOptions, StreamStallError, withStallTimeout } from "./stall-timeout.ts";
 export { repairToolPairing } from "./transcript.ts";
 // Types
 export type {
@@ -161,6 +162,7 @@ import { createAnthropicStreamFn } from "./providers/anthropic.ts";
 import { createOpenAIStreamFn } from "./providers/openai-compat.ts";
 import { createResponsesStreamFn, type ResponsesClientLike } from "./providers/openai-responses.ts";
 import { withRetry } from "./retry.ts";
+import { withStallTimeout } from "./stall-timeout.ts";
 import type { Model, StreamFn, StreamOptions } from "./types.ts";
 
 /** What the caller wants done about caching, and where to hear about it. */
@@ -183,6 +185,13 @@ export interface StreamFnOptions {
 	 * indistinguishable from the branch not existing at all.
 	 */
 	responsesClientFactory?: () => ResponsesClientLike;
+	/**
+	 * How long a request may go without a single stream event before it is
+	 * declared stalled and torn down. The failure it bounds is the one no
+	 * timeout inside the SDK covers: a connection that was accepted and then
+	 * went silent.
+	 */
+	stallTimeoutMs?: number;
 }
 
 /**
@@ -229,10 +238,19 @@ function dispatchStreamFn(settings: StreamFnOptions): StreamFn {
 }
 
 /**
- * Default StreamFn: dispatch by `model.api`, wrapped in retry policy.
+ * Default StreamFn: dispatch by `model.api`, under the stall watchdog, under
+ * the retry policy.
+ *
+ * The order is the contract. The watchdog sits *below* retry so that a stall
+ * before any event has flowed is an ordinary failed connection and earns the
+ * ladder's second attempt, while a stall after events have flowed rethrows —
+ * the session loop then seals the partial as an errored turn.
  */
 export function createDefaultStreamFn(settings: StreamFnOptions = {}): StreamFn {
-	return withRetry(dispatchStreamFn(settings));
+	const guarded = withStallTimeout(dispatchStreamFn(settings), {
+		idleTimeoutMs: settings.stallTimeoutMs ?? 120_000,
+	});
+	return withRetry(guarded);
 }
 
 /**

@@ -461,9 +461,13 @@ describe("mapOpenAIStream", () => {
 		expect((events.at(-1) as any).message.stopReason).toBe("stop");
 	});
 
-	test("empty stream yields terminal error event", async () => {
+	test("empty stream yields terminal error event, with no start to un-say", async () => {
+		// No start in front of the error: start marks the first wire event, and
+		// a stream that never produced one never started. Emitting it eagerly
+		// would also make an accepted-then-silent connection look mid-stream to
+		// the retry layer, which refuses to retry anything after a first event.
 		const events = await collect(mapOpenAIStream(raw([]), "deepseek", "deepseek-chat"));
-		expect(events.map((e) => e.type)).toEqual(["start", "error"]);
+		expect(events.map((e) => e.type)).toEqual(["error"]);
 	});
 });
 
@@ -507,18 +511,26 @@ describe("defaultClient", () => {
 		}
 	}
 
-	test("the caller's abort signal reaches fetch through the real client", async () => {
+	test("the caller's abort reaches the request and the SDK's own signal is not overwritten", async () => {
 		await withFetch(
 			() => new Response(CHAT_SSE, { headers: { "content-type": "text/event-stream" } }),
 			async (calls) => {
 				const controller = new AbortController();
 				await collect(createOpenAIStreamFn({})(MODEL, ctx(), { apiKey: "test-key", signal: controller.signal }));
 
-				// A real client built a real request from the model's baseUrl, and the
-				// wrapper's whole job — injecting the caller's signal into the init it
-				// forwards — is what is asserted, not merely that a function exists.
+				// A real client built a real request from the model's baseUrl.
 				expect(calls[0]?.url).toContain("api.deepseek.com/v1/chat/completions");
-				expect(calls[0]?.signal).toBe(controller.signal);
+				const forwarded = calls[0]?.signal;
+				expect(forwarded).toBeDefined();
+				// The SDK hands the fetch hook its own controller's signal — the one
+				// its timeout timer aborts through — and identity with the caller's
+				// is exactly the bug: forwarding the caller's alone detaches that
+				// timer, and a request that can never time out is a hang with no
+				// ceiling. The composition must still stop when the caller aborts.
+				expect(forwarded).not.toBe(controller.signal);
+				expect(forwarded?.aborted).toBe(false);
+				controller.abort();
+				expect(forwarded?.aborted).toBe(true);
 			},
 		);
 	});

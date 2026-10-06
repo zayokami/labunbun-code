@@ -22,6 +22,7 @@ import {
 import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
 import { type DiscoveredModel, resolveApiKey } from "../model.ts";
 import { looksLikeContextOverflow, statusCodeOf } from "../retry.ts";
+import { composeSignals } from "../signals.ts";
 import type {
 	AgentMessage,
 	AssistantMessageEvent,
@@ -788,11 +789,17 @@ export function createAnthropicStreamFn(options: AnthropicStreamFnOptions = {}) 
 async function defaultClient(model: Model, options?: StreamOptions): Promise<AnthropicClientLike> {
 	const { default: Anthropic } = await import("@anthropic-ai/sdk");
 	const apiKey = options?.apiKey ?? resolveApiKey(model) ?? "";
+	// Both signals must reach the request: the SDK puts its own on the init —
+	// its timeout timer aborts through that one — so replacing it with the
+	// caller's alone would leave the timeout with no listener.
+	const callerSignal = options?.signal;
 	return new Anthropic({
 		apiKey,
 		baseURL: model.baseUrl || undefined,
 		maxRetries: 0, // our retry wrapper owns retry policy
-		fetch: options?.signal ? (input, init) => fetch(input, { ...init, signal: options.signal }) : undefined,
+		fetch: callerSignal
+			? (input, init) => fetch(input, { ...init, signal: composeSignals(init?.signal, callerSignal) })
+			: undefined,
 	}) as unknown as AnthropicClientLike;
 }
 

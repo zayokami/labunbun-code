@@ -11,6 +11,7 @@ import {
 	type ToolResultMessage,
 	userMessage,
 	withRetry,
+	withStallTimeout,
 } from "@labunbun/ai";
 import { z } from "zod";
 import {
@@ -888,7 +889,9 @@ describe("a retried request", () => {
 		// Steps are empty because the harness's own script is replaced wholesale
 		// by the retrying transport under test.
 		const { events, reason } = await runHarness([], {
-			depsOverrides: { streamFn: withRetry(flaky, { baseDelayMs: 1, sleep: async () => {} }) },
+			// Jitter pinned to its top edge so the announced delay is exactly the
+			// backoff the base delay names.
+			depsOverrides: { streamFn: withRetry(flaky, { baseDelayMs: 1, random: () => 1, sleep: async () => {} }) },
 		});
 
 		expect(reason).toBe("completed");
@@ -978,5 +981,88 @@ describe("failure-path consistency", () => {
 		expect(text).toBe("hell");
 		// The session survives the fault.
 		expect(await session.prompt("again")).toBe("completed");
+	});
+});
+
+describe("a stalled stream", () => {
+	// A provider that accepted the connection and then went silent is neither a
+	// failure nor a finish; without the watchdog the turn waits forever. These
+	// two tests run the guard through the session loop in the composition the
+	// app wires (`withRetry(withStallTimeout(dispatch))`). A promise that never
+	// settles does not respect this runner's per-test timeout, so every call
+	// that could hang behind a broken watchdog races a hard bound instead.
+	const HANG = new Promise<never>(() => {});
+	const within = <T>(p: Promise<T>, ms: number): Promise<T> =>
+		Promise.race([
+			p,
+			new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`did not settle within ${ms}ms`)), ms)),
+		]);
+
+	test("a mid-stream stall seals the partial as an errored turn", async () => {
+		const faux = fauxProvider([{ text: "half an answer" }, { text: "never requested" }]);
+		// The stream delivers its content, then swallows the `done` event and goes
+		// quiet — the shape of a proxy that died between the last chunk and the
+		// terminator. The user has already read the text, so it must survive.
+		const stalls: StreamFn = async function* (model, context, options) {
+			for await (const event of faux.streamFn(model, context, options)) {
+				if (event.type === "done") {
+					await HANG;
+					return;
+				}
+				yield event;
+			}
+		};
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [],
+			deps: { streamFn: withStallTimeout(stalls, { idleTimeoutMs: 40 }) },
+		});
+
+		expect(await within(session.prompt("go"), 2_000)).toBe("error");
+		const last = session.messages.at(-1) as any;
+		expect(last?.role).toBe("assistant");
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toContain("stalled");
+		const text = last.content
+			.filter((b: any) => b.type === "text")
+			.map((b: any) => b.text)
+			.join("");
+		expect(text).toBe("half an answer");
+	});
+
+	test("a first-byte stall is retried within the same turn", async () => {
+		// The same composition as the app's default wiring, so the retry layer
+		// sits *above* the watchdog: a stall before any event is a failed
+		// connection and earns the second attempt; only once events have flowed
+		// does a stall become terminal.
+		const faux = fauxProvider([{ text: "recovered" }]);
+		let calls = 0;
+		const flaky: StreamFn = async function* (model, context, options) {
+			calls++;
+			if (calls === 1) {
+				await HANG;
+				return;
+			}
+			yield* faux.streamFn(model, context, options);
+		};
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [],
+			deps: {
+				streamFn: withRetry(withStallTimeout(flaky, { idleTimeoutMs: 40 }), {
+					baseDelayMs: 1,
+					sleep: async () => {},
+				}),
+			},
+		});
+
+		expect(await within(session.prompt("go"), 2_000)).toBe("completed");
+		expect(calls).toBe(2);
+		const last = session.messages.at(-1) as any;
+		const text = last.content
+			.filter((b: any) => b.type === "text")
+			.map((b: any) => b.text)
+			.join("");
+		expect(text).toBe("recovered");
 	});
 });

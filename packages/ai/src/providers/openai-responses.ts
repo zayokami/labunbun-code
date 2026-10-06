@@ -40,6 +40,7 @@ import {
 } from "../cache.ts";
 import { MessageBuilder } from "../message-builder.ts";
 import { resolveApiKey } from "../model.ts";
+import { composeSignals } from "../signals.ts";
 import type { AssistantMessageEvent, Context, Model, StreamOptions, ThinkingLevel, WireTool } from "../types.ts";
 
 // ---------------------------------------------------------------------------
@@ -326,9 +327,15 @@ export async function* mapResponsesStream(
 		return index;
 	}
 
-	yield builder.start();
-
 	for await (const event of rawEvents) {
+		if (!sawEvent) {
+			// Start marks the first wire event, not the act of connecting. A
+			// connection that was accepted and then went silent must look
+			// event-less to the retry layer above, where it earns a second
+			// attempt instead of ending the turn. The Anthropic mapper has
+			// always emitted start this way, off its first wire event.
+			yield builder.start();
+		}
 		sawEvent = true;
 
 		switch (event.type) {
@@ -535,12 +542,19 @@ export function createResponsesStreamFn(settings: ResponsesStreamFnOptions = {})
 async function defaultClient(model: Model, options?: StreamOptions): Promise<ResponsesClientLike> {
 	const { default: OpenAI } = await import("openai");
 	const apiKey = options?.apiKey ?? resolveApiKey(model) ?? "";
+	// The same reason as the Chat Completions adapter: Esc has to cancel this
+	// wire exactly as it cancels the other two.
+	//
+	// Both signals must reach the request: the SDK puts its own on the init —
+	// its timeout timer aborts through that one — so replacing it with the
+	// caller's alone would leave the timeout with no listener.
+	const callerSignal = options?.signal;
 	return new OpenAI({
 		apiKey,
 		baseURL: model.baseUrl || undefined,
 		maxRetries: 0, // our retry wrapper owns retry policy
-		// The same reason as the Chat Completions adapter: Esc has to cancel this
-		// wire exactly as it cancels the other two.
-		fetch: options?.signal ? (input, init) => fetch(input, { ...init, signal: options.signal }) : undefined,
+		fetch: callerSignal
+			? (input, init) => fetch(input, { ...init, signal: composeSignals(init?.signal, callerSignal) })
+			: undefined,
 	}) as unknown as ResponsesClientLike;
 }

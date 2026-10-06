@@ -403,6 +403,38 @@ describe("dispatch", () => {
 		expect(seen[0].tools).toBeDefined();
 	});
 
+	test("the default wiring retries a stalled attempt, which pins the watchdog under retry", async () => {
+		// The claim is the *order* inside `createDefaultStreamFn`: swap the two
+		// wrappers and the stall fires while retry is still waiting on its first
+		// inner attempt — the ladder never gets its second shot and this test
+		// sees one call and a thrown stall. The factory injection is what makes
+		// the default wiring observable with no network: the first request is
+		// accepted and then silent, exactly the failure the watchdog exists for.
+		let calls = 0;
+		const hang: { [Symbol.asyncIterator](): AsyncIterator<unknown> } = {
+			[Symbol.asyncIterator]: () => ({ next: () => new Promise<never>(() => {}) }),
+		};
+		const streamFn = createDefaultStreamFn({
+			stallTimeoutMs: 40,
+			responsesClientFactory: () => ({
+				responses: {
+					async create() {
+						calls++;
+						if (calls === 1) return hang;
+						return raw([{ type: "response.completed", response: { status: "completed" } }]);
+					},
+				},
+			}),
+		});
+
+		const events = await Promise.race([
+			collect(streamFn(MODEL, ctx(), { apiKey: "k" })),
+			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("did not settle within 5000ms")), 5_000)),
+		]);
+		expect(calls).toBe(2);
+		expect(events.at(-1)?.type).toBe("done");
+	});
+
 	test("the model's own row reaches its own wire", async () => {
 		// Ties the registry to the dispatch: the row that decides which wire a model
 		// answers on is the same row this test reads, so a row moved to the wrong

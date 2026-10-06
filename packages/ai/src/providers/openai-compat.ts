@@ -24,6 +24,7 @@ import {
 } from "../cache.ts";
 import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
 import { type DiscoveredModel, resolveApiKey } from "../model.ts";
+import { composeSignals } from "../signals.ts";
 import type { AssistantMessageEvent, Context, Model, StopReason, StreamOptions, WireTool } from "../types.ts";
 
 // ---------------------------------------------------------------------------
@@ -243,9 +244,15 @@ export async function* mapOpenAIStream(
 	let finishReason: string | null = null;
 	let sawContent = false;
 
-	yield builder.start();
-
 	for await (const chunk of rawChunks) {
+		if (!sawContent) {
+			// Start marks the first wire event, not the act of connecting. A
+			// connection that was accepted and then went silent must look
+			// event-less to the retry layer above, where it earns a second
+			// attempt instead of ending the turn. The Anthropic mapper has
+			// always emitted start this way, off its first wire event.
+			yield builder.start();
+		}
 		sawContent = true;
 		if (chunk.usage) {
 			const promptTotal = chunk.usage.prompt_tokens ?? builder.message.usage.promptTotal;
@@ -390,13 +397,20 @@ export function createOpenAIStreamFn(settings: OpenAIStreamFnOptions = {}) {
 async function defaultClient(model: Model, options?: StreamOptions): Promise<OpenAIClientLike> {
 	const { default: OpenAI } = await import("openai");
 	const apiKey = options?.apiKey ?? resolveApiKey(model) ?? "";
+	// Thread the caller's abort signal into every request so Esc cancels
+	// OpenAI-compatible providers the same way it cancels Anthropic.
+	//
+	// Both signals must reach the request: the SDK puts its own on the init —
+	// its timeout timer aborts through that one — so replacing it with the
+	// caller's alone would leave the timeout with no listener.
+	const callerSignal = options?.signal;
 	return new OpenAI({
 		apiKey,
 		baseURL: model.baseUrl || undefined,
 		maxRetries: 0, // our retry wrapper owns retry policy
-		// Thread the caller's abort signal into every request so Esc cancels
-		// OpenAI-compatible providers the same way it cancels Anthropic.
-		fetch: options?.signal ? (input, init) => fetch(input, { ...init, signal: options.signal }) : undefined,
+		fetch: callerSignal
+			? (input, init) => fetch(input, { ...init, signal: composeSignals(init?.signal, callerSignal) })
+			: undefined,
 	}) as unknown as OpenAIClientLike;
 }
 

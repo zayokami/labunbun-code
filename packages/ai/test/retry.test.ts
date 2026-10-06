@@ -103,6 +103,147 @@ describe("withRetry", () => {
 		expect(waited).toBe(2000);
 	});
 
+	test("retry-after is read through a Headers instance, which is what the SDKs attach", async () => {
+		// The SDKs put a real `Headers` on the error. Reading only own
+		// properties, which is what this did, meant the header never fired in
+		// production — the one test there was hand-rolled a plain object.
+		let waited = 0;
+		const error = Object.assign(new Error("rl"), { status: 429, headers: new Headers({ "retry-after": "2" }) });
+		const { fn } = failingStreamFn(1, error);
+		const wrapped = withRetry(fn, {
+			baseDelayMs: 1,
+			sleep: async (ms) => {
+				waited = ms;
+			},
+		});
+		await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+		expect(waited).toBe(2000);
+	});
+
+	test("an empty retry-after counts as absent, not as an instant retry", async () => {
+		// `Number("")` is 0, so a header that says nothing would read as "retry
+		// immediately" and skip the backoff. The jitter is pinned so the wait
+		// that stands in is exactly the base delay.
+		let waited = 0;
+		const error = Object.assign(new Error("rl"), { status: 429, headers: new Headers({ "retry-after": "" }) });
+		const { fn } = failingStreamFn(1, error);
+		await collect(
+			withRetry(fn, {
+				baseDelayMs: 100,
+				random: () => 1,
+				sleep: async (ms) => {
+					waited = ms;
+				},
+			})(FAUX_MODEL, { systemPrompt: "", messages: [] }),
+		);
+		expect(waited).toBe(100);
+	});
+
+	test("retry-after-ms wins over retry-after: seconds would round it off", async () => {
+		let waited = 0;
+		const error = Object.assign(new Error("rl"), {
+			status: 429,
+			headers: new Headers({ "retry-after": "3", "retry-after-ms": "1200" }),
+		});
+		const { fn } = failingStreamFn(1, error);
+		await collect(
+			withRetry(fn, {
+				baseDelayMs: 1,
+				sleep: async (ms) => {
+					waited = ms;
+				},
+			})(FAUX_MODEL, { systemPrompt: "", messages: [] }),
+		);
+		expect(waited).toBe(1200);
+	});
+
+	test("an HTTP-date retry-after is honored as the wait it names", async () => {
+		// The date form is parsed against the real clock, so the assertion is a
+		// band: an implementation that ignored the form would wait the 1ms
+		// backoff instead, and one that misread it as a number would wait 0.
+		let waited = 0;
+		const when = new Date(Date.now() + 5_000).toUTCString();
+		const error = Object.assign(new Error("rl"), { status: 429, headers: { "retry-after": when } });
+		const { fn } = failingStreamFn(1, error);
+		await collect(
+			withRetry(fn, {
+				baseDelayMs: 1,
+				sleep: async (ms) => {
+					waited = ms;
+				},
+			})(FAUX_MODEL, { systemPrompt: "", messages: [] }),
+		);
+		expect(waited).toBeGreaterThanOrEqual(3_500);
+		expect(waited).toBeLessThanOrEqual(5_000);
+	});
+
+	test("a retry-after beyond the cap is clamped to the cap", async () => {
+		// 3600 seconds is an hour; sleeping it because a server said so would
+		// be a session that looks hung. The cap is the ceiling the caller set.
+		let waited = 0;
+		const error = Object.assign(new Error("rl"), { status: 429, headers: { "retry-after": "3600" } });
+		const { fn } = failingStreamFn(1, error);
+		await collect(
+			withRetry(fn, {
+				baseDelayMs: 1,
+				maxDelayMs: 5_000,
+				sleep: async (ms) => {
+					waited = ms;
+				},
+			})(FAUX_MODEL, { systemPrompt: "", messages: [] }),
+		);
+		expect(waited).toBe(5_000);
+	});
+
+	test("a negative retry-after is clamped to zero, not a backwards sleep", async () => {
+		let waited = -1;
+		const error = Object.assign(new Error("rl"), { status: 429, headers: { "retry-after": "-3" } });
+		const { fn } = failingStreamFn(1, error);
+		await collect(
+			withRetry(fn, {
+				baseDelayMs: 1,
+				sleep: async (ms) => {
+					waited = ms;
+				},
+			})(FAUX_MODEL, { systemPrompt: "", messages: [] }),
+		);
+		expect(waited).toBe(0);
+	});
+
+	test("backoff jitters between half and the full delay", async () => {
+		// Half fixed, half random: sessions retrying on the same schedule
+		// synchronize into a herd without the spread, and a delay that could
+		// shrink to nothing would retry instantly. `random: () => 0.5` makes
+		// the formula readable: 1000/2 + 0.5 * (1000/2) = 750.
+		let waited = 0;
+		const { fn } = failingStreamFn(1, Object.assign(new Error("rl"), { status: 429 }));
+		await collect(
+			withRetry(fn, {
+				baseDelayMs: 1000,
+				random: () => 0.5,
+				sleep: async (ms) => {
+					waited = ms;
+				},
+			})(FAUX_MODEL, { systemPrompt: "", messages: [] }),
+		);
+		expect(waited).toBe(750);
+
+		// And the lower edge is a bound, not zero: a delay that reached zero
+		// would be a retry storm wearing jitter's name.
+		let low = 0;
+		const second = failingStreamFn(1, Object.assign(new Error("rl"), { status: 429 }));
+		await collect(
+			withRetry(second.fn, {
+				baseDelayMs: 1000,
+				random: () => 0,
+				sleep: async (ms) => {
+					low = ms;
+				},
+			})(FAUX_MODEL, { systemPrompt: "", messages: [] }),
+		);
+		expect(low).toBe(500);
+	});
+
 	test("wraps a normal faux stream unchanged", async () => {
 		const faux = fauxProvider([{ text: "fine" }]);
 		const wrapped = withRetry(faux.streamFn);
@@ -236,6 +377,9 @@ describe("retry notices", () => {
 		const notices: RetryNotice[] = [];
 		const wrapped = withRetry(fn, {
 			baseDelayMs: 1000,
+			// Jitter pinned to its top edge so the announced delay is exactly
+			// the backoff the base delay names.
+			random: () => 1,
 			onRetry: (notice) => {
 				order.push("notice");
 				notices.push(notice);

@@ -106,8 +106,10 @@ describe("headless retry reporting", () => {
 		const { code, stdout, stderr } = await runCaptured(harness, {
 			modelRef: "anthropic/claude-haiku-4-5",
 			// The wrapper the default stream fn would have built, with the wait
-			// taken out: the notice is what is under test, not the backoff.
-			streamFn: withRetry(flaky, { baseDelayMs: 1, sleep: async () => {} }),
+			// taken out and the jitter pinned to its top edge, so the announced
+			// number is the base delay itself: the notice is what is under test,
+			// not the backoff.
+			streamFn: withRetry(flaky, { baseDelayMs: 1, random: () => 1, sleep: async () => {} }),
 		});
 
 		expect(code).toBe(0);

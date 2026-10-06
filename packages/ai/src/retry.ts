@@ -21,6 +21,8 @@ export interface RetryOptions {
 	overloadedMaxAttempts?: number;
 	onRetry?: (retry: RetryNotice) => void;
 	sleep?: (ms: number) => Promise<void>;
+	/** Jitter source for the backoff; injectable so tests can pin it. */
+	random?: () => number;
 }
 
 const DEFAULTS = {
@@ -110,15 +112,44 @@ function isNetworkError(error: unknown): boolean {
 	return false;
 }
 
+/** One header off an error, whichever container the SDK put it in. */
+function headerValue(headers: unknown, name: string): string | null {
+	if (!headers || typeof headers !== "object") return null;
+	if (headers instanceof Headers) return headers.get(name);
+	const record = headers as Record<string, string | undefined>;
+	const titleCase = name
+		.split("-")
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join("-");
+	return record[name] ?? record[titleCase] ?? null;
+}
+
+/**
+ * The wait a Retry-After response asks for, in milliseconds, or null.
+ *
+ * The SDKs attach a real `Headers` instance, and reading it like a plain
+ * record — which is what this used to do — meant the header never fired in
+ * production; only the hand-rolled fixture here ever had the right shape.
+ * Three forms are legal and all three are read: `retry-after-ms` (first,
+ * because seconds would round it off), seconds, and an HTTP-date. Negative
+ * values clamp to zero rather than sleeping backwards.
+ */
 function retryAfterMsOf(error: unknown): number | null {
-	if (error !== null && typeof error === "object") {
-		const headers = (error as { headers?: Record<string, string | undefined> }).headers;
-		const value = headers?.["retry-after"] ?? headers?.["Retry-After"];
-		if (value) {
-			const seconds = Number(value);
-			if (!Number.isNaN(seconds)) return seconds * 1000;
-		}
+	if (error === null || typeof error !== "object") return null;
+	const headers = (error as { headers?: unknown }).headers;
+	const ms = headerValue(headers, "retry-after-ms");
+	if (ms) {
+		const value = Number(ms);
+		if (Number.isFinite(value)) return Math.max(0, value);
 	}
+	const value = headerValue(headers, "retry-after");
+	// Empty counts as absent: `Number("")` is 0, and a header that says nothing
+	// must not be read as "retry immediately".
+	if (!value) return null;
+	const seconds = Number(value);
+	if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+	const date = Date.parse(value);
+	if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
 	return null;
 }
 
@@ -128,6 +159,7 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 	const maxDelayMs = options.maxDelayMs ?? DEFAULTS.maxDelayMs;
 	const overloadedMaxAttempts = options.overloadedMaxAttempts ?? DEFAULTS.overloadedMaxAttempts;
 	const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+	const random = options.random ?? Math.random;
 
 	return async function* retryingStream(
 		model: Model,
@@ -198,9 +230,14 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 
 				if (overloaded) overloadedAttempts++;
 
-				const retryAfter = retryAfterMsOf(error);
+				// Half fixed, half random: retries from parallel sessions on the
+				// same schedule otherwise synchronize into a herd, and a delay
+				// that could shrink to nothing would retry instantly. The jitter
+				// applies to the exponential backoff only — a Retry-After is the
+				// server's own number. Both live under the caller's cap.
 				const backoff = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
-				const delayMs = retryAfter ?? backoff;
+				const jittered = backoff / 2 + random() * (backoff / 2);
+				const delayMs = Math.min(retryAfterMsOf(error) ?? jittered, maxDelayMs);
 				// Per-request first: the caller that knows which turn this is retrying is
 				// also the one holding a place to say so.
 				const notice: RetryNotice = {
