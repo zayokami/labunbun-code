@@ -756,3 +756,82 @@ describe("a retried request", () => {
 		expect(retried).toBeLessThan(events.findIndex((e) => e.type === "turn_end"));
 	});
 });
+
+describe("failure-path consistency", () => {
+	test("an errored turn records the real result of an early tool that already ran", async () => {
+		// The tool finished while the model was still streaming; the provider then
+		// errored the turn. The result is real, and the interrupted synthesis must
+		// not overwrite it just because the turn died before dispatching.
+		const faux = fauxProvider([
+			{
+				toolCalls: [{ id: "e1", name: "echo", arguments: { text: "kept" } }],
+				stopReason: "error",
+				errorMessage: "stream broke",
+			},
+		]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [echoTool({ isConcurrencySafe: () => true })],
+			deps: { streamFn: faux.streamFn },
+		});
+
+		expect(await session.prompt("go")).toBe("error");
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0].isError).toBe(false);
+		expect(results[0].content[0]).toEqual({ type: "text", text: "kept" });
+	});
+
+	test("a length-exhausted turn settles its kept partial's tool calls into paired results", async () => {
+		// The ladder discards every retried partial — but the last one is kept, and
+		// a kept assistant with toolCall blocks must not reach the next request
+		// unpaired. Every call in the ladder is one length stop: escalate, three
+		// continue-retries, then exhaustion.
+		const faux = fauxProvider([
+			{ toolCalls: [{ id: "l1", name: "echo", arguments: { text: "kept" } }], stopReason: "length" },
+		]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [echoTool({ isConcurrencySafe: () => true })],
+			deps: { streamFn: faux.streamFn },
+		});
+
+		expect(await session.prompt("go")).toBe("error");
+		expect(faux.receivedContexts).toHaveLength(5);
+		const calls = session.messages.flatMap((m) =>
+			m.role === "assistant" ? m.content.filter((b) => b.type === "toolCall").map((b) => b.id) : [],
+		);
+		const results = toolResultsOf(session.messages);
+		expect(results.map((r) => r.toolCallId)).toEqual(calls);
+		expect(results).toHaveLength(1);
+		expect(results[0].isError).toBe(false);
+	});
+
+	test("a mid-stream throw seals the partial as an errored turn instead of rethrowing", async () => {
+		// The retry wrapper cannot retry after the first byte; what the user has
+		// already read must survive into the transcript as an errored turn.
+		const faux = fauxProvider([{ text: "hello world" }, { text: "recovered" }]);
+		let calls = 0;
+		const streamFn: StreamFn = async function* (model, context, options) {
+			calls++;
+			for await (const event of faux.streamFn(model, context, options)) {
+				yield event;
+				if (calls === 1 && event.type === "text_delta") throw new Error("connection reset mid-stream");
+			}
+		};
+		const session = new AgentSession({ model: FAUX_MODEL, tools: [], deps: { streamFn } });
+
+		expect(await session.prompt("go")).toBe("error");
+		const last = session.messages.at(-1) as any;
+		expect(last?.role).toBe("assistant");
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toBe("connection reset mid-stream");
+		const text = last.content
+			.filter((b: any) => b.type === "text")
+			.map((b: any) => b.text)
+			.join("");
+		expect(text).toBe("hell");
+		// The session survives the fault.
+		expect(await session.prompt("again")).toBe("completed");
+	});
+});

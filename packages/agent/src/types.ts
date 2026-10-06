@@ -438,6 +438,13 @@ export interface AgentDeps {
 	 * path to show the model, or null if it could not be written.
 	 */
 	spillOutput?: SpillWriter;
+	/**
+	 * How long a cancelled run keeps waiting for in-flight tools before it
+	 * settles them as interrupted and ends. The default (500 ms) gives a tool
+	 * that respects its signal time to return a real result without letting a
+	 * tool that ignores the signal hold the run hostage. Tests shorten it.
+	 */
+	abortSettleGraceMs?: number;
 }
 
 /** What the cheap rung removed, in the units a person reads. */

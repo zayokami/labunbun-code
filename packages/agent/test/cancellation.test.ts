@@ -26,6 +26,36 @@ function probe(call: AnyTool["call"]): AnyTool {
 	return buildTool({ name: "probe", description: "local test probe", inputSchema: z.object({}), call });
 }
 
+/** A probe that opts into early start, like a read-only tool would. */
+function safeProbe(call: AnyTool["call"]): AnyTool {
+	return buildTool({
+		name: "probe",
+		description: "local test probe",
+		inputSchema: z.object({}),
+		isConcurrencySafe: () => true,
+		call,
+	});
+}
+
+/**
+ * Await, but give up after `ms` with `undefined` — a run that never ends must
+ * fail the test rather than hang it (a promise that never settles does not
+ * respect bun's per-test timeout).
+ */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 function paired(messages: AgentMessage[]) {
 	const calls = messages.flatMap((m) =>
 		m.role === "assistant" ? m.content.filter((b) => b.type === "toolCall").map((b) => b.id) : [],
@@ -381,5 +411,88 @@ describe("session cancellation integration", () => {
 		expect(calls).toBe(0);
 		expect(permissions).toBe(0);
 		expect(paired(session.messages)[0].isError).toBe(true);
+	});
+});
+
+describe("abort and the streaming-tool lifecycle", () => {
+	test("an aborted stream records the real result of an early tool that already ran", async () => {
+		// The tool finished while the model was still streaming, so it has nothing
+		// interrupted about it — the transcript owes the wire that real result, and
+		// the interrupted synthesis must not overwrite it.
+		const ran = deferred<void>();
+		const gate = deferred<void>();
+		const faux = fauxProvider([{ toolCalls: [{ id: "early", name: "probe", arguments: {} }] }]);
+		const streamFn: StreamFn = async function* (model, context, options) {
+			for await (const event of faux.streamFn(model, context, options)) {
+				yield event;
+				// Hold the stream open until the test aborts: everything the turn
+				// needs (the tool call, its early start) has already happened.
+				if (event.type === "toolcall_end") await gate.promise;
+			}
+		};
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [
+				safeProbe(async () => {
+					ran.resolve();
+					return { content: [{ type: "text", text: "ran early" }] };
+				}),
+			],
+			deps: { streamFn },
+		});
+
+		const run = session.prompt("go");
+		await ran.promise;
+		session.abort();
+		gate.resolve();
+
+		expect(await run).toBe("aborted");
+		const results = paired(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0].isError).toBe(false);
+		expect(results[0].content[0]).toEqual({ type: "text", text: "ran early" });
+	});
+
+	test("a tool that ignores its abort signal cannot wedge the run after Esc", async () => {
+		// Streaming start means the tool was already running when the user
+		// interrupted, and this one never checks its signal. The stream is
+		// deliberately finished before the abort: the interrupt lands while the
+		// loop is waiting on the tool, which is exactly the wait that must be
+		// bounded. The grace is short here; the run must still end, settle the
+		// call as interrupted, and stay usable for the next prompt.
+		const entered = deferred<void>();
+		const streamed = deferred<void>();
+		const faux = fauxProvider([{ toolCalls: [{ id: "hang", name: "hang", arguments: {} }] }, { text: "recovered" }]);
+		const streamFn: StreamFn = async function* (...args) {
+			for await (const event of faux.streamFn(...args)) yield event;
+			streamed.resolve();
+		};
+		const hang = buildTool({
+			name: "hang",
+			description: "never returns, never checks its signal",
+			inputSchema: z.object({}),
+			isConcurrencySafe: () => true,
+			call: async () => {
+				entered.resolve();
+				return await new Promise<never>(() => {});
+			},
+		});
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [hang],
+			deps: { streamFn, abortSettleGraceMs: 20 },
+		});
+
+		const run = session.prompt("go");
+		await Promise.all([entered.promise, streamed.promise]);
+		session.abort();
+
+		expect(await within(run, 2_000)).toBe("aborted");
+		const results = paired(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0].isError).toBe(true);
+		expect(session.isRunning).toBe(false);
+		// The abandoned tool does not wedge the session either.
+		expect(await within(session.prompt("again"), 2_000)).toBe("completed");
 	});
 });

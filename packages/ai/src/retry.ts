@@ -4,8 +4,9 @@
  * Adapters let SDK/network exceptions propagate; this wrapper catches them,
  * retries with exponential backoff while nothing has been emitted downstream
  * yet, and converts final failure into a terminal `error` event. Once any
- * event has been forwarded to the consumer, exceptions propagate unchanged
- * (the agent loop's recovery ladder owns mid-stream failures).
+ * event has been forwarded to the consumer, exceptions propagate unchanged:
+ * the stream can no longer be retried safely, and it is the agent loop that
+ * owns the mid-stream failure by sealing the partial as an errored turn.
  */
 
 import { MessageBuilder } from "./message-builder.ts";
@@ -154,7 +155,8 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				return;
 			} catch (error) {
 				// After anything was emitted downstream we can no longer retry
-				// safely — the consumer already saw partial output.
+				// safely — the consumer already saw partial output. The loop
+				// records the partial as an errored turn when this lands there.
 				if (emittedAny) throw error;
 
 				// A user interrupt is not a provider fault: rethrow immediately so

@@ -606,14 +606,21 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// the hook users wire to desktop alerts, so it fires before the
 			// dialog appears rather than after it resolves.
 			if (hooksRuntime.has("Notification")) {
-				const outcome = await hooksRuntime.run("Notification", {
-					tool_name: toolName,
-					tool_input: input,
-					session_id: sessionIdHolder.current,
-					cwd,
-				});
+				// The wait belongs to the run, and so does the abort: an interrupt
+				// stops waiting on the hook rather than waiting it out — nothing it
+				// produces past the abort is read, and the dialog it precedes is
+				// about to be withdrawn by the aborted entry check below anyway.
+				const outcome = await unlessAborted(
+					hooksRuntime.run("Notification", {
+						tool_name: toolName,
+						tool_input: input,
+						session_id: sessionIdHolder.current,
+						cwd,
+					}),
+					ctx.signal,
+				);
 				// Advisory: a Notification hook cannot veto the dialog.
-				reportHookErrors(handle, advisoryHookFailures("Notification", outcome));
+				if (outcome) reportHookErrors(handle, advisoryHookFailures("Notification", outcome));
 			}
 			const allowed = await requestPermissionOrAbort(handle, toolName, input, ctx.signal);
 			if (!allowed) return { behavior: "deny", message: "User denied permission" };
@@ -1367,6 +1374,37 @@ async function askUserOrAbort(
 		// Whatever is still on screen belongs to the aborted run.
 		if (signal.aborted) handle.clearQuestionRequest();
 	}
+}
+
+/**
+ * Await `promise`, unless the run aborts first — then undefined.
+ *
+ * For waits whose product is a dialog: nothing past an abort reads the result,
+ * and holding the wait open only delays settling the turn behind it. The work
+ * is not cancelled — a spawned Notification hook runs to its own end — it just
+ * stops being waited on; a rejection that lands after the abort is dropped
+ * with the result, since there is no caller left to report it to.
+ */
+function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T | undefined> {
+	if (!signal) return promise;
+	if (signal.aborted) {
+		promise.catch(() => {});
+		return Promise.resolve(undefined);
+	}
+	return new Promise<T | undefined>((resolve, reject) => {
+		const onAbort = () => resolve(undefined);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
 }
 
 /** Surface hook failures in the transcript without interrupting the session. */

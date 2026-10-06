@@ -21,7 +21,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "@labunbun/ai";
-import { textContent, toolResultMessage, userMessage } from "@labunbun/ai";
+import { isContextOverflowError, textContent, toolResultMessage, userMessage } from "@labunbun/ai";
 import { LENGTH_RECOVERY_MESSAGE } from "./compaction.ts";
 import { DEFAULT_MAX_CONCURRENCY, partitionToolCalls, Semaphore } from "./concurrency.ts";
 import { capRoundResults } from "./output-limits.ts";
@@ -55,6 +55,13 @@ export interface AgentSessionOptions {
 
 const MAX_OUTPUT_TOKENS_CAP = 64_000;
 const LENGTH_CONTINUE_RETRIES = 3;
+/**
+ * How long a cancelled run keeps waiting for in-flight tools before it settles
+ * them as interrupted and ends: long enough for a tool that respects its signal
+ * to return a real result, short enough that a tool ignoring the signal cannot
+ * hold the run hostage. The host can shorten it via the agent deps.
+ */
+const DEFAULT_ABORT_SETTLE_GRACE_MS = 500;
 
 export class AgentSession {
 	readonly cwd: string;
@@ -299,6 +306,14 @@ export class AgentSession {
 		let escalatedOnce = false;
 		let continueRetries = 0;
 		let turns = 0;
+		// Streaming-tool state for the turn in flight. Declared outside the try so
+		// the catch can still settle the turn that died; reassigned per iteration
+		// because every streamed turn starts its own tools. `earlySettled` records
+		// which calls already have a final result — the write-once set that keeps
+		// a late straggler from overwriting its interrupted settlement.
+		let earlyResults = new Map<string, ToolResultMessage>();
+		let earlyPromises = new Map<string, Promise<void>>();
+		let earlySettled = new Set<string>();
 
 		await this.#emit({ type: "agent_start" });
 
@@ -367,8 +382,11 @@ export class AgentSession {
 				let lastPartial: AssistantMessage | null = null;
 				// Streaming tool execution: concurrency-safe tools start the moment
 				// their toolCall block completes, while the model keeps streaming.
-				const earlyResults = new Map<string, ToolResultMessage>();
-				const earlyPromises = new Map<string, Promise<void>>();
+				// Fresh per turn: results and settlements from earlier turns are
+				// already in the transcript.
+				earlyResults = new Map<string, ToolResultMessage>();
+				earlyPromises = new Map<string, Promise<void>>();
+				earlySettled = new Set<string>();
 				const toolSemaphore = new Semaphore(DEFAULT_MAX_CONCURRENCY);
 				// A cancel that lands while the stream is in flight must end the turn as
 				// aborted. Transports surface a cancel differently: some throw (handled
@@ -393,7 +411,7 @@ export class AgentSession {
 								assistantMessageEvent: event,
 							});
 							if (event.type === "toolcall_end") {
-								this.#maybeStartEarlyTool(event.toolCall, earlyResults, earlyPromises, toolSemaphore);
+								this.#maybeStartEarlyTool(event.toolCall, earlyResults, earlyPromises, earlySettled, toolSemaphore);
 							}
 						}
 					}
@@ -406,7 +424,22 @@ export class AgentSession {
 							? { ...lastPartial, stopReason: "aborted" }
 							: interruptedAssistant(this.#model, "aborted");
 					} else {
-						throw streamError;
+						// A mid-stream throw is this turn's terminal event, not the
+						// run's. Sealing the partial as an errored turn — instead of
+						// rethrowing — is what keeps the three views of the turn from
+						// disagreeing: the text the user has already read stays in the
+						// transcript, any early-started tool blocks below stay paired,
+						// and the error flows through the same branch that handles a
+						// provider-delivered error, overflow classification included.
+						const message = streamError instanceof Error ? streamError.message : String(streamError);
+						assistant = lastPartial
+							? {
+									...lastPartial,
+									stopReason: "error",
+									errorMessage: message,
+									...(isContextOverflowError(streamError) ? { errorKind: "context_overflow" as const } : {}),
+								}
+							: interruptedAssistant(this.#model, "error", message);
 					}
 				} finally {
 					streamOptions.signal?.removeEventListener("abort", onAbort);
@@ -422,6 +455,13 @@ export class AgentSession {
 
 				// ---- length recovery ladder ----
 				if (assistant.stopReason === "length") {
+					// The retries discard the truncated partial, and any early-started
+					// tool of a discarded partial keeps running with nowhere to report:
+					// the decision to retry comes one event later than the tool start,
+					// the pipeline has no preemptive stop, and cancelling a tool that
+					// may already have edited a file is worse than dropping its
+					// unreportable result. Exhaustion below is different — there the
+					// partial is kept, so its tools get settled with it.
 					if (!escalatedOnce && this.#model.maxOutputTokens < MAX_OUTPUT_TOKENS_CAP) {
 						// Discard the truncated partial and retry with more room.
 						escalatedOnce = true;
@@ -434,9 +474,12 @@ export class AgentSession {
 						this.#store?.appendMessage(resume);
 						continue;
 					}
-					// Ladder exhausted.
+					// Ladder exhausted: the partial is kept, so it takes its tools —
+					// real results that finished mid-stream, interrupted settlements
+					// for the rest.
 					this.messages.push(assistant);
 					this.#store?.appendMessage(assistant);
+					await this.#settleToolCalls(assistant, earlyPromises, earlyResults, earlySettled);
 					errorMessage = "Response repeatedly exceeded the output token limit";
 					reason = "error";
 					break;
@@ -448,7 +491,7 @@ export class AgentSession {
 
 				// ---- abnormal termination ----
 				if (assistant.stopReason === "aborted") {
-					this.#synthesizeOrphanResults(assistant);
+					await this.#settleToolCalls(assistant, earlyPromises, earlyResults, earlySettled);
 					reason = "aborted";
 					break;
 				}
@@ -460,13 +503,13 @@ export class AgentSession {
 					// happened. Asking again is not a remedy either: the same
 					// conversation tends to get the same answer, so the run ends with
 					// the explanation in front of the user.
-					this.#synthesizeOrphanResults(assistant);
+					await this.#settleToolCalls(assistant, earlyPromises, earlyResults, earlySettled);
 					errorMessage = assistant.errorMessage ?? "The model declined this request";
 					reason = "error";
 					break;
 				}
 				if (assistant.stopReason === "error") {
-					this.#synthesizeOrphanResults(assistant);
+					await this.#settleToolCalls(assistant, earlyPromises, earlyResults, earlySettled);
 					// The provider is the ground truth on what fits. When it refuses for
 					// size, the estimate was wrong — so the next turn compacts without
 					// consulting it, and says so if it cannot.
@@ -504,7 +547,7 @@ export class AgentSession {
 				}
 
 				const results = capRoundResults(
-					await this.#executeToolCalls(toolCalls, earlyPromises, earlyResults, toolSemaphore),
+					await this.#executeToolCalls(toolCalls, earlyPromises, earlyResults, earlySettled, toolSemaphore),
 					this.#deps.spillOutput,
 				);
 				for (const result of results) {
@@ -525,9 +568,10 @@ export class AgentSession {
 		} catch (loopError) {
 			reason = "error";
 			errorMessage = loopError instanceof Error ? loopError.message : String(loopError);
-			// Pair any dangling tool_use from the last assistant message.
+			// Settle the dying turn's tools — real results first — then pair any
+			// dangling tool_use left on the last assistant message.
 			const lastAssistant = [...this.messages].reverse().find((m): m is AssistantMessage => m.role === "assistant");
-			if (lastAssistant) this.#synthesizeOrphanResults(lastAssistant);
+			await this.#settleToolCalls(lastAssistant ?? null, earlyPromises, earlyResults, earlySettled);
 		} finally {
 			this.#running = false;
 			this.#abortController = null;
@@ -543,6 +587,7 @@ export class AgentSession {
 		toolCalls: ToolCall[],
 		earlyPromises: Map<string, Promise<void>>,
 		earlyResults: Map<string, ToolResultMessage>,
+		earlySettled: Set<string>,
 		semaphore: Semaphore,
 	): Promise<ToolResultMessage[]> {
 		const resolved: ResolvedToolCall[] = [];
@@ -564,30 +609,41 @@ export class AgentSession {
 		const batches = partitionToolCalls(resolved);
 		for (const batch of batches) {
 			if (this.#abortController?.signal.aborted) {
-				// Cancelled while earlier batches ran: settle every remaining call
-				// as a paired interrupted result instead of starting new tools.
-				for (const call of batch.calls) {
-					if (!resultsByCallId.has(call.callId)) {
-						resultsByCallId.set(call.callId, interruptedToolResult(call));
-					}
-				}
+				// Cancelled while earlier batches ran: the sweep at the bottom
+				// settles every remaining call as a paired interrupted result
+				// instead of starting new tools.
 				continue;
 			}
 			if (batch.parallel) {
-				await Promise.all(batch.calls.map((call) => this.#runWithSemaphore(call, resultsByCallId, semaphore)));
+				// Bounded wait: an abort stops the wait after the grace window, and
+				// the sweep below settles whatever the window abandoned.
+				await this.#awaitTools(
+					batch.calls.map((call) => this.#runWithSemaphore(call, resultsByCallId, earlySettled, semaphore)),
+				);
 			} else {
+				// Serial calls wait one at a time; a call the grace window abandoned
+				// is settled by the sweep below, and every call after it is settled
+				// by the pipeline's own abort gates before its tool can run.
 				for (const call of batch.calls) {
-					await this.#runOne(call, resultsByCallId);
+					await this.#awaitTools([this.#runOne(call, resultsByCallId, earlySettled)]);
 				}
 			}
 		}
 
 		// Wait for tools that started mid-stream and merge their buffered results.
-		if (earlyPromises.size > 0) {
-			await Promise.all(earlyPromises.values());
-			for (const [callId, result] of earlyResults) {
-				resultsByCallId.set(callId, result);
-			}
+		await this.#awaitTools([...earlyPromises.values()]);
+		for (const [callId, result] of earlyResults) {
+			resultsByCallId.set(callId, result);
+		}
+
+		// Every call must leave with a paired result: the waits above give up on
+		// stragglers (abort plus grace expired), and the assembly below silently
+		// drops calls it cannot map — so the missing ones are settled as
+		// interrupted here. First settlement wins, which makes this a no-op for
+		// everything that already returned.
+		for (const call of toolCalls) {
+			if (resultsByCallId.has(call.id) || earlySettled.has(call.id)) continue;
+			this.#recordToolResult(call.id, interruptedToolResult(call.id, call.name), resultsByCallId, earlySettled);
 		}
 
 		// Assemble strictly in assistant source order.
@@ -602,16 +658,19 @@ export class AgentSession {
 	async #runWithSemaphore(
 		call: ResolvedToolCall,
 		out: Map<string, ToolResultMessage>,
+		settled: Set<string>,
 		semaphore: Semaphore,
 	): Promise<void> {
 		await semaphore.acquire();
 		try {
 			// The wait above can outlast an abort — settle instead of running.
+			// First settlement wins: if the run's sweep already settled this call,
+			// this is a no-op.
 			if (this.#abortController?.signal.aborted) {
-				out.set(call.callId, interruptedToolResult(call));
+				this.#recordToolResult(call.callId, interruptedToolResult(call.callId, call.tool.name), out, settled);
 				return;
 			}
-			await this.#runOne(call, out);
+			await this.#runOne(call, out, settled);
 		} finally {
 			semaphore.release();
 		}
@@ -630,6 +689,7 @@ export class AgentSession {
 		toolCall: ToolCall,
 		earlyResults: Map<string, ToolResultMessage>,
 		earlyPromises: Map<string, Promise<void>>,
+		earlySettled: Set<string>,
 		semaphore: Semaphore,
 	): void {
 		if (this.#abortController?.signal.aborted) return;
@@ -640,7 +700,7 @@ export class AgentSession {
 		if (!semaphore.tryAcquire()) return; // no shared budget left; post-stream path will run it
 
 		const resolved: ResolvedToolCall = { callId: toolCall.id, tool, input };
-		const promise = this.#runOne(resolved, earlyResults)
+		const promise = this.#runOne(resolved, earlyResults, earlySettled)
 			.catch(() => {
 				// #runOne never throws by contract; belt-and-braces for event handler
 				// rejections — orphan synthesis covers any missing result.
@@ -649,7 +709,7 @@ export class AgentSession {
 		earlyPromises.set(toolCall.id, promise);
 	}
 
-	async #runOne(call: ResolvedToolCall, out: Map<string, ToolResultMessage>): Promise<void> {
+	async #runOne(call: ResolvedToolCall, out: Map<string, ToolResultMessage>, settled: Set<string>): Promise<void> {
 		const signal = this.#abortController?.signal ?? new AbortController().signal;
 		await this.#emit({
 			type: "tool_execution_start",
@@ -682,13 +742,108 @@ export class AgentSession {
 			},
 		});
 
-		out.set(result.toolCallId, result);
+		// Already settled? The run gave up on this call (abort grace expired) and
+		// ended it with an interrupted result. The late arrival must neither
+		// overwrite that pairing nor replay its end event after agent_end.
+		if (!this.#recordToolResult(call.callId, result, out, settled)) return;
 		await this.#emit({
 			type: "tool_execution_end",
 			callId: call.callId,
 			toolName: call.tool.name,
 			result,
 		});
+	}
+
+	/**
+	 * Record a tool call's result exactly once. First settlement wins: a tool
+	 * that outlived an abort must not overwrite the interrupted result the run
+	 * settled it with, and must not replay `tool_execution_end` after
+	 * `agent_end` announced the run was over. Returns false when the call was
+	 * already settled — nothing was recorded and nothing should be announced.
+	 */
+	#recordToolResult(
+		callId: string,
+		result: ToolResultMessage,
+		out: Map<string, ToolResultMessage>,
+		settled: Set<string>,
+	): boolean {
+		if (settled.has(callId)) return false;
+		settled.add(callId);
+		out.set(result.toolCallId, result);
+		return true;
+	}
+
+	/**
+	 * Await in-flight tool promises — but not past an abort plus a grace period.
+	 *
+	 * Without an abort this is a plain await: a running tool is a running tool.
+	 * Once the run is cancelled, the grace timer gives a tool that respects its
+	 * signal a window to return a real result, and expires for one that does
+	 * not. Returning with work still pending is the caller's cue to settle it
+	 * as interrupted; the abandoned promise is muted by the settled set when it
+	 * eventually lands.
+	 */
+	async #awaitTools(promises: Promise<void>[]): Promise<void> {
+		if (promises.length === 0) return;
+		const signal = this.#abortController?.signal;
+		if (!signal) {
+			await Promise.all(promises);
+			return;
+		}
+		let graceTimer: ReturnType<typeof setTimeout> | undefined;
+		let fireGrace: (() => void) | null = null;
+		const abortedThenGrace = new Promise<void>((resolve) => {
+			fireGrace = resolve;
+		});
+		const startGrace = () => {
+			graceTimer = setTimeout(() => fireGrace?.(), this.#deps.abortSettleGraceMs ?? DEFAULT_ABORT_SETTLE_GRACE_MS);
+		};
+		if (signal.aborted) startGrace();
+		else signal.addEventListener("abort", startGrace, { once: true });
+		try {
+			await Promise.race([Promise.all(promises).then(() => undefined), abortedThenGrace]);
+		} finally {
+			signal.removeEventListener("abort", startGrace);
+			if (graceTimer !== undefined) clearTimeout(graceTimer);
+		}
+	}
+
+	/**
+	 * Bring a dying run's tool state into the transcript, then pair what is left.
+	 *
+	 * Tools that started mid-stream may have finished without the transcript
+	 * hearing about it. Their results are real — the tool ran, its
+	 * `tool_execution_end` was announced — so they are recorded as-is (after the
+	 * same round cap every result gets) instead of being overwritten by the
+	 * interrupted synthesis. What is left gets settled as interrupted, so the
+	 * run can end without dangling tool_use blocks on the wire.
+	 */
+	async #settleToolCalls(
+		assistant: AssistantMessage | null,
+		earlyPromises: Map<string, Promise<void>>,
+		earlyResults: Map<string, ToolResultMessage>,
+		earlySettled: Set<string>,
+	): Promise<void> {
+		await this.#awaitTools([...earlyPromises.values()]);
+		if (!assistant) return;
+		const real: ToolResultMessage[] = [];
+		for (const block of assistant.content) {
+			if (block.type !== "toolCall") continue;
+			const result = earlyResults.get(block.id);
+			if (result) {
+				real.push(result);
+			} else {
+				// No result: the tool is still in flight (the grace abandoned it)
+				// or never started. The synthesis below owns this block; marking
+				// it settled first mutes the straggler if it lands later.
+				earlySettled.add(block.id);
+			}
+		}
+		for (const result of capRoundResults(real, this.#deps.spillOutput)) {
+			this.messages.push(result);
+			this.#store?.appendMessage(result);
+		}
+		this.#synthesizeOrphanResults(assistant);
 	}
 
 	/**
@@ -718,14 +873,11 @@ export class AgentSession {
  * Paired isError result for a tool call that was cancelled before it could
  * run — same wording as the orphan synthesis below, so interrupted calls read
  * consistently in the transcript regardless of where cancellation landed.
+ * Takes the pieces, not the ResolvedToolCall: the call-site sweep that settles
+ * abandoned calls may only have a wire ToolCall block to hand.
  */
-function interruptedToolResult(call: ResolvedToolCall): ToolResultMessage {
-	return toolResultMessage(
-		call.callId,
-		call.tool.name,
-		[textContent("Tool execution was interrupted before completion.")],
-		true,
-	);
+function interruptedToolResult(callId: string, toolName: string): ToolResultMessage {
+	return toolResultMessage(callId, toolName, [textContent("Tool execution was interrupted before completion.")], true);
 }
 
 function interruptedAssistant(model: Model, stopReason: "error" | "aborted", message?: string): AssistantMessage {
