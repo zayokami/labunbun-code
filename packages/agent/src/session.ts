@@ -221,7 +221,15 @@ export class AgentSession {
 		this.#steering.push(text);
 	}
 
-	/** Queue a message that restarts the loop after natural termination. */
+	/**
+	 * Queue a message that restarts the loop after natural termination.
+	 *
+	 * A run that ends abnormally never reaches the in-loop drain, so the queue
+	 * is also drained at the top of the next `prompt()` — ahead of the text
+	 * that call carries. That is what keeps the queue from dangling: a
+	 * completion notice queued during a failed run is delivered by the next
+	 * prompt rather than waiting for a prompt that may never come.
+	 */
 	followUp(text: string): void {
 		if (this.#running) {
 			this.#followUp.push(text);
@@ -297,6 +305,22 @@ export class AgentSession {
 		this.#overflowRetried = false;
 		this.#abortController = new AbortController();
 
+		// Deliver anything queued while a previous run was alive, ahead of the
+		// text this call carries. The in-loop drain only fires when a run
+		// terminates naturally, so a follow-up queued during a failed run
+		// (error, refusal, abort, an exhausted length ladder) would otherwise
+		// sit in the queue until the user happens to type something — forever,
+		// in an unattended run. Entry is the one point every ending passes
+		// through; the in-loop drain stays because it is what lets a healthy
+		// run answer a follow-up without waiting for one.
+		while (this.#followUp.length > 0) {
+			const queued = this.#followUp.shift();
+			if (queued === undefined) break;
+			const queuedMsg = userMessage(await this.#userText(queued));
+			this.messages.push(queuedMsg);
+			this.#store?.appendMessage(queuedMsg);
+		}
+
 		const userMsg = userMessage(await this.#userText(text));
 		this.messages.push(userMsg);
 		this.#store?.appendMessage(userMsg);
@@ -319,6 +343,16 @@ export class AgentSession {
 
 		try {
 			while (true) {
+				// Checked before context preparation and the steering drain, and
+				// `turns` counts only turns that reached a `turn_end`: a check
+				// that ran after the drain would persist steered messages this
+				// run never answers, and counting attempts charged the budget
+				// for the length ladder's retries too — the run then stopped
+				// having completed fewer turns than the limit allows.
+				if (turns >= this.#maxTurns) {
+					reason = "max_turns";
+					break;
+				}
 				// ---- context preparation ----
 				let context: Context = {
 					systemPrompt: this.#systemPrompt,
@@ -356,11 +390,6 @@ export class AgentSession {
 					this.#store?.appendMessage(steerMsg);
 				}
 
-				turns++;
-				if (turns > this.#maxTurns) {
-					reason = "max_turns";
-					break;
-				}
 				await this.#emit({ type: "turn_start" });
 
 				// ---- stream the assistant turn ----
@@ -513,6 +542,7 @@ export class AgentSession {
 					// The provider is the ground truth on what fits. When it refuses for
 					// size, the estimate was wrong — so the next turn compacts without
 					// consulting it, and says so if it cannot.
+					let overflowNote = "";
 					if (assistant.errorKind === "context_overflow") {
 						this.#contextOverflowed = true;
 						// And the turn that was refused gets to be the next turn. Ending
@@ -526,8 +556,15 @@ export class AgentSession {
 							this.#overflowRetried = true;
 							continue;
 						}
+						// Without a compactor there is no retry to take — this same
+						// request would be refused again — so the run ends here, and
+						// the message names the missing remedy instead of reading like
+						// a make-room attempt that failed.
+						if (!this.#deps.checkCompaction) {
+							overflowNote = " Automatic compaction is not configured for this session.";
+						}
 					}
-					errorMessage = assistant.errorMessage ?? "Unknown provider error";
+					errorMessage = (assistant.errorMessage ?? "Unknown provider error") + overflowNote;
 					reason = "error";
 					break;
 				}
@@ -536,6 +573,7 @@ export class AgentSession {
 				const toolCalls = assistant.content.filter((block): block is ToolCall => block.type === "toolCall");
 				if (toolCalls.length === 0) {
 					await this.#emit({ type: "turn_end", message: assistant, toolResults: [] });
+					turns++;
 					const followUpText = this.#followUp.shift();
 					if (followUpText !== undefined) {
 						const followUpMsg = userMessage(await this.#userText(followUpText));
@@ -555,6 +593,7 @@ export class AgentSession {
 					this.#store?.appendMessage(result);
 				}
 				await this.#emit({ type: "turn_end", message: assistant, toolResults: results });
+				turns++;
 
 				// An abort during tool execution must end the run — otherwise the
 				// loop streams another turn as if the interrupt never happened.

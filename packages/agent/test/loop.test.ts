@@ -385,6 +385,48 @@ describe("AgentSession loop", () => {
 		expect(reason).toBe("max_turns");
 	});
 
+	test("maxTurns counts completed turns, not attempts", async () => {
+		// The first step exceeds the model's output limit, so the length ladder
+		// spends a retry before the turn can finish. A budget charged for the
+		// retry would make `maxTurns: 1` end the run here — the turn the user
+		// asked for is the one that got the budget.
+		const { reason } = await runHarness([{ text: "truncated", stopReason: "length" }, { text: "ok" }], {
+			maxTurns: 1,
+		});
+		expect(reason).toBe("completed");
+	});
+
+	test("an exhausted run leaves unsent steering in the queue instead of persisting it", async () => {
+		// maxTurns stops the loop at the top of the next turn — before the
+		// steering drain. A steered message therefore persists nowhere in this
+		// run: there is no model call left that would answer it, and a user
+		// message in the store that no turn ever saw would be one the next
+		// request has to carry unexplained.
+		let steered = false;
+		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "a" } }] }, { text: "second run" }]);
+		const sent: string[] = [];
+		const streamFn: StreamFn = async function* (model, context, options) {
+			sent.push(JSON.stringify(context.messages));
+			if (!steered) {
+				steered = true;
+				session.steer("typed for the exhausted turn");
+			}
+			yield* faux.streamFn(model, context, options);
+		};
+		let session: AgentSession;
+		session = new AgentSession({ model: FAUX_MODEL, tools: [echoTool()], maxTurns: 1, deps: { streamFn } });
+
+		expect(await session.prompt("go")).toBe("max_turns");
+		const after = () => session.messages.filter((m) => m.role === "user").map((m: any) => m.content);
+		expect(after()).toEqual(["go"]);
+
+		// Not lost either: it keeps its own contract — "before the next model
+		// call" — and the next run delivers it ahead of that call.
+		await session.prompt("next");
+		expect(after()).toEqual(["go", "next", "typed for the exhausted turn"]);
+		expect(sent[1]).toContain("typed for the exhausted turn");
+	});
+
 	test("steering messages drain before the next model call", async () => {
 		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "a" } }] }, { text: "final" }]);
 		const session = new AgentSession({
@@ -422,6 +464,47 @@ describe("AgentSession loop", () => {
 
 		const userMsgs = session.messages.filter((m) => m.role === "user") as any[];
 		expect(userMsgs.map((m) => m.content)).toEqual(["start", "what I actually asked next"]);
+	});
+
+	test("a follow-up queued during a failed run is delivered at the head of the next prompt", async () => {
+		// The queue's contract is to restart the loop, and a background shell
+		// completion reaches a busy session through it. A run that fails never
+		// reaches the in-loop drain, so the pickup has to be at prompt entry —
+		// otherwise the notice waits for a prompt that happens to come along,
+		// which in an unattended run is never. Entry is also the only spot that
+		// puts it ahead of the next prompt's own text, in queue order.
+		let queued = false;
+		const faux = fauxProvider([{ stopReason: "error", errorMessage: "provider died" }, { text: "second answer" }]);
+		const sent: string[] = [];
+		const streamFn: StreamFn = async function* (model, context, options) {
+			sent.push(JSON.stringify(context.messages));
+			if (!queued) {
+				// Once, during the failing run — a background completion arriving
+				// mid-run, which no later request may re-queue.
+				queued = true;
+				session.followUp("notice from the failed run");
+			}
+			yield* faux.streamFn(model, context, options);
+		};
+		let session: AgentSession;
+		session = new AgentSession({
+			model: FAUX_MODEL,
+			deps: { streamFn, hooks: { composeUserMessage: (text) => `[hook]\n\n${text}` } },
+		});
+
+		expect(await session.prompt("first question")).toBe("error");
+		expect(await session.prompt("what the user asked next")).toBe("completed");
+
+		const userTexts = session.messages.filter((m) => m.role === "user").map((m: any) => m.content);
+		// Composed like any other user message, and ordered ahead of the text
+		// this prompt carried.
+		expect(userTexts).toEqual([
+			"[hook]\n\nfirst question",
+			"[hook]\n\nnotice from the failed run",
+			"[hook]\n\nwhat the user asked next",
+		]);
+		// Delivered, not merely stored: the second run's first request carries it.
+		expect(sent[1]).toContain("notice from the failed run");
 	});
 
 	test("abort during run ends with aborted reason", async () => {
@@ -650,6 +733,23 @@ describe("context overflow", () => {
 		expect(session.contextOverflowed).toBe(true);
 		const end = events.find((event) => event.type === "agent_end");
 		expect(end?.type === "agent_end" ? end.errorMessage : undefined).toBe("prompt is too long: 250000 tokens");
+	});
+
+	test("an overflow with no compactor configured says so", async () => {
+		// The make-room retry is opted into by configuring compaction. Without
+		// one it cannot happen — the same request would be refused again — so
+		// the run ends on the first refusal, and the message has to name the
+		// missing remedy rather than read like a retry that failed.
+		const { session, sent, events } = sessionWith(undefined, [
+			{ stopReason: "error", errorMessage: "prompt is too long: 250000 tokens", errorKind: "context_overflow" },
+		]);
+
+		expect(await session.prompt("go")).toBe("error");
+		expect(sent).toHaveLength(1);
+		const end = events.find((event) => event.type === "agent_end");
+		expect(end?.type === "agent_end" ? end.errorMessage : undefined).toBe(
+			"prompt is too long: 250000 tokens Automatic compaction is not configured for this session.",
+		);
 	});
 });
 
