@@ -1,163 +1,592 @@
-# LaBunbun Code 🐰
+# LaBunbun Code
 
 [![CI](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml/badge.svg)](https://github.com/zayokami/labunbun-code/actions/workflows/ci.yml)
 
-A terminal-native AI coding agent built with **Bun** and **pnpm**.
-
-```
-labunbun -p "fix the failing tests"     # headless: one prompt, print result
-labunbun                                # interactive REPL
-```
-
-## Features
-
-- **Multi-provider LLM support** — Anthropic, OpenAI (on both the Chat
-  Completions and the Responses wire), Google and any OpenAI-compatible API
-  (DeepSeek, Kimi, GLM, OpenRouter, custom endpoints) via settings; the startup
-  probe asks each provider holding a key what it serves and corrects the catalog
-  from the answer. A model whose function calling its vendor publishes on one
-  wire only is registered on the wire that serves it; the same model reached
-  through a reseller that speaks the other one is still listed, and is not
-  offered as a session model — see `/model`.
-- **Core coding tools** — Bash (incl. `run_in_background` with BashOutput /
-  KillBash), Read, Write, Edit (exact string replace with diff preview),
-  Grep, Glob, LS, WebFetch, WebSearch; parallel execution of safe tools,
-  started mid-stream as soon as their arguments finish arriving.
-- **Task list** — TaskCreate/TaskList/TaskGet/TaskUpdate let the agent plan
-  and track multi-step work; progress renders in the REPL.
-- **Interactive dialogs** — permission approvals plus structured
-  AskUserQuestion multiple-choice prompts.
-- **Permission system** — rule engine (`Bash(git *)`, `Edit(src/**)`,
-  `mcp__server__*`), two axes composed into four modes (Ask / Plan / Agent /
-  Agent 无沙箱), a dangerous-command classifier that sits above every mode,
-  interactive approval dialog, "don't ask again" session rules.
-- **Filesystem sandbox** — the sandbox axis is a real confinement on macOS
-  (`sandbox-exec`) and Linux (`bwrap`), covering the workspace and refusing
-  writes to version-control metadata. It is **simulated on Windows**: a path
-  decision this process makes about calls that arrive through the tools, so a
-  subprocess started outside them is not subject to it. `/permissions` names
-  which of the three you have, in those words, rather than saying "sandbox on".
-- **Network access** — a third axis, off the filesystem: a local HTTP and SOCKS5
-  proxy that commands are pointed at, with a domain allow-list. Unlike the
-  filesystem half this one needs no OS support, so it works the same on all
-  three platforms — the proxy is this process, not a kernel — with two limits
-  worth stating rather than one. A program that opens a socket without
-  consulting `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` is not subject to it; and
-  only commands that arrive through the tools are pointed at it at all. The four
-  paths this repo starts without a sandbox policy — hooks, MCP stdio servers,
-  MCP HTTP servers and the `!` prompt prefix — get neither the proxy variables
-  nor the OS wrapper. On macOS and Linux the OS sandbox holds the rest of the
-  boundary; on Windows the proxy is all of it for a tool command, and `/doctor`
-  names all of the above.
-
-  ```jsonc
-  { "networkAccess": "restricted", "networkDomains": ["registry.npmjs.org", { "domain": "*.internal", "action": "deny" }] }
-  ```
-
-  `networkAccess: "enabled"` (the default) with no patterns confines nothing and
-  starts no proxy. A bare string is an allow; the object form carries an
-  explicit `deny`. Both keys are user-tier only — a repository may not set them,
-  because a checked-in file that turns the network off would be a checked-in
-  file that makes `bun install` fail for everyone who clones it. Set
-  `networkAccess: "restricted"` with an empty list and nothing is reachable.
-- **Sessions** — append-only JSONL tree per project (`~/.labunbun/projects/`),
-  crash-safe resume with `--resume`, prompt history with ↑ recall.
-- **Activity** — `/activity` draws the days you used this as a heatmap, with
-  the current and longest streak over them. `r` widens the window
-  (`7d` / `30d` / all), Esc puts it away. Two channels, in two shades: a day a
-  session *started* on, and a day an older session was still being written to.
-  Both count toward a streak — a day you picked up yesterday's thread is a day
-  you used this — but they are not the same weight, so the picture does not claim
-  they are. Days are local, not UTC: a session begun at 23:30 is on that day.
-- **Context management** — automatic compaction at the context-window
-  threshold (structured summary + re-injected recent files), with the cheap rung
-  running first: at the threshold the older tool results become previews (no
-  model call, full text still in the session file) and a summarization is only
-  paid for if that did not free enough — `trimOldToolResults: false` skips
-  straight to the summary, `/trim` does the same rewrite on request. `/context`
-  for what the window is made of, and a live indicator measured against the
-  compaction point — system prompt and tool schemas included, so it reads as full
-  when the session is.
-- **Prompt caching** — explicit breakpoints on Anthropic (tools, system, the
-  previous turn's tail, this turn's tail) and the routing and retention knobs on
-  OpenAI-compatible endpoints; `/cache` reports the hit rate, the ceiling this
-  conversation can reach, and any rewrite of the prefix nobody declared.
-- **Hooks** — user-configurable `PreToolUse` / `PostToolUse` / `Stop` /
-  `SessionStart` … command hooks with a JSON stdin/stdout contract.
-- **MCP client** — stdio + StreamableHTTP servers from `.mcp.json`; tools merge
-  into the registry as `mcp__server__tool`.
-- **Subagents** — the Task tool runs nested agent sessions; a finished subagent
-  keeps its conversation in memory and can be continued with SendMessage or
-  cancelled with TaskStop. Custom agents via frontmatter `.md` files.
-- **Beetle band** — `/beetle <task>` puts four members on it — John, Paul,
-  George and Ringo — each with a role and its own model, working the task over
-  a message bus: a wake-up *is* the schedule, so a band that has gone quiet is
-  costing nothing, and only `/beetle off` disbands. Which model each member
-  runs is asked once, four pickers saved as `beetle.models` (user-tier only)
-  and reconfigurable with `/beetle models`; `/beetle status` reads the band as
-  it stands, and `/beetle say <member> <text>` or `@name <text>` reaches one
-  member — the latter while the main session is idle. Esc interrupts the main
-  session, not the band. The members share your working tree, and `/rewind`
-  does not cover their edits.
-- **Skills** — `SKILL.md` folders become prompt-expanding slash commands.
-- **Plan mode** — read-only research then plan approval before mutations. The
-  pair that was in force before you entered is the pair that comes back, so
-  approving a plan cannot quietly re-confine a session you had un-confined.
-- **Model fallback chain** — `fallbackModels` in settings are tried in order
-  when the primary model fails before streaming any content.
-- **Cost** — the built-in catalog carries each model's list price, and `pricing`
-  in settings overrides it (per `"provider/model"`, for any model, built-in or
-  not). `/cost` reports the conversation you are in and the project it lives in
-  as two separate totals, and names any model whose tokens it could not price
-  rather than counting them as free. `-p --output-format json` reports the same
-  arithmetic as `cost_usd`.
-- **Terminal UX** — virtualized transcript (sealed history + live tail),
-  ctrl+O full-transcript browser, vim modal editing (`vimMode: true`) or
-  emacs modeless editing (`emacsMode: true`), eight token-based themes with
-  `auto` background detection and third-party theme files.
-- **Emacs editing** — `/emacs [on|off]`, or `emacsMode: true`. Modeless, so
-  there is no mode line to read: `C-a`/`C-e`, `C-f`/`C-b`, `C-n`/`C-p`,
-  `M-f`/`M-b`, `C-k`, `C-w`, `C-d`/`C-h`, `C-y`/`M-y`, `C-SPC`, `C-x C-x`,
-  and a real kill ring with the parts that are easy to get wrong — `C-k C-k`
-  joins, a backward `C-k` *prepends*, `M-C-w` bridges two kills that were not
-  consecutive, and a count turns a delete into a kill (`C-u C-d` fills the ring,
-  a bare `C-d` does not). `C-u` is `(4)` and multiplies by 4 per press, `M-1..9`
-  and `M--` build a number, and the goal column survives a run of `C-n`/`C-p` but
-  nothing else. Word motions use Emacs's own rule — a boundary is a change of
-  *script* — so `M-f` stops inside CJK text and `foo-bar` is three words. `?`
-  lists what the engine runs. It also *claims* the keys Emacs binds and this
-  build does not implement (`C-t`, `M-u`, `M-z`, `C-s`, `C-r`, …), consuming
-  them rather than letting them fall through as stray characters, so
-  `C-r` is history search everywhere except here.
-- **DualShock 4** — drive the whole REPL from a controller: navigate lists and
-  dialogs, confirm and cancel, approve or deny a permission, interrupt a turn,
-  open the command wheel, scroll the transcript, tap and swipe the touchpad, and
-  type with an on-screen keyboard without touching the keyboard. The lightbar
-  follows the theme and what the app is doing, a small vocabulary of buzzes says
-  what changed without looking, and the battery sits in the status line. Bindings
-  are yours to change, and the motors and the light can each be switched off —
-  see [Gamepad](#gamepad).
-- **Headless output** — `--output-format text|json|stream-json`.
-- **Config import** — `labunbun yoshi` maps an existing agent-tool setup
-  (Claude Code, Codex, ZCode, DeepSeek Harness, Grok Build, Kimi Code,
-  MiniMax Code, Step Code, OpenCode, Cursor, Trae, T3 Code, Antigravity,
-  `~/.agents`) onto
-  labunbun's own config: settings, skills, rules, slash commands, past
-  conversations and the prompts ↑ recalls. Dry run by default, and a `/yoshi`
-  wizard that asks what to take — or takes everything after one question.
-
-## Quick start
+LaBunbun Code is a terminal coding agent. It runs on Bun and pnpm.
 
 ```bash
-pnpm install
-export ANTHROPIC_API_KEY=sk-...        # or DEEPSEEK_API_KEY etc.
-bun run dev                            # interactive REPL
-bun run dev -p "list files here"       # headless
+labunbun                              # start the interactive session
+labunbun -p "fix the failing tests"   # run one prompt, print the result
 ```
 
-### Custom OpenAI-compatible provider
+## Description
 
-`~/.labunbun/settings.json`:
+LaBunbun Code reads files, changes files, and runs commands. It sends your requests to one language model. The model calls the tools below to do the work.
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| `Bash` | Run a command. It also runs a command in the background. |
+| `BashOutput` | Read the output of a background command. |
+| `KillBash` | Stop a background command. |
+| `Read` | Read a file. |
+| `Write` | Write a new file. |
+| `Edit` | Replace exact text in a file. The tool shows a diff first. |
+| `Grep` | Search file content with a regular expression. |
+| `Glob` | Find files with a name pattern. |
+| `LS` | List the content of a directory. |
+| `WebFetch` | Get one page from the network. |
+| `WebSearch` | Search the network. |
+| `TaskCreate` | Make a task. |
+| `TaskList` | List the tasks. |
+| `TaskGet` | Read one task. |
+| `TaskUpdate` | Change the status or the owner of a task. |
+| `Task` | Start a subagent. |
+| `SendMessage` | Send a message to a subagent. |
+| `TaskStop` | Stop a subagent. |
+
+The agent runs the tools in parallel when the tools are safe to run in parallel. A tool starts as soon as its arguments arrive.
+
+### Model providers
+
+LaBunbun Code supports these providers:
+
+- Anthropic
+- OpenAI, on the Chat Completions wire and on the Responses wire
+- Google
+- OpenAI-compatible endpoints, for example DeepSeek, Kimi, GLM, OpenRouter
+
+You add an OpenAI-compatible provider in the user settings file. See [Add a provider](#add-a-provider).
+
+At startup the tool asks each provider that has an API key which models the provider serves. The tool then corrects the model catalog from the answer.
+
+A model that the vendor serves on only one wire is on only that wire. A reseller can serve the same model on the other wire. The tool lists the model on its wire. The tool does not offer the model as a session model. Use `/model` to see the list.
+
+### Permission, sandbox, and network
+
+LaBunbun Code has three independent axes. Each axis has its own values.
+
+| Axis | Values |
+|------|--------|
+| Permission mode | `ask`, `plan`, `agent` |
+| Sandbox | `workspace-write`, `danger-full-access` |
+| Network | `enabled`, `restricted` |
+
+The mode choices combine the first two axes.
+
+| Mode | Permission mode | Sandbox |
+|------|-----------------|---------|
+| Ask | `ask` | `workspace-write` |
+| Plan | `plan` | `workspace-write` |
+| Agent | `agent` | `workspace-write` |
+| Agent 无沙箱 | `agent` | `danger-full-access` |
+
+Press Shift+Tab to go to the next mode.
+
+**Permission rules.** A rule has the form `Bash(git *)` or `Edit(src/**)` or `mcp__server__*`. A dangerous-command classifier is above every mode. The tool asks you before it runs a tool that no rule permits. You can tell the tool not to ask again for the rest of the session.
+
+**Sandbox.** The OS enforces the sandbox on macOS with `sandbox-exec`. The OS enforces the sandbox on Linux with `bwrap`.
+
+> **WARNING**: A Linux system without `bubblewrap` confines nothing.
+
+> **WARNING**: The sandbox is simulated on Windows. A shell command is not confined on Windows. Run `rm .git/config` through Bash on Windows. The command succeeds.
+
+Inside the workspace, the agent cannot write to `.git/`. This rule applies in every mode. It also applies to a nested repository. It also applies to a symbolic link that refers to a `.git` directory. Reading git data is not restricted.
+
+**Network.** The network axis does not use the filesystem. The tool starts a local HTTP and SOCKS5 proxy. The tool points each command at this proxy. The proxy has a list of domains that it permits.
+
+```jsonc
+{ "networkAccess": "restricted", "networkDomains": ["registry.npmjs.org", { "domain": "*.internal", "action": "deny" }] }
+```
+
+The value `enabled` is the default. It starts no proxy. It restricts nothing. A string in `networkDomains` permits that domain. The object form denies a domain.
+
+> **WARNING**: A program that does not read `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is not restricted by the proxy.
+
+> **NOTE**: Four paths do not get the proxy. They are hooks, MCP stdio servers, MCP HTTP servers, and the `!` prompt prefix. These paths also do not get the OS sandbox.
+
+Only the user tier can set `networkAccess` and `networkDomains`. A repository must not set them. A repository that turns the network off makes `bun install` fail for every user who clones it.
+
+Use `/permissions` to see which of the three confinements you have. Use `/doctor` to see the full report.
+
+### Session files
+
+LaBunbun Code stores each session as a JSONL file. The files are in `~/.labunbun/projects/`. The tool appends to a file. It never rewrites one. The tool can reopen a session after a crash.
+
+### Context window
+
+The tool summarizes the conversation when the context window fills. The summary replaces the oldest messages. The tool adds the files from the recent turns again.
+
+The tool first makes old tool results smaller. It replaces each old tool result with a short preview. This step makes no model call. The full text stays in the session file. The tool calls the model for a summary only if the first step did not free enough space.
+
+Set `trimOldToolResults: false` to skip the first step. Use `/trim` to run the first step on request. Use `/context` to see what the window contains. The indicator counts the system prompt and the tool schemas.
+
+### Prompt cache
+
+A provider bills a prompt in two parts. The first part comes from the cache. The second part the provider reads again. The cache uses the start of the prompt as its key. Only an exact match is a hit.
+
+Use `/cache` to see the hit rate. The report also shows the ceiling for the conversation. The report also shows each rewrite of the start of the prompt that nobody declared. A rewrite is a defect.
+
+LaBunbun Code sends explicit breakpoints to Anthropic. The tool sets a breakpoint on the last tool definition. The tool sets a breakpoint on the system prompt. The tool sets a breakpoint on the end of the previous turn. The tool sets a breakpoint on the end of the current turn. The tool sends a breakpoint only if the text before it is longer than the minimum for that model. The minimum is 512 tokens on Opus. The minimum is 1024 tokens on Sonnet. The minimum is 4096 tokens on Haiku 4.5.
+
+OpenAI-compatible endpoints cache automatically. They accept no breakpoints.
+
+```json
+{ "cache": { "enabled": true, "ttl": "auto", "promptCacheKey": "auto" } }
+```
+
+The value `auto` for `ttl` asks for the 1-hour lifetime. If the provider refuses it, the tool tries 5 minutes. If the provider refuses that, the tool sends no lifetime. Each failure costs one request. Each failure costs one request per process. `/cache` names each downgrade.
+
+Only the user tier can set `cache`.
+
+### Hooks
+
+A hook is a command that the tool runs at a known time. The tool reads the hook list at startup.
+
+```json
+{ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "./check.sh", "timeout": 10000 }] }] } }
+```
+
+The hook events are:
+
+- `PreToolUse`
+- `PostToolUse`
+- `UserPromptSubmit`
+- `SessionStart`
+- `SessionEnd`
+- `Stop`
+- `PreCompact`
+- `Notification`
+
+The maximum timeout is 600000 ms.
+
+### MCP servers
+
+LaBunbun Code reads MCP servers from `.mcp.json` and `~/.labunbun/.mcp.json`. It supports the stdio transport and the StreamableHTTP transport. Each tool name starts with `mcp__`, then the server name, then the tool name. Use `/mcp approve <name>` to approve a server in the project file.
+
+### Subagents
+
+The `Task` tool starts a subagent. The tool keeps the conversation of a finished subagent in memory. Use `SendMessage` to continue it. Use `TaskStop` to stop it.
+
+Put an agent definition in `~/.labunbun/agents/` or in `<project>/.labunbun/agents/`. The file name ends in `.md`. The file has a frontmatter block. The frontmatter key `name` gives the agent type. The frontmatter key `description` gives the text that the model reads. The frontmatter key `tools` gives a list of tool names. The frontmatter key `model` gives the model. The frontmatter key `maxTurns` gives a limit. The rest of the file is the system prompt of the subagent.
+
+### The four-agent band
+
+> **NOTE**: Read this section before you use the band. Each member uses your money on every request.
+
+`/beetle <task>` starts four members:
+
+| Member | Role | Tools |
+|--------|------|-------|
+| John | Lead | `Read`, `Grep`, `Glob`, `Bash` |
+| Paul | Implementer | All tools |
+| George | Research and verification | `Read`, `Grep`, `Glob`, `Bash` |
+| Ringo | Build and run | `Read`, `Grep`, `Glob`, `Bash` |
+
+Each member also has `BandMessage` and the four task tools.
+
+> **NOTE**: The tool list is a structural guide. It is not a sandbox. A member can still change files through Bash.
+
+The members send messages to each other. A message wakes the member that receives it. A band that has no message is not running. A band that has no message costs nothing. Only `/beetle off` stops a band.
+
+The tool asks you for one model per member on the first run. The tool saves the four answers in `beetle.models`. Only the user tier can set `beetle`. Use `/beetle models` to change the answers later.
+
+Use these commands:
+
+| Command | Purpose |
+|---------|---------|
+| `/beetle <task>` | Start a band, or start one more turn. |
+| `/beetle status` | Show the members, their models, their turn counts, and their costs. |
+| `/beetle models` | Choose the model for each member. |
+| `/beetle say <member> <text>` | Send a message to one member. |
+| `/beetle off` | Stop all four members. |
+
+You can also send a message with `@john <text>`. This form works only when the main session is not running.
+
+The four members use the same working directory. `/rewind` does not restore the files that a member changed.
+
+> **NOTE**: Press Esc to stop the main session. Esc does not stop the band. Use `/beetle off`.
+
+### Skills
+
+A skill is a directory that contains a `SKILL.md` file. The tool adds a command for each skill. The command name is `/skill-<name>`.
+
+Put a skill in `~/.labunbun/skills/` or in `<project>/.labunbun/skills/`.
+
+### Plan mode
+
+Plan mode reads the code first. Plan mode does not change files. The tool then shows you a plan. The tool waits for your approval. The tool then applies the plan.
+
+The tool restores the two axes that were in force before you entered plan mode.
+
+### Themes
+
+```bash
+/theme                    # list the themes, and mark the current one
+/theme high-contrast-dark # change the theme now, and remember it
+/theme auto               # match the background of your terminal
+```
+
+| Name | Use |
+|------|-----|
+| `dark` | The default. It follows the palette of your terminal. |
+| `light` | Light backgrounds. |
+| `high-contrast-dark` | Maximum contrast on dark. |
+| `high-contrast-light` | Maximum contrast on light. |
+| `deuteranopia-dark` | Red and green color blindness. Success is blue. |
+| `tritanopia-dark` | Blue and yellow color blindness. |
+| `spiderman` | Red and blue. |
+| `splatoon` | Green and magenta. |
+
+The key `theme` in the settings file selects a theme. The value `auto` asks your terminal for its background color. The tool asks for the OSC 11 color first. The tool then asks for `COLORFGBG`. A terminal that does not answer uses `dark`.
+
+The tool shows a symbol for each state. Success, warning, error, pending, and the selected row each have a symbol. The transcript is readable without color.
+
+#### Write a theme
+
+Put a JSON file in `~/.labunbun/themes/`. Put it in `<project>/.labunbun/themes/` for one project. The project file wins when the two files have the same name.
+
+```json
+{
+  "name": "midnight",
+  "appearance": "dark",
+  "extends": "dark",
+  "tokens": {
+    "accent": "#7aa2f7",
+    "error": "#f7768e",
+    "codeText": "#9aa5ce",
+    "marks": { "error": "×" }
+  }
+}
+```
+
+The key `extends` names a built-in theme. That theme supplies each token that your file does not set. A value is any color that Ink accepts. A value is `"red"`. A value is `"#d55e00"`. A value is `"rgb(215,95,0)"`.
+
+The `Theme` interface has the full token list. The interface is in `packages/tui/src/themes/tokens.ts`. Each token there describes what it colors.
+
+> **NOTE**: A broken theme file does not stop the session. Use `/doctor` to see which file failed and why.
+
+### Editing in the terminal
+
+The tool has three editors. Each one is independent.
+
+| Editor | Command |
+|--------|---------|
+| Default | None |
+| Vim | `/vim [on\|off]`, or `vimMode: true` |
+| Emacs | `/emacs [on\|off]`, or `emacsMode: true` |
+
+#### Emacs keys
+
+The Emacs editor has no mode line. Use these keys.
+
+| Key | Action |
+|-----|--------|
+| `C-a`, `C-e` | Go to the start or the end of the line. |
+| `C-f`, `C-b` | Move one character forward or back. |
+| `C-n`, `C-p` | Move one line down or up. |
+| `M-f`, `M-b` | Move one word forward or back. |
+| `C-k` | Kill to the end of the line. |
+| `C-w` | Kill the word before the point. |
+| `C-d`, `C-h` | Delete one character forward or back. |
+| `C-y`, `M-y` | Paste the last kill, or the one before it. |
+| `C-SPC` | Set the mark. |
+| `C-x C-x` | Go to the mark. |
+| `C-u` | The prefix argument. Its value is `(4)`. Press it again to multiply by 4. |
+| `M-1` to `M-9`, `M--` | Set the prefix argument to a number. |
+| `?` | Show the keys that the engine uses. |
+
+The kill ring has these rules:
+
+- `C-k C-k` joins two lines.
+- A backward `C-k` puts the text before the point.
+- `M-C-w` joins two kills that were not next to each other.
+- A prefix argument makes a delete a kill. `C-u C-d` fills the ring. A `C-d` without a prefix does not.
+
+The engine uses the Emacs rule for words. A boundary is a change of script. `M-f` stops inside CJK text. `foo-bar` is 3 words.
+
+The engine takes these keys and does not use them: `C-t`, `M-u`, `M-z`, `C-s`, `C-r`. The engine uses them for nothing. They do not reach the terminal as characters. `C-r` does history search everywhere except in this editor.
+
+### DualShock 4 controller
+
+> **WARNING**: Do not rest a finger on a button. The tool reads a held button as a press.
+
+A DualShock 4 controller can run the session without a keyboard. Connect the controller with USB or with Bluetooth.
+
+```bash
+/gamepad on        # read a controller now, and remember it
+/gamepad status    # show the transport, the battery, and the bindings
+/gamepad watch     # show each press as one line
+/gamepad list      # list each controller interface that the OS reports
+/gamepad reset     # look for a controller again
+/gamepad approve   # ask whether ✕ can answer a permission dialog
+/gamepad rumble    # buzz once
+/gamepad           # show the table of buttons and actions
+```
+
+Use `--gamepad` to turn the controller on for one run. The flag does not write a setting. Use `--no-gamepad` to turn it off for one run.
+
+| Button | Action |
+|--------|--------|
+| D-pad, left stick | Move in lists, dialogs, and the transcript. |
+| Right stick, vertical | Scroll the transcript. |
+| `L2`, `R2` | Change the repeat rate. The rates are 160 ms and 30 ms. |
+| ✕ | Confirm. Hold for 600 ms in a permission dialog to always allow. |
+| ○ | Cancel. Cancel also interrupts a running turn. |
+| □ | Clear the screen. In the on-screen keyboard, delete one character. |
+| △ | Open the command wheel. In the on-screen keyboard, shift. |
+| `L1`, `R1` | Page back or forward. |
+| Options | Open the transcript browser. |
+| Share | Open the on-screen keyboard. |
+| Touchpad press | Run `/status`. |
+| `L3`, `R3` | Open `/model`. Pick the permission mode. |
+| PS | Nothing. The OS and Steam use this button. |
+
+A repeat starts after 400 ms. A repeat then happens every 80 ms. `L2` and `R2` change these values.
+
+The lightbar uses the accent color of the theme. It is brighter during a turn. It flashes when a dialog waits. It is red when the battery is low.
+
+A waiting dialog also blinks the lightbar on the controller. The bar turns on for 500 ms. The bar turns off for 500 ms. This is the only state that uses a blink.
+
+The motors have these signals:
+
+| Signal | Meaning |
+|--------|---------|
+| One short tap | The tool found a controller. |
+| One firmer tap | Work started. |
+| One long tap | The turn ended. |
+| Two short taps | You stopped the turn. |
+| The faintest tap | The controller said no. |
+| A hard kick, both motors | A dialog needs a decision. |
+| Both motors, gently | The battery is low. |
+
+Two signals are not delayed by an earlier signal. They are a waiting dialog and a low battery. Each happens once. Every other signal waits its turn.
+
+#### Touchpad
+
+The touchpad is not a mouse. A finger on it gives a position and a gesture.
+
+| Gesture | Action |
+|---------|--------|
+| Tap | Confirm, the same as ✕. |
+| Drag | Move one step. One step is an eighth of the surface. |
+| Two fingers | Page back or forward. |
+
+A tap never holds a button. A gesture lasts one report. Buttons keep the hold.
+
+The hold on ✕ is 600 ms of reports from the controller. The tool does not count wall-clock time. A controller that stops and starts reports does not keep the age of the press. The hold starts again.
+
+> **NOTE**: A gap of 250 ms with no reports means the controller is gone. The tool then forgets it.
+
+> **NOTE**: A controller that is connected with USB and switched on appears twice. The tool reads one link and writes to both.
+
+> **NOTE**: Two controllers that are both switched on appear as one. Use the `device` key in the settings to choose one.
+
+```json
+{
+  "gamepad": {
+    "enabled": true,
+    "deadzone": 0.25,
+    "device": "wireless",
+    "rumble": true,
+    "lightbar": true,
+    "bindings": { "cross": "confirm", "r2": "command:/status", "square": "none" },
+    "phrases": ["explain what you just did", "run the tests"]
+  }
+}
+```
+
+The keys `rumble` and `lightbar` both have the value `true` by default. Set a key to `false` to stop that part of the controller from working.
+
+> **WARNING**: `allowApprove` has the value `false` by default. With it off, ✕ does not answer a permission dialog. Only a user-tier settings file can set `gamepad`.
+
+`node-hid` is an optional dependency. The tool works without it. Use `/gamepad on` to see the command that installs it.
+
+## Installation
+
+### Requirements
+
+- The tool does not use Node.js.
+- Bun 1.3.0 or later
+- pnpm 10.33.2 or later
+- An API key for one provider
+
+### Procedure
+
+1. Install the packages.
+
+   ```bash
+   pnpm install
+   ```
+
+2. Set an API key.
+
+   ```bash
+   export ANTHROPIC_API_KEY=sk-...
+   export DEEPSEEK_API_KEY=sk-...
+   ```
+
+3. Start the session.
+
+   ```bash
+   bun run dev
+   ```
+
+   Use this command to run one prompt and print the result.
+
+   ```bash
+   bun run dev -p "list the files here"
+   ```
+
+## Operation
+
+### Command line options
+
+| Option | Purpose |
+|--------|---------|
+| `-p`, `--print` | Run one prompt, then print the result. |
+| `--model <provider/id>` | Use this model for the run. |
+| `--permission-mode <mode>` | Set the permission mode. The values are `ask`, `plan`, `agent`. |
+| `--sandbox <mode>` | Set the sandbox. The values are `workspace-write`, `danger-full-access`. |
+| `--max-turns <n>` | Stop after this many turns. This option works in headless mode only. |
+| `--no-session` | Do not store the session. This option works in headless mode only. |
+| `--resume <id>` | Open this session in the terminal. |
+| `-c`, `--continue` | Open the last session in this directory. |
+| `--output-format <format>` | Set the output format. The values are `text`, `json`, `stream-json`. |
+| `--gamepad` | Use the controller for this run. The tool does not write a setting. |
+| `--no-gamepad` | Do not use the controller for this run. |
+| `--help`, `-h` | Show the options. |
+| `--version`, `-v` | Show the version. |
+
+Every option takes the next argument. The tool does not accept `--option=value`.
+
+The default model is `anthropic/claude-sonnet-5`. The number of turns has no limit by default.
+
+The `json` output format has a `cost_usd` field.
+
+### Session commands
+
+Use these commands in the terminal.
+
+| Command | Purpose |
+|---------|---------|
+| `/status` | Show the model, the context use, the cost, and the settings. |
+| `/model [provider/id]` | Show the model, or change it. |
+| `/mode [mode]` | Show the permission mode, or change it. |
+| `/permissions` | Show the permission mode and the rules. |
+| `/doctor` | Check the environment, the settings, and the provider. |
+| `/cost` | Show the cost of this session, then of this project. |
+| `/context` | Show what the context window contains. |
+| `/cache` | Show the prompt cache hit rate and its ceiling. |
+| `/compact [focus]` | Summarize the conversation. |
+| `/trim` | Replace old tool results with short previews. |
+| `/rewind [number]` | Restore a file from a checkpoint. The tool lists the last 10 checkpoints. |
+| `/fork <id>` | Start a new session from an entry. Use `/tree` to find the id. |
+| `/tree` | Show the branches of the session. |
+| `/resume` | Open an earlier session in this directory. |
+| `/export [path]` | Export the session to a Markdown file. |
+| `/agents [approve]` | List the agent definitions, then load the ones of this project. |
+| `/mcp [approve <name>]` | List the MCP servers, then approve one. |
+| `/activity [7d\|30d\|all]` | Show the days that you used this, and the current streak. |
+| `/think [level]` | Set how hard the model thinks. The values are `off`, `minimal`, `low`, `medium`, `high`. |
+| `/theme [name\|auto]` | Show the themes, or change the theme. |
+| `/vim [on\|off]` | Turn vim editing on or off. |
+| `/emacs [on\|off]` | Turn Emacs editing on or off. |
+| `/gamepad [...]` | Set the controller. See [DualShock 4 controller](#dualshock-4-controller). |
+| `/beetle [...]` | Run the four-agent band. See [The four-agent band](#the-four-agent-band). |
+| `/yoshi [...]` | Import from another agent tool. See [Import procedure](#import-procedure). |
+| `/init` | Make a `LABUNBUN.md` file for this project. |
+| `/explain <target>` | Ask the model to explain code or a concept. |
+| `/hal` | Play a sound. |
+| `/clear` | Clear the display. The session and the model context stay. |
+| `/help` | Show this list. |
+| `/exit` | Stop the session. |
+
+The command `/migrate` is the previous name of `/yoshi`. The command `/quit` is an alias of `/exit`.
+
+### Headless output
+
+Use `--output-format text` for plain text. Use `--output-format json` for one JSON object. Use `--output-format stream-json` for one JSON object per event.
+
+## Configuration
+
+### Files and folders
+
+| Path | Content |
+|------|---------|
+| `~/.labunbun/settings.json` | Your settings. |
+| `~/.labunbun/managed-settings.json` | The policy settings of your organization. |
+| `~/.labunbun/.mcp.json` | Your MCP servers. |
+| `~/.labunbun/MEMORY.md` | Your memory file. |
+| `~/.labunbun/rules/` | Your rule files. |
+| `~/.labunbun/agents/` | Your agent definitions. |
+| `~/.labunbun/skills/` | Your skills. |
+| `~/.labunbun/themes/` | Your themes. |
+| `~/.labunbun/history.jsonl` | The prompts that you typed. Press ↑ to recall them. |
+| `~/.labunbun/projects/<dir>/` | The sessions, the MCP approvals, and the trust of one project. |
+| `<project>/.labunbun/settings.json` | The settings of this project. |
+| `<project>/.labunbun/settings.local.json` | Your settings for this project. |
+| `<project>/.labunbun/rules/` | The rule files of this project. |
+| `<project>/.labunbun/agents/` | The agent definitions of this project. |
+| `<project>/.labunbun/skills/` | The skills of this project. |
+| `<project>/.labunbun/themes/` | The themes of this project. |
+| `<project>/.mcp.json` | The MCP servers of this project. |
+| `<dir>/LABUNBUN.md` or `<dir>/AGENTS.md` | The project guide of one directory. |
+
+The tool reads the memory files from the working directory up to the root of the filesystem. The nearest file has the highest priority. The total size of these files is 40000 characters.
+
+### Settings tiers
+
+The tool reads the settings files in this order. A later file has a higher priority.
+
+1. User: `~/.labunbun/settings.json`
+2. Project: `<project>/.labunbun/settings.json`
+3. Local: `<project>/.labunbun/settings.local.json`
+4. Policy: `~/.labunbun/managed-settings.json`
+
+A project file is controlled by its repository. The tool does not read these keys from a project file:
+
+`model`, `fallbackModels`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `modelDiscovery`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `permissions.allow`, `permissions.additionalDirectories`.
+
+A repository must not choose its own model. A repository must not choose its own confinement. A repository must not approve its own tool calls. A repository must not turn the network off.
+
+The tool reads `permissions.deny` from every tier. It reads `theme`, `vimMode`, and `emacsMode` from a project file.
+
+The tool writes the keys that it ignored to the output at startup.
+
+The tool does not add an ignore rule for `settings.local.json`.
+
+### Approval of project definitions
+
+The tool does not load the agents or the skills of a project at first. Use `/agents approve` to load them. The tool remembers this decision in `~/.labunbun/projects/<dir>/`. The tool does not remember it in the repository.
+
+A headless run has no dialog. The tool does not load the definitions of an unapproved project. The tool writes a note to stderr.
+
+### Settings keys
+
+| Key | Values | Tier |
+|-----|--------|------|
+| `model` | `provider/id` | User |
+| `fallbackModels` | An array of `provider/id`. The tool tries each model in order. | User |
+| `thinkingLevel` | `off`, `minimal`, `low`, `medium`, `high` | User |
+| `permissionMode` | `ask`, `plan`, `agent` | User |
+| `sandbox` | `workspace-write`, `danger-full-access` | User |
+| `networkAccess` | `enabled`, `restricted` | User |
+| `networkDomains` | An array of strings and objects | User |
+| `trimOldToolResults` | A boolean. The value `true` is the default. | User |
+| `modelDiscovery` | A boolean. The value `true` is the default. | User |
+| `backgroundShellNotifications` | A boolean. The value `true` is the default. | User |
+| `env` | An object of environment variables | User |
+| `providers` | An object of OpenAI-compatible providers | User |
+| `pricing` | An object of model prices | User |
+| `cache` | An object of cache settings | User |
+| `beetle` | An object with the key `models` | User |
+| `mcpServers` | An object of MCP servers | User |
+| `hooks` | An object of hooks | User |
+| `gamepad` | An object of controller settings | User |
+| `allowManagedPermissionRulesOnly` | A boolean. Policy tier only. | Policy |
+| `disableBypassPermissionsMode` | A boolean. Policy tier only. | Policy |
+| `theme` | A theme name, or `auto` | Any |
+| `vimMode` | A boolean | Any |
+| `emacsMode` | A boolean | Any |
+| `permissions.allow` | An array of rules | Any |
+| `permissions.deny` | An array of rules | Any |
+| `permissions.additionalDirectories` | An array of paths | Any |
+
+### Add a provider
+
+Add a provider in `~/.labunbun/settings.json`.
 
 ```json
 {
@@ -182,577 +611,159 @@ bun run dev -p "list files here"       # headless
 }
 ```
 
-`pricing` is USD per million tokens (`cacheRead`/`cacheWrite` default to 0,
-which is what an API that does not bill cached tokens separately means). A
-top-level `pricing` map — `{ "anthropic/claude-sonnet-5": { "input": 1.5,
-"output": 7.5 } }` — overrides the catalog's own list prices, which is how a
-gateway or a negotiated rate gets costed correctly. Without a price, tokens are
-counted and `/cost` says they could not be costed; it does not report them as
-free.
+The unit of each price is US dollars per 1 million tokens. The keys `cacheRead` and `cacheWrite` have the value 0 by default.
 
-### Import an existing setup
+A key `pricing` at the top level changes the price of a model. Use the form `"anthropic/claude-sonnet-5"`. This is for a gateway or a rate that you negotiated.
 
-Already configured another agent tool? Copy over what has an equivalent:
+The tool does not report a model with no price as free. Use `/cost` to see which models have no price.
 
-```bash
-bun run dev yoshi                      # dry run: report only, writes nothing
-bun run dev yoshi --from codex         # one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | t3-code | opencode | cursor | trae | antigravity | qoder | codewhale | mimocode-code | openclaw | alma | all
-bun run dev yoshi --only settings      # categories: settings | assets | history | all
-bun run dev yoshi --apply              # write it
-bun run dev yoshi --apply --force      # also overwrite values that exist
+You can change the base URL of a provider. Use `<PROVIDER>_BASE_URL`, for example `ANTHROPIC_BASE_URL`.
+
+## Import procedure
+
+The command `yoshi` copies the setup of another agent tool. The tool reads the other setup. The tool never changes it.
+
+The tool reads these values for `--from`:
+
+```text
+one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | opencode | cursor | trae | t3-code | antigravity | qoder | codewhale | mimocode-code | openclaw | alma | all
 ```
 
-Sources are only read, never modified. Model names, `env`, MCP servers,
-permission rules, skills, agents (`~/.labunbun/agents/`) and rules carry over,
-and a skill directory travels whole — a body pointing at `references/x.md` finds
-it on the other side, and the supporting files that could not come (binary, too
-large) are counted in the report. Slash commands (`~/.claude/commands/**`)
-arrive as skills with `$ARGUMENTS` expanded; a frontmatter key with no
-equivalent here (`allowed-tools`, `model`, `argument-hint`) is named in the
-report rather than written as if it worked. Codex's `~/.codex/rules/*.rules`
-become permission rules — Codex matches a parsed argv prefix where labunbun
-matches the whole command line, so a chained `git commit && …` matches here too.
+The value `all` reads every source that the tool finds.
 
-T3 Code keeps everything in one SQLite database under `.t3/userdata` (or the
-`.t3/dev` tree, which is read instead when the first is empty). Its runtime mode
-is carried over only if you actually chose one: T3's default is `full-access`,
-and an install that never touched the setting has nothing on disk to copy — so
-importing the absence would silently hand you agent mode with no sandbox. Its
-theme ids (`t3-chat`, `grove`, `ocean`, `ember`, `iris`) name themes this build
-does not ship, so the theme is reported by name and not guessed at. Tool calls
-live in T3's activities table as rows with a title and a status rather than as
-messages, so imported transcripts carry the conversation without the tool calls,
-and the report counts what was left behind.
+The tool copies these categories:
 
-Antigravity keeps everything under `~/.gemini`, which the Gemini CLI shares —
-so a home with only Gemini CLI state is not offered an Antigravity migration
-just because that directory is busy. Its conversations live in
-`~/.gemini/antigravity-ide/brain/<id>/` (with `~/.gemini/antigravity` read when
-the first holds nothing), each transcript a `transcript.jsonl` whose `source`
-field — not its 122-valued `type` — says who spoke; a line that names a field as
-truncated is re-read from `transcript_full.jsonl` at the same step. No
-conversation records a working directory, so each one is filed under the project
-you are migrating into and the report says the directory was filed rather than
-recorded. Its agent permission preset is a seven-valued enum whose members are
-all real strings and whose *meanings* are documented nowhere in the product, so
-the value is reported by name and nothing is claimed for it: guessing would move
-a permission setting in the one direction it must not be guessed in.
+- `settings`: the model, the environment variables, the MCP servers, the permission rules
+- `assets`: the skills, the agents, the rules
+- `history`: the sessions and the prompts
 
-Qoder's settings are a **merge of three files** rather than a document — user,
-project and local, the product's default `settingSources` — so reading
-`~/.qoder/settings.json` alone would import a file Qoder is not running. Six
-keys merge one level deep and the rest replace wholesale, and each migrated key
-reports which of the three files it came from. `QODER_CONFIG_DIR_NAME` is a path
-segment the product validates, so a home using one it rejects is reported rather
-than quietly read as `~/.qoder`. Four of its six permission modes name a posture
-this build has no word for and one of those is `default` — importing it would
-write a mode you never chose, so it is named and skipped. **No credential comes
-across.** `headers` and `env` *values* are dropped and their names reported, and
-a server `url` that carries one in its `user:password@` part or in a parameter
-named like a credential is not migrated at all: unlike a header or an
-environment variable there is no way to drop the credential and keep the
-address, so the server is left for you to add by hand. Transcripts live in
-`projects/<slug>/*.jsonl`; they are counted and reported, never opened, and
-their directory is named rather than recorded because a Qoder transcript has no
-working directory of its own.
+### Procedure
 
-Codewhale is **a rename of DeepSeek-TUI**, and the report says so before it says
-anything else: `~/.deepseek` is a live second root, read for the paths whose own
-resolvers still fall back to it (`config.toml`, `permissions.toml`, `mcp.json`,
-`skills`, `settings.toml`, `tui.toml`, `sessions`) and not for the ones that do
-not (`agents/`, `fleets/`, `plugins/`, `themes/`, `workflows/`, `audit.log`,
-`prompts/constitution.md`). Every state document is reported with the root it was
-found under, and a document that is under neither is listed as absent rather than
-passed over — the three are different facts and one sentence would hide two of
-them. `$CODEWHALE_HOME` narrows all of it to one root, which is the product's own
-rule rather than a choice here: an explicit home is an isolation boundary, so
-nothing falls back out of it.
+1. See what the tool does. This step writes nothing.
 
-There are **five settings documents, not one**, and only `config.toml` has a
-project layer — there is no project `settings.toml` and no project `mcp.json`,
-and the CLI refuses a project-scoped settings write outright. `sandbox_mode`
-needs no translation: `read-only`/`workspace-write`/`danger-full-access` are the
-same strings this build uses, minus `read-only`, which has no counterpart here and
-is **named rather than approximated** — claiming the nearest sandbox would widen a
-confinement setting on the user's behalf. `approval_policy` is read apart from
-it, because `config.toml` and `settings.toml` use *different vocabularies* for
-that key and the product says so: `never` maps to nothing, since it both never
-asks and denies what it would not approve, and no mode here does both.
+   ```bash
+   bun run dev yoshi
+   ```
 
-**No credential comes across, and four of the shapes are ones no name-based scan
-can see.** `api_key`, `webhook_token` and `sandbox_api_key` match on their names
-and go; `base_url` can carry one in a URL's userinfo or query, and `http_headers`
-holds bearer tokens under a key that is not itself credential-shaped — the product
-classifies those header names as credential-bearing itself. Both are dropped
-whole and reported by name. MCP `headers`, `env` and `env_headers` lose their
-values the same way, and a server `url` carrying a credential loses the whole
-server, because a URL with it removed points at nothing. Codewhale also ships its
-own `/import-claude`, which moves `~/.claude/CLAUDE.md` into
-`~/.codewhale/instructions.md` — a competing path this run saw and did not take,
-and one that changes what the import above reads if you have already run it.
+2. Choose the sources.
 
-Transcripts *do* come across: each is one `<id>.json` whose metadata records the
-working directory it ran in, so `--history-scope` filters them honestly rather
-than filing every conversation under the project you are importing into.
+   ```bash
+   bun run dev yoshi --from codex
+   ```
 
-OpenClaw resolves **five paths five different ways, and they disagree**, so its
-tree is read from every root that can hold it: `$OPENCLAW_STATE_DIR` when set,
-else `~/.openclaw`, else the pre-rename `~/.clawdbot` an upgraded install never
-moved out of; `OPENCLAW_PROFILE` puts a named profile in `~/.openclaw-<name>`;
-and `OPENCLAW_HOME` moves the whole thing. The *configuration* directory is a
-second resolver with different precedence — it honours `OPENCLAW_CONFIG_PATH`
-and has no `.clawdbot` fallback — so on a real install the two are frequently
-different paths and both are read. Its settings are **two unrelated documents**
-rather than one: `openclaw.json` is the product configuration and
-`<agentDir>/settings.json` is a separate forked Claude Code settings manager,
-and **your model, theme and thinking level may be in the second and not the
-first** — so both are read and neither is merged into the other. `openclaw.json`
-is read with `$include` resolved before anything else, because the product layers
-included files over the root one and reading the root alone imports a document
-OpenClaw is not running; a missing or broken include is a gap this report names
-rather than passes over. **No credential comes across**, and one channel is
-invisible to a key-name scan: `mcp.servers[].url` is validated only as http/https,
-so `https://user:token@host/mcp` is a working server to OpenClaw with the
-credential inside the address — unlike a header or an environment variable there
-is no way to drop it and keep the server, so that one is left for you to add by
-hand. A configuration carrying any of the **ten keys OpenClaw's own MCP schema
-hard-rejects** fails to load *entirely*, so the whole map is refused rather than
-partly imported against a file the product refuses. Six workspace bootstrap
-documents are looked for in the **workspace** rather than the state directory:
-`AGENTS.md` comes across, and the other five are named — "this build has no
-equivalent" and "we did not look" are different claims. Its transcripts are read
-from the agent's SQLite store, including the events stored zstd-compressed
-rather than as text. Two things a migration that bypasses OpenClaw leaves behind
-are named in the report: the macOS Keychain entries for **Codex** and **Claude
-Code** credentials (read-only, never written), and OpenClaw's **own** importer —
-`MigrationProviderPlugin` with `extensions/migrate-claude/`,
-`extensions/codex/src/migration/` and `extensions/migrate-hermes/` — which
-imports *into* OpenClaw and may already have run.
+3. Choose the categories.
 
-Anything without an equivalent is reported as skipped with a reason rather than
-dropped silently, keys the importer does not know included: they are listed by
-name, never by value. Existing values are kept unless `--force` says otherwise.
-The report names every written file that ends up holding a credential.
+   ```bash
+   bun run dev yoshi --only settings
+   ```
 
-Past conversations import as sessions under `~/.labunbun/projects/<cwd>/`, so
-`--continue` finds them, and the prompts you typed import into
-`~/.labunbun/history.jsonl`, so ↑ recalls them in the directory each was typed
-in. Both answer to the same scope: only the current project is taken by default
-— `--history-scope all` goes across projects, `none` skips history entirely —
-and `--history-limit <n>` (default 20) caps the sessions from each source, with
-a separate cap for prompts. A tool call whose other half is missing is dropped
-on the way in: a transcript the messages API would reject is worse than a
-shorter one.
+4. Write the changes.
 
-`/yoshi` in the REPL asks rather than assumes. The first question offers
-`Import everything` — every source found, every category — or `Choose…` for the
-step-by-step questions; either way it asks once about history, prints the same
-dry-run report, and writes only after you confirm. `--yoshi` is the same
-command as the subcommand, for when the flag is easier to type than the word.
-The command was called `migrate` until it was renamed; that spelling still
-works, as `/migrate`, `--migrate` and the `migrate` subcommand.
+   ```bash
+   bun run dev yoshi --apply
+   ```
 
-## Themes
+5. Write the changes over the values that already exist.
 
-```bash
-/theme                    # list every theme, marking the active one
-/theme high-contrast-dark # switch immediately and remember the choice
-/theme auto               # match the terminal background
-```
+   ```bash
+   bun run dev yoshi --apply --force
+   ```
 
-| Name | For |
-|------|-----|
-| `dark` | default; follows the terminal's own palette |
-| `light` | light backgrounds, where terminal-default colors wash out |
-| `high-contrast-dark` | maximum contrast on dark, every state bold |
-| `high-contrast-light` | maximum contrast on light, every state bold |
-| `deuteranopia-dark` | red/green color blindness — success is blue, not green |
-| `tritanopia-dark` | blue/yellow color blindness — avoids the blue/green pair |
-| `spiderman` | red and blue |
-| `splatoon` | green and magenta |
+| Option | Values | Default |
+|--------|--------|---------|
+| `--from` | A list of source names, or `all` | `all` |
+| `--only` | A list of categories, or `all` | `all` |
+| `--history-scope` | `cwd`, `all`, `none` | `cwd` |
+| `--history-limit` | The number of sessions per source. Use 0 for none. | 20 |
+| `--apply` | Write the changes | Dry run |
+| `--force` | Write over values that exist | Keep them |
 
-`theme` in `settings.json` selects one; `"auto"` asks the terminal for its
-background color (OSC 11, then `COLORFGBG`) and picks the theme that states that
-appearance — one of yours if any of them does, the matching built-in otherwise.
-Detection never blocks startup: a terminal that does not answer gets `dark`.
+Use `/yoshi` in the terminal to run a wizard. The wizard asks which sources and which categories to use. Use `--yoshi` to run the same command as the subcommand.
 
-State is never carried by color alone. Success, warning, error, pending and the
-selected row each render a symbol as well, so the transcript stays readable to a
-colorblind reader and through anything that strips ANSI.
+### What the tool copies
 
-### Writing a theme
+The tool copies the model names, the environment variables, the MCP servers, the permission rules, the skills, the agents, and the rules. The tool copies a skill directory as a whole. The tool reports each file that it did not copy.
 
-Drop a JSON file in `~/.labunbun/themes/` (or `.labunbun/themes/` for one
-project, which wins on a name collision):
+The tool turns the slash commands of another tool into skills. The tool expands `$ARGUMENTS`.
 
-```json
-{
-  "name": "midnight",
-  "appearance": "dark",
-  "extends": "dark",
-  "tokens": {
-    "accent": "#7aa2f7",
-    "error": "#f7768e",
-    "codeText": "#9aa5ce",
-    "marks": { "error": "×" }
-  }
-}
-```
+> **NOTE**: The rules files of Codex become permission rules. Codex matches part of a command. LaBunbun Code matches the whole command.
 
-`extends` names a built-in that supplies every token the file leaves out, so a
-theme that changes a handful of colors does not have to restate the two dozen it
-is happy with. Values are anything Ink accepts: `"red"`, `"#d55e00"`,
-`"rgb(215,95,0)"`.
+The tool imports the sessions under `~/.labunbun/projects/<dir>/`. The tool then imports the prompts into `~/.labunbun/history.jsonl`. Use `--continue` to find a session. Press ↑ to find a prompt.
 
-The full token list is the `Theme` interface in
-`packages/tui/src/themes/tokens.ts`, where each token documents what it colors.
-A broken theme file never stops the REPL from starting; run `/doctor` to see
-which file failed and why — including misspelled token names, which otherwise
-just do nothing.
+The tool drops a tool call that has no result. The tool does not write a conversation that the messages API refuses.
 
-## Gamepad
+> **NOTE**: The tool reports each value that it did not copy. The tool does not report the value of a key.
 
-A DualShock 4 (USB or Bluetooth) can drive the REPL on its own — no keyboard
-needed to answer a permission, pick a model, or type a prompt.
+### Credentials
 
-```bash
-/gamepad on        # read a controller now, and remember it
-/gamepad status    # transport, battery, reports, last write, which bindings you changed
-/gamepad watch     # every change as a line: press a button, read its name
-/gamepad list      # every controller interface the OS reports
-/gamepad reset     # let go of it and look again, now — the rescue for a stuck pad
-/gamepad approve   # may ✕ answer a permission dialog? (on|off, no argument toggles)
-/gamepad rumble    # buzz once — the quickest check that writing works
-/gamepad           # the current button and gesture → action table
-```
+> **WARNING**: No credential comes across. The tool never writes a credential from another setup into your settings.
 
-`--gamepad` turns it on for one run without writing anything; `--no-gamepad`
-turns it off the same way.
+The tool removes these keys. It reports each one by name. `api_key`, `webhook_token`, `sandbox_api_key`, `headers`, `env`, `env_headers`.
 
-| Button | Action |
-|--------|--------|
-| D-pad, left stick | Move: lists, dialogs, the command wheel, the transcript |
-| Right stick (vertical) | Scroll the transcript, speed with the offset |
-| L2 / R2 | Modifiers, not rebindable: fine (160 ms) and fast (30 ms) repeats |
-| ✕ | Confirm — send, allow, choose. Held 600 ms in a permission dialog: *always* allow |
-| ○ | Cancel — close, deny, and interrupt a running turn |
-| □ | Clear the screen; backspace in the on-screen keyboard |
-| △ | Command wheel; shift in the on-screen keyboard |
-| L1 / R1 | Page back / forward in lists, the transcript, and the keyboard |
-| Options | Transcript browser |
-| Share | On-screen keyboard |
-| Touchpad press | `/status` |
-| L3 / R3 | Open `/model` / pick the permission mode |
-| PS | Nothing on purpose — the OS and Steam claim it |
+> **WARNING**: The tool cannot remove a credential from a URL. A URL that has `user:password@` in it keeps no meaning without it. The tool does not copy a server with such a URL.
 
-Movement repeats: 400 ms before the first repeat, then every 80 ms, or at the
-L2/R2 rates above. Battery appears in the status line while a pad is connected,
-and the lightbar takes the theme's accent — brighter while a turn is running,
-flashing in the permission colour while a dialog is waiting, red when the
-battery is low.
+The tool also does not copy a server whose URL has a parameter that names a credential. Use `/mcp approve` to add such a server.
 
-A waiting dialog also *blinks*: half a second on, half a second off, in the pad's
-own hardware. The software pulse only dims the bar, and a bar that dims is one
-you can miss from the sofa — which is the one thing a question must not be. It
-is the only state that asks for a blink: the battery warning already reaches
-black on its own, and two rhythms over one light is a flicker.
-
-The motors have a small vocabulary, and it is a sentence each rather than a
-volume:
-
-| Felt | Meaning |
-|------|---------|
-| One short tap | A controller was found |
-| A firmer tap | Work started |
-| A long, deep note | The turn finished |
-| Two quick taps | You stopped it yourself |
-| The faintest tap | A no from the pad: ○ on a dialog, or ✕ where it may not approve |
-| A hard kick, both motors | Something wants a decision |
-| Both motors, gently | The battery just crossed into the low band |
-
-Two of those are felt even if something else buzzed a moment earlier — a
-question, and the battery crossing — because each happens once, and the one that
-is dropped is the one that mattered. Everything else waits its turn: two buzzes
-a moment apart read as one stutter, not as two pieces of news.
-
-### The touch surface
-
-The touchpad is a second input and not a mouse: a finger on it is a position and
-a gesture, never a cursor.
-
-| Gesture | Action |
-|---------|--------|
-| Tap | Confirm, exactly like ✕ |
-| Drag | Move — one step per eighth of the surface, in the direction the finger goes |
-| Two-finger slide | Page back / forward in lists and the transcript |
-
-They are bindings like any other, under the names `/gamepad` prints:
-`touch-tap`, `touch-up`, `touch-down`, `touch-left`, `touch-right`,
-`touch-two-left`, `touch-two-right`.
-
-A tap confirms but never *holds*. The ✕-hold is a real thing — a permission
-dialog reads 600 ms of ✕ as "always allow" — and a gesture lasts exactly one
-report, so the only way one could ever reach that threshold is the reports
-stopping: a pad that went to sleep with a finger resting on it. A controller in
-a bag must not be able to answer a dialog on its own, so gestures are edges by
-construction and buttons keep the hold. `allowApprove` governs the tap in a
-permission dialog exactly as it governs ✕.
-
-Buttons keep the hold on the same principle, measured the same way: 600 ms of
-the pad *reporting* ✕ down, not 600 ms of wall clock. A controller that idles
-out mid-press and comes back with the button still under a thumb spent that
-time saying nothing, so the time is not credited — the press keeps its true age,
-which is what a dialog reads to ask whether it was aimed at it. Nothing is
-invented on the way back either: the button is neither pressed again nor
-released, the hold simply starts over. A silence here means a quarter of a
-second with nothing from the pad (`REPORT_GAP_MS` in
-`packages/gamepad/src/service.ts`) — dozens of reports at the rate a live DS4
-sends them, and an eighth of the two seconds after which the pad is declared
-gone and everything is forgotten.
-
-The thresholds — 250 ms and a few surface units for a tap, an eighth of the
-height for a step — are constants in `packages/gamepad/src/touch.ts`, named so
-that tuning the feel is editing one number.
-
-A controller that is plugged in *and* switched on is attached twice: the OS
-lists two collections of one pad, and nothing on either says they belong
-together. Both are opened and both are written to in their own shape — 32 bytes
-over the wire, 78 with a CRC over the radio — so the bar and the motors work
-whichever link the pad is obeying. `/gamepad status` says so:
-
-```
-  transport: usb
-  links: usb + bluetooth (reading usb)
-```
-
-Buttons are read from one link at a time, the wire first, and the reading moves
-to the other link when that one goes quiet. That is what makes the cable a
-non-event in both directions: pull it and the radio takes over mid-press without
-inventing a release; plug it in mid-session and the new link is picked up within
-a second and written to from the next frame.
-
-Two controllers switched on at once look exactly like this, because nothing on
-either collection says which device it belongs to: two links, one of them read
-and both of them written to. A ✕ on the pad in the bag then moves the session
-the moment the one in your hands stops reporting, and the bag's bar follows the
-screen. There is no identity to sort them by, so nothing is sorted — but a whole
-second of the two links reporting *different* buttons (one pad's links are a few
-milliseconds apart at an edge, never more) is worth saying out loud:
-
-```
-  both links report — these may be two controllers (pin one with the device filter)
-```
-
-The filter is the way out: `"device": "wireless"`, or a path from `/gamepad
-list`, leaves the other collection alone.
-
-Bindings, the device filter and the deadzone live in `settings.json`:
-
-```json
-{
-  "gamepad": {
-    "enabled": true,
-    "deadzone": 0.25,
-    "device": "wireless",
-    "rumble": true,
-    "lightbar": true,
-    "bindings": { "cross": "confirm", "r2": "command:/status", "square": "none" },
-    "phrases": ["explain what you just did", "run the tests"]
-  }
-}
-```
-
-`rumble` and `lightbar` default to on, and either can be turned off for someone
-who does not want a controller that moves or glows on its own. Off is *silence
-and darkness* rather than less of them: a packet describes the whole pad, so a
-field left out is a field written as zero. The motors stay still, the bar goes
-dark, and `/gamepad status` says which of the two is off — as does
-`/gamepad rumble`, which is the one check that needs no screen and would
-otherwise buzz into the void.
-
-`/gamepad` with no argument prints the button ids and the surface's gestures,
-which are the names this file writes. A binding that names a button, a gesture,
-an action or a command that does not exist costs that one binding and is
-reported at startup and in `/doctor` — the rest of the file is unaffected.
-
-**Approving from the pad is off unless you say otherwise.** `allowApprove` is a
-user-tier setting: a project's `.labunbun/settings.json` cannot set `gamepad` at
-all, because a button held down in a pocket is not a person deciding, and a
-cloned repository must not be able to hand its own tool calls to a controller
-lying in your lap. With it off, ✕ does nothing in a permission dialog and the
-keyboard answers; the pad still navigates.
-
-`node-hid` is an *optional* dependency. Without it the rest of labunbun is
-exactly as it was; `/gamepad on` reports which command installs it. When it *is*
-installed, `pnpm bin:build` carries it along: `bun build --compile` embeds the
-native prebuild, and the resulting executable reads a controller with no
-`node_modules` next to it. (Verified against node-hid 3.4.0 on Windows; nothing
-needs `--external`.)
-
-## Prompt caching
-
-Providers bill a prompt in two parts: what they can serve from a cache and what
-they have to read again. The cache is keyed on a **prefix**, so the only way to
-hit it is to send the same bytes in the same order as last time and to let the
-conversation grow by appending. `/cache` prints what that came to:
-
-```
-Prompt cache — anthropic/claude-opus-5
-  requests     241 request(s) (0 re-asked, 0 not answered)
-  tokens       2.87M read · 41.2k written (41.2k 5m · 0 1h) · 0 full price · 18.9k out
-  hit rate     98.6% read · ceiling 98.6% for this shape (100.0% of what is reachable)
-  prefix       1 extension · 1 cold start · 0 rewinds
-  capability   explicit breakpoints · min 512 tokens · TTL 5m or 1h
-```
-
-**Two numbers, not one.** The hit rate is `Σ cacheRead / Σ promptTotal` — the
-share of everything sent that was served from cache. The ceiling is
-`Σ P[t-1] / Σ P[t]`: a request can only read what an earlier request wrote, so
-the best any sequence of prompts can do is bounded by how fast the prompt grows.
-A conversation that ends at 200k tokens after a hundred turns has a ceiling
-around 98%, and no implementation can beat it — the last turn's prompt was never
-written by anyone. So the number to read is *both*: a session at its ceiling is
-doing everything the provider allows, and a session below it is losing tokens to
-something specific. The report prints them side by side for that reason, and
-`/cache` names the causes — a cold start, a TTL that expired, a rewrite the app
-made on purpose (compaction, `/trim`, `/fork`, an approved MCP server appending
-tools), or a **rewind nobody declared**, which is a bug in the shape of the
-prefix rather than a cost of the work.
-
-**What each provider gets.** Anthropic takes explicit `cache_control`
-breakpoints, and the adapter places up to four: the last tool definition, the
-system prompt, the message where the *previous* request ended, and the last
-message of this one. Each is only placed if its prefix clears the model's
-documented minimum (512 tokens on Opus, 1024 on Sonnet, 4096 on Haiku 4.5), so a
-short conversation is not littered with markers the provider would ignore. The
-breakpoint on the previous turn's tail is what carries a prefix across a turn
-that answers twelve tools at once — a vendor's own look-back reaches twenty
-blocks, and that turn puts twenty-four of them between two requests.
-OpenAI-compatible endpoints cache automatically and take no breakpoints;
-`prompt_cache_key` is sent only where the provider documents it (or where
-`cache.promptCacheKey` says `on`), derived from the stable prefix — system
-prompt, tools, model, wire format — so the same conversation resumes onto the
-same cache, and a key that moved per turn would route every turn somewhere else.
-
-**Settings** are user-tier only, because caching is not something a cloned
-repository should be able to change:
-
-```json
-{ "cache": { "enabled": true, "ttl": "auto", "promptCacheKey": "auto" } }
-```
-
-`ttl: "auto"` asks for the one-hour TTL and falls back down a ladder — 1h, then
-5m, then no `ttl` field at all — one failed request per rung, once per process,
-each downgrade named in `/cache`. Only the affected requests are retried; a 400
-that is not about cache settings propagates as the error it is.
-
-**What the hit rate does not promise.** The number `/cache` prints is what the
-provider reported, and nothing here can make a vendor's cache behave as its
-documentation claims. The end-to-end tests in `packages/agent/test/
-cache-hit-rate.test.ts` run the real adapters, the real client stack and the
-real agent loop against a local endpoint implementing the documented rules
-(`packages/ai/test/cache-stub-server.ts`) — that measures the machinery, not a
-vendor, and a real number comes from `/cache` after a real session.
-
-## Project layout
-
-| Package | Purpose |
-|---------|---------|
-| `@labunbun/ai` | Provider-neutral message model, streaming protocol, Anthropic/OpenAI-compat adapters, retry, faux test provider |
-| `@labunbun/agent` | Agent loop, Tool interface, execution pipeline, permission engine, JSONL session tree, compaction |
-| `@labunbun/tools` | Built-in coding tools behind an FS/exec operations abstraction |
-| `@labunbun/mcp` | MCP client (stdio/HTTP), tool adaptation |
-| `@labunbun/tui` | React Ink REPL: store, message views, editor, dialogs, themes |
-| `@labunbun/gamepad` | DualShock 4: report parsing, button mapping, lightbar and rumble rules, the device source (`node-hid`, optional) |
-| `@labunbun/coding-agent` | CLI entry, settings hierarchy, commands, memory, hooks, subagents, skills |
-
-Dependency direction is strictly layered: `ai ← agent ← tools/mcp/tui ← coding-agent`.
-`gamepad` is a leaf with no runtime dependency at all — `tui` takes its types and
-pure functions, and `coding-agent` owns the single place `node-hid` is imported.
-The loop never imports provider adapters directly — they arrive via injected
-`StreamFn`, which is what makes the zero-network faux-provider test strategy work.
+The report names each file that ends with a credential in it.
 
 ## Development
 
+### Gates
+
 ```bash
-pnpm typecheck        # tsc over all packages (source-mapped, no build step)
-pnpm test             # bun test — no network needed
+pnpm typecheck        # tsc over all packages
+pnpm test             # bun test, no network
 pnpm lint             # biome check
-bun run scripts/smoke.ts anthropic/claude-sonnet-5   # live smoke test
-bun run packages/coding-agent/scripts/cache-check.ts anthropic/claude-opus-5 6   # live hit rate (costs money)
-bun run scripts/gamepad-probe.ts                     # a controller, without the app in the way
-bun run scripts/gamepad-probe.ts --touch             # measure the touchpad: decoded points + raw bytes
-pnpm bin:build        # standalone executable via bun build --compile
+pnpm bin:build        # make a standalone executable with bun build --compile
 ```
 
-Every one of those gates runs in CI on ubuntu, windows and macos for each pull
-request and each push to `main`, and all of them are required. The workflow
-calls the same three scripts rather than a paraphrase of them, and adds a
-`bun build --compile` on all three platforms. That last one is why the script
-above is not the one CI runs: `pnpm bin:build` hardcodes
-`dist/labunbun-x64.exe`, which is the Windows path and would write a `.exe` on
-Linux and macOS, so CI calls `bun build` directly and names the artifact per
-runner. No secrets are configured, on purpose — the suite is meant to need no
-network and no key, and a repository secret would quietly turn that into an
-assumption.
+The tool runs these gates on Linux, Windows, and macOS. The tool requires all of them for each pull request.
 
-Three things CI structurally does not check, so a green run is not read as more
-than it is: the `vim-differential` harness needs a real `vim` and is not part of
-`bun test`; the emacs citation guard and the deepseek-harness flow guard skip
-where their local source checkouts are absent, which is a real loss of coverage
-rather than a formality; and `tsconfig.check.json` does not cover
-`packages/coding-agent/bin/`.
+The tool uses no secret in the test suite. The test suite must not need a key or a network.
 
-TypeScript runs in erasable-syntax-only mode and packages export their `src/`
-directly — Bun executes TS natively, so there is no build step in the dev loop.
+### Scripts
 
-### Configuration roots
+```bash
+bun run scripts/smoke.ts anthropic/claude-sonnet-5
+bun run packages/coding-agent/scripts/cache-check.ts anthropic/claude-opus-5 6
+bun run scripts/gamepad-probe.ts
+bun run scripts/gamepad-probe.ts --touch
+```
 
-- User: `~/.labunbun/` — `settings.json`, `.mcp.json`, `MEMORY.md`, `rules/*.md`,
-  `agents/`, `skills/`, `themes/`, plus `projects/<cwd>/` for that project's
-  sessions, MCP approvals, and the definition trust above
-- Project: `.labunbun/` — `settings.json`, `settings.local.json`,
-  `rules/*.md`, `agents/`, `skills/`, `themes/`
-- Project and local settings are read as **repo-controlled**: they may not set
-  `model`, `fallbackModels`, `permissionMode`, `sandbox`, `networkAccess`,
-  `networkDomains`, `env`, `providers`,
-  `hooks`, `mcpServers`, `pricing`, `trimOldToolResults`, `gamepad`,
-  `permissions.allow`, or `permissions.additionalDirectories`.
-  Those are honored from the user, policy (`managed-settings.json`), and
-  `--settings` tiers only; anything dropped is listed at startup. `permissions.deny`
-  is still honored from every tier — tightening is always allowed. Whether
-  `settings.local.json` is committed is up to you; labunbun writes no ignore
-  rule for it.
-- A project's own `agents/` and `skills/` are read the same way, and load only
-  after one approval per directory (`/agents` lists them, `/agents approve`
-  loads them). The decision is remembered under `~/.labunbun/projects/<cwd>/`,
-  never in the repository, so a cloned repo cannot ship its own approval; a
-  `-p` run has no dialog, so an untrusted project's definitions are simply not
-  loaded and it says so on stderr.
-- Memory files: `LABUNBUN.md` or `AGENTS.md` per directory, walked cwd → root
-- Base URLs are overridable per provider via `<PROVIDER>_BASE_URL`, e.g.
-  `ANTHROPIC_BASE_URL` for a gateway or proxy
-- Inside the workspace, `.git/` is not writable by the agent through the `Write`
-  and `Edit` tools — in any mode, and including a nested repository's own `.git`
-  or a symlink that resolves into one. A shell gets the same protection on macOS
-  and Linux, where the OS enforces it — with two limits worth stating: only where
-  that sandbox is actually installed (a Linux box without `bubblewrap` confines
-  nothing), and only for repositories the scan finds, which is four levels deep
-  and skips `node_modules`. **On Windows a shell is not covered at all** — there
-  is no OS sandbox there, so `rm .git/config` through Bash succeeds. Rewriting
-  history is not an edit the user can undo, so it is not something a permission
-  can grant. Reading git metadata is unaffected (`git` runs as usual).
+> **WARNING**: The cache script sends real requests. It costs money.
+
+### Packages
+
+| Package | Purpose |
+|---------|---------|
+| `@labunbun/ai` | The message model, the stream protocol, the provider adapters, the model catalog, the cache policy, the cost accounting. |
+| `@labunbun/agent` | The agent loop, the tool interface, the permission engine, the session files, the compaction. |
+| `@labunbun/tools` | The coding tools. |
+| `@labunbun/mcp` | The MCP client. |
+| `@labunbun/tui` | The terminal interface. It uses React and Ink. |
+| `@labunbun/gamepad` | The DualShock 4 support. |
+| `@labunbun/coding-agent` | The command line tool, the settings, the commands, the hooks, the subagents, the skills. |
+
+The dependency direction is one way: `ai`, then `agent`, then `tools`, `mcp`, `tui`, then `coding-agent`. The package `gamepad` has no dependency. The tool loop never imports a provider adapter. The adapters arrive in the `StreamFn` parameter. This is why the tests run with no network.
+
+### What CI does not check
+
+Three checks are not in CI:
+
+- The `vim-differential` tests need the `vim` program. They are not part of `bun test`.
+- The Emacs citation test and the DeepSeek Harness test skip when they do not find their source.
+- `tsconfig.check.json` does not cover `packages/coding-agent/bin/`.
 
 ## Sponsor
 
-If LaBunbun Code saves you time, consider supporting development:
+If LaBunbun Code saves you time, you can support the development.
 
 | Network | Address |
 |---------|---------|
-| **BTC** | `bc1qv9zhpzzdddyakzsetgwr4tkznl4ycsuxn7d00g` |
-| **ETH** | `0x8dFB632F494C694a1a0Ff4CC2566617230530020` |
-| **SOL** | `AdryGzPCKyH5PPzEmZ9ZxW77A5kCbBuapmrqeYFGcPna` |
+| BTC | `bc1qv9zhpzzdddyakzsetgwr4tkznl4ycsuxn7d00g` |
+| ETH | `0x8dFB632F494C694a1a0Ff4CC2566617230530020` |
+| SOL | `AdryGzPCKyH5PPzEmZ9ZxW77A5kCbBuapmrqeYFGcPna` |
 
 ## License
 
-MIT © 2026 zayoka — see [LICENSE](./LICENSE).
+MIT © 2026 zayoka. Read [LICENSE](./LICENSE).
