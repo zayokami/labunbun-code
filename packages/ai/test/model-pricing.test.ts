@@ -116,7 +116,7 @@ const BUILT_IN_REFS = [
 	"minimax/minimax-m2.7-highspeed",
 	"minimax/minimax-m2.5",
 	"minimax/minimax-m2.5-highspeed",
-	// The gateway: 80 Zen rows and 29 Go rows, each on both wires — 218 references,
+	// The gateway: 85 Zen rows and 33 Go rows, each on both wires — 236 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
 	// pairs below show: `deepseek-v4-pro` is 1.74/3.84 on Zen and 0.66/1.98 on Go,
@@ -126,7 +126,12 @@ const BUILT_IN_REFS = [
 	// `gpt-6.1-sol` on 2026-09-30 the same way — Zen's listing serves it and
 	// models.dev prices it, Go sells no `gpt-6.1-*` id at all — and
 	// `claude-haiku-5-5` on 2026-10-08, Zen-only again: the Go listing carries no
-	// Claude id at all.
+	// Claude id at all — and nine rows on the same day's full re-check of both
+	// halves: Zen's `mistral-large-4`, `exo-free`, `fledge-alpha-free`,
+	// `ling-3.1-flash-free` and `muse-spark-1.2-contributor-free`, Go's `grok-4.5`,
+	// `kimi-k2.6`, `qwen3.6-plus` and `qwen3.7-max`. The re-check also took two ids
+	// off the unpriced list — `deepseek-v4-flash-free` and `mimo-v2.5-free` were
+	// named there and Zen's listing no longer serves either.
 	"opencode-zen/big-pickle",
 	"opencode-zen/claude-fable-5",
 	"opencode-zen/claude-fable-5-1",
@@ -147,6 +152,8 @@ const BUILT_IN_REFS = [
 	"opencode-zen/deepseek-v4-flash-vision-exp",
 	"opencode-zen/deepseek-v4-pro",
 	"opencode-zen/deepseek-v4.1-flash",
+	"opencode-zen/exo-free",
+	"opencode-zen/fledge-alpha-free",
 	"opencode-zen/gemini-3-flash",
 	"opencode-zen/gemini-3.1-pro",
 	"opencode-zen/gemini-3.5-flash",
@@ -192,12 +199,15 @@ const BUILT_IN_REFS = [
 	"opencode-zen/kimi-k2.7-code",
 	"opencode-zen/kimi-k3",
 	"opencode-zen/ling-3.0-flash-fin-free",
+	"opencode-zen/ling-3.1-flash-free",
 	"opencode-zen/longcat-2.5-preview-free",
 	"opencode-zen/mimo-v2.6-flash-free",
 	"opencode-zen/minimax-m2.5",
 	"opencode-zen/minimax-m2.7",
 	"opencode-zen/minimax-m3",
+	"opencode-zen/mistral-large-4",
 	"opencode-zen/muse-spark-1.2",
+	"opencode-zen/muse-spark-1.2-contributor-free",
 	"opencode-zen/muse-spark-1.3",
 	"opencode-zen/muse-spark-1.3-contributor-free",
 	"opencode-zen/nemotron-3-ultra-free",
@@ -216,10 +226,12 @@ const BUILT_IN_REFS = [
 	"opencode-go/glm-5.3-flash",
 	"opencode-go/gpt-5.6-luna",
 	"opencode-go/gpt-6-luna",
+	"opencode-go/grok-4.5",
 	"opencode-go/grok-4.6",
 	"opencode-go/grok-4.7",
 	"opencode-go/hy3",
 	"opencode-go/hy4-preview",
+	"opencode-go/kimi-k2.6",
 	"opencode-go/kimi-k2.7-code",
 	"opencode-go/kimi-k3",
 	"opencode-go/longcat-2.0",
@@ -232,6 +244,8 @@ const BUILT_IN_REFS = [
 	"opencode-go/minimax-m3",
 	"opencode-go/muse-spark-1.2-contributor",
 	"opencode-go/muse-spark-1.3-contributor",
+	"opencode-go/qwen3.6-plus",
+	"opencode-go/qwen3.7-max",
 	"opencode-go/qwen3.7-plus",
 	"opencode-go/qwen3.8-flash",
 	"opencode-go/qwen3.8-max",
@@ -256,6 +270,8 @@ const BUILT_IN_REFS = [
 	"opencode-zen-oai/deepseek-v4-flash-vision-exp",
 	"opencode-zen-oai/deepseek-v4-pro",
 	"opencode-zen-oai/deepseek-v4.1-flash",
+	"opencode-zen-oai/exo-free",
+	"opencode-zen-oai/fledge-alpha-free",
 	"opencode-zen-oai/gemini-3-flash",
 	"opencode-zen-oai/gemini-3.1-pro",
 	"opencode-zen-oai/gemini-3.5-flash",
@@ -301,12 +317,15 @@ const BUILT_IN_REFS = [
 	"opencode-zen-oai/kimi-k2.7-code",
 	"opencode-zen-oai/kimi-k3",
 	"opencode-zen-oai/ling-3.0-flash-fin-free",
+	"opencode-zen-oai/ling-3.1-flash-free",
 	"opencode-zen-oai/longcat-2.5-preview-free",
 	"opencode-zen-oai/mimo-v2.6-flash-free",
 	"opencode-zen-oai/minimax-m2.5",
 	"opencode-zen-oai/minimax-m2.7",
 	"opencode-zen-oai/minimax-m3",
+	"opencode-zen-oai/mistral-large-4",
 	"opencode-zen-oai/muse-spark-1.2",
+	"opencode-zen-oai/muse-spark-1.2-contributor-free",
 	"opencode-zen-oai/muse-spark-1.3",
 	"opencode-zen-oai/muse-spark-1.3-contributor-free",
 	"opencode-zen-oai/nemotron-3-ultra-free",
@@ -325,10 +344,12 @@ const BUILT_IN_REFS = [
 	"opencode-go-oai/glm-5.3-flash",
 	"opencode-go-oai/gpt-5.6-luna",
 	"opencode-go-oai/gpt-6-luna",
+	"opencode-go-oai/grok-4.5",
 	"opencode-go-oai/grok-4.6",
 	"opencode-go-oai/grok-4.7",
 	"opencode-go-oai/hy3",
 	"opencode-go-oai/hy4-preview",
+	"opencode-go-oai/kimi-k2.6",
 	"opencode-go-oai/kimi-k2.7-code",
 	"opencode-go-oai/kimi-k3",
 	"opencode-go-oai/longcat-2.0",
@@ -341,6 +362,8 @@ const BUILT_IN_REFS = [
 	"opencode-go-oai/minimax-m3",
 	"opencode-go-oai/muse-spark-1.2-contributor",
 	"opencode-go-oai/muse-spark-1.3-contributor",
+	"opencode-go-oai/qwen3.6-plus",
+	"opencode-go-oai/qwen3.7-max",
 	"opencode-go-oai/qwen3.7-plus",
 	"opencode-go-oai/qwen3.8-flash",
 	"opencode-go-oai/qwen3.8-max",
@@ -677,7 +700,7 @@ describe("the built-in catalog", () => {
 			["minimax/minimax-m2.5", 0.3, 1.2, 0.03, 0.375],
 			["minimax/minimax-m2.5-highspeed", 0.6, 2.4, 0.03, 0.375],
 
-			// The gateway, on the same terms and the same day. Thirty-two of these rows
+			// The gateway, on the same terms and the same day. Thirty-four of these rows
 			// state a cache-write rate and the rest state none, so nearly three quarters
 			// of the table ends in 0 — which is the reading Gemini and MiniMax M3 already
 			// take, not a claim that writing the cache is free everywhere on the gateway.
@@ -704,6 +727,8 @@ describe("the built-in catalog", () => {
 			["opencode-zen/deepseek-v4-flash-vision-exp", 0.14, 0.28, 0.028, 0],
 			["opencode-zen/deepseek-v4-pro", 1.74, 3.84, 0.145, 0],
 			["opencode-zen/deepseek-v4.1-flash", 0.3, 1.2, 0.006, 0],
+			["opencode-zen/exo-free", 0, 0, 0, 0],
+			["opencode-zen/fledge-alpha-free", 0, 0, 0, 0],
 			["opencode-zen/gemini-3-flash", 0.5, 3, 0.05, 0],
 			["opencode-zen/gemini-3.1-pro", 2, 12, 0.2, 0],
 			["opencode-zen/gemini-3.5-flash", 1.5, 9, 0.15, 0],
@@ -749,12 +774,15 @@ describe("the built-in catalog", () => {
 			["opencode-zen/kimi-k2.7-code", 0.95, 4, 0.19, 0],
 			["opencode-zen/kimi-k3", 3, 15, 0.3, 0],
 			["opencode-zen/ling-3.0-flash-fin-free", 0, 0, 0, 0],
+			["opencode-zen/ling-3.1-flash-free", 0, 0, 0, 0],
 			["opencode-zen/longcat-2.5-preview-free", 0, 0, 0, 0],
 			["opencode-zen/mimo-v2.6-flash-free", 0, 0, 0, 0],
 			["opencode-zen/minimax-m2.5", 0.3, 1.2, 0.06, 0],
 			["opencode-zen/minimax-m2.7", 0.3, 1.2, 0.06, 0],
 			["opencode-zen/minimax-m3", 0.3, 1.2, 0.06, 0],
+			["opencode-zen/mistral-large-4", 0.68, 2.09, 0.07, 0],
 			["opencode-zen/muse-spark-1.2", 1.25, 4.25, 0.15, 0],
+			["opencode-zen/muse-spark-1.2-contributor-free", 0, 0, 0, 0],
 			["opencode-zen/muse-spark-1.3", 1.25, 4.25, 0.15, 0],
 			["opencode-zen/muse-spark-1.3-contributor-free", 0, 0, 0, 0],
 			["opencode-zen/nemotron-3-ultra-free", 0, 0, 0, 0],
@@ -773,10 +801,12 @@ describe("the built-in catalog", () => {
 			["opencode-go/glm-5.3-flash", 0.15, 0.5, 0.03, 0],
 			["opencode-go/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
 			["opencode-go/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
+			["opencode-go/grok-4.5", 2, 6, 0.3, 0],
 			["opencode-go/grok-4.6", 2, 6, 0.5, 0],
 			["opencode-go/grok-4.7", 2, 6, 0.5, 0],
 			["opencode-go/hy3", 0.14, 0.58, 0.035, 0],
 			["opencode-go/hy4-preview", 0.834, 2.501, 0.042, 0],
+			["opencode-go/kimi-k2.6", 0.95, 4, 0.16, 0],
 			["opencode-go/kimi-k2.7-code", 0.95, 4, 0.19, 0],
 			["opencode-go/kimi-k3", 3, 15, 0.3, 0],
 			["opencode-go/longcat-2.0", 0.3, 1.2, 0.006, 0],
@@ -789,6 +819,8 @@ describe("the built-in catalog", () => {
 			["opencode-go/minimax-m3", 0.3, 1.2, 0.06, 0],
 			["opencode-go/muse-spark-1.2-contributor", 0.1, 0.2, 0.002, 0],
 			["opencode-go/muse-spark-1.3-contributor", 0.1, 0.2, 0.002, 0],
+			["opencode-go/qwen3.6-plus", 0.5, 3, 0.05, 0.625],
+			["opencode-go/qwen3.7-max", 2.5, 7.5, 0.5, 3.125],
 			["opencode-go/qwen3.7-plus", 0.4, 1.6, 0.04, 0.5],
 			["opencode-go/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
 			["opencode-go/qwen3.8-max", 2, 6, 0.25, 2.5],
@@ -813,6 +845,8 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/deepseek-v4-flash-vision-exp", 0.14, 0.28, 0.028, 0],
 			["opencode-zen-oai/deepseek-v4-pro", 1.74, 3.84, 0.145, 0],
 			["opencode-zen-oai/deepseek-v4.1-flash", 0.3, 1.2, 0.006, 0],
+			["opencode-zen-oai/exo-free", 0, 0, 0, 0],
+			["opencode-zen-oai/fledge-alpha-free", 0, 0, 0, 0],
 			["opencode-zen-oai/gemini-3-flash", 0.5, 3, 0.05, 0],
 			["opencode-zen-oai/gemini-3.1-pro", 2, 12, 0.2, 0],
 			["opencode-zen-oai/gemini-3.5-flash", 1.5, 9, 0.15, 0],
@@ -858,12 +892,15 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/kimi-k2.7-code", 0.95, 4, 0.19, 0],
 			["opencode-zen-oai/kimi-k3", 3, 15, 0.3, 0],
 			["opencode-zen-oai/ling-3.0-flash-fin-free", 0, 0, 0, 0],
+			["opencode-zen-oai/ling-3.1-flash-free", 0, 0, 0, 0],
 			["opencode-zen-oai/longcat-2.5-preview-free", 0, 0, 0, 0],
 			["opencode-zen-oai/mimo-v2.6-flash-free", 0, 0, 0, 0],
 			["opencode-zen-oai/minimax-m2.5", 0.3, 1.2, 0.06, 0],
 			["opencode-zen-oai/minimax-m2.7", 0.3, 1.2, 0.06, 0],
 			["opencode-zen-oai/minimax-m3", 0.3, 1.2, 0.06, 0],
+			["opencode-zen-oai/mistral-large-4", 0.68, 2.09, 0.07, 0],
 			["opencode-zen-oai/muse-spark-1.2", 1.25, 4.25, 0.15, 0],
+			["opencode-zen-oai/muse-spark-1.2-contributor-free", 0, 0, 0, 0],
 			["opencode-zen-oai/muse-spark-1.3", 1.25, 4.25, 0.15, 0],
 			["opencode-zen-oai/muse-spark-1.3-contributor-free", 0, 0, 0, 0],
 			["opencode-zen-oai/nemotron-3-ultra-free", 0, 0, 0, 0],
@@ -882,10 +919,12 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/glm-5.3-flash", 0.15, 0.5, 0.03, 0],
 			["opencode-go-oai/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
 			["opencode-go-oai/gpt-6-luna", 0.1, 0.5, 0.01, 0.125],
+			["opencode-go-oai/grok-4.5", 2, 6, 0.3, 0],
 			["opencode-go-oai/grok-4.6", 2, 6, 0.5, 0],
 			["opencode-go-oai/grok-4.7", 2, 6, 0.5, 0],
 			["opencode-go-oai/hy3", 0.14, 0.58, 0.035, 0],
 			["opencode-go-oai/hy4-preview", 0.834, 2.501, 0.042, 0],
+			["opencode-go-oai/kimi-k2.6", 0.95, 4, 0.16, 0],
 			["opencode-go-oai/kimi-k2.7-code", 0.95, 4, 0.19, 0],
 			["opencode-go-oai/kimi-k3", 3, 15, 0.3, 0],
 			["opencode-go-oai/longcat-2.0", 0.3, 1.2, 0.006, 0],
@@ -898,6 +937,8 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/minimax-m3", 0.3, 1.2, 0.06, 0],
 			["opencode-go-oai/muse-spark-1.2-contributor", 0.1, 0.2, 0.002, 0],
 			["opencode-go-oai/muse-spark-1.3-contributor", 0.1, 0.2, 0.002, 0],
+			["opencode-go-oai/qwen3.6-plus", 0.5, 3, 0.05, 0.625],
+			["opencode-go-oai/qwen3.7-max", 2.5, 7.5, 0.5, 3.125],
 			["opencode-go-oai/qwen3.7-plus", 0.4, 1.6, 0.04, 0.5],
 			["opencode-go-oai/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
 			["opencode-go-oai/qwen3.8-max", 2, 6, 0.25, 2.5],
@@ -985,6 +1026,8 @@ describe("the built-in catalog", () => {
 			["opencode-zen/deepseek-v4-flash-vision-exp", 1_000_000, 384_000],
 			["opencode-zen/deepseek-v4-pro", 1_000_000, 384_000],
 			["opencode-zen/deepseek-v4.1-flash", 1_000_000, 384_000],
+			["opencode-zen/exo-free", 1_048_576, 131_072],
+			["opencode-zen/fledge-alpha-free", 1_048_576, 131_072],
 			["opencode-zen/gemini-3-flash", 1_048_576, 65_536],
 			["opencode-zen/gemini-3.1-pro", 1_048_576, 65_536],
 			["opencode-zen/gemini-3.5-flash", 1_048_576, 65_536],
@@ -1030,12 +1073,15 @@ describe("the built-in catalog", () => {
 			["opencode-zen/kimi-k2.7-code", 262_144, 262_144],
 			["opencode-zen/kimi-k3", 1_048_576, 131_072],
 			["opencode-zen/ling-3.0-flash-fin-free", 262_144, 32_768],
+			["opencode-zen/ling-3.1-flash-free", 262_144, 32_768],
 			["opencode-zen/longcat-2.5-preview-free", 1_000_000, 131_072],
 			["opencode-zen/mimo-v2.6-flash-free", 200_000, 32_000],
 			["opencode-zen/minimax-m2.5", 204_800, 131_072],
 			["opencode-zen/minimax-m2.7", 204_800, 131_072],
 			["opencode-zen/minimax-m3", 512_000, 128_000],
+			["opencode-zen/mistral-large-4", 524_288, 262_144],
 			["opencode-zen/muse-spark-1.2", 1_048_576, 131_072],
+			["opencode-zen/muse-spark-1.2-contributor-free", 1_048_576, 131_072],
 			["opencode-zen/muse-spark-1.3", 1_048_576, 131_072],
 			["opencode-zen/muse-spark-1.3-contributor-free", 1_048_576, 131_072],
 			["opencode-zen/nemotron-3-ultra-free", 1_000_000, 128_000],
@@ -1054,10 +1100,12 @@ describe("the built-in catalog", () => {
 			["opencode-go/glm-5.3-flash", 1_000_000, 131_072],
 			["opencode-go/gpt-5.6-luna", 1_050_000, 128_000],
 			["opencode-go/gpt-6-luna", 1_050_000, 128_000],
+			["opencode-go/grok-4.5", 500_000, 500_000],
 			["opencode-go/grok-4.6", 500_000, 500_000],
 			["opencode-go/grok-4.7", 500_000, 500_000],
 			["opencode-go/hy3", 256_000, 128_000],
 			["opencode-go/hy4-preview", 1_024_000, 64_000],
+			["opencode-go/kimi-k2.6", 262_144, 65_536],
 			["opencode-go/kimi-k2.7-code", 262_144, 262_144],
 			["opencode-go/kimi-k3", 1_048_576, 131_072],
 			["opencode-go/longcat-2.0", 1_000_000, 131_072],
@@ -1070,6 +1118,8 @@ describe("the built-in catalog", () => {
 			["opencode-go/minimax-m3", 1_000_000, 131_072],
 			["opencode-go/muse-spark-1.2-contributor", 1_048_576, 131_072],
 			["opencode-go/muse-spark-1.3-contributor", 1_048_576, 131_072],
+			["opencode-go/qwen3.6-plus", 1_000_000, 65_536],
+			["opencode-go/qwen3.7-max", 1_000_000, 65_536],
 			["opencode-go/qwen3.7-plus", 1_000_000, 65_536],
 			["opencode-go/qwen3.8-flash", 1_000_000, 131_072],
 			["opencode-go/qwen3.8-max", 1_000_000, 131_072],
@@ -1094,6 +1144,8 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/deepseek-v4-flash-vision-exp", 1_000_000, 384_000],
 			["opencode-zen-oai/deepseek-v4-pro", 1_000_000, 384_000],
 			["opencode-zen-oai/deepseek-v4.1-flash", 1_000_000, 384_000],
+			["opencode-zen-oai/exo-free", 1_048_576, 131_072],
+			["opencode-zen-oai/fledge-alpha-free", 1_048_576, 131_072],
 			["opencode-zen-oai/gemini-3-flash", 1_048_576, 65_536],
 			["opencode-zen-oai/gemini-3.1-pro", 1_048_576, 65_536],
 			["opencode-zen-oai/gemini-3.5-flash", 1_048_576, 65_536],
@@ -1139,12 +1191,15 @@ describe("the built-in catalog", () => {
 			["opencode-zen-oai/kimi-k2.7-code", 262_144, 262_144],
 			["opencode-zen-oai/kimi-k3", 1_048_576, 131_072],
 			["opencode-zen-oai/ling-3.0-flash-fin-free", 262_144, 32_768],
+			["opencode-zen-oai/ling-3.1-flash-free", 262_144, 32_768],
 			["opencode-zen-oai/longcat-2.5-preview-free", 1_000_000, 131_072],
 			["opencode-zen-oai/mimo-v2.6-flash-free", 200_000, 32_000],
 			["opencode-zen-oai/minimax-m2.5", 204_800, 131_072],
 			["opencode-zen-oai/minimax-m2.7", 204_800, 131_072],
 			["opencode-zen-oai/minimax-m3", 512_000, 128_000],
+			["opencode-zen-oai/mistral-large-4", 524_288, 262_144],
 			["opencode-zen-oai/muse-spark-1.2", 1_048_576, 131_072],
+			["opencode-zen-oai/muse-spark-1.2-contributor-free", 1_048_576, 131_072],
 			["opencode-zen-oai/muse-spark-1.3", 1_048_576, 131_072],
 			["opencode-zen-oai/muse-spark-1.3-contributor-free", 1_048_576, 131_072],
 			["opencode-zen-oai/nemotron-3-ultra-free", 1_000_000, 128_000],
@@ -1163,10 +1218,12 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/glm-5.3-flash", 1_000_000, 131_072],
 			["opencode-go-oai/gpt-5.6-luna", 1_050_000, 128_000],
 			["opencode-go-oai/gpt-6-luna", 1_050_000, 128_000],
+			["opencode-go-oai/grok-4.5", 500_000, 500_000],
 			["opencode-go-oai/grok-4.6", 500_000, 500_000],
 			["opencode-go-oai/grok-4.7", 500_000, 500_000],
 			["opencode-go-oai/hy3", 256_000, 128_000],
 			["opencode-go-oai/hy4-preview", 1_024_000, 64_000],
+			["opencode-go-oai/kimi-k2.6", 262_144, 65_536],
 			["opencode-go-oai/kimi-k2.7-code", 262_144, 262_144],
 			["opencode-go-oai/kimi-k3", 1_048_576, 131_072],
 			["opencode-go-oai/longcat-2.0", 1_000_000, 131_072],
@@ -1179,6 +1236,8 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/minimax-m3", 1_000_000, 131_072],
 			["opencode-go-oai/muse-spark-1.2-contributor", 1_048_576, 131_072],
 			["opencode-go-oai/muse-spark-1.3-contributor", 1_048_576, 131_072],
+			["opencode-go-oai/qwen3.6-plus", 1_000_000, 65_536],
+			["opencode-go-oai/qwen3.7-max", 1_000_000, 65_536],
 			["opencode-go-oai/qwen3.7-plus", 1_000_000, 65_536],
 			["opencode-go-oai/qwen3.8-flash", 1_000_000, 131_072],
 			["opencode-go-oai/qwen3.8-max", 1_000_000, 131_072],
@@ -1203,7 +1262,7 @@ describe("the built-in catalog", () => {
 		// rows below are the ones whose vendor published an effort vocabulary, and
 		// the resellers are the ones whose vendor published nothing about thinking
 		// at all. Both are right to say "not medium", for reasons that have nothing
-		// to do with each other, and the second group is 218 rows long — a third of
+		// to do with each other, and the second group is 236 rows long — a third of
 		// the catalog — which would bury the first. The gateway rows are held by
 		// the assertion directly below, which is exhaustive over the same set.
 		const alwaysThinking = BUILT_IN_REFS.filter((ref) => !resolveModel(ref)?.reasoning && !isReseller(ref));
@@ -1244,7 +1303,7 @@ describe("the built-in catalog", () => {
 		// without the flag set is a 400 on its first request, and nothing else in
 		// the suite would notice.
 		const gateway = BUILT_IN_REFS.filter(isReseller);
-		expect(gateway).toHaveLength(218);
+		expect(gateway).toHaveLength(236);
 		expect(gateway.filter((ref) => resolveModel(ref)?.reasoning)).toEqual([]);
 		// And none of them claims a thinking shape either, for the same reason:
 		// the shape is what the 400 is about.
@@ -1341,6 +1400,7 @@ describe("the built-in catalog", () => {
 			"opencode-zen/grok-build-0.1",
 			"opencode-zen/kimi-k2.7-code",
 			"opencode-zen/nemotron-3.5-lightning-free",
+			"opencode-go/grok-4.5",
 			"opencode-go/grok-4.6",
 			"opencode-go/grok-4.7",
 			"opencode-go/kimi-k2.7-code",
@@ -1351,6 +1411,7 @@ describe("the built-in catalog", () => {
 			"opencode-zen-oai/grok-build-0.1",
 			"opencode-zen-oai/kimi-k2.7-code",
 			"opencode-zen-oai/nemotron-3.5-lightning-free",
+			"opencode-go-oai/grok-4.5",
 			"opencode-go-oai/grok-4.6",
 			"opencode-go-oai/grok-4.7",
 			"opencode-go-oai/kimi-k2.7-code",
@@ -1505,7 +1566,7 @@ describe("ids that were retired", () => {
 		// `openAICompatModel` grew an `images` flag for the gateway, and nothing
 		// else in the catalog has to say this: every first-party row on that wire is
 		// a text model, and the two that could take an image are reached by their
-		// own native client. So 44 of 218 rows are the only place the claim lives,
+		// own native client. So 48 of 236 rows are the only place the claim lives,
 		// and before this one nothing in the suite could see it — flipping `false`
 		// to `true` on any row was a silent edit.
 		//
@@ -1533,19 +1594,21 @@ describe("ids that were retired", () => {
 			"hy3",
 			"hy4-preview",
 			"ling-3.0-flash-fin-free",
+			"ling-3.1-flash-free",
 			"longcat-2.0",
 			"mimo-v2.5-pro",
 			"minimax-m2.5",
 			"minimax-m2.7",
 			"nemotron-3-ultra-free",
 			"nemotron-3.5-lightning-free",
+			"qwen3.7-max",
 		]);
-		// 44 of 218: 13 Zen rows and 9 Go rows, each on both wires. Asserted as a
+		// 48 of 236: 14 Zen rows and 10 Go rows, each on both wires. Asserted as a
 		// count rather than derived, so a row that silently joins the list below
 		// cannot do it by also quietly leaving it here.
 		const rows = BUILT_IN_REFS.filter(isReseller);
-		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 1)).toHaveLength(44);
-		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(174);
+		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 1)).toHaveLength(48);
+		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(188);
 		// The two wires agree about the model, which is a check on the *tuple*
 		// being shared rather than transcribed twice — a per-wire table could
 		// disagree and both halves would look right.
@@ -1591,7 +1654,7 @@ describe("ids that were retired", () => {
 		expect(resolveModel("gpt-6.1-sol")?.provider).toBe("openai");
 		expect(resolveModel("gpt-6.1-sol")?.pricing?.cacheRead).toBe(0.1);
 		// Exhaustive, and about the right thing: no bare id may *land on* a gateway
-		// row. Most of the 218 do resolve bare — to the vendor that makes the model
+		// row. Most of the 236 do resolve bare — to the vendor that makes the model
 		// — which is the rule working, not the rule failing, so the check is on
 		// where the resolution goes rather than on whether one happens. A fifth
 		// gateway added to the table without a decision here fails this.

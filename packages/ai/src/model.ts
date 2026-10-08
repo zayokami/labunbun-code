@@ -284,20 +284,21 @@ function openAIResponsesModel(
  *
  * The figures are transcribed from models.dev's catalogue entries for the two
  * plans, swept 2026-09-28, filtered against the gateway's own unauthenticated
- * `/v1/models` listing the same day. Every number below is a copy of a published
+ * `/v1/models` listing the same day, and both sources re-checked on 2026-10-08.
+ * Every number below is a copy of a published
  * price and must not be derived — see the cache rates below for what derivation
  * gets wrong. Both halves are needed and neither is sufficient, and each is wrong
  * on its own: the gateway proves which ids can be called and publishes no price
  * and no limit; models.dev states the money and the sizes but is hand-edited and
  * drifts in both directions. The gateway serves
- * 87 ids on Zen against the 80 priced here, and 43 on Go against 29 — while every
+ * 87 ids on Zen against the 85 priced here, and 43 on Go against 33 — while every
  * priced, undeprecated entry is served, so nothing we can state has been left
  * out. The ids the gateway serves that models.dev does not price are named at the
  * foot of this comment rather than guessed at.
  *
  * Nothing here is routed through `openAIPricing`, whose `cacheWrite` is derived
- * at 1.25x input. The gateway publishes a write rate for 32 of these 109 rows and
- * states no rate at all for 77 of the rest, and the read rates are not a fixed
+ * at 1.25x input. The gateway publishes a write rate for 34 of these 118 rows and
+ * states no rate at all for 84 of the rest, and the read rates are not a fixed
  * multiple of input either: `qwen3.8-flash` reads at 0.016 against an input of
  * 0.15, which is 0.107x, while `qwen3.8-max` beside it reads at exactly 0.125x. A
  * derived figure would land close enough to pass review and wrong in the channel
@@ -488,6 +489,15 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+		true,
+	],
+	["exo-free", "Exo Free", 1_048_576, 131_072, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, true],
+	[
+		"fledge-alpha-free",
+		"Fledge Alpha Free",
+		1_048_576,
+		131_072,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		true,
 	],
 	[
@@ -717,6 +727,14 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		false,
 	],
 	[
+		"ling-3.1-flash-free",
+		"Ling 3.1 Flash Free",
+		262_144,
+		32_768,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		false,
+	],
+	[
 		"longcat-2.5-preview-free",
 		"LongCat 2.5 Preview Free",
 		1_000_000,
@@ -750,11 +768,27 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 	],
 	["minimax-m3", "MiniMax-M3", 512_000, 128_000, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }, true],
 	[
+		"mistral-large-4",
+		"Mistral Large 4",
+		524_288,
+		262_144,
+		{ input: 0.68, output: 2.09, cacheRead: 0.07, cacheWrite: 0 },
+		true,
+	],
+	[
 		"muse-spark-1.2",
 		"Muse Spark 1.2",
 		1_048_576,
 		131_072,
 		{ input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+		true,
+	],
+	[
+		"muse-spark-1.2-contributor-free",
+		"Muse Spark 1.2 Free",
+		1_048_576,
+		131_072,
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		true,
 	],
 	[
@@ -883,6 +917,7 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		true,
 		"none",
 	],
+	["grok-4.5", "Grok 4.5", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 }, true],
 	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
 	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
 	["hy3", "Hy3", 256_000, 128_000, { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 }, false],
@@ -894,6 +929,7 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		{ input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 },
 		false,
 	],
+	["kimi-k2.6", "Kimi K2.6", 262_144, 65_536, { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }, true],
 	[
 		"kimi-k2.7-code",
 		"Kimi K2.7 Code",
@@ -969,6 +1005,27 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		{ input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
 		true,
 	],
+	// Zen's entry for this id states a 262,144 window where Go's states a
+	// million, so each plan's row carries the figure its own catalogue states —
+	// the header's "neither is ever filled in from the other" rule, applied to a
+	// window rather than a price, because nothing here tells which figure the
+	// model itself takes.
+	[
+		"qwen3.6-plus",
+		"Qwen3.6 Plus",
+		1_000_000,
+		65_536,
+		{ input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0.625 },
+		true,
+	],
+	[
+		"qwen3.7-max",
+		"Qwen3.7 Max",
+		1_000_000,
+		65_536,
+		{ input: 2.5, output: 7.5, cacheRead: 0.5, cacheWrite: 3.125 },
+		false,
+	],
 	[
 		"qwen3.7-plus",
 		"Qwen3.7 Plus",
@@ -1023,7 +1080,7 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
  * number is where a table like this goes stale first (Sonnet 5 is $2/$10 — the
  * increase to $3/$15 that was scheduled for 2026-09-01 was cancelled).
  *
- * The 109 rows above are the exception to "the vendor's own page", and they say
+ * The 118 rows above are the exception to "the vendor's own page", and they say
  * so. They are a gateway's, and a gateway has no price list of its own: what it
  * resells is priced by the resellers, so the figures are a third-party
  * catalogue's, taken 2026-09-28 and checked against what the gateway will
@@ -1467,7 +1524,7 @@ const BUILT_IN_MODELS: Model[] = [
 	// The gateway, last. Two plans, two wires, four provider ids, from the two
 	// transcriptions above: a gateway is not a vendor, so one plan on one wire is
 	// one provider, and the base URL is the only thing that distinguishes them.
-	// Writing these out as four separate call sites would be 109 rows that differ
+	// Writing these out as four separate call sites would be 118 rows that differ
 	// in one string each, and the copy that drifted.
 	//
 	// `reasoning: false` on every one of them, and the reason is a model that is
@@ -1505,12 +1562,10 @@ const BUILT_IN_MODELS: Model[] = [
 	// row's and not a provider's.
 	//
 	// What the gateway serves and this table does not, because models.dev states
-	// no price or no limit for them: `jev-1.13` and `jev-1.13-free` (which
-	// models.dev does not know at all), plus on Zen `deepseek-v4-flash-free`,
-	// `mimo-v2.5-free` and `muse-spark-1.2-contributor-free`, and on Go
-	// `deepseek-flash`, `glm-5`, `glm-5.1`, `grok-4.5`, `hy3-preview`,
-	// `kimi-k2.5`, `kimi-k2.6`, `mimo-v2-omni`, `mimo-v2-pro`, `minimax-m2.5`,
-	// `omen-alpha`, `qwen3.5-plus`, `qwen3.6-plus` and `qwen3.7-max`. A user who
+	// no price or no limit for them: on Zen `jev-1.13` and `jev-1.13-free` (which
+	// models.dev does not know at all), and on Go `deepseek-flash`, `glm-5`,
+	// `glm-5.1`, `hy3-preview`, `kimi-k2.5`, `mimo-v2-omni`, `mimo-v2-pro`,
+	// `minimax-m2.5`, `omen-alpha` and `qwen3.5-plus`. A user who
 	// sees one of these in the gateway's own picker is not seeing a mistake here, and
 	// an entry added for any of them would be a price invented to fill a gap.
 	//
