@@ -36,7 +36,13 @@ import {
 	networkAxisFrom,
 	resolveMode,
 } from "./settings.ts";
-import { loadSkills, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
+import {
+	loadSkillsWithNotes,
+	skillDiscoveryBlock,
+	skillDiscoveryBudgetChars,
+	skillsAsCommands,
+	withheldProjectSkills,
+} from "./skills.ts";
 import { createSubagentTools, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
@@ -216,7 +222,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// two modes — which is the kind of difference nobody notices until they trust
 	// a nightly job to do what they just did by hand.
 	const memory = loadMemoryFiles(cwd, home);
-	const skills = loadSkills(cwd, home);
+	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);
 	const commands = [...builtInCommands(), ...skillsAsCommands(skills)];
 	const agentDefinitions = loadAgentDefinitions(cwd, home);
 	// A `-p` run has no dialog to approve a project's definitions with, so an
@@ -231,6 +237,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			withheldDefinitionNotice({ agents: withheldAgents.length, skills: withheldSkills.length }, "headless"),
 		);
 	}
+	// Held-back skill folders (a name that fails validation): a scripted run has
+	// nowhere else to say so, and a skill the author believes is loaded is worse
+	// than no skill.
+	for (const note of skillNotes) console.error(`Skills: ${note}`);
 	// Read at the call, like the REPL's: the definition list is a getter because a
 	// definition approved mid-session joins it, and the store because a sidechain
 	// belongs to whichever session is live.
@@ -294,6 +304,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			platform: process.platform,
 			isTTY: process.stdout.isTTY ?? false,
 			memory: memory.content,
+			skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 		}),
 		tools: allTools,
 		store,

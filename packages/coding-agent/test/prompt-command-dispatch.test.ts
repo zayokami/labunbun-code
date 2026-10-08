@@ -25,6 +25,7 @@ const SKILL = {
 	description: "says it back",
 	body: "SKILL-BODY-MARKER for $ARGUMENTS",
 	sourcePath: "C:/skills/echo/SKILL.md",
+	disableModelInvocation: false,
 };
 
 interface Harness {

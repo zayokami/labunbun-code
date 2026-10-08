@@ -17,6 +17,8 @@ Group the changed files by the concern they serve. Two hunks belong in the same 
 
 ## Matching this repo's commit style
 
+**Standing user instruction (2026-10-09): commit messages are written in Chinese, not English.** This overrides the English history below — the history itself moved twice already, and the current rule is the user's word, not what `git log` shows. Keep the repository's shape (scope: summary, short summary, optional body) in Chinese; only file paths, symbol names, and command names stay as they are.
+
 Run `git log --oneline -15` before writing anything, and match what it shows. The history has two shapes and it moved between them, so a description of "the style" that doesn't say which is current will send you the wrong way:
 
 - **Older commits** (roughly 70 of the last 200) are a plain imperative summary with no prefix at all: `Stop trusting repo-controlled settings tiers`, `Teach the Vim engine vim's character classes and terminal motions`.

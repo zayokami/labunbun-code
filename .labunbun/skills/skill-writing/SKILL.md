@@ -12,12 +12,15 @@ description: How to write a new SKILL.md for this repo — frontmatter format, w
 The loader (`packages/coding-agent/src/skills.ts`) parses frontmatter with one regex for the `---` block, then a per-line `key: value` split. There is no YAML parser behind it:
 
 - Only flat `key: value` pairs work. A nested block or a `- item` list is read back as a literal string, not a structure.
-- Only `name` and `description` are read by the loader today. Extra keys are harmless but ignored — don't invent a key and expect the loader to act on it without adding that support first.
-- `description` is what shows up in autocomplete, so write it in the third person with a concrete trigger ("Use when reviewing a diff for breaking changes to settings.json") rather than a vague label.
+- `name` and `description` are read by the loader, and so is `disable-model-invocation`. Extra keys are harmless but ignored — don't invent a key and expect the loader to act on it without adding that support first.
+- `description` is what shows up in autocomplete AND in the discovery block the model reads, so write it in the third person with a concrete trigger ("Use when reviewing a diff for breaking changes to settings.json") rather than a vague label.
+- The directory name is the skill's identity: it must match the frontmatter `name`, and must be lowercase letters, digits and single hyphens, at most 64 characters. A folder that fails this is held back at load and named in a startup notice — it is never silently loaded under a different name.
 
-## The whole body is sent every time — nothing loads lazily
+## Two ways a skill reaches the model, and the cost of each
 
-Invoking `/skill-<name>` sends the *entire* `SKILL.md` body to the model in one shot (`skillsAsCommands` wraps it verbatim in a `<skill>` tag). There's no automatic mechanism that pages in supporting files on demand.
+**Discovery** (`skillDiscoveryBlock`): the `name — description` line goes into the system prompt of every session, inside a shared 8000-character budget. That line is the whole Level-1 cost; nothing else about the skill is in the prompt until the model invokes it. `disable-model-invocation: true` keeps a skill out of this list while leaving it callable as `/skill-<name>` — the right choice for skills that are only useful when the user names them.
+
+**Invocation** (`skillsAsCommands`): invoking `/skill-<name>` sends the *entire* `SKILL.md` body to the model in one shot (wrapped in a `<skill>` tag). There's no automatic mechanism that pages in supporting files on demand.
 
 That means:
 

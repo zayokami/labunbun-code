@@ -48,6 +48,17 @@ export interface SystemPromptContext {
 	 * hour it runs. The default keeps both production call sites unchanged.
 	 */
 	now?: number;
+	/**
+	 * The skill discovery block (`skillDiscoveryBlock`): the name and
+	 * description of every skill, which is what the model matches a request
+	 * against before invoking one. Empty when nothing is loaded.
+	 *
+	 * A section rather than a tool list for the same reason memory is one: the
+	 * model has to keep seeing it, and the system prompt is what no compaction
+	 * and no transcript edit can drop. It sits after the boundary with memory
+	 * because it differs per project and per machine.
+	 */
+	skills?: string;
 }
 
 export function buildSystemPrompt(tools: AnyTool[], ctx: SystemPromptContext): string {
@@ -98,6 +109,13 @@ You MUST answer the user's question directly, without padding, and to the point.
 	const memory = ctx.memory?.trim();
 	if (memory) {
 		sections.push(`# Project memory\n${memory}`);
+	}
+
+	// Skill discovery, after memory: the block carries its own header and the
+	// budget that decided what survives in it (skills.ts).
+	const skills = ctx.skills?.trim();
+	if (skills) {
+		sections.push(skills);
 	}
 
 	return sections.join("\n\n");

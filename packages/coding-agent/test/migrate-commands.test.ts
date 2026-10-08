@@ -238,7 +238,13 @@ describe("slash commands become skills", () => {
 describe("$ARGUMENTS in a skill body", () => {
 	function promptFor(body: string, args: string): string {
 		const command = skillsAsCommands([
-			{ name: "demo", description: "d", body, sourcePath: "~/.labunbun/skills/demo/SKILL.md" },
+			{
+				name: "demo",
+				description: "d",
+				body,
+				sourcePath: "~/.labunbun/skills/demo/SKILL.md",
+				disableModelInvocation: false,
+			},
 		])[0];
 		if (command.type !== "prompt") throw new Error("skills are prompt commands");
 		return command.getPrompt(args);

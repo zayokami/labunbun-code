@@ -158,7 +158,14 @@ import {
 	shadowedChoiceNotice,
 } from "./settings.ts";
 import { createShellPassthrough } from "./shell-passthrough.ts";
-import { loadSkills, type Skill, skillsAsCommands, withheldProjectSkills } from "./skills.ts";
+import {
+	loadSkillsWithNotes,
+	type Skill,
+	skillDiscoveryBlock,
+	skillDiscoveryBudgetChars,
+	skillsAsCommands,
+	withheldProjectSkills,
+} from "./skills.ts";
 import {
 	type AgentDefinition,
 	createSubagentTools,
@@ -537,7 +544,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		trimOldToolResults: settings.trimOldToolResults,
 		report: (text) => pushInfo(handle, text),
 	});
-	const skills = loadSkills(cwd);
+	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd);
 	// What the trust gate is withholding for this directory. Project-tier agent
 	// definitions and skills load only after one approval (`project-trust.ts`), and
 	// these two lists are what the startup notice and `/agents` speak for. The
@@ -571,6 +578,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		platform: process.platform,
 		isTTY: true,
 		memory: memory.content,
+		skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 	});
 
 	/**
@@ -1199,6 +1207,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			withheldDefinitionNotice({ agents: withheldAgents.length, skills: withheldSkills.length }, "repl"),
 		);
 	}
+	// Held-back skill folders, one line each: the same "a definition that was not
+	// loaded looks identical from the prompt" reason as the withheld tier above.
+	for (const note of skillNotes) pushInfo(handle, `Skill not loaded: ${note}`);
 
 	// The controller, now that there is somewhere to say what happened. Started
 	// after the mount so the first line — including a failure — lands in a
