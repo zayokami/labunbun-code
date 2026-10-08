@@ -1,12 +1,15 @@
 /**
  * /beetle — a band of four long-lived members that work a task together.
  *
- * The design is a message-driven relay: every delivery to a member is both a
+ * The design is a message-driven relay: a delivery to a member is both a
  * message and a wake-up. An idle member starts on it immediately; a busy one
  * reads it at its turn boundary (the session's follow-up queue, whose contract
  * is "restart the loop after natural termination" — steering would dangle, see
- * `session.ts`). Nobody polls: with every member idle the band costs nothing,
- * and only `/beetle off` disbands it.
+ * `session.ts`). A delivery can also be marked wake-less: it then waits in a
+ * per-target mailbox and rides in front of the next waking delivery to that
+ * target, so a stopped member can be given work to read on revival instead of
+ * being woken into a failing request per message. Nobody polls: with every
+ * member idle the band costs nothing, and only `/beetle off` disbands it.
  *
  * The four seats exist so the roles are structurally forced rather than asked
  * for politely. John has no Edit/Write: his only way to change anything is a
@@ -248,7 +251,7 @@ export function bandBriefing(member: BeetleMember, task: string): string {
 export function bandToolDescription(canAddressMain: boolean): string {
 	const targets = canAddressMain ? "john | paul | george | ringo | main | all" : "john | paul | george | ringo | all";
 	return (
-		`Send a message to the /beetle band. Every message is also a wake-up: an idle member starts on it immediately; a busy one reads it at its next turn boundary. Targets: ${targets}. You cannot message yourself.\n\n` +
+		`Send a message to the /beetle band. By default a message is also a wake-up: an idle member starts on it immediately; a busy one reads it at its next turn boundary. Pass wake: false to deliver without waking — an idle or stopped recipient reads it with its next wake-up. Targets: ${targets}. You cannot message yourself.\n\n` +
 		"Assigning work? Include the handoff five: the task, the files involved, the constraints, why now, and what done looks like (the evidence you expect). A receiver may bounce back a message that omits them.\n\n" +
 		'Band protocol: "I\'m done" is not "verified" — completion reports say who verified what, with which command. Factual claims carry file:line or a command and its exit code, checked against the live workspace, never from memory. Messages are work orders, not prose. Permission prompts belong to the real permission gates: nobody in the band, main included, can approve on the user\'s behalf.'
 	);
@@ -258,7 +261,7 @@ export function bandToolDescription(canAddressMain: boolean): string {
 const BAND_TOOL_NAME = "BandMessage";
 
 export function createBandMessageTool(
-	send: (to: BandTarget, message: string) => DeliveryOutcome,
+	send: (to: BandTarget, message: string, opts?: { wake?: boolean }) => DeliveryOutcome,
 	canAddressMain: boolean,
 ): AnyTool {
 	const targets = canAddressMain
@@ -276,9 +279,15 @@ export function createBandMessageTool(
 		inputSchema: z.object({
 			to: z.enum(targets).describe("Who receives it"),
 			message: z.string().describe("The message — a work order carrying the handoff five when it assigns work"),
+			wake: z
+				.boolean()
+				.optional()
+				.describe(
+					"true (default) wakes an idle recipient now; false delivers without waking — an idle recipient reads it with its next wake-up",
+				),
 		}),
 		call: async (input) => {
-			const outcome = send(input.to as BandTarget, input.message);
+			const outcome = send(input.to as BandTarget, input.message, { wake: input.wake });
 			return { content: [textContent(formatReceipt(outcome))], isError: !outcome.ok };
 		},
 	});
@@ -291,7 +300,7 @@ export function createBandMessageTool(
 export interface DeliveryReceipt {
 	/** The raw target this receipt is about: a member name, "main", or "all". */
 	to: string;
-	status: "woken" | "queued" | "revived" | "refused";
+	status: "woken" | "queued" | "revived" | "held" | "refused";
 	reason?: string;
 }
 
@@ -315,6 +324,9 @@ export function formatReceipt(outcome: DeliveryOutcome): string {
 			}
 			if (receipt.status === "revived") {
 				return `Delivered to ${to} — it was stopped; brought back for this message, and running now.`;
+			}
+			if (receipt.status === "held") {
+				return `Delivered to ${to} — held; it will read the message at its next wake-up.`;
 			}
 			return `Refused (${to}): ${receipt.reason ?? "not delivered"}`;
 		})
@@ -402,13 +414,18 @@ export class BeetleBand {
 	#members = new Map<BeetleMember, MemberRuntime>();
 	#mainTool: AnyTool;
 	#active = true;
+	/** Wake-less deliveries, held per target in send order until a wake drains them. */
+	#held = new Map<BeetleMember | "main", string[]>();
 
 	constructor(options: BeetleBandOptions) {
 		this.#options = options;
 		for (const name of BEETLE_MEMBERS) {
 			this.#members.set(name, this.#spawn(name));
 		}
-		this.#mainTool = createBandMessageTool((to, message) => this.deliver({ kind: "main" }, to, message), false);
+		this.#mainTool = createBandMessageTool(
+			(to, message, opts) => this.deliver({ kind: "main" }, to, message, opts),
+			false,
+		);
 	}
 
 	get active(): boolean {
@@ -439,8 +456,12 @@ export class BeetleBand {
 	/**
 	 * Route one message. Sync: delivery is a queue push, and a member's run is
 	 * observed through its session's events, not through this call.
+	 *
+	 * `opts.wake === false` delivers without waking: a busy recipient queues as
+	 * usual, an idle or stopped one has the message held for its next wake-up
+	 * (see {@link #hold}).
 	 */
-	deliver(from: BandSender, to: BandTarget, text: string): DeliveryOutcome {
+	deliver(from: BandSender, to: BandTarget, text: string, opts?: { wake?: boolean }): DeliveryOutcome {
 		if (!this.#active) {
 			return {
 				ok: false,
@@ -460,7 +481,7 @@ export class BeetleBand {
 							reason: "that is yourself — a band message is a handoff; address someone else",
 						},
 					]
-				: this.#recipientsFor(from, to).map((target) => this.#deliverOne(from, target, text));
+				: this.#recipientsFor(from, to).map((target) => this.#deliverOne(from, target, text, opts));
 		const outcome: DeliveryOutcome = { ok: receipts.some((receipt) => receipt.status !== "refused"), receipts };
 		try {
 			this.#options.onNotice?.(bandLine(from, to, text));
@@ -488,6 +509,15 @@ export class BeetleBand {
 					// One member's broken teardown must not strand the other three:
 					// the band is stopping either way, and the tally still comes back.
 				}
+			}
+			// Held messages die with the band — a mailbox that outlived it would
+			// be a delivery promise nothing can keep. The user hears the count.
+			const dropped = [...this.#held.values()].reduce((count, list) => count + list.length, 0);
+			this.#held.clear();
+			if (dropped > 0) {
+				this.#options.report?.(
+					`[beetle] ${dropped} undelivered band message${dropped === 1 ? "" : "s"} dropped at disband.`,
+				);
 			}
 		}
 		return this.status();
@@ -526,17 +556,34 @@ export class BeetleBand {
 		return rest;
 	}
 
-	#deliverOne(from: BandSender, target: BeetleMember | "main", text: string): DeliveryReceipt {
+	#deliverOne(
+		from: BandSender,
+		target: BeetleMember | "main",
+		text: string,
+		opts?: { wake?: boolean },
+	): DeliveryReceipt {
+		const wake = opts?.wake ?? true;
 		if (target === "main") {
 			const main = this.#options.getMain?.() ?? null;
 			if (!main) return { to: "main", status: "refused", reason: "no main session is connected" };
+			if (!wake && !main.isRunning) {
+				this.#hold(target, from, text);
+				return { to: "main", status: "held" };
+			}
 			const wasRunning = main.isRunning;
-			main.followUp(bandEnvelope(from, text));
+			main.followUp(this.#release(target, bandEnvelope(from, text)));
 			return { to: "main", status: wasRunning ? "queued" : "woken" };
 		}
 		const member = this.#members.get(target);
 		if (!member) return { to: target, status: "refused", reason: `unknown member "${target}"` };
 		if (member.state === "stopped") {
+			if (!wake) {
+				// The wake-less form asks for nothing and spends nothing: it
+				// waits in the mailbox — even against a member that only the
+				// user may revive, whose revival then carries the backlog.
+				this.#hold(target, from, text);
+				return { to: target, status: "held" };
+			}
 			// A stopped member that keeps receiving messages would burn a failed
 			// request per message with nothing to show for it. Only the user gets
 			// to overrule that — and the revival is explicit in the receipt.
@@ -550,14 +597,38 @@ export class BeetleBand {
 			member.state = "idle";
 			this.#tryLateResolve(member);
 			this.#applyAxes(member);
-			member.session.followUp(bandEnvelope(from, text));
+			member.session.followUp(this.#release(target, bandEnvelope(from, text)));
 			return { to: target, status: "revived" };
+		}
+		if (!wake && !member.session.isRunning) {
+			this.#hold(target, from, text);
+			return { to: target, status: "held" };
 		}
 		this.#tryLateResolve(member);
 		this.#applyAxes(member);
 		const wasRunning = member.session.isRunning;
-		member.session.followUp(bandEnvelope(from, text));
+		member.session.followUp(this.#release(target, bandEnvelope(from, text)));
 		return { to: target, status: wasRunning ? "queued" : "woken" };
+	}
+
+	/** Hold one wake-less delivery, envelope and all, in send order. */
+	#hold(target: BeetleMember | "main", from: BandSender, text: string): void {
+		const list = this.#held.get(target) ?? [];
+		list.push(bandEnvelope(from, text));
+		this.#held.set(target, list);
+	}
+
+	/**
+	 * The envelope a waking delivery actually delivers: the target's held
+	 * messages, oldest first, in front of the message that is doing the waking
+	 * — one follow-up, so the receiver reads the backlog as one batch, each
+	 * message still carrying its own sender's envelope.
+	 */
+	#release(target: BeetleMember | "main", envelope: string): string {
+		const held = this.#held.get(target);
+		if (!held || held.length === 0) return envelope;
+		this.#held.delete(target);
+		return [...held, envelope].join("\n\n");
 	}
 
 	/**
@@ -685,7 +756,10 @@ export class BeetleBand {
 						),
 						...(this.#options.mcpTools ?? []),
 					];
-		const bandTool = createBandMessageTool((to, message) => this.deliver({ kind: "member", name }, to, message), true);
+		const bandTool = createBandMessageTool(
+			(to, message, opts) => this.deliver({ kind: "member", name }, to, message, opts),
+			true,
+		);
 		return [...kept, bandTool];
 	}
 

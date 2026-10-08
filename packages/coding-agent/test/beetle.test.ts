@@ -419,6 +419,129 @@ describe("delivery", () => {
 		expect(calls[2] ?? "").toContain("From: John (lead)");
 	});
 
+	test("wake: false holds a message for an idle member until something wakes it", async () => {
+		const { band, faux } = makeBand({ script: { john: [{ text: "done" }] }, models: { john: "faux/john" } });
+
+		const held = band.deliver({ kind: "member", name: "paul" }, "john", "no rush — read this later", { wake: false });
+		expect(held.receipts).toEqual([{ to: "john", status: "held" }]);
+		// Held is not delivery: nothing is in the conversation and no request is spent.
+		expect(faux.calls("john")).toHaveLength(0);
+		expect(sessionOf(band, "john").messages).toHaveLength(0);
+
+		band.deliver({ kind: "member", name: "george" }, "john", "and this one after", { wake: false });
+		expect(faux.calls("john")).toHaveLength(0);
+
+		const ended = endedReason(sessionOf(band, "john"));
+		const waking = band.deliver({ kind: "user" }, "john", "go now");
+		expect(waking.receipts).toEqual([{ to: "john", status: "woken" }]);
+		expect(await within(ended, 5_000)).toBe("completed");
+
+		// One request: the backlog rides in front of the waking message, in
+		// order, each message still carrying the envelope of whoever sent it.
+		expect(faux.calls("john")).toHaveLength(1);
+		const sent = faux.calls("john")[0] ?? "";
+		expect(sent).toContain("From: Paul (implementer)");
+		expect(sent).toContain("no rush — read this later");
+		expect(sent).toContain("From: George (verifier)");
+		expect(sent).toContain("and this one after");
+		expect(sent).toContain("go now");
+		expect(sent.indexOf("no rush")).toBeLessThan(sent.indexOf("and this one after"));
+		expect(sent.indexOf("and this one after")).toBeLessThan(sent.indexOf("go now"));
+
+		// The drain happens once: a later wake does not re-deliver the backlog.
+		// The request context is cumulative, so "no re-delivery" is a count —
+		// the historical mention plus, if the drain broke, a second copy.
+		const second = endedReason(sessionOf(band, "john"));
+		band.deliver({ kind: "user" }, "john", "go again");
+		expect(await within(second, 5_000)).toBe("completed");
+		expect(faux.calls("john")).toHaveLength(2);
+		const secondCall = faux.calls("john")[1] ?? "";
+		expect(secondCall).toContain("go again");
+		expect(secondCall.split("no rush").length - 1).toBe(1);
+	});
+
+	test("wake: false to a running member queues like any message", async () => {
+		const entered = Promise.withResolvers<"entered">();
+		const release = Promise.withResolvers<void>();
+		const { band, faux } = makeBand({
+			script: {
+				paul: [
+					{ toolCalls: [{ name: "Bash", arguments: { command: "wait here" } }] },
+					{ text: "still working" },
+					{ text: "read it" },
+				],
+			},
+			models: { paul: "faux/paul" },
+			tools: [gatedBash(() => entered.resolve("entered"), release.promise)],
+			permissionMode: () => "agent",
+			sandbox: () => "workspace-write",
+		});
+
+		const ended = endedReason(sessionOf(band, "paul"));
+		band.deliver({ kind: "user" }, "paul", "start the slow task");
+		expect(await within(entered.promise, 5_000)).toBe("entered");
+
+		// A busy member needs no wake: the wake-less delivery queues exactly
+		// where the waking one would, and the run reads it at the boundary.
+		const queued = band.deliver({ kind: "member", name: "john" }, "paul", "no rush, seeing this", { wake: false });
+		expect(queued.receipts).toEqual([{ to: "paul", status: "queued" }]);
+
+		release.resolve();
+		expect(await within(ended, 5_000)).toBe("completed");
+		const calls = faux.calls("paul");
+		expect(calls).toHaveLength(3);
+		expect(calls[2] ?? "").toContain("no rush, seeing this");
+	});
+
+	test("a held message reaches a stopped member when the user revives it", async () => {
+		const { band, faux } = makeBand({
+			script: { john: [{ stopReason: "error", errorMessage: "boom" }, { text: "REVIVED" }] },
+			models: { john: "faux/john" },
+		});
+
+		const first = endedReason(sessionOf(band, "john"));
+		band.deliver({ kind: "user" }, "john", "first");
+		expect(await within(first, 5_000)).toBe("error");
+		expect(band.status().find((entry) => entry.name === "john")?.state).toBe("stopped");
+
+		// A waking peer message would be refused (see the stopped-member test);
+		// the wake-less form waits instead, and spends nothing.
+		const held = band.deliver({ kind: "member", name: "paul" }, "john", "when you're back", { wake: false });
+		expect(held.receipts).toEqual([{ to: "john", status: "held" }]);
+		expect(faux.calls("john")).toHaveLength(1);
+
+		const revived = endedReason(sessionOf(band, "john"));
+		const outcome = band.deliver({ kind: "user" }, "john", "come back");
+		expect(outcome.receipts).toEqual([{ to: "john", status: "revived" }]);
+		expect(await within(revived, 5_000)).toBe("completed");
+		expect(faux.calls("john")).toHaveLength(2);
+		const sent = faux.calls("john")[1] ?? "";
+		expect(sent).toContain("From: Paul (implementer)");
+		expect(sent).toContain("when you're back");
+		expect(sent).toContain("come back");
+		expect(sent.indexOf("when you're back")).toBeLessThan(sent.indexOf("come back"));
+	});
+
+	test("off drops held messages and says how many", () => {
+		const { band, reports } = makeBand({ script: {} });
+		band.deliver({ kind: "member", name: "paul" }, "john", "one", { wake: false });
+		band.deliver({ kind: "member", name: "paul" }, "john", "two", { wake: false });
+		band.deliver({ kind: "member", name: "john" }, "ringo", "three", { wake: false });
+
+		band.off();
+		expect(reports).toContain("[beetle] 3 undelivered band messages dropped at disband.");
+
+		// One held message reads in the singular; a disband with an empty
+		// mailbox says nothing about mailboxes.
+		const quiet = makeBand({ script: {} });
+		quiet.band.off();
+		expect(quiet.reports.filter((line) => line.includes("undelivered"))).toHaveLength(0);
+		const single = makeBand({ script: {} });
+		single.band.deliver({ kind: "member", name: "paul" }, "john", "only one", { wake: false });
+		single.band.off();
+		expect(single.reports).toContain("[beetle] 1 undelivered band message dropped at disband.");
+	});
+
 	test("a broadcast reaches everyone but the sender, and main hears it too", async () => {
 		let main: AgentSession | null = null;
 		const { band, faux } = makeBand({
@@ -624,6 +747,26 @@ describe("delivery", () => {
 		expect(calls).toHaveLength(4);
 		expect(calls[2] ?? "").not.toContain("while-busy");
 		expect(calls[3] ?? "").toContain("while-busy");
+	});
+
+	test("wake: false holds for idle main and rides its next waking delivery", async () => {
+		let main: AgentSession | null = null;
+		const { band, faux } = makeBand({ script: { "faux-1": [{ text: "main reads it" }] }, main: () => main });
+		main = new AgentSession({ model: FAUX_MODEL, systemPrompt: "main", deps: { streamFn: faux.streamFn } });
+
+		const held = band.deliver({ kind: "member", name: "john" }, "main", "no rush for main", { wake: false });
+		expect(held.receipts).toEqual([{ to: "main", status: "held" }]);
+		expect(faux.calls("faux-1")).toHaveLength(0);
+		expect(main.messages).toHaveLength(0);
+
+		const mainEnd = endedReason(main);
+		const waking = band.deliver({ kind: "member", name: "george" }, "main", "report ready");
+		expect(waking.receipts).toEqual([{ to: "main", status: "woken" }]);
+		expect(await within(mainEnd, 5_000)).toBe("completed");
+		const sent = faux.calls("faux-1")[0] ?? "";
+		expect(sent).toContain("no rush for main");
+		expect(sent).toContain("report ready");
+		expect(sent.indexOf("no rush for main")).toBeLessThan(sent.indexOf("report ready"));
 	});
 
 	test("with no main session, a message to main is refused", () => {
@@ -846,6 +989,7 @@ describe("the tool face", () => {
 		expect(johnTool.description).toContain("handoff five");
 		expect(johnTool.description).toContain("john | paul | george | ringo | main | all");
 		expect(johnTool.description).toContain("cannot message yourself");
+		expect(johnTool.description).toContain("wake: false");
 		expect(johnTool.description).toContain('"I\'m done" is not "verified"');
 		expect(johnTool.description).toContain("file:line");
 		expect(johnTool.description).toContain("approve on the user's behalf");
@@ -879,6 +1023,29 @@ describe("the tool face", () => {
 		expect(refused.isError).toBe(true);
 		expect(text(refused)).toContain("Refused (John):");
 		expect(faux.calls("john")).toHaveLength(0);
+	});
+
+	test("BandMessage's wake: false holds for an idle member and reports it", async () => {
+		const { band, faux } = makeBand({
+			script: { george: [{ text: "on it" }] },
+			models: { john: "faux/john", george: "faux/george" },
+		});
+		const johnTool = toolNamed(sessionOf(band, "john"), "BandMessage");
+
+		const held = await johnTool.call({ to: "george", message: "no rush", wake: false }, callCtx());
+		expect(held.isError).toBeFalsy();
+		expect(text(held)).toContain("Delivered to George — held; it will read the message at its next wake-up.");
+		expect(faux.calls("george")).toHaveLength(0);
+
+		const georgeEnd = endedReason(sessionOf(band, "george"));
+		const waking = await johnTool.call({ to: "george", message: "actually now" }, callCtx());
+		expect(text(waking)).toContain("Delivered to George — woken; it is running your message now.");
+		expect(await within(georgeEnd, 5_000)).toBe("completed");
+		// The woken run reads the held message first — the tool path holds for
+		// the same mailbox the band-level deliveries use.
+		const sent = faux.calls("george")[0] ?? "";
+		expect(sent).toContain("no rush");
+		expect(sent).toContain("actually now");
 	});
 });
 
