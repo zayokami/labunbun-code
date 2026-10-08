@@ -96,7 +96,8 @@ const UNKNOWN: CacheCapability = {
  * A table rather than a family rule, because the spread is not something a rule
  * can express: 512 tokens on Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5 — and
  * 512 again on Sonnet 5.5, which is a floor that went *down* inside a family
- * whose rows are prefixes of one another. The
+ * whose rows are prefixes of one another. Haiku 5.5 is the same slide one
+ * generation later: 512 where Haiku 4.5 needs 4096. The
  * earlier "the Haiku family needs twice as much" inference got both ends wrong —
  * it refused to mark short prefixes that current models cache happily, and it
  * marked Haiku prefixes half the size of what Haiku accepts, which the provider
@@ -134,6 +135,11 @@ export const ANTHROPIC_MIN_PREFIX: ReadonlyArray<readonly [RegExp, number]> = [
 	[/^claude-opus-4-5/, 4096],
 	[/^claude-opus-4/, 1024],
 	[/^claude-sonnet-4/, 1024],
+	// The Sonnet 5.5 reversal one generation over, and not an ordering fix as
+	// that one was: the two Haiku patterns overlap in nothing. 512 is also the
+	// fallback for unknown ids, so this row moves no lookup on its own today —
+	// the pattern-reading test is what holds it in place.
+	[/^claude-haiku-5-5/, 512],
 	[/^claude-haiku-4-5/, 4096],
 	[/^claude-3-5-haiku/, 2048],
 	[/^claude-haiku-3-5/, 2048],

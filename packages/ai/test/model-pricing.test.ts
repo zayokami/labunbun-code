@@ -88,6 +88,7 @@ const BUILT_IN_REFS = [
 	"anthropic/claude-sonnet-5-5",
 	"anthropic/claude-sonnet-5",
 	"anthropic/claude-sonnet-4-6",
+	"anthropic/claude-haiku-5-5",
 	"anthropic/claude-haiku-4-5",
 	"deepseek/deepseek-flash",
 	"deepseek/deepseek-v4-pro",
@@ -115,19 +116,22 @@ const BUILT_IN_REFS = [
 	"minimax/minimax-m2.7-highspeed",
 	"minimax/minimax-m2.5",
 	"minimax/minimax-m2.5-highspeed",
-	// The gateway: 79 Zen rows and 29 Go rows, each on both wires — 216 references,
+	// The gateway: 80 Zen rows and 29 Go rows, each on both wires — 218 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
 	// pairs below show: `deepseek-v4-pro` is 1.74/3.84 on Zen and 0.66/1.98 on Go,
 	// and `grok-4.7` runs the other way at 1.4/4.2 against 2/6. Swept 2026-09-28
 	// from models.dev, filtered against the gateway's own model listing, plus
-	// `claude-sonnet-5-5` added 2026-09-29 on a re-check of both halves, and
+	// `claude-sonnet-5-5` added 2026-09-29 on a re-check of both halves,
 	// `gpt-6.1-sol` on 2026-09-30 the same way — Zen's listing serves it and
-	// models.dev prices it, Go sells no `gpt-6.1-*` id at all.
+	// models.dev prices it, Go sells no `gpt-6.1-*` id at all — and
+	// `claude-haiku-5-5` on 2026-10-08, Zen-only again: the Go listing carries no
+	// Claude id at all.
 	"opencode-zen/big-pickle",
 	"opencode-zen/claude-fable-5",
 	"opencode-zen/claude-fable-5-1",
 	"opencode-zen/claude-haiku-4-5",
+	"opencode-zen/claude-haiku-5-5",
 	"opencode-zen/claude-opus-4-5",
 	"opencode-zen/claude-opus-4-6",
 	"opencode-zen/claude-opus-4-7",
@@ -231,11 +235,12 @@ const BUILT_IN_REFS = [
 	"opencode-go/qwen3.7-plus",
 	"opencode-go/qwen3.8-flash",
 	"opencode-go/qwen3.8-max",
-	"opencode-go/space-bunny-free",
+	"opencode-go/space-bunny",
 	"opencode-zen-oai/big-pickle",
 	"opencode-zen-oai/claude-fable-5",
 	"opencode-zen-oai/claude-fable-5-1",
 	"opencode-zen-oai/claude-haiku-4-5",
+	"opencode-zen-oai/claude-haiku-5-5",
 	"opencode-zen-oai/claude-opus-4-5",
 	"opencode-zen-oai/claude-opus-4-6",
 	"opencode-zen-oai/claude-opus-4-7",
@@ -339,7 +344,7 @@ const BUILT_IN_REFS = [
 	"opencode-go-oai/qwen3.7-plus",
 	"opencode-go-oai/qwen3.8-flash",
 	"opencode-go-oai/qwen3.8-max",
-	"opencode-go-oai/space-bunny-free",
+	"opencode-go-oai/space-bunny",
 ];
 
 /**
@@ -446,6 +451,18 @@ describe("the built-in catalog", () => {
 			cacheRead: 0.2,
 			cacheWrite: 2.5,
 		});
+		// The one Anthropic row with two bands: Haiku 5.5 is billed by prompt
+		// length, and these are the 100k-and-under figures. The vendor page,
+		// models.dev's `anthropic` entry and its Zen-plan entry agree on all four
+		// channels at both bands — models.dev spells the upper band as a `tiers`
+		// entry — and the band above is $0.50/$2.50 with $0.05 reads and $0.625
+		// writes.
+		expect(resolveModel("anthropic/claude-haiku-5-5")?.pricing).toEqual({
+			input: 0.1,
+			output: 0.5,
+			cacheRead: 0.01,
+			cacheWrite: 0.125,
+		});
 		expect(resolveModel("anthropic/claude-haiku-4-5")?.pricing).toEqual({
 			input: 1,
 			output: 5,
@@ -478,6 +495,7 @@ describe("the built-in catalog", () => {
 			["anthropic/claude-sonnet-5-5", "adaptive"],
 			["anthropic/claude-sonnet-5", "adaptive"],
 			["anthropic/claude-sonnet-4-6", "adaptive"],
+			["anthropic/claude-haiku-5-5", "adaptive"],
 			["anthropic/claude-haiku-4-5", "extended"],
 		]);
 	});
@@ -489,8 +507,17 @@ describe("the built-in catalog", () => {
 		// deliberately absent. Sonnet 5.5 joins the two that do run it — its own
 		// release notes say the check is enforced by default on accounts created
 		// from 2026-08-31, which is a different reason from "it is the newest".
+		// Haiku 5.5 is the fourth, and read rather than inferred: the
+		// preserved-thinking guide names it in the same sentence as the other
+		// three, while its own migration guide states Haiku 4.5 does not run the
+		// check — so the boundary between the two falls inside the family.
 		const flagged = BUILT_IN_REFS.filter((ref) => resolveModel(ref)?.thinkingBlockBinding);
-		expect(flagged).toEqual(["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-1", "anthropic/claude-sonnet-5-5"]);
+		expect(flagged).toEqual([
+			"anthropic/claude-opus-5-5",
+			"anthropic/claude-fable-5-1",
+			"anthropic/claude-sonnet-5-5",
+			"anthropic/claude-haiku-5-5",
+		]);
 	});
 
 	test("the models that need an effort of their own when tools are on are named", () => {
@@ -650,10 +677,10 @@ describe("the built-in catalog", () => {
 			["minimax/minimax-m2.5", 0.3, 1.2, 0.03, 0.375],
 			["minimax/minimax-m2.5-highspeed", 0.6, 2.4, 0.03, 0.375],
 
-			// The gateway, on the same terms and the same day. Twenty-nine of these rows
-			// state a cache-write rate and the rest state none, so three quarters of the
-			// table ends in 0 — which is the reading Gemini and MiniMax M3 already take,
-			// not a claim that writing the cache is free everywhere on the gateway.
+			// The gateway, on the same terms and the same day. Thirty-two of these rows
+			// state a cache-write rate and the rest state none, so nearly three quarters
+			// of the table ends in 0 — which is the reading Gemini and MiniMax M3 already
+			// take, not a claim that writing the cache is free everywhere on the gateway.
 			// Nothing here is derived: `qwen3.8-flash` reads at 0.107x input beside
 			// `qwen3.8-max`'s exact 0.125x, so a multiplier would be wrong on one of
 			// the two and would still read as plausible.
@@ -661,6 +688,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen/claude-fable-5", 10, 50, 1, 12.5],
 			["opencode-zen/claude-fable-5-1", 10, 50, 0.25, 12.5],
 			["opencode-zen/claude-haiku-4-5", 1, 5, 0.1, 1.25],
+			["opencode-zen/claude-haiku-5-5", 0.1, 0.5, 0.01, 0.125],
 			["opencode-zen/claude-opus-4-5", 5, 25, 0.5, 6.25],
 			["opencode-zen/claude-opus-4-6", 5, 25, 0.5, 6.25],
 			["opencode-zen/claude-opus-4-7", 5, 25, 0.5, 6.25],
@@ -764,11 +792,12 @@ describe("the built-in catalog", () => {
 			["opencode-go/qwen3.7-plus", 0.4, 1.6, 0.04, 0.5],
 			["opencode-go/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
 			["opencode-go/qwen3.8-max", 2, 6, 0.25, 2.5],
-			["opencode-go/space-bunny-free", 0, 0, 0, 0],
+			["opencode-go/space-bunny", 0.15, 0.6, 0.03, 0],
 			["opencode-zen-oai/big-pickle", 0, 0, 0, 0],
 			["opencode-zen-oai/claude-fable-5", 10, 50, 1, 12.5],
 			["opencode-zen-oai/claude-fable-5-1", 10, 50, 0.25, 12.5],
 			["opencode-zen-oai/claude-haiku-4-5", 1, 5, 0.1, 1.25],
+			["opencode-zen-oai/claude-haiku-5-5", 0.1, 0.5, 0.01, 0.125],
 			["opencode-zen-oai/claude-opus-4-5", 5, 25, 0.5, 6.25],
 			["opencode-zen-oai/claude-opus-4-6", 5, 25, 0.5, 6.25],
 			["opencode-zen-oai/claude-opus-4-7", 5, 25, 0.5, 6.25],
@@ -872,7 +901,7 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/qwen3.7-plus", 0.4, 1.6, 0.04, 0.5],
 			["opencode-go-oai/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
 			["opencode-go-oai/qwen3.8-max", 2, 6, 0.25, 2.5],
-			["opencode-go-oai/space-bunny-free", 0, 0, 0, 0],
+			["opencode-go-oai/space-bunny", 0.15, 0.6, 0.03, 0],
 		]);
 	});
 
@@ -898,6 +927,7 @@ describe("the built-in catalog", () => {
 			["anthropic/claude-sonnet-5-5", 1_000_000, 128_000],
 			["anthropic/claude-sonnet-5", 1_000_000, 128_000],
 			["anthropic/claude-sonnet-4-6", 1_000_000, 128_000],
+			["anthropic/claude-haiku-5-5", 1_000_000, 128_000],
 			["anthropic/claude-haiku-4-5", 200_000, 64_000],
 			["deepseek/deepseek-flash", 1_000_000, 384_000],
 			["deepseek/deepseek-v4-pro", 1_000_000, 384_000],
@@ -939,6 +969,7 @@ describe("the built-in catalog", () => {
 			["opencode-zen/claude-fable-5", 1_000_000, 128_000],
 			["opencode-zen/claude-fable-5-1", 1_000_000, 128_000],
 			["opencode-zen/claude-haiku-4-5", 200_000, 64_000],
+			["opencode-zen/claude-haiku-5-5", 1_000_000, 128_000],
 			["opencode-zen/claude-opus-4-5", 200_000, 64_000],
 			["opencode-zen/claude-opus-4-6", 1_000_000, 128_000],
 			["opencode-zen/claude-opus-4-7", 1_000_000, 128_000],
@@ -1042,11 +1073,12 @@ describe("the built-in catalog", () => {
 			["opencode-go/qwen3.7-plus", 1_000_000, 65_536],
 			["opencode-go/qwen3.8-flash", 1_000_000, 131_072],
 			["opencode-go/qwen3.8-max", 1_000_000, 131_072],
-			["opencode-go/space-bunny-free", 1_048_576, 524_288],
+			["opencode-go/space-bunny", 1_048_576, 524_288],
 			["opencode-zen-oai/big-pickle", 200_000, 32_000],
 			["opencode-zen-oai/claude-fable-5", 1_000_000, 128_000],
 			["opencode-zen-oai/claude-fable-5-1", 1_000_000, 128_000],
 			["opencode-zen-oai/claude-haiku-4-5", 200_000, 64_000],
+			["opencode-zen-oai/claude-haiku-5-5", 1_000_000, 128_000],
 			["opencode-zen-oai/claude-opus-4-5", 200_000, 64_000],
 			["opencode-zen-oai/claude-opus-4-6", 1_000_000, 128_000],
 			["opencode-zen-oai/claude-opus-4-7", 1_000_000, 128_000],
@@ -1150,7 +1182,7 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/qwen3.7-plus", 1_000_000, 65_536],
 			["opencode-go-oai/qwen3.8-flash", 1_000_000, 131_072],
 			["opencode-go-oai/qwen3.8-max", 1_000_000, 131_072],
-			["opencode-go-oai/space-bunny-free", 1_048_576, 524_288],
+			["opencode-go-oai/space-bunny", 1_048_576, 524_288],
 		]);
 	});
 
@@ -1171,7 +1203,7 @@ describe("the built-in catalog", () => {
 		// rows below are the ones whose vendor published an effort vocabulary, and
 		// the resellers are the ones whose vendor published nothing about thinking
 		// at all. Both are right to say "not medium", for reasons that have nothing
-		// to do with each other, and the second group is 216 rows long — a third of
+		// to do with each other, and the second group is 218 rows long — a third of
 		// the catalog — which would bury the first. The gateway rows are held by
 		// the assertion directly below, which is exhaustive over the same set.
 		const alwaysThinking = BUILT_IN_REFS.filter((ref) => !resolveModel(ref)?.reasoning && !isReseller(ref));
@@ -1212,7 +1244,7 @@ describe("the built-in catalog", () => {
 		// without the flag set is a 400 on its first request, and nothing else in
 		// the suite would notice.
 		const gateway = BUILT_IN_REFS.filter(isReseller);
-		expect(gateway).toHaveLength(216);
+		expect(gateway).toHaveLength(218);
 		expect(gateway.filter((ref) => resolveModel(ref)?.reasoning)).toEqual([]);
 		// And none of them claims a thinking shape either, for the same reason:
 		// the shape is what the 400 is about.
@@ -1439,11 +1471,41 @@ describe("ids that were retired", () => {
 		expect(resolveModel("kimi-k2.5")?.id).toBe("kimi-k2.6");
 	});
 
+	test("a gateway row needs both a price and a listing that serves it", () => {
+		// The gate from the other side, one test up: there a served model with no
+		// published price stays out of the Go tables (`kimi-k2.5`); here a
+		// published price does not earn a row either. models.dev prices
+		// `claude-haiku-5-5` on both plans, but the Go listing carries no Claude id
+		// at all, so the Go tables stay silent — a row invented from the price
+		// alone would be a picker entry whose every request the gateway rejects.
+		// Zen passes both gates.
+		expect(resolveModel("opencode-go/claude-haiku-5-5")).toBeUndefined();
+		expect(resolveModel("opencode-zen/claude-haiku-5-5")?.provider).toBe("opencode-zen");
+	});
+
+	test("a plan rename is not a retirement, and the old gateway reference fails loudly", () => {
+		// The Go plan stopped serving `space-bunny-free` and carries the paid
+		// `space-bunny` now (the Go row in `model.ts`, renamed and repriced); the
+		// Zen plan still serves `space-bunny-free`. The old Go reference stops
+		// resolving, and that is a choice rather than an omission: an entry in
+		// `RETIRED_MODEL_IDS` is keyed by bare id and its branch runs before the
+		// gateway scoping, so `space-bunny-free` there would forward *bare*
+		// references to a subscription plan — the one landing site the resolver
+		// deliberately refuses — for an id no vendor retired, since Zen's row
+		// carries it today.
+		expect(resolveModel("opencode-go/space-bunny-free")).toBeUndefined();
+		// The bare form resolves to nothing today — a gateway row, so the bare
+		// reference is refused — and the map entry is exactly what would change
+		// that, whichever wire answers first.
+		expect(resolveModel("space-bunny-free")).toBeUndefined();
+		expect(resolveModel("opencode-zen/space-bunny-free")?.id).toBe("space-bunny-free");
+	});
+
 	test("a gateway row says what it takes, and the text-only set is named", () => {
 		// `openAICompatModel` grew an `images` flag for the gateway, and nothing
 		// else in the catalog has to say this: every first-party row on that wire is
 		// a text model, and the two that could take an image are reached by their
-		// own native client. So 44 of 216 rows are the only place the claim lives,
+		// own native client. So 44 of 218 rows are the only place the claim lives,
 		// and before this one nothing in the suite could see it — flipping `false`
 		// to `true` on any row was a silent edit.
 		//
@@ -1478,12 +1540,12 @@ describe("ids that were retired", () => {
 			"nemotron-3-ultra-free",
 			"nemotron-3.5-lightning-free",
 		]);
-		// 44 of 216: 13 Zen rows and 9 Go rows, each on both wires. Asserted as a
+		// 44 of 218: 13 Zen rows and 9 Go rows, each on both wires. Asserted as a
 		// count rather than derived, so a row that silently joins the list below
 		// cannot do it by also quietly leaving it here.
 		const rows = BUILT_IN_REFS.filter(isReseller);
 		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 1)).toHaveLength(44);
-		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(172);
+		expect(rows.filter((ref) => resolveModel(ref)?.input.length === 2)).toHaveLength(174);
 		// The two wires agree about the model, which is a check on the *tuple*
 		// being shared rather than transcribed twice — a per-wire table could
 		// disagree and both halves would look right.
@@ -1529,7 +1591,7 @@ describe("ids that were retired", () => {
 		expect(resolveModel("gpt-6.1-sol")?.provider).toBe("openai");
 		expect(resolveModel("gpt-6.1-sol")?.pricing?.cacheRead).toBe(0.1);
 		// Exhaustive, and about the right thing: no bare id may *land on* a gateway
-		// row. Most of the 216 do resolve bare — to the vendor that makes the model
+		// row. Most of the 218 do resolve bare — to the vendor that makes the model
 		// — which is the rule working, not the rule failing, so the check is on
 		// where the resolution goes rather than on whether one happens. A fifth
 		// gateway added to the table without a decision here fails this.

@@ -96,7 +96,7 @@ function openAIPricing(input: number, output: number, cacheRead: number): ModelP
  * a non-Anthropic host had no constructor to call.
  *
  * It takes no `thinkingBlockBinding`. The flag and its beta header travel
- * together, to the three models that run the check, and a gateway in front of
+ * together, to the four models that run the check, and a gateway in front of
  * those models is not evidence that it forwards either one; naming a model here
  * would send a parameter whose handling on the far side is unknown.
  */
@@ -290,13 +290,13 @@ function openAIResponsesModel(
  * on its own: the gateway proves which ids can be called and publishes no price
  * and no limit; models.dev states the money and the sizes but is hand-edited and
  * drifts in both directions. The gateway serves
- * 83 ids on Zen against the 78 priced here, and 43 on Go against 29 — while every
+ * 87 ids on Zen against the 80 priced here, and 43 on Go against 29 — while every
  * priced, undeprecated entry is served, so nothing we can state has been left
  * out. The ids the gateway serves that models.dev does not price are named at the
  * foot of this comment rather than guessed at.
  *
  * Nothing here is routed through `openAIPricing`, whose `cacheWrite` is derived
- * at 1.25x input. The gateway publishes a write rate for 30 of these 107 rows and
+ * at 1.25x input. The gateway publishes a write rate for 32 of these 109 rows and
  * states no rate at all for 77 of the rest, and the read rates are not a fixed
  * multiple of input either: `qwen3.8-flash` reads at 0.016 against an input of
  * 0.15, which is 0.107x, while `qwen3.8-max` beside it reads at exactly 0.125x. A
@@ -349,6 +349,20 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		200_000,
 		64_000,
 		{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+		true,
+	],
+	// Added 2026-10-08, the day after it shipped. Same sourcing as the
+	// `claude-sonnet-5-5` row below — the gateway lists it and models.dev prices
+	// it — and the same figures as the vendor page's 100k-and-under band, which
+	// is the band models.dev's Zen entry states before its own `tiers` step. No
+	// Go twin: the Go listing carries no Claude id at all, so both Go tables
+	// stay silent even though models.dev prices the model on the Go plan too.
+	[
+		"claude-haiku-5-5",
+		"Claude Haiku 5.5",
+		1_000_000,
+		128_000,
+		{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
 		true,
 	],
 	[
@@ -972,12 +986,21 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		true,
 	],
 	["qwen3.8-max", "Qwen3.8 Max", 1_000_000, 131_072, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }, true],
+	// Renamed and repriced since the sweep, checked 2026-10-08: the Go listing
+	// serves this model as `space-bunny` at $0.15/$0.60 with $0.03 reads and $0
+	// writes, where this row carried it as the free variant. models.dev's Go
+	// entry still lists both ids; the listing, the one that can reject a
+	// request, carries only this one. The Zen table still serves
+	// `space-bunny-free`, so the plans have stopped agreeing on the id — and an
+	// old Go reference stops resolving rather than forwarding, because
+	// `RETIRED_MODEL_IDS` is for ids no row carries and Zen's row still
+	// carries this one: a plan rename, not a retirement.
 	[
-		"space-bunny-free",
-		"Space Bunny Free",
+		"space-bunny",
+		"Space Bunny",
 		1_048_576,
 		524_288,
-		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		{ input: 0.15, output: 0.6, cacheRead: 0.03, cacheWrite: 0 },
 		true,
 	],
 ];
@@ -989,7 +1012,8 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
  * a date on this line means "as of", not "covers every row below it". Rows added
  * between sweeps name a later date in their own comment: `claude-opus-5-5`
  * (2026-09-23); `gpt-6-sol` / `gpt-6-luna`, `glm-5.3-flashx` and the five
- * MiniMax rows (2026-09-27); `claude-sonnet-5-5` (2026-09-29).
+ * MiniMax rows (2026-09-27); `claude-sonnet-5-5` (2026-09-29); `claude-haiku-5-5`
+ * (2026-10-08).
  * The 09-27 sweep changed prices on no existing row;
  * it added those eight and re-confirmed the rest, including the DeepSeek v4-pro
  * and Kimi K2.6 rows that third-party aggregators were reporting as changed.
@@ -999,7 +1023,7 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
  * number is where a table like this goes stale first (Sonnet 5 is $2/$10 — the
  * increase to $3/$15 that was scheduled for 2026-09-01 was cancelled).
  *
- * The 107 rows above are the exception to "the vendor's own page", and they say
+ * The 109 rows above are the exception to "the vendor's own page", and they say
  * so. They are a gateway's, and a gateway has no price list of its own: what it
  * resells is priced by the resellers, so the figures are a third-party
  * catalogue's, taken 2026-09-28 and checked against what the gateway will
@@ -1026,14 +1050,19 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
  * and 1.5x output across a whole request over 272K input tokens. The second is a
  * premium no per-token table can express at all. MiniMax is a third shape of the
  * same kind: M3's rates double over 512k input and its `priority` service tier
- * is 1.5x on top, so its row carries the standard rate at 512k or under.
+ * is 1.5x on top, so its row carries the standard rate at 512k or under. Claude
+ * Haiku 5.5 is a fourth: its rates step up fivefold over 100k input tokens, so
+ * its row carries the rate at 100k or under.
  *
  * When a price matters — a proxy, a negotiated rate, a newer model — declare it
  * in `pricing` in settings.json, which overrides this table.
  */
 const BUILT_IN_MODELS: Model[] = [
 	// Anthropic. Every model from the 4.6 generation on carries the full 1M-token
-	// window at standard pricing, so there is no long-context premium to model.
+	// window, and all but one are billed the same at any prompt length: the
+	// pricing page names Haiku 5.5 as its exception, priced by prompt length, so
+	// its row carries the band at 100k input tokens or under and its comment the
+	// rest.
 	//
 	// `thinkingMode` is the capability the rows disagree on, and every row states
 	// it rather than inheriting a default: from 4.7 on — and, on the vendor's
@@ -1046,7 +1075,7 @@ const BUILT_IN_MODELS: Model[] = [
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
-		// One of the three models whose thinking blocks are checked against the
+		// One of the four models whose thinking blocks are checked against the
 		// conversation that produced them; see `thinkingBlockBinding`.
 		thinkingBlockBinding: true,
 		// The 0.05x cache-read regime, between the 0.025x pair below and the
@@ -1057,7 +1086,7 @@ const BUILT_IN_MODELS: Model[] = [
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
-		// One of the other two. Mythos 5.1 records the same signatures but runs no
+		// One of the other three. Mythos 5.1 records the same signatures but runs no
 		// such check, so it is deliberately not flagged.
 		thinkingBlockBinding: true,
 		// One of the two rows whose cache reads are not a tenth of input.
@@ -1142,6 +1171,33 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 128_000,
 		thinkingMode: "adaptive",
 		pricing: anthropicPricing(3, 15),
+	}),
+	// A Haiku in name only: the 5.5 generation moved it onto the same 1M/128K
+	// window the rest of its family carries, from 200K/64K, and onto adaptive
+	// thinking from 4.5's `extended` — none of these numbers is inherited from
+	// the row below. The vendor also rejects `temperature`, `top_p` and `top_k`
+	// on it unless they are the defaults, which costs nothing here because the
+	// adapter sends none of the three on any row.
+	//
+	// The fourth shape the pricing note above lists, and the first on an
+	// Anthropic row: the vendor bills Haiku 5.5 by prompt length, and this row
+	// carries the band at 100k input tokens or under — $0.10/$0.50 with $0.01
+	// reads and $0.125 writes. Above 100k the rates step up to $0.50/$2.50 with
+	// $0.05 reads and $0.625 writes; a single per-token table cannot express the
+	// step, so the comment carries it, and the vendor page, models.dev's
+	// `anthropic` entry and its Zen entry agree on all four channels at both
+	// bands.
+	//
+	// Its place among the checked models is read rather than inferred: the
+	// preserved-thinking guide names it beside the other three, while its own
+	// migration guide says Haiku 4.5 runs no check.
+	anthropicModel("claude-haiku-5-5", "Claude Haiku 5.5", {
+		contextWindow: 1_000_000,
+		maxOutputTokens: 128_000,
+		thinkingMode: "adaptive",
+		// The fourth model that runs the prefix check. See `thinkingBlockBinding`.
+		thinkingBlockBinding: true,
+		pricing: anthropicPricing(0.1, 0.5),
 	}),
 	// The only row on the other regime: Haiku 4.5 rejects `adaptive` and is the
 	// last model with a user-set thinking budget.
@@ -1411,7 +1467,7 @@ const BUILT_IN_MODELS: Model[] = [
 	// The gateway, last. Two plans, two wires, four provider ids, from the two
 	// transcriptions above: a gateway is not a vendor, so one plan on one wire is
 	// one provider, and the base URL is the only thing that distinguishes them.
-	// Writing these out as four separate call sites would be 107 rows that differ
+	// Writing these out as four separate call sites would be 109 rows that differ
 	// in one string each, and the copy that drifted.
 	//
 	// `reasoning: false` on every one of them, and the reason is a model that is

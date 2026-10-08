@@ -56,6 +56,7 @@ describe("cacheCapability", () => {
 		expect(floor("claude-sonnet-5-5")).toBe(512);
 		expect(floor("claude-opus-4-7")).toBe(2048);
 		expect(floor("claude-haiku-4-5")).toBe(4096);
+		expect(floor("claude-haiku-5-5")).toBe(512);
 		expect(floor("claude-3-5-haiku-latest")).toBe(2048);
 	});
 
@@ -158,6 +159,7 @@ describe("cacheCapability", () => {
 		// And the table is not empty, so the loop above is not passing vacuously.
 		expect(ANTHROPIC_MIN_PREFIX.length).toBeGreaterThan(0);
 		expect(matchesAPattern("claude-sonnet-5-5")).toBe(true);
+		expect(matchesAPattern("claude-haiku-5-5")).toBe(true);
 		// And the floor those ids actually get is the provider's, which is a
 		// different question with a different answer: OpenAI caches
 		// automatically from 1024, in 128-token increments, with no row of its own
