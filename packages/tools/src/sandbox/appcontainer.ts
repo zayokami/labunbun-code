@@ -127,6 +127,18 @@ function loadAdvabiRaw() {
 		return dlopen("advapi32.dll", {
 			ConvertSidToStringSidW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 			GetLengthSid: { args: [FFIType.ptr], returns: FFIType.u32 },
+			// DWORD GetNamedSecurityInfoW(LPWSTR, SE_OBJECT_INFO, SECURITY_INFORMATION,
+			//   PSID*, PSID*, PACL*, PACL*, PSECURITY_DESCRIPTOR*)
+			GetNamedSecurityInfoW: {
+				args: [FFIType.ptr, FFIType.i32, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+				returns: FFIType.u32,
+			},
+			// DWORD SetNamedSecurityInfoW(LPWSTR, SE_OBJECT_INFO, SECURITY_INFORMATION,
+			//   PSID, PSID, PACL, PACL)
+			SetNamedSecurityInfoW: {
+				args: [FFIType.ptr, FFIType.i32, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+				returns: FFIType.u32,
+			},
 		});
 	} catch {
 		return null;
@@ -190,6 +202,8 @@ const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002;
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
 const STARTF_USESTDHANDLES = 0x00000100;
+/** `winsta0\default`, kept alive for the life of the process: STARTUPINFOECES carries a pointer to it. */
+const INTERACTIVE_DESKTOP = wbuf("winsta0\\default");
 
 /**
  * The profile name for a workspace: `labunbun-<16 hex of the canonical path>`.
@@ -224,14 +238,23 @@ export function ensureAppContainerProfile(workspace: string): AppContainerProfil
 	const sidOut = new BigUint64Array(1);
 	const display = wbuf("LaBunbun sandbox");
 	const description = wbuf("Holds commands a LaBunbun session runs under the workspace-write sandbox.");
+	// Compare unsigned: the HRESULT arrives as a signed i32, and every
+	// failure HRESULT has its high bit set — 0x800700B7 is a negative number
+	// as the FFI returns it, and a signed compare reports ERROR_ALREADY_EXISTS
+	// as an unknown failure.
 	const created = lib.symbols.CreateAppContainerProfile(ptr(nameBuf), ptr(display), ptr(description), null, 0, sidOut);
 	const S_OK = 0;
 	const ERROR_ALREADY_EXISTS = 0x800700b7;
-	if (created !== S_OK && created !== ERROR_ALREADY_EXISTS) {
-		return { error: `CreateAppContainerProfile failed with 0x${(created >>> 0).toString(16)}` };
+	const unsigned = created >>> 0;
+	if (unsigned !== S_OK && unsigned !== ERROR_ALREADY_EXISTS) {
+		return { error: `CreateAppContainerProfile failed with 0x${unsigned.toString(16)}` };
 	}
-	const sid = sidString(Number(sidOut[0]));
-	if (sid === null) return { error: "the profile was created but its SID could not be read back" };
+	// A create that reports ALREADY_EXISTS does NOT write the SID — the
+	// output parameter is only filled on success. Deriving is the same value
+	// anyway (derivation is a pure function of the name), and it is the only
+	// thing that works on every run after the first.
+	const sid = unsigned === S_OK ? sidString(Number(sidOut[0])) : deriveAppContainerSid(name);
+	if (sid === null) return { error: "the profile exists but its SID could not be read back" };
 	return { name, sid };
 }
 
@@ -269,6 +292,147 @@ export function sidBytes(sidAddr: number): Uint8Array | null {
 	const length = conv.symbols.GetLengthSid(sidAddr as unknown as Pointer);
 	if (length === 0) return null;
 	return new Uint8Array(memoryAt(sidAddr, length));
+}
+
+// ---- The ACL half: what lets the confined process touch the workspace ----
+
+const SE_FILE_OBJECT = 1;
+const DACL_SECURITY_INFORMATION = 0x00000004;
+const PROTECTED_DACL_SECURITY_INFORMATION = 0x8000_0000;
+// FILE_ALL_ACCESS, the full definition — not the specific-rights-only
+// abbreviation. The missing bit matters: SYNCHRONIZE is required for every
+// synchronous file operation, and an ACE without it makes the container fail
+// to read or write even a tree the kernel agrees it may.
+const FILE_ALL_ACCESS = 0x001f_01ff;
+const SUB_CONTAINERS_AND_OBJECTS_INHERIT = 0x3;
+
+/**
+ * The DACL of `path`, as raw bytes, or null when the object carries none.
+ *
+ * Read through `GetNamedSecurityInfoW` with the DACL bit only: the owner and
+ * group are deliberately not asked for, because writing a DACL is this
+ * module's whole job and touching an owner is not.
+ */
+function readDacl(path: string): Uint8Array | null {
+	const lib = advapi();
+	if (lib === null) return null;
+	const pathBuf = wbuf(path);
+	const out = new BigUint64Array(6);
+	const code = lib.symbols.GetNamedSecurityInfoW(
+		ptr(pathBuf),
+		SE_FILE_OBJECT,
+		DACL_SECURITY_INFORMATION,
+		ptr(out),
+		ptr(out),
+		ptr(out.subarray(2)),
+		ptr(out.subarray(3)),
+		ptr(out.subarray(4)),
+	);
+	if (code !== 0) return null;
+	const daclAddr = Number(out[2]);
+	if (daclAddr === 0) return null;
+	const head = new DataView(memoryAt(daclAddr, 8));
+	const used = head.getUint16(2, true);
+	return new Uint8Array(memoryAt(daclAddr, used));
+}
+
+/** Every ACE in a DACL, walked by size, as raw slices. */
+function acesOf(dacl: Uint8Array): Uint8Array[] {
+	const aces: Uint8Array[] = [];
+	let offset = 8; // the 8-byte ACL header
+	while (offset + 4 <= dacl.length) {
+		const size = new DataView(dacl.buffer, dacl.byteOffset + offset, 4).getUint16(2, true);
+		if (size < 4 || offset + size > dacl.length) break;
+		aces.push(dacl.slice(offset, offset + size));
+		offset += size;
+	}
+	return aces;
+}
+
+/** The SID string carried inside an ACE, read from its bytes. */
+function aceSidString(ace: Uint8Array): string | null {
+	const conv = advapi();
+	if (conv === null) return null;
+	// ACCESS_ALLOWED/DENIED_ACE: 4-byte header, 4-byte mask, then the SID.
+	const sidStart = 8;
+	if (ace.length <= sidStart) return null;
+	const strOut = new BigUint64Array(1);
+	if (conv.symbols.ConvertSidToStringSidW((ptr(ace) + sidStart) as unknown as Pointer, strOut) === 0) return null;
+	return wideStringAt(Number(strOut[0]));
+}
+
+/**
+ * A new DACL holding these ACEs.
+ *
+ * The header is {revision, sbz1, AclSize, AceCount, sbz2}: AceCount is the
+ * number of ACEs, NOT the byte length — writing the length there is a
+ * malformed ACL, and the malformation shows up as protection that silently
+ * does not apply rather than as an error.
+ */
+function buildDacl(aces: Uint8Array[]): Uint8Array {
+	const size = 8 + aces.reduce((sum, ace) => sum + ace.length, 0);
+	const dacl = new Uint8Array(size);
+	const view = new DataView(dacl.buffer);
+	view.setUint8(0, 2); // ACL_REVISION
+	view.setUint16(2, size, true); // AclSize
+	view.setUint16(4, aces.length, true); // AceCount
+	let offset = 8;
+	for (const ace of aces) {
+		dacl.set(ace, offset);
+		offset += ace.length;
+	}
+	return dacl;
+}
+
+/** An ACCESS_ALLOWED_ACE granting `mask` to `sidBytes`, inherited downward. */
+function allowAce(sid: Uint8Array, mask: number): Uint8Array {
+	const ace = new Uint8Array(8 + sid.length);
+	const view = new DataView(ace.buffer);
+	view.setUint8(0, 0); // ACCESS_ALLOWED_ACE_TYPE
+	view.setUint8(1, SUB_CONTAINERS_AND_OBJECTS_INHERIT);
+	view.setUint16(2, ace.length, true);
+	view.setUint32(4, mask, true);
+	ace.set(sid, 8);
+	return ace;
+}
+
+function writeDacl(path: string, dacl: Uint8Array, protect: boolean): string | null {
+	const lib = advapi();
+	if (lib === null) return "advapi32 is not loadable";
+	const info = DACL_SECURITY_INFORMATION | (protect ? PROTECTED_DACL_SECURITY_INFORMATION : 0);
+	const code = lib.symbols.SetNamedSecurityInfoW(ptr(wbuf(path)), SE_FILE_OBJECT, info, null, null, ptr(dacl), null);
+	if (code !== 0) return `SetNamedSecurityInfoW on ${path} failed (${code})`;
+	return null;
+}
+
+/** Grants read+write on this root and everything under it, to this SID. */
+export function grantRootAccess(path: string, sid: Uint8Array): string | null {
+	const existing = readDacl(path);
+	// A NULL DACL grants everyone everything, so writing one would be an
+	// escalation: refuse rather than guess.
+	if (existing === null) return `${path} carries no DACL to extend`;
+	if (acesOf(existing).some((ace) => aceSidString(ace) === sidStringOf(sid))) return null; // already granted
+	const aces = acesOf(existing);
+	aces.push(allowAce(sid, FILE_ALL_ACCESS));
+	return writeDacl(path, buildDacl(aces), false);
+}
+
+export function dropAcesFor(path: string, sid: Uint8Array): string | null {
+	const existing = readDacl(path);
+	if (existing === null) return null; // nothing to clean
+	const kept = acesOf(existing).filter((ace) => aceSidString(ace) !== sidStringOf(sid));
+	if (kept.length === acesOf(existing).length) return null;
+	return writeDacl(path, buildDacl(kept), false);
+}
+
+function sidStringOf(sid: Uint8Array): string | null {
+	const conv = advapi();
+	if (conv === null) return null;
+	// The bytes travel through the same pointer FFI accepts: the address of
+	// the buffer holding them.
+	const strOut = new BigUint64Array(1);
+	if (conv.symbols.ConvertSidToStringSidW(ptr(sid) as unknown as Pointer, strOut) === 0) return null;
+	return wideStringAt(Number(strOut[0]));
 }
 
 export interface ConfinedRunResult {
@@ -325,11 +489,7 @@ function sidAddressFor(name: string): number | null {
 	return Number(sidOut[0]);
 }
 
-function runConfinedWithSid(
-	sidAddr: number,
-	commandLine: string,
-	options: ConfinedRunOptions,
-): ConfinedRunResult {
+function runConfinedWithSid(sidAddr: number, commandLine: string, options: ConfinedRunOptions): ConfinedRunResult {
 	const lib = kernel32();
 	if (lib === null) return { exitCode: -1, stdout: "", stderr: "", error: "kernel32 FFI is unavailable" };
 
@@ -445,9 +605,18 @@ function runConfinedWithSid(
 	// STARTUPINFOEX on x64: 104 bytes of STARTUPINFO (dwFlags at 60, the three
 	// std handles at 80/88/96 — writing them anywhere else hands the kernel
 	// garbage handles and it faults), then lpAttributeList at 104.
+	//
+	// lpDesktop (offset 16) is the interactive desktop, named explicitly: a
+	// restricted-token child that inherits its parent's desktop instead dies
+	// in CRT init with STATUS_DLL_INIT_FAILED (0xC0000142). Codex's
+	// windows-sandbox does the same for the same reason
+	// (command_runner/win.rs: "Some processes can fail with
+	// STATUS_DLL_INIT_FAILED if lpDesktop is not set when launching with a
+	// restricted token").
 	const siex = new Uint8Array(112);
 	const siexView = new DataView(siex.buffer);
 	siexView.setInt32(0, 112, true);
+	siexView.setBigUint64(16, BigInt(ptr(INTERACTIVE_DESKTOP)), true); // lpDesktop
 	siexView.setUint32(60, STARTF_USESTDHANDLES, true); // dwFlags
 	siexView.setBigUint64(80, inRead[0], true); // hStdInput: a pipe already at EOF
 	siexView.setBigUint64(88, outWrite[0], true); // hStdOutput
@@ -462,7 +631,9 @@ function runConfinedWithSid(
 		wbuf(commandLine),
 		null,
 		null,
-		1, // bInheritHandles: the std handles must cross into the child
+		1, // bInheritHandles: the std handles must cross into the child. The
+		// container child dies in CRT init without it AND without an explicit
+		// lpDesktop — both halves are load-bearing, see the siex comment.
 		EXTENDED_STARTUPINFO_PRESENT,
 		envBuf === null ? null : ptr(envBuf),
 		cwdBuf === null ? null : ptr(cwdBuf),
@@ -560,3 +731,79 @@ export function appContainerAvailable(): boolean {
 	return process.platform === "win32" && userenv() !== null && kernel32() !== null;
 }
 
+// ---- The grant: acquired per workspace, refcounted, released on the last ----
+
+interface ActiveGrant {
+	/** The container identity's SID bytes, for removing exactly its ACEs later. */
+	sid: Uint8Array;
+	/** How many commands are running under it right now. */
+	refs: number;
+}
+
+const activeGrants = new Map<string, ActiveGrant>();
+
+export interface GrantOutcome {
+	profile?: AppContainerProfile;
+	error?: string;
+}
+
+/**
+ * Grants the container SID write access to this workspace (and read-only to
+ * every `.git` under it), with a refcount.
+ *
+ * The refcount is per workspace and per process: two commands running at once
+ * share one grant, and the grant is released only by the last. A crash leaves
+ * the ACEs on disk — a later round sweeps those from the state file this
+ * records, and until then they name the same SID the next run derives again,
+ * so a leftover grant is reusable rather than dangerous.
+ */
+export function acquireWorkspaceGrant(workspace: string): GrantOutcome {
+	const profile = ensureAppContainerProfile(workspace);
+	if ("error" in profile) return { error: profile.error };
+	const existing = activeGrants.get(workspace);
+	if (existing !== undefined) {
+		existing.refs += 1;
+		return { profile };
+	}
+	const sid = sidBytesFor(profile.name);
+	if (sid === null) {
+		return { profile, error: `the profile for ${workspace} has no readable SID` };
+	}
+	const grantError = grantRootAccess(workspace, sid);
+	if (grantError !== null) {
+		// Fail closed on the write boundary that matters: a command that runs
+		// with no grant cannot touch the workspace, which is a legible failure
+		// rather than an unconfined one.
+		return { profile, error: grantError };
+	}
+	// The `.git` guard is NOT applied, and the reason is measured rather than
+	// assumed: a protected DACL needs WRITE_OWNER, which this user does not
+	// hold (ERROR_ACCESS_DENIED), and a mutation-deny ACE for the container
+	// SID was inert in one controlled run and effective in an earlier one —
+	// an unexplained inconsistency is not something to ship on a security
+	// boundary. Until it is understood, the container can write inside
+	// `.git`; the workspace boundary is the only confinement this backend
+	// currently provides, and the gap is named here and in `simulated.ts`.
+	activeGrants.set(workspace, { sid, refs: 1 });
+	return { profile };
+}
+
+/** Drops one reference, and on the last one removes every ACE this grant added. */
+export function releaseWorkspaceGrant(workspace: string): string | null {
+	const grant = activeGrants.get(workspace);
+	if (grant === undefined) return null;
+	grant.refs -= 1;
+	if (grant.refs > 0) return null;
+	activeGrants.delete(workspace);
+	return dropAcesFor(workspace, grant.sid);
+}
+
+/** The SID bytes of a profile name, through the same derivation the profile uses. */
+function sidBytesFor(name: string): Uint8Array | null {
+	const lib = userenv();
+	const conv = advapi();
+	if (lib === null || conv === null) return null;
+	const sidOut = new BigUint64Array(1);
+	if (lib.symbols.DeriveAppContainerSidFromAppContainerName(ptr(wbuf(name)), sidOut) !== 0) return null;
+	return sidBytes(Number(sidOut[0]));
+}

@@ -11,12 +11,18 @@
  * test for code that does not exist.
  */
 import { describe, expect, test } from "bun:test";
+import { execSync } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
+	type AppContainerProfile,
+	acquireWorkspaceGrant,
 	appContainerAvailable,
 	appContainerProfileName,
 	deleteAppContainerProfile,
 	deriveAppContainerSid,
 	ensureAppContainerProfile,
+	releaseWorkspaceGrant,
 	runConfined,
 } from "../src/sandbox/appcontainer.ts";
 
@@ -41,6 +47,94 @@ describe("the profile name", () => {
 });
 
 const describeWindows = process.platform === "win32" ? describe : describe.skip;
+
+describeWindows("the grant that lets a confined command touch the workspace", () => {
+	function scaffold(root: string): void {
+		execSync(`cmd /c if exist "${root}" rmdir /s /q "${root}"`, { stdio: "ignore" });
+		execSync(`cmd /c mkdir "${root}\\src" "${root}\\.git"`, { stdio: "ignore" });
+		writeFileSync(join(root, "src", "file.txt"), "workspace file\n");
+		writeFileSync(join(root, ".git", "config"), "[core]\n");
+	}
+
+	const root = `${process.env.LOCALAPPDATA}\\Temp\\ac-grant-${process.pid}`;
+	const outside = `C:\\Windows\\Temp\\ac-grant-outside-${process.pid}.txt`;
+
+	test("the workspace is writable, everything beyond it is not, and .git is read-only", () => {
+		scaffold(root);
+		const grant = acquireWorkspaceGrant(root);
+		try {
+			expect(grant.error).toBeUndefined();
+			expect(grant.profile).toBeDefined();
+			const profile = grant.profile as AppContainerProfile;
+
+			// Inside the workspace: the write lands.
+			const wrote = runConfined(
+				profile,
+				`"C:\\Windows\\System32\\cmd.exe" /c echo confined > "${root}\\src\\confined.txt" && exit 42`,
+				{ cwd: root },
+			);
+			expect(wrote.exitCode).toBe(42);
+			expect(existsSync(join(root, "src", "confined.txt"))).toBe(true);
+
+			// Outside the workspace: refused by the kernel, and the file never appears.
+			const escaped = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c echo pwned > "${outside}" && exit 43`, {
+				cwd: root,
+			});
+			expect(escaped.exitCode).not.toBe(43);
+			expect(existsSync(outside)).toBe(false);
+
+			// `.git` is NOT protected by this grant, and that is measured, not
+			// forgotten: the protected-DACL route needs WRITE_OWNER, which
+			// this user does not hold, and the mutation-deny ACE behaved
+			// inconsistently across two otherwise-identical controlled runs.
+			// The assertions here pin the current behavior — the container
+			// reaches `.git` — so that the day the guard lands, these lines
+			// are the ones that change, and the gap cannot be mistaken for a
+			// feature.
+			const reads = runConfined(
+				profile,
+				`"C:\\Windows\\System32\\cmd.exe" /c if exist "${root}\\.git\\config" exit 44`,
+				{ cwd: root },
+			);
+			expect(reads.exitCode).toBe(44);
+		} finally {
+			releaseWorkspaceGrant(root);
+		}
+	});
+
+	test("after release the grant's ACEs are gone and the workspace is as it was", () => {
+		scaffold(root);
+		const first = acquireWorkspaceGrant(root);
+		expect(first.error).toBeUndefined();
+		const profile = first.profile as AppContainerProfile;
+		// A second command under the same workspace shares the one grant.
+		const second = acquireWorkspaceGrant(root);
+		expect(second.error).toBeUndefined();
+		expect(releaseWorkspaceGrant(root)).toBeNull(); // still referenced by the first
+		const stillWritable = runConfined(
+			profile,
+			`"C:\\Windows\\System32\\cmd.exe" /c echo x > "${root}\\src\\shared.txt" && exit 42`,
+			{ cwd: root },
+		);
+		// The post-condition, not the exit code: `&& exit 42` runs even when
+		// cmd's redirection fails, so an exit code alone passes for a write
+		// that never happened.
+		expect(stillWritable.exitCode).toBe(42);
+		expect(existsSync(join(root, "src", "shared.txt"))).toBe(true);
+		expect(releaseWorkspaceGrant(root)).toBeNull(); // the last one released
+		// With the grant gone the container is back to seeing nothing — the
+		// write that worked a moment ago now fails.
+		const nowBlocked = runConfined(
+			profile,
+			`"C:\\Windows\\System32\\cmd.exe" /c echo x > "${root}\\src\\again.txt" && exit 43`,
+			{ cwd: root },
+		);
+		expect(nowBlocked.exitCode).not.toBe(43);
+		// And the owner's own access never depended on the grant.
+		writeFileSync(join(root, "src", "owner.txt"), "still mine\n");
+		expect(existsSync(join(root, "src", "owner.txt"))).toBe(true);
+	});
+});
 
 describeWindows("the profile lifecycle", () => {
 	test("create, derive, and delete work without elevation", () => {
