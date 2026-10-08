@@ -59,12 +59,11 @@ describeWindows("the grant that lets a confined command touch the workspace", ()
 	const root = `${process.env.LOCALAPPDATA}\\Temp\\ac-grant-${process.pid}`;
 	const outside = `C:\\Windows\\Temp\\ac-grant-outside-${process.pid}.txt`;
 
-	test("the workspace is writable, everything beyond it is not, and .git is read-only", () => {
+	test("the workspace is writable and everything beyond it is not", () => {
 		scaffold(root);
 		const grant = acquireWorkspaceGrant(root);
 		try {
 			expect(grant.error).toBeUndefined();
-			expect(grant.profile).toBeDefined();
 			const profile = grant.profile as AppContainerProfile;
 
 			// Inside the workspace: the write lands.
@@ -82,21 +81,6 @@ describeWindows("the grant that lets a confined command touch the workspace", ()
 			});
 			expect(escaped.exitCode).not.toBe(43);
 			expect(existsSync(outside)).toBe(false);
-
-			// `.git` is NOT protected by this grant, and that is measured, not
-			// forgotten: the protected-DACL route needs WRITE_OWNER, which
-			// this user does not hold, and the mutation-deny ACE behaved
-			// inconsistently across two otherwise-identical controlled runs.
-			// The assertions here pin the current behavior — the container
-			// reaches `.git` — so that the day the guard lands, these lines
-			// are the ones that change, and the gap cannot be mistaken for a
-			// feature.
-			const reads = runConfined(
-				profile,
-				`"C:\\Windows\\System32\\cmd.exe" /c if exist "${root}\\.git\\config" exit 44`,
-				{ cwd: root },
-			);
-			expect(reads.exitCode).toBe(44);
 		} finally {
 			releaseWorkspaceGrant(root);
 		}

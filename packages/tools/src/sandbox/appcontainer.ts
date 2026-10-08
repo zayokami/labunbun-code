@@ -21,21 +21,27 @@
  *     root, the confined child reads and writes that subtree; a write outside
  *     it is refused by the kernel with access-denied. Without the grant the
  *     child cannot even read the workspace, so the backend fails closed.
- *   - KNOWN DEFICIT, measured and not yet understood: with the grant in place
- *     the confined child reads and writes FILES (traverse works, and a child
- *     cannot reach a file without it) but CANNOT LIST DIRECTORIES — `dir /b`
- *     is access-denied on every directory, the granted root included. The
- *     denial survives an ACE that is non-inherited, one that is full control,
- *     and one that grants ALL APPLICATION PACKAGES (S-1-15-2-1) as well as
- *     the package SID. The spawn shape is not the variable: a bare spawn with
- *     no inherited std handles is denied identically. This is why
- *     `resolveSandboxExecution` still answers `simulated` on win32 — git
- *     status and every `ls` through the shell need a list.
- *   - `.git` is not protected by this backend: a protected DACL needs
- *     WRITE_OWNER, which this user does not hold, and the mutation-deny ACE
- *     did not block file creation in controlled runs. The workspace boundary
- *     is the only confinement the grant provides.
- *
+ *   - Directory ENUMERATION works and `cmd /c dir` does not: FindFirstFile
+ *     through a for-glob or PowerShell lists a granted tree fine, while cmd's
+ *     `dir` is refused — the AppContainer token cannot reach the volume /
+ *     mount-manager subsystem cmd queries (the MS STL issue #6286 landing).
+ *     `git status`, `ls` in bash, and every other FindFirstFile consumer work;
+ *     the earlier "listing is denied" report measured with cmd's `dir` and was
+ *     a property of the instrument, not of the backend.
+ *   - `.git` is NOT protected by this build tonight, and the reason is a
+ *     measurement that would not repeat. The deny ACE (Codex's mutation mask,
+ *     0x10156) demonstrably refuses create/overwrite/delete/rename under
+ *     `.git` when an external process writes it, and demonstrably does not
+ *     when `acquire`'s own `protectGitDir` writes it two statements after
+ *     `grantRootAccess` — same ACL on disk (icacls confirms the deny both
+ *     times), same confined child (the low-integrity label confirms it),
+ *     opposite results. A self-verifying guard was built to settle it and its
+ *     verdict was the unreliable side: it refused on clean trees where the
+ *     settled replay was refused. So the deny is out until the timing is
+ *     understood, and the workspace boundary is the only confinement this
+ *     half ships. Reintroduce `protectGitDir` (last known shape: one
+ *     inherited deny ACE, mask 0x10156) as the opening question of the next
+ *     session.
  * Why AppContainer and not a job object: `JOBOBJECT_SECURITY_LIMIT_INFORMATION`
  * is documented as no longer supported in the SDK, so no `JOB_OBJECT_LIMIT_*`
  * takes a path. Job objects remain fine for process/memory ceilings and
@@ -308,10 +314,13 @@ export function sidBytes(sidAddr: number): Uint8Array | null {
 const SE_FILE_OBJECT = 1;
 const DACL_SECURITY_INFORMATION = 0x00000004;
 const PROTECTED_DACL_SECURITY_INFORMATION = 0x8000_0000;
-// FILE_ALL_ACCESS, the full definition — not the specific-rights-only
-// abbreviation. The missing bit matters: SYNCHRONIZE is required for every
-// synchronous file operation, and an ACE without it makes the container fail
-// to read or write even a tree the kernel agrees it may.
+// FILE_ALL_ACCESS, the documented value including the standard-rights bits. An
+// earlier revision of this comment claimed the missing SYNCHRONIZE bit made
+// the container unable to touch the tree at all — that was a misattribution:
+// the mutation driver disproved it (the confined child writes fine without
+// it), and the failure the bit was blamed for was the spawn shape. The full
+// value stands because it is the standard constant, not because a test
+// demands the bits.
 const FILE_ALL_ACCESS = 0x001f_01ff;
 const SUB_CONTAINERS_AND_OBJECTS_INHERIT = 0x3;
 
@@ -785,14 +794,6 @@ export function acquireWorkspaceGrant(workspace: string): GrantOutcome {
 		// rather than an unconfined one.
 		return { profile, error: grantError };
 	}
-	// The `.git` guard is NOT applied, and the reason is measured rather than
-	// assumed: a protected DACL needs WRITE_OWNER, which this user does not
-	// hold (ERROR_ACCESS_DENIED), and a mutation-deny ACE for the container
-	// SID was inert in one controlled run and effective in an earlier one —
-	// an unexplained inconsistency is not something to ship on a security
-	// boundary. Until it is understood, the container can write inside
-	// `.git`; the workspace boundary is the only confinement this backend
-	// currently provides, and the gap is named here and in `simulated.ts`.
 	activeGrants.set(workspace, { sid, refs: 1 });
 	return { profile };
 }
