@@ -27,9 +27,33 @@
  * nor elevation. An AppContainer child gets a package SID the kernel checks on
  * every file access, which is a real write boundary.
  *
- * **What is genuinely absent here is the wiring, not the mechanism.** Nothing in
- * this build calls those four functions, so the sentence that describes the
- * module's own behaviour was true and the sentence about the platform was not.
+ * **What is genuinely absent here is the wiring, not the mechanism.** `packages/tools/src/sandbox/appcontainer.ts`
+ * now implements the profile lifecycle and the confined spawn (create / derive / delete
+ * without elevation, a child created with PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+ * pipes, timeout-kill) and its tests run them for real on Windows. What it does NOT do
+ * yet is the ACL half: nothing grants the container access to the workspace, and
+ * `resolveSandboxExecution` still answers `simulated` on win32. So the mechanism is
+ * measured and half-built, and this module remains the layer that actually applies
+ * today.
+ *
+ * Measured on this machine (2026-10-09, no elevation, no helper binary):
+ *
+ *   - create / derive / delete all succeed for the current user; derivation is a
+ *     pure function of the name, so the SID a grant names is the SID the next run
+ *     for the same workspace derives again.
+ *   - one `(OI)(CI)(F)` allow ACE for the container SID on a workspace root gives
+ *     the confined child read+write on that subtree and nothing outside it — a
+ *     write beyond the grant is refused by the kernel with access-denied. Without
+ *     the grant the child cannot read the workspace at all, so the backend fails
+ *     closed.
+ *   - a mutation deny ACE (write-data, append-data, write-EA, write-attributes,
+ *     delete, delete-child) on a nested `.git` stops overwrite, delete, and
+ *     rename of anything under `.git` — but a brand-new file can still be
+ *     created there, so `.git` protection is NOT yet correct and the ACL half
+ *     must not ship until it is.
+ *   - the container has no network at all (loopback included), which is why the
+ *     grant half, when it ships, must leave `restricted` on the simulated path
+ *     rather than hand it to the container.
  *
  * One thing that *is* true and worth keeping, because it is the trap: a Job
  * Object cannot do this. `winnt.h:12052` carries
