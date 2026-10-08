@@ -46,11 +46,17 @@
  *     write beyond the grant is refused by the kernel with access-denied. Without
  *     the grant the child cannot read the workspace at all, so the backend fails
  *     closed.
- *   - a mutation deny ACE (write-data, append-data, write-EA, write-attributes,
- *     delete, delete-child) on a nested `.git` stops overwrite, delete, and
- *     rename of anything under `.git` — but a brand-new file can still be
- *     created there, so `.git` protection is NOT yet correct and the ACL half
- *     must not ship until it is.
+ *   - With the grant in place the confined child reads and writes FILES but
+ *     cannot LIST DIRECTORIES (`dir /b` is access-denied on every directory,
+ *     the granted root included), and a bare spawn without inherited std
+ *     handles lists fine — the deficit lives in the pipe/handle-list spawn
+ *     shape and is not yet understood. Directory listing is why git status and
+ *     every `ls` through the shell would fail, so `resolveSandboxExecution`
+ *     still answers `simulated` on win32.
+ *   - `.git` is not protected by this backend: a protected DACL needs
+ *     WRITE_OWNER, which this user does not hold, and the mutation-deny ACE
+ *     did not block file creation in controlled runs. The workspace boundary
+ *     is the only confinement the grant provides.
  *   - the container has no network at all (loopback included), which is why the
  *     grant half, when it ships, must leave `restricted` on the simulated path
  *     rather than hand it to the container.
