@@ -66,6 +66,13 @@ export interface ReplProps {
 	 * transcript or the model. Returning `{ block: true }` rejects the prompt.
 	 */
 	onSubmitText?: (text: string) => PromptSubmitResult | Promise<PromptSubmitResult>;
+	/**
+	 * First refusal for a line typed while a run is in flight. Return true when
+	 * the app has taken the line (an @-mention routed to a band member): it is
+	 * not queued behind the run, and no user entry is recorded here — the
+	 * claiming path records it itself.
+	 */
+	onMidRunText?: (text: string) => boolean;
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
 	/** Slash-command suggestions for autocomplete. */
@@ -161,6 +168,7 @@ export function REPL({
 	onExit,
 	onCommand,
 	onSubmitText,
+	onMidRunText,
 	onMemoryShortcut,
 	commandSuggestions,
 	completeFiles,
@@ -349,14 +357,19 @@ export function REPL({
 		(text: string, mode: QueuedMessage["mode"]) => {
 			// Same rule as an ordinary submit: sending something dismisses the
 			// status card, which is a snapshot the new work has invalidated.
+			store.set((s) => (s.statusCard ? { ...s, statusCard: null } : s));
+			// A line the app claims mid-run (an @-mention for a band) is not a
+			// message for this session: nothing is queued or recorded here — the
+			// claiming path records it itself, and a half-recorded copy would be a
+			// second source of truth for the same keystroke.
+			if (onMidRunText?.(text)) return;
 			store.set((s) => ({
 				...s,
-				statusCard: null,
 				entries: [...s.entries, { kind: "user" as const, text, steered: mode === "steer" }],
 			}));
 			enqueue(text, mode);
 		},
-		[enqueue, store],
+		[enqueue, onMidRunText, store],
 	);
 
 	/**

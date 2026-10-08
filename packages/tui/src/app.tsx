@@ -48,6 +48,13 @@ export interface ReplAppOptions {
 	 * transcript or the model. Returning `{ block: true }` rejects the prompt.
 	 */
 	onSubmitText?: (text: string) => PromptSubmitResult | Promise<PromptSubmitResult>;
+	/**
+	 * First refusal for a line typed while a run is in flight. Return true when
+	 * the app has taken the line (an @-mention routed to a band member): it is
+	 * not queued behind the run, and no user entry is recorded — the claiming
+	 * path records it itself.
+	 */
+	onMidRunText?: (text: string) => boolean;
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
 	/** Slash-command suggestions for autocomplete. */
@@ -254,6 +261,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				onExit={() => instance.unmount()}
 				onCommand={options.onCommand}
 				onSubmitText={options.onSubmitText}
+				onMidRunText={options.onMidRunText}
 				onMemoryShortcut={options.onMemoryShortcut}
 				commandSuggestions={options.commandSuggestions}
 				completeFiles={options.completeFiles}

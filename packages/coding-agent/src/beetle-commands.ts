@@ -124,6 +124,13 @@ export interface ToolChangeLatch {
 	arm(cause: string): void;
 	/** Call for every session event; an armed cause registers on `turn_start`. */
 	observe(event: { type: string }): void;
+	/**
+	 * Drop an armed cause without registering it. A hot swap replaces the
+	 * session the cause was armed for; without this, the incoming session's
+	 * first `turn_start` would register a cause that belongs to the outgoing
+	 * session's tool change.
+	 */
+	reset(): void;
 }
 
 export function createToolChangeLatch(note: (cause: string) => void): ToolChangeLatch {
@@ -135,6 +142,9 @@ export function createToolChangeLatch(note: (cause: string) => void): ToolChange
 		observe(event) {
 			if (event.type !== "turn_start" || pending === null) return;
 			note(pending);
+			pending = null;
+		},
+		reset() {
 			pending = null;
 		},
 	};
@@ -231,6 +241,10 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 					}
 					saveModels(picked);
 					spawn(task);
+				} catch (error) {
+					// The picker is a dialog the host owns; a rejection here used to
+					// vanish as an unhandled rejection — no band, and no line saying why.
+					deps.notify(`Band start failed: ${error instanceof Error ? error.message : String(error)}`);
 				} finally {
 					picking = false;
 				}
@@ -261,6 +275,8 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 							? "Band models saved — the current band keeps its models; the next one uses these."
 							: "Band models saved.",
 					);
+				} catch (error) {
+					deps.notify(`Model reconfiguration failed: ${error instanceof Error ? error.message : String(error)}`);
 				} finally {
 					picking = false;
 				}
@@ -273,17 +289,23 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 				deps.notify("No band is on stage.");
 				return;
 			}
-			const members = current.off();
-			const session = deps.getSession();
-			if (session) {
-				session.setTools(session.tools.filter((tool) => tool !== current.mainTool));
-				deps.noteToolChange("beetle: band tool removed");
+			try {
+				const members = current.off();
+				const lines = members.map(
+					(entry) =>
+						`  ${entry.name} (${entry.role}): ${entry.turns} turns, $${entry.costUSD.toFixed(4)}${entry.unpriced ? " (unpriced)" : ""}`,
+				);
+				deps.notify(`Band off. Final tally:\n${lines.join("\n")}`);
+			} finally {
+				// The disband is already under way: the tool comes off the session
+				// even if the band's own teardown throws — otherwise the main
+				// session keeps a BandMessage that points at nothing.
+				const session = deps.getSession();
+				if (session) {
+					session.setTools(session.tools.filter((tool) => tool !== current.mainTool));
+					deps.noteToolChange("beetle: band tool removed");
+				}
 			}
-			const lines = members.map(
-				(entry) =>
-					`  ${entry.name} (${entry.role}): ${entry.turns} turns, $${entry.costUSD.toFixed(4)}${entry.unpriced ? " (unpriced)" : ""}`,
-			);
-			deps.notify(`Band off. Final tally:\n${lines.join("\n")}`);
 		},
 
 		say(target, text) {

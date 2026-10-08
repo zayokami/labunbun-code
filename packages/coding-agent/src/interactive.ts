@@ -879,6 +879,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// a rewind at message 0 of a conversation that never existed — while the
 		// numbers above it mixed two sessions' prompts into one ceiling.
 		cacheTracker.reset();
+		// And so does the tool-change latch: an armed cause belongs to the session
+		// being left, and the incoming session's first turn_start would otherwise
+		// register it against a request it has nothing to do with.
+		toolChangeLatch.reset();
 		compactionWiring.rebuild(next.model, loaded.store);
 		thresholdHolder.current = compactionThreshold({
 			contextWindow: next.model.contextWindow,
@@ -1125,6 +1129,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			}
 			return undefined;
 		},
+		// The same routing for a line typed while the main session runs: the busy
+		// path never reaches onSubmitText, so an @-mention would otherwise be
+		// steered or queued into the main session. No band or no mention: false,
+		// and the line queues exactly as before.
+		onMidRunText: (text) => beetleSurface.handleMention(text),
 		onMemoryShortcut: (note) => {
 			if (!note) return;
 			appendMemoryNote(note);

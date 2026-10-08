@@ -567,6 +567,22 @@ describe("delivery", () => {
 		expect(band.status().find((entry) => entry.name === "john")?.state).toBe("stopped");
 	});
 
+	test("one member's failing abort does not strand the other three", () => {
+		const { band } = makeBand({ script: {} });
+		const john = sessionOf(band, "john");
+		john.abort = () => {
+			throw new Error("boom");
+		};
+		// A disband takes the whole band down even when one member's teardown
+		// fails: the other three still stop, nothing is thrown out of off(), and
+		// the tally still comes back — a band that kept delivering after a failed
+		// stop would be the one state the user cannot type their way out of.
+		const status = band.off();
+		expect(status.map((entry) => entry.state)).toEqual(["stopped", "stopped", "stopped", "stopped"]);
+		expect(band.active).toBe(false);
+		expect(band.deliver({ kind: "user" }, "paul", "anyone?").ok).toBe(false);
+	});
+
 	test("main is woken when idle and queued behind its own turn when busy", async () => {
 		let main: AgentSession | null = null;
 		const { band, faux } = makeBand({

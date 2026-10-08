@@ -192,7 +192,7 @@ Use these commands:
 | `/beetle say <member> <text>` | Send a message to one member. |
 | `/beetle off` | Stop all four members. |
 
-You can also send a message with `@john <text>`. This form works only when the main session is not running.
+You can also send a message with `@john <text>`. This form works while the main session runs, too. If the band is off, the main session reads the line. After Esc stops the main session, the line goes to the main session.
 
 The four members use the same working directory. `/rewind` does not restore the files that a member changed.
 

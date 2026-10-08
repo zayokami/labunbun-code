@@ -138,7 +138,7 @@ describe("when the queue empties", () => {
 });
 
 /** A session whose queue methods are recorded, then called for real. */
-function setup(vim = false) {
+function setup(vim = false, onMidRunText?: (text: string) => boolean) {
 	const streaming = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	const faux = fauxProvider([{ text: "first answer" }, { text: "second answer" }, { text: "third answer" }]);
@@ -175,7 +175,9 @@ function setup(vim = false) {
 	// actually started, which is what the first submit is here to do.
 	const store = createStore<UiState>(initialUiState(vim));
 	const unsubscribe = connectSessionToStore(session, store);
-	const view = render(<REPL getSession={() => session} store={store} modelName="test" onExit={() => {}} />);
+	const view = render(
+		<REPL getSession={() => session} store={store} modelName="test" onExit={() => {}} onMidRunText={onMidRunText} />,
+	);
 
 	return {
 		session,
@@ -268,6 +270,46 @@ describe("the three verbs in the REPL", () => {
 
 		expect(h.calls.at(-1)).toEqual({ kind: "queue", text: "one more thing" });
 		expect(h.frame()).toContain("Enter queue");
+		h.unmount();
+	});
+
+	// A line the app claims mid-run (an @-mention for the band) is not a message
+	// for this session: it never reaches the queue or the transcript — the
+	// claiming path records it itself, and a half-recorded copy here would be a
+	// second source of truth for the same keystroke.
+	test("a mid-run line the hook claims is neither queued nor in the transcript", async () => {
+		const claimed: string[] = [];
+		const h = setup(false, (text) => {
+			claimed.push(text);
+			return text.startsWith("@");
+		});
+		await type(h.stdin, "run something slow");
+		h.stdin.write("\r");
+		await h.streaming.promise;
+
+		await type(h.stdin, "@john take a look");
+		h.stdin.write("\r");
+		await delay(40);
+
+		expect(claimed).toEqual(["@john take a look"]);
+		expect(h.calls.filter((c) => c.kind !== "prompt")).toEqual([]);
+		expect(h.queuedNow()).toEqual([]);
+		expect(h.userEntries().map((e) => (e.kind === "user" ? e.text : ""))).toEqual(["run something slow"]);
+		h.unmount();
+	});
+
+	test("a mid-run line the hook declines is queued as before", async () => {
+		const h = setup(false, () => false);
+		await type(h.stdin, "run something slow");
+		h.stdin.write("\r");
+		await h.streaming.promise;
+
+		await type(h.stdin, "and then this");
+		h.stdin.write("\r");
+		await delay(40);
+
+		expect(h.calls.at(-1)).toEqual({ kind: "queue", text: "and then this" });
+		expect(h.queuedNow().map((q) => q.text)).toEqual(["and then this"]);
 		h.unmount();
 	});
 

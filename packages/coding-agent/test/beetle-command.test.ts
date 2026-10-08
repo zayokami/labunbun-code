@@ -12,9 +12,10 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentSession } from "@labunbun/agent";
+import { AgentSession, type AnyTool, buildTool } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider, type Model } from "@labunbun/ai";
 import { createStore } from "@labunbun/tui";
+import { z } from "zod";
 import { beetleUsage } from "../src/beetle.ts";
 import {
 	type BeetleSurface,
@@ -49,6 +50,8 @@ interface Harness {
 	boardTasks: BoardTask[];
 	bandToolNames: () => string[];
 	savedModels: () => Record<string, string> | null;
+	/** Flip the picker into throwing mid-test (see `pickThrows`). */
+	setPickThrows: (value: boolean) => void;
 }
 
 function makeHarness(
@@ -58,6 +61,10 @@ function makeHarness(
 		withSession?: boolean;
 		/** Held open before the first pick answers, to freeze a sequence mid-flight. */
 		gateFirstPick?: Promise<void>;
+		/** Start with the picker throwing; `setPickThrows` flips it mid-test. */
+		pickThrows?: boolean;
+		/** Tools the main session already carries before the band starts. */
+		tools?: AnyTool[];
 	} = {},
 ): Harness {
 	const home = mkdtempSync(join(tmpdir(), "lbb-beetle-"));
@@ -68,6 +75,7 @@ function makeHarness(
 	const cards: Harness["cards"] = [];
 	const boardTasks: BoardTask[] = [];
 	const answers = [...(options.picks ?? [])];
+	const pickState = { throws: options.pickThrows ?? false };
 	const byRef = new Map(ROWS.map((model) => [`${model.provider}/${model.id}`, model]));
 	// One provider for every model: these tests assert on flow and lines, never
 	// on what a request carried (that is beetle.test.ts's job).
@@ -75,7 +83,7 @@ function makeHarness(
 	const session = new AgentSession({
 		model: FAUX_MODEL,
 		systemPrompt: "main (test)",
-		tools: [],
+		tools: options.tools ?? [],
 		deps: { streamFn },
 	});
 	const surface = createBeetleSurface({
@@ -84,6 +92,7 @@ function makeHarness(
 		getSession: () => (options.withSession === false ? null : session),
 		pick: async (title, items, initialIndex) => {
 			opened.push({ title, labels: items.map((item) => item.label), initialIndex });
+			if (pickState.throws) throw new Error("terminal gone");
 			if (options.gateFirstPick && opened.length === 1) await options.gateFirstPick;
 			const answer = answers.shift();
 			return answer === undefined ? 0 : answer;
@@ -123,6 +132,9 @@ function makeHarness(
 			if (!existsSync(settingsPath)) return null;
 			const data = JSON.parse(readFileSync(settingsPath, "utf8")) as { beetle?: { models?: Record<string, string> } };
 			return data.beetle?.models ?? null;
+		},
+		setPickThrows: (value) => {
+			pickState.throws = value;
 		},
 	};
 }
@@ -198,6 +210,38 @@ describe("starting a band", () => {
 		expect(harness.bandToolNames()).toEqual([]);
 		expect(harness.savedModels()).toBeNull();
 		expect(harness.session.tools).toHaveLength(0);
+	});
+
+	test("a picker that throws is reported, saves nothing, and frees the surface", async () => {
+		const harness = makeHarness({ pickThrows: true });
+		harness.surface.start("never starts");
+		await tick();
+		expect(harness.notices).toEqual(["Band start failed: terminal gone"]);
+		expect(harness.savedModels()).toBeNull();
+		expect(harness.bandToolNames()).toEqual([]);
+		// The failure released the surface: a second start opens a fresh sequence
+		// instead of being refused with "the picker is still open", which is what
+		// a dead picker sequence would leave behind.
+		harness.setPickThrows(false);
+		harness.surface.start("second try");
+		await tick();
+		expect(harness.opened).toHaveLength(5); // the one that threw, then four fresh
+		expect(harness.notices.some((line) => line.startsWith("Band on stage"))).toBe(true);
+		expect(harness.bandToolNames()).toEqual(["BandMessage"]);
+	});
+
+	test("a configure picker that throws changes nothing", async () => {
+		const harness = makeHarness();
+		harness.surface.start("first");
+		await tick();
+		const before = harness.savedModels();
+		harness.setPickThrows(true);
+		harness.surface.configure();
+		await tick();
+		expect(harness.notices).toContain("Model reconfiguration failed: terminal gone");
+		expect(harness.savedModels()).toEqual(before);
+		// The running band is untouched by a failed reconfigure.
+		expect(harness.bandToolNames()).toEqual(["BandMessage"]);
 	});
 
 	test("a saved config skips the picker entirely", async () => {
@@ -290,6 +334,27 @@ describe("starting a band", () => {
 		await tick();
 		expect(harness.opened).toHaveLength(4); // from the first start only
 		expect(harness.bandToolNames()).toEqual(["BandMessage"]);
+	});
+
+	test("the band tool joins the session's tools after its own, and leaves by identity", async () => {
+		const sentinel = buildTool({
+			name: "Sentinel",
+			description: "a tool the session already had",
+			inputSchema: z.object({}),
+			call: async () => ({ content: [{ type: "text", text: "sentinel" }] }),
+		});
+		const harness = makeHarness({ tools: [sentinel] });
+		harness.surface.start("tool list");
+		await tick();
+		// Appended after the session's own tools, in order — a hot swap copies the
+		// list wholesale, so where the band tool sits is what the copy preserves.
+		expect(harness.session.tools.map((tool) => tool.name)).toEqual(["Sentinel", "BandMessage"]);
+		expect(harness.session.tools[0]).toBe(sentinel);
+		harness.surface.stop();
+		// Identity removal, not a name search: the session returns to exactly the
+		// tool list it had, and the sentinel itself is the same object throughout.
+		expect(harness.session.tools).toHaveLength(1);
+		expect(harness.session.tools[0]).toBe(sentinel);
 	});
 
 	test("with no band, off and say both say so", () => {
@@ -423,5 +488,18 @@ describe("the tool-change latch", () => {
 		latch.arm("beetle: band tool removed");
 		latch.observe({ type: "turn_start" });
 		expect(noted).toEqual(["beetle: band tool added", "beetle: band tool removed"]);
+	});
+
+	test("reset drops an armed cause without registering it", () => {
+		const noted: string[] = [];
+		const latch = createToolChangeLatch((cause) => noted.push(cause));
+		latch.arm("beetle: band tool added");
+		latch.reset();
+		latch.observe({ type: "turn_start" });
+		expect(noted).toEqual([]);
+		// The latch keeps working after a reset — the next arm registers normally.
+		latch.arm("beetle: band tool removed");
+		latch.observe({ type: "turn_start" });
+		expect(noted).toEqual(["beetle: band tool removed"]);
 	});
 });

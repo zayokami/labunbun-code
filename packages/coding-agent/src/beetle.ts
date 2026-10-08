@@ -482,7 +482,12 @@ export class BeetleBand {
 			this.#active = false;
 			for (const member of this.#members.values()) {
 				member.state = "stopped";
-				member.session.abort();
+				try {
+					member.session.abort();
+				} catch {
+					// One member's broken teardown must not strand the other three:
+					// the band is stopping either way, and the tally still comes back.
+				}
 			}
 		}
 		return this.status();
