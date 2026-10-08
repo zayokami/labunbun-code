@@ -9,7 +9,7 @@
  * runs for real without a terminal and without a bill.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSession, type AnyTool, buildTool } from "@labunbun/agent";
@@ -32,6 +32,7 @@ import {
 	createToolChangeLatch,
 	stallNoticeMsFrom,
 } from "../src/beetle-commands.ts";
+import { readBeetleState, writeBeetleState } from "../src/beetle-state.ts";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
 
 /** Rows the picker offers after "Follow the session model" — `provider/id` refs. */
@@ -90,9 +91,11 @@ function makeHarness(
 		/** Budget guardrails as the app layer reads them from settings. */
 		maxTurns?: number;
 		maxCostUSD?: number;
+		/** Reuse an existing home — the restart in the ledger tests. */
+		home?: string;
 	} = {},
 ): Harness {
-	const home = mkdtempSync(join(tmpdir(), "lbb-beetle-"));
+	const home = options.home ?? mkdtempSync(join(tmpdir(), "lbb-beetle-"));
 	const notices: string[] = [];
 	const userEntries: string[] = [];
 	const opened: Harness["opened"] = [];
@@ -398,11 +401,12 @@ describe("starting a band", () => {
 		harness.surface.start("status me");
 		// Poll until the members' one-step scripts have finished: 0 running is the
 		// only deterministic summary, and it is reached within a few ticks. The
-		// board line trails the tally, so the tally is second-to-last.
+		// lifetime line and the board line trail the tally, so the tally is
+		// third-to-last.
 		for (let i = 0; i < 50; i++) {
 			await tick();
 			harness.surface.status();
-			if ((harness.notices.at(-2) ?? "").startsWith("Band: 0/4 running")) break;
+			if ((harness.notices.at(-3) ?? "").startsWith("Band: 0/4 running")) break;
 		}
 		expect(harness.cards.at(-1)?.title).toBe("Beetle band");
 		expect(harness.cards.at(-1)?.details.map(([label]) => label)).toEqual([
@@ -414,7 +418,9 @@ describe("starting a band", () => {
 		// One briefing turn each, faux rows have no price: the tail is exact (the
 		// model name leads the row and lastActivity may trail it).
 		expect(harness.cards.at(-1)?.details[0]?.[1]).toMatch(/ · idle · 1 turns · \$0\.0000 unpriced( · .+)?$/);
-		expect(harness.notices.at(-2)).toBe("Band: 0/4 running · 4 turns · $0.0000");
+		expect(harness.notices.at(-3)).toBe("Band: 0/4 running · 4 turns · $0.0000");
+		// This band counted toward `bands` at its start; nothing has folded yet.
+		expect(harness.notices.at(-2)).toBe("Lifetime: 1 band · 0 turns · $0.0000");
 		expect(harness.notices.at(-1)).toBe("Board: no tasks yet.");
 	});
 
@@ -589,5 +595,115 @@ describe("the tool-change latch", () => {
 		latch.arm("beetle: band tool removed");
 		latch.observe({ type: "turn_start" });
 		expect(noted).toEqual(["beetle: band tool removed"]);
+	});
+});
+
+describe("the ledger across restarts", () => {
+	const ALL_SESSION = { john: "session", paul: "session", george: "session", ringo: "session" };
+	/** The ledger poll: four text-only runs, one turn each. */
+	const wroteTurns = (home: string, wanted: number) => () => (readBeetleState(home).lastBand?.turns ?? 0) >= wanted;
+
+	test("a disbanded band is on file, and the next launch's status reads it back truncated", async () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-beetle-ledger-"));
+		const task = `lay track ${"x".repeat(120)}`;
+		const first = makeHarness({ initial: ALL_SESSION, home });
+		first.surface.start(task);
+		await until(wroteTurns(home, 4));
+
+		const mid = readBeetleState(home);
+		expect(mid.lastBand?.active).toBe(true);
+		expect(mid.lastBand?.disbandedAt).toBeNull();
+		expect(mid.lastBand?.task).toBe(task);
+		expect(mid.lastBand?.members.map((member) => member.name)).toEqual(["john", "paul", "george", "ringo"]);
+
+		first.surface.stop();
+		const after = readBeetleState(home);
+		expect(after.lastBand?.active).toBe(false);
+		expect(after.lastBand?.disbandedAt).not.toBeNull();
+		// Folded once, at the disband — not once per write.
+		expect(after.lifetime.bands).toBe(1);
+		expect(after.lifetime.turns).toBe(after.lastBand?.turns ?? -1);
+
+		// A second harness over the same home is the restart.
+		const second = makeHarness({ initial: ALL_SESSION, home });
+		second.surface.status();
+		expect(second.notices.some((line) => line.includes("No band yet"))).toBe(true);
+		const summary = second.notices.find((line) => line.includes("Last band:"));
+		expect(summary).toBeDefined();
+		expect(summary).not.toContain(task); // 130 chars never fit a summary line
+		expect(summary).toContain(task.slice(0, 60));
+		expect(summary).toContain("disbanded");
+		expect(summary).toContain(`${after.lastBand?.turns} turns`);
+
+		// One more band over the same ledger: a finished record must not fold
+		// again at start — only crash residue does. The lifetime turns stay at
+		// 4 until this band's own disband.
+		const third = makeHarness({ initial: ALL_SESSION, home });
+		third.surface.start("one more");
+		await until(() => readBeetleState(home).lastBand?.task === "one more");
+		const restarted = readBeetleState(home);
+		expect(restarted.lifetime.bands).toBe(2);
+		expect(restarted.lifetime.turns).toBe(4);
+		third.surface.stop();
+	});
+
+	test("a record left active by a killed process folds into the lifetime at the next start", async () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-beetle-ledger-"));
+		writeBeetleState(
+			{
+				lastBand: {
+					task: "crashed run",
+					startedAt: "2026-10-08T09:00:00.000Z",
+					disbandedAt: null,
+					active: true,
+					members: [],
+					costUSD: 2.5,
+					turns: 7,
+				},
+				lifetime: { bands: 1, costUSD: 1, turns: 10 },
+			},
+			home,
+		);
+		const harness = makeHarness({ initial: ALL_SESSION, home });
+		harness.surface.start("new band");
+		await until(() => readBeetleState(home).lastBand?.task === "new band");
+
+		const mid = readBeetleState(home);
+		expect(mid.lifetime.bands).toBe(2);
+		expect(mid.lifetime.costUSD).toBe(3.5);
+		expect(mid.lifetime.turns).toBe(17);
+		expect(mid.lastBand?.active).toBe(true); // the stale record was replaced whole
+
+		await until(wroteTurns(home, 4));
+		harness.surface.stop();
+		const after = readBeetleState(home);
+		expect(after.lifetime.bands).toBe(2);
+		expect(after.lifetime.costUSD).toBe(3.5); // the new band is unpriced: adds nothing
+		expect(after.lifetime.turns).toBe(21);
+	});
+
+	test("a live band's status carries the lifetime total, counted across restarts", async () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-beetle-ledger-"));
+		writeBeetleState({ lastBand: null, lifetime: { bands: 3, costUSD: 1.5, turns: 40 } }, home);
+		const harness = makeHarness({ initial: ALL_SESSION, home });
+		harness.surface.start("another day");
+		await tick();
+		harness.surface.status();
+		// This band counted at start: 3 + 1. Its own turns fold in only at disband.
+		expect(harness.notices.some((line) => line.includes("Lifetime: 4 bands · 40 turns · $1.5000"))).toBe(true);
+		harness.surface.stop();
+	});
+
+	test("a ledger that cannot be written costs one line, not one per write", () => {
+		const home = mkdtempSync(join(tmpdir(), "lbb-beetle-ledger-"));
+		// A file where the state directory should be: every write attempt fails.
+		writeFileSync(join(home, ".labunbun"), "not a directory");
+		const harness = makeHarness({ initial: ALL_SESSION, home });
+		harness.surface.start("it will not save");
+		expect(harness.notices.some((line) => line.includes("Band on stage"))).toBe(true);
+		// By now the ledger was attempted three times — the spawn write, the
+		// start snapshot, and the disband snapshot — and failed each time.
+		harness.surface.stop();
+		expect(harness.notices.filter((line) => line.includes("Band ledger not saved"))).toHaveLength(1);
 	});
 });

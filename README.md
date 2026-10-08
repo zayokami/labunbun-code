@@ -186,6 +186,8 @@ The `beetle` block can hold two budgets. Both keys are optional. `beetle.maxTurn
 
 The `beetle` block can also hold `beetle.stallNoticeMinutes`. A live member that sends no event for this time gets one notice in the transcript. The notice tells you the last action of the member. The notice does not stop anything. The default is five minutes. The value `0` turns the notice off. Only the user tier can set this key.
 
+The band writes a ledger to `~/.labunbun/beetle-state.json`. The ledger holds the last band and the totals of all bands. A new launch reads this file. If a process stops before `/beetle off`, the next start adds that band to the totals. `/beetle status` shows the last band when no band is on stage. The status also shows the lifetime totals.
+
 Use these commands:
 
 | Command | Purpose |

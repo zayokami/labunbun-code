@@ -358,6 +358,18 @@ export interface BeetleMemberStatus {
 }
 
 /**
+ * The book-keeping snapshot the app layer persists: the status table, plus
+ * what the table itself does not know — the task, and whether the band is
+ * still on stage. `at` is when the snapshot was taken.
+ */
+export interface BeetleStateSnapshot {
+	task: string;
+	active: boolean;
+	at: string;
+	members: BeetleMemberStatus[];
+}
+
+/**
  * The per-member tally lines. Shared so `/beetle off` and the budget ceiling's
  * report read as the same table rather than two spellings of it.
  */
@@ -448,6 +460,12 @@ export interface BeetleBandOptions {
 	 * the budget ceiling — leaves no dead tool behind.
 	 */
 	onDisband?: () => void;
+	/**
+	 * Book-keeping snapshots: on start, after every turn (the moment a turn's
+	 * spend is committed), and once more at disband. The app layer persists
+	 * them — a subscriber's bug is caught and costs the band nothing.
+	 */
+	onState?: (snapshot: BeetleStateSnapshot) => void;
 	/** The main session to wake, read at the call — `/resume` swaps it. */
 	getMain?: () => AgentSession | null;
 	/** The permission axes, re-read before every delivery. */
@@ -462,6 +480,8 @@ export class BeetleBand {
 	#members = new Map<BeetleMember, MemberRuntime>();
 	#mainTool: AnyTool;
 	#active = true;
+	/** The task `start` was given; rides on every snapshot. */
+	#task = "";
 	/** Wake-less deliveries, held per target in send order until a wake drains them. */
 	#held = new Map<BeetleMember | "main", string[]>();
 	/** The quiet watchdog's interval, dropped with the band in `off()`. */
@@ -499,9 +519,11 @@ export class BeetleBand {
 
 	/** Wake all four with the task briefing; John additionally gets the lead's instructions. */
 	start(task: string): void {
+		this.#task = task;
 		for (const name of BEETLE_MEMBERS) {
 			this.deliver({ kind: "user" }, name, bandBriefing(name, task));
 		}
+		this.#emitState();
 	}
 
 	/**
@@ -582,6 +604,9 @@ export class BeetleBand {
 			} catch {
 				// Ignored on purpose: stopping is not negotiable.
 			}
+			// The final snapshot — after every member reads stopped — is what
+			// the app layer records as the disband.
+			this.#emitState();
 		}
 		return this.status();
 	}
@@ -607,6 +632,23 @@ export class BeetleBand {
 				messages: member.session.messages.length,
 			};
 		});
+	}
+
+	/**
+	 * One snapshot to the app layer. Subscriber bugs are caught — the same
+	 * rule as the relay notices: book-keeping must not cost the band.
+	 */
+	#emitState(): void {
+		try {
+			this.#options.onState?.({
+				task: this.#task,
+				active: this.#active,
+				at: new Date().toISOString(),
+				members: this.status(),
+			});
+		} catch {
+			// Ignored on purpose: the ledger records the band; it does not leash it.
+		}
 	}
 
 	#recipientsFor(from: BandSender, to: BandTarget): Array<BeetleMember | "main"> {
@@ -843,6 +885,9 @@ export class BeetleBand {
 			// was actually done.
 			member.turns++;
 			this.#checkBudget();
+			// After the budget check: a ceiling that just disbanded emitted its
+			// own final snapshot, and an "active" one must not overwrite it.
+			if (this.#active) this.#emitState();
 		} else if (event.type === "agent_end") {
 			if (event.reason === "error" || event.reason === "max_turns") {
 				// No auto-retry and no auto-revival: a member failing into an

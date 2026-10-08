@@ -13,16 +13,25 @@
 import type { AgentSession, AnyTool, NetworkAxis, PermissionMode, PermissionRule, SandboxMode } from "@labunbun/agent";
 import type { Model, StreamFn, ThinkingLevel } from "@labunbun/ai";
 import {
+	BAND_LINE_PREVIEW_CHARS,
 	BeetleBand,
 	type BeetleMember,
 	type BeetleModels,
 	type BeetlePickOption,
+	type BeetleStateSnapshot,
 	formatReceipt,
 	memberTallyLines,
 	pickBeetleModels,
 	routeMention,
 	SESSION_MODEL_REF,
 } from "./beetle.ts";
+import {
+	type BeetleBandRecord,
+	type BeetleState,
+	foldBandInto,
+	readBeetleState,
+	writeBeetleState,
+} from "./beetle-state.ts";
 import { writeUserSettingsNestedPatch } from "./user-settings.ts";
 
 /** The slice of a status card `/beetle status` draws; the rest is the UI's. */
@@ -166,11 +175,77 @@ export function stallNoticeMsFrom(minutes: number | undefined): number | undefin
 	return minutes === undefined ? undefined : minutes * 60_000;
 }
 
+/** An ISO stamp down to the minute: "2026-10-08T09:00:00.000Z" → "2026-10-08 09:00". */
+function formatStamp(iso: string): string {
+	return iso.slice(0, 16).replace("T", " ");
+}
+
+/**
+ * A task's first line, truncated like the relay preview: `/beetle status` is a
+ * window on the ledger, not its archive.
+ */
+function oneLine(text: string): string {
+	const firstLine = (text.split(/\r?\n/, 1)[0] ?? "").trim();
+	return firstLine.length > BAND_LINE_PREVIEW_CHARS ? `${firstLine.slice(0, BAND_LINE_PREVIEW_CHARS - 1)}…` : firstLine;
+}
+
+/** The last band in one line, for the status a fresh launch shows. */
+function lastBandLine(record: BeetleBandRecord): string {
+	const end = record.disbandedAt ? `disbanded ${formatStamp(record.disbandedAt)}` : "no disband recorded";
+	return `Last band: "${oneLine(record.task)}" — started ${formatStamp(record.startedAt)}, ${end} · ${record.turns} turns · $${record.costUSD.toFixed(4)}`;
+}
+
 export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 	let band: BeetleBand | null = null;
 	let configured: Partial<BeetleModels> | null = deps.initialModels;
 	/** A picker sequence is walking; a second start must not open a second one. */
 	let picking = false;
+	/**
+	 * The ledger, read once at creation: this surface is one REPL run's view of
+	 * the book-keeping, and a restart is the next creation reading the file back.
+	 */
+	const state: BeetleState = readBeetleState(deps.home);
+	/** The last write-failure message already reported; cleared by a success. */
+	let stateWriteError: string | null = null;
+
+	function saveState(): void {
+		try {
+			writeBeetleState(state, deps.home);
+			stateWriteError = null;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			// A ledger write fails on every turn, and one line per failure would
+			// drown the transcript: report each distinct failure once, and re-arm
+			// when a write finally lands.
+			if (message !== stateWriteError) {
+				stateWriteError = message;
+				deps.notify(`Band ledger not saved: ${message}`);
+			}
+		}
+	}
+
+	/** One band snapshot, reduced to the ledger's shape and written. */
+	function recordBandState(snapshot: BeetleStateSnapshot): void {
+		const members = snapshot.members.map((entry) => ({
+			name: entry.name,
+			turns: entry.turns,
+			costUSD: entry.costUSD,
+		}));
+		const record: BeetleBandRecord = {
+			task: snapshot.task,
+			startedAt: state.lastBand?.startedAt ?? snapshot.at,
+			disbandedAt: snapshot.active ? null : snapshot.at,
+			active: snapshot.active,
+			members,
+			costUSD: members.reduce((sum, entry) => sum + entry.costUSD, 0),
+			turns: members.reduce((sum, entry) => sum + entry.turns, 0),
+		};
+		// The fold happens exactly at the active→inactive edge — the guard reads
+		// the record this one replaces — so a band's spend is counted once.
+		if (!record.active && state.lastBand?.active) foldBandInto(state.lifetime, record);
+		state.lastBand = record;
+		saveState();
+	}
 
 	function pickModels(current?: Partial<BeetleModels>): Promise<BeetleModels | null> {
 		const session = deps.getSession();
@@ -201,6 +276,21 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 	}
 
 	function spawn(task: string): void {
+		// Crash residue first: a record still marked active belongs to a process
+		// that died with the band on stage — its spend folds in now, or the
+		// overwrite below would lose it.
+		if (state.lastBand?.active) foldBandInto(state.lifetime, state.lastBand);
+		state.lifetime.bands += 1;
+		state.lastBand = {
+			task,
+			startedAt: new Date().toISOString(),
+			disbandedAt: null,
+			active: true,
+			members: [],
+			costUSD: 0,
+			turns: 0,
+		};
+		saveState();
 		const models: BeetleModels = {
 			john: SESSION_MODEL_REF,
 			paul: SESSION_MODEL_REF,
@@ -228,6 +318,7 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			// takes the main session's tool off here, so no dead BandMessage
 			// survives a band that is no longer on stage.
 			onDisband: () => detachTool(next),
+			onState: recordBandState,
 			getMain: deps.getSession,
 			permissionMode: deps.permissionMode,
 			sandbox: deps.sandbox,
@@ -346,6 +437,9 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			const current = band;
 			if (!current) {
 				deps.notify("No band yet — start one with /beetle <task>.");
+				// The ledger's memory of the last band, so a fresh launch can
+				// still say what the one before it was and how it ended.
+				if (state.lastBand) deps.notify(lastBandLine(state.lastBand));
 				return;
 			}
 			const members = current.status();
@@ -364,6 +458,13 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			deps.notify(
 				`Band: ${running}/${members.length} running · ${turns} turns · $${cost.toFixed(4)}${current.active ? "" : " · disbanded"}`,
 			);
+			// The lifetime totals under the band's own tally. This band counted
+			// toward `bands` at its start; its spend and turns fold in at disband.
+			if (state.lifetime.bands > 0) {
+				deps.notify(
+					`Lifetime: ${state.lifetime.bands} band${state.lifetime.bands === 1 ? "" : "s"} · ${state.lifetime.turns} turns · $${state.lifetime.costUSD.toFixed(4)}`,
+				);
+			}
 			// The board last: the tally line is about the band, the board line is
 			// about the work — and the two read together are what "how is it going"
 			// means. Absent when no board is wired (a test surface, headless).

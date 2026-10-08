@@ -48,6 +48,7 @@ import {
 	type BeetleMember,
 	type BeetleModels,
 	type BeetlePickOption,
+	type BeetleStateSnapshot,
 	bandBriefing,
 	bandEnvelope,
 	bandLine,
@@ -153,6 +154,8 @@ interface BandFixture {
 	faux: RoutedFaux;
 	notices: string[];
 	reports: string[];
+	/** Every book-keeping snapshot, in emission order. */
+	states: BeetleStateSnapshot[];
 }
 
 interface BandFixtureOptions {
@@ -174,6 +177,8 @@ interface BandFixtureOptions {
 	hangOn?: Record<string, readonly number[]>;
 	/** Per-call delay in ms for every call of the given model ids (see routedFaux). */
 	delayMs?: Record<string, number>;
+	/** An extra snapshot subscriber, on top of the fixture's own recorder. */
+	onState?: (snapshot: BeetleStateSnapshot) => void;
 }
 
 function makeBand(options: BandFixtureOptions): BandFixture {
@@ -181,6 +186,7 @@ function makeBand(options: BandFixtureOptions): BandFixture {
 	const refs = memberRefTable();
 	const notices: string[] = [];
 	const reports: string[] = [];
+	const states: BeetleStateSnapshot[] = [];
 	const band = new BeetleBand({
 		models: {
 			john: SESSION_MODEL_REF,
@@ -206,8 +212,14 @@ function makeBand(options: BandFixtureOptions): BandFixture {
 		maxCostUSD: options.maxCostUSD,
 		stallNoticeMs: options.stallNoticeMs,
 		watchdogIntervalMs: options.watchdogIntervalMs,
+		onState: (snapshot) => {
+			// Recorded before the injected subscriber runs: a throwing subscriber
+			// still leaves the fixture's own record behind.
+			states.push(snapshot);
+			options.onState?.(snapshot);
+		},
 	});
-	return { band, faux, notices, reports };
+	return { band, faux, notices, reports, states };
 }
 
 function endedReason(session: AgentSession): Promise<string> {
@@ -1652,5 +1664,60 @@ describe("the quiet watchdog", () => {
 		await settle(100);
 		expect(quietLines(notices)).toHaveLength(0);
 		band.off();
+	});
+});
+
+describe("the book-keeping snapshot", () => {
+	test("fires on start, on each finished turn while live, and on the disband", async () => {
+		const { band, states } = makeBand({
+			script: {
+				john: [{ toolCalls: [{ name: "Bash", arguments: { command: "true" } }] }, { text: "DONE" }],
+				"faux-1": [{ text: "ok" }],
+			},
+			models: { john: "faux/john" },
+			tools: [bashTool()],
+			permissionMode: () => "agent",
+			sandbox: () => "workspace-write",
+		});
+		const ends = BEETLE_MEMBERS.map((name) => endedReason(sessionOf(band, name)));
+		band.start("ledger test");
+
+		// The start snapshot: active, the task verbatim, every seat listed, no
+		// turn behind anyone yet.
+		await until(() => states.length >= 1);
+		expect(states[0]?.active).toBe(true);
+		expect(states[0]?.task).toBe("ledger test");
+		expect(states[0]?.members.map((entry) => entry.name)).toEqual([...BEETLE_MEMBERS]);
+		expect(states[0]?.members.reduce((sum, entry) => sum + entry.turns, 0)).toBe(0);
+
+		expect(await within(Promise.all(ends), 5_000)).toEqual(["completed", "completed", "completed", "completed"]);
+		// A snapshot from mid-run: John still live with a finished turn behind
+		// him. This reds when turn_end stops emitting — a write-once ledger
+		// keeps every other assertion here green.
+		expect(
+			states.some((snapshot) =>
+				snapshot.members.some((entry) => entry.name === "john" && entry.state === "live" && entry.turns >= 1),
+			),
+		).toBe(true);
+		band.off();
+		const last = states.at(-1);
+		expect(last?.active).toBe(false);
+		expect(last?.members.every((entry) => entry.state === "stopped")).toBe(true);
+		expect(last?.at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+	});
+
+	test("a subscriber that throws costs neither the run nor the disband", async () => {
+		const { band, states } = makeBand({
+			script: { "faux-1": [{ text: "ok" }] },
+			onState: () => {
+				throw new Error("subscriber bug");
+			},
+		});
+		const ends = BEETLE_MEMBERS.map((name) => endedReason(sessionOf(band, name)));
+		// start() emits too, and its subscriber threw — the members still ran.
+		band.start("keep going");
+		expect(await within(Promise.all(ends), 5_000)).toEqual(["completed", "completed", "completed", "completed"]);
+		expect(states.length).toBeGreaterThan(0);
+		expect(() => band.off()).not.toThrow();
 	});
 });
