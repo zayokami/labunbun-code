@@ -182,6 +182,8 @@ The members send messages to each other. A message wakes the member that receive
 
 The tool asks you for one model per member on the first run. The tool saves the four answers in `beetle.models`. Only the user tier can set `beetle`. Use `/beetle models` to change the answers later.
 
+The `beetle` block can hold two budgets. Both keys are optional. `beetle.maxTurns` limits the turns in one run of a member. A run that needs more turns ends there. `beetle.maxCostUSD` stops the whole band when the total cost of the four members passes the amount. With no budget, a band runs until `/beetle off`. Only the user tier can set these keys. The cost of a member with no price does not count toward the total.
+
 Use these commands:
 
 | Command | Purpose |
@@ -571,7 +573,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `providers` | An object of OpenAI-compatible providers | User |
 | `pricing` | An object of model prices | User |
 | `cache` | An object of cache settings | User |
-| `beetle` | An object with the key `models` | User |
+| `beetle` | An object with the keys `models`, `maxTurns`, and `maxCostUSD` | User |
 | `mcpServers` | An object of MCP servers | User |
 | `hooks` | An object of hooks | User |
 | `gamepad` | An object of controller settings | User |

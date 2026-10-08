@@ -357,6 +357,17 @@ export interface BeetleMemberStatus {
 	messages: number;
 }
 
+/**
+ * The per-member tally lines. Shared so `/beetle off` and the budget ceiling's
+ * report read as the same table rather than two spellings of it.
+ */
+export function memberTallyLines(members: BeetleMemberStatus[]): string[] {
+	return members.map(
+		(entry) =>
+			`  ${entry.name} (${entry.role}): ${entry.turns} turns, $${entry.costUSD.toFixed(4)}${entry.unpriced ? " (unpriced)" : ""}`,
+	);
+}
+
 interface MemberRuntime {
 	name: BeetleMember;
 	session: AgentSession;
@@ -396,10 +407,23 @@ export interface BeetleBandOptions {
 	thinkingLevel?: () => ThinkingLevel | undefined;
 	trimOldToolResults?: boolean;
 	maxTurns?: number;
+	/**
+	 * Stop the whole band once its four transcripts price past this many USD.
+	 * The check rides on `turn_end` — cost appears when a turn's message lands —
+	 * and only priced turns count: a member on an unpriced model contributes
+	 * zero, which its tally line marks "(unpriced)". Undefined is unbounded.
+	 */
+	maxCostUSD?: number;
 	/** One-line transcript notices: relays and lifecycle events. */
 	onNotice?: (text: string) => void;
 	/** Lines into the main transcript: fallbacks, compaction, stops. */
 	report?: (text: string) => void;
+	/**
+	 * The band just went inactive, through `off()`. The app layer drops the
+	 * main session's BandMessage here so every disband path — the user's stop,
+	 * the budget ceiling — leaves no dead tool behind.
+	 */
+	onDisband?: () => void;
 	/** The main session to wake, read at the call — `/resume` swaps it. */
 	getMain?: () => AgentSession | null;
 	/** The permission axes, re-read before every delivery. */
@@ -518,6 +542,14 @@ export class BeetleBand {
 				this.#options.report?.(
 					`[beetle] ${dropped} undelivered band message${dropped === 1 ? "" : "s"} dropped at disband.`,
 				);
+			}
+			// Farewell after the teardown, so the app layer's listener sees a
+			// band that is already stopped. Its bug must not cost the disband —
+			// same rule as the relay notices.
+			try {
+				this.#options.onDisband?.();
+			} catch {
+				// Ignored on purpose: stopping is not negotiable.
 			}
 		}
 		return this.status();
@@ -772,6 +804,7 @@ export class BeetleBand {
 			// first turn is zero — which is the number that says whether anything
 			// was actually done.
 			member.turns++;
+			this.#checkBudget();
 		} else if (event.type === "agent_end") {
 			if (event.reason === "error" || event.reason === "max_turns") {
 				// No auto-retry and no auto-revival: a member failing into an
@@ -789,6 +822,26 @@ export class BeetleBand {
 		} else if (event.type === "tool_execution_end") {
 			member.lastActivity = `${event.toolName}: ${event.result.isError ? "error" : "ok"}`;
 		}
+	}
+
+	/**
+	 * Stop the band once its spend crosses `maxCostUSD`.
+	 *
+	 * Runs on every `turn_end` — the moment a turn's message, and so its cost,
+	 * is committed — and only when the option is set: no ceiling means the band
+	 * runs until it is stopped by hand, exactly as before. The report carries
+	 * the final tally and says how to start the next band; deliveries after it
+	 * refuse like any disbanded band's.
+	 */
+	#checkBudget(): void {
+		const ceiling = this.#options.maxCostUSD;
+		if (ceiling === undefined || !this.#active) return;
+		const total = this.status().reduce((sum, entry) => sum + entry.costUSD, 0);
+		if (total <= ceiling) return;
+		const members = this.off();
+		this.#options.report?.(
+			`[beetle] budget ceiling crossed — $${total.toFixed(4)} spent, $${ceiling.toFixed(4)} allowed. Final tally:\n${memberTallyLines(members).join("\n")}\nThe band is off; /beetle <task> starts a new one.`,
+		);
 	}
 }
 

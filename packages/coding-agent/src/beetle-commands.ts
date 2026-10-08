@@ -18,6 +18,7 @@ import {
 	type BeetleModels,
 	type BeetlePickOption,
 	formatReceipt,
+	memberTallyLines,
 	pickBeetleModels,
 	routeMention,
 	SESSION_MODEL_REF,
@@ -95,6 +96,10 @@ export interface BeetleSurfaceDeps {
 	taskBoard?: () => BoardTask[];
 	/** The seeded config from settings; null = never configured. */
 	initialModels: Partial<BeetleModels> | null;
+	/** Per-run turn cap for every member (settings.beetle.maxTurns); undefined = unbounded. */
+	maxTurns?: number;
+	/** Band-wide dollar ceiling (settings.beetle.maxCostUSD); undefined = unbounded. */
+	maxCostUSD?: number;
 }
 
 export interface BeetleSurface {
@@ -177,6 +182,13 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 		}
 	}
 
+	function detachTool(target: BeetleBand): void {
+		const session = deps.getSession();
+		if (!session?.tools.includes(target.mainTool)) return;
+		session.setTools(session.tools.filter((tool) => tool !== target.mainTool));
+		deps.noteToolChange("beetle: band tool removed");
+	}
+
 	function spawn(task: string): void {
 		const models: BeetleModels = {
 			john: SESSION_MODEL_REF,
@@ -196,8 +208,14 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			canRunModel: deps.canRunModel,
 			thinkingLevel: deps.thinkingLevel,
 			trimOldToolResults: deps.trimOldToolResults,
+			maxTurns: deps.maxTurns,
+			maxCostUSD: deps.maxCostUSD,
 			onNotice: deps.notify,
 			report: deps.notify,
+			// Every disband path — the user's /beetle off, the budget ceiling —
+			// takes the main session's tool off here, so no dead BandMessage
+			// survives a band that is no longer on stage.
+			onDisband: () => detachTool(next),
 			getMain: deps.getSession,
 			permissionMode: deps.permissionMode,
 			sandbox: deps.sandbox,
@@ -291,20 +309,13 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			}
 			try {
 				const members = current.off();
-				const lines = members.map(
-					(entry) =>
-						`  ${entry.name} (${entry.role}): ${entry.turns} turns, $${entry.costUSD.toFixed(4)}${entry.unpriced ? " (unpriced)" : ""}`,
-				);
-				deps.notify(`Band off. Final tally:\n${lines.join("\n")}`);
+				deps.notify(`Band off. Final tally:\n${memberTallyLines(members).join("\n")}`);
 			} finally {
 				// The disband is already under way: the tool comes off the session
 				// even if the band's own teardown throws — otherwise the main
-				// session keeps a BandMessage that points at nothing.
-				const session = deps.getSession();
-				if (session) {
-					session.setTools(session.tools.filter((tool) => tool !== current.mainTool));
-					deps.noteToolChange("beetle: band tool removed");
-				}
+				// session keeps a BandMessage that points at nothing. Idempotent:
+				// `off()` already detached through `onDisband`.
+				detachTool(current);
 			}
 		},
 

@@ -8,12 +8,19 @@
  * providers, and every test runs against a throwaway home — so the whole flow
  * runs for real without a terminal and without a bill.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSession, type AnyTool, buildTool } from "@labunbun/agent";
-import { FAUX_MODEL, fauxProvider, type Model } from "@labunbun/ai";
+import {
+	clearCustomModels,
+	FAUX_MODEL,
+	type FauxStep,
+	fauxProvider,
+	type Model,
+	registerOpenAICompatibleProvider,
+} from "@labunbun/ai";
 import { createStore } from "@labunbun/tui";
 import { z } from "zod";
 import { beetleUsage } from "../src/beetle.ts";
@@ -34,6 +41,18 @@ const ROWS: Model[] = [
 ];
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Await `tick`s until the predicate holds or the deadline passes. */
+async function until(predicate: () => boolean, ms = 2_000): Promise<void> {
+	const deadline = Date.now() + ms;
+	while (!predicate() && Date.now() < deadline) await tick();
+}
+
+afterEach(() => {
+	// Registered prices are process-global; only one test here prices models,
+	// and a leak would change what every later tally reads.
+	clearCustomModels();
+});
 
 interface Harness {
 	surface: BeetleSurface;
@@ -65,6 +84,11 @@ function makeHarness(
 		pickThrows?: boolean;
 		/** Tools the main session already carries before the band starts. */
 		tools?: AnyTool[];
+		/** The shared faux script; defaults to a single "ok" text step. */
+		script?: FauxStep[];
+		/** Budget guardrails as the app layer reads them from settings. */
+		maxTurns?: number;
+		maxCostUSD?: number;
 	} = {},
 ): Harness {
 	const home = mkdtempSync(join(tmpdir(), "lbb-beetle-"));
@@ -79,7 +103,7 @@ function makeHarness(
 	const byRef = new Map(ROWS.map((model) => [`${model.provider}/${model.id}`, model]));
 	// One provider for every model: these tests assert on flow and lines, never
 	// on what a request carried (that is beetle.test.ts's job).
-	const streamFn = fauxProvider([{ text: "ok" }]).streamFn;
+	const streamFn = fauxProvider(options.script ?? [{ text: "ok" }]).streamFn;
 	const session = new AgentSession({
 		model: FAUX_MODEL,
 		systemPrompt: "main (test)",
@@ -115,6 +139,8 @@ function makeHarness(
 		setStatusCard: (card) => cards.push(card),
 		taskBoard: () => boardTasks,
 		initialModels: options.initial ?? null,
+		maxTurns: options.maxTurns,
+		maxCostUSD: options.maxCostUSD,
 	});
 	const settingsPath = join(home, ".labunbun", "settings.json");
 	return {
@@ -427,6 +453,57 @@ describe("starting a band", () => {
 		harness.surface.stop();
 		expect(harness.surface.handleMention("@john one more")).toBe(false);
 		expect(harness.userEntries).toEqual(["@john take a look"]);
+	});
+
+	test("maxTurns from settings reaches the members — a run that wants another turn ends with max_turns", async () => {
+		const harness = makeHarness({
+			initial: { john: "session", paul: "session", george: "session", ringo: "session" },
+			maxTurns: 1,
+			// The first call asks for a tool — the loop wants a second turn, and
+			// with the cap in place it does not get one. The text step behind it
+			// is the escape hatch for the unplugged wiring: without the cap the
+			// run finishes there instead of looping.
+			script: [{ toolCalls: [{ name: "Probe", arguments: {} }] }, { text: "done" }],
+		});
+		harness.surface.start("runaway");
+		await until(() => harness.notices.some((line) => line.includes("run ended with max_turns")));
+		expect(harness.opened).toHaveLength(0); // the saved config skipped the picker
+		const stopped = harness.notices.find((line) => line.includes("run ended with max_turns"));
+		expect(stopped).toContain("max_turns");
+		expect(stopped).toContain("/beetle say"); // where the way back is named
+	});
+
+	test("maxCostUSD stops the band when the ceiling is crossed, and the tool comes off", async () => {
+		registerOpenAICompatibleProvider({
+			id: "faux",
+			baseUrl: "http://faux.invalid",
+			apiKeyEnv: "FAUX_API_KEY",
+			models: [
+				{
+					id: "faux-1",
+					contextWindow: 200_000,
+					maxOutputTokens: 8_192,
+					pricing: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0 },
+				},
+			],
+		});
+		const harness = makeHarness({
+			initial: { john: "session", paul: "session", george: "session", ringo: "session" },
+			maxCostUSD: 0.5,
+			script: [{ text: "done", usage: { output: 100_000 } }],
+		});
+		harness.surface.start("spend it all");
+		expect(harness.bandToolNames()).toEqual(["BandMessage"]);
+		await until(() => harness.notices.some((line) => line.includes("$0.5000")));
+		const report = harness.notices.find((line) => line.includes("$0.5000"));
+		expect(report).toContain("$1.0000"); // the spend that crossed it
+		expect(report).toContain("Final tally:");
+		// The band stopped itself, so the app layer removes the main session's
+		// tool through the disband hook — no dead BandMessage left behind.
+		expect(harness.bandToolNames()).toEqual([]);
+		// A later /beetle off answers honestly instead of double-tallying.
+		harness.surface.stop();
+		expect(harness.notices.at(-1)).toBe("No band is on stage.");
 	});
 });
 

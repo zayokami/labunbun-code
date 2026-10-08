@@ -101,6 +101,23 @@ describe("SettingsSchema", () => {
 		expect(SettingsSchema.safeParse({ beetle: { models: { john: 4 } } }).success).toBe(false);
 	});
 
+	test("a beetle block can carry the two budget keys", () => {
+		const parsed = SettingsSchema.parse({ beetle: { maxTurns: 12, maxCostUSD: 2.5 } });
+		expect(parsed.beetle?.maxTurns).toBe(12);
+		expect(parsed.beetle?.maxCostUSD).toBe(2.5);
+		// Absent means unbounded, not zero: a ceiling of 0 is a way to say "do not
+		// start one", which is what /beetle off is for.
+		expect(SettingsSchema.parse({ beetle: {} }).beetle?.maxTurns).toBeUndefined();
+		expect(SettingsSchema.parse({ beetle: {} }).beetle?.maxCostUSD).toBeUndefined();
+		// Zero, negatives and fractions are caught at load time rather than
+		// reaching a band as a budget that stops it immediately or never.
+		expect(SettingsSchema.safeParse({ beetle: { maxTurns: 0 } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ beetle: { maxTurns: -3 } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ beetle: { maxTurns: 2.5 } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ beetle: { maxCostUSD: 0 } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ beetle: { maxCostUSD: -0.5 } }).success).toBe(false);
+	});
+
 	test("prices can be declared for a whole catalog, per provider or as an override", () => {
 		const parsed = SettingsSchema.parse({
 			providers: {

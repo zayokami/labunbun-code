@@ -1008,6 +1008,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// through — status reads the work, not a copy of it.
 		taskBoard: () => taskStore.summary(),
 		initialModels: settings.beetle?.models ?? null,
+		maxTurns: settings.beetle?.maxTurns,
+		maxCostUSD: settings.beetle?.maxCostUSD,
 	});
 
 	attachSessionListeners(session);

@@ -20,7 +20,7 @@
  * conversation's final state and every "which request carried what" assertion
  * would be about the end of the run rather than the call in question.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
 	AgentSession,
 	type AnyTool,
@@ -29,7 +29,15 @@ import {
 	type SandboxMode,
 	type ToolResult,
 } from "@labunbun/agent";
-import { FAUX_MODEL, type FauxStep, fauxProvider, type Model, type StreamFn } from "@labunbun/ai";
+import {
+	clearCustomModels,
+	FAUX_MODEL,
+	type FauxStep,
+	fauxProvider,
+	type Model,
+	registerOpenAICompatibleProvider,
+	type StreamFn,
+} from "@labunbun/ai";
 import { createTaskTools, TASK_BOARD_TOOL_NAMES, TaskStore } from "@labunbun/tools";
 import { z } from "zod";
 import {
@@ -109,6 +117,8 @@ interface BandFixtureOptions {
 	main?: () => AgentSession | null;
 	permissionMode?: () => PermissionMode | undefined;
 	sandbox?: () => SandboxMode | undefined;
+	maxTurns?: number;
+	maxCostUSD?: number;
 }
 
 function makeBand(options: BandFixtureOptions): BandFixture {
@@ -137,6 +147,8 @@ function makeBand(options: BandFixtureOptions): BandFixture {
 		permissionMode: options.permissionMode,
 		sandbox: options.sandbox,
 		getPermissionRules: () => [],
+		maxTurns: options.maxTurns,
+		maxCostUSD: options.maxCostUSD,
 	});
 	return { band, faux, notices, reports };
 }
@@ -1288,5 +1300,124 @@ describe("model picker", () => {
 		} finally {
 			delete process.env.BEETLE_TEST_KEY_PRESENT;
 		}
+	});
+});
+
+describe("the budget guardrails", () => {
+	afterEach(() => {
+		// The pricing registration below is process-global, and the rest of this
+		// file prices nothing — a leak would silently price their transcripts.
+		clearCustomModels();
+	});
+
+	/** The members' four refs, each routed to its own faux model id. */
+	const memberRefs: Partial<BeetleModels> = {
+		john: "faux/john",
+		paul: "faux/paul",
+		george: "faux/george",
+		ringo: "faux/ringo",
+	};
+
+	/**
+	 * Price Paul at $10/Mtok output. His one 100k-output turn costs exactly
+	 * $1.00 — over a $0.50 ceiling — while the other three stay unpriced and
+	 * contribute nothing, so which turn crosses the ceiling is fixed.
+	 */
+	function pricePaul(): void {
+		registerOpenAICompatibleProvider({
+			id: "faux",
+			baseUrl: "http://faux.invalid",
+			apiKeyEnv: "FAUX_API_KEY",
+			models: [
+				{
+					id: "paul",
+					contextWindow: 200_000,
+					maxOutputTokens: 8_192,
+					pricing: { input: 0, output: 10, cacheRead: 0, cacheWrite: 0 },
+				},
+			],
+		});
+	}
+
+	test("crossing maxCostUSD stops the band with a tally, and everything after refuses", async () => {
+		pricePaul();
+		const spent: FauxStep[] = [{ text: "done", usage: { output: 100_000 } }];
+		const { band, reports } = makeBand({
+			script: { john: spent, paul: spent, george: spent, ringo: spent },
+			models: memberRefs,
+			maxCostUSD: 0.5,
+		});
+		const ends = BEETLE_MEMBERS.map((name) => endedReason(sessionOf(band, name)));
+		band.start("spend it all");
+		expect(await within(Promise.all(ends), 5_000)).toBeDefined();
+
+		expect(band.active).toBe(false);
+		const report = reports.find((line) => line.includes("$0.5000"));
+		expect(report).toBeDefined();
+		expect(report).toContain("$1.0000"); // the spend that crossed it
+		expect(report).toContain("Final tally:");
+		expect(report).toMatch(/paul \(implementer\): 1 turns, \$1\.0000/);
+		// The tally marks what the ceiling cannot see: John's model has no price.
+		expect(report).toMatch(/john \(lead\): \d+ turns, \$0\.0000 \(unpriced\)/);
+		expect(report).toContain("/beetle"); // where a new band comes from
+		expect(reports.filter((line) => line.includes("budget ceiling crossed"))).toHaveLength(1);
+
+		const after = band.deliver({ kind: "user" }, "paul", "keep going");
+		expect(after.ok).toBe(false);
+		expect(after.receipts[0]?.reason).toContain("not active");
+	});
+
+	test("spending exactly the ceiling is not over it", async () => {
+		// The trigger is strictly-greater: a budget spent to the last cent is
+		// within it, and the next turn is the one that crosses. The old
+		// implementation cannot red this (it has no ceiling at all) — the
+		// boundary is pinned by the driver's `<=` to `<` mutation instead.
+		pricePaul(); // Paul's single turn costs exactly $1.00
+		const spent: FauxStep[] = [{ text: "done", usage: { output: 100_000 } }];
+		const { band, reports } = makeBand({
+			script: { john: spent, paul: spent, george: spent, ringo: spent },
+			models: memberRefs,
+			maxCostUSD: 1,
+		});
+		const ends = BEETLE_MEMBERS.map((name) => endedReason(sessionOf(band, name)));
+		band.start("spend it exactly");
+		expect(await within(Promise.all(ends), 5_000)).toEqual(["completed", "completed", "completed", "completed"]);
+
+		expect(band.active).toBe(true);
+		expect(reports.some((line) => line.includes("budget"))).toBe(false);
+	});
+
+	test("with no maxCostUSD the same spend does not stop the band", async () => {
+		pricePaul();
+		const spent: FauxStep[] = [{ text: "done", usage: { output: 100_000 } }];
+		const { band, reports } = makeBand({
+			script: { john: spent, paul: spent, george: spent, ringo: spent },
+			models: memberRefs,
+		});
+		const ends = BEETLE_MEMBERS.map((name) => endedReason(sessionOf(band, name)));
+		band.start("spend it all");
+		expect(await within(Promise.all(ends), 5_000)).toEqual(["completed", "completed", "completed", "completed"]);
+
+		expect(band.active).toBe(true);
+		expect(reports.some((line) => line.includes("budget"))).toBe(false);
+		// The spend really happened — otherwise "no stop" would prove nothing.
+		expect(band.status().find((entry) => entry.name === "paul")?.costUSD).toBeCloseTo(1, 10);
+	});
+
+	test("maxTurns caps a run that wants another turn", async () => {
+		// A pin on the band-level option, not a bug fix: BeetleBand already
+		// forwards maxTurns to every member session, and this holds that wire
+		// down. The app-layer gap — the surface never carried the setting into
+		// the band — is pinned in beetle-command.test.ts.
+		const wantsAnother: FauxStep[] = [{ toolCalls: [{ name: "Probe", arguments: {} }] }, { text: "done" }];
+		const { band, reports } = makeBand({
+			script: { john: wantsAnother, paul: wantsAnother, george: wantsAnother, ringo: wantsAnother },
+			models: memberRefs,
+			maxTurns: 1,
+		});
+		const ends = BEETLE_MEMBERS.map((name) => endedReason(sessionOf(band, name)));
+		band.start("run away");
+		expect(await within(Promise.all(ends), 5_000)).toEqual(["max_turns", "max_turns", "max_turns", "max_turns"]);
+		expect(reports.some((line) => line.includes("run ended with max_turns"))).toBe(true);
 	});
 });

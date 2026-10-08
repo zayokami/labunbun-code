@@ -344,10 +344,20 @@ export const SettingsSchema = z.object({
 	 * session is using. A saved `models` map is what makes a later `/beetle
 	 * <task>` skip the picker; without one — the block is absent, or a hand edit
 	 * left it empty — the next start asks again.
+	 *
+	 * The two budget keys are opt-in guardrails, and unset means unbounded: a
+	 * band with neither runs until it is stopped by hand, which is the design.
+	 * `maxTurns` caps each run (a member that wants another turn ends with
+	 * `max_turns`; a waking message is the user's explicit new run). `maxCostUSD`
+	 * stops the whole band once its priced turns cross the amount. Zero and
+	 * negatives are refused here — "stop before starting" is what `/beetle off`
+	 * says, not a budget.
 	 */
 	beetle: z
 		.object({
 			models: z.record(z.string(), z.string()).optional(),
+			maxTurns: z.number().int().positive().optional(),
+			maxCostUSD: z.number().positive().optional(),
 		})
 		.optional(),
 	pricing: z.record(z.string(), ModelPricingSchema).optional(),
