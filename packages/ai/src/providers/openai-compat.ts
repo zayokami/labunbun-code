@@ -9,7 +9,9 @@
  * - Tool calls stream as fragments keyed by array INDEX (id/name only on the
  *   first fragment of each call); arguments pieces are concatenated raw and
  *   parsed once at finish.
- * - Reasoning models (DeepSeek-R1 style) stream `delta.reasoning_content`.
+ * - Reasoning models (DeepSeek-R1 style) stream `delta.reasoning_content`;
+ *   some providers instead stream `delta.content` as a LIST of parts during a
+ *   thinking phase, each part wrapping its text one level down.
  * - Usage only arrives when `stream_options: { include_usage: true }`.
  * - finish_reason is the terminal signal: we emit toolcall_end for all open
  *   calls and map to our StopReason.
@@ -31,10 +33,18 @@ import type { AssistantMessageEvent, Context, Model, StopReason, StreamOptions, 
 // Raw wire types (structural subset, local so tests use plain fixtures)
 // ---------------------------------------------------------------------------
 
+/** One entry of the list shape some providers stream as `delta.content`. */
+interface OpenAIContentPart {
+	type?: string | null;
+	text?: string | null;
+	/** A thinking part carries its text one level down, in its own list. */
+	thinking?: Array<{ type?: string | null; text?: string | null }> | null;
+}
+
 export interface OpenAIRawChunk {
 	choices?: Array<{
 		delta?: {
-			content?: string | null;
+			content?: string | null | OpenAIContentPart[];
 			reasoning_content?: string | null;
 			tool_calls?: Array<{
 				index: number;
@@ -284,12 +294,42 @@ export async function* mapOpenAIStream(
 			yield builder.thinkingDelta(thinkingIndex, delta.reasoning_content);
 		}
 
-		if (delta?.content) {
-			if (textIndex === -1) {
-				textIndex = nextContentIndex++;
-				yield builder.textStart(textIndex);
+		// `content` arrives as a string on most providers and as a list of parts
+		// on some: a thinking part carries its text one level down (a `thinking`
+		// array of text parts), the answer's first text part shares its list with
+		// the trace's last, and once the answer is running the field is a plain
+		// string again. Read as a string alone, the list lands whole in
+		// `textDelta` — a block of "[object Object]" in the middle of the
+		// answer, with the trace lost.
+		const content = delta?.content;
+		if (typeof content === "string") {
+			if (content) {
+				if (textIndex === -1) {
+					textIndex = nextContentIndex++;
+					yield builder.textStart(textIndex);
+				}
+				yield builder.textDelta(textIndex, content);
 			}
-			yield builder.textDelta(textIndex, delta.content);
+		} else if (Array.isArray(content)) {
+			for (const part of content) {
+				if (part?.type === "thinking") {
+					for (const inner of part.thinking ?? []) {
+						if (inner?.type === "text" && inner.text) {
+							if (thinkingIndex === -1) {
+								thinkingIndex = nextContentIndex++;
+								yield builder.thinkingStart(thinkingIndex);
+							}
+							yield builder.thinkingDelta(thinkingIndex, inner.text);
+						}
+					}
+				} else if (part?.type === "text" && part.text) {
+					if (textIndex === -1) {
+						textIndex = nextContentIndex++;
+						yield builder.textStart(textIndex);
+					}
+					yield builder.textDelta(textIndex, part.text);
+				}
+			}
 		}
 
 		if (delta?.tool_calls) {

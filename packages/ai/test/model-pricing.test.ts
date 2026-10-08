@@ -29,7 +29,7 @@ afterEach(() => {
  * host test below reads resolved models, so every one of these is borrowed for
  * the duration — this file otherwise asserts the shipped table, and inheriting
  * the machine's configuration would make a developer's proxy a test failure. All
- * eleven, not just the one that happened to be set: the point is that no machine
+ * twelve, not just the one that happened to be set: the point is that no machine
  * can change the answer.
  *
  * The `finally` is the whole restore path, and deliberately not an `afterEach`
@@ -46,6 +46,7 @@ const BASE_URL_VARS = [
 	"OPENAI_BASE_URL",
 	"GOOGLE_BASE_URL",
 	"MINIMAX_BASE_URL",
+	"MISTRAL_BASE_URL",
 	"OPENCODE_ZEN_BASE_URL",
 	"OPENCODE_GO_BASE_URL",
 	"OPENCODE_ZEN_OAI_BASE_URL",
@@ -116,6 +117,11 @@ const BUILT_IN_REFS = [
 	"minimax/minimax-m2.7-highspeed",
 	"minimax/minimax-m2.5",
 	"minimax/minimax-m2.5-highspeed",
+	"mistral/mistral-large-4",
+	"mistral/mistral-large-2512",
+	"mistral/mistral-medium-3-5",
+	"mistral/mistral-small-2603",
+	"mistral/codestral-2508",
 	// The gateway: 85 Zen rows and 33 Go rows, each on both wires — 236 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
@@ -700,6 +706,18 @@ describe("the built-in catalog", () => {
 			["minimax/minimax-m2.5", 0.3, 1.2, 0.03, 0.375],
 			["minimax/minimax-m2.5-highspeed", 0.6, 2.4, 0.03, 0.375],
 
+			// Mistral's five. Two channels here rest on the vendor's own rules
+			// rather than a printed figure: cached input is "billed at 10% of the
+			// standard input token price" by the vendor's statement, and Large 4 is
+			// running at half its struck-through list ($1.36/$2.09) while that
+			// runs. Large 4 is also the one card that prints its cached rate —
+			// $0.07 against a tenth of $0.68 being $0.068 — and the card wins.
+			["mistral/mistral-large-4", 0.68, 2.09, 0.07, 0],
+			["mistral/mistral-large-2512", 0.5, 1.5, 0.05, 0],
+			["mistral/mistral-medium-3-5", 1.5, 7.5, 0.15, 0],
+			["mistral/mistral-small-2603", 0.15, 0.6, 0.015, 0],
+			["mistral/codestral-2508", 0.3, 0.9, 0.03, 0],
+
 			// The gateway, on the same terms and the same day. Thirty-four of these rows
 			// state a cache-write rate and the rest state none, so nearly three quarters
 			// of the table ends in 0 — which is the reading Gemini and MiniMax M3 already
@@ -1003,6 +1021,18 @@ describe("the built-in catalog", () => {
 			["minimax/minimax-m2.5", 204_800, 204_800],
 			["minimax/minimax-m2.5-highspeed", 204_800, 204_800],
 
+			// The same stand-in for the second vendor in that situation. Mistral
+			// publishes a `contextLength` and no `outputTokenLimit` on any of these
+			// five cards, its reference states no default for `max_tokens`, and the
+			// only bound in writing is the one MiniMax's note quotes — the prompt
+			// plus `max_tokens` cannot exceed the context length. So the third
+			// column is the window for all five.
+			["mistral/mistral-large-4", 1_048_576, 1_048_576],
+			["mistral/mistral-large-2512", 262_144, 262_144],
+			["mistral/mistral-medium-3-5", 262_144, 262_144],
+			["mistral/mistral-small-2603", 262_144, 262_144],
+			["mistral/codestral-2508", 131_072, 131_072],
+
 			// The gateway, swept 2026-09-28. These are the numbers the compaction threshold
 			// is derived from, so they are transcribed rather than rounded:
 			// `hy4-preview` on Go is 1,024,000 rather than 1M.
@@ -1259,12 +1289,16 @@ describe("the built-in catalog", () => {
 		// unconfirmed for it. Saying nothing leaves the model at its own default,
 		// which is the same thing we would have asked for anyway.
 		// Split in two, and the split is a partition rather than an exception: the
-		// rows below are the ones whose vendor published an effort vocabulary, and
-		// the resellers are the ones whose vendor published nothing about thinking
-		// at all. Both are right to say "not medium", for reasons that have nothing
-		// to do with each other, and the second group is 236 rows long — a third of
-		// the catalog — which would bury the first. The gateway rows are held by
-		// the assertion directly below, which is exhaustive over the same set.
+		// rows below are the ones where asking "medium" is a question the vendor's
+		// pages never answer — a vocabulary without the word (Kimi, GLM), a model
+		// that thinks with no values stated (Gemini 3.1 Pro), no effort control at
+		// all (MiniMax), or six depths with only the ends described (Mistral) —
+		// and the resellers are the ones whose vendor published nothing about
+		// thinking at all. Both are right to say "not medium", for reasons that
+		// have nothing to do with each other, and the second group is 236 rows
+		// long — a third of the catalog — which would bury the first. The gateway
+		// rows are held by the assertion directly below, which is exhaustive over
+		// the same set.
 		const alwaysThinking = BUILT_IN_REFS.filter((ref) => !resolveModel(ref)?.reasoning && !isReseller(ref));
 		expect(alwaysThinking).toEqual([
 			"kimi/kimi-k3",
@@ -1287,6 +1321,17 @@ describe("the built-in catalog", () => {
 			"minimax/minimax-m2.7-highspeed",
 			"minimax/minimax-m2.5",
 			"minimax/minimax-m2.5-highspeed",
+			// Mistral: the endpoint's schema enumerates six depths but the guide
+			// gives behavior to `high` and `none` only and recommends `high` for
+			// agentic and code work, so what `medium` asks of these models is
+			// written nowhere — the default sends nothing and /think can ask for
+			// the documented value. Large 3 and Codestral state text output only;
+			// they have no depth to ask for at all.
+			"mistral/mistral-large-4",
+			"mistral/mistral-large-2512",
+			"mistral/mistral-medium-3-5",
+			"mistral/mistral-small-2603",
+			"mistral/codestral-2508",
 		]);
 		// The other half of the partition, exhaustive over the same rows. Every
 		// gateway row claims no thinking at all, and the reason is a model in the
@@ -1325,6 +1370,7 @@ describe("the built-in catalog", () => {
 				host("openai/gpt-6-sol"),
 				host("google/gemini-3.8-flash"),
 				host("minimax/minimax-m3"),
+				host("mistral/mistral-large-4"),
 				host("opencode-zen/claude-opus-5-5"),
 				host("opencode-go/deepseek-v4-pro"),
 				host("opencode-zen-oai/gpt-6-sol"),
@@ -1340,6 +1386,7 @@ describe("the built-in catalog", () => {
 				"https://api.openai.com/v1",
 				"https://generativelanguage.googleapis.com/v1beta/openai/",
 				"https://api.minimax.io/v1",
+				"https://api.mistral.ai/v1",
 				// The gateway's four, and the pairs are not interchangeable: the
 				// Anthropic client appends `/v1/messages` to whatever base it is
 				// given, so the pair of rows above must arrive without a `/v1`; the
@@ -1378,11 +1425,20 @@ describe("the built-in catalog", () => {
 			const model = resolveModel(ref);
 			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
 		}
-		// And no other first-party vendor is in that situation, so the rule stays a
-		// fact about MiniMax rather than a description of the whole table.
-		const others = BUILT_IN_REFS.filter((ref) => !ref.startsWith("minimax/") && !isReseller(ref)).filter(
-			(ref) => resolveModel(ref)?.maxOutputTokens === resolveModel(ref)?.contextWindow,
-		);
+		// The second vendor in that situation, for the same shape of reason: the
+		// cards state a `contextLength` and no `outputTokenLimit`, and the only
+		// bound in writing is the one the comment above quotes.
+		const mistral = BUILT_IN_REFS.filter((ref) => ref.startsWith("mistral/"));
+		expect(mistral.length).toBeGreaterThan(0);
+		for (const ref of mistral) {
+			const model = resolveModel(ref);
+			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
+		}
+		// And no first-party vendor beyond these two is in that situation, so the
+		// rule stays a fact about them rather than a description of the whole table.
+		const others = BUILT_IN_REFS.filter(
+			(ref) => !ref.startsWith("minimax/") && !ref.startsWith("mistral/") && !isReseller(ref),
+		).filter((ref) => resolveModel(ref)?.maxOutputTokens === resolveModel(ref)?.contextWindow);
 		expect(others).toEqual([]);
 		// The resellers are the third case, and the one this test had to be widened
 		// for: seven gateway ids carry a *published* output cap equal to the window
@@ -1562,13 +1618,13 @@ describe("ids that were retired", () => {
 		expect(resolveModel("opencode-zen/space-bunny-free")?.id).toBe("space-bunny-free");
 	});
 
-	test("a gateway row says what it takes, and the text-only set is named", () => {
-		// `openAICompatModel` grew an `images` flag for the gateway, and nothing
-		// else in the catalog has to say this: every first-party row on that wire is
-		// a text model, and the two that could take an image are reached by their
-		// own native client. So 48 of 236 rows are the only place the claim lives,
-		// and before this one nothing in the suite could see it — flipping `false`
-		// to `true` on any row was a silent edit.
+	test("rows say what they take, and the text-only sets are named", () => {
+		// `openAICompatModel` grew an `images` flag for the gateway, and the 48
+		// gateway rows that carry `image` were once the only place the claim lived —
+		// every first-party row on that wire was a text model. Mistral's four
+		// image-taking rows changed that, so both halves are pinned here. Before
+		// this test nothing in the suite could see the flags at all — flipping
+		// `false` to `true` on any row was a silent edit.
 		//
 		// What makes it a claim about the model rather than about us: `input` is
 		// what the tool layer asks before it offers a file, so a row that says
@@ -1616,6 +1672,19 @@ describe("ids that were retired", () => {
 			resolveModel("opencode-zen-oai/deepseek-v4-pro")?.input,
 		);
 		expect(resolveModel("opencode-zen/claude-opus-5-5")?.input).toEqual(["text", "image"]);
+		// The first first-party rows that take an image part: Mistral's four text
+		// hybrids say text+image on their cards' input capabilities, and Codestral's
+		// card says text only. Pinned by name because a flipped flag is a picker
+		// entry that fails on first use, not a cosmetic difference.
+		expect(
+			BUILT_IN_REFS.filter((ref) => ref.startsWith("mistral/")).map((ref) => [ref, resolveModel(ref)?.input]),
+		).toEqual([
+			["mistral/mistral-large-4", ["text", "image"]],
+			["mistral/mistral-large-2512", ["text", "image"]],
+			["mistral/mistral-medium-3-5", ["text", "image"]],
+			["mistral/mistral-small-2603", ["text", "image"]],
+			["mistral/codestral-2508", ["text"]],
+		]);
 	});
 
 	test("a bare id no vendor makes is not quietly served by a gateway", () => {

@@ -45,7 +45,7 @@ LaBunbun Code supports these providers:
 - Anthropic
 - OpenAI, on the Chat Completions wire and on the Responses wire
 - Google
-- OpenAI-compatible endpoints, for example DeepSeek, Kimi, GLM, OpenRouter
+- OpenAI-compatible endpoints, for example DeepSeek, Kimi, GLM, Mistral, OpenRouter
 
 You add an OpenAI-compatible provider in the user settings file. See [Add a provider](#add-a-provider).
 

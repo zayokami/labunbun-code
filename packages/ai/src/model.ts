@@ -18,6 +18,8 @@ const GLM_BASE = "https://api.z.ai/api/paas/v4";
 const DEEPSEEK_BASE = "https://api.deepseek.com/v1";
 /** MiniMax's international host; `/chat/completions` on it is OpenAI's wire. */
 const MINIMAX_BASE = "https://api.minimax.io/v1";
+/** Mistral's own host; `/chat/completions` on it is OpenAI's wire. */
+const MISTRAL_BASE = "https://api.mistral.ai/v1";
 // The gateway's two plans, on two wires each. The two spellings of one plan differ
 // only by a path prefix, and the difference is the SDK's, not a convenience: the
 // Anthropic client appends `/v1/messages` to whatever base it is given, so it
@@ -186,9 +188,9 @@ function openAIModel(
 		maxOutputTokens: number;
 		reasoning?: boolean;
 		/**
-		 * Off unless a row asks. Every first-party row on this wire is a text model,
-		 * and the two that could take an image part — Gemini — are reached by their
-		 * own native client where it exists. It is a field rather than a constant
+		 * Off unless a row asks. Almost every first-party row on this wire is a
+		 * text model; the exceptions so far are Mistral's four image-taking rows,
+		 * whose cards state text+image input. It is a field rather than a constant
 		 * because a *gateway* in front of several vendors serves image-capable
 		 * models on the same host, and a row there that said "text" would be a
 		 * claim the model does not support.
@@ -1520,6 +1522,62 @@ const BUILT_IN_MODELS: Model[] = [
 	// M2.1 and M2 are absent on purpose: both are two generations behind, and
 	// M2 is the one row on the vendor's model list that states an output cap
 	// (128k, counting CoT) — which is not a number that transfers to a successor.
+	//
+	// Mistral, on its own host. The reasoning flag needs the most words here:
+	// Large 4, Medium 3.5 and Small 4 all take a `reasoning_effort`, and the
+	// endpoint's schema enumerates six depths — but that is the whole vocabulary
+	// the vendor publishes. The guide assigns behavior to the ends only (`high`
+	// returns the full thinking trace as chunks, `none` drops it) and recommends
+	// `high` for agentic and code work, which is what this app does; what
+	// `medium` would ask of these models is written nowhere. So all five rows
+	// send nothing by default and let each model stand at its own default, and
+	// the documented recommendation is one `/think high` away. The other two
+	// rows have nothing to ask at all: Large 3 and Codestral state text output
+	// only. Large 4 itself is the newest row here, still in public preview.
+	//
+	// No output ceiling is published for any of the five — a `contextLength` and
+	// no `outputTokenLimit` on every card, no stated default for `max_tokens` —
+	// so they carry the window in the output column the way the MiniMax rows do,
+	// for the same bound in writing: the prompt plus `max_tokens` cannot exceed
+	// the context length. No cache-write rate is published either, so that
+	// channel is a real zero, and cached input rides the vendor's stated rule —
+	// a tenth of the input price — except on Large 4, where the card prints
+	// $0.07 against a tenth of $0.68 being $0.068; the card wins. Large 4 is
+	// also at half its struck-through list ($1.36/$2.09) while that runs, the
+	// shape M3's promotion is in.
+	//
+	// Magistral and Devstral are absent on purpose: both are deprecated with
+	// Mistral Medium 3.5 named as the replacement, so they are rows this table
+	// would have to retire on purpose later.
+	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-large-4", "Mistral Large 4", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+		images: true,
+		pricing: { input: 0.68, output: 2.09, cacheRead: 0.07, cacheWrite: 0 },
+	}),
+	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-large-2512", "Mistral Large 3", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		images: true,
+		pricing: { input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0 },
+	}),
+	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-medium-3-5", "Mistral Medium 3.5", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		images: true,
+		pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
+	}),
+	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-small-2603", "Mistral Small 4", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		images: true,
+		pricing: { input: 0.15, output: 0.6, cacheRead: 0.015, cacheWrite: 0 },
+	}),
+	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "codestral-2508", "Codestral", {
+		contextWindow: 131_072,
+		maxOutputTokens: 131_072,
+		pricing: { input: 0.3, output: 0.9, cacheRead: 0.03, cacheWrite: 0 },
+	}),
 	//
 	// The gateway, last. Two plans, two wires, four provider ids, from the two
 	// transcriptions above: a gateway is not a vendor, so one plan on one wire is

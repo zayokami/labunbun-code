@@ -365,6 +365,60 @@ describe("mapOpenAIStream", () => {
 		]);
 	});
 
+	test("a list-shaped content delta becomes thinking and text (Mistral-style)", async () => {
+		// Some providers stream `delta.content` as a list of parts: a thinking
+		// phase whose parts wrap the text one level down, a transition list that
+		// carries the trace's last part and the answer's first, and then plain
+		// strings. A mapper that only reads strings turns the list into
+		// "[object Object]" and loses the trace.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { content: [{ type: "thinking", thinking: [{ type: "text", text: "weigh " }] }] } }] },
+					{
+						choices: [{ delta: { content: [{ type: "thinking", thinking: [{ type: "text", text: "options" }] }] } }],
+					},
+					{
+						choices: [
+							{
+								delta: {
+									content: [
+										{ type: "thinking", thinking: [{ type: "text", text: " done" }] },
+										{ type: "text", text: "The answer" },
+									],
+								},
+							},
+						],
+					},
+					{ choices: [{ delta: { content: " is 42." } }] },
+					{ choices: [{ delta: {}, finish_reason: "stop" }] },
+				]),
+				"mistral",
+				"mistral-medium-3-5",
+			),
+		);
+		expect(events.map((e) => e.type)).toEqual([
+			"start",
+			"thinking_start",
+			"thinking_delta",
+			"thinking_delta",
+			"thinking_delta",
+			"text_start",
+			"text_delta",
+			"text_delta",
+			"thinking_end",
+			"text_end",
+			"done",
+		]);
+		const done = events.at(-1) as any;
+		// Each half lands in its own block, and the text block holds the string
+		// half only.
+		expect(done.message.content).toEqual([
+			{ type: "thinking", thinking: "weigh options done" },
+			{ type: "text", text: "The answer is 42." },
+		]);
+	});
+
 	test("reasoning_tokens reported as usage subset", async () => {
 		const events = await collect(
 			mapOpenAIStream(
