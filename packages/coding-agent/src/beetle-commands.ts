@@ -100,6 +100,8 @@ export interface BeetleSurfaceDeps {
 	maxTurns?: number;
 	/** Band-wide dollar ceiling (settings.beetle.maxCostUSD); undefined = unbounded. */
 	maxCostUSD?: number;
+	/** Quiet-watchdog threshold in minutes (settings.beetle.stallNoticeMinutes). */
+	stallNoticeMinutes?: number;
 }
 
 export interface BeetleSurface {
@@ -153,6 +155,15 @@ export function createToolChangeLatch(note: (cause: string) => void): ToolChange
 			pending = null;
 		},
 	};
+}
+
+/**
+ * The settings key is minutes, the band option is milliseconds. Unset stays
+ * unset so the band's own default (five minutes) applies; zero keeps its
+ * meaning as "no watchdog" through the multiplication.
+ */
+export function stallNoticeMsFrom(minutes: number | undefined): number | undefined {
+	return minutes === undefined ? undefined : minutes * 60_000;
 }
 
 export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
@@ -210,6 +221,7 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			trimOldToolResults: deps.trimOldToolResults,
 			maxTurns: deps.maxTurns,
 			maxCostUSD: deps.maxCostUSD,
+			stallNoticeMs: stallNoticeMsFrom(deps.stallNoticeMinutes),
 			onNotice: deps.notify,
 			report: deps.notify,
 			// Every disband path — the user's /beetle off, the budget ceiling —

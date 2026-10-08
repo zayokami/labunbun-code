@@ -352,12 +352,18 @@ export const SettingsSchema = z.object({
 	 * stops the whole band once its priced turns cross the amount. Zero and
 	 * negatives are refused here — "stop before starting" is what `/beetle off`
 	 * says, not a budget.
+	 *
+	 * `stallNoticeMinutes` is the quiet watchdog: a live member silent this
+	 * long gets one transcript notice naming what it was last doing. It never
+	 * stops anything. Unset reads as five minutes; zero turns it off, which is
+	 * why this key alone accepts zero. Whole minutes only.
 	 */
 	beetle: z
 		.object({
 			models: z.record(z.string(), z.string()).optional(),
 			maxTurns: z.number().int().positive().optional(),
 			maxCostUSD: z.number().positive().optional(),
+			stallNoticeMinutes: z.number().int().nonnegative().optional(),
 		})
 		.optional(),
 	pricing: z.record(z.string(), ModelPricingSchema).optional(),

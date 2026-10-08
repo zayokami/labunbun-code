@@ -11,7 +11,8 @@
  * was queued, and stays off; and the permission axes are re-read per delivery,
  * failing closed in a member — with the one exception the band cannot live
  * without, the bus itself, which is why the band still runs in `ask` mode and
- * in `plan` mode.
+ * in `plan` mode; and the quiet watchdog only observes — one notice per quiet
+ * episode of a live member, silence about idle ones, and nothing ever stopped.
  *
  * Everything runs on scripted faux models routed by model id — the members are
  * separate sessions with separate conversations, and one shared script would
@@ -66,6 +67,25 @@ interface RoutedFaux {
 	streamFn: StreamFn;
 	/** Call-time JSON snapshots of the request messages, one list per model id. */
 	calls(modelId: string): string[];
+	/** Let the hanging (1-based) call for a model id proceed; resolves once it waits. */
+	release(modelId: string, call: number): Promise<void>;
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Poll `tick`s until the predicate holds or the deadline passes. */
+async function until(predicate: () => boolean, ms = 2_000): Promise<void> {
+	const deadline = Date.now() + ms;
+	while (!predicate() && Date.now() < deadline) await tick();
+}
+
+/**
+ * Let a fixed slice of real time pass. For negative assertions — "no notice
+ * arrived" — which have no invariant to poll; positive waits go through
+ * `until` so a loaded runner cannot turn them into flakes.
+ */
+function settle(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -76,20 +96,49 @@ interface RoutedFaux {
  * twice with a script of `[tool, text]` answers the second wake with the
  * repeated text step and never calls the tool again. Closing text is the
  * natural last step of every script.
+ *
+ * `hangOn` parks the listed (1-based) calls per model id until
+ * {@link RoutedFaux.release}: a call that never yields is the shape of a
+ * model request that stopped making progress. A parked call still counts as
+ * a call — its request snapshot is recorded before it parks. `delayMs` is the
+ * opposite shape: every call of that model id takes this long before it
+ * yields, so a run can outlive a stall threshold while staying chatty.
  */
-function routedFaux(script: Record<string, FauxStep[]>): RoutedFaux {
+function routedFaux(
+	script: Record<string, FauxStep[]>,
+	hangOn: Record<string, readonly number[]> = {},
+	delayMs: Record<string, number> = {},
+): RoutedFaux {
 	const providers = new Map<string, ReturnType<typeof fauxProvider>>();
 	for (const [id, steps] of Object.entries(script)) providers.set(id, fauxProvider(steps));
 	const requests = new Map<string, string[]>();
+	const counts = new Map<string, number>();
+	const waiters = new Map<string, () => void>();
 	const streamFn: StreamFn = async function* (model, context, options) {
 		const provider = providers.get(model.id);
 		if (!provider) throw new Error(`no faux script for model "${model.id}"`);
 		const list = requests.get(model.id) ?? [];
 		list.push(JSON.stringify(context.messages));
 		requests.set(model.id, list);
+		const call = (counts.get(model.id) ?? 0) + 1;
+		counts.set(model.id, call);
+		const delay = delayMs[model.id];
+		if (delay !== undefined) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+		if ((hangOn[model.id] ?? []).includes(call)) {
+			await new Promise<void>((resolve) => waiters.set(`${model.id}:${call}`, resolve));
+		}
 		yield* provider.streamFn(model, context, options);
 	};
-	return { streamFn, calls: (id) => requests.get(id) ?? [] };
+	return {
+		streamFn,
+		calls: (id) => requests.get(id) ?? [],
+		async release(id, call) {
+			const key = `${id}:${call}`;
+			await until(() => waiters.has(key));
+			waiters.get(key)?.();
+			waiters.delete(key);
+		},
+	};
 }
 
 /** `faux/john` → a model with id `john`, for the four member refs. */
@@ -119,10 +168,16 @@ interface BandFixtureOptions {
 	sandbox?: () => SandboxMode | undefined;
 	maxTurns?: number;
 	maxCostUSD?: number;
+	stallNoticeMs?: number;
+	watchdogIntervalMs?: number;
+	/** 1-based calls per model id that park until `faux.release` (see routedFaux). */
+	hangOn?: Record<string, readonly number[]>;
+	/** Per-call delay in ms for every call of the given model ids (see routedFaux). */
+	delayMs?: Record<string, number>;
 }
 
 function makeBand(options: BandFixtureOptions): BandFixture {
-	const faux = routedFaux(options.script);
+	const faux = routedFaux(options.script, options.hangOn, options.delayMs);
 	const refs = memberRefTable();
 	const notices: string[] = [];
 	const reports: string[] = [];
@@ -149,6 +204,8 @@ function makeBand(options: BandFixtureOptions): BandFixture {
 		getPermissionRules: () => [],
 		maxTurns: options.maxTurns,
 		maxCostUSD: options.maxCostUSD,
+		stallNoticeMs: options.stallNoticeMs,
+		watchdogIntervalMs: options.watchdogIntervalMs,
 	});
 	return { band, faux, notices, reports };
 }
@@ -1419,5 +1476,181 @@ describe("the budget guardrails", () => {
 		band.start("run away");
 		expect(await within(Promise.all(ends), 5_000)).toEqual(["max_turns", "max_turns", "max_turns", "max_turns"]);
 		expect(reports.some((line) => line.includes("run ended with max_turns"))).toBe(true);
+	});
+});
+
+describe("the quiet watchdog", () => {
+	// Short thresholds and an injected sweep interval: a stalled call parks for
+	// scheduler ticks, never seconds. Positive waits poll an invariant through
+	// `until`; the negative ones ("no second notice") settle a fixed slice of
+	// real time and then assert — a loaded runner has no invariant to poll for
+	// and a wider window would not fix that. "agent" is the mode that lets the
+	// members' Bash stubs actually run (the band denies everything that would
+	// have to ask).
+	const WATCH: Pick<BandFixtureOptions, "stallNoticeMs" | "watchdogIntervalMs" | "permissionMode" | "sandbox"> = {
+		stallNoticeMs: 40,
+		watchdogIntervalMs: 10,
+		permissionMode: () => "agent",
+		sandbox: () => "workspace-write",
+	};
+	/** The members' four refs, each routed to its own faux model id. */
+	const memberRefs: Partial<BeetleModels> = {
+		john: "faux/john",
+		paul: "faux/paul",
+		george: "faux/george",
+		ringo: "faux/ringo",
+	};
+	const quietLines = (notices: string[]) => notices.filter((line) => line.includes("has been quiet"));
+
+	test("a live member stuck in a tool gets one notice that says nothing was stopped", async () => {
+		let releaseBash: () => void = () => {};
+		const released = new Promise<void>((resolve) => {
+			releaseBash = resolve;
+		});
+		const { band, notices } = makeBand({
+			script: {
+				john: [{ toolCalls: [{ name: "Bash", arguments: { command: "sleep 999" } }] }, { text: "DONE" }],
+				paul: [{ text: "ok" }],
+				george: [{ text: "ok" }],
+				ringo: [{ text: "ok" }],
+			},
+			models: memberRefs,
+			tools: [gatedBash(() => {}, released)],
+			...WATCH,
+		});
+		band.start("watch it");
+		await until(() => quietLines(notices).length > 0);
+
+		const notice = quietLines(notices)[0] ?? "";
+		expect(notice).toContain("John has been quiet for");
+		expect(notice).toContain("(last: Bash: running)");
+		expect(notice).toContain("nothing was stopped");
+		expect(notice).toContain("/beetle status");
+		// The "nothing was stopped" claim, checked: the notice is an observation.
+		expect(band.active).toBe(true);
+		expect(band.status().find((entry) => entry.name === "john")?.state).toBe("live");
+		// One notice per quiet episode, not one per sweep.
+		await settle(80);
+		expect(quietLines(notices)).toHaveLength(1);
+
+		releaseBash();
+		await until(() => band.status().find((entry) => entry.name === "john")?.state === "idle");
+		await settle(80);
+		expect(quietLines(notices)).toHaveLength(1);
+		band.off();
+	});
+
+	test("the member's next event re-arms the watch, and the second notice names the newer activity", async () => {
+		const { band, faux, notices } = makeBand({
+			script: {
+				john: [{ toolCalls: [{ name: "Bash", arguments: { command: "true" } }] }, { text: "DONE" }],
+				paul: [{ text: "ok" }],
+				george: [{ text: "ok" }],
+				ringo: [{ text: "ok" }],
+			},
+			models: memberRefs,
+			tools: [bashTool()],
+			hangOn: { john: [1, 2] },
+			...WATCH,
+		});
+		band.start("watch it twice");
+		// Episode one parks inside the model call itself — no tool has run yet.
+		await until(() => quietLines(notices).length >= 1);
+		expect(quietLines(notices)[0]).toContain("(last: no tool activity)");
+
+		await faux.release("john", 1);
+		// The tool ran and the second call parks: the events in between cleared
+		// the one-shot, so a fresh quiet stretch is news again.
+		await until(() => quietLines(notices).length >= 2);
+		expect(quietLines(notices)[1]).toContain("(last: Bash: ok)");
+
+		await faux.release("john", 2);
+		await until(() => band.status().find((entry) => entry.name === "john")?.state === "idle");
+		await settle(80);
+		expect(quietLines(notices)).toHaveLength(2);
+		band.off();
+	});
+
+	test("an idle member's silence is not news", async () => {
+		const { band, notices } = makeBand({
+			script: {
+				john: [{ text: "ok" }],
+				paul: [{ text: "ok" }],
+				george: [{ text: "ok" }],
+				ringo: [{ text: "ok" }],
+			},
+			models: memberRefs,
+			...WATCH,
+		});
+		const ends = BEETLE_MEMBERS.map((name) => endedReason(sessionOf(band, name)));
+		band.start("finish quickly");
+		expect(await within(Promise.all(ends), 5_000)).toEqual(["completed", "completed", "completed", "completed"]);
+		expect(band.status().map((entry) => entry.state)).toEqual(["idle", "idle", "idle", "idle"]);
+
+		// Eight sweeps with every member past the threshold and none of them
+		// live: the watch stays silent. Idle is the design, not a stall — this
+		// is where a scan that dropped the live filter reds.
+		await settle(80);
+		expect(quietLines(notices)).toHaveLength(0);
+		band.off();
+	});
+
+	test("off() ends the watch with the band", async () => {
+		// The contract is the silence after `off()`; which of the teardown
+		// guards produces it — the cleared interval, the stopped-state filter —
+		// is not separable from outside, and removing either one alone stays
+		// green here (declared blind in the batch's mutation run).
+		const { band, notices } = makeBand({
+			script: {
+				john: [{ toolCalls: [{ name: "Bash", arguments: { command: "sleep 999" } }] }, { text: "DONE" }],
+				paul: [{ text: "ok" }],
+				george: [{ text: "ok" }],
+				ringo: [{ text: "ok" }],
+			},
+			models: memberRefs,
+			tools: [gatedBash(() => {}, new Promise<void>(() => {}))],
+			...WATCH,
+		});
+		band.start("watch it then stop");
+		await until(() => quietLines(notices).length >= 1);
+
+		band.off();
+		await until(() => band.status().every((entry) => entry.state === "stopped"));
+		await settle(80);
+		expect(quietLines(notices)).toHaveLength(1);
+	});
+
+	test("a member that keeps working is never reported, however long the run", async () => {
+		// Fifteen turns, each arriving inside the threshold: the run outlives the
+		// stall window several times over, but the member never goes quiet. A
+		// watch that measured "time since spawn" instead of "time since the last
+		// event" would fire mid-run — this is the test that reds when the
+		// heartbeat stops refreshing `lastEventAt`.
+		const chattySteps: FauxStep[] = [
+			...Array.from({ length: 15 }, () => ({ toolCalls: [{ name: "Bash", arguments: { command: "true" } }] })),
+			{ text: "DONE" },
+		];
+		const { band, notices } = makeBand({
+			script: {
+				john: chattySteps,
+				paul: [{ text: "ok" }],
+				george: [{ text: "ok" }],
+				ringo: [{ text: "ok" }],
+			},
+			models: memberRefs,
+			tools: [bashTool()],
+			delayMs: { john: 10 },
+			stallNoticeMs: 150, // each call lands ~10ms after the previous events
+			watchdogIntervalMs: 10,
+			permissionMode: () => "agent",
+			sandbox: () => "workspace-write",
+		});
+		const ends = BEETLE_MEMBERS.map((name) => endedReason(sessionOf(band, name)));
+		band.start("keep working");
+		expect(await within(Promise.all(ends), 5_000)).toEqual(["completed", "completed", "completed", "completed"]);
+
+		await settle(100);
+		expect(quietLines(notices)).toHaveLength(0);
+		band.off();
 	});
 });

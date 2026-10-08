@@ -377,6 +377,10 @@ interface MemberRuntime {
 	state: BeetleMemberState;
 	turns: number;
 	lastActivity: string | null;
+	/** When this member's last event landed, for the quiet watchdog. */
+	lastEventAt: number;
+	/** One quiet notice per episode; that member's next event clears it. */
+	stallNotified: boolean;
 }
 
 /**
@@ -388,6 +392,18 @@ interface MemberRuntime {
  * separately (`mcpTools`), with the persona as the backstop there.
  */
 export const READ_SEAT_TOOL_NAMES = ["Bash", "Glob", "Grep", "Read"] as const;
+
+/** A live member silent this long gets one notice (the settings key reads in minutes). */
+const DEFAULT_STALL_NOTICE_MS = 300_000;
+
+/** How often the quiet watchdog sweeps. */
+const DEFAULT_WATCHDOG_INTERVAL_MS = 30_000;
+
+/** "45s" under a minute, "6m" above it — the units a reader thinks in. */
+function formatQuiet(ms: number): string {
+	const seconds = Math.round(ms / 1000);
+	return seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
+}
 
 export interface BeetleBandOptions {
 	models: BeetleModels;
@@ -414,6 +430,14 @@ export interface BeetleBandOptions {
 	 * zero, which its tally line marks "(unpriced)". Undefined is unbounded.
 	 */
 	maxCostUSD?: number;
+	/**
+	 * How long a live member may go without an event before one notice fires.
+	 * Undefined reads as five minutes; zero or negative turns the watch off.
+	 * Notice-only by design: a quiet member is reported, never stopped.
+	 */
+	stallNoticeMs?: number;
+	/** Watchdog sweep cadence in ms. Undefined reads as 30 seconds. */
+	watchdogIntervalMs?: number;
 	/** One-line transcript notices: relays and lifecycle events. */
 	onNotice?: (text: string) => void;
 	/** Lines into the main transcript: fallbacks, compaction, stops. */
@@ -440,6 +464,8 @@ export class BeetleBand {
 	#active = true;
 	/** Wake-less deliveries, held per target in send order until a wake drains them. */
 	#held = new Map<BeetleMember | "main", string[]>();
+	/** The quiet watchdog's interval, dropped with the band in `off()`. */
+	#watchdog: ReturnType<typeof setInterval> | undefined;
 
 	constructor(options: BeetleBandOptions) {
 		this.#options = options;
@@ -450,6 +476,7 @@ export class BeetleBand {
 			(to, message, opts) => this.deliver({ kind: "main" }, to, message, opts),
 			false,
 		);
+		this.#watchdog = this.#startWatchdog();
 	}
 
 	get active(): boolean {
@@ -525,6 +552,10 @@ export class BeetleBand {
 	off(): BeetleMemberStatus[] {
 		if (this.#active) {
 			this.#active = false;
+			if (this.#watchdog !== undefined) {
+				clearInterval(this.#watchdog);
+				this.#watchdog = undefined;
+			}
 			for (const member of this.#members.values()) {
 				member.state = "stopped";
 				try {
@@ -764,6 +795,8 @@ export class BeetleBand {
 			state: "idle",
 			turns: 0,
 			lastActivity: null,
+			lastEventAt: Date.now(),
+			stallNotified: false,
 		};
 		session.on((event) => this.#onMemberEvent(member, event));
 		return member;
@@ -796,6 +829,11 @@ export class BeetleBand {
 	}
 
 	#onMemberEvent(member: MemberRuntime, event: AgentEvent): void {
+		// Every event is a heartbeat: the quiet watchdog reads from here, and an
+		// arriving event re-arms the member for a fresh notice if it goes quiet
+		// again later — one notice per episode, not one per stall.
+		member.lastEventAt = Date.now();
+		member.stallNotified = false;
 		if (event.type === "agent_start") {
 			if (member.state !== "stopped") member.state = "live";
 		} else if (event.type === "turn_end") {
@@ -819,8 +857,52 @@ export class BeetleBand {
 			} else if (member.state !== "stopped") {
 				member.state = "idle";
 			}
+		} else if (event.type === "tool_execution_start") {
+			member.lastActivity = `${event.toolName}: running`;
 		} else if (event.type === "tool_execution_end") {
 			member.lastActivity = `${event.toolName}: ${event.result.isError ? "error" : "ok"}`;
+		}
+	}
+
+	/**
+	 * Arm the quiet watchdog. `stallNoticeMs` of zero or less — the settings
+	 * key's "off" — gets no timer at all; `unref()` keeps the handle from
+	 * holding the process open, the way the shell poll's does.
+	 */
+	#startWatchdog(): ReturnType<typeof setInterval> | undefined {
+		const threshold = this.#options.stallNoticeMs ?? DEFAULT_STALL_NOTICE_MS;
+		if (threshold <= 0) return undefined;
+		const every = this.#options.watchdogIntervalMs ?? DEFAULT_WATCHDOG_INTERVAL_MS;
+		const timer = setInterval(() => this.#sweepQuiet(), every);
+		timer.unref();
+		return timer;
+	}
+
+	/**
+	 * One watchdog pass: a live member that has gone event-quiet past the
+	 * threshold gets one notice naming what it was last doing.
+	 *
+	 * Only live members count. An idle member's silence is the design — it has
+	 * nothing to do until the next delivery — and a stopped one is silent on
+	 * purpose. The notice says out loud that nothing was stopped: the watchdog
+	 * observes, it never acts.
+	 */
+	#sweepQuiet(): void {
+		if (!this.#active) return;
+		const threshold = this.#options.stallNoticeMs ?? DEFAULT_STALL_NOTICE_MS;
+		const now = Date.now();
+		for (const member of this.#members.values()) {
+			if (member.state !== "live" || member.stallNotified) continue;
+			const quiet = now - member.lastEventAt;
+			if (quiet < threshold) continue;
+			member.stallNotified = true;
+			try {
+				this.#options.onNotice?.(
+					`[beetle] ${DISPLAY_NAME[member.name]} has been quiet for ${formatQuiet(quiet)} (last: ${member.lastActivity ?? "no tool activity"}) — nothing was stopped; /beetle status shows the band.`,
+				);
+			} catch {
+				// A UI subscriber's bug must not cost the sweep — same rule as the relays.
+			}
 		}
 	}
 

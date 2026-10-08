@@ -30,6 +30,7 @@ import {
 	boardLine,
 	createBeetleSurface,
 	createToolChangeLatch,
+	stallNoticeMsFrom,
 } from "../src/beetle-commands.ts";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
 
@@ -504,6 +505,16 @@ describe("starting a band", () => {
 		// A later /beetle off answers honestly instead of double-tallying.
 		harness.surface.stop();
 		expect(harness.notices.at(-1)).toBe("No band is on stage.");
+	});
+
+	test("stallNoticeMinutes converts to band milliseconds, and stays unset when unset", () => {
+		// The one line of real logic between the settings key and the band
+		// option is the unit conversion. The spawn glue that consumes the result
+		// is blind like `initialModels`: the band's five-minute default can
+		// never fire inside a test, so no harness can tell wired from unwired.
+		expect(stallNoticeMsFrom(undefined)).toBeUndefined();
+		expect(stallNoticeMsFrom(0)).toBe(0); // "off" survives the conversion
+		expect(stallNoticeMsFrom(5)).toBe(300_000);
 	});
 });
 

@@ -118,6 +118,18 @@ describe("SettingsSchema", () => {
 		expect(SettingsSchema.safeParse({ beetle: { maxCostUSD: -0.5 } }).success).toBe(false);
 	});
 
+	test("a beetle block can carry the watchdog key, where zero means off", () => {
+		expect(SettingsSchema.parse({ beetle: { stallNoticeMinutes: 5 } }).beetle?.stallNoticeMinutes).toBe(5);
+		// Zero is a legal value with the opposite polarity of the budget keys:
+		// they refuse it because a zero budget is a trap, while for the watchdog
+		// "never tell me" is a real preference - and unset already means five
+		// minutes, so zero is the only spelling of "off".
+		expect(SettingsSchema.parse({ beetle: { stallNoticeMinutes: 0 } }).beetle?.stallNoticeMinutes).toBe(0);
+		expect(SettingsSchema.parse({ beetle: {} }).beetle?.stallNoticeMinutes).toBeUndefined();
+		expect(SettingsSchema.safeParse({ beetle: { stallNoticeMinutes: -1 } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ beetle: { stallNoticeMinutes: 2.5 } }).success).toBe(false);
+	});
+
 	test("prices can be declared for a whole catalog, per provider or as an override", () => {
 		const parsed = SettingsSchema.parse({
 			providers: {

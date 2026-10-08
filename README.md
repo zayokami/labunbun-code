@@ -184,6 +184,8 @@ The tool asks you for one model per member on the first run. The tool saves the 
 
 The `beetle` block can hold two budgets. Both keys are optional. `beetle.maxTurns` limits the turns in one run of a member. A run that needs more turns ends there. `beetle.maxCostUSD` stops the whole band when the total cost of the four members passes the amount. With no budget, a band runs until `/beetle off`. Only the user tier can set these keys. The cost of a member with no price does not count toward the total.
 
+The `beetle` block can also hold `beetle.stallNoticeMinutes`. A live member that sends no event for this time gets one notice in the transcript. The notice tells you the last action of the member. The notice does not stop anything. The default is five minutes. The value `0` turns the notice off. Only the user tier can set this key.
+
 Use these commands:
 
 | Command | Purpose |
@@ -573,7 +575,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `providers` | An object of OpenAI-compatible providers | User |
 | `pricing` | An object of model prices | User |
 | `cache` | An object of cache settings | User |
-| `beetle` | An object with the keys `models`, `maxTurns`, and `maxCostUSD` | User |
+| `beetle` | An object with the keys `models`, `maxTurns`, `maxCostUSD`, and `stallNoticeMinutes` | User |
 | `mcpServers` | An object of MCP servers | User |
 | `hooks` | An object of hooks | User |
 | `gamepad` | An object of controller settings | User |

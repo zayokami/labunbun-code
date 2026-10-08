@@ -1010,6 +1010,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		initialModels: settings.beetle?.models ?? null,
 		maxTurns: settings.beetle?.maxTurns,
 		maxCostUSD: settings.beetle?.maxCostUSD,
+		stallNoticeMinutes: settings.beetle?.stallNoticeMinutes,
 	});
 
 	attachSessionListeners(session);
