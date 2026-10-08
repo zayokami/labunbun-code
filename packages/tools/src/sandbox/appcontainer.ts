@@ -21,11 +21,20 @@
  *     root, the confined child reads and writes that subtree; a write outside
  *     it is refused by the kernel with access-denied. Without the grant the
  *     child cannot even read the workspace, so the backend fails closed.
- *   - With a mutation deny ACE (write-data, append-data, write-EA,
- *     write-attributes, delete, delete-child) on a nested `.git`, the confined
- *     child cannot overwrite, delete, or rename anything under `.git` — but it
- *     CAN still create a new file there, so `.git` protection is not yet
- *     correct and the grant half must not ship until it is.
+ *   - KNOWN DEFICIT, measured and not yet understood: with the grant in place
+ *     the confined child reads and writes FILES (traverse works, and a child
+ *     cannot reach a file without it) but CANNOT LIST DIRECTORIES — `dir /b`
+ *     is access-denied on every directory, the granted root included. The
+ *     denial survives an ACE that is non-inherited, one that is full control,
+ *     and one that grants ALL APPLICATION PACKAGES (S-1-15-2-1) as well as
+ *     the package SID. The spawn shape is not the variable: a bare spawn with
+ *     no inherited std handles is denied identically. This is why
+ *     `resolveSandboxExecution` still answers `simulated` on win32 — git
+ *     status and every `ls` through the shell need a list.
+ *   - `.git` is not protected by this backend: a protected DACL needs
+ *     WRITE_OWNER, which this user does not hold, and the mutation-deny ACE
+ *     did not block file creation in controlled runs. The workspace boundary
+ *     is the only confinement the grant provides.
  *
  * Why AppContainer and not a job object: `JOBOBJECT_SECURITY_LIMIT_INFORMATION`
  * is documented as no longer supported in the SDK, so no `JOB_OBJECT_LIMIT_*`
