@@ -1043,7 +1043,17 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 				onOutput: (chunk) => chunks.push(chunk),
 				timeoutMs: 20_000,
 			});
-			expect(chunks.length).toBeGreaterThan(1);
+			// The chunk contents ride in the failure message, because a count
+			// alone cannot say which shape broke: this test failed once on a
+			// runner that produced a single chunk in 265ms — faster than the
+			// sleep the command was meant to straddle — and "the command was
+			// truncated after the first echo" versus "both writes arrived in
+			// one pipe batch" is visible only in the text. Evaluated only on
+			// failure, so a passing run prints nothing.
+			expect(
+				chunks.length,
+				`chunks were ${chunks.map((c) => JSON.stringify(c.slice(0, 60))).join(" | ")}`,
+			).toBeGreaterThan(1);
 			expect(chunks.join("")).toContain("streaming-one");
 			expect(chunks.join("")).toContain("streaming-two");
 		} finally {
