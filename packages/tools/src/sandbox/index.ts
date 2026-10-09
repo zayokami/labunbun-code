@@ -6,13 +6,21 @@
  * matters most — what to tell the user when the answer is "nothing here is
  * actually confining your commands".
  *
- * Four outcomes, not two, because collapsing them is how a build ends up
+ * Five outcomes, not two, because collapsing them is how a build ends up
  * describing a tool-layer check as a sandbox:
  *
  *   `native`       a real OS backend wraps the shell (macOS seatbelt, Linux bwrap)
- *   `simulated`    no argv backend exists on this platform; what applies is the
- *                  tool-layer path policy, and a subprocess that goes around the
- *                  tools is not subject to it
+ *   `appcontainer` Windows's backend — and not an argv wrapper, because the
+ *                  confinement there is the child process's own token: an
+ *                  AppContainer package SID derived from the workspace, with an
+ *                  ACL grant on the writable roots, spawned through FFI in
+ *                  `appcontainer.ts` rather than by decorating an argv. Reached
+ *                  only with an `enabled` network axis, for the measured reason
+ *                  the branch itself records
+ *   `simulated`    no argv backend exists on this platform, or the one that
+ *                  exists is Windows's and the policy's network axis rules it
+ *                  out; what applies is the tool-layer path policy, and a
+ *                  subprocess that goes around the tools is not subject to it
  *   `unavailable`  a backend exists for this platform but is not installed. The
  *                  command still runs — refusing every command on a machine that
  *                  never installed bubblewrap would be a worse failure than the
@@ -87,6 +95,37 @@ export type SandboxPlatform = "darwin" | "linux" | "win32" | string;
 
 export type SandboxResolution =
 	| { kind: "native"; execution: SandboxExecution; program: string }
+	| {
+			kind: "appcontainer";
+			/**
+			 * The workspace the container profile is derived from — and therefore
+			 * the root whose grant the caller must hold before the spawn.
+			 */
+			workspace: string;
+			/**
+			 * Every root the ACL grant must cover, the workspace first and each
+			 * path once. It is more than `workspace` because more than the
+			 * workspace is writable: a real session's policy names the home
+			 * package caches and the temp directory, and an un-granted container
+			 * child cannot write any of them — the kernel refuses, so the grant
+			 * list is what makes the confined command work rather than merely
+			 * the workspace's own files.
+			 *
+			 * Carried on the resolution rather than re-derived by the two spawn
+			 * paths because there are two of them and one answer: a caller that
+			 * filtered the policy's entries itself would be a second place
+			 * deciding which root is the workspace, and the skip-marker rule
+			 * that decides it is a one-line predicate nobody should have to
+			 * re-read.
+			 */
+			grantRoots: string[];
+			/**
+			 * Always `true`: the branch that returns this kind is reachable only
+			 * with an `enabled` network axis, for the measured reason recorded
+			 * on the branch itself.
+			 */
+			network: true;
+	  }
 	| { kind: "simulated"; reason: string }
 	| { kind: "unavailable"; reason: string }
 	| { kind: "unconfined" };
@@ -107,6 +146,20 @@ export interface ResolveSandboxOptions {
 	platform?: SandboxPlatform;
 	/** Whether the platform's native backend is installed. Injected so this is testable. */
 	hasNativeBackend?: boolean;
+	/**
+	 * Whether the Windows AppContainer backend is usable on this machine.
+	 *
+	 * Injected for the same reason as `hasNativeBackend`, so the branch it
+	 * guards is reachable from a test on a machine that has neither — and
+	 * there is a second reason here that the native flag does not have: the
+	 * answer is a pair of DLL loads, and a resolution function that performs
+	 * them itself stops being a pure function of its inputs. The default is
+	 * `false`, and the direction is the safe one: a wrong `true` sends a
+	 * command down a container path whose profile and grant were never
+	 * established, while a wrong `false` is the simulated answer this
+	 * platform already gives — the status quo, not a new hole.
+	 */
+	hasAppContainer?: boolean;
 	/**
 	 * Whether a path exists. Injected for the same reason as the flag above, and
 	 * consulted for two decisions rather than one: the `missingPathBehavior` filter
@@ -191,7 +244,7 @@ export function detectNativeBackend(platform: SandboxPlatform, env: NodeJS.Proce
 }
 
 /**
- * The two facts a resolution needs, read once.
+ * The facts a resolution needs, read once.
  *
  * Bundled into a value rather than passed as loose arguments so the spawn path
  * and the reporting path cannot be given different answers: the sentence in
@@ -203,11 +256,48 @@ export function detectNativeBackend(platform: SandboxPlatform, env: NodeJS.Proce
 export interface SandboxRuntime {
 	platform: SandboxPlatform;
 	hasNativeBackend: boolean;
+	/**
+	 * Whether production *selects* the Windows AppContainer backend — which is
+	 * not the same question as whether the backend loads.
+	 *
+	 * **Production does not claim it, and the reason is measured, not
+	 * cautious.** The backend itself works: a profile spawns, the ACL grant
+	 * holds, and a command that runs inside the granted workspace reads and
+	 * writes it while the kernel refuses everything beyond it. What does not
+	 * work is the session's own toolchain: the confined child inherits an
+	 * AppContainer token, and a token of that shape executes only what the
+	 * filesystem grants its package SID. `C:\Windows\System32` does; the
+	 * directories this machine's tools live in do not — `git`, `node`, and
+	 * `bun` from `D:\Program Files` and the user profile all come back
+	 * "not recognized" inside the container, and an absolute path to the same
+	 * binary comes back "Access is denied" (a copy placed inside the granted
+	 * workspace runs, which is what separates the two). So selecting the
+	 * backend on this machine would confine every default-mode command into
+	 * something that cannot run `git status`. The README's "simulated on
+	 * Windows" stays true until the toolchain reaches the child.
+	 *
+	 * A test constructs a runtime with it `true` to drive the container branch,
+	 * the same way `hasNativeBackend` is faked for the Linux branch; that is
+	 * what `sandbox-wiring.test.ts` does.
+	 */
+	hasAppContainer?: boolean;
 }
 
-/** This machine's runtime. One PATH scan, at construction, not per command. */
+/**
+ * This machine's runtime. One PATH scan, at construction rather than per
+ * command.
+ *
+ * The AppContainer backend is deliberately not probed here — see
+ * {@link SandboxRuntime.hasAppContainer} for the measurement that keeps
+ * production off it. `appContainerAvailable` remains exported from
+ * `./appcontainer.ts` and stays the honest answer to the narrower question
+ * ("do the DLLs load"), which is the question the tests ask of it.
+ */
 export function detectRuntime(platform: SandboxPlatform = process.platform): SandboxRuntime {
-	return { platform, hasNativeBackend: detectNativeBackend(platform) };
+	return {
+		platform,
+		hasNativeBackend: detectNativeBackend(platform),
+	};
 }
 
 /**
@@ -263,6 +353,91 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	// which.
 	if (policy.fileSystem.kind === "unrestricted") return { kind: "unconfined" };
 
+	// One predicate, consulted in three places for three different reasons, so
+	// that all three consult it about the same machine rather than about three
+	// lookups that could straddle a `mkdir` and disagree. What they do with the
+	// answer differs and the difference is the point: an *entry* marked `skip`
+	// that is missing is dropped (see `presentEntries`, and the AppContainer
+	// grant list below drops them for the same reason — granting a path that is
+	// not there fails the grant), whereas a *protected* path that is missing is
+	// kept and turned into an empty read-only mount, because dropping it would
+	// be the one answer that quietly removes the protection it is there to
+	// provide.
+	const exists = options.exists ?? ((path: string) => existsSync(path));
+	const present = presentEntries(policy, exists);
+
+	// The Windows AppContainer backend, and it is placed here — after the
+	// unrestricted short-circuit and before the `hasNativeSandboxBackend`
+	// check — because that check answers `false` for win32 and would return
+	// `simulated` before this branch were ever reached. Windows has no argv
+	// wrapper, so nothing about an argv decision applies to it; what it has is
+	// a child-process token, and the branch says so in the shape it returns.
+	//
+	// The conditions, and what each one is for:
+	//
+	//   - `win32`, because the backend is `AppContainer` calls in `userenv.dll`
+	//     and nothing else reaches them.
+	//   - `policy.network === "enabled"`, and this is the one that is easy to
+	//     get wrong, so it carries the measured reason rather than a guess.
+	//     A `restricted` axis is enforced by the proxy, and the proxy listens
+	//     on loopback; a container child cannot reach loopback (loopback
+	//     denied even with `privateNetworkClientServer`, measured). So
+	//     confining a restricted command would enforce the axis by breaking
+	//     the network — every allowed domain failing alongside every denied
+	//     one — which is the failure the native backends already have and
+	//     document. `enabled` starts no proxy and needs no loopback, so it is
+	//     the one axis this backend can enforce exactly. `restricted` keeps
+	//     falling through to `simulated`, which is honest: the tool layer and
+	//     the proxy still hold the axis, the OS does not.
+	//   - `hasAppContainer`, which defaults to `false` — see the option's own
+	//     doc for why that direction is the safe one.
+	//
+	// What the branch returns says what the caller must do that `native` does
+	// not: acquire the ACL grants before the spawn and release them after,
+	// because an un-granted container child cannot read the workspace at all —
+	// fail-closed, and a command that does not run is a legible failure, but
+	// the grant is what makes the backend usable rather than merely honest.
+	//
+	// The grants cover every writable root, not only the workspace, and the
+	// reason is a real session's shape: `resolveWritableRoots` always returns
+	// the temp directory and the home package caches beside the workspace, so
+	// a container granted only the workspace cannot `mktemp` and cannot write
+	// its install cache — the narrower-than-asked-for failure this repository
+	// already fixed once in `policyFor`. The workspace leads the list because
+	// the profile — and with it the container identity, and the refcount that
+	// decides when a grant is released — is derived from it; an identity per
+	// root would be an identity per command.
+	//
+	// Read-only roots are absent from the list on purpose: an AppContainer
+	// child reads outside its grant by default and only writes are refused, so
+	// a grant there would buy nothing the token does not already have.
+	//
+	// The workspace itself is the one writable entry `buildSandboxPolicy`
+	// emits without a `skip` marker — every other writable root is a cache or
+	// an additional directory the policy tolerates being absent, and the
+	// workspace is not one of those. A policy with no such entry (a hand-built
+	// one, or one whose only roots are all skip-marked) has nothing to derive
+	// a container from, so the branch does not fire and the existing
+	// `simulated` answer below stands.
+	//
+	// The list is read from `present`, the filtered policy, for the same reason
+	// the translators are: a `skip`-marked root that does not exist would fail
+	// the grant outright, and a build cache that was never created is exactly
+	// such a root — dropping it keeps a confined command runnable, where
+	// granting it would turn the sandbox into a broken tool.
+	if (platform === "win32" && policy.network === "enabled" && (options.hasAppContainer ?? false)) {
+		const writable = present.fileSystem.entries.filter((entry) => entry.access === "write");
+		const workspace = writable.find((entry) => entry.missingPathBehavior !== "skip");
+		if (workspace !== undefined) {
+			return {
+				kind: "appcontainer",
+				workspace: workspace.path,
+				grantRoots: [...new Set([workspace.path, ...writable.map((entry) => entry.path)])],
+				network: true,
+			};
+		}
+	}
+
 	if (!hasNativeSandboxBackend(platform)) {
 		return {
 			kind: "simulated",
@@ -292,16 +467,6 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 			reason: `${nativeSandboxProgram(platform)} is not on PATH, so commands run without filesystem confinement. The deny rules and the dangerous-command classifier still apply — they are in this process, not in the kernel — but the workspace boundary is not being enforced`,
 		};
 	}
-
-	// One predicate, consulted in two places for two different reasons, so that
-	// both consult it about the same machine rather than about two lookups that
-	// could straddle a `mkdir` and disagree. What they do with the answer differs
-	// and the difference is the point: an *entry* marked `skip` that is missing is
-	// dropped (see `presentEntries`), whereas a *protected* path that is missing is
-	// kept and turned into an empty read-only mount, because dropping it would be
-	// the one answer that quietly removes the protection it is there to provide.
-	const exists = options.exists ?? ((path: string) => existsSync(path));
-	const present = presentEntries(policy, exists);
 
 	// Both translators return the argv *after* the program name, so the program
 	// is named here and nowhere else. Absolute for `sandbox-exec`, which must be

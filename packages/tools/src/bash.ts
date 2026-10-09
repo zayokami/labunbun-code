@@ -98,15 +98,29 @@ export function createBashTool(
 						isError: true,
 					};
 				}
-				const shell = await background.start(input.command, cwd, policy);
-				return {
-					content: [
-						textContent(
-							`Started in background as ${shell.id}.\nCommand: ${input.command}\nOutput file: ${shell.outputFile}\nPoll with BashOutput(shell_id="${shell.id}"); stop with KillBash.`,
-						),
-					],
-					details: { backgroundShellId: shell.id },
-				};
+				// Caught here rather than left to reject the tool call, for the
+				// same reason the branch above returns instead of throwing: an
+				// unavailable path is an answer the model reads, not an
+				// exception it cannot see. The message names the constraint
+				// rather than the mechanism — a background shell outlives the
+				// call that starts it, and the Windows container backend's
+				// runner does not return until the child exits.
+				try {
+					const shell = await background.start(input.command, cwd, policy);
+					return {
+						content: [
+							textContent(
+								`Started in background as ${shell.id}.\nCommand: ${input.command}\nOutput file: ${shell.outputFile}\nPoll with BashOutput(shell_id="${shell.id}"); stop with KillBash.`,
+							),
+						],
+						details: { backgroundShellId: shell.id },
+					};
+				} catch (error) {
+					return {
+						content: [textContent(String(error))],
+						isError: true,
+					};
+				}
 			}
 
 			const timeoutMs = input.timeout ?? 120_000;

@@ -1,10 +1,19 @@
 /**
  * The Windows AppContainer backend for the filesystem sandbox.
  *
- * **Status, stated exactly.** The mechanism is measured on this machine and the
- * profile/spawn half is wired here; the ACL grant half (the part that lets the
- * confined process touch the workspace at all) is NOT wired yet — see
- * `simulated.ts`, whose header records what was measured and what remains.
+ * **Status, stated exactly.** Both halves are wired here: the profile/spawn
+ * half, and the ACL grant half — `acquireWorkspaceGrant` /
+ * `releaseWorkspaceGrant`, refcounted per profile, covering every writable
+ * root the policy names rather than only the workspace. `resolveSandboxExecution`
+ * has an `appcontainer` branch and `exec` consumes it: grant before the spawn,
+ * release in a `finally`, so an abort or a failed spawn cannot leak an ACE.
+ * What still keeps production off it is measured, not cautious — a confined
+ * child inherits a token that executes only what the grant names its package
+ * SID, and this machine's `git`, `node`, and `bun` live outside every grant,
+ * so selecting the backend would confine every default-mode command into
+ * something that cannot run `git status`. The measurement lives on
+ * `SandboxRuntime.hasAppContainer` in `./index.ts`; `simulated.ts` records
+ * what the tool layer still does while the OS does nothing.
  *
  * What is measured (2026-10-09, Windows 11 26200, no elevation, no helper
  * binary, no service), through this module's own FFI path:
@@ -58,6 +67,7 @@
  */
 import { dlopen, FFIType, type Pointer, ptr, toArrayBuffer } from "bun:ffi";
 import { createHash } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 
 /** `S-1-15-2-…`, 40 bytes on x64 — the shape the kernel checks per file access. */
 export interface AppContainerProfile {
@@ -65,6 +75,16 @@ export interface AppContainerProfile {
 	name: string;
 	/** The derived package SID, in string form. */
 	sid: string;
+	/**
+	 * Whether this profile was created with the network capability baked in.
+	 *
+	 * The capability is a property of the *profile* (baked at creation, ignored
+	 * on the ALREADY_EXISTS path), not of the spawn — so a caller that runs
+	 * under a net profile must not assume a spawn-time caps struct alone would
+	 * have granted the network, and a caller holding an offline profile must
+	 * not pass one and expect it to stick.
+	 */
+	network: boolean;
 }
 
 function wbuf(text: string): Uint8Array {
@@ -72,6 +92,116 @@ function wbuf(text: string): Uint8Array {
 	const view = new DataView(out.buffer);
 	for (let i = 0; i < text.length; i++) view.setUint16(i * 2, text.charCodeAt(i), true);
 	return out;
+}
+
+/**
+ * The program name to put first in a confined command line.
+ *
+ * `CreateProcessW` is handed `lpApplicationName: null`, so the kernel resolves
+ * the program from the first token of the command line — and it resolves it
+ * **without the parent's PATH**: the child's own restricted token performs
+ * the lookup, and a bare `cmd.exe` fails with 203 (ERROR_INVALID_FUNCTION).
+ * Measured, and asymmetric with the spawn path in a way that matters: `spawn`
+ * reaches the same call but through a code path that resolves the program name
+ * itself, so a relative shell name has always worked there and the container
+ * is the first place it did not.
+ *
+ * The resolution is deliberately narrow: an argument that already carries a
+ * path separator or an extension is used as given, and only a bare name is
+ * looked up under the System32 directory — where the one bare name this build
+ * ever passes (`cmd.exe`, the `detectShell` fallback when no bash is
+ * installed) lives. A wider search (scanning the parent's PATH) would put the
+ * parent's environment inside a decision about the child's identity, which is
+ * the opposite of what a confined spawn is for.
+ */
+export function confinedProgramName(program: string): string {
+	if (program.includes("\\") || program.includes("/")) return program;
+	return `C:\\Windows\\System32\\${program}`;
+}
+
+/**
+ * One Windows command line from argv, quoted the way `CreateProcessW`'s
+ * `lpCommandLine` is parsed.
+ *
+ * **This is the verbatim form, and that is a measured requirement, not a
+ * shortcut.** `CreateProcessW` hands the string to the child's CRT, which
+ * splits it with `CommandLineToArgvW`-style rules — full escaping included —
+ * and that is the right shape for a program that parses its own argv. It is
+ * the wrong shape for `cmd /c`, whose `/s` means "take the text between the
+ * quotes exactly as it stands": an escaped `\"` then survives as a literal
+ * backslash-quote pair, cmd cannot parse it, and every command containing a
+ * quote — which is every redirection, and every command with a string in it —
+ * fails with "The filename, directory name, or volume label syntax is
+ * incorrect". Measured on both sides: Node's `spawn` with its default argv
+ * quoting fails the same command, and the same spawn with
+ * `windowsVerbatimArguments: true` — one layer of quotes, embedded quotes
+ * untouched — succeeds.
+ *
+ * So the rule here is one layer per argument: wrap in double quotes when the
+ * argument contains a space or a tab, and leave everything else alone. A
+ * program that needs escaping is not a program this shell ever runs; `bash`
+ * parses the same verbatim string with its own rules and is unaffected.
+ *
+ * Pure, so it is tested on every platform — the rule is a property of the
+ * Windows command-line format, not of the machine parsing it.
+ */
+export function confinedCommandLine(argv: readonly string[]): string {
+	return argv.map(quoteCommandLineArg).join(" ");
+}
+
+function quoteCommandLineArg(arg: string): string {
+	// Nothing to wrap and nothing to escape: the argument survives verbatim,
+	// which is the common case for `/d`, `/s`, `/c`. The empty string is not
+	// that case — verbatim it would vanish from the command line entirely and
+	// shift every argument after it left by one, so it gets quotes of its own.
+	if (arg !== "" && !/[\s"]/.test(arg)) return arg;
+	// One layer of quotes, and nothing is escaped inside them: a backslash
+	// before the closing quote would otherwise eat it, and the argument would
+	// never terminate — so a trailing run of backslashes is kept as-is only
+	// because the closing quote here is the one the shell strips, not the
+	// program's. A quoted argument ending in backslashes would need doubling
+	// under the escaped form; under the verbatim form nothing doubles.
+	return `"${arg}"`;
+}
+
+/**
+ * The environment block `CreateProcessW` wants: `K=V\0K=V\0\0`, UTF-16LE.
+ *
+ * A `Record` is not that shape, and the difference is not cosmetic: a block
+ * that is not double-NUL-terminated leaves the CRT reading past the end, and
+ * one that is not UTF-16 is read as garbage the first time a child looks up
+ * `PATH`. `wbuf` supplies the UTF-16 conversion and the final terminator, so
+ * what is left is the `K=V` entries joined with NULs.
+ *
+ * Entries the format cannot carry are dropped rather than thrown: a key naming
+ * `=` or NUL would parse as two variables, and a value with NUL would truncate
+ * the block for everything after it. An environment variable cannot contain
+ * those characters on Windows anyway, so what is being skipped is malformed
+ * input rather than a real setting.
+ *
+ * **One name is load-bearing, measured, and the measurement is strange enough
+ * to record in full.** A confined spawn whose block omits `LOCALAPPDATA` fails
+ * with 203 (ERROR_INVALID_FUNCTION) before any command runs — with or without
+ * a `cwd`, with a quoted or unquoted command line, with a 1-entry or a 93-entry
+ * block. Of all 94 variables in a real environment, adding `LOCALAPPDATA` is
+ * the only one that fixes it, and the *value* is irrelevant: a path that does
+ * not exist works, `C:\Windows\System32` works, and renaming the variable
+ * while keeping the value fails. `APPDATA` and `USERPROFILE`, the two nearest
+ * siblings, do nothing. The name is what the confined child resolves. The
+ * production path always spreads `process.env` and so is safe by accident;
+ * a caller building a minimal block has to name it, and
+ * `sandbox-wiring.test.ts` asserts the resolved form so the accident stays
+ * load-bearing.
+ */
+export function confinedEnvBlock(env: Record<string, string>): Uint8Array {
+	const entries: string[] = [];
+	for (const [key, value] of Object.entries(env)) {
+		if (key === "" || key.includes("=") || key.includes("\0") || value.includes("\0")) continue;
+		entries.push(`${key}=${value}`);
+	}
+	// Each entry NUL-terminated, then the block's own extra NUL. An empty
+	// environment is a single NUL, which is what `wbuf("")` produces.
+	return wbuf(entries.length === 0 ? "" : `${entries.join("\0")}\0`);
 }
 
 /** Read a NUL-terminated UTF-16 string out of C-allocated memory. */
@@ -142,6 +272,26 @@ function loadAdvabiRaw() {
 		return dlopen("advapi32.dll", {
 			ConvertSidToStringSidW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 			GetLengthSid: { args: [FFIType.ptr], returns: FFIType.u32 },
+			// BOOL AllocateAndInitializeSid(PSID_IDENTIFIER_AUTHORITY, BYTE nSubAuthorityCount,
+			//   DWORD nSubAuthority0..nSubAuthority7, PSID *pSid) — securitybaseapi.h:424,
+			//   NOT WinBase.h. Eleven arguments: authority, count, eight sub-authority
+			//   slots, out-pointer. The reserved slots are passed as zero.
+			AllocateAndInitializeSid: {
+				args: [
+					FFIType.ptr,
+					FFIType.u8,
+					FFIType.u32,
+					FFIType.u32,
+					FFIType.u32,
+					FFIType.u32,
+					FFIType.u32,
+					FFIType.u32,
+					FFIType.u32,
+					FFIType.u32,
+					FFIType.ptr,
+				],
+				returns: FFIType.i32,
+			},
 			// DWORD GetNamedSecurityInfoW(LPWSTR, SE_OBJECT_INFO, SECURITY_INFORMATION,
 			//   PSID*, PSID*, PACL*, PACL*, PSECURITY_DESCRIPTOR*)
 			GetNamedSecurityInfoW: {
@@ -215,10 +365,131 @@ function kernel32(): ReturnType<typeof loadKernel32Raw> | null {
 const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009;
 /** WinBase.h enum 2 (HandleList), Input bit set — bounds handle inheritance. */
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002;
+/**
+ * The poll slice while waiting for the child: short enough that an abort's
+ * latency stays imperceptible, long enough that a fast command does not spin
+ * the loop.
+ */
+const POLL_MS = 25;
+
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+/**
+ * Reads `lpEnvironment` as UTF-16, which is the form `confinedEnvBlock`
+ * writes.
+ *
+ * **Measured, and the failure is quietly catastrophic.** Without this bit the
+ * kernel reads the same bytes through the ANSI code page instead: a wide
+ * environment block is then a stream of interleaved NULs to it, the child's
+ * CRT init fails, and `CreateProcessW` returns 203
+ * (ERROR_INVALID_FUNCTION) for *every* command — with or without `cwd`, with
+ * an empty block or a 94-entry one. The two shapes were bisected apart
+ * precisely because a wrong answer here looks like a quoting bug or a PATH
+ * bug rather than a flag.
+ */
+const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
 const STARTF_USESTDHANDLES = 0x00000100;
 /** `winsta0\default`, kept alive for the life of the process: STARTUPINFOECES carries a pointer to it. */
 const INTERACTIVE_DESKTOP = wbuf("winsta0\\default");
+
+/**
+ * SECURITY_APP_PACKAGE_AUTHORITY `{0,0,0,0,0,15}` — Winnt.h:10724 — the SID
+ * authority every capability SID hangs under.
+ */
+const CAPABILITY_AUTHORITY = new Uint8Array([0, 0, 0, 0, 0, 15]);
+
+/**
+ * SECURITY_CAPABILITY_BASE_RID `3` — Winnt.h:10729 — the first sub-authority
+ * of every capability SID: `S-1-15-3-<rid>`.
+ */
+const CAPABILITY_BASE_RID = 3;
+
+/**
+ * SECURITY_CAPABILITY_INTERNET_CLIENT `1` — Winnt.h:10748.
+ *
+ * The value that grants the container outbound network. NOT 85: that is the
+ * `WinCapabilityInternetClientSid` **CreateWellKnownSid enum ordinal** — a
+ * different namespace that happens to describe the same capability. Allocating
+ * with 85 produces a structurally valid SID that grants nothing, and the first
+ * capability probe burned a full run on that confusion (loopback timeouts and
+ * DNS failure with "network-capable" children) before the SDK header settled
+ * which number was which.
+ */
+const CAPABILITY_INTERNET_CLIENT = 1;
+
+/** SE_GROUP_ENABLED — the attributes word a capability carries in SECURITY_CAPABILITIES. */
+const SE_GROUP_ENABLED = 4;
+
+/**
+ * The capability SID addresses, kept alive for the life of the process.
+ *
+ * A SID_AND_ATTRIBUTES entry holds a raw pointer to the SID bytes, so an
+ * allocation freed (or collected) under a live SECURITY_CAPABILITIES struct is
+ * a wild pointer the kernel follows during process creation. Two capabilities
+ * allocated once and cached is cheaper than reasoning about lifetimes at every
+ * spawn.
+ */
+const capabilitySidCache = new Map<number, number>();
+
+/** Allocates `S-1-15-3-<rid>` and returns its numeric address. */
+function capabilitySid(rid: number): number | null {
+	const cached = capabilitySidCache.get(rid);
+	if (cached !== undefined) return cached;
+	const conv = advapi();
+	if (conv === null) return null;
+	const out = new BigUint64Array(1);
+	const ok = conv.symbols.AllocateAndInitializeSid(
+		ptr(CAPABILITY_AUTHORITY),
+		2, // revision-independent: the capability SID has two sub-authorities
+		CAPABILITY_BASE_RID,
+		rid,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		out,
+	);
+	if (ok === 0) return null;
+	const addr = Number(out[0]);
+	capabilitySidCache.set(rid, addr);
+	return addr;
+}
+
+/**
+ * Build `{ SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES[] }` for an app SID plus
+ * capabilities.
+ *
+ * Layout, x64: SECURITY_CAPABILITIES is 24 bytes (app SID at 0, capabilities
+ * pointer at 8, count at 16, reserved at 20); each SID_AND_ATTRIBUTES is 16
+ * bytes (SID pointer at 0, attributes at 8). With no capabilities the pointer
+ * is NULL and the count zero — never the address of a zero-length buffer,
+ * which is what the empty-buffer path would hand the kernel.
+ *
+ * The returned buffers must stay referenced until `CreateProcessW` returns:
+ * the kernel reads them during creation.
+ */
+function buildSecurityCapabilities(
+	appSidAddr: number,
+	rids: readonly number[],
+): { caps: Uint8Array; attrs: Uint8Array } {
+	const caps = new Uint8Array(24);
+	const capsView = new DataView(caps.buffer);
+	capsView.setBigUint64(0, BigInt(appSidAddr), true);
+	const attrs = rids.length === 0 ? new Uint8Array(0) : new Uint8Array(16 * rids.length);
+	if (rids.length > 0) {
+		const attrsView = new DataView(attrs.buffer);
+		rids.forEach((rid, index) => {
+			const sidAddr = capabilitySid(rid);
+			if (sidAddr === null) throw new Error(`capability SID for rid ${rid} could not be allocated`);
+			attrsView.setBigUint64(index * 16, BigInt(sidAddr), true);
+			attrsView.setUint32(index * 16 + 8, SE_GROUP_ENABLED, true);
+		});
+		capsView.setBigUint64(8, BigInt(Number(ptr(attrs))), true);
+	}
+	capsView.setUint32(16, rids.length, true);
+	return { caps, attrs };
+}
 
 /**
  * The profile name for a workspace: `labunbun-<16 hex of the canonical path>`.
@@ -228,13 +499,21 @@ const INTERACTIVE_DESKTOP = wbuf("winsta0\\default");
  * agree on the profile, or the second run's grant would name a SID no process
  * can ever hold. The hash is of the lowercased absolute path (Windows paths
  * are case-insensitive, and `C:\Ws` and `c:\ws` are the same directory).
+ *
+ * The `labunbun-net-` variant is a separate name because capabilities are baked
+ * into the profile at creation: creating a profile that already exists is a
+ * no-op success whose capabilities parameter is ignored (measured), so the
+ * mode has to be part of the name or the first creation decides the mode
+ * forever. If a net profile was ever created without them on a machine, the fix
+ * is to delete the profile and let it be recreated — which is recorded here so
+ * the next person does not have to rediscover why.
  */
-export function appContainerProfileName(workspace: string): string {
+export function appContainerProfileName(workspace: string, network = false): string {
 	// Backslash and forward slash are the same separator on Windows; two
 	// spellings of one directory must not get two profiles.
 	const normalized = workspace.toLowerCase().replace(/\\/g, "/");
 	const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
-	return `labunbun-${digest}`;
+	return network ? `labunbun-net-${digest}` : `labunbun-${digest}`;
 }
 
 /**
@@ -244,20 +523,43 @@ export function appContainerProfileName(workspace: string): string {
  * (`0x800700B7`, ERROR_ALREADY_EXISTS) — which is the success case for every
  * run after the first, so it is not an error here. The SID is derived either
  * way, because derivation never fails for a name this user owns.
+ *
+ * `network` selects the profile *and* its capability set. The capabilities are
+ * baked at creation, and the creation call ignores them when the profile
+ * already exists (measured: the ALREADY_EXISTS path never writes the output
+ * SID either, which is why the derive follows) — so the name carrying the mode
+ * is what keeps the first creation's capability set from being the permanent
+ * answer for both modes.
  */
-export function ensureAppContainerProfile(workspace: string): AppContainerProfile | { error: string } {
+export function ensureAppContainerProfile(workspace: string, network = false): AppContainerProfile | { error: string } {
 	const lib = userenv();
 	if (lib === null) return { error: "userenv.dll is not loadable on this platform" };
-	const name = appContainerProfileName(workspace);
+	const name = appContainerProfileName(workspace, network);
 	const nameBuf = wbuf(name);
 	const sidOut = new BigUint64Array(1);
 	const display = wbuf("LaBunbun sandbox");
 	const description = wbuf("Holds commands a LaBunbun session runs under the workspace-write sandbox.");
+	// The capabilities, as the SID_AND_ATTRIBUTES array creation wants — NOT
+	// the SECURITY_CAPABILITIES struct: passing the struct in the fourth
+	// parameter is E_INVALIDARG (0x80070057), measured. With no capabilities
+	// the parameter must be NULL — `ptr` refuses a zero-length buffer anyway
+	// ("a pointer to empty memory doesn't work"), which is the same rule the
+	// kernel states.
+	const rids = network ? [CAPABILITY_INTERNET_CLIENT] : [];
+	const appSidAddr = sidAddressFor(name);
+	const capsArray = appSidAddr === null || rids.length === 0 ? null : buildSecurityCapabilities(appSidAddr, rids);
 	// Compare unsigned: the HRESULT arrives as a signed i32, and every
 	// failure HRESULT has its high bit set — 0x800700B7 is a negative number
 	// as the FFI returns it, and a signed compare reports ERROR_ALREADY_EXISTS
 	// as an unknown failure.
-	const created = lib.symbols.CreateAppContainerProfile(ptr(nameBuf), ptr(display), ptr(description), null, 0, sidOut);
+	const created = lib.symbols.CreateAppContainerProfile(
+		ptr(nameBuf),
+		ptr(display),
+		ptr(description),
+		capsArray === null ? null : ptr(capsArray.attrs),
+		rids.length,
+		sidOut,
+	);
 	const S_OK = 0;
 	const ERROR_ALREADY_EXISTS = 0x800700b7;
 	const unsigned = created >>> 0;
@@ -270,7 +572,7 @@ export function ensureAppContainerProfile(workspace: string): AppContainerProfil
 	// thing that works on every run after the first.
 	const sid = unsigned === S_OK ? sidString(Number(sidOut[0])) : deriveAppContainerSid(name);
 	if (sid === null) return { error: "the profile exists but its SID could not be read back" };
-	return { name, sid };
+	return { name, sid, network };
 }
 
 /** The SID string for a name, creating nothing. Deterministic. */
@@ -457,6 +759,11 @@ export interface ConfinedRunResult {
 	exitCode: number;
 	stdout: string;
 	stderr: string;
+	/**
+	 * True when this run ended the child itself — a timeout kill or an abort
+	 * kill — rather than the child exiting on its own.
+	 */
+	killed: boolean;
 	/** Why the run did not complete normally, when it did not. */
 	error?: string;
 }
@@ -466,19 +773,33 @@ export interface ConfinedRunOptions {
 	/** Environment block for the child, in the `K=V\0K=V\0\0` form Windows wants. */
 	env?: Uint8Array;
 	timeoutMs?: number;
+	/** Decoded stdout as it arrives — the live preview a shell user expects. */
+	onStdout?: (chunk: string) => void;
+	/** Decoded stderr as it arrives. */
+	onStderr?: (chunk: string) => void;
+	/** Aborting kills the child and settles the run; checked every poll. */
+	signal?: AbortSignal;
+}
+
+/** The one failure shape: a run that never started, carrying a number a reader can act on. */
+function ffFailure(error: string): ConfinedRunResult {
+	return { exitCode: -1, stdout: "", stderr: "", killed: false, error };
 }
 
 /**
- * Run one command line inside this profile and wait for it.
+ * Run one command line inside this profile, streaming its output.
  *
- * The command runs to completion with its stdout/stderr on anonymous pipes —
- * this is the shape the Bash tool needs (captured output, not an inherited
- * console), and it is why the spawner lives here rather than being a
- * `Bun.spawn` the caller could have done itself: `Bun.spawn` cannot attach
- * the security-capabilities attribute to the child it creates.
+ * The command's stdout/stderr arrive on anonymous pipes — the shape the Bash
+ * tool needs (captured output with a live preview, not an inherited console),
+ * and it is why the spawner lives here rather than being a `Bun.spawn` the
+ * caller could have done itself: `Bun.spawn` cannot attach the
+ * security-capabilities attribute to the child it creates. Chunks are decoded
+ * incrementally, so a multi-byte character split across two reads arrives
+ * whole rather than as a replacement character.
  *
- * On failure the result says which call failed and with what error code,
- * because every failure mode here is a number a reader can act on.
+ * An abort signal or a timeout kills the child; either way the result reports
+ * `killed`. On failure the result says which call failed and with what error
+ * code, because every failure mode here is a number a reader can act on.
  */
 export function runConfined(
 	profile: AppContainerProfile,
@@ -486,17 +807,22 @@ export function runConfined(
 	options: ConfinedRunOptions = {},
 ): ConfinedRunResult {
 	const lib = kernel32();
-	if (lib === null) return { exitCode: -1, stdout: "", stderr: "", error: "kernel32 FFI is unavailable" };
+	if (lib === null) return ffFailure("kernel32 FFI is unavailable");
 	{
 		const sid = deriveAppContainerSid(profile.name);
-		if (sid === null)
-			return { exitCode: -1, stdout: "", stderr: "", error: `no profile named ${profile.name} exists for this user` };
+		if (sid === null) return ffFailure(`no profile named ${profile.name} exists for this user`);
 	}
 	const sidAddr = sidAddressFor(profile.name);
-	if (sidAddr === null)
-		return { exitCode: -1, stdout: "", stderr: "", error: `no profile named ${profile.name} exists for this user` };
+	if (sidAddr === null) return ffFailure(`no profile named ${profile.name} exists for this user`);
 
-	return runConfinedWithSid(sidAddr, commandLine, options);
+	// The capability list the spawn's SECURITY_CAPABILITIES carries. The
+	// profile's baked-in capability would be enough on its own for a profile
+	// created with it, but the spawn-time struct is what the kernel actually
+	// reads for the token, so a net profile passes the same list here — a
+	// mismatch (net profile, empty caps) would be a network-less child under a
+	// profile that says otherwise.
+	const spawnRids = profile.network ? [CAPABILITY_INTERNET_CLIENT] : [];
+	return runConfinedWithSid(sidAddr, commandLine, options, spawnRids);
 }
 
 function sidAddressFor(name: string): number | null {
@@ -507,13 +833,25 @@ function sidAddressFor(name: string): number | null {
 	return Number(sidOut[0]);
 }
 
-function runConfinedWithSid(sidAddr: number, commandLine: string, options: ConfinedRunOptions): ConfinedRunResult {
+function runConfinedWithSid(
+	sidAddr: number,
+	commandLine: string,
+	options: ConfinedRunOptions,
+	spawnRids: readonly number[] = [],
+): ConfinedRunResult {
 	const lib = kernel32();
-	if (lib === null) return { exitCode: -1, stdout: "", stderr: "", error: "kernel32 FFI is unavailable" };
+	if (lib === null) return ffFailure("kernel32 FFI is unavailable");
 
-	// SECURITY_CAPABILITIES { AppContainerSid, Capabilities = null, Count = 0, Reserved = 0 }
-	const caps = new Uint8Array(24);
-	new DataView(caps.buffer).setBigUint64(0, BigInt(sidAddr), true);
+	// SECURITY_CAPABILITIES { AppContainerSid, Capabilities, Count, Reserved }.
+	// The capabilities and their array must stay referenced until CreateProcessW
+	// returns — the kernel reads both during creation — which is why they are
+	// locals held across the whole function rather than temporaries in the
+	// argument list. `attrs` is deliberately unused: the kernel reaches the
+	// SID_AND_ATTRIBUTES array through the pointer inside `caps`, so keeping
+	// the JS reference is the whole job (a GC'd array under a live pointer is
+	// a wild read), and the linter's "unused" is exactly the lifetime pin.
+	const { caps, attrs } = buildSecurityCapabilities(sidAddr, spawnRids);
+	void attrs;
 
 	const sizeOut = new BigUint64Array(1);
 	// Two attributes, not one: the container capabilities, and — because the
@@ -524,12 +862,7 @@ function runConfinedWithSid(sidAddr: number, commandLine: string, options: Confi
 	lib.symbols.InitializeProcThreadAttributeList(null, attrCount, 0, sizeOut);
 	const attrList = new Uint8Array(Number(sizeOut[0]));
 	if (lib.symbols.InitializeProcThreadAttributeList(ptr(attrList), attrCount, 0, sizeOut) === 0) {
-		return {
-			exitCode: -1,
-			stdout: "",
-			stderr: "",
-			error: `InitializeProcThreadAttributeList failed (${lib.symbols.GetLastError()})`,
-		};
+		return ffFailure(`InitializeProcThreadAttributeList failed (${lib.symbols.GetLastError()})`);
 	}
 	const attrAddr = ptr(attrList);
 	if (
@@ -544,12 +877,7 @@ function runConfinedWithSid(sidAddr: number, commandLine: string, options: Confi
 		) === 0
 	) {
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return {
-			exitCode: -1,
-			stdout: "",
-			stderr: "",
-			error: `UpdateProcThreadAttribute(capabilities) failed (${lib.symbols.GetLastError()})`,
-		};
+		return ffFailure(`UpdateProcThreadAttribute(capabilities) failed (${lib.symbols.GetLastError()})`);
 	}
 
 	// Pipes for stdin/stdout/stderr. Each carries SECURITY_ATTRIBUTES with
@@ -574,13 +902,13 @@ function runConfinedWithSid(sidAddr: number, commandLine: string, options: Confi
 	const errWrite = new BigUint64Array(1);
 	if (lib.symbols.CreatePipe(inRead, inWrite, ptr(inheritable), 0) === 0) {
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return { exitCode: -1, stdout: "", stderr: "", error: `CreatePipe(stdin) failed (${lib.symbols.GetLastError()})` };
+		return ffFailure(`CreatePipe(stdin) failed (${lib.symbols.GetLastError()})`);
 	}
 	if (lib.symbols.CreatePipe(outRead, outWrite, ptr(inheritable), 0) === 0) {
 		lib.symbols.CloseHandle(inRead[0]);
 		lib.symbols.CloseHandle(inWrite[0]);
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return { exitCode: -1, stdout: "", stderr: "", error: `CreatePipe(stdout) failed (${lib.symbols.GetLastError()})` };
+		return ffFailure(`CreatePipe(stdout) failed (${lib.symbols.GetLastError()})`);
 	}
 	if (lib.symbols.CreatePipe(errRead, errWrite, ptr(inheritable), 0) === 0) {
 		lib.symbols.CloseHandle(inRead[0]);
@@ -588,7 +916,7 @@ function runConfinedWithSid(sidAddr: number, commandLine: string, options: Confi
 		lib.symbols.CloseHandle(outRead[0]);
 		lib.symbols.CloseHandle(outWrite[0]);
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return { exitCode: -1, stdout: "", stderr: "", error: `CreatePipe(stderr) failed (${lib.symbols.GetLastError()})` };
+		return ffFailure(`CreatePipe(stderr) failed (${lib.symbols.GetLastError()})`);
 	}
 	lib.symbols.CloseHandle(inWrite[0]);
 
@@ -612,12 +940,7 @@ function runConfinedWithSid(sidAddr: number, commandLine: string, options: Confi
 		lib.symbols.CloseHandle(outWrite[0]);
 		lib.symbols.CloseHandle(errRead[0]);
 		lib.symbols.CloseHandle(errWrite[0]);
-		return {
-			exitCode: -1,
-			stdout: "",
-			stderr: "",
-			error: `UpdateProcThreadAttribute(handles) failed (${lib.symbols.GetLastError()})`,
-		};
+		return ffFailure(`UpdateProcThreadAttribute(handles) failed (${lib.symbols.GetLastError()})`);
 	}
 
 	// STARTUPINFOEX on x64: 104 bytes of STARTUPINFO (dwFlags at 60, the three
@@ -652,7 +975,7 @@ function runConfinedWithSid(sidAddr: number, commandLine: string, options: Confi
 		1, // bInheritHandles: the std handles must cross into the child. The
 		// container child dies in CRT init without it AND without an explicit
 		// lpDesktop — both halves are load-bearing, see the siex comment.
-		EXTENDED_STARTUPINFO_PRESENT,
+		EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
 		envBuf === null ? null : ptr(envBuf),
 		cwdBuf === null ? null : ptr(cwdBuf),
 		ptr(siex),
@@ -667,22 +990,81 @@ function runConfinedWithSid(sidAddr: number, commandLine: string, options: Confi
 		lib.symbols.CloseHandle(outRead[0]);
 		lib.symbols.CloseHandle(errRead[0]);
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return { exitCode: -1, stdout: "", stderr: "", error: `CreateProcessW failed (${err})` };
+		return ffFailure(`CreateProcessW failed (${err})`);
 	}
 
 	const timeoutMs = options.timeoutMs ?? 600_000;
-	const waited = lib.symbols.WaitForSingleObject(pi[0], timeoutMs);
-	if (waited === 258) {
-		// WAIT_TIMEOUT: the command outlived its budget. Kill it FIRST — a
-		// process that still lives still holds the write ends, and reading a
-		// pipe with a live writer blocks forever, which is a deadlock, not a
-		// slow read.
-		lib.symbols.TerminateProcess(pi[0], 1);
+	const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : null;
+	const decoderOut = new StringDecoder("utf8");
+	const decoderErr = new StringDecoder("utf8");
+	const outChunks: string[] = [];
+	const errChunks: string[] = [];
+	const pumpOut = (): { eof: boolean; text: boolean } =>
+		pumpPipe(lib, outRead[0], decoderOut, outChunks, options.onStdout);
+	const pumpErr = (): { eof: boolean; text: boolean } =>
+		pumpPipe(lib, errRead[0], decoderErr, errChunks, options.onStderr);
+
+	// The wait is a poll, not one blocking call: the pipes have to be pumped
+	// while the command runs — that is what a live preview is — and an abort
+	// has to be able to end the run between polls. Each slice waits briefly,
+	// drains both pipes, and then asks which of the end conditions arrived.
+	let waitError: string | undefined;
+	for (;;) {
+		const waited = lib.symbols.WaitForSingleObject(pi[0], POLL_MS);
+		// Pump before the exit check, so the child's final words — written on its
+		// way out, after the last wait — are captured.
+		pumpOut();
+		pumpErr();
+		// WAIT_OBJECT_0 (0) means signaled, which for a process handle means it
+		// has exited.
+		if (waited === 0) break;
+		if (options.signal?.aborted) {
+			// An abort is the caller's deadline arriving early: kill and say so.
+			lib.symbols.TerminateProcess(pi[0], 1);
+			waitError = "the command was aborted before it exited";
+			break;
+		}
+		if (deadline !== null && Date.now() >= deadline) {
+			// Kill FIRST — a process that still lives still holds the write
+			// ends, and reading a pipe with a live writer blocks forever,
+			// which is a deadlock, not a slow read.
+			lib.symbols.TerminateProcess(pi[0], 1);
+			waitError = `the command did not exit within ${timeoutMs}ms`;
+			break;
+		}
 	}
-	// Reading happens only with every writer either exited or killed: a read
-	// then either drains or reports the broken pipe that means EOF.
-	const stdout = drainPipe(pi[0], lib, outRead[0]);
-	const stderr = drainPipe(pi[0], lib, errRead[0]);
+
+	// The final drain. Exit or kill closed every writer the child held, so a
+	// read now either drains or reports the broken pipe that means EOF. A
+	// grandchild the command spawned may still hold one — quiet with the
+	// process gone gets a bounded grace (50 × 20ms), the rule the old
+	// drainPipe had.
+	let quietPolls = 0;
+	for (;;) {
+		const out = pumpOut();
+		const err = pumpErr();
+		if (out.eof && err.eof) break;
+		if (out.text || err.text) {
+			quietPolls = 0;
+			continue;
+		}
+		quietPolls += 1;
+		if (quietPolls > 50) break;
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+	}
+	// A stream that ends mid-character leaves the decoder holding bytes; end()
+	// flushes them as the replacement character rather than dropping them.
+	const tailOut = decoderOut.end();
+	const tailErr = decoderErr.end();
+	if (tailOut !== "") {
+		outChunks.push(tailOut);
+		options.onStdout?.(tailOut);
+	}
+	if (tailErr !== "") {
+		errChunks.push(tailErr);
+		options.onStderr?.(tailErr);
+	}
+
 	const exit = new Uint32Array(1);
 	lib.symbols.GetExitCodeProcess(pi[0], exit);
 	lib.symbols.CloseHandle(pi[0]);
@@ -692,56 +1074,49 @@ function runConfinedWithSid(sidAddr: number, commandLine: string, options: Confi
 	lib.symbols.DeleteProcThreadAttributeList(attrAddr);
 	return {
 		exitCode: exit[0],
-		stdout,
-		stderr,
-		...(waited === 258 ? { error: `the command did not exit within ${timeoutMs}ms` } : {}),
+		stdout: outChunks.join(""),
+		stderr: errChunks.join(""),
+		killed: waitError !== undefined,
+		...(waitError !== undefined ? { error: waitError } : {}),
 	};
 }
 
 /**
- * Drain a pipe whose writers are all gone, as text — and keep draining while
- * the command lives, because a slow builder writes for minutes.
+ * One non-blocking round of a pipe: everything currently buffered comes out,
+ * decoded, and emitted. Reports whether the pipe reached EOF (a broken pipe —
+ * every writer closed) and whether this round produced any text.
  *
  * Peek before every read: `ReadFile` on a synchronous pipe blocks until data
- * or EOF, and EOF is the one state Peek reports as a broken pipe. The wait is
- * bounded by the process, not by the pipe — quiet with the command still
- * running is a build mid-thought, and cutting it off there would truncate
- * real output. Only a dead process with a quiet pipe is a grandchild holding
- * the write end (a `start`ed background process, a service the command
- * launched), and that is the one state this loop stops waiting for.
+ * or EOF, and `PeekNamedPipe` is what tells the two apart without blocking.
+ * Its 5th parameter is the one that answers — lpTotalBytesAvail; the 6th is
+ * bytes-left-in-this-message, which is zero for a byte stream and reads as
+ * "no data" forever.
  */
-function drainPipe(processHandle: bigint, lib: NonNullable<ReturnType<typeof kernel32>>, handle: bigint): string {
-	const chunks: Uint8Array[] = [];
-	let quietPolls = 0;
+function pumpPipe(
+	lib: NonNullable<ReturnType<typeof kernel32>>,
+	handle: bigint,
+	decoder: StringDecoder,
+	sink: string[],
+	onText: ((chunk: string) => void) | undefined,
+): { eof: boolean; text: boolean } {
+	let text = false;
 	for (;;) {
-		// Peek's 5th parameter is the one that answers — lpTotalBytesAvail. The
-		// 6th is bytes-left-in-this-message, which is zero for a byte stream
-		// and reads as "no data" forever.
 		const available = new BigUint64Array(1);
-		const peek = lib.symbols.PeekNamedPipe(handle, null, 0, null, available, null);
-		if (peek === 0) break; // ERROR_BROKEN_PIPE: every writer is closed — EOF
+		if (lib.symbols.PeekNamedPipe(handle, null, 0, null, available, null) === 0) return { eof: true, text };
 		const bytes = Number(available[0]);
-		if (bytes === 0) {
-			// Quiet: fine while the command runs, bounded once it does not.
-			// WAIT_OBJECT_0 (0) means signaled, which for a process handle
-			// means it has exited — the opposite reading spins forever on a
-			// pipe whose writer is already gone.
-			const exited = lib.symbols.WaitForSingleObject(processHandle, 0) === 0;
-			if (exited) {
-				quietPolls += 1;
-				if (quietPolls > 50) break;
-			}
-			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-			continue;
-		}
-		quietPolls = 0;
+		if (bytes === 0) return { eof: false, text };
 		const buffer = new Uint8Array(Math.min(bytes, 1024 * 1024));
 		const read = new BigUint64Array(1);
-		if (lib.symbols.ReadFile(handle, buffer, buffer.length, read, null) === 0) break;
+		if (lib.symbols.ReadFile(handle, buffer, buffer.length, read, null) === 0) return { eof: true, text };
 		const count = Number(read[0]);
-		if (count > 0) chunks.push(buffer.slice(0, count));
+		if (count === 0) return { eof: false, text };
+		const chunk = decoder.write(Buffer.from(buffer.buffer, buffer.byteOffset, count));
+		if (chunk !== "") {
+			sink.push(chunk);
+			onText?.(chunk);
+			text = true;
+		}
 	}
-	return Buffer.concat(chunks).toString("utf8");
 }
 
 /** True when this machine can confine a process this way at all. */
@@ -756,6 +1131,15 @@ interface ActiveGrant {
 	sid: Uint8Array;
 	/** How many commands are running under it right now. */
 	refs: number;
+	/**
+	 * Every root this grant wrote an ACE on, the workspace first.
+	 *
+	 * Recorded because the release has to remove exactly what the acquire
+	 * added: dropping only the workspace would leave write ACEs on the temp
+	 * directory and the caches — a grant that outlives the command that asked
+	 * for it, which is a widening rather than a leak.
+	 */
+	roots: string[];
 }
 
 const activeGrants = new Map<string, ActiveGrant>();
@@ -766,19 +1150,34 @@ export interface GrantOutcome {
 }
 
 /**
- * Grants the container SID write access to this workspace (and read-only to
- * every `.git` under it), with a refcount.
+ * Grants the container SID write access to this workspace — and to any extra
+ * writable roots a real session names — with a refcount.
  *
- * The refcount is per workspace and per process: two commands running at once
- * share one grant, and the grant is released only by the last. A crash leaves
- * the ACEs on disk — a later round sweeps those from the state file this
- * records, and until then they name the same SID the next run derives again,
- * so a leftover grant is reusable rather than dangerous.
+ * The refcount is per profile and per process: two commands running at once
+ * share one grant, and the grant is released only by the last. The key is the
+ * profile name rather than the workspace because a workspace now has two
+ * profiles — offline and network-capable — with two SIDs, and a grant that
+ * named the wrong one would be an ACE for an identity no child ever runs as.
+ *
+ * `extraRoots` is what the resolver's `grantRoots` carries beyond the
+ * workspace. A real session's policy names the temp directory and the home
+ * package caches beside the workspace, and a container granted only the
+ * workspace cannot `mktemp` and cannot write its install cache — so a caller
+ * that resolves through `resolveSandboxExecution` passes the whole list, not
+ * just the entry the profile is derived from.
+ *
+ * A crash leaves the ACEs on disk — a later round sweeps those from the state
+ * file this records, and until then they name the same SID the next run
+ * derives again, so a leftover grant is reusable rather than dangerous.
  */
-export function acquireWorkspaceGrant(workspace: string): GrantOutcome {
-	const profile = ensureAppContainerProfile(workspace);
+export function acquireWorkspaceGrant(
+	workspace: string,
+	network = false,
+	extraRoots: readonly string[] = [],
+): GrantOutcome {
+	const profile = ensureAppContainerProfile(workspace, network);
 	if ("error" in profile) return { error: profile.error };
-	const existing = activeGrants.get(workspace);
+	const existing = activeGrants.get(profile.name);
 	if (existing !== undefined) {
 		existing.refs += 1;
 		return { profile };
@@ -787,25 +1186,39 @@ export function acquireWorkspaceGrant(workspace: string): GrantOutcome {
 	if (sid === null) {
 		return { profile, error: `the profile for ${workspace} has no readable SID` };
 	}
-	const grantError = grantRootAccess(workspace, sid);
-	if (grantError !== null) {
-		// Fail closed on the write boundary that matters: a command that runs
-		// with no grant cannot touch the workspace, which is a legible failure
-		// rather than an unconfined one.
-		return { profile, error: grantError };
+	// The workspace first, then the roots the policy adds. Every root is
+	// granted or none is: a half-grant leaves a command that can write its
+	// workspace but not its cache, which is the narrower-than-asked failure
+	// this repository already fixed once in `policyFor` — and here it would be
+	// worse, because the first write that misses is the one that fails.
+	const roots = [workspace, ...extraRoots.filter((root) => root !== workspace)];
+	for (const root of roots) {
+		const grantError = grantRootAccess(root, sid);
+		if (grantError !== null) {
+			// Fail closed on the write boundary that matters: a command that runs
+			// with no grant cannot touch the workspace, which is a legible failure
+			// rather than an unconfined one.
+			return { profile, error: grantError };
+		}
 	}
-	activeGrants.set(workspace, { sid, refs: 1 });
+	activeGrants.set(profile.name, { sid, refs: 1, roots });
 	return { profile };
 }
 
 /** Drops one reference, and on the last one removes every ACE this grant added. */
-export function releaseWorkspaceGrant(workspace: string): string | null {
-	const grant = activeGrants.get(workspace);
+export function releaseWorkspaceGrant(workspace: string, network = false): string | null {
+	const grant = activeGrants.get(appContainerProfileName(workspace, network));
 	if (grant === undefined) return null;
 	grant.refs -= 1;
 	if (grant.refs > 0) return null;
-	activeGrants.delete(workspace);
-	return dropAcesFor(workspace, grant.sid);
+	activeGrants.delete(appContainerProfileName(workspace, network));
+	// Every root, not just the workspace — see `ActiveGrant.roots` for why.
+	let firstError: string | null = null;
+	for (const root of grant.roots) {
+		const dropError = dropAcesFor(root, grant.sid);
+		if (dropError !== null && firstError === null) firstError = dropError;
+	}
+	return firstError;
 }
 
 /** The SID bytes of a profile name, through the same derivation the profile uses. */

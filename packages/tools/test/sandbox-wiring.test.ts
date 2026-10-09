@@ -640,6 +640,372 @@ describe("the network axis does not smuggle a wrapper around an unrestricted fil
 	});
 });
 
+describe("the Windows AppContainer branch, selected by the resolver", () => {
+	// The fifth outcome, and the only one that is not an argv decision. It is
+	// testable on every machine because every input is injected: `platform`,
+	// the backend-availability flag, and `exists`. What each test below pins is
+	// one condition of the branch or one property of what it returns — the
+	// workspace it derives the container from, and the list of roots the caller
+	// must grant before the spawn.
+	const confined = (cwd: string, network: NetworkAxis, writableRoots?: string[]) =>
+		policyFor({ sandbox: "workspace-write", workspace: cwd, network, writableRoots });
+
+	const win32 = {
+		command: ["C:\\Windows\\System32\\cmd.exe", "/d", "/s", "/c", "true"],
+		platform: "win32" as const,
+		hasAppContainer: true,
+		exists: () => true,
+	};
+
+	test("an open network with a usable backend resolves to the container, naming the workspace", () => {
+		const cwd = workspace();
+		const resolution = resolveSandboxExecution({ ...win32, policy: confined(cwd, { access: "enabled", domains: [] }) });
+		expect(resolution.kind).toBe("appcontainer");
+		if (resolution.kind !== "appcontainer") return;
+		// The profile — the identity, and the refcount that decides when a grant
+		// is released — is derived from this path, so it is the workspace and
+		// nothing else.
+		expect(resolution.workspace).toBe(canonical(cwd));
+		expect(resolution.network).toBe(true);
+		// Fifty characters and lowercase is the shape `userenv` accepts, and it
+		// is `appcontainer.ts` that enforces it — here the point is only that the
+		// resolution carried a real path, not the empty string.
+		expect(resolution.workspace.length).toBeGreaterThan(0);
+	});
+
+	test("the grant list is every writable root, the workspace first and each path once", () => {
+		// More than the workspace is writable in every real session — the temp
+		// directory and the package caches arrive beside it — and a container
+		// granted only the workspace cannot `mktemp`. The workspace leads because
+		// the identity is derived from it; the rest follow in policy order.
+		const cwd = workspace();
+		const cache = mkdtempSync(join(tmpdir(), "lbb-ac-cache-"));
+		const resolution = resolveSandboxExecution({
+			...win32,
+			policy: confined(cwd, { access: "enabled", domains: [] }, [cache, cwd]),
+		});
+		expect(resolution.kind).toBe("appcontainer");
+		if (resolution.kind !== "appcontainer") return;
+		// `cwd` appears twice in the policy's entries — once as the workspace
+		// and once as a writable root that names itself — and is granted once.
+		expect(resolution.grantRoots).toEqual([canonical(cwd), canonical(cache)]);
+	});
+
+	test("a skip-marked root that does not exist is dropped from the grant list", () => {
+		// The same rule the translators follow, for a reason that is stronger
+		// here: granting a path that is not there fails the grant outright, so
+		// keeping it would turn a confined command into a command that does not
+		// run at all — a narrower sandbox becoming a broken tool.
+		const cwd = workspace();
+		const absent = join(tmpdir(), "lbb-ac-never-created");
+		const present = mkdtempSync(join(tmpdir(), "lbb-ac-present-"));
+		const resolution = resolveSandboxExecution({
+			...win32,
+			exists: (path) => path !== canonical(absent),
+			policy: confined(cwd, { access: "enabled", domains: [] }, [absent, present]),
+		});
+		expect(resolution.kind).toBe("appcontainer");
+		if (resolution.kind !== "appcontainer") return;
+		expect(resolution.grantRoots).toEqual([canonical(cwd), canonical(present)]);
+		// And the workspace itself survives the same filter even when it is not
+		// there — it is the one entry never marked `skip`.
+		const gone = resolveSandboxExecution({
+			...win32,
+			exists: () => false,
+			policy: confined(cwd, { access: "enabled", domains: [] }, [present]),
+		});
+		expect(gone.kind).toBe("appcontainer");
+		if (gone.kind !== "appcontainer") return;
+		expect(gone.grantRoots).toEqual([canonical(cwd)]);
+	});
+
+	test("read-only roots stay out of the grant list", () => {
+		// A grant there buys nothing: a container child reads outside its grant
+		// by default and only writes are refused. Asserting the absence is what
+		// stops a later "grant everything the policy mentions" change from
+		// passing silently.
+		const cwd = workspace();
+		const readable = mkdtempSync(join(tmpdir(), "lbb-ac-readable-"));
+		const resolution = resolveSandboxExecution({
+			...win32,
+			policy: policyFor({
+				sandbox: "workspace-write",
+				workspace: cwd,
+				network: { access: "enabled", domains: [] },
+				readOnlyRoots: [readable],
+			}),
+		});
+		expect(resolution.kind).toBe("appcontainer");
+		if (resolution.kind !== "appcontainer") return;
+		expect(resolution.grantRoots).toEqual([canonical(cwd)]);
+	});
+
+	test("a restricted network keeps the simulated answer, backend or none", () => {
+		// The measured reason, and it is the one that is easy to get wrong: the
+		// proxy that enforces the axis listens on loopback, and a container child
+		// cannot reach it — so confining a restricted command would enforce the
+		// axis by breaking the network, every allowed domain failing alongside
+		// every denied one. `simulated` is where the tool layer and the proxy
+		// still hold the axis, which is an honest answer rather than a broken
+		// one.
+		const restricted: NetworkAxis = {
+			access: "restricted",
+			domains: [{ pattern: "registry.npmjs.org", permission: "allow" }],
+		};
+		const resolution = resolveSandboxExecution({ ...win32, policy: confined(workspace(), restricted) });
+		expect(resolution.kind).toBe("simulated");
+	});
+
+	test("without the availability flag the answer is the simulated one it has always been", () => {
+		// The default direction, and the safe one: a wrong `true` sends a
+		// command down a container path whose profile and grant were never
+		// established, while a wrong `false` costs the answer this platform
+		// already gives. No production caller passes the flag yet.
+		const { hasAppContainer: _ignored, ...withoutFlag } = win32;
+		const resolution = resolveSandboxExecution({
+			...withoutFlag,
+			policy: confined(workspace(), { access: "enabled", domains: [] }),
+		});
+		expect(resolution.kind).toBe("simulated");
+	});
+
+	test("danger-full-access wraps nothing, whatever the platform claims", () => {
+		// The unrestricted short-circuit runs before the branch, and it has to:
+		// an unrestricted filesystem with a container around it is confinement
+		// the user asked not to have.
+		const resolution = resolveSandboxExecution({
+			...win32,
+			policy: policyFor({
+				sandbox: "danger-full-access",
+				workspace: workspace(),
+				network: { access: "enabled", domains: [] },
+			}),
+		});
+		expect(resolution.kind).toBe("unconfined");
+	});
+
+	test("a policy whose only roots are all skip-marked never reaches the branch", () => {
+		// A hand-built policy can name roots without naming a workspace. The
+		// branch refuses rather than picking an arbitrary root as the identity —
+		// an identity per root would be an identity per command, and the
+		// refcount that releases a grant would have nothing stable to hang on.
+		const cache = mkdtempSync(join(tmpdir(), "lbb-ac-skiponly-"));
+		const policy: SandboxPolicy = {
+			fileSystem: {
+				kind: "restricted",
+				entries: [{ path: canonical(cache), access: "write", missingPathBehavior: "skip" }],
+			},
+			network: "enabled",
+			networkRules: [],
+			protected: [],
+		};
+		const resolution = resolveSandboxExecution({ ...win32, policy });
+		expect(resolution.kind).toBe("simulated");
+	});
+
+	test.each(["darwin", "linux"] as const)("the branch never fires on %s, whatever the flag says", (platform) => {
+		// The condition is the platform itself — `AppContainer` is `userenv.dll`
+		// and nothing else reaches it — so a claim of availability must not be
+		// able to move a Mac onto the Windows backend.
+		const resolution = resolveSandboxExecution({
+			...win32,
+			platform,
+			hasNativeBackend: true,
+			policy: confined(workspace(), { access: "enabled", domains: [] }),
+		});
+		expect(resolution.kind).toBe("native");
+	});
+});
+
+const describeWindowsExec = process.platform === "win32" ? describe : describe.skip;
+
+describeWindowsExec("the container path reaches a real spawn", () => {
+	// The wiring half, against the machine it describes. The decision tests
+	// above pin what the resolver says; this pins that a `ChildProcessExecOperations`
+	// built with the container runtime actually ends up with a confined child —
+	// the claim is not "the resolver returned a kind" but "a command ran under a
+	// token that refuses a write outside its grant".
+	//
+	// The injection is the same one the Linux branch uses, aimed at the fifth
+	// outcome: `hasAppContainer: true` on a machine whose `detectRuntime`
+	// already answers that is redundant, and it is written out anyway so the
+	// runtime under test is legible rather than inherited.
+	//
+	// **The policy here is `workspace-write`, not the file's usual
+	// `netPolicy`.** That helper builds a `danger-full-access` policy on
+	// purpose — the filesystem wrapper is what it must not build, so the
+	// network tests can run without bwrap — and an unrestricted policy
+	// short-circuits the resolver to `unconfined` before the container branch
+	// is ever consulted. Using it here would have tested the plain spawn path
+	// while believing it tested the container: the inside write would pass and
+	// the outside write would be refused by nothing at all.
+	const CONTAINER_RUNTIME: SandboxRuntime = { platform: "win32", hasNativeBackend: false, hasAppContainer: true };
+
+	function containerPolicy(cwd: string): SandboxPolicy {
+		return buildSandboxPolicy({
+			sandbox: "workspace-write",
+			workspace: cwd,
+			network: "enabled",
+			networkRules: [],
+		});
+	}
+
+	test("a command runs inside the container and comes back with its output and exit code", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		try {
+			const result = await exec.exec({ command: "echo confined-hello", cwd, sandbox: containerPolicy(cwd) });
+			expect(result.exitCode).toBe(0);
+			expect(result.killed).toBe(false);
+			expect(result.stdout).toContain("confined-hello");
+		} finally {
+			void exec.close?.();
+		}
+	});
+
+	test("the grant lets the child write the workspace and the kernel refuses everything beyond it", async () => {
+		// The claim this whole backend exists for. The inside write is the
+		// usability half — an un-granted child cannot even read the workspace, so
+		// this passing is also evidence the grant was acquired — and the outside
+		// write is the confinement half: "Access is denied" is the kernel, not
+		// this process's opinion.
+		const cwd = workspace();
+		const outside = `C:\\Windows\\Temp\\lbb-ac-wire-out-${process.pid}.txt`;
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		try {
+			const inside = await exec.exec({
+				command: `echo written > "${cwd.replace(/\//g, "\\")}\\inside.txt"`,
+				cwd,
+				sandbox: containerPolicy(cwd),
+			});
+			expect(inside.exitCode).toBe(0);
+			expect(existsSync(join(cwd, "inside.txt"))).toBe(true);
+
+			const escaped = await exec.exec({
+				command: `echo pwned > "${outside}"`,
+				cwd,
+				sandbox: containerPolicy(cwd),
+			});
+			expect(escaped.exitCode).not.toBe(0);
+			expect(existsSync(outside)).toBe(false);
+		} finally {
+			void exec.close?.();
+		}
+	});
+
+	test("a command that outlives its timeout is killed rather than handed off", async () => {
+		// The divergence from the spawn path, measured so it stays true: the
+		// confined runner owns a raw process handle, so there is no
+		// `ChildProcess` to hand `onTimeout` and a timeout kills.
+		//
+		// The command is a `powershell Start-Sleep`, and that shape is
+		// measured rather than assumed. The two obvious sleepers are both dead
+		// on arrival inside the container: `timeout /t N` refuses to run at all
+		// when its stdin is redirected — the confined child's stdin is a pipe at
+		// EOF — and exits 1 in ~130ms; `ping -n N 127.0.0.1` needs a network the
+		// container does not have (no IP driver) and exits in 40–100ms. A
+		// sleeper that dies before the deadline cannot test a kill. Powershell
+		// lives in System32, reads no stdin, and touches no socket.
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		try {
+			const result = await exec.exec({
+				command: "powershell -NoProfile -Command Start-Sleep -Seconds 30",
+				cwd,
+				sandbox: containerPolicy(cwd),
+				timeoutMs: 600,
+			});
+			expect(result.killed).toBe(true);
+			expect(result.exitCode).not.toBe(0);
+		} finally {
+			void exec.close?.();
+		}
+	});
+
+	test("an already-aborted signal kills the child before it can run", async () => {
+		// The one abort case this build can honour: the signal is checked
+		// between polls, so a signal that fired before the run began is seen on
+		// the first poll. A mid-run abort is not — the runner is synchronous FFI
+		// and the event loop cannot deliver the listener while it blocks — and
+		// that limit is documented on the branch rather than tested here,
+		// because measuring it would mean freezing this test's own loop.
+		//
+		// The command is the powershell sleeper for the measured reason given on
+		// the timeout test above: a command that exits on its own before the
+		// first poll (25ms) makes `waited === 0` win the race and reports
+		// `killed: false` — which is exactly what `ping -n 30` did here for three
+		// runs, because the container has no IP driver. Powershell starts slowly
+		// enough that the first poll still finds it alive.
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		try {
+			const controller = new AbortController();
+			controller.abort();
+			const result = await exec.exec({
+				command: "powershell -NoProfile -Command Start-Sleep -Seconds 30",
+				cwd,
+				sandbox: containerPolicy(cwd),
+				signal: controller.signal,
+			});
+			expect(result.killed).toBe(true);
+		} finally {
+			void exec.close?.();
+		}
+	});
+
+	test("streaming reaches the caller while the command runs, not in one dump after", async () => {
+		// The preview half of the contract, and it is the one a synchronous
+		// runner could plausibly have broken: `onOutput` is called from inside
+		// the pump loop, so chunks arrive as the child writes them.
+		//
+		// The two writes are one powershell command with a sleep between them
+		// (measured: 378ms and 1404ms), for the same reason the timeout test
+		// needs a real sleeper — `ping -n 5 127.0.0.1` inside the container exits
+		// in milliseconds with "Unable to contact IP driver", so both echoes
+		// land in one chunk and the assertion below passes for the wrong
+		// reason. The two `Write-Host`s are separated by a `Start-Sleep` the
+		// kernel-level pipe keeps apart.
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		try {
+			const chunks: string[] = [];
+			await exec.exec({
+				command:
+					"powershell -NoProfile -Command Write-Host streaming-one; Start-Sleep -Seconds 1; Write-Host streaming-two",
+				cwd,
+				sandbox: containerPolicy(cwd),
+				onOutput: (chunk) => chunks.push(chunk),
+				timeoutMs: 20_000,
+			});
+			expect(chunks.length).toBeGreaterThan(1);
+			expect(chunks.join("")).toContain("streaming-one");
+			expect(chunks.join("")).toContain("streaming-two");
+		} finally {
+			void exec.close?.();
+		}
+	});
+
+	test("run_in_background under the same policy refuses, rather than falling through to a bare spawn", async () => {
+		// The escape hatch `bash.ts` named when it threaded the policy into the
+		// background manager: with the container in force, starting a background
+		// shell must not run the shell with nothing around it. Refusing is the
+		// honest option available here — the confined runner waits for the child
+		// to exit, and a background shell's whole point is a child that outlives
+		// the call.
+		const cwd = workspace();
+		const manager = new BackgroundShellManager(CONTAINER_RUNTIME);
+		const policy = containerPolicy(cwd);
+		let caught: unknown;
+		try {
+			await manager.start("echo backgrounded", cwd, policy);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(Error);
+		expect(String(caught)).toContain("run_in_background");
+	});
+});
+
 describe("a path the policy names but the disk does not have", () => {
 	// Not cosmetic on the Linux side. `bwrap` refuses to start when a `--bind`
 	// source is absent, so a policy naming a build cache that was never created

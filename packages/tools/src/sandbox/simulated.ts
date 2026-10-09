@@ -27,14 +27,26 @@
  * nor elevation. An AppContainer child gets a package SID the kernel checks on
  * every file access, which is a real write boundary.
  *
- * **What is genuinely absent here is the wiring, not the mechanism.** `packages/tools/src/sandbox/appcontainer.ts`
- * now implements the profile lifecycle and the confined spawn (create / derive / delete
- * without elevation, a child created with PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
- * pipes, timeout-kill) and its tests run them for real on Windows. What it does NOT do
- * yet is the ACL half: nothing grants the container access to the workspace, and
- * `resolveSandboxExecution` still answers `simulated` on win32. So the mechanism is
- * measured and half-built, and this module remains the layer that actually applies
- * today.
+ * **What is absent is not the mechanism, and not the wiring either — it is the
+ * reason production still lands here.** `packages/tools/src/sandbox/appcontainer.ts`
+ * now implements the whole backend: the profile lifecycle and the confined spawn
+ * (create / derive / delete without elevation, a child created with
+ * PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, pipes, timeout-kill), the refcounted
+ * ACL grant over every writable root the policy names, the resolver's `appcontainer`
+ * branch, and the `exec` consumer that grants before the spawn and releases in a
+ * `finally`. Its tests run all of that for real on Windows. What keeps production
+ * off it is measured rather than cautious: a confined child inherits an
+ * AppContainer token, and a token of that shape executes only what the grant names
+ * its package SID. `C:\Windows\System32` does; the directories this machine's tools
+ * live in do not — `git`, `node`, and `bun` from `D:\Program Files` and the user
+ * profile come back "not recognized" inside the container, and an absolute path to
+ * the same binary comes back "Access is denied" (a copy placed inside the granted
+ * workspace runs, which is what separates the two). So selecting the backend would
+ * confine every default-mode command into something that cannot run `git status`.
+ * The branch stays reachable from a test that injects the flag, and
+ * `SandboxRuntime.hasAppContainer` in `./index.ts` carries the full measurement.
+ * Until the toolchain reaches the child, this module remains the layer that
+ * actually applies.
  *
  * Measured on this machine (2026-10-09, no elevation, no helper binary):
  *
@@ -46,20 +58,25 @@
  *     write beyond the grant is refused by the kernel with access-denied. Without
  *     the grant the child cannot read the workspace at all, so the backend fails
  *     closed.
- *   - With the grant in place the confined child reads and writes FILES but
- *     cannot LIST DIRECTORIES (`dir /b` is access-denied on every directory,
- *     the granted root included), and a bare spawn without inherited std
- *     handles lists fine — the deficit lives in the pipe/handle-list spawn
- *     shape and is not yet understood. Directory listing is why git status and
- *     every `ls` through the shell would fail, so `resolveSandboxExecution`
- *     still answers `simulated` on win32.
- *   - `.git` is not protected by this backend: a protected DACL needs
- *     WRITE_OWNER, which this user does not hold, and the mutation-deny ACE
- *     did not block file creation in controlled runs. The workspace boundary
- *     is the only confinement the grant provides.
- *   - the container has no network at all (loopback included), which is why the
- *     grant half, when it ships, must leave `restricted` on the simulated path
- *     rather than hand it to the container.
+ *   - Directory listing is fine, and the old reason it was not has been
+ *     retracted: `FindFirstFile` consumers — `git status`, `ls` in bash —
+ *     list a granted tree, and only `cmd /c dir` was refused, for the reason
+ *     `appcontainer.ts` records (the MS-STL issue #6286 landing). What keeps
+ *     `resolveSandboxExecution` on `simulated` today is the toolchain DACL
+ *     above, not listing.
+ *   - `.git` is NOT protected by this backend tonight, and the reason is a
+ *     measurement that would not repeat: the deny ACE refuses an external
+ *     process's writes under `.git` and does not refuse `acquire`'s own two
+ *     statements later — same ACL on disk, same confined child, opposite
+ *     results. So the deny is out until the timing is understood, and the
+ *     workspace boundary is the only confinement the container half ships.
+ *     `appcontainer.ts` carries the full shape to reintroduce.
+ *   - the container has no network a session can use: loopback is denied in
+ *     it even with the `privateNetworkClientServer` capability (measured),
+ *     and a `restricted` axis is enforced by a proxy that listens on
+ *     loopback. That is why the resolver's branch fires only with
+ *     `network === "enabled"`, and `restricted` keeps landing here rather
+ *     than in the container.
  *
  * One thing that *is* true and worth keeping, because it is the trap: a Job
  * Object cannot do this. `winnt.h:12052` carries

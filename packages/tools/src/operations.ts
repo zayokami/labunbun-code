@@ -12,6 +12,14 @@ import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
 import { createStreamCapture, nextSpillPath } from "./output-capture.ts";
 import {
+	acquireWorkspaceGrant,
+	confinedCommandLine,
+	confinedEnvBlock,
+	confinedProgramName,
+	releaseWorkspaceGrant,
+	runConfined,
+} from "./sandbox/appcontainer.ts";
+import {
 	detectRuntime,
 	resolveSandboxExecution,
 	type SandboxBackend,
@@ -666,6 +674,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 					command: [shellCommand, ...args(command)],
 					platform: this.#runtime.platform,
 					hasNativeBackend: this.#runtime.hasNativeBackend,
+					hasAppContainer: this.#runtime.hasAppContainer,
 				})
 			: ({ kind: "unconfined" } as const);
 		const [program, ...programArgs] =
@@ -680,6 +689,119 @@ export class ChildProcessExecOperations implements ExecOperations {
 		// leaves a session that confined nothing with the environment it had.
 		const proxyEnv = sandbox ? await this.networkEnvFor(sandbox) : undefined;
 		const childEnv = { ...process.env, ...env, ...proxyEnv };
+
+		// The container path's view of that environment, and the difference from
+		// what `spawn` accepts is real rather than cosmetic: `process.env` on
+		// Windows carries `undefined` values for the handful of pseudo variables
+		// Node defines (`NODE_ENV`, `TZ`), and an env block with a literal
+		// "undefined" string in it reaches the child as a variable set to the
+		// text "undefined". Filtering is what `confinedEnvBlock` would do anyway
+		// — but doing it there would make the block builder silently drop values
+		// the spawn path would have passed, so the drop happens at the one place
+		// that knows which environment this is.
+		const confinedEnv = Object.fromEntries(
+			Object.entries(childEnv).filter((entry): entry is [string, string] => entry[1] !== undefined),
+		);
+
+		// The Windows container path, and it is here rather than above because
+		// everything it needs is decided by now: the shell argv, the child
+		// environment, and the resolution's grant roots.
+		//
+		// What this branch does *not* do is fall through to the plain spawn
+		// below. That is the one shape the appcontainer kind must never take:
+		// `resolution.kind === "native" ? … : [shellCommand, …]` reads as
+		// "anything not native runs the bare shell", which was true while the
+		// fifth kind did not exist and is a fail-open now that it does — a
+		// command the resolver confined would run with no container at all.
+		//
+		// Three properties of the confined run are worth stating, because each
+		// one is a difference from the spawn path rather than a detail:
+		//
+		//   - **It is synchronous FFI.** `runConfined` does not return until the
+		//     child has exited, and the poll it waits in cannot yield to the
+		//     event loop. That is measured, not an oversight: the abort check
+		//     inside it reads `signal.aborted`, which is set by the listener
+		//     below — and a listener cannot fire while the loop is blocked. So
+		//     an abort that arrives *during* the run is not seen by it; the
+		//     timeout kill and the abort-at-entry case are, and both leave
+		//     `killed` true. Concretely: a user who presses Esc mid-command
+		//     waits for the timeout, exactly as a hung local terminal would.
+		//     The async restructuring that would fix this is a separate change.
+		//   - **No handoff.** The spawn path can hand a live `ChildProcess` to
+		//     `onTimeout` for background adoption; a confined run owns a raw
+		//     process handle no `ChildProcess` wraps, so a timeout kills. The
+		//     `Bash` tool's copy that promises "a foreground command that
+		//     exceeds its timeout keeps running in the background" is therefore
+		//     wrong under this backend, and the tool description that carries
+		//     it is part of the honest-reporting round, not of this one.
+		//   - **The grant outlives the command, not the call.** It is acquired
+		//     before the spawn and released in a `finally`, so an abort or a
+		//     spawn failure cannot leak an ACE onto the workspace. The refcount
+		//     inside `acquireWorkspaceGrant` is what keeps two commands running
+		//     at once from dropping each other's grant.
+		if (resolution.kind === "appcontainer") {
+			const grant = acquireWorkspaceGrant(resolution.workspace, resolution.network, resolution.grantRoots.slice(1));
+			if (grant.error !== undefined || grant.profile === undefined) {
+				// Fail closed and legibly: no grant means the child could not
+				// touch the workspace at all, which is a worse command than a
+				// command that fails before it starts.
+				return {
+					stdout: "",
+					stderr: grant.error ?? "the container profile could not be established",
+					exitCode: -1,
+					killed: false,
+				};
+			}
+			// The child's environment: the parent's, the caller's overrides, and
+			// the block format `CreateProcessW` demands, all from the one value
+			// defined above — `confinedEnv` is that value with the undefined
+			// pseudo-variables removed, for the reason given where it is built.
+			const envBlock = confinedEnvBlock(confinedEnv);
+			// Declared outside the try so the `finally` can append the cleanup
+			// error to whatever result the run produced, without the run's own
+			// assignment having to know the cleanup exists.
+			let result: ExecResult = { stdout: "", stderr: "", exitCode: -1, killed: false };
+			try {
+				const confined = runConfined(
+					grant.profile,
+					confinedCommandLine([confinedProgramName(shellCommand), ...args(command)]),
+					{
+						cwd,
+						env: envBlock,
+						timeoutMs,
+						signal,
+						onStdout: (chunk) => onOutput?.(chunk),
+						onStderr: (chunk) => onOutput?.(chunk),
+					},
+				);
+				if (confined.error !== undefined) {
+					// The run ended by kill or never started. Either way the
+					// numbers alone would read as a command that ran, so the
+					// reason travels in stderr where the tool puts it.
+					result = {
+						stdout: confined.stdout,
+						stderr: confined.error,
+						exitCode: confined.exitCode,
+						killed: confined.killed,
+					};
+				} else {
+					result = { stdout: confined.stdout, stderr: confined.stderr, exitCode: confined.exitCode, killed: false };
+				}
+			} finally {
+				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network);
+				// A failed cleanup is reported, not thrown: the command already
+				// ran and its exit code is what the caller acts on, so raising
+				// here would turn a successful command into an exception. The
+				// warning rides along on the same result, appended to stderr,
+				// because that is where the tool surfaces it. A leftover ACE
+				// names the container SID — which the next run derives again —
+				// so it is reusable rather than dangerous.
+				if (dropError !== null && dropError !== "") {
+					result.stderr = result.stderr === "" ? dropError : `${result.stderr}\n${dropError}`;
+				}
+			}
+			return result;
+		}
 
 		return new Promise((resolve) => {
 			const startedAt = Date.now();

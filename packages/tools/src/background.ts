@@ -222,12 +222,33 @@ export class BackgroundShellManager {
 					command: [shellCommand, ...args(command)],
 					platform: this.#runtime.platform,
 					hasNativeBackend: this.#runtime.hasNativeBackend,
+					hasAppContainer: this.#runtime.hasAppContainer,
 				})
 			: ({ kind: "unconfined" } as const);
 		const [program, ...programArgs] =
 			resolution.kind === "native"
 				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
 				: [shellCommand, ...args(command)];
+		// The container backend does not serve this path, and the branch says so
+		// rather than falling through to the bare shell. `bash.ts` named this
+		// exact hole when it threaded the policy in — "leaving it out would make
+		// `run_in_background: true` the way around the sandbox" — and the
+		// container kind makes it real in a way the simulated answer never did:
+		// a foreground command under the same session policy would run confined
+		// while this one ran with nothing around it.
+		//
+		// Why not confine it: `runConfined` is a synchronous FFI wait that does
+		// not return until the child exits, and a background shell's whole point
+		// is a child that outlives the call — a server, a watcher, a test suite
+		// that reports progress. Holding this method until the process died
+		// would block the session, so the only honest options are confining it
+		// through an async rewrite of the spawner or refusing to start it. This
+		// build does the second.
+		if (resolution.kind === "appcontainer") {
+			throw new Error(
+				"run_in_background is not available while the Windows container sandbox is in force: a background shell outlives the call that starts it, and this build's confined runner waits for the child to exit. Run the command in the foreground, or turn the sandbox off for this session.",
+			);
+		}
 		// The policy's variables go last, for the reason `exec` puts them last:
 		// what confines this command outranks what this process happened to
 		// inherit. A manager with no policy spawns with no env of its own, so a
