@@ -1109,7 +1109,7 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 			const chunks: string[] = [];
 			await exec.exec({
 				command:
-					"powershell -NoProfile -Command Write-Host streaming-one; Start-Sleep -Seconds 1; Write-Host streaming-two",
+					"powershell -NoProfile -Command \"Write-Output ('cwd=' + (Get-Location)); Write-Output ('exists=' + (Test-Path -LiteralPath '.')); Write-Host streaming-one; Start-Sleep -Seconds 1; Write-Host streaming-two\"",
 				cwd,
 				sandbox: containerPolicy(cwd),
 				onOutput: (chunk) => chunks.push(chunk),
