@@ -22,6 +22,7 @@ import {
 	confinedCommandLine,
 	confinedEnvBlock,
 	confinedProgramName,
+	containerCanExecute,
 	deleteAppContainerProfile,
 	deriveAppContainerSid,
 	ensureAppContainerProfile,
@@ -141,6 +142,42 @@ describe("the command line CreateProcessW is handed", () => {
 		// Dropping it would shift every argument after it left by one — the
 		// child would read the wrong argv, and nothing would look wrong.
 		expect(confinedCommandLine(["prog", "", "tail"])).toBe('prog "" tail');
+	});
+});
+
+describe("what a container child can execute", () => {
+	// The rule, pin by pin: System32 is the one directory every container
+	// child runs without a grant, and a granted root is the other set. The
+	// case that earns its own test is the session shell on a machine with
+	// Git for Windows — `detectShell` prefers it, it is in neither set, and
+	// spawning it there measured as the child dying at DLL initialization
+	// with 0xC0000142 on the GitHub Windows runner. The assertion below is
+	// what `operations.exec` refuses on.
+
+	test("System32 is executable, in any spelling of it", () => {
+		// The name arrives resolved — `confinedProgramName` already turned a
+		// bare `cmd.exe` into this — but the case and the separators are the
+		// policy's, not the kernel's.
+		expect(containerCanExecute("C:\\Windows\\System32\\cmd.exe", [])).toBe(true);
+		expect(containerCanExecute("c:/windows/system32/windowspowershell/v1.0/powershell.exe", [])).toBe(true);
+	});
+
+	test("a granted root changes the answer, which is the grant doing work rather than permission", () => {
+		// A copy of bash inside the granted workspace runs — the measured
+		// difference between "Access is denied" and a run. Same shape from
+		// `acquireWorkspaceGrant`'s own test, from the program's side.
+		expect(containerCanExecute("D:\\Ws\\bin\\bash.exe", ["D:\\Ws"])).toBe(true);
+		expect(containerCanExecute("D:\\Ws\\bin\\bash.exe", ["d:/ws"])).toBe(true);
+	});
+
+	test("outside both sets is refused — the Program Files session shell", () => {
+		expect(containerCanExecute("C:\\Program Files\\Git\\bin\\bash.exe", [])).toBe(false);
+		// The prefix trap: `D:\Ws2` is not inside `D:\Ws` even though the
+		// string starts with it, and a prefix check that ignored the
+		// separator would grant a sibling.
+		expect(containerCanExecute("D:\\Ws2\\bash.exe", ["D:\\Ws"])).toBe(false);
+		// An empty root is a root that grants nothing.
+		expect(containerCanExecute("D:\\Ws\\bash.exe", [""])).toBe(false);
 	});
 });
 
@@ -382,13 +419,9 @@ describeWindows("a confined process", () => {
 		const profile = ensureAppContainerProfile(workspace);
 		if ("error" in profile) throw new Error(profile.error);
 		try {
-			const echoed = runConfined(
-				profile,
-				'"C:\\Windows\\System32\\cmd.exe" /c echo %LBB_PROBE%',
-				{
-					env: confinedEnvBlock({ ...process.env, LBB_PROBE: "block-delivered" } as Record<string, string>),
-				},
-			);
+			const echoed = runConfined(profile, '"C:\\Windows\\System32\\cmd.exe" /c echo %LBB_PROBE%', {
+				env: confinedEnvBlock({ ...process.env, LBB_PROBE: "block-delivered" } as Record<string, string>),
+			});
 			expect(echoed.error).toBeUndefined();
 			expect(echoed.exitCode).toBe(0);
 			expect(echoed.stdout).toContain("block-delivered");

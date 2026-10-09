@@ -37,6 +37,17 @@
  *     `git status`, `ls` in bash, and every other FindFirstFile consumer work;
  *     the earlier "listing is denied" report measured with cmd's `dir` and was
  *     a property of the instrument, not of the backend.
+ *   - What the session shell does inside the container is the toolchain
+ *     measurement from the other side. `detectShell` prefers
+ *     `C:\Program Files\Git\bin\bash.exe` wherever Git for Windows is
+ *     installed, and such a shell starts under the container token and dies
+ *     at DLL initialization — 0xC0000142, `STATUS_DLL_INIT_FAILED` — because
+ *     the MSYS runtime beside it is granted to nobody. Four container-path
+ *     tests failed exactly that way on the GitHub Windows runner while the
+ *     same suite passed here, where the conventional path does not exist and
+ *     the shell is `cmd.exe`. `containerCanExecute` turns that number into a
+ *     refusal naming the program, and the container-path tests inject a shell
+ *     of their own so a machine's Git layout is not part of what they measure.
  *   - `.git` is NOT protected by this build tonight, and the reason is a
  *     measurement that would not repeat. The deny ACE (Codex's mutation mask,
  *     0x10156) demonstrably refuses create/overwrite/delete/rename under
@@ -117,6 +128,58 @@ function wbuf(text: string): Uint8Array {
 export function confinedProgramName(program: string): string {
 	if (program.includes("\\") || program.includes("/")) return program;
 	return `C:\\Windows\\System32\\${program}`;
+}
+
+/** `c:\windows\system32\` — the one directory every container child executes without a grant. */
+const SYSTEM32_PREFIX = "c:\\windows\\system32\\";
+
+/**
+ * Whether a container child can execute the named program: under System32, or
+ * inside a root the grant names — and nothing else.
+ *
+ * Takes the program **as `confinedProgramName` resolves it** (a bare name has
+ * already become `C:\Windows\System32\<name>` by the time this is asked),
+ * because the resolution and the executability are two questions about the
+ * same token and one answer.
+ *
+ * The rule is the blocker recorded on `SandboxRuntime.hasAppContainer`, seen
+ * from the program's side: a confined child executes only what the grant names
+ * its package SID, plus the system directories the image grants every
+ * AppContainer. `git`, `node` and `bun` outside every grant come back "not
+ * recognized" by PATH and "Access is denied" by absolute path, while a copy
+ * placed inside the granted workspace runs — the grant is the whole
+ * difference.
+ *
+ * **The consequence this function exists for is the session shell.**
+ * `detectShell` prefers `C:\Program Files\Git\bin\bash.exe` when Git for
+ * Windows is installed in its conventional place, so on such a machine the
+ * shell is in neither set: `CreateProcessW` starts it — the image file itself
+ * is readable — and it dies at DLL initialization with exit code 0xC0000142
+ * (`STATUS_DLL_INIT_FAILED`) because the MSYS runtime beside it cannot be
+ * loaded. That measured as four opaque failures on the GitHub Windows runner
+ * (`test (windows-latest)`, every container-path spawn red with the same
+ * number) while the identical suite was green here, where the conventional
+ * path does not exist and the shell falls back to `cmd.exe`. A refusal naming
+ * the program beats that number, so `operations.exec` checks before it
+ * spawns.
+ *
+ * Case-insensitive and separator-agnostic on purpose: Windows paths differ
+ * only in case (see `caseInsensitiveSandboxPaths`), and the granted roots
+ * arrive from the policy with whichever separator the policy was built with.
+ * Pure, so it is tested on every platform — the containment is a property of
+ * the rule, not of the machine.
+ */
+export function containerCanExecute(program: string, grantedRoots: readonly string[]): boolean {
+	const programPath = program.toLowerCase().replace(/\//g, "\\");
+	if (programPath.startsWith(SYSTEM32_PREFIX)) return true;
+	return grantedRoots.some((root) => isContainedInPath(programPath, root));
+}
+
+/** `program === root` or `program` strictly inside `root`, compared as Windows does. */
+function isContainedInPath(programPath: string, root: string): boolean {
+	if (root === "") return false;
+	const rootPath = root.toLowerCase().replace(/\//g, "\\");
+	return programPath === rootPath || programPath.startsWith(rootPath.endsWith("\\") ? rootPath : `${rootPath}\\`);
 }
 
 /**

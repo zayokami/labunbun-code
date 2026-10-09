@@ -16,6 +16,7 @@ import {
 	confinedCommandLine,
 	confinedEnvBlock,
 	confinedProgramName,
+	containerCanExecute,
 	releaseWorkspaceGrant,
 	runConfined,
 } from "./sandbox/appcontainer.ts";
@@ -463,7 +464,7 @@ function createExecCapture(dir: string) {
 }
 
 export class ChildProcessExecOperations implements ExecOperations {
-	#shell = detectShell();
+	#shell: ReturnType<typeof detectShell>;
 	/**
 	 * What this machine can confine with, asked once at construction.
 	 *
@@ -529,8 +530,21 @@ export class ChildProcessExecOperations implements ExecOperations {
 	 */
 	#epoch = 0;
 
-	constructor(runtime: SandboxRuntime = detectRuntime()) {
+	/**
+	 * `shell` is injectable for the same reason `runtime` is, and the reason
+	 * is not hypothetical: the container-path tests assert what the AppContainer
+	 * branch spawns, and `detectShell` answers with whatever shell the
+	 * *machine* prefers — Git for Windows' `bash.exe` in its conventional place
+	 * on most developer machines and on the GitHub Windows runner, `cmd.exe`
+	 * where no bash is installed. Those two answers are not the same test: one
+	 * of them cannot execute inside the container at all (see
+	 * `containerCanExecute`). Injecting the shell makes the tests measure the
+	 * branch rather than the machine's Git layout, the same way `FAKE_LINUX`
+	 * makes the wrapping branch measurable on a Windows box.
+	 */
+	constructor(runtime: SandboxRuntime = detectRuntime(), shell: ReturnType<typeof detectShell> = detectShell()) {
 		this.#runtime = runtime;
+		this.#shell = shell;
 	}
 
 	/**
@@ -719,7 +733,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 		// fifth kind did not exist and is a fail-open now that it does — a
 		// command the resolver confined would run with no container at all.
 		//
-		// Three properties of the confined run are worth stating, because each
+		// Four properties of the confined run are worth stating, because each
 		// one is a difference from the spawn path rather than a detail:
 		//
 		//   - **It is synchronous FFI.** `runConfined` does not return until the
@@ -744,7 +758,35 @@ export class ChildProcessExecOperations implements ExecOperations {
 		//     spawn failure cannot leak an ACE onto the workspace. The refcount
 		//     inside `acquireWorkspaceGrant` is what keeps two commands running
 		//     at once from dropping each other's grant.
+		//   - **A shell the container cannot execute refuses the command.**
+		//     `detectShell` prefers Git for Windows' `bash.exe` wherever it is
+		//     installed, and a container child cannot execute a program whose
+		//     runtime sits outside every grant: the child starts and dies at
+		//     DLL initialization with 0xC0000142 — measured, as four opaque
+		//     spawn failures on the GitHub Windows runner. So the branch checks
+		//     first (`containerCanExecute`) and fails closed with a reason,
+		//     rather than handing a doomed program to the spawner or — the
+		//     other direction — falling through to the unconfined spawn.
 		if (resolution.kind === "appcontainer") {
+			// Refuse before anything is spent — before the grant is even
+			// acquired — when the shell this session resolved cannot execute
+			// inside the container. The measurement is on `containerCanExecute`,
+			// and the shape it replaces matters: `CreateProcessW` starts a
+			// Git-Bash session shell and the child then dies at DLL
+			// initialization with 0xC0000142, which reads as a command that ran
+			// and failed rather than a backend that could not start. A refusal
+			// naming the program and the two sets it is not in is actionable;
+			// the number is not. Fail closed: an unconfined fallback here would
+			// run the command the user asked to confine.
+			const shellProgram = confinedProgramName(shellCommand);
+			if (!containerCanExecute(shellProgram, resolution.grantRoots)) {
+				return {
+					stdout: "",
+					stderr: `the Windows container sandbox cannot run this session's shell: ${shellProgram} is not in C:\\Windows\\System32 and not inside a granted root, so the confined child could not execute it. Turn the sandbox off for this session, or point the shell (LBB_BASH_PATH) at a path inside a granted root.`,
+					exitCode: -1,
+					killed: false,
+				};
+			}
 			const grant = acquireWorkspaceGrant(resolution.workspace, resolution.network, resolution.grantRoots.slice(1));
 			if (grant.error !== undefined || grant.profile === undefined) {
 				// Fail closed and legibly: no grant means the child could not
@@ -767,18 +809,14 @@ export class ChildProcessExecOperations implements ExecOperations {
 			// assignment having to know the cleanup exists.
 			let result: ExecResult = { stdout: "", stderr: "", exitCode: -1, killed: false };
 			try {
-				const confined = runConfined(
-					grant.profile,
-					confinedCommandLine([confinedProgramName(shellCommand), ...args(command)]),
-					{
-						cwd,
-						env: envBlock,
-						timeoutMs,
-						signal,
-						onStdout: (chunk) => onOutput?.(chunk),
-						onStderr: (chunk) => onOutput?.(chunk),
-					},
-				);
+				const confined = runConfined(grant.profile, confinedCommandLine([shellProgram, ...args(command)]), {
+					cwd,
+					env: envBlock,
+					timeoutMs,
+					signal,
+					onStdout: (chunk) => onOutput?.(chunk),
+					onStderr: (chunk) => onOutput?.(chunk),
+				});
 				if (confined.error !== undefined) {
 					// The run ended by kill or never started. Either way the
 					// numbers alone would read as a command that ran, so the

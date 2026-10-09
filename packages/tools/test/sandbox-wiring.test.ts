@@ -903,9 +903,22 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		});
 	}
 
+	/**
+	 * A shell this test supplies rather than the machine's — `cmd.exe`, which
+	 * `confinedProgramName` resolves to System32 and a container child can
+	 * execute. Without the injection these tests measured the host's Git
+	 * layout: on the GitHub Windows runner `detectShell` answers with
+	 * `C:\Program Files\Git\bin\bash.exe`, which starts inside the container
+	 * and dies at DLL initialization with 0xC0000142, so every spawn below was
+	 * red there while the same assertions passed on a machine with no
+	 * conventional Git install. The refusal test right after uses the Program
+	 * Files path deliberately.
+	 */
+	const CONTAINER_SHELL = { command: "cmd.exe", args: (cmd: string) => ["/d", "/s", "/c", cmd] };
+
 	test("a command runs inside the container and comes back with its output and exit code", async () => {
 		const cwd = workspace();
-		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		try {
 			const result = await exec.exec({ command: "echo confined-hello", cwd, sandbox: containerPolicy(cwd) });
 			expect(result.exitCode).toBe(0);
@@ -924,7 +937,7 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// this process's opinion.
 		const cwd = workspace();
 		const outside = `C:\\Windows\\Temp\\lbb-ac-wire-out-${process.pid}.txt`;
-		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		try {
 			const inside = await exec.exec({
 				command: `echo written > "${cwd.replace(/\//g, "\\")}\\inside.txt"`,
@@ -960,7 +973,7 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// sleeper that dies before the deadline cannot test a kill. Powershell
 		// lives in System32, reads no stdin, and touches no socket.
 		const cwd = workspace();
-		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		try {
 			const result = await exec.exec({
 				command: "powershell -NoProfile -Command Start-Sleep -Seconds 30",
@@ -990,7 +1003,7 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// runs, because the container has no IP driver. Powershell starts slowly
 		// enough that the first poll still finds it alive.
 		const cwd = workspace();
-		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		try {
 			const controller = new AbortController();
 			controller.abort();
@@ -1019,7 +1032,7 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// reason. The two `Write-Host`s are separated by a `Start-Sleep` the
 		// kernel-level pipe keeps apart.
 		const cwd = workspace();
-		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME);
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		try {
 			const chunks: string[] = [];
 			await exec.exec({
@@ -1033,6 +1046,35 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 			expect(chunks.length).toBeGreaterThan(1);
 			expect(chunks.join("")).toContain("streaming-one");
 			expect(chunks.join("")).toContain("streaming-two");
+		} finally {
+			void exec.close?.();
+		}
+	});
+
+	test("a shell the container cannot execute refuses the command, with the reason in stderr", async () => {
+		// The refusal that replaced four opaque CI failures. A session whose
+		// shell resolves to `C:\Program Files\Git\bin\bash.exe` — which
+		// `detectShell` prefers on any machine with Git for Windows installed
+		// conventionally, the GitHub Windows runner included — hands the
+		// container branch a program in neither System32 nor a granted root.
+		// Spawned, it starts and dies at DLL initialization with 0xC0000142,
+		// a number that reads as "the command ran and failed" when the truth is
+		// "the backend could not start the shell". The refusal names the
+		// program and the two sets it is not in, and fails closed — falling
+		// through to the unconfined spawn would run the command the user asked
+		// to confine.
+		const cwd = workspace();
+		const gitBash = { command: "C:\\Program Files\\Git\\bin\\bash.exe", args: (cmd: string) => ["-lc", cmd] };
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, gitBash);
+		try {
+			const result = await exec.exec({ command: "echo unreachable", cwd, sandbox: containerPolicy(cwd) });
+			expect(result.exitCode).toBe(-1);
+			expect(result.killed).toBe(false);
+			expect(result.stderr).toContain("C:\\Program Files\\Git\\bin\\bash.exe");
+			expect(result.stderr).toContain("System32");
+			// And nothing ran: the refusal is before the spawn, so no child
+			// existed to produce output.
+			expect(result.stdout).toBe("");
 		} finally {
 			void exec.close?.();
 		}
