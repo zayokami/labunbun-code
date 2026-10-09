@@ -1209,17 +1209,24 @@ interface ActiveGrant {
 const activeGrants = new Map<string, ActiveGrant>();
 
 /**
- * The one spelling of a root every reader agrees on: symlinks, junctions,
- * `\\?\` prefixes and 8.3 short names all resolved, so an ACE written here
- * covers a child however it spells the same directory. Best-effort — a path
- * that cannot be resolved is returned as spelled, because a grant that
- * refuses over an unreadable parent would fail closed for no gain.
+ * The one spelling of a path every reader agrees on: symlinks, junctions,
+ * `\\?\` prefixes and 8.3 short names all resolved, so an operation on it
+ * covers a child however it spells the same object. Best-effort — a path
+ * that cannot be resolved is returned as spelled, because failing over an
+ * unreadable parent would fail a command for no gain.
+ *
+ * Exported because two callers need it for two different measured reasons:
+ * a grant writes the ACE on it (the GitHub runner's short-named TEMP had
+ * the ACE landing on an object the child never opened), and a confined
+ * spawn is handed it as the child's cwd (the same short name made a
+ * powershell child die with .NET's "Access to the path" while it resolved
+ * its own cwd). Same rule, two failure shapes, one spelling.
  */
-function canonicalGrantPath(root: string): string {
+export function canonicalPathForChild(path: string): string {
 	try {
-		return realpathSync(root);
+		return realpathSync(path);
 	} catch {
-		return root;
+		return path;
 	}
 }
 
@@ -1284,7 +1291,7 @@ export function acquireWorkspaceGrant(
 	// the kernel checks, so the ACE lands where every reader finds it. A path
 	// that cannot be resolved is granted as spelled: resolving is best-effort
 	// and the grant failing closed covers the rest.
-	const roots = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalGrantPath);
+	const roots = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
 	for (const root of roots) {
 		const grantError = grantRootAccess(root, sid);
 		if (grantError !== null) {

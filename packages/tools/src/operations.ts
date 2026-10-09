@@ -13,6 +13,7 @@ import type { SandboxPolicy } from "@labunbun/agent";
 import { createStreamCapture, nextSpillPath } from "./output-capture.ts";
 import {
 	acquireWorkspaceGrant,
+	canonicalPathForChild,
 	confinedCommandLine,
 	confinedEnvBlock,
 	confinedProgramName,
@@ -809,8 +810,15 @@ export class ChildProcessExecOperations implements ExecOperations {
 			// assignment having to know the cleanup exists.
 			let result: ExecResult = { stdout: "", stderr: "", exitCode: -1, killed: false };
 			try {
+				// The child's cwd, spelled the one way every reader agrees on — the
+				// same canonicalisation the grant roots get, and for the same measured
+				// reason: on the GitHub Windows runner the workspace is short-named
+				// (`RUNNER~1`) and a confined powershell whose cwd it was died with
+				// .NET's `Access to the path ... is denied` — the runtime resolves
+				// its cwd itself at start-up, and it resolved a spelling the ACE did
+				// not cover. Best-effort: an unresolvable cwd is handed over spelled.
 				const confined = runConfined(grant.profile, confinedCommandLine([shellProgram, ...args(command)]), {
-					cwd,
+					cwd: canonicalPathForChild(cwd),
 					env: envBlock,
 					timeoutMs,
 					signal,
