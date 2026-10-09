@@ -17,6 +17,7 @@
  * control a control.
  */
 import { describe, expect, test } from "bun:test";
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -1095,6 +1096,13 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// land in one chunk and the assertion below passes for the wrong
 		// reason. The two `Write-Host`s are separated by a `Start-Sleep` the
 		// kernel-level pipe keeps apart.
+		//
+		// The explicit budget covers the *test*, not the command — `timeoutMs`
+		// below governs the command and this line governs the harness, and the
+		// GitHub Windows runner needs the room: a cold powershell plus the
+		// one-second sleep measures ~6.3s there, past bun's 5s default, so a
+		// green run on a fast machine was still killed on the slow one by a
+		// timeout inside the harness rather than inside the runner.
 		const cwd = workspace();
 		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		try {
@@ -1123,7 +1131,7 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		} finally {
 			void exec.close?.();
 		}
-	});
+	}, 30_000);
 
 	test("a shell the container cannot execute refuses the command, with the reason in stderr", async () => {
 		// The refusal that replaced four opaque CI failures. A session whose
