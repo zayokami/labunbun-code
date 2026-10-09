@@ -644,7 +644,12 @@ export class ChildProcessExecOperations implements ExecOperations {
 	 * nothing. `describeSandboxBackend` treats a missing answer as `simulated`.
 	 */
 	get sandboxBackend(): SandboxBackend {
-		return sandboxBackendFor(this.#runtime.platform, this.#runtime.hasNativeBackend);
+		// The third argument is the same fact the resolver takes, read from the
+		// same runtime: the sentence `/permissions` prints and the branch the
+		// argv comes from have to be answers to one question. A runtime that
+		// does not claim the backend reports `simulated`, which is what
+		// production still runs.
+		return sandboxBackendFor(this.#runtime.platform, this.#runtime.hasNativeBackend, this.#runtime.hasAppContainer);
 	}
 
 	async exec(options: {

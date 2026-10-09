@@ -801,6 +801,16 @@ describe("networkConfinement", () => {
 	test.each([
 		[undefined, "no-os-backend"],
 		["simulated", "no-os-backend"],
+		// The container backend lands with the weakest for a measured reason
+		// rather than a cautious one: the resolver's container branch is
+		// reachable only with an `enabled` axis, because the proxy that
+		// enforces `restricted` listens on loopback and a container child
+		// cannot reach it — so the command being asked about resolved to
+		// `simulated` and runs on the proxy. Reading `os-namespace` here would
+		// describe a kernel denial the command never got, which is the
+		// over-claim direction: a user told the OS denies every route while
+		// their proxy-routed command is wide open.
+		["appcontainer", "no-os-backend"],
 		["unavailable", "backend-missing"],
 		["native", "os-namespace"],
 	] as const)("backend %s with a confined filesystem", (backend, expected) => {

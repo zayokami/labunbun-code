@@ -80,7 +80,9 @@ Press Shift+Tab to go to the next mode.
 
 > **WARNING**: A Linux system without `bubblewrap` confines nothing.
 
-> **WARNING**: The sandbox is simulated on Windows. A shell command is not confined on Windows. Run `rm .git/config` through Bash on Windows. The command succeeds.
+> **WARNING**: A shell command is not confined on Windows. The tool-layer policy decides writes and nothing stops a subprocess that goes around the tools. Run `rm .git/config` through Bash on Windows. The command succeeds.
+>
+> This build does carry a real Windows backend — an AppContainer child with a kernel-checked write boundary, implemented and tested in `packages/tools/src/sandbox/appcontainer.ts` — and the resolver can pick it. Production does not, for a measured reason: a confined child executes only what the grant names its package SID, and `git`, `node` and `bun` live outside every grant on this machine, so selecting the backend would confine every default-mode command into something that cannot run `git status`. The measurement is recorded on `SandboxRuntime.hasAppContainer` in `packages/tools/src/sandbox/index.ts`, and `/permissions` prints which layer is actually holding the session.
 
 Inside the workspace, the agent cannot write to `.git/`. This rule applies in every mode. It also applies to a nested repository. It also applies to a symbolic link that refers to a `.git` directory. Reading git data is not restricted.
 

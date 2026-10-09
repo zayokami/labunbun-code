@@ -515,18 +515,41 @@ function presentEntries(policy: SandboxPolicy, exists: (path: string) => boolean
 	};
 }
 
-/** What confines a command on this machine. See `ChildProcessExecOperations.sandboxBackend`. */
-export type SandboxBackend = "native" | "simulated" | "unavailable";
+/**
+ * What confines a command on this machine. See `ChildProcessExecOperations.sandboxBackend`.
+ *
+ * Four answers rather than the three this began as, because the two Windows
+ * kinds are different facts: `simulated` means nothing OS-level applies to the
+ * command, `appcontainer` means a container child is spawned and the kernel
+ * refuses its writes outside the granted roots. They cannot share a name —
+ * the over-claim direction, a simulated command reporting itself as confined,
+ * is the one that costs a user, and a string cannot be narrowed after the
+ * fact.
+ */
+export type SandboxBackend = "native" | "simulated" | "unavailable" | "appcontainer";
 
 /**
- * The backend this machine would get, from the two facts that decide it.
+ * The backend this machine would get, from the facts that decide it.
  *
  * A function of its platform rather than a read of `process.platform` inside, so
  * that the "Linux without bubblewrap" case — the one that decides whether a user
  * is told a lie — is reachable from a test running on any machine, including the
  * Windows one this was written on.
+ *
+ * `hasAppContainer` is the third fact, and only win32 has one to supply: this
+ * backend is a pair of DLL loads and a profile, not a program on PATH, so it
+ * does not vary by machine the way `bwrap` does. Its default follows the same
+ * rule as the twin in `resolveSandboxExecution` — a wrong `false` reports the
+ * tool-layer answer this platform already gives, the status quo, while a wrong
+ * `true` tells a user the kernel is holding a boundary it is not. Production
+ * passes `SandboxRuntime.hasAppContainer`, which `detectRuntime` does not claim.
  */
-export function sandboxBackendFor(platform: SandboxPlatform, hasNativeBackend: boolean): SandboxBackend {
+export function sandboxBackendFor(
+	platform: SandboxPlatform,
+	hasNativeBackend: boolean,
+	hasAppContainer = false,
+): SandboxBackend {
+	if (platform === "win32") return hasAppContainer ? "appcontainer" : "simulated";
 	if (!hasNativeSandboxBackend(platform)) return "simulated";
 	return hasNativeBackend ? "native" : "unavailable";
 }
@@ -555,7 +578,12 @@ export function sandboxBackendFor(platform: SandboxPlatform, hasNativeBackend: b
  *
  * An unreported backend is read as the weakest, matching
  * `describeSandboxBackend`: not knowing what confines this is not evidence that
- * something does.
+ * something does. An `appcontainer` backend joins it on a `restricted` axis for
+ * a measured reason rather than a cautious one: the resolver's container branch
+ * is reachable only with an `enabled` axis, because the proxy that enforces
+ * `restricted` listens on loopback and a container child cannot reach it — so
+ * the command being asked about resolved to `simulated` and runs on the proxy.
+ * Reading that as `os-namespace` would describe a kernel denial it never got.
  */
 export function networkConfinement(
 	backend: SandboxBackend | undefined,
@@ -566,6 +594,9 @@ export function networkConfinement(
 	if (sandbox === "danger-full-access") return "filesystem-axis-off";
 	if (backend === "native") return "os-namespace";
 	if (backend === "unavailable") return "backend-missing";
+	// `simulated`, an unreported backend, and `appcontainer` all land here. The
+	// third is not an oversight — see the function's own doc for why a restricted
+	// command under an appcontainer runtime is not kernel-confined.
 	return "no-os-backend";
 }
 
@@ -631,6 +662,17 @@ export function describeSandboxBackend(
 			// Linux is a separate question, it is unverified, and it stays in
 			// `bwrap.ts` rather than being resolved in a string this long.
 			return `Sandbox: enforced by the OS. Commands run under ${nativeSandboxProgram(platform)}. The workspace boundary is a write boundary — version-control metadata is refused for writing — and this mode does not narrow reads, which start from the machine's own. The kernel is what holds this rather than this process, and it is attached to the process rather than to the command, so it survives however the process tree is arranged.`;
+		case "appcontainer":
+			// The `.git` promise the native case makes is deliberately not repeated:
+			// the deny ACE is out until the timing anomaly in its measurement is
+			// understood (`appcontainer.ts` carries the record), so a confined
+			// command CAN write `.git` inside its grant and only the tool layer
+			// refuses it. And the restricted-axis gap is stated in the fixed
+			// string because this function is not handed the axis, the sentence
+			// is the same either way, and a reader told "enforced by the OS"
+			// while their axis is restricted would rely on a confinement they
+			// do not have.
+			return `Sandbox: enforced by the OS. Commands run in a Windows AppContainer profile derived from this workspace, and the kernel refuses a write outside the roots the policy grants — every writable root the session names, not only the workspace. The confinement is the child's own token rather than a wrapper around it, so it is attached to the process and survives however the process tree is arranged. This mode does not narrow reads. Version-control metadata is not protected by this backend: the deny ACE that would protect it is out until the timing anomaly in its measurement is understood, so a confined command can still write .git inside its grant and only the tool-layer rule refuses that, for calls that arrive through the tools. A restricted network axis is not confined by this backend either: the proxy that enforces it listens on loopback, which a container child cannot reach, so that command runs on the tool-layer policy and the proxy rather than being held here.`;
 		case "unavailable":
 			return `Sandbox: not enforced. ${nativeSandboxProgram(platform)} is not installed here, so commands run without filesystem confinement. The deny rules and the dangerous-command classifier still apply — they live in this process — but the workspace boundary is not being held.`;
 		default:

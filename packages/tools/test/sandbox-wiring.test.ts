@@ -495,6 +495,7 @@ describe("what the user is told", () => {
 		const native = describeSandboxBackend("native", "workspace-write", "darwin");
 		const unavailable = describeSandboxBackend("unavailable", "workspace-write", "linux");
 		const simulated = describeSandboxBackend("simulated", "workspace-write", "win32");
+		const appcontainer = describeSandboxBackend("appcontainer", "workspace-write", "win32");
 		const unreported = describeSandboxBackend(undefined, "workspace-write", "win32");
 
 		// The sentence a user forms their model from. What is asserted here is
@@ -506,6 +507,27 @@ describe("what the user is told", () => {
 		expect(unavailable).toContain("bwrap");
 		expect(simulated).toContain("not OS-enforced");
 		expect(unreported).toBe(simulated);
+		// The container sentence, and the half of it that matters most: it is a
+		// real confinement, so it says "enforced by the OS" like the native one —
+		// and it must NOT borrow the native sentence's version-control promise.
+		// The deny ACE is out (the timing anomaly in `appcontainer.ts`), so a
+		// confined command can write .git inside its grant. A sentence that
+		// repeated the native claim here would tell a user the one thing this
+		// backend demonstrably does not do, so the absence is asserted rather
+		// than left to a reader of the string.
+		expect(appcontainer).toContain("enforced by the OS");
+		expect(appcontainer).toContain("AppContainer profile derived from this workspace");
+		expect(appcontainer).toContain("Version-control metadata is not protected by this backend");
+		// The restricted-axis gap is stated too, because the reader this sentence
+		// reaches cannot be handed the axis: a `restricted` command is never
+		// confined here (the proxy is on loopback, which the container child
+		// cannot reach, measured), and someone told "enforced by the OS" would
+		// rely on a confinement they do not have.
+		expect(appcontainer).toContain("restricted network axis is not confined");
+		// And it must not name a wrapper program: the confinement is the child's
+		// own token, not an argv in front of the shell.
+		expect(appcontainer).not.toContain("sandbox-exec");
+		expect(appcontainer).not.toContain("bwrap");
 		// The negative half, which is the half that matters. A positive assertion
 		// only proves the right words are present somewhere in the string; these
 		// prove the claim that must not be. A simulated layer that renders as
@@ -520,7 +542,7 @@ describe("what the user is told", () => {
 		// Asked first on purpose: on a Mac with `sandbox-exec` right there, an
 		// unrestricted policy still wraps nothing, so "native" must never be
 		// allowed to imply confinement on its own.
-		for (const backend of ["native", "simulated", "unavailable"] as const) {
+		for (const backend of ["native", "simulated", "unavailable", "appcontainer"] as const) {
 			const sentence = describeSandboxBackend(backend, "danger-full-access", "darwin");
 			expect(sentence).toContain("Sandbox: off");
 			expect(sentence).not.toContain("enforced by the OS");
@@ -536,6 +558,18 @@ describe("what the user is told", () => {
 		// And the case that is not a tuning question at all.
 		expect(sandboxBackendFor("win32", true)).toBe("simulated");
 		expect(sandboxBackendFor("win32", false)).toBe("simulated");
+		// The fourth answer, and it is win32's own: the AppContainer backend is
+		// a pair of DLL loads rather than a program on PATH, so `hasNativeBackend`
+		// is not what decides it — the deliberate claim in the runtime is, and
+		// the default is the safe direction (no claim reads as `simulated`, the
+		// status quo, while a wrong claim would tell a user the kernel holds a
+		// boundary it does not). The flag changes nothing off win32: there is no
+		// fourth answer for a platform whose backend is a wrapper.
+		expect(sandboxBackendFor("win32", false, true)).toBe("appcontainer");
+		expect(sandboxBackendFor("win32", true, true)).toBe("appcontainer");
+		expect(sandboxBackendFor("darwin", true, true)).toBe("native");
+		expect(sandboxBackendFor("darwin", false, true)).toBe("unavailable");
+		expect(sandboxBackendFor("linux", false, true)).toBe("unavailable");
 	});
 
 	test("the executor reports the backend its own runtime implies, not the host's", () => {
@@ -546,6 +580,25 @@ describe("what the user is told", () => {
 		expect(new ChildProcessExecOperations({ platform: "win32", hasNativeBackend: true }).sandboxBackend).toBe(
 			"simulated",
 		);
+		// The container claim, and the sentence follows it: the report and the
+		// branch the argv comes from are answers to one question, so the runtime
+		// that would confine the spawn is the runtime that says so. The control
+		// beside it is production's actual shape — `detectRuntime` does not claim
+		// the backend, so what `/permissions` prints on this machine is still the
+		// simulated sentence, and the README's warning stays true.
+		expect(
+			new ChildProcessExecOperations({
+				platform: "win32",
+				hasNativeBackend: false,
+				hasAppContainer: true,
+			}).sandboxBackend,
+		).toBe("appcontainer");
+		expect(
+			new ChildProcessExecOperations({
+				platform: "win32",
+				hasNativeBackend: false,
+			}).sandboxBackend,
+		).toBe("simulated");
 	});
 
 	test("the app's own executor reports its backend, rather than nothing", () => {
