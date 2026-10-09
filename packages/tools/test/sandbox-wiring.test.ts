@@ -988,6 +988,70 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		}
 	});
 
+	/**
+	 * The 8.3 short spelling of a directory, or `null` when the filesystem
+	 * does not produce one.
+	 *
+	 * Straight from `cmd`, with `%~sI`: it is the shell's own short-name
+	 * expansion, so it is the spelling a Windows child resolves rather than a
+	 * reimplementation of the heuristic. The GitHub Windows runner's `TEMP`
+	 * is spelled this way (`RUNNER~1`), which is why the grant test below
+	 * needs it at all.
+	 */
+	function eightDotThree(path: string): string | null {
+		try {
+			const out = execSync(`cmd /c for %I in ("${path}") do @echo %~sI`, { encoding: "utf8" }).trim();
+			return out === "" ? null : out;
+		} catch {
+			return null;
+		}
+	}
+
+	test("the grant covers the workspace however it is spelled", async () => {
+		// The spelling test the GitHub Windows runner asked for. Its `TEMP`
+		// is `C:\Users\RUNNER~1\AppData\Local\Temp` — the 8.3 short name —
+		// and a confined powershell there died with .NET's
+		// `Access to the path '...\lbb-sandbox-wire-…' is denied` while a
+		// confined cmd under the same policy wrote the same tree fine: the
+		// ACE had been written against one spelling of the directory and the
+		// child read another. `acquireWorkspaceGrant` now canonicalises each
+		// root with `realpathSync` before writing, so the ACE lands on the one
+		// spelling every reader agrees on.
+		//
+		// Both spellings are driven because the machine this test was written
+		// on spells its TEMP the long way: the short-name case is the one that
+		// failed in CI, and it cannot be skipped just because it happens to
+		// pass here — on a machine where the two spellings already resolve
+		// identically, both cases pass, and on the runner the short case is
+		// the whole point. If the short spelling cannot be produced (a
+		// filesystem that does not track 8.3 names, say), the test says so and
+		// skips rather than passing for the wrong reason.
+		const long_root = workspace();
+		const short_root = eightDotThree(long_root);
+		if (short_root === null || short_root.toLowerCase() === long_root.toLowerCase()) {
+			// No distinct short spelling on this filesystem: nothing to
+			// compare, and a pass here would measure nothing.
+			return;
+		}
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
+		try {
+			for (const spelling of [long_root, short_root]) {
+				const target = `${spelling}\\grant-${Date.now()}.txt`;
+				const result = await exec.exec({
+					command: `echo written > "${target}"`,
+					cwd: spelling,
+					sandbox: containerPolicy(spelling),
+					timeoutMs: 10_000,
+				});
+				expect(result.exitCode).toBe(0);
+				expect(result.stderr).not.toContain("denied");
+				expect(existsSync(target)).toBe(true);
+			}
+		} finally {
+			void exec.close?.();
+		}
+	});
+
 	test("an already-aborted signal kills the child before it can run", async () => {
 		// The one abort case this build can honour: the signal is checked
 		// between polls, so a signal that fired before the run began is seen on

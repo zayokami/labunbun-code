@@ -78,6 +78,7 @@
  */
 import { dlopen, FFIType, type Pointer, ptr, toArrayBuffer } from "bun:ffi";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 
 /** `S-1-15-2-…`, 40 bytes on x64 — the shape the kernel checks per file access. */
@@ -1207,6 +1208,21 @@ interface ActiveGrant {
 
 const activeGrants = new Map<string, ActiveGrant>();
 
+/**
+ * The one spelling of a root every reader agrees on: symlinks, junctions,
+ * `\\?\` prefixes and 8.3 short names all resolved, so an ACE written here
+ * covers a child however it spells the same directory. Best-effort — a path
+ * that cannot be resolved is returned as spelled, because a grant that
+ * refuses over an unreadable parent would fail closed for no gain.
+ */
+function canonicalGrantPath(root: string): string {
+	try {
+		return realpathSync(root);
+	} catch {
+		return root;
+	}
+}
+
 export interface GrantOutcome {
 	profile?: AppContainerProfile;
 	error?: string;
@@ -1254,7 +1270,21 @@ export function acquireWorkspaceGrant(
 	// workspace but not its cache, which is the narrower-than-asked failure
 	// this repository already fixed once in `policyFor` — and here it would be
 	// worse, because the first write that misses is the one that fails.
-	const roots = [workspace, ...extraRoots.filter((root) => root !== workspace)];
+	//
+	// Each root is canonicalised before the ACE is written, and the reason is
+	// a measured failure on the GitHub Windows runner rather than tidiness:
+	// that machine's `TEMP` is spelled with the 8.3 short name
+	// (`C:\Users\RUNNER~1\AppData\Local\Temp`), and an ACE written against the
+	// short spelling does not cover a child that opens the same directory by
+	// another spelling — the confined powershell died with .NET's
+	// `Access to the path 'C:\Users\RUNNER~1\AppData\Local\Temp\lbb-…' is
+	// denied` while the write-test shell under the same policy succeeded,
+	// because the two children resolved the path differently. `realpathSync`
+	// resolves short names, `\\?\` prefixes and junctions to the one spelling
+	// the kernel checks, so the ACE lands where every reader finds it. A path
+	// that cannot be resolved is granted as spelled: resolving is best-effort
+	// and the grant failing closed covers the rest.
+	const roots = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalGrantPath);
 	for (const root of roots) {
 		const grantError = grantRootAccess(root, sid);
 		if (grantError !== null) {
