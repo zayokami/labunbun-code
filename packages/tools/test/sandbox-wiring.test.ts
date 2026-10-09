@@ -1089,27 +1089,41 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// runner could plausibly have broken: `onOutput` is called from inside
 		// the pump loop, so chunks arrive as the child writes them.
 		//
-		// The two writes are one powershell command with a sleep between them
-		// (measured: 378ms and 1404ms), for the same reason the timeout test
-		// needs a real sleeper — `ping -n 5 127.0.0.1` inside the container exits
-		// in milliseconds with "Unable to contact IP driver", so both echoes
-		// land in one chunk and the assertion below passes for the wrong
-		// reason. The two `Write-Host`s are separated by a `Start-Sleep` the
-		// kernel-level pipe keeps apart.
+		// The two writes are one cmd command with a `waitfor` between them.
+		// That shape is the end of a chain of measured failures, not a first
+		// guess, and each rung is recorded so nobody climbs back up it:
+		//
+		//   - `powershell Write-Host one; Start-Sleep 1; Write-Host two` is
+		//     red on the GitHub Windows runner even now that the grant and
+		//     the cwd are spelled canonically: the error is .NET's
+		//     `Access to the path '<short-named workspace>' is denied` raised
+		//     at `line:1 char:1` — before the first statement runs —
+		//     because the powershell engine cannot initialise under an
+		//     AppContainer token with that directory current, while a
+		//     confined `cmd` under the same policy writes the same tree fine.
+		//   - `for /l %i in (1,1,N) do @rem & echo two` never reaches the
+		//     second echo at all: `rem` swallows `& echo two` as its own
+		//     comment. Measured here, one chunk containing "streaming-one".
+		//   - `ping -n N` and `timeout /t N` are dead inside the container:
+		//     no IP driver, and `timeout` refuses a redirected stdin.
+		//
+		// `waitfor /t 3 NeverComingSignal` is System32's own waiter — it
+		// waits the full three seconds for a signal nobody sends, prints
+		// nothing of its own (`>nul 2>&1`), and needs neither network nor a
+		// terminal. Its own output must be silenced: left alone it captures
+		// the pipe and the echoes never surface.
 		//
 		// The explicit budget covers the *test*, not the command — `timeoutMs`
 		// below governs the command and this line governs the harness, and the
-		// GitHub Windows runner needs the room: a cold powershell plus the
-		// one-second sleep measures ~6.3s there, past bun's 5s default, so a
-		// green run on a fast machine was still killed on the slow one by a
-		// timeout inside the harness rather than inside the runner.
+		// GitHub Windows runner needed the room once already: a run past
+		// bun's 5s default was killed by the harness rather than by the
+		// runner. 30s leaves that whole class of problem out of the picture.
 		const cwd = workspace();
 		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
 		try {
 			const chunks: string[] = [];
 			await exec.exec({
-				command:
-					"powershell -NoProfile -Command \"Write-Output ('cwd=' + (Get-Location)); Write-Output ('exists=' + (Test-Path -LiteralPath '.')); Write-Host streaming-one; Start-Sleep -Seconds 1; Write-Host streaming-two\"",
+				command: "echo streaming-one & waitfor /t 3 NeverComingSignal >nul 2>&1 & echo streaming-two",
 				cwd,
 				sandbox: containerPolicy(cwd),
 				onOutput: (chunk) => chunks.push(chunk),
