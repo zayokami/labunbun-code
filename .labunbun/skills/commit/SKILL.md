@@ -17,7 +17,7 @@ Group the changed files by the concern they serve. Two hunks belong in the same 
 
 ## Matching this repo's commit style
 
-**Standing user instruction (2026-10-09): commit messages are written in Chinese, not English.** This overrides the English history below — the history itself moved twice already, and the current rule is the user's word, not what `git log` shows. Keep the repository's shape (scope: summary, short summary, optional body) in Chinese; only file paths, symbol names, and command names stay as they are.
+**Standing user instruction (2026-10-09): commit messages are written in English, not Chinese.** This reverses an earlier instruction given the same day, and it overrides what `git log` shows — the recent commits are in Chinese, the older ones in English, and the current rule is the user's word rather than either history. Keep the repository's shape (scope: summary, short summary, optional body); file paths, symbol names, and command names stay as they are.
 
 Run `git log --oneline -15` before writing anything, and match what it shows. The history has two shapes and it moved between them, so a description of "the style" that doesn't say which is current will send you the wrong way:
 
@@ -36,6 +36,6 @@ Print the exact message and the exact paths about to be staged before touching t
 
 Stage only the specific paths identified above — never `git add -A` or `git add .` when the working tree has anything outside the current scope. Commit with the confirmed message via a heredoc so a multi-line body survives shell quoting intact.
 
-End the message with the `Co-Authored-By: Claude <noreply@anthropic.com>` trailer, after the body and separated by a blank line. Most of the recent history carries one (74 of the last 200 commits), so a commit without it is the odd one out. Show it in the preview above, since it is part of the message the user is approving.
+End the message with the `Co-Authored-By: LaBunbun Code` trailer, after the body and separated by a blank line. Most of the recent history carries one (74 of the last 200 commits), so a commit without it is the odd one out. Show it in the preview above, since it is part of the message the user is approving.
 
 Never push as part of this skill; that is a separate action requiring its own confirmation.
