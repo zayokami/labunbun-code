@@ -1052,7 +1052,7 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 			// failure, so a passing run prints nothing.
 			expect(
 				chunks.length,
-				`chunks were ${chunks.map((c) => JSON.stringify(c.slice(0, 60))).join(" | ")}`,
+				`chunks were ${chunks.map((c) => JSON.stringify(c.slice(0, 200))).join(" | ")}`,
 			).toBeGreaterThan(1);
 			expect(chunks.join("")).toContain("streaming-one");
 			expect(chunks.join("")).toContain("streaming-two");
