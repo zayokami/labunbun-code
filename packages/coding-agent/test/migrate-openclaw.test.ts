@@ -250,12 +250,15 @@ describe("the roots", () => {
 		);
 	});
 
-	test("the agent directory is a config key, and there is no $OPENCLAW_AGENT_DIR", () => {
+	test("the agent directory is a config key and takes no environment override", () => {
 		// `agents[].agentDir` wins outright and is resolved through `resolveUserPath`;
 		// otherwise the tree is `<stateDir>/agents/<id>/agent`
-		// (`agent-scope-config.ts:578-589`). `OPENCLAW_AGENT_DIR` appears in
-		// OpenClaw's own tree only inside `*.test.ts` and `oauth-test-utils.ts`, so a
-		// reader that honoured it would be reading a variable the product does not.
+		// (`agent-scope-config.ts:578-589`, where `:577` states the rule: per-agent
+		// paths stay independent of process-wide install overrides).
+		// `OPENCLAW_AGENT_DIR` is a real process-wide variable the product reads
+		// elsewhere (`shared-main-dir.ts:8`, `install-agent-dir.ts:43`,
+		// `agent-store-source.ts:108`), but per-agent resolution does not read it —
+		// and this test exercises the per-agent resolution.
 		//
 		// A real temp directory rather than `/state`, because the configured arm runs
 		// the value through `resolve()` — on Windows `resolve("/elsewhere")` is a

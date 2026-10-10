@@ -146,10 +146,13 @@ export const OPENCLAW_AGENT_DB_FILENAME = "openclaw-agent.sqlite";
  *
  * `agents[].agentDir` wins outright and is run through `resolveUserPath`;
  * otherwise the tree is `<stateDir>/agents/<id>/agent`
- * (`agent-scope-config.ts:578-589`). The key is **configuration, not
- * environment** — `OPENCLAW_AGENT_DIR` appears in this repository's reading of
- * OpenClaw only inside `*.test.ts` files and `oauth-test-utils.ts`, and is not a
- * product variable. Naming it here is how a reader knows not to go looking for it.
+ * (`agent-scope-config.ts:578-589`, where `:577` states the governing rule:
+ * "Per-agent paths stay independent of process-wide install overrides").
+ * `OPENCLAW_AGENT_DIR` is a real process-wide variable — the shared-main auth
+ * store (`shared-main-dir.ts:8`), the install-dir override
+ * (`install-agent-dir.ts:43`), and agent-store candidates
+ * (`agent-store-source.ts:108`) read it — but per-agent resolution does not,
+ * and this importer follows the per-agent rule.
  */
 export function openclawAgentDir(stateDir: string, agentId: string, configured?: string): string {
 	const trimmed = typeof configured === "string" ? configured.trim() : "";
