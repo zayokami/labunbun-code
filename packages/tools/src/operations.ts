@@ -58,18 +58,8 @@ export interface FileSystemOperations {
 	move(from: string, to: string): Promise<void>;
 }
 
-/**
- * How much of a captured stream stays in memory: a head and a tail of this many
- * characters each. Past that the middle is dropped from the window, and from
- * the first drop on the whole stream is written to the spill file — so this is
- * a memory bound, not a loss: everything the window let go is in the file.
- *
- * A hundred and twenty thousand characters at the very worst (both streams at
- * both caps), against the unbounded string this used to be. The size matches
- * the pipeline's default result limit so the two cuts agree about what "too
- * long" means; the pipeline cuts what arrives here down to the model's share
- * of it, and finds the file pointer rather than writing a second copy.
- */
+// Long-form design notes: docs/dev/tools.md
+/** How much of each captured stream stays in memory: a head and a tail of this many characters. */
 const CAPTURE_HEAD_CHARS = 30_000;
 const CAPTURE_TAIL_CHARS = 30_000;
 
@@ -88,16 +78,8 @@ export interface ExecResult {
 	 * process over instead of the timeout killing it. `exitCode` is `null` then.
 	 */
 	handedOff?: boolean;
-	/**
-	 * Set when the output outgrew the capture bound (`spillDir` was given) and
-	 * the whole stream was written to a file.
-	 *
-	 * `chars` is that file's exact length — every character both streams
-	 * emitted, interleaved as it arrived, which is the only order a capture can
-	 * preserve and the order the command actually produced. The bounded `stdout`
-	 * and `stderr` say how much of each stream the result itself is missing
-	 * (`... [truncated N chars of output]`); this says where all of it is.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Set when the output outgrew the capture bound and the whole stream went to a file. */
 	spill?: { path: string; chars: number };
 }
 
@@ -129,84 +111,23 @@ export interface ExecOperations {
 		signal?: AbortSignal;
 		env?: Record<string, string>;
 		onOutput?: (chunk: string) => void;
-		/**
-		 * Take the process over when `timeoutMs` elapses, instead of killing it.
-		 *
-		 * Opt-in, and it is the only difference between a wait that kills and one
-		 * that hands over: a foreground timeout says the caller stopped waiting,
-		 * which is not a statement that the command should die — a test suite a
-		 * second past its budget is a candidate for the background, not for a
-		 * process-tree kill. When provided, the timeout calls this with the live
-		 * child and settles the promise immediately; the abort listener is
-		 * detached in the same breath, because a process an embedder has adopted
-		 * should not die when some later turn's signal fires. Without it the
-		 * timeout kills, exactly as before.
-		 */
+		// Long-form design notes: docs/dev/tools.md
+		/** Take the process over when `timeoutMs` elapses, instead of killing it. */
 		onTimeout?: (handoff: ExecHandoff) => void;
-		/**
-		 * A confinement policy to put around the shell, or `undefined` for none.
-		 *
-		 * Optional because a caller with no sandbox in play is a real case — the
-		 * `!` shell passthrough is deliberately outside the mode system — not
-		 * because forgetting it should be quiet. When present, this resolves the
-		 * platform's backend and wraps the shell with it; `sandboxBackend` on the
-		 * implementation says which backend that turned out to be, including the
-		 * cases where the answer is "none, and here is why".
-		 */
+		// Long-form design notes: docs/dev/tools.md
+		/** A confinement policy to put around the shell, or `undefined` for none. */
 		sandbox?: SandboxPolicy;
-		/**
-		 * Where to write a command's output once it outgrows the in-memory
-		 * capture — and, just by being present, the switch that turns that
-		 * capture on.
-		 *
-		 * Unset, accumulation is exactly what it always was: one unbounded string
-		 * per stream. That is the right default for an embedder's own executor and
-		 * a bad one for a tool a model can point at `yes`, which is why the tool
-		 * set threads its spill directory through. Set, each stream keeps a head
-		 * and a tail in memory and the whole output — interleaved in arrival
-		 * order, the only order a stream has — goes to a file under this
-		 * directory once the middle stops fitting; `ExecResult.spill` then names
-		 * that file. The directory is created if missing. A capture that could
-		 * not write reports no spill rather than a path to a half-written file.
-		 */
+		// Long-form design notes: docs/dev/tools.md
+		/** Where a command's output goes once it outgrows the in-memory capture; presence turns the capture on. */
 		spillDir?: string;
 	}): Promise<ExecResult>;
 
-	/**
-	 * The proxy variables a child spawned under `policy` needs for its traffic to
-	 * be confined, or `undefined` when the policy confines no network.
-	 *
-	 * This exists because `exec` is not the only thing that spawns a shell. The
-	 * background manager spawns one directly, and for as long as the proxy
-	 * lifecycle was a private detail of this class, that second spawn path
-	 * resolved the policy's *filesystem* half and quietly dropped its network
-	 * half: the domain table is enforced by the proxy alone, so
-	 * `run_in_background: true` was a one-word way around the whole network axis
-	 * while every foreground command looked correctly confined.
-	 *
-	 * The lifecycle — one listener **per policy**, shared between concurrent
-	 * callers, all closed together — lives here, so a second spawner joins the
-	 * existing proxy rather than opening a second one nobody closes. "Per policy"
-	 * is not padding: a single shared listener would be one set of rules for the
-	 * whole session, which is the hole that made the first restricted command
-	 * decide destinations for every command after it.
-	 *
-	 * Optional because a fake or an embedder's own executor may confine nothing
-	 * and have nothing to share, not because a missing answer may be read
-	 * optimistically: a caller with no answer injects nothing, which is the
-	 * direction that fails open, so a real executor that confines a network has
-	 * to answer this.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** The proxy variables a child under `policy` needs, or `undefined` when the policy confines no network. */
 	networkEnvFor?(policy: SandboxPolicy): Promise<Record<string, string> | undefined>;
 
-	/**
-	 * What confines commands run through here, when this implementation knows.
-	 *
-	 * Optional because a fake or an embedder's own executor may have no backend to
-	 * report, not because a missing answer may be read optimistically: an absent
-	 * backend renders as "simulated", so forgetting it is the safe direction to
-	 * fail in.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** What confines commands run through here, when this implementation knows. */
 	readonly sandboxBackend?: SandboxBackend;
 }
 
@@ -278,15 +199,8 @@ function isFileSync(path: string): boolean {
 	}
 }
 
-/**
- * Whether a `bash.exe` found on PATH is Windows' own — the WSL launcher.
- *
- * It answers to the same name and sits in directories that are on every PATH,
- * but it starts a Linux VM: every command this tool runs names Windows paths,
- * and a shell that resolves them somewhere else is not the shell it promises.
- * Only PATH-derived candidates are held to this: `LBB_BASH_PATH` is a user
- * saying "this one", and that is the end of the question.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Whether a `bash.exe` found on PATH is Windows' own WSL launcher. */
 function isWindowsBash(path: string): boolean {
 	const normalized = path.toLowerCase().replace(/\//g, "\\");
 	const systemRoot = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
@@ -294,14 +208,8 @@ function isWindowsBash(path: string): boolean {
 	return normalized.includes("\\microsoft\\windowsapps\\");
 }
 
-/**
- * Every PATH directory that could hold an executable by that name, in order.
- *
- * Only drive-anchored entries are searched: a shell that is itself MSYS hands
- * its children a PATH made of POSIX paths (`/usr/bin`), which no Windows
- * process can open — the same directories are behind them under their real
- * names, so nothing is lost by skipping the ones that cannot be opened.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Every PATH directory that could hold an executable by that name, in order. */
 function* pathCandidates(name: string): Generator<string> {
 	for (const entry of (process.env.PATH ?? "").split(";")) {
 		const dir = entry.trim().replace(/^"|"$/g, "");
@@ -310,16 +218,8 @@ function* pathCandidates(name: string): Generator<string> {
 	}
 }
 
-/**
- * Shell resolution: prefer a POSIX-compatible shell (Git Bash / MSYS2) on
- * Windows since most agent commands assume POSIX syntax; fall back to cmd.
- *
- * The conventional locations are answered first — that install is a deliberate
- * one, and it is where the user pointed us if they set `LBB_BASH_PATH`. PATH
- * is the long tail: an install under scoop, chocolatey, or simply on another
- * drive was, before this, a machine where every command quietly ran through
- * cmd.exe instead, and the tool's POSIX-shaped commands failed one at a time.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Shell resolution: a POSIX-compatible shell on Windows when one exists, else `cmd.exe`; `/bin/bash` elsewhere. */
 export function detectShell(): { command: string; args: (cmd: string) => string[] } {
 	if (process.platform === "win32") {
 		const conventional = [
@@ -340,44 +240,14 @@ export function detectShell(): { command: string; args: (cmd: string) => string[
 	return { command: "/bin/bash", args: (cmd) => ["-c", cmd] };
 }
 
-/**
- * Everything a proxy is built from, as one comparable string.
- *
- * A proxy closes over the rules it was started with, so this string is the whole
- * question "may I reuse the proxy I have?" — and the reason the answer has to
- * include the rules is the hole it closes: without it, the first restricted
- * command of a session decided the destination policy for every command after
- * it, and narrowing an allowlist mid-session silently did nothing.
- *
- * JSON rather than a hand-joined string, because a joined one is ambiguous.
- * Join each rule as `permission:pattern` with a space between rules and
- * `[{allow,"x"},{allow,"y"}]` and `[{allow,"x allow:y"}]` both render
- * `allow:x allow:y` — two different allowlists, one key, and the second one
- * would be run under the first one's rules. That needs an odd pattern to reach,
- * but the cost of the unambiguous form is one `JSON.stringify` per command and
- * the cost of the other one is a policy that is not the policy.
- *
- * Rules are left in order, **not sorted**. Sorting would make two tables that
- * differ only in order collide, and whether the decision function cares about
- * order is not this file's to assume — a needless rebuild costs one listener, a
- * missed one costs enforcement. Same reasoning for not normalising case or
- * trimming.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Everything a proxy is built from, as one comparable string. */
 function proxyPolicyKey(policy: SandboxPolicy): string {
 	return JSON.stringify([policy.network, (policy.networkRules ?? []).map((rule) => [rule.permission, rule.pattern])]);
 }
 
-/**
- * The bounded capture `exec` runs when it was given a spill directory.
- *
- * Three windows over the same chunks: one per stream, whose text becomes the
- * result, and a combined one, which is the only writer to disk. Combined is the
- * writer because it is the only one whose bound is guaranteed to cross first —
- * it sees every chunk both streams emit, so it can never overflow later than
- * either single stream, and the file therefore exists with a lossless seed
- * (`OverflowSink.overflow` is handed the un-dropped stream) before either
- * result stream has let go of a character.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The bounded capture `exec` runs when it was given a spill directory. */
 function createExecCapture(dir: string) {
 	let file: { fd: number; path: string } | null = null;
 	let broken = false;
@@ -446,14 +316,9 @@ function createExecCapture(dir: string) {
 					spill: { path: closed.path, chars: outResult.total + errResult.total },
 				};
 			}
-			// Deleted for one of two reasons, and the difference matters: both
-			// streams fitting their windows means the combined capture opened a
-			// file for output the text already holds whole (each stream past half
-			// the shared bound is enough to trip it) — a stray file nobody needs,
-			// with the pipeline's own cut free to spill as it would for any
-			// result. A broken file is deleted for the opposite reason: the only
-			// thing worse than a missing pointer is one that points at a maimed
-			// file. Either way this is best effort; the spill directory ages out.
+			// Deleted for one of two reasons: the text already holds the whole output,
+			// or the file is broken. Both are best effort.
+			// Long-form design notes: docs/dev/tools.md
 			try {
 				unlinkSync(closed.path);
 			} catch {
@@ -466,97 +331,27 @@ function createExecCapture(dir: string) {
 
 export class ChildProcessExecOperations implements ExecOperations {
 	#shell: ReturnType<typeof detectShell>;
-	/**
-	 * What this machine can confine with, asked once at construction.
-	 *
-	 * A PATH scan per command would be pure waste, and the answer does not change
-	 * while the process runs. Injectable so the wrapping branch is reachable from
-	 * a test on a machine that is not the one it wraps for — see
-	 * `sandbox-wiring.test.ts`, where a fake Linux runtime is the only thing that
-	 * makes "the wrapper is really around the shell" an assertion rather than a
-	 * hope.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** What this machine can confine with, asked once at construction. */
 	readonly #runtime: SandboxRuntime;
 
-	/**
-	 * One proxy per policy a session has run under, keyed by `proxyPolicyKey`.
-	 *
-	 * A single shared instance rather than one per command: the rules and the
-	 * listening port belong to the session, and a fresh proxy per command would
-	 * mean a fresh loopback port per command — which reads to a child process as
-	 * "my network configuration is changing underneath me", and breaks anything
-	 * that caches the proxy URL. It is created lazily because the common case
-	 * (`network: enabled`, no rules) must not pay for a listening socket, and
-	 * `close` exists because a proxy nobody tears down is a socket nobody owns.
-	 *
-	 * **Keyed by the policy, and the key is the fix.** It used to be a single
-	 * unkeyed slot, and that made the first restricted command of a session the
-	 * authority on destinations for every command after it: the proxy closes over
-	 * the rules it was built with, so narrowing an allowlist mid-session changed
-	 * nothing, because the narrowing policy was never consulted. The direction is
-	 * the bad one — the policy that survives is the older and usually the broader
-	 * of the two, so this fails open. `sandbox-wiring.test.ts` measures it.
-	 *
-	 * A `null` value is a remembered *answer*, not a missing one: `network: enabled`
-	 * with no rules starts nothing, so an unrestricted session would otherwise
-	 * re-enter `startNetworkProxy` — and re-ask `needsNetworkProxy` — once per
-	 * command. **That is an optimisation with no observable difference**, and it is
-	 * written here as one so that nobody later builds an assertion on it: there is
-	 * no injection seam that could count the calls, and `networkProxyRunning` is
-	 * false either way. Removing the `null` costs one function call per command and
-	 * breaks nothing.
-	 *
-	 * Every proxy stays live until {@link close} rather than being retired when a
-	 * newer one arrives, because `NetworkProxy.close` destroys every connection
-	 * the proxy has open and a command started under the previous policy may still
-	 * be running with that port in its environment. Keeping them all also means a
-	 * session that flips between two policies twice does not churn four listeners.
-	 *
-	 * The map grows with the number of *distinct* policies, which is one per
-	 * allowlist edit rather than one per command. That is a resource characteristic,
-	 * not a bound, and it is written down here rather than hidden behind an eviction
-	 * rule — eviction would have to close a proxy something may still be using,
-	 * which is the problem the previous paragraph is about.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** One proxy per policy a session has run under, keyed by `proxyPolicyKey`. */
 	#proxies = new Map<string, NetworkProxy | null>();
 	#starting: Promise<NetworkProxy | undefined> | undefined;
-	/**
-	 * Bumped by {@link close}, so a start that was already in flight when close
-	 * ran can tell that it is late.
-	 *
-	 * `close` clears the map, but it cannot un-start a listener that has not been
-	 * listening yet. Without this the late start installs itself into the empty map
-	 * and there is a proxy on a port nothing will ever close — the same leak `close`
-	 * exists to prevent, reachable by quitting during a slow listen.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Bumped by `close`, so a start that was already in flight can tell that it is late. */
 	#epoch = 0;
 
-	/**
-	 * `shell` is injectable for the same reason `runtime` is, and the reason
-	 * is not hypothetical: the container-path tests assert what the AppContainer
-	 * branch spawns, and `detectShell` answers with whatever shell the
-	 * *machine* prefers — Git for Windows' `bash.exe` in its conventional place
-	 * on most developer machines and on the GitHub Windows runner, `cmd.exe`
-	 * where no bash is installed. Those two answers are not the same test: one
-	 * of them cannot execute inside the container at all (see
-	 * `containerCanExecute`). Injecting the shell makes the tests measure the
-	 * branch rather than the machine's Git layout, the same way `FAKE_LINUX`
-	 * makes the wrapping branch measurable on a Windows box.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** `runtime` and `shell` are injectable, so tests assert the branches and not the machine's own layout. */
 	constructor(runtime: SandboxRuntime = detectRuntime(), shell: ReturnType<typeof detectShell> = detectShell()) {
 		this.#runtime = runtime;
 		this.#shell = shell;
 	}
 
-	/**
-	 * Whether a proxy is listening right now.
-	 *
-	 * Skips the remembered `null` answers, because this asks "is a socket open",
-	 * not "is the cache warm". The tests read it to assert that a confined command
-	 * left exactly one listener behind and that `close` took it away; nothing in
-	 * the running app reads it. It used to claim `/doctor` does, which was not true
-	 * of any code in this repo.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Whether a proxy is listening right now. */
 	get networkProxyRunning(): boolean {
 		for (const proxy of this.#proxies.values()) if (proxy) return true;
 		return false;
@@ -577,22 +372,8 @@ export class ChildProcessExecOperations implements ExecOperations {
 		await Promise.all(proxies.map((proxy) => proxy.close()));
 	}
 
-	/**
-	 * The proxy for `policy`, or `undefined` when the policy confines nothing.
-	 *
-	 * Two callers arriving together under the same policy must not start two
-	 * listeners, so the in-flight promise is shared. A start that fails clears
-	 * the slot: leaving a rejected promise cached would turn one transient
-	 * `EADDRNOTAVAIL` into a permanently broken `exec`, and the next command
-	 * would retry the same way the first did.
-	 *
-	 * Callers under *different* policies are serialised rather than run
-	 * concurrently. Letting them overlap would mean two writers racing to fill
-	 * the map, and the loser's proxy would be installed by whichever start
-	 * resolved last — the entry would then name a port built from rules the
-	 * next caller's policy did not ask for. Waiting costs one start's latency
-	 * in a case that happens once per allowlist edit.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** The proxy for `policy`, or `undefined` when the policy confines nothing. */
 	async #proxyFor(policy: SandboxPolicy): Promise<NetworkProxy | undefined> {
 		const key = proxyPolicyKey(policy);
 		const cached = this.#proxies.get(key);
@@ -650,14 +431,8 @@ export class ChildProcessExecOperations implements ExecOperations {
 		return (await this.#proxyFor(policy))?.env;
 	}
 
-	/**
-	 * What confines a command on this machine.
-	 *
-	 * Optional on the interface because an embedder's own `Operations` has no
-	 * backend to report, and required here because this class always does — a
-	 * caller that asked "what is holding my commands in?" must not be told
-	 * nothing. `describeSandboxBackend` treats a missing answer as `simulated`.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** What confines a command on this machine. */
 	get sandboxBackend(): SandboxBackend {
 		// The third argument is the same fact the resolver takes, read from the
 		// same runtime: the sentence `/permissions` prints and the branch the
@@ -710,75 +485,21 @@ export class ChildProcessExecOperations implements ExecOperations {
 		const proxyEnv = sandbox ? await this.networkEnvFor(sandbox) : undefined;
 		const childEnv = { ...process.env, ...env, ...proxyEnv };
 
-		// The container path's view of that environment, and the difference from
-		// what `spawn` accepts is real rather than cosmetic: `process.env` on
-		// Windows carries `undefined` values for the handful of pseudo variables
-		// Node defines (`NODE_ENV`, `TZ`), and an env block with a literal
-		// "undefined" string in it reaches the child as a variable set to the
-		// text "undefined". Filtering is what `confinedEnvBlock` would do anyway
-		// — but doing it there would make the block builder silently drop values
-		// the spawn path would have passed, so the drop happens at the one place
-		// that knows which environment this is.
+		// The container path's view of the child environment, with the `undefined`
+		// pseudo-variables of `process.env` dropped for the env block.
+		// Long-form design notes: docs/dev/tools.md
 		const confinedEnv = Object.fromEntries(
 			Object.entries(childEnv).filter((entry): entry is [string, string] => entry[1] !== undefined),
 		);
 
-		// The Windows container path, and it is here rather than above because
-		// everything it needs is decided by now: the shell argv, the child
-		// environment, and the resolution's grant roots.
-		//
-		// What this branch does *not* do is fall through to the plain spawn
-		// below. That is the one shape the appcontainer kind must never take:
-		// `resolution.kind === "native" ? … : [shellCommand, …]` reads as
-		// "anything not native runs the bare shell", which was true while the
-		// fifth kind did not exist and is a fail-open now that it does — a
-		// command the resolver confined would run with no container at all.
-		//
-		// Four properties of the confined run are worth stating, because each
-		// one is a difference from the spawn path rather than a detail:
-		//
-		//   - **It is synchronous FFI.** `runConfined` does not return until the
-		//     child has exited, and the poll it waits in cannot yield to the
-		//     event loop. That is measured, not an oversight: the abort check
-		//     inside it reads `signal.aborted`, which is set by the listener
-		//     below — and a listener cannot fire while the loop is blocked. So
-		//     an abort that arrives *during* the run is not seen by it; the
-		//     timeout kill and the abort-at-entry case are, and both leave
-		//     `killed` true. Concretely: a user who presses Esc mid-command
-		//     waits for the timeout, exactly as a hung local terminal would.
-		//     The async restructuring that would fix this is a separate change.
-		//   - **No handoff.** The spawn path can hand a live `ChildProcess` to
-		//     `onTimeout` for background adoption; a confined run owns a raw
-		//     process handle no `ChildProcess` wraps, so a timeout kills. The
-		//     `Bash` tool's copy that promises "a foreground command that
-		//     exceeds its timeout keeps running in the background" is therefore
-		//     wrong under this backend, and the tool description that carries
-		//     it is part of the honest-reporting round, not of this one.
-		//   - **The grant outlives the command, not the call.** It is acquired
-		//     before the spawn and released in a `finally`, so an abort or a
-		//     spawn failure cannot leak an ACE onto the workspace. The refcount
-		//     inside `acquireWorkspaceGrant` is what keeps two commands running
-		//     at once from dropping each other's grant.
-		//   - **A shell the container cannot execute refuses the command.**
-		//     `detectShell` prefers Git for Windows' `bash.exe` wherever it is
-		//     installed, and a container child cannot execute a program whose
-		//     runtime sits outside every grant: the child starts and dies at
-		//     DLL initialization with 0xC0000142 — measured, as four opaque
-		//     spawn failures on the GitHub Windows runner. So the branch checks
-		//     first (`containerCanExecute`) and fails closed with a reason,
-		//     rather than handing a doomed program to the spawner or — the
-		//     other direction — falling through to the unconfined spawn.
+		// The Windows container path: the shell argv, the child environment, and
+		// the grant roots are all decided by now, and this branch never falls
+		// through to the plain spawn below.
+		// Long-form design notes: docs/dev/tools.md
 		if (resolution.kind === "appcontainer") {
-			// Refuse before anything is spent — before the grant is even
-			// acquired — when the shell this session resolved cannot execute
-			// inside the container. The measurement is on `containerCanExecute`,
-			// and the shape it replaces matters: `CreateProcessW` starts a
-			// Git-Bash session shell and the child then dies at DLL
-			// initialization with 0xC0000142, which reads as a command that ran
-			// and failed rather than a backend that could not start. A refusal
-			// naming the program and the two sets it is not in is actionable;
-			// the number is not. Fail closed: an unconfined fallback here would
-			// run the command the user asked to confine.
+			// Refuse before the grant is acquired when this session's shell cannot
+			// execute inside the container; fail closed.
+			// Long-form design notes: docs/dev/tools.md
 			const shellProgram = confinedProgramName(shellCommand);
 			if (!containerCanExecute(shellProgram, resolution.grantRoots)) {
 				return {
@@ -963,25 +684,8 @@ export class ChildProcessExecOperations implements ExecOperations {
 	}
 }
 
-/**
- * The operations the app runs on.
- *
- * `exec` is a parameter so a caller can name the executor it owns — a test that
- * has to observe the proxy under test cannot, if the object it holds is not the
- * one running commands. It also keeps one listener: everything routed through
- * the returned object shares the executor's proxy rather than each part opening
- * its own. **That is one listener per policy**, which is what makes it safe — a
- * single listener for the whole session would be one set of rules for every
- * command in it, and the first restricted command would decide destinations for
- * all the rest.
- *
- * The executor's own answers are forwarded rather than recomputed here. They
- * used to be dropped, and the drop was invisible in both directions at once:
- * `sandboxBackend` came back `undefined`, so `/permissions` rendered "simulated,
- * not OS-enforced" on every machine — including a Mac with `sandbox-exec`
- * sitting right there — and `networkEnvFor` came back `undefined`, so a spawn
- * that asked this object for the policy's proxy got nothing and ran unconfined.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The operations the app runs on, with the executor's own answers forwarded. */
 export function defaultOperations(exec: ChildProcessExecOperations = new ChildProcessExecOperations()): Operations {
 	const fs = new NodeFileSystemOperations();
 	return {

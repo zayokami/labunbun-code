@@ -1,15 +1,5 @@
-/**
- * Background shell manager: long-running commands (dev servers, watchers)
- * started by the Bash tool with run_in_background, or adopted by it when a
- * foreground command outlives its timeout. Output streams to a temp file;
- * BashOutput tails it, KillBash terminates the process tree.
- *
- * A shell that finishes on its own is announced through `onComplete`, so an
- * app can be woken instead of polling, and its record stays pollable until the
- * retained set outgrows {@link MAX_RETAINED_SHELLS} — a session that starts a
- * watcher per hour should not accumulate a record per command for the life of
- * the process.
- */
+// Background shell manager: long-running and adopted shells, their logs, and their bound.
+// Long-form design notes: docs/dev/tools.md
 import { type ChildProcess, spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,17 +14,8 @@ const MAX_SHELL_OUTPUT_CHARS = 30_000;
 /** How many ended shells the manager keeps pollable before evicting the oldest. */
 const MAX_RETAINED_SHELLS = 16;
 
-/**
- * The last `maxChars` characters of a file, without reading the whole thing.
- *
- * One character is at most four UTF-8 bytes, so a window of `4 * maxChars`
- * bytes always holds at least that many characters: the last `maxChars` of what
- * it decodes are the last `maxChars` of the file, and everything before them
- * never had to be read. A window that opens in the middle of a character
- * decodes its leftover bytes as a replacement character — at the front of the
- * window, ahead of everything kept, so the text that comes back is a suffix of
- * the file and made of characters the file contains.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The last `maxChars` characters of a file, without reading the whole thing. */
 export function readTail(path: string, maxChars: number): { text: string; truncated: boolean; bytes: number } {
 	const bytes = statSync(path).size;
 	const window = Math.min(bytes, maxChars * 4);
@@ -127,16 +108,8 @@ export class BackgroundShellManager {
 		});
 	}
 
-	/**
-	 * The first end event a shell reports, and the only one acted on.
-	 *
-	 * A failed spawn can surface twice — an `error` and, on some platforms, the
-	 * `close` behind it — so the stamp decides: whoever arrives first stops the
-	 * clock and does the work, and a second event only updates the record. A
-	 * killed shell is deliberately not a completion: the user asked for it to
-	 * stop, so nothing is woken to say that it did — but its record is still
-	 * stamped, because an ended shell is an eviction candidate however it ended.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** The first end event a shell reports, and the only one acted on. */
 	#onEnded(entry: ShellEntry): void {
 		if (entry.endedAt !== undefined) return;
 		entry.endedAt = Date.now();
@@ -154,16 +127,8 @@ export class BackgroundShellManager {
 		this.#evictEnded();
 	}
 
-	/**
-	 * Keep the ended shells bounded.
-	 *
-	 * Every shell stays pollable after it ends — that is what BashOutput reads,
-	 * and it is how a caller who missed the announcement catches up — but the
-	 * map would otherwise keep a record per command for the life of the process.
-	 * Ended shells are kept newest-first up to {@link MAX_RETAINED_SHELLS} and
-	 * the oldest beyond that are dropped. A running shell is never a candidate:
-	 * its record is the only handle that can still kill it.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Keep the ended shells bounded. */
 	#evictEnded(): void {
 		const ended = [...this.#entries.entries()].filter(([, entry]) => entry.endedAt !== undefined);
 		if (ended.length <= MAX_RETAINED_SHELLS) return;
@@ -185,30 +150,8 @@ export class BackgroundShellManager {
 		return () => this.#exitHandlers.delete(handler);
 	}
 
-	/**
-	 * Start a detached command.
-	 *
-	 * `sandbox` is a parameter rather than something this manager resolves for
-	 * itself because it spawns the shell directly instead of going through
-	 * `Operations.exec`. That made it a second, unwrapped spawn path: the moment
-	 * a filesystem sandbox existed, `run_in_background: true` would have been a
-	 * one-word bypass around it, and it would have looked like the sandbox working
-	 * for every command a user actually ran in the foreground. The wrapping is
-	 * resolved here for the same reason it is in `exec` — the wrapper has to be
-	 * the parent of the shell, and this is the parent of the shell.
-	 *
-	 * The network half of that policy is resolved here too, and that was the
-	 * second instance of the same bypass: the wrapper is built from the policy's
-	 * filesystem half and the proxy's variables were never added to the spawn,
-	 * so a backgrounded command reached the network unconfined while every
-	 * foreground command was held by the proxy. `networkRules` is enforced by
-	 * the proxy alone — there is no second reading of the domain table — so
-	 * dropping those variables dropped the axis.
-	 *
-	 * Async because resolving them is: starting a listener is not something a
-	 * synchronous spawn can do, and making `start` wait is what keeps the two
-	 * spawn paths on one lifecycle instead of one listener each.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Start a detached command. */
 	async start(command: string, cwd: string, sandbox?: SandboxPolicy): Promise<BackgroundShell> {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
@@ -229,21 +172,9 @@ export class BackgroundShellManager {
 			resolution.kind === "native"
 				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
 				: [shellCommand, ...args(command)];
-		// The container backend does not serve this path, and the branch says so
-		// rather than falling through to the bare shell. `bash.ts` named this
-		// exact hole when it threaded the policy in — "leaving it out would make
-		// `run_in_background: true` the way around the sandbox" — and the
-		// container kind makes it real in a way the simulated answer never did:
-		// a foreground command under the same session policy would run confined
-		// while this one ran with nothing around it.
-		//
-		// Why not confine it: `runConfined` is a synchronous FFI wait that does
-		// not return until the child exits, and a background shell's whole point
-		// is a child that outlives the call — a server, a watcher, a test suite
-		// that reports progress. Holding this method until the process died
-		// would block the session, so the only honest options are confining it
-		// through an async rewrite of the spawner or refusing to start it. This
-		// build does the second.
+		// The container backend does not serve this path: refuse rather than
+		// fall through to the bare shell.
+		// Long-form design notes: docs/dev/tools.md
 		if (resolution.kind === "appcontainer") {
 			throw new Error(
 				"run_in_background is not available while the Windows container sandbox is in force: a background shell outlives the call that starts it, and this build's confined runner waits for the child to exit. Run the command in the foreground, or turn the sandbox off for this session.",
@@ -283,20 +214,8 @@ export class BackgroundShellManager {
 		return info;
 	}
 
-	/**
-	 * Register a process that was already running — the shape a foreground
-	 * command arrives in when it outlives its timeout and the executor hands it
-	 * over rather than killing it.
-	 *
-	 * Everything the class already offers works on the adopted process from
-	 * here: `output` tails the log, `kill` stops the tree, `completed` resolves
-	 * with the exit code. The one thing not re-attached is output: the exec
-	 * call's own listeners keep reading both pipes — a process caught
-	 * mid-stream has no clean point to switch readers without racing one
-	 * against the other — and they forward what they read through `append`.
-	 * Whatever had been buffered before the handoff is written first, so the
-	 * log opens with what the command had already printed.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Register a process that was already running — a foreground command that outlived its timeout. */
 	adopt(input: {
 		child: ChildProcess;
 		command: string;
@@ -330,41 +249,16 @@ export class BackgroundShellManager {
 		return this.#entries.get(id)?.info;
 	}
 
-	/**
-	 * Append a chunk to a shell's log.
-	 *
-	 * The adopted shell's write path: the exec call that started the process
-	 * owns its pipes to the end, so the manager is handed what those listeners
-	 * read rather than attaching a second reader to a stream already being read.
-	 * An unknown id is ignored — the same best-effort stance as the log write
-	 * itself, for a chunk whose process has no other reader to lose it to.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Append a chunk to a shell's log. */
 	append(id: string, chunk: string): void {
 		const entry = this.#entries.get(id);
 		if (!entry) return;
 		logAppender(entry.info.outputFile)(chunk);
 	}
 
-	/**
-	 * Resolve once a shell has ended, with its exit code.
-	 *
-	 * A caller has no way to learn that a shell finished except by reading
-	 * `status`, so the only available technique is polling — and polling means
-	 * choosing a budget, which is an assertion about how fast the machine is that
-	 * nothing enforces. Measured on macOS CI: a test that waited on
-	 * `50 × 100 ms` exhausted the whole budget with the shell still `running` and
-	 * failed, while the very next test in the same file, spawning and polling the
-	 * same way, passed in 113 ms.
-	 *
-	 * The process already announces its own end, and `start` installs the handler
-	 * that marks the shell `completed` before this can be called, so this hands
-	 * that over rather than guessing at it. A shell that has already ended
-	 * resolves immediately instead of waiting for an event that already fired.
-	 *
-	 * A shell that never ends still hangs here, and that is deliberate: the
-	 * caller owns the timeout, so a hang fails the caller rather than being read
-	 * as a slow machine. An unknown id resolves with `null`, matching `get`.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Resolve once a shell has ended, with its exit code. */
 	completed(id: string): Promise<number | null> {
 		const entry = this.#entries.get(id);
 		if (!entry) return Promise.resolve(null);
@@ -384,16 +278,8 @@ export class BackgroundShellManager {
 		return [...this.#entries.values()].map((e) => e.info);
 	}
 
-	/**
-	 * The end of a shell's output so far, at most `maxChars` of it.
-	 *
-	 * A shell is polled while it runs, so the log only ever grows: a dev server
-	 * left up for an hour would otherwise be read whole — as bytes and again as
-	 * a string — to show the last few lines of it, once per poll. The read
-	 * starts at an offset instead, and what it skipped is said out loud along
-	 * with the path to the whole thing, because a tail is a window on the log
-	 * and not the log.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** The end of a shell's output so far, at most `maxChars` of it. */
 	output(id: string, maxChars = MAX_SHELL_OUTPUT_CHARS): string {
 		const entry = this.#entries.get(id);
 		if (!entry || !existsSync(entry.info.outputFile)) return "";

@@ -1,37 +1,5 @@
-/**
- * The `.gitignore` subset the file walker honours.
- *
- * The tree a developer searches is the tree git tracks. A file git will not
- * show in `git status` is a file a search result should not be quoting, and
- * the project already said which files those are — in the file it wrote for
- * exactly that purpose. Searching past a `.gitignore` means Grep and Glob
- * report matches from build output and logs that the developer cannot see,
- * which is worse than a miss: it reads as real.
- *
- * The subset is exactly this, and the Grep description says the same words:
- *
- * - blank lines and lines starting with `#` are skipped;
- * - `!` re-includes what an earlier rule excluded (last matching rule wins);
- * - a trailing `/` restricts a rule to directories;
- * - a pattern containing a slash anywhere is anchored to the directory its
- *   `.gitignore` lives in and matched against the path from there;
- * - a pattern with no slash is matched against the name, at any depth;
- * - a directory that is excluded is never re-included from inside it — git's
- *   own rule ("It is not possible to re-include a file if a parent directory
- *   of that file is excluded"), and the reason the walker may prune a matched
- *   directory instead of descending to test each descendant.
- *
- * Deliberately not here, none of it claimed in the description: `.git/info/
- * exclude`, the global `core.excludesFile`, escaped trailing spaces, and
- * `**` semantics — `Bun.Glob` reads `**` its own way, and the walker does not
- * re-interpret it. Matching is case-sensitive everywhere, because the skip
- * list next door is and a guess about the filesystem's case behaviour is one
- * more thing to be wrong about.
- *
- * Nested `.gitignore` files are read, and a deeper one is evaluated after the
- * ones above it, so it overrides them — git's precedence, expressed as the
- * fold in {@link isIgnored}.
- */
+// The `.gitignore` subset the file walker honours.
+// Long-form design notes: docs/dev/tools.md
 
 /** One `.gitignore` file, parsed. */
 export interface IgnoreSet {

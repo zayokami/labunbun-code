@@ -24,17 +24,8 @@ function foldCase(path: string): string {
 	return caseInsensitivePaths ? path.toLowerCase() : path;
 }
 
-/**
- * Resolve symlinks in the part of `absolutePath` that exists, keeping the rest
- * verbatim.
- *
- * `realpath` alone is not enough: Write's target does not exist yet, and
- * realpath throws on a missing component. So walk up to the first ancestor that
- * does exist, resolve that, and re-append what is left. This is what makes a
- * symlink (or Windows junction) inside the workspace that points outside it —
- * or at `.git` — visible to the checks below, since they compare the resolved
- * target rather than the link the model named.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Resolve the links in the part of `absolutePath` that exists, and keep the rest verbatim. */
 function resolveSymlinks(absolutePath: string): string {
 	const missing: string[] = [];
 	let current = absolutePath;
@@ -95,19 +86,8 @@ export function guardPathContainment(inputPath: string, cwd: string, operation: 
 /** Directories the agent must not rewrite, whatever the permission mode says. */
 const PROTECTED_SEGMENTS = [".git"] as const;
 
-/**
- * Verify a path the agent intends to *write*: contained in cwd, and not inside
- * version-control metadata.
- *
- * Containment alone answers "is this inside the workspace?", and `.git/` is
- * inside it — but a write there is not a recoverable edit. A model that decides
- * to tidy up HEAD, or a prompt-injected one that rewrites `.git/config` or a
- * hook, destroys history the user cannot get back, so this refuses regardless of
- * mode, allow rules, or how reasonable the request sounds.
- *
- * Read tools keep using guardPathContainment: reading metadata (log, diff,
- * show) is legitimate work, and `git` is on PATH for anything else.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Verify a path the agent intends to write: contained in cwd, and not inside version-control metadata. */
 export function guardWritablePath(inputPath: string, cwd: string, operation: string): string {
 	const resolved = guardPathContainment(inputPath, cwd, operation);
 	const root = foldCase(resolveCanonical(cwd, cwd).replace(/\/$/, ""));
@@ -117,25 +97,9 @@ export function guardWritablePath(inputPath: string, cwd: string, operation: str
 	const relative = folded === root ? "" : folded.slice(root.length + 1);
 	const protectedSegment = relative.split("/").find((segment) => {
 		if ((PROTECTED_SEGMENTS as readonly string[]).includes(segment)) return true;
-		// A segment that is `.git` once trailing dots and spaces are removed.
-		//
-		// **Measured, and the fix is the safe direction.** On this machine
-		// `guardWritablePath(".git /config")` and `(".git./config")` both passed
-		// the guard, because the comparison was exact string equality. On Windows
-		// those are *sibling directories* named `".git "` and `".git."` rather
-		// than aliases — writing them creates a new directory and leaves the real
-		// `.git` untouched, so on this platform the gap was a false negative
-		// rather than an escape. That is not true everywhere: SMB shares, tar and
-		// zip extraction, and the POSIX side of a WSL mount all strip trailing
-		// dots and spaces, and there the same path lands inside the real `.git`.
-		// Refusing the near-miss spelling is free on the platforms where it names
-		// a different directory and closes the gap on the ones where it does not.
-		//
-		// The alternative — stripping first and only then comparing — would be a
-		// different rule: it would refuse `git checkout` output paths that happen
-		// to end in a dot, which is a real pattern on Windows and is not an
-		// attack. Matching the name and *additionally* its trimmed form keeps
-		// that case allowed while closing this one.
+		// The trimmed spelling counts too: a segment that is `.git` once the
+		// dots and spaces at its end are removed is refused as well.
+		// Long-form design notes: docs/dev/tools.md
 		const trimmed = segment.replace(/[. ]+$/, "");
 		return trimmed !== segment && (PROTECTED_SEGMENTS as readonly string[]).includes(trimmed);
 	});

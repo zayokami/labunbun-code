@@ -29,18 +29,8 @@ export interface FileWalkerOps {
 	readTextFile?(path: string): Promise<string>;
 }
 
-/**
- * Walk a project tree and return matching files as absolute forward-slash
- * paths, newest first. Shared by the Glob tool (which filters through a glob
- * pattern) and the prompt's @-mention completer (which relativizes against the
- * session cwd itself). The walker caps depth and result count so a runaway
- * tree cannot stall either caller.
- *
- * `respectGitignore` is opt-in rather than automatic. The completer does not
- * pass it: it lists what exists for the user to name, and the user may name a
- * file git ignores — a path they can Read is a path worth completing. A search
- * is the opposite question: what does the tracked tree say? See `ignore.ts`.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Walk a project tree and return matching files as absolute forward-slash paths, newest first. */
 export async function walkProjectFiles(
 	root: string,
 	ops: FileWalkerOps,

@@ -95,18 +95,8 @@ export class TaskStore {
 		}));
 	}
 
-	/**
-	 * Replace the whole list with a list that was saved somewhere.
-	 *
-	 * Ids come from the saved list rather than from `create`, because a restored
-	 * task is the same task: the conversation may already say "task #2 is in
-	 * progress", and renumbering it would quietly mean something else. The
-	 * counter moves past the highest restored id so the next new task gets a new
-	 * number.
-	 *
-	 * A copy is kept, so the caller's array — a session file's contents — cannot
-	 * be edited by a later `update`.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Replace the whole list with a list that was saved somewhere. */
 	restore(tasks: AgentTask[]): void {
 		this.#tasks.clear();
 		for (const task of tasks) this.#tasks.set(task.id, { ...task, blockedBy: [...task.blockedBy] });

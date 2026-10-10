@@ -4,15 +4,8 @@ import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
 import type { Operations } from "./operations.ts";
 
-/**
- * How many entries a listing shows before it says the rest were cut.
- *
- * The same figure as Glob's, because it answers the same question — how much
- * of a directory listing is worth carrying in a conversation — and the notice
- * is a count with no file, unlike Glob's: what a caller does with a listing of
- * thousands of names is go find something by pattern, and Glob is the tool
- * that finds it.
- */
+// Long-form design notes: docs/dev/tools.md
+/** How many entries a listing shows before it says the rest were cut. */
 const MAX_ENTRIES = 200;
 
 /** Directory listing with sizes and type markers. */

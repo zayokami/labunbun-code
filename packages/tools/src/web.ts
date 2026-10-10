@@ -1,15 +1,6 @@
-/**
- * Web tools: WebFetch (URL → readable text) and WebSearch (DuckDuckGo HTML
- * endpoint, no API key). Network access is the tool's job; tests cover the
- * pure text-extraction and result-parsing helpers.
- *
- * Both are subject to the session's network axis. That is not an addition, it
- * is the whole reason the axis exists: these two fetch in *this* process, so
- * `HTTP_PROXY` is not in the path and the proxy cannot hold them — which left
- * a single tool call reaching any public host while the same host over `Bash`
- * was refused by the axis. A network policy that one built-in tool walks
- * around is not a policy, it is a suggestion with a shell.
- */
+// Web tools: WebFetch turns a URL into readable text, WebSearch searches DuckDuckGo.
+// Network access is the job of the tools, and the tests cover the pure helpers.
+// Long-form design notes: docs/dev/tools.md
 
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -28,14 +19,8 @@ const MAX_CONTENT_CHARS = 40_000;
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 10_000_000;
 
-/**
- * Where WebSearch goes. Named so the network axis has something to judge.
- *
- * A literal inlined into the fetch URL would make the check above it read as a
- * comparison against a constant that cannot vary — which is true, and is the
- * point: the host is fixed, so the decision can be made without a network round
- * trip, and the only variable in the request is the part that should be gated.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Where WebSearch goes, named so that the network axis has something to judge. */
 const SEARCH_HOST = "html.duckduckgo.com";
 
 /** Strip HTML down to readable text: drop scripts/styles/tags, decode entities, collapse whitespace. */
@@ -119,15 +104,8 @@ async function fetchWithTimeout(url: string, init?: RequestInit, signal?: AbortS
 	}
 }
 
-/**
- * The network axis's answer for `hostname`, as a refusal string or `null`.
- *
- * `decideNetworkRequest` is the same function the proxy calls, used here with
- * the same arguments, so there is one table and one decision rather than a
- * second matcher that could disagree with the first. `normalizeHost` first
- * because that is what the proxy applies to a CONNECT target, and the two
- * paths have to judge the same spelling of the same name the same way.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The answer of the network axis for `hostname`, as a refusal string or `null`. */
 function refuseByNetworkPolicy(hostname: string, network: NetworkAxis | undefined): string | null {
 	if (!network) return null;
 	const decision = decideNetworkRequest(network.domains, normalizeHost(hostname), network.access);
@@ -135,19 +113,8 @@ function refuseByNetworkPolicy(hostname: string, network: NetworkAxis | undefine
 	return `Network policy refuses ${hostname} (${decision.reason})`;
 }
 
-/**
- * The addresses a hostname stands for, at the moment of the check.
- *
- * Injected rather than reached for directly, for the reason `resolveSandboxExecution`
- * takes an `exists`: the one impure call in the guard is the one a test must be
- * able to state. A test that lets this reach a real resolver is asserting on the
- * DNS of the machine and of the moment — and it does so *quietly*, because a name
- * that resolves on a developer laptop and does not resolve in CI fails the test
- * for a reason that has nothing to do with the code under test. That is not
- * hypothetical: this file's own header says nothing is contacted, and the guard's
- * lookup was still reaching out, so the one test asserting the network was open
- * passed at home and failed everywhere else.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The addresses a hostname stands for, at the moment of the check. */
 export type HostResolver = (hostname: string) => Promise<string[]>;
 
 /** The real resolver. The only place in this module that touches DNS. */
@@ -156,30 +123,8 @@ export const resolveHostWithDns: HostResolver = async (hostname) => {
 	return records.map((record) => record.address);
 };
 
-/**
- * Guard against SSRF: resolve the hostname and check every returned address.
- * DNS can return several records, mixed families among them, so every one is
- * checked rather than the first.
- *
- * **What this does not do, stated because the alternative reading is stronger.**
- * It does not pin the connection to the address it checked. `fetch()` resolves
- * the name a second time, so a name whose answer changes between this lookup and
- * that one is checked against one address and connected to another. This narrows
- * that window to the gap between two resolutions; it does not close it. Closing
- * it means connecting to the resolved address while presenting the original
- * `Host`/SNI, which needs a MITM CA and an attribution frame to keep the two
- * apart — a trade this build has declined and documented at the top of
- * `proxy.ts`, so the honest sentence here is the narrow one rather than a claim
- * about the backstop.
- *
- * A lookup that fails is a refusal rather than a pass: not knowing where a name
- * points is not evidence that it points somewhere public, and the fail-closed
- * reading is the only one a URL the model chose can be given.
- *
- * The network axis is checked first and on the same pass, for two reasons. It
- * is cheaper — no DNS lookup — and it is the user's declared intent, so there
- * is no reason to resolve a name before finding out it was never allowed.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Guard against SSRF: resolve the hostname and check every returned address. */
 async function guardPublicUrl(
 	rawUrl: string,
 	network: NetworkAxis | undefined,
@@ -244,17 +189,8 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
 	return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
 }
 
-/**
- * Fetch with SSRF re-validation on every hop. `redirect: "manual"` stops the
- * runtime from silently following a redirect to a blocked address after the
- * initial URL passed the check — a public URL can 302 to a private one.
- *
- * The network axis rides on the same hop loop rather than being checked once
- * at the entry, which is the only placement that covers it: a public URL the
- * axis allows can 302 to a host it does not, and a check outside this loop
- * would be a check of the URL the model typed rather than of every host the
- * fetch actually visits.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Fetch with an SSRF re-check on every hop. */
 async function fetchGuarded(
 	url: string,
 	init: RequestInit,

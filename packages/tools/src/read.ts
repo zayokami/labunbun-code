@@ -15,36 +15,17 @@ const MAX_LINE_CHARS = 2000;
  */
 const MAX_RESULT_CHARS = 200_000;
 
-/**
- * `readOnlyRoots` are directories outside the workspace that this tool may
- * still read: the app's tool-output spill directory, where results too large
- * for the context are kept in full. Read gets this and nothing else does —
- * Write and Edit go through `guardWritablePath`, which has no such escape —
- * because the file a spilled Bash result points at is a dead end otherwise.
- *
- * `readState` is where the read is recorded, for the edit gate: an edit is only
- * allowed on a file the model has actually read, and that fact is code here
- * rather than a line in Edit's prompt. It is a parameter and not a singleton
- * because two sessions can be alive in one process — see `read-file-state.ts`.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The Read tool: paging with line numbers, the read-only roots, and the read record for the edit gate. */
 export function createReadTool(
 	cwd: string,
 	ops: Operations,
 	readOnlyRoots: string[] = [],
 	readState: ReadFileState = new ReadFileState(),
 ): AnyTool {
-	// Containment decides the workspace boundary, so `outside workspace` reads the
-	// same here as it does for Glob, Grep, LS, Write and Edit. The only way past
-	// it is a root the caller named, and that question is asked of a `read` entry
-	// rather than of a list this file keeps — so a root is sayable in one place
-	// and the same entry is what stops Write from writing there.
-	//
-	// `ctx.sandbox` is deliberately not consulted. The boundary is the
-	// application's, not the mode's: the same file is readable in Agent and in
-	// Agent 无沙箱, just as the write tools' `.git` rule holds in every mode. What
-	// the sandbox axis governs is the shell, which the kernel confines on macOS
-	// and Linux and nothing confines on Windows. See `readableRootsPolicy` for
-	// the widening that threading the mode through here was measured to cause.
+	// Containment decides the boundary, and the caller's roots are the only way
+	// past it. `ctx.sandbox` is not consulted here.
+	// Long-form design notes: docs/dev/tools.md
 	const resolveReadable = (inputPath: string): string => {
 		try {
 			return guardPathContainment(inputPath, cwd, "Read");
@@ -125,28 +106,9 @@ export function createReadTool(
 					: "";
 			const rendered = `${numbered}${notice}`;
 
-			// What the model is about to have seen, recorded. Every error path above
-			// returned instead, so an entry here means the read worked: a missing
-			// file, an unreadable one and an offset past the end all leave the
-			// previous record alone, because none of them showed the model anything.
-			//
-			// `content` is `shownLines` joined rather than `rendered`: a gate asks
-			// whether an `old_string` is in what the model saw, and Read's six-column
-			// gutter would put a tab between every pair of lines and answer that
-			// question about a file the model has not seen. For an unpaged read with
-			// nothing cut this string is the file byte for byte.
-			//
-			// Three things make it something other than the whole file, and all three
-			// are things the caller did not ask for by paging:
-			//   1. a line over the per-line cap, cut and marked `…` above;
-			//   2. a file longer than the default window, cut at `MAX_LINES` with no
-			//      offset and no limit — the model gets a page it never requested, and
-			//      `fullRead` alone would call that a whole-file read;
-			//   3. a result longer than `maxResultSizeChars`, which the pipeline cuts
-			//      through the *middle* before the model sees it (`output-limits.ts:108`
-			//      keeps a head and a tail). This one leaves the recorded string
-			//      longer than what arrived, which no comparison can repair from here
-			//      — `partialView` is what has to carry it.
+			// The record: only a read the model received is recorded, and `content`
+			// is the shown lines — not the whole file when a cut was not asked for.
+			// Long-form design notes: docs/dev/tools.md
 			const cutUnasked = input.offset === undefined && input.limit === undefined && end < allLines.length;
 			const cutLine = shownLines.some((shown, i) => shown !== allLines[start + i]);
 			const cutByResultLimit = rendered.length > MAX_RESULT_CHARS;
@@ -171,16 +133,8 @@ export function createReadTool(
 	});
 }
 
-/**
- * Which failure a Read hit, said in the terms the model can act on.
- *
- * The message this replaced — "File does not exist or cannot be read" — was
- * three answers under one name: a typo'd path, a directory, and a permission
- * problem all read identically, so the model's next move (fix the path? use LS?
- * give up?) was a guess. The codes below are Node's, carried through both
- * `Operations` implementations untouched, and `EISDIR` is measured on Windows
- * as well as POSIX — a directory read is not a POSIX-only nicety.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Which failure a Read hit, said in the terms the model can act on. */
 function describeReadFailure(path: string, error: unknown): string {
 	const raw = (error as { code?: unknown } | null | undefined)?.code;
 	const code = typeof raw === "string" ? raw : undefined;

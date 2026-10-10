@@ -68,16 +68,9 @@ export function createWriteTool(
 			try {
 				await ops.mkdir(dirname(path));
 				await ops.writeTextFileAtomic(path, input.content);
-				// A Write is the one case where a file the model never read is still a
-				// file whose whole content it knows: it just authored all of it. Without
-				// this the Edit gate refuses the next edit to a file the session created
-				// itself, which is the shape of every "create then fix" task. The
-				// record is what `ReadFileState` documents; this is its only production
-				// writer, and until it existed the documented rule had no caller.
-				//
-				// The fresh mtime rides along for the same reason as the content: a
-				// pre-write baseline on a record that now describes post-write bytes
-				// would refuse the next edit as changed-since-read.
+				// Recorded so the edit gate accepts the next edit to the file the
+				// session just created.
+				// Long-form design notes: docs/dev/tools.md
 				let writtenAt: number | undefined;
 				try {
 					writtenAt = (await ops.stat(path)).mtimeMs;

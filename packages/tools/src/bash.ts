@@ -10,14 +10,8 @@ import { workspacePolicy } from "./sandbox/workspace-policy.ts";
 /** How much output the live preview keeps — the tail of it, and not the result. */
 const MAX_PREVIEW_CHARS = 30_000;
 
-/**
- * How often a running command may push its output to the UI.
- *
- * The stream is a preview, not a transcript — the full output arrives with the
- * result either way — so ten updates a second is indistinguishable from every
- * chunk, while a command printing thousands of lines a second would otherwise
- * drive one store update and one React render per line.
- */
+// Long-form design notes: docs/dev/tools.md
+/** How often a running command may push its output to the UI. */
 export const BASH_UPDATE_INTERVAL_MS = 100;
 
 export function createBashTool(
@@ -72,18 +66,9 @@ export function createBashTool(
 			const policy = await workspacePolicy(cwd, {
 				sandbox: ctx.sandbox,
 				network: ctx.network,
-				// **`writableRoots` is what this line was missing**, and without it the
-				// policy was "the workspace and nothing else" — so `mktemp` could not
-				// create its directory and `npm install` could not write its cache, under
-				// the mode every user gets by default. Nothing leaked; the policy was
-				// exactly as narrow as it was built.
-				//
-				// `home` and `tempDir` are passed in rather than read here. The temp
-				// directory and the package caches are per-USER paths, and this
-				// repository's rule is that a reader takes its home as an argument:
-				// `os.homedir()` reads only the Win32 environment block, so a reader
-				// that calls it reads the developer's real config on linux and macOS,
-				// which is a defect CI already caught once (see `source-env-coverage`).
+				// The policy needs the per-user roots, and `home`/`tempDir` are
+				// arguments and not reads of the process.
+				// Long-form design notes: docs/dev/tools.md
 				writableRoots: resolveWritableRoots({
 					home: options?.home,
 					tempDir: options?.tempDir,
@@ -197,17 +182,9 @@ export function createBashTool(
 				};
 			}
 
-			// Nothing is cut here. The executor bounded the capture — it is the only
-			// party that saw every chunk — and a cut at this layer could only keep
-			// what the conversation already had while dropping output no file holds:
-			// `overflow: "spill"` above promises that what does not fit is written
-			// out in full, and the pointer below is where this result said it went.
-			//
-			// Both streams over the bound at once puts two truncation notices in one
-			// result, and the pipeline's cut reads only the first — so a further cut
-			// would keep the first stream's count and let the second's go stale.
-			// Accepted: the file holds every character either way, and a marker
-			// format with ordinals is not worth the rare case that needs it.
+			// Nothing is cut here: the executor bounded the capture, and the
+			// pipeline's own cut reuses its spill file.
+			// Long-form design notes: docs/dev/tools.md
 			const output = [result.stdout, result.stderr].filter((s) => s.length > 0).join("\n--- stderr ---\n");
 			// The pointer leads, and the verdict right behind it: a long result is
 			// cut at both ends on its way into the conversation, and the two lines

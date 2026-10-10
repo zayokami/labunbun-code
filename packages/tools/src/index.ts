@@ -83,35 +83,14 @@ export interface CreateAllToolsOptions {
 	webTools?: boolean;
 	/** Directories outside the workspace Read may still open (the spill dir). */
 	readOnlyRoots?: string[];
-	/**
-	 * Where tools that bound their own output write what did not fit — Bash's
-	 * exec overflow, a Glob match list past its cap.
-	 *
-	 * Meant to be under a `readOnlyRoots` entry (a spill the model cannot read
-	 * back is a file for nobody) and under tool-output's root, so the same
-	 * retention sweep prunes it. Unset, Bash still spills at the pipeline and
-	 * Glob falls back to a count.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Where tools that bound their own output write what did not fit. */
 	spillDir?: string;
-	/**
-	 * Where Read records what it showed, for the edit gate to read back.
-	 *
-	 * A caller passes its own when something outside the tool set has to act on
-	 * it: the app clears it with the session swap, because the tool array crosses
-	 * a `/resume` unchanged (`interactive.ts:875`). Left out, one is made here —
-	 * fine for a caller with a single session, and the only way the pair can ever
-	 * split is a caller who hand-builds the tools and hands Read and Edit
-	 * different stores, which the gate answers by refusing.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** Where Read records what it showed, for the edit gate to read back. */
 	readState?: ReadFileState;
-	/**
-	 * What Bash passes to the policy builder as extra writable roots.
-	 *
-	 * `home` and `tempDir` are **parameters rather than reads of the process**, so
-	 * a caller can point the whole set at a fixture. `os.homedir()` reads only the
-	 * Win32 environment block, so on linux and macOS a reader that calls it reads
-	 * the developer's real home — the defect `source-env-coverage` exists to catch.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** What Bash passes to the policy builder as extra writable roots. */
 	home?: string;
 	tempDir?: string;
 	/** Extra roots the session configuration asked for, on top of the defaults. */

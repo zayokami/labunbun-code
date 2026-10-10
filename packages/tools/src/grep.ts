@@ -8,20 +8,8 @@ import type { Operations } from "./operations.ts";
 const MAX_MATCHES = 200;
 const REGEX_TIMEOUT_MS = 2000;
 
-/**
- * Content search over the same walk the Glob tool uses, `.gitignore` included
- * — the walker is `glob.ts`'s, the subset is `ignore.ts`'s, and each exists
- * once.
- *
- * This header used to claim the tool "spawns ripgrep when available (fast,
- * respects .gitignore); otherwise falls back to a pure-JS directory walk".
- * It never spawned anything — there was one pure-JS path — and both things the
- * claim implied (real `.gitignore` support, a non-JS regex dialect) were
- * user-visible in the description and absent from the code. The description
- * and this tool now state the same subset in the same words, and the walk is
- * the one the Glob tool runs, so a Grep result and a Glob listing disagree
- * only when the pattern does.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Content search over the same walk the Glob tool uses, `.gitignore` included. */
 export function createGrepTool(cwd: string, ops: Operations): AnyTool {
 	return buildTool({
 		name: "Grep",

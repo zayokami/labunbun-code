@@ -1,37 +1,5 @@
-/**
- * Edit — exact-string replacement, with the two gates in front of it and a
- * diagnostic behind it that says *where* it went wrong.
- *
- * ## Why most of this file is not about matching
- *
- * Measured on this repository's own history (`edit_probe.ts`: 99 hunks over 60
- * commits, reproduced below):
- *
- *   UNIQUE, one call   74   74.7%
- *   NON-UNIQUE          1    1.0%
- *   NON-CONTIGUOUS     24   24.2%
- *
- * The 24.2% was decomposed before anything was written here
- * (`edit_shape_analysis.ts`, same corpus): **24/24 are hunks whose removed
- * lines are separated by kept context lines** — two or more separate edits in
- * one diff hunk — and **0/24 are quote- or whitespace-caused**. So the honest
- * read is that this bucket is "needs more than one call", not "impossible",
- * and no amount of normalisation in *this* file moves it: the two strategies
- * below are the ones that can express one call, and a third fuzzy pass would
- * not have reached a single one of the 24.
- *
- * That is also why fuzzy matching is refused outright. The reference
- * implementation runs four passes of it, and the measured consequence is that a
- * stale patch lands somewhere plausible-but-wrong instead of failing. Our
- * failure mode is a loud refusal with a diff attached; a confident wrong edit is
- * worse than a wasted turn.
- *
- * What is left is where a model actually loses turns: the two refusals in front
- * of the write, and the not-found message, which in the reference hands the
- * model back its own input plus a boolean — no line number, no surrounding
- * content, no statement of what differs. Indentation drift is the single
- * commonest cause of that miss. See {@link explainMiss}.
- */
+// Edit — exact string replacement, with two gates in front and a miss diagnostic behind.
+// Long-form design notes: docs/dev/tools.md
 import { type AnyTool, buildTool, type ToolResult } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
@@ -41,27 +9,11 @@ import type { ReadFileState, ReadFileStateEntry } from "./read-file-state.ts";
 import { decideWrite } from "./sandbox/simulated.ts";
 import { workspacePolicy } from "./sandbox/workspace-policy.ts";
 
-/**
- * `call`'s result carries what actually landed on disk, not what was asked for.
- *
- * `ToolResult` has no room for these, and they are deliberately **not** in
- * `content`: `runToolPipeline` builds the model-visible message from
- * `content` and `isError` alone (`pipeline.ts:41-42`), so a field only the
- * caller can see would be a second, divergent account of the same edit. The
- * caller that renders a diff reads these; the model reads the text, which
- * repeats the on-disk string whenever it differs from the request.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Carries what actually landed on disk: the on-disk newString and the transformations that fired. */
 export interface EditToolResult extends ToolResult {
-	/**
-	 * The replacement text **as written to disk** — after quote restyling and line
-	 * ending conversion, if either fired.
-	 *
-	 * The reference returns the pre-transformation string, so a model can believe
-	 * it wrote X while the file contains Y. This field and the `content` text are
-	 * the same string, asserted against a read-back of the file after the write
-	 * (`edit.ts` asserts `readBack.slice(index, index + newString.length) ===
-	 * newString`), so the two cannot drift.
-	 */
+	// Long-form design notes: docs/dev/tools.md
+	/** The replacement text as written to disk, after quote restyle and line ending conversion. */
 	newString?: string;
 	/**
 	 * One entry per transformation that changed bytes, empty when none did.
@@ -76,14 +28,8 @@ const TRANSFORM_QUOTES = "quote-style-preserved";
 /** Newline style rewritten to the file's own. Only ever non-empty when it changed bytes. */
 const TRANSFORM_LINE_ENDINGS = "line-endings-preserved";
 
-/**
- * How many differing lines the miss diagnostic names.
- *
- * Three is the point where a model has enough to act and few enough that the
- * diagnostic still fits in the result it is attached to; the *suggestion* below
- * covers the whole block when one can be trusted, so this is the fallback, not
- * the main channel.
- */
+// Long-form design notes: docs/dev/tools.md
+/** How many differing lines the miss diagnostic names. */
 const MAX_REPORTED_DIFFERENCES = 3;
 
 /** Longest anchor line the fallback scan will consider. A "line" longer than this is a minified file. */
@@ -95,17 +41,8 @@ const MAX_SCAN_LINES = 50_000;
 /** `old_string` lines the fallback scan will try. */
 const MAX_SCAN_ANCHORS = 32;
 
-/**
- * Slop between the file's mtime and the instant the read was recorded, for the
- * fallback comparison used when a record carries no mtime of its own.
- *
- * One millisecond, which absorbs the float rounding between two clocks and
- * nothing else. The asymmetry is deliberate: a false "changed" costs the model
- * one re-read, a false "unchanged" costs it a wrong edit, so this number is not
- * "one filesystem tick" — on a filesystem with coarse timestamps, rounding the
- * comparison *down* (which is what a small positive tolerance does) would widen
- * the window in which a real change reads as no change.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Slop between the file's mtime and the read instant, for the comparison used when a record carries no mtime. */
 const MTIME_TOLERANCE_MS = 1;
 
 export function createEditTool(cwd: string, ops: Operations, readState: ReadFileState): AnyTool {
@@ -155,21 +92,8 @@ export function createEditTool(cwd: string, ops: Operations, readState: ReadFile
 				return errorResult(String(error));
 			}
 
-			// --- Gate 1: this session read the file, and not a page of it. --------
-			//
-			// The reference has both of these in code (FileEditTool.ts:275 and :451);
-			// before this, they were a prompt line (the old `prompt` said "Read the
-			// file with Read before editing" and nothing checked it). A prompt line is
-			// a request, and a model — or an injected instruction riding in a file it
-			// never opened — can decline one.
-			//
-			// A *paged* read (`offset`/`limit`) is refused outright rather than made
-			// conditional: the model saw a disjoint slice and has no evidence about
-			// the rest of the file, while the replacement is applied to all of it. A
-			// full read that was *cut* (`partialView` — the 2000-line window, a line
-			// over the per-line cap, a spilled middle) is a different case and is not
-			// refused here: it is an honest prefix of the file, so the question worth
-			// asking is whether anything has touched the file since, which is gate 2.
+			// Gate 1: this session read the file, and not a page of it.
+			// Long-form design notes: docs/dev/tools.md
 			const seen = readState.getState(path);
 			if (!seen) {
 				return errorResult(
@@ -248,18 +172,8 @@ export function createEditTool(cwd: string, ops: Operations, readState: ReadFile
 			}
 
 			// --- Splice. --------------------------------------------------------
-			//
-			// Slices are taken from the ORIGINAL content at the ORIGINAL offsets.
-			// Under quote normalization the model's spelling is not what is on disk,
-			// so replacing `input.old_string` literally would corrupt the bytes
-			// around the match.
-			//
-			// A deletion eats the line break that follows it. `old_string` for a
-			// deletion almost never ends in a newline — a model deleting a block
-			// usually quotes it without the trailing blank — and without this every
-			// deletion leaves a blank line behind. Scoped to deletions on purpose: a
-			// *replacement* whose old text stops mid-line must not swallow the
-			// newline, or the line after it is glued on.
+			// Slices come from the original content at the original offsets; a deletion also eats its newline.
+			// Long-form design notes: docs/dev/tools.md
 			const eatTrailingBreak = input.new_string === "";
 			const parts: string[] = [];
 			let cursor = 0;
@@ -343,32 +257,8 @@ function errorResult(text: string): EditToolResult {
 // Gates
 // ---------------------------------------------------------------------------
 
-/**
- * Why the recorded read no longer describes the file, or `null` when it does.
- *
- * Two rules, in this order, and the order is the point:
- *
- * 1. **Content, when there is a whole file to compare.** An uncut full read
- *    recorded the file's own bytes (`read-file-state.ts:126-128`), so a
- *    difference is proof the file moved, whatever the clock says. This rule
- *    also decides the Windows case in the permissive direction for free:
- *    OneDrive, Dropbox and Defender touch mtime on files whose bytes did not
- *    move, and a gate that refuses on that basis is a gate users disable. When
- *    the bytes are identical the edit lands on exactly what the model saw, so
- *    it proceeds — and `stat` is never called, which is why the carve-out costs
- *    nothing on the common path.
- *
- * 2. **mtime, when there is nothing to compare** — a read that was cut, so
- *    `seen.content` is a prefix rather than the file. The baseline is the
- *    file's own mtime as recorded with the read, so the question "did anything
- *    touch it" is asked in one clock: the file's against itself. Comparing the
- *    file's mtime against the instant the read happened was the old rule, and
- *    it refuses in both directions the two clocks can disagree — a file whose
- *    mtime runs ahead (skew, coarse timestamps, a runner mid time-sync) is
- *    "changed" with nothing having touched it, which Windows CI produced live.
- *    Falls back to the read instant when no mtime was recorded; there, a small
- *    positive tolerance absorbs float rounding, and the direction stays refuse.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Why the recorded read no longer describes the file, or `null` when it does. */
 async function stalenessOf(
 	path: string,
 	ops: Operations,
@@ -397,22 +287,8 @@ export interface MatchPlan {
 
 const NO_MATCH: MatchPlan = { indices: [], texts: [], strategy: "exact" };
 
-/**
- * Exact first, then curly-quote normalisation, and nothing else.
- *
- * **Length preservation is load-bearing.** {@link normalizeQuotes} maps one
- * code unit to one code unit, so an offset found in the normalised text is the
- * same offset in the original, and `oldString.length` characters from it are
- * the same characters. Every line of {@link findMatches}'s second branch, and
- * every slice in the splice, rests on that. A normaliser that grew or shrank a
- * string — mapping `...` to `…`, folding a ligature, stripping a zero-width
- * joiner — would make every match land at the wrong offset, and the failure
- * would be a *plausible-looking wrong edit*, not an error.
- *
- * Whitespace normalisation is refused for a different reason: it does not make
- * the match correct, it makes the match *possible*, and it is the difference
- * between refusing loudly and writing somewhere plausible-but-wrong.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Exact match first, then curly-quote normalisation, and nothing else. */
 export function findMatches(content: string, oldString: string): MatchPlan {
 	const exact = locate(content, oldString);
 	if (exact.length > 0)
@@ -440,16 +316,8 @@ export function findMatches(content: string, oldString: string): MatchPlan {
  * second replacement that never happens.
  */
 function locate(haystack: string, needle: string): number[] {
-	// **An empty needle matches at every index, and `from = at + 0` never
-	// advances** — so this loops forever, appending an index each pass.
-	// Measured: `findMatches("abc", "")` did not return in 12 seconds and had to
-	// be killed. It does not throw, so nothing catches it: the caller does not
-	// learn anything and the process spins at 100% CPU.
-	//
-	// `validateInput` rejects an empty `old_string`, but that runs in the tool
-	// pipeline, not inside `call` — so any embedder or future path that invokes
-	// `tool.call` directly reaches this. The guard belongs where the loop is,
-	// because a caller that cannot reach the pipeline must still be safe.
+	// An empty needle matches at every index, so the guard must sit where the loop is.
+	// Long-form design notes: docs/dev/tools.md
 	if (needle.length === 0) return [];
 	const found: number[] = [];
 	let from = 0;
@@ -461,18 +329,8 @@ function locate(haystack: string, needle: string): number[] {
 	}
 }
 
-/**
- * Curly quotation marks to their ASCII equivalents, one code unit to one.
- *
- * **The length-preservation invariant lives here.** Every entry below is a
- * single-code-unit key mapped to a single-code-unit value, so
- * `normalizeQuotes(s).length === s.length` for every string — including one
- * containing astral characters, because no key here is outside the BMP. That
- * property is what lets {@link findMatches} search the normalised text and
- * slice the original at the same offset. Adding a mapping that changes length
- * (a multi-character replacement, or an astral curly quote) breaks every match
- * in the file, silently and plausibly.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Curly quotation marks to their ASCII equivalents, one code unit to one. */
 export function normalizeQuotes(text: string): string {
 	return text.replace(/[“”„‟‘’‚‛]/g, (c) => {
 		switch (c) {
@@ -519,14 +377,8 @@ function quoteStyleOf(text: string): QuoteStyle {
 	return "straight";
 }
 
-/**
- * One style for several regions, or `mixed` if they disagree.
- *
- * With `replace_all` every occurrence is replaced by the same string, so a
- * disagreement means no restyle can be right for all of them. Reporting that
- * as `mixed` sends the replacement through unaltered, which is the honest
- * outcome: the model's bytes, and `transformations` empty to say so.
- */
+// Long-form design notes: docs/dev/tools.md
+/** One style for several regions, or `mixed` if they disagree. */
 function agreeOnQuoteStyle(styles: QuoteStyle[]): QuoteStyle {
 	if (styles.length === 0) return "none";
 	const first = styles[0];
@@ -538,15 +390,8 @@ const CURLY_PAIRS: ReadonlyArray<readonly [string, string]> = [
 	["‘", "’"],
 ];
 
-/**
- * Straight quotes to curly, opening on the first occurrence of each kind and
- * closing on the second, alternating.
- *
- * The open/close choice is a heuristic — a file cannot say which `"` opens a
- * quotation — which is exactly why this only ever runs on the replacement, is
- * always named in `transformations`, and is skipped entirely when the regions
- * disagree.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Straight quotes to curly, opening on the first occurrence of each kind and closing on the second. */
 function toCurlyQuotes(text: string): string {
 	let out = "";
 	let doubleIndex = 0;
@@ -572,14 +417,8 @@ function toStraightQuotes(text: string): string {
 // Line endings
 // ---------------------------------------------------------------------------
 
-/**
- * The file's own newline style, by majority.
- *
- * The reference rewrites every file it touches to LF. This repository has a
- * recorded CRLF problem — no `.gitattributes`, `core.autocrlf=true`, so a
- * Windows worktree is CRLF while the blobs are LF — and copying that default
- * would reproduce it here, one file per edit.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The file's own newline style, by majority. */
 export function detectLineEnding(content: string): "crlf" | "lf" {
 	const crlf = countOf(content, "\r\n");
 	const lf = countOf(content, "\n");
@@ -599,14 +438,8 @@ function countOf(haystack: string, needle: string): number {
 	}
 }
 
-/**
- * Rewrite bare newlines to the file's style. A lone `\r` is left alone.
- *
- * Only *bare* newlines are touched, and only because the model builds its
- * `new_string` with `\n` regardless of what the file uses. A lone `\r` inside a
- * string literal is far more likely to be a character than a line ending
- * somebody meant, and this function's job is not to second-guess that.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Rewrite bare newlines to the file's style. A lone `\r` is left alone. */
 export function applyLineEndings(text: string, eol: "crlf" | "lf"): string {
 	if (eol === "lf") return text.replace(/\r\n/g, "\n");
 	return text.replace(/\r\n|\n/g, (match) => (match === "\n" ? "\r\n" : match));
@@ -642,45 +475,8 @@ export interface MissDiagnostic {
 	notes: string[];
 }
 
-/**
- * Why a suggested `old_string` is worth sending back unchanged.
- *
- * The reference's not-found case is the worst-served path in that file and the
- * most frequent one — indentation drift — and it answers with the model's own
- * input and a boolean. The rule below is deliberately narrow, because a wrong
- * suggestion costs more turns than no suggestion: one is re-sent, fails, and
- * the model now has two contradictory strings; the other leaves it with the
- * line numbers and the file.
- *
- * A suggestion is offered only when **all** of these hold:
- *
- * - an anchor line was found **exactly once** in the file, so the region is
- *   located rather than guessed;
- * - the file has a line for every line of `old_string` at that offset, so
- *   nothing has to be invented at the edges;
- * - every line pair is equal **modulo leading whitespace and a trailing `\r`**
- *   and nothing else — the model is off by indentation or by line endings, not
- *   by content;
- * - the resulting string occurs **exactly once** in the file, checked with the
- *   real matcher, so sending it back can neither fail nor be ambiguous.
- *
- * The last condition is what makes the first three safe: the suggestion is
- * literally a slice of the file, so it is correct by construction. Every other
- * cause of a miss — a wrong line, a renamed symbol, a stale read — is declined
- * and reported as line numbers instead.
- *
- * One cause is answered by a **second route** rather than by these four
- * conditions: a block that is the file's text modulo written-out escape
- * sequences — a literal `\n` (backslash and letter) where the file has a real
- * line break, or the reverse. There the anchors cannot line up (the block has
- * the wrong number of lines, or one line where the file has two, before
- * anything is compared), so {@link detectEscapedMiss} respells the block first,
- * and the suggestion is that respelled text — which still has to pass the
- * uniqueness check the four conditions end with. Escapes are **reported, never
- * silently unescaped**: a matcher that guessed which backslashes the model
- * meant would land plausible-but-wrong edits, the same footing this file
- * refuses whitespace normalisation for.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The conditions under which a suggested `old_string` is worth sending back unchanged. */
 export function explainMiss(content: string, oldString: string): MissDiagnostic {
 	const oldLines = oldString.split("\n");
 	// The second route is computed up front because it decides the outcome on
@@ -755,21 +551,8 @@ export function explainMiss(content: string, oldString: string): MissDiagnostic 
 		}
 	}
 
-	// Which of the two near-misses is it? Saying so turns "these two strings look
-	// identical" into an instruction, and it is the difference between the model
-	// guessing and the model knowing.
-	//
-	// **Neither note is offered once the block is unrecoverable.** `indentOnly` is
-	// set by *any one* line differing by indentation, so a block that differs by
-	// indentation on one line and by content on the next used to print "the
-	// difference is leading whitespace only" directly above "no corrected
-	// old_string is offered (the lines differ by more than indentation and line
-	// endings)" — telling the model both, and sending it down the wrong path. A note
-	// that contradicts the sentence under it is worse than no note.
-	//
-	// The escape note takes precedence over both: the comparisons above were made
-	// against the escaped spelling, so "whitespace only" or "CRLF" would be
-	// verdicts about a string the model did not mean to send.
+	// Neither note is offered once the block is unrecoverable; the escape note takes precedence.
+	// Long-form design notes: docs/dev/tools.md
 	if (escaped) {
 		notes.push(escaped.note);
 	} else if (recoverable && complete) {
@@ -817,26 +600,8 @@ interface EscapedMiss {
 	note: string;
 }
 
-/**
- * The miss that is a spelling of line breaks and tabs.
- *
- * Both directions exist and both lose turns in a coding session:
- *
- * - the model wrote an escape **too literally** — `\n` as the two characters
- *   backslash and `n` in a JSON string it double-escaped — where the file has a
- *   real line break;
- * - the model wrote one **too rarely** — a real newline where the file contains
- *   the two characters, which is what happens when the text being matched is
- *   *itself* about escapes (this repository's own test fixtures are full of
- *   them), or when the model unescaped something it copied out of Read.
- *
- * Firing requires the respelled block to occur **exactly once** — checked with
- * the real matcher, and then checked again on the slice itself, because under
- * quote normalisation the matched text can be the file's spelling rather than
- * the needle. That bar is what keeps this from guessing: a miss with one
- * plausible respelling anywhere in the file is reported, and a miss with none
- * falls through to the indentation machinery unchanged.
- */
+// Long-form design notes: docs/dev/tools.md
+/** The miss that is a spelling of line breaks and tabs. */
 function detectEscapedMiss(content: string, oldString: string): EscapedMiss | null {
 	if (/\\[nrt]/.test(oldString)) {
 		const real = oldString.replace(/\\r/g, "\r").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
@@ -871,16 +636,8 @@ function uniqueSlice(content: string, needle: string): string | null {
 	return findMatches(content, plan.texts[0]).indices.length === 1 ? plan.texts[0] : null;
 }
 
-/**
- * Find the line the model was looking at, in the order the reference uses and
- * for the same reason: its own first line, then its own last line, then a
- * longest-common-prefix scan.
- *
- * A candidate must occur **exactly once** to be used. A repeated line — a
- * closing brace, a `return;` — locates nothing, and aligning on the wrong one
- * of two produces line numbers that are confidently wrong, which is worse than
- * no line numbers.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Find the line the model was looking at: its first line, its last line, then a common-prefix scan. */
 function locateAnchor(content: string, oldLines: string[]): MissAnchor | null {
 	const fileLines = content.split("\n");
 	const wanted = oldLines.filter((l) => l.trim().length > 0 && l.trim().length <= MAX_ANCHOR_CHARS);
@@ -1033,18 +790,8 @@ function firstLine(text: string): string {
 
 const DIFF_CONTEXT_LINES = 2;
 
-/**
- * Unified-style hunk around the first replacement — enough for the UI to show
- * what changed without a full diff engine.
- *
- * Takes the offset rather than searching for `oldString`: under quote
- * normalization the string that is on disk is not the one the model sent, and
- * `indexOf` on the model's spelling would return -1 for the very edit that
- * needed the diff.
- *
- * Lines are shown without their trailing `\r`, because a diff rendered in CRLF
- * and pasted into a terminal is a diff with a blank line after every real one.
- */
+// Long-form design notes: docs/dev/tools.md
+/** Unified-style hunk around the first replacement, enough for the UI to show what changed. */
 export function miniDiff(oldContent: string, index: number, removed: string, added: string): string {
 	if (index < 0 || index > oldContent.length) return "";
 	const crlf = detectLineEnding(oldContent) === "crlf";

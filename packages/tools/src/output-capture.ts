@@ -1,32 +1,11 @@
-/**
- * Bounded capture of a stream that is still arriving.
- *
- * A shell command's output can be arbitrarily large and arrives in chunks; a
- * string that grows with it is a memory bound nobody picked. A capture keeps a
- * window instead — a head and a tail, fixed at construction — and hands the
- * full stream to an {@link OverflowSink} the moment the middle stops fitting.
- * The text it yields then carries the same one-line notice the pipeline's own
- * cuts use ({@link formatCutMarker}), so a result bounded here and cut again
- * there keeps one cumulative count instead of restarting it.
- *
- * Before the bound is crossed, nothing has been dropped: the head holds the
- * stream's start, the tail its end, and the total has never exceeded their sum,
- * so the two buffers cover the whole stream exactly — which is what makes the
- * seed handed to `overflow` a lossless prefix.
- */
+// Bounded capture of a stream that has not finished: a fixed window, then a spill sink.
+// Long-form design notes: docs/dev/output-limits.md
 
 import { join } from "node:path";
 import { formatCutMarker } from "@labunbun/agent";
 
-/**
- * Holds the last `maxChars` of a stream without rejoining it on every chunk.
- *
- * Chunks are dropped whole from the front once enough have accumulated, so the
- * set retained stays near the cap instead of growing with the command's total
- * output; only `read()` joins, and it is called once per emission rather than
- * once per chunk. The tail can therefore overshoot the cap by at most the length
- * of one chunk, which `read()` trims.
- */
+// Long-form design notes: docs/dev/output-limits.md
+/** Holds the last `maxChars` of a stream without rejoining it on every chunk. */
 export function createTailBuffer(maxChars: number): { push(chunk: string): void; read(): string } {
 	const chunks: string[] = [];
 	let size = 0;
