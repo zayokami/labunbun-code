@@ -1,35 +1,13 @@
-/**
- * Prompt caching, as facts rather than hopes.
- *
- * Two things live here, and they are deliberately separate from the adapters
- * that use them: what each provider actually caches (capability, minimum
- * prefix, granularity, knobs) and how a cached prefix is *measured* once the
- * provider reports it back. Both are pure, so a test can pin them without a
- * network and without a provider.
- *
- * The measurement half exists because the numbers were previously invisible:
- * `prompt_cache_hit_tokens` and the top-level `cached_tokens` some providers
- * put on the usage object were never read, so a session that read 99% of its
- * prompt from cache was recorded as having read none of it. A cache hit rate
- * nobody can see is a cache hit rate nobody can raise.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Prompt caching as facts rather than hopes: capability, policy, and measurement. */
 
 import type { AgentMessage, Context, Model, Usage } from "./types.ts";
 
 /** Whether the caller marks the prefix, or the provider decides by itself. */
 export type CacheMode = "explicit" | "automatic";
 
-/**
- * What one provider does about caching, and what a caller may do about it.
- *
- * `minPrefixTokens` is a floor the provider documents: a prefix shorter than it
- * is not cached at all, so a marker placed there is a write that never becomes
- * a read. `incrementTokens` is the granularity a hit is rounded to — OpenAI
- * matches the first 1024 tokens exactly and then every further 128, so a
- * 1100-token prefix reads back 1024. Both are floors and granularities, not
- * promises: the real numbers come back in `usage`, which is why this module
- * also knows how to read them.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** What one provider does about caching, and what a caller may do about it. */
 export interface CacheCapability {
 	mode: CacheMode;
 	minPrefixTokens: number;
@@ -90,29 +68,8 @@ const UNKNOWN: CacheCapability = {
 	promptCacheKey: false,
 };
 
-/**
- * The shortest prefix each Anthropic model will cache, as documented.
- *
- * A table rather than a family rule, because the spread is not something a rule
- * can express: 512 tokens on Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5 — and
- * 512 again on Sonnet 5.5, which is a floor that went *down* inside a family
- * whose rows are prefixes of one another. Haiku 5.5 is the same slide one
- * generation later: 512 where Haiku 4.5 needs 4096. The
- * earlier "the Haiku family needs twice as much" inference got both ends wrong —
- * it refused to mark short prefixes that current models cache happily, and it
- * marked Haiku prefixes half the size of what Haiku accepts, which the provider
- * then silently ignored.
- *
- * Ordered most-specific-first, and tested with a start anchor: the ids are
- * prefixes of one another, so `claude-opus-4-5` has to be matched before
- * `claude-opus-4` or an Opus 4.5 request is held to the wrong floor.
- *
- * Exported, and only for the test that keeps it Anthropic's. A pattern added
- * for another vendor's id cannot be caught by asserting on the floor a lookup
- * returns, because the fallback is 512 and so is half this table: a mutant that
- * adds `[/^gpt-6-/, 512]` is invisible from the outside. Reading the patterns is
- * the only form of that assertion which holds whatever floor is chosen.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The shortest prefix each Anthropic model will cache, as documented. */
 export const ANTHROPIC_MIN_PREFIX: ReadonlyArray<readonly [RegExp, number]> = [
 	// Ahead of the Sonnet 5 row below, and the reason the ordering note exists in
 	// its sharpest form: a *newer* model in a family whose floor went **down**.
@@ -145,17 +102,8 @@ export const ANTHROPIC_MIN_PREFIX: ReadonlyArray<readonly [RegExp, number]> = [
 	[/^claude-haiku-3-5/, 2048],
 ];
 
-/**
- * What to assume for an Anthropic-shaped model that is not in the table.
- *
- * The lowest floor anyone documents, deliberately. The two ways of being wrong
- * are not symmetric: a floor set too low places a breakpoint the provider
- * silently ignores, which shows up immediately as `cache_creation: 0` in the
- * usage and costs nothing but one of four breakpoint slots, while a floor set
- * too high declines to mark a prefix the provider would have cached — and that
- * is a hit rate of zero with no error anywhere to explain it. Erring low is free
- * and self-diagnosing; erring high is silent and expensive.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** What to assume for an Anthropic-shaped model that is not in the table. */
 const ANTHROPIC_UNKNOWN_MIN = ANTHROPIC.minPrefixTokens;
 
 /** The shortest prefix this model will cache, whatever its provider calls itself. */
@@ -166,15 +114,8 @@ export function anthropicMinPrefixTokens(modelId: string): number {
 	return ANTHROPIC_UNKNOWN_MIN;
 }
 
-/**
- * What a model's provider does about caching.
- *
- * A provider we have no row for is read through `model.api` rather than
- * `model.provider`, so a self-registered gateway that speaks `anthropic-messages`
- * still gets breakpoints instead of being treated as an unknown automatic
- * provider — the wire format is what decides whether a marker is accepted, and
- * ours says it is.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** What a model's provider does about caching. */
 export function cacheCapability(model: Model): CacheCapability {
 	const base = CAPABILITIES[model.provider] ?? (model.api === "anthropic-messages" ? ANTHROPIC : UNKNOWN);
 	if (base.mode !== "explicit") return base;
@@ -188,52 +129,19 @@ export function cacheCapability(model: Model): CacheCapability {
 /** How long a written cache entry should live, where the provider lets us choose. */
 export type CacheTtl = "5m" | "1h";
 
-/**
- * What this app asks providers to do about their cache.
- *
- * `ttl: "auto"` resolves to the long one, and the cost argument is worth writing
- * down because it looks wrong at first: a one-hour write is billed at twice the
- * input price against 1.25x for five minutes, but only for the tokens actually
- * *written* at that breakpoint — the part of the prefix that was not already
- * cached. In a conversation, that is the handful of tokens added since the last
- * request, so the premium is paid on the delta and the read discount applies to
- * everything behind it. What the shorter TTL buys in exchange is an entry that
- * is gone after a five-minute pause, which turns the next turn into a full-price
- * replay of the whole transcript. For a goal measured in hit rate the long TTL
- * is not a close call.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** What this app asks providers to do about their cache. */
 export interface CachePolicy {
-	/**
-	 * Place explicit breakpoints on providers that require them.
-	 *
-	 * Off is a real choice rather than a debugging switch: a caller whose prompts
-	 * never repeat — a one-shot script, a batch of unrelated documents — writes an
-	 * entry on every request and reads none of them back, and pays the write
-	 * premium for the privilege.
-	 */
+	// Long-form design notes: docs/dev/ai-layer.md
+	/** Place explicit breakpoints on providers that require them. */
 	explicitBreakpoints?: boolean;
 	/** Which TTL to ask for; "auto" means the long one, with a fallback if refused. */
 	ttl?: "auto" | CacheTtl;
-	/**
-	 * Send the routing key that steers a prefix to one cache.
-	 *
-	 * "auto" follows the provider's own documentation, which is the only thing
-	 * that can decide it: an OpenAI-compatible endpoint that has never heard of
-	 * `prompt_cache_key` may reject the request for it, and the providers whose
-	 * guides describe it are a short list. "on" is for an endpoint that turns out
-	 * to want one anyway, which is a judgement about someone else's gateway that
-	 * only its operator can make.
-	 */
+	// Long-form design notes: docs/dev/ai-layer.md
+	/** Send the routing key that steers a prefix to one cache. */
 	promptCacheKey?: PromptCacheKeyMode;
-	/**
-	 * How long the provider should keep an entry, where it lets the caller say.
-	 *
-	 * Unset means the field is not sent, and that is the right default rather than
-	 * a cautious one: on OpenAI, an organization without zero-data-retention
-	 * already gets the long retention by default, so sending `"24h"` repeats what
-	 * it would have done and sending `"in_memory"` would shorten it. Only a caller
-	 * who has read their own organization's setting can want either.
-	 */
+	// Long-form design notes: docs/dev/ai-layer.md
+	/** How long the provider should keep an entry, where it lets the caller say. */
 	promptCacheRetention?: PromptCacheRetention;
 }
 
@@ -267,15 +175,8 @@ export function resolveCacheTtl(policy?: CachePolicy): CacheTtl {
 	return ttl === "auto" ? "1h" : ttl;
 }
 
-/**
- * Whether this request should carry a routing key.
- *
- * "auto" is the provider's documented answer and nothing else — the point of the
- * capability row is that an unmeasured endpoint gets nothing invented for it. A
- * key sent to a gateway that does not know the field is a 400 on every request,
- * and a key sent to one that ignores it is a field that means nothing: neither is
- * a thing to do on a guess.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Whether this request should carry a routing key. */
 export function resolvePromptCacheKey(policy: CachePolicy | undefined, capability: CacheCapability): boolean {
 	const mode = policy?.promptCacheKey ?? DEFAULT_KEY_MODE;
 	if (mode === "on") return true;
@@ -283,15 +184,8 @@ export function resolvePromptCacheKey(policy: CachePolicy | undefined, capabilit
 	return capability.promptCacheKey;
 }
 
-/**
- * The retention value to send, or undefined to send none.
- *
- * Gated on the provider rather than on a list of model ids: the field is
- * documented by one vendor, that vendor's models disagree about which values
- * they take, and a request that names a value a model does not support is a 400.
- * So the caller opts in and the provider has to be the one that documents the
- * field — which means a gateway never receives it, however the policy reads.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The retention value to send, or undefined to send none. */
 export function resolvePromptCacheRetention(
 	policy: CachePolicy | undefined,
 	capability: CacheCapability,
@@ -304,14 +198,8 @@ export function resolvePromptCacheRetention(
 // The identity of a stable prefix
 // ---------------------------------------------------------------------------
 
-/**
- * A 53-bit-ish hash of a string, as hex.
- *
- * Two FNV-1a passes with different offset bases, concatenated. Not a
- * cryptographic hash and not trying to be: the job is telling two byte strings
- * apart within one session, where a 32-bit hash would already be adequate and
- * this makes the collision argument boring.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** A hash of a string, as hex: two FNV-1a passes with different offset bases. */
 export function hash64(text: string): string {
 	let a = 0x811c9dc5;
 	let b = 0x01000193;
@@ -323,36 +211,15 @@ export function hash64(text: string): string {
 	return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0");
 }
 
-/**
- * Everything that is fixed for the whole life of a prefix, as one string.
- *
- * The wire format, the model, the tools and the system prompt: the four things
- * that are decided once and never change again within a session, and the four a
- * provider keys its cache on. Messages are deliberately absent — they are what
- * grows, and a key that moved with them would name a different cache on every
- * turn, which is the opposite of routing.
- *
- * Shared by the cache key below and by the tracker's notion of a family, so that
- * the prefix a report calls one conversation and the prefix a provider is asked
- * to route are the same prefix by construction.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Everything that is fixed for the whole life of a prefix, as one string. */
 export function prefixIdentity(model: Pick<Model, "api" | "id">, context: Context): string {
 	const tools = context.tools?.length ? JSON.stringify(context.tools) : "";
 	return `${model.api}\x00${model.id}\x00${context.systemPrompt}\x00${tools}`;
 }
 
-/**
- * The value to send as `prompt_cache_key`, or undefined to send none.
- *
- * The readably-prefixed hash of {@link prefixIdentity}: readable because the key
- * turns up in a provider's own logs and a support conversation goes better when
- * it says whose it is, and a hash because the identity is a whole system prompt
- * and tool schema, which is not something to paste into a header-sized field.
- *
- * Same prefix, same key — across turns, across processes and across a resumed
- * session, which is the case the docs describe: requests that share a long prefix
- * should be routed to the machine that already has it.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The value to send as `prompt_cache_key`, or undefined to send none. */
 export function promptCacheKeyFor(model: Pick<Model, "api" | "id">, context: Context): string {
 	return `labunbun-${hash64(prefixIdentity(model, context))}`;
 }
@@ -374,37 +241,16 @@ export interface CacheNotice {
 	reason: string;
 }
 
-/**
- * The share of a request's prompt that was served from cache, or `undefined`
- * when the request did not say.
- *
- * `undefined` rather than 0: a provider that does not report the field, and a
- * request that genuinely read nothing, are different answers, and printing 0%
- * for both is how a working cache looks broken.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The share of a request's prompt that was served from cache, or `undefined`. */
 export function cacheHitRate(usage: Usage): number | undefined {
 	const total = usage.promptTotal;
 	if (total === undefined || total <= 0) return undefined;
 	return usage.cacheRead / total;
 }
 
-/**
- * Read the cached-token count out of whichever field a provider used.
- *
- * Four spellings are in the wild for the same number: OpenAI's Chat Completions
- * nests it under `prompt_tokens_details.cached_tokens`, Moonshot puts it at the
- * top level of `usage`, DeepSeek reports `prompt_cache_hit_tokens` alongside the
- * nested copy, and the Responses wire renames both halves of the usage block —
- * `input_tokens_details.cached_tokens`. Reading only the first is how a Kimi
- * session that hit its cache ~99% of the time was recorded as hitting none of it;
- * not reading the fourth is the same failure one wire over.
- *
- * Where more than one of them is present and they disagree, the largest wins.
- * They name the same quantity, so the smaller one is the one under-reporting —
- * and under-reporting is the failure being fixed here. A first-wins read would
- * reintroduce it the moment a gateway emitted a stale `cached_tokens: 0` beside
- * a correct `prompt_cache_hit_tokens`.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Read the cached-token count out of whichever field a provider used. */
 export function cachedTokensFrom(usage: {
 	prompt_tokens_details?: { cached_tokens?: number } | null;
 	input_tokens_details?: { cached_tokens?: number } | null;
@@ -429,14 +275,8 @@ export function cachedTokensFrom(usage: {
 const CHARS_PER_TOKEN = 4;
 const CHARS_PER_TOKEN_JSON = 3;
 
-/**
- * Characters in one message, as the wire will carry it.
- *
- * Only the text is counted. Images would need their own rule, and guessing one
- * would produce a number that looks measured; the price of leaving them out is
- * an underestimate, and everything this estimate decides (whether a prefix has
- * cleared a minimum) is a floor comparison.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Characters in one message, as the wire will carry it. */
 function messageChars(message: AgentMessage): number {
 	if (message.role === "user") {
 		return typeof message.content === "string"
@@ -453,35 +293,14 @@ function messageChars(message: AgentMessage): number {
 	return message.content.reduce((sum, block) => sum + (block.type === "text" ? block.text.length : 0), 0);
 }
 
-/**
- * Input tokens in the whole request, estimated.
- *
- * The same shape the compaction threshold uses (`agent/src/compaction.ts`),
- * for the same reason: the last assistant message carries the provider's own
- * count of the prompt that produced it, so the unknown part is only what has
- * been appended since — and that is mostly plain text, which divides by four
- * well enough to answer "is this over a thousand tokens".
- *
- * It is an estimate and the comment says so. Nothing here is billed on it.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Input tokens in the whole request, estimated. */
 export function estimatePrefixTokens(context: Context): number {
 	return prefixTierTokens(context).messages;
 }
 
-/**
- * The prefix length at each tier a provider caches separately, in tokens.
- *
- * Anthropic rejects the whole request if the `tools` tier changes, only the
- * system tier and below if `system` does, and so on — so its breakpoints sit on
- * tier *boundaries*, and each boundary has its own length against its own
- * minimum. One number for the whole prompt cannot answer "is this position
- * worth marking": a 900-token system prompt under a 60k transcript clears no
- * minimum on its own, while the same system prompt at the end of the transcript
- * does.
- *
- * Cumulative at each boundary, since a prefix is what a breakpoint caches: a
- * breakpoint on the system prompt caches the tools as well.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The prefix length at each tier a provider caches separately, in tokens. */
 export interface PrefixTiers {
 	/** Up to and including the last tool definition. */
 	tools: number;
@@ -519,20 +338,8 @@ function estimateMessageTokens(messages: readonly AgentMessage[]): number {
 // How good a session's caching could be
 // ---------------------------------------------------------------------------
 
-/**
- * The best hit rate a sequence of requests could possibly have achieved.
- *
- * A request can only read what an earlier request wrote, and a prompt only
- * grows: request `t` can read at most the prompt of request `t-1`. So the
- * ceiling is `sum(P[t-1]) / sum(P[t])` — a number that falls as a conversation
- * grows, because the newest prompt is always the biggest one. It is what turns
- * "we are at 96%" from a verdict into a diagnosis: at the ceiling the machinery
- * is perfect and the workload is the limit; below it, tokens were thrown away.
- *
- * Measured from the provider's own prompt counts, in order. Requests that did
- * not report one are skipped rather than estimated, since a fabricated ceiling
- * would be used to excuse a real gap.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The best hit rate a sequence of requests could possibly have achieved. */
 export function cacheCeiling(promptTotals: readonly number[]): number | undefined {
 	const known = promptTotals.filter((total) => total > 0);
 	if (known.length < 2) return undefined;

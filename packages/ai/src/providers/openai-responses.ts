@@ -1,35 +1,5 @@
-/**
- * OpenAI Responses adapter — the third wire, and the one that carries tool
- * calling for the GPT-6 generation.
- *
- * What made this a separate adapter rather than a mode flag on the
- * Chat Completions one is that the two disagree on every shape the agent loop
- * touches:
- *
- *   - The system prompt is a top-level `instructions` field, not the first
- *     message. That is not cosmetic: the cached prefix runs `instructions` first
- *     and then `input`, so a conversation whose system prompt is rebuilt per turn
- *     invalidates the whole prefix no matter how little else changed.
- *   - Tools are declared flat — `{type, name, description, parameters}` with no
- *     `function` wrapper.
- *   - A tool result is an input item `{type: "function_call_output", call_id}`
- *     referencing the call, not a `role: "tool"` message.
- *   - The stream is a sequence of *named* events (`response.output_text.delta`,
- *     `response.function_call_arguments.delta`, …) rather than an array of deltas,
- *     and the terminal event carries the whole response envelope including usage.
- *
- * **How much of this is verified.** The shapes and event names are the vendor's
- * published wire format. Nothing here has been round-tripped against a live
- * endpoint — this checkout cannot make a paid request, and the repository's
- * standing rule is that a claim about the wire is only as good as the evidence
- * for it. The parts a live request would settle, and that a reader should treat
- * as open rather than settled, are called out where they appear.
- *
- * Store-side, this sends `store: false`. A coding session's transcript is the
- * user's source code and everything said about it; keeping it on the provider's
- * side by default is not a decision this adapter gets to make quietly, and the
- * flag is also what makes reasoning replay possible without an `id`.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** OpenAI Responses adapter: the third wire, and the one that carries tool calls for the GPT-6 generation. */
 import {
 	type CachePolicy,
 	cacheCapability,
@@ -124,14 +94,8 @@ export interface ResponsesRequestParams {
 	prompt_cache_retention?: string;
 }
 
-/**
- * The effort this request can actually carry.
- *
- * `undefined` means the request carries no `reasoning` field at all, which is
- * three different things that must not be confused: the session asked for none,
- * the session asked for one this model does not accept, or the model says nothing
- * about efforts and we send what was asked for.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The effort this request can actually carry, or nothing. */
 export function responsesEffort(
 	model: Model,
 	thinkingLevel: ThinkingLevel | undefined,
@@ -221,16 +185,7 @@ export function convertInput(context: Context): ResponsesInputItem[] {
 			// the items to be attributed to the turn that produced them.
 			for (const block of message.content) {
 				if (block.type === "thinking" && block.thinking) {
-					// Only a block that came back with the encrypted blob is replayable.
-					// One without it is dropped rather than sent empty: the wire has no
-					// spelling for a reasoning item with neither text we can read nor a
-					// blob it can verify, and sending one is the request that 400s.
-					//
-					// Note what is NOT carried: the item `id`. With `store: false` there
-					// is nothing on the provider's side for it to name. If the wire turns
-					// out to want it, this is where that would go — which is the one claim
-					// in this adapter a live request would falsify and this checkout
-					// cannot.
+					// Long-form design notes: docs/dev/ai-layer.md
 					if (block.signature) {
 						out.push({
 							type: "reasoning",
@@ -487,15 +442,8 @@ export async function* mapResponsesStream(
 	yield builder.done(stop, builder.message.usage);
 }
 
-/**
- * The turn's outcome.
- *
- * A Responses terminal event names a *status*, not a reason: `completed` covers
- * both a plain answer and a turn that ended in tool calls, so the two are told
- * apart by what the turn contains. Getting this wrong is not cosmetic — the agent
- * loop stops on `stop` and runs tools on `toolUse`, so an answer that ended in a
- * tool call reported as `stop` is a session that quietly does nothing.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The turn's outcome. A Responses terminal event names a status, not a reason. */
 export function resolveStopReason(
 	status: string | undefined,
 	incompleteReason: string | undefined,

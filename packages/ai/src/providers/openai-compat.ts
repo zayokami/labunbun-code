@@ -1,21 +1,5 @@
-/**
- * OpenAI-compatible Chat Completions adapter.
- *
- * Works unchanged against OpenAI, DeepSeek, Kimi (Moonshot), GLM (Z.AI),
- * OpenRouter, and any other provider exposing the /chat/completions wire
- * format via a custom baseUrl.
- *
- * Wire quirks handled:
- * - Tool calls stream as fragments keyed by array INDEX (id/name only on the
- *   first fragment of each call); arguments pieces are concatenated raw and
- *   parsed once at finish.
- * - Reasoning models (DeepSeek-R1 style) stream `delta.reasoning_content`;
- *   some providers instead stream `delta.content` as a LIST of parts during a
- *   thinking phase, each part wrapping its text one level down.
- * - Usage only arrives when `stream_options: { include_usage: true }`.
- * - finish_reason is the terminal signal: we emit toolcall_end for all open
- *   calls and map to our StopReason.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** OpenAI-compatible Chat Completions adapter. */
 import {
 	type CachePolicy,
 	cacheCapability,
@@ -371,19 +355,7 @@ export async function* mapOpenAIStream(
 		yield builder.textEnd(textIndex);
 	}
 
-	// Determine terminal stop reason BEFORE emitting toolcall_end events so the
-	// finalized partial carries the right stopReason.
-	//
-	// Three outcomes, told apart on purpose:
-	//  - a reason the map knows is respected;
-	//  - a reason it does not is not a normal finish, and defaulting to "stop"
-	//    files an unknown outcome as a successful turn. Sealed as an error and
-	//    named, the same call the Anthropic adapter makes;
-	//  - no reason at all keeps the "stop" guess, and it is a guess: the SDK
-	//    consumes the `[DONE]` sentinel before this mapper sees it, so a clean
-	//    end and a proxy that dropped the connection after the last content
-	//    chunk are indistinguishable here. "stop" is what the sentinel would
-	//    have confirmed, and the content that did arrive is real either way.
+	// Long-form design notes: docs/dev/ai-layer.md
 	let stop: StopReason = "stop";
 	if (finishReason) {
 		const mapped = FINISH_REASON_MAP[finishReason];
@@ -470,18 +442,8 @@ export interface OpenAIModelsClientLike {
 	models: { list(options?: { signal?: AbortSignal }): Promise<OpenAIModelPage> };
 }
 
-/**
- * What this key can reach. Almost only ids: unlike Anthropic's, this endpoint
- * states no price and no output cap, and only one vendor states a window at all
- * (Kimi, as `context_length`). So the entries it returns can confirm an id exists
- * and can report one that does not — plus, where a vendor bothers, correct a
- * window. That window matters more than it looks: it is the input to the
- * compaction threshold, and this is the one chance to check it against the vendor
- * without paying for a call.
- *
- * Unpaginated by the spec, so whatever comes back is the whole catalog and is
- * reported as complete.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** What this key can reach: almost only ids, plus a window where a vendor states one. */
 export async function listOpenAIModels(
 	model: Model,
 	options?: { client?: OpenAIModelsClientLike; signal?: AbortSignal },

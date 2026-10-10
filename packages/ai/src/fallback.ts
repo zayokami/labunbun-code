@@ -1,11 +1,5 @@
-/**
- * Model fallback chain: on a provider error that arrives BEFORE any content
- * was streamed (auth failure, model unavailable, rate-limited past retries),
- * transparently retry the turn with the next model in the chain. Errors after
- * content started flowing propagate unchanged — falling back would replay the
- * turn the user already watched — and the agent loop seals the partial as an
- * errored turn.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Model fallback chain: try the next model on a pre-content provider error. */
 import { isAbortError } from "./retry.ts";
 import type { AssistantMessageEvent, Context, Model, StreamFn, StreamOptions } from "./types.ts";
 

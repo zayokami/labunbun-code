@@ -194,14 +194,8 @@ export interface StreamFnOptions {
 	stallTimeoutMs?: number;
 }
 
-/**
- * The error a model fails with when no key resolves, or undefined when one does.
- *
- * The adapters would otherwise hand the SDK an empty key and let it complain
- * about authentication, which reads like a failure a retry might get past. The
- * pre-flight is the whole difference, so it is exported: a test that proved it
- * by reaching a provider would be testing the provider.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The error a model fails with when no key resolves, or undefined when one does. */
 export function missingApiKey(model: Model, options?: StreamOptions): MissingApiKeyError | undefined {
 	if (options?.apiKey) return undefined;
 	return resolveApiKey(model) ? undefined : new MissingApiKeyError(model);
@@ -237,15 +231,8 @@ function dispatchStreamFn(settings: StreamFnOptions): StreamFn {
 	};
 }
 
-/**
- * Default StreamFn: dispatch by `model.api`, under the stall watchdog, under
- * the retry policy.
- *
- * The order is the contract. The watchdog sits *below* retry so that a stall
- * before any event has flowed is an ordinary failed connection and earns the
- * ladder's second attempt, while a stall after events have flowed rethrows —
- * the session loop then seals the partial as an errored turn.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Default StreamFn: dispatch by `model.api`, under the stall watchdog, under the retry policy. */
 export function createDefaultStreamFn(settings: StreamFnOptions = {}): StreamFn {
 	const guarded = withStallTimeout(dispatchStreamFn(settings), {
 		idleTimeoutMs: settings.stallTimeoutMs ?? 120_000,
@@ -253,22 +240,8 @@ export function createDefaultStreamFn(settings: StreamFnOptions = {}): StreamFn 
 	return withRetry(guarded);
 }
 
-/**
- * The same stream function, plus a record of what each request did to the cache.
- *
- * The tracker wraps the *whole* transport, retry policy included, so what it
- * records is one entry per request the caller made rather than per attempt
- * underneath it: a retry that succeeds is the same prefix asked twice, and that
- * is how it is recorded.
- *
- * A caller that wants no tracking uses `createDefaultStreamFn` and pays nothing:
- * the hashing here runs per request, and an embedder who never reads the report
- * should not be charged for it.
- *
- * The notices list is created here and handed to both — the adapter writes to it,
- * the tracker reads it — because the adapter has to exist before the wrapper
- * that would otherwise be its owner.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The same stream function, plus a record of what each request did to the cache. */
 export function createTrackedStreamFn(settings: StreamFnOptions = {}): { streamFn: StreamFn; tracker: CacheTracker } {
 	const notices: CacheNotice[] = [];
 	const inner = createDefaultStreamFn({

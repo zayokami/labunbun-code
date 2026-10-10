@@ -1,39 +1,5 @@
-/**
- * Watching a prefix across requests, so a rewind cannot happen quietly.
- *
- * The hit-rate number alone cannot say *why* a cache missed. A request that
- * reads nothing may be a cold start (nobody had written the prefix yet), a TTL
- * that expired, a genuine prefix rewind (the bytes changed somewhere in the
- * middle, so everything after that point was charged at full price), or a
- * different conversation entirely — a subagent, a model fallback. This module
- * answers that question by remembering the wire-visible bytes of each request
- * and comparing the next one against them.
- *
- * It is a `StreamFn` wrapper rather than part of the agent session, and that is
- * deliberate: the session sees only its own loop, while compaction and subagent
- * requests are issued through the same `StreamFn` the app hands out. A tracker
- * living inside the session would report those requests as missing and, worse,
- * would compare them against the main loop's transcript and call every one of
- * them a rewind.
- *
- * **Families.** Two requests are comparable only when they share a cache
- * namespace *and* a prefix: same model, same tools, same system prompt. A
- * subagent has its own system prompt and a filtered tool list, so its request
- * is a new family — first request in a family is a cold start by definition,
- * never a rewind. A model switch (or a fallback) is a new family for the same
- * reason: caches are scoped per model, so the new model has nothing to read no
- * matter how stable our bytes were.
- *
- * **What is hashed.** Only the bytes the adapters actually put on the wire —
- * role, text, block kinds, tool ids and arguments — never `timestamp`, `usage`
- * or anything else that moves on every turn without being sent. Hashing the
- * whole neutral message would report rewinds that the provider never sees.
- * Conversely the neutral transcript is compared, not the post-merge wire array:
- * the Anthropic adapter merges consecutive tool results into one user turn,
- * which is a stable transform, so a divergence in the neutral list appears at
- * or before its wire position. Indices below are therefore *message* indices,
- * which is the unit a person can look up in the transcript.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Watching a prefix across requests, so a rewind cannot happen quietly. */
 
 import { type CacheNotice, hash64, prefixIdentity } from "./cache.ts";
 import type { AgentMessage, Context, Model, StreamFn, StreamOptions } from "./types.ts";
@@ -73,17 +39,8 @@ export interface CacheRequestRecord {
 	at: number;
 	/** Milliseconds since the previous request in the same family. */
 	gapMs?: number;
-	/**
-	 * What this request was, relative to the one before it in its family.
-	 *
-	 * "reask" is the same prefix presented again: a retry after a failure, or a
-	 * second attempt with a different output cap. Both ask the provider to read
-	 * the same bytes, so neither is a wasted cache opportunity and neither grows
-	 * the conversation — which is exactly why they are not "extensions".
-	 *
-	 * A family's first request is a cold start by definition: it is the one
-	 * request that could not have read anything.
-	 */
+	// Long-form design notes: docs/dev/ai-layer.md
+	/** What this request was, relative to the one before it in its family. */
 	kind: "first" | "extension" | "rewind" | "reask";
 	divergence?: CacheDivergence;
 	/** Causes registered before this request, e.g. "compaction". */
@@ -127,15 +84,8 @@ export interface CacheTracker {
 }
 
 export interface CacheTrackerOptions {
-	/**
-	 * A list this tracker reads its notices from, filled by whoever owns the
-	 * transport.
-	 *
-	 * The direction is unusual — the tracker is handed something rather than
-	 * producing it — because the notices come from *inside* the adapter and the
-	 * adapter is built before this wrapper can exist. Handing over the array
-	 * instead of a setter keeps the transport the only writer.
-	 */
+	// Long-form design notes: docs/dev/ai-layer.md
+	/** A list this tracker reads its notices from, filled by whoever owns the transport. */
 	notices?: CacheNotice[];
 }
 
@@ -163,19 +113,8 @@ function messageText(message: AgentMessage): string {
 	return `r\x00${message.toolCallId}\x00${parts.join("\x01")}`;
 }
 
-/**
- * The request as a list of comparable units: tools, system prompt, then one per
- * message.
- *
- * Tools and system are units 0 and 1 rather than being folded into one key,
- * because a divergence there has a different fix from a divergence in the
- * transcript — the tool list is frozen for the session and a change to it means
- * something appended tools mid-conversation (`/mcp approve`), which invalidates
- * every tier below it.
- *
- * Empty system prompts and absent tool lists hash to a constant, so a request
- * without them still compares cleanly against another without them.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The request as comparable units: tools, system prompt, then one per message. */
 export function contextFingerprints(context: Context): string[] {
 	const units: string[] = [];
 	units.push(hash64(`tools\x00${context.tools?.length ? JSON.stringify(context.tools) : ""}`));
@@ -187,15 +126,8 @@ export function contextFingerprints(context: Context): string[] {
 /** The index whose meaning is the tools block, then the system prompt. */
 const FIRST_MESSAGE_UNIT = 2;
 
-/**
- * Where `next` stopped extending `prev`, or undefined when it extends it.
- *
- * A longer list that starts with the old one is the healthy case — the
- * conversation grew. Anything else is a rewind: the bytes at `index` changed,
- * so every token after it is a fresh write. A *shorter* list that the old one
- * starts with (a truncation) also lands here, and it is a rewind for the same
- * reason.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Where `next` stopped extending `prev`, or undefined when it extends it. */
 export function firstDivergence(prev: readonly string[], next: readonly string[]): CacheDivergence | undefined {
 	const shared = Math.min(prev.length, next.length);
 	for (let i = 0; i < shared; i++) {
@@ -221,21 +153,8 @@ interface FamilyState {
 	at: number;
 }
 
-/**
- * Wrap a `StreamFn` so every request it makes is recorded.
- *
- * It wraps the stream function it is given and observes logical requests: a
- * failed attempt that the retry policy retries away is the retry policy's
- * business, and the attempt that succeeds is recorded as `reask` — the same
- * prefix asked again — because that is what the cache sees.
- *
- * Usage is read from the terminal `done`/`error` event; a stream abandoned
- * before it (cancelled, or an error thrown by the client) still produces a
- * record, with `reported: false`, because a request that reached the provider
- * and got nothing back is exactly the kind of thing a cache report should not
- * hide. The wrapper never throws on its own account: bookkeeping must not be the
- * reason a turn fails.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Wrap a `StreamFn` so every request it makes is recorded. */
 export function withCacheTracker(
 	inner: StreamFn,
 	options: CacheTrackerOptions = {},

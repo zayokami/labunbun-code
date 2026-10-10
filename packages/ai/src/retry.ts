@@ -1,13 +1,5 @@
-/**
- * Retry wrapper — THE throw boundary of the streaming protocol.
- *
- * Adapters let SDK/network exceptions propagate; this wrapper catches them,
- * retries with exponential backoff while nothing has been emitted downstream
- * yet, and converts final failure into a terminal `error` event. Once any
- * event has been forwarded to the consumer, exceptions propagate unchanged:
- * the stream can no longer be retried safely, and it is the agent loop that
- * owns the mid-stream failure by sealing the partial as an errored turn.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Retry wrapper: the throw boundary of the streaming protocol. */
 
 import { MessageBuilder } from "./message-builder.ts";
 import { MissingApiKeyError } from "./model.ts";
@@ -72,14 +64,8 @@ export function looksLikeContextOverflow(message: string): boolean {
 	return OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
 }
 
-/**
- * True when the provider refused the request for being too large to send.
- *
- * Nothing is gained by retrying it — the request does not shrink on its own —
- * and nothing is gained by replaying it against the next model in a fallback
- * chain, which is how an oversized context turns into a generic error on every
- * later turn. Only the caller can make it smaller.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** True when the provider refused the request for being too large to send. */
 export function isContextOverflowError(error: unknown): boolean {
 	const status = statusCodeOf(error);
 	if (status !== null && !isOverflowStatus(status)) return false;
@@ -124,16 +110,8 @@ function headerValue(headers: unknown, name: string): string | null {
 	return record[name] ?? record[titleCase] ?? null;
 }
 
-/**
- * The wait a Retry-After response asks for, in milliseconds, or null.
- *
- * The SDKs attach a real `Headers` instance, and reading it like a plain
- * record — which is what this used to do — meant the header never fired in
- * production; only the hand-rolled fixture here ever had the right shape.
- * Three forms are legal and all three are read: `retry-after-ms` (first,
- * because seconds would round it off), seconds, and an HTTP-date. Negative
- * values clamp to zero rather than sleeping backwards.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The wait a `Retry-After` response asks for, in milliseconds, or null. */
 function retryAfterMsOf(error: unknown): number | null {
 	if (error === null || typeof error !== "object") return null;
 	const headers = (error as { headers?: unknown }).headers;

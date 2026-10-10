@@ -1,21 +1,5 @@
-/**
- * Ask the providers what they serve.
- *
- * The catalog in `model.ts` is a hand-written snapshot of a date. Vendors retire
- * ids and move context windows without asking anyone, and the only way to find
- * out is to ask them. That is what this module does: once, at startup, in the
- * background, and never awaited.
- *
- * What cannot be discovered is the price. None of these APIs returns one — the
- * models endpoints report ids, and Anthropic's additionally reports a display
- * name, a context window and an output cap — so a price is still either the
- * table's or the user's own `settings.pricing` declaration. Claims to the
- * contrary are how a cost report starts quietly lying.
- *
- * Every failure mode ends the same way. No key, a rejected request, a timeout, a
- * listing that came back empty: the provider is simply not probed, and the table
- * stands exactly as it would have without any of this.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Ask the providers what they serve. */
 import {
 	allModels,
 	applyBaseUrlOverrides,
@@ -119,18 +103,8 @@ function providersWithKeys(): Model[] {
 	return [...byProvider.values()];
 }
 
-/**
- * The catalog request for one model, as the startup refresh makes it.
- *
- * Exported, and with an injected client, for one reason: which wire a model
- * answers its catalog on is a per-model decision made here, and `refreshModelCatalog`
- * already lets a caller replace this whole function — so without a way to reach
- * *this* one, the only test available is that the refresh returns nothing, which
- * is indistinguishable from the branch not existing. That distinction is not
- * theoretical: `providersWithKeys` picks one model per provider, so a provider
- * whose first row sits on a wire this function does not handle is never probed
- * at all, and the catalog silently stops refreshing for it.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The catalog request for one model, as the startup refresh makes it. */
 export async function probeProvider(
 	model: Model,
 	signal?: AbortSignal,
@@ -160,16 +134,8 @@ function nameRefs(refs: string[]): string {
 	return refs.length > NOTICE_LIMIT ? `${shown} and ${refs.length - NOTICE_LIMIT} more` : shown;
 }
 
-/**
- * One line about what the refresh changed, or `undefined` when it changed
- * nothing. A background refresh that found nothing new must say nothing: a
- * startup notice that appears every single time is a notice nobody reads.
- *
- * Both halves explain themselves, because both are surprising on their own. A
- * model vanishing from the picker while still being usable is only reassuring if
- * someone says so, and a model appearing with no price is only honest if it says
- * that the price is what is missing.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** One line about what the refresh changed, or `undefined` when it changed nothing. */
 export function formatCatalogNotice(refresh: CatalogRefresh | undefined): string | undefined {
 	if (!refresh) return undefined;
 	const parts: string[] = [];

@@ -1,12 +1,5 @@
-/**
- * Repairs on a stored transcript, before it is sent anywhere.
- *
- * A conversation that has been read back from disk, converted from another
- * tool's history, or reassembled after a damaged line was skipped is a list of
- * messages that may no longer be well-formed. The provider is the judge of
- * that, and its verdict is a 400 with no message index and no explanation —
- * so the repair happens here, where the structure is still in hand.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Repairs on a stored transcript, before it is sent anywhere. */
 import type { AgentMessage } from "./types.ts";
 
 /**

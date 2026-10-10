@@ -1,14 +1,7 @@
 import type { AssistantMessage, AssistantMessageEvent, StopReason, ToolCall, Usage } from "./types.ts";
 
-/**
- * Shared accumulator that turns provider wire events into our uniform
- * `AssistantMessageEvent` protocol.
- *
- * Adapters feed it provider-specific callbacks; it owns the partial
- * AssistantMessage snapshot carried by every event, so consumers can render
- * directly without re-reducing deltas. Tool-call arguments are buffered as
- * raw text and parsed exactly once, when the block ends.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Shared accumulator: adapters feed it wire events; every event carries the partial it owns. */
 export class MessageBuilder {
 	#message: AssistantMessage;
 	#started = false;

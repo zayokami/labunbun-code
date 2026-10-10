@@ -1,18 +1,5 @@
-/**
- * `withStallTimeout` — the idle watchdog between the consumer and the wire.
- *
- * The failure it exists for is the request that never ends and never fails: a
- * provider or a proxy that accepted the connection and then went silent.
- * Timeouts inside the SDK cover a slow response, not a dead one — and the
- * retry layer only sees failures, so silence climbs no retry ladder and ends
- * no turn. This wrapper turns "no event for N ms" into a thrown
- * `StreamStallError`.
- *
- * Composition: it sits *under* retry (`withRetry(withStallTimeout(dispatch))`).
- * A stall before any event has flowed is a failed connection and earns the
- * ladder's second attempt; a stall after events have flowed is terminal, and
- * the session loop seals the partial as an errored turn.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** `withStallTimeout`: the idle watchdog between the consumer and the wire. */
 
 import { composeSignals } from "./signals.ts";
 import type { AssistantMessageEvent, Context, Model, StreamFn, StreamOptions } from "./types.ts";

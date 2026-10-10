@@ -1,15 +1,5 @@
-/**
- * Anthropic Messages API adapter.
- *
- * Split into pure, individually testable pieces:
- * - `buildAnthropicRequest` — our Context → wire params (message grouping,
- *   thinking budget, cache breakpoints).
- * - `mapAnthropicStream` — raw SSE event objects → AssistantMessageEvent.
- * - `createAnthropicStreamFn` — wires the official SDK client to the two.
- *
- * Tool-call arguments arrive as `input_json_delta` fragments which are buffered
- * raw and parsed once at block end (avoids O(n²) partial-JSON parsing).
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Anthropic Messages API adapter, in three testable pieces. */
 
 import {
 	type CacheNotice,
@@ -81,14 +71,8 @@ export type AnthropicRawStreamEvent =
 	| { type: "message_stop" }
 	| { type: "error"; error?: { type?: string; message?: string } };
 
-/**
- * Why a refusal happened, exactly as far as the API will say.
- *
- * Both fields are nullable and either can arrive alone: `category` is the
- * machine-readable half and `explanation` the prose. On a beta endpoint there
- * are more categories and more fields; this reader takes the GA shape and
- * ignores additions rather than guessing at them.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Why a refusal happened, exactly as far as the API will say. */
 export interface AnthropicStopDetails {
 	category?: string | null;
 	explanation?: string | null;
@@ -105,21 +89,8 @@ const THINKING_BUDGETS: Record<Exclude<ThinkingLevel, "off">, number> = {
 	high: 32768,
 };
 
-/**
- * The depth dial for the models that think adaptively — what replaced the
- * budget. There the model paces itself and effort is the only say the caller
- * has left.
- *
- * `off` lands on the lowest rung rather than on nothing at all, because on
- * these models there is nothing to switch off: thinking is not optional, and
- * the vendor's guidance for a request that used to ask for a small budget is
- * the lowest effort. `minimal` joins `low` for the same reason — the scale has
- * no rung below it.
- *
- * The two rungs above `high` are deliberately unreachable here: the session's
- * `ThinkingLevel` is exactly these four plus `off`, and mapping a level onto
- * anything beyond it would be inventing a setting nobody asked for.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The depth dial for the models that think adaptively: what replaced the budget. */
 const THINKING_EFFORT: Record<ThinkingLevel, "low" | "medium" | "high"> = {
 	off: "low",
 	minimal: "low",
@@ -136,16 +107,8 @@ interface AnthropicBlockBinding {
 	prefix_mismatch_behavior: "drop_block";
 }
 
-/**
- * Opts a request into the beta that lets a thinking block be dropped instead of
- * failing the whole request.
- *
- * Two halves that only work together: the beta header lives on the client call,
- * and `thinking.block_binding` lives in the body. Sending the field without the
- * header is itself a 400, and sending the header to a model that runs no prefix
- * check asks it to honour a parameter it does not know — so both travel
- * together, and only to the models flagged `thinkingBlockBinding`.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The beta that lets a thinking block be dropped instead of failing the request. */
 export const THINKING_BLOCK_BINDING_BETA = "thinking-binding-controls-2026-08-01";
 
 /**
@@ -202,41 +165,8 @@ function cacheControl(request: AnthropicCacheRequest): AnthropicCacheControl {
 	return request.ttl === undefined ? { type: "ephemeral" } : { type: "ephemeral", ttl: request.ttl };
 }
 
-/**
- * Which of the four breakpoint slots this request uses.
- *
- * Anthropic's tiers are ordered `tools → system → messages`, and a change at one
- * level invalidates that level and everything below it. So the positions are
- * chosen to be the longest prefixes that do not change between the requests of
- * one conversation:
- *
- *   - `tools`     — the tool definitions, frozen when the session was built;
- *   - `system`    — the same plus the system prompt, which changes only when the
- *                   app rebuilds it (a resumed session, a different working
- *                   directory). Keeping this separate from `tools` means a
- *                   changed system prompt still reads the tools tier back.
- *   - `previous`  — where the request before this one ended;
- *   - `tail`      — where this one ends, written for the next one to read.
- *
- * `previous` is the one that needs justifying. A read is an exact hash match at
- * a breakpoint; failing that the API walks backwards at most 20 positions. In an
- * ordinary tool loop the previous request's tail is two or three positions back
- * — an assistant turn and a run of tool results, which the API counts as one
- * position each — so the walk finds it and the extra breakpoint changes nothing.
- * It exists for the case where the tail moved further than the walk reaches,
- * where having a breakpoint *on* the position rather than searching for it turns
- * a full miss into a full read.
- *
- * All four slots are spent when all four positions clear their minimum, in the
- * order the tiers require: `tools`, `system`, `previous`, `tail`. There is no
- * reserve, so anything added later — a request-level automatic breakpoint, a
- * marker an embedding app wants to place — has to take a slot from this list
- * rather than be appended to it.
- *
- * Every position is checked against its own minimum: a breakpoint below the
- * model's floor is not cached, and (unlike a breakpoint that is simply shorter)
- * it tells us nothing in the response except that nothing happened.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Which of the four breakpoint slots this request uses. */
 export interface AnthropicBreakpointPlan {
 	tools: boolean;
 	system: boolean;
@@ -246,21 +176,8 @@ export interface AnthropicBreakpointPlan {
 
 const NO_BREAKPOINTS: AnthropicBreakpointPlan = { tools: false, system: false, previous: false, tail: false };
 
-/**
- * Where the request before this one ended, and how long its prompt was.
- *
- * The prompt that produced the newest assistant message was everything before
- * it, and a transcript only grows by appending — so the message immediately
- * before that assistant message is exactly where that prompt ended. No state
- * across requests is needed, which matters: this survives a process restart and
- * a resumed session, where a remembered index would not.
- *
- * The token count comes from that message's own usage, because it *is* the
- * prompt the provider billed and therefore exact. That doubles as the
- * correctness condition: a message with no usage came from a request that never
- * answered, so nothing is known to have been written at the position before it,
- * and there is nothing worth pointing a breakpoint at.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Where the request before this one ended, and how long its prompt was. */
 export function previousRequestTail(messages: readonly AgentMessage[]): { index: number; tokens: number } | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
@@ -327,19 +244,7 @@ export function buildAnthropicRequest(
 		}));
 	}
 
-	// Two shapes, and a model takes exactly one of them: `enabled` with a budget
-	// on the oldest row, `adaptive` with an effort on everything from 4.7 on.
-	// The wrong one is a 400 on the first request, which is why the choice is a
-	// per-model capability rather than a default with an exception.
-	//
-	// The session's level is honoured only on a row that declares a thinking
-	// shape — `reasoning: true` or a `thinkingMode`. A row that declares neither
-	// is saying this endpoint was not observed to think, and a level handed to
-	// it anyway puts a `thinking` field the model can refuse on the request: on
-	// a gateway row carrying a 4.6-or-later Claude id, `{type: "enabled",
-	// budget_tokens}` is exactly the 400 this path exists to avoid. Forcing
-	// `off` there sends no thinking field at all, which for those rows is the
-	// only request known to work.
+	// Long-form design notes: docs/dev/ai-layer.md
 	const declaresThinking = model.reasoning || model.thinkingMode !== undefined;
 	const thinking = declaresThinking ? (options?.thinkingLevel ?? (model.reasoning ? "medium" : "off")) : "off";
 	if (model.thinkingMode === "adaptive") {
@@ -370,31 +275,8 @@ export function buildAnthropicRequest(
 	return params;
 }
 
-/**
- * Convert our neutral messages to Anthropic wire format.
- *
- * Key rules:
- * - Consecutive ToolResultMessages merge into ONE user message of tool_result
- *   blocks (the API requires tool_use/result pairing inside user turns).
- * - Thinking blocks round-trip with their signature, which is what the API
- *   requires before it will take them back at all. That is not the same as
- *   their being honoured: on the models that check a block against the
- *   conversation that produced it, editing the history in place — which is
- *   what compaction does — leaves a signature that no longer matches. The
- *   `drop_block` opt-in keeps that a dropped block rather than a 400 on the
- *   next request.
- * - A user message's text is sent as a block array even when it would fit in a
- *   bare string. The two forms are the same prompt, but one message carries a
- *   breakpoint on the turn it arrives and none on the turns after it, and a
- *   breakpoint can only attach to a block — so sending blocks throughout means
- *   the bytes of a message never depend on whether it happens to be the tail.
- *   The exception is an empty message, which has no block to attach to and no
- *   tokens to cache, and keeps its old form.
- *
- * `marks` are indices into the *neutral* array, not the wire array: the merge
- * below means the two do not line up, and a rewind report that said "wire
- * message 7" would be describing something the reader cannot find.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Convert our neutral messages to Anthropic wire format. */
 export function convertMessages(
 	messages: Context["messages"],
 	marks?: ReadonlySet<number>,
@@ -702,29 +584,15 @@ export interface AnthropicStreamFnOptions {
 	onCacheNotice?: (notice: CacheNotice) => void;
 }
 
-/**
- * The TTLs to try, in order, each rung reached only because the one above it was
- * refused.
- *
- * The first rung is what the policy asked for. Below it the short TTL, and below
- * that no `ttl` field at all: a gateway that rejects the field outright rejects
- * either value, and the point of a ladder is that the third rung is a request
- * that any Anthropic-shaped endpoint will accept. Each rung costs one failed
- * request, once per process, and then never again.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The TTLs to try, in order, each rung reached because the one above was refused. */
 function ttlLadder(policy?: CachePolicy): Array<CacheTtl | undefined> {
 	if (policy?.explicitBreakpoints === false) return [undefined];
 	return resolveCacheTtl(policy) === "1h" ? ["1h", "5m", undefined] : ["5m", undefined];
 }
 
-/**
- * Whether a failure is the provider refusing our cache settings.
- *
- * A 400 that mentions none of this is a genuinely malformed request and must
- * propagate: retrying it without a `ttl` would turn a real error into a silent
- * one. The wording check is what separates the two, and it is deliberately
- * narrow.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Whether a failure is the provider refusing our cache settings. */
 function looksLikeCacheSettingRejection(error: unknown): boolean {
 	if (statusCodeOf(error) !== 400) return false;
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
@@ -829,15 +697,8 @@ export interface AnthropicModelsClientLike {
 	models: { list(params: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<AnthropicModelPage> };
 }
 
-/**
- * What this key can reach, with the limits the API states for each model.
- *
- * Paginated: the endpoint answers 20 rows at a time unless asked for more, and a
- * list truncated at the page cap would be a list that says the models past it do
- * not exist. `complete` reports whether we saw all of them — a partial listing is
- * still worth reading for its limits, but it must never be used to conclude that
- * something is gone.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** What this key can reach, with the limits the API states for each model. */
 export async function listAnthropicModels(
 	model: Model,
 	options?: { client?: AnthropicModelsClientLike; signal?: AbortSignal },

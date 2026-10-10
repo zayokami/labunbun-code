@@ -34,16 +34,8 @@ const OPENCODE_GO_BASE = "https://opencode.ai/zen/go";
 const OPENCODE_ZEN_OAI_BASE = "https://opencode.ai/zen/v1";
 const OPENCODE_GO_OAI_BASE = "https://opencode.ai/zen/go/v1";
 
-/**
- * The four providers above are a *route to* a model rather than a home for one,
- * and `resolveModel` treats them differently for exactly that reason: a bare id
- * never resolves to one of these rows. See the comment on that function for what
- * that costs and why the alternative is worse.
- *
- * Deliberately the four built-in ids and not a shape — a "looks like a reseller"
- * test would also catch a user who registered their own gateway, and a user
- * registering `openrouter` under that name is telling us to believe them.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** The four gateway provider ids: a route to a model, not a home for one. */
 const GATEWAY_PROVIDERS = new Set(["opencode-zen", "opencode-go", "opencode-zen-oai", "opencode-go-oai"]);
 
 /** 10 * 1.25 is 1.25, but 0.1 * 3 leaves floating-point dust in a price table. */
@@ -51,17 +43,8 @@ function roundPrice(usd: number): number {
 	return Number(usd.toFixed(4));
 }
 
-/**
- * Anthropic bills cache traffic as a multiplier of the input rate rather than
- * as rows of its own: a cache read costs 0.1x input, and a 5-minute cache write
- * 1.25x. Derived here so a rate change moves all three numbers together instead
- * of leaving two of them behind.
- *
- * The read multiplier is a parameter because two rows are priced at 0.025x
- * instead — Fable 5.1 and Mythos 5.1, the two ".1" releases, which is exactly why
- * the pair is where a copy-paste error would hide — and a third at 0.05x, Opus
- * 5.5. Three regimes, and the vendor's pricing page footnotes each one by name.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Cache prices derived from the input rate; the read multiplier is a parameter. */
 function anthropicPricing(input: number, output: number, cacheReadMultiplier = 0.1): ModelPricing {
 	return {
 		input,
@@ -87,21 +70,8 @@ function openAIPricing(input: number, output: number, cacheRead: number): ModelP
 	};
 }
 
-/**
- * A row on the Anthropic wire, for a host that is not Anthropic's.
- *
- * This exists because the wire and the vendor are separate questions. A gateway
- * in front of Claude speaks exactly this protocol and is not this vendor: it
- * has its own host, its own credential, its own price list, and — the reason it
- * could not be expressed before — no way to be written down. The three fields
- * that say *which vendor* used to be literals inside {@link anthropicModel}, so
- * a non-Anthropic host had no constructor to call.
- *
- * It takes no `thinkingBlockBinding`. The flag and its beta header travel
- * together, to the four models that run the check, and a gateway in front of
- * those models is not evidence that it forwards either one; naming a model here
- * would send a parameter whose handling on the far side is unknown.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** A row on the Anthropic wire, for a host that is not Anthropic's. */
 function anthropicCompatModel(
 	provider: string,
 	baseUrl: string,
@@ -166,16 +136,8 @@ function anthropicModel(
 	};
 }
 
-/**
- * One model on an OpenAI wire.
- *
- * The two wires take the same options and differ only in which `ApiId` the row
- * carries, so they share this body. What that shares is deliberately *only* the
- * options: a field that only one wire reads (`toolReasoningEffort`, which is a
- * statement about Chat Completions) must not become available on both by being
- * written next to the shared signature — which is why it is read out of `opts`
- * below by name rather than spread.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** One model on one OpenAI wire; both wires share this body. */
 function openAIModel(
 	api: "openai-completions" | "openai-responses",
 	provider: string,
@@ -187,14 +149,8 @@ function openAIModel(
 		contextWindow: number;
 		maxOutputTokens: number;
 		reasoning?: boolean;
-		/**
-		 * Off unless a row asks. Almost every first-party row on this wire is a
-		 * text model; the exceptions so far are Mistral's four image-taking rows,
-		 * whose cards state text+image input. It is a field rather than a constant
-		 * because a *gateway* in front of several vendors serves image-capable
-		 * models on the same host, and a row there that said "text" would be a
-		 * claim the model does not support.
-		 */
+		// Long-form design notes: docs/dev/ai-layer.md
+		/** Off unless a row asks. */
 		images?: boolean;
 		apiKeyEnvFallbacks?: string[];
 		/**
@@ -250,15 +206,8 @@ function openAICompatModel(
 	return openAIModel("openai-completions", provider, baseUrl, apiKeyEnv, id, name, opts);
 }
 
-/**
- * A model on OpenAI's Responses wire.
- *
- * For the GPT-6 generation this is the *only* wire it publishes function calling
- * on, so a row here is what makes the model an agent model rather than a text one:
- * `packages/agent/src/session.ts` sends `tools` on every request, and a wire that
- * does not accept tools is not a worse session, it is a session where the agent
- * quietly stops acting.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** A model on OpenAI's Responses wire. */
 function openAIResponsesModel(
 	provider: string,
 	baseUrl: string,
@@ -270,47 +219,8 @@ function openAIResponsesModel(
 	return openAIModel("openai-responses", provider, baseUrl, apiKeyEnv, id, name, opts);
 }
 
-/**
- * One model on one of the two gateway plans, transcribed once and materialized
- * onto both wires below.
- *
- * The gateway sells the same catalog two ways: Zen, pay-as-you-go, and Go, a
- * subscription. Each plan has its own key, its own host and its own price list,
- * and the two do not agree with each other on a model they share — which is what
- * stops this collapsing into one table. `deepseek-v4-pro` is $1.74/$3.84 on Zen
- * and $0.66/$1.98 on Go, so Go is the cheaper plan there; `grok-4.7` is
- * $1.40/$4.20 on Zen and $2.00/$6.00 on Go, so it is the dearer one. Both plans
- * are cheaper and dearer depending on the model, and no rule is published for
- * converting between them, so the two lists below are separate transcriptions
- * and neither is ever filled in from the other.
- *
- * The figures are transcribed from models.dev's catalogue entries for the two
- * plans, swept 2026-09-28, filtered against the gateway's own unauthenticated
- * `/v1/models` listing the same day, and both sources re-checked on 2026-10-08.
- * Every number below is a copy of a published
- * price and must not be derived — see the cache rates below for what derivation
- * gets wrong. Both halves are needed and neither is sufficient, and each is wrong
- * on its own: the gateway proves which ids can be called and publishes no price
- * and no limit; models.dev states the money and the sizes but is hand-edited and
- * drifts in both directions. The gateway serves
- * 87 ids on Zen against the 85 priced here, and 43 on Go against 33 — while every
- * priced, undeprecated entry is served, so nothing we can state has been left
- * out. The ids the gateway serves that models.dev does not price are named at the
- * foot of this comment rather than guessed at.
- *
- * Nothing here is routed through `openAIPricing`, whose `cacheWrite` is derived
- * at 1.25x input. The gateway publishes a write rate for 34 of these 118 rows and
- * states no rate at all for 84 of the rest, and the read rates are not a fixed
- * multiple of input either: `qwen3.8-flash` reads at 0.016 against an input of
- * 0.15, which is 0.107x, while `qwen3.8-max` beside it reads at exactly 0.125x. A
- * derived figure would land close enough to pass review and wrong in the channel
- * that bills a long session. Where no rate is published the row carries 0, the
- * reading the Gemini and MiniMax M3 rows above already take.
- *
- * Two display names are the catalogue's with a promotion taken off: it lists
- * Grok 4.7 as "Grok 4.7 (30% Off)" and DeepSeek V4 Pro on Go as "DeepSeek V4 Pro
- * (New)". A discount that expires does not belong in a model picker.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** One model on one gateway plan: id, name, limits, price, and the per-wire flags. */
 type GatewayModel = readonly [
 	id: string,
 	name: string,
@@ -679,22 +589,8 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		true,
 		"none",
 	],
-	// Sorts after `gpt-6-sol` because "-" (0x2D) precedes "." (0x2E), which is
-	// the same reason `gpt-5-codex` precedes `gpt-5.1` earlier in this table.
-	// Added on a re-check of both halves of the rule — Zen's own listing serves
-	// the id and models.dev prices it — and with no seventh element for the same
-	// reason its first-party row has no `toolReasoningEffort`: the constraint
-	// rides through a reseller, and so does the absence of the value that would
-	// satisfy it. Go sells no `gpt-6.1-*` id, so there is no row to add there.
-	//
-	// The eighth element is `toolCalling: false`, and it is the one row in this
-	// table that carries it. Its first-party counterpart now sits on
-	// `openai-responses`, because that is where OpenAI publishes the model's
-	// function calling; this row stays on Chat Completions because that is the
-	// only wire Zen's listing proves it answers, and a row on a wire nobody has
-	// asked about is a row that 404s. The cost is that the model is text-only
-	// here, so the flag marks it and the picker does not offer it for a session
-	// that expects a tool call.
+	// Sorts after `gpt-6-sol` ("-" before "."); no `toolReasoningEffort`; the one gateway row with `toolCalling: false`.
+	// Long-form design notes: docs/dev/ai-layer.md
 	[
 		"gpt-6.1-sol",
 		"GPT-6.1 Sol",
@@ -1045,15 +941,8 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		true,
 	],
 	["qwen3.8-max", "Qwen3.8 Max", 1_000_000, 131_072, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }, true],
-	// Renamed and repriced since the sweep, checked 2026-10-08: the Go listing
-	// serves this model as `space-bunny` at $0.15/$0.60 with $0.03 reads and $0
-	// writes, where this row carried it as the free variant. models.dev's Go
-	// entry still lists both ids; the listing, the one that can reject a
-	// request, carries only this one. The Zen table still serves
-	// `space-bunny-free`, so the plans have stopped agreeing on the id — and an
-	// old Go reference stops resolving rather than forwarding, because
-	// `RETIRED_MODEL_IDS` is for ids no row carries and Zen's row still
-	// carries this one: a plan rename, not a retirement.
+	// Renamed and repriced since the sweep, checked 2026-10-08: the Go listing serves `space-bunny`, this row carried the free variant.
+	// Long-form design notes: docs/dev/ai-layer.md
 	[
 		"space-bunny",
 		"Space Bunny",
@@ -1064,72 +953,11 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 	],
 ];
 
-/**
- * Where the money numbers come from.
- *
- * Every row was checked against the vendor's own page, last swept on 2026-09-27 —
- * a date on this line means "as of", not "covers every row below it". Rows added
- * between sweeps name a later date in their own comment: `claude-opus-5-5`
- * (2026-09-23); `gpt-6-sol` / `gpt-6-luna`, `glm-5.3-flashx` and the five
- * MiniMax rows (2026-09-27); `claude-sonnet-5-5` (2026-09-29); `claude-haiku-5-5`
- * (2026-10-08).
- * The 09-27 sweep changed prices on no existing row;
- * it added those eight and re-confirmed the rest, including the DeepSeek v4-pro
- * and Kimi K2.6 rows that third-party aggregators were reporting as changed.
- * Anthropic's
- * and DeepSeek's are the vendors' USD figures; the cache channel is derived by
- * the documented multipliers rather than copied, because a hand-copied third
- * number is where a table like this goes stale first (Sonnet 5 is $2/$10 — the
- * increase to $3/$15 that was scheduled for 2026-09-01 was cancelled).
- *
- * The 118 rows above are the exception to "the vendor's own page", and they say
- * so. They are a gateway's, and a gateway has no price list of its own: what it
- * resells is priced by the resellers, so the figures are a third-party
- * catalogue's, taken 2026-09-28 and checked against what the gateway will
- * actually serve. Treat them as a tier below the rows around them, and re-sweep
- * them sooner than the rest.
- *
- * The OpenAI-compatible rows are worth less than the Anthropic ones: they differ
- * per host, and DeepSeek has billed peak and off-peak rates since 2026-08-16 —
- * the figures below are the peak ones, so a session outside 01:00-04:00 and
- * 06:00-10:00 UTC on a weekday was charged half of what this table says.
- *
- * Cache writes are the channel the vendors agree on least, so each row says what
- * its vendor says: nothing for DeepSeek and the Kimi K2 series, whose caches are
- * populated at ordinary input rates; nothing today for Z.AI, whose pricing page
- * calls cache storage "limited-time free" rather than free; 1.25x input for
- * OpenAI; K3's own stated write price; nothing for MiniMax M3, the one row on
- * its vendor's table with no write rate at all while its M2.x rows state one;
- * and for Google, nothing — it meters cache *storage* by the hour instead, a
- * charge this table cannot express, which makes a Gemini row a floor rather
- * than a ceiling.
- *
- * Two published regimes are time-boxed, and the table carries the current one:
- * Google's Flash prices roughly double on 2027-01-01, and OpenAI bills 2x input
- * and 1.5x output across a whole request over 272K input tokens. The second is a
- * premium no per-token table can express at all. MiniMax is a third shape of the
- * same kind: M3's rates double over 512k input and its `priority` service tier
- * is 1.5x on top, so its row carries the standard rate at 512k or under. Claude
- * Haiku 5.5 is a fourth: its rates step up fivefold over 100k input tokens, so
- * its row carries the rate at 100k or under.
- *
- * When a price matters — a proxy, a negotiated rate, a newer model — declare it
- * in `pricing` in settings.json, which overrides this table.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Where the money numbers come from: vendor pages, sweep dates, and the gateway exception. */
 const BUILT_IN_MODELS: Model[] = [
-	// Anthropic. Every model from the 4.6 generation on carries the full 1M-token
-	// window, and all but one are billed the same at any prompt length: the
-	// pricing page names Haiku 5.5 as its exception, priced by prompt length, so
-	// its row carries the band at 100k input tokens or under and its comment the
-	// rest.
-	//
-	// `thinkingMode` is the capability the rows disagree on, and every row states
-	// it rather than inheriting a default: from 4.7 on — and, on the vendor's
-	// recommendation, for the 4.6 pair as well — the only shape these models take
-	// is adaptive thinking, with `output_config.effort` setting the depth and
-	// `enabled` + `budget_tokens` refused outright. Haiku 4.5 is the reverse and
-	// rejects `adaptive`. The wrong shape for a row is a 400 on the first request,
-	// which is why a row that guesses is worse than one that says nothing.
+	// Anthropic. 1M window from 4.6 on; adaptive thinking from 4.7 on (Haiku 4.5 stays on `extended`); every row states `thinkingMode`.
+	// Long-form design notes: docs/dev/ai-layer.md
 	anthropicModel("claude-opus-5-5", "Claude Opus 5.5", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
@@ -1199,18 +1027,8 @@ const BUILT_IN_MODELS: Model[] = [
 		thinkingMode: "adaptive",
 		pricing: anthropicPricing(5, 25),
 	}),
-	// Sonnet 5.5, checked against the vendor's own model page on 2026-09-29, the
-	// day after it shipped. Two facts here are read rather than carried over, and
-	// the flag is the one that must be: its breaking-change list says the API
-	// checks a replayed thinking block against the conversation that produced it,
-	// enforced by default for accounts created on or after 2026-08-31, so it runs
-	// the check the pair above runs and belongs beside them. It is not inferred
-	// from "the newest model" — Mythos 5.1 is newer than the pair and runs none.
-	//
-	// The price is unchanged from Sonnet 5, and the vendor, models.dev's `anthropic`
-	// entry and models.dev's entry for the Zen plan all say the same four figures,
-	// so this is a copy of an agreement rather than a derivation. Its own default
-	// effort is `high`, which is what we send for a session that asked for nothing.
+	// Sonnet 5.5, checked 2026-09-29: runs the thought-block check (default for accounts created on or after 2026-08-31); price unchanged from Sonnet 5.
+	// Long-form design notes: docs/dev/ai-layer.md
 	anthropicModel("claude-sonnet-5-5", "Claude Sonnet 5.5", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
@@ -1231,25 +1049,8 @@ const BUILT_IN_MODELS: Model[] = [
 		thinkingMode: "adaptive",
 		pricing: anthropicPricing(3, 15),
 	}),
-	// A Haiku in name only: the 5.5 generation moved it onto the same 1M/128K
-	// window the rest of its family carries, from 200K/64K, and onto adaptive
-	// thinking from 4.5's `extended` — none of these numbers is inherited from
-	// the row below. The vendor also rejects `temperature`, `top_p` and `top_k`
-	// on it unless they are the defaults, which costs nothing here because the
-	// adapter sends none of the three on any row.
-	//
-	// The fourth shape the pricing note above lists, and the first on an
-	// Anthropic row: the vendor bills Haiku 5.5 by prompt length, and this row
-	// carries the band at 100k input tokens or under — $0.10/$0.50 with $0.01
-	// reads and $0.125 writes. Above 100k the rates step up to $0.50/$2.50 with
-	// $0.05 reads and $0.625 writes; a single per-token table cannot express the
-	// step, so the comment carries it, and the vendor page, models.dev's
-	// `anthropic` entry and its Zen entry agree on all four channels at both
-	// bands.
-	//
-	// Its place among the checked models is read rather than inferred: the
-	// preserved-thinking guide names it beside the other three, while its own
-	// migration guide says Haiku 4.5 runs no check.
+	// A Haiku in name only: 1M/128K window, adaptive thinking, and the first Anthropic prompt-length band, $0.10/$0.50 at 100k input or under.
+	// Long-form design notes: docs/dev/ai-layer.md
 	anthropicModel("claude-haiku-5-5", "Claude Haiku 5.5", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 128_000,
@@ -1266,24 +1067,8 @@ const BUILT_IN_MODELS: Model[] = [
 		thinkingMode: "extended",
 		pricing: anthropicPricing(1, 5),
 	}),
-	// The OpenAI-compatible half of the table.
-	//
-	// `reasoning` decides what the adapter asks for by default: true sends
-	// `reasoning_effort: "medium"`, false sends nothing and lets the model's own
-	// default stand. Only the rows where "medium" is a documented value are true —
-	// OpenAI's six and Gemini 3.8 Flash. It is false for every model that always
-	// thinks, which reads backwards until you see the failure it avoids: K3's
-	// effort set is low/high/max and Z.AI's 5.3 takes max/high/low, so asking
-	// either for "medium" is asking for a depth it has no word for. DeepSeek
-	// documents the mapping medium → high, which is why its rows stay true.
-	//
-	// On a row that also carries `toolReasoningEffort` this default governs
-	// tool-less requests only, and the tool-less request is the one the flag is
-	// even about.
-	//
-	// DeepSeek — peak rates; the rest of the week is half of these. Each id answers
-	// in thinking or non-thinking mode (thinking by default), so the chat/reasoner
-	// pair these replaced is one entry per model now, not two.
+	// The OpenAI-compatible half: `reasoning` is true only where "medium" is a documented value; DeepSeek carries peak rates.
+	// Long-form design notes: docs/dev/ai-layer.md
 	openAICompatModel("deepseek", DEEPSEEK_BASE, "DEEPSEEK_API_KEY", "deepseek-flash", "DeepSeek Flash", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 384_000,
@@ -1296,19 +1081,8 @@ const BUILT_IN_MODELS: Model[] = [
 		reasoning: true,
 		pricing: { input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 },
 	}),
-	// Kimi (Moonshot), on the international host, because the ids and the USD
-	// figures below are the ones platform.kimi.ai publishes — the China platform
-	// serves the same ids priced in CNY. Keys are not interchangeable between the
-	// two, so a key from platform.kimi.com has to name its host:
-	// KIMI_BASE_URL=https://api.moonshot.cn/v1. MOONSHOT_API_KEY is the variable
-	// Kimi's own documentation uses; KIMI_API_KEY leads only because it is what
-	// this table shipped first.
-	//
-	// K2.x publishes no output ceiling, only the rule — the maximum is the window
-	// minus the prompt, and a request whose two lengths would exceed the window is
-	// refused — so the number here is the documented default it falls back to. K3
-	// publishes a default too, and its settable maximum is not a cap a session
-	// should assume.
+	// Kimi (Moonshot), international host; another host needs `KIMI_BASE_URL`; K2.x and K3 publish no output cap, only the "window minus prompt" rule.
+	// Long-form design notes: docs/dev/ai-layer.md
 	openAICompatModel("kimi", KIMI_BASE, "KIMI_API_KEY", "kimi-k3", "Kimi K3", {
 		contextWindow: 1_048_576,
 		maxOutputTokens: 131_072,
@@ -1370,17 +1144,8 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 131_072,
 		pricing: { input: 0.6, output: 2.2, cacheRead: 0.11, cacheWrite: 0 },
 	}),
-	// OpenAI itself: no adapter was ever needed, only these rows, because the compat
-	// wire this file talks is OpenAI's. gpt-5.3-codex is current and deliberately
-	// absent — it answers only on /v1/responses, and a row that 404s on the wire we
-	// speak is worse than no row.
-	//
-	// GPT-6.1 Sol is a point release inside the 6-generation rather than a new
-	// family, and it is *not* a rename of `gpt-6-sol`: same $2/$10, but its cache
-	// read is $0.10 where Sol's is $0.20, so it is half price on exactly one
-	// channel and unchanged on the other three. Luna is the same shape and the
-	// same trap — "half of the 6-generation row" is wrong in the channel that
-	// costs the most for Luna and wrong in the one nobody watches for 6.1.
+	// OpenAI itself: the compat wire is OpenAI's, so only rows are needed; `gpt-5.3-codex` is absent on purpose, and `gpt-6.1-sol` halves one channel only.
+	// Long-form design notes: docs/dev/ai-layer.md
 	openAIResponsesModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-6.1-sol", "GPT-6.1 Sol", {
 		contextWindow: 1_050_000,
 		maxOutputTokens: 128_000,
@@ -1400,21 +1165,8 @@ const BUILT_IN_MODELS: Model[] = [
 		reasoning: true,
 		pricing: openAIPricing(10, 50, 1),
 	}),
-	// Sol and Luna are the 6-generation's answer to the 5.6 tier, and they arrived
-	// as a price cut rather than a new family. Sol is exactly half of 5.6 Sol on all
-	// three channels ($4/$0.40/$20 → $2/$0.20/$10); Luna halves its input and cache
-	// read ($0.20/$0.02 → $0.10/$0.01) and takes its output down harder, $1.20 to
-	// $0.50. The 5.6 ids are still served at what they always cost, so those rows
-	// stay rather than being forwarded.
-	//
-	// Both carry `toolReasoningEffort`, and neither carries it lightly. Their model
-	// pages say function calling over Chat Completions — the wire this file speaks —
-	// is available *only* at `reasoning_effort: "none"`, and name `medium` as the
-	// server-side default. `reasoning: true` would send `medium` and `reasoning:
-	// false` would send nothing, and both land on the same default. Neither returns
-	// an error: the turn comes back with no `tool_calls` in it. Astra's page does
-	// not carry that constraint, which is why the field is a row's and not a
-	// provider's.
+	// Sol and Luna are a price cut of the 5.6 tier, not a new family; both need `reasoning_effort: "none"` for tools on Chat Completions.
+	// Long-form design notes: docs/dev/ai-layer.md
 	openAICompatModel("openai", OPENAI_BASE, "OPENAI_API_KEY", "gpt-6-sol", "GPT-6 Sol", {
 		contextWindow: 1_050_000,
 		maxOutputTokens: 128_000,
@@ -1463,37 +1215,8 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 65_536,
 		pricing: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
 	}),
-	// MiniMax. Five rows because the vendor sells five, and the two highspeed
-	// twins are not a like-for-like swap: each costs twice the input and twice the
-	// output of the row it shadows, and the *same* cached read. Nothing here is
-	// derived — every figure is off the vendor's own pages. What the vendor does
-	// not publish is called out below rather than filled in.
-	//
-	// `maxOutputTokens` is the one number here that is not an output cap, because
-	// MiniMax publishes no per-model output limit and no default for one. The only
-	// bound it states is that the maximum token count is the *total* of input and
-	// output, so output cannot exceed the window — which is what this carries, and
-	// it is why the Kimi rows above use a documented default instead and this one
-	// cannot. Two things keep the value from being taken at face value: the
-	// compaction reserve is `min(maxOutputTokens, 20k)` and the escalation ceiling
-	// `min(maxOutputTokens * 2, 64k)`, so both consumers clamp it and no number
-	// above 32k behaves differently from any other; and on the OpenAI wire this
-	// adapter only sends `max_tokens` when a caller passes one.
-	//
-	// `reasoning` is false throughout, which for M3 is a stated default rather
-	// than an absence: its thinking control is off unless the request asks. The
-	// control lives on MiniMax's Anthropic endpoint, not on the one these rows
-	// speak, so nothing here sends it.
-	//
-	// M3's rates are the standard tier at 512k input or under, and they are a
-	// promotional halving of the struck-through list prices ($0.60/$0.12/$2.40):
-	// over 512k input they double, and the `priority` service tier is 1.5x on top.
-	// That is a four-regime table the way OpenAI's >272k premium is, and it is
-	// carried the same way — one rate, with the rest named here.
-	//
-	// Its cache-write channel is a real zero, not a missing one: M3's rows are the
-	// only ones on the pricing page with no write rate at all, while every M2.x
-	// row states $0.375.
+	// MiniMax: five rows; `maxOutputTokens` carries the window and both consumers clamp it; M3 has no cache-write rate, and 512k/tier premiums apply.
+	// Long-form design notes: docs/dev/ai-layer.md
 	openAICompatModel("minimax", MINIMAX_BASE, "MINIMAX_API_KEY", "minimax-m3", "minimax-M3", {
 		contextWindow: 1_000_000,
 		maxOutputTokens: 1_000_000,
@@ -1519,36 +1242,8 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 204_800,
 		pricing: { input: 0.6, output: 2.4, cacheRead: 0.03, cacheWrite: 0.375 },
 	}),
-	// M2.1 and M2 are absent on purpose: both are two generations behind, and
-	// M2 is the one row on the vendor's model list that states an output cap
-	// (128k, counting CoT) — which is not a number that transfers to a successor.
-	//
-	// Mistral, on its own host. The reasoning flag needs the most words here:
-	// Large 4, Medium 3.5 and Small 4 all take a `reasoning_effort`, and the
-	// endpoint's schema enumerates six depths — but that is the whole vocabulary
-	// the vendor publishes. The guide assigns behavior to the ends only (`high`
-	// returns the full thinking trace as chunks, `none` drops it) and recommends
-	// `high` for agentic and code work, which is what this app does; what
-	// `medium` would ask of these models is written nowhere. So all five rows
-	// send nothing by default and let each model stand at its own default, and
-	// the documented recommendation is one `/think high` away. The other two
-	// rows have nothing to ask at all: Large 3 and Codestral state text output
-	// only. Large 4 itself is the newest row here, still in public preview.
-	//
-	// No output ceiling is published for any of the five — a `contextLength` and
-	// no `outputTokenLimit` on every card, no stated default for `max_tokens` —
-	// so they carry the window in the output column the way the MiniMax rows do,
-	// for the same bound in writing: the prompt plus `max_tokens` cannot exceed
-	// the context length. No cache-write rate is published either, so that
-	// channel is a real zero, and cached input rides the vendor's stated rule —
-	// a tenth of the input price — except on Large 4, where the card prints
-	// $0.07 against a tenth of $0.68 being $0.068; the card wins. Large 4 is
-	// also at half its struck-through list ($1.36/$2.09) while that runs, the
-	// shape M3's promotion is in.
-	//
-	// Magistral and Devstral are absent on purpose: both are deprecated with
-	// Mistral Medium 3.5 named as the replacement, so they are rows this table
-	// would have to retire on purpose later.
+	// M2.1 and M2 are absent on purpose (two generations behind); Mistral rows carry the window in the output column and the Large 4 card price.
+	// Long-form design notes: docs/dev/ai-layer.md
 	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-large-4", "Mistral Large 4", {
 		contextWindow: 1_048_576,
 		maxOutputTokens: 1_048_576,
@@ -1578,71 +1273,8 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 131_072,
 		pricing: { input: 0.3, output: 0.9, cacheRead: 0.03, cacheWrite: 0 },
 	}),
-	//
-	// The gateway, last. Two plans, two wires, four provider ids, from the two
-	// transcriptions above: a gateway is not a vendor, so one plan on one wire is
-	// one provider, and the base URL is the only thing that distinguishes them.
-	// Writing these out as four separate call sites would be 118 rows that differ
-	// in one string each, and the copy that drifted.
-	//
-	// `reasoning: false` on every one of them, and the reason is a model that is
-	// on the list: Zen carries `claude-opus-5-5`, and on the Anthropic wire
-	// `reasoning: true` makes the adapter send `thinking: {type: "enabled",
-	// budget_tokens}` — the shape Claude 4.6 and later reject with a 400. There is
-	// no documentation that the gateway forwards `thinking: {type: "adaptive"}`
-	// or `output_config` either, so the adaptive shape is no safer than the
-	// budget one; sending nothing is the only request known to work. The cost is
-	// real and worth stating: a Claude model reached through a gateway thinks
-	// less than the same model reached directly, and `thinkingMode` is left off
-	// on purpose rather than set optimistically.
-	//
-	// The one hazard this arrangement used to leave open is closed in the
-	// adapter, not on these rows. `thinkingLevel` from the session used to win
-	// over `model.reasoning` there, so a session that picked a level sent the
-	// budget shape through the gateway — a 400 against a 4.6-or-later Claude
-	// row. `buildAnthropicRequest` now honours a session level only on a row
-	// that declares a thinking shape (`reasoning: true` or a `thinkingMode`),
-	// and these rows declare neither, so whatever the session asks for they go
-	// out with no thinking field at all. `anthropic.test.ts` pins that answer
-	// against a row of exactly this shape, and the partition in
-	// `model-pricing.test.ts` keeps every one of these rows on the no-thinking
-	// side.
-	//
-	// `toolReasoningEffort` reaches only the two OpenAI-wire providers, and that
-	// is where the two ids that need it are. The field is read in exactly one
-	// place in this repo — the OpenAI compatibility adapter — so on the Anthropic
-	// wire it would be a claim about a code path nothing executes. `gpt-6-sol` and
-	// `gpt-6-luna` publish function calling as available only at
-	// `reasoning_effort: "none"` and name `medium` as the server default, which
-	// returns a turn with no tool calls in it and no error; the constraint is the
-	// model's, not the host's, so it rides through the gateway with them. That
-	// `gpt-6-astra` is on the same list without it is the reason the field is a
-	// row's and not a provider's.
-	//
-	// What the gateway serves and this table does not, because models.dev states
-	// no price or no limit for them: on Zen `jev-1.13` and `jev-1.13-free` (which
-	// models.dev does not know at all), and on Go `deepseek-flash`, `glm-5`,
-	// `glm-5.1`, `hy3-preview`, `kimi-k2.5`, `mimo-v2-omni`, `mimo-v2-pro`,
-	// `minimax-m2.5`, `omen-alpha` and `qwen3.5-plus`. A user who
-	// sees one of these in the gateway's own picker is not seeing a mistake here, and
-	// an entry added for any of them would be a price invented to fill a gap.
-	//
-	// A fourth wire exists that some of a vendor's rows deliberately do not
-	// reach: several of Zen's OpenAI models answer only on `/v1/responses`, which
-	// is not a wire `ApiId` can name. The same reason `gpt-5.3-codex` is absent
-	// from OpenAI's own rows above applies here, and a row that 404s on the wire
-	// we speak is worse than no row.
-	//
-	// This used to name "the `gpt-6-*` and `grok-*` families" as the members that
-	// answer only there, which stopped being true and became actively misleading:
-	// every `grok-*` id Zen serves is in this table, and so are `gpt-6-astra`,
-	// `gpt-6-sol` and `gpt-6-luna`, all three on the OpenAI wire below. The
-	// id-level check that replaces the family claim is the listing itself —
-	// everything Zen serves is in these two tables or in the unpriced list above —
-	// and `gpt-6.1-sol` was added on that basis on 2026-09-30, alongside its three
-	// siblings rather than on a family rule. Reachability on the wire is the one
-	// thing here that listing does not prove; it takes a request, which this
-	// checkout cannot make.
+	// The gateway, last: two plans, two wires, four provider ids; `reasoning: false` everywhere (no documented thinking shape), plus the unpriced-id list.
+	// Long-form design notes: docs/dev/ai-layer.md
 	...OPENCODE_ZEN_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images]) =>
 		anthropicCompatModel("opencode-zen", OPENCODE_ZEN_BASE, "OPENCODE_API_KEY", undefined, id, name, {
 			contextWindow,
@@ -1685,25 +1317,8 @@ const BUILT_IN_MODELS: Model[] = [
 	),
 ];
 
-/**
- * Ids no row in this table carries, and the row that answers to them now.
- *
- * A model id written into a settings file outlives the model. When a vendor
- * retires one, the choice is between mapping it here and letting the reference
- * stop resolving — which turns a working configuration into "no such model"
- * while the model the user picked is still served, under a new name. The map is
- * one-way and one-directional on purpose: nothing writes these ids back out, and
- * nothing lists them, because there is nothing left to choose.
- *
- * Retirement is the usual reason an id lands here, not the only one: vendors also
- * keep answering compatibility aliases long after the release they named, and an
- * alias the table cannot match is as unreachable as a retired id.
- *
- * Forwarding is not price-preserving. A target is chosen for family and tier, but
- * where a family has ended — Kimi's moonshot-v1 ids — the retirement notice is
- * the only guide, and what a session costs can change with the reference. That is
- * the reason to write the mapping down rather than guess at it twice.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Ids no row carries, and the row that answers to them now. */
 const RETIRED_MODEL_IDS = new Map<string, string>([
 	// Anthropic, by the replacement each notice named — a 4.6-generation id or
 	// later in every case. The ids whose notice named a whole group's successors
@@ -1823,46 +1438,19 @@ export interface DiscoveredModel {
 	maxOutputTokens?: number;
 }
 
-/**
- * What the providers said they serve, filled in once at startup by
- * `refreshModelCatalog`. Empty until then, and empty forever on a machine that
- * is offline or has no key — in which case the table above is the whole truth,
- * exactly as it was before any of this existed.
- *
- * `providerCatalogue` holds only listings that came back complete and non-empty.
- * The empty set means something here — it is what hides a model — so a provider
- * we could not reach must not be recorded as a provider that serves nothing.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** What the providers said they serve, filled in once at startup. */
 const providerCatalogue = new Map<string, Set<string>>();
 
-/**
- * Limits a provider stated for an id, keyed "provider/id". Beats the table.
- *
- * Partial, because a listing can restate one limit and stay silent on the other:
- * Kimi publishes a window and no output cap at all, and a window on its own is
- * worth having — it is what the compaction threshold is measured against, and a
- * stale one is worse than a missing one.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Limits a provider stated for an id, keyed "provider/id"; they beat the table. */
 const liveLimits = new Map<string, { contextWindow?: number; maxOutputTokens?: number }>();
 
 /** Models discovery added because a vendor serves one the table has never heard of. */
 const discoveredModels = new Map<string, Model>();
 
-/**
- * Build a model from what the provider said, borrowing the transport fields —
- * api, base URL, key variable — from a model of the same provider we already
- * know.
- *
- * Only reachable when the provider stated both limits, which is the whole rule:
- * a window we would have to guess is a compaction threshold we would be guessing
- * at, and a wrong threshold is worse than a missing row. In practice that means
- * Anthropic's unknowns are added and the OpenAI-compatible ones are not, but the
- * rule is about the data, not about which vendors are trusted.
- *
- * No price, deliberately. The table is keyed by id and this id is not in it, so
- * the honest answer is "not priced" — which the cost report already knows how to
- * print — rather than $0, which reads as free.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Build a row from what the provider said; both limits needed, and no price. */
 function synthesizeModel(provider: string, discovered: DiscoveredModel): Model | undefined {
 	const { contextWindow, maxOutputTokens } = discovered;
 	if (contextWindow === undefined || maxOutputTokens === undefined) return undefined;
@@ -1878,15 +1466,8 @@ function synthesizeModel(provider: string, discovered: DiscoveredModel): Model |
 	};
 }
 
-/**
- * Record what one provider reported it serves.
- *
- * `complete` says whether the listing is the provider's whole catalog. A listing
- * cut short by the page cap still carries usable limits — each row describes
- * itself — but it may be missing ids, so it must not hide anything.
- *
- * Returns the ids the visible catalog gained and lost, so the caller can say so.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Record what one provider reported it serves; returns the ids gained and lost. */
 export function setProviderCatalogue(
 	provider: string,
 	models: DiscoveredModel[],
@@ -1953,15 +1534,8 @@ function withLiveLimits(model: Model): Model {
 	return { ...model, ...limits };
 }
 
-/**
- * Everything this process knows about, including models a provider has since
- * stopped listing.
- *
- * Resolution reads this, not `listModels`. A model a vendor retired this morning
- * is still the model yesterday's session recorded, and that transcript has to
- * resolve and cost with the row it was written against. Discovery narrows what
- * can be *chosen*; it never narrows what can be *named*.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Everything this process knows, including models a provider no longer lists. */
 export function allModels(): Model[] {
 	const models = [...BUILT_IN_MODELS, ...customModels.values(), ...discoveredModels.values()];
 	if (liveLimits.size === 0 && pricingOverrides.size === 0) return models;
@@ -1987,30 +1561,8 @@ export function baseUrlEnvVar(provider: string): string {
 	return `${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_BASE_URL`;
 }
 
-/**
- * The gateway providers that sell a model under exactly this bare id, for a
- * "no such model, but it is here" message.
- *
- * Exists because of the rule `resolveModel` enforces and cannot itself report: a
- * bare id no vendor makes resolves to nothing, while the `/model` picker lists it
- * a screen away as `opencode-zen/gpt-5-codex`. Without this the user is told a
- * model is unknown while looking at it.
- *
- * Empty whenever the bare name would have worked, which is two cases beyond the
- * obvious one: a model a first-party vendor makes (`claude-opus-5-5` is sold by
- * the gateway too, and the bare name is the one the user should keep typing),
- * and an id that forwards to its replacement. The contract is "consult this after
- * a resolution has already failed", and a hint that fires when it should not is
- * worse than none — it would send a user off to buy a plan they did not need.
- *
- * A qualified reference needs no guard of its own, which a falsification run
- * pointed out by holding every attempt to break one: the id below is compared
- * whole, so `opencode-ze/gpt-5-codex` matches no row and a correct one already
- * returned empty from the test above. An earlier version spelled `includes("/")`
- * out here to be safe against a model id that contained a slash; if one ever
- * does, the guard would suppress a hint that is the right thing to give, so it
- * is not worth having.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Gateway providers that sell this bare id, for a "no such model, but it is here" hint. */
 export function gatewayProvidersFor(reference: string): string[] {
 	if (resolveModel(reference)) return [];
 	return [
@@ -2053,15 +1605,8 @@ export function apiKeyEnvNames(model: Model): string[] {
 	return [model.apiKeyEnv, ...(model.apiKeyEnvFallbacks ?? [])];
 }
 
-/**
- * A model whose key could not be resolved from the environment.
- *
- * Raised before a request is built, in place of handing an empty key to the
- * provider's SDK: the SDKs report that as an authentication failure, which reads
- * like something a later attempt might fix. It is not — no attempt can supply a
- * credential the environment does not hold — so the type is what lets the retry
- * wrapper end the turn on the first try and say which variable is missing.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** A model whose key the environment does not hold; raised before a request is built. */
 export class MissingApiKeyError extends Error {
 	readonly provider: string;
 	readonly envNames: string[];
@@ -2075,42 +1620,11 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
-/**
- * Resolve a model reference:
- * - "provider/model" → exact match on provider + id
- * - "model-id" → unique id match across providers, at the vendor that makes it
- *
- * A reference that matches nothing is tried once more against the ids that have
- * been retired, so a settings file written before a model was renamed keeps
- * resolving to the model that answers to it today.
- */
+// Long-form design notes: docs/dev/ai-layer.md
+/** Resolve a `provider/model` or bare id reference; retired ids are tried once more. */
 export function resolveModel(reference: string): Model | undefined {
-	// A bare id means the vendor that makes the model, and only that vendor. Two
-	// ways a row breaks that promise, both of them created by the gateway tables
-	// and neither visible in the row itself:
-	//
-	// A bare id a vendor has since *retired* still means the retirement, even
-	// where some other host is selling a model of that name today. The reference
-	// was written when exactly one row carried it, so answering it with a
-	// reseller's row would move the session to a different vendor on a different
-	// host at a different price without anything having asked for that —
-	// `deepseek-v4-flash` is exactly the case: retired at DeepSeek in favour of
-	// `deepseek-flash`, and sold under its own name and its own rates by four
-	// gateway providers.
-	//
-	// And an id *no* first-party vendor carries resolves to nothing at all rather
-	// than to the gateway. `gpt-5-codex` is the case that shaped this: before the
-	// gateway tables it was an unknown model, which is a fact a migration reports;
-	// with them it is a Zen row, so a user's `model` setting silently becomes a
-	// subscription plan they may hold no key for, on a host whose prices are not
-	// OpenAI's, and the only symptom is a request that fails at the auth header.
-	// The rule the picker already follows is the one worth following here too: a
-	// model at a gateway is chosen by picking it, under the name it is offered
-	// under. Nothing about `gpt-5-codex` says "on the Zen plan".
-	//
-	// A qualified reference is exempt from both, and has to be:
-	// `opencode-zen/deepseek-v4-flash` names the reseller, and resolving it to
-	// DeepSeek would be the guess this whole function exists to avoid.
+	// A bare id means the vendor that makes the model, and only that vendor: a retired bare id stays retired, and an id no vendor carries resolves to nothing rather than to the gateway.
+	// Long-form design notes: docs/dev/ai-layer.md
 	if (!reference.includes("/")) {
 		if (RETIRED_MODEL_IDS.has(reference)) return lookupReplacement(reference);
 		const bare = lookupModel(reference);
