@@ -1089,9 +1089,10 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// runner could plausibly have broken: `onOutput` is called from inside
 		// the pump loop, so chunks arrive as the child writes them.
 		//
-		// The two writes are one cmd command with a `waitfor` between them.
-		// That shape is the end of a chain of measured failures, not a first
-		// guess, and each rung is recorded so nobody climbs back up it:
+		// The two writes are one cmd command with a busy spinner between
+		// them. That shape is the end of a chain of measured failures, not a
+		// first guess, and each rung is recorded so nobody climbs back up
+		// it:
 		//
 		//   - `powershell Write-Host one; Start-Sleep 1; Write-Host two` is
 		//     red on the GitHub Windows runner even now that the grant and
@@ -1104,14 +1105,29 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		//   - `for /l %i in (1,1,N) do @rem & echo two` never reaches the
 		//     second echo at all: `rem` swallows `& echo two` as its own
 		//     comment. Measured here, one chunk containing "streaming-one".
-		//   - `ping -n N` and `timeout /t N` are dead inside the container:
-		//     no IP driver, and `timeout` refuses a redirected stdin.
+		//     The swallowing is what an unparenthesised `do` does to any
+		//     `&` after it — `do @set _=%i & echo two` measured echoing
+		//     "two" once per iteration — so the spinner below sits inside
+		//     parentheses.
+		//   - `ping -n N`, `timeout /t N` and `choice /t N /d y` are dead
+		//     inside the container: no IP driver, and each refuses a
+		//     redirected stdin (choice fails immediately and prints its
+		//     `[Y,N]?` prompt into the pipe it cannot read).
+		//   - `waitfor /t 3 NeverComingSignal >nul 2>&1` was the device this
+		//     test shipped with. It is gone: on the machine this was
+		//     measured on, `waitfor` cannot create or wait its named event
+		//     under the container token — it fails instantly with `ERROR:
+		//     Cannot wait for the specified signal.` (66ms, measured through
+		//     this same executor) — and the `>nul 2>&1` that kept its noise
+		//     off the pipe also kept that failure invisible, so both echoes
+		//     arrived in one chunk of a 62ms run.
 		//
-		// `waitfor /t 3 NeverComingSignal` is System32's own waiter — it
-		// waits the full three seconds for a signal nobody sends, prints
-		// nothing of its own (`>nul 2>&1`), and needs neither network nor a
-		// terminal. Its own output must be silenced: left alone it captures
-		// the pipe and the echoes never surface.
+		// That leaves `for /l` over `set`: plain CPU inside the container,
+		// no console, no network, no kernel object. Measured through this
+		// executor, 10000 iterations straddled the echoes by ~240ms and
+		// 20000 by ~500ms (twice) — comfortably more than the one pipe read
+		// the assertion can hide behind, and a slower machine only widens
+		// the gap, up to the 20s `timeoutMs` below.
 		//
 		// The explicit budget covers the *test*, not the command — `timeoutMs`
 		// below governs the command and this line governs the harness, and the
@@ -1123,7 +1139,7 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		try {
 			const chunks: string[] = [];
 			await exec.exec({
-				command: "echo streaming-one & waitfor /t 3 NeverComingSignal >nul 2>&1 & echo streaming-two",
+				command: "echo streaming-one & (for /l %i in (1,1,20000) do @set _=%i) & echo streaming-two",
 				cwd,
 				sandbox: containerPolicy(cwd),
 				onOutput: (chunk) => chunks.push(chunk),
