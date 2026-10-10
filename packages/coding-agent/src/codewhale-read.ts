@@ -1,40 +1,6 @@
-/**
- * Codewhale's user state, as read from a home directory.
- *
- * Read `codewhale-home.ts` first — every path below is that module's, with the
- * reference `file:line` it came from. The standing caveats for this source, in
- * one place:
- *
- *   - **Two roots, and which one answers is per-path.** Codewhale is a rename of
- *     DeepSeek-TUI, `~/.deepseek` is still a live fallback for some readers and
- *     not for others, and {@link CODEWHALE_LEGACY_FALLBACK} says which is which.
- *     `~/.codewhale` is checked first everywhere, and the code below never reads
- *     a legacy path as if it were the canonical one.
- *   - **Five settings documents, not one.** `config.toml` and `permissions.toml`
- *     are siblings; `settings.toml` has *three* candidate roots and none of them
- *     is project-scoped; `tui.toml` is superseded and folded into `settings.toml`
- *     by the product; and there is a project `config.toml` under `<workspace>`.
- *     Reading only the first would be reading a quarter of what Codewhale reads.
- *   - **`config.toml` holds credentials in four shapes, and a key-based scan sees
- *     none of the interesting ones.** `api_key`, `webhook_token` and
- *     `sandbox_api_key` match `looksLikeSecretName` and go. `base_url` and
- *     `http_headers` do not — the first because a credential can live in a URL's
- *     userinfo or query, the second because the *values* are tokens under a key
- *     that is not itself credential-shaped. Both are handled explicitly below,
- *     and both go through the shared {@link urlCredentialProblem} rather than a
- *     check written here.
- *   - **Session transcripts are counted, and their envelope is read; their
- *     messages are converted by `codewhale-session.ts`.** `SavedSession` is a
- *     single JSON document per session with `metadata.workspace` recorded, so
- *     the history arm works from the product's own bytes rather than from a
- *     guessed path.
- *
- * **Nothing here throws.** Every read that fails becomes a line in
- * {@link RawCodewhale.skipped} naming what failed and why, which is the
- * convention `qoder-read.ts` and `antigravity-read.ts` use: a migration that
- * aborts on one damaged file loses every other source's import to make a point
- * about that file.
- */
+// Codewhale's user state, as read from a home directory: the two roots, the five
+// settings documents, the credential scrub, skills, sessions and hooks.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -125,28 +91,8 @@ type CodewhaleToml =
 	| { kind: "absent" }
 	| { kind: "invalid"; reason: string };
 
-/**
- * One rule from `permissions.toml`.
- *
- * `crates/config/src/lib.rs:625-630` is the whole document — `PermissionsToml`
- * is `{ rules: Vec<ToolAskRule> }` and nothing else, `#[serde(deny_unknown_fields)]`.
- * The rule itself is `crates/execpolicy/src/lib.rs:112-137`:
- *
- * ```rust
- * pub struct ToolAskRule {
- *     pub tool: String,
- *     pub command: Option<String>,
- *     pub command_exact: bool,
- *     pub path: Option<String>,
- *     pub workspace: Option<String>,
- *     pub action: PermissionAction,   // "allow" | "ask" | "deny"
- * }
- * ```
- *
- * **No credential can live here**, which is worth stating because it is the one
- * Codewhale settings document that can be carried whole: every field is a tool
- * name, a path or an enum.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One rule from `permissions.toml`, the one settings document carried whole. */
 export interface CodewhalePermissionRule {
 	tool: string;
 	command?: string;
@@ -156,18 +102,8 @@ export interface CodewhalePermissionRule {
 	action: "allow" | "ask" | "deny" | "other";
 }
 
-/**
- * One entry from Codewhale's `[hooks]` table.
- *
- * `HooksConfig` is `crates/tui/src/hooks/config.rs:379-406` — `enabled`,
- * `default_timeout_secs`, `working_dir`, `hooks: Vec<Hook>` — and `Hook`
- * (`:254-290`) is `event`, `command`, `condition?`, `timeout_secs`, `background`,
- * `continue_on_error`, `name?`.
- *
- * **`condition` is a typed enum, not a string** (`HookCondition`, `:217`: `Always`,
- * `ToolName`, `ToolCategory`, `Mode`, `ExitCode`), and it is the field that decides
- * whether a hook can be imported at all — see {@link planCodewhaleHooks}.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One entry from Codewhale's `[hooks]` table; `condition` decides whether it can be imported. */
 export interface CodewhaleHook {
 	/** The persisted event name, snake_case (`:117-135`). */
 	event: string;
@@ -208,14 +144,8 @@ export interface RawCodewhale {
 	env: CodewhaleEnv;
 	/** The two roots, and whether the tree was pinned by `CODEWHALE_HOME`. */
 	resolved: CodewhaleHome;
-	/**
-	 * True when the resolved tree exists and holds something.
-	 *
-	 * **`present` is not "a settings file was read."** A Codewhale home with only
-	 * skills, only sessions or only a project `config.toml` is a real install with
-	 * something in it, and the same argument `qoder-read.ts` makes about a
-	 * CLI-only home applies here.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** True when the resolved tree holds something; not only when a settings file was read. */
 	present: boolean;
 	/** Why `CODEWHALE_HOME` was refused, or `null`. */
 	rejectedHome: string | null;
@@ -225,17 +155,8 @@ export interface RawCodewhale {
 	settingsPath: string;
 	/** `tui.toml` — superseded, named, never read. */
 	tuiPrefsPath: string;
-	/**
-	 * Where each state document actually resolved, and **which root answered**.
-	 *
-	 * **This is the field the two-root problem is reported through, and it exists
-	 * because "Codewhale's settings came across" hides three facts.** A document in
-	 * `~/.codewhale` is a current install; the same document in `~/.deepseek` is a
-	 * pre-rename install the product still reads; a document under `root:
-	 * "absent"` was **not read at all** and the corresponding parsed field is
-	 * `null`. Collapsing the three would make a report claim a read that never
-	 * happened, which is the failure the whole source registry exists to prevent.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Where each state document resolved, and which root answered. */
 	documents: CodewhaleDocument[];
 	/** `<cwd>/.codewhale/config.toml`, the project layer, or `null` without a `cwd`. */
 	projectConfigPath: string | null;
@@ -253,18 +174,8 @@ export interface RawCodewhale {
 	permissions: CodewhalePermissionRule[] | null;
 	/** The parsed `settings.toml`, or `null`. */
 	settings: Record<string, unknown> | null;
-	/**
-	 * `[hooks]` from `config.toml`, and `<workspace>/.codewhale/hooks.toml`, as two
-	 * blocks rather than one merge.
-	 *
-	 * **Kept apart because the product keeps them apart and the project half is
-	 * gated.** `HooksConfig::load_with_project`
-	 * (`crates/tui/src/hooks/config.rs:440-441`) appends project hooks *after*
-	 * global ones and only after "workspace trust and exact-byte hook approval"
-	 * (`:442-443`) — a hook runs code, so an untrusted repository's `hooks.toml` is
-	 * inert in Codewhale. Merging them here would import a command the product
-	 * itself would refuse to run.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `[hooks]` from `config.toml` and the project hooks file, as two blocks rather than one merge. */
 	hooks: CodewhaleHooksBlock[];
 	/**
 	 * The servers from `mcp.json`, keyed by name.
@@ -274,27 +185,12 @@ export interface RawCodewhale {
 	 * already gone; see {@link scrubCodewhaleCredentials}.
 	 */
 	mcpServers: Record<string, unknown>;
-	/**
-	 * `~/.codewhale/mcp.json`, the user-global MCP file, and **whether it was
-	 * there**.
-	 *
-	 * Held as a path because there is no project MCP file to name — see
-	 * `codewhale-home.ts`. A report that printed "no MCP servers" for a home with
-	 * no `mcp.json` at all would be saying the same sentence twice, so the
-	 * absence is a field and the plan can word it.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `~/.codewhale/mcp.json` and whether it was there; held as a path because no project MCP file exists. */
 	mcpPath: string;
 	mcpPresent: boolean;
-	/**
-	 * The user-global instruction documents, **in the product's precedence**, with
-	 * the first copy of each basename winning.
-	 *
-	 * `.codewhale` before `.agents` before `.deepseek`, per
-	 * `project_context.rs:354-364`. `.agents/AGENTS.md` and
-	 * `.agents/instructions.md` are the shared agent home this repository already
-	 * migrates as its `agents` source, so a name that arrives from both is
-	 * recorded as a collision rather than imported twice.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The user-global instruction documents, in the product's precedence, first copy of each basename winning. */
 	globalInstructions: RawFile[];
 	/** A basename answered by two of the three roots; the later was not read. */
 	instructionCollisions: Array<{ name: string; kept: string; dropped: string }>;
@@ -310,19 +206,8 @@ export interface RawCodewhale {
 	assets: RawFile[];
 	/** A folder name answered by both skill roots; the second was not read. */
 	assetCollisions: Array<{ name: string; kept: string; dropped: string }>;
-	/**
-	 * The **shared** `~/.agents` paths Codewhale reads and this importer does not.
-	 *
-	 * **This repository already has an `agents` source that owns that tree**
-	 * (`agents-read.ts:34-39` reads `~/.agents/AGENTS.md`, `skills/`, `agents/`
-	 * and `commands/`). Importing it here as well would write every file in it
-	 * twice — and because `collectFileWrites` keys on the target path, the second
-	 * copy would be reported as a written skill attributed to Codewhale when it
-	 * was the same file the `agents` run already wrote. The same exclusion
-	 * `kimi-read.ts` makes with `KIMI_SHARED_TREE`, for the same reason.
-	 *
-	 * Filtered by existence, so an absent entry is not a report line.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The shared `~/.agents` paths Codewhale reads and this importer does not; the `agents` source owns them. */
 	sharedTree: string[];
 	/** How many session transcripts are on disk. None is read here. */
 	sessionCount: number;
@@ -335,35 +220,12 @@ export interface RawCodewhale {
 	skipped: CodewhaleSkipped[];
 }
 
-/**
- * Key names `looksLikeSecretName` does not catch.
- *
- * That helper matches `TOKEN`, `KEY`, `SECRET`, `PASSWORD` and `CREDENTIAL` as
- * case-insensitive substrings, which covers `api_key`, `webhook_token` and
- * `sandbox_api_key` — the three credential-bearing Codewhale keys it has to.
- * The single gap that matters is `authorization`, which no Codewhale key uses
- * but which an MCP `headers` block or a hand-edited `[providers.*]` entry very
- * plausibly does, and which is in {@link CODEWHALE_CREDENTIAL_TABLE_KEYS}
- * anyway; it is listed here so the two mechanisms are not mistaken for one.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Key names `looksLikeSecretName` does not catch. */
 const CODEWHALE_SECRET_KEY = /authorization/i;
 
-/**
- * Top-level keys that are **maps from a user-chosen name to an entry**.
- *
- * The distinction this set exists to draw is the same one `qoder-read.ts` draws,
- * and it is worth restating because Codewhale makes it sharper. `providers` is a
- * `#[serde(flatten)]`ed `extras: BTreeMap<String, toml::Value>`
- * (`crates/config/src/lib.rs:612-615`), so **every dynamically named provider
- * lands under it** — a user who wrote `[providers.my-gateway]` gets an entry
- * called `my-gateway`, and `looksLikeSecretName` matches `KEY` inside that name
- * exactly as it matched inside `keyboard-mcp` in Qoder. A scrub that deleted
- * `providers.my-key-router` would delete a working provider route because its
- * name contained three letters.
- *
- * `servers` and `mcpServers` are the MCP maps under the same argument, and
- * `skills` is a `BTreeMap` in `SkillsToml` (`crates/config/src/lib.rs:1689`).
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Top-level keys that are maps from a user-chosen name to an entry. */
 const CODEWHALE_ENTRY_MAP_KEYS: ReadonlySet<string> = new Set([
 	"providers",
 	"servers",
@@ -375,37 +237,8 @@ const CODEWHALE_ENTRY_MAP_KEYS: ReadonlySet<string> = new Set([
 	"plugin_configs",
 ]);
 
-/**
- * Keys whose **values** are credentials whatever the key is called.
- *
- * This is the part a key-name scan cannot do, and it is the security-critical
- * half of this file. Four keys, each with the product's own evidence:
- *
- *   - `http_headers` — `BTreeMap<String, String>` on both the root `ConfigToml`
- *     (`crates/config/src/lib.rs:886-887`) and every `ProviderConfigToml`
- *     (`:210-211`). The product classifies a header as credential-bearing by
- *     name: `is_upstream_auth_header` (`crates/config/src/lib.rs:130-138`) is
- *     `is_sensitive_config_key`, whose doc says "suppress every
- *     credential-shaped request header instead of allowing the same secret
- *     through Proxy-Authorization, X-Auth-Token, X-Access-Token, X-Goog-Api-Key,
- *     or another *-token/*-api-key spelling." So the reference product itself
- *     says these values are secrets, and the reference product's own comment on
- *     the root field says nothing puts them anywhere safer — `config.toml` is an
- *     ordinary `0644` file, unlike `secrets/secrets.json`.
- *   - `headers`, `env`, `env_headers`, `env_http_headers` — the MCP entry's
- *     credential channels, in `crates/tui/src/mcp.rs:626`, `:568`, `:631` and
- *     the `:629` alias. The product's own comment at `:619-623` says a stored
- *     header "lives in plain text in `~/.deepseek/mcp.json`".
- *   - `bearer_token_env_var` — names a variable rather than holding a token, and
- *     is dropped for the same reason as the rest: this build's MCP client has
- *     nowhere to put it, and a name that resolves to a bearer token is a name a
- *     report should not echo without saying so.
- *
- * **`env_headers` is here even though its values are not in the file**, because
- * the file holds an environment variable *name* and the destination this build
- * writes has no field for that either. Dropping it loses an indirection rather
- * than a secret, and the report says which of the two happened.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Keys whose values are credentials whatever the key is called. */
 const CODEWHALE_CREDENTIAL_TABLE_KEYS: ReadonlySet<string> = new Set([
 	"http_headers",
 	...CODEWHALE_MCP_CREDENTIAL_KEYS,
@@ -413,42 +246,12 @@ const CODEWHALE_CREDENTIAL_TABLE_KEYS: ReadonlySet<string> = new Set([
 	"env_http_headers",
 ]);
 
-/**
- * Keys whose **value is a URL that can carry a credential**, checked with the
- * shared {@link urlCredentialProblem}.
- *
- * `base_url` is the load-bearing one: `[providers.*].base_url` is a whole URL a
- * user pastes from a gateway's dashboard, and `https://key@host/v1` is a shape
- * every such dashboard produces. This is the hole that was found in Qoder and
- * then fixed across all fourteen existing sources, and the fix is a shared
- * function rather than a per-source regexp — a first version of that guard used
- * `new URL` as its main path and mis-parsed 11 of 16 hand-edited URLs.
- *
- * **An MCP entry's `url` is deliberately NOT in this list**, and the reason is
- * that the planner has to make a decision this reader cannot: a URL carrying a
- * credential loses the **whole server**, not just the credential, because a URL
- * with its userinfo or its `?access_token=` removed is a *different URL* that
- * points at nothing (`qoder-plan.ts` argues it at length). Dropping the string
- * here would leave the planner looking at an entry with no `command` and no
- * `url`, and it would report "names neither a command nor a URL" — which is
- * false, because the file named one. So the MCP URL reaches
- * {@link urlCredentialProblem} in `planCodewhaleMcp`, where the loss can be
- * reported as the loss of a server. The `config.toml` URLs here have no planner
- * side at all — this source maps no provider route — so dropping them here is
- * the only way they are reported, and dropping them is the only safe answer.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Keys whose value is a URL that can carry a credential, checked with {@link urlCredentialProblem}. */
 const CODEWHALE_URL_KEYS: ReadonlySet<string> = new Set(["base_url", "sandbox_url", "origin"]);
 
-/**
- * The largest depth a credential-shaped key is looked for at.
- *
- * Eight is past anything Codewhale nests to — the deepest attested provider key
- * is three segments (`providers.<name>.api_key`) — and the cap is here so a
- * pathological document cannot turn a credential scan into a walk of a
- * megabyte-deep structure. A key deeper than this is **left in place**, which is
- * the one thing this function can get wrong, and it is stated rather than
- * pretended away.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The largest depth a credential-shaped key is looked for at; deeper keys stay in place. */
 const MAX_CREDENTIAL_SCAN_DEPTH = 8;
 
 /** The one line a JSON document read through `parseJsonc` earns. */
@@ -456,31 +259,8 @@ const CODEWHALE_JSONC_RECOVERY =
 	"not parseable as plain JSON — read anyway with comments and trailing commas stripped. The file's own reader is a strict " +
 	"JSON parser, so it would have rejected this document outright";
 
-/**
- * Remove every credential from a parsed document, recording each by path and
- * never touching a value it did not have to.
- *
- * Three mechanisms, in the order they run:
- *
- *   1. **Key-name scrub.** Every key matching `looksLikeSecretName` or
- *      {@link CODEWHALE_SECRET_KEY} is deleted at any depth, and one `skipped`
- *      line records its full path. This catches `api_key`, `webhook_token`,
- *      `sandbox_api_key` and `search.api_key`.
- *   2. **Credential-table drop.** Every key in
- *      {@link CODEWHALE_CREDENTIAL_TABLE_KEYS} is deleted *with its entries named
- *      individually*, so the report can say "left off Authorization,
- *      X-Api-Key" rather than "left off a headers block". The values are never
- *      read into a string.
- *   3. **URL check.** Every key in {@link CODEWHALE_URL_KEYS} whose value trips
- *      {@link urlCredentialProblem} is deleted whole, with one line naming the
- *      shape found (`URL_USERINFO` or `URL_PARAMETER`) and not one character of
- *      the URL.
- *
- * **The entry-map exemption is what keeps #1 from eating the user's own names.**
- * Below a key in {@link CODEWHALE_ENTRY_MAP_KEYS} the immediate children are
- * names the user chose, so they are stepped over and only each entry's own keys
- * are matched. The key above was still tested and still deleted if it matched.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Remove every credential from a parsed document, recording each by path, in three mechanisms. */
 function scrubCodewhaleCredentials(value: Record<string, unknown>, into: CodewhaleSkipped[], prefix: string): void {
 	const walk = (node: unknown, path: string[], depth: number): void => {
 		if (!isRecord(node) || depth > MAX_CREDENTIAL_SCAN_DEPTH) return;
@@ -548,14 +328,8 @@ function scrubCodewhaleCredentials(value: Record<string, unknown>, into: Codewha
 	walk(value, [], 0);
 }
 
-/**
- * A file's text, or the reason it is not text.
- *
- * `statSync` first rather than opening and catching, because the two failures a
- * caller must tell apart are *absent* and *there but unreadable*, and both would
- * otherwise arrive as exceptions — which would make a home that has never
- * installed Codewhale produce a report full of "unreadable" lines.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A file's text, or the reason it is not text; `statSync` first keeps absent and unreadable apart. */
 function readCodewhaleText(path: string): CodewhaleText {
 	let isDirectory: boolean;
 	try {
@@ -568,15 +342,8 @@ function readCodewhaleText(path: string): CodewhaleText {
 	return content === null ? { kind: "unreadable", reason: "present but unreadable" } : { kind: "text", value: content };
 }
 
-/**
- * A JSON document, with the two failures kept apart and one recovery attempted.
- *
- * `mcp.json` is plain JSON in the product — there is no comment-stripping reader
- * on that path — so `parseJsonc` is a **superset** of what Codewhale accepts. A
- * file this reader can still parse is one Codewhale would reject, which is the
- * opposite of what recovery normally covers, and the reason the report line says
- * so rather than reading it quietly.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A JSON document, with the two failures kept apart and one recovery attempted. */
 function readCodewhaleJson(path: string): CodewhaleJson {
 	const text = readCodewhaleText(path);
 	if (text.kind === "absent") return { kind: "absent" };
@@ -601,20 +368,11 @@ function readCodewhaleJson(path: string): CodewhaleJson {
 	}
 }
 
+// Long-form design notes: docs/dev/migration-sources.md
 /**
  * A TOML document, with the same numeric-key retry `step-read.ts` and
- * `grok-read.ts` document.
- *
- * **This is the parser's deviation, not Codewhale's.** TOML 1.0 allows a
- * digits-only segment after a dot (`[providers].0 = 1`) and `Bun.TOML.parse`
- * rejects the whole document over it. Codewhale parses with the `toml` crate,
- * which is spec-compliant, so such a file is one Codewhale reads. Quoting the
- * segments is a no-op under the spec and recovers every other setting in the
- * file; the segments that were requoted come back in
- * {@link CodewhaleToml} so the report can name them.
- *
- * A fixed phrase for the failure, never the parser's message: `toml`'s error can
- * quote the offending line, which may be a credential.
+ * `grok-read.ts` document; the failure line is a fixed phrase, never the
+ * parser's message.
  */
 function readCodewhaleToml(path: string): CodewhaleToml {
 	const text = readCodewhaleText(path);
@@ -651,26 +409,11 @@ function codewhaleDirectoryEntries(dir: string): Dirent[] {
 	}
 }
 
+// Long-form design notes: docs/dev/migration-sources.md
 /**
  * `~/.codewhale/AGENTS.md`, `~/.deepseek/AGENTS.md` and the `instructions.md`
- * pair, **in the product's own precedence**, first copy of each basename winning.
- *
- * The precedence is not a guess: `project_context.rs:348-353` states it in the
- * product's words — "Within each file name, `.codewhale/` takes priority over
- * vendor-neutral `.agents/`, which takes priority over legacy `.deepseek/`" — and
- * `global_context_relative_paths()` (`:806-815`) returns them in exactly the
- * order {@link CODEWHALE_GLOBAL_INSTRUCTIONS} lists.
- *
- * **The `.agents` rows are skipped rather than read, and that is the same
- * exclusion `kimi-read.ts` makes with `KIMI_SHARED_TREE`.** `~/.agents` is the
- * shared agent home this repository already migrates as its own `agents` source
- * (`agents-read.ts:34-39`), so reading it here would write `AGENTS.md` twice —
- * once attributed to `agents` and once attributed to Codewhale — and the second
- * would land on the first's target path. Both `.agents` rows are named in
- * {@link RawCodewhale.sharedTree} instead.
- *
- * **A collision between the two Codewhale roots is recorded rather than dropped
- * silently**, so a user holding `AGENTS.md` in both learns which one was used.
+ * pair, in the product's own precedence, first copy of each basename winning;
+ * `.agents` rows are named instead and collisions are recorded.
  */
 function readCodewhaleGlobalInstructions(
 	home: string,
@@ -712,15 +455,8 @@ function readCodewhaleGlobalInstructions(
 	return { files, collisions };
 }
 
-/**
- * The deprecated `WHALE.md` files, **named and not read**.
- *
- * `DEPRECATED_WHALE_FILENAME = "WHALE.md"` (`project_context.rs:343`) and
- * `WHALE_IGNORED_WARNING` (`:346`): "WHALE.md is ignored; move project
- * instructions to AGENTS.md, or Codewhale-specific authority policy to
- * `.codewhale/constitution.json`." The product reads one only to warn about it,
- * so importing one would add instructions the product itself will never load.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The deprecated `WHALE.md` files, named and not read; the product reads one only to warn. */
 function findCodewhaleDeprecatedDocuments(home: string, resolved: CodewhaleHome): string[] {
 	const found: string[] = [];
 	for (const [root, name] of CODEWHALE_GLOBAL_DOCUMENTS) {
@@ -731,15 +467,8 @@ function findCodewhaleDeprecatedDocuments(home: string, resolved: CodewhaleHome)
 	return found;
 }
 
-/**
- * `<workspace>/.codewhale/rules/*.md`, in filename order.
- *
- * `project_context.rs:340` (`RULES_DIRS`) and the doc comment at `:335-339`:
- * "All `.md` files in these directories are loaded as project rules in filename
- * order." **`md` is the only extension read** — the cache-invalidation walk at
- * `:769-786` filters on it at `:781` — so a `.txt` beside them is something the
- * product does not load and is named rather than carried.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `<workspace>/.codewhale/rules/*.md`, in filename order; `md` is the only extension read. */
 function readCodewhaleProjectRules(workspace: string, home: string, skipped: CodewhaleSkipped[]): RawFile[] {
 	const dir = codewhaleProjectRulesDir(workspace);
 	if (!existsSync(dir)) return [];
@@ -779,19 +508,11 @@ function readCodewhaleProjectRules(workspace: string, home: string, skipped: Cod
 	return files;
 }
 
+// Long-form design notes: docs/dev/migration-sources.md
 /**
- * Skills from the roots Codewhale owns, first root winning a name.
- *
- * The order is the product's — the global Codewhale root first, then the project
- * scopes (`tui/src/skills/mod.rs:985-991`: "Project roots outrank global roots",
- * so the *caller* passes them in product order) — and a folder present in two is
- * one skill with the second copy not read.
- *
- * **`~/.agents/skills` is deliberately absent from {@link codewhaleSkillRoots}'s
- * output and is not added here.** It is the shared agentskills.io tree, this
- * repository's `agents` source owns it outright, and a second import would write
- * every file in it twice with the second copy attributed to Codewhale. See
- * {@link RawCodewhale.sharedTree}.
+ * Skills from the roots Codewhale owns, first root winning a name and
+ * collisions recorded; `~/.agents/skills` is not among them, by the same
+ * exclusion as {@link RawCodewhale.sharedTree}.
  */
 function readCodewhaleSkills(
 	roots: string[],
@@ -845,15 +566,8 @@ function countCodewhaleSessions(sessionsDir: string): number {
 	return count;
 }
 
-/**
- * The `servers` map out of `mcp.json`, or `{}`.
- *
- * **The canonical key is `servers`, and `mcpServers` is the alias.** See
- * {@link CODEWHALE_MCP_SERVERS_KEY}: a file carrying the canonical name uses it,
- * and one carrying only the alias deserializes through it, and one carrying both
- * uses the canonical — which is the only reading consistent with
- * `#[serde(alias = "mcpServers")]`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The `servers` map out of `mcp.json`, or `{}`; `mcpServers` is the alias. */
 function readCodewhaleMcpServers(document: CodewhaleJson): Record<string, unknown> {
 	if (document.kind !== "object") return {};
 	const container = document.value[CODEWHALE_MCP_SERVERS_KEY];
@@ -862,15 +576,11 @@ function readCodewhaleMcpServers(document: CodewhaleJson): Record<string, unknow
 	return isRecord(alias) ? alias : {};
 }
 
+// Long-form design notes: docs/dev/migration-sources.md
 /**
  * `permissions.toml`'s rules, in file order, with the ones this build cannot
- * carry named rather than dropped.
- *
- * **The document is `deny_unknown_fields`** (`crates/config/src/lib.rs:625`),
- * so a file with a key Codewhale has since removed fails to load *for the
- * product too* — which makes a parse failure here a fact about the user's
- * install rather than about this reader, and the reason is the parser's message
- * never printed.
+ * carry named rather than dropped; the document is `deny_unknown_fields` for
+ * the product too.
  */
 function readCodewhalePermissions(
 	document: CodewhaleToml,
@@ -917,33 +627,11 @@ function readCodewhalePermissions(
 	return out;
 }
 
+// Long-form design notes: docs/dev/migration-sources.md
 /**
- * Read one Codewhale home.
- *
- * **Pure with respect to everything outside `home`, `cwd` and `env`**: it
- * resolves paths against those arguments and never calls `os.homedir()` or
- * `process.cwd()`, so a fixture laid out by a test and a developer's own
- * `~/.codewhale` are the same code path. It does touch the filesystem,
- * necessarily — that is what reading is.
- *
- * `cwd` is the directory being migrated into, and it is what the **project
- * `config.toml`**, the project rules and the project anchors hang off. It is
- * `string | undefined` rather than defaulted to `process.cwd()` for the same
- * reason the reader takes `home` as an argument: a default would let a test that
- * forgot it read whatever directory the runner happened to be in.
- *
- * `env` defaults to `process.env`, which is what `readSources` passes, so a
- * developer who has set `CODEWHALE_HOME` gets that tree — the correct answer for
- * their machine. A test passes an explicit block instead, and **a test that
- * asserts on content must pass `env`** rather than rely on the ambient one.
- *
- * The order is the settings documents, then the fields read out of them, then the
- * global instructions, then skills, then the session count, then the paths that
- * exist and are deliberately not opened — but {@link RawCodewhale.skipped} is
- * **sorted by name before it is returned**, so two runs over one home produce the
- * same report rather than one that changes with the order the filesystem handed
- * back. Nothing short-circuits: a home with an unparseable `config.toml` still
- * yields its skills.
+ * Read one Codewhale home. Pure with respect to everything outside `home`,
+ * `cwd` and `env`; `skipped` is sorted by name before it is returned, and
+ * nothing short-circuits.
  */
 export function readCodewhale(home: string, cwd: string | undefined, env: CodewhaleEnv = process.env): RawCodewhale {
 	const resolved = resolveCodewhaleHome(home, env);
@@ -1058,18 +746,7 @@ export function readCodewhale(home: string, cwd: string | undefined, env: Codewh
 	const deprecatedDocuments = findCodewhaleDeprecatedDocuments(home, resolved);
 	const projectRules = cwd === undefined ? [] : readCodewhaleProjectRules(cwd, home, skipped);
 	const projectAnchors = cwd === undefined ? null : readAnchors(cwd, home, skipped);
-	// **Three skill roots, and which three is a decision with a stated reason.**
-	// The global Codewhale root (which may be `~/.deepseek/skills` — the loader
-	// falls back for this name) and the two project scopes. `~/.agents/skills` is
-	// **not** among them: the `agents` source owns that tree outright, and
-	// importing it here would land a second copy of every file in it. See
-	// `codewhaleSkillRoots` and {@link RawCodewhale.sharedTree}.
-	//
-	// The **already-resolved** skills directory, not the resolved home.
-	// `CODEWHALE_LEGACY_FALLBACK["skills"]` is `true`, so the loader's own rule puts
-	// this tree at `~/.deepseek/skills` on a pre-rename install; asking for
-	// `<home>/skills` instead would report a home with a full skills tree as having
-	// none, which is the exact failure the two-root table exists to prevent.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const skillRoots = codewhaleSkillRoots(byName.get("skills")?.path ?? join(resolved.root, "skills"));
 	if (cwd !== undefined) {
 		skillRoots.push(codewhaleProjectSkillsDir(cwd), codewhaleProjectSharedSkillsDir(cwd));
@@ -1127,19 +804,8 @@ export function readCodewhale(home: string, cwd: string | undefined, env: Codewh
 	};
 }
 
-/**
- * The field each `HookCondition` variant carries, on the hook table beside
- * `condition`.
- *
- * `HookCondition` (`crates/tui/src/hooks/config.rs:217`) is a unit-or-struct enum,
- * and serde's **external** tagging puts a struct variant's single field on the
- * parent rather than inside a nested object. Verified against the bytes a
- * `[[hooks.hooks]]` table produces: `condition = "exit_code"` with `code = 2`
- * beside it, `condition = "mode"` with `mode = "plan"`, `condition =
- * "tool_category"` with `category = "shell"`. `Always` (`:219-221`) is the unit
- * variant and carries nothing, which is why it is absent here rather than mapped
- * to `""`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The field each `HookCondition` variant carries, on the hook table beside `condition`. */
 const CODEWHALE_CONDITION_ARGUMENT: Readonly<Record<string, string>> = {
 	tool_name: "name",
 	tool_category: "category",

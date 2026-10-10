@@ -1,16 +1,6 @@
-/**
- * Grok Build's configuration in the target's shape.
- *
- * The biggest module left after the split, and the one that borrows the most
- * from `migrate-core.ts` — `isRecord`, `tildePath`, `summarizeNames`,
- * `placeholderNote` and the rest. That is the point of the split rather than a
- * cost of it: what is specific to Grok is what is left here.
- *
- * The permission rules are the bulk of the file. Grok spells them in its own
- * rule language — a compact tool table, verbose forms, a per-server section —
- * and `planGrokPermissions` decides, per form, whether the target can say the
- * same thing and what to report when it cannot.
- */
+// Grok Build's config.toml in the target's shape: the model and provider tables, the permission
+// rules in their compact and verbose forms, the MCP servers, the assets, and everything else named.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { join } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
@@ -58,14 +48,8 @@ function firstGrokString(value: unknown): string | undefined {
 /** Context window assumed for an imported endpoint whose source states no `context_window`. */
 const GROK_ASSUMED_CONTEXT_WINDOW = 128_000;
 
-/**
- * `[models]` keys this importer reports rather than carries.
- *
- * Each is a decision a user could have made and then gone looking for. They are
- * listed rather than left to the closing aggregate because each has a *reason* —
- * something this build does differently, not merely a key with no mapping — and
- * a refusal that explains itself is worth more than a name in a list.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `[models]` keys this importer reports rather than carries. */
 const GROK_UNMIGRATED_MODEL_KEYS: Array<[key: string, reason: string]> = [
 	[
 		"default_reasoning_effort",
@@ -94,14 +78,8 @@ const GROK_UNMIGRATED_MODEL_KEYS: Array<[key: string, reason: string]> = [
 	["subagent_rate_limit_max_attempts", "retry behaviour on 429s in subagents, which the adapters own here"],
 ];
 
-/**
- * `config.toml` sections that get a line of their own rather than a mapping.
- *
- * Every documented key a user could plausibly have set is here, because the one
- * thing a migration report may not do is leave a setting looking simply missed.
- * The reasons are deliberately not interchangeable: each says what the section
- * holds and what this build does instead.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `config.toml` sections that get a line of their own rather than a carried value. */
 const GROK_UNMIGRATED_SECTIONS: Array<[key: string, reason: string]> = [
 	["agent", "names the agent definition grok loads for the session; agents here are files under ~/.labunbun/agents"],
 	[
@@ -189,18 +167,8 @@ const GROK_UNMIGRATED_SECTIONS: Array<[key: string, reason: string]> = [
 	["worktree", "how grok lays out a session's worktree; the worktrees here are git's own"],
 ];
 
-/**
- * The tool prefixes a *compact* `[permission]` rule may use.
- *
- * Exactly `tool_name_to_filter` (`permission/rules.rs:244`), which is what the
- * array form's parser consults and what it rejects everything else against. Two
- * things about it are easy to guess wrong from the config reference: the
- * spellings are PascalCase with no lowercase arm at all, and there are **no
- * entries for `Any` or `WebSearch`-as-a-filter** beyond the ones listed — a
- * `bash(...)` or `Any(...)` in that array is an `UnknownToolPrefix` warning and a
- * dropped rule, not a rule in force. Carrying one across as if grok had read it
- * would put a rule in this build's list that the user's grok never had.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The tool prefixes a compact `[permission]` rule may use. */
 const GROK_COMPACT_TOOL_NAMES: Record<string, string> = {
 	Bash: "bash",
 	Read: "read",
@@ -217,16 +185,8 @@ const GROK_COMPACT_TOOL_NAMES: Record<string, string> = {
 	SendAgentMessage: "agent_message",
 };
 
-/**
- * The tool names a *verbose* `[[permission.rules]]` entry may use.
- *
- * A different vocabulary entirely: that field is the serde lowercase name of
- * `ToolFilter`, so `Any` and `Bash` — valid prefixes in the array form — do not
- * deserialize here, and a table holding one costs grok *every* rule in it. The
- * set is narrower than the compact one: `ToolFilter` has no `websearch` variant,
- * so `tool = "websearch"` is one of those table-failing values rather than a
- * search rule, and a name this table does not know is reported as exactly that.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The tool names a verbose `[[permission.rules]]` entry may use. */
 const GROK_VERBOSE_TOOL_NAMES: Record<string, string> = {
 	any: "any",
 	bash: "bash",
@@ -272,21 +232,8 @@ function indexOfUnescaped(text: string, target: string, last = false): number {
 	return last ? (indexes.at(-1) ?? -1) : (indexes[0] ?? -1);
 }
 
-/**
- * One compact `[permission]` entry, split the way grok splits it.
- *
- * A mirror of `parse_permission_rule` (`permission/rules.rs:109`) down to the
- * parts this translation needs: the `Tool(...)` prefix and its content, the
- * trailing `:*` that means "the command starts with this" rather than "this
- * glob", the `domain:` marker, and the `.claude` `mcp__<server>[__<tool>]`
- * spelling grok rewrites onto its own qualified names. A prefix grok refuses is
- * refused here too, so the two cannot disagree about which rules exist.
- *
- * The two shapes fail differently on purpose: a bad *compact* entry is warned
- * about and dropped while its neighbours load, but a bad entry in the verbose
- * `rules` array fails the deserialization of the whole table, so grok ends up
- * with **no** rules from it. The caller reproduces both granularities.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One compact `[permission]` entry, split the way grok splits it. */
 function parseGrokRuleText(text: string): GrokRuleParts | { invalid: string } {
 	const rule = text.trim();
 	if (GROK_UNSUPPORTED_RULE_FORMS.includes(rule)) {
@@ -341,28 +288,8 @@ function unescapeGrokRule(text: string): string {
 	return text.replace(/\\\(/g, "(").replace(/\\\)/g, ")").replace(/\\\\/g, "\\");
 }
 
-/**
- * One grok rule as this build's rule text, or the reason it cannot become one.
- *
- * Three differences between the two engines drive this, and every one of them
- * would be silent if the pattern were copied across:
- *
- *   - grok matches a `Bash` pattern against a command that *starts with* it as
- *     well as against one it globs, while a rule here is either an exact string
- *     or a glob. So a pattern carrying no wildcard gets a trailing `*`, which is
- *     exactly the prefix match and nothing wider (`Bash(sed:*)` in grok blocks
- *     `sed-custom`, and `Bash(sed*)` here does too).
- *   - grok's `edit` covers writes, and `Edit(...)` here does not match the
- *     `Write` tool — so one source rule becomes two. A file protection that
- *     covers half of what it did is not something to let a user discover.
- *   - grok spells MCP tools `server__tool`, this build spells them
- *     `mcp__server__tool`, and a rule written in the source's own `.claude`
- *     spelling is rewritten by grok before it is ever matched.
- *
- * `Any` is refused in both of its forms: bare it is a catch-all (grok drops
- * exactly these from `--allow`), and patterned it matches whatever text the call
- * happens to carry, which a rule here has no form for.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One grok rule as this build's rule text, or the reason it cannot become one. */
 function grokRuleText(
 	tool: string,
 	pattern: string | undefined,
@@ -417,25 +344,8 @@ function clipped(text: string): string {
 	return text.length > 80 ? `${text.slice(0, 80)}…` : text;
 }
 
-/**
- * `[permission]` in grok's `config.toml`, carried over as this build's rules.
- *
- * The two shapes grok accepts do not merge, and the difference is worth getting
- * right: when any of the compact `allow` / `deny` / `ask` keys holds an array,
- * `parse_toml_permission_section` returns those and **never looks at
- * `[[permission.rules]]`**. A file with both is therefore reported as the one
- * grok reads rather than as their union — importing the other half would put
- * rules in force here that were never in force there.
- *
- * The verbose shape carries its own trap, and it is not the one the config
- * reference implies: an entry with no `action` does not default to deny, it fails
- * the parse and takes the whole table with it (see {@link readGrokVerboseRules}).
- * That is what the report says, rather than a rule-by-rule account of rules
- * nothing ever loaded.
- *
- * `ask` has no tier here, exactly as Codex's `prompt` decision does not: the
- * rules that carry it are named rather than turned into an allow or a deny.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `[permission]` in grok's `config.toml`, carried over as this build's rules. */
 export function planGrokPermissions(
 	raw: RawGrokBuild,
 	home: string,
@@ -584,24 +494,8 @@ interface GrokVerboseRule {
 	domain: boolean;
 }
 
-/**
- * Read the verbose `[permission]` table the way serde reads it, reporting nothing.
- *
- * **`action` is required**, and that is the trap in this shape: `RuleAction`
- * carries `#[default] Deny` (CWE-1188) and `PermissionRule.tool` and
- * `pattern_mode` carry field-level `#[serde(default)]` — but the action field
- * carries none, and the struct has no container-level default either. So the
- * `Deny` default is what *Rust* code gets when it constructs a rule, not what a
- * missing key deserializes to: an entry with no `action` fails the parse, and
- * because `try_into::<PermissionConfig>()` is all-or-nothing, grok then holds
- * **none** of the table's rules. Reading that entry as a deny would put a refusal
- * in force here that was never in force there.
- *
- * Pure, and called from two places on purpose: the rule translator needs the
- * rules, and the policy reader needs to know whether this section loaded at all
- * (a failed table leaves the policy at its type default too). One reader, so the
- * two cannot disagree about whether the user's rules ever applied.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read the verbose `[permission]` table the way serde reads it, reporting nothing. */
 function readGrokVerboseRules(permission: Record<string, unknown>): { rules: GrokVerboseRule[]; omitted: string[] } {
 	const rules = permission.rules;
 	// A missing `rules` key is the container's own `#[serde(default)]`: an absent
@@ -678,26 +572,8 @@ function planGrokVerboseRules(
 	}
 }
 
-/**
- * `[permission] prompt_policy`, which grok does not read from here.
- *
- * The key is real — a session's permission config does carry a `prompt_policy`,
- * and its `Deny` is grok's own dontAsk (`manager/mod.rs` logs
- * `always-approve is active while prompt_policy is dontAsk (Deny)`) — but it does
- * not come from this file. The `config.toml` loader keeps only the rule tables
- * (`extract_toml_permissions` → `parse_toml_permission_section` → a
- * `PermissionConfig` whose sole field is `rules`), and the shell's own test
- * `permission_prompt_policy_warns_as_unconsumed` pins that a `prompt_policy`
- * written in `[permission]` is reported to the user as an unrecognized key. The
- * policy the session actually runs with arrives from the Claude compat layer
- * instead: `DefaultPermissionMode::effects` maps a `.claude` settings
- * `permissions.defaultMode` of `dontAsk` to `Deny` and `auto` to `Auto`.
- *
- * So this is a line and not a mapping: carrying the value over would tell a user
- * that a policy grok warned about and ignored is now in force under another name,
- * and the mode it would have to become is precisely the one this migration may not
- * invent on the user's behalf.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `[permission] prompt_policy`, which grok does not read from here. */
 const GROK_PROMPT_POLICY_REASON =
 	"grok does not read this key: its config.toml loader keeps only the rule tables and reports prompt_policy as " +
 	"an unrecognized key, so nothing written here was ever in force — the policy a session runs with comes from the " +
@@ -706,15 +582,8 @@ const GROK_PROMPT_POLICY_REASON =
 /** Keys of `[permission]` that this planner reads or names; the rest reach {@link reportUnhandledKeys}. */
 const GROK_PERMISSION_HANDLED = new Set<string>(["rules", "allow", "deny", "ask", "prompt_policy"]);
 
-/**
- * Keys of a `[model.<id>]` entry that this planner reads.
- *
- * The rest of such a table is a list of retunings — `reasoning_effort`,
- * `temperature`, `max_retries` — and each of them is reported rather than
- * dropped, for the same reason the `[models]` keys are: the entry itself may be
- * carried over, and a user reading that line would otherwise take it for a table
- * that came across whole.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Keys of a `[model.<id>]` entry that this planner reads. */
 const GROK_MODEL_ENTRY_HANDLED = new Set<string>([
 	"base_url",
 	"api_base_url",
@@ -733,15 +602,8 @@ const GROK_MODEL_ENTRY_HANDLED = new Set<string>([
 	"auth_provider",
 ]);
 
-/**
- * Keys of a `[model_providers.<id>]` entry that this planner reads or names.
- *
- * The three header-shaped tables are named in one line rather than read: a
- * provider entry here carries an endpoint, a credential variable and models, so
- * there is nowhere for request headers or URL query parameters to go. `auth` and
- * `auth_provider` are likewise named: grok runs a command to mint the endpoint's
- * token, which is a mechanism this build does not have.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Keys of a `[model_providers.<id>]` entry that this planner reads or names. */
 const GROK_PROVIDER_ENTRY_HANDLED = new Set<string>([
 	"base_url",
 	"api_base_url",
@@ -783,19 +645,8 @@ function unloadedTable(from: string, items: MigrationItem[], reasons: string[]):
 	});
 }
 
-/**
- * Rewrite one `[mcp_servers.<name>]` entry into this build's MCP shape.
- *
- * The transport is the same two shapes Codex uses, and grok reads its table
- * untagged — `Stdio` first — so an entry with both a `command` and a `url` is a
- * stdio server with an unused URL, exactly as it is there.
- *
- * Everything this refuses is a credential grok does not store: `bearer_token_env_var`,
- * `oauth_client_secret_env_var` and `env_http_headers` all name variables in the
- * user's environment. The server is copied and the report says which variables it
- * used to read — reading them here, or inventing an empty value, would turn a
- * working server into one that fails at connect time.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Rewrite one `[mcp_servers.<name>]` entry into this build's MCP shape. */
 function normalizeGrokMcp(
 	entry: Record<string, unknown>,
 ): { config: Record<string, unknown>; downgrades: string[] } | null {
@@ -859,26 +710,8 @@ function normalizeGrokMcp(
 	return null;
 }
 
-/**
- * `[models]`, `[model.<id>]`, `[model_providers.<id>]`, `[permission]`,
- * `[mcp_servers.*]` and the rest of grok's `config.toml`.
- *
- * `[model.<id>]` is grok's per-model override table. An entry becomes a provider
- * here when something gives it an endpoint: its own `base_url`/`api_base_url`, or
- * a `model_provider` naming a `[model_providers.<id>]` entry that has one. The
- * second spelling is easy to miss and was missed here: grok's own table sits one
- * level over from Codex's, and a model reaching through it has an endpoint while
- * its own table shows none. An entry with neither only retunes a row of grok's
- * own catalogue and stays behind.
- *
- * The credential rule shapes this function. grok accepts an inline `api_key`
- * there and this importer **does not read its value**: the settings schema here
- * holds a variable *name* and has nowhere to put a literal. So such an endpoint
- * is registered with the variable named after it, and the report says the key is
- * still in `config.toml` and has to be exported. Copying it into `settings.json`
- * would put a live credential in a second file, which is the one thing this
- * importer never does.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `[models]`, `[model.<id>]`, `[model_providers.<id>]`, `[permission]`, `[mcp_servers.*]` and the rest of grok's `config.toml`. */
 export function planGrokBuild(
 	raw: RawGrokBuild,
 	home: string,
@@ -927,25 +760,9 @@ export function planGrokBuild(
 		});
 	}
 
-	// ── model_providers: the endpoint table a model inherits from ─────────────
-	// grok resolves a model's connection through `with_provider_defaults`
-	// (`agent/model_providers.rs:170`): the model's own fields win, and a model
-	// that sets none of them inherits the provider's `base_url` / `api_base_url`,
-	// `api_backend` and `context_window`, plus the provider's `env_key` / `api_key`
-	// / credential helper when it has no credential of its own. So
-	// `[model.<id>] model_provider = "gateway"` is an endpoint definition whose
-	// endpoint is one table over, and reading only `[model.<id>]` reports "no
-	// endpoint of its own" about a model that has one.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const providerTable = isRecord(raw.config.model_providers) ? raw.config.model_providers : {};
-	/** What a model entry can inherit from the provider it names.
-	 *
-	 * `endpointProblem` is why `endpoint` carries a credential, or `null`. It is
-	 * kept beside the endpoint rather than folded into it: an endpoint dropped at
-	 * this table would reach the model loop as a provider that "defines neither
-	 * base_url nor api_base_url", which is false — it defines one, and this importer
-	 * refuses it. `endpointField` names which of the two spellings answered, so the
-	 * model's report line can point at the field rather than at the table.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
 	const providers = new Map<
 		string,
 		{
@@ -1076,14 +893,7 @@ export function planGrokBuild(
 			});
 			continue;
 		}
-		// The endpoint is the same credential channel an MCP server's `url` is, under
-		// another name, and it reaches a provider entry through two shapes: the
-		// model's own `base_url` / `api_base_url`, or the provider table's when this
-		// model states none. Both are checked here, after the merge, so neither
-		// spelling can drift past the other. There is no half to keep — the same
-		// address with its userinfo or its `?access_token=` stripped is a different
-		// address pointing at nothing — so the model is left off rather than written
-		// under a line saying nothing in it is a secret.
+		// Long-form design notes: docs/dev/migration-sources.md
 		const endpointProblem =
 			ownEndpoint !== undefined ? urlCredentialProblem(ownEndpoint) : (provider?.endpointProblem ?? null);
 		// `endpoint` is defined above, so exactly one of these two is: the model's own
@@ -1313,16 +1123,7 @@ export function planGrokBuild(
 				});
 				continue;
 			}
-			// `url` is the one credential channel a name-based scan cannot reach: the
-			// token is inside the one string every importer treats as a safe
-			// identifier, not under a secret-shaped key. grok supplies a credential
-			// without storing one through `bearer_token_env_var` and `env_http_headers`,
-			// which name variables — so that is the alternative to point at here.
-			// There is no half to keep: the same address with its userinfo or its
-			// `?access_token=` stripped is a different address pointing at nothing, so
-			// nothing is written. `containsSecret` is `true` even so, because the value
-			// this line is about was one, and no `markMcpSecret` runs because no file
-			// receives it.
+			// Long-form design notes: docs/dev/migration-sources.md
 			const url = normalized.config.url;
 			if (typeof url === "string" && url !== "") {
 				const problem = urlCredentialProblem(url);
@@ -1497,23 +1298,8 @@ export function planGrokBuild(
 	reportUnhandledKeys("grok-build", raw.config, GROK_CONFIG_HANDLED, from, items);
 }
 
-/**
- * The asset face of `$GROK_HOME`: the files the user wrote, then the things this
- * importer walks past and names.
- *
- * Not {@link planAssetTrees}, for the reason that helper's own doc gives in
- * reverse: it renders the memory label from `SOURCE_ROOTS[source]`, which is a
- * guess at a directory *under home* — and `$GROK_HOME` can be anywhere. Every
- * path here is built from the resolved root, so a label always names a file the
- * reader actually opened. {@link planDeepSeekAssets} was split off for the same
- * reason.
- *
- * The second half matters as much as the first. A tree the importer walked past
- * without a word reads as an oversight, and the user's next move is to look for
- * it in the target and conclude the migration was broken — so every tree that
- * holds something and has no landing place here gets a line, and the two
- * credential files get one each that says outright that they were not opened.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The asset face of `$GROK_HOME`: the files the user wrote, then the things this importer walks past and names. */
 export function planGrokAssets(
 	raw: RawGrokBuild,
 	home: string,
@@ -1792,27 +1578,8 @@ export function planGrokAssets(
 	});
 }
 
-/**
- * `[ui] permission_mode`, and the two keys that spell the same decision.
- *
- * The mapping is short because grok's own is: `parse_permission_mode_canonical`
- * knows `always-approve`, `auto` and `ask`, treats `default` as a spelling of ask
- * and sends **everything else** there too. So a user who wrote
- * `permission_mode = "plan"` in `[ui]`, expecting the Claude Code vocabulary, has
- * been running with a mode that never auto-approves — and carrying the *name*
- * they wrote across would hand them a mode grok never applied. This planner
- * imports the mode grok resolved and names the string it resolved it from, which
- * is the only reading that cannot be a lie in either direction.
- *
- * Two details of `permission_mode_from_ui_if_set` are load-bearing. The
- * precedence is **type-gated**: `permission_mode` counts only as a string,
- * `approval_mode` only as a string, `yolo` only as `true`, so a key present in a
- * shape grok does not read falls through to the next instead of deciding. And
- * the presence of *any* of the three pins the answer — an explicit
- * `yolo = false` resolves to ask rather than to "unset", so an account default
- * cannot win — which is why a reading of ask is claimed as an explicit pair
- * here rather than left out as if nothing had been said.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `[ui] permission_mode`, and the two keys that spell the same decision. */
 function planGrokPermissionMode(
 	raw: RawGrokBuild,
 	home: string,
@@ -1847,14 +1614,7 @@ function planGrokPermissionMode(
 	const label =
 		readable.length > 0 ? `${from}.${decidedBy} (${JSON.stringify(ui[decidedBy])})` : `${from}.${present.join(", ")}`;
 
-	// One key, two axes here. `always-approve` is the reading that becomes the
-	// pair which asks nothing *and* confines nothing — `agent` under the open
-	// sandbox, which is the pairing Claude Code's `bypassPermissions` already maps
-	// to in claude-plan.ts. `ask` becomes a *confined* pair because grok states no
-	// confinement beside the mode: its `[sandbox] profile` is a separate section
-	// this importer reports and does not read (see the unmigrated sections above),
-	// so that half is this build's default and the claim line says in those words
-	// which half was chosen. `auto` is a classifier, and no mode here is one.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const mapped =
 		reads === "always-approve"
 			? { mode: "agent" as PermissionMode, sandbox: "danger-full-access" as SandboxMode }

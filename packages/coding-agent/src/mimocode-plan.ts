@@ -1,56 +1,6 @@
-/**
- * MiMo Code's configuration in the target's shape: the model, the permission
- * rules, the MCP servers, the skills, the agents, the commands and the memory,
- * and everything the reader saw that this importer will not carry.
- *
- * **The first thing to know about this source is that it has three credential
- * channels that are not key-shaped, and all three are in the MCP block.**
- *
- *   - **`mcp.<name>.url` is validated only as http/https.** `Remote.url` is
- *     `Schema.String` (`config/mcp.ts:52`) with no format, so
- *     `https://user:token@host/mcp` passes with the credential inside the string
- *     every importer treats as a safe identifier. This is the same hole that was
- *     found in Qoder and then fixed across all fourteen sources before this one,
- *     and {@link urlCredentialProblem} is the guard — **this planner uses the
- *     shared one rather than writing a new one**, which is the whole point of it
- *     existing.
- *   - **`mcp.<name>.environment` is a plain string map** (`config/mcp.ts:21-23`),
- *     so `{"MY_TOKEN": "…"}` is a credential the reader drops by name.
- *   - **`mcp.<name>.oauth.clientSecret`** (`config/mcp.ts:39-41`) is dropped by the
- *     reader's walk, since `clientSecret` matches `looksLikeSecretName`.
- *
- * **MiMo Code ships its own redactor and this importer deliberately does not use
- * it.** `config/mcp.ts:82,91-93` lists
- * `authorization, token, api_key, apikey, key, secret, password, credential` and
- * matches with `input.toLowerCase().includes(item)` — a **substring** test, so it
- * flags a server *named* `keyboard-mcp`, a path `monkey` and a header
- * `x-team-keynote`. That list is for *values* (`redactString`, `:170-175`), where
- * over-matching only makes the printed string uglier; applied to *keys* it would
- * delete the user's own servers. The list's words are kept here (they are the
- * spellings a user pastes out of a dashboard) and matched against whole
- * segments instead, with {@link MIMOCODE_ENTRY_MAP_KEYS} stepping over the names
- * the user chose.
- *
- * **Four things are deliberately not migrated, and each is a decision with a
- * reason rather than an omission:**
- *
- *   1. **Provider credentials.** `provider.<id>.options.apiKey` and
- *      `provider.<id>.headers` are dropped by the reader by name. The real keys
- *      are in `<data>/auth.json` and the `account` table, neither of which is
- *      opened — see {@link planMiMoCodeCredentials}.
- *   2. **`{env:VAR}` and `{file:path}` are copied verbatim, never substituted.**
- *      `config/variable.ts:32-45` expands both into the config text *before* it is
- *      parsed. Substituting here would freeze an environment lookup into a literal
- *      secret inside labunbun's `settings.json` — the opposite of what the user
- *      wrote. Where the substitution appears inside an MCP `command` array the
- *      server is refused rather than written, because this build does not expand
- *      it either and the literal would be an argv MiMo Code never ran.
- *   3. **Plugins.** `config/plugin.ts:33-38` turns each `{plugin,plugins}/*.{ts,js}`
- *      hit into a `pathToFileURL(item).href` and the engine **imports** it at
- *      start-up. A plugin is installed code, not prose.
- *   4. **Config-defined `agent` and `mode` entries.** See
- *      {@link planMiMoCodeAgentEntries} for why the name is all that comes across.
- */
+// MiMo Code's configuration in the target's shape: the model, the permission rules,
+// the MCP servers, the skills, the agents, the commands and the memory.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -94,16 +44,8 @@ import { mimocodeSettingsOrigin, mimocodeSettingsSubkeyOrigin } from "./mimocode
  */
 const SOURCE: MigrationSourceId = "mimocode-code";
 
-/**
- * Top-level keys of the settings document this mapper accounts for.
- *
- * Read against the reader's header, not in isolation. `model`, `mcp` and
- * `permission` are the three this planner actually reads. `tui` is here because
- * {@link planMiMoCodeTui} gets a line of its own rather than falling into the
- * catch-all; `agent`/`mode` because {@link planMiMoCodeAgentEntries} does. The
- * rest are named by the closing aggregate item, which is the honest place for a
- * key this importer has no mapping for and no note about.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Top-level keys of the settings document this mapper accounts for. */
 const MIMOCODE_SETTINGS_HANDLED = new Set([
 	"model",
 	"small_model",
@@ -122,26 +64,8 @@ const MIMOCODE_SETTINGS_HANDLED = new Set([
 	...MIMOCODE_LEGACY_KEYS,
 ]);
 
-/**
- * The report label for a settings key: the file its value came from, plus the
- * layer when that file is not the user's own.
- *
- * **The layer suffix is the point.** `config.json` is the *first* of three global
- * documents and `mimocode.jsonc` the last (see `mimocodeReadRoots`), and a
- * project `.mimocode/mimocode.jsonc` beats both. A report that printed
- * `<config>/config.json → mcp` for a server the project has overridden would send
- * the user to edit a file that no longer decides anything. The `global-*` sources
- * print no suffix — they are all in the user's own `<config>` directory, and a
- * suffix reading "global layer" tells a reader nothing they did not have.
- */
-/**
- * The layer a report line names in prose rather than by its enum value.
- *
- * `project` reads as a fragment and `custom-file` reads as a filename with a
- * hyphen in it, so both are given words: the first because a user should be told
- * which file they have to open, and the second because `$MIMOCODE_CONFIG` is the
- * variable that produced it and nothing else would let them find it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The layer a report line names in prose rather than by its enum value. */
 const MIMOCODE_LAYER_LABELS: Partial<Record<MiMoCodeSettingsSource, string>> = {
 	project: "project layer",
 	"custom-file": "$MIMOCODE_CONFIG",
@@ -159,32 +83,8 @@ function mimocodeFrom(raw: RawMiMoCode, key: string, subkey?: string): string {
 	return `${narrowed.path} → ${key}.${subkey}${suffix}`;
 }
 
-/**
- * MiMo Code's permission verbs → this build's tool names.
- *
- * **Only exact-name verbs are mapped, and one verb maps to two tools on purpose.**
- *
- *   - `edit` covers MiMo Code's whole edit family, which its own code names
- *     `EDIT_TOOLS = ["edit", "write", "apply_patch", "multiedit"]`
- *     (`permission/index.ts:614`) — so `edit: "deny"` denies writes as well as
- *     edits, and mapping it to `Edit` alone would narrow a deny into a hole.
- *     `Edit` **and** `Write` is the faithful pair.
- *   - `read` covers `READ_TOOLS = ["read", "view_image"]` (`permission/index.ts:615`);
- *     this build has no `view_image`, so `Read` alone loses nothing.
- *   - `bash` is `Bash` and nothing else. `BashOutput`, `KillBash` and
- *     `TaskUpdate` have no MiMo Code verb: they are this build's own tools, and
- *     giving them a rule MiMo Code never had would be the importer inventing a
- *     decision.
- *
- * **Everything absent from this table is a report line, not a guess.** `task`,
- * `actor`, `codesearch`, `lsp`, `doom_loop`, `skill`, `external_directory` and the
- * `*` wildcard all name things this build either has no tool for or does not mean
- * the same thing by. `"*"` in particular is MiMo Code's *deny-everything*
- * spelling (`config/permission.ts:61-63`: a bare string action becomes
- * `{"*": action}`), and the closest thing here would be a rule that changes what
- * every tool can do — which is a widening a migration must not make on its own
- * judgement.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** MiMo Code's permission verbs → this build's tool names. */
 export const MIMOCODE_PERMISSION_TOOLS: Record<string, readonly string[]> = {
 	read: ["Read"],
 	edit: ["Edit", "Write"],
@@ -201,19 +101,8 @@ export const MIMOCODE_PERMISSION_TOOLS: Record<string, readonly string[]> = {
 // The model
 // ---------------------------------------------------------------------------
 
-/**
- * `model` → this build's `model`, when the reference resolves.
- *
- * **The id is a `provider/model` string and the two registries differ**, so the
- * value is resolved rather than copied: `ConfigModelID` is a plain
- * `Schema.String` (`config/model-id.ts:12-14`) carrying whatever models.dev calls
- * it, and a model this build does not carry becomes a reported skip rather than a
- * `model` value in `settings.json` that nothing can resolve.
- *
- * Claimed only when the file states one. An absent key means nothing claimed and
- * nothing said — importing the schema's default would be writing a model on the
- * user's behalf that they never stated.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `model` → this build's `model`, when the reference resolves. */
 function planMiMoCodeModel(raw: RawMiMoCode, items: MigrationItem[], claimScalar: ClaimScalar): void {
 	if (raw.settings === null) return;
 	const value = raw.settings.model;
@@ -258,16 +147,8 @@ function planMiMoCodeModel(raw: RawMiMoCode, items: MigrationItem[], claimScalar
 	);
 }
 
-/**
- * `small_model`, `vision_model` and `model_groups` — named, never claimed.
- *
- * `small_model` is the model MiMo Code uses for background and cheap work and
- * `vision_model` the one it uses for images. This build has exactly one `model`
- * key and a `fallbackModels` list that means "try these when the first fails" —
- * **which is a different decision**, not a smaller one. Importing `small_model`
- * as a fallback would change what happens when the primary model is unavailable,
- * so it is reported instead.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `small_model`, `vision_model` and `model_groups` — named, never claimed. */
 function planMiMoCodeOtherModels(raw: RawMiMoCode, items: MigrationItem[]): void {
 	if (raw.settings === null) return;
 	for (const key of ["small_model", "vision_model"]) {
@@ -304,42 +185,8 @@ function planMiMoCodeOtherModels(raw: RawMiMoCode, items: MigrationItem[]): void
 // Permission rules
 // ---------------------------------------------------------------------------
 
-/**
- * `permission` → this build's allow/deny rules, through `fromConfig`'s own shape.
- *
- * `permission/index.ts:596-608` verbatim in effect:
- *
- * ```js
- * for (const [key, value] of Object.entries(permission)) {
- *   if (typeof value === "string") { ruleset.push({ permission: key, action: value, pattern: "*" }); continue }
- *   ruleset.push(...Object.entries(value).map(([pattern, action]) => ({ permission: key, pattern: expand(pattern), action })))
- * }
- * ```
- *
- * **Three properties of that shape this function reproduces rather than
- * approximates, and each one is a decision about what gets enforced:**
- *
- *   - **Insertion order decides, because `evaluate` uses `findLast`**
- *     (`permission/evaluate.ts:11-14`) and the config's own `permissionPreprocess`
- *     (`config/permission.ts:25-30`) exists purely to preserve it — `evaluate`
- *     `findLast`s over an array, so two rules for the same tool and pattern
- *     resolve to whichever the user wrote *last*. `Object.entries` on a
- *     `JSON.parse` result is that order, so reading the file is enough; a reader
- *     that sorted the keys would silently resolve every such pair the other way.
- *   - **`expand()` is NOT reproduced.** `permission/index.ts:583-589` rewrites a
- *     leading `~/` or `$HOME/` against **`os.homedir()` of the machine that ran
- *     MiMo Code**. Substituting here would rewrite the *importing* machine's home
- *     into a rule that meant the source machine's — silently widening a path
- *     pattern, in the one direction a permission import must not move on its own.
- *     The specifier is copied verbatim and the fact is reported.
- *   - **The default action is `ask`** (`permission/evaluate.ts:14`:
- *     `return match ?? { action: "ask", permission, pattern: "*" }`), so a rule
- *     MiMo Code has is a *narrowing* of an ask-by-default posture. There is no
- *     ask tier here: `ask` rules are **left out of both lists** rather than
- *     turned into an allow, which would run exactly the calls the user meant to be
- *     prompted for. This is `opencode-plan.ts`'s rule and it is the reason that
- *     branch exists.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `permission` → this build's allow/deny rules, through `fromConfig`'s own shape. */
 function planMiMoCodePermissions(
 	raw: RawMiMoCode,
 	items: MigrationItem[],
@@ -501,26 +348,8 @@ function planMiMoCodePermissions(
 // MCP servers
 // ---------------------------------------------------------------------------
 
-/**
- * The keys MiMo Code's own schema accepts on an MCP entry, verbatim.
- *
- * `config/mcp.ts:16-73` — `Local` (`:16-33`) and `Remote` (`:50-68`):
- *
- * ```js
- * Local  = { type: "local",  command: string[], environment?, enabled?, timeout?, sampling? }
- * Remote = { type: "remote", url: string, enabled?, headers?, oauth?, timeout?, sampling? }
- * ```
- *
- * **`command` is an array**, not a command plus an `args` key, and that is the
- * single most load-bearing line on this list: a reader expecting `command: "npx"`
- * and `args: ["-y", "x"]` would read `undefined` here and either drop the server
- * or write an empty command.
- *
- * A **legacy `{enabled: boolean}`** form exists too, and it works only because the
- * config merge is deep rather than replace: a global entry's full definition and a
- * project's `{enabled: false}` fold into one object. {@link planMiMoCodeMcp}
- * recognises it and reports it as what it is.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The keys MiMo Code's own schema accepts on an MCP entry, verbatim. */
 const MIMOCODE_MCP_KEYS = new Set([
 	"type",
 	"command",
@@ -533,18 +362,8 @@ const MIMOCODE_MCP_KEYS = new Set([
 	"oauth",
 ]);
 
-/**
- * `{env:VAR}` and `{file:path}` in a value, verbatim from `config/variable.ts:32-45`.
- *
- * **Detected, never substituted.** `ConfigVariable.substitute` expands both into
- * the config text before it is parsed, so by the time a settings file is *read*
- * the placeholders are already gone — a file that still contains one was written
- * by something other than the product, or the substitution failed, and either way
- * this build does not expand it. Copying it verbatim into `settings.json` would
- * preserve the user's text; **expanding it here would freeze an environment
- * lookup into a literal secret**, which is the failure the whole
- * `scrubMiMoCodeCredentials` guard exists to prevent.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `{env:VAR}` and `{file:path}` in a value, verbatim from `config/variable.ts:32-45`. */
 const MIMOCODE_PLACEHOLDER = /\{(?:env|file):[^}]+\}/;
 
 /** Whether this build would expand a `{env:…}` or `{file:…}` at all. It would not. */
@@ -554,29 +373,8 @@ function placeholderIn(value: unknown): string | null {
 	return match === null ? null : match[0];
 }
 
-/**
- * One MCP server from `settings.mcp` → this build's server shape.
- *
- * **Three credential channels are handled and they are handled differently, on
- * purpose.**
- *
- *   - **`headers` are dropped whole.** MiMo Code ships a redactor for them
- *     (`config/mcp.ts:170-182`), so it agrees they hold bearer tokens; a header
- *     value is an ordinary place for one, and a header *name* is not a credential
- *     so the reader's key-based scrub does not see them at all. Dropping the block
- *     loses the server's authentication, which the report says, and that is the
- *     right trade.
- *   - **`environment` values are not copied; the names are.** Same reasoning, for
- *     the process environment of a spawned server. Any name matching
- *     `looksLikeSecretName` was already deleted by the reader with a `skipped`
- *     line carrying its full path, so what is left are names the user chose.
- *   - **`url` cannot be half-dropped.** A URL with its userinfo or its
- *     `?access_token=` removed is a *different URL that points at nothing*, and
- *     writing one would trade a credential on disk for a server that fails at
- *     connect time while the report calls the copy a clean `map`. So the server is
- *     not carried across at all. `containsSecret` is `true` on that line although
- *     nothing was written: the value that line is about *is* one.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One MCP server from `settings.mcp` → this build's server shape. */
 function planMiMoCodeMcp(
 	raw: RawMiMoCode,
 	items: MigrationItem[],
@@ -668,14 +466,7 @@ function planMiMoCodeMcp(
 				});
 				continue;
 			}
-			// A placeholder anywhere in the argv would be a literal here and a
-			// resolved path there, so the argv MiMo Code ran is not the one written.
-			// **The `?? null` is load-bearing and was a real bug once.** `Array.find`
-			// answers `undefined` when nothing matched, and `undefined !== null` is
-			// true — so the guard below fired for every server, refused all of them,
-			// and wrote no `.mcp.json` at all while a test that only checked a
-			// placeholder passed. A missing value is normalised here rather than
-			// compared against the wrong sentinel.
+			// Long-form design notes: docs/dev/migration-sources.md
 			const placeholder = strings.map(placeholderIn).find((one) => one !== null) ?? null;
 			if (placeholder !== null) {
 				items.push({
@@ -861,19 +652,8 @@ function planMiMoCodeMcp(
 // Assets
 // ---------------------------------------------------------------------------
 
-/**
- * Skills, agents and commands.
- *
- * **A skill is copied verbatim because the two shapes are the same** — a
- * directory with a `SKILL.md` in it — so there is no rewrite to explain. An agent
- * is a `.md` file in either case, and its nesting is kept: MiMo Code names
- * `agents/team/reviewer.md` as **`team/reviewer`** (`config/entry-name.ts:12-16`),
- * so a nested agent becomes a nested path here rather than a flattened name that
- * two teams could collide on.
- *
- * **A command is prose the user wrote and becomes a skill**, which is the same
- * rewrite `planCommands` does for every other source.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Skills, agents and commands. */
 function planMiMoCodeAssets(raw: RawMiMoCode, force: boolean, items: MigrationItem[], writes: PlannedWrite[]): void {
 	collectFileWrites(
 		SOURCE,
@@ -939,15 +719,7 @@ function planMiMoCodeAssets(raw: RawMiMoCode, force: boolean, items: MigrationIt
 		);
 	}
 
-	// The standing instruction document, as a rule file.
-	//
-	// **A rule file and not a memory entry**, for the reason
-	// `planMemoryAsRule`'s own detail line already states: this build merges rule
-	// files with the memory it has instead of replacing it, which is what a
-	// document the agent re-reads at the top of every session wants.
-	//
-	// **No report line when there is no document**, which is the same contract the
-	// other importers keep: a `null` here is not a failure and is not worth a row.
+	// Long-form design notes: docs/dev/migration-sources.md
 	if (raw.agentsMd?.trim() && raw.agentsMdPath !== null) {
 		planMemoryAsRule(
 			SOURCE,
@@ -1027,23 +799,8 @@ function planMiMoCodeAgentEntries(raw: RawMiMoCode, items: MigrationItem[]): voi
 	}
 }
 
-/**
- * Plugins, and the two directories whose names still say `opencode`.
- *
- * **A plugin is installed code, not a setting.** `config/plugin.ts:33-38` globs
- * `{plugin,plugins}` for `*.ts` and `*.js` and turns each hit into a
- * `pathToFileURL(item).href`, which the engine **imports at start-up**. Copying
- * the path into `settings.json` would import a server or an agent that does not
- * exist here; copying the contents would be running another product's program
- * against this one's configuration. The name is the whole of what is carried.
- *
- * **The managed-config directories are still named `opencode`** —
- * `/etc/opencode`, `/Library/Application Support/opencode`,
- * `%ProgramData%\opencode` (`config/managed.ts:23-36`) — because the rename to
- * MiMo Code did not reach that function. Grepping the tree for `mimocode` misses
- * all three. They belong to whoever deployed the machine and are overwritten on
- * the next policy push, so they are named here and never read: MDM territory.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Plugins, and the two directories whose names still say `opencode`. */
 function planMiMoCodePlugins(raw: RawMiMoCode, items: MigrationItem[]): void {
 	if (raw.plugins.length === 0) return;
 	items.push({
@@ -1060,16 +817,8 @@ function planMiMoCodePlugins(raw: RawMiMoCode, items: MigrationItem[]): void {
 	});
 }
 
-/**
- * The MDM directories, named **unconditionally**.
- *
- * **Split out of {@link planMiMoCodePlugins} because it is not conditional on
- * anything.** An earlier version of this line sat inside the
- * `plugins.length > 0` guard, so a MiMo Code with no plugin directory and an
- * administrator pushing managed configuration printed nothing about it — and
- * "the report said nothing" is the state this line exists to prevent, since the
- * directory's name is the only evidence there is.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The MDM directories, named **unconditionally**. */
 function planMiMoCodeManagedConfig(items: MigrationItem[]): void {
 	items.push({
 		source: SOURCE,
@@ -1086,36 +835,8 @@ function planMiMoCodeManagedConfig(items: MigrationItem[]): void {
 	});
 }
 
-/**
- * The four skill trees MiMo Code borrows, each named and **none imported**.
- *
- * `skill/index.ts:26` is `[".claude", ".codex", ".opencode", ".agents"]`, scanned
- * at `<home>/<dir>/skills` (`:232-235`) and at every `<dir>` walking **up** from
- * the working directory (`:257-261`), so a MiMo Code install sees three other
- * products' skills with nothing configured. `:34-42` keeps `.agents` on unless
- * `MIMOCODE_DISABLE_AGENTS_SKILLS` is set and gates the other three behind
- * `MIMOCODE_ENABLE_{CLAUDE_CODE,CODEX,OPENCODE}_SKILLS`.
- *
- * **This importer reads none of them, and `.agents` is the reason that is a rule
- * rather than an accident.** `~/.agents` is a tree this repository **already
- * migrates**, as its `agents` source. Importing it here as well would write every
- * one of the user's skills twice — once attributed to `agents` and once to
- * `mimocode-code` — and both report lines would say they were imported. That is
- * the same bug `KIMI_SHARED_TREE` in `kimi-read.ts` exists to prevent, reached the
- * same way by a product that harvests the shared tree.
- *
- * **The other three are named rather than imported for a second reason:** they are
- * other products' files, and two of them (`claude-code`, `codex`) are sources this
- * repository already migrates — so importing them here would file them under the
- * wrong product's name *as well as* double-importing them. `.opencode` is the one
- * with no importer of its own (`opencode-read.ts` harvests that tree for its
- * inventory and imports providers, MCP and `AGENTS.md`, not `skills/`), and the
- * line says "by hand" for it rather than pointing at a source that will not do it.
- *
- * **A line per tree per root, and only when the tree exists.** `existsSync` and
- * nothing more: the point is to name a directory the user can go and look at, and
- * a directory that is not there is not worth a row.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The four skill trees MiMo Code borrows, each named and **none imported**. */
 function planMiMoCodeVendorSkills(raw: RawMiMoCode, items: MigrationItem[]): void {
 	const roots = raw.cwd === null ? [raw.home] : [raw.home, raw.cwd];
 	for (const vendor of MIMOCODE_VENDOR_SKILL_DIRS) {
@@ -1145,21 +866,8 @@ function planMiMoCodeVendorSkills(raw: RawMiMoCode, items: MigrationItem[]): voi
 	}
 }
 
-/**
- * The TUI layer, the two other instruction documents, and the credential files.
- *
- * **The `tui.json` sentence is the one a user is most likely to need**, because
- * this build has no keybinds at all and a report that said nothing would read as
- * "there was no TUI configuration".
- *
- * **The other two instruction documents are named rather than read, and for two
- * different reasons.** `CLAUDE.md` is *also* MiMo Code's own
- * (`session/instruction.ts:19`), but the one this importer names is
- * `~/.claude/CLAUDE.md` — a **fourth source's file**, which this repository
- * already migrates as `claude-code`. Importing it here would land a second copy of
- * the same instructions under a different product's name. `CONTEXT.md` is the
- * third entry in the same array and the source's own comment calls it deprecated.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The TUI layer, the two other instruction documents, and the credential files. */
 function planMiMoCodeTui(raw: RawMiMoCode, items: MigrationItem[]): void {
 	if (raw.tui === null) return;
 	items.push({
@@ -1210,21 +918,8 @@ function planMiMoCodeTui(raw: RawMiMoCode, items: MigrationItem[]): void {
 	});
 }
 
-/**
- * The credential-bearing files and tables, named.
- *
- * **Nothing here is opened, and the sentence says so rather than implying the
- * importer checked.** `auth.json` holds every provider key and OAuth refresh token
- * in the install and is written with mode `0o600` (`auth/index.ts:9,96-98`);
- * `mcp-auth.json` holds per-server OAuth entries (`mcp/auth.ts:32`); the `account`
- * table holds `email`, `url`, `access_token` and `refresh_token`
- * (`account/account.sql.ts:6-17`); `session_share` holds `id`, `secret` and `url`
- * (`share/share.sql.ts:5-12`), and that `secret` is the bearer half of a share
- * link.
- *
- * **Re-authenticate by hand rather than importing these.** A migration that
- * copied an access token would also have to explain why it is in two files now.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The credential-bearing files and tables, named. */
 function planMiMoCodeCredentials(raw: RawMiMoCode, items: MigrationItem[]): void {
 	for (const entry of raw.credentials) {
 		if (!entry.exists) continue;
@@ -1253,26 +948,8 @@ function planMiMoCodeCredentials(raw: RawMiMoCode, items: MigrationItem[]): void
 	});
 }
 
-/**
- * The legacy keys, the inline-config channels, and the database.
- *
- * **The legacy-key line is the one that earns its place.** `history`,
- * `auto_worktree`, `theme`, `keybinds` and `tui` are deleted from every loaded
- * document before `Info` — which is `.strict()` — ever sees it
- * (`config/config.ts:61-75` and `:500`). So a user who wrote `theme` is looking
- * at a key **nothing reads**, including MiMo Code itself, and the migration is
- * the moment to say so. Reporting it as an "unhandled key" would be a weaker and
- * vaguer sentence about the same fact.
- *
- * **`MIMOCODE_CONFIG_CONTENT` and `MIMOCODE_CONFIG_DEFAULTS` are not read**, and
- * the reason is worth one line: they are inline JSON **in the environment**, so
- * reading them would mean parsing an arbitrary value a parent process chose to
- * export, and a report cannot attribute a document to a file. Same for
- * `MIMOCODE_AUTH_CONTENT`, which `auth/index.ts:76` still reads as a fallback —
- * though `util/credential-env.ts:15` deliberately strips it from the environment of
- * every child the engine spawns, on the grounds that any child could otherwise
- * read the whole `auth.json` out of it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The legacy keys, the inline-config channels, and the database. */
 function planMiMoCodeLeftovers(raw: RawMiMoCode, items: MigrationItem[]): void {
 	if (raw.rejectedHome !== null) {
 		items.push({
@@ -1388,21 +1065,8 @@ function planMiMoCodeLeftovers(raw: RawMiMoCode, items: MigrationItem[]): void {
 // Assemble
 // ---------------------------------------------------------------------------
 
-/**
- * Assemble the plan.
- *
- * Every parameter is one something below uses: `claimScalar` for the one model,
- * `addPermissionRules` for the allow/deny pairs, and
- * `mcpServers`/`markMcpSecret`/`existingMcpServers`/`force` for the one place a
- * credential could still reach a written file.
- *
- * **There is no `claimModePair` and no `claimEnv`, and both absences are
- * load-bearing.** MiMo Code has no permission *mode* at all — `permission` is a
- * rule map whose unmatched default is `ask` (`permission/evaluate.ts:14`) — so
- * there is no mode+sandbox pair to claim and importing one would write a posture
- * the user never stated. And the 41-key document has no `env` block, so there is
- * nothing to carry into `settings.env`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Assemble the plan. */
 export function planMiMoCode(
 	raw: RawMiMoCode,
 	items: MigrationItem[],

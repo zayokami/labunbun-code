@@ -1,48 +1,6 @@
-/**
- * MiMo Code's user state, as read from a home directory.
- *
- * Read `mimocode-home.ts` first — every path claim below is that module's, and it
- * says which of them are quoted from the product and which are chosen. The
- * standing caveats for this source, in one place:
- *
- *   - **The README documents the wrong paths and the code does not.** `README.md:385`
- *     claims `%LOCALAPPDATA%\mimocode\` and `:422` claims
- *     `~/Library/Application Support/mimocode/`; neither is in the tree, because
- *     `packages/shared/src/global.ts:1-50` is four `path.join`s over four
- *     `xdg-basedir` constants with no platform branch. A MiMo Code on Windows
- *     lives at `~/.config/mimocode`. Everything below follows the code.
- *   - **Settings are a deep merge of up to seven files, in a fixed order, and the
- *     order is not the order the filenames suggest.** `config.json` is applied
- *     **first** and `mimocode.jsonc` **last** (`config/config.ts:630-636`), so the
- *     `.jsonc` wins. Reading `<config>/mimocode.json` alone would import a
- *     document MiMo Code is not running.
- *   - **Every settings document is JSONC** — `ConfigParse.jsonc` runs
- *     `jsonc-parser` with `allowTrailingComma: true` (`config/parse.ts:9`), so a
- *     comment and a trailing comma are both legal in a file called `config.json`.
- *     `JSON.parse` alone throws the whole document away.
- *   - **Five keys are deleted before the schema ever sees the document** —
- *     `history`, `auto_worktree`, and the legacy `theme`/`keybinds`/`tui`
- *     (`config/config.ts:61-75`) — and `Info` is `.strict()` (`config.ts:500`). A
- *     reader that does not delete them first reports five keys the user never set,
- *     or refuses a file MiMo Code reads. See {@link MIMOCODE_LEGACY_KEYS}.
- *   - **No credential is migrated, and the credential channels are named rather
- *     than opened.** Two of them are *not* key-shaped: `mcp.<name>.url` is
- *     validated only as http/https, so `https://user:token@host/mcp` passes with
- *     the token inside the string every reader treats as a safe identifier. See
- *     `mimocode-plan.ts`'s use of `urlCredentialProblem`.
- *   - **`mcp.<name>.command` is an ARRAY, not a command plus an `args` key.**
- *     `Local.command` is `Schema.mutable(Schema.Array(Schema.String))`
- *     (`config/mcp.ts:18-20`), so `[0]` is the program and the rest are its
- *     arguments. Reading it as a string would drop the executable.
- *   - **Sessions are SQLite, and the count is real.** `message.agent_id != "main"`
- *     rows are subagent turns (`session/session.sql.ts:94`), and the product's
- *     own readers filter them out — see `mimocode-session.ts`.
- *
- * **Nothing here throws.** Every read that fails becomes a line in
- * {@link RawMiMoCode.skipped} naming what failed and why, which is the convention
- * `antigravity-read.ts` uses: a migration that aborts on one damaged file loses
- * every other source's import to make a point about that file.
- */
+// MiMo Code's user state, as read from a home directory: the settings layers
+// and merge, the credential scrub, the asset walks, and the read entry point.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -74,14 +32,8 @@ import {
 	mimocodeRoots,
 } from "./mimocode-home.ts";
 
-/**
- * One thing the walk found and did not carry over, with the reason.
- *
- * `name` is a **label, not a resolved path**, and the same convention
- * `antigravity-read.ts` uses: a bare name where that is unambiguous, a
- * forward-slashed relative label where it is not. Nothing here ever holds a value
- * read out of a credential-shaped key — see {@link RawMiMoCode.skipped}.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One thing the walk found and did not carry over, with the reason. */
 export interface MiMoCodeSkipped {
 	name: string;
 	reason: string;
@@ -104,15 +56,8 @@ export type MiMoCodeSettingsSource =
 	| "custom-file"
 	| "project";
 
-/**
- * One settings file that was found and parsed, with the layer it stands for.
- *
- * **The three `global-*` sources are the same `<config>` directory** under three
- * file names, and the merge order between them is the whole point — see
- * {@link MIMOCODE_SETTINGS_FILES}. `custom-file` is `$MIMOCODE_CONFIG`, which is
- * applied after all three. `project` is any `.mimocode/mimocode.json(c)` walking
- * up from the working directory, nearest last.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One settings file that was found and parsed, with the layer it stands for — see {@link MIMOCODE_SETTINGS_FILES}. */
 export interface MiMoCodeSettingsLayer {
 	source: MiMoCodeSettingsSource;
 	path: string;
@@ -151,79 +96,27 @@ export interface RawMiMoCode {
 	settingsLayers: MiMoCodeSettingsLayer[];
 	/** Which layer last carried each top-level key, and where that layer's file is. */
 	provenance: MergedMiMoCodeSettings["provenance"];
-	/**
-	 * The **merged** settings document — what MiMo Code would actually be running —
-	 * or `null` when no layer was readable.
-	 *
-	 * `null` rather than `{}` on purpose: a home where every file is present and
-	 * unusable must say which of "a directory where a file was expected",
-	 * "unreadable", "not a JSON object" or "not parseable" applies, and an empty
-	 * object would let a planner claim a document was read and held nothing. An
-	 * **absent** file produces no line at all — never having written settings is
-	 * the ordinary state of a fresh install, not a failure.
-	 *
-	 * Credential-shaped keys have been **removed** from whatever comes back; see
-	 * {@link scrubMiMoCodeCredentials}.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The merged settings document MiMo Code would actually be running, or `null` when no layer was readable. */
 	settings: Record<string, unknown> | null;
 	/** `mcp` after the merge, copied without interpretation. */
 	mcpServers: Record<string, unknown>;
-	/**
-	 * The legacy keys {@link MIMOCODE_LEGACY_KEYS} found in the merged document,
-	 * each with the file that carried it.
-	 *
-	 * Kept so the planner can say a user who wrote `theme` is no longer read by
-	 * anything, rather than reporting `theme` as a key with no mapping — the two
-	 * sentences are very different and only one of them is true.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The legacy keys {@link MIMOCODE_LEGACY_KEYS} found in the merged document, each with the file that carried it. */
 	legacyKeys: Array<{ key: string; path: string }>;
-	/**
-	 * `<config>/tui.json` | `tui.jsonc` — the TUI's own document, **or `null` when
-	 * there is none**.
-	 *
-	 * Read, counted and reported, but nothing is claimed from it: it holds keybinds
-	 * and presentation, and this build has no analogue for either. Reading it is
-	 * still worth it, because "there is a `tui.json` and none of it came across" is
-	 * a sentence a user deserves and "nothing was found" is not.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `<config>/tui.json` | `tui.jsonc` — the TUI's own document, or `null` when there is none. */
 	tui: { path: string; keys: number } | null;
-	/**
-	 * `$MIMOCODE_TUI_CONFIG` — named whether or not it exists, never read.
-	 *
-	 * `cli/cmd/tui/config/tui.ts:110-115` merges it **after** `<config>/tui.json(c)`
-	 * and **before** the project files, so a user's global TUI settings can be
-	 * shadowed by it. A report that says "nothing came across from `tui.json`"
-	 * while this file overrides every key of it would be describing the wrong
-	 * document.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `$MIMOCODE_TUI_CONFIG` — named whether or not it exists, never read. */
 	tuiConfigEnvPath: string | null;
-	/**
-	 * The standing instruction document — `AGENTS.md` from the first of
-	 * {@link mimocodeGlobalInstructionPaths} that has one — or `null`.
-	 *
-	 * **Absent is silent, and that is the whole contract**, the same choice the
-	 * other importers make for this file: a document that was never written is not
-	 * an error and does not get a report line.
-	 *
-	 * Only `AGENTS.md` is read, though `MIMOCODE_INSTRUCTION_FILES` names three:
-	 * `~/.claude/CLAUDE.md` belongs to another source (see
-	 * {@link mimocodeVendoredClaudeMd}) and `CONTEXT.md` is marked deprecated in
-	 * the product's own comment (`session/instruction.ts:21`). Both are named
-	 * instead.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The standing instruction document — `AGENTS.md` from the first of {@link mimocodeGlobalInstructionPaths} that has one — or `null`. */
 	agentsMd: string | null;
 	/** The path {@link RawMiMoCode.agentsMd} came from, or `null`. */
 	agentsMdPath: string | null;
-	/**
-	 * Memory entries from `<data>/memory/{global,projects,sessions}/…`, as
-	 * {@link RawFile}s.
-	 *
-	 * The three scopes are told apart by name in {@link RawFile.detail} and by the
-	 * file name the planner builds, because `memory/paths.ts:47` keys a
-	 * `global` entry with an **empty** id and a `projects`/`sessions` one with the
-	 * project's or the session's — a reader that filed all three under one stem
-	 * would write two different documents to one path.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Memory entries from `<data>/memory/{global,projects,sessions}/…`, as {@link RawFile}s. */
 	memory: RawFile[];
 	/**
 	 * Skills, de-duplicated by **path-relative** name with the **last** root
@@ -247,25 +140,11 @@ export interface RawMiMoCode {
 	modes: string[];
 	/** Command markdown files, which become skills through `planCommands`. */
 	commands: RawCommands;
-	/**
-	 * Plugin entry points — file names, never contents.
-	 *
-	 * `config/plugin.ts:33` globs `{plugin,plugins}/*.{ts,js}` and turns each hit
-	 * into a `pathToFileURL(item).href`, i.e. **an address the engine imports at
-	 * start-up**. A plugin is installed code, not prose: copying its path here
-	 * would import a server or an agent that does not exist in this tree, and
-	 * copying its contents would be running another product's program. The name is
-	 * all this field holds.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Plugin entry points — file names, never contents. */
 	plugins: string[];
-	/**
-	 * The session database, **existence-checked only**, or `null` when the install
-	 * keeps none of the names MiMo Code does.
-	 *
-	 * The *name* is what a report may print. Nothing in `mimocode-read.ts` opens
-	 * it; `mimocode-session.ts` does, read-only, and only when the user asked for
-	 * history.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The session database, **existence-checked only**, or `null` when the install keeps none of the names MiMo Code does. */
 	database: { path: string; exists: boolean; sidecars: string[] } | null;
 	/** How many sessions the database holds, or 0 when it was not opened. */
 	sessionCount: number;
@@ -284,14 +163,8 @@ export interface RawMiMoCode {
 	skipped: MiMoCodeSkipped[];
 }
 
-/**
- * A file's text, or the reason it is not text.
- *
- * `statSync` first rather than opening and catching, because the two failures a
- * caller must tell apart are *absent* and *there but unreadable*, and both would
- * otherwise arrive as exceptions — which would make a home that has never
- * installed MiMo Code produce a report full of "unreadable" lines.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A file's text, or the reason it is not text. */
 function readMiMoCodeText(path: string): MiMoCodeText {
 	let isDirectory: boolean;
 	try {
@@ -304,23 +177,8 @@ function readMiMoCodeText(path: string): MiMoCodeText {
 	return content === null ? { kind: "unreadable", reason: "present but unreadable" } : { kind: "text", value: content };
 }
 
-/**
- * A JSONC document, with the two failures kept apart and one recovery attempted.
- *
- * **`JSON.parse` first, then `parseJsonc`**, and the recovery here is *not* a
- * superset of the product's the way it is for Qoder: `ConfigParse.jsonc`
- * (`config/parse.ts:9`) already runs `jsonc-parser` with
- * `allowTrailingComma: true`, so anything {@link parseJsonc} reads is something
- * MiMo Code reads too. The `recovered` flag therefore means "this file carries
- * comments or a trailing comma", which is a fact worth a report line — a user who
- * has decorated their settings should know the decoration was read — but it is
- * not a warning.
- *
- * A fixed phrase for the failure, never the parser's message: a `SyntaxError`
- * from `JSON.parse` quotes the text it choked on, which would put a fragment of
- * the user's file into the report, and `ConfigParse.jsonc`'s own message dumps
- * the **entire** file (`config/parse.ts:36`: `\n--- JSONC Input ---\n${text}`).
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A JSONC document, with the two failures kept apart and one recovery attempted. */
 function readMiMoCodeJson(path: string): MiMoCodeJson {
 	const text = readMiMoCodeText(path);
 	if (text.kind === "absent") return { kind: "absent" };
@@ -366,76 +224,20 @@ function mimocodeDirectoryEntries(dir: string): Dirent[] {
 // The credential scrub
 // ---------------------------------------------------------------------------
 
-/**
- * The largest depth a credential-shaped key is looked for at.
- *
- * Eight is well past anything `mimocode.json` nests to — `provider.<id>.options.apiKey`
- * is three — and the cap is here so a pathological document cannot turn a
- * credential scan into a walk of a megabyte-deep structure. A key deeper than
- * this is **left in place**, which is the one thing this function can get wrong;
- * it is stated rather than pretended away.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The largest depth a credential-shaped key is looked for at. */
 const MAX_CREDENTIAL_SCAN_DEPTH = 8;
 
-/**
- * Key names `looksLikeSecretName` does not catch.
- *
- * That helper matches `TOKEN`, `KEY`, `SECRET`, `PASSWORD` and `CREDENTIAL` as
- * case-insensitive substrings, which covers `apiKey`, `accessToken` and
- * `clientSecret`. The one word it misses is the one MiMo Code itself puts on its
- * own redaction list (`config/mcp.ts:82`: `authorization`), and `bearer` is the
- * other spelling that shows up in a header a user pastes out of a dashboard.
- *
- * **MiMo Code's own matcher is a substring test and is far wider than this one** —
- * `sensitive.some(item => input.toLowerCase().includes(item))` (`mcp.ts:91-93`) —
- * so it flags a *server named* `keyboard-mcp` and a path key `monkey`. That is
- * why the name is matched **here** and not by the product's list: the product's
- * list is for *values*, and applying it to keys would delete the user's servers.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Key names `looksLikeSecretName` does not catch. */
 const MIMOCODE_SECRET_KEY = /^(?:authorization|bearer)$/i;
 
-/**
- * Config keys that {@link looksLikeSecretName} matches and that are **not**
- * credentials.
- *
- * **A real false positive, found by a test rather than reasoned about in advance.**
- * `looksLikeSecretName` matches `KEY` as a case-insensitive *substring*, so
- * `keybinds` — one of the five keys MiMo Code itself deletes from every settings
- * document (`config/config.ts:61-75`) and therefore one a user very plausibly
- * still has in an old file — is deleted by the scrub. The document then loses a
- * key the user set and the report has nothing to explain, because the line that
- * named it was the scrub's own.
- *
- * The fix is an exemption list rather than a narrower matcher, and that is the
- * deliberate choice: narrowing `looksLikeSecretName` would change every source in
- * this repository, and the false positives it produces are different in each.
- * Here the set of keys that provably hold no credential is short, closed, and
- * quotable, and a new one added to `MIMOCODE_LEGACY_KEYS` belongs here too — so
- * the list is stated as "the legacy keys" rather than spelled out a second time.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Config keys that {@link looksLikeSecretName} matches and that are **not** credentials. */
 const MIMOCODE_NON_SECRET_KEYS: ReadonlySet<string> = new Set(MIMOCODE_LEGACY_KEYS);
 
-/**
- * Remove every credential-shaped key from a parsed document, recording each by
- * path and never touching the value.
- *
- * Nothing in MiMo Code's settings is *expected* to be a bare secret — the
- * provider keys live in `auth.json` and the OAuth refresh tokens in the
- * `account` table, neither of which is read at all — and the code keys
- * `provider.<id>.options.apiKey`, `provider.<id>.models.<m>.headers`,
- * `mcp.<n>.headers`, `mcp.<n>.environment`, `mcp.<n>.oauth.clientSecret`,
- * `lsp.<n>.env` and `formatter.environment` all exist. It is written as one
- * because a guard nobody can see is not a guard. The names go into `skipped`; the
- * values are dropped on the floor, so a credential can never reach a planner, a
- * plan, a report or a written file.
- *
- * **The one thing this function gets wrong is a map treated as a generic object**,
- * and {@link MIMOCODE_ENTRY_MAP_KEYS} is what it gets right: below one of those
- * keys the immediate children are names the user chose, so they are stepped over
- * and only the entries' own keys are matched. `mcp.keyboard-mcp` is not a
- * credential — it is the name of an MCP server the user created, and deleting it
- * deletes the server, its command and its working directory with it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Remove every credential-shaped key from a parsed document, recording each by path and never touching the value. */
 function scrubMiMoCodeCredentials(value: Record<string, unknown>, into: MiMoCodeSkipped[], prefix: string): void {
 	const walk = (node: unknown, path: string[], depth: number): void => {
 		if (!isRecord(node) || depth > MAX_CREDENTIAL_SCAN_DEPTH) return;
@@ -450,16 +252,7 @@ function scrubMiMoCodeCredentials(value: Record<string, unknown>, into: MiMoCode
 				delete node[key];
 				continue;
 			}
-			// A map keyed by a name the user chose. The key above was still tested and
-			// still deleted if it matched — `mcp` does not, and a settings file whose
-			// top level carried `apiKey` still loses it. What is exempt is the *next*
-			// level: these are the map's own keys, so each is stepped over and only
-			// the entry's contents are scrubbed.
-			// A subtree that provably holds no credential at any depth — see
-			// {@link MIMOCODE_NON_CREDENTIAL_SUBTREES}. Tested before the entry-map
-			// branch because the exemption it needs is *deeper* than that one: `permission`
-			// is a verb map whose values are path-pattern maps, so stepping over one
-			// level is not enough.
+			// Long-form design notes: docs/dev/migration-sources.md
 			if (MIMOCODE_NON_CREDENTIAL_SUBTREES.has(key)) continue;
 			if (MIMOCODE_ENTRY_MAP_KEYS.has(key)) {
 				if (!isRecord(nested)) continue;
@@ -478,23 +271,8 @@ function scrubMiMoCodeCredentials(value: Record<string, unknown>, into: MiMoCode
 // The settings merge
 // ---------------------------------------------------------------------------
 
-/**
- * `remeda`'s `mergeDeep`, as `config/config.ts:54` uses it, plus the one array
- * exception `mergeConfigConcatArrays` makes (`config/config.ts:52-58`).
- *
- * Two properties are load-bearing and both are stated rather than assumed:
- *
- *   - **Objects merge; everything else is replaced.** An array under a key is a
- *     leaf, so a later layer's `tools` map replaces the earlier one's wholesale
- *     where the two share a tool name, and replaces the whole value where they do
- *     not. That is what makes a project `.mimocode/mimocode.jsonc` able to *drop*
- *     a global provider or an MCP server, not merely add to it.
- *   - **`instructions` is the one union.** `merged.instructions = Array.from(new
- *     Set([...target.instructions, ...source.instructions]))` — so a project's
- *     instruction list **adds to** the global one rather than replacing it. A
- *     reader that replaced it would drop the global instructions for every user
- *     who also has a project file, which is most of them.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `remeda`'s `mergeDeep`, as `config/config.ts:54` uses it, plus the one array exception `mergeConfigConcatArrays` makes (`config/config.ts:52-58`). */
 function mimocodeMergeInto(target: Record<string, unknown>, source: Record<string, unknown>): void {
 	for (const [key, value] of Object.entries(source)) {
 		if (value === undefined) continue;
@@ -528,20 +306,8 @@ function cloneValue(value: unknown): unknown {
 	return value;
 }
 
-/**
- * The layers, applied in order — what MiMo Code would actually be running.
- *
- * Exported because this is the function worth arguing with: it is pure, it takes
- * a list of documents, and every claim above about deep merging and the one array
- * union is a claim about *this*. A reader that read one layer would be right
- * about the file and wrong about the settings.
- *
- * `provenance` records the **last layer that carried the key by name**, not the
- * layer whose value survived — the two differ for a key a later layer set to
- * `null`, which the merge treats as a leaf and installs. The product has no
- * provenance record of its own here, so this is an importer's own aid and it is
- * documented as one rather than presented as quoted.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The layers, applied in order — what MiMo Code would actually be running. */
 export function mergeMiMoCodeSettings(layers: MiMoCodeSettingsLayer[]): MergedMiMoCodeSettings {
 	const settings: Record<string, unknown> = {};
 	const provenance: MergedMiMoCodeSettings["provenance"] = {};
@@ -552,30 +318,14 @@ export function mergeMiMoCodeSettings(layers: MiMoCodeSettingsLayer[]): MergedMi
 	return { settings, provenance };
 }
 
-/**
- * The file a settings key's value came from, as a report may print it.
- *
- * Falls back to the **first global document's** path when {@link provenance} has
- * nothing for the key, which is the case only for a key the merge produced that no
- * layer carried by name — and is right for the only way that happens, which is a
- * key this importer asked about that no layer set.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The file a settings key's value came from, as a report may print it. */
 export function mimocodeSettingsOrigin(home: string, raw: RawMiMoCode, key: string): string {
 	return tildePath(home, raw.provenance[key]?.path ?? raw.settingsLayers[0]?.path ?? raw.roots.config);
 }
 
-/**
- * The file that carried a **sub-key** — a finer question than
- * {@link mimocodeSettingsOrigin} asks, and the only one that gives a report line
- * the right answer.
- *
- * Provenance is keyed by top-level name alone, so an MCP server the user added and
- * a project never mentioned is attributed to whichever layer last carried the
- * *name* `mcp` — the project's, whenever the project has any servers at all.
- * Printed as a label that sends the user to the project file to edit a server
- * that is not in it. So the read is untouched and only the label is narrowed, to
- * the last layer in application order that holds `key.subkey`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The file that carried a **sub-key**, a finer question than {@link mimocodeSettingsOrigin} asks. */
 export function mimocodeSettingsSubkeyOrigin(
 	home: string,
 	raw: RawMiMoCode,
@@ -598,18 +348,8 @@ export function mimocodeSettingsSubkeyOrigin(
 // Assets
 // ---------------------------------------------------------------------------
 
-/**
- * Every `.md` at any depth under `dir`, named by {@link mimocodeEntryName}.
- *
- * **The nesting is kept, and that is the whole point of this function.** The
- * product's `configEntryNameFromPath` (`config/entry-name.ts:12-16`) cuts the path
- * at the first search root and strips only the extension, so
- * `agents/team/reviewer.md` is the agent **`team/reviewer`** — a slash and all.
- * A recursive walk that named each file by its basename would produce
- * `reviewer`, and two teams each with a `reviewer.md` would collapse into one
- * name: one skill written and one silently dropped, both report lines claiming
- * their own import.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Every `.md` at any depth under `dir`, named by {@link mimocodeEntryName}. */
 function readMiMoCodeMarkdown(dir: string): RawFile[] {
 	const files: RawFile[] = [];
 	const walk = (current: string, prefix: string): void => {
@@ -643,15 +383,7 @@ function readMiMoCodeSkills(
 	const assets: RawFile[] = [];
 	const collisions: RawMiMoCode["assetCollisions"] = [];
 	const claimed = new Map<string, string>();
-	// **In `mimocodeReadRoots`'s own order, weakest first**, because that is the
-	// order the product merges in and a later directory overwrites an earlier one's
-	// entry of the same name. Reversing this loop — which an earlier draft of this
-	// function did, on the reasoning that Qoder's reader reverses — inverts the
-	// precedence: `<config>` came out last and won, so a user who had shadowed a
-	// skill in their project was handed the global copy MiMo Code itself had
-	// already overridden. The direction of a skill collision is invisible in a
-	// passing test unless the test asserts *which* copy won, which is why this one
-	// does.
+	// Long-form design notes: docs/dev/migration-sources.md
 	for (const root of readRoots) {
 		for (const dir of mimocodeAssetDirs(root, MIMOCODE_SKILL_DIRS)) {
 			if (!existsSync(dir)) continue;
@@ -749,33 +481,8 @@ function readMiMoCodeAgentsMd(
 // The entry point
 // ---------------------------------------------------------------------------
 
-/**
- * Read one MiMo Code home.
- *
- * **Pure with respect to everything outside `home`, `cwd` and `env`**: it resolves
- * paths against those arguments and never calls `os.homedir()` or
- * `process.cwd()`, so a fixture laid out by a test and a developer's own
- * `~/.config/mimocode` are the same code path. It does touch the filesystem,
- * necessarily — that is what reading is.
- *
- * `cwd` is the directory being migrated into, and it is what the **project**
- * settings layer and the per-project asset directories hang off. It is
- * `string | undefined` rather than defaulted to `process.cwd()` for the same
- * reason the reader takes `home` as an argument: a default here would let a test
- * that forgot it read whatever directory the test runner happened to be in.
- * `readSources(home, cwd)` always passes it.
- *
- * `env` defaults to `process.env`, which is what `readSources` passes, so a
- * developer who has set `MIMOCODE_HOME` gets that tree — the correct answer for
- * their machine. A test passes an explicit block instead. **A test that asserts on
- * content must pass `env` rather than rely on the ambient block**, which is the
- * one way a test that reads a fixture home could quietly read a real one.
- *
- * {@link RawMiMoCode.skipped} is **sorted by name before it is returned**, so two
- * runs over one home produce the same report rather than one that changes with
- * the order the filesystem handed back. Nothing short-circuits: a home with a
- * damaged settings file still yields its skills.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read one MiMo Code home. */
 export function readMiMoCode(home: string, cwd: string | undefined, env: MiMoCodeEnv = process.env): RawMiMoCode {
 	const roots = mimocodeRoots(home, env);
 	const readRoots = mimocodeReadRoots(home, roots, cwd, env);
@@ -893,29 +600,8 @@ function mimocodeTreeHasContent(root: string): boolean {
 	}
 }
 
-/**
- * The settings layers, in the order `loadGlobal` and `merge` apply them.
- *
- * Reproduced from `config/config.ts:630-636` and `:820-830`:
- *
- *   1. `<config>/config.json` — the **first**, and the one that loses.
- *   2. `<config>/mimocode.json`
- *   3. `<config>/mimocode.jsonc` — the **last** global file, and the one that wins.
- *   4. `$MIMOCODE_CONFIG`'s file, when set — a whole extra document after the three.
- *   5. every `.mimocode/mimocode.json(c)` walking up from `cwd`, **nearest last**.
- *
- * **`config.json` is deliberately *not* looked for inside a `.mimocode`
- * directory.** `config/config.ts:847-855` gates the second pass on
- * `dir.endsWith(".mimocode") || dir === Flag.MIMOCODE_CONFIG_DIR` and then reads
- * only `["mimocode.json", "mimocode.jsonc"]`; `<config>` itself does not end with
- * `.mimocode` (it is `~/.config/mimocode`), so it gets the first pass and no
- * second. Reading a project's `config.json` would import a file MiMo Code ignores.
- *
- * **A missing file is not an error here** — it is the normal state of four of the
- * five, and reporting "there is no `<cwd>/.mimocode/mimocode.jsonc`" for every
- * project a user visits would be noise. A file that exists and does not parse is
- * the opposite: it changes what the merge produces, so it is named.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The settings layers, in the order `loadGlobal` and `merge` apply them. */
 function readMiMoCodeLayers(
 	roots: MiMoCodeRoots,
 	readRoots: string[],
@@ -993,22 +679,7 @@ function readMiMoCodeTui(
 	return null;
 }
 
-/**
- * Agent markdown, from every root — **and never from `.claude`**.
- *
- * The asymmetry is verified rather than assumed. `config/paths.ts:41-55` defines
- * `claudeCommandDirectories` and `config/config.ts:844-847` feeds it to
- * `ConfigCommand.load`; there is no `claudeAgentDirectories` and no
- * `ConfigAgent.load` call for `~/.claude`. `config/agent.ts:146`'s name-derivation
- * patterns list `/agent/` and `/agents/` and not `.claude`'s, while
- * `config/command.ts:47-52` lists both. So MiMo Code reads Claude Code's commands
- * and not its agents, and importing the latter would import files the product
- * itself ignores.
- *
- * Mode files (`{mode,modes}/*.md`, `config/agent.ts:166`) are **not** read: a mode
- * is a plan/build posture rather than an agent definition, and this build's
- * subagent file has no field for one. They are named by the planner instead.
- */
+// Long-form design notes: docs/dev/migration-sources.md
 /** Mode markdown file names under every root. Nothing is opened. */
 function readMiMoCodeModes(readRoots: string[]): string[] {
 	const names: string[] = [];
@@ -1042,17 +713,8 @@ function readMiMoCodeAgents(readRoots: string[]): RawFile[] {
 	return files;
 }
 
-/**
- * Command markdown, from every root **plus** every `.claude` directory the
- * product reads.
- *
- * `config/paths.ts:41-55`: `<home>/.claude` plus every `.claude` walking up from
- * the working directory, and `config/config.ts:844-847` merges them **before** the
- * `.mimocode` ones with the comment "Load Claude Code commands first so .mimocode
- * commands override on name collision" — so `.mimocode` wins, which is the
- * reverse of what "load first" would suggest to a reader and is exactly the
- * de-duplication order used here.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Command markdown, from every root plus every `.claude` directory the product reads. */
 function readMiMoCodeCommands(readRoots: string[], home: string, cwd: string | undefined): RawCommands {
 	const files: RawFile[] = [];
 	const skips: RawCommands["skips"] = [];

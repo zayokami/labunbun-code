@@ -1,35 +1,6 @@
-/**
- * Alma's user state in the target's shape: the model, the theme, the permission
- * posture, the MCP servers, the hooks, the skills and the memory — and
- * everything the reader saw that this importer will not carry.
- *
- * **The first thing to know about this source is what it does not have.** Alma
- * ships its entire settings schema, in `~/.config/alma/api-spec.md`, written by
- * the app itself on every start-up. That declaration is the best evidence
- * available about what a migration from Alma is mostly about, and it is short:
- *
- *   - **No permission mode.** No key in the schema chooses one.
- *   - **No sandbox.** No key, no concept, no equivalent. Alma asks per tool call
- *     or it does not.
- *   - **One approval switch.** `security.autoApproveToolRequests`, a boolean.
- *   - **No instruction document.** `AGENTS.md`, `CLAUDE.md` and `ALMA.md` each
- *     occur zero times in the 3.1 MB main bundle. What there is instead is a
- *     persona, a security policy and a relationship, in three markdown files, and
- *     this importer names all three rather than pretending one of them is an
- *     instruction document it can carry.
- *
- * So this planner claims **two** scalars and **one mode pair**, and the pair is
- * the interesting one: {@link planAlmaAutoApprove} claims both halves from a
- * single boolean, and says in the report which half Alma never expressed.
- *
- * **The credentials are three channels and all three are closed.** An MCP
- * server's `headers` and `env` values were already dropped by `readAlma`; the
- * server's `url` is checked here with the shared {@link urlCredentialProblem},
- * because the answer for a URL is not "strip the credential" but "do not import
- * this server at all". And the model reference is resolved without ever touching
- * `providers.api_key`, which is a plaintext column this importer's `SELECT`
- * does not name.
- */
+// Alma's user state in the target's shape: the model, the theme, the mode
+// pair, the MCP servers, the hooks, the skills and the memory.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { join } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
@@ -67,49 +38,12 @@ import type {
 } from "./migrate-types.ts";
 import { resolveModelReference } from "./migrate-types.ts";
 
-/**
- * This source's id, spelled once.
- *
- * The union and every table keyed by it live in `migrate-types.ts`; this is a
- * plain literal with no cast, and the only thing it buys is one spelling rather
- * than eleven. **The call lives in `migrate.ts`** — see that file's arm for
- * `alma`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** This source's id, spelled once. The union and every keyed table live in `migrate-types.ts`; the call lives in `migrate.ts`. */
 const SOURCE: MigrationSourceId = "alma";
 
-/**
- * `security.autoApproveToolRequests` → this build's two mode axes.
- *
- * **The mapping is one boolean to one pair, and both halves are argued rather
- * than assumed.** Alma's `false` is not a *choice* — it is what the key means
- * when the app finds it missing, `!0 === t?.security?.autoApproveToolRequests`
- * reads `false` for `undefined` — so **nothing is claimed for an absent key**,
- * exactly as `planQoderPermissionMode` declines to import a schema default.
- * Writing the stricter posture on the user's behalf is the fail-open failure
- * `t3-plan.ts` argues at length.
- *
- * `true` → `agent` + `workspace-write`, and the sandbox half is the argument:
- *
- *   - **The mode half is `agent`.** `autoApproveToolRequests` is Alma's
- *     "never ask" and nothing else; the single call site approves the request and
- *     returns `{approved: true, reason: "approved", action: "allow_once"}`.
- *   - **The sandbox half is `workspace-write`, and that is narrower than the
- *     other reading.** The tempting mapping is `agent` + `danger-full-access`,
- *     which is what a source whose *one* value means both gets — Qoder's
- *     `bypass_permissions`. **Alma has no unconfined setting to map.** There is
- *     no key anywhere in the schema or the runtime for a sandbox, so choosing
- *     `danger-full-access` would be this importer inventing a permission the user
- *     never granted in Alma and the app never offered them. `workspace-write` is
- *     the default confinement of a mode that does not ask, and the report says
- *     exactly that rather than calling the pair a faithful copy.
- *
- * A **non-boolean** in that key claims nothing, and the reader is what makes that
- * true rather than a branch here: `readAlma` reads it through `booleanAt`, which
- * answers `undefined` for anything that is not a boolean, so a hand-written
- * `"true"` produces no claim and no line. That is the honest outcome — Alma
- * itself tests the key with `=== true`, so a string was off there too — and it is
- * stated here rather than written as an unreachable branch.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `security.autoApproveToolRequests` true → `agent` + `workspace-write`; an absent or non-boolean key claims nothing. */
 export const ALMA_AUTO_APPROVE_ON: { mode: PermissionMode; sandbox: SandboxMode } = {
 	mode: "agent",
 	sandbox: "workspace-write",
@@ -142,25 +76,8 @@ const ALMA_SETTINGS_REPORTED: Readonly<Record<string, string>> = {
 		"no equivalent here, and it is absent from the interface Alma itself ships, so it is a drift between the app and its own documentation",
 };
 
-/**
- * `chat.defaultModel` → this build's `model`.
- *
- * **Alma's model reference is `"<providerId>:<modelId>"`, quoted from the shipped
- * `AppSettings` interface** — `defaultModel: string; // Format: "providerId:modelId"`
- * — and confirmed by the resolver that builds the picker:
- * `` `${o.id}:${o.models[0]}` ``.
- *
- * The provider half is **not** a labunbun provider id and is not one this
- * importer could make it into: `providers.id` is a row id the app generated, and
- * `providers.type` is one of eighteen values of which `anthropic` and `openai`
- * are the only ones whose names mean anything to a model registry. So only the
- * **model half** is resolved, and the provider's user-visible `name` and `type`
- * are what the report says when it does not resolve — **never its `api_key`,
- * which is a plaintext column**.
- *
- * A bare family alias (`opus`, `sonnet`) has no provider half at all in Alma's
- * format, so it goes through the same resolver every other source uses.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `chat.defaultModel` → this build's `model`. Only the model half is resolved, and `providers.api_key` is never read. */
 function planAlmaModel(raw: RawAlma, items: MigrationItem[], claimScalar: ClaimScalar): void {
 	const value = raw.settings?.defaultModel;
 	if (value === undefined) return;
@@ -202,18 +119,8 @@ function planAlmaModel(raw: RawAlma, items: MigrationItem[], claimScalar: ClaimS
 	});
 }
 
-/**
- * `general.theme` → this build's `theme`.
- *
- * Alma's values are `'light' | 'dark' | 'system'` — quoted from the shipped
- * `AppSettings` interface, and the third is a real choice rather than a missing
- * value. `'light'` and `'dark'` are both built-in theme names here, so those two
- * map; **`'system'` does not and must not be forced onto one**, because it means
- * "follow the terminal", which is what this build already does by default, and
- * pinning it to `light` or `dark` would be writing an appearance the user
- * declined to choose. The report says so and the session starts as it otherwise
- * would.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `general.theme` → this build's `theme`. `light` and `dark` map; `system` follows the terminal and stays unset. */
 function planAlmaTheme(raw: RawAlma, items: MigrationItem[], claimScalar: ClaimScalar): void {
 	const value = raw.settings?.theme;
 	if (value === undefined) return;
@@ -253,15 +160,8 @@ function planAlmaTheme(raw: RawAlma, items: MigrationItem[], claimScalar: ClaimS
 	});
 }
 
-/**
- * `security.autoApproveToolRequests` → the mode pair, when the key is a boolean.
- *
- * See {@link ALMA_AUTO_APPROVE} for the mapping and, more importantly, for why
- * the sandbox half is `workspace-write` when Alma's one value is read as "never
- * ask and no confinement elsewhere". The short version repeated where it is
- * read: **Alma has no sandbox setting, so the confinement half is this build's
- * own default rather than a translation of anything.**
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The approval switch → the mode pair. The sandbox half is this build's own default, not a translation of anything. */
 function planAlmaAutoApprove(raw: RawAlma, claimModePair: ClaimModePair): void {
 	const value = raw.settings?.autoApproveToolRequests;
 	if (value === undefined) return;
@@ -298,45 +198,8 @@ function planAlmaReportedSettings(raw: RawAlma, items: MigrationItem[]): void {
 	}
 }
 
-/**
- * One MCP server from `mcp.json` → this build's server shape.
- *
- * **The variant is Alma's own choice, made by two one-line functions**:
- *
- * ```js
- * function Ss(e) { return "command" in e }
- * function As(e) { return "url" in e }
- * ```
- *
- * So the key's *presence* decides, not its value: an entry carrying
- * `command: ""` is a stdio server to Alma, and an entry carrying both keys is
- * one Alma's manager will start twice with two different shapes. Both become
- * their own report lines rather than a guess.
- *
- * **`transport` defaults to `streamable-http` and falls back to SSE** —
- * `if ("sse" === (t.transport || "streamable-http"))`, one comparison over a
- * defaulted value, which is the whole of Alma's transport negotiation: it only
- * ever uses SSE when the entry *says* so, and the fallback is a connection-time
- * behaviour rather than a second declared transport. So an entry with no
- * `transport` is a streamable-HTTP server, and an entry that says `sse` is one
- * this build's single HTTP client cannot be told apart from — the report says
- * so rather than calling it a rename.
- *
- * **`headers` and `env` were already removed by `readAlma`.** The `env` block
- * arrives as `{ NAME: null }` — the names, and no value — so this function can
- * report which variables a server needed without holding one. What it still has
- * to handle is the third channel:
- *
- * **The URL.** There is no half-measure here, and the reason is the same one
- * every source in this repository has since Qoder: a URL with its userinfo or
- * its `?access_token=` removed is a *different URL that points at nothing*, and
- * writing one would trade a credential on disk for a server that fails at
- * connect time under a report line calling the copy clean. So the server is not
- * carried across at all, the reason names which of the two shapes was found
- * without printing any of it, and `containsSecret` is `true` — nothing was
- * written, but the value the line is *about* is a credential and a future reader
- * filtering for "was anything here a secret?" should not have to re-derive it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One `mcp.json` server → this build's server shape, with every scrubbed credential channel named and the URL left out whole. */
 function planAlmaMcp(
 	raw: RawAlma,
 	items: MigrationItem[],
@@ -520,39 +383,8 @@ function isAbsolutePath(path: string): boolean {
 	return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
-/**
- * Alma's four hook events → this build's, through the shared normalizer.
- *
- * **Three of the four are the same decision at the same moment** and are renamed;
- * `app.willQuit` has no counterpart here and is not mapped to `SessionEnd`,
- * which fires when a *conversation* ends rather than when the application quits.
- * The mapping table is `ALMA_HOOK_EVENT_MAP` and it is exported from
- * `alma-home.ts` so a test can check the table rather than the prose.
- *
- * Three things do not survive the crossing, and each is a real narrowing rather
- * than a cosmetic one:
- *
- *   1. **A `chat.message.willSend` matcher is dropped.** Alma tests that event's
- *      matcher against the **message content** (`getMatchTarget`), and this
- *      build tests every matcher against `payload.tool_name`, which is empty for
- *      a prompt event — so a content pattern imported unchanged would be matched
- *      against the empty string and fire on every prompt that matches nothing at
- *      all. Dropped and counted.
- *   2. **The `enabled` flag is honoured as "not imported".** Alma's handler
- *      carries `{ command, timeout, enabled }`; a handler the user switched off
- *      stays off, and importing it would widen what runs.
- *   3. **`updatedInput` has no counterpart.** Alma lets a hook **rewrite the tool
- *      arguments or the message it is about to send** by returning
- *      `{ decision, reason, updatedInput }` on any stdout line. The block half —
- *      `decision: "block"` and exit code 2 — this build understands identically.
- *      The rewrite half does not exist here, so a hook that used it arrives as
- *      one that can block but cannot edit, and the report says so.
- *
- * **The timeout needs no conversion.** Alma's is milliseconds
- * (`r.timeout ?? 1e4`), which is this build's unit too; a converter written by
- * pattern-matching the sources that do use seconds would make a ten-second hook
- * wait ten thousand seconds. The clamp still applies at 600,000 ms.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Alma's four hook events → this build's, through the shared normalizer, with the drop rules counted. */
 function planAlmaHooks(raw: RawAlma, items: MigrationItem[], claimHooks: ClaimHooks): void {
 	if (raw.hooks === undefined) return;
 	const from = tildePath(raw.home, raw.hooksPath);
@@ -664,22 +496,8 @@ function planAlmaHooks(raw: RawAlma, items: MigrationItem[], claimHooks: ClaimHo
 	}
 }
 
-/**
- * Skills and memory.
- *
- * **A skill is copied verbatim because the two shapes are the same** — a
- * directory holding a `SKILL.md` with `name` and `description` in its
- * frontmatter — so there is no rewrite to explain.
- *
- * **Only Alma's own two roots are read**, and the report names the five it does
- * not: two shared, three foreign. That is the whole of
- * {@link almaOwnSkillRoots}'s reason for existing, and a test plans `alma` and
- * `agents` together over one shared skill to prove a file is written once.
- *
- * `MEMORY.md` is Alma's index and a file in `memory/` is an entry; both become
- * rule files with distinct names, because folding the index in with the entries
- * would assert something about it that Alma's own reader does not.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Skills and memory: a verbatim copy of Alma's own skill roots, and one rule file per memory document. */
 function planAlmaAssets(raw: RawAlma, force: boolean, items: MigrationItem[], writes: PlannedWrite[]): void {
 	collectFileWrites(
 		SOURCE,
@@ -737,15 +555,8 @@ function planAlmaAssets(raw: RawAlma, force: boolean, items: MigrationItem[], wr
 	}
 }
 
-/**
- * Everything the reader saw and this importer will not carry.
- *
- * **The lines that matter most here are the ones about things a user would
- * otherwise assume came across:** the four identity documents with no
- * equivalent, the five skill roots that are not Alma's, the forty bundled skills
- * that are the product's own, the two dormant facts about Alma's own export, and
- * the thread archive with its three traps.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Everything the reader saw and this importer will not carry, each with the reason the user is owed. */
 function planAlmaLeftovers(raw: RawAlma, items: MigrationItem[]): void {
 	if (raw.settingsProblem !== null) {
 		items.push({
@@ -950,16 +761,8 @@ function planAlmaLeftovers(raw: RawAlma, items: MigrationItem[]): void {
 	}
 }
 
-/**
- * Assemble the plan.
- *
- * Every parameter is one something below uses: `claimScalar` for the model and
- * the theme, `claimModePair` for the approval switch, `claimHooks` for the hook
- * block, and `mcpServers`/`markMcpSecret` for the one place a credential could
- * still reach a written file. **There is no `claimEnv`**, and the absence is
- * load-bearing rather than an oversight: the only environment variable Alma
- * stores a value under is an MCP server's, and those do not come across.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Assemble the plan. There is no `claimEnv`, and the absence carries the decision. */
 export function planAlma(
 	raw: RawAlma,
 	items: MigrationItem[],

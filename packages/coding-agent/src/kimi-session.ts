@@ -1,53 +1,6 @@
-/**
- * Kimi Code session transcripts (`$KIMI_CODE_HOME/sessions`).
- *
- * A Kimi Code session is a directory per conversation, and inside it one
- * `agents/<agentId>/wire.jsonl` per agent: an append-only journal of everything
- * that shaped the agent's context. The transcript read here is the journal, not
- * the context — the two differ, and the difference is the whole difficulty of
- * this module.
- *
- * The context is what the model was sent: `context.apply_compaction` throws the
- * prefix away and keeps a summary, `context.undo` takes a rewind back, and
- * `context.clear` empties it. The journal keeps every one of those records plus
- * the messages they discarded, in order, which is why Kimi's own reader rebuilds
- * the context by *folding* the journal (`agent/replayBuilder/fold.ts`) instead
- * of reading it. This module mirrors that fold rather than inventing a reading:
- * the boundary an imported session resumes from has to be the boundary Kimi
- * itself would resume from, or the import is a summary of a conversation the
- * user never had.
- *
- * Concretely, the fold's rules are reproduced here one for one:
- *
- *   - a message appended while a tool result is still outstanding waits behind
- *     it (`appendMessage`'s deferral), because the journal can deliver a user
- *     message mid-tool-run and the context never holds it in that order;
- *   - `step.begin` opens an assistant message, `content.part` fills it and
- *     `tool.call` adds a call to it, so an assistant turn is several records;
- *   - a call with no result by the time the step ends is closed with an error
- *     result (`TOOL_INTERRUPTED_ON_RESUME_OUTPUT` there), which is what keeps an
- *     interrupted turn from losing both halves of its pair;
- *   - `context.undo` walks back over *real user inputs* — skipping injections
- *     and stopping at a compaction summary — and the messages it removed leave
- *     the journal too;
- *   - `context.clear` empties the context and leaves the journal alone, so a
- *     cleared session still imports with its whole transcript;
- *   - `context.apply_compaction` replaces the context with the summary (plus the
- *     legacy kept tail, when the record is in the old shape) and binds that
- *     summary to the `full_compaction.begin` record already in the journal.
- *
- * What this reader does *not* do is as deliberate. Reasoning that arrives only
- * encrypted is counted and dropped rather than carried as a signature this build
- * cannot vouch for; audio and video parts, tool displays and every bookkeeping
- * record (`turn.prompt`, `llm.request`, `usage.record`, the goal and permission
- * records) are left behind, none of which the model ever saw as content. And a
- * journal whose records cannot be folded at all — a `content.part` for a step
- * that was never opened — is refused rather than half-read, because a reader
- * that guesses there is a reader that imports a prefix the source itself
- * dropped.
- *
- * Nothing here writes, and nothing outside `<root>/sessions` is opened.
- */
+// Kimi Code's session journal at `$KIMI_CODE_HOME/sessions`: the fold Kimi's own
+// replay applies to a conversation, and everything this reader refuses to guess.
+// Long-form design notes: docs/dev/migration-sources.md
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
@@ -119,31 +72,8 @@ const WIRE_HEAD_BYTES = 64 * 1024;
 /** The protocol this reader understands; a wire newer than it is reported. */
 const KNOWN_WIRE_PROTOCOL = "1.5";
 
-/**
- * Every session Kimi's own list would show.
- *
- * The walk is the authority on what exists, and `<root>/session_index.jsonl` is
- * not: it is an append log of `{sessionId, sessionDir, workDir}` lines that also
- * holds deletions and, as the tool's own reader notes, entries pointing outside
- * the sessions tree. It is therefore read only to attribute a working directory,
- * and only for a line whose `sessionDir` is the directory the walk actually
- * found — a stale line must not place a conversation in a project it never ran
- * in.
- *
- * Three things are skipped, each for its own reason:
- *
- *   - a child session (`custom.child_session_kind === "child"`), which is a
- *     subagent conversation spawned for a task rather than one the user had;
- *     Kimi writes it beside its parent, with both keys, so the marker is exact;
- *   - every agent's journal but the main agent's, counted as subagent threads:
- *     a session's `agents/` directory holds one wire per agent, and importing
- *     each would import the same conversation several times over;
- *   - a directory that is neither a session nor meant to be one (no state file
- *     and no `agents/`) is passed over in silence, because a note about
- *     something the user never had is a note about nothing. A directory with an
- *     `agents/` directory but no readable state is a *broken* session, and that
- *     is counted.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Every session Kimi's own list shows, with each skip counted for its own reason. */
 export function listKimiSessions(root: string): KimiListing {
 	const sessions: KimiSessionFile[] = [];
 	const counts = new Map<string, number>();
@@ -231,15 +161,8 @@ interface KimiAgent {
 	type: string;
 }
 
-/**
- * The agents of a session: what `state.agents` names, plus any directory under
- * `agents/` it does not.
- *
- * Both directions are needed. A state file written before an agent was
- * registered would leave a journal nobody lists; a state file that lost its
- * agents map (the tool's own reader calls this the empty-inventory case) would
- * hide every journal on disk.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The agents of a session: what the state file names, plus any directory under `agents/` it does not. */
 function listAgents(agentsDir: string, state: Record<string, unknown> | null): KimiAgent[] {
 	const out = new Map<string, KimiAgent>();
 	for (const [id, meta] of Object.entries(asRecord(state?.agents) ?? {})) {
@@ -269,28 +192,8 @@ function isSafeAgentId(id: string): boolean {
 	return /^[A-Za-z0-9._-]+$/.test(id) && id !== "." && id !== "..";
 }
 
-/**
- * Which agent's journal is the conversation.
- *
- * The tool resolves it as the literal `agents/main/wire.jsonl`: the engine
- * registers exactly that id as the session's `main` agent
- * (`sessionLifecycleService`) and its own readers — the CLI's replay
- * (`agents['main']`) and the viewer's route (which defaults to `main` and
- * refuses when there is none) — name nothing else. So the agent named `main`
- * comes first here too.
- *
- * The rest exists so a session whose main journal is not on disk is imported
- * rather than lost, and it is a ranking of *kinds* rather than knowledge:
- * an `independent` agent has no parent (the viewer's own disk-only inventory
- * labels every non-main agent that way when `state.json` is unreadable), so its
- * journal is a conversation of its own, where a `sub`'s is a thread of the
- * session's. Last comes the only agent with a journal at all, for a session old
- * enough to predate the field.
- *
- * Everything else is a sub-thread, and the count travels to the report rather
- * than being silently dropped: a user who ran subagents should be told their
- * transcripts stayed behind.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Which agent's journal is the conversation: `main` first, the rest ranked by kind. */
 function chooseAgent(agents: KimiAgent[], agentsDir: string): { agentId: string; others: number } | null {
 	for (const type of ["main", "independent"]) {
 		const ofType = agents.filter((agent) => agent.type === type);
@@ -343,23 +246,8 @@ function sessionTitle(state: Record<string, unknown> | null): string {
 	return firstText(asText(state?.title)) || firstText(asText(state?.lastPrompt));
 }
 
-/**
- * `session_index.jsonl` as `sessionDir → workDir`, for the entries whose
- * `sessionDir` is the directory the walk found.
- *
- * The file is an append log, so it holds lines for sessions that are gone (a
- * deletion is a line too), lines a hand edited, and lines for a session that was
- * copied into another workspace — this tool's own legacy migration copies session
- * directories between buckets, which is the one way two lines can name one id.
- * A prompt history imported under the wrong project is worse than one left
- * behind, so an entry is used only when its `sessionDir` is the directory the
- * walk actually found, and one whose basename is not the id its line claims is
- * refused outright. That is stricter than the tool's own reader, which uses the
- * index to *find* a session and therefore has to accept any line whose directory
- * exists and lies under `<root>/sessions`; keying by the directory is what this
- * reader can afford, because it already knows which directory it is reading and
- * only wants the project name that goes with it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `session_index.jsonl` as `sessionDir → workDir`, only for entries the walk can vouch for. */
 function readSessionIndex(root: string): Map<string, string> {
 	const out = new Map<string, string>();
 	const text = readTextOrNull(join(root, "session_index.jsonl"));
@@ -384,15 +272,8 @@ function projectKey(path: string): string {
 	return caseInsensitivePaths ? slashed.toLowerCase() : slashed;
 }
 
-/**
- * What the first records of a wire say about the session.
- *
- * A session whose state file was written by an older release can carry no `cwd`,
- * and the wire's own `config.update` is then the only place the project is
- * named. Only the first {@link WIRE_HEAD_BYTES} are read: the record is written
- * when the session starts, so a wire that names its directory later than that is
- * reported as having none rather than read to the end during a listing.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** What the first records of a wire say about the session: the `cwd` fallback and the start time. */
 function readWireHead(path: string): { cwd: string; createdAt: number } {
 	let text: string;
 	try {
@@ -452,15 +333,8 @@ interface PendingCall {
 	name: string;
 }
 
-/**
- * Read one session end to end.
- *
- * Returns `{ error }` only when the journal cannot be folded — a record that
- * names a step the journal never opened, which is a journal the tool itself
- * refuses to replay. Every other surprise inside the file is a line this reader
- * counts and leaves behind, which is what keeps one unknown record from costing
- * the user a whole conversation.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read one session end to end; an error only when the journal cannot be folded. */
 export function readKimiSession(session: KimiSessionFile): KimiRead | { error: string } {
 	const text = readTextOrNull(session.path);
 	if (text === null) return { error: "session transcript could not be read" };
@@ -488,15 +362,8 @@ export function readKimiSession(session: KimiSessionFile): KimiRead | { error: s
 		deferred = [];
 		push(queued);
 	};
-	/**
-	 * Close the steps the journal left open, so nothing imports as still streaming.
-	 *
-	 * A step can be left open three ways: the process died before its `step.end`,
-	 * the journal ends there, or a `context.clear`/`undo`/compaction dropped the
-	 * step from the context while its records stayed in the journal. The source
-	 * says nothing about how any of those ended, so the reason is derived from what
-	 * the step holds — the same reading the ZCode and dsh readers make.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Close the steps the journal left open, so nothing imports as a live turn. */
 	const sealOpenSteps = (): void => {
 		for (const step of openSteps.values()) {
 			if (step.message.role !== "assistant") continue;
@@ -783,21 +650,8 @@ export function readKimiSession(session: KimiSessionFile): KimiRead | { error: s
 	const repaired = repairToolPairing(messages);
 	bump(counts, "unpaired tool call or result", repaired.dropped);
 
-	// Boundaries keep their place among the messages: each is carried as the number
-	// of messages that came before it, and the messages are laid out in one pass so
-	// that index is exact. If the repair pass dropped anything, every boundary moves
-	// to the end instead of landing mid-transcript — a boundary whose suffix no
-	// longer exists would be worse than a late one, and that is the same trade the
-	// ZCode and dsh readers make.
-	//
-	// Two boundaries can share a position: a compaction's records land where the
-	// records of one before it already stand, because a rewind between them removed
-	// every message that would have separated them. They are inserted in the order
-	// the journal wrote them — each position carrying the count of messages before
-	// it, plus the boundaries already placed — so the newest is the last, which is
-	// the one a resumed session starts from: the target reads its context from the
-	// final boundary onward, and the newest summary is the one that stands for
-	// everything the older ones described.
+	// Boundaries keep their place among the messages, by the count of messages before each one.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const entries: KimiEntry[] = repaired.messages.map((message) => ({ kind: "message", message }));
 	const markers: Array<{ after: number; entry: KimiEntry }> = [];
 	let seen = 0;
@@ -834,16 +688,8 @@ export function readKimiSession(session: KimiSessionFile): KimiRead | { error: s
 /** The fold's stand-in for a tool result the journal never recorded. */
 const INTERRUPTED_OUTPUT = "No result was recorded for this tool call: the source session ended while it was running.";
 
-/**
- * The compaction a summary is still waiting for: the `full_compaction.begin`
- * placeholder a later `context.apply_compaction` fills in.
- *
- * The fold patches only the *last* record of its replay and gives up when a
- * message was appended between the two records, which loses the summary from its
- * replay (the context keeps it). Searching back for the open placeholder instead
- * binds the summary to the record that opened it, which is the placement the
- * fold's own patch is trying to achieve.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The `full_compaction.begin` placeholder a later summary fills in. */
 function openCompaction(stream: KimiStreamItem[]): KimiStreamItem | undefined {
 	for (let i = stream.length - 1; i >= 0; i--) {
 		const item = stream[i];
@@ -852,18 +698,8 @@ function openCompaction(stream: KimiStreamItem[]): KimiStreamItem | undefined {
 	return undefined;
 }
 
-/**
- * A `ContextMessage` as a labunbun message, or null when nothing can carry it.
- *
- * The origins the tool itself calls "real user input" are the ones imported:
- * what the user typed, and the two slash-command activations that were typed at
- * the prompt. Everything else the harness appends to its own context — injected
- * reminders, shell lines, task notifications, cron and hook output, system
- * triggers, the summary the context starts from — is a message the target
- * renders for itself on resume, and importing the source's copy would send two
- * of them. Those are counted by what they were, so the report says what happened
- * to the user's `!` commands rather than pretending they were never there.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A `ContextMessage` as a labunbun message, or null when nothing can carry it. */
 function kimiMessage(
 	raw: Record<string, unknown> | null,
 	counts: Map<string, number>,
@@ -955,14 +791,8 @@ function summaryItem(summary: string, time: number): KimiMessage {
 	};
 }
 
-/**
- * `isRealUserInput`, the tool's own predicate: what an `undo` counts.
- *
- * An origin the journal did not state counts — an old record omits it, and a
- * message the user typed is more likely than one the harness appended by
- * accident. A slash-command activation counts only when the trigger says the
- * user typed it (`user-slash`); a model-invoked skill is the model's own step.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `isRealUserInput`, the tool's own predicate: what an `undo` counts. */
 function isRealUserInput(origin: string, trigger: string): boolean {
 	if (origin === "" || origin === "user") return true;
 	if (origin === "skill_activation" || origin === "plugin_command") return trigger === "user-slash";
@@ -1019,14 +849,8 @@ function assistantContent(
 	return content;
 }
 
-/**
- * A tool call of an appended message, in either spelling the journal has used.
- *
- * Version 1.0 wrote `{function: {name, arguments}}` and the tool migrates those
- * records forward on read (`wire/migration/v1.1.ts`); reading both spellings
- * here means a journal from before the migration imports without the reader
- * having to know which release wrote it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A tool call of an appended message, in either spelling the journal has used. */
 function toolCall(raw: unknown): ToolCall | null {
 	const block = asRecord(raw);
 	if (block === null) return null;
@@ -1038,14 +862,8 @@ function toolCall(raw: unknown): ToolCall | null {
 	return { type: "toolCall", id, name, arguments: JSON.stringify(parseArguments(toolCallArguments(args))) };
 }
 
-/**
- * A call's arguments as text to be parsed.
- *
- * The journal writes `args` as the tool input object and version 1.0 wrote the
- * model's raw string, so both are accepted; anything else is JSON-encoded the
- * way the fold does it (`JSON.stringify(event.args)`) before the shared
- * normaliser turns it into an object.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A call's arguments as text to be parsed. */
 function toolCallArguments(args: unknown): string {
 	if (args === undefined || args === null) return "";
 	if (typeof args === "string") return args;
@@ -1128,15 +946,8 @@ function summaryText(record: Record<string, unknown>): string {
 /** Stand-in for a tool name the source did not record; replaced when a call names it. */
 const UNKNOWN_TOOL_NAME = "unknown";
 
-/**
- * Fill in a tool result's tool name from the call it answers, in place: the
- * journal records the name on the call, and a result that renders unnamed is a
- * result the user cannot recognise.
- *
- * In place rather than as a new array, because the messages are already held by
- * the transcript's entries and rebuilding the array would leave the imported
- * entries pointing at the unnamed originals.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Fill in a tool result's tool name from the call it answers, in place. */
 function fillToolNames(messages: AgentMessage[]): void {
 	const names = new Map<string, string>();
 	for (const message of messages) {
@@ -1150,19 +961,8 @@ function fillToolNames(messages: AgentMessage[]): void {
 	}
 }
 
-/**
- * How a step ended, in the target's vocabulary.
- *
- * The values are the source's own, normalized by its loop before they reach the
- * journal (`normalizeFinishReason`): `tool_calls` becomes `tool_use`,
- * `completed` becomes `end_turn` and `truncated` becomes `max_tokens`.
- *
- * `filtered` is a provider's safety filter cutting the answer off, which is the
- * target's `refusal` — a deliberate stop rather than a failure of the request,
- * and one the user has to be able to see. A step with no reason at all (an older
- * journal, or one cut off before its `step.end`) is read from its content, the
- * way the readers of the sources that record no reason do.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** How a step ended, in the target's vocabulary. */
 function stopReasonOf(reason: string, content: AssistantContent[]): StopReason {
 	if (reason === "tool_use") return "toolUse";
 	if (reason === "end_turn") return "stop";

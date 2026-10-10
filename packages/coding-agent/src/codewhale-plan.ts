@@ -1,78 +1,6 @@
-/**
- * Codewhale's user state in the target's shape: the permission posture, the
- * permission rules, the MCP servers, the skills, the instruction documents and
- * everything the reader saw that this importer will not carry.
- *
- * **The headline is that `sandbox_mode` needs no translation at all.**
- * `crates/config/src/lib.rs:3799-3804`:
- *
- * ```rust
- * pub const CONFIG_TOML_SANDBOX_MODES: &[&str] = &[
- *     "read-only", "workspace-write", "danger-full-access", "external-sandbox",
- * ];
- * ```
- *
- * Two of those three-and-a-bit are **byte-identical to this build's own
- * vocabulary** (`packages/agent/src/types.ts:49`: `SANDBOX_MODES =
- * ["workspace-write", "danger-full-access"]`). That is not a coincidence to be
- * waved at — it is the reason Codewhale is worth importing carefully: the
- * confinement axis maps 1:1 and the *approval* axis does not, so the pair has to
- * be read apart rather than taken as one value.
- *
- * **`approval_policy` has two vocabularies in two files, and only one of them is
- * `config.toml`'s.** `crates/config/src/lib.rs:3794-3796` gives the root key's
- * five: `on-request`, `untrusted`, `never`, `auto`, `suggest`. The doc comment on
- * `check_config_toml_choice` (`:3822-3825`) spells out the trap by name:
- * "`use-tui-default`, `ask`, `auto-review` and `full-access` are settings.toml
- * values for the /settings editor; **config.toml does not read them**." And
- * `settings_schema.rs:257-272` confirms which values the editor offers — and its
- * trailing comment is the load-bearing one: "`never` is a managed-policy value
- * only: it is accepted from config.toml and shown read-only, never offered by the
- * editor." So a migration that read `approval_policy` out of `settings.toml` with
- * `config.toml`'s table would map `ask` and `full-access` to nothing at all.
- *
- * **Two map, one maps to nothing, and the one that maps to nothing is the
- * dangerous one.** `AskForApproval` (`crates/execpolicy/src/lib.rs:209-227`) is
- * the type the policy resolves to:
- *
- * ```rust
- * UnlessTrusted,                       // trusted prefix skips the ask
- * OnFailure,                           // allow, and ask only after a failure
- * OnRequest,                           // always require approval
- * Reject { sandbox_approval, rules, mcp_elicitations },
- * Never,                               // never require approval; forbid what would need it
- * ```
- *
- *   - `auto` → `agent`. The loosest thing Codewhale has
- *     (`approval_policy_rank` at `crates/config/src/lib.rs:3873-3881` gives it 0,
- *     the loosest rank, and the doc above it says "Full Access is looser than
- *     every project policy, so its baseline is the loosest ranked policy
- *     (`auto`)"). The sandbox half is claimed from `sandbox_mode` rather than
- *     assumed — see {@link planCodewhaleModes}.
- *   - `on-request` / `untrusted` / `suggest` → `ask`. Three names for one posture;
- *     `approval_policy_rank` puts all three at 1 beside `suggested` and `deny`'s
- *     opposites, and the TUI's own bridge says so directly
- *     (`crates/tui/src/config.rs:4426-4434`: `"ask" | "suggest" | "on-request" |
- *     "untrusted" => Some("on-request")`).
- *   - `never` → **nothing.** `AskForApproval::Never` is "never require approval;
- *     forbid commands that would need it" — it never asks *and* denies what it
- *     will not approve. Nothing here does both: `ask` asks, `agent` runs. Mapping
- *     it to either would change what runs in one direction or the other, so it is
- *     named and skipped. Importing the absence would be safe and importing a
- *     guess would not.
- *   - `settings.toml`'s `ask` → `ask`, `full-access` → `agent` with the sandbox
- *     unconfined, `auto-review` and `use-tui-default` → nothing.
- *
- * **Nothing carries a credential, and the four shapes that could have are all
- * named.** `config.toml` holds them at `[providers.*].api_key` (a
- * credential-shaped key, caught by name), `[providers.*].base_url` (**a URL, and
- * a URL can carry one in its userinfo or query**), `[providers.*].http_headers`
- * (**the values are tokens under a key that is not credential-shaped**),
- * `[search].api_key`, `[vision_model].api_key`, `[lifecycle_outbox].webhook_token`,
- * and a top-level `sandbox_api_key`. The reader has already dropped every one of
- * them by the time this file runs; see {@link RawCodewhale.skipped}. Two more
- * channels are the MCP `headers` / `env` blocks and a `url` carrying a credential.
- */
+// Codewhale's user state in the target's shape: the permission posture, the
+// permission rules, the MCP servers, the skills and the instruction documents.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { join } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
@@ -107,37 +35,12 @@ import type {
 } from "./migrate-types.ts";
 import { resolveModelReference } from "./migrate-types.ts";
 
-/**
- * This source's id, spelled once.
- *
- * The union and every table keyed by it live in `migrate-types.ts`; this is a
- * plain literal with no cast, and the only thing it buys is one spelling rather
- * than eleven. **The call lives in `migrate.ts`** — see that file's arm for
- * `codewhale`, which is where this planner is actually reached from.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** This source's id, spelled once. */
 const SOURCE: MigrationSourceId = "codewhale";
 
-/**
- * `config.toml`'s `approval_policy` → this build's permission mode.
- *
- * **Only the `config.toml` vocabulary appears here, and that is the point.**
- * `CONFIG_TOML_APPROVAL_POLICIES` (`crates/config/src/lib.rs:3794-3796`) is
- * `["on-request", "untrusted", "never", "auto", "suggest"]`; the four values the
- * `settings.toml` editor uses (`use-tui-default`, `ask`, `auto-review`,
- * `full-access`) are a **different** table and the product says in as many words
- * that `config.toml` does not read them
- * (`crates/config/src/lib.rs:3822-3825`). Two tables rather than one merged list
- * is the difference between a mapping and a guess.
- *
- * The second table is {@link CODEWHALE_SETTINGS_APPROVAL_POLICIES}.
- *
- * **`never` maps to nothing on purpose**, and it is the only member of the
- * five that does. See the header: `AskForApproval::Never` denies what it will not
- * approve, and neither `ask` nor `agent` does both.
- *
- * Exported for the row count, not for the values: a row added here without a line
- * in the mapper test's table is an import whose claim nobody has checked.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `config.toml`'s `approval_policy` → this build's permission mode. */
 export const CODEWHALE_APPROVAL_POLICIES: Record<string, PermissionMode | undefined> = {
 	auto: "agent",
 	"on-request": "ask",
@@ -146,19 +49,8 @@ export const CODEWHALE_APPROVAL_POLICIES: Record<string, PermissionMode | undefi
 	never: undefined,
 };
 
-/**
- * `settings.toml`'s `approval_policy` → this build's permission mode.
- *
- * `crates/config/src/settings_schema.rs:257-272`, the four `SettingOption`s the
- * `/settings` editor offers. **`use-tui-default` and `auto-review` map to
- * nothing:**
- *
- *   - `use-tui-default` is the *absence* of a choice, so importing it would write
- *     a posture the user never stated;
- *   - `auto-review` is a classifier that approves the calls it judges routine
- *     (`crates/tui/src/config.rs:4426-4434` groups it with `auto`), and no mode
- *     here does that — `ask` puts a person in the loop and `agent` runs everything.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `settings.toml`'s `approval_policy` → this build's permission mode. */
 export const CODEWHALE_SETTINGS_APPROVAL_POLICIES: Record<string, PermissionMode | undefined> = {
 	ask: "ask",
 	"full-access": "agent",
@@ -166,24 +58,8 @@ export const CODEWHALE_SETTINGS_APPROVAL_POLICIES: Record<string, PermissionMode
 	"use-tui-default": undefined,
 };
 
-/**
- * `config.toml`'s `sandbox_mode` → this build's sandbox, and what to do about the
- * one value with no counterpart.
- *
- * **Two of the four map 1:1**, because `SANDBOX_MODES` here
- * (`packages/agent/src/types.ts:49`) and `CONFIG_TOML_SANDBOX_MODES` there are the
- * same two strings. The other two do not:
- *
- *   - `read-only` — **nothing.** This build has no read-only sandbox; the two
- *     values are `workspace-write` and `danger-full-access`. Claiming
- *     `workspace-write` for it would **widen** a confinement setting on the
- *     user's behalf, and widening is the one direction a migration must not move
- *     in on its own judgement. A user who wants it sets `/mode` after.
- *   - `external-sandbox` — **nothing**, and for a second reason: it routes
- *     `exec_shell` through an external backend's HTTP API at `sandbox_url` with a
- *     bearer token (`crates/tui/src/config.rs:3137-3141`), and this build has no
- *     such backend. There is nothing to point it at.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `config.toml`'s `sandbox_mode` → this build's sandbox, and what to do about the value with no counterpart. */
 export const CODEWHALE_SANDBOX_MODES: Record<string, SandboxMode | undefined> = {
 	"workspace-write": "workspace-write",
 	"danger-full-access": "danger-full-access",
@@ -199,14 +75,8 @@ export const CODEWHALE_CONFIG_SANDBOX_VALUES: readonly string[] = [
 	"external-sandbox",
 ];
 
-/**
- * Top-level keys of `config.toml` this mapper accounts for.
- *
- * Read against the reader's header: `providers` is walked for its
- * `base_url`, `model` and `context_window`; `approval_policy` and `sandbox_mode`
- * are the mode pair; `model` and `default_text_model` are the model. Everything
- * else is named by the closing aggregate line rather than silently left behind.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Top-level keys of `config.toml` this mapper accounts for. */
 const CODEWHALE_CONFIG_HANDLED = new Set([
 	"providers",
 	"approval_policy",
@@ -250,25 +120,8 @@ const CODEWHALE_SANDBOX_REASONS: Record<string, string> = {
 		"not a value Codewhale's config.toml accepts, so it never confined anything here; the sandbox is left as it is",
 };
 
-/**
- * The two mode axes, read apart and claimed together.
- *
- * **Both halves come from separate keys, and neither is claimed alone.** This is
- * the property `claimModePair` exists to enforce, and it is enforced here by hand
- * for the reason given at the claim site: Codewhale states `approval_policy` and
- * `sandbox_mode` as two independent root keys
- * (`crates/config/src/lib.rs:927-928`), so a `claimModePair` call would put one
- * sentence about a single value onto both report lines and both would be wrong.
- * `antigravity-plan.ts` makes exactly this call for exactly this reason.
- *
- * **Which sandbox an `auto` approval policy gets is a real question and this is
- * the answer.** `auto` is Codewhale's loosest policy and the file may say nothing
- * about confinement at all. Claiming `agent` alone would leave a session that
- * auto-approves everything inside a workspace sandbox — a combination no user
- * chose — so when `sandbox_mode` is absent **neither** key is claimed. That is the
- * `t3-plan.ts` argument: writing the strictest posture because the schema would
- * have supplied it is the fail-open failure, and so is writing the loosest.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The two mode axes, read apart and claimed together. */
 function planCodewhaleModes(raw: RawCodewhale, items: MigrationItem[], claimScalar: ClaimScalar): void {
 	const config = raw.config;
 	const settings = raw.settings;
@@ -346,22 +199,7 @@ function planCodewhaleModes(raw: RawCodewhale, items: MigrationItem[], claimScal
 		return;
 	}
 
-	// **Claimed per field, not through `claimModePair`, and the reason is the same
-	// one `antigravity-plan.ts` gives for the same decision.** `claimModePair` writes
-	// one shared detail onto both keys, and it is written for a source that has *one*
-	// value doing two jobs: its sandbox note says either "the source's mode also meant
-	// no confinement" or "the source had no separate confinement setting". **Codewhale
-	// has two separate root keys for this** — `approval_policy` and `sandbox_mode`, both
-	// attested in `ConfigToml` (`crates/config/src/lib.rs:927-928`) — so both of those
-	// sentences would be false here, and a report line is not the place to be
-	// approximately right about where a confinement setting came from.
-	//
-	// What `claimModePair` buys — that a mode cannot be written without a sandbox
-	// beside it — is kept, and it is enforced above: when `sandbox_mode` is absent
-	// **neither** key is claimed.
-	// **Labelled with the file the value is in, not the one the pair usually is.**
-	// `settings.toml` carries a posture of its own and a report line pointing at
-	// `config.toml` for a value that is not in it sends the user to the wrong file.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const modeFrom =
 		typeof approval === "string"
 			? `${tildePath(raw.home, raw.configPath)} → approval_policy`
@@ -387,21 +225,8 @@ function planCodewhaleModes(raw: RawCodewhale, items: MigrationItem[], claimScal
 	);
 }
 
-/**
- * `config.toml`'s model → this build's `model`.
- *
- * **`default_text_model` is read only when `model` is absent**, and the reason is
- * a doc comment rather than a guess: `default_text_model` is described as the
- * "TUI-compatible default DeepSeek model" (`crates/config/src/lib.rs:888`) while
- * `model` is the root selector. An install that set both means both, and the root
- * one is the closer analogue of what this build stores — so it wins and the other
- * is named.
- *
- * **A model that resolves to nothing here is reported, not written.**
- * `resolveModelReference` is the shared check and a model this build does not
- * carry becomes a reported skip rather than a `model` value that would fail at
- * the first request.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `config.toml`'s model → this build's `model`. */
 function planCodewhaleModel(raw: RawCodewhale, items: MigrationItem[], claimScalar: ClaimScalar): void {
 	if (raw.config === null) return;
 	const label = tildePath(raw.home, raw.configPath);
@@ -438,38 +263,8 @@ function planCodewhaleModel(raw: RawCodewhale, items: MigrationItem[], claimScal
 	claimScalar(SOURCE, "model", resolved, `${label} → model`, "taken from Codewhale's root `model` selector");
 }
 
-/**
- * `permissions.toml`'s rules → this build's permission lists.
- *
- * **The document is small and typed, which is unusual enough to be worth saying.**
- * `PermissionsToml` (`crates/config/src/lib.rs:625-630`) is
- * `{ rules: Vec<ToolAskRule> }` and `ToolAskRule`
- * (`crates/execpolicy/src/lib.rs:112-137`) is six fields, none of them a
- * credential — so unlike everything else in `config.toml` this file is carried
- * whole.
- *
- * **Three of the six fields have no counterpart here and each costs a rule:**
- *
- *   - `action = "ask"` — the forced-approval rule. This build's permission lists
- *     are `allow` and `deny`; there is no "always ask" list, so an ask rule would
- *     have to become an allow rule (widening) or a deny rule (narrowing past what
- *     the user wrote). Neither is the rule they wrote.
- *   - `tool` — the rule names a Codewhale tool (`exec_shell`, `edit_file`), and
- *     this build's rule grammar has no tool field: a rule is matched on the
- *     command line. A rule with **no** `command` therefore has nothing to match
- *     on and is dropped.
- *   - `workspace` — pins a rule to one repo. This build's rules are global, so a
- *     workspace-scoped rule imported as global would apply everywhere, which is a
- *     widening.
- *
- * **`command_exact` is the subtle one and it goes the safe way.**
- * `crates/execpolicy/src/lib.rs:120-122`: "Approval-card remembered grants set
- * this so approving one safe command cannot silently authorize a later invocation
- * with extra arguments." A prefix rule for `git status` matches `git status --amend`
- * here; an exact rule does not. So an **exact** rule is imported as its own text
- * and reported as narrower-or-equal, while a rule with a `path` but no `command`
- * has no command text at all and is named.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `permissions.toml`'s rules → this build's permission lists. */
 function planCodewhalePermissions(
 	raw: RawCodewhale,
 	items: MigrationItem[],
@@ -552,39 +347,8 @@ function planCodewhalePermissions(
 	}
 }
 
-/**
- * One MCP server from `mcp.json`'s `servers` → this build's server shape.
- *
- * **The transport is decided the way the product's own fields describe it.**
- * `McpServerConfig` (`crates/tui/src/mcp.rs:562-658`) has both `command: Option<String>`
- * and `url: Option<String>` with **no `#[serde(rename_all)]`**, so both spellings
- * are the bare names. Three cases:
- *
- *   - `command` present → stdio, `args`/`env`/`cwd` alongside it. An **empty**
- *     `command` string still selects stdio, because the field is an `Option<String>`
- *     and `Some("")` is a value; reading "absent when empty" would reclassify a
- *     malformed entry as a transport-less one and give the wrong reason.
- *   - `url` present, `command` absent → HTTP, with `transport` deciding between
- *     streamable HTTP and legacy SSE. `crates/tui/src/mcp.rs:578-582` says the
- *     default is Streamable HTTP with an SSE fallback, and `transport: "sse"`
- *     forces the legacy one.
- *   - both, or neither → named, because picking one would be picking for it.
- *
- * **`disabled` and `enabled` are both real and independent** (`:594`, `:596`, with
- * `enabled` defaulting to `true`). `disabled: true` is the switch-off and the
- * server is not imported — importing a server the user turned off would add one to
- * the target that they had deliberately removed.
- *
- * **Every credential channel is dropped and the names reported**, and none of the
- * values reaches this function: the reader has already deleted them and written
- * one `skipped` line per name. See {@link CODEWHALE_MCP_CREDENTIAL_KEYS}.
- * `env_headers` is the fourth and it is the mildest: the file holds an environment
- * variable *name*, and this build's server config has no field for that either.
- *
- * **A `url` carrying a credential loses the whole server**, for the reason
- * `qoder-plan.ts` argues at length: a URL with its userinfo or its
- * `?access_token=` removed is a *different URL* that points at nothing.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One MCP server from the MCP document → this build's server shape. */
 function planCodewhaleMcp(
 	raw: RawCodewhale,
 	items: MigrationItem[],
@@ -826,24 +590,8 @@ function planCodewhaleMcp(
 	}
 }
 
-/**
- * Codewhale's `HookEvent` names, and the ones this build has a hook for.
- *
- * `HookEvent` is `#[serde(rename_all = "snake_case")]`
- * (`crates/tui/src/hooks/config.rs:26-27`) and `ALL_HOOK_EVENTS` (`:81-97`)
- * declares **fifteen** of them; `as_str` (`:117-135`) is the persisted spelling
- * and the two agree exactly. Seven of the fifteen have a counterpart here and
- * nine do not, and the nine are the interesting half: a hook under an event this
- * build does not fire would be imported and never run, which is a silent loss
- * dressed as a successful migration.
- *
- * **The nine are spelled out rather than left to a default branch**, so the
- * table's shape says "this is the whole list" and a variant added upstream is a
- * diff here rather than a silent no-op.
- *
- * Exported for the row count, for the same reason
- * {@link CODEWHALE_APPROVAL_POLICIES} is.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Codewhale's `HookEvent` names, and the ones this build has a hook for. */
 export const CODEWHALE_HOOK_EVENTS: Record<string, string | undefined> = {
 	session_start: "SessionStart",
 	session_end: "SessionEnd",
@@ -870,43 +618,8 @@ export const CODEWHALE_HOOK_EVENTS_THIS_BUILD_RUNS: readonly string[] = CODEWHAL
 	(name) => CODEWHALE_HOOK_EVENTS[name] !== undefined,
 );
 
-/**
- * `[hooks]` → this build's hook config, through the shared normalizer.
- *
- * **The block is reassembled into the Claude shape rather than reimplemented**,
- * because `normalizeClaudeHooks` is the thing that knows this build's event names
- * and how it clamps a timeout. Codewhale's entry is already very close — an event,
- * a shell command, an optional condition, a timeout — and what it has that this
- * build's entry does not is `background` and `continue_on_error`.
- *
- * **`background` is dropped** and this is the safe direction: this build's handler
- * has no such field, so an imported hook runs synchronously and the turn waits.
- *
- * **`continue_on_error` is dropped, and that is a widening**, so it is counted and
- * said rather than left implicit: this build always continues past a failing hook,
- * so a Codewhale hook that set the flag to `false` — which meant "abort the turn" —
- * becomes one that does not. The count is what keeps the tally honest.
- *
- * **`condition` decides importability, and it is the sharpest field here.**
- * `HookCondition` (`crates/tui/src/hooks/config.rs:217`) is `Always`, `ToolName
- * { name }`, `ToolCategory { category }`, `Mode { mode }` and `ExitCode { code }`:
- *
- *   - `always` (and an absent condition) maps onto "no matcher" and imports;
- *   - `tool_name` maps onto this build's **matcher**, which is what a matcher is;
- *   - `exit_code`, `tool_category` and `mode` are **skipped, not approximated**. A
- *     matcher is a subject pattern; "only when the exit code was 2" is a different
- *     predicate, and `tool_category` / `mode` name Codewhale's own taxonomies
- *     (`"safe"`, `"file_write"`, `"shell"`; `"plan"`, `"agent"`, `"yolo"`) whose
- *     meanings are not written down anywhere this build can check.
- *
- * **A hook skipped for its condition is reported rather than dropped**, because an
- * imported hook running on the wrong predicate is worse than one that never came
- * across.
- *
- * **`[hooks].enabled = false` switches the whole table off and nothing is
- * imported.** A user who turned their hooks off has hooks that are off; importing
- * them would add a behaviour they deliberately removed.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `[hooks]` → this build's hook config, through the shared normalizer. */
 function planCodewhaleHooks(raw: RawCodewhale, items: MigrationItem[], claimHooks: ClaimHooks): void {
 	// **Two maps rather than one list of a union type**, and the reason is that the
 	// two shapes land in different places in the Claude-shaped document: a
@@ -1077,18 +790,8 @@ function isAbsolutePath(path: string): boolean {
 	return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
-/**
- * The instruction documents, the project rules and the skills.
- *
- * **Rule files and not memory entries**, for the reason `planMemoryAsRule`'s own
- * detail line states: this build merges rule files with the memory it has instead
- * of replacing it, which is what a document the agent re-reads at the top of every
- * session wants.
- *
- * **A name collision is folded into the path** rather than resolved, because two
- * documents wanting one target path is the case `planAntigravityAssets` guards
- * against and resolving it would mean picking a winner silently.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The instruction documents, the project rules and the skills. */
 function planCodewhaleAssets(raw: RawCodewhale, force: boolean, items: MigrationItem[], writes: PlannedWrite[]): void {
 	collectFileWrites(
 		SOURCE,
@@ -1171,15 +874,8 @@ function splitDir(path: string): string {
 	return index <= 0 ? path.slice(0, index + 1) : path.slice(0, index);
 }
 
-/**
- * Every name, with no truncation.
- *
- * `summarizeNames` stops at five and writes "+N more", which is right for a list of
- * server names and **wrong for the two tables this file quotes**: the whole point of
- * naming which paths fall back to `~/.deepseek` is that the user can look up the one
- * they care about, and a list that stops at five cannot answer that for the paths it
- * left out. Both tables are short, fixed, and fully readable in a report line.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Every name, with no truncation. */
 function allNames(names: string[]): string {
 	return names.join(", ");
 }
@@ -1191,25 +887,8 @@ function noFallbackPaths(): string[] {
 		.map(([name]) => name);
 }
 
-/**
- * Everything the reader saw and this importer will not carry.
- *
- * **Two of these lines are the report's most important sentences for this
- * source**, and both are facts about a competing path rather than about a file
- * that could have been read:
- *
- *   - **Codewhale ships its own Claude Code importer.** `/import-claude`
- *     (`crates/tui/src/commands/groups/config/import_claude.rs`, 305 lines, and
- *     `crates/tui/src/import_claude.rs`, 543 lines) reads `~/.claude.json` and
- *     `~/.claude/settings.json` and, on `--apply`, moves `~/.claude/CLAUDE.md` to
- *     `~/.codewhale/instructions.md`. A user who has run it has already had their
- *     CLAUDE.md moved into a file this importer reads, and the report has to say
- *     so — "the run saw a competing path and did not take it".
- *   - **Codewhale is a rename of DeepSeek-TUI.** `~/.deepseek` is a live fallback
- *     root for some readers and not for others, which is what
- *     {@link CODEWHALE_LEGACY_FALLBACK} records, and what makes the tree this
- *     import read not always the tree the user still writes to.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Everything the reader saw and this importer will not carry. */
 function planCodewhaleLeftovers(raw: RawCodewhale, items: MigrationItem[]): void {
 	// **Which root answered each document, stated plainly, including "neither".**
 	// Codewhale is two-rooted and the fallback is per-path, so a report that said
@@ -1445,37 +1124,8 @@ function planCodewhaleLeftovers(raw: RawCodewhale, items: MigrationItem[]): void
 	}
 }
 
-/**
- * Assemble the plan.
- *
- * Every parameter is one something below uses: `claimScalar` for the model and
- * for the two mode axes, `claimPermissionList` for `permissions.toml`, and
- * `mcpServers`/`markMcpSecret`/`existingMcpServers`/`force` for the one place a
- * credential could still reach a written file.
- *
- * **There is no `claimModePair`, and that absence is a decision rather than an
- * oversight.** Codewhale states `approval_policy` and `sandbox_mode` as two
- * independent root keys, so the pair is claimed per field — see
- * {@link planCodewhaleModes} for why, which is the same argument
- * `antigravity-plan.ts` makes and for the same reason: `claimModePair` writes one
- * shared detail onto both keys, and both of its sandbox sentences would be false
- * of a source that has a `sandbox_mode` of its own.
- *
- * **There is no `claimEnv`, and that absence is a fact.** The one place Codewhale
- * stores an environment variable's *value* is an MCP server's `env`, and the
- * instruction on this source is that those values do not come across; nothing else
- * in any of its documents holds one.
- *
- * **`claimHooks` is present, and finding it late is worth recording.** An earlier
- * draft of this header said Codewhale had no hooks at all, on the evidence that
- * `ConfigToml` (`crates/config/src/lib.rs:882-995`) declares no `hooks` field. That
- * is a false negative of a familiar kind: `HooksConfig` is deserialized
- * **separately** from the root config (`crates/tui/src/hooks/config.rs:379`,
- * "Configuration for hooks (loaded from config.toml)"), exactly as the TUI's own
- * `Config` is. Reading "the field is not on the struct" as "the document does not
- * exist" is the same mistake as trusting a field list for a settings file, and it
- * is corrected here rather than quietly.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Assemble the plan. */
 export function planCodewhale(
 	raw: RawCodewhale,
 	items: MigrationItem[],

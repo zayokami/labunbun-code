@@ -1,12 +1,6 @@
-/**
- * OpenCode's user state: the three merged settings documents, the provider and
- * MCP tables they hold, the instruction file, and the skill trees.
- *
- * Everything here is transcribed from the OpenCode source rather than from its
- * documentation, and the citations are to `G:\Bunttta\opencode-dev` — which is
- * the one thing that makes this source different from the other nine. Where the
- * source and a blog post disagree, this module follows the source and says so.
- */
+// OpenCode's user state: the three merged settings documents, the provider and
+// MCP tables, the instruction file, and the skill trees.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -32,23 +26,8 @@ import { parseFrontmatter } from "./skills.ts";
 /** Entry names that look like credentials, at the config root. Named; never opened. */
 const OPENCODE_CREDENTIAL_NAME = /(credential|secret|token|auth|\.env$)/i;
 
-/**
- * The config keys that changed spelling between v1 and v2, v2's name first.
- *
- * Eight of them, and they are eight of the same edit: v1 had a singular name for
- * most of what became a table in v2, and v2 made the plural the real one —
- * `provider` → `providers`, `permission` → `permissions`, `agent` → `agents`,
- * `command` → `commands`, `plugin` → `plugins`, `snapshot` → `snapshots`,
- * `attachment` → `attachments`, and `reference` → `references`. Nothing was
- * renamed in the other direction: `isV1` (`core/src/v1/config/migrate.ts:31-33`)
- * decides a document is v1 by looking for a **v1** key, so a file holding only
- * v2 names is not v1 at all and goes to the v2 engine unlowered.
- *
- * Both spellings are read, v2 first, so a file OpenCode has already migrated and
- * a file it has not both import. The spelling actually used travels to the
- * report, because a line reading `opencode.json → provider.gw` is pointing at a
- * key that is not in the file the user is looking at.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The eight config keys that changed spelling between v1 and v2, v2's name first. */
 export const OPENCODE_KEY_SPELLINGS = {
 	providers: ["providers", "provider"],
 	permissions: ["permissions", "permission"],
@@ -68,16 +47,8 @@ export function opencodeConfigSpellings(key: string): readonly string[] {
 	return [key];
 }
 
-/**
- * Where a key was found, and whether only the v2 engine reads it there.
- *
- * `v2Only` is the answer to a question a report line has to get right: whether
- * "it stays in opencode's file, which is where opencode reads it from" is true.
- * For a v1 name it is. For a v2 name in a v1-shaped file it is **not** — v2's
- * own migration rebuilds the document from a literal key list
- * (`core/src/v1/config/migrate.ts:36-72`) and every name not on it is dropped, so
- * a v2-only key left in an old file is a value OpenCode is about to delete.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Where a key was found, and whether only the v2 engine reads it there. */
 export interface OpencodeConfigKey {
 	/** The spelling the merged document actually used. */
 	spelling: string;
@@ -102,34 +73,8 @@ export function opencodeConfigValue(config: Record<string, unknown>, key: string
 	return opencodeConfigKey(config, key)?.value;
 }
 
-/**
- * The files OpenCode writes credentials into, by the root each one sits in.
- *
- * **The data root, not the config root** — which is where a reader looks first,
- * and where this importer looked until the report said "no credentials here" on a
- * machine holding two. `auth.json` is
- * `path.join(Global.Path.data, "auth.json")` (`opencode/src/auth/index.ts:10`),
- * an OAuth token per provider, written 0600 (`:88`); `mcp-auth.json` is
- * `path.join(Global.Path.data, "mcp-auth.json")` (`opencode/src/mcp/auth.ts:37`),
- * the MCP client's own OAuth cache, written the same way (`:80`).
- *
- * `password` is the CLI daemon's shared secret, at
- * `path.join(directory, "password")` over `Global.Path.state`
- * (`cli/src/services/daemon.ts:39-41`): 32 random bytes as base64url (`:50`),
- * written 0600 through a temp file and a rename (`:53-54`) so a reader never sees
- * a half-written one. Its own comment gives the reason it is a file at all — so
- * discovered clients can reconnect "without exposing a password flag or
- * environment variable" (`:48-49`).
- *
- * Beside it sits `server.json`, deliberately **not** in this list. Its
- * `Registration` is `{id, version?, url, pid}` (`cli/src/services/daemon.ts:23-28`):
- * the address to reach the daemon and the pid of the one running it, with no
- * secret in it. Reporting it as a credential would spend the one warning a user
- * actually reads on a file with nothing in it.
- *
- * Their contents are the credentials of the user's accounts, and this importer
- * reports their presence and nothing else.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The files OpenCode writes credentials into, by the root each one sits in. */
 export const OPENCODE_CREDENTIAL_FILES: Readonly<Record<"data" | "state", readonly string[]>> = {
 	data: ["auth.json", "mcp-auth.json"],
 	state: ["password"],
@@ -145,15 +90,8 @@ export interface OpencodeCredentialFile {
 	path: string;
 }
 
-/**
- * The tables in `opencode.db` that are never read, with the reason.
- *
- * Four of OpenCode's tables hold credentials, and three of them hold nothing
- * else: `account` carries `access_token`/`refresh_token`, `credential` and
- * `control_account` are the machine's own stores, and `session_share` has a
- * `secret text notNull` column — the capability URL a shared session is behind.
- * A migration reads the `session` and `message` tables and names these.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The tables in `opencode.db` that are never read, with the reason. */
 export const OPENCODE_CREDENTIAL_TABLES: Readonly<Record<string, string>> = {
 	account: "access and refresh tokens for the accounts signed in to this install",
 	control_account: "the machine's own account records",
@@ -184,18 +122,8 @@ export interface OpencodeConfigMerge {
 export interface RawOpencode {
 	/** The three resolved roots, each with the rule that decided it. */
 	roots: ReturnType<typeof opencodeRoots>;
-	/**
-	 * True when this install has run, judged by the config root or by either of the
-	 * two things only a run leaves behind.
-	 *
-	 * The config root alone is not enough of a test. `DatabaseMigration.apply(db)`
-	 * runs in the database service's own constructor
-	 * (`core/src/database/database.ts:24-35`), so the file is there after the first
-	 * launch whether or not the user has ever written a setting — and a user who
-	 * has deleted, or never created, `~/.config/opencode` still has every session
-	 * in it. Reporting that machine as "no source configuration found" is a true
-	 * sentence in front of a false conclusion.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** True when this install has run, judged by the config root or by what a run leaves behind. */
 	present: boolean;
 	/** Where the config root came from, rendered for the report. */
 	configOrigin: string;
@@ -217,14 +145,8 @@ export interface RawOpencode {
 	extraSkillPaths: string[];
 	/** `skills.urls` — skills OpenCode fetches over the network. Named; never fetched. */
 	skillUrls: string[];
-	/**
-	 * Which `skills` shape the file had: v1's `{paths, urls}` or v2's one list.
-	 *
-	 * The two produce different report lines — `skills.paths` and `skills.urls` name
-	 * keys that do not exist in a v2 file — and a v2 list was split here by the same
-	 * test v2 uses, so this says the split happened rather than leaving the reader to
-	 * assume the file named two fields.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Which `skills` shape the file had: v1's `{paths, urls}` or v2's one list. */
 	skillsSpelling: "object" | "list";
 	/** `plugin` — plugin specifiers. Named; never installed or run. */
 	plugins: string[];
@@ -247,14 +169,8 @@ export interface RawOpencode {
 	credentialFiles: string[];
 	/** Credential tables found in the database, by name, with the reason each was left. */
 	credentialTables: string[];
-	/**
-	 * The known credential files, found under the root each one lives in.
-	 *
-	 * Separate from `credentialFiles` because that one is a listing of the config
-	 * root and these are probes of a named path, so it reports a file whether or
-	 * not any directory listing showed it — and it carries the root, which is the
-	 * part a report line has to get right.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The known credential files, found under the root each one lives in. */
 	credentialFilesNamed: OpencodeCredentialFile[];
 	/** The pre-JSON TOML file, by presence only. */
 	legacyToml: boolean;
@@ -320,14 +236,8 @@ export function mergeOpencodeConfig(configRoot: string): OpencodeConfigMerge {
 	return { config: merged, from, errors, shadowed };
 }
 
-/**
- * `mergeDeep` as OpenCode applies it: objects merge key by key, everything else
- * is replaced by the later value.
- *
- * Reproduced rather than replaced with a spread because a spread would let
- * `config.json`'s `mcp` block be wholly replaced by `opencode.jsonc`'s, where
- * OpenCode's `mergeDeep` keeps the two servers that only one of them names.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `mergeDeep` as OpenCode applies it: objects merge key by key, everything else is replaced. */
 function mergeDeepInto(target: Record<string, unknown>, source: Record<string, unknown>): void {
 	for (const [key, value] of Object.entries(source)) {
 		if (isRecord(value) && isRecord(target[key])) {
@@ -369,29 +279,8 @@ function opencodeAssetDirs(configRoot: string, kind: keyof typeof OPENCODE_ASSET
 	return OPENCODE_ASSET_DIRS[kind].map((name) => join(configRoot, name)).filter((path) => existsSync(path));
 }
 
-/**
- * The skills in one source directory, by OpenCode's own rule, and the ones it skips.
- *
- * OpenCode globs two shapes in the directory (`packages/core/src/skill.ts:79`): any
- * `*.md` at the top level, and `SKILL.md` at any depth
- * and then names each hit (`skill.ts:87-99`): the frontmatter's `name` if it has
- * one, otherwise the file's own basename — **but only when the file sits directly
- * in the source directory**, and otherwise nothing at all. Two consequences, and
- * both are silent in OpenCode:
- *
- * - a bare `<dir>/<name>.md` is a skill, and a reader that only looks inside
- *   subdirectories for a `SKILL.md` never sees one;
- * - a `<dir>/<sub>/SKILL.md` whose frontmatter has no `name:` is not a skill at
- *   all, so importing it would be importing something the user cannot run in
- *   OpenCode either. Those are returned as `unnamed` and named in the report.
- *
- * The name is the frontmatter's where there is one, so a skill can arrive under a
- * different name than the directory it was found in.
- *
- * A nested skill carries the files beside its `SKILL.md`, and a bare top-level
- * `.md` carries none: its directory is the source directory, so anything scanned
- * there belongs to some other skill too.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The skills in one source directory, by OpenCode's own rule, and the ones it skips. */
 function readOpencodeSkillDir(dir: string): { skills: RawFile[]; unnamed: string[] } {
 	const skills: RawFile[] = [];
 	const unnamed: string[] = [];
@@ -455,25 +344,8 @@ function readOpencodeSkillDir(dir: string): { skills: RawFile[]; unnamed: string
 	return { skills, unnamed };
 }
 
-/**
- * Agent markdown under the four directories v2 reads, with the nesting flattened.
- *
- * `legacySources` (`packages/core/src/config/plugin/agent.ts:21-24`) is two
- * patterns with **different depths**: `agent`/`agents` is read recursively and
- * `mode`/`modes` only one level down. A nested `agent/build/plan.md` is a real
- * agent to OpenCode and invisible to a one-level reader.
- *
- * The name v2 derives is the path relative to the config directory with the
- * leading segment and the extension removed (`agent.ts:156-160`), so
- * `agent/build/plan.md` is `build/plan`. This importer writes one file per agent
- * under a flat directory, so the separator becomes a dash — the same call
- * `readCommandFiles` makes for the same reason, and a collision between two
- * flattened names is reported by `collectFileWrites` rather than silently won.
- *
- * A file under `mode`/`modes` is forced to `mode: "primary"` (`agent.ts:173`),
- * which is why those two are worth saying out loud in the report: the agent is
- * offered to the session as a top-level choice, not spawned as a subagent.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Agent markdown under the four directories v2 reads, with the nesting flattened. */
 function readOpencodeAgentFiles(configRoot: string): RawFile[] {
 	const files: RawFile[] = [];
 	for (const name of OPENCODE_ASSET_DIRS.agents) {
@@ -547,19 +419,8 @@ function markdownFilesUnder(dir: string): Array<{ name: string; path: string }> 
 	return out;
 }
 
-/**
- * The config root's own entries, split into the directories this importer reads
- * nothing out of and the files it has no mapping for.
- *
- * One listing with `withFileTypes` rather than two calls to `readDirectoryNames`,
- * because that helper returns both kinds and the two answers then disagree: a
- * `cache/` directory would be reported once as "N entries this importer reads
- * nothing out of" and again as a file with no mapping, which reads as two
- * separate things wrong with a tree that has one thing in it. The credential
- * names come out of the same pass for the same reason — a directory called
- * `tokens` is not a credential file, and naming it as one sends the user
- * looking for a secret that was never there.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The config root's own entries, split into directories and files with no mapping. */
 function readOpencodeConfigRoot(
 	configRoot: string,
 	accounted: Set<string>,
@@ -594,14 +455,8 @@ function readOpencodeCredentialTables(dbPath: string | null): string[] {
 	return readOpencodeTableNames(dbPath).filter((name) => name in OPENCODE_CREDENTIAL_TABLES);
 }
 
-/**
- * The known credential files on this machine, each against the root it is in.
- *
- * `existsSync` is the only contact: a name and a path, never a byte. Each name is
- * looked for in the root its source joins it to rather than in one root for all of
- * them, which is the whole reason this is keyed by root — the flat list it replaces
- * sent `password` to the config root too, and found nothing.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The known credential files on this machine, each against the root it is in. */
 function readOpencodeCredentialFiles(roots: OpencodeRoots): OpencodeCredentialFile[] {
 	const found: OpencodeCredentialFile[] = [];
 	for (const root of ["data", "state"] as const) {
@@ -700,15 +555,8 @@ export function readOpencode(home: string): RawOpencode {
 	};
 }
 
-/**
- * The rule that decided a root, in the report's own words.
- *
- * The default case is the one worth spelling out rather than leaving as a bare
- * path: on Windows the tree is at `~/.config/opencode` and not under
- * `%APPDATA%`, because `xdg-basedir@5.1.0` has no Windows branch. A report that
- * prints a bare path makes a reader who is looking in the usual place wonder
- * whether the importer is broken.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The rule that decided a root, in the report's own words. */
 export function describeOpencodeRoot(origin: string): string {
 	switch (origin) {
 		case "config-dir":
@@ -724,27 +572,8 @@ export function describeOpencodeRoot(origin: string): string {
 	}
 }
 
-/** `skills.paths` entries that are directories, `~` expanded the way OpenCode expands them. */
-/**
- * `skills` under both shapes: v1's `{paths, urls}` and v2's one flat list.
- *
- * **v2 drops the distinction**, and the way it drops it is
- * `[...(info.skills.paths ?? []), ...(info.skills.urls ?? [])]`
- * (`core/src/v1/config/migrate.ts:62`) — paths first, then URLs, with nothing at
- * the boundary to say which is which. So the split is made the way v2 itself makes
- * it reading the list back (`config/plugin/skill.ts:35`): an entry is a URL when
- * `URL.canParse` holds **and** its protocol is `http:` or `https:`, and a
- * directory otherwise. A `git+ssh://` or `github:` entry is therefore a directory
- * here as it is there, and the report says the list was split, so a wrong call is
- * a sentence the user can check rather than a skill that silently did not import.
- *
- * The other two things v2 does with the same entries, and does not do here: a
- * relative path resolves against the workspace directory rather than the working
- * one (`config/plugin/skill.ts:43`), and `~/` expands against `global.home` (`:39`).
- * The expansion matches; the workspace-relative resolution has no equivalent in a
- * migration that reads one user's home, so those entries are reported as paths
- * that resolved to nothing.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `skills` under both shapes: v1's `{paths, urls}` and v2's one flat list. */
 function opencodeSkillEntries(config: Record<string, unknown>): { paths: string[]; urls: string[] } {
 	const value = opencodeConfigValue(config, "skills");
 	const expand = (entry: string): string => {

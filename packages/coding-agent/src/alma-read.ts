@@ -1,43 +1,7 @@
-/**
- * Alma's user state, as read from a home directory.
- *
- * Read `alma-home.ts` first — every path claim below is that module's, and it
- * says which of them are quoted from the shipped bundle and which are not. The
- * standing facts for this source, in one place:
- *
- *   - **Settings are a row in SQLite, not a file.** `app_settings.settings_data`,
- *     one row per database (`id DEFAULT 'default'`), so this reader opens
- *     `<userData>/chat_threads.db` read-only to get them. There is no
- *     `settings.json` to find, and `settings.json` occurs twice in the bundle in
- *     contexts that are not this.
- *   - **The settings blob is read through a whitelist, not scrubbed.** Alma's
- *     settings *is* the application's whole configuration state and carries
- *     `chromeRelayAuthToken`, `tts.apiKey`, `network.proxy.password` and the
- *     Telegram/Discord/Feishu/Weixin bridge tokens as ordinary members of the
- *     same JSON object as `general.theme` and `chat.defaultModel`. Only the keys
- *     in {@link ALMA_SETTINGS_KEYS_READ} are copied out, so a credential-shaped
- *     key a future release adds has no path to a planner. What the reader *did*
- *     leave behind is named in {@link RawAlma.unhandledSettings}.
- *   - **`providers.api_key` is a plaintext column and is never selected.** The
- *     queries below name their columns. The app's own generated `api-spec.md`
- *     claims the keys are stored encrypted; the DDL says
- *     `api_key TEXT NOT NULL` with no encryption call on the write path, and the
- *     DDL is what the bytes do.
- *   - **There is no instruction document to import.** `AGENTS.md`, `CLAUDE.md`
- *     and `ALMA.md` each occur **zero** times in the 3.1 MB main bundle. What
- *     Alma has instead is five identity documents — {@link ALMA_IDENTITY_DOCS} —
- *     of which only `MEMORY.md` has anywhere to go.
- *   - **Alma has no permission mode and no sandbox.** Not "they were not
- *     migrated": the shipped `AppSettings` interface has no key for either. The
- *     nearest thing is `security.autoApproveToolRequests`, a boolean, and
- *     `alma-plan.ts` claims it as a mode pair with both halves it can justify.
- *
- * **Nothing here throws.** Every read that fails becomes a line in
- * {@link RawAlma.skipped} naming what failed and why — the convention
- * `antigravity-read.ts` and `qoder-read.ts` both use, because a migration that
- * aborts on one damaged file loses every other source's import to make a point
- * about that file.
- */
+// Alma's user state as read from a home directory: SQLite settings, the MCP and
+// hook files, skills from Alma's own two roots, memory, and the roots named but
+// never read. Read `alma-home.ts` first for every path claim.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { Database } from "bun:sqlite";
 import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
@@ -69,14 +33,8 @@ import { isRecord, readAttachments, readJson, readText, tildePath } from "./migr
 import type { RawFile } from "./migrate-types.ts";
 import { parseFrontmatter } from "./skills.ts";
 
-/**
- * One thing the walk found and did not carry over, with the reason.
- *
- * `name` is a **label, not a resolved path**, and the same convention
- * `qoder-read.ts` uses: a bare name where that is unambiguous, a
- * forward-slashed relative label where it is not. Nothing here ever holds a value
- * read out of a credential-shaped key — see {@link RawAlma.skipped}.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One thing the walk found and did not carry over. `name` is a label, not a resolved path, never a value from a credential-shaped key. */
 export interface AlmaSkipped {
 	name: string;
 	reason: string;
@@ -145,26 +103,13 @@ export interface RawAlma {
 	settingsProblem: string | null;
 	/** The whitelisted settings, or `null` when there was no row. */
 	settings: AlmaSettings | null;
-	/**
-	 * Top-level keys present in `settings_data` that this importer did not read.
-	 *
-	 * Two lists' worth of information: the ones on
-	 * {@link ALMA_SETTINGS_KEYS_READ} that the user's file does not carry are
-	 * simply absent, and everything else is here. A name from
-	 * {@link ALMA_SETTINGS_NOT_READ} is a credential or a container of one and is
-	 * reported by that name alone.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Top-level keys present in `settings_data` that this importer did not read. */
 	unhandledSettings: string[];
 	/** Every provider's id, name and type. `api_key` is not among the columns selected. */
 	providers: AlmaProvider[];
-	/**
-	 * The workspace Alma's plain-file thread archive is written under, or `null`.
-	 *
-	 * **One workspace, not the workspace of each thread** — see
-	 * {@link ALMA_CRON_TITLE_PREFIX} in `alma-home.ts`. It comes from
-	 * `settings.workspace.path` and falls back to the `Default` row the app
-	 * creates at `<userData>/workspaces/default`.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The one workspace Alma's thread archive is written under, or `null`. */
 	archiveWorkspacePath: string | null;
 	/** How many `.md` files the thread archive holds, none of them read. */
 	archiveCount: number;
@@ -199,16 +144,8 @@ function almaDirectoryEntries(dir: string): Dirent[] {
 	}
 }
 
-/**
- * Open the database read-only, run `work`, and close it whatever happens.
- *
- * **Read-only is the point, and it is enforced twice.** `readonly: true` stops
- * this importer writing, and the queries below name their columns rather than
- * selecting `*`, so the plaintext `api_key` column is never read into memory
- * even when the handle is open. A `*` would be one keystroke and would put every
- * provider's plaintext key into the process heap, from where a report line or a
- * thrown error could carry it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Open the database read-only, run `work`, and close it whatever happens. */
 function withDatabase<T>(dbPath: string, work: (db: Database) => T): T | null {
 	let db: Database | null = null;
 	try {
@@ -226,17 +163,8 @@ function withDatabase<T>(dbPath: string, work: (db: Database) => T): T | null {
 	}
 }
 
-/**
- * The settings blob, or `null` when it could not be read as a JSON object.
- *
- * `null` rather than `{}` on a parse failure, and the distinction is the whole
- * function. An **empty object** is a real answer — Alma stored settings and they
- * were empty — and a report that said "read the settings, they held nothing"
- * would be true. A blob that will not parse is a *failure*, and returning `{}`
- * for it would let a planner claim nothing from a file it never read while the
- * report said nothing was wrong with it. Three states: an object, an empty
- * object, and `null`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The settings blob, or `null` when it could not be read as a JSON object. The three states are an object, an empty object, and `null`. */
 function readAlmaSettingsBlob(blob: string): Record<string, unknown> | null {
 	try {
 		const parsed: unknown = JSON.parse(blob);
@@ -267,15 +195,8 @@ function booleanAt(source: unknown, key: string): boolean | undefined {
 	return typeof value === "boolean" ? value : undefined;
 }
 
-/**
- * Turn the raw blob into the whitelisted {@link AlmaSettings}.
- *
- * Note what is *not* here: no `general.language`, no `general.autoStart`, no
- * `network.proxy` (a credential), no `tts` (a credential), no
- * `keybindings`/`terminal`/`webSearch`/`whisper` (this build has no equivalent),
- * and no `themeConfig` beyond the fact that `general.theme` names the mode. Each
- * of those is either credential-shaped, has no target, or is cosmetic.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Turn the raw blob into the whitelisted `AlmaSettings`. */
 function narrowAlmaSettings(blob: Record<string, unknown>): AlmaSettings {
 	const general = blob.general;
 	const chat = blob.chat;
@@ -327,28 +248,8 @@ function narrowAlmaSettings(blob: Record<string, unknown>): AlmaSettings {
 	return settings;
 }
 
-/**
- * Alma's skills from **its own two roots**, with the product's own two
- * frontmatter requirements applied and the product's own precedence.
- *
- * **The other five roots are not here and that is the design.** Alma reads
- * `~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`, `~/.claude/plugins`
- * and `<workspace>/.agents/skills` alongside its own two; see
- * `alma-home.ts` for why each is named rather than imported, and why importing
- * `~/.agents/skills` here would double-write every file the `agents` source
- * already owns.
- *
- * **First match wins, by lowercased name**, which is Alma's own behaviour — the
- * product resolves a name against the roots in order and never reads the loser,
- * so a reader that imported both would hand the user a file Alma will never load
- * and one that imported only the first would look right and say nothing about
- * the second. Every collision is recorded with both roots named.
- *
- * **A skill without `name` and `description` in its frontmatter is rejected**,
- * because Alma rejects it: `parseSkillMd` returns `null` and logs which of the
- * two was missing. Each refusal is a `skipped` line, since a skill Alma silently
- * ignored is one the user believes is loaded.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Alma's skills from its own two roots, first match wins by lowercased name, with each refusal and collision reported. */
 function readAlmaSkills(
 	configDir: string,
 	workspacePath: string | null,
@@ -418,23 +319,8 @@ function readAlmaSkills(
 	return { assets, collisions };
 }
 
-/**
- * `~/.config/alma/memory/` and `MEMORY.md`, as {@link RawFile}s.
- *
- * **The index and the entries are told apart by name**, exactly as Qoder's are:
- * `MEMORY.md` at the configuration root is the index the agent is told to read,
- * and a file in `memory/` is an entry. Both become rule files with distinct
- * names in `alma-plan.ts`, because folding twenty entries and the index into
- * twenty-one files would assert something about the index the product does not.
- *
- * The dated-entry name pattern is Alma's own, read off the index builder:
- * `` `${fullYear}-${pad(month+1)}-${pad(date)}` `` and the previous day beside it.
- * A regular file in `memory/` that does not look like a date is still carried —
- * **this reader does not second-guess a file name**, because Alma's own index
- * writer only ever writes dated ones and a hand-added entry is the user's own —
- * but it is carried as an entry and named in the report rather than merged into
- * the index.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `~/.config/alma/memory/` and `MEMORY.md`, as `RawFile`s. The index and the entries are told apart by name, and this reader does not second-guess a file name. */
 function readAlmaMemory(configDir: string, home: string, skipped: AlmaSkipped[]): RawFile[] {
 	const out: RawFile[] = [];
 	const index = almaIdentityDocPath(configDir, "MEMORY.md");
@@ -467,29 +353,8 @@ function readAlmaMemory(configDir: string, home: string, skipped: AlmaSkipped[])
 	return out;
 }
 
-/**
- * `mcp.json`, with the two credential channels removed before anything else sees
- * the entry.
- *
- * **`headers` is dropped whole and `env` values are replaced by their names** —
- * the same trade every source in this repository makes, for the same reason: a
- * header value and an environment value are both ordinary places for a bearer
- * token, and this importer writes none of them. The **names** survive so the
- * report can tell the user which variables to set again.
- *
- * The scrub happens here rather than in the planner because `RawAlma` is the
- * thing the report is written from and from the test suite, and a credential in
- * it would be one `JSON.stringify(raw)` away from an issue.
- *
- * `env` is walked with the map-slot exemption the other sources use: an MCP
- * server's **name** is a thing the user chose (`keyboard-mcp` is an ordinary
- * name), so a name that reads as a credential must not delete the server. The
- * keys *inside* `env` are matched, and matched values dropped.
- *
- * The **URL is not scrubbed here** — it is checked in `alma-plan.ts` with the
- * shared {@link urlCredentialProblem}, because the answer is not "remove the
- * credential" but "do not import this server at all".
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `mcp.json`, with the two credential channels removed before anything else sees the entry. `headers` is dropped whole, `env` values become names, and the URL is checked in the planner. */
 function readAlmaMcp(
 	configDir: string,
 	home: string,
@@ -534,16 +399,8 @@ function readAlmaMcp(
 	return { mcpServers: out, mcpPath: path };
 }
 
-/**
- * `hooks.json`'s `hooks` block, verbatim.
- *
- * Handed over as it stands because {@link normalizeClaudeHooks} in
- * `migrate-core.ts` is what knows this build's event names and Alma has its own
- * four; `alma-plan.ts` translates between the two vocabularies and lets the
- * normalizer drop whatever it has no word for. A file with no `hooks` key
- * produces `undefined`, which is the difference between "Alma has no hooks" and
- * "the file was there and held nothing".
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `hooks.json`'s `hooks` block, verbatim. A file with no `hooks` key produces `undefined`, which is not the same as a file that held nothing. */
 function readAlmaHooks(configDir: string, home: string, skipped: AlmaSkipped[]): { hooks: unknown; hooksPath: string } {
 	const path = almaHooksPath(configDir);
 	if (!existsSync(path)) return { hooks: undefined, hooksPath: path };
@@ -558,21 +415,8 @@ function readAlmaHooks(configDir: string, home: string, skipped: AlmaSkipped[]):
 	return { hooks: document.hooks, hooksPath: path };
 }
 
-/**
- * Read one Alma home.
- *
- * **Pure with respect to everything outside `home` and `env`**: it resolves paths
- * against those arguments and never calls `os.homedir()` or `process.cwd()`, so
- * a fixture laid out by a test and a developer's own `~/.config/alma` are the
- * same code path. It does touch the filesystem, necessarily.
- *
- * `env` defaults to `process.env`, which is what `readSources` passes, so a
- * developer on Windows gets their real `%APPDATA%\alma` — the correct answer for
- * their machine. A test passes an explicit block. This is the same trade
- * `qoder-read.ts` makes and it is stated here because it is the one way a test
- * that reads a fixture home could quietly read a real one: **a test that asserts
- * on content must pass `env` rather than rely on the ambient block.**
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read one Alma home. Resolves against `home` and `env` only and never calls `os.homedir()`, so a test that asserts on content must pass `env`. */
 export function readAlma(home: string, env: AlmaEnv = process.env): RawAlma {
 	const roots = almaRoots(home, env);
 	const skipped: AlmaSkipped[] = [];

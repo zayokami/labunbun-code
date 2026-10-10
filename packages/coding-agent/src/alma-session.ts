@@ -1,51 +1,6 @@
-/**
- * Alma's conversations, out of `chat_threads.db`.
- *
- * **The layout is settled and awkward.** Two tables and a link:
- *
- * ```sql
- * CREATE TABLE IF NOT EXISTS chat_threads (
- *   id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT,
- *   is_generating BOOLEAN DEFAULT FALSE, reasoning_effort TEXT DEFAULT 'medium',
- *   metadata TEXT DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
- * )
- * CREATE TABLE IF NOT EXISTS chat_messages (
- *   id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, parent_id TEXT, slot_id TEXT,
- *   depth INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL,
- *   timestamp TEXT NOT NULL, metadata TEXT DEFAULT '{}',
- *   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- *   FOREIGN KEY (thread_id) REFERENCES chat_threads(id) ON DELETE CASCADE
- * )
- * ```
- *
- * …and then fifteen `ALTER TABLE chat_threads ADD COLUMN` statements, one of
- * which duplicates a column the `CREATE` already made. **The drizzle schema —
- * the one the application itself queries through — declares twenty-two columns**
- * (`we("chat_threads", { id, title, model, tools, tools_compact_view,
- * prompt_app_id, workspace_id, artifact_workspace_id, is_generating,
- * is_favorited, is_favorite_pinned, favorite_pinned_order, sidebar_pin_slot,
- * is_incognito, enable_artifacts, parent_thread_id, reasoning_effort, fast_mode,
- * skill_ids, metadata, created_at, updated_at })`). So the "eight columns" and the
- * "eighteen columns" a reader might quote are both wrong; the number that
- * matters is on the other side of this comment.
- *
- * **There is no `cwd` column, and `metadata` does not stand in for one.** The
- * application's own thread-creation path writes `metadata: {}` — literally an
- * empty object — and the working directory lives on the **workspace**: a thread
- * names one with `workspace_id`, and the path is `workspaces.path`. The column
- * is `REFERENCES workspaces(id) ON DELETE SET NULL`, so deleting a workspace
- * leaves its threads with **no path at all** rather than a stale one, and there
- * is no fallback to try.
- *
- * This module therefore reports the plain fact — "this thread recorded no
- * working directory" — rather than writing a placeholder. A placeholder is the
- * one thing the rest of this pipeline cannot survive: `narrowCandidates` counts
- * an empty `cwd` under "no working directory recorded" and drops the session,
- * and a *wrong* cwd files a conversation under a project it was never had in.
- * {@link HistoryCandidate.cwdSubstitute} is the mechanism the other sources use
- * for exactly this, and it carries a flag to the report so the user is told the
- * directory was assumed rather than recorded.
- */
+// Alma's conversations, out of `chat_threads.db`: the queries, the
+// no-workspace note, and the role filter.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -72,16 +27,8 @@ export interface AlmaMessage {
 	timestamp: number;
 }
 
-/**
- * Where the database is, or `null` when there is no application-data path.
- *
- * **There is no `home` argument**, which is worth a line of its own: Alma's only
- * database lives under Electron's `userData` root, which `APPDATA` names on its own.
- * Nothing about it is derived from the home directory, and a reader that looked
- * under `~/.alma/chat_threads.db` or `~/.config/alma/chat_threads.db` would never
- * find one. Every other session reader here takes `home`; this one cannot, and the
- * shape difference is the honest one.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Where the database is, or `null` when there is no application-data path. No `home` argument: only `APPDATA` names the root. */
 export function almaDbLocation(env: AlmaEnv = process.env): string | null {
 	const userData = almaUserDataDir(almaAppData(env), ALMA_USER_DATA_DIR);
 	return userData === null ? null : almaDbPath(userData);
@@ -114,20 +61,8 @@ function timestamp(value: unknown): number {
 	return Number.isFinite(parsed) ? parsed : 0;
 }
 
-/**
- * Every thread, with its working directory where one is reachable.
- *
- * **The `LEFT JOIN` is the honest shape.** An inner join would drop every
- * orphaned thread from the listing, and an orphan is precisely the case the
- * report exists to say something about — a user whose conversations exist and
- * whose project mapping does not is exactly who needs to be told rather than
- * quietly given nothing.
- *
- * **Two columns are never selected that could have been**: `metadata` is a JSON
- * blob whose keys are the app's business and `api_key`-shaped columns are not
- * in this table at all, but the column list stays explicit for the same reason
- * `readAlma`'s does — a `*` is one keystroke away from a credential.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Every thread, with its working directory where one is reachable. The `LEFT JOIN` keeps orphaned threads in the listing. */
 export function readAlmaThreads(dbPath: string): AlmaThread[] {
 	if (!existsSync(dbPath)) return [];
 	const rows = withDatabase(dbPath, (db) =>
@@ -154,25 +89,8 @@ export function readAlmaThreads(dbPath: string): AlmaThread[] {
 	});
 }
 
-/**
- * One thread's messages, oldest first.
- *
- * `ORDER BY created_at ASC, depth ASC` — `depth` is the column Alma maintains
- * for a branch of the conversation, so a message edited into existence later
- * still sorts after what it was edited from rather than by whatever its own
- * timestamp happens to be.
- *
- * **The `message` column is a JSON blob, and the record shape is read rather than
- * assumed.** The application writes `{ role, parts: [{ type, … }] }` — `role` is
- * one of `user`, `assistant` or anything else, which it passes through verbatim
- * (`t = "user" === e.role ? "User" : "assistant" === e.role ? "Assistant" :
- * e.role` in its own archiver). Only `type: "text"` parts contribute, which is
- * Alma's own filter and the reason its markdown archive has no tool calls in it.
- *
- * **Rows whose blob will not parse are counted, not skipped silently**: a
- * transcript with a hole in the middle of it is still worth importing, and the
- * count is what tells the user there was one.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One thread's messages, oldest first. Rows whose blob will not parse are counted, not dropped in silence. */
 export function readAlmaMessages(dbPath: string, threadId: string): { messages: AlmaMessage[]; unparsable: number } {
 	const rows = withDatabase(dbPath, (db) =>
 		db
@@ -226,18 +144,8 @@ export const ALMA_NO_WORKSPACE =
 
 /** What a listing found beyond the candidates themselves. */
 
-/**
- * List Alma's threads.
- *
- * **`cwdSubstitute` is set to the configuration root rather than to `cwd`**, and
- * that choice is the whole difference between importing a user's conversations
- * and importing none of them. The default `--history-scope` is `cwd`, so a
- * source whose sessions name no directory would plan zero sessions while the
- * report looked clean; `cwdSubstitute` files each one under a stated directory
- * and carries the flag to the report so the sentence the user reads can name the
- * difference between "recorded" and "assumed". See `HistoryCandidate`'s own
- * comment, which is where that reasoning belongs.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** List Alma's threads. `cwdSubstitute` files each orphan under the configuration root and carries the flag to the report. */
 export function listAlmaHistory(home: string, env: AlmaEnv = process.env): HistoryListing {
 	const candidates: HistoryCandidate[] = [];
 	const notes: HistoryNote[] = [];
@@ -300,25 +208,8 @@ export const ALMA_ROW_DROPPED =
 export const ALMA_ROW_UNPARSABLE =
 	"message row whose `message` column is not a JSON object this importer could read — Alma writes one JSON blob per row and a hand-edited or half-written one is reported rather than skipped in silence";
 
-/**
- * Read one thread's rows and convert them.
- *
- * **Only `user` and `assistant` become turns, and everything else is counted.**
- * Alma passes a third role through verbatim — its own archiver writes
- * `t = "user" === role ? "User" : "assistant" === role ? "Assistant" : role` — so
- * a row can carry a role this build has no message type for. Dropping it in
- * silence would produce a transcript with a hole and no explanation, so it is
- * counted and the count reaches the report.
- *
- * **No tool calls are reconstructed, and that is a limitation rather than a
- * choice.** `chat_messages.message` holds the whole message JSON, so a tool call
- * *is* in the blob — as a part with a `tool-` type and an `input`. Reconstructing
- * one would mean inventing an id, a name and a matching `toolResult` row, and
- * this build rejects a transcript that half-pairs them: a tool call with no result
- * (or the reverse) fails the messages API on the first `--continue`, which is
- * worse than a shorter transcript. So the text survives and the actions do not,
- * and `alma-plan.ts` says so where the user reads about their conversations.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read one thread's rows and convert them. Only `user` and `assistant` become turns, and no tool calls are rebuilt. */
 export function readAlmaConversation(sourceId: string, env: AlmaEnv = process.env): AlmaConversation | null {
 	const dbPath = almaDbLocation(env);
 	if (dbPath === null) return null;

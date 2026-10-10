@@ -1,20 +1,5 @@
-/**
- * Settings hierarchy (later overrides earlier):
- *   user (~/.labunbun/settings.json)
- *   → project (<cwd>/.labunbun/settings.json)
- *   → local (<cwd>/.labunbun/settings.local.json)
- *   → policy (~/.labunbun/managed-settings.json)
- *   → flag (--settings / CLI-provided object)
- *
- * Objects merge recursively; arrays and scalars replace.
- *
- * `project` and `local` both live inside the working tree, so both are treated
- * as repo-controlled: they are filtered through {@link stripUntrustedKeys}
- * before merging, and only the user's own tiers (user/policy/flag) can set the
- * keys that decide what the agent may do or where it sends data. The "local"
- * tier is not a trust boundary either — labunbun never writes an ignore rule
- * for it, so whether it is committed is up to whoever cloned the repo.
- */
+// Settings hierarchy (later overrides earlier): user, project, local, policy and flag.
+// Long-form design notes: docs/dev/migration-framework.md
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -36,15 +21,8 @@ import { registerOpenAICompatibleProvider, setPricingOverride, THINKING_LEVELS }
 import { z } from "zod";
 import { stripBom } from "./json-text.ts";
 
-/**
- * Mode values from releases that had them, and what to write instead.
- *
- * Each entry is the whole replacement, not just a mode name, because the answer
- * is a *pair*: `bypassPermissions` was one value doing two jobs (never ask, no
- * confinement) and the new system asks for both halves separately. Naming only
- * the mode would send `bypassPermissions` users to the sandboxed pairing, which
- * is the one change in this batch that could quietly narrow a scripted run.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Mode values from releases that had them, and what to write instead. */
 const LEGACY_MODE_SUGGESTIONS: Record<string, string> = {
 	default: 'permissionMode "ask"',
 	manual: 'permissionMode "ask"',
@@ -53,16 +31,8 @@ const LEGACY_MODE_SUGGESTIONS: Record<string, string> = {
 	bypassPermissions: 'permissionMode "agent" together with sandbox "danger-full-access"',
 };
 
-/**
- * The mode axis, validated against the one list that defines it.
- *
- * Written by hand as a `z.enum` this used to be a second, independent copy of
- * {@link PERMISSION_MODES} — the file's own comment claimed the schema read the
- * same list, and it did not, so a mode added there was a mode the settings
- * file rejected. Deriving it here is what makes the claim true, and the legacy
- * branch is why a stale value produces a sentence to act on rather than
- * "invalid enum value" from a zod version whose error text is not ours.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The mode axis, validated against the one list that defines it. */
 export const PermissionModeSchema = z.custom<PermissionMode>().superRefine((value, ctx) => {
 	if (typeof value !== "string") {
 		ctx.addIssue({ code: "custom", message: `permissionMode must be a string, got ${typeof value}` });
@@ -92,15 +62,8 @@ export const SandboxModeSchema = z.custom<SandboxMode>().superRefine((value, ctx
 	});
 });
 
-/**
- * One domain rule, in either of the two spellings a user would write.
- *
- * A bare string is an allow, because that is what almost every entry in a
- * `networkDomains` list is and the object form would be tedious for the
- * common case. `{domain, action: "deny"}` exists because a deny with no way to
- * express it is a deny nobody writes — and once `allow: "*"` is in a table,
- * the deny is the only thing standing between it and everything.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One domain rule, in either of the two spellings a user would write. */
 export const NetworkDomainRuleSchema = z.union([
 	z.string(),
 	z.object({ domain: z.string(), action: z.enum(NETWORK_DOMAIN_PERMISSIONS) }),
@@ -136,65 +99,18 @@ export const SettingsSchema = z.object({
 	model: z.string().optional(),
 	/** Model references tried in order when the primary errors before streaming. */
 	fallbackModels: z.array(z.string()).optional(),
-	/**
-	 * How hard the model should think, for every request this session makes.
-	 *
-	 * Unset leaves the choice to the model itself. Where it is set, it is still
-	 * bounded by what each model declares: a row that declares no thinking shape
-	 * is sent none, whatever this says — that answer belongs to the adapter,
-	 * which can see the row, and is pinned by its tests.
-	 *
-	 * Derived from `THINKING_LEVELS` rather than restating the list, so a level
-	 * added to the type is a level this file accepts by construction.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** How hard the model should think, for every request this session makes. */
 	thinkingLevel: z.enum(THINKING_LEVELS).optional(),
 	permissionMode: PermissionModeSchema.optional(),
-	/**
-	 * The other axis: what the process may touch, as opposed to what asks.
-	 *
-	 * Separate from `permissionMode` because the two are separate — see
-	 * `PERMISSION_MODES` in `@labunbun/agent`. `workspace-write` resolves to an
-	 * OS-enforced policy on macOS and Linux; on Windows it resolves to a
-	 * tool-layer one, which is a weaker guarantee and is described as such
-	 * rather than as confinement.
-	 *
-	 * **Where that description actually reaches a user: `/permissions`, and only
-	 * there.** An earlier version of this comment said the weakening "says so in
-	 * `/doctor` and in the mode's own hint", and neither was true. `/doctor` has
-	 * no filesystem-sandbox row at all — it calls `sandboxBackendFor` once, to
-	 * compute the *network* caveat, and prints that only when the network axis is
-	 * restricting, which is not the default. The mode hints in `MODE_CHOICES` say
-	 * nothing about the sandbox for `ask`, `plan` or `agent`; the only one that
-	 * mentions it is `agentNoSandbox`, which describes the axis being off.
-	 *
-	 * So on a default-configured Windows install the filesystem layer is
-	 * disclosed in exactly one place, and it is an *under*-disclosure rather than
-	 * an overstatement: nothing shown to a user overstates what the layer does.
-	 * Stated here because the cost of this being wrong is a future `/doctor`
-	 * regression that removes all sandbox disclosure while a comment promises it
-	 * is covered elsewhere. `simulated.ts` carries the same fact about its own
-	 * disclaimer, and gets it right.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** The other axis: what the process may touch, as opposed to what asks. */
 	sandbox: SandboxModeSchema.optional(),
-	/**
-	 * The network axis, which is **not** derived from `sandbox`.
-	 *
-	 * Separate for the same reason the two sandbox keys are: `workspace-write`
-	 * that silently cut the network would break `npm install` and `git fetch`
-	 * for everyone who took the default, so confinement here is something the
-	 * user asks for by name. Defaults to `enabled`, which is today's behaviour.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** The network axis, which is **not** derived from `sandbox`. */
 	networkAccess: z.enum(NETWORK_SANDBOX_POLICIES).optional(),
-	/**
-	 * Domain rules for the proxy. A bare string is an allow; the object form
-	 * carries an explicit `deny`. See {@link NetworkDomainRuleSchema}.
-	 *
-	 * Under `networkAccess: "restricted"` an empty list reaches nothing, which
-	 * is the fail-closed reading and the reason it is safe to leave unset: the
-	 * restriction does not turn on because someone filled this in, it turns on
-	 * because someone set `networkAccess`, and by then an empty list is the
-	 * answer "nothing, yet".
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Domain rules for the proxy, in either spelling. See {@link NetworkDomainRuleSchema}. */
 	networkDomains: z.array(NetworkDomainRuleSchema).optional(),
 	/**
 	 * Theme name: a built-in, a theme file from `~/.labunbun/themes/`, or
@@ -212,16 +128,8 @@ export const SettingsSchema = z.object({
 	 * is actually in effect, so setting both is reportable rather than ambiguous.
 	 */
 	emacsMode: z.boolean().optional(),
-	/**
-	 * Let the cheap rung run by itself when the context crosses the compaction
-	 * threshold: the older tool results become previews, and a summarization call
-	 * happens only if that did not free enough. On by default, because the rung
-	 * only ever runs where the alternative is a summarization: it is a rewrite of
-	 * text the model has already read, not a deletion of it (the full result is
-	 * still in the session file, and large outputs are on disk), and it costs no
-	 * model call. Set false to go straight to the summary, or use `/trim` to do
-	 * the same thing on request.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Let the cheap rung run by itself when the context crosses the compaction threshold. */
 	trimOldToolResults: z.boolean().optional(),
 	/**
 	 * Ask each provider with a key what it serves, once at startup, and let the
@@ -231,16 +139,8 @@ export const SettingsSchema = z.object({
 	 * or metered machine should not have to firewall a startup chat.
 	 */
 	modelDiscovery: z.boolean().optional(),
-	/**
-	 * Wake the session when a background shell finishes on its own.
-	 *
-	 * On by default: the notice is what lets a long command run in the
-	 * background without the model polling for it — the session is told once,
-	 * with the exit code and the end of the log, and decides what to say. The
-	 * message travels the follow-up queue, so a completion during a turn waits
-	 * for the turn's natural end. Set false to leave completions to BashOutput
-	 * polling and spend no turn on them.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Wake the session when a background shell finishes on its own. */
 	backgroundShellNotifications: z.boolean().optional(),
 	permissions: z
 		.object({
@@ -249,15 +149,8 @@ export const SettingsSchema = z.object({
 			additionalDirectories: z.array(z.string()).default([]),
 		})
 		.default({ allow: [], deny: [], additionalDirectories: [] }),
-	/**
-	 * The DualShock 4: whether one is read, and what its buttons do.
-	 *
-	 * Every key here is honored from the user's own tiers only (see
-	 * {@link PROJECT_TIER_KEY_POLICY}) — the whole block is denied rather than
-	 * filtered key by key, because there is no harmless sub-key to keep: a cloned
-	 * repository that could write `allowApprove` would be handing a controller in
-	 * the user's lap the power to approve that repository's own tool calls.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** The DualShock 4: whether one is read, and what its buttons do. */
 	gamepad: z
 		.object({
 			/** Look for a controller at startup. Off until the user turns it on. */
@@ -276,14 +169,8 @@ export const SettingsSchema = z.object({
 			 * work or one that reads every tremor as a direction.
 			 */
 			deadzone: z.number().min(0).max(1).optional(),
-			/**
-			 * Button → action, replacing the defaults one entry at a time.
-			 *
-			 * Deliberately not an enum: a name that resolves to nothing becomes a
-			 * line in `/doctor` and costs that one binding, whereas validating it here
-			 * would reject the whole settings file over a typo — the same bargain
-			 * theme files strike for an unknown token.
-			 */
+			// Long-form design notes: docs/dev/migration-framework.md
+			/** Button → action, replacing the defaults one entry at a time. */
 			bindings: z.record(z.string(), z.string()).optional(),
 			/** Whole prompts the command wheel offers at one press. */
 			phrases: z.array(z.string()).optional(),
@@ -335,29 +222,8 @@ export const SettingsSchema = z.object({
 	 * the point, because a gateway, a negotiated rate or a repriced model makes
 	 * the published number wrong for the bill it is meant to describe.
 	 */
-	/**
-	 * The /beetle band: which model each of the four members runs.
-	 *
-	 * Honored from the user's own tiers only (see {@link PROJECT_TIER_KEY_POLICY}):
-	 * the choice decides what the user's money is spent on, which is the same
-	 * class as `model`. A member set to `"session"` follows whichever model the
-	 * session is using. A saved `models` map is what makes a later `/beetle
-	 * <task>` skip the picker; without one — the block is absent, or a hand edit
-	 * left it empty — the next start asks again.
-	 *
-	 * The two budget keys are opt-in guardrails, and unset means unbounded: a
-	 * band with neither runs until it is stopped by hand, which is the design.
-	 * `maxTurns` caps each run (a member that wants another turn ends with
-	 * `max_turns`; a waking message is the user's explicit new run). `maxCostUSD`
-	 * stops the whole band once its priced turns cross the amount. Zero and
-	 * negatives are refused here — "stop before starting" is what `/beetle off`
-	 * says, not a budget.
-	 *
-	 * `stallNoticeMinutes` is the quiet watchdog: a live member silent this
-	 * long gets one transcript notice naming what it was last doing. It never
-	 * stops anything. Unset reads as five minutes; zero turns it off, which is
-	 * why this key alone accepts zero. Whole minutes only.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** The /beetle band: which model each of the four members runs. */
 	beetle: z
 		.object({
 			models: z.record(z.string(), z.string()).optional(),
@@ -374,17 +240,8 @@ export const SettingsSchema = z.object({
 export type Settings = z.infer<typeof SettingsSchema>;
 export type RawSettingsInput = z.input<typeof SettingsSchema>;
 
-/**
- * Make the providers and prices a settings file declares real: register the
- * OpenAI-compatible providers so their models resolve, then apply the declared
- * prices over the catalog's own.
- *
- * Called once at startup by both modes, before anything resolves a model — a
- * reference to a model that only exists in settings is unknown until this runs,
- * and a price is only used by whoever resolves the model afterwards. Shared
- * rather than written twice so the two entry points cannot drift into costing
- * the same run differently.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Make the providers and prices a settings file declares real. */
 export function applyCatalogSettings(settings: Settings): void {
 	for (const provider of settings.providers?.openaiCompatible ?? []) {
 		registerOpenAICompatibleProvider(provider);
@@ -416,54 +273,8 @@ export interface LoadedSettings {
 	ignoredKeys: IgnoredSettingsKey[];
 }
 
-/**
- * Settings a repository is not allowed to set for itself.
- *
- * `project` (`<cwd>/.labunbun/settings.json`) and `local` values come from files
- * inside the working tree — repo contents the user did not necessarily write.
- * Left unfiltered, a cloned repo can hand itself `bypassPermissions`, register a
- * provider pointed at a host it controls, redirect credentials through `env`
- * (`ANTHROPIC_BASE_URL` and friends), install a hook that runs on every turn,
- * connect an MCP server without passing the approval gate, or declare that the
- * model it is about to run costs nothing. These keys are honored only from tiers
- * the user controls: user, policy, flag.
- *
- * Deliberately not denied:
- *   - `permissions.deny` — tightening is always safe, and a repo's own
- *     guardrails stay effective against the agent it just configured.
- *   - `theme` / `vimMode` / `emacsMode` — cosmetic, no reach beyond the user's
- *     own terminal.
- *   - `trimOldToolResults` is denied for the opposite reason: it decides how much
- *     of the user's own conversation the model keeps, and a cloned repository
- *     should not get to make the agent forget on the user's behalf.
- *   - `gamepad` is denied *whole*, where `permissions` is denied key by key.
- *     There is no sub-key worth keeping: `enabled` claims an input device,
- *     `device` and `bindings` decide which one and what its buttons mean,
- *     `phrases` puts repository-authored text one press away from the prompt, and
- *     `allowApprove` would let a repository hand a physical button the power to
- *     approve its own tool calls. "Tightening is always safe" has no analogue
- *     here — every field widens what something outside the keyboard can do.
- *   - `allowManagedPermissionRulesOnly` / `disableBypassPermissionsMode` — these
- *     are read only from the policy tier already; they are listed here so the
- *     merged settings can never carry a repo-supplied value even if a future
- *     reader forgets that rule.
- *   - `cache` — it decides how the *user's* conversation is billed and how much
- *     of it hits the cache, and it has no effect on the repository at all, so a
- *     repo has no legitimate reason to set it. `ttl: "5m"` or
- *     `explicitBreakpoints: false` would quietly tax every turn of a session run
- *     inside that checkout, which is a strange thing for a checkout to want.
- *
- * Every key is classified, in a table rather than in an array of denied names.
- * A list of names is a list that drifts, and this one decides what a cloned
- * repository may hand itself — which model it runs, under which permission mode,
- * where its data goes (`env`, `providers`), what runs on the user's machine
- * (`hooks`), which servers it may reach (`mcpServers`), what its turns are
- * reported to cost. Typed over `keyof Settings` on purpose: a key added to
- * `SettingsSchema` and not classified here does not compile, so the default for
- * a new field is a question someone answers rather than an omission nobody sees.
- * `project-tier-keys.test.ts` asks the same thing at runtime, in both directions
- * — an unclassified key, and a row for a key the schema no longer has.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Settings a repository is not allowed to set for itself. */
 export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> = {
 	model: "denied",
 	fallbackModels: "denied",
@@ -509,14 +320,8 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	permissions: "repo",
 };
 
-/**
- * The same question for `permissions`, which merges field by field.
- *
- * `deny` is absent on purpose: tightening is always safe, and a repository's own
- * guardrails stay effective against the agent it just configured. `allow` and
- * `additionalDirectories` both widen what the agent may do — the first by
- * pre-approving calls, the second by declaring more of the disk a workspace.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The same question for `permissions`, which merges field by field. */
 export const PROJECT_TIER_PERMISSION_KEY_POLICY: Record<keyof Settings["permissions"], "denied" | "repo"> = {
 	allow: "denied",
 	additionalDirectories: "denied",
@@ -575,21 +380,8 @@ interface TierSource {
 	sources: Partial<Record<SettingsSourceName, string>>;
 }
 
-/**
- * The tier that would win over a choice written to the user file, if there is
- * one.
- *
- * `/theme`, `/model` and `/vim` all write `~/.labunbun/settings.json`, and every
- * other tier is merged on top of it. So a project's settings file, a local
- * override or the managed one quietly undoes the choice at the next startup —
- * the write is fine, and the silence about it is what leaves a user setting the
- * same theme every morning.
- *
- * Ordered by precedence, so the tier reported is the one that actually wins.
- * Only keys with no schema default are meaningful here: `theme`, `model` and
- * `vimMode` are all optional, so a value present in a tier's own parsed
- * settings is a value its file really set.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The tier that would win over a choice written to the user file, if there is one. */
 export function shadowingTier(
 	loaded: TierSource,
 	key: UserChoiceKey,
@@ -602,14 +394,8 @@ export function shadowingTier(
 	return undefined;
 }
 
-/**
- * One clause for a confirmation line, saying where the choice that was just
- * saved will be overridden. Undefined when nothing outranks the user file — the
- * common case, and the one that must stay quiet.
- *
- * `display` is how the caller shortens a path for the screen; passed in rather
- * than applied here so this module keeps knowing nothing about `~`.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One clause for a confirmation line, saying where the choice that was just saved will be overridden. */
 export function shadowedChoiceNotice(
 	loaded: TierSource,
 	key: UserChoiceKey,
@@ -660,15 +446,8 @@ export function mergeSettings<T>(base: T, override: unknown): T {
 	return out as T;
 }
 
-/**
- * Read the four file tiers. `home` is a parameter with a default rather than a
- * call to `homedir()` in the body, like every other module that resolves one
- * (`loadSkills`, `loadMemoryFiles`, `historyFilePath`, `sessionsRoot`): it is
- * what lets a caller that already knows which home it is serving — the REPL's
- * `options.home`, or a test with a throwaway one — read that home's files
- * instead of the process's own. Resolving it here would also mean the wizard
- * could be pointed at one home and the settings load at another.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read the four file tiers. `home` is a parameter with a default rather than a call to `homedir()` in the body. */
 export function loadSettings(cwd: string, flagSettings?: RawSettingsInput, home: string = homedir()): LoadedSettings {
 	const order: SettingsSourceName[] = ["user", "project", "local", "policy"];
 	let merged: RawSettingsInput = {};
@@ -750,31 +529,8 @@ export function collectPermissionRules(loaded: LoadedSettings): PermissionRule[]
 	return rules;
 }
 
-/**
- * Resolve the effective pair, letting the policy tier veto the unrestricted
- * sandbox. Returns the reason when a downgrade happened so the caller can tell
- * the user why the mode they asked for isn't the one they got.
- *
- * `disableBypassPermissionsMode` keeps its name and its spelling across the
- * rename. It is a policy-tier key — an admin writes it into the managed
- * settings file, which is why `PROJECT_TIER_KEY_POLICY` denies it from every
- * other tier — and renaming a key that lives in files we do not control breaks
- * them quietly rather than loudly: the schema does not refuse a field it has
- * never heard of, it strips it and reports success, so `loadSettings` prints no
- * warning and the lockdown simply stops applying. A wrong *type* under a known
- * key does fail the parse. A renamed key is the silent half.
- *
- * The name is a fossil of the old mode enum, where `bypassPermissions` was one
- * value doing two jobs at once: never ask, and confine nothing. That value is
- * gone — the two jobs are `permissionMode` and `sandbox`, asked separately (see
- * `LEGACY_MODE_SUGGESTIONS`). Of the pair, only "confine nothing" is something a
- * policy file can take away without also bringing an unattended run to a halt,
- * so that is the axis this key moves: `danger-full-access` comes back as
- * `workspace-write`, and the approval policy is left exactly as asked. Narrowing
- * a machine's confinement without also making it prompt for things it used to
- * run silently is the smaller change, and a policy file that wanted both can set
- * them itself.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Resolve the effective pair, letting the policy tier veto the unrestricted sandbox. */
 export function resolveMode(
 	requested: { mode: PermissionMode; sandbox: SandboxMode },
 	loaded: LoadedSettings,
@@ -790,25 +546,8 @@ export function resolveMode(
 	return { ...requested };
 }
 
-/**
- * Read the network axis out of a settings object.
- *
- * The one place the two are turned into a configuration, for the same reason
- * `resolveMode` is the one place the other two are: a second place doing this
- * arithmetic is a second answer to "what may this session reach", and the two
- * answers only have to differ on the one machine where nobody is looking.
- *
- * The default is `enabled` with an empty table, and that is a deliberate
- * statement rather than a filler. An empty table under `restricted` reaches
- * nothing, so defaulting the mode to `restricted` would make a settings file
- * that says nothing about the network into a session that cannot fetch
- * anything — a silent, invisible breakage for the many people who never touch
- * these keys. Writing `"networkAccess": "restricted"` is how you ask for that.
- *
- * The union in the schema is a convenience for the file (a bare string is
- * almost always what anyone wants to write) and is collapsed here, so nothing
- * downstream has to know a rule has two spellings.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read the network axis out of a settings object. */
 export function networkAxisFrom(settings: Settings): NetworkAxis {
 	return {
 		access: settings.networkAccess ?? "enabled",

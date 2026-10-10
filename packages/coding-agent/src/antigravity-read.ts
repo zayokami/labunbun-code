@@ -1,43 +1,6 @@
-/**
- * Antigravity's user state, as read from a home directory.
- *
- * Read `antigravity-home.ts` first — every path claim below is that module's,
- * and it says which of them are verified against the product and which are
- * inferred. The standing caveats for this source, in one place:
- *
- *   - **The MCP file is `mcp_config.json`.** 14 occurrences in
- *     `language_server.exe`; `mcp.json` and `mcp_settings.json` have zero each.
- *     Every other source in this repo's migration set spells it `.mcp.json`,
- *     and a reader that reached for that spelling would report a user with MCP
- *     servers as having none.
- *   - **There is nothing to import that is a credential.** Antigravity keeps
- *     OAuth tokens in the OS credential store — `wincred` on Windows, the
- *     keychain elsewhere — and there is no credential document under
- *     `~/.gemini` to read. A `credentials.db` path does occur in the binary,
- *     inside an agent prompt template, as `~/.config/gcloud/credentials.db` in
- *     a list of files the agent is told not to read: it is an example of a
- *     sensitive path belonging to **gcloud**, not a store Antigravity writes.
- *     Nothing in this module opens it, and {@link scrubAntigravityCredentials}
- *     exists because `config.json` is a settings document that a future version
- *     could grow a token into, not because one is expected.
- *   - **Conversation contents are not read and not parsed.** Counting and
- *     measuring each transcript is the whole of it, and the layout that makes
- *     that possible is the product's own — see {@link antigravityConversationsDir}
- *     for the four independent attestations of `brain/<id>/…/transcript.jsonl`.
- *     A unit here is a conversation *directory* and a size, never a parsed turn.
- *   - **Two data roots, and only one is read.** `antigravity-ide` wins when it
- *     has anything in it and `antigravity` is the fallback, because the app
- *     copies the first from the second and never deletes the source. Which one
- *     answered is on {@link RawAntigravity.dataDir}, and the other is still on
- *     {@link RawAntigravity.dataDirs}, because "the IDE has two spellings for
- *     its data directory" is a fact the report is better for knowing.
- *
- * **Nothing here throws.** Every read that fails becomes a line in
- * {@link RawAntigravity.skipped} naming what failed and why, which is the
- * convention `step-home.ts` uses for a walk that passes over something: a
- * migration that aborts on one damaged file loses every other source's import
- * to make a point about that file.
- */
+// Antigravity's user state, as read from a home directory. Every path claim lives
+// in `antigravity-home.ts`, and no read here throws.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -60,33 +23,15 @@ import { isRecord, parseJsonc, readSkillDirs, readText, tildePath } from "./migr
 import type { RawFile } from "./migrate-types.ts";
 import { looksLikeSecretName } from "./migrate-types.ts";
 
-/**
- * One thing the walk found and did not carry over, with the reason.
- *
- * `name` is a **label, not a resolved path**: a bare file or directory name
- * where that is unambiguous, and a forward-slashed relative label where it is
- * not (`plugins/foo`, `workflows.json`). This is the same convention as
- * `step-home.ts`'s `StepSkippedEntry` and `step-read.ts`'s `agent/<name>`
- * labels — the report renders every path it names with forward slashes, and a
- * Windows separator inside one of those lines is a rendering bug, not a path.
- *
- * A name appears here for one of four reasons, and the sentence says which:
- * it could not be read, it could not be parsed, it was deliberately left
- * unopened, or it was read and then not carried because of a collision.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One thing the walk found and did not carry over, with the reason. */
 export interface AntigravitySkipped {
 	name: string;
 	reason: string;
 }
 
-/**
- * One conversation, named and measured and never opened.
- *
- * A conversation is a **directory** under `brain/`, not a file, and `size` is
- * the size of the compact transcript inside it — `.system_generated/logs/
- * transcript.jsonl` — because that is the file whose presence decides whether
- * there is anything here to import. See {@link antigravityConversationsDir}.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One conversation, named and measured and never opened. */
 export interface AntigravityConversation {
 	/** The directory's own name, which is the conversation id. */
 	name: string;
@@ -96,32 +41,8 @@ export interface AntigravityConversation {
 	size: number;
 }
 
-/**
- * The theme, in Antigravity's own spelling rather than this build's.
- *
- * `dist/utils.js:63-84` resolves it in two steps and the second is not an
- * equality test:
- *
- * ```js
- * const themeMode = config?.userSettings?.themeMode;
- * if (themeMode && themeMode.includes('INHERIT')) return nativeTheme.shouldUseDarkColors ? 'DARK' : 'LIGHT';
- * if (themeMode && themeMode.includes('LIGHT'))  return 'LIGHT';
- * return 'DARK';
- * ```
- *
- * **`String.prototype.includes`, not `===`** — and it matters, because the value
- * is an enum the product spells in more than one form and this reader has no
- * way to enumerate them. `themeMode === "LIGHT"` would import
- * `LIGHT_MODE`, `MODE_LIGHT` or `light` as *dark*, silently and in the
- * direction the user did not choose. Both tests below are the app's, including
- * the order: `INHERIT` is tested first, so a value naming both is inherited.
- *
- * The `themeMode &&` guard is reproduced too. `themeMode.includes` on a
- * non-string throws inside `getThemeMode`, whose `catch` returns `'DARK'`
- * (`:80-83`) — so a settings file with `"themeMode": 1` is a **dark** theme to
- * Antigravity, not a missing one, and reading it as absent would let the
- * planner invent a preference the app does not have.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The theme, in Antigravity's own spelling rather than this build's. */
 export interface AntigravityTheme {
 	/** `userSettings.themeMode` verbatim, or `null` when the file states none. */
 	declared: string | null;
@@ -154,50 +75,22 @@ export interface RawAntigravity {
 	 * line saying so, and this is how a caller tells the two apart.
 	 */
 	present: boolean;
-	/**
-	 * The data root that answered, or `null` when neither has content.
-	 *
-	 * `antigravity-ide` when it is not empty, else `antigravity`, which is the
-	 * order {@link antigravityDataDirs} returns and the app's own copy
-	 * direction. `null` is a real answer — it means the home has customization
-	 * but no IDE data, which is the shape of a user who installed the CLI side
-	 * or deleted the IDE — and it is what stops the reader from reading
-	 * `brain/` and `mcp_config.json` out of a directory it never established was
-	 * theirs.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The data root that answered, or `null` when neither has content. */
 	dataDir: string | null;
 	/** Both candidate roots, most authoritative first, whether or not either exists. */
 	dataDirs: string[];
 	/** `~/.gemini/config/config.json`. Always present as a path, never as a read. */
 	configPath: string;
-	/**
-	 * The settings document, parsed, or `null` when it could not be.
-	 *
-	 * `null` rather than `{}` on purpose: when the file is there and unusable,
-	 * {@link AntigravitySkipped} says which of "a directory where a file was
-	 * expected", "unreadable", "not a JSON object", "not parseable" or "read
-	 * anyway with comments stripped" applied, and an empty object would let a
-	 * planner claim a document was read and held nothing. An **absent** file
-	 * produces no line at all — never having written settings is the ordinary
-	 * state of a home that only installed the IDE, not a failure to report.
-	 * Credential-shaped keys have been **removed** from whatever comes back —
-	 * see {@link scrubAntigravityCredentials}.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The settings document, parsed, or `null` when it could not be. */
 	config: Record<string, unknown> | null;
 	/** The theme, in the app's own terms. See {@link AntigravityTheme}. */
 	theme: AntigravityTheme;
 	/** Every `mcp_config.json` consulted, in priority order, existing or not. */
 	mcpConfigPaths: string[];
-	/**
-	 * The servers from every `mcp_config.json`, merged.
-	 *
-	 * The values are the source's own server objects, copied without
-	 * interpretation: `command`/`args`/`env` for a stdio server and
-	 * `serverUrl` for an SSE one are the shapes the product documents, and
-	 * deciding what this build can reproduce from them is the planner's job.
-	 * A server that is present in two documents appears once, from the
-	 * earlier one in {@link mcpConfigPaths}; {@link mcpCollisions} says so.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The servers from every `mcp_config.json`, merged. */
 	mcpServers: Record<string, unknown>;
 	/**
 	 * Server name → the `mcp_config.json` it was read from, so the planner can
@@ -207,45 +100,16 @@ export interface RawAntigravity {
 	mcpSources: Record<string, string>;
 	/** Names in more than one document, and which file won. */
 	mcpCollisions: Array<{ name: string; kept: string; dropped: string }>;
-	/**
-	 * Standing instructions, as {@link RawFile}s, from every candidate in
-	 * {@link antigravityMemoryPaths} that exists.
-	 *
-	 * One array rather than one string because there can be more than one:
-	 * `memory.txt` is the machine-local memory file and `GEMINI.md` /
-	 * `AGENTS.md` are rules, and a home can hold both. Which paths were tried
-	 * is in {@link antigravityMemoryPaths}, and a candidate that is there but
-	 * unreadable is named in {@link AntigravitySkipped}.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Standing instructions, as {@link RawFile}s, from every candidate that exists. */
 	memory: RawFile[];
-	/**
-	 * Skills and legacy workflows, as {@link RawFile}s.
-	 *
-	 * Skills come from `~/.gemini/config/skills/<name>/SKILL.md` and carry the
-	 * files beside them as `attachments` — the shape `readSkillDirs` gives
-	 * every other source, and the reason a skill's `references/` and
-	 * `scripts/` travel with it. Workflows come from the two deprecated
-	 * `workflows/` trees and carry a `detail` saying which tree they were in
-	 * and that the product now converts them to skills.
-	 *
-	 * A workflow whose name a skill already answers to is **left out** and
-	 * recorded in {@link nameCollisions}, rather than dropped silently: a skill
-	 * is the live shape and a workflow the same name is the shape the product
-	 * itself retires in favour of it, so the skill is the one worth carrying —
-	 * and the collision is a line in the report so the user is told the second
-	 * file was there.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Skills and legacy workflows, as {@link RawFile}s. */
 	assets: RawFile[];
 	/** One entry per conversation file: its name, its path, its size. */
 	conversations: AntigravityConversation[];
-	/**
-	 * Two assets answering to one name, and which of the two this reader kept.
-	 *
-	 * "Kept" and "dropped" are this reader's words, not the plan's: nothing has
-	 * been written yet, and the write step keeps the first of two writes to one
-	 * target path anyway. The record exists so the report can say a second file
-	 * was found under a name already taken.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Two assets answering to one name, and which of the two this reader kept. */
 	nameCollisions: Array<{ name: string; kept: string; dropped: string }>;
 	/**
 	 * Everything seen and not carried over, each with the reason. Sorted by
@@ -263,41 +127,16 @@ type AntigravityJson =
 	| { kind: "absent" }
 	| { kind: "invalid"; reason: string };
 
-/**
- * The largest depth a credential-shaped key is looked for at.
- *
- * Eight is well past anything a settings document nests to — `config.json`
- * holds `userSettings` and one level under it — and the cap is here so a
- * pathological document cannot turn a credential scan into a walk of a
- * megabyte-deep structure. A key deeper than this is **left in place**, which
- * is the one thing this function can get wrong; it is stated rather than
- * pretended away.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The largest depth a credential-shaped key is looked for at. */
 const MAX_CREDENTIAL_SCAN_DEPTH = 8;
 
-/**
- * Key names `looksLikeSecretName` does not catch.
- *
- * That helper matches `TOKEN`, `KEY`, `SECRET`, `PASSWORD` and `CREDENTIAL` as
- * case-insensitive substrings (`migrate-types.ts:379-384`), which covers
- * `apiKey`, `accessToken`, `refreshToken`, `clientSecret` and `privateKey`. It
- * is deliberately broad — it also matches a hypothetical `monkey`, and a
- * settings key called that is dropped as a credential it is not. The cost is
- * one line in the report saying so, which is cheaper than a token written into
- * a file the user then shares. `authorization` is the one common spelling it
- * misses, because none of the five markers is in it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Key names `looksLikeSecretName` does not catch. */
 const ANTIGRAVITY_SECRET_KEY = /authorization/i;
 
-/**
- * Antigravity's theme, from the parsed settings document.
- *
- * `dist/utils.js:71-75`, reproduced in {@link AntigravityTheme}: the value is
- * `config?.userSettings?.themeMode`, `INHERIT` is tested first with
- * `String.prototype.includes`, `LIGHT` second, and everything else — including
- * a value that is not a string at all — is `DARK`, which is what the app's
- * `catch` returns.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Antigravity's theme, from the parsed settings document. */
 function antigravityTheme(config: Record<string, unknown> | null): AntigravityTheme {
 	const settings = config === null ? undefined : config.userSettings;
 	const mode = isRecord(settings) ? settings.themeMode : undefined;
@@ -316,20 +155,8 @@ function antigravityTheme(config: Record<string, unknown> | null): AntigravityTh
 	};
 }
 
-/**
- * Remove every credential-shaped key from a parsed document, recording each by
- * path and never touching the value.
- *
- * Nothing in `config.json` is expected to be a secret — the settings document
- * holds `userSettings.themeMode` and similar — so this is a guard rather than a
- * step, and it is written as one because a guard nobody can see is not a guard.
- * The names go into `skipped`; the values are dropped on the floor, so a token
- * that a future Antigravity version put in its settings file never reaches a
- * planner, a plan, a report or a written target file.
- *
- * Depth-limited at {@link MAX_CREDENTIAL_SCAN_DEPTH}, which is documented on
- * the constant because the depth is where this function could be wrong.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Remove every credential-shaped key from a parsed document, recording each by path and never touching the value. */
 function scrubAntigravityCredentials(value: Record<string, unknown>, into: AntigravitySkipped[]): void {
 	const walk = (node: unknown, prefix: string, depth: number): void => {
 		if (!isRecord(node) || depth > MAX_CREDENTIAL_SCAN_DEPTH) return;
@@ -346,18 +173,8 @@ function scrubAntigravityCredentials(value: Record<string, unknown>, into: Antig
 	walk(value, "config.json", 0);
 }
 
-/**
- * A file's text, or the reason it is not text.
- *
- * `statSync` first rather than opening and catching, because the two failures
- * a caller must tell apart are *absent* and *there but unreadable*, and both
- * arrive as exceptions from `readText` — which would make a home that has never
- * installed Antigravity produce a report full of "unreadable" lines. A
- * directory sitting where a file was expected is its own case, and a real one:
- * `~/.gemini/config` is both a directory here and a file name inside
- * `~/.gemini`, so a user who has it the other way round gets a sentence that
- * says which.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A file's text, or the reason it is not text. */
 function readAntigravityText(path: string): AntigravityText {
 	let isDirectory: boolean;
 	try {
@@ -370,32 +187,8 @@ function readAntigravityText(path: string): AntigravityText {
 	return content === null ? { kind: "unreadable", reason: "present but unreadable" } : { kind: "text", value: content };
 }
 
-/**
- * A JSON document, with the two failures kept apart and one recovery attempted.
- *
- * Plain `JSON.parse` first, which is what both halves of the product do: the
- * Electron launcher opens `config.json` with `JSON.parse` (`dist/utils.js:70`)
- * and the binary's own JSON-shape validation for MCP is a
- * `jsontext.Value` unmarshal, which is plain JSON. There is **no** evidence
- * that either file is JSONC — the only document the product documents as JSONC
- * is a plugin's `plugin.json`, which this source does not read.
- *
- * So the retry is a recovery, not a format claim, and it is **reported**: when
- * `JSON.parse` fails the text is run through {@link parseJsonc} once, and if
- * that yields a non-empty object the file is read with `recovered: true` set,
- * which every caller turns into one line in `skipped`. A user whose settings
- * file carries a comment is told the file was read anyway and why, because
- * "every setting came across" and "every setting came across from a file this
- * build does not officially parse" are different sentences.
- *
- * A document whose body is nothing but a block comment parses as an empty
- * object under both readers and so reports as damaged; that is the one input
- * where the recovery is wrong, and it costs a settings file that held nothing.
- *
- * A fixed phrase for the failure, never the parser's message: a `SyntaxError`
- * from `JSON.parse` quotes the text it choked on, which would put a fragment of
- * the user's file into the report.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A JSON document, with the two failures kept apart and one recovery attempted. */
 function readAntigravityJson(path: string): AntigravityJson {
 	const text = readAntigravityText(path);
 	if (text.kind === "absent") return { kind: "absent" };
@@ -423,29 +216,8 @@ function readAntigravityJson(path: string): AntigravityJson {
 const ANTIGRAVITY_JSONC_RECOVERY =
 	"not parseable as plain JSON — read anyway with comments and trailing commas stripped, so anything the stripping removed is not carried over";
 
-/**
- * One MCP document's servers, and the three ways it can have none worth reading.
- *
- * The shape is the product's: a top-level object with `mcpServers` holding a map
- * of server name to that server's object. The Go type is
- * `struct { McpServers map[string]jsontext.Value \`json:"mcpServers"\` }`, and
- * the failure the product raises when the field is the wrong type is the string
- * `mcpServers field is not a JSON object, got %T` — so a non-object
- * `mcpServers` is a real, named condition rather than a shape this reader
- * invented.
- *
- * A **missing** `mcpServers` is reported rather than passed over in silence,
- * because the one document where a user is likely to have got it wrong is
- * exactly this one: the whole rest of this repo's migration set spells its MCP
- * document with the servers at the top level, so `{"sqlite": {…}}` is a shape a
- * user arriving from another tool will write by hand. Saying "this source reads
- * only the `mcpServers` field" is worth one line; importing it anyway would be
- * inventing a schema.
- *
- * Entries are handed over as they are. The Go map's value type is
- * `jsontext.Value`, so *any* JSON value is legal where the product is
- * concerned, and this reader does not second-guess it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One MCP document's servers, and the three ways it can have none worth reading. */
 function readAntigravityMcpFile(
 	path: string,
 	label: string,
@@ -487,33 +259,8 @@ function antigravityDirectoryEntries(dir: string): Dirent[] {
 	}
 }
 
-/**
- * The workflow markdown files under one deprecated tree, as skills would be.
- *
- * Recursive rather than flat because the product's own discovery instructions
- * write both as `*.md` globs and neither states a depth, and a reader that
- * assumed depth zero would silently drop a nested workflow.
- *
- * Four kinds of entry are passed over, each named in `skipped` with its own
- * reason — except the fourth, which is walked:
- *
- *   - **`*.md.bak`** — the product's own archive suffix. The built-in
- *     `migrate-workflows` skill renames each converted file to
- *     `<name>.md.bak` rather than deleting it, so one of these is a workflow
- *     that has *already* been converted, and saying that is the difference
- *     between "this was already migrated" and "this was missed".
- *   - **`README.md`** — not a workflow, and every other reader in this repo
- *     refuses one for the same reason (`readCommandFiles` in `migrate-core.ts`).
- *   - **anything that is not a `.md`** — named rather than read, because a
- *     workflow is markdown by the product's own definition and a file that is
- *     not one is not a workflow this importer can translate.
- *   - **a directory** — walked, recursively.
- *
- * The `detail` on each result is what the planner needs to explain the copy: a
- * workflow is a `.md` file and a skill here is a directory with a `SKILL.md`
- * and a `name`/`description` header, so this is a rewrite and not a verbatim
- * move, and the vendor's own migration performs exactly that rewrite.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The workflow markdown files under one deprecated tree, as skills would be. */
 function readAntigravityWorkflows(dir: string, label: string, skipped: AntigravitySkipped[]): RawFile[] {
 	const files: RawFile[] = [];
 	const walk = (current: string, prefix: string): void => {
@@ -565,29 +312,8 @@ function readAntigravityWorkflows(dir: string, label: string, skipped: Antigravi
 	return files;
 }
 
-/**
- * The conversations under one data root: named and measured, never opened.
- *
- * **The layout here is attested, so the shape of this scan follows the product
- * rather than a guess.** A data root holds `brain/`, and each entry of `brain/`
- * is a **directory** named for a conversation id, with its transcript at
- * `.system_generated/logs/transcript.jsonl` inside it — see
- * {@link antigravityConversationsDir} for the four independent attestations.
- * An earlier draft scanned for *files* under a `conversations/` directory whose
- * name nothing attested; that would have found nothing on every real install.
- *
- * So a conversation is measured by its compact transcript, and the measurement is
- * a size rather than a parse: this half of the reader accounts for what is there,
- * and the transcripts themselves are read by the history phase, on the same
- * two-phase schedule every other source here uses.
- *
- * `found` distinguishes *the directory is not there* from *it is there and holds
- * nothing*, which are different sentences to a user deciding whether their
- * history came across. A conversation whose transcript is missing is named and
- * counted, with the reason — it is a conversation the user can see in Antigravity
- * and this reader cannot account for, which is exactly the case a report owes
- * them an explanation for.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The conversations under one data root: named and measured, never opened. */
 function readAntigravityConversations(
 	dir: string,
 	skipped: AntigravitySkipped[],
@@ -629,23 +355,8 @@ function readAntigravityConversations(
 	return { found: true, conversations };
 }
 
-/**
- * Read one Antigravity home.
- *
- * Pure with respect to everything outside `home`: it resolves paths against the
- * argument and never calls `os.homedir()`, so a fixture laid out by a test and
- * a developer's own `~/.gemini` are the same code path. It does touch the
- * filesystem, necessarily — that is what reading is.
- *
- * The work is done in one order — the settings document, then the theme that
- * only it can answer, then the MCP documents in priority order, then the
- * standing instructions, then the skills and workflows, then the conversations,
- * and last the paths that exist and are deliberately not opened — but
- * {@link AntigravitySkipped} is **sorted by name before it is returned**, so
- * two runs over one home produce the same report rather than one that changes
- * with the order the filesystem happened to hand back. Nothing short-circuits:
- * a home with a damaged `config.json` still yields its skills.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read one Antigravity home. */
 export function readAntigravity(home: string): RawAntigravity {
 	const geminiRoot = antigravityGeminiRoot(home);
 	const dataDirs = antigravityDataDirs(home);
@@ -764,14 +475,7 @@ export function readAntigravity(home: string): RawAntigravity {
 		}
 	}
 
-	// The named-only paths are checked last and reported only when they exist, so
-	// an install with none of them is not told about five directories it does not
-	// have. The label is what the report prints and what the reason hangs off;
-	// existence is the only thing asked of the filesystem here.
-	//
-	// The label is resolved by replacing its leading `~/.gemini` — a slice rather
-	// than a `replace`, because a home that itself contained the text `~/.gemini`
-	// would otherwise have that occurrence substituted instead of the leading one.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const labelPrefix = `~/${ANTIGRAVITY_GEMINI_DIR}`;
 	for (const [label, reason] of Object.entries(ANTIGRAVITY_NAMED_ONLY)) {
 		if (!label.startsWith(labelPrefix)) continue;

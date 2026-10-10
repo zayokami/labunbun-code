@@ -1,102 +1,5 @@
-/**
- * Import an existing agent-tool setup into labunbun's own configuration.
- *
- * Recognised source layouts, all user-scope only:
- *   claude-code  ~/.claude/settings.json, ~/.claude.json, ~/.claude/skills,
- *                ~/.claude/rules
- *   codex        $CODEX_HOME when set, else ~/.codex — config.toml, AGENTS.md
- *                (AGENTS.override.md first when both are there), skills, agents,
- *                prompts, rules, sessions and archived_sessions, history.jsonl
- *   zcode        ~/.zcode/v2/config.json, ~/.zcode/cli/config.json,
- *                ~/.zcode/cli/db/db.sqlite, ~/.zcode/AGENTS.md, ~/.zcode/skills
- *   agents       ~/.agents/AGENTS.md, ~/.agents/skills, ~/.agents/agents
- *   deepseek-harness $DSH_HOME when set, else ~/.dsh — settings.yaml, AGENTS.md,
- *                skills, cordis patches declaring MCP servers, .agent-presets,
- *                sessions
- *   grok-build   $GROK_HOME when set, else ~/.grok — config.toml (models, MCP
- *                servers, permission rules), AGENTS.md, rules, skills, commands,
- *                agents, plugins, memory, sessions
- *   kimi-code    $KIMI_CODE_HOME when set, else ~/.kimi-code — config.toml
- *                (permissions, hooks, models), mcp.json, AGENTS.md, skills,
- *                agents, plugins, sessions, user-history
- *   minimax-code $MINIMAX_DATA_DIR, else $MAVIS_DATA_DIR, else ~/.minimax —
- *                config.yaml, permission.json, mcp.json, AGENTS.md, skills,
- *                agents, plans, v2/sessions
- *   step-code    $STEPCODE_CONFIG_DIR, else ~/.step-code — config.toml, mcp.json,
- *                AGENTS.md, skills, agents, sessions
- *   opencode     $OPENCODE_CONFIG_DIR, else <XDG config>/opencode — config.json /
- *                opencode.json / opencode.jsonc (merged in that order, all JSONC),
- *                providers, MCP, AGENTS.md, asset trees, opencode.db
- *   cursor       ~/.cursor (cli-config.json, hooks.json, mcp.json),
- *                <project>/.cursor/rules, ~/.config/cursor/prompt_history.json
- *   trae         ~/.trae/user_rules, <project>/.trae/rules, <editor profile>/
- *                User/mcp.json
- *   t3-code      $T3CODE_HOME when set, else ~/.t3 — <base>/userdata (the
- *                production tree; a dev build's <base>/dev is read only when
- *                there is no production one), holding settings.json,
- *                client-settings.json, desktop-settings.json and state.sqlite
- *   antigravity  ~/.gemini/antigravity-ide (the tree a current build writes
- *                to; ~/.gemini/antigravity is the pre-split one and is read
- *                when the first holds nothing) — config/config.json, mcp_config.json,
- *                skills, workflows + global_workflows, brain/<id>/.system_generated/
- *                logs/transcript.jsonl. `~/.gemini` itself is *not* a detection
- *                root: the Gemini CLI shares it.
- *   qoder         $QODER_CONFIG_DIR when set, else <$QODER_CLI_HOME or home>/
- *                $QODER_CONFIG_DIR_NAME (default `.qoder`) — settings.json
- *                (hooks, mcpServers, enabledPlugins, pluginConfigs and
- *                chatSession.builtInBrowserHosts are the *only* fields the desktop
- *                reads by name), skills, memory, projects/<slug>/<id>.jsonl.
- *                `%APPDATA%/com.qoder.app.stable/main.sqlite` is named, not read.
- *   codewhale     $CODEWHALE_HOME when set, else ~/.codewhale — with ~/.deepseek as a
- *                live second root (Codewhale is a rename of DeepSeek-TUI), so config.toml,
- *                permissions.toml, settings.toml, tui.toml, mcp.json, skills,
- *                ~/.agents/AGENTS.md + instructions.md, <workspace>/.codewhale/config.toml
- *                and rules/*.md, sessions/<id>.json. secrets/secrets.json, credentials/,
- *                keyring-locks/ and state.db are named, not read.
- *   mimocode-code $MIMOCODE_HOME when set (must be absolute), else the four XDG
- *                bases — `~/.config/mimocode` is the config root and
- *                `~/.local/share/mimocode` the data root, on **every** platform
- *                including Windows, because `packages/shared/src/global.ts` has no
- *                `process.platform` branch. (The product's own README claims
- *                `%LOCALAPPDATA%` and `~/Library/Application Support`; neither is
- *                in its code.) config.json, mimocode.json and mimocode.jsonc are
- *                merged **in that order**, all JSONC; project .mimocode/mimocode.json(c),
- *                AGENTS.md, memory, skill(s)/agent(s)/mode(s)/command(s)/plugin(s),
- *                and <data>/mimocode.db
- *   openclaw       $OPENCLAW_STATE_DIR when set, else ~/.openclaw, else the
- *                pre-rename ~/.clawdbot; $OPENCLAW_PROFILE moves the root to
- *                ~/.openclaw-<name> and OPENCLAW_HOME moves it anywhere
- *                (`state-dir.ts:21-43`, `cli/profile-utils.ts:35-37`). The
- *                *config* directory is a second resolver with different
- *                precedence (`infra/config-dir.ts:7-20`), so the two disagree on
- *                a real install and both are read: openclaw.json / clawdbot.json
- *                with `$include` resolved, mcp.servers, hooks, managed
- *                skills/ + plugin-skills/, the separate
- *                <agentDir>/settings.json, the six workspace bootstrap
- *                documents, and agents/<id>/agent/openclaw-agent.sqlite
- *   alma          **four unrelated roots.** ~/.config/alma is the only one read
- *                for files — SOUL.md, USER.md, MEMORY.md, SECURITY.md,
- *                HEARTBEAT.md, skills/, mcp.json, hooks.json, memory/; the
- *                Electron userData root (%APPDATA%\alma on Windows) holds the
- *                only real database, chat_threads.db, and is opened read-only
- *                for `app_settings.settings_data`, `providers` and the thread
- *                count; ~/.alma holds bin/, npm-cache/, activity-records/ and
- *                cache/; and ~/alma — **no leading dot** — holds the browser
- *                extension's stable copy and worktrees/. Settings are a SQLite
- *                row, not a file: `chat.defaultModel`, `general.theme` and
- *                `security.autoApproveToolRequests` are the three keys read, out
- *                of a blob this importer whitelists rather than scrubs
- *
- * Structure: read (I/O) → plan (pure) → apply (I/O). The planning step is where
- * every mapping decision lives, so the decisions are testable without touching
- * a real home directory, and `--apply` has nothing to decide.
- *
- * Two invariants hold throughout:
- * - Sources are read, never written. A migration cannot damage the setup it is
- *   importing from, so re-running it is always safe.
- * - Nothing is written without `apply: true`. The default run reports what it
- *   would do and returns.
- */
+// Migration hub: raw per-source reads become a plan, and the plan becomes writes.
+// Long-form design notes: docs/dev/migration-framework.md
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -228,23 +131,8 @@ export interface RawSources {
 	alma: RawAlma;
 }
 
-/**
- * Read every source tree.
- *
- * `cwd` is required and not defaulted, and that is the one design decision in
- * this file worth arguing for. Ten sources read only from `home`; Cursor and Trae
- * also read a *project* half — `<project>/.cursor/rules`,
- * `<project>/.trae/rules` — and a project directory is not something a reader may
- * pick for itself. With a default of `process.cwd()`, a caller that forgot the
- * argument would silently read whatever directory the process happened to be in,
- * and a test suite would import from the repository it runs in: an "empty home
- * yields an empty plan" assertion that quietly depends on the checkout it runs
- * from, which is the shape of a failure nobody can reproduce.
- *
- * So the compiler makes every call site say which project it means. There are
- * more than fifty of them and each is a one-word change, which is the trade this
- * module makes everywhere else too.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read every source tree. `cwd` is required and not defaulted. */
 export function readSources(home: string, cwd: string): RawSources {
 	return {
 		home,
@@ -379,21 +267,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 			});
 			return;
 		}
-		// Two claims on one key in a single run: only the second one lands, and
-		// until this demoted the first the report showed two green ticks, a
-		// written file with one value in it, and a sentence — usually in the past
-		// tense — saying the first claim's value was imported. It was not.
-		//
-		// The collision is not detectable when the first claim is made: `existing`
-		// is what the file held *before* this migration and cannot see a write
-		// from a moment ago, which is exactly why the two looked independent. So
-		// the earlier line is rewritten here, where the collision is a fact, and
-		// the scan is by target key rather than by source — a superseded claim is
-		// superseded whoever made it.
-		//
-		// The scan runs over what is already in `items`, before this claim joins
-		// it: a loop that reached the new line would find it, and a report that
-		// skipped its own write is the same lie one step further along.
+		// Long-form design notes: docs/dev/migration-framework.md
 		const target = `settings.json → ${key}`;
 		for (let i = items.length - 1; i >= 0; i--) {
 			const item = items[i];
@@ -408,15 +282,8 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		items.push({ source, from, to: target, action: "map", detail, containsSecret: false });
 	};
 
-	/**
-	 * Claim the two mode axes as the single decision they are.
-	 *
-	 * A foreign tool's mode is one value doing both jobs; this repo splits them,
-	 * so an import has to say both. Funnelling every mode write through here
-	 * means no planner can write `permissionMode` and leave `sandbox` alone, and
-	 * the report gains a line naming the half that the source never mentioned —
-	 * which is the honest way to record a default the import chose.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Claim the two mode axes as the single decision they are. */
 	const claimModePair: ClaimModePair = (source, mode, sandbox, from, detail) => {
 		claimScalar(source, "permissionMode", mode, from, detail);
 		claimScalar(
@@ -430,14 +297,8 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		);
 	};
 
-	/**
-	 * Permission rules claimed across sources, written once at the end.
-	 *
-	 * Two sources can each have decided something about what may run unasked, and
-	 * a later source must add to what an earlier one claimed rather than replace
-	 * it — a rules list that silently loses half its entries is worse than one
-	 * that was never imported.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Permission rules claimed across sources, written once at the end. */
 	const permissionRules: { allow: string[]; deny: string[]; additionalDirectories: string[] } = {
 		allow: [],
 		deny: [],
@@ -500,14 +361,8 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		});
 	};
 
-	/**
-	 * Hooks claimed across sources, written once at the end.
-	 *
-	 * A hook is keyed by event, and two sources holding a `Stop` hook each are
-	 * describing one configuration rather than two rival ones. This exists
-	 * because writing the key from each source meant the last one reached erased
-	 * the first while both report lines still said their hooks were written.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Hooks claimed across sources, written once at the end. */
 	const hookConfig: Record<string, NormalizedHookEntry[]> = {};
 	let hooksTouched = false;
 	// Whether `--force` claimed to replace the target's hooks rather than add to
@@ -570,14 +425,8 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		});
 	};
 
-	/**
-	 * Claim one env var, respecting an existing value unless forced.
-	 *
-	 * `action` and `detail` exist for the sources whose variable is scoped more
-	 * narrowly than a target `settings.env` is — see {@link ClaimEnv}. Both
-	 * default to the faithful-copy reading, so the eight sources that scope
-	 * nothing differently say nothing extra.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Claim one env var, respecting an existing value unless forced. */
 	const claimEnv = (
 		source: MigrationSourceId,
 		name: string,
@@ -995,15 +844,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
-	// Qoder has all three categories too, and for the same reason Antigravity's arm
-	// is one arm per category: `planQoder` claims a mode, MCP servers, hooks,
-	// skills and rule files, and a run that asked only for assets must still reach
-	// the skills and memory without passing through a settings gate.
-	//
-	// The one shape difference is the opposite of Antigravity's: there is no
-	// `wants("history")` branch, because `planQoder` deliberately claims nothing
-	// from the sessions and reports the count in its leftover lines instead. See
-	// `qoder-session.ts` for why reading them is a separate batch.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (only.includes("qoder") && raw.qoder.present) {
 		if (wants("settings") || wants("assets")) {
 			planQoder(
@@ -1022,22 +863,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
-	// Codewhale is the first source here whose gate is two roots rather than one,
-	// and the reason is its own history rather than its shape: it is a rename of
-	// DeepSeek-TUI and `~/.deepseek` is still a live fallback for some of its
-	// readers, so `RawCodewhale.present` is true when **either** tree holds
-	// something. The reader decided that; the gate asks it the same question
-	// rather than re-deriving it, which is the property `antigravity`'s and
-	// `t3-code`'s arms have.
-	//
-	// One arm rather than one per category for Qoder's reason: `planCodewhale`
-	// claims two mode axes, permission rules, hooks, MCP servers, skills and rule
-	// files, and a run that asked only for assets must still reach the skills and the
-	// instruction documents without passing through a settings gate. **No
-	// `claimModePair`**, because Codewhale states `approval_policy` and
-	// `sandbox_mode` as two separate root keys and the pair is claimed per field —
-	// see `planCodewhale`'s own header for why, which is the same argument
-	// `antigravity`'s arm makes.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (only.includes("codewhale") && raw.codewhale.present) {
 		if (wants("settings") || wants("assets")) {
 			planCodewhale(
@@ -1057,16 +883,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
-	// MiMo Code has settings and assets, and no hooks, so this is Qoder's shape
-	// rather than Antigravity's: one arm per category is not needed because
-	// `planMiMoCode` reaches its skills and memory through no settings gate — the
-	// gate is on the call, not on the parts.
-	//
-	// **There is no `claimModePair` and no `claimHooks`, and both absences are the
-	// product's, not an oversight.** MiMo Code's `permission` is a rule map whose
-	// unmatched default is `ask`, with no mode key anywhere in its 41-key document,
-	// so there is no mode+sandbox pair to claim and no posture to write. See the
-	// header of `mimocode-plan.ts`.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (only.includes("mimocode-code") && raw.mimocodeCode.present) {
 		if (wants("settings") || wants("assets")) {
 			planMiMoCode(
@@ -1085,15 +902,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
-	// OpenClaw has all three categories, and the arm is gated per category for the
-	// reason Qoder's and MiMo Code's are: `planOpenClaw` claims a mode, MCP servers,
-	// hooks, managed skills and the workspace instruction document, and a run that
-	// asked only for assets must still reach the skills without passing through a
-	// settings gate that happens to be empty.
-	//
-	// **Unlike Qoder's, this one does reach `openclaw-session.ts`** — the transcript
-	// format is established, so the `wants("history")` branch below is the path
-	// that converts a chosen session rather than a count.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (only.includes("openclaw") && raw.openclaw.present) {
 		if (wants("settings") || wants("assets")) {
 			planOpenClaw(
@@ -1112,20 +921,7 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
-	// Alma claims a model, a theme, a mode pair, MCP servers, hooks, skills and
-	// memory, so the arm is Qoder's shape rather than Antigravity's: the gate is on
-	// the call, not on the parts, because `planAlmaAssets` reaches the skills and
-	// the memory through no settings gate of its own.
-	//
-	// **`present` rather than `settings !== null`, and that is deliberate.** Alma
-	// with a `skills/` tree, a `mcp.json` or four identity documents and no
-	// settings row is a real state with things in it, and it is the state of a
-	// user who installed the CLI and never opened the desktop app.
-	//
-	// **The conversation half is `wants("history")` below**, through
-	// `alma-session.ts`: Alma's transcripts are rows in a SQLite table and the
-	// record shape is established, so unlike Qoder's this source converts chosen
-	// sessions rather than counting them.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (only.includes("alma") && raw.alma.present) {
 		if (wants("settings") || wants("assets")) {
 			planAlma(
@@ -1221,20 +1017,8 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 	return { home: raw.home, sources: only, categories, items, writes };
 }
 
-/**
- * Merge imported prompts into `~/.labunbun/history.jsonl`.
- *
- * Targets are read, not written, everywhere else in this file; this is the one
- * path that rewrites a file the user is also writing to, since ↑ recall appends
- * to it as they type. So the merge is a single whole-file write, the imported
- * prompts go *before* the existing ones — the newest entries are what ↑ offers
- * first, and those should be the ones typed here — and an entry already in the
- * file is never written again. That last rule is also what makes a second run
- * write nothing at all.
- *
- * There is no `--force`: the file is merged, never replaced, and the only thing
- * forcing could do is duplicate prompts the user already has.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Merge imported prompts into `~/.labunbun/history.jsonl`. */
 function planPromptHistory(
 	home: string,
 	promptHistory: PromptHistoryImport,
@@ -1341,14 +1125,8 @@ function planPromptHistory(
 	});
 }
 
-/**
- * Turn converted sessions into plans and their skips into items.
- *
- * The target id is derived from the source id, so importing a session twice
- * names the same file and the second run reports "already imported" instead of
- * writing a duplicate conversation. That check is a `statSync` on the *target*,
- * which is the one directory this function is allowed to look at.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Turn converted sessions into plans and their skips into items. */
 function planHistory(
 	home: string,
 	history: HistoryImport,
@@ -1535,15 +1313,8 @@ export interface RunMigrationOptions {
 	apply?: boolean;
 	force?: boolean;
 	home?: string;
-	/**
-	 * The project directory the run is in; defaults to the process's own.
-	 *
-	 * Exists for the same reason `readSources` takes its `cwd` as a required
-	 * argument: it is an input a caller may need to state rather than inherit.
-	 * A test running against a fake home is the case that needs it — without it
-	 * the project half of Cursor and Trae is read out of the checkout the test
-	 * suite happens to be in.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** The project directory the run is in; defaults to the process's own. */
 	cwd?: string;
 	/** Existing user-scope settings; read from disk when omitted. */
 	existing?: RawSettingsInput;
@@ -1671,20 +1442,7 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	if (source === "cursor") return raw.cursor.present;
 	if (source === "trae") return raw.trae.present;
 
-	// T3 keeps everything in one state directory, and its conversations live in a
-	// database inside it, so the directory's existence is the shallow question
-	// every other branch here asks. `RawT3Code` spells it `stateDir` rather than
-	// `present` because the reader's own two answers are the settings documents
-	// and the skips, and a bare "was there anything here" flag would have been a
-	// third.
-	//
-	// **This arm was missing, and the miss was silent.** Without one this function
-	// fell through to `raw.agents.present`, so a T3 install with no agents tree
-	// planned zero T3 sessions — and every test in `migrate-t3-history.test.ts`
-	// passed, because all of them call `listHistory`/`readHistory` directly and
-	// never came through this gate. The lesson is the reason the gate exists at
-	// all: a reader tested only at its own level is not evidence that anything
-	// calls it.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "t3-code") return raw.t3Code.stateDir !== null;
 
 	// Antigravity asks the question its reader already answered. `~/.gemini` is
@@ -1694,71 +1452,19 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	// this gate cannot drift from the reader the way a `present` arm would.
 	if (source === "antigravity") return raw.antigravity.present && raw.antigravity.dataDir !== null;
 
-	// Qoder's gate is the one that can be answered honestly. A Qoder install with
-	// a `settings.json`, a skills tree or a memory directory is worth offering; one
-	// with none of those has nothing to import and offering it would be a question
-	// whose only possible answer still costs the user a read and a keystroke.
-	//
-	// **`present` is deliberately not `settings !== null`.** A Qoder CLI-only home
-	// has skills and memory and no settings document, and that is a real state with
-	// things in it — the same argument `t3-code`'s arm makes about a dev build.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "qoder") return raw.qoder.present;
 
-	// Codewhale's history arm is its transcripts, so the gate is the reader's own
-	// count of `<id>.json` files rather than `present`. The distinction is a real
-	// state rather than a nicety: a home with settings and skills and no session
-	// has nothing for `--history-scope` to fetch, and running the history phase
-	// anyway would produce an empty listing that reads as "you had no sessions".
-	// `sessionCount` counts files and reads none of them, so the gate costs
-	// nothing — and it counts whichever root the product would read, so a home
-	// whose sessions were never migrated off `~/.deepseek` still passes it.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "codewhale") return raw.codewhale.sessionCount > 0;
 
-	// MiMo Code's gate is `present`, which its reader answers as "any of the four
-	// roots holds something" — the question this source needs, because its config
-	// and data roots are **siblings** rather than nested and either one alone can be
-	// the only populated one. A user who has run the TUI without keeping a
-	// conversation has an empty `<data>` and a populated `<config>`, and a user who
-	// imported a conversation elsewhere has the reverse; asking for either specific
-	// root would call the source absent on half the machines that have it.
-	//
-	// **This arm is load-bearing in a way the reader's tests cannot see.** Without
-	// it the function falls through to `raw.agents.present`, which is another
-	// source's flag: a MiMo Code install with no `~/.agents` tree would plan zero
-	// MiMo Code sessions and every test of the session reader — which calls
-	// `listHistory`/`readHistory` directly — would still pass. Same failure as the
-	// `t3-code` arm's, which is where the comment about it came from.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "mimocode-code") return raw.mimocodeCode.present;
 
-	// **OpenClaw's gate asks its reader two questions, and both have bitten a
-	// migration that asked only one.** `present` alone would offer a home whose
-	// state directory exists but is empty — which is what a first run leaves, and
-	// `resolveConfigDir` creates nothing, so "the directory is there" is not
-	// evidence. `configDir` alone would miss an install whose configuration is
-	// elsewhere, which is the *normal* case for a `.clawdbot` user and for anyone
-	// with `OPENCLAW_CONFIG_PATH` set — the two resolvers disagree by design
-	// (`state-dir.ts:33-43` against `config-dir.ts:7-20`).
-	//
-	// Either root answering is enough, and both are asked, so a home with history
-	// but no settings and a home with settings but no history are both offered.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "openclaw") return raw.openclaw.present;
 
-	// **Alma's gate asks two questions, and the second is the one that matters.**
-	//
-	// `present` alone is not enough: it is true for a home holding only `~/.alma`
-	// (a CLI install's `bin/` and npm cache), only `~/alma` (the browser relay),
-	// or a `~/.config/alma` holding nothing importable. None of those has a
-	// conversation, and offering one costs the user a read and a keystroke.
-	//
-	// `threadCount` alone is not enough either, and this is the failure the T3
-	// comment above describes: without an arm here the function falls through to
-	// `raw.agents.present`, which is **another source's flag**, so an Alma install
-	// with no `~/.agents` tree would plan zero Alma sessions while every test of
-	// `alma-session.ts` — which calls `listAlmaHistory` directly — still passed.
-	//
-	// So it is `present || threadCount > 0`: a home with settings but no
-	// conversations, and a home with conversations and no settings, are both
-	// offered, and neither is offered because a directory exists.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "alma") return raw.alma.present || raw.alma.threadCount > 0;
 
 	return raw.agents.present;
@@ -1793,14 +1499,8 @@ function readHistoryFor(
 	return history;
 }
 
-/**
- * Read the prompts each source remembers, under the same scope as its sessions.
- *
- * The scope question is asked once per source and means "what of mine should
- * come across" — a user who asked for this project's history did not ask for
- * every prompt they have ever typed, and one who said no to history did not mean
- * "except the recall list".
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read the prompts each source remembers, under the same scope as its sessions. */
 function readPromptHistoryFor(
 	raw: RawSources,
 	only: MigrationSourceId[],

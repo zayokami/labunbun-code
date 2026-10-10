@@ -1,41 +1,6 @@
-/**
- * OpenClaw's user state, as read from a home directory.
- *
- * Read `openclaw-home.ts` first — every path claim below is that module's. The
- * standing caveats for this source, in one place:
- *
- *   - **There are two unrelated settings documents and a user's model may be in
- *     either.** `<stateDir>/openclaw.json` is the product configuration;
- *     `<agentDir>/settings.json` is a *forked Claude Code settings manager*
- *     (`src/agents/sessions/settings-storage.ts:89`) holding `defaultProvider`,
- *     `defaultModel`, `defaultThinkingLevel`, `theme` and the rest
- *     (`:73-111`). Reading only the first reports "no model set" for a user who
- *     set one, which is the most common way a migration of this shape goes wrong.
- *   - **`$include` is the layering mechanism, and skipping it imports a document
- *     the product is not running** (`includes.ts:25`). Merge semantics are
- *     specific and are implemented below: arrays concatenate, objects merge
- *     recursively, primitives take the source (`includes.ts:204-207`).
- *   - **The MCP server map is open-world and has retired keys that make a whole
- *     file fail to load.** `McpServerSchema` ends in `.catchall(z.unknown())`
- *     (`zod-schema.mcp-server.ts:154`), which is precisely why the retired aliases
- *     are rejected in a `superRefine` rather than by the schema — the comment at
- *     `:75-76` says so. **A file carrying one of them does not load at all**, so a
- *     migrator that silently ignored them would report a healthy install where the
- *     product refuses to start.
- *   - **The state directory has three spellings and only one of them is the
- *     answer** (`state-dir.ts:21-43`, `cli/profile-utils.ts:26-37`,
- *     `infra/config-dir.ts:7-20`). They disagree about `OPENCLAW_CONFIG_PATH`
- *     and about the `.clawdbot` fallback; see the table in `openclaw-home.ts`.
- *
- * **Nothing here throws.** Every read that fails becomes a line in
- * {@link RawOpenClaw.skipped} naming what failed and why, for the reason
- * `qoder-read.ts` states in its own header.
- *
- * **No field holds a credential and no field holds a conversation.** See
- * {@link scrubOpenClawCredentials} for the shapes that were removed, and the
- * header of `migrate-core.ts`'s `urlCredentialProblem` for the one that no
- * key-name scan can see.
- */
+// OpenClaw's user state, as read from a home directory: the configuration after
+// `$include` resolution, the agent, MCP, the credential scrub and the workspace.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -71,15 +36,8 @@ export interface OpenClawSkipped {
 	reason: string;
 }
 
-/**
- * A configuration document in the three states one can be in when it is on disk.
- *
- * `recovered` records whether the file needed the JSON5 fallback: OpenClaw tries
- * strict JSON first and JSON5 second (`utils/parse-json-compat.ts:48-55`), so a
- * file that only parses as JSON5 is a real and common state — and its comments are
- * **stripped on write** (`config/json5-comments.ts:24-34`), which is why this
- * importer never round-trips a document through the product's writer.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A configuration document: its parsed value, or why it could not be read. */
 type OpenClawJson =
 	| { kind: "object"; value: Record<string, unknown>; recovered: boolean }
 	| { kind: "absent" }
@@ -114,125 +72,41 @@ export interface RawOpenClaw {
 	 */
 	configPath: string;
 	configCandidates: string[];
-	/**
-	 * The configuration **after `$include` resolution** — the document OpenClaw is
-	 * actually running — or `null` when nothing was readable.
-	 *
-	 * `null` rather than `{}` on purpose: a present-but-unusable file must say which
-	 * of "not a JSON object" or "not parseable" applies, and an empty object would
-	 * let a planner claim a document was read and held nothing.
-	 *
-	 * **This is the merged document, not the file.** An importer that read
-	 * `openclaw.json` alone and stopped would be importing a file the product has
-	 * layered other documents over, which is the single most load-bearing thing
-	 * this reader does beyond opening the right directories.
-	 *
-	 * Credential-shaped keys have been removed; see {@link scrubOpenClawCredentials}.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The configuration after `$include` resolution, or `null` when nothing was readable. */
 	settings: Record<string, unknown> | null;
 	/** The files an `$include` pulled in, in the order they were merged. */
 	includeFiles: string[];
-	/**
-	 * Includes that could not be read, and why.
-	 *
-	 * **Never empty when {@link RawOpenClaw.settings} is non-null but thin.** A
-	 * malformed sibling is isolated rather than fatal — `resolveConfigIncludesForTopLevelKey`
-	 * exists for exactly that (`includes.ts:637-646`) — so a home whose include is
-	 * broken still reports the keys it does have, and this list says what is
-	 * missing. Silence here would be a report claiming completeness it does not have.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Includes that could not be read, and why. */
 	includeFailures: Array<{ path: string; reason: string }>;
-	/**
-	 * Top-level keys that were dropped because the product would not load a file
-	 * carrying them, named rather than counted.
-	 *
-	 * A whole-file failure in OpenClaw is not a per-key one, so these are a
-	 * *diagnosis*, not a partial import: the planner refuses the MCP map entirely
-	 * when this is non-empty.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Top-level keys the product would refuse to load, named rather than counted. */
 	retiredMcpKeys: string[];
-	/**
-	 * `mcp.servers` — copied without interpretation, credential values removed.
-	 *
-	 * The map itself is keyed by a name the user chose (`types.mcp.ts:15-17`), and a
-	 * server called `keyboard-mcp` is an ordinary thing to want, so the scrub walks
-	 * *into* each entry and never deletes the entry. What is removed, and why, is
-	 * {@link scrubOpenClawCredentials}'s whole subject.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `mcp.servers`, with every credential value removed. */
 	mcpServers: Record<string, unknown>;
-	/**
-	 * The **names** of the credential values {@link RawOpenClaw.mcpServers} had
-	 * removed, keyed by server name.
-	 *
-	 * **This exists because a value that is gone is a name the report cannot
-	 * print.** The scrub drops `env` and `headers` whole, so a planner reading
-	 * `mcpServers` sees no trace of them and would report a clean `map` for a server
-	 * whose secrets were dropped — which is the "everything came across" reading
-	 * the credential rules exist to prevent. The names are carried separately so the
-	 * planner can say "left off MY_TOKEN, authorization — set them again here".
-	 *
-	 * Never a value. See {@link scrubOpenClawCredentials}.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The names of the credential values `mcpServers` had removed, keyed by server name. */
 	mcpCredentialNames: Record<string, { env?: string[]; headers?: string[] }>;
-	/**
-	 * The **names** of the environment variables `openclaw.json`'s `env` block
-	 * declared, never a value.
-	 *
-	 * **The one that carries the finding this source exists for.** OpenClaw's own
-	 * provider key list (`src/infra/dotenv.ts:43,61,62,76`) includes
-	 * `KIMI_API_KEY`, `KIMICODE_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY`
-	 * and `MINIMAX_API_KEY`, so this block is a place *other tools'* credentials
-	 * live. An importer that copied `env` into this build's settings would hand one
-	 * tool's key to another file; an importer that copies nothing and **names what
-	 * it saw** is what keeps that from being invisible.
-	 *
-	 * Read from the unsanitized merge for the reason
-	 * {@link RawOpenClaw.mcpCredentialNames} is: the scrub has already removed the
-	 * values, so the scrubbed copy has no names left to report.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The names under `env`, never a value. */
 	envNames: string[];
-	/**
-	 * `<agentDir>/settings.json` — the forked Claude Code settings document — or
-	 * `null` when there is none.
-	 *
-	 * **Read separately and never merged into {@link RawOpenClaw.settings}.** They
-	 * are different documents with different schemas: this one carries
-	 * `defaultProvider`/`defaultModel`/`defaultThinkingLevel`/`theme`
-	 * (`settings-storage.ts:73-111`) and the product configuration carries none of
-	 * them. The planner reads both and reports both.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `<agentDir>/settings.json`, read separately from the product configuration. */
 	agentSettings: Record<string, unknown> | null;
 	/** Where {@link RawOpenClaw.agentSettings} came from, or `null` beside it. */
 	agentSettingsPath: string | null;
-	/**
-	 * Retired keys carried by {@link RawOpenClaw.agentSettings}.
-	 *
-	 * Four checks, not six: `queueMode`, `websockets`, `skills` **as an object**
-	 * (it is a `string[]` now) and `retry.maxDelayMs` — `requireSupportedSettings`
-	 * (`settings-manager.ts:51-77`) pushes all four and throws. A document carrying
-	 * one does not load, so the planner says so rather than importing a settings
-	 * file OpenClaw refuses.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Retired keys carried by `agentSettings`. */
 	retiredAgentSettingKeys: string[];
-	/**
-	 * `<workspace>/AGENTS.md` — the one bootstrap document with an equivalent here
-	 * — or `null`.
-	 *
-	 * **These live in the workspace, not in `~/.openclaw`** (the policy resolves
-	 * them against `workspaceRoot`, `workspace-bootstrap-policy.ts:51-57`), so the
-	 * field is null for a home that has never run an agent in a directory it kept.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `<workspace>/AGENTS.md`, or `null`. */
 	agentsMd: string | null;
 	/** The workspace the bootstrap documents were looked for in. */
 	workspaceDir: string | null;
-	/**
-	 * The other five bootstrap documents, by name.
-	 *
-	 * Named and not imported, because this build has no counterpart for a persona
-	 * document, a device identity, a user profile, a first-run script or a root
-	 * memory index. **They are reported by name because "no equivalent" and "we did
-	 * not look" are different claims**, and only one of them is true.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The other five bootstrap documents, by name. */
 	otherBootstrapDocs: Array<{ name: string; present: boolean }>;
 	/** Managed and plugin skills, de-duplicated by folder name, managed first. */
 	assets: RawFile[];
@@ -268,24 +142,8 @@ const DEFAULT_AGENT_ID = "main";
 /** How deep a credential-shaped key is looked for. See the note in `qoder-read.ts`. */
 const MAX_CREDENTIAL_SCAN_DEPTH = 8;
 
-/**
- * Keys whose value is dropped **whole**, contents and all.
- *
- * The distinction is the same one `scrubQoderCredentials` draws, and getting it
- * backwards is how a scrub deletes a user's servers. `mcp.servers.headers` is a
- * slot — every value in it is registered sensitive by the product's own schema
- * (`zod-schema.mcp-server.ts:33-37`), so dropping the map loses nothing that was
- * configuration. `mcp.servers.keyboard-mcp` is a *name*, and it is handled by
- * {@link OPENCLAW_NAME_MAP_KEYS} instead.
- *
- * **`env` is deliberately NOT here**, which was a first-draft mistake worth
- * recording: it is not only a credential slot. `env.shellEnv` is plain
- * configuration (`enabled`, `timeoutMs`, `types.openclaw.ts:55-67`), so dropping
- * the whole block lost it. `env` recurses instead — `env.vars` is dropped whole
- * below, and a bare `FOO: "bar"` under `env` survives because it is not a
- * credential. `auth` is dropped the same way for the same reason: it is a mix of
- * `authProfiles` (state) and profile *references*.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Keys whose value is dropped whole, contents and all. */
 const OPENCLAW_CREDENTIAL_SLOTS = new Set([
 	"headers",
 	"apiKey",
@@ -296,40 +154,12 @@ const OPENCLAW_CREDENTIAL_SLOTS = new Set([
 	"authProfiles",
 ]);
 
-/**
- * Keys whose value is a **map the user keys by hand**, so its child keys are
- * names rather than field names.
- *
- * **This set is what stops {@link scrubOpenClawCredentials} deleting servers, and
- * the bug it prevents is not hypothetical.** `looksLikeSecretName` matches `KEY` as
- * a case-insensitive *substring*, so a server named `keyboard-mcp` matches it — and
- * a walk that tested every key it reached would delete that user's server, its
- * command, its arguments and its working directory, none of which is a secret. That
- * is the failure `qoder-read.ts` documents in its own header ("a server called
- * `keyboard-mcp` is an ordinary thing to want; `looksLikeSecretName` matches `KEY`
- * inside it and the naive walk took that as a finding"), and a first draft of this
- * module reproduced it exactly.
- *
- * So when the walk reaches one of these keys it **recurses into each entry and keeps
- * every entry**, dropping credential-shaped keys *inside* an entry
- * (`mcp.servers.x.env`, `models.providers.y.apiKey`) and never the entry itself.
- *
- * `authProfiles` is deliberately **not** here: it is login state rather than a
- * user-named map, so it is dropped whole above.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Keys whose value is a map the user keys by hand, so its child keys are names. */
 const OPENCLAW_NAME_MAP_KEYS = new Set(["servers", "providers", "entries", "surfaces", "accessGroups"]);
 
-/**
- * The keys OpenClaw's own MCP schema hard-rejects (`zod-schema.mcp-server.ts`).
- *
- * **Nine at the top level** — eight in the loop at `:77-86` plus `disabled` at
- * `:102-113` — and one more nested under `codex` (`:95-104`). They exist as
- * checks rather than as a strict object *because* the schema is
- * `.catchall(z.unknown())` (`:154`): without the `superRefine` those aliases would
- * be swallowed by the open-world catchall and silently accepted. A file carrying
- * one fails to load in its entirety, which is why this importer reports the
- * diagnosis instead of importing the surviving keys as if the file were healthy.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The keys OpenClaw's own MCP schema hard-rejects. */
 const OPENCLAW_RETIRED_MCP_KEYS = new Set([
 	"connectTimeout",
 	"connect_timeout",
@@ -345,14 +175,8 @@ const OPENCLAW_RETIRED_MCP_KEYS = new Set([
 /** The nested retired key, under `codex` (`zod-schema.mcp-server.ts:95-104`). */
 const OPENCLAW_RETIRED_MCP_CODEX_KEY = "default_tools_approval_mode";
 
-/**
- * Read OpenClaw's state from `home`.
- *
- * `cwd` is the workspace the bootstrap documents are looked for in and is
- * **required, not defaulted** — for the reason `readSources` states: a workspace is
- * not something a reader may pick for itself. `env` is required too, so no test can
- * be made hermetic by forgetting it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read OpenClaw's state from `home`; `cwd` and `env` have no default. */
 export function readOpenClaw(home: string, cwd: string, env: OpenClawEnv): RawOpenClaw {
 	const skipped: OpenClawSkipped[] = [];
 	const stateDir = openclawStateDir(home, env);
@@ -417,19 +241,8 @@ export function readOpenClaw(home: string, cwd: string, env: OpenClawEnv): RawOp
 // Configuration: strict JSON, JSON5, and `$include`
 // ---------------------------------------------------------------------------
 
-/**
- * Parse one configuration document: **strict JSON first, JSON5 second**
- * (`utils/parse-json-compat.ts:48-55`).
- *
- * The JSON5 arm is a comment-and-trailing-comma stripper rather than a full JSON5
- * parser, and that is enough for what OpenClaw writes: the fallback exists for
- * comments (`config/json5-comments.ts:24-34`), which are the only JSON5 feature the
- * product's own writer produces.
- *
- * **The document is never written back.** OpenClaw strips JSON5 comments on save,
- * so a round-trip through its writer would quietly delete the user's comments —
- * which is exactly why this is a reader and not a rewriter.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Parse one configuration document: strict JSON first, JSON5 second. */
 function parseConfigText(raw: string): OpenClawJson {
 	try {
 		const parsed: unknown = JSON.parse(raw);
@@ -448,22 +261,8 @@ function parseConfigText(raw: string): OpenClawJson {
 	}
 }
 
-/**
- * Remove `//` and block comments, and trailing commas, that are **outside** a
- * string.
- *
- * Hand-written rather than delegated to a JSON5 library: the only JSON5 this
- * product's writer produces is comments (`json5-comments.ts:24-34`), and the
- * string tracking is the part a naive `replace` gets wrong — a URL in a config
- * value contains `//` and stripping to end-of-line would truncate the document.
- *
- * **Trailing commas are handled here because the product names them.** Its own
- * comment on the fallback is "accepts JSON5 syntax such as comments **and
- * trailing commas**" (`utils/parse-json-compat.ts:48`), so a file with a trailing
- * comma parses for OpenClaw and must parse here. Removing one only where the next
- * non-space character closes a container is what keeps `"a", "b"` intact — a
- * blanket `,}` replacement would eat the comma out of an object *value*.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Remove `//` and block comments, and a comma at the end of a container, outside a string. */
 function stripJson5Comments(raw: string): string {
 	let out = "";
 	let inString = false;
@@ -526,22 +325,8 @@ function stripJson5Comments(raw: string): string {
 	return out;
 }
 
-/**
- * The merged configuration: `configPath` plus every `$include`, deepest last.
- *
- * **The merge is the product's** (`includes.ts:204-207`): arrays concatenate,
- * objects merge recursively, and a primitive takes the *source* — the document being
- * merged in — over the target. Getting the primitive direction backwards inverts
- * every override the user wrote, which is why it is spelled out here and tested.
- *
- * Bounds are the product's too: {@link OPENCLAW_INCLUDE_MAX_DEPTH} over the file
- * chain and {@link OPENCLAW_INCLUDE_MAX_BYTES} per file (`includes.ts:26,31`). A
- * chain deeper than the budget is a failure of *that* include, not of the read —
- * the product isolates a malformed branch the same way
- * (`resolveConfigIncludesForTopLevelKey`, `includes.ts:637-646`), and a document
- * that would not load is worth less to the user than one that loads with a gap the
- * report names.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The merged configuration: `configPath` plus every `$include`, in merge order. */
 function resolveOpenClawConfig(
 	home: string,
 	configPath: string,
@@ -578,27 +363,8 @@ function resolveOpenClawConfig(
 	return { value: scrubOpenClawCredentials(merged).value, raw: merged, files, failures };
 }
 
-/**
- * Resolve one document's `$include` chain, returning the document with its
- * includes merged in.
- *
- * **The direction of the merge is the thing to get right, and it is the opposite of
- * the obvious reading.** The product returns `deepMerge(included, rest)`
- * (`includes.ts:368`): `included` is the *target* and `rest` — the including
- * document's **own** keys, gathered as `siblingKeys` at `:360-366` — is the
- * *source*. Primitives take the source (`includes.ts:204-207`), so **a key written
- * in `openclaw.json` wins over the same key in an included file.** An importer that
- * merged the other way round would silently invert every override the user wrote
- * in the file they actually edited.
- *
- * For an array of includes, `entries.reduce((current, entry) => deepMerge(current,
- * entry.value), {})` (`:336`) makes each **later** include the source, so a later
- * entry wins — the same rule one level down.
- *
- * `basePath` is the file the *current* document lives in, because an include path
- * is resolved relative to **the including file's own directory** (`includes.ts:415-418`)
- * and not to the root configuration's.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Resolve one document's `$include` chain, with the document's own keys as the source. */
 function resolveIncludes(
 	document: Record<string, unknown>,
 	basePath: string,
@@ -717,17 +483,8 @@ function readJsonFile(path: string): OpenClawJson {
 // Agents
 // ---------------------------------------------------------------------------
 
-/**
- * The agent whose state is read.
- *
- * `agents` is a list whose entries carry an `id` (`agent-scope-config.ts:578-589`
- * reads `resolveAgentConfig(cfg, id)`), and OpenClaw's own store is laid out under
- * `agents/<id>/agent` — so a user with several agents has several stores and this
- * importer reads the **first configured agent**, which is the one the product calls
- * `main` when none is named. Naming one agent and saying so is the honest move: a
- * reader that merged several would produce a `RawOpenClaw` describing no single
- * install.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The agent whose state is read: the first configured one, or `main`. */
 function readAgentId(settings: Record<string, unknown> | null): string {
 	const agents = settings?.agents;
 	if (isRecord(agents) && typeof agents.default === "string" && agents.default.trim() !== "") {
@@ -757,15 +514,8 @@ function readConfiguredAgentDir(settings: Record<string, unknown> | null, agentI
 	return undefined;
 }
 
-/**
- * The retired keys carried by an agent settings document
- * (`settings-manager.ts:51-77`).
- *
- * Four checks, and two of them are not top-level keys at all: `skills` is
- * rejected **as an object** (it is a `string[]` now) and `retry.maxDelayMs` is
- * nested inside `retry`. Reporting either as a top-level key name would be a
- * finding the user cannot act on.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The retired keys carried by an agent settings document. */
 export function collectRetiredAgentSettingKeys(settings: Record<string, unknown> | null): string[] {
 	if (settings === null) return [];
 	const found: string[] = [];
@@ -780,16 +530,8 @@ export function collectRetiredAgentSettingKeys(settings: Record<string, unknown>
 // MCP
 // ---------------------------------------------------------------------------
 
-/**
- * The retired keys across every configured server, sorted and de-duplicated.
- *
- * **Read from the unsanitized merge**, for a reason that is not obvious and that a
- * first draft got wrong: one of the nine rejected keys is `client_key`, and
- * `looksLikeSecretName` matches the `KEY` inside it — so the credential scrub had
- * already deleted the key before this ran, and a configuration OpenClaw would
- * refuse to load was reported as clean. A diagnosis that reads the sanitized copy
- * diagnoses the sanitized document rather than the user's.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The retired keys across every configured server, sorted and de-duplicated. */
 function collectRetiredMcpKeys(raw: Record<string, unknown> | null): string[] {
 	if (raw === null) return [];
 	const mcp = raw.mcp;
@@ -809,18 +551,8 @@ function collectRetiredMcpKeys(raw: Record<string, unknown> | null): string[] {
 	return [...found].sort();
 }
 
-/**
- * `mcp.servers`, copied with every credential value removed, plus the names.
- *
- * See {@link scrubOpenClawCredentials} for what "removed" covers; this only has to
- * find the map. A `mcp` with no `servers` is an empty object rather than `null`,
- * for the reason `qoder-read.ts` gives: the key's absence is information, and an
- * absent map reads the same as an empty one in a report either way.
- *
- * The names are read from the **original** entry, before the scrub runs — reading
- * them from the scrubbed copy is the bug this split exists to prevent, since the
- * scrubbed copy no longer has the keys at all.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `mcp.servers`, copied with every credential value removed, plus the names. */
 function readMcpServers(
 	settings: Record<string, unknown> | null,
 	raw: Record<string, unknown> | null,
@@ -863,33 +595,8 @@ function readMcpServers(
 // Credentials
 // ---------------------------------------------------------------------------
 
-/**
- * Remove every credential value from a document, keeping the structure.
- *
- * **Four classes of thing are removed, and the fourth is the one that matters.**
- *
- *   1. **Slots the product itself registers sensitive.** `mcp.servers[].env` and
- *      `.headers` are wrapped in `.register(sensitive)` in the product's own schema
- *      (`zod-schema.mcp-server.ts:20-24,33-37`) — every value, whatever it is called.
- *   2. **Keys that read as credentials.** {@link looksLikeSecretName} covers
- *      `apiKey`, `accessToken`, `clientSecret`, `password`.
- *   3. **Named slots.** {@link OPENCLAW_CREDENTIAL_SLOTS} covers the ones whose name
- *      is not credential-shaped but whose *contents* are: `clientCert`/`clientKey`
- *      are TLS key material, `authProfiles` and `tokens` hold login state.
- *   4. **The URL.** `mcp.servers[].url` is validated only as http/https
- *      (`zod-schema.mcp-server.ts:26`), so `https://user:token@host/mcp` is a valid
- *      server as far as OpenClaw is concerned, and the credential is inside a
- *      string every scanner treats as a safe identifier.
- *
- * The fourth is why this function records {@link looksLikeSecretName}'s miss rather
- * than trusting it: **the key is called `url` and there is nothing to key-name-match
- * on.** The guard that catches it is `urlCredentialProblem`, and it lives in the
- * planner — the value cannot be dropped here and the server kept, because a URL with
- * its userinfo removed points at nothing.
- *
- * **Every key a user typed as a server name survives.** See
- * {@link OPENCLAW_CREDENTIAL_SLOTS} for why that distinction is load-bearing.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Remove every credential value from a document, keeping the structure. */
 export function scrubOpenClawCredentials<T>(value: T): { value: T; removed: string[] } {
 	const removed: string[] = [];
 	const walk = (node: unknown, path: string, level: number): unknown => {
@@ -932,14 +639,8 @@ export function scrubOpenClawCredentials<T>(value: T): { value: T; removed: stri
 	return { value: walk(value, "", 0) as T, removed };
 }
 
-/**
- * The names under `env`, read from the **unsanitized** merge.
- *
- * `env` carries an index signature (`types.openclaw.ts:57-67`): a *string* value
- * directly under it is the documented "sugar" for `env.vars`, and a record value
- * is a structured block (`shellEnv` and friends). Both shapes are named; neither
- * is read, and no value is ever returned.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The names under `env`, read from the unsanitized merge. */
 function readOpenClawEnvNames(raw: Record<string, unknown> | null): string[] {
 	const env = raw?.env;
 	if (!isRecord(env)) return [];
@@ -955,18 +656,8 @@ function readOpenClawEnvNames(raw: Record<string, unknown> | null): string[] {
 // Workspace bootstrap documents
 // ---------------------------------------------------------------------------
 
-/**
- * The workspace documents: `AGENTS.md` read, the other five named.
- *
- * **They live in the workspace, not the state directory.** `resolveWorkspaceBootstrapPath`
- * resolves them against `workspaceRoot` (`workspace-bootstrap-policy.ts:51-57`), so
- * a migration that looked for them under `~/.openclaw` would find nothing on every
- * machine and could not tell that apart from a machine that has none.
- *
- * **`TOOLS.md` is absent from {@link OPENCLAW_BOOTSTRAP_FILENAMES} on purpose** —
- * see that constant's own note. It is not reported here either, for the same
- * reason: `openclaw doctor --fix` folds it into `AGENTS.md`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The workspace documents: `AGENTS.md` read, the other five named. */
 function readWorkspace(
 	cwd: string,
 	skipped: OpenClawSkipped[],
@@ -1011,14 +702,8 @@ export interface OpenClawBootstrapDoc {
 	legacySpelling?: boolean;
 }
 
-/**
- * `path`'s contents when it is a regular file and **not** a symlink.
- *
- * `lstatSync` rather than `statSync`: `root-memory-files.ts:41-52` requires
- * `entry.isFile() && !entry.isSymbolicLink()` on a *directory entry*, which is
- * `lstat` semantics — `statSync` follows the link and would report a symlink to a
- * real file as a plain file, which is the case the product refuses.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `path`'s contents when it is a regular file and not a symlink. */
 function readRealFileOnly(path: string): string | null {
 	try {
 		if (lstatSync(path).isSymbolicLink()) return null;

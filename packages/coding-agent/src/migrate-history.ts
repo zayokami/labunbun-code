@@ -1,18 +1,6 @@
-/**
- * Conversation-history import: another tool's transcripts, written as labunbun
- * session files.
- *
- * Sources are read, never written, and a session only becomes a file when the
- * user asks for it. The conversion is lossy on purpose: reasoning that arrives
- * encrypted, sidechains and subagent threads are dropped and counted rather
- * than reconstructed, and a tool call left without its result (or the reverse)
- * loses both halves — a transcript that half-pairs would fail the API on the
- * first `--continue`, which is worse than a shorter transcript.
- *
- * Two phases, because the second one is expensive:
- *   list…  — metadata only (a bounded head-read per file), for the picker
- *   read…  — full conversion of the sessions the user actually chose
- */
+// Conversation-history import: another tool's transcripts, written as labunbun session files.
+// The conversion is lossy on purpose, list and read are two phases, and pair losses are counted.
+// Long-form design notes: docs/dev/migration-framework.md
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -87,24 +75,8 @@ export interface HistoryCandidate {
 	/** The id the source tool uses, and the input to the target session id. */
 	sourceId: string;
 	cwd: string;
-	/**
-	 * Set when the source records **no** directory for this session and the session
-	 * is filed under one anyway. {@link cwd} is already that directory; this field
-	 * is the marker that says the directory is the user's and not the source's.
-	 *
-	 * **Nothing is gained by leaving {@link cwd} empty and resolving this later,
-	 * and one thing is lost.** An empty cwd is the value `narrowCandidates` counts
-	 * under "no working directory recorded" and drops, which is right for a source
-	 * that records directories and had one session without one (dsh's `_no-cwd`
-	 * bucket). Applying it to a source that records *no* directory for *any*
-	 * session drops every session while the report looks clean — and since the
-	 * default scope is `cwd`, it would do so on the default run. So the substitute
-	 * is applied where it is chosen, the source that chose it says why in a note,
-	 * and this flag survives to the report so the sentence the user reads can name
-	 * the difference between "recorded" and "assumed". This is the same shape the
-	 * prompt-history path uses for the same reason
-	 * ({@link PromptHistoryInput.cwdSubstitute}).
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Set when the source records no directory for this session and the session is filed under one anyway. */
 	cwdSubstitute?: string;
 	/** Empty when the source does not name a session; filled in during conversion. */
 	title: string;
@@ -195,18 +167,8 @@ export function sameProject(a: string, b: string): boolean {
 	return projectKey(a) === projectKey(b);
 }
 
-/**
- * Identity of a recall entry: the prompt plus the directory it was typed in.
- *
- * Recall is filtered by directory, so the same words typed in two projects are
- * two entries; and the path has to be normalised, or one directory spelled with
- * a backslash and with a slash would count twice.
- *
- * The two halves are joined by a NUL: both are free text, and any separator a
- * prompt could itself contain would let `{cwd: "a b", text: "c"}` and
- * `{cwd: "a", text: "b c"}` collide — which would drop a prompt rather than
- * merge it.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Identity of a recall entry: the prompt plus the directory it was typed in. */
 export function promptKey(text: string, cwd: string): string {
 	return `${projectKey(cwd)}\u0000${text}`;
 }
@@ -254,16 +216,8 @@ function parseArguments(raw: string): unknown {
 	}
 }
 
-/**
- * The opening lines of a file, up to about `maxBytes` of them.
- *
- * A line that would not fit is not returned: half a JSON object is not the
- * object it was cut from, and every caller here parses what it gets. The first
- * line is the exception, and the exception is the point — a Codex rollout opens
- * with the `session_meta` line, which carries the whole base instruction set and
- * is routinely larger than any head window. Dropping it turned 115 of 125
- * rollouts on a real machine into "no session metadata" rather than sessions.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The opening lines of a file, up to about `maxBytes` of them. */
 function readHeadLines(path: string, maxBytes = 65_536): string[] {
 	try {
 		return headLinesOf(readFileSync(path, "utf8"), maxBytes);
@@ -284,15 +238,8 @@ function headLinesOf(text: string, maxBytes: number): string[] {
 	return out;
 }
 
-/**
- * The closing lines of a file, up to about `maxBytes` of them.
- *
- * The mirror of {@link readHeadLines}, and for the same class of file: a prompt
- * history is appended to, so its newest prompts are at the end, and a limit-based
- * import reading from the front would carry the oldest prompts on the machine.
- * `truncated` says the window was smaller than the file, so the report can admit
- * that something before it went unread rather than implying the count is all of it.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The closing lines of a file, up to about `maxBytes` of them. */
 function readTailLines(path: string, maxBytes: number): { lines: string[]; truncated: boolean } {
 	try {
 		const size = statSync(path).size;
@@ -341,34 +288,15 @@ function firstText(value: string, max = 60): string {
 /** The suffix Codex compresses a rollout with once it is a week old. */
 const COMPRESSED_SUFFIX = ".zst";
 
-/**
- * The canonical `.jsonl` name of a rollout file, or `null` when the name is not
- * a rollout's.
- *
- * Both spellings Codex writes are accepted — `rollout-*.jsonl`, and the
- * `rollout-*.jsonl.zst` it recompresses an old rollout into — because the id and
- * the timestamp are parsed from this name rather than from the file's, and the
- * compressed spelling would otherwise fail the `rollout-`/`.jsonl` test on its
- * trailing `.zst` alone.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The canonical `.jsonl` name of a rollout file, or `null` when the name is not a rollout's. */
 function plainRolloutName(name: string): string | null {
 	const plain = name.endsWith(COMPRESSED_SUFFIX) ? name.slice(0, -COMPRESSED_SUFFIX.length) : name;
 	return plain.startsWith("rollout-") && plain.endsWith(".jsonl") ? plain : null;
 }
 
-/**
- * A rollout's text, compressed or not.
- *
- * A `.jsonl.zst` is decompressed whole, which is a cost worth naming: the
- * listing walks every rollout and reads a bounded head of each, and for a
- * compressed one that window is now paid for with a full decode of the file.
- * Codex itself avoids this with a seekable decoder, but a stream here would be a
- * second reader with its own copy of the head-window rules — including the rule
- * that keeps an oversized first line — and one file, one reader is worth more
- * than the time on a path a user walks once. The frame carries its source size
- * (Codex pledges it on write, `encode_zstd_to_writer`), which is what lets a
- * one-shot decompressor size its output.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** A rollout's text, compressed or not. */
 function readRolloutText(path: string): string | null {
 	try {
 		const bytes = readFileSync(path);
@@ -391,14 +319,8 @@ function rolloutLines(path: string): string[] {
 	return text.split("\n");
 }
 
-/**
- * `rollout-*.jsonl` under a Codex session root, newest first.
- *
- * A compressed rollout is skipped when its plain sibling is still there, which
- * is Codex's own rule (`should_skip_compressed_sibling`): in that state the plain
- * file is the one Codex reads, and listing both would put one session in the
- * picker twice — once under a name that has no second copy behind it.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** `rollout-*.jsonl` under a Codex session root, newest first. */
 function listRolloutFiles(root: string): Array<{ plainName: string; path: string; mtimeMs: number }> {
 	const out: Array<{ plainName: string; path: string; mtimeMs: number }> = [];
 	const walk = (dir: string, depth: number): void => {
@@ -584,16 +506,8 @@ function claudeAssistant(message: Record<string, unknown>, timestamp: number): A
 	});
 }
 
-/**
- * `projects/<slug>/memory/` — the auto-memory Claude Code keeps per project: a
- * `MEMORY.md` and the notes written beside it (`memdir/paths.ts`, `AUTO_MEM_DIRNAME`).
- *
- * It sits in the same directory as the transcripts, so the walk below used to
- * count it as one more sidechain directory and the report called it a subagent
- * transcript — a curated memory document described as a conversation nobody
- * needed. Named for what it is now, and not imported: this build keeps one
- * memory file for the user, so one project's notes would apply to every project.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** `projects/<slug>/memory/` — the auto-memory Claude Code keeps per project: a `MEMORY.md` and the notes beside it. */
 const AUTO_MEMORY_DIRNAME = "memory";
 
 function listClaudeCodeHistory(home: string): HistoryListing {
@@ -752,16 +666,8 @@ function readCodexMeta(text: string): { cwd: string; sessionId: string; child: b
 	return null;
 }
 
-/**
- * `$CODEX_HOME/sessions/` and `$CODEX_HOME/archived_sessions/`.
- *
- * The archived directory is the same kind of session — Codex moves a rollout
- * there when the user archives the session, and its own thread listing reads
- * that directory under the same rules when asked for archived threads. Reading
- * only `sessions/` would leave every archived session out of the picker while
- * the report claimed to have found the source's history, so the walk covers both
- * and each session carries which one it came from.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** `$CODEX_HOME/sessions/` and `$CODEX_HOME/archived_sessions/`. */
 function listCodexHistory(home: string): HistoryListing {
 	const root = codexRoot(home);
 	const candidates: HistoryCandidate[] = [];
@@ -1093,14 +999,8 @@ function readZcodeSession(sourceId: string, home: string): { entries: HistoryEnt
 // OpenCode
 // ---------------------------------------------------------------------------
 
-/**
- * What a compaction marker says when the transcript holds the trigger but not the
- * summary. OpenCode's own reader only accepts a completed pair
- * (`session/compaction.ts:108` — a summary that also has to be finished and
- * unerrored), so a compaction recorded by a build that was interrupted leaves
- * exactly this case; saying so beats dropping the marker, which would import a
- * transcript that silently claims never to have been summarized.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** What a compaction marker says when the transcript holds the trigger but not the summary. */
 const OPENCODE_MISSING_SUMMARY = "(compaction recorded by OpenCode; its summary is not in this database)";
 
 /** The database this install reads, resolved the way the reader resolves it. */
@@ -1108,16 +1008,8 @@ function opencodeDbPathFor(home: string): string | null {
 	return opencodeDatabasePath(opencodeRoots(home).data);
 }
 
-/**
- * OpenCode's sessions, as history candidates.
- *
- * A subagent session (`parent_id` set) is counted and skipped for the same reason
- * ZCode's are: it is a task the primary ran, not a conversation the user had, and
- * importing it would replay the subagent's turns as though the user had typed
- * them. An archived session is imported with the flag rather than skipped, which
- * is what Codex's `archived_sessions/` already does — it is a real conversation
- * the user chose to put away, and "archived" is a property the target records too.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** OpenCode's sessions, as history candidates. */
 function listOpencodeHistory(home: string): HistoryListing {
 	const candidates: HistoryCandidate[] = [];
 	let children = 0;
@@ -1161,19 +1053,8 @@ function opencodeSummaryText(parts: OpencodePartRow[]): string {
 		.trim();
 }
 
-/**
- * A tool's recorded answer, in the order v1's `output` then `error` put them.
- *
- * **v2 has no `state.output`.** The four arms of `ToolState`
- * (`packages/schema/src/session-message.ts:83-114`) carry their answer in
- * three different places: a completed call has `result` (typed `unknown`, so a
- * tool that returns something other than a string is stringified here) and
- * `content[]` of `text`/`file` blocks; a failed one has `error.message`;
- * pending and running have none of the three. `result` first because that is
- * what v1's `output` held — the tool's own answer rather than the rendering of
- * it — and `content` last because it is the fallback for a tool that filled in
- * only its model-facing blocks.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** A tool's recorded answer, in the order v1's `output` then `error` put them. */
 function opencodeV2ToolOutput(state: Record<string, unknown>): string {
 	const result = state.result;
 	if (typeof result === "string" && result !== "") return result;
@@ -1207,15 +1088,8 @@ function opencodeV2ToolArguments(input: unknown): string {
 	return record === null ? "{}" : JSON.stringify(record);
 }
 
-/**
- * Pair the repaired message stream with the compaction markers, in that order.
- *
- * A marker's position is an index into `collected` recorded as the stream was
- * built, and a repair pass that dropped something invalidates it — so when
- * anything was dropped the markers all move to the end rather than land at
- * positions that no longer mean what they said. The drop count comes back
- * because the caller reports it: an unpaired half is a thing left out.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Pair the repaired message stream with the compaction markers, in that order. */
 function assembleOpencodeEntries(
 	collected: AgentMessage[],
 	markers: Array<{ after: number; entry: HistoryEntry }>,
@@ -1234,24 +1108,8 @@ function assembleOpencodeEntries(
 	return { entries, dropped: repaired.dropped };
 }
 
-/**
- * v2's messages, which are one typed JSON object per row rather than a `message`
- * row plus its `part` rows.
- *
- * Three of the eight types are **not messages and are counted rather than
- * turned into one**: `synthetic` is what the tool itself injected, `system` is
- * the harness talking to itself, and `agent-switched`/`model-switched` record a
- * setting change. This importer's transcript has three roles — user, assistant,
- * tool result (`packages/ai/src/types.ts:125`) — and no system one, so rendering
- * any of them as a user turn would put words in the user's mouth. `shell` is the
- * same case: a record of a command the user ran, carrying its output, which is
- * not something the user said. Each is counted under a name that says which.
- *
- * The one type that is a real message and is not read as a turn is `compaction`,
- * which becomes a marker: v1 split it across two messages joined by a `parentID`
- * link, v2 records it as one row with both halves in it
- * (`session-message.ts:184-189`).
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** v2's messages, which are one typed JSON object per row rather than a `message` row plus its `part` rows. */
 function opencodeV2Session(rows: OpencodeSessionMessageRow[]): { entries: HistoryEntry[]; notes: HistoryNote[] } {
 	const notes: HistoryNote[] = [];
 	let synthetic = 0;
@@ -1399,20 +1257,7 @@ function readOpencodeSession(sourceId: string, home: string): { entries: History
 		else partsByMessage.set(part.messageId, [part]);
 	}
 
-	// Which user messages triggered a compaction, and what each one summarized.
-	//
-	// OpenCode splits a compaction across **two** messages and joins them with a
-	// link rather than with their order: the user's own message gains a
-	// `compaction` part (`CompactionPart`, `packages/schema/src/v1/session.ts:195-201`),
-	// and a separate assistant message carries `summary: true` and names the user
-	// message in its `parentID` — which is the only field on the pair, since
-	// `messageBase` is just `{ id, sessionID }` (`session.ts:327-330`) and
-	// `Assistant.parentID` is required (`session.ts:461`). OpenCode's own reader
-	// finds the pair the same way, indexing the users that hold a compaction part
-	// and reaching them from the assistant through `msg.info.parentID`
-	// (`session/compaction.ts:96-112`). Matching on adjacency instead would pair
-	// the summary with whichever user message happened to be written before it,
-	// which is a different message whenever anything landed in between.
+	// Long-form design notes: docs/dev/migration-framework.md
 	const compactionHeads = new Set<string>();
 	const summaryByHead = new Map<string, string>();
 	for (const message of messages) {
@@ -1548,33 +1393,14 @@ function readOpencodeSession(sourceId: string, home: string): { entries: History
 // MiMo Code
 // ---------------------------------------------------------------------------
 
-/**
- * The database this install reads, resolved once for the same reason
- * `opencodeDbPathFor` resolves one.
- *
- * `$MIMOCODE_DB` can put it anywhere and `:memory:` puts it nowhere at all, and the
- * channel filename for a nightly is a build-time constant no reader can know — so
- * a listing that re-derived the path differently from the reader would report a
- * source as holding transcripts the read phase then finds nowhere.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The database this install reads, resolved once for the same reason `opencodeDbPathFor` resolves one. */
 function miMoCodeDbPathFor(home: string): string | null {
 	return mimocodeDatabasePath(mimocodeRoots(home, process.env).data, process.env);
 }
 
-/**
- * MiMo Code's sessions, as history candidates.
- *
- * **A subagent session (`parent_id` set) is counted and skipped**, for OpenCode's
- * reason: it is a task the primary ran, not a conversation the user had, and
- * importing it would replay the subagent's turns as though the user had typed them.
- *
- * **An archived session is imported with the flag rather than skipped.** This is a
- * stronger statement than OpenCode's needs to be: `session.time_archived` is a
- * first-class column on the session row
- * (`session/session.sql.ts:41-44`) and the product keeps archiving to it, so an
- * archived session is a real conversation the user chose to put away — and
- * "archived" is a property the target records too.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** MiMo Code's sessions, as history candidates. */
 function listMiMoCodeHistory(home: string): HistoryListing {
 	const candidates: HistoryCandidate[] = [];
 	let children = 0;
@@ -1605,25 +1431,8 @@ function listMiMoCodeHistory(home: string): HistoryListing {
 /** Why a compaction's summary arrives empty, when it does. */
 const MIMOCODE_MISSING_SUMMARY = "(compaction recorded by MiMo Code; its summary is not in this database)";
 
-/**
- * One MiMo Code session's main thread, as history entries.
- *
- * **The record shape is not inferred, and the strongest evidence is that MiMo
- * Code ships a reader for it.** `session/opencode-import.ts` opens an upstream
- * `opencode.db` through `openReadonly` (`storage/read-sqlite.bun.ts:7-13`) and
- * reads `session` -> `message` -> `part`, `JSON.parse`-ing each `data` column
- * (`:219` and `:236`) into the same `MessageV2` union this function reads. So the
- * `data` blobs below are `MessageV2.Info` and `MessageV2.Part` — `role` of
- * `"user"` (`session/message-v2.ts:527`) or `"assistant"` (`:577`), `parentID`
- * (`:597`) and `summary: boolean` (`:609`); and a part discriminated on `type`
- * with `text` (`:187`), `reasoning` (`:204`), `tool` (`:484`), `compaction`
- * (`:319`) and the step/patch/file family around them.
- *
- * **The one filter this adds is `agent_id = 'main'`**, because MiMo Code's
- * `message` table carries a column an opencode v1 database does not
- * (`session/session.sql.ts:94`). See `mimocode-session.ts`'s header for why a
- * reader that omits it duplicates the main thread with the subagent's work.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One MiMo Code session's main thread, as history entries. */
 function readMiMoCodeSession(sourceId: string, home: string): { entries: HistoryEntry[]; notes: HistoryNote[] } {
 	const dbPath = miMoCodeDbPathFor(home);
 	if (dbPath === null) return { entries: [], notes: [] };
@@ -1860,17 +1669,8 @@ function listGrokHistory(home: string): HistoryListing {
 	};
 }
 
-/**
- * Read one chosen grok session.
- *
- * The candidate carries the transcript's path and nothing else, while the reader
- * takes the session the listing built: its directory, where the compaction
- * segments are, and its kind and parent, which the report needs to say that a
- * fork's inherited prefix came along. Widening `HistoryCandidate` for one
- * source's vocabulary would put grok's fields in every other source's way, so
- * the session is looked up again instead — and one that went away between the
- * listing and the read is reported rather than reconstructed from a path.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read one chosen grok session. */
 function readGrokHistory(home: string, candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
 	const session = listGrokSessions(grokRoot(home)).sessions.find((found) => found.path === candidate.path);
 	if (!session) return { entries: [], notes: [{ reason: "session is no longer on disk", count: 1 }] };
@@ -1902,17 +1702,8 @@ function listKimiHistory(home: string): HistoryListing {
 	};
 }
 
-/**
- * Read one chosen kimi session.
- *
- * The candidate carries a path and the reader wants the session the listing
- * built, so it is looked up again rather than rebuilt from the path — and one
- * that went away between the listing and the read is reported, not reconstructed.
- * The reader's own vocabulary is this module's: `KimiEntry` is `HistoryEntry`
- * written out — a message, or a compaction summary with the token count it
- * replaced — so entries cross over as they are rather than through a translation
- * that could disagree with either side.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read one chosen kimi session. */
 function readKimiHistory(home: string, candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
 	const session = listKimiSessions(kimiRoot(home)).sessions.find((found) => found.path === candidate.path);
 	if (!session) return { entries: [], notes: [{ reason: "session is no longer on disk", count: 1 }] };
@@ -1925,15 +1716,8 @@ function readKimiHistory(home: string, candidate: HistoryCandidate): { entries: 
 // MiniMax Code
 // ---------------------------------------------------------------------------
 
-/**
- * Every session MiniMax's own walk would find, as candidates.
- *
- * The archived flag travels as a fact about where the transcript came from — the
- * same call the codex source makes for `archived_sessions/` and kimi for the
- * sessions it filed away — because archived is a place a session was put, not a
- * reason it is worth less. A session the tool hides or files under an internal
- * kind never reaches here: the listing counts it and says why.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Every session MiniMax's own walk would find, as candidates. */
 function listMinimaxHistory(home: string): HistoryListing {
 	const listed = listMinimaxSessions(minimaxRoot(home).root);
 	return {
@@ -1950,15 +1734,8 @@ function listMinimaxHistory(home: string): HistoryListing {
 	};
 }
 
-/**
- * Read one chosen MiniMax session.
- *
- * The candidate carries a path and the reader wants the session the listing
- * built — its directory, which writer left the transcript, and the kind and
- * parent the report needs — so the session is looked up again rather than
- * rebuilt from the path. One that went away between the listing and the read is
- * reported, not reconstructed.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read one chosen MiniMax session. */
 function readMinimaxHistory(
 	home: string,
 	candidate: HistoryCandidate,
@@ -1979,26 +1756,8 @@ function countKimiHistoryFiles(root: string): number {
 	}
 }
 
-/**
- * `<root>/user-history/<md5(cwd)>.jsonl`, one `{"content": "…"}` per line.
- *
- * Two things about this file decide the shape of the reader.
- *
- * The name is a hash of the working directory, so it is one-way: the only list
- * this reader can find by itself is the current project's. Scope `all` asks for
- * every project, and the way back to the others is the sessions — each records
- * the directory it ran in, so hashing that finds its file. A project whose
- * sessions are all gone keeps its prompts out of reach, and that is counted
- * rather than passed over, because the format cannot tell this reader which
- * directory an unreachable file belongs to.
- *
- * And a line carries its text and nothing else: no timestamp, no directory. The
- * directory is the file's, and time is what the format does not have — the file
- * is append-only, so its order is the only ordering there is. These entries
- * therefore arrive newest-first with epoch 0, which is what keeps the per-source
- * limit taking the newest end: the selection sorts by that timestamp and is
- * stable, so equal keys keep the order they were read in.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** `<root>/user-history/<md5(cwd)>.jsonl`, one `{"content": "…"}` per line. */
 function readKimiPromptHistory(
 	home: string,
 	options: { cwd: string; scope: HistoryScope; limit: number },
@@ -2100,30 +1859,11 @@ export interface PromptHistoryInput {
 	overLimit: number;
 	/** The file was larger than this reads, so only its newest end was considered. */
 	truncated: boolean;
-	/**
-	 * Set when this source has no prompt list anywhere, with the reason to report.
-	 *
-	 * A source with an empty list and a source with no list look the same from
-	 * `seen`, and the difference is the whole point for a reader wondering why their
-	 * prompts did not appear: one means "nothing was typed", the other "nothing is
-	 * kept". Only sources whose tree was actually walked set this, so the line means
-	 * a list was looked for and there is none — not that a directory was missing.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Set when this source has no prompt list anywhere, with the reason to report. */
 	absent?: string;
-	/**
-	 * Set when the source's list records no directory and every entry was therefore
-	 * filed under the directory this run is in.
-	 *
-	 * A `PromptEntry` is `{ text, cwd, timestamp }` and `loadHistory` drops every
-	 * line whose `cwd` is not the project being opened, so an entry filed under no
-	 * directory is one ↑ will never offer — which is why sources whose list records
-	 * none are normally reported rather than imported. Where a source's list is
-	 * worth importing anyway (it is a list the user typed, it simply is not scoped),
-	 * the entries are filed under the current project and this field is set, so the
-	 * report can say that instead of the sentence it would otherwise print. The
-	 * sentence is a claim about where ↑ will offer the prompts, and printing it for
-	 * entries whose directory is a guess is the same defect as a silent mismatch.
-	 */
+	// Long-form design notes: docs/dev/migration-framework.md
+	/** Set when the source's list records no directory and every entry was therefore filed under the directory this run is in. */
 	cwdSubstitute?: string;
 }
 
@@ -2232,16 +1972,8 @@ function readClaudePromptHistory(
 	return selectPrompts(scan, options);
 }
 
-/**
- * `<CODEX_HOME>/history.jsonl`: `{session_id, text, ts}`.
- *
- * It names the session, not the directory, so the directory comes from the
- * rollout of that session — the same metadata the session listing reads, and the
- * same listing that knows about `archived_sessions/`: a prompt answered in a
- * session the user later archived must still find its project. A prompt whose
- * session has no rollout left on disk cannot be located to a project, and an
- * entry that no directory can recall is not worth writing.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** `<CODEX_HOME>/history.jsonl`: `{session_id, text, ts}`. */
 function readCodexPromptHistory(
 	home: string,
 	options: { cwd: string; scope: HistoryScope; limit: number },
@@ -2284,20 +2016,8 @@ function readCodexPromptHistory(
 	return selectPrompts(scan, options);
 }
 
-/**
- * `$GROK_HOME/sessions/<cwd-dir>/prompt_history.jsonl`: `{timestamp, session_id,
- * prompt, is_bash}`.
- *
- * The file is per working directory rather than per home — grok keeps one beside
- * each project's sessions, which is what its own ↑ filters on — so the directory
- * comes from where the file sits (a line does not name one) and the scope decides
- * which files are worth opening at all. Under `cwd` that is the one file for the
- * project being migrated; under `all` it is every project's.
- *
- * A directory whose name decodes to no path and which has no `.cwd` sidecar is
- * skipped with a count: prompts written into the wrong project's recall list are
- * worse than prompts left behind, and recall is filtered by directory.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** `$GROK_HOME/sessions/<cwd-dir>/prompt_history.jsonl`: `{timestamp, session_id, prompt, is_bash}`. */
 function readGrokPromptHistory(
 	home: string,
 	options: { cwd: string; scope: HistoryScope; limit: number },
@@ -2375,15 +2095,8 @@ function grokStamp(value: unknown): unknown {
 // Step Code
 // ---------------------------------------------------------------------------
 
-/**
- * Every session Step's own session list would show, as candidates.
- *
- * The walk behind `listStepSessions` is `stepSessionScan`'s: the canonical tree
- * and the pre-rename one, the configured session directory read in either
- * layout, and a file that appears in more than one of them taken once. A file
- * the scan passed over arrives as a note with the reason it could not become a
- * session, folded the way kimi's and MiniMax's listings fold theirs.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Every session Step's own session list would show, as candidates. */
 function listStepHistory(home: string): HistoryListing {
 	const listed = listStepSessions(home);
 	const counts = new Map<string, number>();
@@ -2404,15 +2117,8 @@ function listStepHistory(home: string): HistoryListing {
 	};
 }
 
-/**
- * Read one chosen Step session.
- *
- * The listing reads a bounded head of each file to find its name; the session
- * this returns is the one the listing built, looked up again rather than rebuilt
- * from the path — a file that went away between the two is reported, not
- * reconstructed. `StepEntry` is `HistoryEntry` written out, so entries cross
- * over as they are.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read one chosen Step session. */
 function readStepHistory(home: string, candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
 	const session = listStepSessions(home).sessions.find((found) => found.path === candidate.path);
 	if (!session) return { entries: [], notes: [{ reason: "session is no longer on disk", count: 1 }] };
@@ -2475,46 +2181,8 @@ function readOpencodePromptHistory(
 	return selectPrompts(scan, options);
 }
 
-/**
- * Cursor CLI's ↑ recall list, imported with the directory named as a substitute.
- *
- * `<cli home>/chats/<md5>/view/prompt_history.json` is a **flat JSON array of bare
- * strings** — not the JSONL of every other source here, which is why it gets its
- * own reader rather than a shared line parser. Three properties of it decide the
- * treatment, and the first is the reason this is the one list in the repo that is
- * imported despite recording no directory.
- *
- * **No directory, and no timestamp either.** The entries are strings: there is
- * nowhere in the format to record either, so unlike OpenCode's list — which
- * records a mode and is dropped for the same missing directory — there is nothing
- * here to recover and nothing that could be misread. A prompt the user typed is
- * worth having back, so the entries are filed under the directory this run is in
- * and the report says so: ↑ will offer them in every project, not only this one.
- * That is a real widening and it is stated as one, which is what
- * {@link PromptHistoryInput.cwdSubstitute} exists for.
- *
- * Consequently `--history-scope` cannot filter this list, and the choice is
- * reported rather than left to look like it worked: the filter compares an entry's
- * directory against the current project, and every entry's directory is the
- * current project by construction.
- *
- * **The ordering is the file's, because the format has no other.** As in the Kimi
- * case: the file is append-only, so the entries arrive newest-first and every
- * timestamp is 0, which is what keeps the per-source limit taking the newest end —
- * the selection sorts by that timestamp and is stable, so equal keys keep the order
- * they were read in. The array is reversed on the way in for exactly that reason,
- * and an unsorted middle (an array the CLI rewrote rather than appended to) would
- * defeat it; a list this short is not worth sorting defensively for.
- *
- * **One path, and this is the one Cursor path with no official citation.** The
- * list is `<cli home>/chats/<md5 of this cwd>/view/prompt_history.json` — three
- * directories down, in a subtree whose name is a digest of the working directory.
- * `cursorPromptHistoryFile` returns it when it is there and `null` when it is not;
- * the "not there" sentence then names the exact path that was looked for, because
- * a report that says only "no list" is indistinguishable from one that looked in
- * the wrong place. When nothing is found the source is reported as having no list,
- * which is a different statement from having an empty one.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Cursor CLI's ↑ recall list, imported with the directory named as a substitute. */
 function readCursorPromptHistory(
 	home: string,
 	options: { cwd: string; scope: HistoryScope; limit: number },
@@ -2616,16 +2284,7 @@ export function readPromptHistory(
 	if (source === "opencode") return readOpencodePromptHistory(home, options);
 	if (source === "cursor") return readCursorPromptHistory(home, options);
 
-	// MiniMax has no prompt list, and the reason is specific enough to be worth a
-	// line rather than the usual silence. Three things on its disk could be mistaken
-	// for one, and it writes none of them as one: the composer's unsent drafts are
-	// text the user never sent (`v2/mcode/drafts`), the sessions hold the prompts
-	// themselves — those are imported as transcripts — and the shell's own history
-	// is a file MiniMax protects rather than reads (`.bash_history` / `.zsh_history`
-	// appear in its sensitive-file list, `agent-modules/permission/src/tools/fs-permission.ts:53-54`).
-	// So the ↑ list gets nothing from this source while the prompts it does know
-	// about come across inside their sessions, and a reader who asked for MiniMax
-	// history is owed that distinction.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "minimax-code") {
 		return {
 			seen: 0,
@@ -2659,14 +2318,7 @@ export function readPromptHistory(
 				"their sessions",
 		};
 	}
-	// Qoder's sentence is a weaker claim than Step's or MiniMax's, and it is worded
-	// to match what was actually established. There is no cross-session prompt list
-	// named anywhere in the desktop bundle — no `promptHistory`, no `history.json`,
-	// no `recentPrompts`, no completions store — and the only per-session record the
-	// product keeps is the transcript tree this source already counts and does not
-	// read. So the ↑ list gets nothing here, and saying so is better than the
-	// silent empty the fall-through below would give: a user who pressed ↑ in Qoder
-	// is owed the distinction between "there was nothing" and "nothing came across".
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "qoder") {
 		return {
 			seen: 0,
@@ -2680,14 +2332,7 @@ export function readPromptHistory(
 				"added to the ↑ recall list",
 		};
 	}
-	// Alma has no cross-session prompt list either, and the reason here is
-	// structural rather than a search: the prompts *are* the message rows. Every
-	// user message this importer converts already arrives with the thread it was
-	// typed in and the timestamp it was typed at, so a recall list would be the
-	// sessions' own first user turns read a second time. Saying so beats the
-	// silent empty the fall-through below would give — a user who pressed ↑ in
-	// Alma is owed the difference between "there was nothing" and "nothing came
-	// across", and here the truth is the second.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "alma") {
 		return {
 			seen: 0,
@@ -2720,17 +2365,7 @@ export function readPromptHistory(
 				"list here and nothing was lost",
 		};
 	}
-	// MiMo Code's recall list is inside its sessions rather than beside them, so the
-	// up-arrow list gets nothing while the prompts it does know about come across with
-	// the transcripts. That is worth one sentence rather than the silent empty the
-	// fall-through would give: a user who pressed up-arrow in MiMo Code is owed the
-	// distinction between "there was nothing" and "nothing came across here".
-	//
-	// **It is not a case of a file this importer failed to find.** MiMo Code is an
-	// opencode fork, and the opencode it forked writes
-	// `<state>/prompt-history.jsonl`; MiMo Code's TUI has no such file and its prompts
-	// live as `user` messages in the same `message`/`part` rows this importer already
-	// reads as transcripts.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "mimocode-code") {
 		return {
 			seen: 0,
@@ -2744,14 +2379,7 @@ export function readPromptHistory(
 				"was added to the up-arrow recall list, and the prompts you sent come across with their sessions",
 		};
 	}
-	// OpenClaw's recall list is its transcripts, so the sentence is the same shape as
-	// MiMo Code's above — but the *reason* is a stronger claim than "no file was
-	// found", and the wording matches what was established rather than what was
-	// looked for. OpenClaw keeps one authoritative store
-	// (`<stateDir>/agents/<id>/agent/openclaw-agent.sqlite`) and every prompt is a
-	// `user`-role message inside it, which this importer already reads as
-	// transcripts. A user who pressed up-arrow in OpenClaw is owed the distinction
-	// between "there was nothing" and "nothing came across here".
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "openclaw") {
 		return {
 			seen: 0,
@@ -2772,35 +2400,15 @@ export function readPromptHistory(
 // T3 Code
 // ---------------------------------------------------------------------------
 
-/**
- * Why a T3 Code transcript arrives without its tool calls.
- *
- * Named once, as a constant, because it is the note most likely to be reworded by
- * whoever reads a report and wonders why. The reason is short and does not depend
- * on the wording: T3 stores a tool call as a row in `projection_thread_activities`
- * with `tone = "tool"`, and that row's payload is `itemType`, `toolCallId`,
- * `status`, `title`, `detail` and an opaque `data` — a projection for T3's own UI,
- * not a call with an argument list and a matching result. The count beside it in
- * the report is how many such rows the offered threads hold.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Why a T3 Code transcript arrives without its tool calls. */
 const T3_TOOL_ACTIVITY_NOTE =
 	"tool activity row, not a message — t3 code records a tool call in its activities table with a title, a status and an " +
 	"opaque payload rather than as a message with an argument list and a matching result, so imported transcripts carry the " +
 	"conversation without the tool calls or their output";
 
-/**
- * Every T3 Code thread, as candidates.
- *
- * **A thread with no recorded directory is still offered.** `cwd` is a required
- * field of a {@link HistoryCandidate}, and T3's thread row has no directory
- * column of its own — the effective one comes from a join, and a project whose
- * `workspace_root` is empty (T3 allows registering a project before opening it in
- * a directory) yields a thread with no path at all. Such a thread is listed with
- * the source's own base directory rather than dropped, because the alternative is
- * a conversation the user can see in T3 and that this importer reports as
- * missing; `narrowCandidates` then decides what the scope means for it, and the
- * report says which directory it was filed under.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Every T3 Code thread, as candidates. */
 function listT3History(home: string): HistoryListing {
 	const base = t3BaseDir(home);
 	const candidates: HistoryCandidate[] = [];
@@ -2833,29 +2441,8 @@ function listT3History(home: string): HistoryListing {
 	return { candidates, notes };
 }
 
-/**
- * One chosen T3 thread, as transcript entries.
- *
- * **Reasoning folds into the answer that follows it.** T3 records `reasoning` as
- * its own row in the same message table and orders by the same clock
- * (`ProjectionThreadMessages.ts:225`), so a thinking run and the reply it
- * produced are adjacent and the reply is what the user read. Emitting them as two
- * separate assistant messages would show a turn that stops to think and then says
- * nothing before another turn that answers a question already answered — so
- * consecutive reasoning rows are held and prepended to the next assistant message
- * as `thinking` content, exactly as the four file-based sources fold their own.
- *
- * A reasoning run with **no** assistant message after it — a turn that was
- * interrupted mid-thought — becomes its own message rather than being dropped.
- * Losing it would leave an imported transcript that silently omits part of a turn
- * it otherwise carries, which is the kind of gap nobody notices until they try to
- * resume the session.
- *
- * The empty case is reported rather than counted as a failure, and its reason
- * names the roles rather than saying the thread was empty. Those are different
- * statements: a T3 thread that recorded nothing is a real thing, and so is one
- * whose every row is a role this importer does not read.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One chosen T3 thread, as transcript entries. */
 function readT3History(home: string, candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
 	const messages = t3SessionMessages(home, candidate.sourceId);
 	if (messages.length === 0) {
@@ -2918,43 +2505,8 @@ function readT3History(home: string, candidate: HistoryCandidate): { entries: Hi
 // Antigravity
 // ---------------------------------------------------------------------------
 
-/**
- * Every Antigravity conversation, as candidates.
- *
- * **No conversation carries a working directory, and that is a finding rather than
- * a gap in the reader.** The compact transcript has no `cwd` field — the product's
- * own record type has none, and neither does the untruncated one, since they are
- * the same records — and nothing beside the transcript fills the hole: the
- * conversation directory's attested siblings are `swarm.md` (the multi-agent
- * coordination board) and `scratch/`, neither of which names a directory the user
- * was working in. Antigravity does associate conversations with projects — its
- * settings carry a `project_conversations` field and a per-project settings file
- * is what `GetSandboxConfig` reads — but **where that file lives could not be
- * established**: no `.gemini/projects`, no `project.json`, no `ProjectSettingsPath`
- * in either binary, and the only `.idea` hits are inside a file-exclusion list.
- *
- * **So every candidate is filed under the directory the user is migrating into,
- * and the report says the directory was assumed.** The alternative — `cwd: ""` —
- * is the value {@link narrowCandidates} counts under "no working directory
- * recorded" and *drops*, which is the right verdict for a source that records
- * directories and had one session without one (dsh's `_no-cwd` bucket) and the
- * wrong one here: applied to a source that records no directory for any session
- * it drops all of them, and since the default scope is `cwd` it would do that on
- * the default run. A history that imports nothing is not a migration that found
- * nothing, and the report must not be able to make the two look alike.
- *
- * The substitute is the user's current project, which is exactly what
- * `readCursorPromptHistory` does for the identical situation and why
- * {@link HistoryCandidate.cwdSubstitute} exists: the session lands in the project
- * being migrated into and `↑` will offer it in every project, and the note below
- * plus the report line both say in words that the directory is a fallback rather
- * than a fact. **Nothing here claims which project a conversation belonged to** —
- * this importer does not know and the product did not record it.
- *
- * Which data root is read is the same decision the reader makes, and for the same
- * reason: {@link antigravityDataDirs} orders them by which tree the current build
- * writes to, and the first with content wins.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Every Antigravity conversation, as candidates. */
 function listAntigravityHistory(home: string, options: { cwd: string }): HistoryListing {
 	const dataDir = antigravityDataDirs(home).find((dir) => antigravityTreeHasContent(dir));
 	if (dataDir === undefined) return { candidates: [], notes: [] };
@@ -2985,19 +2537,8 @@ function listAntigravityHistory(home: string, options: { cwd: string }): History
 	return { candidates, notes };
 }
 
-/**
- * One chosen Antigravity conversation, as transcript entries.
- *
- * **The title is read here and nowhere else, because the listing phase cannot
- * afford it.** Antigravity has no metadata file beside the transcript, so the
- * title is the first *user* turn — and a user turn is not guaranteed to be the
- * first record: line one of a conversation is the product's own system prompt.
- * Finding one means scanning until a user turn appears, which for a listing over
- * a whole tree means reading every conversation on the machine before the user
- * has chosen any of them. The start time has no such problem — line one carries
- * it — and is read from a bounded head at listing time instead, so only this one
- * column is blank in the picker.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One chosen Antigravity conversation, as transcript entries. */
 function readAntigravityHistory(
 	home: string,
 	candidate: HistoryCandidate,
@@ -3040,36 +2581,15 @@ function readAntigravityHistory(
 // OpenClaw
 // ---------------------------------------------------------------------------
 
-/**
- * Where OpenClaw's agent store is for this home.
- *
- * The state directory is resolved with the product's own precedence — including
- * the `~/.clawdbot` fallback (`state-dir.ts:33-43`) — so an upgraded install whose
- * state never moved is found rather than reported absent. `env` defaults to
- * `process.env` for the same reason every other source's does; every test passes
- * one explicitly.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Where OpenClaw's agent store is for this home. */
 function openclawDbPathFor(home: string, env: NodeJS.ProcessEnv = process.env): string {
 	const stateDir = openclawStateDir(home, env);
 	return openclawAgentDbPath(stateDir, "main");
 }
 
-/**
- * Every OpenClaw session, as candidates.
- *
- * **The working directory comes from the transcript header, not from a column.**
- * Neither `session_windows` nor `session_nodes` has one; it is in the header event
- * (`{type: "session", …, cwd}`, `transcript-header.ts:18-27`) and in optional
- * `entry_json` fields that are **absent on a session that was not spawned**. The
- * header is read for every session for that reason — it is unconditional, whereas
- * the `entry_json` fields are not.
- *
- * **A session with no directory at all is still offered**, with the state
- * directory as its `cwd`, for the reason `listT3History` gives in its own words: a
- * conversation the user can see in OpenClaw and that this importer reports as
- * missing is the worse outcome. `narrowCandidates` then decides what the scope
- * means for it.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Every OpenClaw session, as candidates. */
 function listOpenClawHistory(home: string, options: { env?: NodeJS.ProcessEnv } = {}): HistoryListing {
 	const dbPath = openclawDbPathFor(home, options.env);
 	const windows = readOpenClawSessionWindows(dbPath);
@@ -3137,24 +2657,8 @@ function listOpenClawHistory(home: string, options: { env?: NodeJS.ProcessEnv } 
 	return { candidates, notes };
 }
 
-/**
- * Convert one OpenClaw session.
- *
- * **The dispatch is on `message.role`, not on the event's `type`** — and that is
- * the whole reason this is not `readClaudeCodeSession`. Claude Code puts the role
- * on the event; OpenClaw puts it on the payload and has **three** roles where
- * Claude Code has two, `toolResult` being a first-class message rather than a
- * block inside a user turn (`packages/llm-core/src/types.ts:369-372,387-395,
- *425-433`). Handing an OpenClaw transcript to the Claude reader makes every line
- * fail its `type` test, be counted as a "non-conversation entry", and import
- * **zero messages while the report claims the file was read**. See the header of
- * `openclaw-session.ts`.
- *
- * The content-block vocabulary *is* the same, which is why the three helpers below
- * are near-copies of `claudeEntriesFromUser` / `claudeAssistant` /
- * `claudeResultContent` rather than something new: `TextContent`, `ThinkingContent`,
- * `ToolCall` and `ImageContent` (`types.ts:264-313`) are the same four shapes.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Convert one OpenClaw session. */
 function readOpenClawSession(
 	home: string,
 	candidate: HistoryCandidate,
@@ -3222,15 +2726,8 @@ function readOpenClawSession(
 	return { entries: repaired.messages.map((message) => ({ kind: "message", message })), notes };
 }
 
-/**
- * One assistant turn, from OpenClaw's `AssistantMessage`
- * (`packages/llm-core/src/types.ts:387-422`).
- *
- * Structurally `claudeAssistant` with one difference worth naming: **OpenClaw's
- * `stopReason` includes `error` and `aborted`** (`:357`) where Claude Code's has
- * three values, so those two fall through to the tool-call-or-stop default rather
- * than being dropped.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One assistant turn, from OpenClaw's `AssistantMessage` (`packages/llm-core/src/types.ts:387-422`). */
 function openclawAssistant(message: Record<string, unknown>, timestamp: number): AgentMessage | null {
 	const raw = Array.isArray(message.content) ? message.content : [];
 	const content: AssistantContent[] = [];
@@ -3297,25 +2794,8 @@ function firstMessageText(message: Record<string, unknown>): string {
 // Codewhale
 // ---------------------------------------------------------------------------
 
-/**
- * Every Codewhale session, as candidates.
- *
- * **This is the one history listing in this file whose `cwd` is not a
- * substitute or a hash lookup.** `SessionMetadata.workspace` is a `PathBuf` with
- * the serde name `workspace` (`crates/tui/src/session_manager.rs:342-343`), so a
- * Codewhale transcript records the directory it ran in — and the on-disk fixture
- * confirms the key is really there, nested under `metadata`
- * (`crates/tui/tests/fixtures/work_graph_session_v1_reader.json:12`).
- *
- * That is why nothing here sets {@link HistoryCandidate.cwdSubstitute}: the
- * default `--history-scope cwd` genuinely narrows, where for most sources it
- * silently keeps everything.
- *
- * **The listing reads a bounded head of each file, not the whole thing.** The
- * envelope is pretty-printed JSON with `metadata` opening second, so a 256 KB
- * window finds every field this function needs without paying for a conversation
- * the user has not chosen yet. See `codewhale-session.ts`.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Every Codewhale session, as candidates. */
 function listCodewhaleHistory(home: string): HistoryListing {
 	const listed = listCodewhaleSessions(home);
 	const counts = new Map<string, number>();
@@ -3336,14 +2816,8 @@ function listCodewhaleHistory(home: string): HistoryListing {
 	};
 }
 
-/**
- * Read one chosen Codewhale session.
- *
- * The listing read a bounded head and this reads the whole file; the session is
- * looked up again by path rather than rebuilt from it, so a file that went away
- * between the two phases is reported rather than reconstructed — the same
- * convention `readStepHistory` and `readMinimaxHistory` follow.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read one chosen Codewhale session. */
 function readCodewhaleHistory(
 	home: string,
 	candidate: HistoryCandidate,
@@ -3364,23 +2838,8 @@ function readCodewhaleHistory(
 	return { entries: read.entries, notes: read.notes };
 }
 
-/**
- * Read one chosen Alma thread.
- *
- * **Alma's conversations are rows, not files**, so this is a second query rather
- * than a second read of something already in hand — the same shape as the
- * SQLite-backed sources and unlike the file-backed ones.
- *
- * **The one Alma-specific fact is the working directory, and it is already
- * settled before this runs.** `chat_threads` has no directory column and
- * `metadata` is not one either — the application writes `metadata: {}` when it
- * creates a thread — so the path comes from `workspace_id → workspaces.path`.
- * When that link is gone, `listAlmaHistory` has already filed the candidate under
- * the configuration root and set `cwdSubstitute`, and the report says the
- * directory was assumed rather than recorded. **This function never invents
- * one**: a wrong `cwd` files a conversation under a project it was never had in,
- * which is the one error the rest of the pipeline cannot recover from.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read one chosen Alma thread. */
 function readAlmaHistory(candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
 	const conversation = readAlmaConversation(candidate.sourceId);
 	if (conversation === null) {
@@ -3708,14 +3167,8 @@ export function historyPath(session: HistorySession, home: string): string {
 	return sessionFilePath(session.cwd, importedSessionId(session.source, session.sourceId), home);
 }
 
-/**
- * Render a converted session as the JSONL `SessionStore` reads: a header, then
- * one entry per line, each linked to the previous by id.
- *
- * Ids are derived from the session id and the entry's index rather than
- * generated, so re-running the import over the same source produces the same
- * bytes — which is what makes a second `--apply` a no-op instead of a rewrite.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Render a converted session as the JSONL `SessionStore` reads: a header, then one entry per line, each linked to the previous by id. */
 export function renderHistorySession(session: HistorySession): string {
 	const sessionId = importedSessionId(session.source, session.sourceId);
 	const lines: string[] = [];

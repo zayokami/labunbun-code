@@ -1,43 +1,6 @@
-/**
- * Qoder's user state, as read from a home directory.
- *
- * Read `qoder-home.ts` first — every path claim below is that module's, and it
- * says which of them are quoted from the product and which are chosen. The
- * standing caveats for this source, in one place:
- *
- *   - **`settings.json` holds much less than a reader would expect, and the
- *     bundle says exactly how much.** The desktop app reads settings by field,
- *     and every call that names a literal names one of five keys: `hooks`,
- *     `mcpServers`, `enabledPlugins`, `pluginConfigs` and
- *     `chatSession.builtInBrowserHosts`. There is no field call for a permission
- *     mode, a theme or a model. Those three are what a migration from most other
- *     sources is mostly about, and on Qoder 0.4.3 **this file has none of them** —
- *     which is the single most load-bearing fact in this source and the reason
- *     `planQoder` claims exactly one scalar.
- *   - **There is no credential to migrate, and this is verified rather than
- *     assumed.** Every one of the four `apiKey` occurrences in the bundle is in a
- *     BYOK flow or an IPC message, and the key itself is sealed before it is
- *     stored: `g5t.seal` builds `{schemaVersion: 1, apiKey}` and hands the JSON
- *     to `protectionService.protectString`, and what lands in SQLite is
- *     `byok_model_credentials.encrypted_payload BLOB NOT NULL`. The plaintext key
- *     is never in `settings.json`. The MCP path is the one that could still hold
- *     one, and {@link scrubQoderCredentials} exists because Qoder's own MCP
- *     reader throws on a literal `authorization` or `token` — a future version
- *     could grow one under a name nobody has seen.
- *   - **Session transcripts are counted and never opened.** The path is settled
- *     (`vze`: `projects/<slug>/<sessionId>.jsonl`) but the record format is
- *     written by the native `qoder-runtime-host` binary, which is in neither the
- *     JavaScript bundle nor the SDK. See `qoder-session.ts`.
- *   - **One configuration home is read, and the other is named.** Qoder resolves a
- *     single home per process — `mc()` returns one `{user, project}` pair — so a
- *     home holding both `.qoder` and `.qoder-cn` is two installs, not two halves
- *     of one.
- *
- * **Nothing here throws.** Every read that fails becomes a line in
- * {@link RawQoder.skipped} naming what failed and why, which is the convention
- * `antigravity-read.ts` uses: a migration that aborts on one damaged file loses
- * every other source's import to make a point about that file.
- */
+// Qoder's user state, as read from one home: the settings layers and their
+// merge, the scrub, the counts, and what is named and not opened.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -70,14 +33,8 @@ import {
 	qoderTreeHasContent,
 } from "./qoder-home.ts";
 
-/**
- * One thing the walk found and did not carry over, with the reason.
- *
- * `name` is a **label, not a resolved path**, and the same convention
- * `antigravity-read.ts` uses: a bare name where that is unambiguous, a
- * forward-slashed relative label where it is not. Nothing here ever holds a value
- * read out of a credential-shaped key — see {@link RawQoder.skipped}.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One thing the walk found and did not carry over; `name` is a label rather than a resolved path, and never a value read out of a credential-shaped key. */
 export interface QoderSkipped {
 	name: string;
 	reason: string;
@@ -104,41 +61,20 @@ export interface RawQoder {
 	home: string;
 	/** The environment block the home was resolved from, kept for the report. */
 	env: QoderEnv;
-	/**
-	 * The configuration home that answered: `$QODER_CONFIG_DIR` when set, else
-	 * `<cli home or home>/<directory name>`.
-	 *
-	 * Always a path, never a read: a home that has never installed Qoder still
-	 * has the right answer for where one *would* be, and a report that printed a
-	 * "not found" line for every absent path would bury the ones that matter.
-	 * {@link RawQoder.settings} is `null` in that case.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The configuration home that answered: `$QODER_CONFIG_DIR` when set, else `<cli home or home>/<directory name>`; always a path and never a read. */
 	configDir: string;
 	/** The other build's configuration home, named whether or not it exists. */
 	otherConfigDir: string;
 	/** True when the home resolved above exists and holds something. */
 	present: boolean;
-	/**
-	 * Why `QODER_CONFIG_DIR_NAME` was not used, or `null`.
-	 *
-	 * The SDK **throws** on an invalid name rather than falling back —
-	 * `${configDirNameEnv} must be a valid directory name` /
-	 * `must not use a protected directory name` — so a Qoder configured that way
-	 * is a Qoder that will not start. This importer falls back to `.qoder` and
-	 * reports it, because silently reading a directory the product refused to
-	 * read would import a tree Qoder itself rejects.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Why `QODER_CONFIG_DIR_NAME` was not used, or `null`; the SDK throws on an invalid name, so this importer falls back to `.qoder` and reports the refusal. */
 	rejectedDirName: string | null;
 	/** `<home>/settings.json` — the **user** layer's path, whatever else was read. */
 	settingsPath: string;
-	/**
-	 * The settings layers that were found and parsed, in the order applied.
-	 *
-	 * One entry for a home that only ever wrote `~/.qoder/settings.json`, and three
-	 * for a project with a local override. Kept so the report can say which file a
-	 * key came from; nothing reads them a second time, and the credentials in them
-	 * were already dropped (see {@link scrubQoderCredentials}).
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The settings layers that were found and parsed, in the order applied; kept so the report can say which file a key came from. */
 	settingsLayers: QoderSettingsLayer[];
 	/**
 	 * Which layer last carried each top-level key, and where that layer's file is.
@@ -148,104 +84,23 @@ export interface RawQoder {
 	 * deliberately does not mean.
 	 */
 	provenance: MergedQoderSettings["provenance"];
-	/**
-	 * The **merged** settings document — what Qoder would actually be running — or
-	 * `null` when no layer was readable.
-	 *
-	 * `null` rather than `{}` on purpose: a home where the file is present and
-	 * unusable must say which of "a directory where a file was expected",
-	 * "unreadable", "not a JSON object" or "not parseable" applies, and an empty
-	 * object would let a planner claim a document was read and held nothing. An
-	 * **absent** file produces no line at all — never having written settings is
-	 * the ordinary state of a home that only installed the CLI, not a failure.
-	 *
-	 * **This is the merge, not the user layer**, and that is the whole difference:
-	 * six keys — `mcpServers` among them — are merged one level deep rather than
-	 * all the way (see {@link QODER_MERGE_SHALLOW}), so an MCP server the user
-	 * configured and a project has redefined is one entry with the project's
-	 * command, and the user file alone is not a document Qoder is running.
-	 * See {@link mergeQoderSettings}.
-	 *
-	 * Credential-shaped keys have been **removed** from whatever comes back; see
-	 * {@link scrubQoderCredentials}.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The merged settings document Qoder would run, or `null` when no layer was readable; this is the merge and not the user layer, and credential-shaped keys are already gone. */
 	settings: Record<string, unknown> | null;
-	/**
-	 * `<cwd>/.qoder/.mcp.json`, or `null` when there is no `cwd`.
-	 *
-	 * Held as a **path and nothing more**: this importer does not stat it, does not
-	 * read it and does not know whether it exists. It is in {@link RawQoder} so the
-	 * report can name the file a user who has one would otherwise find missing,
-	 * because its absence from an import looks exactly like a project with no MCP
-	 * configuration. See {@link qoderProjectMcpPath} for why it is not read.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `<cwd>/.qoder/.mcp.json`, or `null` when there is no `cwd`; held as a path and nothing more, so the report can name the file a user who has one would otherwise find missing. */
 	projectMcpPath: string | null;
-	/**
-	 * `mcpServers` **after the merge**, copied without interpretation.
-	 *
-	 * The desktop reads the field by name (`readField("mcpServers", {})`) and the
-	 * SDK writes back to it, so the key is one per settings file — but `mcpServers`
-	 * is one of the six {@link QODER_MERGE_SHALLOW} keys, so the **names** here are
-	 * the union across the layers that had the key and each **entry** is whatever
-	 * the last layer to mention that name said. `provenance.mcpServers` names the
-	 * file that supplied the map; it does not mean every entry in it came from
-	 * there, and the report line is worded so it does not.
-	 *
-	 * The `<project>/.qoder/.mcp.json` file is a **separate** location and is not
-	 * read: it is not a settings file, so the merge does not reach it, and the SDK's
-	 * project layer resolves it against the working directory. It is named in the
-	 * report rather than opened.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `mcpServers` after the merge, copied without interpretation; the names are the union across the layers that had the key and each entry is whatever the last layer to mention that name said. */
 	mcpServers: Record<string, unknown>;
-	/**
-	 * `settings.hooks`, verbatim and uninterpreted.
-	 *
-	 * Handed over as it stands because {@link normalizeClaudeHooks} in
-	 * `migrate-core.ts` is what knows this build's event names, which Qoder's own
-	 * reader does not: `hGr` takes **any** key of the `hooks` object as an event
-	 * name and never enumerates them, because the dispatcher is in the runtime
-	 * binary. Passing the block through and letting the normalizer drop the
-	 * events it has no word for is what makes an unknown event a report line
-	 * rather than a silent loss.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `settings.hooks`, verbatim and uninterpreted; the normalizer in `migrate-core.ts` knows this build's event names and turns an unknown event into a report line rather than a silent loss. */
 	hooks: unknown;
-	/**
-	 * `<configDir>/AGENTS.md` — the standing instruction document — or `null`.
-	 *
-	 * **This is not the memory directory.** Qoder has both, they are different
-	 * files, and collapsing them would assert that an index is an instruction:
-	 * {@link RawQoder.memory} is the dated entries under `<configDir>/memory`,
-	 * and this one document is what the product injects whatever project it is
-	 * run in.
-	 *
-	 * **What is verified, and where the citation comes from.** The list the product
-	 * builds is literally `["AGENTS.override.md", "AGENTS.md", ...fallbackFilenames]`
-	 * — so `AGENTS.md` is in it whatever `contextFileName` is set to, which is the
-	 * part this field relies on. That array, the three `user`/`project`/`local`
-	 * scopes, and the `projectDocMaxBytes` size policy all come from
-	 * `dist/_worker/qoder-worker-runtime.obf.mjs` in the installed package.
-	 *
-	 * **They are not in `dist/index.js`, which has zero occurrences of the
-	 * string.** That is the same trap as the settings keys: the plain SDK bundle
-	 * supports a confident "Qoder has no `AGENTS.md`" that the product contradicts.
-	 *
-	 * **What is not verified.** The runtime walks *up from the project boundary*,
-	 * so the copy that reaches most sessions is the one beside the code, not one at
-	 * the config root; whether Qoder also keeps a user-scope document at this path
-	 * could not be established from the bundle. Reading it is the shape the other
-	 * ten importers use, and it is safe either way: a config root with no
-	 * `AGENTS.md` yields `null` and the field costs nothing.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** `<configDir>/AGENTS.md`, the standing instruction document, or `null`; the name is attested and this location is a chosen one. */
 	agentsMd: string | null;
-	/**
-	 * Memory entries from `<home>/memory`, as {@link RawFile}s, plus the index.
-	 *
-	 * A memory *entry* is a file named for the day it was written —
-	 * {@link QODER_MEMORY_ENTRY_PATTERN} — and `MEMORY.md` beside them is the
-	 * index the agent is told to read, not an entry. Both are carried, and the
-	 * index is carried as its own rule file so the two do not collapse into one
-	 * name.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Memory entries and the index from `<home>/memory`, as {@link RawFile}s; the index is carried under its own name so the two do not collapse into one. */
 	memory: RawFile[];
 	/**
 	 * Skills from {@link qoderSkillsDirs}, de-duplicated by folder name with the
@@ -274,91 +129,20 @@ export interface RawQoder {
 	skipped: QoderSkipped[];
 }
 
-/**
- * The largest depth a credential-shaped key is looked for at.
- *
- * Eight is well past anything `settings.json` nests to — the deepest attested
- * key is three segments (`context.fileFiltering.customIgnoreFilePaths`), and the
- * shallowest merge merge-policy key is one. The cap is here so a pathological
- * document cannot turn a credential scan into a walk of a megabyte-deep
- * structure. A key deeper than this is **left in place**, which is the one thing
- * this function can get wrong; it is stated rather than pretended away.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The largest depth a credential-shaped key is looked for at; a key deeper than this is left in place, the one thing the scan can get wrong. */
 const MAX_CREDENTIAL_SCAN_DEPTH = 8;
 
-/**
- * Key names `looksLikeSecretName` does not catch.
- *
- * That helper matches `TOKEN`, `KEY`, `SECRET`, `PASSWORD` and `CREDENTIAL` as
- * case-insensitive substrings, which covers `apiKey`, `accessToken` and
- * `clientSecret`. It deliberately misses two spellings that are the ones Qoder
- * itself names: `authorization`, which is one of the two keys the product's own
- * MCP reader throws `MCP_CONFIG_STATIC_CREDENTIAL_FORBIDDEN` for, and
- * `bearerToken` — no, `bearerToken` *does* match `TOKEN`; the second one is
- * `password`, which matches, so the real gap is the single word `authorization`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The one key name `looksLikeSecretName` misses that Qoder itself names: a case-insensitive `authorization`. */
 const QODER_SECRET_KEY = /authorization/i;
 
-/**
- * Settings keys whose value is a **map from a user-chosen name to an entry**.
- *
- * **The distinction this set exists to draw is between a key that names a slot and
- * a key that names a thing.** `headers.authorization` is a slot: the credential is
- * under it, and deleting it removes the credential and nothing else.
- * `mcpServers.keyboard-mcp` is not a slot — it is the *name of an MCP server the
- * user created*, and deleting it deletes the server, its command, its arguments
- * and its working directory, none of which is a secret. A server called
- * `keyboard-mcp` is an ordinary thing to want; `looksLikeSecretName` matches `KEY`
- * inside it and the naive walk took that as a finding.
- *
- * **So the scrub's job is to drop credential-shaped keys *inside* an entry and
- * never the entry itself**, and that is what the recursion below does for these
- * keys: the map's own keys are walked through, each entry's contents are scrubbed
- * normally, and the name is left alone. `headers.authorization` and
- * `env.API_TOKEN` still go, each with its own `skipped` line carrying the full
- * path — which is the guarantee `planQoderMcp` depends on, and why its "a name
- * that reads as a credential was already gone" comment stays true of `env`'s
- * *contents* while no longer being true of the server's own name.
- *
- * **The membership is derived rather than guessed, from two facts in the product.**
- *
- *   - The six {@link QODER_MERGE_SHALLOW} keys are the keys the SDK's own merge
- *     treats as one level deep (`Object.assign` over the top-level map rather than
- *     a walk into each value). A key the product merges *by its own names* is a
- *     map the user keys by hand, which is the property this set needs.
- *   - `hooks` is map-shaped too and is not in that list: the merge concatenates
- *     each event's group arrays (`path.length === 2 && path[0] === "hooks"`),
- *     which is a per-name merge by a different rule. It belongs here for the same
- *     reason, and the reader's own note that `hGr` takes *any* key of `hooks` as
- *     an event name makes it the sharpest case: an event named
- *     `StopSessionSecret` would otherwise take its handlers with it.
- *
- * Nothing attested in Qoder's eighteen `QODER_HOOK_EVENTS` matches a credential
- * word today — checked name by name against both matchers — so this is not a live
- * loss for the hooks block. But the names are the user's, the product does not
- * enumerate them, and the exemption costs nothing.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Settings keys whose value is a map from a user-chosen name to an entry: the six shallow keys plus `hooks`. The scrub drops credential-shaped keys inside an entry and never the entry itself. */
 const QODER_ENTRY_MAP_KEYS: ReadonlySet<string> = new Set([...QODER_MERGE_SHALLOW, "hooks"]);
 
-/**
- * Remove every credential-shaped key from a parsed document, recording each by
- * path and never touching the value.
- *
- * Nothing in Qoder's `settings.json` is *expected* to be a secret — the BYOK key
- * is sealed into SQLite before it is stored, which is why this is a guard rather
- * than a step — and it is written as one because a guard nobody can see is not a
- * guard. The names go into `skipped`; the values are dropped on the floor, so a
- * credential can never reach a planner, a plan, a report or a written file.
- *
- * **The one thing this function gets wrong is a map treated as a generic object**,
- * and {@link QODER_ENTRY_MAP_KEYS} is what it gets right: below one of those keys
- * the immediate children are names the user chose, so they are stepped over and
- * only the entries' own keys are matched. Everything else about the walk is
- * unchanged — same depth cap, same `skipped` labels, same reason string.
- *
- * Depth-limited at {@link MAX_CREDENTIAL_SCAN_DEPTH}, documented there because
- * the depth is where this function could be wrong.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Remove every credential-shaped key from a parsed document, recording each by path and never touching the value; the names go into `skipped` and the values are dropped. */
 function scrubQoderCredentials(value: Record<string, unknown>, into: QoderSkipped[], prefix: string): void {
 	const walk = (node: unknown, path: string[], depth: number): void => {
 		if (!isRecord(node) || depth > MAX_CREDENTIAL_SCAN_DEPTH) return;
@@ -393,17 +177,8 @@ function scrubQoderCredentials(value: Record<string, unknown>, into: QoderSkippe
 	walk(value, [], 0);
 }
 
-/**
- * A file's text, or the reason it is not text.
- *
- * `statSync` first rather than opening and catching, because the two failures a
- * caller must tell apart are *absent* and *there but unreadable*, and both would
- * otherwise arrive as exceptions — which would make a home that has never
- * installed Qoder produce a report full of "unreadable" lines. A directory where
- * a file was expected is its own case, and a real one: `<home>/memory` is a
- * directory here and the settings document lives one level up, so a user who has
- * the other arrangement gets a sentence that says which.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A file's text, or the reason it is not text; `statSync` first so absent and there-but-unreadable stay apart. */
 function readQoderText(path: string): QoderText {
 	let isDirectory: boolean;
 	try {
@@ -416,34 +191,8 @@ function readQoderText(path: string): QoderText {
 	return content === null ? { kind: "unreadable", reason: "present but unreadable" } : { kind: "text", value: content };
 }
 
-/**
- * A JSON document, with the two failures kept apart and one recovery attempted.
- *
- * **The recovery is not speculative here, and the difference from every other
- * source in this repository is worth stating plainly.** Qoder's own two halves
- * disagree: the desktop's `readDocument` parses with `goe`, which rejects a
- * comment or a trailing comma as `SETTINGS_JSON_INVALID`, while the SDK's loader
- * calls `dc`, and `dc(t, path)` is `JSON.parse(lc(t))` where `lc` is a
- * comment-stripper — it skips a leading BOM, then walks the text keeping string
- * literals intact while removing `//` and block comments. `lc` does **not** handle
- * trailing commas, so a file with one fails under **both** halves of the product.
- *
- * So: plain `JSON.parse` first, which is what the desktop does; then `parseJsonc`
- * once; and if that yields a non-empty object the file is read with
- * `recovered: true`, which every caller turns into one line in `skipped`.
- *
- * **This reader's recovery is a strict superset of the product's.** `parseJsonc`
- * strips trailing commas as well as comments, so a file this importer can still
- * read is one **neither** Qoder half would accept — which is the opposite failure
- * from the one the recovery normally covers, and the reason the report line says
- * the desktop would have rejected the file. Reading such a file is the right call
- * for a migration (the user's settings are their settings) and the wrong thing to
- * do silently, which is what the line is for.
- *
- * A fixed phrase for the failure, never the parser's message: a `SyntaxError`
- * from `JSON.parse` quotes the text it choked on, which would put a fragment of
- * the user's file into the report.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A JSON document with the two failures kept apart and one recovery attempted: plain `JSON.parse` first, then `parseJsonc` once, which is a strict superset of what either Qoder half accepts. */
 function readQoderJson(path: string): QoderJson {
 	const text = readQoderText(path);
 	if (text.kind === "absent") return { kind: "absent" };
@@ -485,24 +234,8 @@ function qoderDirectoryEntries(dir: string): Dirent[] {
 	}
 }
 
-/**
- * The memory entries in one memory directory, plus the index, as {@link RawFile}s.
- *
- * **Both halves are read and they are not the same kind of thing.** An entry is a
- * file named for the day it was written, matched by
- * {@link QODER_MEMORY_ENTRY_PATTERN} — the product's own discriminator, which its
- * memory reader applies before it reads a file, so nothing else in the directory
- * is treated as an entry. `MEMORY.md` beside them is the index the agent is told
- * to read, and it is carried under its own name rather than folded in with the
- * entries: importing twenty entries and the index as twenty-one would assert
- * something about the index that the product's own reader does not assert.
- *
- * The project-scoped memory directory — `projects/<slug>/memory` — is **not**
- * read here, and the reason is that this function has no `cwd`. It is a function
- * of the directory being migrated into, and `readSources(home, cwd)` has one;
- * `qoder-home.ts` exposes the derivation and `planQoder` names the directory it
- * did not read.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The memory entries in one memory directory, plus the index, as {@link RawFile}s; the project-scoped directory is not read here because this function has no `cwd`. */
 function readQoderMemory(configDir: string, home: string, skipped: QoderSkipped[]): RawFile[] {
 	const dir = qoderMemoryDir(configDir);
 	if (!existsSync(dir)) return [];
@@ -541,21 +274,8 @@ function readQoderMemory(configDir: string, home: string, skipped: QoderSkipped[
 	return files;
 }
 
-/**
- * `<configDir>/AGENTS.md`, or `null` when there is nothing to import.
- *
- * **Absent is silent, and that is the whole contract.** Every other read in this
- * file distinguishes three states; this one returns two, because the ten other
- * importers in this repository all made the same choice for the same file: a
- * document that was never written is not an error and does not get a report line.
- * A test pins it.
- *
- * **This is not {@link RawQoder.memory}.** That field is the dated entries under
- * `<configDir>/memory` plus the index beside them; this is the one standing
- * instruction document. They are different files with different meanings, and
- * reading the directory instead of the document would import an index and call it
- * an instruction.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `<configDir>/AGENTS.md`, or `null` when there is nothing to import; absent is silent, the contract the other importers use for the same file. */
 function readQoderAgentsMd(configDir: string, home: string, skipped: QoderSkipped[]): string | null {
 	const path = qoderAgentsMdPath(configDir);
 	const content = readQoderText(path);
@@ -567,15 +287,8 @@ function readQoderAgentsMd(configDir: string, home: string, skipped: QoderSkippe
 	return content.value;
 }
 
-/**
- * Skills from both candidate roots, the first root winning a name.
- *
- * Qoder's precedence is the order `qoderSkillsDirs` returns, so a folder present
- * in both is one skill and the second copy is not read. The collision is
- * recorded rather than dropped silently — a user who has the same skill in two
- * places is owed the sentence, and a report claiming one skill where two files
- * were found reads as an importer bug.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Skills from both candidate roots, the first root winning a name; a collision is recorded rather than dropped in silence. */
 function readQoderSkills(
 	configDir: string,
 	home: string,
@@ -614,23 +327,8 @@ function readQoderSkills(
 	return { assets, collisions };
 }
 
-/**
- * How many transcripts are on disk, spread across how many projects, and how many
- * bytes in total — none of them opened.
- *
- * The layout is the product's own (`vze`), so this walk is reliable about what
- * is *there*: one directory per working directory under `projects/`, and one
- * `<sessionId>.jsonl` per session inside it. The *contents* are a different
- * question and a different piece of work — the writer is the native
- * `qoder-runtime-host` binary, which is in neither the JavaScript bundle nor the
- * SDK, so no record format could be established from bytes. See
- * `qoder-session.ts`.
- *
- * A `.jsonl` file that is not there, and one that is, are counted apart: a user
- * whose projects directory holds directories with no transcript is a real state
- * (a project created and never used, or cleaned up) and the report says so
- * rather than reporting a number that silently excluded them.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** How many transcripts are on disk, spread across how many projects, and how many bytes in total; none of them opened, and a project with no transcript is counted apart. */
 export function countQoderSessions(
 	configDir: string,
 	skipped: QoderSkipped[],
@@ -683,20 +381,8 @@ export interface QoderSettingsLayer {
 	settings: Record<string, unknown>;
 }
 
-/**
- * The merge, and who said what.
- *
- * `provenance` is the SDK's own record (`p[f] = {source: d.source, path: d.path}`,
- * overwritten as the layers are applied), and it exists for the report: a key the
- * **local** layer last supplied has to say so, or the user is told their
- * `~/.qoder/settings.json` said something it did not say.
- *
- * Note what provenance records — **the last layer that carried the key**, not the
- * layer whose value survived. Those differ for a key a later layer sets to a value
- * the merge then drops (`undefined`, or a prototype key), and the product reports
- * the former, so this does too. A report that said "the project layer set it" for a
- * key the user layer still governs would be its own kind of wrong.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The merge, and who said what: `provenance` is the SDK's own record and names the last layer that carried a key, not the layer whose value survived. */
 export interface MergedQoderSettings {
 	settings: Record<string, unknown>;
 	provenance: Record<string, { source: QoderSettingsSource; path: string }>;
@@ -723,34 +409,8 @@ function qoderCloneRecord(value: Record<string, unknown>): Record<string, unknow
 	return out;
 }
 
-/**
- * `pc` — the merge policy for one path within the document.
- *
- * ```js
- * if (uc.has(path) || (path.length === 2 && path[0] === "providers")) return "shallow";
- * if (cc.has(path)) return "union";
- * if (path.length === 2 && path[0] === "hooks") return "concat";
- * // undefined: merge into
- * ```
- *
- * All three conditions are reproduced verbatim. Two notes on what they actually
- * do, because both are easy to read as doing more than they do:
- *
- *   - **`providers` merges one level deep because `providers` is in `uc`.** The
- *     extra `n.length === 2 && n[0] === "providers"` clause is carried because
- *     `pc` has it, but nothing reaches it: a shallow key `continue`s out of `Rn`
- *     before any recursion, so `pc(["providers", name])` is only called from the
- *     branch that handles a target **missing** the key — where the branch's own
- *     `i && o` guard has already failed and the policy is not consulted — and
- *     from there the next path is three segments long, which no clause matches.
- *     An earlier draft of this comment credited the clause with making one
- *     provider entry replace rather than merge all the way down. It does not; the
- *     name in `uc` does. Dropping the clause changes no output, which a mutation
- *     run over this file's tests confirms.
- *   - **`hooks` is matched on arity, not on a name list.** A hook event is
- *     `hooks.<Event>` and its group arrays concatenate, which is why two layers
- *     that both define `PreToolUse` produce both groups rather than one winning.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `pc`: the merge policy for one path within the document; the extra `providers` clause is carried because the product has it, and no path reaches it. */
 function qoderMergePolicy(path: string[]): "shallow" | "union" | "concat" | undefined {
 	const dotted = path.join(".");
 	if (QODER_MERGE_SHALLOW_SET.has(dotted) || (path.length === 2 && path[0] === "providers")) return "shallow";
@@ -759,27 +419,8 @@ function qoderMergePolicy(path: string[]): "shallow" | "union" | "concat" | unde
 	return undefined;
 }
 
-/**
- * `Rn` — fold one document into the accumulator, in place.
- *
- * Reproduced statement for statement, including the three shapes that look like
- * bugs and are not to be "fixed" here:
- *
- *   - **A shallow key is merged one level deep, not replaced.** `Object.assign(u,
- *     clone(i))` then `Object.assign(u, clone(o))` is `{...i, ...o}`, so
- *     `mcpServers` gains the later layer's server *names* and loses the earlier
- *     layer's definitions of the ones both declare. An earlier draft of this file
- *     called the six keys "replaced wholesale", which these bytes do not support.
- *   - **A shallow key set to two non-objects becomes `{}`.** `let u = {}` and both
- *     `Object.assign` calls are guarded by an is-record test, so a later layer
- *     replacing a string with a number yields an empty object. Faithful is the
- *     only safe choice: this importer's whole claim is that it reads what Qoder
- *     reads.
- *   - **The union dedupes by identity.** `[...new Set([...i, ...u])]` compares the
- *     values themselves, so two structurally equal objects from two layers stay
- *     two entries. Making them one would be this importer deciding that Qoder's
- *     list should be shorter than Qoder's list.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `Rn`: fold one document into the accumulator, in place, reproduced statement for statement; the three shapes that look like bugs are reproduced rather than "fixed". */
 function qoderMergeInto(target: Record<string, unknown>, source: Record<string, unknown>, path: string[] = []): void {
 	for (const [key, value] of Object.entries(source)) {
 		if (QODER_PROTOTYPE_SET.has(key) || value === undefined) continue;
@@ -815,14 +456,8 @@ function qoderMergeInto(target: Record<string, unknown>, source: Record<string, 
 	}
 }
 
-/**
- * The three layers, applied in order — what Qoder would actually be running.
- *
- * Exported because this is the function worth arguing with: it is pure, it takes
- * three documents, and every claim above about shallow merging, union and
- * concatenation is a claim about *this*. A reader that read one layer would be
- * right about the file and wrong about the settings.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The three layers, applied in order, as what Qoder would actually be running; exported because every merge claim is a claim about this function. */
 export function mergeQoderSettings(layers: QoderSettingsLayer[]): MergedQoderSettings {
 	const settings: Record<string, unknown> = {};
 	const provenance: MergedQoderSettings["provenance"] = {};
@@ -836,14 +471,8 @@ export function mergeQoderSettings(layers: QoderSettingsLayer[]): MergedQoderSet
 	return { settings, provenance };
 }
 
-/**
- * The file a settings key's value came from, as a report may print it.
- *
- * Falls back to the **user** layer's path when {@link provenance} has nothing for
- * the key, which is the case for a key the merge produced that no layer carried by
- * name — and is right for the only way that happens, which is a key this importer
- * asked about that no layer set.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The file a settings key's value came from, as a report may print it; falls back to the user layer's path for a key no layer carried by name. */
 export function qoderSettingsOrigin(
 	home: string,
 	provenance: MergedQoderSettings["provenance"],
@@ -854,26 +483,8 @@ export function qoderSettingsOrigin(
 	return tildePath(home, path ?? fallback);
 }
 
-/**
- * The file that carried a **sub-key** — a finer question than
- * {@link qoderSettingsOrigin} asks, and the only one that gives a report line the
- * right answer.
- *
- * The SDK's provenance is keyed by top-level name alone, so a server the user
- * added and a project never mentioned is attributed to whichever layer last
- * carried the *name* `mcpServers` — the project's, whenever the project has any
- * servers at all. Printed as a label, that sends the user to the project file to
- * edit a server that is not in it: the same mistake the layer suffix exists to
- * prevent, pointed the other way.
- *
- * So the read is untouched and only the label is narrowed — to the last layer, in
- * application order, that holds `key.subkey`. Where no layer holds it, which is
- * the case for a key the merge produced rather than any layer carried, `fallback`
- * is returned, and the caller passes the top-level origin so the answer degrades
- * to what it always was. The layer comes back with the path because the report
- * names it, and a suffix saying `project layer` beside a user's own file would be
- * the same error once more.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The file that carried a sub-key, a finer question than {@link qoderSettingsOrigin} asks; only the label is narrowed, and `fallback` answers when no layer holds `key.subkey`. */
 export function qoderSettingsSubkeyOrigin(
 	home: string,
 	layers: QoderSettingsLayer[],
@@ -890,22 +501,8 @@ export function qoderSettingsSubkeyOrigin(
 	return { path: fallback, source: fallbackSource };
 }
 
-/**
- * Read the layers that exist, in `QODER_SETTINGS_SOURCES` order.
- *
- * **A missing file is not an error here** — it is the normal state of two of the
- * three, and reporting "there is no `<cwd>/.qoder/settings.local.json`" for every
- * project a user visits would be noise. A file that exists and does not parse is
- * the opposite: it changes what the merge produces, so it is named.
- *
- * **The one case where the product reads fewer than three** is reproduced: `fc`
- * computes `c = resolve(cliHome) === resolve(cwd)` and skips both
- * `cwd`-relative layers when the directory being migrated into *is* the CLI home,
- * because then the "project" settings would be the user's own global settings read
- * a second time from a different path. That is a real configuration (a CLI home
- * set to a project directory) and it is why this takes the same two arguments
- * `fc` does.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The layers that exist, in `QODER_SETTINGS_SOURCES` order; a missing file is not an error, and the `fc` shortcut that reads fewer than three is reproduced. */
 function readQoderLayers(
 	home: string,
 	cwd: string | undefined,
@@ -937,38 +534,8 @@ function readQoderLayers(
 	return layers;
 }
 
-/**
- * Read one Qoder home.
- *
- * **Pure with respect to everything outside `home`, `cwd` and `env`**: it resolves
- * paths against those arguments and never calls `os.homedir()` or
- * `process.cwd()`, so a fixture laid out by a test and a developer's own `~/.qoder`
- * are the same code path. It does touch the filesystem, necessarily — that is what
- * reading is.
- *
- * `cwd` is the directory being migrated into, and it is what the **project and
- * local settings layers** hang off (`<cwd>/.qoder/settings.json` and
- * `settings.local.json`). It is `string | undefined` rather than defaulted to
- * `process.cwd()` for the same reason the reader takes `home` as an argument: a
- * default here would let a test that forgot it read whatever directory the test
- * runner happened to be in. `readSources(home, cwd)` always passes it.
- *
- * `env` defaults to `process.env`, which is what `readSources` passes, so a
- * developer who has set `QODER_CONFIG_DIR` gets that tree — the correct answer
- * for their machine. A test passes an explicit block instead. This is the same
- * trade `codex-home.ts` makes with `CODEX_HOME` and it is stated here because it
- * is the one way a test that reads a fixture home could quietly read a real one:
- * **a test that asserts on content must pass `env` rather than rely on the
- * ambient block.**
- *
- * The order is the settings layers, then the fields read out of the merged
- * document, then memory and skills, then the transcript count, then the paths
- * that exist and are deliberately not opened — but {@link RawQoder.skipped} is
- * **sorted by name before it is returned**, so two runs over one home produce the
- * same report rather than one that changes with the order the filesystem handed
- * back. Nothing short-circuits: a home with a damaged `settings.json` still yields
- * its skills.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read one Qoder home; pure with respect to `home`, `cwd` and `env`, and the skipped lines come back sorted by name. */
 export function readQoder(
 	home: string,
 	cwd: string | undefined,

@@ -1,71 +1,7 @@
-/**
- * Cursor's user state: the rules, the two MCP documents, the CLI configuration,
- * the hooks, the three asset directories, the editor's storage as a set of names,
- * and the CLI's own per-workspace tree.
- *
- * **The citations here are of two kinds and each claim below is marked with
- * which one it is.** `DOCUMENTATION-LEVEL` means a second-hand claim with a date
- * on it, checkable only against Cursor's published pages. `SOURCE-LEVEL` means it
- * was read out of the minified bundle the CLI actually ships — build
- * `2026.09.26-dd393fe` — and is cited as **module path + function name + build
- * id**, never as a `file:line`, which would be invented precision about a file
- * nobody can open.
- *
- * The two kinds are not equal in what a reader owes the user, and the standing
- * caveat used to be "this source is documentation-level throughout". It stopped
- * being true when the CLI bundle was unpacked, and the split is worth keeping
- * visible: a reader deciding whether to trust a sentence should not have to guess
- * which of two standards it was written to. Every source-level claim in this
- * module is about *shape or path arithmetic* — the parts documentation does not
- * cover and that were wrong before they were checked. Every documentation-level
- * claim is about a file Cursor documents, where the docs and the file agree.
- *
- * Six things about Cursor's shape are load-bearing and none of them is obvious:
- *
- * 1. **The rules are `.mdc` and the frontmatter is three keys** — `description`,
- *    `globs`, `alwaysApply` — with `globs` written as a comma-delimited *string*,
- *    not a YAML list. There is no `ruleType`: the four rule behaviours come out of
- *    combinations of those three, and a `ruleType` seen in the wild came from a
- *    generator. The frontmatter is carried over verbatim (see `cursor-plan.ts`);
- *    what does not survive is the *activation*, and that is the downgrade.
- *    *DOCUMENTATION-LEVEL.*
- * 2. **A plain `.md` in a rules directory is ignored by Cursor** — the official
- *    page says so in as many words, and gives the reason (no frontmatter). Those
- *    files are named rather than imported: they are either a mistake or a
- *    convention for another tool, and either way importing them would put prose in
- *    the user's context that Cursor itself never showed them.
- *    *DOCUMENTATION-LEVEL.*
- * 3. **There are three permission systems and they do not overlap.** The CLI's
- *    (`permissions` in `cli-config.json` / `cli.json`), the IDE's
- *    (`permissions.json`, not read by the CLI), and the in-app command allowlist,
- *    which overrides the IDE's. Only the first is read here, and the report says
- *    which one it was. *SOURCE-LEVEL* for the CLI's list and the IDE's being
- *    unread by it; *DOCUMENTATION-LEVEL* for the third, which is an in-app
- *    feature with no file behind it.
- * 4. **Three of the trees Cursor reads are not its own, and copying them would
- *    file every one of the user's skills under the wrong tool.** See
- *    {@link CURSOR_VENDOR_TREES} — the exclusion is per asset kind, because the
- *    three kinds do not read the same four directories, and a flat list would
- *    either miss a tree Cursor really does read or claim one it does not.
- *    *SOURCE-LEVEL* (`$n` and the `thirdParty` marks, build `2026.09.26-dd393fe`).
- * 5. **The three asset kinds are read differently**, and the differences are the
- *    whole of how they are read — commands are user *and* project, one level,
- *    `*.md` only; agents are **project only**; skills are user and project,
- *    recursive to a depth limit. *SOURCE-LEVEL.*
- * 6. **A command has no frontmatter and its arguments are substituted, not
- *    appended.** Both are the opposite of what the shared `commandAsSkill` path
- *    says, which is why this source writes its own. *SOURCE-LEVEL* — see
- *    {@link CURSOR_COMMAND_ARGUMENTS} for the substitution rule verbatim and
- *    `parseMarkdownCommand` for the title extraction.
- *
- * **What is deliberately not read**, and is named rather than quietly skipped:
- * the chat bodies, which live in the editor's SQLite `state.vscdb` and are keyed
- * by a workspace hash this importer cannot recompute; the MCP OAuth tokens under
- * the CLI's data root, which are `existsSync` and nothing else; and the two
- * decision lists beside them. {@link readCursorStateDatabases} and
- * {@link readCursorProjectData} are the two readers that do nothing but count
- * and name, and both say why in place.
- */
+// Cursor's user state: the rules, the two MCP documents, the CLI configuration,
+// the hooks, the three asset directories, the editor's storage as a set of names,
+// and the CLI's own per-workspace tree.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { type Dirent, existsSync, readdirSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
@@ -102,14 +38,8 @@ export const CURSOR_USER_RULES_NOT_LOADED =
 // Documents
 // ---------------------------------------------------------------------------
 
-/**
- * A configuration file, in the three states it can be in.
- *
- * "Absent" and "unreadable" are kept apart because the report prints different
- * sentences for them and only one of them is worth explaining: a file the user
- * wrote and that does not parse is a fact they need, and folding it into
- * "nothing there" is how a broken edit goes unnoticed for months.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A configuration file, in the three states it can be in: absent, unreadable, document. */
 export type CursorDocument =
 	| { kind: "absent" }
 	| { kind: "unreadable" }
@@ -151,24 +81,8 @@ export interface CursorIgnoredFile {
 	reason: string;
 }
 
-/**
- * `.mdc` files under a rules directory, recursively, and the `.md` files beside them.
- *
- * Recursion is the documented shape and not quite the documented *claim*: the
- * official rules page shows a nested layout as its own example
- * (`frontend/components.mdc`) and never says whether discovery stops at the top
- * level. Reading recursively is right if it recurses and harmless if it does not,
- * because a nested file Cursor ignores is a file a user wrote and would expect to
- * come across.
- *
- * The two directories are walked separately and kept apart, because they are
- * different things: `<project>/.cursor/rules` is Cursor's own and is loaded, and
- * `~/.cursor/rules` is a community convention that **Cursor staff say is not
- * supported** — User Rules are a settings-UI feature with no directory of their
- * own. Those files are still imported, because the user wrote them and the
- * importer's job is to carry them, but each one says in the report that Cursor
- * itself never loaded it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `.mdc` files under a rules directory, recursively, and the `.md` files beside them. */
 function readCursorRules(projectRoot: string, userRoot: string): { rules: CursorRule[]; ignored: CursorIgnoredFile[] } {
 	const rules: CursorRule[] = [];
 	const ignored: CursorIgnoredFile[] = [];
@@ -226,27 +140,8 @@ interface CursorAssetSkip {
 	reason: string;
 }
 
-/**
- * Frontmatter the way Cursor parses it: **line by line, not as YAML.**
- *
- * Verbatim from the bundle (`Hs`, build `2026.09.26-dd393fe`):
- *
- * ```js
- * for (const e of r.split("\n")) {
- *   const t = e.trim();
- *   if (!t.length || t.startsWith("#")) continue;
- *   const r = t.indexOf(":");
- *   if (-1 === r) continue;
- *   s[t.slice(0, r).trim().toLowerCase()] = t.slice(r + 1).trim();
- * }
- * ```
- *
- * So a value is whatever follows the first colon, a key is lowercased, `#` lines
- * are comments, and nothing is nested. This is the same parser
- * `subagents.ts:parseAgentDefinitions` uses on the target side, which is why an
- * agent file is carried over **byte for byte** rather than rewritten: every key
- * Cursor honours that this build also honours is already in the same spelling.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Frontmatter the way Cursor parses it: line by line, not as YAML (`Hs` in the bundle). */
 function readCursorFrontmatter(content: string): { body: string; data: Record<string, string> } | null {
 	const match = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/m.exec(content);
 	if (!match) return null;
@@ -266,27 +161,8 @@ function readCursorFrontmatter(content: string): { body: string; data: Record<st
 	return { body, data };
 }
 
-/**
- * One `commands/` directory: the `*.md` files directly in it, and nothing else.
- *
- * **Source-level** — `loadCommandsFromDirectory` (build `2026.09.26-dd393fe`):
- *
- * ```js
- * const n = (yield this.readDirectory(e)).filter((e) => !e.isDirectory && e.name.endsWith(".md"));
- * ```
- *
- * **Not recursive**, so a command in a subdirectory is invisible to Cursor and
- * must not be invented here — it is named instead. And a file whose name minus
- * `.md` is blank is dropped by Cursor itself (`if (!o.trim()) return null`).
- *
- * The description Cursor derives is worth stating because it is a source of
- * surprise rather than a design: `extractTitle` is applied to the **first line
- * only**, and falls back to that line verbatim when it is not a heading. A
- * command that opens with a frontmatter block is therefore described to the
- * model as the three characters `---`. {@link cursorCommandDescription} does not
- * reproduce that; it looks for the first heading anywhere in the file, which is
- * the same text the author meant.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One `commands/` directory: the `*.md` files directly in it, and nothing else. */
 function readCursorCommandDir(dir: string): { files: RawFile[]; skips: CursorAssetSkip[] } {
 	const files: RawFile[] = [];
 	const skips: CursorAssetSkip[] = [];
@@ -328,45 +204,13 @@ function readCursorCommandDir(dir: string): { files: RawFile[]; skips: CursorAss
 	return { files, skips };
 }
 
-/**
- * The one line that says what a Cursor command does with its arguments, and it
- * is the opposite of what the shared command writer says for the other sources.
- *
- * **Source-level** — build `2026.09.26-dd393fe`:
- *
- * ```js
- * let r = e, o = false;
- * r.includes("$ARGUMENTS") && (o = true, r = r.replace(/\$ARGUMENTS/g, t.join(" ")));
- * /(?<!\w)\$(\d{1,2})\b/g.test(r) && (r = r.replace(…, (m, d) => n > 0 && n <= t.length ? t[n - 1] : ""));
- * const i = o ? r : t.length ? `${e}\n\n${t.join(" ")}` : e;
- * ```
- *
- * Three facts, and the shared `commandAsSkill` detail would state the first one
- * backwards:
- *
- *   - **`$ARGUMENTS` *is* substituted**, and so is `$1` through `$99` — not
- *     `$1` through `$9`. The guard is `(?<!\w)`, so `$1` inside `$12` does not
- *     match on its own.
- *   - **An argument with no matching placeholder becomes the empty string**, not
- *     the literal `$7`.
- *   - **The arguments are appended only when nothing was substituted.** With a
- *     placeholder, the substituted text *replaces* them; without one, they land
- *     after a blank line. So "appends its arguments" and "substitutes
- *     `$ARGUMENTS`" are not two descriptions of the same command — they are two
- *     different commands, and the file says which.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** What a Cursor command does with its arguments: the opposite of the shared `commandAsSkill` writer. */
 export const CURSOR_COMMAND_ARGUMENTS =
 	"cursor substitutes $ARGUMENTS and $1-$99 when the command runs, and an argument past the end becomes blank rather than staying literal; when the file has no such placeholder it appends the arguments after a blank line instead — a skill body is never substituted, so both the placeholders and the append are behaviour this build does not have";
 
-/**
- * A description for the imported skill, which is not the one Cursor shows.
- *
- * Cursor reads the **first line** and, if it is not a heading, uses that line
- * verbatim — so a file opening with `---` is described as `---`. This looks for
- * the first heading anywhere, then for the first line that is neither the
- * frontmatter fence nor blank, and finally says what the file is rather than
- * inventing prose for it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A description for the imported skill, which is not the one Cursor shows. */
 export function cursorCommandDescription(id: string, content: string): string {
 	const heading = /^#{1,6}[ \t]+(.+)$/m.exec(content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, ""));
 	const first = (heading?.[1] ?? "").trim();
@@ -379,40 +223,12 @@ export function cursorCommandDescription(id: string, content: string): string {
 	return line ? line.replace(/\s+/g, " ").slice(0, 200) : `the cursor command /${id}`;
 }
 
-/**
- * The file extensions Cursor reads an agent out of.
- *
- * **Source-level** — `Ys` in the same module as the subagent loader, passed as
- * `includeFile` to the ripwalk that collects them (build `2026.09.26-dd393fe`):
- *
- * ```js
- * function Ys(e){const t=(0,s.extname)(e).toLowerCase();
- *   return ".md"===t||".mdc"===t||".markdown"===t}
- * ```
- *
- * Three extensions, not one, and lowercased first — so `AGENT.MD` counts. A
- * reader that took only `.md` would skip a file Cursor loads, and an `.mdc` in
- * an agents directory is not a strange thing to find: `.mdc` is the extension
- * Cursor's *rules* use, so a user who copied a rule-shaped file across would
- * produce one by accident.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The file extensions Cursor reads an agent out of, lowercased first: `.md`, `.mdc`, `.markdown`. */
 export const CURSOR_AGENT_EXTENSIONS = [".md", ".mdc", ".markdown"] as const;
 
-/**
- * How deep the agent walk goes.
- *
- * **The source has no cap** — the ripwalk it hands to runs until the filesystem
- * runs out — and this is the one place the importer's answer is not the
- * source's. A cap is imposed because a walk with no bound is a walk a user can
- * make slow, and because every other walk in this repository has one.
- *
- * The value is `CURSOR_SKILL_MAX_DEPTH`'s, and deliberately the same number
- * rather than a new one: two walks in one product that both stop at ten is a
- * coincidence, and matching it means the report can say "ten" once per kind
- * rather than inviting the reader to wonder whether the two differ for a reason.
- * What the walk gives up on is **named**, so a tree deeper than this is a report
- * sentence and not a silent omission.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** How deep the agent walk goes: 10 — this importer's own limit, the source has no cap. */
 export const CURSOR_AGENT_MAX_DEPTH = 10;
 
 /**
@@ -479,18 +295,7 @@ function readCursorAgentDir(dir: string): { files: RawFile[]; skips: CursorAsset
 				});
 				continue;
 			}
-			// The filename, not the frontmatter's `name`, because that is what
-			// `readAgentFiles` — the reader the other sources share — uses, and the
-			// directory this lands in is built from it.
-			//
-			// **That is a divergence from Cursor and it is reported.** The loader does
-			// `name: n.name || Vs(basename)`, where `Vs` is
-			// `basename(e, extname(e)).replace(/[\s_]+/g, "-")` — so Cursor shows the
-			// frontmatter's name when there is one, and otherwise a *slugified*
-			// basename, which is not the filename either. Two files called
-			// `code reviewer.md` and `code-reviewer.md` are the same agent to Cursor
-			// and two to this run. The target reads the filename, so that is what the
-			// directory is named, and the difference is the user's to see.
+			// Long-form design notes: docs/dev/migration-sources.md
 			const id = entry.name.slice(0, entry.name.length - extname(entry.name).length);
 			const cursorName = parsed.data.name;
 			const slug = id.replace(/[\s_]+/g, "-");
@@ -527,40 +332,8 @@ function readCursorAgentDir(dir: string): { files: RawFile[]; skips: CursorAsset
 /** How deep `findSkillMarkdownFiles` walks before it gives up. */
 const CURSOR_SKILL_MAX_DEPTH = 10;
 
-/**
- * One `skills/` directory, walked the way Cursor walks it.
- *
- * **Source-level** — `findSkillMarkdownFiles` (build `2026.09.26-dd393fe`)
- * recurses under `if (s > 10) return`, keeps only files named exactly
- * `SKILL.md`, and resolves each directory before descending on it, requiring the
- * resolved path to still be inside the root — in the project scope. That last
- * one is not reproduced here as a check, because the walk never leaves the root
- * on its own: `readdirSync` reports a symlink as a link rather than a
- * directory, so a linked directory falls out of the walk instead of being
- * descended into. The difference is only in *which* links get followed, never
- * in what is left behind, and following none of them is the conservative side:
- * a link is the one way a scan of a workspace tree reaches a directory the user
- * keeps somewhere else entirely.
- *
- * **The name is the directory holding `SKILL.md`, not the top-level one**, and
- * that is a different rule from every other reader in this repository. It is
- * `getSkillIdForPath`:
- *
- * ```js
- * const s = basename(dirname(skillMdPath));
- * const a = dupNames.has(s) && getRelativeSkillId(root, skillMdPath) ? getRelativeSkillId(…) : s;
- * let d = a, l = 2;
- * for (; taken.has(d); ) d = `${a}-${l}`, l++;
- * ```
- *
- * So a nested `frontend/deploy/SKILL.md` is the skill `deploy`; only when two
- * of them are called `deploy` does the path come in, joined with `-`. Getting
- * the first case wrong would name every nested skill after its top-level
- * directory and merge unrelated ones.
- *
- * **The third line of that snippet is not reproduced, on purpose** — see the
- * note at the `const name = base` below, which is where the reason belongs.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One `skills/` directory, walked the way Cursor walks it (`findSkillMarkdownFiles`). */
 function readCursorSkillDir(root: string): { files: RawFile[]; skips: CursorAssetSkip[] } {
 	const skips: CursorAssetSkip[] = [];
 	const found: string[] = [];
@@ -613,17 +386,7 @@ function readCursorSkillDir(root: string): { files: RawFile[]; skips: CursorAsse
 			.filter((part) => part.length > 0)
 			.join("-");
 		const base = (counts.get(bare) ?? 0) > 1 && relative.length > 0 ? relative : bare;
-		// `name` is `base`, and the source's own `for (; taken.has(d); ) d =
-		// \`${a}-${l++}\`` is deliberately **not** reproduced. Its `taken` set spans
-		// every root of one load; this set spans one `skills` directory, and within
-		// one directory the rule above already yields distinct names — the bare name
-		// is used only when it is unique, and the relative path is unique by
-		// construction. So the loop cannot fire here, and a mechanism that can only
-		// be a no-op is one more thing that reads as load-bearing. The case the
-		// source's suffix exists for — the same id claimed by the user half and the
-		// project half of a home that is also its own project — is caught one layer
-		// up by `collectFileWrites`, which reports the collision and keeps the first
-		// rather than inventing a second directory.
+		// Long-form design notes: docs/dev/migration-sources.md
 		const name = base;
 		const content = readText(path);
 		if (content === null) {
@@ -654,54 +417,8 @@ function readCursorSkillDir(root: string): { files: RawFile[]; skips: CursorAsse
 	return { files, skips };
 }
 
-/**
- * The trees Cursor harvests that another source in this repository already owns.
- *
- * **Per asset kind, because the three kinds do not read the same trees.** A flat
- * list would be wrong in both directions: naming `.codex` for commands would
- * claim Cursor reads `~/.codex/commands` (it does not), and stopping at `.claude`
- * for skills would import a second copy of every Claude skill the user has.
- *
- * **Source-level**, build `2026.09.26-dd393fe` — the roots each kind loads:
- *
- *   - skills: `$n` in `index.js` pairs `{configDir, subdir, thirdParty}`, and
- *     `Wn(enabled)` is `$n.filter(t => !t.builtin && (enabled || !t.thirdParty))`.
- *     The `configDir` values are `.cursor` and the four vendors `.claude`,
- *     `.codex`, `.grok`, `.agents`, at **both** the user and the workspace level,
- *     through `Dct` and `x7$`. **And `.agents` is marked `thirdParty: false` in
- *     that table** — unlike `.claude`, `.codex` and `.grok`, which are `true` —
- *     so Cursor treats `~/.agents/skills` as a first-class skill root. It is
- *     excluded here for a different reason and on a different warrant: not
- *     "Cursor marks it another tool's" but "this repository's `agents` source
- *     imports it, and importing it twice would file the same skill under two
- *     names". The exclusion is the same; the reason printed is not, and a report
- *     that gave Cursor's reason would be asserting something the source denies.
- *   - agents: `computeAgentsDirs()` pushes `.claude` and `.grok` only, and only
- *     when third-party extensibility is on — and **off the resolved workspace
- *     path alone**. There is no `homedir()` anywhere in it, so the two agent
- *     trees have **no user half at all**, which is why `scopes` below is the one
- *     place the table says where each tree can be.
- *   - commands: loaded from `.claude` at both levels, **ungated** — the
- *     extensibility flag does not apply to commands at all.
- *
- * Each entry's `owner` is a `MIGRATION_SOURCE_IDS` member that really does read
- * that directory for that kind; that was checked per entry rather than assumed
- * from the name, because the same vendor id is not good for all three kinds.
- *
- * **The flag that decides half of this is not modelled, and does not need to
- * be.** `thirdPartyExtensibilityEnabled` defaults to `true`
- * (`t?.thirdPartyExtensibilityEnabled ?? true`, and no configuration key in the
- * bundle turns it off), but excluding these trees is right in **both** states:
- *
- *   - **on** — Cursor would read them, and copying them would file a Claude
- *     skill under Cursor's name as well, so the user ends up with two of every
- *     one and no way to tell which is the copy that came from where.
- *   - **off** — the trees are none of Cursor's business, and the source that
- *     does own them brings them in its own run.
- *
- * So the answer is the same either way, and a report sentence that branched on
- * the flag would be branching on something with no second outcome.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The trees Cursor harvests that another source in this repository already owns, per asset kind. */
 export const CURSOR_VENDOR_TREES: Readonly<
 	Record<
 		CursorAssetKind,
@@ -749,46 +466,10 @@ export interface RawCursorAssets {
 	vendorTrees: CursorVendorTreeHit[];
 }
 
-/**
- * Both halves of the three directories, which is not the same six paths.
- *
- * **Agents have no user half.** `computeAgentsDirs()` computes the list from
- * `resolve(this.workspacePath)` and there is no other call site for it anywhere
- * in the bundle, so a `~/.cursor/agents` a user built by hand is not read by
- * Cursor. Reading it here would mean importing a directory the source is
- * documented not to look at — and, worse, reporting it as Cursor content.
- *
- * **The home and the cwd come in rather than the two `.cursor` roots**, and the
- * reason is the vendor scan at the bottom: the third-party trees are
- * `~/.claude/skills` and `<workspace>/.claude/skills`, and their base is the
- * home and the workspace — **not** the config root. On a machine that set
- * `CURSOR_CONFIG_DIR`, the config root is somewhere else entirely, and
- * `join(configRoot, ".claude", "skills")` would be a directory that does not
- * exist on any machine. The bundle makes the same distinction: `loadSkillRoots`
- * takes `userHomeDirectory` and each workspace, never `WI()`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Both halves of the three directories, which is not the same six paths. */
 export function readCursorAssets(home: string, cwd: string): RawCursorAssets {
-	// **`home`, not {@link cursorUserRoot}.** This is the one place in the asset
-	// path where the two are different, and getting it wrong is the same failure
-	// batch 1 fixed for the config files, one level down: silent emptiness.
-	//
-	// The source's asset loader takes a `userHomeDirectory`, and it defaults to
-	// `homedir()` — module `../commands.ts` (chunk `4723.index.js`, build
-	// `2026.09.26-dd393fe`):
-	//
-	// ```js
-	// this.userHomeDirectory = t?.userHomeDirectory ?? homedir()
-	// …
-	// loadCommandsFromDirectory(join(this.userHomeDirectory, ".cursor", "commands"), "user")
-	// ```
-	//
-	// and the same `userHomeDirectory` is what `c$0`, `x7$` and `Dct` are handed
-	// for the skill roots. **`WI()` appears in none of them.** So on a machine
-	// that exports `XDG_CONFIG_HOME` or `CURSOR_CONFIG_DIR`, the config files
-	// move and the three asset directories do not: Cursor reads `~/.cursor/…`
-	// for both, and a reader that used the config root for the assets would find
-	// the config and nothing else. `migrate.ts` passes `options.home ?? homedir()`
-	// here, which is the same value by construction.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const projectRoot = cursorProjectRoot(cwd);
 	const commands: RawCommands = { files: [], skips: [] };
 	for (const root of [home, cwd]) {
@@ -808,14 +489,7 @@ export function readCursorAssets(home: string, cwd: string): RawCursorAssets {
 	const vendorTrees: CursorVendorTreeHit[] = [];
 	for (const kind of ["commands", "agents", "skills"] as const) {
 		for (const entry of CURSOR_VENDOR_TREES[kind]) {
-			// Each tree is looked for only at the levels the source loads it at,
-			// which is the reason `scopes` exists on the table. The case it was added
-			// for: `computeAgentsDirs()` resolves everything off
-			// `resolve(workspacePath)` and never mentions the home, so a
-			// `~/.claude/agents` is not a tree Cursor reads — naming it would put a
-			// sentence in the report telling the user Cursor harvests a directory it
-			// does not touch, and the `claude-code` source imports that directory in
-			// its own run regardless of what this source says about it.
+			// Long-form design notes: docs/dev/migration-sources.md
 			for (const [scope, base] of [
 				["user", home],
 				["project", cwd],
@@ -895,18 +569,8 @@ function readCursorStateDatabases(userData: string): RawCursor["stateDatabases"]
 	return out;
 }
 
-/**
- * The CLI's per-workspace data tree, and the known files in it.
- *
- * Listed rather than addressed, for the reason the slug is not computed — see the
- * block comment in `cursor-home.ts`. `existsSync` is the only contact with any of
- * them: `mcp-auth.json` is a token store, and the other two are decision lists
- * this importer has no reading for in any case.
- *
- * The workspace is the directory name, reported as-is. It is a slug of the
- * workspace path (`r_()`), so it is already a name the reader cannot mistake for
- * something they typed.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The CLI's per-workspace data tree, and the known files in it, named rather than addressed. */
 function readCursorProjectData(home: string): RawCursor["projectData"] {
 	const root = cursorProjectDataRoot(home);
 	if (!existsSync(root)) return { root: null, files: [] };
@@ -940,15 +604,8 @@ export interface RawCursor {
 		userData: string;
 		userDataOrigin: CursorUserDataOrigin;
 	};
-	/**
-	 * True when there is anything here at all.
-	 *
-	 * Wider than "does `~/.cursor` exist", for the same reason OpenCode's is: a
-	 * Cursor install that has been opened and used leaves its state in the editor's
-	 * user-data directory, and a user who never touched the CLI's files still has a
-	 * tree worth naming. Narrower than "does any of them exist", because an empty
-	 * directory has nothing to import.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** True when there is anything here at all: wider than "does `~/.cursor` exist", narrower than "does any of them exist". */
 	present: boolean;
 	rules: CursorRule[];
 	/** `.md` files in a rules directory, which Cursor ignores. Named, never imported. */
@@ -960,15 +617,8 @@ export interface RawCursor {
 	cli: { global: CursorDocument; project: CursorDocument };
 	hooks: { global: CursorDocument; project: CursorDocument };
 	stateDatabases: Array<{ path: string; kind: "workspace" | "global"; workspace?: string }>;
-	/**
-	 * The CLI's per-workspace data tree under its own data root.
-	 *
-	 * Kept apart from `stateDatabases` because the two answer different
-	 * questions: those are the *editor's* SQLite files, this is the *CLI's*, and
-	 * it hangs off `$CURSOR_DATA_DIR` rather than the editor's user-data
-	 * directory. `root` is the tree itself and is `null` when there is none, which
-	 * is the common case and still worth distinguishing from "there and empty".
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The CLI's per-workspace data tree under its own data root, kept apart from `stateDatabases`. */
 	projectData: {
 		root: string | null;
 		files: Array<{ name: string; path: string; workspace: string; kind: "credential" | "decision" }>;
@@ -1008,23 +658,7 @@ export function readCursor(home: string, cwd: string): RawCursor {
 	// nothing out of. `rules` has been in both lists since before there were
 	// assets, which is the shape being followed here.
 	const assetDirs = ["commands", "agents", "skills"];
-	// `projects` joins the accounted list for a different reason than the three
-	// above. The other three are imported or reported by name, so leaving them in
-	// the leftovers list would print both halves of a contradiction. `projects` is
-	// *never* imported, but `readCursorProjectData` gives it a line of its own that
-	// says strictly more than the generic one — which files are in it, and that the
-	// token store was not opened. Listing it here would print "reads nothing out
-	// of projects" directly above the paragraph about the token in it, and the
-	// first sentence is the one that reads as "there is nothing there".
-	//
-	// **At both roots, and only where it is the tree that reader walks.** The first
-	// half of that is the fix: the list was extended for the user root and not for
-	// the project one, so a home whose project directory is also its home printed
-	// the contradiction anyway — and a test written to catch it looked at the user
-	// list, which was clean, so it passed. The second half is why the entry is
-	// computed rather than written: with `CURSOR_DATA_DIR` pointing elsewhere, a
-	// `projects` under either root is an unrelated directory, and "this importer
-	// reads nothing out of it" is exactly true of it.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const dataProjects = cursorProjectDataRoot(home);
 	const accountedAt = (root: string, files: Readonly<Record<string, string>>): string[] => [
 		...Object.keys(files),
@@ -1072,14 +706,7 @@ export function readCursor(home: string, cwd: string): RawCursor {
 			assets.skills.length > 0 ||
 			assets.skillSkips.length > 0 ||
 			assets.vendorTrees.length > 0 ||
-			// The per-workspace data tree, on the same grounds again — and this is
-			// the one case where the pillar is doing work the others cannot. Under
-			// the default data root, `projects` is an entry of the user directory and
-			// `otherUserFiles` would carry the install on its own. Once
-			// `CURSOR_DATA_DIR` points somewhere else, the tree is the only thing
-			// left of the CLI's own state on this machine, and without this
-			// disjunct a user with nothing but MCP tokens behind it would be told
-			// there is no Cursor here.
+			// Long-form design notes: docs/dev/migration-sources.md
 			projectData.root !== null ||
 			// Same reasoning for the two lists of names. A home whose only Cursor
 			// file is `permissions.json` is a home where the report has something to

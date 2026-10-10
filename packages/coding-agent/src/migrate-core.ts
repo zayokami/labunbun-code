@@ -1,17 +1,5 @@
-/**
- * The pieces more than one source needs, whichever side of the read/plan
- * divide they sit on.
- *
- * Two kinds of thing live here, and both are here because of who calls them.
- * The first is the generic readers — `readJson`, `readSkillDirs`,
- * `readAgentFiles` and the rest — which every source's layout adapter is built
- * from. The second is the set of helpers that used to sit inside one source's
- * region while three or more other sources called them: `isRecord` (declared
- * next to the codex planner, called 149 times), `summarizeNames`, `tildePath`,
- * `placeholderNote` and the directory counters. A helper's home is decided by
- * its callers, not by which source it happened to be written next to, and
- * leaving them where they were is what made this file unreadable.
- */
+// Shared readers and helpers, the pieces more than one source needs.
+// Long-form design notes: docs/dev/migration-framework.md
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -55,34 +43,8 @@ export function readText(path: string): string | null {
 	}
 }
 
-/**
- * A JSON document that may carry comments and trailing commas.
- *
- * Written for OpenCode, which parses **every** one of its three settings files
- * with `ConfigParse.jsonc` (`opencode/src/config/config.ts:240`) — not just the
- * one named `.jsonc`. So `// my provider` above a block in `opencode.json` is a
- * legal line in a file whose extension promises plain JSON, and handing that
- * file to {@link readJson} throws it away in total: the catch there returns
- * `{}`, and the report then says nothing about a file the user can see is full
- * of settings. The failure is silent in the worst direction.
- *
- * The stripping is a scanner rather than a regex, and the reason is the whole
- * point of the function. `text.replace(/\/\/.*$/gm, "")` mangles `"baseURL":
- * "https://api.example.com"` — it cuts the value at the `//` — and a Windows
- * path in a `"command"` array loses everything after its separator. So this
- * tracks whether it is inside a string, and honours `\` as an escape inside one,
- * which is what keeps a URL's `//` and a Windows path's `\\` intact.
- *
- * Trailing commas are removed by the same pass for the same reason: they cannot
- * be a regex over the whole document without also matching a comma inside a
- * string value.
- *
- * It is not a general JSONC implementation. A string containing a literal
- * newline (illegal in JSON) is not repaired, and a `//` inside a *block* comment
- * is handled because the scanner is a small state machine rather than a
- * substitution — but anything the vendor's `jsonc-parser` accepts and this does
- * not costs one settings file, which is reported rather than lost quietly.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** A JSON document that may carry comments and trailing commas. */
 export function parseJsonc(text: string): Record<string, unknown> {
 	const parsed: unknown = JSON.parse(stripJsonc(text));
 	return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
@@ -139,18 +101,7 @@ function stripJsonc(text: string): string {
 			i++;
 			continue;
 		}
-		// A comma is dropped only when the next character that is neither space nor
-		// comment closes an object or an array. This test lives here rather than in a
-		// `replace(/,(\s*[}\]])/g, "$1")` over the finished text for the same reason
-		// the comment tests do: a regex cannot see string boundaries, so it would eat
-		// the comma out of a value like `"a, }"` and silently rewrite it.
-		//
-		// The lookahead skips comments as well as space, which is not a nicety: a
-		// comment after the last entry is the most common place a hand-edited
-		// `.jsonc` file has one, so looking only past whitespace left the comma in
-		// front of `/* … */\n}` and `JSON.parse` rejected the whole document — the
-		// exact silent loss this function exists to prevent, arriving by the other
-		// door.
+		// Long-form design notes: docs/dev/migration-framework.md
 		if (char === ",") {
 			const ahead = skipJsonTrivia(text, i + 1);
 			if (text[ahead] === "}" || text[ahead] === "]") continue;
@@ -195,15 +146,8 @@ const MAX_ATTACHMENT_BYTES = 256 * 1024;
 /** Most supporting files one skill may bring along. */
 const MAX_ATTACHMENTS = 200;
 
-/**
- * The files beside a skill's `SKILL.md`, as attachments.
- *
- * A skill is a directory, not a document: its body points at `references/*.md`,
- * `scripts/`, and so on, and copying only the `SKILL.md` leaves those pointers
- * dangling. Text files are carried; binaries and anything oversized are counted
- * and named in the report instead of written, because the writer is text-only
- * and a silent truncation would be worse than an explanation.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The files beside a skill's `SKILL.md`, as attachments. */
 export function readAttachments(skillDir: string): Pick<RawFile, "attachments" | "attachmentSkips"> {
 	const attachments: RawAttachment[] = [];
 	const attachmentSkips: Array<{ relativePath: string; reason: string }> = [];
@@ -275,15 +219,8 @@ export function readSkillDirs(skillsRoot: string): RawFile[] {
 /** Longest skill name to derive from a command file's path. */
 export const MAX_COMMAND_NAME = 64;
 
-/**
- * Slash-command markdown files, read recursively.
- *
- * Unlike a rules or agents directory, a commands tree mirrors how the source
- * tool namespaced its commands: `fix/bugs.md` is a different command from
- * `fix.md`, and the two files may say different things. The nesting is
- * flattened into the name (`fix-bugs`) because a skill here is one directory
- * per name, and a collision would be reported as one skill having been kept.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Slash-command markdown files, read recursively. */
 export function readCommandFiles(root: string): RawCommands {
 	const files: RawFile[] = [];
 	const skips: Array<{ path: string; reason: string }> = [];
@@ -344,18 +281,8 @@ export function readMarkdownDir(dir: string): RawFile[] {
 	return out;
 }
 
-/**
- * Agent definition files (`agents/*.md`), annotated when the frontmatter asks
- * for a model.
- *
- * The model name is resolved when a subagent starts, against the models this
- * build knows (`subagents.ts`). A name that resolves is used; one that does not
- * falls back to the session's model and says so at the spawn. The note here is
- * therefore about which of those two the user should expect, not about a field
- * being ignored — it used to read "is not honoured", which stopped being true
- * when that resolution landed, and a report that describes behaviour the build
- * does not have is the same defect as a silent mismatch.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Agent definition files (`agents/*.md`), annotated when the frontmatter asks for a model. */
 export function readAgentFiles(dir: string): RawFile[] {
 	const files = readMarkdownDir(dir);
 	for (const file of files) {
@@ -389,28 +316,8 @@ const GROK_HEADER_LINE = /^\s*\[\[?\s*([A-Za-z0-9_. -]+?)\s*\]\]?\s*$/;
 /** The key part of an assignment: `a.b = …`, quoted segments left out of the match. */
 const GROK_ASSIGNMENT_KEY = /^([A-Za-z0-9_. -]+?)\s*=/;
 
-/**
- * Quote the digits-only segments in a document's key paths so this parser can
- * read it, and say which paths were touched.
- *
- * `[model.grok-4.6]` is TOML 1.0, and it is what grok's user guide writes —
- * `docs/user-guide/05-configuration.md`, `11-custom-models.md` (three times) and
- * the shell README all spell per-model overrides that way. It is the path
- * `model.grok-4."6"`: the id with a dot in it becomes *three* keys. grok's own
- * pty test says so in as many words ("bare `[model.grok-4.5]` is TOML key-path
- * syntax, not the id `grok-4.5`"), and its parser takes it. `Bun.TOML` does not:
- * a digits-only bare segment after a dot is rejected, and the rejection costs the
- * whole document — every other setting, rule and MCP server in the file with it.
- *
- * So the segments are quoted, which under the spec produces the identical
- * structure, and the paths are handed back so the report can explain what grok
- * made of them. Only the key part of a line is touched, and nothing inside a
- * triple-quoted string is, so a value that happens to look like a header — a
- * description containing `[model.grok-4.6]` — is left as the user wrote it.
- *
- * Returns `null` when the document needs no repair, which is the case for every
- * file this parser accepts as-is.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Quote the digits-only segments in a document's key paths so this parser can read it, and say which paths were touched. */
 export function requoteNumericKeyPaths(text: string): { text: string; changed: string[] } | null {
 	const changed: string[] = [];
 	let multiline: string | null = null;
@@ -440,14 +347,8 @@ export function requoteNumericKeyPaths(text: string): { text: string; changed: s
 	return changed.length === 0 ? null : { text: lines.join("\n"), changed };
 }
 
-/**
- * Direct children of `dir` of any kind, or 0 when it is unreadable.
- *
- * Not {@link countDirectoryEntries}: grok's `personas`, `roles` and `workflows`
- * trees hold `.toml` and `.rhai` files, and counting only directories would make
- * each of them come back as 0 — which the caller filters out, so a tree full of
- * the user's own definitions would be reported as one grok does not have.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Direct children of `dir` of any kind, or 0 when it is unreadable. */
 export function countTreeEntries(dir: string): number {
 	try {
 		return existsSync(dir) ? readdirSync(dir).length : 0;
@@ -465,15 +366,8 @@ export function readDirectoryNames(dir: string): string[] {
 	}
 }
 
-/**
- * Characters that make a hook matcher mean something different in each tool.
- *
- * `matchesPattern` in `hooks.ts` treats `*` as the only wildcard and escapes
- * every other pattern character, so a source matcher written as a regular
- * expression (`mcp__.*__delete.*`) imports as a literal that can never match.
- * Keeping this list equal to the escape list there is what makes the check
- * honest — a character escaped there but not here would be a silent miss.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Characters that make a hook matcher mean something different in each tool. */
 export const HOOK_MATCHER_METACHARACTERS = /[.+^${}()|[\]\\]/;
 
 /** A matcher name this build can reproduce: tool names, MCP ids, and `*`. */
@@ -487,17 +381,8 @@ export const MAX_HOOK_TIMEOUT_MS = 600_000;
 
 export const DEFAULT_HOOK_TIMEOUT_MS = 60_000;
 
-/**
- * One handler in the target's shape, or nothing plus a count of why not.
- *
- * The timeout is the one field whose *value* has to change on the way across:
- * the source counts it in seconds — "Timeout in seconds for this specific
- * command", `schemas/hooks.ts` — and runs a handler that names none for ten
- * minutes (`utils/hooks.ts`, `TOOL_HOOK_EXECUTION_TIMEOUT_MS`), where this build
- * counts milliseconds and waits a minute. A copy that keeps the number is the
- * one thing that makes `timeout: 30` mean thirty milliseconds, so the
- * conversion happens here and both counts are reported.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One handler in the target's shape, or nothing plus a count of why not. */
 export function normalizeClaudeHandler(handler: unknown, counts: NormalizedHooks): NormalizedHookEntry["hooks"] {
 	if (!isRecord(handler)) {
 		counts.malformed += 1;
@@ -531,15 +416,8 @@ export function normalizeClaudeHandler(handler: unknown, counts: NormalizedHooks
 	];
 }
 
-/**
- * Rewrite source hooks as the target's hook config.
- *
- * The two shapes look alike enough that copying the block reads as faithful and
- * is not: the target runs a fixed set of events, only shell-command handlers,
- * and a matcher where `*` is the only wildcard. Counting each difference here
- * lets the report say what did not come across, rather than writing a hook that
- * never fires.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Rewrite source hooks as the target's hook config. */
 export function normalizeClaudeHooks(raw: unknown): NormalizedHooks {
 	const result: NormalizedHooks = {
 		config: {},
@@ -605,30 +483,8 @@ export function normalizeClaudeHooks(raw: unknown): NormalizedHooks {
 	return result;
 }
 
-/**
- * A parameter name whose **last** segment names a credential.
- *
- * **Last segment, whole words, no substrings** — three separate narrowing rules,
- * each buying a different false positive back:
- *
- *   - *Whole words.* The obvious implementation is {@link looksLikeSecretName},
- *     which matches `KEY` as a substring and would flag `?monkey=1`,
- *     `?keyboard=…` and `?hockey=…`.
- *   - *Split on separators and camelCase too*, so `accessToken` becomes
- *     `access`/`Token` while `monkey` stays whole and is not caught.
- *   - **Last segment only**, which is the one that separates a credential from
- *     the noun it modifies: `?key_count=3`, `?token_type=bearer` and
- *     `?signature_version=4` are all a credential word used as an adjective, and
- *     none of their values is a secret. A qualifier in front of the credential
- *     word (`sortKey`, `public_key`, `hasToken`) is still flagged — there is no
- *     way to tell those from `access_token` by name alone, and the direction of
- *     that error is deliberate; see {@link urlCredentialProblem}.
- *
- * `sig`, `signature`, `auth`, `authz`, `bearer` and `jwt` are here and not in
- * {@link looksLikeSecretName}'s list because they are what a signed-URL service
- * actually uses, and they are the spellings a user pastes out of a vendor's
- * dashboard.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** A parameter name whose **last** segment names a credential. */
 const CREDENTIAL_URL_SEGMENTS: ReadonlySet<string> = new Set([
 	"token",
 	"key",
@@ -647,16 +503,8 @@ const CREDENTIAL_URL_SEGMENTS: ReadonlySet<string> = new Set([
 	"jwt",
 ]);
 
-/**
- * Whole names that are one segment after the split and so need no camelCase
- * boundary: `accessToken` splits, `accesstoken` does not.
- *
- * These are the credential words with their usual prefixes already glued on. The
- * prefixes are the same ones the segment rule catches — `access_token`,
- * `client_secret`, `private_key` all end in a bare segment — so this table is
- * the lowercase spelling of that rule rather than a second opinion about which
- * words are credentials.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Whole names that are one segment after the split and so need no camelCase boundary: `accessToken` splits, `accesstoken` does not. */
 const CREDENTIAL_URL_NAMES: ReadonlySet<string> = new Set([
 	"apikey",
 	"apisecret",
@@ -698,50 +546,8 @@ function safeDecode(text: string): string {
 const URL_USERINFO = "it carries a `name:password@` part in front of the address";
 const URL_PARAMETER = "one of its `?`/`#` parameter names is a credential word";
 
-/**
- * Why a URL is carrying a credential, or `null` when it is not.
- *
- * **An MCP server's URL is the one credential channel this repository's importers
- * copied without looking at, and every one of them copied it.** A name-based
- * credential scan cannot see it, because the credential is not under a
- * secret-shaped *key* — it is inside the one string every importer treats as a
- * safe identifier. Two shapes carry one:
- *
- *   - **Userinfo.** `https://alice:hunter2@host/sse` is RFC 3986 §3.2.3, and every
- *     MCP client in existence accepts it. The password is not a substring of the
- *     URL the way a token in a query is; it is the thing before the `@`.
- *   - **A credential-named parameter.** `?access_token=…`, `?api_key=…`, `?sig=…`
- *     — the signing schemes people copy out of a vendor's dashboard.
- *
- * The report says `containsSecret: false` for a server it copied, so a URL like
- * this is not merely a secret on disk: it is the importer asserting the opposite
- * of the truth about it, which is the failure this repository treats as the
- * expensive one.
- *
- * **This parses the string by hand and never calls `new URL`.** That is the whole
- * design, and it was written the other way round first: a `URL`-based version
- * measured 11 of 16 cases wrong, because the parser is *least* useful exactly
- * where a credential is most likely to be. It rejects a space in the host, a port
- * above 65535, an unclosed bracket, and a scheme-relative `//user:pass@host` —
- * and every one of those is a hand-edited URL, which is what a pasted credential
- * URL is. "The parser rejected it" is not "it is safe", so nothing here depends on
- * the parser's opinion; a structural scan reaches the same answer on both
- * `https://alice:hunter2@host/sse` and `https://alice:hunter2@ho st/sse`.
- * Measured on the `URL` version: scheme-relative URLs, URLs with a space in the
- * host and URLs with an out-of-range port all returned "no problem" while
- * carrying a working password.
- *
- * **It over-flags, on purpose.** The cost matrix is not symmetric: a false
- * positive costs a user one server, and they are told which one and why, so they
- * can add it back by hand; a false negative writes a live token into
- * `~/.labunbun/.mcp.json` under a report line that says nothing in it is a secret.
- * So `?sortKey=updatedAt` is flagged and `?public_key=` is flagged, because there
- * is no way to tell those from `?access_token=` by name alone and guessing the
- * other way is guessing about credentials.
- *
- * The **value is never returned** — only {@link URL_USERINFO} or
- * {@link URL_PARAMETER} — so this can go in a report line.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Why a URL is carrying a credential, or `null` when it is not. */
 export function urlCredentialProblem(url: string): string | null {
 	// Strip the scheme, then the `//` that introduces the authority. Both are
 	// optional and the order matters: `https://x` has its first `/` at the index
@@ -776,14 +582,8 @@ export function urlCredentialProblem(url: string): string | null {
 	return null;
 }
 
-/**
- * One line naming the keys that were neither imported nor explained.
- *
- * Silence is the one thing a migration report may not do: a key the user set is
- * either carried across or named here, so the report cannot leave them
- * wondering whether something went missing. Values are never printed — the
- * names are the report, the contents are the user's own.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One line naming the keys that were neither imported nor explained. */
 export function reportUnhandledKeys(
 	source: MigrationSourceId,
 	container: Record<string, unknown>,
@@ -907,32 +707,12 @@ export function planAssetTrees(
 	}
 }
 
-/**
- * Command frontmatter keys that do nothing once the file is a skill here.
- *
- * The last two are ZCode's: `SAFE_FRONTMATTER_KEYS` in
- * `adapters/src/commands/index.ts` names six keys a command may declare, and
- * this build reads neither `disable-noninteractive` nor `skills` from a skill's
- * header. A key ZCode honours and this build silently ignores is the one a user
- * is most likely to believe is still in force, so it is named rather than
- * dropped.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Command frontmatter keys that do nothing once the file is a skill here. */
 const UNHONORED_COMMAND_KEYS = ["allowed-tools", "model", "argument-hint", "disable-noninteractive", "skills"];
 
-/**
- * Rewrite a source command file as a skill.
- *
- * The body is carried byte for byte — a command is prose the user wrote, and
- * the only part that has to change is the header, which this build reads as a
- * skill's `name`/`description`. Everything else the source understood is named
- * in the report rather than copied into a file that looks like it honours it:
- * `allowed-tools` and `model` do nothing here, and `$1`-`$9` and inline shell
- * expansion are never substituted.
- *
- * A `detail` the reader already set is kept in front of the rest. That is the
- * plugin provenance: a command lifted out of a plugin has to keep saying so, and
- * this rewrite would otherwise be the last word on it.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Rewrite a source command file as a skill. */
 function commandAsSkill(file: RawFile): RawFile {
 	const { data, body } = parseFrontmatter(file.content);
 	const description = (data.description ?? "").replace(/\s+/g, " ").trim();
@@ -956,14 +736,8 @@ function commandAsSkill(file: RawFile): RawFile {
 	};
 }
 
-/**
- * Command files become skills: a command is a named prompt, and a skill here is
- * exactly that, so this is a rewrite of the header rather than a translation.
- *
- * Codex's own importer turns Claude Code commands into skills the same way,
- * which is a sign the mapping is the intended one rather than merely the
- * convenient one.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Command files become skills: a command is a named prompt, and a skill here is exactly that. */
 export function planCommands(
 	source: MigrationSourceId,
 	commands: RawCommands,
@@ -1037,18 +811,8 @@ export function planMemoryAsRule(
 	});
 }
 
-/**
- * Merge prepared provider specs into the settings patch, reporting a collision
- * rather than overwriting it: `id` is what a model reference resolves against,
- * so replacing an existing entry silently repoints configuration that was
- * already working.
- *
- * Returns the ids that were taken, so a caller that wants to report on the
- * entries it offered asks this function instead of re-deriving which of them
- * survived. The rule is small and it is exactly the kind of small rule that
- * drifts: two copies of it is how a report starts describing a patch that was
- * never written.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Merge prepared provider specs into the settings patch, reporting a collision rather than overwriting it. */
 export function mergeProviderSpecs(
 	source: MigrationSourceId,
 	additions: Array<Record<string, unknown>>,
@@ -1158,15 +922,8 @@ export function collectFileWrites(
 	}
 }
 
-/**
- * Queue the files that belong beside `file` (a skill's `references/`, say).
- *
- * They are written into the same directory as the file they arrived with, which
- * is what keeps a skill's internal links pointing at something real after the
- * move. A supporting file that is already at the target is kept rather than
- * overwritten, for the same reason the main file is: the user may have edited
- * it, and `--force` is how they say they did not.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Queue the files that belong beside `file` (a skill's `references/`, say). */
 function collectAttachmentWrites(
 	file: RawFile,
 	mainPath: string,

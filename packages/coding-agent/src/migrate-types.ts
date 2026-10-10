@@ -1,14 +1,5 @@
-/**
- * The vocabulary every migration module shares: which sources exist, what one
- * of them looks like once read, and what a planned write or a report line is.
- *
- * This module is deliberately a leaf. `migrate-history.ts` needs
- * {@link MigrationSourceId} and the hub needs all of it, so anything that would
- * have to import back from either of them cannot live here — which is why
- * `PlanOptions`, the one type that talks about imported history, stays in the
- * hub. Keeping that edge one-way is what lets `migrate-history.ts` name the source
- * ids without the two modules importing each other.
- */
+// The vocabulary every migration module shares: the sources, what one looks like once read, and the write and report lines.
+// Long-form design notes: docs/dev/migration-framework.md
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -107,14 +98,8 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	alma: "Alma",
 };
 
-/**
- * Directory that marks a source as present, relative to home.
- *
- * Only for the sources whose tree really is under `~`. dsh and grok both let an
- * environment variable put theirs anywhere, so their entries here are the
- * *default* spelling, used to render a label rather than to find the tree — see
- * {@link sourceRoot}, which is what detection and the readers call.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Directory that marks a source as present, relative to home. */
 export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	"claude-code": ".claude",
 	codex: ".codex",
@@ -168,60 +153,16 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	// The spelling here is the canonical half; `sourceRoot` and `detectionRoots`
 	// resolve both.
 	codewhale: CODEWHALE_DEFAULT_DIR,
-	// **Also not a single segment, and for the same reason as OpenCode's entry
-	// above.** MiMo Code is an opencode fork whose `packages/shared/src/global.ts`
-	// imports `xdg-basedir` with no platform branch, so the tree lives under the
-	// XDG bases and on Windows this is `~/.config/mimocode` rather than
-	// `%LOCALAPPDATA%`. **The product's own README disagrees** — it claims
-	// `%LOCALAPPDATA%\mimocode\` (`README.md:385`) and
-	// `~/Library/Application Support/mimocode/` (`:422`), and neither path is
-	// anywhere in the tree. Like OpenCode's, this exists to render a label; see
-	// `sourceRoot`, which is what finds the tree.
+	// Long-form design notes: docs/dev/migration-framework.md
 	"mimocode-code": ".config/mimocode",
-	// `.openclaw`, and the entry exists only to render a label. **Three spellings
-	// are live and they disagree**: `resolveStateDir` falls back to `.clawdbot`
-	// when `.openclaw` is absent (`state-dir.ts:33-43`), `OPENCLAW_PROFILE` puts a
-	// named profile in `.openclaw-<name>` (`cli/profile-utils.ts:35-37`), and
-	// `OPENCLAW_STATE_DIR` replaces the root outright. A plain relative spelling is
-	// therefore wrong for two of the three ways this source installs itself, which
-	// is why both `sourceRoot` and `detectionRoots` have branches for it. See
-	// `openclaw-home.ts`, which is where all five resolvers are quoted.
+	// Long-form design notes: docs/dev/migration-framework.md
 	openclaw: OPENCLAW_DEFAULT_DIR,
-	// `.config/alma`, and this is **the only one of Alma's four roots that this
-	// importer reads a file from**. Alma writes to Electron's `userData`
-	// (`%APPDATA%\alma`, holding `chat_threads.db`), to `~/.alma` (binaries, an
-	// npm cache, screenshots) and to `~/alma` — no leading dot, the browser
-	// extension's stable copy and `worktrees/`. Three roots for one source is the
-	// record so far, so the label names the configuration root and both
-	// `sourceRoot` and `detectionRoots` have branches for the rest. See
-	// `alma-home.ts`, which is where all four are quoted.
+	// Long-form design notes: docs/dev/migration-framework.md
 	alma: ".config/alma",
 };
 
-/**
- * Where a source's tree actually is.
- *
- * Most roots are home-relative. Seven are not: `$DSH_HOME`, `$GROK_HOME`,
- * `$CODEX_HOME`, `$KIMI_CODE_HOME`, MiniMax's pair of variables, Step's two and
- * `$ZCODE_DATA_BASE_DIR` can each put their tree anywhere, and a reader that
- * consulted `~/` anyway would call the source absent while the importer went on
- * to import from it — or, worse here, detection would find it while the label
- * named a path nobody read. One function rather than a condition inside
- * `detectSources`, so the detection and the readers cannot disagree about which
- * tree a source is.
- *
- * Step's entry is `stepRoot`, which is also the only one that is *not* a single
- * expression: the directory name itself is a setting (`$STEPCODE_CONFIG_DIR`),
- * an agent-directory override moves the tree out of the home entirely, and the
- * pre-rename `.step-harness` tree is read when the canonical one holds nothing.
- *
- * ZCode's is the one whose *default* is also a variable: the desktop half of its
- * tree is `$ZCODE_DATA_BASE_DIR/.zcode`, so this function is where the data
- * directory name stops being a constant. Its CLI half is a second root with a
- * second variable and is resolved in `zcode-read.ts`; detection deliberately
- * looks only at the data root, because that is the half a fresh install always
- * has.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Where a source's tree actually is. */
 function sourceRoot(id: MigrationSourceId, home: string): string {
 	if (id === "deepseek-harness") return dshRoot(home);
 	if (id === "grok-build") return grokRoot(home);
@@ -234,30 +175,9 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	// `detectionRoots`. See `opencodeRoots`, which is what the reader uses for all
 	// three.
 	if (id === "opencode") return opencodeRoots(home).config;
-	// MiMo Code's config root, from the same derivation OpenCode's uses and for the
-	// same reason: four XDG bases rather than one home-relative directory, so
-	// `join(home, SOURCE_ROOTS[id])` would be wrong for a user who has moved any of
-	// them. `mimocodeRoots` also honours `$MIMOCODE_HOME`, which replaces all four.
-	//
-	// It reads `process.env` through its `env` parameter, as `opencodeRoots` does
-	// directly and for the same reason: a developer with `MIMOCODE_HOME` set gets
-	// that tree, which is the correct answer for their machine. A reader that takes
-	// the block as an argument (`readMiMoCode`) is what the tests point at a
-	// fixture with.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "mimocode-code") return mimocodeRoots(home, process.env).config;
-	// Neither of these is a home-relative join. Both are VS Code forks whose state
-	// lives outside the home, and both have a first-class path derivation worth
-	// calling rather than spelling out again here.
-	//
-	// **These two branches are unreachable today, and no test covers them.**
-	// `detectionRoots` answers both ids before it ever gets here, because a VS Code
-	// fork is detected by more than one root. They are kept because they are the
-	// right answer — `~/.trae` would be *wrong* for Trae, whose global rules live in
-	// `~/.trae/user_rules` — and a future caller deserves the correct one. The
-	// alternative, deleting them, leaves `return join(home, SOURCE_ROOTS[id])` as the
-	// fallthrough for a source whose root is not a home-relative join, with nothing
-	// to catch it. Said here rather than left for a reader to assume a branch that
-	// runs on every import.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "cursor") return cursorUserRoot(home);
 	if (id === "trae") return traeGlobalRulesDir(home, traeEdition(home));
 	if (id === "zcode") return zcodeRoot(home);
@@ -269,40 +189,11 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	// `??` is the fallback for a label rendered against a tree nothing was read
 	// from, which is the same state `detectionRoots` reports as absent.
 	if (id === "t3-code") return t3Root(home) ?? t3StateDirs(home)[0];
-	// Qoder's tree moves for two reasons the plain `join` below cannot express: a
-	// whole-path override (`$QODER_CONFIG_DIR`, which wins outright and is used
-	// verbatim) and a directory *name* the user chose (`$QODER_CONFIG_DIR_NAME`,
-	// applied under `$QODER_CLI_HOME` or the home). Both are the product's own
-	// precedence — `qoderConfigDir` quotes it — so calling it here means detection
-	// and the reader cannot disagree about which tree the source is.
-	//
-	// `qoderConfigDir` reads `process.env` directly, as `codexRoot` and `t3Root`
-	// do. That is the same trade those two make and it has one consequence worth
-	// naming: a developer with `QODER_CONFIG_DIR` set gets that tree, which is the
-	// correct answer for their machine.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "qoder") return qoderConfigDir(home);
-	// Codewhale's tree moves for one reason — `$CODEWHALE_HOME` — and it is a
-	// **whole-directory** override, unlike Qoder's `$QODER_CONFIG_DIR`. Two things
-	// are reproduced here rather than left to a plain `join`, and both are the
-	// product's own rules from `crates/paths/src/lib.rs`:
-	//
-	//   - an unusable override is *refused*, not used: a relative value raises
-	//     `PathOverrideErrorKind::Relative` in the product, so falling back to
-	//     `~/.codewhale` silently would import a tree Codewhale itself rejected
-	//     (the same argument Qoder's branch makes);
-	//   - `~/.deepseek` is a live second root, so the *detection* below needs both.
-	//
-	// `resolveCodewhaleHome` reads `process.env` through its defaulted parameter,
-	// which is the same trade `qoderConfigDir` and `codexRoot` make.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "codewhale") return resolveCodewhaleHome(home).root;
-	// OpenClaw resolves **three** spellings and they disagree, so this is the
-	// product's own precedence rather than a `join`: `$OPENCLAW_STATE_DIR` wins
-	// outright, else `.openclaw` if it exists, else `.clawdbot`
-	// (`src/config/state-dir.ts:21-43`), and `OPENCLAW_HOME` moves the whole
-	// thing. `openclawStateDir` quotes all three; `process.env` is passed as an
-	// argument rather than read inside that module, which is the same trade
-	// `qoderConfigDir` makes above and for the same reason — a developer with the
-	// variable set gets that tree, which is the correct answer for their machine.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "openclaw") return openclawStateDir(home, process.env);
 	// Alma's configuration root, which is the only one of its four that a report
 	// points a user at for something they can edit. There is no environment
@@ -319,15 +210,8 @@ function sourceRoot(id: MigrationSourceId, home: string): string {
 	return join(home, SOURCE_ROOTS[id]);
 }
 
-/**
- * Detect a source by what is in it, not by whether its directory exists.
- *
- * `~/.agents` (and `~/.claude`, `~/.codex`) are directories other tools create —
- * an empty one has nothing to import, and offering it is a question whose only
- * possible answer still costs the user a read and a keystroke. A root that is
- * present but unreadable counts as empty for the same reason: nothing can be
- * read from it either way.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Detect a source by what is in it, not by whether its directory exists. */
 function sourceHasContent(root: string): boolean {
 	try {
 		return readdirSync(root).length > 0;
@@ -340,24 +224,8 @@ export function detectSources(home: string): MigrationSourceId[] {
 	return MIGRATION_SOURCE_IDS.filter((id) => detectionRoots(id, home).some(sourceHasContent));
 }
 
-/**
- * The trees whose being non-empty means "this source is here".
- *
- * One for every source except OpenCode, which needs two. `core/src/global.ts:34-42`
- * creates the config root at import time, before the user has written a setting,
- * so on a stock install the config root exists and is *empty* — and
- * {@link sourceHasContent} counts an empty directory as absent, which is right for
- * a directory other tools create and wrong for this one. A user who has run
- * OpenCode, talked to it, and never touched a setting has settings to import from
- * nowhere and sessions to import from `<data>`; detection that looked only at the
- * config root would offer them a source with nothing in it and hide the one with
- * everything.
- *
- * The `OPENCODE_CONFIG_DIR` case is the sharp one: the override replaces
- * `Global.Path.config` (`core/src/global.ts:64`), so a user who sets it has a tree
- * at an arbitrary path that only comes into being when something is written there,
- * while every session sits in the untouched default data root.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The trees whose being non-empty means "this source is here". */
 function detectionRoots(id: MigrationSourceId, home: string): string[] {
 	if (id === "opencode") {
 		const roots = opencodeRoots(home);
@@ -380,124 +248,17 @@ function detectionRoots(id: MigrationSourceId, home: string): string[] {
 	// and then find nothing to import, which is the more embarrassing half of
 	// that failure rather than the safer one.
 	if (id === "t3-code") return t3StateDirs(home);
-	// **Antigravity is the first source whose home-relative root cannot be used for
-	// detection at all.** `~/.gemini` is shared with the Gemini CLI, so a home that
-	// has never run Antigravity can still have a busy `~/.gemini` — and offering
-	// those users an Antigravity migration would be the same failure the two IDE
-	// branches above avoid, except with nothing behind it: every one of those
-	// entries is still a directory Antigravity itself writes.
-	//
-	// So detection looks at three directories Antigravity owns: both data roots
-	// (the new one and the pre-split one, because which exists depends on whether
-	// the user went through the IDE-split wizard), and `~/.gemini/config` — the
-	// customization root the product's own guide names as its "Global Configuration
-	// (Machine-Local)" location, holding `skills/`, `plugins/`, `mcp_config.json`
-	// and `hooks.json`. A user with all three deleted but `config/` still populated
-	// is real, and the reader handles it: `RawAntigravity.dataDir` is `null` there
-	// and every conversation count is zero, which is a report with nothing in it
-	// rather than a crash.
-	//
-	// What this cannot rule out: a home whose *only* `~/.gemini/config` content is
-	// something that is not Antigravity's. That is why `config` is last and not
-	// first — a home with any data root at all is detected by the first two.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "antigravity") return [...antigravityDataDirs(home), antigravityConfigDir(home)];
-	// **Qoder is the first source whose detection needs no special case, and that
-	// is a fact rather than an omission.** `~/.qoder` is not shared with a foreign
-	// tool the way `~/.gemini` is: the Qoder CLI writes its own state under the
-	// same directory (`$QODER_CLI_HOME` defaults to the home and `.qoder` is
-	// appended to it), so anything in there is Qoder's. A CLI-only home with skills
-	// and memory but no `settings.json` is a real state and worth offering — it is
-	// not a Gemini CLI home that happens to be busy.
-	//
-	// Two roots are checked anyway, and both are Qoder spellings: the resolved one
-	// (`sourceRoot`, which honours the two environment overrides) and the
-	// **China build's default**, because a `.qoder-cn` home is an install this
-	// importer reads settings from under a different name. `QODER_CN_DEFAULT_DIR`
-	// is a constant rather than a build-time lookup — the product picks its build
-	// at start-up and a process cannot see both, so listing the two spellings is
-	// what makes a machine holding either detectable.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "qoder") return [sourceRoot(id, home), join(home, QODER_CN_DEFAULT_DIR)];
-	// **Codewhale is the first source whose two roots are two *eras* rather than two
-	// builds.** `~/.deepseek` is the pre-rename tree and the product still reads it
-	// — `resolve_state_dir` (`crates/config/src/lib.rs:6158`) and
-	// `default_user_state_path_from_environment`
-	// (`crates/tui/src/config/paths.rs:240-263`) both fall back to it — so a home
-	// that used Codewhale under its old name has its whole tree there and nothing
-	// under `.codewhale`. Looking only at the canonical root would report those
-	// users as having no Codewhale at all.
-	//
-	// The reverse is handled rather than assumed away: a user who has run Codewhale
-	// since the rename has `~/.codewhale` and, for the paths that still fall back,
-	// **also** a stale `~/.deepseek`. Both are therefore read, and the per-path
-	// resolution in `codewhale-home.ts` decides which one answers — detection only
-	// has to say the source is here at all.
-	//
-	// **`CODEWHALE_HOME` narrows this to one root**, and that is the product's own
-	// rule rather than a choice here: an explicit home "is an isolation boundary:
-	// state/config resolvers must not fall back to ambient legacy `~/.deepseek`
-	// data outside that root" (`crates/config/src/lib.rs:6105-6111`). Falling back
-	// from an isolated profile would read exactly the data the user isolated
-	// themselves from.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "codewhale") return codewhaleDefaultRoots(home);
-	// **OpenClaw is the first source whose detection roots are three spellings of
-	// one tree rather than distinct trees**, and all three are live because the
-	// product's own resolver moves between them: `resolveStateDir` falls back to
-	// the pre-rename `~/.clawdbot` when `.openclaw` is absent
-	// (`src/config/state-dir.ts:33-43`), and a named profile puts the tree in
-	// `~/.openclaw-<name>` (`src/cli/profile-utils.ts:35-37`).
-	//
-	// **A detector that looked only at `.openclaw` would report "no OpenClaw" for
-	// every user who upgraded from the pre-rename build**, whose entire history
-	// lives in `.clawdbot` — which is the failure `SOURCE_ROOTS`'s entry describes
-	// and the reason that entry cannot be used for detection even though it is a
-	// plain relative spelling.
-	//
-	// What this cannot rule out is a profile directory with no `OPENCLAW_PROFILE`
-	// set now: a profile name is only discoverable from the variable, so a home
-	// that ran `openclaw --profile work` once and never exported it has a
-	// `~/.openclaw-work` this never looks at. Stated rather than papered over.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "openclaw") return openclawStateRoots(home, process.env);
-	// **Alma is the first source in this repository whose home is four *unrelated*
-	// roots rather than four of anything else.** `detectionRoots` needs all four,
-	// and the reason is not tidiness: each of the other three is the *only* one
-	// that answers for some real user.
-	//
-	// `~/.config/alma` holds the identity documents, `mcp.json`, `hooks.json` and
-	// the personal `skills/`. `%APPDATA%/alma` holds `chat_threads.db` — every
-	// conversation — plus `plugin-storage/`, and a user who installed Alma and
-	// never opened the settings has it and nothing else. `~/.alma` holds `bin/`,
-	// an npm cache, screenshots and a cache directory, none of it importable, all
-	// of it written by the CLI rather than the desktop app. And `~/alma` — **with
-	// no leading dot**, a different directory from `~/.alma` — holds the browser
-	// extension's stable copy and `worktrees/`.
-	//
-	// **The leading dot is the single most-missed path in the product.** A
-	// detector that looked for `~/.alma` and `~/.config/alma` would report "no
-	// Alma" for every user who has only ever run the CLI, and for every user who
-	// runs the browser relay.
-	//
-	// The `userData` root is `null` on macOS and Linux, where this importer does
-	// not guess at `~/Library/Application Support` or the XDG data base, and it is
-	// simply absent from the list there. **A path this source names but did not
-	// read is better than one it names wrongly**, and the report says which
-	// platform it is on.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "alma") return almaDetectionRoots(home, process.env);
-	// **MiMo Code is the first source whose tree is four sibling directories rather
-	// than one, and that is the whole reason this branch exists.**
-	// `resolveMimocodeHome` (`packages/shared/src/global.ts:26-50`) answers four
-	// bases — `xdgConfig`, `xdgData`, `xdgState`, `xdgCache`, each with `mimocode`
-	// appended — or, under `$MIMOCODE_HOME`, `<root>/{config,data,state,cache}`.
-	// Neither shape nests the others, so there is no single directory whose being
-	// non-empty means "MiMo Code is here".
-	//
-	// **Two of the four would be wrong on their own and one is the sharp case.**
-	// `config` gets a starter `mimocode.jsonc` written on first run
-	// (`config/config.ts:656-662`), so it is non-empty early. `data` is where every
-	// session and `auth.json` live and is frequently empty for a user who has run
-	// the TUI without keeping a conversation. `state` and `cache` hold nothing this
-	// importer reads. Looking at `config` alone would call the source absent on
-	// exactly the machines whose history is the thing being migrated, so all four
-	// are checked and the order puts the two that carry content first.
+	// Long-form design notes: docs/dev/migration-framework.md
 	if (id === "mimocode-code") {
 		const roots = mimocodeRoots(home, process.env);
 		return [roots.config, roots.data, roots.state, roots.cache];
@@ -509,14 +270,8 @@ function detectionRoots(id: MigrationSourceId, home: string): string[] {
 // Raw source data
 // ---------------------------------------------------------------------------
 
-/**
- * A file that travels with a {@link RawFile} rather than standing on its own: a
- * skill's `references/*.md`, `scripts/`, and so on.
- *
- * A skill is a directory, not a document. Copying only its `SKILL.md` leaves the
- * body pointing at files that are not there, so the supporting files are read
- * alongside it and written next to it.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** A file that travels with a {@link RawFile} rather than standing on its own. */
 export interface RawAttachment {
 	/** Path relative to the owning file's directory, e.g. `references/api.md`. */
 	relativePath: string;
@@ -541,14 +296,8 @@ export interface RawFile {
 	attachmentSkips?: Array<{ relativePath: string; reason: string }>;
 }
 
-/**
- * Command files found under a source's commands directory, with the ones that
- * could not become a skill.
- *
- * Separate from {@link RawFile} because a command file is not carried as it
- * stands: its header is rewritten, and the reason a file was refused (a README,
- * a name too long to be a directory here) has to survive into the report.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Command files found under a source's commands directory, with the ones that could not become a skill. */
 export interface RawCommands {
 	files: RawFile[];
 	skips: Array<{ path: string; reason: string }>;
@@ -558,15 +307,8 @@ export interface RawCommands {
 // Plan
 // ---------------------------------------------------------------------------
 
-/**
- * `map` — carried over as-is.
- * `downgrade` — carried over with a semantic loss, explained in `detail`.
- * `skip` — deliberately not carried over; `detail` says why.
- *
- * Skips are reported rather than dropped silently. A setting that vanishes
- * without explanation reads as a migration bug, and the user cannot tell the
- * difference between "labunbun has no equivalent" and "the importer missed it".
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** The three outcomes for one source value: carried as is, carried with a loss, or refused with a reason. */
 export type MigrationAction = "map" | "downgrade" | "skip";
 
 export interface MigrationItem {
@@ -637,14 +379,8 @@ export function looksLikeSecretName(name: string): boolean {
 	return SECRET_ENV_MARKERS.some((marker) => upper.includes(marker));
 }
 
-/**
- * Short model aliases → labunbun model references.
- *
- * Source tools accept a family alias where labunbun wants a `provider/id`
- * reference. Each target is verified against the registry during planning, so an
- * alias pointing at a model this build doesn't carry becomes a reported skip
- * rather than an unusable `model` value written into settings.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Short model aliases → labunbun model references. */
 const MODEL_ALIASES: Record<string, string> = {
 	opus: "anthropic/claude-opus-5",
 	sonnet: "anthropic/claude-sonnet-5",
@@ -664,15 +400,8 @@ export function resolveModelReference(value: string): string | undefined {
 	return undefined;
 }
 
-/**
- * Keys in the source state file that are telemetry or runtime bookkeeping.
- *
- * `projects` is deliberately not among them: each entry under it holds that
- * project's local-scope MCP servers (`services/mcp/config.ts` reads them for
- * scope `local`), and those are configuration. They are named one by one in
- * `planClaudeCode` — calling the whole map "not configuration" was a claim the
- * file itself contradicts.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Keys in the source state file that are telemetry or runtime bookkeeping. */
 export const STATE_TELEMETRY_KEYS = new Set(["tipsHistory", "promptQueueUseCount", "cachedChangelog"]);
 
 /**
@@ -701,18 +430,8 @@ export function targetMcpPath(home: string): string {
 	return join(home, ".labunbun", ".mcp.json");
 }
 
-/**
- * Claim one environment variable.
- *
- * `action` defaults to `map`, which is right whenever the source's variable and
- * the target's mean the same thing. A source that **scopes** its variables more
- * narrowly than the target does should pass `downgrade`: T3 Code injects a
- * provider instance's variables into that provider's process, while a target
- * `settings.env` reaches every tool call, so the value arrives unchanged and its
- * scope does not — and a report line that called that a faithful copy would be
- * the kind of imprecision that is only noticed once a shell has inherited an
- * endpoint meant for one model provider.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Claim one environment variable. */
 export type ClaimEnv = (
 	source: MigrationSourceId,
 	name: string,
@@ -796,22 +515,8 @@ export type ClaimScalar = (
 	detail: string,
 ) => void;
 
-/**
- * Claim a mode and a sandbox together, as the one decision they are.
- *
- * Every foreign tool's notion of "how much do you ask me" is a single value, and
- * in this repo the closest equivalent is often a *pair*: `bypassPermissions`
- * meant never-ask and unconfined, and `yolo` means the same. Calling
- * `claimScalar` twice by hand in each of eight mappers is how one of them ends
- * up writing the mode and forgetting the sandbox — a session that auto-approves
- * everything and still enforces a workspace sandbox is a combination the user
- * never chose, and nothing in the report would say so.
- *
- * So this is the only way a mode is written. Both halves are claimed even when
- * the source named only one, because "the source had no opinion about the
- * sandbox" is not the same claim as "import nothing" — the alternative is a
- * half-written pair that reads as a deliberate setting.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** Claim a mode and a sandbox together, as the one decision they are. */
 export type ClaimModePair = (
 	source: MigrationSourceId,
 	mode: PermissionMode,
@@ -820,15 +525,8 @@ export type ClaimModePair = (
 	detail: string,
 ) => void;
 
-/**
- * One source's share of the target's hook config, claimed rather than written.
- *
- * Two sources can each hold hooks — a `Stop` hook from one and a `PreToolUse`
- * from the other is one configuration, not two competing ones — so entries are
- * unioned per event and the key is written once at the end. Writing straight
- * into the patch would let the last source reached erase the first while both
- * report lines saying their hooks were written.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** One source's share of the target's hook config, claimed rather than written. */
 export type ClaimHooks = (
 	source: MigrationSourceId,
 	config: Record<string, NormalizedHookEntry[]>,

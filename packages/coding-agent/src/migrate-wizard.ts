@@ -1,23 +1,5 @@
-/**
- * The interactive `/migrate` flow: ask what to bring over, show the plan, then
- * write only after the user has seen it.
- *
- * The wizard asks questions, it does not decide: every answer ends up as an
- * argument to `runMigration`, the same call the CLI makes, so the wizard cannot
- * import anything `labunbun migrate` would not.
- *
- * The first question is the shortcut. "Import everything" answers the source and
- * category questions with "every source found, every category" and goes straight
- * to the plan; history is still asked about, because that one answer decides how
- * much of the user's past is read and no default is worth guessing at.
- *
- * Two things about the dialog it has to live with, both visible in
- * `packages/tui`: a question offers radio-style options and answers with the
- * chosen label (there is no multi-select), and a picker scrolls a long list but
- * resolves to a single index. So "which sources?" is one yes/no question per
- * source, and "which sessions?" is a picker whose first entry stands for "all of
- * them".
- */
+// The interactive `/migrate` flow: ask what to bring over, show the plan, write only after the user sees it.
+// Long-form design notes: docs/dev/migration-framework.md
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
@@ -165,16 +147,8 @@ async function askCategories(dialog: MigrationDialogBridge): Promise<MigrationCa
 	return CATEGORY_QUESTIONS.filter((_, index) => answers[index] === YES).map((entry) => entry.category);
 }
 
-/**
- * What one history answer buys: the sessions to bring, and the prompts that come
- * with them.
- *
- * The recall list rides on the same answer on purpose. The user was asked what of
- * theirs should come across, and "this project only" is an answer about their
- * words as much as about their transcripts — importing every prompt they ever
- * typed in every directory would be answering a question they did not say yes to,
- * and "skip history" cannot sensibly mean "except the recall list".
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** What one history answer buys: the sessions to bring, and the prompts that come with them. */
 interface HistoryTake {
 	/** Sessions to bring. */
 	history: HistoryInput;
@@ -182,14 +156,8 @@ interface HistoryTake {
 	prompts: PromptHistoryInput;
 }
 
-/**
- * How much of one source's history to take.
- *
- * `null` means "leave this source's history alone" — the user said so, or
- * cancelled the picker, or there is nothing to take. A source with nothing to
- * list is not asked about, and nothing of it is read: without an answer there is
- * no scope to read under.
- */
+// Long-form design notes: docs/dev/migration-framework.md
+/** How much of one source's history to take. */
 async function askHistory(
 	dialog: MigrationDialogBridge,
 	source: MigrationSourceId,

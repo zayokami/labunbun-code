@@ -11,25 +11,8 @@ import {
 	t3StateDirs,
 } from "./t3-home.ts";
 
-/**
- * One environment variable T3 Code stored against a provider instance.
- *
- * A `sensitive` entry is deliberately **not** carried. T3 does not persist the
- * value of one: it writes the six-dot marker `SECRET_REDACTED = "••••••"`
- * (`apps/server/src/serverSettings.ts:147`, applied by `redactSecret` at
- * `:159`) and keeps the real value in the secret store under
- * `<stateDir>/secrets` (`apps/server/src/config.ts:163`), swapping it back in
- * whenever the settings are read (`materializeProviderEnvironmentSecrets` at
- * `serverSettings.ts:699`, wired into `getSettings` at `:1127` and the change
- * stream at `:779`). So a sensitive entry read here holds a marker, not a value
- * — and writing that marker into the target's settings would produce an
- * environment variable that looks configured and silently fails. The entry is
- * skipped with a reason instead, and the `secrets/` directory is never opened.
- *
- * The redaction is also the reason an `environment` array read from disk can be
- * trusted to hold real values on its non-sensitive entries: the marker is
- * written *instead of* a value, never alongside one.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One environment variable T3 Code stored against a provider instance. */
 export interface T3EnvironmentVariable {
 	/** The variable's name, as T3 stored it. */
 	name: string;
@@ -41,32 +24,8 @@ export interface T3EnvironmentVariable {
 	driver: string;
 }
 
-/**
- * What T3 Code's `settings.json` gave up.
- *
- * **Absence is spelled two different ways here, and which one a field uses is
- * part of its contract rather than an accident of how it was read.** A field read
- * out of the document with {@link text} is a `string`, and an empty one means the
- * file stated nothing; a field read as a *shape* is `| null`, and `null` means
- * the document held nothing of that shape. The two are not interchangeable, and
- * the difference is load-bearing for {@link T3Settings.runtimeMode} — it is
- * spelled out in `t3-plan.ts`.
- *
- * They are kept apart because a `string | null` that is only ever `null`-or-a-
- * non-empty-string is a lie the type tells about the value: it invites
- * `value ?? fallback`, which on an empty string does **not** fall back, so the
- * fail-open branch a reader writes to be safe silently never runs. That is not
- * hypothetical — an empty string is what T3's own absence decodes to here, and
- * the one setting where importing a default would be wrong is a `string`.
- *
- * Why the file can be silent: T3's writer strips defaults before persisting
- * (`stripDefaultServerSettings`, `apps/server/src/serverSettings.ts:387-419`,
- * called at `:550` against `PERSISTED_SERVER_SETTINGS_DEFAULTS`), and that
- * default is the *decoded* schema default, so a setting left at T3's own default
- * is simply not in the file. `defaultModelSelection` is the one field where the
- * reader cannot tell "absent" from "present and null" — both are `null` here —
- * and the mapping is the same either way, so the distinction is not carried.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** What T3 Code's `settings.json` gave up. */
 export interface T3Settings {
 	/** `defaultRuntimeMode`, or `""` when the file states none. See {@link T3Settings}. */
 	runtimeMode: string;
@@ -88,18 +47,8 @@ export interface T3Settings {
 	projectOverrides: string[];
 }
 
-/**
- * A model T3 Code was pointed at.
- *
- * Two shapes exist on the wire and {@link T3Settings} normalizes them.
- * `ModelSelectionWire` is `{ instanceId, model, options? }`
- * (`packages/contracts/src/orchestration.ts:75-79`). Selections persisted before
- * the driver/instance split carry `{ provider, model }` instead, and T3's own
- * schema absorbs that with a pre-decoding transform that takes `provider` as the
- * routing key when `instanceId` is absent (`:92-107`). This reader reads the slug
- * the same way, so a selection written by an older build is not dropped for
- * naming a field the current one no longer has.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A model T3 Code was pointed at. */
 export interface T3ModelSelection {
 	/** The routing key: an instance id, or the legacy driver slug it was promoted from. */
 	instanceId: string;
@@ -109,47 +58,20 @@ export interface T3ModelSelection {
 	fromLegacyProvider: boolean;
 }
 
-/**
- * One conversation thread, as the listing phase sees it.
- *
- * Deliberately carries no message text. Listing is what a session picker runs
- * before the user has chosen anything, and a listing that read every
- * conversation would make opening the picker cost the whole history — the one
- * input in this migration the architecture is explicit about reading once, and
- * only for the sessions that were actually chosen.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One conversation thread, as the listing phase sees it. */
 export interface T3SessionRow {
 	/** `projection_threads.thread_id`, which is what T3 resumes by. */
 	id: string;
 	/** The thread's title, or `""` when T3 left it empty. */
 	title: string;
-	/**
-	 * The effective working directory, or `null` when neither column gave one.
-	 *
-	 * `projection_threads.worktree_path` wins over
-	 * `projection_projects.workspace_root` (`005_Projections.ts:11` and `:27`),
-	 * because a thread opened in a worktree ran in the worktree and not in the
-	 * project it belongs to. There is no `cwd` column anywhere in the schema —
-	 * verified against the DDL rather than taken on report — so this join is the
-	 * only place a working directory can come from.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The effective working directory, or `null` when neither column gave one. */
 	cwd: string | null;
 	/** `created_at` in epoch ms, 0 when T3 stored something unparseable. */
 	startedAt: number;
-	/**
-	 * How many tool-lifecycle activity rows this thread accumulated.
-	 *
-	 * Carried so the report can say what a transcript will *not* contain instead of
-	 * letting a user discover it. T3 records a tool call as an activity row
-	 * (`projection_thread_activities`) rather than as a message, and the row is
-	 * shaped for T3's own UI: its columns are `activity_id`, `thread_id`, `turn_id`,
-	 * `tone`, `kind`, `summary`, `payload_json`, `created_at` and a `sequence`
-	 * added by `008_ProjectionThreadActivitySequence.ts` — a one-line summary of
-	 * what happened and an opaque payload, with no argument list and no result
-	 * paired with it. Reconstructing a tool call from that is a separate piece of
-	 * work with its own failure modes, so this importer carries the conversation
-	 * and names the count instead.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** How many tool-lifecycle activity rows this thread accumulated. */
 	toolCount: number;
 }
 
@@ -165,15 +87,8 @@ export interface T3SessionMessage {
 
 /** One thing seen and not read, and why. */
 export interface T3Skipped {
-	/**
-	 * The thing's own name — a filename, a directory name, or a table name.
-	 *
-	 * A path is allowed only where the thing *is* a path and has no other name:
-	 * the two entries about state directories name themselves that way because a
-	 * user who ran a dev build recognises `~/.t3/dev` and nothing else. Values are
-	 * never here, and a sensitive environment entry contributes its *variable's*
-	 * name — see {@link T3EnvironmentVariable}.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** The thing's own name — a filename, a directory name, or a table name. */
 	name: string;
 	/** The reason, in the words the report prints. */
 	reason: string;
@@ -185,45 +100,20 @@ export interface RawT3Code {
 	stateDir: string | null;
 	/** `settings.json`, or `null` when it was absent or unparseable. */
 	settings: T3Settings | null;
-	/**
-	 * Every top-level key `settings.json` holds, whatever became of it.
-	 *
-	 * Carried so the report can account for the rest of the file by name instead of
-	 * leaving a settings document half-migrated and unexplained. `settings` alone
-	 * cannot do it: it holds the seven keys this importer *found* something in,
-	 * and the sixty-odd it did not are exactly the ones a user would notice
-	 * vanishing.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Every top-level key `settings.json` holds, whatever became of it. */
 	settingsKeys: string[];
 	/** `client-settings.json`, or `null`. */
 	clientSettings: Record<string, unknown> | null;
 	/** `desktop-settings.json`, or `null`. */
 	desktopSettings: Record<string, unknown> | null;
-	/**
-	 * Everything seen and passed over, each with a reason.
-	 *
-	 * Sessions are **not** here. They are read through
-	 * {@link t3SessionRows} and {@link t3SessionMessages}, on the two-phase
-	 * schedule the rest of this migration uses: list the candidates, let the user
-	 * choose, then read only what they chose.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Everything seen and passed over, each with a reason. Sessions are not here. */
 	skipped: T3Skipped[];
 }
 
-/**
- * Read a T3 Code installation.
- *
- * Nothing here throws. Every file is optional, every JSON document may be
- * malformed, and the database may belong to a build with a different schema — a
- * T3 release that renamed a column should cost this importer one query, not the
- * whole run. The failures land in {@link RawT3Code.skipped} with their own
- * reasons, so a report can say what was not read instead of leaving a user to
- * work out whether the migration was partial.
- *
- * No credential is read. T3's sensitive environment values are not in
- * `settings.json` at all — see {@link T3EnvironmentVariable} — and the `secrets/`
- * directory they do live in is never opened.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Read a T3 Code installation. */
 export function readT3Code(home: string): RawT3Code {
 	const skipped: T3Skipped[] = [];
 	const stateDir = t3Root(home);
@@ -255,16 +145,8 @@ export function readT3Code(home: string): RawT3Code {
 	};
 }
 
-/**
- * Pull the migration-relevant keys out of a decoded `settings.json`.
- *
- * The keys this returns are the ones the target has an equivalent for. Everything
- * else in T3's schema — worktree cleanup policy, storage cleanup, response
- * streaming, device hosts, observability, Tailscale — belongs to a desktop app
- * with its own process model and has no meaning here, and
- * `t3-plan.ts` accounts for the rest of the file with one aggregate note rather
- * than pretending each key was considered and rejected.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Pull the migration-relevant keys out of a decoded `settings.json`. */
 function readSettings(document: Record<string, unknown>, skipped: T3Skipped[]): T3Settings {
 	return {
 		runtimeMode: text(document.defaultRuntimeMode),
@@ -276,22 +158,8 @@ function readSettings(document: Record<string, unknown>, skipped: T3Skipped[]): 
 	};
 }
 
-/**
- * The non-sensitive environment variables of every configured provider instance.
- *
- * `providerInstances` is `Record<ProviderInstanceId, ProviderInstanceConfig>`
- * (`packages/contracts/src/settings.ts:1292`), where each entry has a `driver`
- * slug and an `environment` array
- * (`packages/contracts/src/providerInstance.ts:104-110` — `name`, `value`,
- * `sensitive`, and a `valueRedacted` flag). The per-driver `config`
- * blob is `Schema.Unknown` by design — each driver registers its own decoder with
- * the runtime registry — so this reader does not go looking inside it for a key
- * or a token, and a blob that happens to hold one is never copied.
- *
- * The legacy single-instance `providers` map (`settings.ts:1279`) is read too.
- * It is the same information in an older shape, and skipping it would drop the
- * environment of any user whose T3 predates the instance split.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The non-sensitive environment variables of every configured provider instance. */
 function readEnvironment(instances: unknown, legacyProviders: unknown, skipped: T3Skipped[]): T3EnvironmentVariable[] {
 	const found: T3EnvironmentVariable[] = [];
 	const read = (source: unknown, legacy: boolean) => {
@@ -335,17 +203,8 @@ function projectOverrideKeys(value: unknown): string[] {
 	return Object.keys(record).sort();
 }
 
-/**
- * Normalize one `ModelSelection`, reading T3's legacy `{ provider, model }`.
- *
- * An `instanceId` wins over a `provider` when both are present, which is the
- * order T3's own transform uses (`orchestration.ts:99-107`): the current field is
- * authoritative and the legacy one is the fallback for payloads written before
- * the split. That transform passes the legacy slug straight through as the
- * routing key — `defaultInstanceIdForDriver` (`:148` in `providerInstance.ts`) is
- * named in its comment as what the slug stands for, not called by it — and so
- * does this, which is all a reader outside T3's registry can do with it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Normalize one `ModelSelection`, reading T3's legacy `{ provider, model }`. */
 function modelSelection(value: unknown): T3ModelSelection | null {
 	const record = asRecord(value);
 	if (record === null) return null;
@@ -358,39 +217,8 @@ function modelSelection(value: unknown): T3ModelSelection | null {
 	return null;
 }
 
-/**
- * Every conversation thread, without their messages.
- *
- * **This is not T3's own thread listing, and the two differences are deliberate.**
- * T3 has two: `listThreadRows` takes every row
- * (`orchestration/Layers/ProjectionSnapshotQuery.ts:562-601`) and
- * `listActiveThreadRows` drops what the user archived or deleted
- * (`:610-652`). This query is the first with two filters layered on it, and each
- * one is about what a migration should resurrect rather than about what a session
- * picker should show:
- *
- *  - a **soft-deleted** row is excluded on both sides, because the user threw it
- *    away and importing it would put back something they removed;
- *  - an **archived** row is *not* excluded. T3 hides it from the main list, but
- *    `listArchivedThreadRows` (`:701-...`) is a second view of the same rows and
- *    an archived conversation is still one the user paid for. Excluding it would
- *    be a filter about the layout of T3's sidebar leaking into a migration.
- *
- * The join to `projection_projects` is not optional: the thread row has no
- * directory of its own and `workspace_root` is the only other place one can come
- * from (see {@link T3SessionRow.cwd}).
- *
- * The order is `created_at, thread_id` — T3's own tiebreak for a listing
- * (`:601`) — and the second key is load-bearing: `created_at` is not unique, and
- * an unstable order would make a session picker show two different lists for two
- * identical runs.
- *
- * Returns `[]` for a database that is absent, unreadable, or from a build whose
- * schema differs — a T3 release that renamed a projection table should cost this
- * importer its conversations and nothing else. The reason is not returned,
- * because this runs inside the listing phase, which reports its own notes; the
- * settings read is unaffected either way.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Every conversation thread, without their messages. */
 export function t3SessionRows(home: string): T3SessionRow[] {
 	const stateDir = t3Root(home);
 	if (stateDir === null) return [];
@@ -429,16 +257,8 @@ export function t3SessionRows(home: string): T3SessionRow[] {
 	}
 }
 
-/**
- * Tool-lifecycle activity counts, per thread.
- *
- * Best-effort and separate from the thread query on purpose: the activities
- * table is the one most likely to be absent or renamed, because it is the newest
- * of the three projections and the one this importer cares about least. Folding
- * its failure into the thread query would let a T3 build that renamed it take the
- * user's conversations down with it — losing the thing they wanted in exchange
- * for the count of the thing they did not.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Tool-lifecycle activity counts, per thread. */
 function toolActivityCounts(db: Database): Array<Record<string, unknown>> {
 	try {
 		return db
@@ -452,21 +272,8 @@ function toolActivityCounts(db: Database): Array<Record<string, unknown>> {
 	}
 }
 
-/**
- * One thread's messages, in T3's own order.
- *
- * `role IN ('user', 'assistant', 'reasoning')` rather than the two roles a
- * transcript is usually made of: `reasoning` is a role T3 records in this same
- * table and is a real part of what the thread contains. `system` is not carried
- * because it is the desktop client's own framing — a migration has already put
- * the conversation in a different client, and replaying another client's system
- * preamble reads as though the assistant had said it.
- *
- * `ORDER BY created_at ASC, message_id ASC` is T3's ordering
- * (`ProjectionThreadMessages.ts:225`) and the second key is load-bearing:
- * `created_at` alone is not unique, so dropping it yields a different order from
- * the one the user's own client shows.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One thread's messages, in T3's own order. */
 export function t3SessionMessages(home: string, threadId: string): T3SessionMessage[] {
 	const stateDir = t3Root(home);
 	if (stateDir === null) return [];
@@ -497,18 +304,8 @@ export function t3SessionMessages(home: string, threadId: string): T3SessionMess
 	}
 }
 
-/**
- * Name a state directory that has content and was not the one read.
- *
- * `t3Root` reads the production directory when both exist — see `t3-home.ts` for
- * why that is the right tree — so a dev build's state is left behind. It is named
- * here rather than left for the user to find, because "the migration ignored a
- * directory full of my conversations" and "there was no dev tree" look identical
- * from the outside until you go and look.
- *
- * An empty sibling produces nothing. "There is a `dev` directory holding nothing"
- * is not information a migration report needs.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Name a state directory that has content and was not the one read. */
 function noteOtherStateDirs(home: string, read: string, skipped: T3Skipped[]): void {
 	for (const dir of t3StateDirs(home)) {
 		if (dir === read || !treeHasContent(dir)) continue;
@@ -522,20 +319,8 @@ function noteOtherStateDirs(home: string, read: string, skipped: T3Skipped[]): v
 	}
 }
 
-/**
- * Name the attachments directory when there is one.
- *
- * An imported conversation carries its text and nothing else, so a message that
- * points at a file leaves a path in the transcript that resolves to nothing once
- * the migration is done. That is worth one report line rather than a user
- * discovering it while scrolling back through a conversation they just imported.
- *
- * The files themselves are not copied. They are conversation-scoped binary blobs
- * with names T3 chose, and a target history entry is a text transcript; putting
- * the bytes somewhere and rewriting every reference to point at them is a
- * different migration from the one this importer does, and doing half of it would
- * be the worse outcome.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Name the attachments directory when there is one. */
 function noteAttachments(stateDir: string, skipped: T3Skipped[]): void {
 	if (!treeHasContent(t3AttachmentsDir(stateDir))) return;
 	skipped.push({

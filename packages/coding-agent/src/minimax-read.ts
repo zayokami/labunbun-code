@@ -1,11 +1,6 @@
-/**
- * MiniMax Code's user state: `config.yaml`, `permission.json`, `mcp.json`,
- * `AGENTS.md`, skills, agents, plans, and `v2/sessions`.
- *
- * The rule encoding lives here rather than in the planner because it is a
- * decoding problem, not a decision: MiniMax writes a rule as an escaped string
- * that has to be taken apart before anything can be planned from it.
- */
+// MiniMax Code's user state: `config.yaml`, `permission.json`, `mcp.json`, `AGENTS.md`,
+// skills, agents, plans, and `v2/sessions`.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import type { Dirent } from "node:fs";
 import { existsSync, readdirSync } from "node:fs";
@@ -32,19 +27,8 @@ import {
 	minimaxSkillsDir,
 } from "./minimax-home.ts";
 
-/**
- * Why one MiniMax rule could not become a rule here.
- *
- * `inert-there` — MiniMax itself never consults it, so leaving it behind costs
- * nothing: the tool name matches no tool it has (`permissionToolMatches`,
- * `local-runtime/src/permissions/rule-match.ts:87-91`) or the matcher speaks
- * about an action the tool does not perform (`:63-67`).
- *
- * `no-specifier-grammar` — MiniMax does consult it, and this engine does not:
- * a specifier is only read for `Bash`, `Read`, `Write`, `Edit` and MCP tool
- * names (`packages/agent/src/permissions.ts:213-245`). This one is a real loss
- * and the direction of the loss depends on the behavior.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Why one MiniMax rule could not become a rule here. */
 export type MinimaxRuleDropReason = "inert-there" | "no-specifier-grammar";
 
 /** One rule that did not come across, with the name it was written under. */
@@ -57,22 +41,8 @@ export interface MinimaxRuleDrop {
 	reason: MinimaxRuleDropReason;
 }
 
-/**
- * `~/.minimax/permission.json`, decoded into rule text this build's engine reads.
- *
- * The file holds the user's allow/deny/ask decisions in one of two generations
- * (`local-runtime/src/permissions/rule-codec.ts`): v1 is a Claude-Code-shaped
- * `{allow, deny, ask}` of `Tool(pattern)` strings, v2 is
- * `{version: 2, allow, deny, ask}` of `{tool_name, matcher}` records whose
- * matcher is `tool`, `command` or `path` — and only the `path` matcher carries
- * an `actions` list, because the other two are already scoped by the tool.
- *
- * The two engines are close relatives: MiniMax's v1 grammar is Claude Code's,
- * and this build's `Tool(specifier)` grammar is the same family, so a rule
- * carries as text with its tool name translated. The exceptions are the ones
- * the two engines do not agree on, and they are named one by one in
- * {@link notCarried} rather than left to be discovered.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `~/.minimax/permission.json`, decoded into rule text this build's engine reads. */
 export interface MinimaxPermissions {
 	allow: string[];
 	deny: string[];
@@ -81,31 +51,13 @@ export interface MinimaxPermissions {
 	/** Which generation of the file was read. */
 	version: 1 | 2;
 	notCarried: MinimaxRuleDrop[];
-	/**
-	 * Bash rules that ended in `:*` over there, as the source spelled them.
-	 *
-	 * MiniMax reads that suffix as its own word-boundary command prefix
-	 * (`matchesCommandPrefix`, `rule-match.ts:141-148`), a shape this build's
-	 * engine does not have: a Bash specifier here is a glob over the whole
-	 * command line (`packages/agent/src/permissions.ts:213-222`), so a rule
-	 * carried verbatim as `Bash(sed:*)` would match the literal text `sed:` and
-	 * nothing else — a dead allow *and* a dead deny. These are carried as
-	 * `Bash(sed*)`, the closest one-rule equivalent, and the two ways that is
-	 * wider are named in the report rather than left in the code.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Bash rules that ended in `:*` over there, as the source spelled them. */
 	widened: string[];
 }
 
-/**
- * MiniMax Code's user state.
- *
- * One tree, in one of three places: `$MINIMAX_DATA_DIR`, else `$MAVIS_DATA_DIR`,
- * else `<home>/.minimax` — {@link minimaxRoot} owns that rule, including the
- * trim and the refusal to expand `~`. The predecessor tree `<home>/.mavis` is a
- * second question rather than a second source: it is the same tree under its
- * older name, and {@link minimaxLegacyDataDir} answers "separate directory, or
- * a link to the one we already have" the way the vendor answers it.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** MiniMax Code's user state. */
 export interface RawMinimaxCode {
 	/** The tree that was read — see {@link legacyRead} for which one that is. */
 	root: string;
@@ -128,17 +80,8 @@ export interface RawMinimaxCode {
 	/** Why `config.yaml` contributed nothing, when it was there but unreadable. */
 	configError?: string;
 	permissions: MinimaxPermissions;
-	/**
-	 * Why `permission.json` contributed nothing.
-	 *
-	 * Set for every way the file can be unusable, because MiniMax treats them the
-	 * same way: one malformed entry, one unknown version, a corrupt document or a
-	 * shape that is not an object all raise `LocalPermissionStoreUnhealthyError`
-	 * (`local-runtime/src/permissions/rules.ts:214-262`), which its callers turn
-	 * into "ask about everything" rather than "allow everything". Rules out of a
-	 * store the source itself refuses are intentions currently in force nowhere,
-	 * so none of them is imported.
-	 */
+	// Long-form design notes: docs/dev/migration-sources.md
+	/** Why `permission.json` contributed nothing. */
 	permissionError?: string;
 	/** `<root>/mcp.json` — a `{"mcpServers": {…}}` wrapper, as this build's own file. */
 	mcp: Record<string, unknown>;
@@ -226,23 +169,8 @@ const MINIMAX_KNOWN_DIRS = new Set([
 	"review-rules",
 ]);
 
-/**
- * The directories MiniMax reads by borrowing another agent's tree, and the
- * config key that turns each one off.
- *
- * `readExternalUserSkillRoots` (`local-runtime/src/skills/roots.ts:129-137`)
- * adds Claude Code's, Codex's and the shared agents home's skill directories to
- * MiniMax's own skill search, and `DEFAULT_SKILLS_CONFIG`
- * (`packages/config/src/skills-config.ts:62-76`) has all three on. That makes
- * them borrowed rather than MiniMax's: the `claude-code`, `codex` and `agents`
- * sources each own one of them, and importing them here as well would put every
- * skill in the collection twice.
- *
- * The project-level half of the same list (`<workspace>/.minimax/skills`,
- * `<workspace>/.claude/skills`, `<workspace>/.agents/skills`, with a walk up to
- * the repository root when `walkUp` is on) is about a working directory, not
- * about this tree, so it is named in the plan rather than looked for.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The directories MiniMax reads by borrowing another agent's tree, and the config key that turns each one off. */
 const MINIMAX_BORROWED_TREES: Array<{ key: string; legacyKey?: string; path: string }> = [
 	{ key: "user-cc", legacyKey: "user-claude", path: join(".claude", "skills") },
 	{ key: "user-codex", path: join(".codex", "skills") },
@@ -255,23 +183,8 @@ export const MINIMAX_BUILTIN_AGENTS_DIR = ".builtin";
 /** The file MiniMax connects MCP servers from, named as the report spells it. */
 export const MINIMAX_MCP_FILE_NAME = "mcp.json";
 
-/**
- * A tool name in a MiniMax permission rule, and the name this build's engine
- * knows for the same tool.
- *
- * The two engines are relatives — MiniMax's rule strings are Claude Code's
- * syntax (`parseRuleString`, `local-runtime/src/permissions/rule-codec.ts:166-181`)
- * and this build's `Tool(specifier)` is the same shape — but their tool names
- * are not the same strings: MiniMax's are lower case and this build's are not,
- * and a rule naming a tool that does not exist where it is read is a rule that
- * silently does nothing.
- *
- * `action` is the capability MiniMax says this tool performs
- * (`permissionInputAction`, `local-runtime/src/permissions/rule-match.ts:78-85`);
- * it is read only for `path` matchers, the one matcher kind that carries its own
- * `actions` list. `fs` is the umbrella name MiniMax puts over the file tools, so
- * it expands to every one of them whose action the rule asks for.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A tool name in a MiniMax permission rule, and the name this build's engine knows for the same tool. */
 const MINIMAX_TOOL_NAMES: Record<string, Array<{ name: string; action: MinimaxAction }>> = {
 	read: [{ name: "Read", action: "read" }],
 	write: [{ name: "Write", action: "write" }],
@@ -293,15 +206,8 @@ const MINIMAX_TOOL_NAMES: Record<string, Array<{ name: string; action: MinimaxAc
 /** The capabilities a MiniMax rule can be scoped to (`rule-codec.ts:44-51`). */
 type MinimaxAction = "read" | "write" | "delete" | "execute" | "network";
 
-/**
- * The tool names whose specifier this build's engine actually consults.
- *
- * `inputMatchesSpecifier` (`packages/agent/src/permissions.ts:213-245`) has a
- * case for `Bash`, one for the file tools, one for `mcp__…`, and a default that
- * answers `false`. A rule for any other name in that position is written to no
- * effect — the file holds it, nothing reads it — which is the one outcome a
- * migration must not produce quietly.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The tool names whose specifier this build's engine actually consults. */
 const MINIMAX_SPECIFIER_TOOLS = new Set(["Bash", "Read", "Write", "Edit"]);
 
 /** `Tool(pattern)`, `Tool`, or a bare name; the same split MiniMax's reader makes. */
@@ -320,42 +226,8 @@ function formatMinimaxRule(toolName: string, pattern?: string): string {
 	return pattern === undefined ? toolName : `${toolName}(${pattern})`;
 }
 
-/**
- * One entry of either generation, decoded into this build's rule text.
- *
- * The three things that can happen, and why each is the one that is right:
- *
- *   - the rule carries. Its tool name is translated and its pattern is kept as
- *     written, because the two grammars agree on the shapes that matter: a
- *     `/**` subtree, an exact path, a `*`-suffixed command prefix — with one
- *     exception, the `:*` suffix below. A rule whose meaning would change under
- *     the translation is not carried — that is the next two cases;
- *   - it is left behind because MiniMax does not consult it either, and then
- *     nothing is lost: a name no MiniMax tool has (`permissionToolMatches`,
- *     `rule-match.ts:87-91`, is an exact comparison) or a `path` matcher whose
- *     `actions` exclude the only action its tool performs (`:63-67`);
- *   - it is left behind though MiniMax does consult it, and then something is:
- *     this engine reads a specifier for four tool names and the MCP family, so
- *     `glob(/etc/**)` — live in MiniMax, where a glob's target is the pattern it
- *     was given — is a rule that would sit in the file unread here.
- *
- * The exception is a Bash pattern ending in `:*`. Keeping it as written would
- * be keeping a rule that does nothing here, and *that* is the one outcome worse
- * than a rule that means something slightly different: `Bash(sed:*)` reads as
- * `sed:*` as a glob, which matches no command a user ever runs, so a deny
- * written that way protects nothing after the migration. It is rewritten to the
- * glob the two engines both understand and the rewrite is recorded in
- * {@link widened}, where the report picks it up.
- *
- * What this does not try to reproduce: which *matcher kind* a v1 entry has is
- * inferred over there from the shape of its pattern — a leading `/`, `~/`, `./`
- * or a drive letter makes it a path matcher and anything else a command matcher
- * (`inferLegacyMatcher`, `rule-codec.ts:276-292`). The two kinds read the
- * pattern differently, and reproducing the guess here would mean this build
- * deciding what the user meant by a pattern MiniMax was already guessing at. The
- * pattern travels as written, and the caveat the caller writes for the rules it
- * does carry says the two grammars differ.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One entry of either generation, decoded into this build's rule text. */
 function decodeMinimaxRule(
 	entry: { toolName: string; pattern?: string; actions?: readonly MinimaxAction[] },
 	behavior: "allow" | "deny",
@@ -403,25 +275,8 @@ function decodeMinimaxRule(
 	return { rules, drops };
 }
 
-/**
- * `permission.json`, decoded — or nothing at all, when MiniMax would read
- * nothing from it either.
- *
- * Every way this file can be unusable is a *refusal* over there, not a partial
- * read: a corrupt document, a root that is not an object, one malformed v2
- * entry and any *explicit* `version` other than 2 all raise
- * `LocalPermissionStoreUnhealthyError` (`local-runtime/src/permissions/rules.ts:214-262`). "v1" is the shape *without* a `version` key rather than the
- * shape that spells `1` (`record.version === 2` picks the v2 decoder, `!==
- * undefined` is the refusal, and what is left is v1), so a file that writes
- * `version: 1` is refused over there as well — the distinction a hand-edited file
- * gets wrong. The comment at the first of those refusals says what its callers do
- * with it —
- * "Treating it as an empty rule set could drop a persisted deny and silently
- * authorize a command", so the store is treated as unhealthy and the user is
- * asked. A rule out of such a file is a decision that is in force nowhere, and
- * importing the allows out of it would put a set of permissions into effect
- * that the user's own tool is currently refusing to honour.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `permission.json`, decoded — or nothing at all, when MiniMax would read nothing from it either. */
 function readMinimaxPermissions(root: string): Pick<RawMinimaxCode, "permissions" | "permissionError"> {
 	const empty: MinimaxPermissions = { allow: [], deny: [], askCount: 0, version: 1, notCarried: [], widened: [] };
 	const text = readText(minimaxPermissionFile(root));
@@ -472,15 +327,7 @@ function readMinimaxPermissions(root: string): Pick<RawMinimaxCode, "permissions
 				notCarried.push(...decoded.drops);
 				continue;
 			}
-			// v2: `{tool_name, matcher}`. A bad entry here is not skipped — it is the
-			// reason the whole file is unreadable, in MiniMax as well as here.
-			//
-			// `ask` is validated before it is counted, because that is what the
-			// source does: `configV2ToRules` maps all three behaviors through the
-			// same reader (`rule-codec.ts:143-153`), so a malformed `ask` entry
-			// makes MiniMax refuse the store exactly as a malformed `allow` one
-			// does. Counting it first would report "N ask rules here have no
-			// equivalent" for a store the source reads as empty.
+			// Long-form design notes: docs/dev/migration-sources.md
 			if (!isRecord(raw) || typeof raw.tool_name !== "string" || raw.tool_name.trim() === "") {
 				return {
 					permissions: empty,
@@ -567,19 +414,8 @@ function readMinimaxConfig(root: string): Pick<RawMinimaxCode, "config" | "confi
 	}
 }
 
-/**
- * `mcp.json` (and the `mcp/mcp.json` MiniMax also looks in), parsed.
- *
- * Unlike kimi's bare `{name: server}` map both files are the same
- * `{"mcpServers": {…}}` wrapper this build's own `.mcp.json` uses, so the values
- * travel as they stand.
- *
- * Both are read, and each one's parse failure is reported against its own path:
- * a report that named `mcp.json` for a broken `mcp/mcp.json` would send the user
- * to a file this run never opened. Which of the two *answers* is the planner's
- * decision, because it depends on what MiniMax does with each — see the note at
- * the top of its MCP section.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `mcp.json` (and the `mcp/mcp.json` MiniMax also looks in), parsed. */
 function readMinimaxMcp(root: string): Pick<RawMinimaxCode, "mcp" | "mcpAlias" | "mcpErrors"> {
 	const read = (path: string): { servers: Record<string, unknown> } | { error: string } | null => {
 		const text = readText(path);
@@ -606,28 +442,8 @@ function readMinimaxMcp(root: string): Pick<RawMinimaxCode, "mcp" | "mcpAlias" |
 	};
 }
 
-/**
- * The user's agents, one directory each.
- *
- * A MiniMax agent is a *directory* — `agents/<name>/` holding `agent.md` (the
- * system prompt), `config.yaml` (its model selection), and optionally
- * `PERSONA.md`, `skills/`, `memory/`, `crons/` and `daily/`. This build's
- * subagent is a single markdown file, so `agent.md` is what travels.
- *
- * `PERSONA.md` is deliberately not folded into it. The two are separate prompt
- * assets over there (`getPersona` and `getSystemPrompt`, `agent-files.ts:866,906`),
- * and for a *custom* agent — which is what a user's own directory is — only the
- * system prompt becomes `agentSystemPrompt` (`agent-profile.ts:502`), while the
- * persona travels beside it as its own field. Concatenating them here would
- * invent a document that neither tool has, so the persona is named in the
- * agent's note instead and the user can paste it in if they want it inline.
- *
- * `skills/` under an agent is a skill tree scoped to that agent alone
- * (`resolveConfiguredSkillRoots`, `local-runtime/src/skills/roots.ts:40-50`
- * gives every agent its own root). A skill here is global — loaded into every
- * session — so those trees are counted and named rather than imported, the same
- * line the grok source draws at its per-workspace memory.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The user's agents, one directory each. */
 function readMinimaxAgents(
 	root: string,
 ): Pick<RawMinimaxCode, "agents" | "agentSkips" | "builtinAgentNames" | "agentSkillTrees"> {
@@ -689,26 +505,8 @@ function readMinimaxAgents(
 	return { agents, agentSkips, builtinAgentNames, agentSkillTrees };
 }
 
-/**
- * The trees MiniMax reads out of other agents' homes, and whether it still does.
- *
- * `skills.external` is on by default and so is each of its sources, so on a
- * default install MiniMax is already showing the user Claude Code's, Codex's
- * and `~/.agents`' skills. Turning a source off in `config.yaml` is a user
- * decision this reader honours: naming a tree as borrowed when the user has
- * switched it off would be telling them something about their own config that
- * is not true.
- *
- * A source is named by its current key or by the spelling it had before the
- * rename, and the current one wins when both are written — `parseSkillsConfig`
- * looks for `user-cc` first and falls back to `user-claude`
- * (`LEGACY_SOURCE_KEY_BY_KIND`, `skills-config.ts:41-46, 110-121`). Missing the
- * legacy spelling would be the exact mistake this function exists to avoid: a
- * user who switched the source off under the old name would be told it is on.
- *
- * A value that is not a table leaves the default in place, which is how the
- * source reads it (`parseSource`, `skills-config.ts:96-101`).
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The trees MiniMax reads out of other agents' homes, and whether it still does. */
 function readMinimaxBorrowedTrees(home: string, config: Record<string, unknown>): string[] {
 	const skills = isRecord(config.skills) ? config.skills : {};
 	const external = isRecord(skills.external) ? skills.external : {};
@@ -745,22 +543,7 @@ function readMinimaxOtherDirs(root: string, accounted: Set<string>): Array<{ nam
 export function readMinimaxCode(home: string): RawMinimaxCode {
 	const primary = minimaxRoot(home);
 	const legacyRoot = minimaxLegacyDataDir(home);
-	// Which tree the vendor would end up reading, walked the way its own resolution
-	// walks it (`resolveDataDirPair`, `packages/config/src/data-dir.ts:286-382`) —
-	// because its move of the legacy tree is a rename, never a merge, so two trees
-	// on one machine are one tree's worth of decisions plus a backup of the other.
-	// What decides is the *content* test and not an existence test: an `.minimax`
-	// that is there but empty is exactly the state it moves `.mavis` over
-	// (`:310-330`), so an existence test here would report the source as having
-	// nothing while its data sits under the older name. Three corners are copied
-	// from that function rather than guessed at: a legacy tree answers only when it
-	// is a directory (or a link to one) — a plain file at `.mavis` is never read,
-	// it is only renamed onto (`:306-308`, `:342`) — a primary directory this
-	// process cannot list is *not* empty and does not fall back (`:311-315`), and
-	// the one pair that falls back to nothing at all is "empty here, empty there",
-	// where the vendor keeps the current name (`:318-321`). An explicit
-	// `$MINIMAX_DATA_DIR` skips the pair entirely, which is why the fallback is only
-	// open to the default path.
+	// Long-form design notes: docs/dev/migration-sources.md
 	const primaryState = minimaxDataState(primary.root);
 	const legacyState = legacyRoot === null ? "missing" : minimaxDataState(legacyRoot);
 	const legacyRead =

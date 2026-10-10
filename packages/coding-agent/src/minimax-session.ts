@@ -1,75 +1,6 @@
-/**
- * MiniMax Code session transcripts (`<root>/v2/sessions`).
- *
- * One session is one dated directory holding a `manifest.json`, the history
- * files, and the `snapshots/` and `reports/` directories beside them. The
- * history comes in two generations and a reader has to know both:
- *
- *   - the current one is `messages.jsonl`: one canonical envelope per line,
- *     `{message_id, turn_id, message, turn_config?, history_artifact?}`, written
- *     by `CanonicalHistoryJsonlDataSource`;
- *   - the released one is `snapshot.json` plus an append-only `ledger.jsonl` of
- *     `message.*` events, which the current build replays and then *materializes*
- *     into `messages.jsonl` the first time it opens the session. A machine whose
- *     sessions have all been opened since then has only the first form; a machine
- *     that has not run that build has only the second.
- *
- * The canonical file is a *context*, not a journal, and that is the single most
- * important thing about it. When MiniMax compacts, it **replaces** the file's
- * contents: the new first record is a `compactionSummary` (or, in the older
- * Archon spelling, a user message carrying an `archonCompaction` marker) and the
- * messages before it are not in the file any more. So there is nothing to
- * reconstruct — but there is something to say: the import starts with a
- * compaction marker, so a reader of it can see that this conversation is a
- * continuation rather than a beginning. A migration that dropped the marker
- * would present a compacted session as a complete one.
- *
- * Reading follows the tool's own read path (`readSnapshot`,
- * `canonical-history-provider.ts:321-353`), which is a two-step answer that this
- * module reproduces step for step, because the difference between the steps is
- * the difference between refusing a session and importing it:
- *
- *   1. **decode strictly.** `readEnvelopesStrict` is `readJsonl` with no
- *      observer, so a malformed line is fatal rather than skipped, and the
- *      envelope decoder is exact about the envelope's keys. A file that fails
- *      here is refused whole, with the line named — half a conversation is worse
- *      than a reported failure, because the missing half is invisible;
- *   2. **repair the tool protocol, refuse the rest.** `repairCanonicalHistory`
- *      (`canonical-history-recovery.ts:57-84`) drops exactly the tool rows whose
- *      disposition is deterministic — an orphan result, a result that does not
- *      follow its call, a call with no identity, an interrupted round — and keeps
- *      everything else, while `assertRecoveryInvariants` still fails closed on
- *      "ambiguous identity, compaction, and turn-config corruption". This reader
- *      draws the line in the same place: an identity used twice, a boundary that
- *      is not the first record, a `turn_config` on the wrong message and a
- *      `history_artifact` past the first envelope refuse the session, while the
- *      tool pairing is left to `@labunbun/ai`'s `repairToolPairing`, whose verdict
- *      — not just its count — is what this module returns.
- *
- * A trailing assistant message whose tool results never arrived is kept, which is
- * the tool's own answer for a *read*: `allowPendingToolCallTail` retains the final
- * in-flight round and reports no issue for it, while an execution read removes
- * it. A transcript is a read, and the text in that message is the user's.
- *
- * What this reader deliberately does not read, and why:
- *
- *   - `display.jsonl`, and the SQLite rows behind it: renderings of the
- *     conversation for the UI, with compaction lifecycle and review frames mixed
- *     in. The tool falls back to them only after both file sources are gone; a
- *     migration that raised a transcript from a rendering would import the UI's
- *     view of a conversation as the conversation;
- *   - `snapshots/` and `reports/`: the durable pre-compaction artifacts that
- *     `history_artifact` points at, not conversation;
- *   - `v2/chats`: the pre-`v2` draft ledgers, which the tool's own migrator moves
- *     into `v2/sessions` before they can be read as history;
- *   - unsent composer drafts (`v2/mcode/drafts`): text the user never sent.
- *
- * The SQLite database is opened read-only and only for metadata (title, project
- * directory, archived flag, internal kind); the walk over the manifests decides
- * which sessions exist, exactly as it does in the tool's own discovery. Nothing
- * here writes anything, and no file outside the sessions tree and that database
- * is opened.
- */
+// MiniMax Code session transcripts (`<root>/v2/sessions`), in two history generations: the released
+// snapshot-and-ledger pair, and the canonical `messages.jsonl`.
+// Long-form design notes: docs/dev/migration-sources.md
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -148,39 +79,12 @@ export interface MinimaxRead {
 // Listing
 // ---------------------------------------------------------------------------
 
-/**
- * The session kinds the tool keeps out of the ordinary session list.
- *
- * `eligible()` in `projects/sidebar/predicate.ts:30-56` is the sidebar's own
- * filter and the closest thing the product has to a definition of "a
- * conversation the user had": no parent session, not archived, not hidden, and a
- * kind that is not one of these three. `cron` joins them from the shared list
- * default (`sessions/query/query-service.ts:236-238`).
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The session kinds the tool keeps out of the ordinary session list. */
 const INTERNAL_SESSION_KINDS = new Set(["peek", "task", "channel", "cron"]);
 
-/**
- * Every session the tool's own walk would find.
- *
- * The walk *is* the authority on what exists. It is the walk the tool's own
- * discovery makes — `listManifestPaths` descends exactly four levels
- * (`session-history-location.ts:186-202`) — and the manifest is what proves a
- * directory is a session: one whose JSON does not state a string `sessionId` and
- * a safe-integer `createdAtMs` belongs to nothing this reader can name and is
- * counted rather than guessed at.
- *
- * The metadata row is a *lookup*, never the authority, for the fields the
- * manifest does not carry — title, project directory, archived flag — and for the
- * three the tool's own list filters on. What that costs is stated in the notes:
- * when the database cannot be read at all, every walked session is listed (they
- * are real) but none can be classified, so a hidden or internal session is
- * imported rather than silently skipped; when the database is readable and one
- * row is missing, that session is listed and counted, because a directory with
- * history in it is a conversation whatever the missing row means.
- *
- * A session directory whose history files are both gone is counted and skipped:
- * a manifest-only session has nothing to import.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Every session the tool's own walk would find. */
 export function listMinimaxSessions(root: string): MinimaxListing {
 	const sessions: MinimaxSessionFile[] = [];
 	const counts = new Map<string, number>();
@@ -255,15 +159,8 @@ interface MinimaxManifest {
 	updatedAtMs: number;
 }
 
-/**
- * `<dir>/manifest.json`, or null when it is not a manifest this reader can name.
- *
- * `isManifestIdentity` is the tool's own guard (`session-history-location.ts:334-342`):
- * a session id that is a string and a creation time that is a safe integer, and
- * nothing else — deliberately, because the layout and the paths block are a
- * convenience and a manifest that has them wrong still names the session it is
- * for.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `<dir>/manifest.json`, or null when it is not a manifest this reader can name. */
 function readManifest(dir: string): MinimaxManifest | null {
 	const value = parseJsonText(readTextOrNull(join(dir, "manifest.json")));
 	if (value === null) return null;
@@ -276,15 +173,8 @@ function readManifest(dir: string): MinimaxManifest | null {
 	};
 }
 
-/**
- * Which history a session directory holds, and the file to open first.
- *
- * The tool's own priority is `canonical > legacy > manifest`
- * (`candidateHistoryKind`, `session-history-location.ts:271-283`), decided by
- * which files exist rather than by the manifest, which lists every path whether
- * or not it was ever written. `messages.jsonl` therefore wins when it is there,
- * and the released pair answers when it is not.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Which history a session directory holds, and the file to open first. */
 function locateHistory(dir: string): { kind: MinimaxHistoryKind; path: string } | null {
 	const messages = join(dir, "messages.jsonl");
 	if (existsSync(messages)) return { kind: "canonical", path: messages };
@@ -307,16 +197,8 @@ interface MinimaxSessionRow {
 	updatedAt: number;
 }
 
-/**
- * The session metadata, read-only, or an empty index with a note.
- *
- * `new Database(path)` *creates* a missing database, so the file is checked
- * before it is opened and the handle is closed in a `finally`: the discipline
- * `zcode-db.ts` already sets out for the other SQLite source. Every failure — a
- * missing file, a locked database, a schema newer than this query — becomes "no
- * metadata", never an aborted migration: the sessions are still there and still
- * importable, they just cannot be titled, scoped or classified.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The session metadata, read-only, or an empty index with a note. */
 function readSessionRows(
 	dbPath: string,
 	counts: Map<string, number>,
@@ -421,15 +303,8 @@ export function readMinimaxSession(session: MinimaxSessionFile): MinimaxRead | {
 	return { entries, notes: toNotes(counts) };
 }
 
-/**
- * `messages.jsonl`, decoded and validated the way the tool decodes and validates it.
- *
- * The line rules are `readJsonl`'s: one trailing empty line is the writer's final
- * newline and is dropped, and every other blank line is malformed. `parseJsonLine`
- * is a plain `JSON.parse`, and the tool replaces the parse error with a reason
- * rather than quoting the line back — a history line holds whatever the user
- * typed, so this reader does the same and names the line number only.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `messages.jsonl`, decoded and validated the way the tool decodes and validates it. */
 function readCanonical(session: MinimaxSessionFile): Outcome<RecordsOutcome> {
 	const text = readTextOrNull(session.path);
 	if (text === null) return { ok: false, reason: "canonical history file could not be read" };
@@ -466,29 +341,8 @@ const ENVELOPE_KEYS = new Set(["message_id", "turn_id", "message", "turn_config"
 /** The keys a turn configuration may carry — `TURN_CONFIG_KEYS`. */
 const TURN_CONFIG_KEYS = new Set(["system_prompt", "model", "tools"]);
 
-/**
- * One canonical envelope, or the reason it is not one.
- *
- * `decodeCanonicalHistoryEnvelope` (`canonical-history-jsonl.ts:308-338`) is the
- * rule, and two of its properties decide how much this reader trusts:
- *
- *   - the envelope's keys are **exact**, and an unknown key is not ignored: it
- *     means a writer this reader has not seen. The three named keys are required
- *     and the two optional ones are decoded to the shape that makes them
- *     recognizable, so a record whose meaning cannot be accounted for is refused
- *     rather than imported;
- *   - the *message* is not exact, and deliberately so: `decodeMessage` reads
- *     `role` and `timestamp` and spreads the rest — content, usage, stopReason,
- *     provider, model, errorMessage — through as written. That is where a
- *     transcript lives, so the tolerance is the point.
- *
- * One place is deliberately looser than the tool. A `turn_config`'s own body is
- * decoded only as far as recognizing it, because none of it is carried: a record
- * whose config is malformed but whose message is intact is imported with the
- * config dropped and counted. The tool's strict reader refuses such a file and
- * its tolerant reader drops the whole *line*, so both readings exist upstream and
- * this is the one that loses less of a real conversation.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One canonical envelope, or the reason it is not one. */
 function decodeEnvelope(value: Record<string, unknown>): Outcome<MinimaxRecord> {
 	for (const key of Object.keys(value)) {
 		if (!ENVELOPE_KEYS.has(key)) return { ok: false, reason: `envelope contains unsupported key ${key}` };
@@ -566,16 +420,8 @@ function isTurnConfig(value: unknown): boolean {
 	return config.tools === undefined || Array.isArray(config.tools);
 }
 
-/**
- * The `history_artifact` shape `decodeCanonicalHistoryArtifact` insists on.
- *
- * It marks the first envelope of a context the tool produced by compaction:
- * generation *n+1* of a context that was generation *n*, recorded with the parent
- * snapshot's id and revision so the lineage can be checked. None of it is carried
- * into the import — the compaction marker already says a context was replaced —
- * but a file whose lineage is malformed is a file the tool refuses, so it is
- * refused here.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The `history_artifact` shape `decodeCanonicalHistoryArtifact` insists on. */
 function isHistoryArtifact(value: unknown): boolean {
 	const artifact = asRecord(value);
 	if (artifact === null || artifact.schemaVersion !== 1) return false;
@@ -608,26 +454,8 @@ function isHistoryArtifact(value: unknown): boolean {
 	);
 }
 
-/**
- * The rules the tool keeps even while it is repairing (`assertRecoveryInvariants`).
- *
- * `canonical-history-recovery.ts:86-128` runs the sequence validator over the
- * records with every tool-protocol row *projected away* — tool calls stripped
- * from assistant content, tool results rewritten as empty assistant messages —
- * and then checks tool-call identity on its own. What survives that projection is
- * exactly what is checked here, because everything else has a deterministic
- * repair:
- *
- *   - an identity used twice makes a message unaddressable;
- *   - a tool call identity used twice makes a result ambiguous;
- *   - a compaction boundary that is not the unique first record contradicts the
- *     file's own layout, because a compaction *replaces* the file;
- *   - a `turn_config` that is not on the first user message of its turn has
- *     drifted off the message it describes, and it is a system prompt: attaching
- *     it to the wrong turn changes what the model was told;
- *   - a `history_artifact` past the first envelope claims a compaction the records
- *     around it do not show.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The rules the tool keeps even while it is repairing (`assertRecoveryInvariants`). */
 function validateSequence(records: readonly MinimaxRecord[]): Outcome<null> {
 	const messageIds = new Set<string>();
 	const toolCallIds = new Set<string>();
@@ -670,21 +498,8 @@ function sequenceError(at: number, reason: string): Outcome<never> {
 	return { ok: false, reason: `canonical history sequence is invalid at record ${at}: ${reason}` };
 }
 
-/**
- * Whether a record begins a new context, and whether its marker is well formed.
- *
- * `isCompactionBoundary` (`canonical-history-jsonl.ts:1056-1076`) accepts the
- * native summary and the two Archon spellings and refuses a marker it cannot
- * read. Both Archon forms are still on disk:
- *
- *   - `schemaVersion: 2` is the generation form — a `generation`, and a
- *     `parentSnapshot` naming the generation it replaced, which must be exactly
- *     one less;
- *   - `version: 2` is the recap form — the summary, the recent user queries it was
- *     built from, and the todo list it preserved;
- *   - anything else with a `summary` string is `schemaVersion: 1`, the original
- *     marker, which carried no structure worth checking.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Whether a record begins a new context, and whether its marker is well formed. */
 function compactionBoundary(message: Record<string, unknown>): Outcome<boolean> {
 	if (message.role === "compactionSummary") return { ok: true, value: true };
 	if (!Object.hasOwn(message, "archonCompaction")) return { ok: true, value: false };
@@ -772,28 +587,8 @@ function assistantToolCallIds(message: Record<string, unknown>): string[] {
 // The released (snapshot + ledger) history
 // ---------------------------------------------------------------------------
 
-/**
- * The pre-`v2` pair, replayed the way the tool replays it
- * (`released-session-history-reader.ts:68-119`).
- *
- * `snapshot.json` is the state at a watermark and `ledger.jsonl` is everything
- * after it, so the reading is: the snapshot's `piHistory` first, then each event
- * — an append adds, a replace (or a retracted turn) swaps the whole list, and a
- * delete empties it. Events are sorted by `seq` and deduplicated (identical
- * duplicates dropped, conflicting ones fatal), the tail after the watermark must
- * continue the sequence without a gap, and a half-written last line is cut before
- * parsing, because an append that died mid-write is not a corrupt ledger.
- *
- * The snapshot is a *cache*, and that is the part worth stating plainly. When it
- * is corrupt, or its tail will not read, the tool does not give up on the session:
- * it replays the **complete** ledger from sequence 1 and fails only when that
- * fails too or holds no conversation record at all. The same is done here, because
- * the ledger is the record and the snapshot is derived from it.
- *
- * A session with both files and no conversation in either answers with an empty
- * transcript rather than an error: nothing is wrong with it, it just never had a
- * conversation.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The pre-`v2` pair, replayed the way the tool replays it (`released-session-history-reader.ts:68-119`). */
 function readLegacy(session: MinimaxSessionFile): Outcome<RecordsOutcome> {
 	const snapshot = readLegacySnapshot(join(session.dir, "snapshot.json"), session.sessionId);
 	const ledger = readBytesOrNull(join(session.dir, "ledger.jsonl"));
@@ -850,17 +645,8 @@ interface LegacyEvent {
 	messages: unknown[] | undefined;
 }
 
-/**
- * `snapshot.json`, or null when there is none.
- *
- * The acceptance rules are the tool's own guards
- * (`released-session-history-reader.ts:353-397`): `schemaVersion: 1`, the session
- * id this reader asked for, a non-empty `snapshotId`, a finite `createdAtMs`, a
- * watermark naming the same session with a non-negative `lastSeq` and a byte
- * offset that is either absent or a non-negative integer, and a payload whose
- * `displayMessages` and `piHistory` are arrays with a boolean `piHistoryFacts`
- * and `deleted` — and a snapshot that says it was deleted carries no messages.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `snapshot.json`, or null when there is none. */
 function readLegacySnapshot(path: string, sessionId: string): Outcome<LegacySnapshot | null> {
 	const text = readTextOrNull(path);
 	if (text === null) return { ok: true, value: null };
@@ -902,23 +688,8 @@ function readLegacySnapshot(path: string, sessionId: string): Outcome<LegacySnap
 	};
 }
 
-/**
- * `ledger.jsonl` read from the top, deduplicated, and cut at the snapshot's
- * watermark, or the reason it cannot be.
- *
- * The tool seeks to the watermark's byte offset because a live session may be
- * appending while a turn starts; a migration has no such reader, so the file is
- * read whole and the events at or below the watermark are dropped afterwards. The
- * watermark's consistency is still checked — one pointing past the end of the
- * ledger is a state the tool refuses to read and recovers from, so it recovers
- * here too.
- *
- * An *absent* ledger is not an error and not a cause for recovery, whatever the
- * snapshot holds: the tool's `readLegacyLedgerTail` answers `undefined` for
- * `ENOENT` and its caller reads that as no events (`?? []`,
- * `released-session-history-reader.ts:62-71, 154-161`), so a session whose ledger
- * was never written — or was cleaned up — is replayed from its snapshot alone.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `ledger.jsonl` read from the top, deduplicated, and cut at the snapshot's watermark. */
 function readLedger(ledger: Buffer | null, sessionId: string, snapshot: LegacySnapshot | null): Outcome<LegacyEvent[]> {
 	if (ledger === null) return { ok: true, value: [] };
 	if (snapshot !== null && snapshot.byteOffset > ledger.length) {
@@ -1057,26 +828,8 @@ function eventRecords(sessionId: string, event: LegacyEvent): Outcome<MinimaxRec
 	);
 }
 
-/**
- * Legacy entries as canonical records.
- *
- * A legacy entry is either a bare pi message or an envelope a previous generation
- * already wrote (`isCanonicalEnvelopeShape`: `message_id` and `turn_id` and a
- * message), and the two are told apart by those keys. A bare message has neither
- * identity nor turn, so both are derived the way the tool derives them: the turn
- * id is the record's own, or the sequence of the event it came from, or — for a
- * snapshot, which has no events — a running count that opens a turn at every user
- * message and at the first one. The message id is the message's own
- * `msg_id`/`id`/`messageId` when it is spelled as a canonical id may be, and
- * otherwise a digest of the record's own bytes: stable for the same input, which
- * is what makes a re-run of the migration produce the same transcript rather than
- * a second set of identities.
- *
- * Every one of these records then goes through the *canonical* decoder, which is
- * what the tool does too (`legacyEnvelope`): a legacy message that cannot be
- * decoded is a session the tool's own migration would have failed on, so it is a
- * refusal here rather than a message imported with a guessed shape.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Legacy entries as canonical records. */
 function legacyRecords(
 	sessionId: string,
 	messages: readonly unknown[],
@@ -1118,28 +871,14 @@ function legacyRecords(
 	return { ok: true, value: records };
 }
 
-/**
- * The decoder's refusal for an entry that is not a message at all, reused verbatim.
- *
- * The tool does not skip such an entry — `legacyEnvelope` hands it to the canonical
- * decoder whatever it is, and the decoder refuses anything that is not a plain
- * object (`message must be a plain object`), which fails the whole read. Skipping
- * it here would import a transcript the tool cannot open, and would do so silently.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The decoder's refusal for an entry that is not a message at all, reused verbatim. */
 function legacyNotAMessage(): Outcome<never> {
 	return { ok: false, reason: "a legacy history message is invalid (message must be a plain object)" };
 }
 
-/**
- * `normalizeLegacyHistoryTimestamp`: a legacy stamp made into the finite number
- * the canonical shape requires.
- *
- * Legacy messages were written by a generation that allowed a string stamp
- * (`legacy-history-timestamp.ts:8-19, 68-75`), and the canonical decoder rejects
- * one. The fallback is the time of the thing the record came from — the
- * snapshot's `createdAtMs`, or the event's — and a record with neither is left
- * alone, so the decoder refuses it rather than this reader inventing a time.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `normalizeLegacyHistoryTimestamp`: a legacy stamp made into the finite number the canonical shape requires. */
 function normalizeLegacyEntry(entry: unknown, fallbackMs: number | undefined): unknown {
 	const container = asRecord(entry);
 	if (container === null) return entry;
@@ -1177,17 +916,8 @@ function timestampMs(value: unknown): number | undefined {
 // Records to messages
 // ---------------------------------------------------------------------------
 
-/**
- * The records as the target's own messages.
- *
- * The translation is close to an identity, and the differences are the whole
- * content of this function: `arguments` becomes JSON text, a thinking block loses
- * its signature, a compacted context becomes a marker instead of a message, and
- * every record that is not a message the model saw — the harness's own turn
- * configuration, a role this build does not carry, a call or a result with no
- * identity — is counted and left out. The target's `Usage` has no `cost` and no
- * `totalTokens`; both are derived numbers in the source and are dropped.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The records as the target's own messages. */
 function foldRecords(
 	records: readonly MinimaxRecord[],
 	counts: Map<string, number>,
@@ -1286,17 +1016,8 @@ function assistantRecord(
 	});
 }
 
-/**
- * A thinking block, or null when there is nothing to carry.
- *
- * A redacted block's payload lives in the signature field and belongs to the
- * provider that issued it, and a signature replayed against a provider that did
- * not issue it is the first thing an API rejects — so such a block is counted and
- * not carried, as it is by every reader here of provider-signed reasoning. Text
- * is carried without its signature for the same reason: the target has a
- * `signature` field, and leaving it empty is honest where another provider's blob
- * would not be.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A thinking block, or null when there is nothing to carry. */
 function thinkingContent(block: Record<string, unknown>, counts: Map<string, number>): AssistantContent | null {
 	const thinking = asText(block.thinking);
 	if (block.redacted === true || !thinking) {
@@ -1308,20 +1029,8 @@ function thinkingContent(block: Record<string, unknown>, counts: Map<string, num
 	return { type: "thinking", thinking };
 }
 
-/**
- * A tool call, with its arguments as the raw JSON text the target expects.
- *
- * pi stores `arguments` as a JSON object and the target stores the text of one,
- * because its adapters never parse partial JSON. A string is already text — a
- * writer that recorded arguments it could not parse stored them that way — and an
- * absent or unencodable value becomes `{}`, which is what a call with no
- * parameters takes.
- *
- * A call with no identity is dropped, which is the tool's own repair of an
- * `invalid-assistant-tool-call` and not merely a nicety: a call the target cannot
- * name is a call whose result it cannot match, and the request would be rejected
- * outright.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** A tool call, with its arguments as the raw JSON text the target expects. */
 function toolCall(block: Record<string, unknown>, counts: Map<string, number>): ToolCall | null {
 	const id = asText(block.id);
 	if (!id) {
@@ -1405,15 +1114,8 @@ function imageContent(block: Record<string, unknown>, counts: Map<string, number
 	return { type: "image", mimeType, data };
 }
 
-/**
- * How a turn ended, in the target's vocabulary.
- *
- * pi writes five of the target's seven reasons, so the mapping is the identity
- * for those and for the two the target added and a newer writer may already
- * record. Anything else is from a vocabulary this build has not been taught: it is
- * counted, and the answer is read from the content instead — the derivation the
- * readers of every source that records no reason use.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** How a turn ended, in the target's vocabulary. */
 function stopReasonOf(reason: unknown, content: readonly AssistantContent[], counts: Map<string, number>): StopReason {
 	switch (reason) {
 		case "stop":

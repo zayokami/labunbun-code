@@ -1,68 +1,6 @@
-/**
- * Qoder's user state in the target's shape: the permission posture, the MCP
- * servers, the hooks, the skills and the memory, and everything the reader saw
- * that this importer will not carry.
- *
- * **The first thing to know about this source is what it does not have.** A
- * migration from most tools in this repository is mostly three scalars — a
- * model, a theme, a permission mode — and Qoder 0.4.3's `settings.json` carries
- * none of them. That is not a gap in the reading; it is what the bytes say. The
- * desktop app reads its settings field by field, and **every call that names a
- * literal names one of five keys**:
- *
- * ```js
- * readField("hooks", …)   readField("mcpServers", …)   readField("enabledPlugins", …)
- * readField("pluginConfigs", …)   readField("chatSession.builtInBrowserHosts", …)
- * ```
- *
- * There is no field call for a permission mode, a theme or a model anywhere in
- * the bundle. So this planner claims **one** scalar, and the other two are absent
- * rather than unhandled. {@link planQoderAbsentScalars} is the line that says so,
- * and it is the most important line this file writes.
- *
- * **The permission mode is read anyway, because the key is real.** The SDK's
- * settings writer sets `general.defaultPermissionMode`. It occurs **twice** in the
- * SDK bundle, **35 bytes apart inside one expression** — `o !== undefined &&
- * s.defaultPermissionMode === undefined && (s.defaultPermissionMode = o)` at byte
- * 12207 and 12242 — so it is one site, not two: a read followed by a write of the
- * same key. There is no third occurrence, and **none in the desktop bundle**. The
- * one site is the *outbound* direction (this build's `t.defaultMode`, translated by
- * `toQoderDefaultPermissionMode`), which is weaker evidence than it looks: it
- * proves the SDK can *write* the key, and says nothing about where Qoder *reads*
- * it, because no read site is attested anywhere we can see. So the key exists, and
- * a user who installed the CLI side may have one. It is claimed when present and
- * the report says that a desktop-only install will not have it. That is the
- * opposite of the tempting alternative, which is to skip the key because
- * "the desktop doesn't read it" and leave a CLI user's mode behind.
- *
- * **The settings are a merge of three files, and this planner reads the merge.**
- * `~/.qoder/settings.json` is only the **user** layer. The SDK's loader
- * (`settingSources` defaults to `["user","project","local"]`) also reads
- * `<cwd>/.qoder/settings.json` and `<cwd>/.qoder/settings.local.json`, and folds
- * them in with per-path policies — six top-level keys merged **one level deep**,
- * thirteen paths **unioned**, hook event groups **concatenated**, and everything
- * else merged all the way down. `mcpServers` is one of the six: a project's server
- * map unions with the user's, but a server both declare is taken **whole** from the
- * project. So `RawQoder.settings` is the merge, `RawQoder.provenance` says which
- * file last supplied each key, and every label below that names a settings key
- * names that file. Reading the user layer alone would have imported servers with
- * commands and environments the project has replaced. The merge itself is
- * `mergeQoderSettings` in `qoder-read.ts`.
- *
- * **Three things are deliberately not migrated, and each is a decision with a
- * reason rather than an omission:**
- *
- *   1. **MCP `env` values and `headers`.** Both can hold a bearer token, and both
- *      are copied by name only — see {@link planQoderMcp}. Qoder itself refuses a
- *      literal `authorization` or `token`, but `headers: { "x-api-key": … }` is a
- *      shape it accepts, so a value could reach a written file through a key name
- *      no scanner here would recognise as a credential.
- *   2. **BYOK provider credentials.** Not a decision so much as a fact: Qoder
- *      seals the key before it stores it (`{schemaVersion: 1, apiKey}` →
- *      `protectionService.protectString` → `byok_model_credentials.encrypted_payload`),
- *      so there is nothing in `settings.json` to migrate and nothing to re-auth.
- *   3. **Sessions.** Counted, never opened; see `qoder-session.ts`.
- */
+// Qoder's user state in the target's shape: the permission posture, the MCP servers, the hooks, the
+// skills and the memory, and everything the reader saw that this importer will not carry.
+// Long-form design notes: docs/dev/migration-sources.md
 
 import { join } from "node:path";
 import type { PermissionMode, SandboxMode } from "@labunbun/agent";
@@ -88,58 +26,12 @@ import {
 import type { RawQoder } from "./qoder-read.ts";
 import { qoderSettingsOrigin, qoderSettingsSubkeyOrigin } from "./qoder-read.ts";
 
-/**
- * This source's id, spelled once.
- *
- * The union and every table keyed by it live in `migrate-types.ts`; this is a
- * plain literal with no cast, and the only thing it buys is one spelling rather
- * than eleven. **The call lives in `migrate.ts`** — see that file's arm for
- * `qoder`, which is where this planner is actually reached from.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** This source's id, spelled once. */
 const SOURCE: MigrationSourceId = "qoder";
 
-/**
- * Qoder's permission modes → this build's two mode axes.
- *
- * **The vocabulary is the SDK's own**, and it is worth being precise about where
- * it comes from, because it is easy to mistake for a guess. `toQoderDefaultPermissionMode`
- * is the SDK translating *this build's* mode names into the strings it passes to
- * Qoder's CLI:
-
- * ```js
- * case "acceptEdits":        return "accept_edits";
- * case "bypassPermissions":
- * case "yolo":               return "bypass_permissions";
- * case "dontAsk":            return "dont_ask";
- * case "default": case "accept_edits": case "bypass_permissions":
- * case "dont_ask": case "plan": case "auto": return e;
- * ```
-
- * The right-hand column of that switch is Qoder's vocabulary, and the pass-through
- * cases are the whole of it: `default`, `accept_edits`, `bypass_permissions`,
- * `dont_ask`, `plan`, `auto`.
- *
- * **Two map and four do not.**
- *
- * - `accept_edits` → `ask`, which is **narrower than it says.** This build has no
- *   mode that applies edits without asking, so every write gets asked like
- *   everything else. Widening a permission setting is the direction a migration
- *   must not move in on its own, and the report line says so in those words
- *   rather than calling it a rename.
- * - `bypass_permissions` → `agent` + `danger-full-access`, and both halves are
- *   claimed together because that single value is doing two jobs — never ask
- *   *and* no confinement. Claiming only the mode half would leave a session that
- *   auto-approves everything and still enforces a sandbox, which is a combination
- *   no user chose.
- * - `default` → **nothing**, because it is the schema's absence rather than a
- *   choice. Writing the strictest posture on the user's behalf "because their
- *   schema would have supplied it" is the fail-open failure `t3-plan.ts` argues at
- *   length; omitting it leaves the session at this build's own default.
- * - `auto`, `dont_ask` and `plan` → nothing, each for its own reason below.
- *
- * Exported for the row count, not for the values: a row added here without a line
- * in the mapper test's table is an import whose claim nobody has checked.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Qoder's permission modes → this build's two mode axes. */
 export const QODER_PERMISSION_MODES: Record<string, { mode: PermissionMode; sandbox: SandboxMode } | undefined> = {
 	accept_edits: { mode: "ask", sandbox: "workspace-write" },
 	bypass_permissions: { mode: "agent", sandbox: "danger-full-access" },
@@ -149,16 +41,8 @@ export const QODER_PERMISSION_MODES: Record<string, { mode: PermissionMode; sand
 	plan: undefined,
 };
 
-/**
- * Top-level keys of `settings.json` this mapper accounts for.
- *
- * Read as the *whole* list, and read against the reader's header. `mcpServers`
- * and `hooks` are the two this planner actually reads; `general` is here because
- * `planQoderPermissionMode` handles exactly one key under it and reports the
- * rest; the last three get a line of their own from
- * {@link planQoderPlugins} or from {@link planQoderAbsentScalars} and so are not
- * the unhandled-key catch-all's business.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Top-level keys of `settings.json` this mapper accounts for. */
 const QODER_SETTINGS_HANDLED = new Set([
 	"mcpServers",
 	"hooks",
@@ -171,26 +55,8 @@ const QODER_SETTINGS_HANDLED = new Set([
 /** The keys under `general` this mapper accounts for. See {@link QODER_PERMISSION_MODES}. */
 const QODER_GENERAL_HANDLED = new Set(["defaultPermissionMode"]);
 
-/**
- * The keys Qoder's own settings reader recognises on one MCP entry, verbatim.
- *
- * Two sets exist in the bundle and **they are not the same set**, which is the
- * kind of detail that produces a wrong report if the wrong one is quoted. This is
- * the **live** one — the set the settings editor checks an edited entry against
- * before it will save it:
- *
- * ```js
- * new Set(["displayName","command","args","cwd","env","environment","url","qoder_url",
- *          "type","authType","legacySseFallback","headers","timeout"])
- * ```
- *
- * The other one — a 12-name array including `disabled` and excluding
- * `displayName` and `qoder_url` — belongs to the **QoderWork importer**, which
- * reads a *foreign* product's file and is not what wrote this one. The difference
- * is why `disabled` gets its own sentence below rather than being treated as
- * ordinary: it is written by the product (`setEntryDisabled` sets and deletes it)
- * and read by the live normalizer, but it is absent from the editor's own key set.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The keys Qoder's own settings reader recognises on one MCP entry, verbatim. */
 const QODER_MCP_KEYS = new Set([
 	"displayName",
 	"command",
@@ -207,27 +73,8 @@ const QODER_MCP_KEYS = new Set([
 	"timeout",
 ]);
 
-/**
- * The report label for a settings key: the file its value came from, plus the
- * layer when that file is not the user's own.
- *
- * **The layer suffix is the point.** A project or local `settings.json` supplies
- * any of the six {@link QODER_MERGE_SHALLOW} keys in whole — a server entry, a
- * plugin's configuration, one provider — so a report that printed
- * `~/.qoder/settings.json → mcpServers` for a server that in fact came from
- * `<project>/.qoder/settings.json` would send the user to edit the wrong file and
- * find nothing there. The `user` layer prints no suffix: it is where
- * these labels have always pointed, and a report line reading "the user layer"
- * tells a reader nothing they did not have.
- *
- * `subkey` narrows the file as well as the label. The SDK's provenance is keyed by
- * top-level name, so `mcpServers` — carried by every layer that has any server at
- * all — would attribute a server the *project* never mentioned to the project
- * file. {@link qoderSettingsSubkeyOrigin} asks the question at the granularity the
- * label is printed at, and the suffix is appended **after** the subkey so the
- * result reads `… → mcpServers.demo (project layer)` rather than
- * `… → mcpServers (project layer).demo`.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The report label for a settings key: the file its value came from, plus the layer. */
 function qoderFrom(raw: RawQoder, key: string, subkey?: string): string {
 	const top = raw.provenance[key];
 	const file = qoderSettingsOrigin(raw.home, raw.provenance, key, raw.settingsPath);
@@ -245,15 +92,8 @@ function qoderFrom(raw: RawQoder, key: string, subkey?: string): string {
 	return `${shown.path} → ${label}${suffix}`;
 }
 
-/**
- * The three scalars every other source here maps, and the one line that explains
- * their absence from Qoder.
- *
- * This is the sentence a user who ran `/model` in Qoder and expects to find it
- * here is owed. It is not an apology — it is a fact with a citation, and stating
- * it is what stops a report that lists four settings from looking like four
- * settings were quietly dropped.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** The three scalars every other source here maps, and the one line that explains their absence. */
 function planQoderAbsentScalars(raw: RawQoder, items: MigrationItem[]): void {
 	if (raw.settings === null) return;
 	items.push({
@@ -271,20 +111,8 @@ function planQoderAbsentScalars(raw: RawQoder, items: MigrationItem[]): void {
 	});
 }
 
-/**
- * `general.defaultPermissionMode` → this build's two mode axes, when the file
- * states one.
- *
- * **The key is claimed only when present, and that is the whole argument.** See
- * the header for why it is read at all when no code in the shipped desktop reads
- * it: the SDK writes it, so a CLI-side install can have one, and "the desktop
- * doesn't read it" is not a reason to leave a user's stated posture behind.
- *
- * An absent key means nothing claimed and nothing said — the same call
- * `planT3RuntimeMode` makes for an absent `defaultRuntimeMode`, and for the same
- * reason. Importing the schema's default would be writing `agent` +
- * `danger-full-access` for a user whose file said nothing.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `general.defaultPermissionMode` → this build's two mode axes, when the file states one. */
 function planQoderPermissionMode(raw: RawQoder, items: MigrationItem[], claimModePair: ClaimModePair): void {
 	if (raw.settings === null) return;
 	const general = raw.settings.general;
@@ -344,48 +172,8 @@ function planQoderPermissionMode(raw: RawQoder, items: MigrationItem[], claimMod
 	});
 }
 
-/**
- * One MCP server from `settings.mcpServers` → this build's server shape.
- *
- * **The transport is decided by Qoder's own live normalizer, and its rules are
- * not the ones a reader would guess.** From the code that validates an entry
- * before the settings editor will save it:
- *
- * ```js
- * const hasCommand = typeof e.command === "string",
- *       hasUrl     = typeof e.url     === "string";
- * if (!trustedGateway && !hasCommand && !hasUrl) $A("MCP_CONFIG_TRANSPORT_REQUIRED", …);
- * if (!trustedGateway && hasCommand && hasUrl)      $A("MCP_CONFIG_TRANSPORT_AMBIGUOUS", …);
- * ```
- *
- * So: an **empty** `command` string still selects stdio, `command` and `url`
- * together is an **error rather than "command wins"**, and a third transport
- * exists — a `qoder_url` pointing at Qoder's own managed gateway, which is only
- * accepted when the URL passes a region-and-trusted-domain check against an
- * environment this build does not have. Each of those three becomes its own
- * outcome below.
- *
- * **Two credential paths are stripped, and neither is a guess about the user's
- * intentions.**
- *
- *   - **`headers`** are dropped whole. Qoder's stdio normalizer keeps an
- *     `environment` block and its URL branch keeps `headers`, and a header value
- *     is an ordinary place for a bearer token — `headers: {"x-api-key": …}` is a
- *     shape Qoder accepts and a shape no name-based credential scan here would
- *     flag. Dropping the block loses the server's authentication, which the
- *     report says, and that is the right trade: a server that asks for its
- *     credentials again is a nuisance, and a token written into a file the user
- *     then shares is not.
- *   - **`env` values are not copied; the names are.** Same reasoning, applied to
- *     the stdio branch, where the values are the process environment of a spawned
- *     server. The names come across in the report and the user can fill them in.
- *     A name that reads as a credential was already gone before this function ran:
- *     `readQoder` deletes every key matching `looksLikeSecretName` — and more than
- *     that, `QODER_SECRET_KEY` — at every depth, and records one `skipped` line
- *     per deletion naming the exact path. So `entry.env` holds only names that did
- *     **not** read as credentials, which is why this function counts them without
- *     re-sorting them.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** One MCP server from `settings.mcpServers` → this build's server shape. */
 function planQoderMcp(
 	raw: RawQoder,
 	items: MigrationItem[],
@@ -511,21 +299,7 @@ function planQoderMcp(
 			continue;
 		}
 
-		// The URL is the one credential channel no name-based scan can see: the
-		// token is not under a secret-shaped key, it is inside the one string every
-		// importer treats as a safe identifier. `headers` and `env` are handled by
-		// dropping the credential and keeping the server; **there is no such half
-		// here** — a URL with its userinfo or its `?access_token=` removed is a
-		// different URL that points at nothing, and writing one would trade a
-		// credential on disk for a server that fails at connect time while the
-		// report calls the copy a clean `map`. So the server is not carried across,
-		// and the reason says which shape was found without printing any of it.
-		//
-		// `containsSecret` is `true` here although nothing was written. The flag is
-		// documented as "whether the migrated value is a credential" and the value
-		// this line is about *is* one — nothing reads it today, but a future reader
-		// filtering items for "was anything here a secret?" should not have to
-		// re-derive this from the prose above.
+		// Long-form design notes: docs/dev/migration-sources.md
 		if (!hasCommand && url !== "") {
 			const problem = urlCredentialProblem(url);
 			if (problem !== null) {
@@ -684,35 +458,8 @@ function planQoderMcp(
 	}
 }
 
-/**
- * `settings.hooks` → this build's hook config, through the shared normalizer.
- *
- * **The shape is Qoder's own and the event names are checkable against a list.**
- * `hGr` validates the block and is not zod: each key of `hooks` is an event name
- * it takes verbatim, each event's value is an array of groups, and each group is
- * `{ matcher?, hooks: [...] }`. The reader's output record carries
- * `{id, event, matcher, condition, hookType, summary, async, asyncRewake, once, groupIndex, hookIndex}`.
- *
- * Two things follow from that record and both cost something if dropped silently:
- *
- *   - **There is no timeout.** Not "the unit is unknown" — the reader has no
- *     timeout field at all, so there is nothing on disk for a timeout to come
- *     from. Handlers are written untimed and this build's default applies.
- *   - **`if`, `async`, `asyncRewake` and `once` have no equivalent here.** `if` is
- *     a condition Qoder evaluates before running; this build's hook entry has no
- *     condition field, so a conditional hook would run unconditionally — which is
- *     why the *conditional* ones are skipped rather than widened. `once` means
- *     "run this one time" and dropping it would make the hook run on every event
- *     instead, so those are skipped too. `async` runs the hook without blocking
- *     the turn; dropping it makes the hook synchronous, which is the *stricter*
- *     direction and the one safe default.
- *
- * The event list is the other half of the decision and it is in the SDK:
- * {@link QODER_HOOK_EVENTS}, eighteen names. Seven of them are events this build
- * runs; the rest are reported through `droppedEvents`, which is what
- * `normalizeClaudeHooks` collects precisely so an event nobody has a word for
- * becomes a sentence rather than a silence.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** `settings.hooks` → this build's hook config, through the shared normalizer. */
 function planQoderHooks(raw: RawQoder, items: MigrationItem[], claimHooks: ClaimHooks): void {
 	if (raw.hooks === undefined) return;
 	const from = qoderFrom(raw, "hooks");
@@ -800,14 +547,8 @@ function planQoderHooks(raw: RawQoder, items: MigrationItem[], claimHooks: Claim
 	}
 }
 
-/**
- * Count the hook entries matching a predicate, without reading anything else.
- *
- * Walks the same three levels `hGr` does — event → group → handler — and treats
- * anything that is not the shape as not matching, which is the same tolerance
- * `normalizeClaudeHooks` applies. It exists so the report can say "3 handlers were
- * left off" from the file rather than from a guess about how many were there.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Count the hook entries matching a predicate, without reading anything else. */
 function QoderHookCount(hooks: unknown, predicate: (entry: Record<string, unknown>) => boolean): number {
 	if (!isRecord(hooks)) return 0;
 	let count = 0;
@@ -823,15 +564,8 @@ function QoderHookCount(hooks: unknown, predicate: (entry: Record<string, unknow
 	return count;
 }
 
-/**
- * Whether a path is absolute, without pulling `node:path`'s platform behaviour in.
- *
- * Qoder's own check is `path.isAbsolute`, which is platform-dependent — and this
- * reader has to decide about a *file written on another machine*, so it tests both
- * spellings rather than the one this process would use. A Windows path read on
- * Linux is absolute in every sense that matters here, and dropping it because the
- * importing machine is not Windows would lose a working server.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Whether a path is absolute, without pulling `node:path`'s platform behaviour in. */
 function isAbsolutePath(path: string): boolean {
 	return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
@@ -856,16 +590,8 @@ function planQoderPlugins(raw: RawQoder, items: MigrationItem[]): void {
 	}
 }
 
-/**
- * Skills and memory.
- *
- * **A skill is copied verbatim because the two shapes are the same** — a
- * directory with a `SKILL.md` in it, carrying `name` and `description` — so there
- * is no rewrite to explain. The two memory documents are told apart by name:
- * `MEMORY.md` is Qoder's index and a dated file is an entry, and both become rule
- * files with distinct names because collapsing them would assert that an index is
- * an entry.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Skills and memory. */
 function planQoderAssets(raw: RawQoder, force: boolean, items: MigrationItem[], writes: PlannedWrite[]): void {
 	collectFileWrites(
 		SOURCE,
@@ -930,19 +656,7 @@ function planQoderAssets(raw: RawQoder, force: boolean, items: MigrationItem[], 
 		});
 	}
 
-	// The standing instruction document, as a rule file.
-	//
-	// **A rule file and not a memory entry**, for the reason `planMemoryAsRule`'s
-	// own detail line already states: this build merges rule files with the
-	// memory it has instead of replacing it, which is what a document the agent
-	// re-reads at the top of every session wants. The name is
-	// `imported-qoder-agents.md` and not one of the `imported-qoder-<basename>.md`
-	// names above, so an `AGENTS.md` cannot collide with an `agents.md` memory
-	// entry — and if a user has both, the two stay two files.
-	//
-	// **No report line when there is no document**, which is the same contract the
-	// ten other importers have: a `null` here is not a failure and is not worth a
-	// row. A test pins that, in both directions.
+	// Long-form design notes: docs/dev/migration-sources.md
 	if (raw.agentsMd?.trim()) {
 		planMemoryAsRule(
 			SOURCE,
@@ -957,14 +671,8 @@ function planQoderAssets(raw: RawQoder, force: boolean, items: MigrationItem[], 
 	}
 }
 
-/**
- * Everything the reader saw and this importer will not carry.
- *
- * **The session count is the point of this function.** A report that says "7
- * sessions left behind" is worth writing even though the migration does not move
- * them: it is the difference between a user who expected their history to come
- * across and being told, and a user who never had any.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Everything the reader saw and this importer will not carry. */
 function planQoderLeftovers(raw: RawQoder, items: MigrationItem[]): void {
 	if (raw.projectMcpPath !== null) {
 		items.push({
@@ -1062,19 +770,8 @@ function planQoderLeftovers(raw: RawQoder, items: MigrationItem[]): void {
 	}
 }
 
-/**
- * Assemble the plan.
- *
- * Every parameter is one something below uses: `claimModePair` for the one
- * scalar, `claimHooks` for the hook block, `mcpServers`/`markMcpSecret` for the
- * one place a credential could still reach a written file, and
- * `existingMcpServers`/`force` for a server the user already has. There is **no
- * `claimEnv` and no `claimScalar`**, and both absences are load-bearing rather
- * than oversights: this build has one variable Qoder stores a value under — an
- * MCP server's `env` — and the instruction on this source is that those values
- * do not come across, and there is no theme or model to claim at all. See the
- * header for why.
- */
+// Long-form design notes: docs/dev/migration-sources.md
+/** Assemble the plan. */
 export function planQoder(
 	raw: RawQoder,
 	items: MigrationItem[],
