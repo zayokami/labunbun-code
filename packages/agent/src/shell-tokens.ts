@@ -1,41 +1,12 @@
-/**
- * Shell tokenizing, shared by the two places that have to read a command line
- * the way a shell would: the permission engine's Bash→file-rule extension, and
- * the dangerous-command classifier.
- *
- * It was one function living inside `permissions.ts` until the classifier needed
- * the same reading, and a second copy would be a second set of answers to "what
- * are the words in this command" — the failure mode being that a rule or a
- * classification quietly applies to one tokenizer's idea of a command and not
- * the other's.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** Shell tokenizing, shared by the permission engine and the dangerous-command classifier. */
 
-/**
- * Shell metacharacters that separate one command from the next.
- *
- * `&` and `;` cover backgrounding and sequencing, `|` a pipe, and a newline the
- * same job `;` does. The two-character forms come first in the alternation so
- * `&&` is not read as two `&`.
- *
- * **This does not know about quotes, and splitting a command line with it is
- * wrong in a way that shows up as a false positive rather than a missed match.**
- * `printf 'a;rm -rf /'` is one command that prints; split with this it becomes
- * two, and the second one is classified. Use {@link splitShellCommands}, which
- * tracks quoting and backslash escapes. This stays exported because it also
- * answers "which characters are separators", which is a question about the
- * alphabet rather than about any one command.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** Shell metacharacters that separate one command from the next. */
 export const COMMAND_SEPARATOR_RE = /(?:\|\||&&|[;|&\n])/;
 
-/**
- * Split one shell segment into tokens, honoring quotes so a quoted path with
- * spaces stays one token, and unwrapping the quotes as the shell would.
- *
- * Not a shell: no expansion, no substitution, no escaping. A token it cannot
- * read comes back as literal text, which is the safe direction for both callers —
- * a rule that fails to match costs an approval prompt, and a command the
- * classifier cannot decompose is one whose nested pieces it never got to look at.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** Split one shell segment into tokens, honoring quotes and unwrapping them. */
 export function tokenizeShell(segment: string): string[] {
 	const tokens: string[] = [];
 	let current = "";
@@ -71,43 +42,13 @@ export function tokenizeShell(segment: string): string[] {
 export interface ShellSegment {
 	/** The command's own text, trimmed, with its quote characters still on it. */
 	text: string;
-	/**
-	 * The separator that follows this command: `|`, `&&`, `||`, `;`, `&`, a
-	 * newline, or `""` when the command ends the line.
-	 *
-	 * Only `|` moves bytes from the command on its left to the command on its
-	 * right. Every other value here means the second command starts fresh, so a
-	 * caller reasoning about dataflow needs this field and not just the text —
-	 * which is the whole reason {@link splitShellSegments} exists.
-	 */
+	// Long-form design notes: docs/dev/command-classifier.md
+	/** The separator that follows this command: `|`, `&&`, `||`, `;`, `&`, a newline, or `""` when the command ends the line. */
 	separator: string;
 }
 
-/**
- * Split a command line into the separate commands it runs, keeping each one's
- * terminator.
- *
- * The scan tracks two things the regex it replaces did not, and both of them
- * were producing wrong answers rather than merely coarse ones.
- *
- * **Quotes.** `echo "a;rm -rf /"` is one command that prints six words. Split on
- * the separator characters alone it becomes two, and the second is a forced
- * recursive delete — so the classifier refused commands that print text
- * containing a semicolon, which is the sort of false positive a user answers by
- * switching the thing off.
- *
- * **Backslashes.** A backslash quotes the character after it, so `find . -exec
- * cmd \;` is one command whose argument is a semicolon. Split naively, the
- * trailing `\` was dropped and the segment lost its terminator.
- *
- * A backslash inside single quotes is itself rather than an escape, which is the
- * one rule here that does not generalise and is the reason this is a scanner and
- * not a single lookbehind.
- *
- * The quote characters are left in each segment. {@link tokenizeShell} is what
- * unwraps them, and the segments are meant to keep their original text so a
- * caller that shows one to a user shows what was actually typed.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** Split a command line into the separate commands it runs, keeping each one's terminator. */
 export function splitShellSegments(command: string): ShellSegment[] {
 	const segments: ShellSegment[] = [];
 	let current = "";
@@ -159,16 +100,8 @@ export function splitShellSegments(command: string): ShellSegment[] {
 	return segments.filter((segment) => segment.text.length > 0);
 }
 
-/**
- * The commands of a command line, without their separators.
- *
- * This is the form most callers want: they ask what a line *does*, not how the
- * pieces are joined, and dropping the separator loses nothing for them. It is
- * defined in terms of {@link splitShellSegments} so that the scan is written
- * once — the two had drifted apart in an earlier revision, which is the sort of
- * thing that shows up later as one of them quietly answering a different
- * question than the caller believes it is asking.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** The commands of a command line, without their separators. */
 export function splitShellCommands(command: string): string[] {
 	return splitShellSegments(command).map((segment) => segment.text);
 }

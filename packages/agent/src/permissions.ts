@@ -129,28 +129,8 @@ const FILE_READING_COMMANDS = new Set([
 /** Shell metacharacters that separate one command from the next. */
 export { COMMAND_SEPARATOR_RE, tokenizeShell } from "./shell-tokens.ts";
 
-/**
- * Best-effort extraction of file paths a shell command would read or write.
- *
- * This exists so that a deny rule like `Read(**\/.env)` also covers
- * `Bash(cat .env)` — without it the shell is an open bypass around every file
- * deny rule the user configured.
- *
- * Deliberately defense-in-depth, and still not a sandbox: a shell can express
- * file access in unbounded ways (`$(printf ...)`, variable indirection, `bash
- * -c`, `eval`), so static extraction can always be evaded by someone trying.
- * The contract that keeps this safe to rely on is directional — callers use the
- * result only to *deny*, never to allow. Failing to extract a path leaves the
- * original decision untouched rather than widening it.
- *
- * What constrains a command today is neither this function nor the sandbox axis.
- * The sandbox axis is enforced — by seatbelt or bubblewrap on the platforms
- * that have them, and by the tool-layer path policy where they do not, which
- * `describeSandboxBackend` says out loud rather than leaving for the reader to
- * assume. The per-command classifier sits above every mode and above the
- * sandbox setting in both directions. Neither of those reaches a process that
- * goes around the tools, which is the honest limit of the pair.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** Best-effort extraction of file paths a shell command would read or write. */
 export function extractBashFilePaths(command: string): string[] {
 	const found: string[] = [];
 
@@ -184,16 +164,8 @@ export function extractBashFilePaths(command: string): string[] {
 	return found.filter((path) => path.length > 0);
 }
 
-/**
- * Tools whose file deny rules a Bash command should also be held to.
- *
- * The set is about *rules a user has written*, not about the tools this build
- * ships: `NotebookEdit` is named because the importer reads settings written for
- * another tool that had one, and a rule protecting a path has to protect it from
- * the shell as well — dropping the name would quietly re-open the path for every
- * such rule. A name here that matches no tool costs nothing; a name missing here
- * costs the rule.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** Tools whose file deny rules a Bash command should also be held to. */
 const FILE_TOOL_NAMES = new Set(["Read", "Edit", "Write", "NotebookEdit"]);
 
 /**
@@ -360,27 +332,7 @@ export function evaluatePermissions(
 	if (toolName === "Bash") {
 		const command = readBashCommand(input);
 		if (command === undefined) {
-			// Fail closed, and say so, rather than falling through to "not a
-			// dangerous command".
-			//
-			// **Unreachable through the built-in Bash tool today**, and this
-			// branch is here because of what it would mean if it were not. The
-			// pipeline parses tool input against the tool's schema *before* it
-			// calls `canUseTool` (`pipeline.ts`, the order is zod safeParse →
-			// validateInput → beforeToolCall → canUseTool), so a `command` that is
-			// not a string never reaches this function — the tool call already
-			// failed validation.
-			//
-			// But that guarantee lives in another file and is enforced by nothing
-			// that ties the two together. The alternative was to read "I could not
-			// find the command" as "the command is not dangerous", which is the
-			// one inference this whole step must never make: a classifier that is
-			// not consulted cannot report a match, and an `agent`-mode call with
-			// no allow rule would then be let through by the mode's own answer
-			// below. Relaxing the Bash schema from `z.string()` to `z.unknown()`
-			// is all it would take. Measured before the change:
-			// `evaluatePermissions("Bash", { command: 123 }, { mode: "agent", … })`
-			// returned `allow`, and so did `{ command: null }` and `{}`.
+			// Long-form design notes: docs/dev/command-classifier.md
 			return {
 				behavior: "deny",
 				message: `Bash: the call carries no readable string command, so nothing can be classified. Refused rather than treated as safe — a call that is not shaped like a Bash call should have failed schema validation first.`,
@@ -415,19 +367,8 @@ function readBashCommand(input: unknown): string | undefined {
 	return typeof command === "string" ? command : undefined;
 }
 
-/**
- * What a classified command becomes, per mode.
- *
- * `ask` asks, and says why — the reason is the only thing the dialog has that
- * the model does not, so a bare "allow?" would train a user to say yes to the
- * one prompt that needed reading.
- *
- * `agent` refuses outright, and that is what keeps "every call runs without
- * asking" from being read as "every
- * call runs, including the one that deletes the repository". A mode that
- * auto-approves everything has nothing left to protect a user with, so the
- * commands that cannot be un-done are the ones it is not allowed to spend.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** What a classified command becomes, per mode. */
 function decideDangerous(match: DangerousCommandMatch, mode: PermissionMode): PermissionResult {
 	const why = `Blocked as a dangerous command: ${match.rule}`;
 	if (mode === "agent") {
@@ -439,17 +380,8 @@ function decideDangerous(match: DangerousCommandMatch, mode: PermissionMode): Pe
 	return { behavior: "ask", message: why };
 }
 
-/**
- * Does a bare (specifier-less) MCP rule cover this tool?
- *
- * MCP tools are named `mcp__<server>__<tool>`, and rules for them are written
- * as bare tool names rather than `Tool(specifier)` form: `mcp__github` for a
- * whole server, `mcp__github__*` for the same thing spelled with a wildcard,
- * `mcp__github__create_issue` for one tool. Without this, all three fell
- * through to the exact-equality check in `ruleMatches`, so only the fully
- * spelled-out third form ever matched and the server-wide forms were silently
- * inert — a rule the user believed was in force doing nothing at all.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** Does a bare (specifier-less) MCP rule cover this tool? */
 function mcpRuleMatches(ruleToolName: string, toolName: string): boolean {
 	if (ruleToolName === toolName) return true;
 	if (ruleToolName.includes("*")) return specifierToRegExp(ruleToolName).test(toolName);
@@ -466,34 +398,8 @@ function ruleMatches(rule: PermissionRule, toolName: string, input: unknown, cwd
 	return inputMatchesSpecifier(toolName, rule.specifier, input, cwd);
 }
 
-/**
- * What plan mode still permits: the tools that only look at the world, and the
- * one that only asks about it.
- *
- * By name, because this package is handed tool names and never tool objects —
- * `Tool.isReadOnly` is the tools' own answer to the same question, and nothing
- * here can read it. So the two are kept in step by hand, and
- * `plan-mode-allowlist.test.ts` walks the tool set the app actually builds and
- * fails on any disagreement in either direction — including the reverse one, a
- * name here that no tool answers to (a `TodoWrite` entry outlived the tool it
- * named, and a mode admitting a tool nothing offers reads as a capability the
- * user has and does not).
- *
- * AskUserQuestion is here because asking changes nothing, and plan mode is
- * exactly where a guess would otherwise be made — a plan built on an assumed
- * goal costs the user a whole approval cycle to reject. BandMessage is here
- * for the same shape of reason: it wakes and informs other sessions, and
- * whatever a woken session then does is evaluated in that session under the
- * same mode — the bus cannot buy a write the mode promised does not exist,
- * while a bus left off the list is a whole subsystem silently switched off
- * rather than gated. WebFetch/WebSearch are here for the same reason Read is:
- * research that touches no file of the workspace. Bash is not, and that is the
- * mode's promise: no shell at all, not even a read-only one.
- *
- * Exported for that test: the reverse direction cannot be checked through
- * `evaluatePermissions`, which answers "deny" for a name it does not know and
- * "deny" for a mutating tool the same way.
- */
+// Long-form design notes: docs/dev/command-classifier.md
+/** What plan mode still permits: the tools that only look at the world, and the one that only asks about it. */
 export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
 	"Read",
 	"Grep",
