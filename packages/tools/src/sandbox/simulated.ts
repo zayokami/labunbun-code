@@ -1,124 +1,12 @@
-/**
- * The Windows filesystem sandbox — which is not a sandbox, and says so.
- *
- * **What this module is not, stated precisely.** It is not OS-level enforcement.
- * A subprocess started outside the tools is not subject to it, and nothing here
- * should ever be described as if it were. Read the result of this module as "the
- * Write/Edit tool call was refused by this process", never as "the write could
- * not have happened".
- *
- * ## It used to also claim there was nowhere else to go
- *
- * This header said a real Windows confinement layer "compiles two helper
- * binaries and registers a Windows service", that this build does none of that,
- * "and there is no user-mode equivalent of macOS `seatbelt`". The first half is
- * about one design. The second half was **false, and false in the expensive
- * direction**: it named a missing capability that exists, and it was being read
- * as the reason the Windows half is thin.
- *
- * Verified against the Windows SDK 10.0.26100.0 headers on this machine:
- *
- *   - `userenv.h:1398`  `CreateAppContainerProfile`
- *   - `userenv.h:1550`  `DeriveAppContainerSidFromAppContainerName`
- *   - `WinBase.h:3591`  `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
- *   - `winnt.h:12671`    `SECURITY_CAPABILITIES`
- *
- * All four are documented, user-mode, and need neither a driver nor a service
- * nor elevation. An AppContainer child gets a package SID the kernel checks on
- * every file access, which is a real write boundary.
- *
- * **What is absent is not the mechanism, and not the wiring either — it is the
- * reason production still lands here.** `packages/tools/src/sandbox/appcontainer.ts`
- * now implements the whole backend: the profile lifecycle and the confined spawn
- * (create / derive / delete without elevation, a child created with
- * PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, pipes, timeout-kill), the refcounted
- * ACL grant over every writable root the policy names, the resolver's `appcontainer`
- * branch, and the `exec` consumer that grants before the spawn and releases in a
- * `finally`. Its tests run all of that for real on Windows. What keeps production
- * off it is measured rather than cautious: a confined child inherits an
- * AppContainer token, and a token of that shape executes only what the grant names
- * its package SID. `C:\Windows\System32` does; the directories this machine's tools
- * live in do not — `git`, `node`, and `bun` from `D:\Program Files` and the user
- * profile come back "not recognized" inside the container, and an absolute path to
- * the same binary comes back "Access is denied" (a copy placed inside the granted
- * workspace runs, which is what separates the two). So selecting the backend would
- * confine every default-mode command into something that cannot run `git status`.
- * The branch stays reachable from a test that injects the flag, and
- * `SandboxRuntime.hasAppContainer` in `./index.ts` carries the full measurement.
- * Until the toolchain reaches the child, this module remains the layer that
- * actually applies.
- *
- * Measured on this machine (2026-10-09, no elevation, no helper binary):
- *
- *   - create / derive / delete all succeed for the current user; derivation is a
- *     pure function of the name, so the SID a grant names is the SID the next run
- *     for the same workspace derives again.
- *   - one `(OI)(CI)(F)` allow ACE for the container SID on a workspace root gives
- *     the confined child read+write on that subtree and nothing outside it — a
- *     write beyond the grant is refused by the kernel with access-denied. Without
- *     the grant the child cannot read the workspace at all, so the backend fails
- *     closed.
- *   - Directory listing is fine, and the old reason it was not has been
- *     retracted: `FindFirstFile` consumers — `git status`, `ls` in bash —
- *     list a granted tree, and only `cmd /c dir` was refused, for the reason
- *     `appcontainer.ts` records (the MS-STL issue #6286 landing). What keeps
- *     `resolveSandboxExecution` on `simulated` today is the toolchain DACL
- *     above, not listing.
- *   - `.git` is NOT protected by this backend tonight, and the reason is a
- *     measurement that would not repeat: the deny ACE refuses an external
- *     process's writes under `.git` and does not refuse `acquire`'s own two
- *     statements later — same ACL on disk, same confined child, opposite
- *     results. So the deny is out until the timing is understood, and the
- *     workspace boundary is the only confinement the container half ships.
- *     `appcontainer.ts` carries the full shape to reintroduce.
- *   - the container has no network a session can use: loopback is denied in
- *     it even with the `privateNetworkClientServer` capability (measured),
- *     and a `restricted` axis is enforced by a proxy that listens on
- *     loopback. That is why the resolver's branch fires only with
- *     `network === "enabled"`, and `restricted` keeps landing here rather
- *     than in the container.
- *
- * One thing that *is* true and worth keeping, because it is the trap: a Job
- * Object cannot do this. `winnt.h:12052` carries
- * `// N.B. The JOBOBJECT_SECURITY_LIMIT_INFORMATION information class is no
- * longer supported.` — Microsoft removed the only job flag that ever constrained
- * a token, so no `JOB_OBJECT_LIMIT_*` takes a path or an access mask. Job
- * objects remain useful for process and memory ceilings, and useless as a
- * filesystem boundary. That distinction is the whole reason AppContainer and not
- * a job is the mechanism to reach for.
- *
- * The "helper program out of scope" constraint is a separate fact and still
- * stands; it is not what makes this module thin.
- *
- * What this module buys is that the decision is *made and said out loud*, in one
- * place, from a policy value that can be asserted. Before this existed the
- * `.git` guard lived only in the tool layer and the policy was never consulted;
- * `rm .git/config` through Bash was `allow` in `agent` mode, measured.
- *
- * The rule every function here obeys: **a wrong answer may narrow access, never
- * widen it.** A path this module cannot place inside a known root is refused.
- * There is no "no opinion" branch, because a caller that reads "no opinion" as
- * "carry on" is a caller that a bug in here turns into a bypass.
- */
+// The Windows filesystem sandbox — which is not a sandbox, and says so. It is
+// not OS-level enforcement: read its result as "the tool call was refused by
+// this process", never as "the write could not have happened".
+// Long-form design notes: docs/dev/sandbox.md
 import { canRead, canWrite, type FileSystemAccessMode, type SandboxPolicy } from "@labunbun/agent";
 import { normalizePathSeparators, resolveCanonical } from "../containment.ts";
 
-/**
- * The one sentence every surface that shows this layer has to show.
- *
- * Exported rather than written into each call site because a softened version —
- * "sandboxed", "protected", "confined" with nothing after it — is how a tool-layer
- * check ends up reading as a kernel one.
- *
- * **One production surface renders it**: the `simulated` case of
- * `describeSandboxBackend`, which `/permissions` prints
- * (`coding-agent/src/interactive.ts`). The three this comment used to name are
- * not there. There is no mode banner in this build. `/doctor` exists but never
- * reads this. And a deny message from `decideWrite` names the rule that refused
- * and where the path landed rather than restating this — which is the right
- * shape for a message the model has to act on, but it does mean the disclaimer
- * has no second surface to be lost from.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The one sentence every surface that shows this layer has to show. */
 export const SIMULATED_SANDBOX_DISCLAIMER =
 	"checked in this process for calls that arrive through the tools; a subprocess started outside them is not subject to it, and no OS mechanism is enforcing this";
 
@@ -133,79 +21,19 @@ export type SandboxDecision =
 	| { allowed: false; reason: string; canonicalPath: string };
 
 export interface SandboxDecisionOptions {
-	/**
-	 * Which filesystem's rules to judge by. Explicit so the layer is testable
-	 * from either machine — `classifyDangerousCommand` takes the same parameter
-	 * for the same reason, and a test that skips itself on the machine it runs
-	 * on reports green without having checked anything.
-	 *
-	 * Defaults to `process.platform`.
-	 */
+	// Long-form design notes: docs/dev/sandbox.md
+	/** Which filesystem's rules to judge by, explicit so the layer is testable from either machine. */
 	platform?: string;
 }
 
-/**
- * Whether paths on this platform may differ only in case.
- *
- * Mirrors `caseInsensitivePaths` in `../containment.ts`, including macOS: APFS
- * is case-insensitive by default, and a build that treated a Mac workspace as
- * case-sensitive would let `.GIT/config` past a `.git` rule on the platform
- * where that costs a user their history. Anything not named — a BSD, a
- * hypothetical — is case-sensitive, which is the direction that refuses more.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Whether paths on this platform may differ only in case, mirroring the tool layer's own rule. */
 export function caseInsensitiveSandboxPaths(platform: string = process.platform): boolean {
 	return platform === "win32" || platform === "darwin";
 }
 
-/**
- * Whether this write is permitted, and if not, why.
- *
- * The candidate is canonicalised first — through `resolveCanonical`, the same
- * helper the tool layer uses — and only then compared. String-prefixing the raw
- * input is the defect this ordering exists to prevent: a path is allowed here
- * because of what it *spells like*, and a symlink, a junction, a `..`, or a
- * different spelling of a directory name all make the spelling lie.
- *
- * The comparison itself is `isWithinRoot` below, which is a three-line
- * predicate rather than a call to `isContainedIn` — see the comment on it for
- * why, and `sandbox-simulated.test.ts` for the assertion that keeps the two
- * from drifting apart.
- *
- * `@labunbun/agent`'s `isWritePermitted` is the same rule judged lexically
- * with no filesystem access. It is the right answer when the caller has
- * already canonicalised and the two platforms' case rules agree, and it is
- * not consulted here because the layer that *has* a filesystem should use it.
- *
- * **What the `.git` protection here actually is, measured rather than
- * assumed.** The first loop below refuses `policy.protected`, and that is a
- * *list*, not a rule about path shapes. For every policy
- * `buildSandboxPolicy` produces in `workspace-write` the list is never empty:
- * `protectedFor` adds `join(root, ".git")` for every writable root
- * unconditionally, so `.git/config` is refused here on its own — a claim that
- * was false of an earlier version of this comment and of `write.ts` beside it,
- * and is asserted in `sandbox-simulated.test.ts` against a policy built with
- * no `protectedPaths` passed at all, so it is the derivation doing the work
- * rather than a test fixture supplying the answer.
- *
- * So this function is **not** a second copy of `guardWritablePath`'s rule, and
- * it is deliberately not made into one. It cannot answer for a `.git` the list
- * does not carry: one under `node_modules`, one deeper than the scan's four
- * segments, or one spelled `".git "` / `".git."` (the trim the guard added for
- * shares that strip trailing dots and spaces — `containment.ts:139-140`, and
- * `findProtectedPaths` matches the exact name, so none of the three reaches
- * `protected`). And under `danger-full-access` it runs no rule at all, by the
- * branch below and by `describeSimulatedSandbox`, whose one-line summary tells
- * the user every path including `.git` is writable.
- *
- * Giving it the guard's shape would therefore cost a second source of truth,
- * break a documented and tested meaning of the mode that turns the sandbox
- * off, and make `decideRead` the odd one out — it applies no protected list at
- * all, on purpose, because reading history is ordinary work. Both write call
- * sites run `guardWritablePath` first and unconditionally (`write.ts:55`,
- * `edit.ts:40`), and the cases only that guard can catch are driven through a
- * real Write and Edit in `tools.test.ts`, so deleting either call there goes
- * red.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Whether this write is permitted, and if not, why. */
 export function decideWrite(
 	policy: SandboxPolicy,
 	candidatePath: string,
@@ -284,19 +112,8 @@ export function decideWrite(
 	};
 }
 
-/**
- * Whether this read is permitted.
- *
- * Kept beside the write decision rather than in the caller because the two
- * answer different questions about the same entry, and a caller that derived
- * "readable" from "writable" would refuse to read a read-only root — the one
- * place a read-only root is useful. The `.git` protection is *not* applied
- * here: reading history, diffs, and logs is ordinary work, which is why the
- * write side refuses it — twice over, by `policy.protected` here and by
- * `guardWritablePath`'s path match beside it — and the read side leaves it
- * alone. A `read` entry naming `.git` is what would make it readable *and*
- * unreachable through this function; nothing builds one.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Whether this read is permitted. Kept beside the write decision because they answer different questions. */
 export function decideRead(
 	policy: SandboxPolicy,
 	candidatePath: string,
@@ -339,19 +156,8 @@ export function decideRead(
 	};
 }
 
-/**
- * A one-line summary of this layer, for a caller holding a policy and nowhere to
- * put it.
- *
- * **No production code calls this.** The sentence a user reads is the `simulated`
- * case of `describeSandboxBackend`, which embeds the disclaimer directly instead
- * of formatting a policy. It is kept because the wording is worth having and
- * `sandbox-simulated.test.ts` pins it — that test is the only automated guard
- * `SIMULATED_SANDBOX_DISCLAIMER` has — and because a policy-shaped caller is the
- * obvious next thing to want. What it must not do is claim a surface: it is not
- * the `/doctor` line and not the mode banner, because there is no mode banner in
- * this build and `/doctor` does not read it.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** A one-line summary of this layer, for a caller holding a policy and nowhere to put it. */
 export function describeSimulatedSandbox(policy: SandboxPolicy): string {
 	if (policy.fileSystem.kind === "unrestricted") {
 		return "danger-full-access: the policy is unrestricted, so no path check runs at all — every path, including .git, is writable";
@@ -368,43 +174,8 @@ export function describeSimulatedSandbox(policy: SandboxPolicy): string {
 	return `workspace-write, simulated: ${roots} — ${SIMULATED_SANDBOX_DISCLAIMER}`;
 }
 
-/**
- * Whether `candidate` sits inside `root`, the root itself included.
- *
- * This is `isContainedIn` with the case rule supplied rather than read off the
- * host, and that is the entire reason it exists. `isContainedIn` folds case
- * when — and only when — the process is running on a case-insensitive
- * filesystem, so on a Linux CI machine there is no way to ask this function the
- * Windows question, and a Windows machine cannot be shown the POSIX one. Both
- * answers are reachable, and both are wrong to guess: a decision that folded
- * case on a case-sensitive filesystem would refuse more than it should, and one
- * that did not fold on a case-insensitive one would let `.GIT/config` past a
- * `.git` rule, which is the direction this layer is not allowed to fail in.
- *
- * Duplicating a three-line predicate is cheaper than a wrong answer, but only
- * because it is pinned: `sandbox-simulated.test.ts` asserts that on the
- * platform where the two case rules agree, this and `isContainedIn` return the
- * same answer for the same inputs. Change either and that test goes red.
- *
- * The root is canonicalised here rather than at the point the policy is built,
- * because the two are not the same guarantee. `candidate` arrives already
- * resolved by the caller; `root` arrives however the caller spelled it, and
- * those two spellings are not always the same directory. macOS is the case that
- * broke this — and it broke it in the loudest direction available: `os.tmpdir()`
- * is `/var/folders/…`, which is a symlink to `/private/var/folders/…`, so every
- * canonicalised path stopped matching a lexically-compared root and the layer
- * refused *every write in the workspace*. Not one machine this was developed on
- * has that symlink, so no local run could see it; the macOS CI job did, in the
- * first run. `guardPathContainment` never had the bug because it resolves both
- * sides, which is the shape this now has.
- *
- * The cost is a `realpathSync` per root per decision — a policy carries a
- * handful of roots, and a write is already a file operation, so this is not the
- * expensive part of the answer. Correctness in the decision function beats a
- * cache here for the reason given above: a "roots are canonical" convention is
- * exactly the kind of invariant that lives in a comment and dies with the
- * caller that knew about it.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Whether `candidate` sits inside `root`, the root itself included, with the case rule supplied. */
 function isWithinRoot(candidate: string, root: string, platform: string): boolean {
 	const fold = caseInsensitiveSandboxPaths(platform)
 		? (value: string) => value.toLowerCase()

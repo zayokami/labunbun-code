@@ -1,76 +1,17 @@
-/**
- * Finding the `.git` directories inside a workspace, so they can go into
- * `SandboxPolicy.protected`.
- *
- * **The gap this closes is measured, not theoretical.** Before the simulated
- * layer existed, with no sandbox rules configured, `agent` mode let all three of
- * these through Bash:
- *
- *   allow   rm .git/config
- *   allow   mv .git /tmp/x
- *   allow   echo x > .git/hooks/pre-commit
- *
- * The `.git` guard in `packages/tools/src/containment.ts` stops Edit and Write
- * and nothing else — Bash walks straight past it. (`rm -rf .git` *is* refused,
- * but by the dangerous-command classifier catching the `-rf`, not by any `.git`
- * rule.) So the discovery here is for the *shell* policy, which is the one the
- * tool layer's own guard cannot produce. On macOS and Linux that policy becomes
- * a real kernel confinement. On Windows it does not: `resolveSandboxExecution`
- * reports `simulated`, and `exec` wraps the shell only for a `native`
- * resolution, so the protected list is built, handed to `exec`, and dropped there
- * unread. The gap above therefore stands on this platform exactly as measured —
- * `echo x > .git/hooks/pre-commit` through Bash still lands — so this scan
- * neither narrows nor closes it here. The sentence in `describeSandboxBackend`
- * is the one that tells the user so.
- *
- * Two shapes of `.git` are both real and both must be found:
- *
- *   a **directory** in an ordinary checkout, and
- *   a **file** in a worktree or a submodule, where the file is a `gitdir: …`
- *   pointer. A scan that only looked for the directory would protect every
- *   repository in the tree and miss every linked one — and a linked worktree is
- *   exactly where a `rm` does the most damage per keystroke.
- *
- * A nested repository (submodule, vendored checkout) has its own `.git` and is
- * just as unrecoverable as the top-level one, so the walk does not stop at the
- * first hit.
- */
+// Finding the `.git` directories inside a workspace, so they can go into
+// `SandboxPolicy.protected`. A directory and a worktree's gitdir file both count.
+// Long-form design notes: docs/dev/sandbox.md
 import type { Dirent } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { isContainedIn, resolveCanonical } from "../containment.ts";
 
-/**
- * The deepest directory whose entries this scan examines.
- *
- * A bound, not a tuning knob: the work is proportional to the tree rather than to
- * the number of repositories in it, and a monorepo has tens of thousands of
- * directories. The cost it actually saves is measured on this repository — depth
- * 4 with the `node_modules` skip is **76 ms**, and the same walk with the skip
- * removed is **1762 ms** for the same single hit.
- *
- * Counted from the workspace as depth 0, so the default examines
- * `<workspace>/a/b/c/d` and finds a `.git` inside it — five path segments down
- * from the root. A repository nested deeper than that is not found, and the
- * consequence is stated here rather than left for someone to discover: a
- * `.git` the scan misses is a write the policy does not protect. Callers that
- * need deeper coverage pass a larger `maxDepth` and pay the walk time for it.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The deepest directory whose entries this scan examines. A bound, not a tuning knob. */
 export const DEFAULT_PROTECTED_SCAN_DEPTH = 4;
 
-/**
- * Directories not descended into by default.
- *
- * Exactly one, and the reason is **cost, measured** — it is the 76 ms / 1762 ms
- * difference above. It is deliberately *not* justified by reachability:
- * `node_modules` is inside the checkout and `npm install` writes into it, so a
- * vendored repository there is a real, if unusual, thing to protect. This is a
- * genuine narrowing, it is a parameter so a caller who disagrees can pass its own
- * set, and that caller can scan everything once per workspace for 1.8 s. What is
- * *not* on this list is anything a user plausibly keeps a repository in: `dist`
- * and `build` are frequently where a clone lands in a scratch workspace, and
- * skipping them would buy very little and hide a `.git`.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Directories not descended into by default. Exactly one, and the reason is cost, measured. */
 export const PROTECTED_SCAN_SKIP_DIRS: ReadonlySet<string> = new Set(["node_modules"]);
 
 export interface FindProtectedPathsOptions {
@@ -78,29 +19,8 @@ export interface FindProtectedPathsOptions {
 	skipDirs?: ReadonlySet<string>;
 }
 
-/**
- * Every `.git` in the workspace, as canonical absolute forward-slash paths.
- *
- * "Canonical" is load-bearing rather than cosmetic: the decision layer
- * canonicalises the candidate path before comparing it, so a scan that returned
- * `/var/folders/…` (a symlink) or a `C:\ws\.git` (backslashes, or a `\\?\`
- * prefix) would produce entries that match nothing, and the policy would
- * silently protect nothing. The comparison in `simulated.ts` folds case for a
- * case-insensitive filesystem, so the spelling of a segment does not have to
- * agree — but its *identity* does.
- *
- * The walk is breadth-first and tracks the canonical paths it has already
- * entered, so a symlink pointing at a directory the walk also reaches by its
- * real name is visited once. The depth bound is what makes that belt-and-
- * braces: even a cycle among links stays inside the bound.
- *
- * A directory that cannot be enumerated — permissions, a share that is down, a
- * path that turns out not to be a directory — is skipped and the walk
- * continues. Failing the whole policy because one subtree is unreadable would be
- * worse than the gap it causes: a policy that does not load confines nothing at
- * all. A link that dangles is filtered earlier and by a different check, at the
- * containment and `isDirectory` steps below, so it never reaches here.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Every `.git` in the workspace, as canonical absolute forward-slash paths. */
 export async function findProtectedPaths(
 	workspace: string,
 	maxDepth: number = DEFAULT_PROTECTED_SCAN_DEPTH,

@@ -1,93 +1,10 @@
-/**
- * The macOS backend: a `sandbox-exec` profile generated from a `SandboxPolicy`.
- *
- * Pure. No filesystem access, no `process.platform`, no clock — the caller
- * passes the policy and the command and gets back an argv. That is deliberate:
- * everything this file decides (which paths are writable, what order the denies
- * come in) is then assertable without a Mac, which is the only way to test it
- * from the machine this repository is built on.
- *
- * ## Shape
- *
- * The returned argv is the **argument vector after the program name**:
- *
- *     ["-p", <profile>, "-D<KEY>=<value>", ..., "--", ...command]
- *
- * The caller prepends `/usr/bin/sandbox-exec`. It is spelled out rather than
- * absolute here because `sandbox-exec` must be the system binary and resolving
- * it through `PATH` is how an attacker substitutes their own; that check belongs
- * next to the spawn, which has the filesystem access this file does not.
- *
- * ## Paths are `-D` parameters, never profile text
- *
- * Every path reaches the profile through `(param "KEY")` plus a `-DKEY=value`
- * argument. This is the security property of the file, not a style choice: a
- * path interpolated into the profile text could carry `") (allow file-write*
- * (subpath "/` and close the string it was in, appending rules of its own.
- *
- * The reason that is safe is that `sandbox-exec` substitutes a `-D` value as an
- * opaque string and does not re-lex it as SBPL — so there is nothing for a path
- * to escape from. **That premise is the reason this file is shaped this way at
- * all, and it was not verified here from a Mac.** It is the load-bearing
- * assumption of the file: if a future `sandbox-exec` did re-lex parameter values,
- * the escaping path would be a `.git`-protect rule silently replaced by an
- * attacker-chosen allow.
- * The cheap check is one command on a real Mac — a `-D` value containing
- * `(allow file-write*)` and see whether it takes effect — and it is a smoke test,
- * not a unit test.
- *
- * ## Denies come last
- *
- * A seatbelt profile resolves last-rule-wins. A `(deny ...)` emitted before the
- * broad `(allow file-read*)` or before a `(allow file-write* (subpath ...))`
- * that covers it is dead text that reads as a protection and is not one. So the
- * profile is assembled base → read baseline → writable roots → network → deny
- * entries → protected paths, with nothing after the protected block.
- */
+// The macOS backend: a `sandbox-exec` profile generated from a `SandboxPolicy`.
+// Pure: the caller passes the policy and the command, and gets back an argv.
+// Long-form design notes: docs/dev/sandbox.md
 import { canWrite, type SandboxPolicy } from "@labunbun/agent";
 
-/**
- * The part of the profile that is not the policy: process control, the terminal,
- * and local IPC.
- *
- * Trimmed down from a 116-line base policy these rules were derived from, to the
- * part a confined command actually needs. What was left out and why:
- *
- *   - The `(ipc-posix-name-regex #"^/__KMP_REGISTERED_LIB_[0-9]+$")` filter on
- *     the shared-memory operations is dropped; the three operations themselves
- *     are emitted bare, which is a widening. The claim that libomp then
- *     registers its segment under an unfiltered name is the working theory, not
- *     a measurement.
- *   - `(deny default)` and `(allow signal (target same-sandbox))` are kept
- *     verbatim — they are the closed-by-default posture the whole file rests on.
- *
- * `mach-lookup` is deliberately **not** widened. An unfiltered one is an escape
- * hatch to every Mach service the sandboxed process can reach, so only the two
- * services a process cannot start without are here; the network-service list
- * lives in the network section, which is emitted only when the policy enables
- * the network.
- *
- * **Operation names accept a trailing `*`, and this file depends on it.** The
- * `(allow process-info*)`, `(allow file-read*)` and `(allow file-write*)` below
- * and in `READ_BASELINE` are the reason an unlisted path is readable and
- * unwritable rather than unreadable under `(deny default)` — replacing them with
- * an enumeration would widen or break the sandbox, so this paragraph used to
- * say the opposite and was wrong. Chromium's own profile has shipped
- * `(allow file-read* (subpath (param "USER_HOME_DIR")))`
- * (`chromium/sandbox/mac/seatbelt_sandbox_design.md:177`).
- *
- * What does *not* work is a prefix that names no operation. This file carried
- * `(allow ipc-posix-sysv*)` for a while, and there is no such family: the SysV
- * operations hang off `ipc-sysv*`, and the POSIX shared-memory ones are named
- * individually above (`ipc-posix-shm-read-data`, `...-write-create`,
- * `...-write-unlink`). An unknown name is an unbound variable —
- * `sandbox-exec` refuses to compile the profile, so the symptom is a command
- * that never runs carrying a parser backtrace instead of a program.
- *
- * Note what could not have caught either one: the tests here compare generated
- * strings, and only a Mac parses SBPL, so a name this profile would reject is
- * invisible to the whole suite.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The part of the profile that is not the policy: process control, the terminal, and local IPC. */
 const BASE_POLICY = `(version 1)
 (deny default)
 
@@ -207,28 +124,8 @@ interface SeatbeltParam {
 	value: string;
 }
 
-/**
- * Build the `sandbox-exec` argument vector for `policy`, wrapping `command`.
- *
- * Returns `command` **unchanged** for a policy that confines nothing and
- * permits the network: a wrapper whose profile grants everything is a
- * mechanism that can only be a no-op, and paying for `sandbox-exec` to reach
- * that result would be a wrapper that only looks like a sandbox. `argv[0]` of
- * the result is then the user's own program, which is the honest thing for a
- * caller to spawn and the thing a test can check.
- *
- * The exception is an unconfined filesystem with `network: "restricted"`, which
- * still wraps: dropping `--unshare-net` there would silently discard a
- * restriction the caller asked for, and a wrapper that under-delivers is worse
- * than the no-wrapper case above. That branch produces a profile allowing all
- * reads and writes and no network.
- *
- * **About `missingPathBehavior`:** this function cannot honour it. It is pure,
- * so it cannot tell whether `/w/.cache/labunbun` exists, and a `skip`-marked
- * entry that does not exist is passed through. Under seatbelt that is harmless
- * — a `subpath` filter matching nothing grants nothing. The caller must still
- * drop the non-existent ones before spawning.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Build the `sandbox-exec` argument vector for `policy`, wrapping `command`. */
 export function buildSeatbeltArgs(policy: SandboxPolicy, command: string[]): string[] {
 	if (policy.fileSystem.kind === "unrestricted") {
 		return policy.network === "enabled" ? [...command] : ["-p", unconfinedProfile(), "--", ...command];
@@ -282,15 +179,8 @@ export function buildSeatbeltArgs(policy: SandboxPolicy, command: string[]): str
 	];
 }
 
-/**
- * The read baseline: readable everywhere.
- *
- * This is why `read` entries produce no rule. `buildSandboxPolicy` records them
- * and says so on its own side — "on the backends where the default is readable
- * they are not emitted at all" — and this is one of those backends. The entries
- * are still carried for the Windows simulated layer, which has no readable
- * default and needs the list to answer at all.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The read baseline: readable everywhere, so `read` entries produce no rule. */
 const READ_BASELINE = `; Read baseline: readable everywhere, matching this build's read-only mode.
 ; "read" entries are additions to this and so emit no rule of their own.
 (allow file-read*)`;
@@ -324,20 +214,8 @@ function unconfinedProfile(): string {
 ${networkPolicy("restricted")}`;
 }
 
-/**
- * Directory ancestors of every protected path and every denied path that sit
- * inside a writable root.
- *
- * Seatbelt matches on pathnames. Renaming a writable directory moves its
- * protected descendants with it — `mv /w/repo/sub /w/repo/x` turns a protected
- * `/w/repo/sub/.git` into `/w/repo/x/.git`, which no longer matches the deny
- * emitted for it, while `/w/repo/x` is writable through the broad root. Denying
- * `file-write-unlink` on those ancestors closes the rename, and it has to be
- * emitted after every allow for the same last-rule-wins reason as the denies
- * themselves. The ancestor block covers protected and denied paths alike,
- * because relocating a read-only subpath onto an unnamed directory and
- * relocating a denied path onto one are the same bypass.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Directory ancestors of every protected path and every denied path that sit inside a writable root. */
 function protectedAncestors(policy: SandboxPolicy): SeatbeltParam[] {
 	const writable = policy.fileSystem.entries.filter((entry) => canWrite(entry.access)).map((entry) => entry.path);
 	const carved = [
@@ -367,22 +245,9 @@ function protectedAncestors(policy: SandboxPolicy): SeatbeltParam[] {
 function ancestorsUpTo(path: string, root: string): string[] {
 	const chain: string[] = [];
 	let current = path;
-	// Two conditions, and both are load-bearing.
-	//
-	// `isAtOrBelow` is the ordinary exit: the walk has climbed out of the
-	// writable root. There is no `undefined` arm — `parentOf` returns `/` at the
-	// root rather than nothing — so nothing "runs out" that way.
-	//
-	// The no-progress check is the backstop. With a writable root of `/`,
-	// `isAtOrBelow` matches everything, because its trailing-slash strip turns
-	// `"/"` into `""` and every absolute path starts with `""`; and `parentOf("/")`
-	// is `""` and `parentOf("")` is `""`, so the walk oscillates between `""` and
-	// `""` forever. Measured before this guard: 12 steps and counting, chain
-	// `[…, "/", "", "", …]`. Nothing in this build produces a writable root of
-	// `/` — `danger-full-access` is what a caller means by "the whole disk" — so
-	// this is unreachable today rather than fixed-by-observation. A profile
-	// generator that can be made to hang is worth closing while the door is open,
-	// and the guard costs two comparisons per ancestor.
+	// Two conditions, both load-bearing: the ordinary exit from the walk, and a
+	// no-progress backstop for a writable root of `/`, which oscillates forever.
+	// Long-form design notes: docs/dev/sandbox.md
 	while (isAtOrBelow(current, root)) {
 		chain.push(current);
 		const parent = parentOf(current);
@@ -392,26 +257,8 @@ function ancestorsUpTo(path: string, root: string): string[] {
 	return chain;
 }
 
-/**
- * The containing directory of an absolute path.
- *
- * The return type is `string`, never `undefined` — an earlier version of this
- * comment claimed an `undefined` the signature did not permit, which left a
- * reader hunting for a caller that had to handle a case the code could not
- * produce. `ancestorsUpTo` below is where that fiction had propagated: it
- * declared `string | undefined` and looped on `current !== undefined`, an arm no
- * input could reach, so the walk's real termination condition is `isAtOrBelow`
- * and nothing else. Both are now the shape they actually are.
- *
- * **What the root actually yields is `""`, not `/`, and this comment used to say
- * `/`.** `"/".replace(/\/+$/, "")` is `""`, `lastIndexOf("/")` on that is `-1`,
- * and the function returns the empty string. Every other input behaves as a
- * reader would expect — `parentOf("/a")` is `/` — which is why the exception
- * survived a read. It is not theoretical: the guard in `ancestorsUpTo` carries an
- * explicit `parent === ""` arm, and that arm exists for this input and no other.
- * No writable root in this build is `/`, so nothing depends on which of the two
- * it returns today.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The containing directory of an absolute path. Returns a string, never `undefined`; the root yields `""`. */
 function parentOf(path: string): string {
 	const trimmed = path.replace(/\/+$/, "");
 	const index = trimmed.lastIndexOf("/");

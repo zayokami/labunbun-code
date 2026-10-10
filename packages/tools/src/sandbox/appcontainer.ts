@@ -1,81 +1,7 @@
-/**
- * The Windows AppContainer backend for the filesystem sandbox.
- *
- * **Status, stated exactly.** Both halves are wired here: the profile/spawn
- * half, and the ACL grant half — `acquireWorkspaceGrant` /
- * `releaseWorkspaceGrant`, refcounted per profile, covering every writable
- * root the policy names rather than only the workspace. `resolveSandboxExecution`
- * has an `appcontainer` branch and `exec` consumes it: grant before the spawn,
- * release in a `finally`, so an abort or a failed spawn cannot leak an ACE.
- * What still keeps production off it is measured, not cautious — a confined
- * child inherits a token that executes only what the grant names its package
- * SID, and this machine's `git`, `node`, and `bun` live outside every grant,
- * so selecting the backend would confine every default-mode command into
- * something that cannot run `git status`. The measurement lives on
- * `SandboxRuntime.hasAppContainer` in `./index.ts`; `simulated.ts` records
- * what the tool layer still does while the OS does nothing.
- *
- * What is measured (2026-10-09, Windows 11 26200, no elevation, no helper
- * binary, no service), through this module's own FFI path:
- *
- *   - `CreateAppContainerProfile` / `DeriveAppContainerSidFromAppContainerName`
- *     / `DeleteAppContainerProfile` in `userenv.dll` all succeed for the
- *     current user. Derivation is deterministic: the same name yields the same
- *     SID every time, without creating anything.
- *   - A child created with `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
- *     (0x00020009 — enum 9 in WinBase.h with the Input bit set; the value is
- *     NOT 0x2000B, which is a different attribute and fails with
- *     ERROR_BAD_LENGTH) runs and returns its exit code.
- *   - With one `(OI)(CI)(F)` allow ACE for the container SID on a workspace
- *     root, the confined child reads and writes that subtree; a write outside
- *     it is refused by the kernel with access-denied. Without the grant the
- *     child cannot even read the workspace, so the backend fails closed.
- *   - Directory ENUMERATION works and `cmd /c dir` does not: FindFirstFile
- *     through a for-glob or PowerShell lists a granted tree fine, while cmd's
- *     `dir` is refused — the AppContainer token cannot reach the volume /
- *     mount-manager subsystem cmd queries (the MS STL issue #6286 landing).
- *     `git status`, `ls` in bash, and every other FindFirstFile consumer work;
- *     the earlier "listing is denied" report measured with cmd's `dir` and was
- *     a property of the instrument, not of the backend.
- *   - What the session shell does inside the container is the toolchain
- *     measurement from the other side. `detectShell` prefers
- *     `C:\Program Files\Git\bin\bash.exe` wherever Git for Windows is
- *     installed, and such a shell starts under the container token and dies
- *     at DLL initialization — 0xC0000142, `STATUS_DLL_INIT_FAILED` — because
- *     the MSYS runtime beside it is granted to nobody. Four container-path
- *     tests failed exactly that way on the GitHub Windows runner while the
- *     same suite passed here, where the conventional path does not exist and
- *     the shell is `cmd.exe`. `containerCanExecute` turns that number into a
- *     refusal naming the program, and the container-path tests inject a shell
- *     of their own so a machine's Git layout is not part of what they measure.
- *   - `.git` is NOT protected by this build tonight, and the reason is a
- *     measurement that would not repeat. The deny ACE (Codex's mutation mask,
- *     0x10156) demonstrably refuses create/overwrite/delete/rename under
- *     `.git` when an external process writes it, and demonstrably does not
- *     when `acquire`'s own `protectGitDir` writes it two statements after
- *     `grantRootAccess` — same ACL on disk (icacls confirms the deny both
- *     times), same confined child (the low-integrity label confirms it),
- *     opposite results. A self-verifying guard was built to settle it and its
- *     verdict was the unreliable side: it refused on clean trees where the
- *     settled replay was refused. So the deny is out until the timing is
- *     understood, and the workspace boundary is the only confinement this
- *     half ships. Reintroduce `protectGitDir` (last known shape: one
- *     inherited deny ACE, mask 0x10156) as the opening question of the next
- *     session.
- * Why AppContainer and not a job object: `JOBOBJECT_SECURITY_LIMIT_INFORMATION`
- * is documented as no longer supported in the SDK, so no `JOB_OBJECT_LIMIT_*`
- * takes a path. Job objects remain fine for process/memory ceilings and
- * useless as a filesystem boundary. A restricted token is also not it: no
- * token restricts writes to a path.
- *
- * Why bun:ffi and not a compiled helper: the repo ships no native binaries,
- * and `bun:ffi` calls these documented user-mode entry points directly. The
- * one thing FFI needs that is easy to get wrong is addresses, and the rule
- * here is the one every probe confirmed: **`ptr(typedArray)` returns that
- * buffer's numeric address**, a typed array marshals to its own address when
- * passed for a pointer argument, and `toArrayBuffer(numericAddress, 0, len)`
- * views C-allocated memory for reading.
- */
+// The Windows AppContainer backend for the filesystem sandbox. Both halves are
+// wired — profile/spawn and the refcounted ACL grant — and production stays off
+// it because the confined token cannot run this machine's toolchain (measured).
+// Long-form design notes: docs/dev/sandbox.md
 import { dlopen, FFIType, type Pointer, ptr, toArrayBuffer } from "bun:ffi";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -87,15 +13,8 @@ export interface AppContainerProfile {
 	name: string;
 	/** The derived package SID, in string form. */
 	sid: string;
-	/**
-	 * Whether this profile was created with the network capability baked in.
-	 *
-	 * The capability is a property of the *profile* (baked at creation, ignored
-	 * on the ALREADY_EXISTS path), not of the spawn — so a caller that runs
-	 * under a net profile must not assume a spawn-time caps struct alone would
-	 * have granted the network, and a caller holding an offline profile must
-	 * not pass one and expect it to stick.
-	 */
+	// Long-form design notes: docs/dev/sandbox.md
+	/** Whether this profile carries the network capability — baked at creation, not granted per spawn. */
 	network: boolean;
 }
 
@@ -106,26 +25,8 @@ function wbuf(text: string): Uint8Array {
 	return out;
 }
 
-/**
- * The program name to put first in a confined command line.
- *
- * `CreateProcessW` is handed `lpApplicationName: null`, so the kernel resolves
- * the program from the first token of the command line — and it resolves it
- * **without the parent's PATH**: the child's own restricted token performs
- * the lookup, and a bare `cmd.exe` fails with 203 (ERROR_INVALID_FUNCTION).
- * Measured, and asymmetric with the spawn path in a way that matters: `spawn`
- * reaches the same call but through a code path that resolves the program name
- * itself, so a relative shell name has always worked there and the container
- * is the first place it did not.
- *
- * The resolution is deliberately narrow: an argument that already carries a
- * path separator or an extension is used as given, and only a bare name is
- * looked up under the System32 directory — where the one bare name this build
- * ever passes (`cmd.exe`, the `detectShell` fallback when no bash is
- * installed) lives. A wider search (scanning the parent's PATH) would put the
- * parent's environment inside a decision about the child's identity, which is
- * the opposite of what a confined spawn is for.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The program name to put first in a confined command line: a bare name resolves under System32. */
 export function confinedProgramName(program: string): string {
 	if (program.includes("\\") || program.includes("/")) return program;
 	return `C:\\Windows\\System32\\${program}`;
@@ -134,42 +35,8 @@ export function confinedProgramName(program: string): string {
 /** `c:\windows\system32\` — the one directory every container child executes without a grant. */
 const SYSTEM32_PREFIX = "c:\\windows\\system32\\";
 
-/**
- * Whether a container child can execute the named program: under System32, or
- * inside a root the grant names — and nothing else.
- *
- * Takes the program **as `confinedProgramName` resolves it** (a bare name has
- * already become `C:\Windows\System32\<name>` by the time this is asked),
- * because the resolution and the executability are two questions about the
- * same token and one answer.
- *
- * The rule is the blocker recorded on `SandboxRuntime.hasAppContainer`, seen
- * from the program's side: a confined child executes only what the grant names
- * its package SID, plus the system directories the image grants every
- * AppContainer. `git`, `node` and `bun` outside every grant come back "not
- * recognized" by PATH and "Access is denied" by absolute path, while a copy
- * placed inside the granted workspace runs — the grant is the whole
- * difference.
- *
- * **The consequence this function exists for is the session shell.**
- * `detectShell` prefers `C:\Program Files\Git\bin\bash.exe` when Git for
- * Windows is installed in its conventional place, so on such a machine the
- * shell is in neither set: `CreateProcessW` starts it — the image file itself
- * is readable — and it dies at DLL initialization with exit code 0xC0000142
- * (`STATUS_DLL_INIT_FAILED`) because the MSYS runtime beside it cannot be
- * loaded. That measured as four opaque failures on the GitHub Windows runner
- * (`test (windows-latest)`, every container-path spawn red with the same
- * number) while the identical suite was green here, where the conventional
- * path does not exist and the shell falls back to `cmd.exe`. A refusal naming
- * the program beats that number, so `operations.exec` checks before it
- * spawns.
- *
- * Case-insensitive and separator-agnostic on purpose: Windows paths differ
- * only in case (see `caseInsensitiveSandboxPaths`), and the granted roots
- * arrive from the policy with whichever separator the policy was built with.
- * Pure, so it is tested on every platform — the containment is a property of
- * the rule, not of the machine.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Whether a container child can execute the named program, under System32 or a granted root. */
 export function containerCanExecute(program: string, grantedRoots: readonly string[]): boolean {
 	const programPath = program.toLowerCase().replace(/\//g, "\\");
 	if (programPath.startsWith(SYSTEM32_PREFIX)) return true;
@@ -183,31 +50,10 @@ function isContainedInPath(programPath: string, root: string): boolean {
 	return programPath === rootPath || programPath.startsWith(rootPath.endsWith("\\") ? rootPath : `${rootPath}\\`);
 }
 
+// Long-form design notes: docs/dev/sandbox.md
 /**
- * One Windows command line from argv, quoted the way `CreateProcessW`'s
- * `lpCommandLine` is parsed.
- *
- * **This is the verbatim form, and that is a measured requirement, not a
- * shortcut.** `CreateProcessW` hands the string to the child's CRT, which
- * splits it with `CommandLineToArgvW`-style rules — full escaping included —
- * and that is the right shape for a program that parses its own argv. It is
- * the wrong shape for `cmd /c`, whose `/s` means "take the text between the
- * quotes exactly as it stands": an escaped `\"` then survives as a literal
- * backslash-quote pair, cmd cannot parse it, and every command containing a
- * quote — which is every redirection, and every command with a string in it —
- * fails with "The filename, directory name, or volume label syntax is
- * incorrect". Measured on both sides: Node's `spawn` with its default argv
- * quoting fails the same command, and the same spawn with
- * `windowsVerbatimArguments: true` — one layer of quotes, embedded quotes
- * untouched — succeeds.
- *
- * So the rule here is one layer per argument: wrap in double quotes when the
- * argument contains a space or a tab, and leave everything else alone. A
- * program that needs escaping is not a program this shell ever runs; `bash`
- * parses the same verbatim string with its own rules and is unaffected.
- *
- * Pure, so it is tested on every platform — the rule is a property of the
- * Windows command-line format, not of the machine parsing it.
+ * One Windows command line from argv, quoted the way `CreateProcessW`'s `lpCommandLine` is parsed.
+ * Pure, so it is tested on every platform.
  */
 export function confinedCommandLine(argv: readonly string[]): string {
 	return argv.map(quoteCommandLineArg).join(" ");
@@ -228,35 +74,8 @@ function quoteCommandLineArg(arg: string): string {
 	return `"${arg}"`;
 }
 
-/**
- * The environment block `CreateProcessW` wants: `K=V\0K=V\0\0`, UTF-16LE.
- *
- * A `Record` is not that shape, and the difference is not cosmetic: a block
- * that is not double-NUL-terminated leaves the CRT reading past the end, and
- * one that is not UTF-16 is read as garbage the first time a child looks up
- * `PATH`. `wbuf` supplies the UTF-16 conversion and the final terminator, so
- * what is left is the `K=V` entries joined with NULs.
- *
- * Entries the format cannot carry are dropped rather than thrown: a key naming
- * `=` or NUL would parse as two variables, and a value with NUL would truncate
- * the block for everything after it. An environment variable cannot contain
- * those characters on Windows anyway, so what is being skipped is malformed
- * input rather than a real setting.
- *
- * **One name is load-bearing, measured, and the measurement is strange enough
- * to record in full.** A confined spawn whose block omits `LOCALAPPDATA` fails
- * with 203 (ERROR_INVALID_FUNCTION) before any command runs — with or without
- * a `cwd`, with a quoted or unquoted command line, with a 1-entry or a 93-entry
- * block. Of all 94 variables in a real environment, adding `LOCALAPPDATA` is
- * the only one that fixes it, and the *value* is irrelevant: a path that does
- * not exist works, `C:\Windows\System32` works, and renaming the variable
- * while keeping the value fails. `APPDATA` and `USERPROFILE`, the two nearest
- * siblings, do nothing. The name is what the confined child resolves. The
- * production path always spreads `process.env` and so is safe by accident;
- * a caller building a minimal block has to name it, and
- * `sandbox-wiring.test.ts` asserts the resolved form so the accident stays
- * load-bearing.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The environment block `CreateProcessW` wants: `K=V\0K=V\0\0`, UTF-16LE. */
 export function confinedEnvBlock(env: Record<string, string>): Uint8Array {
 	const entries: string[] = [];
 	for (const [key, value] of Object.entries(env)) {
@@ -437,19 +256,8 @@ const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002;
 const POLL_MS = 25;
 
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
-/**
- * Reads `lpEnvironment` as UTF-16, which is the form `confinedEnvBlock`
- * writes.
- *
- * **Measured, and the failure is quietly catastrophic.** Without this bit the
- * kernel reads the same bytes through the ANSI code page instead: a wide
- * environment block is then a stream of interleaved NULs to it, the child's
- * CRT init fails, and `CreateProcessW` returns 203
- * (ERROR_INVALID_FUNCTION) for *every* command — with or without `cwd`, with
- * an empty block or a 94-entry one. The two shapes were bisected apart
- * precisely because a wrong answer here looks like a quoting bug or a PATH
- * bug rather than a flag.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Reads `lpEnvironment` as UTF-16, which is the form `confinedEnvBlock` writes. */
 const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
 const STARTF_USESTDHANDLES = 0x00000100;
 /** `winsta0\default`, kept alive for the life of the process: STARTUPINFOECES carries a pointer to it. */
@@ -467,31 +275,15 @@ const CAPABILITY_AUTHORITY = new Uint8Array([0, 0, 0, 0, 0, 15]);
  */
 const CAPABILITY_BASE_RID = 3;
 
-/**
- * SECURITY_CAPABILITY_INTERNET_CLIENT `1` — Winnt.h:10748.
- *
- * The value that grants the container outbound network. NOT 85: that is the
- * `WinCapabilityInternetClientSid` **CreateWellKnownSid enum ordinal** — a
- * different namespace that happens to describe the same capability. Allocating
- * with 85 produces a structurally valid SID that grants nothing, and the first
- * capability probe burned a full run on that confusion (loopback timeouts and
- * DNS failure with "network-capable" children) before the SDK header settled
- * which number was which.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** `SECURITY_CAPABILITY_INTERNET_CLIENT` — 1, the outbound-network capability. */
 const CAPABILITY_INTERNET_CLIENT = 1;
 
 /** SE_GROUP_ENABLED — the attributes word a capability carries in SECURITY_CAPABILITIES. */
 const SE_GROUP_ENABLED = 4;
 
-/**
- * The capability SID addresses, kept alive for the life of the process.
- *
- * A SID_AND_ATTRIBUTES entry holds a raw pointer to the SID bytes, so an
- * allocation freed (or collected) under a live SECURITY_CAPABILITIES struct is
- * a wild pointer the kernel follows during process creation. Two capabilities
- * allocated once and cached is cheaper than reasoning about lifetimes at every
- * spawn.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The capability SID addresses, kept alive because a freed SID under a live struct is a wild pointer. */
 const capabilitySidCache = new Map<number, number>();
 
 /** Allocates `S-1-15-3-<rid>` and returns its numeric address. */
@@ -520,19 +312,8 @@ function capabilitySid(rid: number): number | null {
 	return addr;
 }
 
-/**
- * Build `{ SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES[] }` for an app SID plus
- * capabilities.
- *
- * Layout, x64: SECURITY_CAPABILITIES is 24 bytes (app SID at 0, capabilities
- * pointer at 8, count at 16, reserved at 20); each SID_AND_ATTRIBUTES is 16
- * bytes (SID pointer at 0, attributes at 8). With no capabilities the pointer
- * is NULL and the count zero — never the address of a zero-length buffer,
- * which is what the empty-buffer path would hand the kernel.
- *
- * The returned buffers must stay referenced until `CreateProcessW` returns:
- * the kernel reads them during creation.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Build `{ SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES[] }` for an app SID plus capabilities. */
 function buildSecurityCapabilities(
 	appSidAddr: number,
 	rids: readonly number[],
@@ -555,23 +336,8 @@ function buildSecurityCapabilities(
 	return { caps, attrs };
 }
 
-/**
- * The profile name for a workspace: `labunbun-<16 hex of the canonical path>`.
- *
- * Deterministic on purpose. The SID is derived from the name, and the SID is
- * what the ACL grant will name — so two runs that agree on the workspace must
- * agree on the profile, or the second run's grant would name a SID no process
- * can ever hold. The hash is of the lowercased absolute path (Windows paths
- * are case-insensitive, and `C:\Ws` and `c:\ws` are the same directory).
- *
- * The `labunbun-net-` variant is a separate name because capabilities are baked
- * into the profile at creation: creating a profile that already exists is a
- * no-op success whose capabilities parameter is ignored (measured), so the
- * mode has to be part of the name or the first creation decides the mode
- * forever. If a net profile was ever created without them on a machine, the fix
- * is to delete the profile and let it be recreated — which is recorded here so
- * the next person does not have to rediscover why.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The profile name for a workspace, deterministic so two runs agree on the SID a grant names. */
 export function appContainerProfileName(workspace: string, network = false): string {
 	// Backslash and forward slash are the same separator on Windows; two
 	// spellings of one directory must not get two profiles.
@@ -580,21 +346,8 @@ export function appContainerProfileName(workspace: string, network = false): str
 	return network ? `labunbun-net-${digest}` : `labunbun-${digest}`;
 }
 
-/**
- * Create the profile if this user does not have it yet, and derive its SID.
- *
- * Creating a profile that already exists fails with a pointer-size HRESULT
- * (`0x800700B7`, ERROR_ALREADY_EXISTS) — which is the success case for every
- * run after the first, so it is not an error here. The SID is derived either
- * way, because derivation never fails for a name this user owns.
- *
- * `network` selects the profile *and* its capability set. The capabilities are
- * baked at creation, and the creation call ignores them when the profile
- * already exists (measured: the ALREADY_EXISTS path never writes the output
- * SID either, which is why the derive follows) — so the name carrying the mode
- * is what keeps the first creation's capability set from being the permanent
- * answer for both modes.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Create the profile if this user does not have it yet, and derive its SID. */
 export function ensureAppContainerProfile(workspace: string, network = false): AppContainerProfile | { error: string } {
 	const lib = userenv();
 	if (lib === null) return { error: "userenv.dll is not loadable on this platform" };
@@ -745,14 +498,8 @@ function aceSidString(ace: Uint8Array): string | null {
 	return wideStringAt(Number(strOut[0]));
 }
 
-/**
- * A new DACL holding these ACEs.
- *
- * The header is {revision, sbz1, AclSize, AceCount, sbz2}: AceCount is the
- * number of ACEs, NOT the byte length — writing the length there is a
- * malformed ACL, and the malformation shows up as protection that silently
- * does not apply rather than as an error.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** A new DACL holding these ACEs. `AceCount` is the number of ACEs, not the byte length. */
 function buildDacl(aces: Uint8Array[]): Uint8Array {
 	const size = 8 + aces.reduce((sum, ace) => sum + ace.length, 0);
 	const dacl = new Uint8Array(size);
@@ -850,21 +597,8 @@ function ffFailure(error: string): ConfinedRunResult {
 	return { exitCode: -1, stdout: "", stderr: "", killed: false, error };
 }
 
-/**
- * Run one command line inside this profile, streaming its output.
- *
- * The command's stdout/stderr arrive on anonymous pipes — the shape the Bash
- * tool needs (captured output with a live preview, not an inherited console),
- * and it is why the spawner lives here rather than being a `Bun.spawn` the
- * caller could have done itself: `Bun.spawn` cannot attach the
- * security-capabilities attribute to the child it creates. Chunks are decoded
- * incrementally, so a multi-byte character split across two reads arrives
- * whole rather than as a replacement character.
- *
- * An abort signal or a timeout kills the child; either way the result reports
- * `killed`. On failure the result says which call failed and with what error
- * code, because every failure mode here is a number a reader can act on.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Run one command line inside this profile, streaming its output on anonymous pipes. */
 export function runConfined(
 	profile: AppContainerProfile,
 	commandLine: string,
@@ -906,14 +640,10 @@ function runConfinedWithSid(
 	const lib = kernel32();
 	if (lib === null) return ffFailure("kernel32 FFI is unavailable");
 
-	// SECURITY_CAPABILITIES { AppContainerSid, Capabilities, Count, Reserved }.
-	// The capabilities and their array must stay referenced until CreateProcessW
-	// returns — the kernel reads both during creation — which is why they are
-	// locals held across the whole function rather than temporaries in the
-	// argument list. `attrs` is deliberately unused: the kernel reaches the
-	// SID_AND_ATTRIBUTES array through the pointer inside `caps`, so keeping
-	// the JS reference is the whole job (a GC'd array under a live pointer is
-	// a wild read), and the linter's "unused" is exactly the lifetime pin.
+	// The capabilities and their array stay locals across the whole function: the
+	// kernel reads both during creation, and a GC'd array under a live pointer is
+	// a wild read. `attrs` is the lifetime pin, not dead code.
+	// Long-form design notes: docs/dev/sandbox.md
 	const { caps, attrs } = buildSecurityCapabilities(sidAddr, spawnRids);
 	void attrs;
 
@@ -944,16 +674,9 @@ function runConfinedWithSid(
 		return ffFailure(`UpdateProcThreadAttribute(capabilities) failed (${lib.symbols.GetLastError()})`);
 	}
 
-	// Pipes for stdin/stdout/stderr. Each carries SECURITY_ATTRIBUTES with
-	// bInheritHandle = TRUE, because a child that must inherit handles from a
-	// parent that did not ask for inheritance (bInheritHandles=FALSE) gets
-	// none at all — the child then sees an invalid stdout and every write
-	// fails, which reads as "echo works, output is empty" until the pipes are
-	// examined.
-	// SECURITY_ATTRIBUTES on x64: nLength at 0, lpSecurityDescriptor (NULL) at
-	// 8, bInheritHandle at 16 — not at 8, which is the security descriptor's
-	// own field, and writing there hands the kernel a non-null pointer it
-	// cannot read (ERROR_NOACCESS, 998).
+	// Each pipe carries SECURITY_ATTRIBUTES with bInheritHandle = TRUE, and the
+	// field sits at offset 16 on x64, not 8.
+	// Long-form design notes: docs/dev/sandbox.md
 	const inheritable = new Uint8Array(24);
 	const inheritableView = new DataView(inheritable.buffer);
 	inheritableView.setUint32(0, 24, true); // nLength
@@ -1007,17 +730,10 @@ function runConfinedWithSid(
 		return ffFailure(`UpdateProcThreadAttribute(handles) failed (${lib.symbols.GetLastError()})`);
 	}
 
-	// STARTUPINFOEX on x64: 104 bytes of STARTUPINFO (dwFlags at 60, the three
-	// std handles at 80/88/96 — writing them anywhere else hands the kernel
-	// garbage handles and it faults), then lpAttributeList at 104.
-	//
-	// lpDesktop (offset 16) is the interactive desktop, named explicitly: a
-	// restricted-token child that inherits its parent's desktop instead dies
-	// in CRT init with STATUS_DLL_INIT_FAILED (0xC0000142). Codex's
-	// windows-sandbox does the same for the same reason
-	// (command_runner/win.rs: "Some processes can fail with
-	// STATUS_DLL_INIT_FAILED if lpDesktop is not set when launching with a
-	// restricted token").
+	// STARTUPINFOEX on x64: 104 bytes of STARTUPINFO, then lpAttributeList.
+	// lpDesktop at offset 16 names the interactive desktop explicitly, or a
+	// restricted-token child dies in CRT init with 0xC0000142.
+	// Long-form design notes: docs/dev/sandbox.md
 	const siex = new Uint8Array(112);
 	const siexView = new DataView(siex.buffer);
 	siexView.setInt32(0, 112, true);
@@ -1145,16 +861,10 @@ function runConfinedWithSid(
 	};
 }
 
+// Long-form design notes: docs/dev/sandbox.md
 /**
- * One non-blocking round of a pipe: everything currently buffered comes out,
- * decoded, and emitted. Reports whether the pipe reached EOF (a broken pipe —
- * every writer closed) and whether this round produced any text.
- *
- * Peek before every read: `ReadFile` on a synchronous pipe blocks until data
- * or EOF, and `PeekNamedPipe` is what tells the two apart without blocking.
- * Its 5th parameter is the one that answers — lpTotalBytesAvail; the 6th is
- * bytes-left-in-this-message, which is zero for a byte stream and reads as
- * "no data" forever.
+ * One non-blocking round of a pipe: everything buffered comes out, decoded, and emitted.
+ * Peek before every read: `ReadFile` blocks, and the 5th `PeekNamedPipe` parameter answers.
  */
 function pumpPipe(
 	lib: NonNullable<ReturnType<typeof kernel32>>,
@@ -1195,33 +905,15 @@ interface ActiveGrant {
 	sid: Uint8Array;
 	/** How many commands are running under it right now. */
 	refs: number;
-	/**
-	 * Every root this grant wrote an ACE on, the workspace first.
-	 *
-	 * Recorded because the release has to remove exactly what the acquire
-	 * added: dropping only the workspace would leave write ACEs on the temp
-	 * directory and the caches — a grant that outlives the command that asked
-	 * for it, which is a widening rather than a leak.
-	 */
+	// Long-form design notes: docs/dev/sandbox.md
+	/** Every root this grant wrote an ACE on, the workspace first. */
 	roots: string[];
 }
 
 const activeGrants = new Map<string, ActiveGrant>();
 
-/**
- * The one spelling of a path every reader agrees on: symlinks, junctions,
- * `\\?\` prefixes and 8.3 short names all resolved, so an operation on it
- * covers a child however it spells the same object. Best-effort — a path
- * that cannot be resolved is returned as spelled, because failing over an
- * unreadable parent would fail a command for no gain.
- *
- * Exported because two callers need it for two different measured reasons:
- * a grant writes the ACE on it (the GitHub runner's short-named TEMP had
- * the ACE landing on an object the child never opened), and a confined
- * spawn is handed it as the child's cwd (the same short name made a
- * powershell child die with .NET's "Access to the path" while it resolved
- * its own cwd). Same rule, two failure shapes, one spelling.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The one spelling of a path every reader agrees on: symlinks, junctions, and 8.3 names resolved. */
 export function canonicalPathForChild(path: string): string {
 	try {
 		return realpathSync(path);
@@ -1235,27 +927,8 @@ export interface GrantOutcome {
 	error?: string;
 }
 
-/**
- * Grants the container SID write access to this workspace — and to any extra
- * writable roots a real session names — with a refcount.
- *
- * The refcount is per profile and per process: two commands running at once
- * share one grant, and the grant is released only by the last. The key is the
- * profile name rather than the workspace because a workspace now has two
- * profiles — offline and network-capable — with two SIDs, and a grant that
- * named the wrong one would be an ACE for an identity no child ever runs as.
- *
- * `extraRoots` is what the resolver's `grantRoots` carries beyond the
- * workspace. A real session's policy names the temp directory and the home
- * package caches beside the workspace, and a container granted only the
- * workspace cannot `mktemp` and cannot write its install cache — so a caller
- * that resolves through `resolveSandboxExecution` passes the whole list, not
- * just the entry the profile is derived from.
- *
- * A crash leaves the ACEs on disk — a later round sweeps those from the state
- * file this records, and until then they name the same SID the next run
- * derives again, so a leftover grant is reusable rather than dangerous.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Grants the container SID write access to the workspace and any extra roots, refcounted. */
 export function acquireWorkspaceGrant(
 	workspace: string,
 	network = false,
@@ -1278,19 +951,10 @@ export function acquireWorkspaceGrant(
 	// this repository already fixed once in `policyFor` — and here it would be
 	// worse, because the first write that misses is the one that fails.
 	//
-	// Each root is canonicalised before the ACE is written, and the reason is
-	// a measured failure on the GitHub Windows runner rather than tidiness:
-	// that machine's `TEMP` is spelled with the 8.3 short name
-	// (`C:\Users\RUNNER~1\AppData\Local\Temp`), and an ACE written against the
-	// short spelling does not cover a child that opens the same directory by
-	// another spelling — the confined powershell died with .NET's
-	// `Access to the path 'C:\Users\RUNNER~1\AppData\Local\Temp\lbb-…' is
-	// denied` while the write-test shell under the same policy succeeded,
-	// because the two children resolved the path differently. `realpathSync`
-	// resolves short names, `\\?\` prefixes and junctions to the one spelling
-	// the kernel checks, so the ACE lands where every reader finds it. A path
-	// that cannot be resolved is granted as spelled: resolving is best-effort
-	// and the grant failing closed covers the rest.
+	// Each root is canonicalised before the ACE is written — a measured GitHub
+	// runner failure: an ACE against the 8.3 short spelling does not cover a
+	// child that opens the same directory by another spelling.
+	// Long-form design notes: docs/dev/sandbox.md
 	const roots = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
 	for (const root of roots) {
 		const grantError = grantRootAccess(root, sid);

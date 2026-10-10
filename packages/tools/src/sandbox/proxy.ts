@@ -1,42 +1,6 @@
-/**
- * A local HTTP and SOCKS5 proxy that refuses what the domain policy refuses.
- *
- * This is the part of the network axis that touches a socket; the decision it
- * enforces is a pure function in `@labunbun/agent` (`network-policy.ts`) so
- * that the rules can be asserted on any machine, including the Windows one this
- * was written on. Every connection here goes through one gate —
- * {@link decideUpstream}, the address blocklist and then the domain rules —
- * **before** an upstream socket is opened, which is the property that makes this
- * a filter rather than a logger.
- *
- * ## No MITM, deliberately
- *
- * `https://` reaches this proxy as `CONNECT host:443` followed by a byte pipe.
- * The proxy sees the hostname and then stops being able to see anything, which
- * is exactly the trade this build makes: it can refuse a destination, and it
- * cannot read the traffic. The alternative — a locally generated CA with a
- * man-in-the-middle in front of it — buys content inspection and costs the user
- * a certificate in their trust store that whoever gets one file write can use.
- * Not making that trade is in the plan's "not delivered" list and it is a real
- * limitation, not an oversight: a domain on the allow list can exfiltrate
- * through a request this proxy cannot read.
- *
- * ## What this does not stop
- *
- * Proxy environment variables are a convention. A program that calls `connect`
- * without consulting them is not routed here and is subject to no rule in this
- * file. Where an OS sandbox backend is actually installed it closes that gap;
- * where none is — Windows, or Linux without bubblewrap — nothing in this build
- * does, and `describeNetworkPolicy` says so per case rather than in a footnote
- * nobody reads.
- *
- * ## Two ports, because tooling differs
- *
- * `HTTP_PROXY`/`HTTPS_PROXY` speak the HTTP proxy protocol; `ALL_PROXY` speaks
- * SOCKS5. Both point at the same decision. A client handed only one of them is
- * a client this cannot filter, which is why both are started together rather
- * than one being offered as an option.
- */
+// A local HTTP and SOCKS5 proxy that refuses what the domain policy refuses.
+// The decision it enforces is a pure function in `@labunbun/agent`.
+// Long-form design notes: docs/dev/sandbox.md
 
 import type { EventEmitter } from "node:events";
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
@@ -57,15 +21,8 @@ const SOCKS_REFUSED = 0x02;
 /** "Command not supported" — this proxy is CONNECT only. */
 const SOCKS_COMMAND_UNSUPPORTED = 0x07;
 
-/**
- * A complete SOCKS5 reply: VER, REP, RSV, ATYP=IPv4, BND.ADDR=0.0.0.0, BND.PORT=0.
- *
- * Ten bytes, written out whole rather than assembled from a placeholder and a
- * `subarray`. The assembled version shipped one byte too long — the placeholder's
- * own VER survived into the middle — and the extra byte sat in the client's
- * read buffer, shifting everything the tunnel then carried. It answered every
- * reply test correctly, because those tests read the first ten bytes.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** A complete SOCKS5 reply: VER, REP, RSV, ATYP=IPv4, BND.ADDR=0.0.0.0, BND.PORT=0. */
 function socksReply(code: number): Buffer {
 	return Buffer.from([0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
 }
@@ -79,35 +36,13 @@ export interface NetworkProxyOptions {
 	host?: string;
 	/** Give up on an upstream that has not answered `connect` in this long. */
 	connectTimeoutMs?: number;
-	/**
-	 * The address blocklist. Defaults to {@link isBlockedNetworkHost}.
-	 *
-	 * Injectable for one reason, and it is a narrow one: a test that wants to
-	 * watch a *permitted* connection happen has to connect somewhere, and every
-	 * address this build refuses is a loopback address — the only kind the test
-	 * machine has. An injection point lets those tests run against a stand-in
-	 * without turning the real table off, and the tests that pin the real table
-	 * deliberately do **not** pass this.
-	 */
+	// Long-form design notes: docs/dev/sandbox.md
+	/** The address blocklist. Defaults to {@link isBlockedNetworkHost}. Injectable so a test can watch a permitted connection. */
 	isBlockedHost?: (host: string) => boolean;
 }
 
-/**
- * The one gate. Every upstream connection in this file goes through here, and it
- * runs the address blocklist **before** the domain rules rather than after.
- *
- * The order is the whole point. The rules are a user's configuration and a user
- * can write `*`, which answers `allowed: true` for `127.0.0.1` and for
- * `169.254.169.254` — so the blocklist has to be the thing that can still say
- * no. It is also the reason `blocked_address` is its own reason code: a refusal
- * from here that reported `no_matching_allow_rule` would send the user to the
- * allowlist, where the entry they need is one they cannot add.
- *
- * One function rather than a check pasted into three handlers, because three
- * copies is how {@link handleHttp} ends up consulting a table `handleSocks` does
- * not — and with a SOCKS client the only evidence it got is a single byte, so a
- * missed gate there is invisible from the outside.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** The one gate. The address blocklist runs before the domain rules. */
 function decideUpstream(options: NetworkProxyOptions, host: string): NetworkDecision {
 	const blocked = (options.isBlockedHost ?? isBlockedNetworkHost)(host);
 	if (blocked) return { allowed: false, reason: "blocked_address" };
@@ -125,140 +60,17 @@ export interface NetworkProxy {
 	close(): Promise<void>;
 }
 
-/**
- * Environment variables that carry a proxy URL, in both cases.
- *
- * Both spellings are set deliberately. A great deal of tooling reads only the
- * lowercase form (`curl`, `requests`, most JVM launchers) and a great deal
- * reads only the uppercase one; setting one and leaving the other is how a
- * policy ends up enforced for half the tools in a build, and it fails open for
- * the other half.
- *
- * The six URL keys in the table below are the standard spellings, and they are
- * not the whole of what is in circulation: ten per-tool variables are read by
- * the package managers that have a proxy option of their own —
- * `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, `NPM_CONFIG_HTTP_PROXY`,
- * `NPM_CONFIG_HTTPS_PROXY`, `NPM_CONFIG_PROXY`, `BUNDLE_HTTP_PROXY`,
- * `BUNDLE_HTTPS_PROXY`, `PIP_PROXY`, `DOCKER_HTTP_PROXY` and
- * `DOCKER_HTTPS_PROXY`.
- *
- * **Seven of those ten are the gap. The other three are set, and this paragraph
- * used to say none of them was** — it predates `TOOL_PROXY_KEYS` below, which
- * pins `NPM_CONFIG_PROXY`, `NPM_CONFIG_HTTPS_PROXY` and `PIP_PROXY` to this
- * policy's URL. The three are listed here in the same breath as the seven that
- * are missing, so the list above reads as one gap and is two. The gap is
- * `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, `NPM_CONFIG_HTTP_PROXY`,
- * `BUNDLE_HTTP_PROXY`, `BUNDLE_HTTPS_PROXY`, `DOCKER_HTTP_PROXY` and
- * `DOCKER_HTTPS_PROXY`.
- *
- * **What follows is a per-family reading of each tool's own source, not a
- * measurement, and this paragraph used to say the opposite.** Nothing here was
- * run: no proxy decision was exercised end to end for any of the five families.
- * Two of them could not have been — `yarn` and `podman` are not installed on
- * the machine this was written on. Read the bullets for what they are: an
- * argument from a file path and a line number, not an observation.
- *
- * Those ten serve **five** families, not four — yarn, npm, bundler, pip and
- * docker — and only four have a verdict below. Three read the standard
- * variables this build already sets:
- *
- *   * npm: `node_modules/@npmcli/agent/lib/proxy.js:13` builds `PROXY_ENV_KEYS`
- *     as `{https_proxy, http_proxy, proxy, no_proxy}` and lower-cases every
- *     `process.env` key before matching, so `HTTP_PROXY`/`HTTPS_PROXY` reach it,
- *     and `getProxy` at `:64-71` falls back to them. `NPM_CONFIG_*` is an
- *     *override* of that fallback (`@npmcli/config/lib/index.js:335-338`), not
- *     the only path to it.
- *   * pip: `requests` sets `trust_env = True` by default
- *     (`pip/_vendor/requests/sessions.py:492`) and only
- *     `pip/_internal/cli/index_command.py:133` clears it, which requires
- *     `--proxy` or `--no-proxy-env`. With neither, `get_environ_proxies` reads
- *     the environment. `PIP_PROXY` likewise turns `trust_env` off rather than
- *     being the way in.
- *   * docker: its documented proxy configuration is `HTTP_PROXY`/`HTTPS_PROXY`
- *     and their lowercase forms, on both the daemon and the client side.
- *
- * Yarn is the one that may differ and it is NOT verified here: no `yarn` is
- * installed on this machine, so nothing about it was run. Yarn Classic falls
- * back to the standard variables; Yarn Berry (2+) is reported to read only
- * `YARN_HTTP_PROXY`/`YARN_HTTPS_PROXY` from `networkConfig`, which would make it
- * a real gap — but that is from the upstream source, not from this box, and it
- * is left as the one known unknown rather than asserted either way.
- *
- * **Bundler had no verdict at all, which is why the count above says five and
- * the verdicts say four.** `BUNDLE_HTTP_PROXY`/`BUNDLE_HTTPS_PROXY` were listed
- * in the inventory and then never adjudicated, so a reader following the
- * citations found nothing there. It is recorded here as an **open question, not
- * a finding**: Bundler's documented per-application proxy setting is
- * `BUNDLE_*_PROXY`, and whether it also honours the standard variables is not
- * established by anything in this repository. Until someone reads Bundler's own
- * source, treat it as a possible second gap alongside yarn, and do not read the
- * absence of a bullet as a verdict that it is fine.
- *
- * There is a second order to all of this, and it is the one that decides whether
- * any of the above confines anything: a package manager's **own** proxy option
- * outranks the standard variables inside that tool. `operations.ts` builds the
- * child environment as `{...process.env, ...env, ...proxyEnv}`, so the merge
- * order protects against a caller naming `HTTP_PROXY` — and does nothing at all
- * about a caller naming the override. An ambient `PIP_PROXY` in the developer's
- * own environment was enough to send a confined `pip install` somewhere the
- * policy never sees. That is why `TOOL_PROXY_KEYS` below exists.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Environment variables that carry a proxy URL, in both cases. */
 const HTTP_PROXY_KEYS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] as const;
 const SOCKS_PROXY_KEYS = ["ALL_PROXY", "all_proxy"] as const;
-/**
- * WebSocket and FTP spellings, set alongside the standard ones.
- *
- * These six were set by `proxyEnv` but named nowhere in the doc block above,
- * which counted "the six URL keys in the table below" and then discussed only
- * the per-tool variables — so the inventory a reader auditing "what does this
- * inject into a child" was reading six keys and hearing about none of these.
- *
- * **Counted, not summed by hand: `proxyEnv` sets twenty-one keys — seventeen
- * carrying a URL and four set to the empty string.** The seventeen are these
- * six, the four in `HTTP_PROXY_KEYS`, the two in `SOCKS_PROXY_KEYS` and the
- * five in `TOOL_PROXY_KEYS` below. This comment said twelve on its first
- * draft, which counted the first three groups and then listed the fourth and
- * the no-proxy keys as though they were included; a test now measures the
- * number rather than trusting it.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** WebSocket and FTP spellings, set alongside the standard ones. */
 const EXTRA_HTTP_PROXY_KEYS = ["WS_PROXY", "ws_proxy", "WSS_PROXY", "wss_proxy", "FTP_PROXY", "ftp_proxy"] as const;
 const NO_PROXY_KEYS = ["NO_PROXY", "no_proxy"] as const;
 
-/**
- * Per-tool proxy overrides, pinned to this policy's destination.
- *
- * **Pinned, not stripped**, and the direction matters. Stripping `PIP_PROXY`
- * would not make pip use `HTTP_PROXY` — it would remove pip's only proxy setting
- * and send it out directly, which is the same bypass by the other road. There
- * is no version of "remove the override" that is safe here; the tool has to be
- * *told* where to go. So these are set to the same URL the standard variables
- * carry, and the tool's own preference now points at the policy's proxy.
- *
- * What is measured, and what is not:
- *
- *   - **pip — measured.** `PIP_PROXY` is honoured: with it pointing at a closed
- *     port, `pip download` failed with `NewConnectionError ... host='127.0.0.1',
- *     port=9` and the identical command without it downloaded normally. That is
- *     a behaviour, not a source reading, and it is the reason this set is not
- *     empty.
- *   - **npm — source evidence only.** `@npmcli/config/lib/index.js:332-346`
- *     (`loadEnv`) maps every `npm_config_*` variable onto a config key, lowercased
- *     and dash-converted, which outranks the defaults; and `npm config ls -l`
- *     reports exactly three proxy options, `proxy`, `https-proxy` and
- *     `noproxy`, so those are the three pinned. What could **not** be shown on
- *     this machine is the end-to-end behaviour: every `npm view` here succeeded
- *     through a deliberately closed proxy, with the variable, with `--proxy`, and
- *     with neither, so something outside npm is serving registry reads and npm's
- *     own path never engaged. The claim that npm reads these is from the source;
- *     the claim that it ignores them here is not established.
- *   - **yarn — unverified.** Not installed. Yarn Berry is reported to read
- *     `YARN_HTTP_PROXY`/`YARN_HTTPS_PROXY`; nothing about that was run, so it is
- *     left as a known gap rather than pinned on the strength of a blog post.
- *
- * Both casings are listed because npm's own filter is case-insensitive
- * (`/^npm_config_/i`) and POSIX environment variables are case-sensitive while
- * Windows ones are not — one spelling is not enough for both.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Per-tool proxy overrides, pinned to this policy's destination. */
 const TOOL_PROXY_KEYS = [
 	"npm_config_proxy",
 	"NPM_CONFIG_PROXY",
@@ -269,19 +81,8 @@ const TOOL_PROXY_KEYS = [
 /** The no-proxy half of the same override, pinned to the same empty value. */
 const TOOL_NO_PROXY_KEYS = ["npm_config_noproxy", "NPM_CONFIG_NOPROXY"] as const;
 
-/**
- * `NO_PROXY` is set to the **empty string**, deliberately, and that is worth
- * reading twice.
- *
- * Putting `localhost` or `127.0.0.1` there is the conventional thing to do and
- * it is a documented bypass: a client honouring it connects straight to the
- * address instead of asking this proxy, so under `restricted` every host-local
- * service becomes reachable by adding one line to a config file. An empty value
- * routes even loopback through the decision, where it is judged like anything
- * else — and it is set in both spellings for the same reason the URLs are,
- * because a stale lowercase `no_proxy=localhost` inherited from the ambient
- * environment would otherwise win on half the tools.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** `NO_PROXY` is set to the empty string, deliberately: the conventional `localhost` entry is a documented bypass. */
 function proxyEnv(httpUrl: string, socksUrl: string): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const key of HTTP_PROXY_KEYS) env[key] = httpUrl;
@@ -295,14 +96,8 @@ function proxyEnv(httpUrl: string, socksUrl: string): Record<string, string> {
 	return env;
 }
 
-/**
- * Start both proxies.
- *
- * Returns `undefined` when the policy confines nothing, so a caller does not
- * pay for a listening socket and a poisoned environment in exchange for
- * enforcing nothing. That is also the only case where a child's ambient proxy
- * variables are left alone.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Start both proxies. Returns `undefined` when the policy confines nothing. */
 export async function startNetworkProxy(options: NetworkProxyOptions): Promise<NetworkProxy | undefined> {
 	if (!needsNetworkProxy(options.network, options.rules)) return undefined;
 
@@ -389,24 +184,8 @@ async function handleConnect(
 	upstream.pipe(clientSocket);
 }
 
-/**
- * Absolute-form `GET http://host/path` — the shape `HTTP_PROXY` clients use.
- *
- * A request in origin-form (`GET /path`) reaches this listener when the client
- * *is* using a proxy but wrote the request line in the direct form, or connected
- * here by hand. It is not a URL this can place, so `new URL` throws and it
- * fails as a malformed host. Failing is right — there is no host to decide
- * against, and inventing one would be the dangerous move.
- *
- * **It is worth being precise about what bounds such a client, because the
- * obvious answer is wrong on two of three platforms.** A client that ignores
- * `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` does not reach this listener at all —
- * it opens its own socket, and this proxy is not in that path. Where an OS
- * sandbox backend is actually installed it closes that gap; where none is —
- * Windows, or Linux without bubblewrap — **nothing in this build does**, and
- * the connection is simply direct. This file says so at the top, and this
- * paragraph used to imply the opposite without a platform qualifier.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Absolute-form `GET http://host/path` — the shape `HTTP_PROXY` clients use. Origin-form fails as a malformed host. */
 async function handleHttp(options: NetworkProxyOptions, req: IncomingMessage, res: ServerResponse): Promise<void> {
 	const target = new URL(req.url ?? "");
 	const decision = decideUpstream(options, target.hostname);
@@ -437,14 +216,8 @@ async function handleHttp(options: NetworkProxyOptions, req: IncomingMessage, re
 	req.pipe(upstream);
 }
 
-/**
- * Split `host:port`, keeping an unbracketed IPv6 literal intact.
- *
- * Splitting at the first colon is the one line of code that turns `::1` into
- * an empty host, which then reads as malformed and is refused — a fail-closed
- * accident rather than a decision, which is the kind of accident that gets
- * "fixed" later by someone who reads the failure as the bug.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** Split `host:port`, keeping an unbracketed IPv6 literal intact. */
 export function splitHostPort(authority: string): [string, string | undefined] {
 	const value = authority.trim();
 	if (value.startsWith("[")) {
@@ -513,16 +286,8 @@ async function handleSocks(
 	}
 }
 
-/**
- * One byte of a wire buffer, or a throw.
- *
- * `noUncheckedIndexedAccess` makes every index into a `Buffer` a `number |
- * undefined`, and this file reads a protocol whose whole job is to fail on a
- * malformed message. The three ways out of that are all worse than a throw: an
- * `!` the linter forbids, a `?? 0` that turns a truncated greeting into a
- * plausible one, and a comparison against `undefined` that quietly does the
- * right thing for every value except the one it was written for.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** One byte of a wire buffer, or a throw. */
 function byte(buffer: Buffer, index: number): number {
 	const value = buffer[index];
 	if (value === undefined) throw new Error(`expected at least ${index + 1} bytes, got ${buffer.length}`);
@@ -571,16 +336,8 @@ function formatIpv6(bytes: Buffer): string {
 	return `${hex.slice(0, bestStart).join(":")}::${hex.slice(bestStart + bestLength).join(":")}`;
 }
 
-/**
- * A byte reader that keeps **one** `data` listener for the whole handshake.
- *
- * Attaching and removing a listener per read looks equivalent and is not: with
- * no listener attached the socket keeps whatever was left in its buffer, and
- * bytes that arrive in the gap between two awaits are dropped. A SOCKS5
- * greeting is 2+N+method bytes sent in one write, so the gap is exactly where
- * the rest of the greeting is. `release()` removes the listener before the
- * socket is handed to `pipe`, which is the other half of the same hazard.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** A byte reader that keeps **one** `data` listener for the whole handshake. */
 function byteReader(socket: Duplex) {
 	// Annotated rather than inferred: `Buffer.alloc` narrows to a buffer over
 	// `ArrayBuffer`, and the `data` event hands over the wider `Buffer` type, so
@@ -661,14 +418,8 @@ function openUpstream(host: string, port: number, timeoutMs: number): Promise<So
 	});
 }
 
-/**
- * What `http.Server` and `net.Server` share, and all this file calls on either.
- *
- * Declaring it structurally is what lets the SOCKS5 listener be a `net.Server`
- * without every helper above growing a union or a cast. The event methods come
- * from `EventEmitter` rather than being spelled out, because a hand-written
- * `on(event: string, ...)` is not assignable from Node's typed overloads.
- */
+// Long-form design notes: docs/dev/sandbox.md
+/** What `http.Server` and `net.Server` share, and all this file calls on either. */
 interface ListeningServer extends EventEmitter {
 	listen(port: number, host: string, callback: () => void): unknown;
 	address(): { port: number } | string | null;
