@@ -1,16 +1,5 @@
-/**
- * Append-only JSONL session tree: every entry links to its parent by id, so
- * branching and forking are structural rather than bolted on.
- *
- * Every entry links to its parent by id, so branching/forking is structural.
- * The linear conversation view walks header → active leaf.
- *
- * Appends are crash-safe in the small: a torn final line is skipped on load.
- * A line can also be lost from the middle of a file — an append that ran out
- * of disk writes half an entry and the next append lands after it — so a line
- * that does not parse costs its own entry and nothing else. What that costs the
- * *chain* is repaired in {@link SessionStore.linearEntries}.
- */
+// Append-only JSONL session tree. Entries link by id, and a bad line costs only itself.
+// Long-form design notes: docs/dev/session-store.md
 import {
 	appendFileSync,
 	closeSync,
@@ -59,15 +48,8 @@ export type SessionEntry =
 	  }
 	| { id: string; parentId: string; type: "custom"; timestamp: number; kind: string; data: unknown };
 
-/**
- * What set a compaction off.
- *
- * `auto` is the threshold; `manual` is `/compact`; `overflow` is the third
- * caller — a request the provider has already refused for size, where the
- * estimate is known to be wrong and "not yet" is not an available answer.
- * Recorded rather than inferred, because a session read back weeks later has no
- * other way to say why the transcript changed shape.
- */
+// Long-form design notes: docs/dev/session-store.md
+/** What set a compaction off: the threshold, `/compact`, or a size refusal from the provider. */
 export type CompactionTrigger = "auto" | "manual" | "overflow";
 
 /** What a compaction leaves behind. */
@@ -88,20 +70,8 @@ function isMessageEntry(entry: SessionEntry): entry is Extract<SessionEntry, { t
 	return entry.type === "message";
 }
 
-/**
- * Whether the live message is the one the file holds, as far as can be told.
- *
- * Identical is the normal answer. The exception is a tool result the cheap rung
- * rewrote: the live list carries a preview where the file carries the full text,
- * and the call it came from is what says it is the same message either way.
- * Comparing the text would refuse the record exactly when the session had been
- * running long enough to trim — and refusing it is not free: the file keeps the
- * transcript the summary just replaced, so resuming replays it and pays for the
- * same summary twice.
- *
- * Nothing else is allowed through. A user or assistant message that is not the
- * same object is a live array that has diverged, and the caller gets null.
- */
+// Long-form design notes: docs/dev/session-store.md
+/** Whether the live message is the one the file holds, as far as can be told. */
 function sameMessage(stored: AgentMessage | undefined, live: AgentMessage | undefined): boolean {
 	if (stored === live) return true;
 	return (
@@ -158,14 +128,8 @@ export class SessionStore {
 		return header?.sessionId ?? null;
 	}
 
-	/**
-	 * Lines this store could not read: they were not an entry, or not JSON.
-	 *
-	 * Not a diagnostic counter — a session that came back shorter than it was
-	 * written is something the person resuming it should be told, and this is
-	 * where the number of missing messages can be counted. Zero for a read that
-	 * stopped at `maxBytes`, which cuts the file rather than losing it.
-	 */
+	// Long-form design notes: docs/dev/session-store.md
+	/** Lines this store could not read: not an entry, or not JSON. */
 	get skippedLines(): number {
 		return this.#skippedLines;
 	}
@@ -192,18 +156,8 @@ export class SessionStore {
 		return store;
 	}
 
-	/**
-	 * Load an existing session file, one line at a time.
-	 *
-	 * A line that will not parse is skipped rather than ending the read: the
-	 * file is append-only, so a damaged line is a damaged *entry*, and stopping
-	 * there would throw away every message written after it. The count is kept
-	 * so the caller can say what is missing.
-	 *
-	 * `maxBytes` reads only the head of the file, for callers that want a label
-	 * rather than a conversation (`listSessions`). The last line of a capped read
-	 * is usually a fragment, which the same skip handles.
-	 */
+	// Long-form design notes: docs/dev/session-store.md
+	/** Load an existing session file, one line at a time. */
 	static load(path: string, options: { maxBytes?: number } = {}): SessionStore {
 		const store = new SessionStore(path);
 		if (!existsSync(path)) return store;
@@ -291,38 +245,8 @@ export class SessionStore {
 		return entry;
 	}
 
-	/**
-	 * Linear view: header → active leaf.
-	 *
-	 * `parentId` is the link, but it can name an entry that is not there — a
-	 * damaged line takes its entry's id with it, and the child that pointed at
-	 * it is orphaned. The fallback is the entry written just before the orphan:
-	 * entries are appended in the order they happened, so the line above a
-	 * missing one is the message that came before it. Without that, one bad line
-	 * would hide every *older* message from the session that owns them, which is
-	 * the largest part of the conversation.
-	 *
-	 * The visited set is what keeps both paths from looping: a file whose links
-	 * were edited by hand can point forward, or in a circle, and a walk that
-	 * trusted it would never return.
-	 *
-	 * The answer is the same for the same tree, and the tree only changes where
-	 * this store changes it — `append`, `branch`, and the leaf recomputation that
-	 * follows a load — so the walk is kept until one of them runs. What made that
-	 * worth doing is not `/tree` or `/rewind`, which are typed by a person, but
-	 * the event path: `readTaskSnapshot` walks the whole chain on every task
-	 * change, and on a 20,000-entry session that walk cost 32ms, against nothing
-	 * for the array already in hand. It was worse than linear, too — four times
-	 * the entries was thirteen times the cost — because every step of it moved the
-	 * whole chain (`unshift`) and paid for a map of every entry. So the cost was
-	 * felt exactly where it hurts most: at the end of a long session, on the path
-	 * that saves the plan, on every task change.
-	 *
-	 * The array is shared rather than copied — `readonly` is the whole of the
-	 * contract, and a caller that reorders it would be corrupting every later
-	 * reader. Freezing it says that more loudly, and measured 5.8ms for the
-	 * privilege on this walk, which is more than the walk itself.
-	 */
+	// Long-form design notes: docs/dev/session-store.md
+	/** Linear view: header → active leaf, cached until the tree changes. */
 	linearEntries(): readonly SessionEntry[] {
 		if (this.#linear) return this.#linear;
 		const chain: SessionEntry[] = [];
@@ -375,53 +299,24 @@ export class SessionStore {
 			.map((e) => e.message);
 	}
 
-	/**
-	 * Every compaction on the active path, oldest first — the session's own
-	 * record of what shaped the conversation in hand. Read back rather than
-	 * counted in memory, because the counter that would hold it
-	 * (`CompactionManager`) is rebuilt on every `/model` and `/resume`: what
-	 * survives those is the file.
-	 *
-	 * Only the active path: a compaction on an abandoned branch says nothing
-	 * about the conversation that replaced it. And because every compaction
-	 * re-roots the chain, "on the active path" is at most one — a reader who
-	 * wants how many summaries a session has paid for wants `compactionCount()`.
-	 */
+	// Long-form design notes: docs/dev/session-store.md
+	/** Every compaction on the active path, oldest first. At most one, since each re-roots the chain. */
 	compactions(): Extract<SessionEntry, { type: "compaction" }>[] {
 		return this.linearEntries().filter(
 			(e): e is Extract<SessionEntry, { type: "compaction" }> => e.type === "compaction",
 		);
 	}
 
-	/**
-	 * How many summaries this session has paid for, counted in the file rather
-	 * than along the active chain.
-	 *
-	 * The two questions are different and only one of them is about the branch in
-	 * view. `compactions()` answers "what shaped what I am looking at", and each
-	 * compaction re-roots the chain onto its own boundary, so the entries left
-	 * behind by earlier passes sit on branches the current one does not run
-	 * through. This answers "how much of this conversation has been rewritten" —
-	 * which is what decides whether another summary is still worth its cost, and
-	 * is a property of the session rather than of the leaf it happens to be on.
-	 * A resumed session reads its own history back: the answer does not restart
-	 * because a new manager was built.
-	 */
+	// Long-form design notes: docs/dev/session-store.md
+	/** How many summaries this session has paid for, counted in the file, not along the chain. */
 	compactionCount(): number {
 		let count = 0;
 		for (const entry of this.entries) if (entry.type === "compaction") count++;
 		return count;
 	}
 
-	/**
-	 * What the model is sent when this session is resumed: the boundary of the
-	 * last compaction, then everything after it.
-	 *
-	 * Not the same as `messages()`. A compaction leaves the transcript it
-	 * replaced in the file — that is the audit trail, and replaying it would
-	 * resurrect the very context the summary was written to replace, at full
-	 * price, and then summarize it again.
-	 */
+	// Long-form design notes: docs/dev/session-store.md
+	/** What the model is sent on resume: the last compaction boundary, then everything after it. */
 	contextMessages(): AgentMessage[] {
 		const linear = this.linearEntries();
 		let start = 0;
@@ -441,23 +336,8 @@ export class SessionStore {
 		return out;
 	}
 
-	/**
-	 * Record a compaction: `boundary` replaces everything above `suffix`.
-	 *
-	 * The replaced entries stay in the file as an abandoned branch — history is
-	 * never rewritten — while the active chain becomes [root, boundary, ..suffix],
-	 * so the session on disk reads exactly like the one in memory.
-	 *
-	 * The boundary hangs off the root rather than the last replaced entry: it
-	 * stands *in place of* everything above it, so leaving those entries on the
-	 * chain would make `linearEntries()` — and every view built on it, `/tree`
-	 * included — claim the session still holds the transcript it just summarized
-	 * away. The full history stays reachable in the file, and `/tree` can still
-	 * branch back into it.
-	 *
-	 * Returns null when the trailing entries are not the messages being kept: a
-	 * live array that has diverged from the store must not be guessed at.
-	 */
+	// Long-form design notes: docs/dev/session-store.md
+	/** Record a compaction: `boundary` replaces everything above `suffix`. Null when the trailing entries are not the kept messages. */
 	appendCompaction(record: CompactionRecord): SessionEntry | null {
 		const linear = this.linearEntries();
 		const messageEntries = linear.filter(isMessageEntry);

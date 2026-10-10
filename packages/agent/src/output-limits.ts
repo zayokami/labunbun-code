@@ -1,19 +1,6 @@
-/**
- * How much text one tool result — and one whole round of them — may put into
- * the conversation.
- *
- * Two limits, because a turn gets too large in two different ways. One enormous
- * result is bounded by the tool's own `maxResultSizeChars`. Many results that
- * are each reasonable are bounded by the round budget: ten results of 25k chars
- * are each well inside their own limit and 250k together, which is a quarter of
- * a large context window spent on one turn's tool output.
- *
- * Cutting is lossy, so both limits cut through {@link cutText}, which keeps the
- * two ends of the output — what was run, and where it ended up — plus the one
- * line that makes a cut recoverable, the path to the spilled file, and a notice
- * that stays honest about how much is missing, cumulatively, when the same
- * result is cut twice: once by its tool's limit, once by the round budget.
- */
+// Bounds on the text that tool output may add to the conversation: one result
+// meets its tool's own limit, and one whole round meets the round budget.
+// Long-form design notes: docs/dev/output-limits.md
 import type { ToolResultContent, ToolResultMessage } from "@labunbun/ai";
 
 /** Total characters of tool-result text one round may add to the conversation. */
@@ -44,41 +31,18 @@ export type SpillWriter = (request: SpillRequest) => string | null;
 /** First line of a result whose full text was written to a file. {@link formatSpillHeader}. */
 const SPILL_HEADER = /^\[full output: \d+ chars → ([^\]]+)\]\n/;
 
-/**
- * Write that first line.
- *
- * Shared with callers that bound their own output before the pipeline sees it —
- * a shell captures a head and a tail and writes the whole stream out itself —
- * so the header a second cut recognizes is the header the first one wrote, and
- * spilling finds an existing pointer instead of making a second file.
- */
+// Long-form design notes: docs/dev/output-limits.md
+/** Write the first line of a result whose full text was written to a file. */
 export function formatSpillHeader(path: string, chars: number): string {
 	return `[full output: ${chars} chars → ${path}]\n`;
 }
 
-/**
- * The notice a cut leaves at the point where it cut, carrying how many
- * characters of the output are not shown here.
- *
- * Matched wherever it sits rather than only at the end, because a cut that keeps
- * both ends puts it in the middle. The price of that is a body that literally
- * contains this sentence mid-string being misread on a second cut — the same
- * exposure the end-anchored form had, widened from the last line to any line.
- *
- * Plain digits on purpose: the marker is read back by {@link cutText} on a
- * second cut, and a locale-grouped "1.234.567" parses as 1.234 in half of
- * Europe. (It is never shown to a person — the model reads it as a number.)
- */
+// Long-form design notes: docs/dev/output-limits.md
+/** The notice a cut leaves at the point where it cut, carrying how many characters are not shown. */
 const CUT_MARKER = /\n\.\.\. \[truncated (\d+) chars of output\](?:\n|$)/;
 
-/**
- * Write that notice — one line, no newlines of its own; whoever joins a head
- * and a tail around it supplies those, the same way this module's own cuts do.
- *
- * Shared the same way {@link formatSpillHeader} is: a caller that drops a
- * middle before the pipeline ever cuts writes a marker this module parses, so
- * the cumulative count survives a second cut instead of being reset by it.
- */
+// Long-form design notes: docs/dev/output-limits.md
+/** Write that notice — one line, no newlines of its own. */
 export function formatCutMarker(missing: number): string {
 	return `... [truncated ${missing} chars of output]`;
 }
@@ -92,18 +56,8 @@ interface Cuttable {
 	omitted: number;
 }
 
-/**
- * Take a possibly-already-cut result back apart.
- *
- * The notice and both of the line breaks that hold it are removed, and the two
- * ends are rejoined across the gap it stood in. Taking the trailing break with
- * it is not tidiness: the two breaks replaced the middle that is gone, so
- * keeping either one would leave a character in `body` that no original text
- * had, and `body.length + omitted` has to stay equal to the length the text had
- * before any cut touched it. A second cut measures its notice against that
- * identity, so anything left behind here is counted twice — once as text the
- * model is being shown and once as text that is missing.
- */
+// Long-form design notes: docs/dev/output-limits.md
+/** Take a possibly-already-cut result back apart. */
 function takeApart(text: string): Cuttable {
 	const headerMatch = SPILL_HEADER.exec(text);
 	const header = headerMatch?.[0] ?? "";
@@ -117,21 +71,8 @@ function takeApart(text: string): Cuttable {
 	};
 }
 
-/**
- * Cut `text` down to `limit` characters, saying what is missing.
- *
- * The middle goes, not the end: the head says what was run and the first lines
- * of the file being edited, the tail says what the build said about it and which
- * test failed, and a reader who has only one of the two cannot tell which case
- * they are in. The notice stands at the cut between them.
- *
- * A result that is cut for the first time and has somewhere to spill is written
- * out in full first, and the path goes on the *first* line: it is the only part
- * of a cut result that cannot be reconstructed from the rest, so it has to
- * survive the second cut that the round budget may still apply. The notice is
- * cumulative for the same reason — the reader of a twice-cut result is owed the
- * same number as the reader of a once-cut one.
- */
+// Long-form design notes: docs/dev/output-limits.md
+/** Cut `text` down to `limit` characters, saying what is missing. */
 export function cutText(text: string, limit: number, spill?: SpillWriter, request?: SpillRequest): string {
 	// Also the caller's question, and answered here anyway: a function named for
 	// cutting is the wrong place to discover that it can lengthen a short string
@@ -205,21 +146,8 @@ function resultChars(message: ToolResultMessage): number {
 	return message.content.reduce((sum, block) => sum + (block.type === "text" ? block.text.length : 0), 0);
 }
 
-/**
- * Bound what one round's tool results add to the conversation.
- *
- * The budget is split in proportion to size, with a floor reserved first for
- * every result. Proportional, because the result that carries the most output
- * is usually the one being worked on; floored, because "proportional" would
- * otherwise hand a result a hundred characters and call that a preview; and
- * reserved first, because floors taken out as you go would let a round of many
- * results exceed the budget they are meant to be bounded by.
- *
- * Results that are still whole and have somewhere to spill are spilled rather
- * than thrown away. The text is complete at this point — the tool's own limit
- * did not have to cut it, only the turn's budget did — so this is the last
- * moment the full output exists anywhere.
- */
+// Long-form design notes: docs/dev/output-limits.md
+/** Bound what one round's tool results add to the conversation. */
 export function capRoundResults(
 	results: ToolResultMessage[],
 	spill?: SpillWriter,
