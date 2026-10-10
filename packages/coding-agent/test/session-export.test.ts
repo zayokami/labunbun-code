@@ -57,6 +57,51 @@ describe("resolveContinueTarget", () => {
 		expect(target.firstUserText).toBe("newest session");
 	});
 
+	test("a session nothing was ever said in is not where --continue lands", () => {
+		// Hermetic: the tests above share one cwd, and the pick has to be made
+		// against exactly the two files this test planted.
+		const ownHome = mkdtempSync(join(tmpdir(), "lbb-continue-empty-home-"));
+		const ownCwd = mkdtempSync(join(tmpdir(), "lbb-continue-empty-cwd-"));
+		try {
+			const real = SessionStore.startNew(ownCwd, ownHome);
+			real.appendMessage(userMessage("a conversation that happened"));
+			const realId = real.sessionId;
+			if (!realId) throw new Error("expected a session id");
+			// Launched and exited: a header-only file, and the newest one — every
+			// process start writes one. Continuing into it resumes nothing.
+			const emptyShell = SessionStore.startNew(ownCwd, ownHome);
+			const now = Date.now() / 1000;
+			utimesSync(real.path, now - 60, now - 60);
+			utimesSync(emptyShell.path, now, now);
+
+			const target = resolveContinueTarget(ownCwd, ownHome);
+			expect(target?.sessionId).toBe(realId);
+		} finally {
+			rmSync(ownHome, { recursive: true, force: true });
+			rmSync(ownCwd, { recursive: true, force: true });
+		}
+	});
+
+	test("when every session is an empty shell the newest is still the answer", () => {
+		const ownHome = mkdtempSync(join(tmpdir(), "lbb-continue-all-empty-home-"));
+		const ownCwd = mkdtempSync(join(tmpdir(), "lbb-continue-all-empty-cwd-"));
+		try {
+			const older = SessionStore.startNew(ownCwd, ownHome);
+			const newer = SessionStore.startNew(ownCwd, ownHome);
+			const newerId = newer.sessionId;
+			if (!newerId) throw new Error("expected a session id");
+			const now = Date.now() / 1000;
+			utimesSync(older.path, now - 60, now - 60);
+			utimesSync(newer.path, now, now);
+
+			// Nothing better to offer: the old behavior, kept deliberately.
+			expect(resolveContinueTarget(ownCwd, ownHome)?.sessionId).toBe(newerId);
+		} finally {
+			rmSync(ownHome, { recursive: true, force: true });
+			rmSync(ownCwd, { recursive: true, force: true });
+		}
+	});
+
 	test("sessions from other projects are invisible", () => {
 		const otherCwd = join(cwd, "elsewhere");
 		expect(resolveContinueTarget(otherCwd, home)).toBeNull();

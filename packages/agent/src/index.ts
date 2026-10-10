@@ -18,6 +18,7 @@ export {
 } from "./activity.ts";
 // Compaction
 export {
+	COMPACTION_BOUNDARY_LEAD,
 	COMPACTION_DISABLED_NOTICE,
 	COMPACTION_REFILLING_NOTICE,
 	type CompactionConfig,
@@ -33,7 +34,9 @@ export {
 	estimateContextUsage,
 	extractRecentFiles,
 	hardContextLimit,
+	isCompactionBoundary,
 	keepSuffix,
+	LENGTH_RECOVERY_MESSAGE,
 	microcompact,
 	SUMMARY_PROMPT,
 	stripAnalysis,

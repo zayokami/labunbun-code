@@ -27,7 +27,7 @@ function fixture() {
 async function startup(
 	home: string,
 	cwd: string,
-	options: { continueLast?: boolean; resumeSessionId?: string },
+	options: { continueLast?: boolean; resumeSessionId?: string; home?: string },
 	env: Record<string, string> = {},
 ) {
 	const script = `
@@ -158,6 +158,61 @@ describe("interactive --continue startup", () => {
 		expect(SessionStore.load(chosen.path).messages()).toHaveLength(4);
 		expect(SessionStore.load(newest.path).messages()).toEqual(newest.messages());
 		expect(SessionStore.listSessions(cwd, home)).toHaveLength(2);
+	}, 30_000);
+
+	test("a matched session that cannot be read is reported, not silently dropped", async () => {
+		const { home, cwd } = fixture();
+		const unreadable = seed(cwd, home, "unreadable");
+		const id = unreadable.sessionId;
+		if (!id) throw new Error("expected a session id");
+		// The header line is gone. The file still lists — its name is the id —
+		// and still matches the requested one, but no session can be rebuilt
+		// from it. This used to leave the run with no store at all: no error,
+		// no persistence, the whole exchange kept in memory and thrown away.
+		damageLine(unreadable.path, 1);
+
+		const result = await startup(home, cwd, { resumeSessionId: id });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain(`Could not read session ${id}`);
+		// "Starting a new one" has to mean it: the run persists.
+		expect(SessionStore.listSessions(cwd, home)).toHaveLength(2);
+	}, 30_000);
+
+	test("the home option, not the process environment, decides which sessions exist", async () => {
+		const envHome = mkdtempSync(join(tmpdir(), "lbb-home-env-"));
+		const optionHome = mkdtempSync(join(tmpdir(), "lbb-home-option-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-home-cwd-"));
+		roots.push(envHome, optionHome, cwd);
+		const planted = seed(cwd, optionHome, "in the option home");
+
+		// The environment's home is empty; only the option's home has a session.
+		const result = await startup(envHome, cwd, { continueLast: true, home: optionHome });
+
+		expect(result.reason).toBe("completed");
+		expect(result.mountedMessages).toEqual(planted.messages());
+		// The new question joined the resumed store, rather than opening a
+		// second conversation under the environment's home.
+		expect(SessionStore.listSessions(cwd, optionHome)).toHaveLength(1);
+		expect(SessionStore.listSessions(cwd, envHome)).toHaveLength(0);
+	}, 30_000);
+
+	test("an explicit --resume also reads the option's home, not the environment's", async () => {
+		const envHome = mkdtempSync(join(tmpdir(), "lbb-home-env-"));
+		const optionHome = mkdtempSync(join(tmpdir(), "lbb-home-option-"));
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-home-cwd-"));
+		roots.push(envHome, optionHome, cwd);
+		const planted = seed(cwd, optionHome, "in the option home");
+		const id = planted.sessionId;
+		if (!id) throw new Error("expected a session id");
+
+		// The environment's home is empty; a lookup that read it would report
+		// "Session not found" and exit 1 instead of resuming.
+		const result = await startup(envHome, cwd, { resumeSessionId: id, home: optionHome });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.mountedMessages).toEqual(planted.messages());
+		expect(SessionStore.listSessions(cwd, envHome)).toHaveLength(0);
 	}, 30_000);
 
 	test("with no prior session, starts and persists a fresh conversation", async () => {

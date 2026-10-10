@@ -381,13 +381,15 @@ function elideText(text: string, budget = SUFFIX_ELISION_CHARS): string {
 /**
  * What every boundary message opens with.
  *
- * Named because three pieces of code have to agree on it: the boundary that
+ * Named because four pieces of code have to agree on it: the boundary that
  * is written, the rule that decides what counts as a user's own request — a
  * boundary is a summary wearing a user's clothes, and retaining one verbatim
- * would put a summary inside a summary — and the estimator's rule against
- * anchoring on usage a rewrite has outlived.
+ * would put a summary inside a summary — the estimator's rule against
+ * anchoring on usage a rewrite has outlived, and the transcript replay in
+ * `@labunbun/tui`, which renders a resumed boundary as a marker row instead
+ * of as something the user said.
  */
-const COMPACTION_BOUNDARY_LEAD =
+export const COMPACTION_BOUNDARY_LEAD =
 	"[Conversation compacted to stay within the context window. The summary below preserves everything important.]";
 
 /**
@@ -454,7 +456,7 @@ export function retainedRequests(messages: AgentMessage[], budget = RETAINED_REQ
 }
 
 /** A summary wearing a user's clothes: the message a compaction rewrote the transcript onto. */
-function isCompactionBoundary(message: AgentMessage | undefined): boolean {
+export function isCompactionBoundary(message: AgentMessage | undefined): boolean {
 	if (message?.role !== "user") return false;
 	return userText(message).trim().startsWith(COMPACTION_BOUNDARY_LEAD);
 }

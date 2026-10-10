@@ -139,11 +139,13 @@ import {
 import {
 	damagedSessionNotice,
 	exitSummaryLine,
+	findSession,
 	formatMessageCount,
 	listSessions,
 	loadSessionForResume,
 	resolveContinueTarget,
 	type SessionSummary,
+	shortSessionId,
 } from "./session-resume.ts";
 import {
 	applyCatalogSettings,
@@ -286,22 +288,28 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	let resumedMessages: AgentMessage[] | undefined;
 	if (options.resumeSessionId) {
 		const resumeId = options.resumeSessionId;
-		const sessions = listSessions(cwd);
-		const match =
-			sessions.find((s) => s.sessionId === resumeId) ?? sessions.find((s) => s.sessionId.includes(resumeId));
+		const match = findSession(listSessions(cwd, home), resumeId);
 		if (!match) {
 			console.error(`Session not found: ${options.resumeSessionId}`);
 			return 1;
 		}
 		const loaded = loadSessionForResume(match.path);
-		store = loaded?.store;
 		if (loaded) {
+			store = loaded.store;
 			damageNotice = damagedSessionNotice(loaded.store, loaded.removed);
 			resumedMessages = loaded.messages;
+		} else {
+			// The file lists — its name is the id — and matches, but nothing can be
+			// rebuilt from it: its header is gone. This used to leave the run with
+			// no store at all, silently: the exchange stayed in memory and was
+			// thrown away when the process exited. A new session is started, and
+			// the miss is said out loud.
+			console.error(`Could not read session ${resumeId} — starting a new one.`);
+			store = SessionStore.startNew(cwd, home);
 		}
 	} else if (options.continueLast) {
 		// --resume wins when both are given; this is the shorthand.
-		const target = resolveContinueTarget(cwd);
+		const target = resolveContinueTarget(cwd, home);
 		if (target) {
 			const loaded = loadSessionForResume(target.path);
 			store = loaded?.store;
@@ -312,10 +320,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		}
 		if (!store) {
 			console.error("No previous session to continue — starting a new one.");
-			store = SessionStore.startNew(cwd);
+			store = SessionStore.startNew(cwd, home);
 		}
 	} else {
-		store = SessionStore.startNew(cwd);
+		store = SessionStore.startNew(cwd, home);
 	}
 	// Before the transcript is on screen, so the count the user is about to read
 	// is explained rather than contradicted.
@@ -912,7 +920,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		attachSessionListeners(next);
 		refreshContextInfo(next);
 		sessionRef = next;
-		pushInfo(handle, `Resumed session ${summary.sessionId.slice(0, 8)} (${loaded.messages.length} messages).`);
+		pushInfo(handle, `Resumed session ${shortSessionId(summary.sessionId)} (${loaded.messages.length} messages).`);
 	}
 
 	/** Switch the active model mid-session (/model). Returns false when refused. */
@@ -1906,7 +1914,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				pushInfo(ctx.handle, "Interrupt the current run first (Esc), then /resume.");
 				return true;
 			}
-			const sessions = listSessions(ctx.cwd);
+			// The running session is not something to resume into: it is the
+			// newest file in the project, so it used to sit at the top of this
+			// list and Enter on it cleared the screen onto the conversation
+			// that was already open — a wipe in the shape of a resume.
+			const currentId = ctx.sessionStore()?.sessionId;
+			const sessions = listSessions(ctx.cwd, ctx.home).filter((s) => s.sessionId !== currentId);
 			if (sessions.length === 0) {
 				pushInfo(ctx.handle, "No saved sessions for this project.");
 				return true;
@@ -1915,13 +1928,19 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const handleRef = ctx.handle;
 				if (!handleRef) return;
 				const items = sessions.map((s) => ({
-					label: `${s.sessionId.slice(0, 8)}  ${new Date(s.mtimeMs).toLocaleString()}`,
+					label: `${shortSessionId(s.sessionId)}  ${new Date(s.mtimeMs).toLocaleString()}`,
 					description: `${formatMessageCount(s)} msgs — ${s.firstUserText}`,
 				}));
 				const index = await handleRef.pickFromList("Resume a session", items);
 				if (index === null) return;
 				await ctx.hotSwapSession(sessions[index]);
-			})();
+			})().catch((error) => {
+				// The picker has closed and nothing else happened: the swap threw
+				// after the dialog was gone, and an unhandled rejection used to
+				// take the process down in the middle of a live terminal. The
+				// failure lands in the transcript instead.
+				pushInfo(ctx.handle, `Resume failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
 			return true;
 		}
 		case "/model": {
@@ -1990,7 +2009,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				model: `${session.model.provider}/${session.model.id}`,
 				directory: shortenHome(ctx.cwd, ctx.home),
 				permissions: describeAxes(session.permissionMode, session.sandbox),
-				session: storeId ? storeId.slice(0, 8) : "(not persisted)",
+				session: storeId ? shortSessionId(storeId) : "(not persisted)",
 				context: info,
 				details: [
 					[
@@ -2016,7 +2035,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			pushInfo(
 				ctx.handle,
 				`Status: ${session.model.provider}/${session.model.id} · ${describeAxes(session.permissionMode, session.sandbox)} · ${
-					storeId ? storeId.slice(0, 8) : "not persisted"
+					storeId ? shortSessionId(storeId) : "not persisted"
 				}`,
 			);
 			return true;

@@ -47,11 +47,45 @@ export function listSessions(cwd?: string, home?: string): SessionSummary[] {
 }
 
 /**
- * The most recent saved session for a project — the target of `--continue`.
- * Null when nothing was ever saved; callers start fresh and say so.
+ * The part of a session id that names it. Ids open with an ISO timestamp, so
+ * the first eight characters are the year and month — identical for every
+ * session started in the same month. The tail is the random suffix, and it is
+ * what a person reads, types, and hands back to `--resume`.
+ */
+export function shortSessionId(sessionId: string): string {
+	return sessionId.slice(-8);
+}
+
+/**
+ * The session a `--resume` value names: an exact id first, then a substring
+ * match, in that order — a full id and a prefix both work, and a token that
+ * is one id's suffix still finds the id it names rather than a session that
+ * merely contains it.
+ *
+ * An empty token finds nothing. `includes("")` is true for every session, so
+ * without the guard a bare `--resume` would match whichever session came
+ * first and call it the one that was asked for.
+ */
+export function findSession<T extends { sessionId: string }>(sessions: T[], id: string): T | undefined {
+	if (!id) return undefined;
+	return sessions.find((s) => s.sessionId === id) ?? sessions.find((s) => s.sessionId.includes(id));
+}
+
+/**
+ * The session `--continue` lands in — the most recently touched one with
+ * something in it. Null when nothing was ever saved; callers start fresh and
+ * say so.
+ *
+ * Skipping empty shells is the point, not a fallback: every process start
+ * writes a header-only file, so the newest file in a project is usually a
+ * session nobody ever said anything in, and continuing into it resumes
+ * nothing while looking like it resumed something. When every session is a
+ * shell the newest still answers — there is nothing better to offer, and
+ * refusing to continue at all would be the larger surprise.
  */
 export function resolveContinueTarget(cwd?: string, home?: string): SessionSummary | null {
-	return listSessions(cwd, home)[0] ?? null;
+	const sessions = listSessions(cwd, home);
+	return sessions.find((s) => s.messageCount > 0) ?? sessions[0] ?? null;
 }
 
 function textOf(message: AgentMessage): string {
@@ -135,9 +169,10 @@ export function formatMessageCount(summary: Pick<SessionSummary, "messageCount" 
 
 export function exitSummaryLine(opts: { sessionId?: string; messageCount: number; cliName: string }): string | null {
 	if (!opts.sessionId || opts.messageCount === 0) return null;
-	// Eight characters is enough: resume matches by prefix, falling back to a
-	// substring search (see the session lookup in interactive.ts).
-	return `To resume: ${opts.cliName} --resume ${opts.sessionId.slice(0, 8)}`;
+	// The tail, not the head: an id opens with an ISO timestamp, so the first
+	// eight characters are the same for every session this month, and a token
+	// made of them names all of them. `findSession` resolves the suffix.
+	return `To resume: ${opts.cliName} --resume ${shortSessionId(opts.sessionId)}`;
 }
 
 export function formatSessionList(sessions: SessionSummary[]): string {

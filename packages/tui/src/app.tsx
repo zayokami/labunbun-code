@@ -9,9 +9,8 @@ import type { PadBridge } from "@labunbun/gamepad";
 import { render } from "ink";
 import { sealCount } from "./components/MessageList.tsx";
 import {
+	bindSession,
 	CLEAR_SCREEN,
-	connectSessionToStore,
-	connectTurnFooter,
 	type PromptSubmitResult,
 	type PromptSubmitVerdict,
 	REPL,
@@ -242,11 +241,12 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 	 * time, so no closure ever holds a stale session.
 	 */
 	const sessionHolder = { current: options.session };
-	let unsubscribeSession = connectSessionToStore(sessionHolder.current, store);
-	// The finished-run footer, second listener on the same session: subscribed
-	// after the reducer so its line lands after whatever `agent_end` committed
-	// to the transcript.
-	let unsubscribeFooter = connectTurnFooter(sessionHolder.current, store);
+	// Both subscriptions and the opening transcript come from `bindSession`: a
+	// session resumed at startup carries its history in `messages`, and the
+	// connect is what turns it into rows. (The footer is the second listener on
+	// the same session — subscribed after the reducer, so its line lands after
+	// whatever `agent_end` committed to the transcript.)
+	let { unsubscribeSession, unsubscribeFooter } = bindSession(store, sessionHolder.current);
 
 	// exitOnCtrlC: false hands Ctrl+C to the REPL's own handler, which aborts a
 	// running turn first and requires a second press when idle. Ink's default
@@ -348,26 +348,12 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		},
 		setSession: (next) => {
 			sessionHolder.current = next;
+			// Detach the outgoing session first, so a last event from it cannot land
+			// after the swap; `bindSession` then owns the clear-then-seed order and
+			// re-reads the mode label the incoming session is actually in.
 			unsubscribeSession();
 			unsubscribeFooter();
-			unsubscribeSession = connectSessionToStore(next, store);
-			unsubscribeFooter = connectTurnFooter(next, store);
-			// Transient transcript state belongs to the old session; dialogs and
-			// the theme belong to the app and survive. The mode label does **not**
-			// survive, and is the one thing here that has to be re-read rather than
-			// kept: the new session was built from a different settings file, and
-			// carrying the old label over would name a mode this session is not in.
-			store.set((s) => ({
-				...s,
-				entries: [],
-				streamingText: "",
-				thinkingText: "",
-				pendingTools: [],
-				statusPhase: "idle",
-				contextInfo: undefined,
-				tasks: [],
-				modeLabel: describeModeChoice(next.permissionMode, next.sandbox),
-			}));
+			({ unsubscribeSession, unsubscribeFooter } = bindSession(store, next));
 		},
 		setModelName: (name) => {
 			store.set((s) => ({ ...s, modelName: name }));

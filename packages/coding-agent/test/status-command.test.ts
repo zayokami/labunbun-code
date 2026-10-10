@@ -78,7 +78,9 @@ describe("/status", () => {
 		// `Agent 无沙箱` — the two rows differ only in confinement, and that is the
 		// one fact on this card a user cannot infer from the rest of it.
 		expect(card?.permissions).toBe("Ask");
-		expect(card?.session).toBe("abcdef01");
+		// The tail of the id, not the head: ids start with a timestamp, so the
+		// first eight characters are the same for every session this month.
+		expect(card?.session).toBe("23456789");
 		expect(card?.context).toEqual({ usedTokens: 42_000, threshold: 200_000 });
 		expect(card?.details.map(([label]) => label)).toEqual(["Cost", "Cache", "Thinking", "Theme", "MCP"]);
 		// Both totals on one row: a single number here would be read as whichever of
@@ -140,7 +142,7 @@ describe("/status", () => {
 		handleAppCommand("/status", h.ctx);
 		const text = infoTexts(h.store);
 		expect(text).toContain("Status:");
-		expect(text).toContain("abcdef01");
+		expect(text).toContain("23456789");
 		// The card is transient; the transcript is not, and it must not carry the
 		// whole block that the card exists to replace.
 		expect(text.split("\n")).toHaveLength(1);

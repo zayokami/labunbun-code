@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentSession } from "@labunbun/agent";
-import { cycleModeChoice } from "@labunbun/agent";
+import { cycleModeChoice, describeModeChoice } from "@labunbun/agent";
 import { type PadBridge, padPalette } from "@labunbun/gamepad";
 import { Box, Text, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -14,7 +14,7 @@ import { shortcutGroups } from "../shortcuts.ts";
 import type { Store } from "../store.ts";
 import { useStore } from "../store.ts";
 import { useTheme } from "../theme.ts";
-import { type QueuedMessage, reduceEvent, type UiState } from "../ui-state.ts";
+import { entriesFromMessages, type QueuedMessage, reduceEvent, type UiState } from "../ui-state.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
 import { CommandWheel } from "./CommandWheel.tsx";
 import { ListPickerDialog } from "./ListPickerDialog.tsx";
@@ -918,8 +918,18 @@ function pushInfo(store: Store<UiState>, text: string): void {
 	store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text }] }));
 }
 
-/** Subscribe a store to an AgentSession's events. Returns unsubscribe. */
+/**
+ * Subscribe a store to an AgentSession's events. Returns unsubscribe.
+ *
+ * A session that already has history — one just resumed — emits no events for
+ * it, so the resumed conversation is seeded here, before the subscription
+ * starts and could miss anything. An empty session seeds nothing.
+ */
 export function connectSessionToStore(session: AgentSession, store: Store<UiState>): () => void {
+	const history = entriesFromMessages(session.messages);
+	if (history.length > 0) {
+		store.set((state) => ({ ...state, entries: [...state.entries, ...history] }));
+	}
 	return session.on((event: AgentEvent) => {
 		store.set((state) => reduceEvent(state, event));
 	});
@@ -971,5 +981,44 @@ export function connectTurnFooter(
 	return () => {
 		unsubscribeSession();
 		unsubscribeStore();
+	};
+}
+
+/**
+ * Point the store at a session: drop the outgoing transcript, seed the
+ * incoming session's own history, then follow it live.
+ *
+ * The clear and the seed are one step on purpose. They are the two halves of
+ * opening a session — clearing without seeding opens a resumed conversation
+ * on a blank screen, and seeding without clearing interleaves two
+ * conversations — and the order between them is the whole of what makes
+ * `/resume` look like a swap rather than a wipe. Transient transcript state
+ * belongs to the outgoing session and is cleared with it; dialogs and the
+ * theme belong to the app and survive. The mode label is re-read rather than
+ * kept, because the incoming session was built from a different settings
+ * file, and a label carried over would name a mode it is not in.
+ *
+ * The caller detaches the outgoing subscriptions before calling this: both
+ * subscriptions are rebound here, and an event from the session being left
+ * must not land after its replacement's transcript is on screen.
+ */
+export function bindSession(
+	store: Store<UiState>,
+	next: AgentSession,
+): { unsubscribeSession: () => void; unsubscribeFooter: () => void } {
+	store.set((s) => ({
+		...s,
+		entries: [],
+		streamingText: "",
+		thinkingText: "",
+		pendingTools: [],
+		statusPhase: "idle",
+		contextInfo: undefined,
+		tasks: [],
+		modeLabel: describeModeChoice(next.permissionMode, next.sandbox),
+	}));
+	return {
+		unsubscribeSession: connectSessionToStore(next, store),
+		unsubscribeFooter: connectTurnFooter(next, store),
 	};
 }

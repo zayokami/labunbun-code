@@ -2,7 +2,14 @@
  * UI state model: AgentSession events reduce into a flat transcript of
  * renderable entries plus transient streaming/status slices.
  */
-import type { ActivityRange, AgentEvent } from "@labunbun/agent";
+import {
+	type ActivityRange,
+	type AgentEvent,
+	COMPACTION_BOUNDARY_LEAD,
+	isCompactionBoundary,
+	LENGTH_RECOVERY_MESSAGE,
+} from "@labunbun/agent";
+import type { AgentMessage, ImageContent, TextContent } from "@labunbun/ai";
 import type { ListPickerState } from "./components/ListPickerDialog.tsx";
 import type { PermissionOption } from "./permission-options.ts";
 import { DEFAULT_THEME } from "./themes/index.ts";
@@ -446,5 +453,95 @@ export function reduceEvent(state: UiState, event: AgentEvent): UiState {
 
 		default:
 			return state;
+	}
+}
+
+/**
+ * The transcript a session already has, as renderable rows.
+ *
+ * `reduceEvent` turns live events into rows, and a resumed session emits none
+ * for the conversation it arrives with — the messages are pushed into the
+ * session and nothing else happens, so connecting a store to it left the
+ * screen blank while the model answered with the full history in mind. This
+ * is the missing half: the same rows, built from the messages themselves.
+ *
+ * Two messages in the array are not the user's. A compaction boundary is a
+ * marker line, not something to read back as their words; the loop's own
+ * length-recovery message is not shown at all. A tool result attaches to the
+ * row of the call it answers — and one whose call is gone, which is what a
+ * session file that lost a line leaves behind, is dropped rather than shown
+ * as output from nowhere.
+ */
+export function entriesFromMessages(messages: readonly AgentMessage[]): UiEntry[] {
+	const entries: UiEntry[] = [];
+	// The rows a later toolResult attaches to, by call id. Each object is
+	// pushed into `entries` first and filled in place, so the array that is
+	// returned is the array that was finished.
+	const toolRows = new Map<string, Extract<UiEntry, { kind: "toolUse" }>>();
+	for (const message of messages) {
+		if (message.role === "user") {
+			const text = typeof message.content === "string" ? message.content : textOfBlocks(message.content);
+			if (text.trim().length === 0) continue;
+			if (isCompactionBoundary(message)) {
+				entries.push({ kind: "info", text: COMPACTION_BOUNDARY_LEAD });
+				continue;
+			}
+			if (text.trim().startsWith(LENGTH_RECOVERY_MESSAGE)) continue;
+			entries.push({ kind: "user", text });
+			continue;
+		}
+		if (message.role === "assistant") {
+			// Text runs and tool calls keep their order inside the message; a run
+			// of text is one row, and a message with nothing but tool calls gets
+			// no assistant row at all.
+			let textRun: string[] = [];
+			const flushText = (): void => {
+				const text = textRun.join("\n");
+				if (text.trim().length > 0) entries.push({ kind: "assistant", text });
+				textRun = [];
+			};
+			for (const block of message.content) {
+				if (block.type === "text") {
+					textRun.push(block.text);
+				} else if (block.type === "toolCall") {
+					flushText();
+					const row: Extract<UiEntry, { kind: "toolUse" }> = {
+						kind: "toolUse",
+						callId: block.id,
+						toolName: block.name,
+						inputPreview: toolPreview(block.name, parseToolArguments(block.arguments)),
+					};
+					toolRows.set(block.id, row);
+					entries.push(row);
+				}
+			}
+			flushText();
+			continue;
+		}
+		const row = toolRows.get(message.toolCallId);
+		if (!row) continue;
+		row.resultText = textOfBlocks(message.content).slice(0, RESULT_TEXT_CAP);
+		row.isError = message.isError;
+	}
+	return entries;
+}
+
+/** A block array's text, in order — the same join the live reducer writes. */
+function textOfBlocks(blocks: readonly (TextContent | ImageContent)[]): string {
+	return blocks
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n");
+}
+
+/**
+ * Tool arguments are a JSON string on the wire. A shape that does not parse
+ * is previewed as the raw string — the row still says what was asked for.
+ */
+function parseToolArguments(argumentsText: string): unknown {
+	try {
+		return JSON.parse(argumentsText);
+	} catch {
+		return argumentsText;
 	}
 }
