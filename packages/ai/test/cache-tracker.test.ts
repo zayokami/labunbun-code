@@ -15,7 +15,6 @@ function model(overrides: Partial<Model> = {}): Model {
 		contextWindow: 200_000,
 		maxOutputTokens: 64_000,
 		reasoning: true,
-		input: ["text"],
 		...overrides,
 	};
 }

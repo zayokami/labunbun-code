@@ -25,7 +25,6 @@ const MODEL = {
 	contextWindow: 200_000,
 	maxOutputTokens: 64_000,
 	reasoning: true,
-	input: ["text" as const],
 };
 
 function record(overrides: Partial<CacheRequestRecord> = {}): CacheRequestRecord {

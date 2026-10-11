@@ -19,7 +19,6 @@ const MODEL: Model = {
 	contextWindow: 128_000,
 	maxOutputTokens: 8_192,
 	reasoning: false,
-	input: ["text"],
 };
 
 function ctx(overrides: Partial<Context> = {}): Context {
@@ -550,12 +549,12 @@ describe("defaultClient", () => {
 	 */
 	async function withFetch(
 		answer: () => Response,
-		body: (calls: Array<{ url: string; signal: AbortSignal | null | undefined }>) => Promise<void>,
+		body: (calls: Array<{ url: string; signal: AbortSignal | null | undefined; headers: Headers }>) => Promise<void>,
 	): Promise<void> {
 		const realFetch = globalThis.fetch;
-		const calls: Array<{ url: string; signal: AbortSignal | null | undefined }> = [];
+		const calls: Array<{ url: string; signal: AbortSignal | null | undefined; headers: Headers }> = [];
 		globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-			calls.push({ url: String(input), signal: init?.signal });
+			calls.push({ url: String(input), signal: init?.signal, headers: new Headers(init?.headers) });
 			return answer();
 		}) as unknown as typeof fetch;
 		try {
@@ -601,6 +600,22 @@ describe("defaultClient", () => {
 			async (calls) => {
 				await expect(collect(createOpenAIStreamFn({})(MODEL, ctx(), { apiKey: "test-key" }))).rejects.toThrow();
 				expect(calls).toHaveLength(1);
+			},
+		);
+	});
+
+	test("caller-supplied headers reach the outgoing request", async () => {
+		// The whole path rather than the seam: `StreamOptions.headers` rides the
+		// adapter onto the SDK's request options and comes out on the wire. The
+		// field was declared and silently dropped before this — a gap no
+		// signature could show.
+		await withFetch(
+			() => new Response(CHAT_SSE, { headers: { "content-type": "text/event-stream" } }),
+			async (calls) => {
+				await collect(
+					createOpenAIStreamFn({})(MODEL, ctx(), { apiKey: "test-key", headers: { "x-gateway": "route-a" } }),
+				);
+				expect(calls[0]?.headers.get("x-gateway")).toBe("route-a");
 			},
 		);
 	});

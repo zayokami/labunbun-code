@@ -623,12 +623,16 @@ export function createAnthropicStreamFn(options: AnthropicStreamFnOptions = {}) 
 			// Per request rather than on the client, so that a model without the
 			// flag is not carrying a header meant for another one.
 			const betaHeaders = anthropicBetaHeaders(model);
+			// The caller's headers ride along, with the model's beta headers on
+			// top: a beta header is a requirement of the wire this row names, so
+			// it wins a collision against an incidental one.
+			const headers = { ...streamOptions?.headers, ...betaHeaders };
 
 			let raw: AsyncIterable<AnthropicRawStreamEvent>;
 			try {
 				raw = (await client.messages.create(
 					params,
-					Object.keys(betaHeaders).length > 0 ? { headers: betaHeaders } : undefined,
+					Object.keys(headers).length > 0 ? { headers } : undefined,
 				)) as unknown as AsyncIterable<AnthropicRawStreamEvent>;
 			} catch (error) {
 				// The downgrade happens here, below `withRetry`, because a 400 is not a

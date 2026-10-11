@@ -28,7 +28,6 @@ const MODEL: Model = {
 	contextWindow: 200_000,
 	maxOutputTokens: 64_000,
 	reasoning: true,
-	input: ["text"],
 };
 
 /** Long enough that the breakpoint planner has something to mark. */

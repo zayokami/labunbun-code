@@ -33,7 +33,6 @@ const MODEL: Model = {
 	contextWindow: 1_050_000,
 	maxOutputTokens: 128_000,
 	reasoning: true,
-	input: ["text", "image"],
 	pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
 };
 
@@ -374,6 +373,26 @@ describe("createResponsesStreamFn", () => {
 		await collect(streamFn(MODEL, ctx(), { apiKey: "k" }));
 		expect(seen).toHaveLength(1);
 		expect(seen[0].model).toBe("gpt-6.1-sol");
+	});
+
+	test("caller-supplied headers reach the SDK's request options", async () => {
+		// `StreamOptions.headers` is the caller's channel; the body must not grow
+		// a `headers` field for it, so the SDK's second argument is where it has
+		// to land — and the second argument is what this reads.
+		const seen: Array<{ headers?: Record<string, string> } | undefined> = [];
+		const streamFn = createResponsesStreamFn({
+			clientFactory: () => ({
+				responses: {
+					async create(_params: Record<string, unknown>, options?: { headers?: Record<string, string> }) {
+						seen.push(options);
+						return raw([{ type: "response.completed", response: { status: "completed" } }]);
+					},
+				},
+			}),
+		});
+		await collect(streamFn(MODEL, ctx(), { apiKey: "k", headers: { "x-gateway": "route-a" } }));
+		await collect(streamFn(MODEL, ctx(), { apiKey: "k" }));
+		expect(seen).toEqual([{ headers: { "x-gateway": "route-a" } }, undefined]);
 	});
 });
 

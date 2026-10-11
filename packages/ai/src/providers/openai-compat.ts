@@ -383,7 +383,10 @@ export async function* mapOpenAIStream(
 export interface OpenAIClientLike {
 	chat: {
 		completions: {
-			create(params: Record<string, unknown>): Promise<{ [Symbol.asyncIterator](): AsyncIterator<unknown> }>;
+			create(
+				params: Record<string, unknown>,
+				options?: { headers?: Record<string, string> },
+			): Promise<{ [Symbol.asyncIterator](): AsyncIterator<unknown> }>;
 		};
 	};
 }
@@ -401,7 +404,12 @@ export function createOpenAIStreamFn(settings: OpenAIStreamFnOptions = {}) {
 	): AsyncGenerator<AssistantMessageEvent> {
 		const client = settings.clientFactory ? settings.clientFactory() : await defaultClient(model, options);
 		const params = buildOpenAIRequest(model, context, options, settings.policy);
-		const raw = (await client.chat.completions.create(params)) as unknown as AsyncIterable<OpenAIRawChunk>;
+		// Caller-supplied headers reach the wire on the SDK's request options,
+		// not in the body.
+		const raw = (await client.chat.completions.create(
+			params,
+			options?.headers ? { headers: options.headers } : undefined,
+		)) as unknown as AsyncIterable<OpenAIRawChunk>;
 		yield* mapOpenAIStream(raw, model.provider, model.id);
 	};
 }

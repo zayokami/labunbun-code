@@ -212,7 +212,6 @@ function stubModel(baseUrl: string): Model {
 		contextWindow: 200_000,
 		maxOutputTokens: 4_096,
 		reasoning: false,
-		input: ["text"],
 		pricing: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 	};
 }

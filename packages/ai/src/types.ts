@@ -216,7 +216,6 @@ export interface Model<Api extends ApiId = ApiId> {
 	// Long-form design notes: docs/dev/ai-layer.md
 	/** `false` when this model cannot call tools on the wire its own row names. */
 	toolCalling?: false;
-	input: ("text" | "image")[];
 	pricing?: ModelPricing;
 }
 

@@ -83,7 +83,6 @@ function anthropicCompatModel(
 		contextWindow: number;
 		maxOutputTokens: number;
 		reasoning?: boolean;
-		images?: boolean;
 		thinkingMode?: "adaptive" | "extended";
 		pricing: ModelPricing;
 	},
@@ -101,7 +100,6 @@ function anthropicCompatModel(
 		contextWindow: opts.contextWindow,
 		maxOutputTokens: opts.maxOutputTokens,
 		reasoning: opts.reasoning ?? true,
-		input: opts.images === false ? ["text"] : ["text", "image"],
 		...(opts.thinkingMode ? { thinkingMode: opts.thinkingMode } : {}),
 		pricing: opts.pricing,
 	};
@@ -114,7 +112,6 @@ function anthropicModel(
 		contextWindow: number;
 		maxOutputTokens: number;
 		reasoning?: boolean;
-		images?: boolean;
 		thinkingMode?: "adaptive" | "extended";
 		thinkingBlockBinding?: boolean;
 		pricing: ModelPricing;
@@ -149,9 +146,6 @@ function openAIModel(
 		contextWindow: number;
 		maxOutputTokens: number;
 		reasoning?: boolean;
-		// Long-form design notes: docs/dev/ai-layer.md
-		/** Off unless a row asks. */
-		images?: boolean;
 		apiKeyEnvFallbacks?: string[];
 		/**
 		 * Omitted rather than defaulted, for the reason `reasoning` cannot carry:
@@ -189,7 +183,6 @@ function openAIModel(
 		contextWindow: opts.contextWindow,
 		maxOutputTokens: opts.maxOutputTokens,
 		reasoning: opts.reasoning ?? false,
-		input: opts.images ? ["text", "image"] : ["text"],
 		pricing: opts.pricing,
 	};
 }
@@ -227,7 +220,6 @@ type GatewayModel = readonly [
 	contextWindow: number,
 	maxOutputTokens: number,
 	pricing: ModelPricing,
-	images: boolean,
 	toolReasoningEffort?: "none",
 	/**
 	 * `false` for a model whose function calling is published on an endpoint other
@@ -239,31 +231,16 @@ type GatewayModel = readonly [
 ];
 
 const OPENCODE_ZEN_MODELS: GatewayModel[] = [
-	["big-pickle", "Big Pickle", 200_000, 32_000, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, false],
-	[
-		"claude-fable-5",
-		"Claude Fable 5",
-		1_000_000,
-		128_000,
-		{ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
-		true,
-	],
+	["big-pickle", "Big Pickle", 200_000, 32_000, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }],
+	["claude-fable-5", "Claude Fable 5", 1_000_000, 128_000, { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }],
 	[
 		"claude-fable-5-1",
 		"Claude Fable 5.1",
 		1_000_000,
 		128_000,
 		{ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
-		true,
 	],
-	[
-		"claude-haiku-4-5",
-		"Claude Haiku 4.5",
-		200_000,
-		64_000,
-		{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
-		true,
-	],
+	["claude-haiku-4-5", "Claude Haiku 4.5", 200_000, 64_000, { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }],
 	// Added 2026-10-08, the day after it shipped. Same sourcing as the
 	// `claude-sonnet-5-5` row below — the gateway lists it and models.dev prices
 	// it — and the same figures as the vendor page's 100k-and-under band, which
@@ -276,23 +253,14 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		128_000,
 		{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
-		true,
 	],
-	[
-		"claude-opus-4-5",
-		"Claude Opus 4.5",
-		200_000,
-		64_000,
-		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-		true,
-	],
+	["claude-opus-4-5", "Claude Opus 4.5", 200_000, 64_000, { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }],
 	[
 		"claude-opus-4-6",
 		"Claude Opus 4.6",
 		1_000_000,
 		128_000,
 		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-		true,
 	],
 	[
 		"claude-opus-4-7",
@@ -300,7 +268,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		128_000,
 		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-		true,
 	],
 	[
 		"claude-opus-4-8",
@@ -308,39 +275,16 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		128_000,
 		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-		true,
 	],
-	[
-		"claude-opus-5",
-		"Claude Opus 5",
-		1_000_000,
-		128_000,
-		{ input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-		true,
-	],
-	[
-		"claude-opus-5-5",
-		"Claude Opus 5.5",
-		1_000_000,
-		128_000,
-		{ input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
-		true,
-	],
-	[
-		"claude-sonnet-4",
-		"Claude Sonnet 4",
-		1_000_000,
-		64_000,
-		{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-		true,
-	],
+	["claude-opus-5", "Claude Opus 5", 1_000_000, 128_000, { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }],
+	["claude-opus-5-5", "Claude Opus 5.5", 1_000_000, 128_000, { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 }],
+	["claude-sonnet-4", "Claude Sonnet 4", 1_000_000, 64_000, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }],
 	[
 		"claude-sonnet-4-5",
 		"Claude Sonnet 4.5",
 		1_000_000,
 		64_000,
 		{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-		true,
 	],
 	[
 		"claude-sonnet-4-6",
@@ -348,16 +292,8 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		64_000,
 		{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-		true,
 	],
-	[
-		"claude-sonnet-5",
-		"Claude Sonnet 5",
-		1_000_000,
-		128_000,
-		{ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-		true,
-	],
+	["claude-sonnet-5", "Claude Sonnet 5", 1_000_000, 128_000, { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }],
 	// Added 2026-09-29, the day after it shipped. The gateway lists it and
 	// models.dev prices it at the same figures as its own predecessor, which is
 	// also the vendor's — three sources agreeing is why this row is a copy rather
@@ -369,7 +305,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		128_000,
 		{ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-		true,
 	],
 	[
 		"deepseek-v4-flash",
@@ -377,7 +312,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 },
-		false,
 	],
 	[
 		"deepseek-v4-flash-vision-exp",
@@ -385,7 +319,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 },
-		true,
 	],
 	[
 		"deepseek-v4-pro",
@@ -393,7 +326,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 1.74, output: 3.84, cacheRead: 0.145, cacheWrite: 0 },
-		false,
 	],
 	[
 		"deepseek-v4.1-flash",
@@ -401,32 +333,16 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
-		true,
 	],
-	["exo-free", "Exo Free", 1_048_576, 131_072, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, true],
-	[
-		"fledge-alpha-free",
-		"Fledge Alpha Free",
-		1_048_576,
-		131_072,
-		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		true,
-	],
-	[
-		"gemini-3-flash",
-		"Gemini 3 Flash",
-		1_048_576,
-		65_536,
-		{ input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 },
-		true,
-	],
+	["exo-free", "Exo Free", 1_048_576, 131_072, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }],
+	["fledge-alpha-free", "Fledge Alpha Free", 1_048_576, 131_072, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }],
+	["gemini-3-flash", "Gemini 3 Flash", 1_048_576, 65_536, { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 }],
 	[
 		"gemini-3.1-pro",
 		"Gemini 3.1 Pro Preview",
 		1_048_576,
 		65_536,
 		{ input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
-		true,
 	],
 	[
 		"gemini-3.5-flash",
@@ -434,7 +350,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		65_536,
 		{ input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 },
-		true,
 	],
 	[
 		"gemini-3.5-flash-lite",
@@ -442,7 +357,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		65_536,
 		{ input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 },
-		true,
 	],
 	[
 		"gemini-3.6-flash",
@@ -450,7 +364,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		65_536,
 		{ input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
-		true,
 	],
 	[
 		"gemini-3.7-flash",
@@ -458,7 +371,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		65_536,
 		{ input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
-		true,
 	],
 	[
 		"gemini-3.8-flash",
@@ -466,39 +378,23 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		65_536,
 		{ input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
-		true,
 	],
-	["glm-5", "GLM-5", 204_800, 131_072, { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 }, false],
-	["glm-5.1", "GLM-5.1", 204_800, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
-	["glm-5.2", "GLM-5.2", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
-	["glm-5.3", "GLM-5.3", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
-	[
-		"glm-5.3-flash",
-		"GLM-5.3-Flash",
-		1_000_000,
-		131_072,
-		{ input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
-		true,
-	],
-	["gpt-5", "GPT-5", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }, true],
-	["gpt-5-codex", "GPT-5 Codex", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }, true],
-	["gpt-5-nano", "GPT-5 Nano", 400_000, 128_000, { input: 0.05, output: 0.4, cacheRead: 0.005, cacheWrite: 0 }, true],
-	["gpt-5.1", "GPT-5.1", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }, true],
-	[
-		"gpt-5.1-codex",
-		"GPT-5.1 Codex",
-		400_000,
-		128_000,
-		{ input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 },
-		true,
-	],
+	["glm-5", "GLM-5", 204_800, 131_072, { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 }],
+	["glm-5.1", "GLM-5.1", 204_800, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }],
+	["glm-5.2", "GLM-5.2", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }],
+	["glm-5.3", "GLM-5.3", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }],
+	["glm-5.3-flash", "GLM-5.3-Flash", 1_000_000, 131_072, { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 }],
+	["gpt-5", "GPT-5", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }],
+	["gpt-5-codex", "GPT-5 Codex", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }],
+	["gpt-5-nano", "GPT-5 Nano", 400_000, 128_000, { input: 0.05, output: 0.4, cacheRead: 0.005, cacheWrite: 0 }],
+	["gpt-5.1", "GPT-5.1", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }],
+	["gpt-5.1-codex", "GPT-5.1 Codex", 400_000, 128_000, { input: 1.07, output: 8.5, cacheRead: 0.107, cacheWrite: 0 }],
 	[
 		"gpt-5.1-codex-max",
 		"GPT-5.1 Codex Max",
 		400_000,
 		128_000,
 		{ input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
-		true,
 	],
 	[
 		"gpt-5.1-codex-mini",
@@ -506,89 +402,42 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		400_000,
 		128_000,
 		{ input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0 },
-		true,
 	],
-	["gpt-5.2", "GPT-5.2", 400_000, 128_000, { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 }, true],
-	[
-		"gpt-5.2-codex",
-		"GPT-5.2 Codex",
-		400_000,
-		128_000,
-		{ input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
-		true,
-	],
-	[
-		"gpt-5.3-codex",
-		"GPT-5.3 Codex",
-		400_000,
-		128_000,
-		{ input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
-		true,
-	],
+	["gpt-5.2", "GPT-5.2", 400_000, 128_000, { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 }],
+	["gpt-5.2-codex", "GPT-5.2 Codex", 400_000, 128_000, { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 }],
+	["gpt-5.3-codex", "GPT-5.3 Codex", 400_000, 128_000, { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 }],
 	[
 		"gpt-5.3-codex-spark",
 		"GPT-5.3 Codex Spark",
 		128_000,
 		128_000,
 		{ input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
-		false,
 	],
-	["gpt-5.4", "GPT-5.4", 1_050_000, 128_000, { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 }, true],
-	[
-		"gpt-5.4-mini",
-		"GPT-5.4 Mini",
-		400_000,
-		128_000,
-		{ input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
-		true,
-	],
-	[
-		"gpt-5.4-nano",
-		"GPT-5.4 Nano",
-		400_000,
-		128_000,
-		{ input: 0.2, output: 1.25, cacheRead: 0.02, cacheWrite: 0 },
-		true,
-	],
-	["gpt-5.4-pro", "GPT-5.4 Pro", 1_050_000, 128_000, { input: 30, output: 180, cacheRead: 30, cacheWrite: 0 }, true],
-	["gpt-5.5", "GPT-5.5", 1_050_000, 128_000, { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }, true],
-	["gpt-5.5-pro", "GPT-5.5 Pro", 1_050_000, 128_000, { input: 30, output: 180, cacheRead: 30, cacheWrite: 0 }, true],
-	[
-		"gpt-5.6-luna",
-		"GPT-5.6 Luna",
-		1_050_000,
-		128_000,
-		{ input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
-		true,
-	],
-	["gpt-5.6-sol", "GPT-5.6 Sol", 1_050_000, 128_000, { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }, true],
+	["gpt-5.4", "GPT-5.4", 1_050_000, 128_000, { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 }],
+	["gpt-5.4-mini", "GPT-5.4 Mini", 400_000, 128_000, { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 }],
+	["gpt-5.4-nano", "GPT-5.4 Nano", 400_000, 128_000, { input: 0.2, output: 1.25, cacheRead: 0.02, cacheWrite: 0 }],
+	["gpt-5.4-pro", "GPT-5.4 Pro", 1_050_000, 128_000, { input: 30, output: 180, cacheRead: 30, cacheWrite: 0 }],
+	["gpt-5.5", "GPT-5.5", 1_050_000, 128_000, { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }],
+	["gpt-5.5-pro", "GPT-5.5 Pro", 1_050_000, 128_000, { input: 30, output: 180, cacheRead: 30, cacheWrite: 0 }],
+	["gpt-5.6-luna", "GPT-5.6 Luna", 1_050_000, 128_000, { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }],
+	["gpt-5.6-sol", "GPT-5.6 Sol", 1_050_000, 128_000, { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }],
 	[
 		"gpt-5.6-terra",
 		"GPT-5.6 Terra",
 		1_050_000,
 		128_000,
 		{ input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
-		true,
 	],
-	["gpt-6-astra", "GPT-6 Astra", 1_050_000, 128_000, { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, true],
+	["gpt-6-astra", "GPT-6 Astra", 1_050_000, 128_000, { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }],
 	[
 		"gpt-6-luna",
 		"GPT-6 Luna",
 		1_050_000,
 		128_000,
 		{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
-		true,
 		"none",
 	],
-	[
-		"gpt-6-sol",
-		"GPT-6 Sol",
-		1_050_000,
-		128_000,
-		{ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-		true,
-		"none",
-	],
+	["gpt-6-sol", "GPT-6 Sol", 1_050_000, 128_000, { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, "none"],
 	// Sorts after `gpt-6-sol` ("-" before "."); no `toolReasoningEffort`; the one gateway row with `toolCalling: false`.
 	// Long-form design notes: docs/dev/ai-layer.md
 	[
@@ -597,48 +446,31 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_050_000,
 		128_000,
 		{ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
-		true,
 		undefined,
 		false,
 	],
-	["grok-4.5", "Grok 4.5", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 }, true],
-	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
-	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 1.4, output: 4.2, cacheRead: 0.35, cacheWrite: 0 }, true],
-	["grok-build-0.1", "Grok Build 0.1", 256_000, 256_000, { input: 1, output: 2, cacheRead: 0.2, cacheWrite: 0 }, true],
-	["kimi-k2.5", "Kimi K2.5", 262_144, 65_536, { input: 0.6, output: 3, cacheRead: 0.08, cacheWrite: 0 }, true],
-	["kimi-k2.6", "Kimi K2.6", 262_144, 65_536, { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }, true],
-	[
-		"kimi-k2.7-code",
-		"Kimi K2.7 Code",
-		262_144,
-		262_144,
-		{ input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
-		true,
-	],
-	["kimi-k3", "Kimi K3", 1_048_576, 131_072, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }, true],
+	["grok-4.5", "Grok 4.5", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 }],
+	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }],
+	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 1.4, output: 4.2, cacheRead: 0.35, cacheWrite: 0 }],
+	["grok-build-0.1", "Grok Build 0.1", 256_000, 256_000, { input: 1, output: 2, cacheRead: 0.2, cacheWrite: 0 }],
+	["kimi-k2.5", "Kimi K2.5", 262_144, 65_536, { input: 0.6, output: 3, cacheRead: 0.08, cacheWrite: 0 }],
+	["kimi-k2.6", "Kimi K2.6", 262_144, 65_536, { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }],
+	["kimi-k2.7-code", "Kimi K2.7 Code", 262_144, 262_144, { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 }],
+	["kimi-k3", "Kimi K3", 1_048_576, 131_072, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }],
 	[
 		"ling-3.0-flash-fin-free",
 		"Ling 3.0 Flash Fin Free",
 		262_144,
 		32_768,
 		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		false,
 	],
-	[
-		"ling-3.1-flash-free",
-		"Ling 3.1 Flash Free",
-		262_144,
-		32_768,
-		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		false,
-	],
+	["ling-3.1-flash-free", "Ling 3.1 Flash Free", 262_144, 32_768, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }],
 	[
 		"longcat-2.5-preview-free",
 		"LongCat 2.5 Preview Free",
 		1_000_000,
 		131_072,
 		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		true,
 	],
 	[
 		"mimo-v2.6-flash-free",
@@ -646,32 +478,16 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		200_000,
 		32_000,
 		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		true,
 	],
-	[
-		"minimax-m2.5",
-		"MiniMax-M2.5",
-		204_800,
-		131_072,
-		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
-		false,
-	],
-	[
-		"minimax-m2.7",
-		"MiniMax-M2.7",
-		204_800,
-		131_072,
-		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
-		false,
-	],
-	["minimax-m3", "MiniMax-M3", 512_000, 128_000, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }, true],
+	["minimax-m2.5", "MiniMax-M2.5", 204_800, 131_072, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }],
+	["minimax-m2.7", "MiniMax-M2.7", 204_800, 131_072, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }],
+	["minimax-m3", "MiniMax-M3", 512_000, 128_000, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }],
 	[
 		"mistral-large-4",
 		"Mistral Large 4",
 		524_288,
 		262_144,
 		{ input: 0.68, output: 2.09, cacheRead: 0.07, cacheWrite: 0 },
-		true,
 	],
 	[
 		"muse-spark-1.2",
@@ -679,7 +495,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		131_072,
 		{ input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
-		true,
 	],
 	[
 		"muse-spark-1.2-contributor-free",
@@ -687,7 +502,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		131_072,
 		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		true,
 	],
 	[
 		"muse-spark-1.3",
@@ -695,7 +509,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		131_072,
 		{ input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
-		true,
 	],
 	[
 		"muse-spark-1.3-contributor-free",
@@ -703,7 +516,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_048_576,
 		131_072,
 		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		true,
 	],
 	[
 		"nemotron-3-ultra-free",
@@ -711,7 +523,6 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		1_000_000,
 		128_000,
 		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		false,
 	],
 	[
 		"nemotron-3.5-lightning-free",
@@ -719,41 +530,18 @@ const OPENCODE_ZEN_MODELS: GatewayModel[] = [
 		262_144,
 		262_144,
 		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		false,
 	],
-	[
-		"qwen3.5-plus",
-		"Qwen3.5 Plus",
-		262_144,
-		65_536,
-		{ input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
-		true,
-	],
-	[
-		"qwen3.6-plus",
-		"Qwen3.6 Plus",
-		262_144,
-		65_536,
-		{ input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0.625 },
-		true,
-	],
+	["qwen3.5-plus", "Qwen3.5 Plus", 262_144, 65_536, { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }],
+	["qwen3.6-plus", "Qwen3.6 Plus", 262_144, 65_536, { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0.625 }],
 	[
 		"qwen3.8-flash",
 		"Qwen3.8 Flash",
 		1_000_000,
 		131_072,
 		{ input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.2 },
-		true,
 	],
-	["qwen3.8-max", "Qwen3.8 Max", 262_144, 131_072, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }, true],
-	[
-		"space-bunny-free",
-		"Space Bunny Free",
-		1_048_576,
-		524_288,
-		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		true,
-	],
+	["qwen3.8-max", "Qwen3.8 Max", 262_144, 131_072, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }],
+	["space-bunny-free", "Space Bunny Free", 1_048_576, 524_288, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }],
 ];
 const OPENCODE_GO_MODELS: GatewayModel[] = [
 	[
@@ -762,7 +550,6 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
-		false,
 	],
 	[
 		"deepseek-v4-flash-vision-exp",
@@ -770,7 +557,6 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
-		true,
 	],
 	[
 		"deepseek-v4-pro",
@@ -778,7 +564,6 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 0.66, output: 1.98, cacheRead: 0.022, cacheWrite: 0 },
-		false,
 	],
 	[
 		"deepseek-v4.1-flash",
@@ -786,81 +571,42 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		1_000_000,
 		384_000,
 		{ input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
-		true,
 	],
-	["glm-5.2", "GLM-5.2", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
-	["glm-5.3", "GLM-5.3", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, false],
-	[
-		"glm-5.3-flash",
-		"GLM-5.3-Flash",
-		1_000_000,
-		131_072,
-		{ input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
-		true,
-	],
-	[
-		"gpt-5.6-luna",
-		"GPT-5.6 Luna",
-		1_050_000,
-		128_000,
-		{ input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
-		true,
-	],
+	["glm-5.2", "GLM-5.2", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }],
+	["glm-5.3", "GLM-5.3", 1_000_000, 131_072, { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }],
+	["glm-5.3-flash", "GLM-5.3-Flash", 1_000_000, 131_072, { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 }],
+	["gpt-5.6-luna", "GPT-5.6 Luna", 1_050_000, 128_000, { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }],
 	[
 		"gpt-6-luna",
 		"GPT-6 Luna",
 		1_050_000,
 		128_000,
 		{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
-		true,
 		"none",
 	],
-	["grok-4.5", "Grok 4.5", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 }, true],
-	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
-	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, true],
-	["hy3", "Hy3", 256_000, 128_000, { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 }, false],
-	[
-		"hy4-preview",
-		"Hy4 preview",
-		1_024_000,
-		64_000,
-		{ input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 },
-		false,
-	],
-	["kimi-k2.6", "Kimi K2.6", 262_144, 65_536, { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }, true],
-	[
-		"kimi-k2.7-code",
-		"Kimi K2.7 Code",
-		262_144,
-		262_144,
-		{ input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
-		true,
-	],
-	["kimi-k3", "Kimi K3", 1_048_576, 131_072, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }, true],
-	[
-		"longcat-2.0",
-		"LongCat-2.0",
-		1_000_000,
-		131_072,
-		{ input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
-		false,
-	],
+	["grok-4.5", "Grok 4.5", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 }],
+	["grok-4.6", "Grok 4.6", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }],
+	["grok-4.7", "Grok 4.7", 500_000, 500_000, { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }],
+	["hy3", "Hy3", 256_000, 128_000, { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 }],
+	["hy4-preview", "Hy4 preview", 1_024_000, 64_000, { input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 }],
+	["kimi-k2.6", "Kimi K2.6", 262_144, 65_536, { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }],
+	["kimi-k2.7-code", "Kimi K2.7 Code", 262_144, 262_144, { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 }],
+	["kimi-k3", "Kimi K3", 1_048_576, 131_072, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }],
+	["longcat-2.0", "LongCat-2.0", 1_000_000, 131_072, { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 }],
 	[
 		"longcat-2.5-preview-free",
 		"LongCat 2.5 Preview Free",
 		1_000_000,
 		131_072,
 		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		true,
 	],
-	["mimo-v2.5", "MiMo V2.5", 1_000_000, 128_000, { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 }, true],
+	["mimo-v2.5", "MiMo V2.5", 1_000_000, 128_000, { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 }],
 	[
 		"mimo-v2.5-pro",
 		"MiMo V2.5 Pro",
 		1_048_576,
 		128_000,
 		{ input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
-		false,
 	],
 	[
 		"mimo-v2.6-flash",
@@ -868,7 +614,6 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		1_048_576,
 		131_072,
 		{ input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
-		true,
 	],
 	[
 		"mimo-v2.6-pro",
@@ -876,24 +621,15 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		1_048_576,
 		131_072,
 		{ input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
-		true,
 	],
-	[
-		"minimax-m2.7",
-		"MiniMax-M2.7",
-		204_800,
-		131_072,
-		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 },
-		false,
-	],
-	["minimax-m3", "MiniMax-M3", 1_000_000, 131_072, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }, true],
+	["minimax-m2.7", "MiniMax-M2.7", 204_800, 131_072, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 }],
+	["minimax-m3", "MiniMax-M3", 1_000_000, 131_072, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }],
 	[
 		"muse-spark-1.2-contributor",
 		"Muse Spark 1.2 Contributor",
 		1_048_576,
 		131_072,
 		{ input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-		true,
 	],
 	[
 		"muse-spark-1.3-contributor",
@@ -901,56 +637,26 @@ const OPENCODE_GO_MODELS: GatewayModel[] = [
 		1_048_576,
 		131_072,
 		{ input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-		true,
 	],
 	// Zen's entry for this id states a 262,144 window where Go's states a
 	// million, so each plan's row carries the figure its own catalogue states —
 	// the header's "neither is ever filled in from the other" rule, applied to a
 	// window rather than a price, because nothing here tells which figure the
 	// model itself takes.
-	[
-		"qwen3.6-plus",
-		"Qwen3.6 Plus",
-		1_000_000,
-		65_536,
-		{ input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0.625 },
-		true,
-	],
-	[
-		"qwen3.7-max",
-		"Qwen3.7 Max",
-		1_000_000,
-		65_536,
-		{ input: 2.5, output: 7.5, cacheRead: 0.5, cacheWrite: 3.125 },
-		false,
-	],
-	[
-		"qwen3.7-plus",
-		"Qwen3.7 Plus",
-		1_000_000,
-		65_536,
-		{ input: 0.4, output: 1.6, cacheRead: 0.04, cacheWrite: 0.5 },
-		true,
-	],
+	["qwen3.6-plus", "Qwen3.6 Plus", 1_000_000, 65_536, { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0.625 }],
+	["qwen3.7-max", "Qwen3.7 Max", 1_000_000, 65_536, { input: 2.5, output: 7.5, cacheRead: 0.5, cacheWrite: 3.125 }],
+	["qwen3.7-plus", "Qwen3.7 Plus", 1_000_000, 65_536, { input: 0.4, output: 1.6, cacheRead: 0.04, cacheWrite: 0.5 }],
 	[
 		"qwen3.8-flash",
 		"Qwen3.8 Flash",
 		1_000_000,
 		131_072,
 		{ input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.2 },
-		true,
 	],
-	["qwen3.8-max", "Qwen3.8 Max", 1_000_000, 131_072, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }, true],
+	["qwen3.8-max", "Qwen3.8 Max", 1_000_000, 131_072, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }],
 	// Renamed and repriced since the sweep, checked 2026-10-08: the Go listing serves `space-bunny`, this row carried the free variant.
 	// Long-form design notes: docs/dev/ai-layer.md
-	[
-		"space-bunny",
-		"Space Bunny",
-		1_048_576,
-		524_288,
-		{ input: 0.15, output: 0.6, cacheRead: 0.03, cacheWrite: 0 },
-		true,
-	],
+	["space-bunny", "Space Bunny", 1_048_576, 524_288, { input: 0.15, output: 0.6, cacheRead: 0.03, cacheWrite: 0 }],
 ];
 
 // Long-form design notes: docs/dev/ai-layer.md
@@ -1247,25 +953,21 @@ const BUILT_IN_MODELS: Model[] = [
 	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-large-4", "Mistral Large 4", {
 		contextWindow: 1_048_576,
 		maxOutputTokens: 1_048_576,
-		images: true,
 		pricing: { input: 0.68, output: 2.09, cacheRead: 0.07, cacheWrite: 0 },
 	}),
 	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-large-2512", "Mistral Large 3", {
 		contextWindow: 262_144,
 		maxOutputTokens: 262_144,
-		images: true,
 		pricing: { input: 0.5, output: 1.5, cacheRead: 0.05, cacheWrite: 0 },
 	}),
 	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-medium-3-5", "Mistral Medium 3.5", {
 		contextWindow: 262_144,
 		maxOutputTokens: 262_144,
-		images: true,
 		pricing: { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 },
 	}),
 	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "mistral-small-2603", "Mistral Small 4", {
 		contextWindow: 262_144,
 		maxOutputTokens: 262_144,
-		images: true,
 		pricing: { input: 0.15, output: 0.6, cacheRead: 0.015, cacheWrite: 0 },
 	}),
 	openAICompatModel("mistral", MISTRAL_BASE, "MISTRAL_API_KEY", "codestral-2508", "Codestral", {
@@ -1275,42 +977,37 @@ const BUILT_IN_MODELS: Model[] = [
 	}),
 	// The gateway, last: two plans, two wires, four provider ids; `reasoning: false` everywhere (no documented thinking shape), plus the unpriced-id list.
 	// Long-form design notes: docs/dev/ai-layer.md
-	...OPENCODE_ZEN_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images]) =>
+	...OPENCODE_ZEN_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing]) =>
 		anthropicCompatModel("opencode-zen", OPENCODE_ZEN_BASE, "OPENCODE_API_KEY", undefined, id, name, {
 			contextWindow,
 			maxOutputTokens,
 			reasoning: false,
-			images,
 			pricing,
 		}),
 	),
-	...OPENCODE_GO_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images]) =>
+	...OPENCODE_GO_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing]) =>
 		anthropicCompatModel("opencode-go", OPENCODE_GO_BASE, "OPENCODE_API_KEY", undefined, id, name, {
 			contextWindow,
 			maxOutputTokens,
 			reasoning: false,
-			images,
 			pricing,
 		}),
 	),
-	...OPENCODE_ZEN_MODELS.map(
-		([id, name, contextWindow, maxOutputTokens, pricing, images, toolReasoningEffort, toolCalling]) =>
-			openAICompatModel("opencode-zen-oai", OPENCODE_ZEN_OAI_BASE, "OPENCODE_API_KEY", id, name, {
-				contextWindow,
-				maxOutputTokens,
-				reasoning: false,
-				images,
-				toolReasoningEffort,
-				...(toolCalling === false ? { toolCalling: false as const } : {}),
-				pricing,
-			}),
+	...OPENCODE_ZEN_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, toolReasoningEffort, toolCalling]) =>
+		openAICompatModel("opencode-zen-oai", OPENCODE_ZEN_OAI_BASE, "OPENCODE_API_KEY", id, name, {
+			contextWindow,
+			maxOutputTokens,
+			reasoning: false,
+			toolReasoningEffort,
+			...(toolCalling === false ? { toolCalling: false as const } : {}),
+			pricing,
+		}),
 	),
-	...OPENCODE_GO_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, images, toolReasoningEffort]) =>
+	...OPENCODE_GO_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing, toolReasoningEffort]) =>
 		openAICompatModel("opencode-go-oai", OPENCODE_GO_OAI_BASE, "OPENCODE_API_KEY", id, name, {
 			contextWindow,
 			maxOutputTokens,
 			reasoning: false,
-			images,
 			toolReasoningEffort,
 			pricing,
 		}),
@@ -1416,7 +1113,6 @@ export function registerOpenAICompatibleProvider(spec: OpenAICompatibleProviderS
 			contextWindow: m.contextWindow,
 			maxOutputTokens: m.maxOutputTokens,
 			reasoning: m.reasoning ?? false,
-			input: ["text"],
 			pricing: m.pricing,
 		});
 	}

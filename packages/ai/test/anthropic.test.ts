@@ -33,7 +33,6 @@ const MODEL: Model = {
 	// adaptive, so a fixture that left the field off would be pinning the shape
 	// the real model rejects.
 	thinkingMode: "adaptive",
-	input: ["text", "image"],
 };
 
 /**
@@ -227,6 +226,28 @@ describe("thinking-block binding", () => {
 		await collect(streamFn(BINDING_MODEL, longCtx()));
 		await collect(streamFn(MODEL, longCtx()));
 		expect(seen).toEqual([{ headers: { "anthropic-beta": THINKING_BLOCK_BINDING_BETA } }, undefined]);
+	});
+
+	test("caller-supplied headers reach the request, below the model's own", async () => {
+		// `StreamOptions.headers` is the caller's channel (a gateway that routes
+		// on a header, say). A beta header is a requirement of the wire this row
+		// names, so a collision resolves in its favour.
+		const seen: Array<{ headers?: Record<string, string> } | undefined> = [];
+		const client = (): AnthropicClientLike => ({
+			messages: {
+				create: async (_params, options) => {
+					seen.push(options);
+					return okStream();
+				},
+			},
+		});
+		const streamFn = createAnthropicStreamFn({ clientFactory: client });
+		await collect(streamFn(BINDING_MODEL, longCtx(), { headers: { "x-gateway": "a", "anthropic-beta": "spoofed" } }));
+		await collect(streamFn(MODEL, longCtx(), { headers: { "x-gateway": "a" } }));
+		expect(seen).toEqual([
+			{ headers: { "x-gateway": "a", "anthropic-beta": THINKING_BLOCK_BINDING_BETA } },
+			{ headers: { "x-gateway": "a" } },
+		]);
 	});
 });
 

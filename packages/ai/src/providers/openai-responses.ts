@@ -465,7 +465,10 @@ export function resolveStopReason(
 
 export interface ResponsesClientLike {
 	responses: {
-		create(params: Record<string, unknown>): Promise<{ [Symbol.asyncIterator](): AsyncIterator<unknown> }>;
+		create(
+			params: Record<string, unknown>,
+			options?: { headers?: Record<string, string> },
+		): Promise<{ [Symbol.asyncIterator](): AsyncIterator<unknown> }>;
 	};
 }
 
@@ -482,7 +485,12 @@ export function createResponsesStreamFn(settings: ResponsesStreamFnOptions = {})
 	): AsyncGenerator<AssistantMessageEvent> {
 		const client = settings.clientFactory ? settings.clientFactory() : await defaultClient(model, options);
 		const params = buildResponsesRequest(model, context, options, settings.policy);
-		const raw = (await client.responses.create(params)) as unknown as AsyncIterable<ResponsesRawEvent>;
+		// Caller-supplied headers reach the wire on the SDK's request options,
+		// not in the body.
+		const raw = (await client.responses.create(
+			params,
+			options?.headers ? { headers: options.headers } : undefined,
+		)) as unknown as AsyncIterable<ResponsesRawEvent>;
 		yield* mapResponsesStream(raw, model.provider, model.id);
 	};
 }
