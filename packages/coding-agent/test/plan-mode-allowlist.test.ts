@@ -3,18 +3,25 @@
  *
  * The engine in `@labunbun/agent` decides the mode by tool name — it is handed
  * names, never tool objects — while every tool answers the same question itself
- * through `Tool.isReadOnly`. Nothing read that declaration, and the two drifted:
- * AskUserQuestion declared itself read-only and was still refused in plan mode,
- * which a real session showed when the model, told to plan a task whose goal had
- * never been stated, tried to ask which task and had to plan a guess instead.
+ * through `Tool.isReadOnly`. For a while nothing read that declaration, and the
+ * two drifted: AskUserQuestion declared itself read-only and was still refused
+ * in plan mode, which a real session showed when the model, told to plan a task
+ * whose goal had never been stated, tried to ask which task and had to plan a
+ * guess instead. The app now derives a set from the live declarations
+ * (`collectReadOnlyToolNames`) and hands it to the engine as
+ * `readOnlyToolNames`, so the declarations are what the gate reads.
  *
- * So this walks the tool set the app actually builds and fails on any
- * disagreement, in both directions: a read-only tool the mode refuses, and a
- * mutating one it permits. A tool that wants plan mode to admit it has to say so
- * in its own declaration, and the name list in `permissions.ts` has to agree
- * with what the tools say. A third check walks the list itself, because the rows
- * here can only see names that answer to a tool: a name with nothing behind it
- * is a mode admitting a capability that does not exist.
+ * The static list in `permissions.ts` remains the fallback for callers with no
+ * tool objects (tests, embedders), and this file keeps the fallback in step
+ * with the declarations it mirrors: it walks the tool set the app actually
+ * builds and fails on any disagreement, in both directions — a read-only tool
+ * the mode refuses, and a mutating one it permits. A tool that wants plan mode
+ * to admit it has to say so in its own declaration, and the name list has to
+ * agree with what the tools say. A third check walks the list itself, because
+ * the rows here can only see names that answer to a tool: a name with nothing
+ * behind it is a mode admitting a capability that does not exist. The last test
+ * runs the wired path — the derived set handed to the engine — so the two
+ * readings are asserted to agree, not assumed to.
  *
  * The subagent tools (Task, SendMessage, TaskStop) are deliberately not in the
  * set: they are built from a live session's context. None declares
@@ -22,7 +29,12 @@
  * which is what their own declarations say.
  */
 import { describe, expect, test } from "bun:test";
-import { type AnyTool, evaluatePermissions, PLAN_MODE_READ_ONLY_TOOLS } from "@labunbun/agent";
+import {
+	type AnyTool,
+	collectReadOnlyToolNames,
+	evaluatePermissions,
+	PLAN_MODE_READ_ONLY_TOOLS,
+} from "@labunbun/agent";
 import { createAllTools, defaultOperations, TaskStore } from "@labunbun/tools";
 import { createAskUserQuestionTool } from "../src/ask-user.ts";
 import { createBandMessageTool } from "../src/beetle.ts";
@@ -103,6 +115,25 @@ describe("plan mode's allow-list against the tools' declarations", () => {
 		// its own coverage with it.
 		for (const name of ["AskUserQuestion", "WebFetch", "WebSearch", "BashOutput"]) {
 			expect(names).toContain(name);
+		}
+	});
+
+	// The wired path: the set the app computes from the live declarations, handed
+	// to the engine the way `interactive.ts` and `headless.ts` hand it. The rows
+	// above exercise only the fallback the engine keeps for callers with no tool
+	// objects; this runs the form production uses, so a broken collector cannot
+	// pass unnoticed (an empty set would deny every tool, a name mangled on the
+	// way would deny that one).
+	test("the set the app derives from the live tools keeps every row's answer", () => {
+		const declared = collectReadOnlyToolNames(appTools());
+		expect(declared.size).toBeGreaterThan(0);
+		for (const [name, readOnly] of TOOLS) {
+			const { behavior } = evaluatePermissions(
+				name,
+				{},
+				{ mode: "plan", sandbox: "workspace-write", rules: [], cwd: CWD, readOnlyToolNames: declared },
+			);
+			expect(behavior === "deny").toBe(!readOnly);
 		}
 	});
 });

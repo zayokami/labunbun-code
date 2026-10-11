@@ -264,6 +264,18 @@ export interface PermissionEngineConfig {
 	 * are testable from one machine rather than one of them being skipped.
 	 */
 	platform?: DangerousCommandPlatform;
+	/**
+	 * The read-only answer for every tool the caller registered, derived from the
+	 * tool objects themselves (`collectReadOnlyToolNames`) rather than from
+	 * {@link PLAN_MODE_READ_ONLY_TOOLS}.
+	 *
+	 * The engine is handed names, never tool objects, so a caller that holds the
+	 * objects computes this once and hands the answer down; the plan gate then
+	 * reads the same source the tools declare from. Absent, the gate falls back
+	 * to the static list — callers with no tool objects (tests, embedders) keep
+	 * working — and `plan-mode-allowlist.test.ts` holds the two in step.
+	 */
+	readOnlyToolNames?: ReadonlySet<string>;
 }
 
 /**
@@ -318,7 +330,7 @@ export function evaluatePermissions(
 	//    classifier is gated on `toolName === "Bash"`, and `Bash` is exactly what
 	//    this check denies, so every other tool already arrived here with the same
 	//    answer it gets now.
-	if (config.mode === "plan" && !isReadOnlyTool(toolName)) {
+	if (config.mode === "plan" && !isReadOnlyTool(toolName, config.readOnlyToolNames)) {
 		return { behavior: "deny", message: `Plan mode: ${toolName} is not allowed (read-only mode)` };
 	}
 
@@ -416,8 +428,36 @@ export const PLAN_MODE_READ_ONLY_TOOLS: readonly string[] = [
 	"ExitPlanMode",
 ];
 
-function isReadOnlyTool(toolName: string): boolean {
-	return PLAN_MODE_READ_ONLY_TOOLS.includes(toolName);
+/**
+ * Whether plan mode still permits this tool.
+ *
+ * A caller-provided set wins: it was derived from the live tool objects, so the
+ * declaration on the tool is what decides. Otherwise the static list is the
+ * answer — it is also the reference the bilateral test measures every built-in
+ * declaration against, so the two readings cannot drift apart.
+ */
+function isReadOnlyTool(toolName: string, declared?: ReadonlySet<string>): boolean {
+	return declared ? declared.has(toolName) : PLAN_MODE_READ_ONLY_TOOLS.includes(toolName);
+}
+
+/**
+ * The names of the tools whose own declaration says they only read.
+ *
+ * Presence in the set is the whole answer: `isReadOnly` is asked with an empty
+ * input object, which is what every declaration in this build answers from
+ * (`() => true` / `() => false`). A declaration that ever wanted the input
+ * itself could not be folded into a set — it would have to be asked at the call
+ * site — so the empty object is a deliberate, visible limit rather than a
+ * hidden one.
+ */
+export function collectReadOnlyToolNames(
+	tools: ReadonlyArray<{ name: string; isReadOnly?: (input: never) => boolean }>,
+): ReadonlySet<string> {
+	const names = new Set<string>();
+	for (const tool of tools) {
+		if (tool.isReadOnly?.({} as never)) names.add(tool.name);
+	}
+	return names;
 }
 
 export function formatRule(rule: PermissionRule): string {

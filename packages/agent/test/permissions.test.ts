@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
 import {
+	collectReadOnlyToolNames,
 	evaluatePermissions,
 	inputMatchesSpecifier,
 	normalizePathSpec,
@@ -224,6 +225,49 @@ describe("evaluatePermissions", () => {
 		const config = { mode: "plan" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
 		expect(evaluatePermissions("Write", { file_path: "a.txt", content: "" }, config).behavior).toBe("deny");
 		expect(evaluatePermissions("Read", { file_path: "a.txt" }, config).behavior).toBe("ask");
+	});
+
+	/**
+	 * The caller's set, when there is one, *is* the gate — both directions.
+	 *
+	 * The static list and the live tool objects agreed on every tool this build
+	 * registers (that is `plan-mode-allowlist.test.ts`'s job), so a test that only
+	 * ran the real set through would pass even if the engine still read the list.
+	 * The two rows below are each the *disagreement*: a name the list does not
+	 * hold is admitted when declared read-only, and a list member is refused when
+	 * the caller's set drops it. Either one silently falling back to the list
+	 * fails here.
+	 */
+	test("a caller-supplied set decides the gate, not the static list", () => {
+		const base = { mode: "plan" as const, sandbox: SANDBOX, rules: [], cwd: CWD };
+		// Not in `PLAN_MODE_READ_ONLY_TOOLS`; declared read-only, the plan gate steps
+		// aside and the empty rule list lands on the mode's own answer.
+		const declared = evaluatePermissions("Write", {}, { ...base, readOnlyToolNames: new Set(["Write"]) });
+		expect(declared.behavior).toBe("ask");
+		// In the static list, but the caller's set does not hold it: denied, with
+		// the plan gate's own message rather than some other refusal.
+		const dropped = evaluatePermissions("Read", {}, { ...base, readOnlyToolNames: new Set<string>() });
+		expect(dropped.behavior).toBe("deny");
+		if (dropped.behavior !== "deny") throw new Error("unreachable");
+		expect(dropped.message).toContain("Plan mode");
+	});
+
+	/**
+	 * Presence in the set is the declaration's own answer, and a missing
+	 * declaration is the mutating one.
+	 *
+	 * `buildTool` defaults an absent `isReadOnly` to false, so a tool with no
+	 * declaration must land on the deny side of the gate rather than on an
+	 * unknown that slips through — and the middle entry proves the set is built
+	 * from the answers, not from the mere existence of the method.
+	 */
+	test("collectReadOnlyToolNames answers from the declarations alone", () => {
+		const names = collectReadOnlyToolNames([
+			{ name: "Alpha", isReadOnly: () => true },
+			{ name: "Beta", isReadOnly: () => false },
+			{ name: "Gamma" },
+		]);
+		expect([...names]).toEqual(["Alpha"]);
 	});
 
 	/**

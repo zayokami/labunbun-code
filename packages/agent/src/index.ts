@@ -81,6 +81,7 @@ export {
 } from "./output-limits.ts";
 // Permission rule engine
 export {
+	collectReadOnlyToolNames,
 	evaluatePermissions,
 	formatRule,
 	inputMatchesSpecifier,
