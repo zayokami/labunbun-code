@@ -26,15 +26,8 @@ export const MIMOCODE_HOME_ENV = "MIMOCODE_HOME";
 /** An extra config **directory**, searched alongside `<config>` for every asset. */
 export const MIMOCODE_CONFIG_DIR_ENV = "MIMOCODE_CONFIG_DIR";
 
-// Long-form design notes: docs/dev/migration-sources.md
-/** An extra config file, merged after the global one. */
-export const MIMOCODE_CONFIG_FILE_ENV = "MIMOCODE_CONFIG";
-
 /** Relocates the session database. Absolute, `<data>/`-relative, or `:memory:`. */
 export const MIMOCODE_DB_ENV = "MIMOCODE_DB";
-
-/** The TUI's own document, merged after `<config>/tui.json(c)` and before the project's. */
-export const MIMOCODE_TUI_CONFIG_ENV = "MIMOCODE_TUI_CONFIG";
 
 // Long-form design notes: docs/dev/migration-sources.md
 /** The four variables `xdg-basedir` reads, each verbatim when truthy. */
@@ -180,26 +173,6 @@ export function mimocodeEntryName(relativePath: string): string {
 }
 
 // Long-form design notes: docs/dev/migration-sources.md
-/** Roots a command file may be named relative to, from `config/command.ts:47-52`. */
-export const MIMOCODE_CLAUDE_COMMAND_ROOTS: readonly string[] = [
-	"/.mimocode/command/",
-	"/.mimocode/commands/",
-	"/.claude/command/",
-	"/.claude/commands/",
-	"/command/",
-	"/commands/",
-];
-
-// Long-form design notes: docs/dev/migration-sources.md
-/** Roots an agent file may be named relative to, from `config/agent.ts:146`. */
-export const MIMOCODE_AGENT_NAME_ROOTS: readonly string[] = [
-	"/.mimocode/agent/",
-	"/.mimocode/agents/",
-	"/agent/",
-	"/agents/",
-];
-
-// Long-form design notes: docs/dev/migration-sources.md
 /** The `.claude` directories this importer can name: `<home>/.claude` and `<cwd>/.claude`. */
 export function mimocodeClaudeCommandRoots(home: string, cwd: string): string[] {
 	return [join(home, ".claude"), join(cwd, ".claude")];
@@ -287,11 +260,9 @@ export const MIMOCODE_VENDOR_SKILL_DIRS: readonly MiMoCodeVendorSkillDir[] = [
 // ---------------------------------------------------------------------------
 
 // Long-form design notes: docs/dev/migration-sources.md
+// Long-form design notes: docs/dev/migration-sources.md
 /** The three document names MiMo Code injects, from `session/instruction.ts:17-21`. */
 export const MIMOCODE_INSTRUCTION_FILES: readonly string[] = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
-
-/** The character count below which a project `AGENTS.md` also pulls in `CLAUDE.md`. */
-export const MIMOCODE_CLAUDE_FALLBACK_MAX_CHARS = 500;
 
 // Long-form design notes: docs/dev/migration-sources.md
 /** The global instruction documents, in the order `globalFiles` returns them (`session/instruction.ts:28-36`). */
@@ -314,11 +285,6 @@ export function mimocodeVendoredClaudeMd(home: string): string {
 // Long-form design notes: docs/dev/migration-sources.md
 /** The three memory scopes, from the pattern at `memory/paths.ts:47`. */
 export const MIMOCODE_MEMORY_SCOPES: readonly string[] = ["global", "projects", "sessions"];
-
-/** `<data>/memory` — the machine-wide memory root. */
-export function mimocodeMemoryRoot(dataRoot: string): string {
-	return join(dataRoot, "memory");
-}
 
 // Long-form design notes: docs/dev/migration-sources.md
 /** Parse a memory file's path back into `{scope, scopeId, key}`, or `null`. */
@@ -396,10 +362,6 @@ export const MIMOCODE_CREDENTIAL_TABLES: readonly string[] = ["account", "accoun
 // Long-form design notes: docs/dev/migration-sources.md
 /** A derived table that holds an index rather than content, and which must not be read as history. */
 export const MIMOCODE_DERIVED_TABLES: readonly string[] = ["history_fts", "external_import"];
-
-// Long-form design notes: docs/dev/migration-sources.md
-/** The message rows that are subagent turns rather than the conversation. */
-export const MIMOCODE_MAIN_AGENT_ID = "main";
 
 // ---------------------------------------------------------------------------
 // Managed configuration — report only

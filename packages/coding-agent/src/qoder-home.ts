@@ -230,17 +230,6 @@ export function qoderMemoryDir(configDir: string): string {
 	return join(configDir, "memory");
 }
 
-/**
- * `<home>/projects/<slug>/memory` — the per-project memory directory.
- *
- * `join(t, "projects", Bfe(cwd), "memory")`, verbatim in shape. The slug comes
- * from {@link qoderProjectSlug} rather than a slug of its own so that the two
- * directories cannot disagree about which project they are for.
- */
-export function qoderProjectMemoryDir(configDir: string, cwd: string): string {
-	return join(qoderProjectDir(configDir, cwd), "memory");
-}
-
 // Long-form design notes: docs/dev/migration-sources.md
 /** `<configDir>/AGENTS.md` — Qoder's standing instruction document; the name is attested, this location is a choice. */
 export function qoderAgentsMdPath(configDir: string): string {
@@ -254,11 +243,6 @@ export const QODER_MEMORY_ENTRY_PATTERN = /^\d{4}-\d{2}-\d{2}\.md$/u;
 // Long-form design notes: docs/dev/migration-sources.md
 /** The name of the index that sits inside the memory directory, beside the dated entries; the name test is case-insensitive. */
 export const QODER_MEMORY_INDEX_NAME = "MEMORY.md";
-
-/** The memory documents to read from the machine-wide directory, in this order. */
-export function qoderMemoryIndexPaths(configDir: string): string[] {
-	return [join(qoderMemoryDir(configDir), QODER_MEMORY_INDEX_NAME)];
-}
 
 // Long-form design notes: docs/dev/migration-sources.md
 /** Qoder's own hook event names, verbatim from the SDK: 18 events in the SDK's order, seven of which this build also runs. */

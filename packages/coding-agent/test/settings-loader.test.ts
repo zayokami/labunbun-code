@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PERMISSION_MODES, SessionStore } from "@labunbun/agent";
+import { PERMISSION_MODES, RULE_SOURCE_ORDER, SessionStore } from "@labunbun/agent";
 import {
 	applySettingsEnv,
 	collectPermissionRules,
@@ -337,15 +337,23 @@ describe("permission rule tiers", () => {
 		);
 	});
 
-	test("rules follow the settings hierarchy order", () => {
+	test("the collected order is RULE_SOURCE_ORDER's order", () => {
 		withSettingsTiers(
 			{
 				user: { permissions: { allow: ["Read"], deny: [] } },
+				// Repo tiers contribute denies only, so that is what they carry here.
+				project: { permissions: { allow: [], deny: ["Grep"] } },
+				local: { permissions: { allow: [], deny: ["Glob"] } },
 				policy: { permissions: { allow: ["Write"], deny: [] } },
 			},
 			(cwd, home) => {
-				const sources = collectPermissionRules(loadSettings(cwd, undefined, home)).map((r) => r.source);
-				expect(sources.indexOf("userSettings")).toBeLessThan(sources.indexOf("policy"));
+				const flag = { permissions: { allow: ["LS"], deny: [] } };
+				const sources = [...new Set(collectPermissionRules(loadSettings(cwd, flag, home)).map((r) => r.source))];
+				// docs/dev/command-classifier.md's claim for RULE_SOURCE_ORDER is
+				// that it fixes the order rules are collected in. Every tier carries
+				// one rule, so the sequence of sources reads that claim out.
+				expect(sources).toContain("cliArg");
+				expect(sources).toEqual(RULE_SOURCE_ORDER.filter((source) => sources.includes(source)));
 			},
 		);
 	});

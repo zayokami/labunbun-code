@@ -125,11 +125,6 @@ export function almaMemoryDir(configDir: string): string {
 	return join(configDir, "memory");
 }
 
-/** `~/.config/alma/groups` — chat-group state, `telegram-state.json` and so on. */
-export function almaGroupDir(configDir: string): string {
-	return join(configDir, "groups");
-}
-
 /** `~/.config/alma/cron` — the scheduled-job store. */
 export function almaCronDir(configDir: string): string {
 	return join(configDir, "cron");
@@ -148,11 +143,6 @@ export function almaChromeExtensionDir(home: string): string {
 /** `<userData>/chat_threads.db` — the only real database in the product. */
 export function almaDbPath(userData: string): string {
 	return join(userData, "chat_threads.db");
-}
-
-/** `<userData>/plugin-storage/<plugin id>` — a plugin's own state directory. */
-export function almaPluginStorageDir(userData: string, pluginId: string): string {
-	return join(userData, "plugin-storage", pluginId);
 }
 
 // Long-form design notes: docs/dev/migration-sources.md
@@ -190,23 +180,8 @@ export function almaForeignSkillRoots(home: string): string[] {
 }
 
 // Long-form design notes: docs/dev/migration-sources.md
-/** The order Alma resolves a skill name in, first match wins. A shadowed skill is invisible, so `RawAlma` carries the collision list. */
-export const ALMA_SKILL_ROOT_PRECEDENCE: readonly string[] = [
-	"~/.config/alma/skills",
-	"~/.claude/skills",
-	"~/.codex/skills",
-	"~/.agents/skills",
-	"~/.claude/plugins",
-	"<workspace>/.agents/skills",
-	"<workspace>/.alma/skills",
-];
-
-// Long-form design notes: docs/dev/migration-sources.md
 /** How many skills Alma ships in `resources/bundled-skills/`. Counted, not quoted: 40 directories in the 0.4.160 win-x64 package. */
 export const ALMA_BUNDLED_SKILL_COUNT = 40;
-
-// Long-form design notes: docs/dev/migration-sources.md
-/** A skill is a directory holding a `SKILL.md` whose frontmatter carries `name` and `description`. */
 
 // Long-form design notes: docs/dev/migration-sources.md
 /** The hook events Alma has, verbatim: `tool.willExecute`, `tool.didExecute`, `chat.message.willSend`, `app.willQuit`. */
@@ -301,22 +276,8 @@ export function isAlmaCredentialKey(key: string): boolean {
 // ---------------------------------------------------------------------------
 
 // Long-form design notes: docs/dev/migration-sources.md
-/** The link from a thread to the directory it was had in, added after the fact with `ON DELETE SET NULL`, so an orphaned thread has no path. */
-export const ALMA_THREAD_WORKSPACE_COLUMN = "workspace_id";
-
-// Long-form design notes: docs/dev/migration-sources.md
 /** Threads whose title starts with this are never archived. The plain-file archive has three traps, all named in the report. */
 export const ALMA_CRON_TITLE_PREFIX = "⏰ Cron:";
-
-/** The YAML frontmatter keys the archive writes, verbatim and in this order. */
-export const ALMA_ARCHIVE_FRONT_KEYS: readonly string[] = [
-	"threadId",
-	"title",
-	"createdAt",
-	"updatedAt",
-	"model",
-	"messageCount",
-];
 
 /** Where a thread's markdown archive lives, given the archiver's one workspace. */
 export function almaThreadsArchiveDir(workspacePath: string): string {

@@ -192,31 +192,6 @@ export function traeProjectSkillsDir(cwd: string): string {
 	return join(traeProjectRoot(cwd), "skills");
 }
 
-/** `~/.trae/skills` — the global half of the same feature. */
-export function traeGlobalSkillsDir(home: string, edition: "intl" | "cn"): string {
-	return traeGlobalOwned(home, edition, "skills");
-}
-
-/** `<project>/.trae/commands` — TRAE's own slash commands. */
-export function traeProjectCommandsDir(cwd: string): string {
-	return join(traeProjectRoot(cwd), "commands");
-}
-
-/** `~/.trae/commands` — the global half of the same feature. */
-export function traeGlobalCommandsDir(home: string, edition: "intl" | "cn"): string {
-	return traeGlobalOwned(home, edition, "commands");
-}
-
-/** `<project>/.trae/hooks.json` — **vendor-documented**, see {@link TRAE_OWNED_ASSETS}. */
-export function traeProjectHooksFile(cwd: string): string {
-	return join(traeProjectRoot(cwd), "hooks.json");
-}
-
-/** `~/.trae/hooks.json` — the global half of the same feature. */
-export function traeGlobalHooksFile(home: string, edition: "intl" | "cn"): string {
-	return traeGlobalOwned(home, edition, "hooks.json");
-}
-
 // Long-form design notes: docs/dev/migration-sources.md
 /** `~/.trae[-cn]/memory/user_profile.md`, the global memory file. */
 export function traeGlobalMemoryFile(home: string, edition: "intl" | "cn"): string {

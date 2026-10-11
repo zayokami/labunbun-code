@@ -185,13 +185,6 @@ export function listAlmaHistory(home: string, env: AlmaEnv = process.env): Histo
 	return { candidates, notes };
 }
 
-/** One message row, as the conversion needs it. */
-export interface AlmaRow {
-	role: string;
-	text: string | null;
-	timestamp: number;
-}
-
 /** What one chosen thread converts to, before `migrate-history.ts` wraps it. */
 export interface AlmaConversation {
 	messages: AgentMessage[];

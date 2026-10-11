@@ -132,28 +132,6 @@ const asString = (value: unknown): string => (typeof value === "string" ? value 
 const asNumber = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 
 /**
- * Every table the database has, sorted.
- *
- * Read from `sqlite_master`, which holds the schema rather than any user's rows.
- * This is the one query that is safe to make about a database whose other tables
- * are off limits, and it is what lets the report say "this install has a
- * `session_share` table" instead of naming tables that may not exist.
- */
-export function readMiMoCodeTableNames(dbPath: string | null): string[] {
-	return (
-		withDb(dbPath, (db) => {
-			const rows = db
-				.query("select name from sqlite_master where type = 'table' and name not like 'sqlite_%'")
-				.all() as Array<Record<string, unknown>>;
-			return rows
-				.map((row) => asString(row.name))
-				.filter((name) => name !== "")
-				.sort();
-		}) ?? []
-	);
-}
-
-/**
  * Every session, newest first.
  *
  * `parent_id` and `time_archived` are both **selected rather than filtered** here:

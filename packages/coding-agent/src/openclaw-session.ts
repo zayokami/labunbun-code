@@ -56,7 +56,6 @@
  */
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { type OpenClawEnv, openclawStateDir } from "./openclaw-home.ts";
 
 /** A session's identity, as `session_windows` records it. */
 export interface OpenClawSessionWindowRow {
@@ -121,28 +120,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: null;
-}
-
-/**
- * Every table the store has, sorted.
- *
- * Read from `sqlite_master`, which holds the schema rather than any user's rows.
- * This is the one query that is safe to make about a database whose contents are
- * off limits, and it is what lets {@link hasCompressedEvents} answer without
- * assuming a schema version.
- */
-export function readOpenClawTableNames(dbPath: string): string[] {
-	return (
-		withDb(dbPath, (db) => {
-			const rows = db
-				.query("select name from sqlite_master where type = 'table' and name not like 'sqlite_%'")
-				.all() as Array<Record<string, unknown>>;
-			return rows
-				.map((row) => asString(row.name))
-				.filter((name) => name !== "")
-				.sort();
-		}) ?? []
-	);
 }
 
 /**
@@ -285,24 +262,4 @@ export function openclawAgentDbPath(stateDir: string, agentId: string, configure
 			? configuredAgentDir.trim()
 			: `${stateDir}/agents/${agentId}/agent`;
 	return dir.replace(/[\\/]+$/, "").concat("/openclaw-agent.sqlite");
-}
-
-/**
- * The agent store for a home, or `null`.
- *
- * The state directory is resolved with the product's own precedence — including
- * the `.clawdbot` fallback — so an upgraded install whose state never moved is
- * found rather than reported absent.
- */
-export function findOpenClawAgentDb(home: string, env: OpenClawEnv, agentId = "main"): string | null {
-	const stateDir = openclawStateDir(home, env);
-	const candidates = [
-		openclawAgentDbPath(stateDir, agentId),
-		// `agents[].agentDir` can put the store anywhere; the two spellings below
-		// are the layout a default install writes, kept because a profile root moves
-		// the whole tree rather than the agent subdirectory.
-		openclawAgentDbPath(stateDir, agentId, `${stateDir}/agents/${agentId}/agent`),
-	];
-	for (const candidate of candidates) if (existsSync(candidate)) return candidate;
-	return null;
 }

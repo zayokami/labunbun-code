@@ -138,9 +138,6 @@ export function openclawDefaultAgentDir(stateDir: string, agentId: string): stri
 	return join(stateDir, "agents", agentId, "agent");
 }
 
-/** The agent directory's authoritative session store. */
-export const OPENCLAW_AGENT_DB_FILENAME = "openclaw-agent.sqlite";
-
 /**
  * The agent directory for `agentId`.
  *

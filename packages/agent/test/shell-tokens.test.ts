@@ -20,6 +20,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { classifyDangerousCommand } from "../src/dangerous-command.ts";
+// From the barrel on purpose: this is the path a consumer gets the constant
+// through, and the re-export is otherwise unread (docs/dev/command-classifier.md).
+import { COMMAND_SEPARATOR_RE } from "../src/index.ts";
 import { extractBashFilePaths } from "../src/permissions.ts";
 import { splitShellCommands, splitShellSegments, tokenizeShell } from "../src/shell-tokens.ts";
 
@@ -244,5 +247,29 @@ describe("tokenizeShell", () => {
 		["''", [""], "an empty quoted string is a token, not an absence"],
 	])("%s tokenizes to %j (%s)", (input, expected) => {
 		expect(tokenizeShell(input)).toEqual(expected);
+	});
+});
+
+describe("COMMAND_SEPARATOR_RE: the separator alphabet", () => {
+	// The scanner splits by walking characters, so nothing in the process calls
+	// the regex — it stays exported to answer a question about the alphabet:
+	// which characters separate commands (docs/dev/command-classifier.md).
+	// These pin that answer to the scanner the callers actually use, so the two
+	// cannot drift apart while both stay green.
+	test("matches exactly the separator characters the scanner splits on", () => {
+		const matched: string[] = [];
+		for (let code = 0x20; code <= 0x7e; code++) {
+			const char = String.fromCharCode(code);
+			if (COMMAND_SEPARATOR_RE.test(char)) matched.push(char);
+		}
+		expect(matched).toEqual(["&", ";", "|"]);
+		expect(COMMAND_SEPARATOR_RE.test("\n")).toBe(true);
+	});
+
+	test("every separator it names splits a command in two", () => {
+		for (const separator of [";", "|", "&", "\n", "&&", "||"]) {
+			expect(COMMAND_SEPARATOR_RE.test(separator), JSON.stringify(separator)).toBe(true);
+			expect(splitShellCommands(`a${separator}b`), JSON.stringify(separator)).toEqual(["a", "b"]);
+		}
 	});
 });

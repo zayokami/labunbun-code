@@ -39,12 +39,6 @@ export interface Skill {
 	disableModelInvocation: boolean;
 }
 
-/** Why a skill folder was held back, phrased for the startup notice. */
-export interface SkillNote {
-	dir: string;
-	reason: string;
-}
-
 export interface SkillLoadResult {
 	skills: Skill[];
 	/** One line per held-back skill folder, in directory order. */

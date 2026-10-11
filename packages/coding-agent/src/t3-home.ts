@@ -61,11 +61,6 @@ export function t3BaseDir(home: string): string {
 	return resolve(override);
 }
 
-/** `<base dir>/userdata` — where an installed T3 Code keeps everything. */
-export function t3StateDir(baseDir: string): string {
-	return join(baseDir, T3_STATE_SUBDIR);
-}
-
 /**
  * Every state directory worth *detecting*, most authoritative first.
  *

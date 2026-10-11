@@ -3,7 +3,7 @@
 // Long-form design notes: docs/dev/migration-sources.md
 
 import { existsSync, readdirSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 // Long-form design notes: docs/dev/migration-sources.md
 /** The canonical Codewhale application directory name. */
@@ -20,23 +20,9 @@ export type CodewhaleEnv = Record<string, string | undefined>;
 /** The variable that moves the whole tree, and the only one that does. */
 export const CODEWHALE_HOME_ENV = "CODEWHALE_HOME";
 
-// Long-form design notes: docs/dev/migration-sources.md
-/** Variables that relocate the config file rather than the tree. */
-export const CODEWHALE_CONFIG_PATH_ENV = "CODEWHALE_CONFIG_PATH";
-
-/** The second half of the config-file override pair. See {@link CODEWHALE_CONFIG_PATH_ENV}. */
-export const CODEWHALE_LEGACY_CONFIG_PATH_ENV = "DEEPSEEK_CONFIG_PATH";
-
-// Long-form design notes: docs/dev/migration-sources.md
-/** Whether the tree is env-relocatable, and which variables do it. */
-export const CODEWHALE_HOME_ENVS: readonly string[] = [CODEWHALE_HOME_ENV];
-
 // ---------------------------------------------------------------------------
 // The two roots
 // ---------------------------------------------------------------------------
-
-/** Why `CODEWHALE_HOME` was refused, or `null` when it was unset or usable. */
-export type CodewhaleHomeRejection = "relative" | "tilde-without-home";
 
 // Long-form design notes: docs/dev/migration-sources.md
 /** The home the reader will open, and why a configured one was not used. */
@@ -274,19 +260,6 @@ export function codewhaleProjectConfigPath(workspace: string, exists: (path: str
 	return exists(legacy) ? legacy : primary;
 }
 
-// Long-form design notes: docs/dev/migration-sources.md
-/** A project config that exists but cannot be used, kept distinct from absence. */
-export function codewhaleProjectConfigReport(
-	workspace: string,
-	exists: (path: string) => boolean = existsSync,
-): {
-	path: string;
-	present: boolean;
-} {
-	const path = codewhaleProjectConfigPath(workspace, exists);
-	return { path, present: exists(path) };
-}
-
 // ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
@@ -362,30 +335,9 @@ export function codewhaleProjectSharedSkillsDir(workspace: string): string {
 	return join(workspace, ".agents", "skills");
 }
 
-/** `~/.deepseek/skills` — the pre-rename root for this name, named for the report. */
-export function codewhaleLegacySkillsRoot(home: string): string {
-	return join(home, CODEWHALE_LEGACY_DIR, "skills");
-}
-
-// Long-form design notes: docs/dev/migration-sources.md
-/** `~/.codewhale/agents/<id>.toml` — Fleet personal agent profiles. */
-export function codewhaleAgentsDir(root: string): string {
-	return join(root, "agents");
-}
-
 /** `<workspace>/.codewhale/agents` — the project half. `fleet/profile.rs:20`. */
 export function codewhaleProjectAgentsDir(workspace: string): string {
 	return join(workspace, CODEWHALE_DEFAULT_DIR, "agents");
-}
-
-/** `~/.codewhale/fleets/<slug>.toml` — `FLEET_DIR = "fleets"` (`fleet/store.rs:76`), joined at `:597-598`. */
-export function codewhaleFleetsDir(root: string): string {
-	return join(root, "fleets");
-}
-
-/** `~/.codewhale/plugins/<name>/` — `plugins/discovery.rs:61-63`. */
-export function codewhalePluginsDir(root: string): string {
-	return join(root, "plugins");
 }
 
 // ---------------------------------------------------------------------------
@@ -542,42 +494,4 @@ export function codewhaleTreeHasContent(root: string): boolean {
 	} catch {
 		return false;
 	}
-}
-
-// Long-form design notes: docs/dev/migration-sources.md
-/** The config-file override, if one is set, and the environment it came from. */
-export function codewhaleConfigOverride(
-	home: CodewhaleHome,
-	env: CodewhaleEnv = process.env,
-): { path: string; from: string } | null {
-	for (const name of [CODEWHALE_CONFIG_PATH_ENV, CODEWHALE_LEGACY_CONFIG_PATH_ENV]) {
-		const raw = env[name];
-		if (raw === undefined) continue;
-		const trimmed = raw.trim();
-		if (trimmed === "") continue;
-		const expanded = expandLeadingTilde(trimmed, home.root);
-		if (expanded === null || !isAbsolute(expanded)) continue;
-		return { path: expanded, from: name };
-	}
-	return null;
-}
-
-// Long-form design notes: docs/dev/migration-sources.md
-/** The config document, honouring a file-level override when one is set. */
-export function codewhaleConfigPathWithOverride(home: CodewhaleHome, env: CodewhaleEnv = process.env): string {
-	return codewhaleConfigOverride(home, env)?.path ?? codewhaleConfigPath(home);
-}
-
-/** `permissions.toml` beside the resolved `config.toml`, which is what the product reads. */
-export function codewhalePermissionsPathWithOverride(home: CodewhaleHome, env: CodewhaleEnv = process.env): string {
-	const overridden = codewhaleConfigOverride(home, env);
-	if (overridden !== null) return join(resolve(overridden.path, ".."), "permissions.toml");
-	return codewhalePermissionsPath(home);
-}
-
-/** `settings.toml` beside the resolved `config.toml` when one is overridden. */
-export function codewhaleSettingsPathWithOverride(home: CodewhaleHome, env: CodewhaleEnv = process.env): string {
-	const overridden = codewhaleConfigOverride(home, env);
-	if (overridden !== null) return join(resolve(overridden.path, ".."), "settings.toml");
-	return codewhaleSettingsCandidates(home)[0];
 }
