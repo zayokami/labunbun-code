@@ -207,7 +207,14 @@ export class SessionStore {
 					const stat = statSync(full);
 					out.push({ path: full, sessionId: name.replace(/\.jsonl$/, ""), mtimeMs: stat.mtimeMs });
 				}
-			} catch {}
+			} catch (error) {
+				// Swallowed, a failed listing is indistinguishable from an empty one:
+				// /resume shows "no sessions" beside a directory full of transcripts.
+				// The listing still returns what it has; it just says so on the way.
+				console.error(
+					`Warning: could not list sessions in ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 		return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
 	}

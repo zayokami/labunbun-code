@@ -14,6 +14,7 @@ import {
 	AgentSession,
 	type AnyTool,
 	buildTool,
+	collectReadOnlyToolNames,
 	evaluatePermissions,
 	type NetworkAxis,
 	type PermissionMode,
@@ -88,9 +89,19 @@ function loadDefinitionsFromDir(dir: string, source: "user" | "project"): AgentD
 					source,
 					body: body.trim() || undefined,
 				});
-			} catch {}
+			} catch (error) {
+				// One unreadable file used to vanish from the list with nothing said,
+				// which reads as "no such agent" at the one moment the user is
+				// wondering where their definition went.
+				console.error(
+					`Warning: could not read agent definition ${join(dir, name)}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
-	} catch {
+	} catch (error) {
+		console.error(
+			`Warning: could not list agent definitions in ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+		);
 		return out;
 	}
 	return out;
@@ -372,6 +383,11 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 			}
 
 			const tools = definition.tools ? ctx.allTools.filter((t) => definition.tools?.includes(t.name)) : ctx.allTools;
+			// The subagent's plan gate reads the same declaration the parent's does.
+			// Computed from this definition's tool list, not the parent's: a plan-mode
+			// subagent restricted to read tools should not inherit an answer about
+			// tools it does not have.
+			const readOnlyToolNames = collectReadOnlyToolNames(tools);
 			const store = ctx.store?.();
 			const permissionMode = ctx.permissionMode?.();
 			const sandbox = ctx.sandbox?.();
@@ -431,6 +447,7 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 									sandbox: permCtx.sandbox,
 									rules: ctx.getPermissionRules?.() ?? [],
 									cwd: toolCtx.cwd,
+									readOnlyToolNames,
 								});
 								if (decision.behavior === "ask") {
 									return {

@@ -5,10 +5,27 @@ import type { NetworkAxis, SandboxMode, SandboxPolicy, WritableRoot } from "@lab
 import { policyFor } from "./index.ts";
 import { findProtectedPaths } from "./protected-paths.ts";
 
+/** Reported once per process: the scan runs on every call, the condition does not change under it. */
+let protectedPathsFailureReported = false;
+
 // Long-form design notes: docs/dev/sandbox.md
 /** `.git` directories inside a workspace, re-derived on every call. The smoke test keeps the cache story. */
 function protectedPathsFor(workspace: string): Promise<string[]> {
-	return findProtectedPaths(workspace).catch(() => [] as string[]);
+	return findProtectedPaths(workspace).catch((error: unknown) => {
+		// The walk itself already absorbs per-directory failures (see
+		// `protected-paths.ts` — one unreadable subtree costs only its own coverage),
+		// so reaching here means something it cannot degrade past. The empty list is
+		// still returned — a policy that does not load confines nothing, which is
+		// worse than one that confines less — but not silently: an unreported drop
+		// of `.git` protection is the exact failure this seam exists to prevent.
+		if (!protectedPathsFailureReported) {
+			protectedPathsFailureReported = true;
+			console.error(
+				`Warning: could not scan ${workspace} for protected paths: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		return [] as string[];
+	});
 }
 
 export interface WorkspacePolicyOptions {

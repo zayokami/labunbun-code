@@ -35,6 +35,18 @@ describe("hintLine", () => {
 		expect(hintLine(120, { editor: "vim", vimMode: "insert" })).toContain("Esc normal");
 		expect(hintLine(120, { editor: "vim", vimMode: "visual" })).toContain("Esc cancel");
 	});
+
+	// The overlay's Ctrl+R row had the bug first, and the hint is the same lie in
+	// a smaller font: under emacs the engine claims `C-r` as reserved isearch, so
+	// the host never sees the key and history search is unreachable. The other two
+	// editors keep the clause, because for them the key does reach the host.
+	test("drops ctrl+r under emacs, where the engine eats the key", () => {
+		for (const columns of [120, HINT_SHORT_MIN_COLUMNS]) {
+			expect(hintLine(columns, { editor: "emacs", vimMode: "insert" })).not.toContain("ctrl+r");
+		}
+		expect(hintLine(120, { editor: "none", vimMode: "insert" })).toContain("ctrl+r search");
+		expect(hintLine(120, { editor: "vim", vimMode: "insert" })).toContain("ctrl+r search");
+	});
 });
 
 describe("escapeHint", () => {

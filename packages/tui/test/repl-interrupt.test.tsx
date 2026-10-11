@@ -201,6 +201,32 @@ describe("Esc and the vim layer", () => {
 });
 
 /**
+ * The @-list's empty states, which used to be one state.
+ *
+ * A failed listing rendered as an empty list — the same frame as "no files
+ * match" — so a directory read that broke was indistinguishable from a truthful
+ * empty answer, and the user's next move (backspace, retype) could never fix
+ * it. The failure now gets its own line.
+ */
+describe("the @-list says why it is empty", () => {
+	test("a failed listing says so instead of reading as no matches", async () => {
+		const h = setup({
+			completeFiles: async () => {
+				throw new Error("EACCES: permission denied");
+			},
+		});
+		await delay(40);
+		h.stdin.write("@src");
+		// The listing runs behind the same debounce as the success path, on timers
+		// the whole test runner shares: wait for the line rather than betting on a
+		// duration.
+		await waitFor(() => h.frame().includes("file listing failed"));
+		expect(h.frame()).toContain("file listing failed");
+		h.unmount();
+	}, 20_000);
+});
+
+/**
  * `?` and the key list behind it.
  *
  * Two presses of Escape that look identical to the terminal mean different

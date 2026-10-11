@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { resolveCanonical } from "../src/containment.ts";
+import { type FileWalkerOps, walkProjectFiles } from "../src/glob.ts";
 import {
 	createAllTools,
 	createEditTool,
@@ -492,6 +493,54 @@ describe("Grep tool", () => {
 		const tool = createGrepTool(dir, defaultOperations());
 		const result = await call(tool, { pattern: "TOKEN" });
 		expect(pathsOf((result.content[0] as any).text)).toEqual(["sub/wanted.tmp"]);
+	});
+
+	// The walker's own comment says a `.gitignore` it cannot read must not be
+	// quietly walked past — and until these two rows existed, the code did
+	// exactly that: the read's rejection was mapped to `null`, which the walk
+	// reads as "no ignore file here". A real `EACCES` fixture is not portable,
+	// so the two sides of the distinction are driven through the ops seam:
+	// unreadable (throw) and vanished (ENOENT, the readdir-to-read race).
+	describe("walkProjectFiles and an unreadable .gitignore", () => {
+		const root = join(tmpdir(), "lbb-walk-unreadable");
+		const entries = [
+			{ name: ".gitignore", isDirectory: false },
+			{ name: "app.ts", isDirectory: false },
+		];
+		const ops = (readTextFile: FileWalkerOps["readTextFile"]): FileWalkerOps => ({
+			readdir: async () => entries,
+			stat: async () => ({ mtimeMs: 1 }),
+			readTextFile,
+		});
+
+		test("a read failure rejects rather than walking past the rules", async () => {
+			const failing = Object.assign(new Error("EACCES: permission denied, open '.gitignore'"), { code: "EACCES" });
+			await expect(
+				walkProjectFiles(
+					root,
+					ops(async () => {
+						throw failing;
+					}),
+					{ respectGitignore: true },
+				),
+			).rejects.toThrow(/could not read .*\.gitignore: EACCES/);
+		});
+
+		test("a file deleted between the listing and the read (ENOENT) is treated as absent", async () => {
+			const paths = await walkProjectFiles(
+				root,
+				ops(async () => {
+					throw Object.assign(new Error("ENOENT: no such file or directory, open '.gitignore'"), { code: "ENOENT" });
+				}),
+				{ respectGitignore: true },
+			);
+			// No rules to apply, and no failure either: the file being gone is the
+			// same fact as never having been there. Both entries land in the result
+			// — the `.gitignore` is itself a walked file, exactly as git sees it;
+			// what would be wrong is only the throw.
+			expect(paths).toHaveLength(2);
+			expect(paths.some((path) => path.endsWith("app.ts"))).toBe(true);
+		});
 	});
 
 	test("include is matched against the path relative to the search root", async () => {

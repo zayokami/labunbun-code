@@ -61,7 +61,20 @@ export async function walkProjectFiles(
 		// precedence, and the order `isIgnored` folds in.
 		let here = chain;
 		if (readGitignore && entries.some((entry) => !entry.isDirectory && entry.name === ".gitignore")) {
-			const text = await readGitignore(join(dir, ".gitignore")).catch(() => null);
+			const gitignorePath = join(dir, ".gitignore");
+			const text = await readGitignore(gitignorePath).catch((error: unknown) => {
+				// Deleted between the `readdir` above and this read: that race means
+				// the file is not there, which is the same fact as never having been —
+				// not a failure to honour it. Any other error (permissions, a share
+				// that is down) is exactly the case the comment above the reader
+				// describes: a walk asked to respect an ignore file it cannot read
+				// throws rather than quietly walking past it.
+				if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+				throw new Error(
+					`walkProjectFiles: could not read ${gitignorePath}: ${error instanceof Error ? error.message : String(error)}`,
+					{ cause: error },
+				);
+			});
 			if (text !== null) {
 				here = [...chain, { base: dir.split("\\").join("/"), rules: parseGitignore(text) }];
 			}

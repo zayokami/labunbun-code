@@ -386,6 +386,9 @@ export function PromptInput({
 	// at-word is a single token that starts with "@".
 	const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
 	const [fileIndex, setFileIndex] = useState(0);
+	// A listing that failed is a different fact from "no files match", and the
+	// empty list alone renders as the second: the failure gets its own line.
+	const [fileListingFailed, setFileListingFailed] = useState(false);
 	const atQuery = currentAtWord(state.text, state.cursor);
 
 	useEffect(() => {
@@ -395,15 +398,22 @@ export function PromptInput({
 				.then((files) => {
 					setFileSuggestions(filterFiles(files, atQuery));
 					setFileIndex(0);
+					setFileListingFailed(false);
 				})
-				.catch(() => setFileSuggestions([]));
+				.catch(() => {
+					setFileSuggestions([]);
+					setFileListingFailed(true);
+				});
 		}, 120);
 		return () => clearTimeout(timer);
 	}, [atQuery, completeFiles]);
 
 	// A stale list must not linger once the caret leaves the at-word.
 	useEffect(() => {
-		if (atQuery === null) setFileSuggestions([]);
+		if (atQuery === null) {
+			setFileSuggestions([]);
+			setFileListingFailed(false);
+		}
 	}, [atQuery]);
 
 	// Escape routing for an owner that took the key (REPL). A vim user needs Esc to
@@ -712,7 +722,7 @@ export function PromptInput({
 					<Text dimColor>{matches.length === 0 ? "no match" : "↑/↓ or Ctrl+R older · Enter use · Esc cancel"}</Text>
 				</Box>
 			)}
-			{(suggestions.length > 0 || fileSuggestions.length > 0) && (
+			{(suggestions.length > 0 || fileSuggestions.length > 0 || fileListingFailed) && (
 				<Box flexDirection="column" marginBottom={0}>
 					{suggestions.map(([name, description], i) => {
 						const isSelected = suggestionIndex % suggestions.length === i;
@@ -734,9 +744,11 @@ export function PromptInput({
 					})}
 					{fileSuggestions.length > 0 ? (
 						<Text dimColor>↑/↓ select · Tab complete · Esc dismiss</Text>
-					) : (
+					) : fileListingFailed ? (
+						<Text color={theme.textMuted}>file listing failed — try again or check the directory</Text>
+					) : suggestions.length > 0 ? (
 						<Text dimColor>Tab cycle · Enter run</Text>
-					)}
+					) : null}
 				</Box>
 			)}
 			{selected && state.text !== selected[0] && <Text dimColor> </Text>}

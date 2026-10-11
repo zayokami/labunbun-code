@@ -46,10 +46,16 @@ export function escapeHint(editor: EditorKind, vimMode: VimMode): string {
  */
 export function hintLine(columns: number, opts: { editor: EditorKind; vimMode: VimMode }): string {
 	const esc = escapeHint(opts.editor, opts.vimMode);
+	// Under emacs the engine claims `C-r` as reserved isearch, so the key never
+	// reaches history search — the overlay's Ctrl+R row says so at length, and the
+	// hint must not say the opposite in the smaller font. The other two editors
+	// keep the clause: with no editor the host owns the key, and with vim it is
+	// search in insert mode (redo lives in the overlay's Vim group).
+	const search = opts.editor === "emacs" ? "" : " · ctrl+r search";
 	if (columns >= HINT_FULL_MIN_COLUMNS) {
-		return `Enter send · Shift+Enter newline · ↑↓ history · ctrl+r search · ${esc} · /help`;
+		return `Enter send · Shift+Enter newline · ↑↓ history${search} · ${esc} · /help`;
 	}
-	if (columns >= HINT_SHORT_MIN_COLUMNS) return `Enter send · ↑↓ history · ctrl+r search · ${esc} · /help`;
+	if (columns >= HINT_SHORT_MIN_COLUMNS) return `Enter send · ↑↓ history${search} · ${esc} · /help`;
 	return `Enter send · ${esc} · /help`;
 }
 

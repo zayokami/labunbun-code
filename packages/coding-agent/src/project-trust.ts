@@ -27,7 +27,7 @@
  * comes back on the next start — the question is asked again rather than the
  * answer being remembered, which is the same shape the MCP gate has.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
@@ -103,6 +103,7 @@ export function isProjectTierTrusted(cwd: string, kind: DefinitionKind, home: st
 export function approveProjectDefinitions(cwd: string, kinds: DefinitionKind[], home: string = homedir()): void {
 	const path = trustStorePath(cwd, home);
 	let existing: Record<string, unknown> = {};
+	let parseFailure: unknown;
 	try {
 		if (existsSync(path)) {
 			const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
@@ -111,7 +112,26 @@ export function approveProjectDefinitions(cwd: string, kinds: DefinitionKind[], 
 			// from whatever else it holds.
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
 		}
-	} catch {}
+	} catch (error) {
+		parseFailure = error;
+	}
+	if (parseFailure !== undefined) {
+		// Read-modify-write over an unreadable file: continuing with `{}` would
+		// rewrite the store holding only the new kinds. The corrupt file moves
+		// aside (best effort) and the warning names where it went — the earlier
+		// trust is then visibly re-asked rather than invisibly discarded.
+		const backup = `${path}.corrupt-${Date.now()}`;
+		let moved: string | null = null;
+		try {
+			renameSync(path, backup);
+			moved = backup;
+		} catch {}
+		console.error(
+			`Warning: ${path} could not be read (${parseFailure instanceof Error ? parseFailure.message : String(parseFailure)}); ` +
+				(moved ? `moved to ${moved}.` : "could not be moved aside.") +
+				" Earlier approvals are not in effect until re-approved.",
+		);
+	}
 	const trusted = loadTrustedDefinitionKinds(cwd, home);
 	for (const kind of kinds) trusted.add(kind);
 	existing.trustedDefinitionKinds = KINDS.filter((kind) => trusted.has(kind));
