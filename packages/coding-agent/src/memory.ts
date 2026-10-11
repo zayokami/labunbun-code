@@ -158,8 +158,3 @@ export function loadMemoryFiles(cwd: string, home = homedir()): MemoryLoadResult
 	}
 	return { content, files: contributing, truncated };
 }
-
-/** Empty-result helper for tests and callers without memory files. */
-export function emptyMemory(): MemoryLoadResult {
-	return { content: "", files: [], truncated: false };
-}

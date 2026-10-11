@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { type CodeToken, highlightCode, isSupportedLanguage } from "../src/highlight.ts";
+import { type CodeToken, highlightCode } from "../src/highlight.ts";
 
 /** Flatten one line's tokens back to text. */
 function textOf(tokens: CodeToken[]): string {
@@ -64,22 +64,22 @@ describe("round trip", () => {
 });
 
 describe("language support", () => {
-	test("known fence tags are recognized", () => {
+	test("every advertised fence tag highlights its own quoted strings", () => {
+		// Driven through `highlightCode` rather than a membership predicate, so a
+		// tag listed here but missing from the rules table fails through the
+		// coloring itself instead of agreeing with a second copy of the rule.
 		for (const tag of ["ts", "tsx", "js", "python", "py", "rust", "rs", "go", "bash", "sh", "sql"]) {
-			expect(isSupportedLanguage(tag), tag).toBe(true);
+			expect(ofKind(highlightCode(['"x"'], tag)[0], "string"), tag).toEqual(['"x"']);
 		}
 	});
 
-	test("an unknown or absent tag is not claimed", () => {
-		expect(isSupportedLanguage("nope")).toBe(false);
-		expect(isSupportedLanguage("")).toBe(false);
-	});
-
-	test("an unknown language is returned as one plain token", () => {
+	test("an unknown or absent language is returned as one plain token", () => {
 		// Guessing wrong is worse than not highlighting: keywords from the wrong
 		// language would color arbitrary words in prose-like content.
-		const [tokens] = highlightCode(["const if while return"], "nope");
-		expect(tokens).toEqual([{ text: "const if while return", kind: "plain" }]);
+		for (const tag of ["nope", ""]) {
+			const [tokens] = highlightCode(["const if while return"], tag);
+			expect(tokens, tag).toEqual([{ text: "const if while return", kind: "plain" }]);
+		}
 	});
 });
 

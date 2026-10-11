@@ -14,7 +14,7 @@
  */
 import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type SpillRequest, type SpillWriter, sanitizeCwd, sessionsRoot } from "@labunbun/agent";
+import { type SpillRequest, sanitizeCwd, sessionsRoot } from "@labunbun/agent";
 
 /** How long a spilled result stays readable. */
 export const TOOL_OUTPUT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -90,11 +90,6 @@ export function writeToolOutput(request: SpillRequest, options: SpillWriterOptio
 		// A missing convenience, not a failed tool: the result is cut instead.
 		return null;
 	}
-}
-
-/** {@link writeToolOutput} bound to one session, for callers that have one. */
-export function createSpillWriter(options: SpillWriterOptions): SpillWriter {
-	return (request) => writeToolOutput(request, options);
 }
 
 /**

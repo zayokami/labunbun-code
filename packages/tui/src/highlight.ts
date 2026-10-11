@@ -298,11 +298,6 @@ const LANGUAGES: Record<string, LanguageRules> = {
 	sql: rules(SQL_KEYWORDS, { lineComment: ["--"], quotes: ["'", '"'] }),
 };
 
-/** Whether a fence tag has highlighting rules. */
-export function isSupportedLanguage(language: string): boolean {
-	return language.toLowerCase() in LANGUAGES;
-}
-
 const IDENT_START = /[A-Za-z_$]/;
 const IDENT_PART = /[A-Za-z0-9_$]/;
 

@@ -174,14 +174,3 @@ export function exitSummaryLine(opts: { sessionId?: string; messageCount: number
 	// made of them names all of them. `findSession` resolves the suffix.
 	return `To resume: ${opts.cliName} --resume ${shortSessionId(opts.sessionId)}`;
 }
-
-export function formatSessionList(sessions: SessionSummary[]): string {
-	if (sessions.length === 0) return "No saved sessions for this project.";
-	return sessions
-		.slice(0, 10)
-		.map(
-			(s, i) =>
-				`${i + 1}. ${new Date(s.mtimeMs).toLocaleString()}  (${formatMessageCount(s)} msgs)\n   ${s.firstUserText}`,
-		)
-		.join("\n");
-}

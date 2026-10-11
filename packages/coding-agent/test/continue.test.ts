@@ -4,13 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compactionBoundary, SessionStore } from "@labunbun/agent";
 import { type AgentMessage, assistantMessage, userMessage } from "@labunbun/ai";
-import {
-	damagedSessionNotice,
-	formatMessageCount,
-	formatSessionList,
-	listSessions,
-	loadSessionForResume,
-} from "../src/session-resume.ts";
+import { damagedSessionNotice, formatMessageCount, listSessions, loadSessionForResume } from "../src/session-resume.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -515,9 +509,6 @@ describe("what the picker reads out of a session file", () => {
 		expect(summary.firstUserText).toBe("old question");
 		expect(summary.truncated).toBe(false);
 		expect(formatMessageCount(summary)).toBe("2");
-		const listed = formatSessionList(listSessions(cwd, home));
-		expect(listed).toContain("(2 msgs)");
-		expect(listed).toContain("old question");
 	});
 
 	test("a transcript too long to read for a label is counted as a floor", () => {
@@ -538,7 +529,6 @@ describe("what the picker reads out of a session file", () => {
 		// marked as a floor rather than passed off as a total.
 		expect(summary.messageCount).toBe(1);
 		expect(formatMessageCount(summary)).toBe("1+");
-		expect(formatSessionList([summary])).toContain("(1+ msgs)");
 	});
 });
 
