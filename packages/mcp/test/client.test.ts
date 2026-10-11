@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type AgentDeps, type AnyTool, runToolPipeline, sanitizeCwd } from "@labunbun/agent";
@@ -7,9 +7,11 @@ import {
 	approveMcpServer,
 	connectAllMcpServers,
 	connectMcpServer,
+	disconnectAllMcpServers,
 	loadApprovedMcpServers,
 	loadMcpConfig,
 	loadProjectMcpServerNames,
+	type McpConnection,
 	McpServerConfigSchema,
 	sanitizeMcpError,
 } from "../src/client.ts";
@@ -357,26 +359,50 @@ describe("sanitizeMcpError", () => {
 });
 
 describe("loadMcpConfig", () => {
-	test("returns empty object when no config files exist", () => {
-		// Half the lookup is the home-scope file, and on a developer's machine
-		// that is a real `~/.labunbun/.mcp.json` full of real servers — the
-		// "no config files" premise only holds with the environment pointed at
-		// somewhere empty. Restored afterwards, because the rest of the suite
-		// (and the runner) share this process's environment.
-		const saved = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME };
-		const emptyHome = join(tmpdir(), "lbb-mcp-empty-home-does-not-exist");
-		process.env.USERPROFILE = emptyHome;
-		process.env.HOME = emptyHome;
-		try {
-			const configs = loadMcpConfig("/nonexistent-path-xyz");
-			expect(Object.keys(configs)).toHaveLength(0);
-		} finally {
-			for (const key of ["USERPROFILE", "HOME"] as const) {
-				const value = saved[key];
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-		}
+	test("returns no servers and no errors when neither file exists", () => {
+		// The home is passed rather than read from the environment: this test used
+		// to point USERPROFILE/HOME somewhere empty and put them back, because the
+		// old reader fell back to the process environment and would pick up the
+		// developer's real `~/.labunbun/.mcp.json`. An injectable home makes the
+		// premise hold by construction.
+		const loaded = loadMcpConfig(
+			join(tmpdir(), "lbb-mcp-empty-cwd-does-not-exist"),
+			join(tmpdir(), "lbb-mcp-empty-home-does-not-exist"),
+		);
+		expect(Object.keys(loaded.servers)).toHaveLength(0);
+		expect(loaded.errors).toHaveLength(0);
+	});
+
+	test("reads the project and home scopes from the home it was handed", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-mcp-merge-"));
+		const home = mkdtempSync(join(tmpdir(), "lbb-mcp-merge-home-"));
+		writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { alpha: { command: "alpha-bin" } } }));
+		mkdirSync(join(home, ".labunbun"), { recursive: true });
+		writeFileSync(
+			join(home, ".labunbun", ".mcp.json"),
+			JSON.stringify({ mcpServers: { beta: { url: "https://example.com/mcp" } } }),
+		);
+		const loaded = loadMcpConfig(cwd, home);
+		expect(Object.keys(loaded.servers).sort()).toEqual(["alpha", "beta"]);
+		expect(loaded.errors).toHaveLength(0);
+	});
+
+	// The failure this channel exists for: a typo in `.mcp.json` used to read as
+	// "no servers configured" — the file vanished in silence. And the message
+	// must not quote the file: `env`/`headers` values in it are where tokens
+	// live, and a `JSON.parse` error echoes the text around the mistake.
+	test("an unreadable file is reported, and its text does not ride out in the error", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "lbb-mcp-bad-json-"));
+		writeFileSync(
+			join(cwd, ".mcp.json"),
+			'{ "mcpServers": { "a": { "url": "https://user:tok-secret@example.com" } }, oops',
+		);
+		const loaded = loadMcpConfig(cwd, join(tmpdir(), "lbb-mcp-unused-home"));
+		expect(Object.keys(loaded.servers)).toHaveLength(0);
+		expect(loaded.errors).toHaveLength(1);
+		expect(loaded.errors[0].path).toBe(join(cwd, ".mcp.json"));
+		expect(loaded.errors[0].message).toBe("invalid JSON");
+		expect(loaded.errors[0].message).not.toContain("tok-secret");
 	});
 });
 
@@ -469,6 +495,58 @@ describe("loadApprovedMcpServers / approveMcpServer", () => {
 		mkdirSync(dirname(storePath), { recursive: true });
 		writeFileSync(storePath, "{ not json");
 		expect(loadApprovedMcpServers(cwd, home).size).toBe(0);
+	});
+
+	// Approval is a read-modify-write over the whole store, so a corrupt store
+	// used to be the loss of every earlier approval: the parse failure became
+	// `{}`, and the write then persisted only the new name. The corrupt file
+	// must survive the write somewhere findable, and the warning must say where.
+	test("approving over a corrupt store moves it aside instead of silently dropping earlier approvals", () => {
+		const { cwd, home } = dirs("lbb-mcp-approve6-");
+		const storePath = join(home, ".labunbun", "projects", sanitizeCwd(cwd), "mcp-approved.json");
+		mkdirSync(dirname(storePath), { recursive: true });
+		writeFileSync(storePath, "{ not json");
+
+		const warnings: string[] = [];
+		const original = console.error;
+		console.error = (message: unknown) => warnings.push(String(message));
+		try {
+			approveMcpServer(cwd, "alpha", home);
+		} finally {
+			console.error = original;
+		}
+
+		// The new approval landed...
+		expect(loadApprovedMcpServers(cwd, home).has("alpha")).toBe(true);
+		// ...the corrupt file is beside it, byte for byte...
+		const backups = readdirSync(dirname(storePath)).filter((name) => name.startsWith("mcp-approved.json.corrupt-"));
+		expect(backups).toHaveLength(1);
+		expect(readFileSync(join(dirname(storePath), backups[0]), "utf8")).toBe("{ not json");
+		// ...and the warning says what happened and where the file went.
+		expect(warnings.join("\n")).toContain("moved to");
+		expect(warnings.join("\n")).toContain("re-approved");
+	});
+});
+
+describe("disconnectAllMcpServers", () => {
+	test("asks every opened connection to close, swallows a failed close, skips the ones that never opened", async () => {
+		const closed: string[] = [];
+		const fake = (name: string, client: unknown): McpConnection =>
+			({ serverName: name, client, tools: [], prompts: [] }) as McpConnection;
+		const opened = fake("opened", {
+			close: async () => {
+				closed.push("opened");
+			},
+		});
+		const broken = fake("broken", {
+			close: async () => {
+				throw new Error("the pipe was already gone");
+			},
+		});
+		const never = fake("never", null);
+
+		await expect(disconnectAllMcpServers([opened, broken, never])).resolves.toBeUndefined();
+		expect(closed).toEqual(["opened"]);
 	});
 });
 

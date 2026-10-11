@@ -3,7 +3,7 @@
  * tools into the agent Tool registry under `mcp__<server>__<tool>` names.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { type AnyTool, buildTool, sanitizeCwd, type ToolResult } from "@labunbun/agent";
@@ -358,18 +358,82 @@ export async function connectMcpServer(
 	}
 }
 
-/** Load .mcp.json from a project root (and user scope). */
-export function loadMcpConfig(cwd: string): Record<string, McpServerConfig> {
-	const out: Record<string, McpServerConfig> = {};
-	const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+/** One config file that could not be read, for a caller to report rather than swallow. */
+export interface McpConfigError {
+	path: string;
+	message: string;
+}
+
+export interface McpConfigLoad {
+	servers: Record<string, McpServerConfig>;
+	errors: McpConfigError[];
+}
+
+/**
+ * Load .mcp.json from a project root (and user scope).
+ *
+ * `home` is injectable and must be the caller's: this used to read
+ * `USERPROFILE`/`HOME` from the environment, so a caller that had resolved its
+ * own home (a test, an override) read a different file than the one it was told
+ * about. A file that failed to parse also vanished without a word — a typo in
+ * `.mcp.json` read as "no servers configured" — so unreadable files come back
+ * in `errors` for the caller to report.
+ */
+export function loadMcpConfig(cwd: string, home: string = homedir()): McpConfigLoad {
+	const servers: Record<string, McpServerConfig> = {};
+	const errors: McpConfigError[] = [];
 	for (const path of [join(cwd, ".mcp.json"), join(home, ".labunbun", ".mcp.json")]) {
 		try {
 			if (!existsSync(path)) continue;
 			const parsed = JSON.parse(readFileSync(path, "utf8")) as { mcpServers?: Record<string, McpServerConfig> };
-			Object.assign(out, parsed.mcpServers ?? {});
-		} catch {}
+			Object.assign(servers, parsed.mcpServers ?? {});
+		} catch (error) {
+			errors.push({
+				path,
+				// A JSON.parse failure quotes the text around the mistake, and this
+				// file can hold credentials inside `env`/`headers` values — the one
+				// thing that must not ride into a UI or a transcript (the same rule
+				// `sanitizeMcpError` enforces for everything else).
+				message: error instanceof SyntaxError ? "invalid JSON" : error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
-	return out;
+	return { servers, errors };
+}
+
+/**
+ * Validate the `mcpServers` object a settings file (or `--settings`) declares
+ * into the same shape {@link loadMcpConfig} returns.
+ *
+ * The settings schema keeps the value as `unknown` so that one bad entry cannot
+ * fail the whole settings load; this is where each entry is checked against the
+ * real server schema. An entry that fails comes back as an error rather than
+ * being dropped silently — a server that never appears anywhere else is the one
+ * failure the user cannot debug. Validation messages go through
+ * `sanitizeMcpError` for the same reason connection errors do: the schema quotes
+ * the value it rejected, and a rejected `env`/`headers` entry is exactly where a
+ * credential sits.
+ */
+export function parseMcpServersRecord(raw: unknown, sourceLabel: string): McpConfigLoad {
+	const servers: Record<string, McpServerConfig> = {};
+	const errors: McpConfigError[] = [];
+	if (raw === undefined) return { servers, errors };
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		errors.push({ path: sourceLabel, message: "mcpServers is not an object" });
+		return { servers, errors };
+	}
+	for (const [name, entry] of Object.entries(raw)) {
+		const parsed = McpServerConfigSchema.safeParse(entry);
+		if (parsed.success) {
+			servers[name] = entry as McpServerConfig;
+		} else {
+			errors.push({
+				path: `${sourceLabel}: mcpServers.${name}`,
+				message: `invalid config: ${sanitizeMcpError(parsed.error.message, entry as McpServerConfig)}`,
+			});
+		}
+	}
+	return { servers, errors };
 }
 
 /**
@@ -431,9 +495,30 @@ export function loadApprovedMcpServers(cwd: string, home: string = homedir()): S
 export function approveMcpServer(cwd: string, serverName: string, home: string = homedir()): void {
 	const path = approvalStorePath(cwd, home);
 	let existing: Record<string, unknown> = {};
+	let parseFailure: unknown;
 	try {
 		if (existsSync(path)) existing = JSON.parse(readFileSync(path, "utf8"));
-	} catch {}
+	} catch (error) {
+		parseFailure = error;
+	}
+	if (parseFailure !== undefined) {
+		// Read-modify-write over an unreadable file: continuing with `{}` would
+		// rewrite the store holding only the new name, dropping every earlier
+		// approval in silence. The corrupt file moves aside (best effort) and the
+		// warning names where it went — the earlier approvals are then visibly
+		// gone from /mcp rather than invisibly gone from the disk.
+		const backup = `${path}.corrupt-${Date.now()}`;
+		let moved: string | null = null;
+		try {
+			renameSync(path, backup);
+			moved = backup;
+		} catch {}
+		console.error(
+			`Warning: ${path} could not be read (${parseFailure instanceof Error ? parseFailure.message : String(parseFailure)}); ` +
+				(moved ? `moved to ${moved}.` : "could not be moved aside.") +
+				" Earlier approvals are not in effect until re-approved.",
+		);
+	}
 	const approved = new Set<string>(Array.isArray(existing.approvedMcpServers) ? existing.approvedMcpServers : []);
 	approved.add(serverName);
 	existing.approvedMcpServers = [...approved];
@@ -453,6 +538,22 @@ export async function connectAllMcpServers(
 				return { serverName: name, client: null as never, tools: [], prompts: [], error: "not approved" };
 			}
 			return connectMcpServer(name, config, options);
+		}),
+	);
+}
+
+/**
+ * Close every connection that opened. Best effort: a failed close must not fail
+ * the run that is ending, and a connection that never opened (`client: null`)
+ * has nothing to close.
+ */
+export async function disconnectAllMcpServers(connections: McpConnection[]): Promise<void> {
+	await Promise.all(
+		connections.map(async (connection) => {
+			if (!connection.client) return;
+			try {
+				await connection.client.close();
+			} catch {}
 		}),
 	);
 }
