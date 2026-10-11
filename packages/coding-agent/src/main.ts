@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { PERMISSION_MODES, type PermissionMode, SANDBOX_MODES, type SandboxMode } from "@labunbun/agent";
+import { chunkWritesForConPTY, isConPTYHost } from "@labunbun/tui";
 import { runHeadless } from "./headless.ts";
 import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
@@ -250,6 +251,11 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		printHelp();
 		return 0;
 	}
+
+	// One install for every mode: on a Windows console a single write past the
+	// buffer budget strands the viewport where it was, and this process is about
+	// to emit whole-transcript reprints. See `conpty.ts` in the tui package.
+	if (isConPTYHost()) chunkWritesForConPTY(process.stdout);
 
 	// Subcommands run before model resolution and the API-key check: importing a
 	// configuration is exactly what someone does when they have no working

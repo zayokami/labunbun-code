@@ -10,7 +10,7 @@ import { render } from "ink";
 import { sealCount } from "./components/MessageList.tsx";
 import {
 	bindSession,
-	CLEAR_SCREEN,
+	clearScreenSequence,
 	type PromptSubmitResult,
 	type PromptSubmitVerdict,
 	REPL,
@@ -192,9 +192,10 @@ export function sameShells(a: UiBackgroundShell[], b: UiBackgroundShell[]): bool
  * with. The transcript remounts on a new theme object and ink prints every
  * sealed row again (see `transcriptPaintKey`) — which is a repaint only if the
  * screen is empty first, or the transcript would simply appear twice, the old
- * palette above the new. Taking the screen back takes the scrollback with it,
- * so it is spent only when there is both something to reprint and something to
- * change.
+ * palette above the new. Taking the screen back takes the scrollback with it
+ * on the terminals that can; Windows consoles keep it (see
+ * `clearScreenSequence`). So the wipe is spent only when there is both
+ * something to reprint and something to change.
  */
 export function applyTheme(
 	store: Store<UiState>,
@@ -202,7 +203,7 @@ export function applyTheme(
 	stream: { isTTY?: boolean; write: (data: string) => void } = process.stdout,
 ): void {
 	if (store.get().theme === theme) return;
-	if (stream.isTTY && sealCount(store.get().entries) > 0) stream.write(CLEAR_SCREEN);
+	if (stream.isTTY && sealCount(store.get().entries) > 0) stream.write(clearScreenSequence());
 	store.set((s) => ({ ...s, theme }));
 }
 

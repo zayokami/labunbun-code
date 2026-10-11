@@ -4,6 +4,7 @@ import { type PadBridge, padPalette } from "@labunbun/gamepad";
 import { Box, Text, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WHEEL_ROWS, wheelEntries, wheelMove } from "../command-wheel.ts";
+import { isConPTYHost } from "../conpty.ts";
 import { type EditorKind, resolveEditingMode } from "../editing-mode.ts";
 import { advanceTimer, IDLE_TIMER, type TimerState } from "../elapsed.ts";
 import { formatDoneLine, pickDoneVerb } from "../flavor.ts";
@@ -116,6 +117,18 @@ const EMACS_KEYS_HELP = `  emacs: Ctrl-A/E line ends · Ctrl-F/B char · Alt-F/B
 
 /** Clear screen, clear scrollback, home cursor — the full terminal wipe. */
 export const CLEAR_SCREEN = "\x1b[2J\x1b[3J\x1b[H";
+
+/**
+ * The wipe to send from where the app is actually running.
+ *
+ * A Windows console reads 3J literally: it clears the scrollback and snaps a
+ * reader who had scrolled up back to the top, so one Ctrl+L costs them both
+ * the history and their place. There the wipe stops at the screen; the
+ * reprint that follows still replaces what is on it.
+ */
+export function clearScreenSequence(onWindowsConsole = isConPTYHost()): string {
+	return onWindowsConsole ? CLEAR_SCREEN.replace("\x1b[3J", "") : CLEAR_SCREEN;
+}
 
 /** Double-press window for the idle Ctrl+C exit confirmation. */
 export const CTRL_C_EXIT_WINDOW_MS = 2000;
@@ -533,7 +546,7 @@ export function REPL({
 			// holding a frame it believes is on screen, and the frame that follows
 			// is byte-identical to the last one — so it skips the write and the
 			// clear is all the user sees.
-			if (stdout.isTTY) writeStdout(CLEAR_SCREEN);
+			if (stdout.isTTY) writeStdout(clearScreenSequence());
 			store.set((s) => ({ ...s, paint: s.paint + 1 }));
 			return;
 		}
@@ -673,7 +686,7 @@ export function REPL({
 			case "clear":
 				// □ is Ctrl+L, character for character — including the reason it goes
 				// through ink's writer rather than `process.stdout`.
-				if (stdout.isTTY) writeStdout(CLEAR_SCREEN);
+				if (stdout.isTTY) writeStdout(clearScreenSequence());
 				store.set((s) => ({ ...s, paint: s.paint + 1 }));
 				return true;
 			case "cancel":

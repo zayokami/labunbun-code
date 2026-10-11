@@ -18,7 +18,7 @@ import { render } from "ink-testing-library";
 import type React from "react";
 import { applyTheme } from "../src/app.tsx";
 import { transcriptPaintKey, VirtualMessageList } from "../src/components/MessageList.tsx";
-import { CLEAR_SCREEN } from "../src/components/REPL.tsx";
+import { clearScreenSequence } from "../src/components/REPL.tsx";
 import { createStore } from "../src/store.ts";
 import { DARK_THEME, type Theme, ThemeContext } from "../src/theme.ts";
 import { initialUiState, type UiEntry, type UiState } from "../src/ui-state.ts";
@@ -136,7 +136,7 @@ describe("the screen is taken back before the reprint", () => {
 
 		applyTheme(store, LOUD, stream);
 
-		expect(writes).toEqual([CLEAR_SCREEN]);
+		expect(writes).toEqual([clearScreenSequence()]);
 		expect(store.get().theme).toBe(LOUD);
 	});
 
@@ -162,7 +162,7 @@ describe("the screen is taken back before the reprint", () => {
 		expect(writes).toEqual([]);
 
 		applyTheme(storeWith(settledRows(9)), LOUD, stream);
-		expect(writes).toEqual([CLEAR_SCREEN]);
+		expect(writes).toEqual([clearScreenSequence()]);
 	});
 
 	test("applying the theme that is already there changes nothing at all", () => {
@@ -187,7 +187,7 @@ describe("the screen is taken back before the reprint", () => {
 		applyTheme(store, LOUD, stream);
 		applyTheme(store, DARK_THEME, stream);
 
-		expect(writes).toEqual([CLEAR_SCREEN, CLEAR_SCREEN]);
+		expect(writes).toEqual([clearScreenSequence(), clearScreenSequence()]);
 		expect(store.get().theme).toBe(DARK_THEME);
 	});
 

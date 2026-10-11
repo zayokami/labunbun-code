@@ -17,7 +17,7 @@ import { AgentSession } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider, type StreamFn } from "@labunbun/ai";
 import type { PadAction } from "@labunbun/gamepad";
 import { render } from "ink-testing-library";
-import { CLEAR_SCREEN, connectSessionToStore, REPL } from "../src/components/REPL.tsx";
+import { clearScreenSequence, connectSessionToStore, REPL } from "../src/components/REPL.tsx";
 import { createStore } from "../src/store.ts";
 import { DARK_THEME } from "../src/theme.ts";
 import { initialUiState, type UiState } from "../src/ui-state.ts";
@@ -496,7 +496,7 @@ describe("□ clears the screen", () => {
 
 		await press(h.pad, padAction("clear", { button: "square" }));
 		expect(h.store.get().paint).toBe(1);
-		expect(h.frames.some((frame) => frame.includes(CLEAR_SCREEN))).toBe(true);
+		expect(h.frames.some((frame) => frame.includes(clearScreenSequence()))).toBe(true);
 
 		await press(h.pad, padAction("clear", { button: "square" }));
 		expect(h.store.get().paint).toBe(2);
