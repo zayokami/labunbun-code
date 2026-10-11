@@ -6,9 +6,9 @@
  * notices until the total is questioned.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { assistantMessage, type Usage, userMessage } from "@labunbun/ai";
 import {
 	CostTracker,
@@ -152,11 +152,36 @@ describe("loadCostState", () => {
 			totalCostUSD: 1.5,
 			totalDurationMs: 4200,
 			modelsUsage: {
-				"p/m": { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4, costUSD: 1.5 },
+				"p/m": {
+					inputTokens: 1,
+					outputTokens: 2,
+					cacheReadTokens: 3,
+					cacheWriteTokens: 4,
+					reasoningTokens: 1,
+					costUSD: 1.5,
+				},
 			},
 		};
 		writeFileSync(path, JSON.stringify(state));
 		expect(loadCostState(path)).toEqual(state);
+	});
+
+	// Entries persisted before the reasoning field existed have no such key.
+	// Re-loading them used to hand `undefined` to the sums; the loader backfills
+	// zero so a pre-field project reads cleanly rather than as a gap.
+	test("an entry persisted before reasoningTokens existed backfills to zero", () => {
+		const path = tmpFile();
+		writeFileSync(
+			path,
+			JSON.stringify({
+				totalCostUSD: 1,
+				totalDurationMs: 0,
+				modelsUsage: {
+					"p/m": { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 1 },
+				},
+			}),
+		);
+		expect(loadCostState(path).modelsUsage["p/m"]?.reasoningTokens).toBe(0);
 	});
 
 	// Cost data is a convenience, not a record of truth: a corrupt file should
@@ -165,6 +190,10 @@ describe("loadCostState", () => {
 		const path = tmpFile();
 		writeFileSync(path, "{ not json");
 		expect(loadCostState(path)).toEqual(emptyCostState());
+		// Moved aside rather than left where the next persist would overwrite it:
+		// the corrupt file is the only copy of the history it held.
+		expect(existsSync(path)).toBe(false);
+		expect(readdirSync(dirname(path)).some((name) => name.includes(".corrupt-"))).toBe(true);
 	});
 
 	test("missing fields fall back to zero rather than undefined", () => {
@@ -236,7 +265,14 @@ describe("formatCostState", () => {
 				totalCostUSD: 0.5,
 				totalDurationMs: 0,
 				modelsUsage: {
-					"p/m": { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40, costUSD: 0.5 },
+					"p/m": {
+						inputTokens: 10,
+						outputTokens: 20,
+						cacheReadTokens: 30,
+						cacheWriteTokens: 40,
+						reasoningTokens: 0,
+						costUSD: 0.5,
+					},
 				},
 			},
 			"This project, all sessions",
@@ -253,8 +289,22 @@ describe("formatCostState", () => {
 				totalCostUSD: 0,
 				totalDurationMs: 0,
 				modelsUsage: {
-					"p/a": { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 0 },
-					"p/b": { inputTokens: 2, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 0 },
+					"p/a": {
+						inputTokens: 1,
+						outputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						reasoningTokens: 0,
+						costUSD: 0,
+					},
+					"p/b": {
+						inputTokens: 2,
+						outputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						reasoningTokens: 0,
+						costUSD: 0,
+					},
 				},
 			},
 			"This project, all sessions",
@@ -278,7 +328,14 @@ describe("formatCostState", () => {
 				totalCostUSD: 0,
 				totalDurationMs: 0,
 				modelsUsage: {
-					"p/cached": { inputTokens: 100, outputTokens: 0, cacheReadTokens: 900, cacheWriteTokens: 0, costUSD: 0 },
+					"p/cached": {
+						inputTokens: 100,
+						outputTokens: 0,
+						cacheReadTokens: 900,
+						cacheWriteTokens: 0,
+						reasoningTokens: 0,
+						costUSD: 0,
+					},
 				},
 			},
 			"This session",
@@ -335,6 +392,7 @@ describe("formatCostReport", () => {
 			outputTokens: 0,
 			cacheReadTokens: 0,
 			cacheWriteTokens: 0,
+			reasoningTokens: 0,
 			costUSD: 0,
 		};
 		const text = formatCostReport(emptyCostState(), {
@@ -352,6 +410,7 @@ describe("formatCostReport", () => {
 			outputTokens: 0,
 			cacheReadTokens: 0,
 			cacheWriteTokens: 0,
+			reasoningTokens: 0,
 			costUSD: 2,
 		};
 		const text = formatCostReport(emptyCostState(), {

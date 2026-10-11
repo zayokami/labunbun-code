@@ -11,7 +11,7 @@
  * has no price for contributes tokens and no money — `/cost` says which, rather
  * than reporting a total that quietly omits it.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
@@ -22,6 +22,12 @@ export interface ModelUsage {
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
+	/**
+	 * Reasoning tokens, reported beside the others rather than summed into them:
+	 * `Usage.reasoning` is a subset of `output` on both wire formats, and a
+	 * separate total that absorbed it would double-count every thinking token.
+	 */
+	reasoningTokens: number;
 	costUSD: number;
 }
 
@@ -45,12 +51,14 @@ function accumulate(state: CostState, provider: string, modelId: string, usage: 
 		outputTokens: 0,
 		cacheReadTokens: 0,
 		cacheWriteTokens: 0,
+		reasoningTokens: 0,
 		costUSD: 0,
 	};
 	existing.inputTokens += usage.input;
 	existing.outputTokens += usage.output;
 	existing.cacheReadTokens += usage.cacheRead;
 	existing.cacheWriteTokens += usage.cacheWrite;
+	existing.reasoningTokens += usage.reasoning ?? 0;
 	existing.costUSD += breakdown.total;
 	state.modelsUsage[key] = existing;
 	state.totalCostUSD += breakdown.total;
@@ -127,13 +135,37 @@ export class CostTracker {
 export function loadCostState(path: string): CostState {
 	if (!existsSync(path)) return emptyCostState();
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf8")) as CostState;
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<CostState>;
+		const modelsUsage = Object.fromEntries(
+			Object.entries(parsed.modelsUsage ?? {}).map(([key, usage]) => [
+				key,
+				// `reasoningTokens` arrived with the field; an entry persisted before
+				// it backfills to zero rather than reading as `undefined` in sums.
+				{ ...usage, reasoningTokens: usage.reasoningTokens ?? 0 },
+			]),
+		);
 		return {
 			totalCostUSD: parsed.totalCostUSD ?? 0,
 			totalDurationMs: parsed.totalDurationMs ?? 0,
-			modelsUsage: parsed.modelsUsage ?? {},
+			modelsUsage,
 		};
-	} catch {
+	} catch (error) {
+		// This file is read-modify-written on every persist: continuing with an
+		// empty state would rewrite the ledger holding only this session, dropping
+		// the directory's whole cost history in silence. The corrupt file moves
+		// aside (best effort) and the warning names where it went, so the history
+		// is visibly gone from /cost rather than invisibly gone from the disk.
+		const backup = `${path}.corrupt-${Date.now()}`;
+		let moved: string | null = null;
+		try {
+			renameSync(path, backup);
+			moved = backup;
+		} catch {}
+		console.error(
+			`Warning: ${path} could not be read (${error instanceof Error ? error.message : String(error)}); ` +
+				(moved ? `moved to ${moved}.` : "could not be moved aside.") +
+				" This project's earlier cost history is not in effect.",
+		);
 		return emptyCostState();
 	}
 }
@@ -168,7 +200,11 @@ function cacheChannels(usage: ModelUsage): string {
 export function formatCostState(state: CostState, label: string): string {
 	const lines = [`${label}: $${state.totalCostUSD.toFixed(4)}`];
 	for (const [key, usage] of Object.entries(state.modelsUsage)) {
-		lines.push(`  ${key}: ${totalTokens(usage)} tokens, $${usage.costUSD.toFixed(4)}`);
+		// The reasoning share rides the token count rather than getting a line of
+		// its own: it is a subset of that count, and a line beside it would read
+		// as a second, additive total. Models that never report it show nothing.
+		const reasoning = usage.reasoningTokens > 0 ? ` (${usage.reasoningTokens.toLocaleString()} reasoning)` : "";
+		lines.push(`  ${key}: ${totalTokens(usage)} tokens${reasoning}, $${usage.costUSD.toFixed(4)}`);
 		lines.push(`    ${cacheChannels(usage)}`);
 	}
 	return lines.join("\n");
