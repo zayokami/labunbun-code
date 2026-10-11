@@ -18,7 +18,6 @@ export const FAUX_MODEL: Model = {
 	contextWindow: 200_000,
 	maxOutputTokens: 8_192,
 	reasoning: false,
-	input: ["text"],
 };
 
 export interface FauxToolCallSpec {
@@ -69,7 +68,16 @@ export function fauxProvider(steps: FauxStep[]): FauxProvider {
 	let callIndex = 0;
 
 	const streamFn: StreamFn = async function* (model, context, options) {
-		const step = steps[Math.min(callIndex, steps.length - 1)];
+		const stepIndex = callIndex;
+		const step = steps[Math.min(stepIndex, steps.length - 1)];
+		// Consumed when the stream starts, not when it drains. A consumer may
+		// legitimately stop reading at the terminal event — `withModelFallback`
+		// breaks there by design — which abandons this generator before any tail
+		// code runs; an increment at the end would hand the same step to the next
+		// call, so a scripted summary replayed the previous refusal. The docstring
+		// above has always said a `stream()` call consumes a step; this is the
+		// line that makes that true however far the stream is read.
+		callIndex++;
 		receivedContexts.push(context);
 
 		if (step.assertContext) step.assertContext(context, callIndex);
@@ -91,7 +99,6 @@ export function fauxProvider(steps: FauxStep[]): FauxProvider {
 			for (const event of step.events) {
 				yield event;
 			}
-			callIndex++;
 			return;
 		}
 
@@ -119,7 +126,7 @@ export function fauxProvider(steps: FauxStep[]): FauxProvider {
 
 		const calls: ToolCall[] = (step.toolCalls ?? []).map((spec, i) => ({
 			type: "toolCall",
-			id: spec.id ?? `faux_call_${callIndex}_${i}`,
+			id: spec.id ?? `faux_call_${stepIndex}_${i}`,
 			name: spec.name,
 			arguments: JSON.stringify(spec.arguments),
 		}));
@@ -151,10 +158,7 @@ export function fauxProvider(steps: FauxStep[]): FauxProvider {
 			if (stop === "refusal" && step.errorMessage) builder.message.errorMessage = step.errorMessage;
 			yield builder.done(stop, step.usage);
 		}
-		callIndex++;
 	};
 
 	return { streamFn, receivedContexts };
 }
-
-export type FauxScriptStep = FauxStep;
