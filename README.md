@@ -125,7 +125,7 @@ LaBunbun Code sends explicit breakpoints to Anthropic. The tool sets a breakpoin
 OpenAI-compatible endpoints cache automatically. They accept no breakpoints.
 
 ```json
-{ "cache": { "enabled": true, "ttl": "auto", "promptCacheKey": "auto" } }
+{ "cache": { "ttl": "auto", "promptCacheKey": "auto" } }
 ```
 
 The value `auto` for `ttl` asks for the 1-hour lifetime. If the provider refuses it, the tool tries 5 minutes. If the provider refuses that, the tool sends no lifetime. Each failure costs one request. Each failure costs one request per process. `/cache` names each downgrade.

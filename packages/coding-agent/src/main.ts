@@ -5,6 +5,7 @@ import { runHeadless } from "./headless.ts";
 import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
 import { DEFAULT_HISTORY_LIMIT, MIGRATION_SOURCE_IDS, runMigration } from "./migrate.ts";
+import type { RawSettingsInput } from "./settings.ts";
 
 /**
  * Check `--permission-mode` and `--sandbox` against the lists that define them.
@@ -68,6 +69,12 @@ interface CliArgs {
 	continueLast: boolean;
 	outputFormat: string | null;
 	/**
+	 * `--settings <json>`: a settings object for this run alone, merged over every
+	 * file tier. Kept as the raw string here; `main` parses it so a malformed one
+	 * is a CLI error (exit 2) rather than something a run discovers later.
+	 */
+	settings: string | null;
+	/**
 	 * `null` means "whatever the settings say". A flag rather than a value: the
 	 * two spellings are `--gamepad` and `--no-gamepad`, and neither writes the
 	 * setting — a flag that edited the user's file would make "try it once"
@@ -96,6 +103,7 @@ function parseArgs(argv: string[]): CliArgs {
 		resume: null,
 		continueLast: false,
 		outputFormat: null,
+		settings: null,
 		gamepad: null,
 		apply: false,
 		force: false,
@@ -153,6 +161,12 @@ function parseArgs(argv: string[]): CliArgs {
 			case "--output-format":
 				args.outputFormat = rest[++i] ?? null;
 				break;
+			case "--settings":
+				// Empty string rather than null when the value is missing, so a
+				// bare `--settings` is a visible error instead of "flag not given"
+				// — the same distinction `-p` draws for its prompt.
+				args.settings = rest[++i] ?? "";
+				break;
 			case "--gamepad":
 				args.gamepad = true;
 				break;
@@ -209,10 +223,11 @@ Options:
       --sandbox <s>            ${SANDBOX_MODES.join(" | ")}
                                The other axis: what a run may touch at all.
       --max-turns <n>          Cap agent turns in headless mode
-      --no-session             Don't persist this session to disk
+      --no-session             Don't persist this session to disk (headless mode only)
       --resume <id>            Resume a saved session
   -c, --continue               Continue the most recent session
       --output-format <f>      Headless output: text | json | stream-json
+      --settings <json>        Settings for this run as a JSON object (wins over files)
       --gamepad                Read a DualShock 4 this run (or --no-gamepad)
   -h, --help                   Show this help
 
@@ -278,6 +293,46 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		return result.applied && result.applied.failed.length > 0 ? 1 : 0;
 	}
 
+	// yoshi's own flags without the subcommand word used to parse and then be
+	// dropped: `labunbun --apply` started a plain REPL having done nothing the
+	// user asked. Only the word selects the subcommand, so the error names it.
+	const yoshiOnlyFlags: Array<[keyof CliArgs, string]> = [
+		["apply", "--apply"],
+		["force", "--force"],
+		["from", "--from"],
+		["only", "--only"],
+		["historyScope", "--history-scope"],
+		["historyLimit", "--history-limit"],
+	];
+	const strayYoshiFlags = yoshiOnlyFlags
+		.filter(([key]) => args[key] !== null && args[key] !== false)
+		.map(([, flag]) => flag);
+	if (strayYoshiFlags.length > 0) {
+		console.error(`${strayYoshiFlags.join(", ")} only applies to the \`yoshi\` subcommand (see --help)`);
+		return 2;
+	}
+
+	// `--settings` is parsed here, where a malformed value is a CLI error like any
+	// unknown flag: downstream reads a plain object, never a string it might have
+	// to defend against.
+	let flagSettings: RawSettingsInput | undefined;
+	if (args.settings !== null) {
+		if (!args.settings.trim()) {
+			console.error("--settings requires a JSON object");
+			return 2;
+		}
+		try {
+			const parsed: unknown = JSON.parse(args.settings);
+			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+				throw new Error("must be a JSON object");
+			}
+			flagSettings = parsed as RawSettingsInput;
+		} catch (error) {
+			console.error(`Invalid --settings: ${error instanceof Error ? error.message : String(error)}`);
+			return 2;
+		}
+	}
+
 	// Both axes, validated once, before either path branches. This used to live
 	// inside the `-p` branch only, so the interactive path reached the session
 	// with `permissionMode: args.permissionMode as never` — a cast, no check. A
@@ -308,8 +363,17 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			maxTurns: args.maxTurns ?? undefined,
 			noSession: args.noSession,
 			outputFormat: (args.outputFormat as never) ?? undefined,
+			flagSettings,
 			home: options.home,
 		});
+	}
+
+	// README's flag table has said "headless mode only" since both paths existed,
+	// but the interactive path accepted the flag and no code read it — the same
+	// silent drop the yoshi flags had. Reject it where it cannot mean anything.
+	if (args.noSession) {
+		console.error("--no-session works in headless mode only; interactive sessions always persist");
+		return 2;
 	}
 
 	console.log(`${CLI_NAME} ${CODING_AGENT_VERSION} — starting interactive mode…`);
@@ -320,6 +384,7 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		resumeSessionId: args.resume ?? undefined,
 		continueLast: args.continueLast,
 		gamepad: args.gamepad ?? undefined,
+		flagSettings,
 		home: options.home,
 	});
 }
