@@ -4,9 +4,16 @@
  *
  * Usage: bun run scripts/smoke.ts <provider/model> ["prompt"]
  * Requires the provider's API key in its environment variable
- * (ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, ...).
+ * (ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, ...). Models that take no key
+ * (the local Ollama daemon) stream without one.
  */
-import { createDefaultStreamFn, resolveModel, userMessage } from "../packages/ai/src/index.ts";
+import {
+	createDefaultStreamFn,
+	missingApiKey,
+	refreshModelCatalog,
+	resolveModel,
+	userMessage,
+} from "../packages/ai/src/index.ts";
 
 const reference = process.argv[2];
 if (!reference) {
@@ -15,16 +22,24 @@ if (!reference) {
 }
 const prompt = process.argv[3] ?? "Reply with exactly: smoke ok";
 
-const model = resolveModel(reference);
+let model = resolveModel(reference);
+if (!model) {
+	// A ref only a listing can name — what an Ollama daemon happens to serve —
+	// is not in the static table yet: ask the providers once, then resolve again.
+	await refreshModelCatalog();
+	model = resolveModel(reference);
+}
 if (!model) {
 	console.error(`Unknown model reference: ${reference}`);
 	console.error(`Known: anthropic/claude-sonnet-5, deepseek/deepseek-flash, ...`);
 	process.exit(1);
 }
 
-const key = process.env[model.apiKeyEnv];
-if (!key) {
-	console.error(`Missing API key: set ${model.apiKeyEnv}`);
+// Keyless models exist now (the local Ollama daemon): `missingApiKey` is the one
+// question that covers both, and it names the variable when there is one to set.
+const missingKey = missingApiKey(model);
+if (missingKey) {
+	console.error(`${missingKey.message}\nExample: export ${missingKey.envNames[0]}=...`);
 	process.exit(1);
 }
 

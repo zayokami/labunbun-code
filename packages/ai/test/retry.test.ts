@@ -482,6 +482,18 @@ describe("the missing-key pre-flight", () => {
 		}
 	}
 
+	test("a model that names no variable is missing nothing", async () => {
+		// The local Ollama daemon's rows, after synthesis: keyless by design. The
+		// pre-flight must pass them through — without the empty-name check it
+		// would build an error naming the literal string "undefined", and the
+		// request it was meant to catch would be the one request that is fine.
+		const keyless: Model = { ...model };
+		delete keyless.apiKeyEnv;
+		await withNoKey(() => {
+			expect(missingApiKey(keyless)).toBeUndefined();
+		});
+	});
+
 	test("answers from the environment, and yields to an explicit key", async () => {
 		await withNoKey(() => {
 			const missing = missingApiKey(model);

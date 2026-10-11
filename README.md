@@ -45,11 +45,12 @@ LaBunbun Code supports these providers:
 - Anthropic
 - OpenAI, on the Chat Completions wire and on the Responses wire
 - Google
+- Ollama, on a local daemon and on the Ollama cloud
 - OpenAI-compatible endpoints, for example DeepSeek, Kimi, GLM, Mistral, OpenRouter
 
 You add an OpenAI-compatible provider in the user settings file. See [Add a provider](#add-a-provider).
 
-At startup the tool asks each provider that has an API key which models the provider serves. The tool then corrects the model catalog from the answer.
+At startup the tool asks each provider that has an API key which models the provider serves. The local Ollama daemon needs no key, and the tool asks it as well. The tool then corrects the model catalog from the answer.
 
 A model that the vendor serves on only one wire is on only that wire. A reseller can serve the same model on the other wire. The tool lists the model on its wire. The tool does not offer the model as a session model. Use `/model` to see the list.
 
@@ -625,7 +626,7 @@ A key `pricing` at the top level changes the price of a model. Use the form `"an
 
 The tool does not report a model with no price as free. Use `/cost` to see which models have no price.
 
-You can change the base URL of a provider. Use `<PROVIDER>_BASE_URL`, for example `ANTHROPIC_BASE_URL`.
+You can change the base URL of a provider. Use `<PROVIDER>_BASE_URL`, for example `ANTHROPIC_BASE_URL`. Use `OLLAMA_BASE_URL` to move the local Ollama daemon to another address.
 
 ## Import procedure
 

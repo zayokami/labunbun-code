@@ -30,6 +30,8 @@ export interface OpenAIRawChunk {
 		delta?: {
 			content?: string | null | OpenAIContentPart[];
 			reasoning_content?: string | null;
+			/** The same trace under the name Ollama and OpenRouter use. */
+			reasoning?: string | null;
 			tool_calls?: Array<{
 				index: number;
 				id?: string | null;
@@ -270,12 +272,17 @@ export async function* mapOpenAIStream(
 		if (!choice) continue;
 
 		const delta = choice.delta;
-		if (delta?.reasoning_content) {
+		// One trace under two spellings: DeepSeek and friends send
+		// `reasoning_content`, Ollama and OpenRouter send `reasoning`. Reading one
+		// alone dropped the other vendor's whole trace in silence. The empty
+		// string is not a trace either, hence `||` rather than `??`.
+		const thought = delta?.reasoning_content || delta?.reasoning;
+		if (thought) {
 			if (thinkingIndex === -1) {
 				thinkingIndex = nextContentIndex++;
 				yield builder.thinkingStart(thinkingIndex);
 			}
-			yield builder.thinkingDelta(thinkingIndex, delta.reasoning_content);
+			yield builder.thinkingDelta(thinkingIndex, thought);
 		}
 
 		// `content` arrives as a string on most providers and as a list of parts
@@ -414,9 +421,20 @@ export function createOpenAIStreamFn(settings: OpenAIStreamFnOptions = {}) {
 	};
 }
 
+/**
+ * What goes on the wire when a row names no key. openai@7 refuses to build a
+ * client without a credential — an empty or null `apiKey` throws before any
+ * request can be made — and a keyless provider really has none: the local
+ * Ollama daemon takes requests bare and ignores the header it gets. So a
+ * placeholder goes out as its Bearer token; the alternative is no client at
+ * all. A literal rather than an env read: nothing may become a credential by
+ * accident.
+ */
+const KEYLESS_PLACEHOLDER = "no-key";
+
 async function defaultClient(model: Model, options?: StreamOptions): Promise<OpenAIClientLike> {
 	const { default: OpenAI } = await import("openai");
-	const apiKey = options?.apiKey ?? resolveApiKey(model) ?? "";
+	const apiKey = options?.apiKey ?? resolveApiKey(model) ?? KEYLESS_PLACEHOLDER;
 	// Thread the caller's abort signal into every request so Esc cancels
 	// OpenAI-compatible providers the same way it cancels Anthropic.
 	//
@@ -471,7 +489,7 @@ async function defaultModelsClient(model: Model): Promise<OpenAIModelsClientLike
 	const { default: OpenAI } = await import("openai");
 	// As in the Anthropic adapter: how long to wait arrives as a signal.
 	return new OpenAI({
-		apiKey: resolveApiKey(model) ?? "",
+		apiKey: resolveApiKey(model) ?? KEYLESS_PLACEHOLDER,
 		baseURL: model.baseUrl || undefined,
 		maxRetries: 0,
 	}) as unknown as OpenAIModelsClientLike;

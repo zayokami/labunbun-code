@@ -190,8 +190,12 @@ export interface Model<Api extends ApiId = ApiId> {
 	/** Provider key, e.g. "anthropic" | "deepseek" | "kimi". */
 	provider: string;
 	baseUrl: string;
-	/** Environment variable holding the API key. */
-	apiKeyEnv: string;
+	/**
+	 * Environment variable holding the API key. Absent for a provider that needs
+	 * none — the local Ollama daemon so far — which `missingApiKey` reads as
+	 * "there is nothing to miss" rather than as a variable named `undefined`.
+	 */
+	apiKeyEnv?: string;
 	/**
 	 * Additional environment variables to try when `apiKeyEnv` is unset, in
 	 * order. Exists because the same provider is commonly configured under more

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolveModel } from "../src/model.ts";
+import { dynamicProviderTemplates, resolveModel } from "../src/model.ts";
 import {
 	buildOpenAIRequest,
 	convertMessages,
@@ -364,6 +364,54 @@ describe("mapOpenAIStream", () => {
 		]);
 	});
 
+	test("`reasoning` is the same trace under the name Ollama uses", async () => {
+		// A second spelling, not a second feature: DeepSeek says
+		// `reasoning_content`, Ollama and OpenRouter say `reasoning`. A mapper
+		// that reads one alone drops the other vendor's whole trace in silence —
+		// this is the Ollama wire shape the local daemon streams.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { reasoning: "weighed " } }] },
+					{ choices: [{ delta: { reasoning: "it" } }] },
+					{ choices: [{ delta: { content: "42" } }] },
+					{ choices: [{ delta: {}, finish_reason: "stop" }] },
+				]),
+				"ollama",
+				"qwen3:8b",
+			),
+		);
+		expect(events.map((e) => e.type)).toEqual([
+			"start",
+			"thinking_start",
+			"thinking_delta",
+			"thinking_delta",
+			"text_start",
+			"text_delta",
+			"thinking_end",
+			"text_end",
+			"done",
+		]);
+		expect(events.filter((e) => e.type === "thinking_delta").map((e) => e.delta)).toEqual(["weighed ", "it"]);
+	});
+
+	test("an empty string under one spelling does not mask the other", async () => {
+		// Proxies in front of either vendor sometimes send both fields at once,
+		// one of them "". The empty string is not a trace, so it must not win the
+		// choice — hence `||` rather than `??`.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { reasoning_content: "", reasoning: "real" } }] },
+					{ choices: [{ delta: {}, finish_reason: "stop" }] },
+				]),
+				"ollama",
+				"qwen3:8b",
+			),
+		);
+		expect(events.filter((e) => e.type === "thinking_delta").map((e) => e.delta)).toEqual(["real"]);
+	});
+
 	test("a list-shaped content delta becomes thinking and text (Mistral-style)", async () => {
 		// Some providers stream `delta.content` as a list of parts: a thinking
 		// phase whose parts wrap the text one level down, a transition list that
@@ -616,6 +664,25 @@ describe("defaultClient", () => {
 					createOpenAIStreamFn({})(MODEL, ctx(), { apiKey: "test-key", headers: { "x-gateway": "route-a" } }),
 				);
 				expect(calls[0]?.headers.get("x-gateway")).toBe("route-a");
+			},
+		);
+	});
+
+	test("a keyless model goes out with the placeholder credential", async () => {
+		// openai@7 refuses to build a client from an empty credential, and the
+		// local Ollama daemon has none to offer — so the row goes out with a
+		// placeholder Bearer the daemon ignores. This pins that path end to end:
+		// the real SDK, a stubbed fetch, and the header the request carries.
+		const template = dynamicProviderTemplates().find((model) => model.provider === "ollama");
+		if (!template) throw new Error("expected the ollama template");
+		await withFetch(
+			() => new Response(CHAT_SSE, { headers: { "content-type": "text/event-stream" } }),
+			async (calls) => {
+				const events = await collect(createOpenAIStreamFn({})(template, ctx({ messages: [userMessage("hi")] })));
+
+				expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual(["ok"]);
+				expect(calls[0]?.url).toBe("http://localhost:11434/v1/chat/completions");
+				expect(calls[0]?.headers.get("authorization")).toBe("Bearer no-key");
 			},
 		);
 	});

@@ -57,6 +57,7 @@ export {
 	clearDiscovery,
 	clearPricingOverrides,
 	type DiscoveredModel,
+	dynamicProviderTemplates,
 	gatewayProvidersFor,
 	listModels,
 	MissingApiKeyError,
@@ -157,7 +158,7 @@ export {
 import type { CacheNotice, CachePolicy } from "./cache.ts";
 import type { CacheTracker } from "./cache-tracker.ts";
 import { withCacheTracker } from "./cache-tracker.ts";
-import { MissingApiKeyError, resolveApiKey } from "./model.ts";
+import { apiKeyEnvNames, MissingApiKeyError, resolveApiKey } from "./model.ts";
 import { createAnthropicStreamFn } from "./providers/anthropic.ts";
 import { createOpenAIStreamFn } from "./providers/openai-compat.ts";
 import { createResponsesStreamFn, type ResponsesClientLike } from "./providers/openai-responses.ts";
@@ -198,6 +199,10 @@ export interface StreamFnOptions {
 /** The error a model fails with when no key resolves, or undefined when one does. */
 export function missingApiKey(model: Model, options?: StreamOptions): MissingApiKeyError | undefined {
 	if (options?.apiKey) return undefined;
+	// A row naming no variable wants no key: the local daemon. The distinction
+	// is drawn off the empty name list, because the error below would otherwise
+	// name a variable that does not exist.
+	if (apiKeyEnvNames(model).length === 0) return undefined;
 	return resolveApiKey(model) ? undefined : new MissingApiKeyError(model);
 }
 

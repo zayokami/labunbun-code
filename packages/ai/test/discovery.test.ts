@@ -17,10 +17,12 @@ import {
 	formatCatalogNotice,
 	refreshModelCatalog,
 } from "../src/discovery.ts";
+import { missingApiKey } from "../src/index.ts";
 import {
 	apiKeyEnvNames,
 	clearCustomModels,
 	clearDiscovery,
+	dynamicProviderTemplates,
 	listModels,
 	resolveModel,
 	setProviderCatalogue,
@@ -52,6 +54,9 @@ const KEY_VARS = [
 	"GLM_API_KEY",
 	"OPENAI_API_KEY",
 	"GEMINI_API_KEY",
+	// Ollama's cloud account. The local daemon beside it names no variable at
+	// all, which is not a name this list could take away.
+	"OLLAMA_API_KEY",
 	// One name for all four gateway providers: Zen and Go issue a single
 	// dashboard key, and each plan's own catalog entry declares the same
 	// variable (`env: ["OPENCODE_API_KEY"]` on both of them), so one exported
@@ -126,12 +131,15 @@ test("every variable the registry names is one this file takes away", () => {
 });
 
 describe("asking the providers", () => {
-	test("a provider with no key is not asked at all", async () => {
+	test("a provider whose key is missing is not asked; one that takes no key is", async () => {
 		const restore = withoutKeys();
 		try {
 			const { probe, asked } = answering({ provider: "anthropic", models: [], complete: true });
 			expect(await refreshModelCatalog({ probe })).toBeUndefined();
-			expect(asked).toEqual([]);
+			// The keyed providers are skipped — asking without a key is a request
+			// that can only be rejected. The local Ollama template is not skipped:
+			// nothing is missing from it, and its catalog exists in no other place.
+			expect(asked).toEqual(["ollama/local"]);
 		} finally {
 			restore();
 		}
@@ -144,9 +152,11 @@ describe("asking the providers", () => {
 			const { probe, asked } = answering({ provider: "anthropic", models: [], complete: true });
 			await refreshModelCatalog({ probe });
 			// One provider, one request — not one per model — and the providers
-			// without a key are left alone rather than asked and rejected.
-			expect(asked).toHaveLength(1);
+			// without a key are left alone rather than asked and rejected. The
+			// keyless template is asked either way: two questions, not one per row.
+			expect(asked).toHaveLength(2);
 			expect(asked[0]).toStartWith("anthropic/");
+			expect(asked[1]).toBe("ollama/local");
 		} finally {
 			restore();
 		}
@@ -279,6 +289,57 @@ describe("what the answer changes", () => {
 		});
 		expect(resolveModel("anthropic/claude-opus-6")?.id).toBe("claude-opus-6");
 		expect(resolveModel("claude-opus-6")?.provider).toBe("anthropic");
+	});
+
+	test("a provider with no table row gets its rows from its own listing", async () => {
+		// The local Ollama daemon: the one provider whose catalog cannot be
+		// written down, because only the daemon knows what has been pulled. Its
+		// template is not a model — it never resolves on its own — but it gives
+		// the probe a wire and a base URL, and the synthesizer a row to build on.
+		const { probe } = answering({
+			provider: "ollama",
+			models: [{ id: "llama3.2:3b", contextWindow: 131_072, maxOutputTokens: 131_072, reasoning: false }],
+			complete: true,
+		});
+		const refresh = await refreshModelCatalog({ probe, models: dynamicProviderTemplates() });
+
+		expect(refresh?.added).toEqual(["ollama/llama3.2:3b"]);
+		const row = resolveModel("ollama/llama3.2:3b");
+		if (!row) throw new Error("expected the listed model to resolve");
+		expect(row).toMatchObject({
+			provider: "ollama",
+			api: "openai-completions",
+			baseUrl: "http://localhost:11434/v1",
+			contextWindow: 131_072,
+			maxOutputTokens: 131_072,
+			reasoning: false,
+			// No price: it runs on the user's own hardware, and there is no rate to
+			// transcribe — the same reading every discovered row takes.
+			pricing: undefined,
+		});
+		// Keyless end to end: the row names no variable and wants none.
+		expect(apiKeyEnvNames(row)).toEqual([]);
+		expect(missingApiKey(row)).toBeUndefined();
+		// The daemon's loadout is reachable only qualified, like the other
+		// gateways: the bare id resolves to nothing, and the hint can offer it.
+		expect(resolveModel("llama3.2:3b")).toBeUndefined();
+	});
+
+	test("what a listing says about thinking reaches the row it builds", async () => {
+		const { probe } = answering({
+			provider: "ollama",
+			models: [
+				{ id: "qwen3:8b", contextWindow: 40_960, maxOutputTokens: 40_960, reasoning: true },
+				// No claim either way: the template's own flag stands rather than the
+				// silence being read as a `false` the daemon never said.
+				{ id: "granite4:7b", contextWindow: 131_072, maxOutputTokens: 131_072 },
+			],
+			complete: true,
+		});
+		await refreshModelCatalog({ probe, models: dynamicProviderTemplates() });
+
+		expect(resolveModel("ollama/qwen3:8b")?.reasoning).toBe(true);
+		expect(resolveModel("ollama/granite4:7b")?.reasoning).toBe(false);
 	});
 
 	test("an id with no stated limits is not offered at all", async () => {

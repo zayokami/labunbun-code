@@ -38,7 +38,7 @@ import {
 	type PermissionRule,
 	type SandboxMode,
 } from "@labunbun/agent";
-import { type Model, resolveApiKey, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
+import { type Model, missingApiKey, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
 import { TASK_BOARD_TOOL_NAMES } from "@labunbun/tools";
 import { z } from "zod";
 import { type CompactionWiring, createCompactionWiring } from "./compaction-wiring.ts";
@@ -1092,7 +1092,7 @@ export async function pickBeetleModels(options: PickBeetleModelsOptions): Promis
 				// shape /model uses: "claude-sonnet-5" tells a human less than
 				// "Claude Sonnet 5", but the id is what gets stored, so both show.
 				label: `${active === row + 1 ? "* " : "  "}${model.name}`,
-				description: `${model.provider}/${model.id} · ${Math.round(model.contextWindow / 1000)}k context${resolveApiKey(model) ? "" : " — no API key"}`,
+				description: `${model.provider}/${model.id} · ${Math.round(model.contextWindow / 1000)}k context${missingApiKey(model) ? " — no API key" : ""}`,
 			})),
 		];
 		const title = `Beetle · ${DISPLAY_NAME[member]} (${BEETLE_ROLES[member]}) — model ${i + 1}/4`;

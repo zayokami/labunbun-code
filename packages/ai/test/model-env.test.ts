@@ -128,7 +128,7 @@ describe("resolveApiKey", () => {
 	test("a model without fallbacks reads only its own variable", () => {
 		const model = resolveModel("deepseek/deepseek-flash");
 		if (!model) throw new Error("expected the built-in model to resolve");
-		expect(apiKeyEnvNames(model)).toEqual([model.apiKeyEnv]);
+		expect(apiKeyEnvNames(model)).toEqual(["DEEPSEEK_API_KEY"]);
 	});
 
 	test("the Kimi rows read the vendor's own variable as well", () => {

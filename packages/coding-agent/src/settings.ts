@@ -132,7 +132,8 @@ export const SettingsSchema = z.object({
 	/** Let the cheap rung run by itself when the context crosses the compaction threshold. */
 	trimOldToolResults: z.boolean().optional(),
 	/**
-	 * Ask each provider with a key what it serves, once at startup, and let the
+	 * Ask each provider with a key — and each one that takes no key at all, like
+	 * the local Ollama daemon — what it serves, once at startup, and let the
 	 * answer narrow the `/model` picker. On by default: it is one request per
 	 * provider, it never blocks anything, and a failure leaves the catalog's own
 	 * table in place. Set false to keep the picker to the table — an air-gapped

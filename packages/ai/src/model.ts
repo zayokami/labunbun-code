@@ -20,6 +20,10 @@ const DEEPSEEK_BASE = "https://api.deepseek.com/v1";
 const MINIMAX_BASE = "https://api.minimax.io/v1";
 /** Mistral's own host; `/chat/completions` on it is OpenAI's wire. */
 const MISTRAL_BASE = "https://api.mistral.ai/v1";
+/** Ollama's cloud host. `/v1` is OpenAI's wire; the native catalog API sits at the root. */
+const OLLAMA_CLOUD_BASE = "https://ollama.com/v1";
+/** The local daemon's default address; a user who moved it sets `OLLAMA_BASE_URL`. */
+const OLLAMA_LOCAL_BASE = "http://localhost:11434/v1";
 // The gateway's two plans, on two wires each. The two spellings of one plan differ
 // only by a path prefix, and the difference is the SDK's, not a convenience: the
 // Anthropic client appends `/v1/messages` to whatever base it is given, so it
@@ -35,8 +39,20 @@ const OPENCODE_ZEN_OAI_BASE = "https://opencode.ai/zen/v1";
 const OPENCODE_GO_OAI_BASE = "https://opencode.ai/zen/go/v1";
 
 // Long-form design notes: docs/dev/ai-layer.md
-/** The four gateway provider ids: a route to a model, not a home for one. */
-const GATEWAY_PROVIDERS = new Set(["opencode-zen", "opencode-go", "opencode-zen-oai", "opencode-go-oai"]);
+/**
+ * Providers that are a route to a model rather than a home for one: the four
+ * gateway ids, plus Ollama. Cloud and local alike serve models other vendors
+ * make, so a bare id only they carry resolves to nothing and gets the
+ * "offered by" hint instead of a silent route.
+ */
+const GATEWAY_PROVIDERS = new Set([
+	"opencode-zen",
+	"opencode-go",
+	"opencode-zen-oai",
+	"opencode-go-oai",
+	"ollama",
+	"ollama-cloud",
+]);
 
 /** 10 * 1.25 is 1.25, but 0.1 * 3 leaves floating-point dust in a price table. */
 function roundPrice(usd: number): number {
@@ -975,6 +991,124 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 131_072,
 		pricing: { input: 0.3, output: 0.9, cacheRead: 0.03, cacheWrite: 0 },
 	}),
+	// Ollama Cloud, in the host's own listing order — the one order its `tags`
+	// page states, so the picker reads the way `ollama list` does. Every row is
+	// priced at zero for the reason big-pickle is: the plan is a subscription,
+	// and no per-token rate exists to transcribe. Each window is what the
+	// model's own `show` page states; Ollama publishes no output cap, so like
+	// the Mistral rows the window stands in for one. `reasoning` is read off
+	// that page's thinking metadata rather than off a vendor habit: true where
+	// asking "medium" lands on what the model does when nothing is asked — the
+	// boolean thinking models that default on, and the gpt-oss pair whose
+	// default IS medium — and false everywhere else. Gemma 4 is the row worth
+	// naming: its boolean default is off, so a "medium" would switch thinking
+	// on against its own default, which is exactly the mistake the flag exists
+	// to prevent.
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "kimi-k3", "Kimi K3", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "minimax-m3", "minimax-M3", {
+		contextWindow: 512_000,
+		maxOutputTokens: 512_000,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "mistral-large-4", "Mistral Large 4", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel(
+		"ollama-cloud",
+		OLLAMA_CLOUD_BASE,
+		"OLLAMA_API_KEY",
+		"deepseek-v4-pro:0813",
+		"DeepSeek V4 Pro 0813",
+		{
+			contextWindow: 1_048_576,
+			maxOutputTokens: 1_048_576,
+			pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		},
+	),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "gpt-oss:120b", "GPT-OSS 120B", {
+		contextWindow: 131_072,
+		maxOutputTokens: 131_072,
+		reasoning: true,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "kimi-k2.6", "Kimi K2.6", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		reasoning: true,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "minimax-m2.7", "minimax-M2.7", {
+		contextWindow: 196_608,
+		maxOutputTokens: 196_608,
+		reasoning: true,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "nemotron-3-super", "Nemotron 3 Super", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		reasoning: true,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "glm-5.2", "GLM-5.2", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "glm-5.3-flash", "GLM-5.3-Flash", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "kimi-k2.7-code", "Kimi K2.7 Code", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		reasoning: true,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "nemotron-3-nano:30b", "Nemotron 3 Nano 30B", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		reasoning: true,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "gemma4:31b", "Gemma 4 31B", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "glm-5.3", "GLM-5.3", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "mistral-large-3:675b", "Mistral Large 3", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "nemotron-3-ultra", "Nemotron 3 Ultra", {
+		contextWindow: 262_144,
+		maxOutputTokens: 262_144,
+		reasoning: true,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
+	openAICompatModel("ollama-cloud", OLLAMA_CLOUD_BASE, "OLLAMA_API_KEY", "gpt-oss:20b", "GPT-OSS 20B", {
+		contextWindow: 131_072,
+		maxOutputTokens: 131_072,
+		reasoning: true,
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	}),
 	// The gateway, last: two plans, two wires, four provider ids; `reasoning: false` everywhere (no documented thinking shape), plus the unpriced-id list.
 	// Long-form design notes: docs/dev/ai-layer.md
 	...OPENCODE_ZEN_MODELS.map(([id, name, contextWindow, maxOutputTokens, pricing]) =>
@@ -1123,6 +1257,38 @@ export function clearCustomModels(): void {
 }
 
 /**
+ * Providers whose catalog exists only in their own answer, keyed by provider.
+ * No row can be written down ahead of time because nobody but the daemon knows
+ * what is pulled. The entry below is a template, not a model: it is never
+ * listed in `/model` and never resolves. It exists so the discovery probe and
+ * `synthesizeModel` have the provider's wire and base URL to speak with.
+ */
+const dynamicProviders = new Map<string, Model>([
+	[
+		"ollama",
+		{
+			id: "local",
+			name: "Ollama (local)",
+			api: "openai-completions",
+			provider: "ollama",
+			baseUrl: OLLAMA_LOCAL_BASE,
+			// No `apiKeyEnv`, and the absence is the statement: the local daemon
+			// wants no key, which `missingApiKey` reads as nothing to miss.
+			contextWindow: 0,
+			maxOutputTokens: 0,
+			reasoning: false,
+			// The user's own hardware; there is no rate to transcribe.
+			pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		},
+	],
+]);
+
+/** The template per provider whose catalog only discovery can state. */
+export function dynamicProviderTemplates(): Model[] {
+	return [...dynamicProviders.values()];
+}
+
+/**
  * A model a provider listed about itself. Only `id` is guaranteed: Anthropic's
  * models endpoint also reports a display name, a context window and an output
  * cap, Kimi's reports a window, and the rest report ids and nothing else.
@@ -1132,6 +1298,12 @@ export interface DiscoveredModel {
 	displayName?: string;
 	contextWindow?: number;
 	maxOutputTokens?: number;
+	/**
+	 * Whether the provider stated that this model thinks — Ollama's `show`
+	 * reports it as a capability. Absent when the listing said nothing, which is
+	 * not the same claim as `false`.
+	 */
+	reasoning?: boolean;
 }
 
 // Long-form design notes: docs/dev/ai-layer.md
@@ -1150,7 +1322,9 @@ const discoveredModels = new Map<string, Model>();
 function synthesizeModel(provider: string, discovered: DiscoveredModel): Model | undefined {
 	const { contextWindow, maxOutputTokens } = discovered;
 	if (contextWindow === undefined || maxOutputTokens === undefined) return undefined;
-	const template = [...BUILT_IN_MODELS, ...customModels.values()].find((model) => model.provider === provider);
+	const template =
+		[...BUILT_IN_MODELS, ...customModels.values()].find((model) => model.provider === provider) ??
+		dynamicProviders.get(provider);
 	if (!template) return undefined;
 	return {
 		...template,
@@ -1158,6 +1332,9 @@ function synthesizeModel(provider: string, discovered: DiscoveredModel): Model |
 		name: discovered.displayName ?? discovered.id,
 		contextWindow,
 		maxOutputTokens,
+		// What the listing itself said about thinking, when it said anything; the
+		// template's own flag stands otherwise, the way its wire and host do.
+		...(discovered.reasoning !== undefined ? { reasoning: discovered.reasoning } : {}),
 		pricing: undefined,
 	};
 }
@@ -1286,10 +1463,11 @@ export function applyBaseUrlOverrides(model: Model): Model {
 /**
  * The API key for a model: `apiKeyEnv` first, then `apiKeyEnvFallbacks` in
  * order. Returns undefined when none of them is set, so callers can tell
- * "missing" apart from "empty".
+ * "missing" apart from "empty" — and when the row names no variable at all,
+ * which is a provider that takes requests without one.
  */
 export function resolveApiKey(model: Model): string | undefined {
-	for (const name of [model.apiKeyEnv, ...(model.apiKeyEnvFallbacks ?? [])]) {
+	for (const name of apiKeyEnvNames(model)) {
 		const value = process.env[name];
 		if (value) return value;
 	}
@@ -1298,7 +1476,7 @@ export function resolveApiKey(model: Model): string | undefined {
 
 /** Env var names a model will accept its key from, in precedence order. */
 export function apiKeyEnvNames(model: Model): string[] {
-	return [model.apiKeyEnv, ...(model.apiKeyEnvFallbacks ?? [])];
+	return [model.apiKeyEnv, ...(model.apiKeyEnvFallbacks ?? [])].filter((name) => name !== undefined);
 }
 
 // Long-form design notes: docs/dev/ai-layer.md

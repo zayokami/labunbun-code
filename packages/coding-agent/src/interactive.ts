@@ -33,14 +33,13 @@ import {
 } from "@labunbun/agent";
 import {
 	type AgentMessage,
-	apiKeyEnvNames,
 	createTrackedStreamFn,
 	formatCatalogNotice,
 	gatewayProvidersFor,
 	type Model,
+	missingApiKey,
 	refreshModelCatalog,
 	repairToolPairing,
-	resolveApiKey,
 	resolveModel,
 	THINKING_LEVELS,
 	type ThinkingLevel,
@@ -260,9 +259,26 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Models and prices the settings file declares, before anything resolves one.
 	applyCatalogSettings(settings);
 
+	// ---- catalog refresh ----
+	// Ask each provider what it serves, in the background. Started before the
+	// model resolves, because for one kind of provider — the local Ollama
+	// daemon, whose catalog exists only in its own answer — resolution has
+	// nothing to match until the listing is in. Nothing waits on it unless that
+	// happens: the catalog's own table is already usable, and a provider that
+	// does not answer leaves it exactly as it was.
+	const catalogAbort = new AbortController();
+	const catalogRefresh =
+		settings.modelDiscovery === false ? undefined : refreshModelCatalog({ signal: catalogAbort.signal });
+
 	// ---- model ----
 	const modelRef = options.modelRef ?? settings.model ?? "anthropic/claude-sonnet-5";
-	const model = resolveModel(modelRef);
+	let model = resolveModel(modelRef);
+	if (!model && catalogRefresh) {
+		// A ref the table does not know may be one a provider is about to name:
+		// wait for the listing once, then ask again.
+		await catalogRefresh;
+		model = resolveModel(modelRef);
+	}
 	if (!model) {
 		console.error(`Unknown model: ${modelRef}`);
 		return 1;
@@ -270,24 +286,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Narrowed alias: closures below (hot-swap) read the startup model without
 	// re-narrowing.
 	const startupModel: Model = model;
-	if (!resolveApiKey(model)) {
-		const names = apiKeyEnvNames(model);
-		console.error(
-			`Missing API key for ${model.provider}: set ${names.join(" or ")} in your environment.\n` +
-				`Example: export ${model.apiKeyEnv}=sk-...`,
-		);
+	// `missingApiKey` rather than a bare key read: the local daemon's rows name
+	// no variable at all, and that absence means "nothing to miss", not a name
+	// to export.
+	const missingStartupKey = missingApiKey(model);
+	if (missingStartupKey) {
+		console.error(`${missingStartupKey.message}\nExample: export ${missingStartupKey.envNames[0]}=sk-...`);
 		return 1;
 	}
-
-	// ---- catalog refresh ----
-	// Ask each provider with a key what it serves, in the background. Started
-	// here — after the key check, before the long startup awaits — so the answer
-	// is in place by the time the user opens /model, and nothing waits on it: the
-	// catalog's own table is already usable, and a provider that does not answer
-	// leaves it exactly as it was.
-	const catalogAbort = new AbortController();
-	const catalogRefresh =
-		settings.modelDiscovery === false ? undefined : refreshModelCatalog({ signal: catalogAbort.signal });
 
 	// ---- session persistence: resume, continue, or new ----
 	let store: SessionStore | undefined;
@@ -964,8 +970,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			pushInfo(handle, unknownModelMessage(ref));
 			return false;
 		}
-		if (!resolveApiKey(next)) {
-			pushInfo(handle, `No API key for ${next.provider} — set ${next.apiKeyEnv}. Model unchanged.`);
+		const missingKey = missingApiKey(next);
+		if (missingKey) {
+			pushInfo(handle, `No API key for ${next.provider} — set ${missingKey.envNames.join(" or ")}. Model unchanged.`);
 			return false;
 		}
 		sessionRef?.setModel(next);
@@ -1043,7 +1050,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		streamFn,
 		model: () => sessionRef?.model ?? model,
 		resolveModel,
-		canRunModel: (candidate) => Boolean(resolveApiKey(candidate)),
+		canRunModel: (candidate) => missingApiKey(candidate) === undefined,
 		thinkingLevel: () => thinkingLevel,
 		trimOldToolResults: settings.trimOldToolResults,
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
@@ -2009,7 +2016,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// it rather than switching to whichever happens to be first.
 				const active = models.findIndex((m) => current && m.provider === current.provider && m.id === current.id);
 				const items = models.map((m, i) => {
-					const hasKey = Boolean(resolveApiKey(m));
+					const hasKey = missingApiKey(m) === undefined;
 					// The display name leads and the wire reference follows: two rows
 					// reading `anthropic/claude-sonnet-5` and `anthropic/claude-sonnet-5-1`
 					// are a choice nobody can make at a glance, and the id is still what

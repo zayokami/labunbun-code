@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
 	clearCustomModels,
+	clearDiscovery,
 	clearPricingOverrides,
 	gatewayProvidersFor,
 	listModels,
@@ -29,7 +30,7 @@ afterEach(() => {
  * host test below reads resolved models, so every one of these is borrowed for
  * the duration — this file otherwise asserts the shipped table, and inheriting
  * the machine's configuration would make a developer's proxy a test failure. All
- * twelve, not just the one that happened to be set: the point is that no machine
+ * fourteen, not just the one that happened to be set: the point is that no machine
  * can change the answer.
  *
  * The `finally` is the whole restore path, and deliberately not an `afterEach`
@@ -51,6 +52,12 @@ const BASE_URL_VARS = [
 	"OPENCODE_GO_BASE_URL",
 	"OPENCODE_ZEN_OAI_BASE_URL",
 	"OPENCODE_GO_OAI_BASE_URL",
+	// Ollama's two roots are one pair: only the cloud one redirects a row this
+	// file asserts, but the local daemon's variable redirects the same provider
+	// family, and a borrowed pair is one line here rather than a debugging
+	// session the day a local row appears.
+	"OLLAMA_CLOUD_BASE_URL",
+	"OLLAMA_BASE_URL",
 ];
 const savedEnv = new Map<string, string | undefined>();
 
@@ -122,6 +129,28 @@ const BUILT_IN_REFS = [
 	"mistral/mistral-medium-3-5",
 	"mistral/mistral-small-2603",
 	"mistral/codestral-2508",
+	// Ollama Cloud: the host's own listing order, swept 2026-10-12 from its
+	// `tags` endpoint. A subscription plan, so every row is priced at zero —
+	// nobody is billed per token — and none of them states an output cap, so
+	// the window stands in for one, as the Mistral rows do.
+	"ollama-cloud/kimi-k3",
+	"ollama-cloud/minimax-m3",
+	"ollama-cloud/mistral-large-4",
+	"ollama-cloud/deepseek-v4-pro:0813",
+	"ollama-cloud/deepseek-v4.1-flash",
+	"ollama-cloud/gpt-oss:120b",
+	"ollama-cloud/kimi-k2.6",
+	"ollama-cloud/minimax-m2.7",
+	"ollama-cloud/nemotron-3-super",
+	"ollama-cloud/glm-5.2",
+	"ollama-cloud/glm-5.3-flash",
+	"ollama-cloud/kimi-k2.7-code",
+	"ollama-cloud/nemotron-3-nano:30b",
+	"ollama-cloud/gemma4:31b",
+	"ollama-cloud/glm-5.3",
+	"ollama-cloud/mistral-large-3:675b",
+	"ollama-cloud/nemotron-3-ultra",
+	"ollama-cloud/gpt-oss:20b",
 	// The gateway: 85 Zen rows and 33 Go rows, each on both wires — 236 references,
 	// in the order `BUILT_IN_MODELS` materializes them. The two plans are separate
 	// transcriptions and neither was ever filled in from the other, which the
@@ -397,6 +426,19 @@ function isWholeWindowOutput(ref: string): boolean {
 }
 
 describe("the built-in catalog", () => {
+	test("every row in the table is named above, in the table's own order", () => {
+		// The list at the top is hand-written and every assertion in this file is
+		// built on it. That is the point — a list read off `listModels()` would
+		// assert the table against itself — but it is also the hole: a row added
+		// to `BUILT_IN_MODELS` and not to the list makes every check here pass
+		// while checking less than it did the day before, which is how the Ollama
+		// Cloud rows were added before this test existed. This closes it.
+		clearCustomModels();
+		clearDiscovery();
+		const shipped = listModels().map((model) => `${model.provider}/${model.id}`);
+		expect(shipped).toEqual(BUILT_IN_REFS);
+	});
+
 	test("every model carries a price", () => {
 		// An unpriced catalog entry reads as a free model: the cost tracker looks
 		// the price up, finds nothing, and adds zero to a total nobody questions.
@@ -718,6 +760,30 @@ describe("the built-in catalog", () => {
 			["mistral/mistral-small-2603", 0.15, 0.6, 0.015, 0],
 			["mistral/codestral-2508", 0.3, 0.9, 0.03, 0],
 
+			// Ollama Cloud, swept from the host's own listing on 2026-10-12. All
+			// eighteen state zero for a structural reason rather than a promotional
+			// one: the plan bills a subscription, no per-token rate exists on any
+			// page of the host's to transcribe, and a zero reads as "this table
+			// cannot price it" in every cost report that prints one.
+			["ollama-cloud/kimi-k3", 0, 0, 0, 0],
+			["ollama-cloud/minimax-m3", 0, 0, 0, 0],
+			["ollama-cloud/mistral-large-4", 0, 0, 0, 0],
+			["ollama-cloud/deepseek-v4-pro:0813", 0, 0, 0, 0],
+			["ollama-cloud/deepseek-v4.1-flash", 0, 0, 0, 0],
+			["ollama-cloud/gpt-oss:120b", 0, 0, 0, 0],
+			["ollama-cloud/kimi-k2.6", 0, 0, 0, 0],
+			["ollama-cloud/minimax-m2.7", 0, 0, 0, 0],
+			["ollama-cloud/nemotron-3-super", 0, 0, 0, 0],
+			["ollama-cloud/glm-5.2", 0, 0, 0, 0],
+			["ollama-cloud/glm-5.3-flash", 0, 0, 0, 0],
+			["ollama-cloud/kimi-k2.7-code", 0, 0, 0, 0],
+			["ollama-cloud/nemotron-3-nano:30b", 0, 0, 0, 0],
+			["ollama-cloud/gemma4:31b", 0, 0, 0, 0],
+			["ollama-cloud/glm-5.3", 0, 0, 0, 0],
+			["ollama-cloud/mistral-large-3:675b", 0, 0, 0, 0],
+			["ollama-cloud/nemotron-3-ultra", 0, 0, 0, 0],
+			["ollama-cloud/gpt-oss:20b", 0, 0, 0, 0],
+
 			// The gateway, on the same terms and the same day. Thirty-four of these rows
 			// state a cache-write rate and the rest state none, so nearly three quarters
 			// of the table ends in 0 — which is the reading Gemini and MiniMax M3 already
@@ -1033,6 +1099,31 @@ describe("the built-in catalog", () => {
 			["mistral/mistral-small-2603", 262_144, 262_144],
 			["mistral/codestral-2508", 131_072, 131_072],
 
+			// Ollama Cloud: each window is what the model's own `show` page states,
+			// and Ollama publishes no output cap for any of them — the third column
+			// is the window itself, the same stand-in the two vendors above take.
+			// `nemotron-3-nano:30b` states its key with the architecture prefix and
+			// `nemotron-3-ultra` reports the bare `context_length`, which is why the
+			// reader matches on the suffix.
+			["ollama-cloud/kimi-k3", 1_048_576, 1_048_576],
+			["ollama-cloud/minimax-m3", 512_000, 512_000],
+			["ollama-cloud/mistral-large-4", 1_048_576, 1_048_576],
+			["ollama-cloud/deepseek-v4-pro:0813", 1_048_576, 1_048_576],
+			["ollama-cloud/deepseek-v4.1-flash", 1_048_576, 1_048_576],
+			["ollama-cloud/gpt-oss:120b", 131_072, 131_072],
+			["ollama-cloud/kimi-k2.6", 262_144, 262_144],
+			["ollama-cloud/minimax-m2.7", 196_608, 196_608],
+			["ollama-cloud/nemotron-3-super", 262_144, 262_144],
+			["ollama-cloud/glm-5.2", 1_048_576, 1_048_576],
+			["ollama-cloud/glm-5.3-flash", 1_048_576, 1_048_576],
+			["ollama-cloud/kimi-k2.7-code", 262_144, 262_144],
+			["ollama-cloud/nemotron-3-nano:30b", 262_144, 262_144],
+			["ollama-cloud/gemma4:31b", 262_144, 262_144],
+			["ollama-cloud/glm-5.3", 1_048_576, 1_048_576],
+			["ollama-cloud/mistral-large-3:675b", 262_144, 262_144],
+			["ollama-cloud/nemotron-3-ultra", 262_144, 262_144],
+			["ollama-cloud/gpt-oss:20b", 131_072, 131_072],
+
 			// The gateway, swept 2026-09-28. These are the numbers the compaction threshold
 			// is derived from, so they are transcribed rather than rounded:
 			// `hy4-preview` on Go is 1,024,000 rather than 1M.
@@ -1332,6 +1423,27 @@ describe("the built-in catalog", () => {
 			"mistral/mistral-medium-3-5",
 			"mistral/mistral-small-2603",
 			"mistral/codestral-2508",
+			// Ollama Cloud's ten, and none of them is a guess: the host's `show`
+			// page states each model's thinking vocabulary and default, and the
+			// flag was read off it. The vocabulary without the word (Kimi K3,
+			// DeepSeek 4.x, both GLM 5.x — all of which take low/high/max with a
+			// default that is not medium), no thinking at all (MiniMax M3, both
+			// Mistral rows — the host reports no capability), and Gemma 4, whose
+			// boolean default is off: for it `medium` would switch thinking on
+			// against its own default, which is exactly the mistake the flag
+			// exists to prevent. The eight rows above them in the cloud block
+			// claim `reasoning: true` and are absent here for the same reason:
+			// their default IS what asking "medium" lands on.
+			"ollama-cloud/kimi-k3",
+			"ollama-cloud/minimax-m3",
+			"ollama-cloud/mistral-large-4",
+			"ollama-cloud/deepseek-v4-pro:0813",
+			"ollama-cloud/deepseek-v4.1-flash",
+			"ollama-cloud/glm-5.2",
+			"ollama-cloud/glm-5.3-flash",
+			"ollama-cloud/gemma4:31b",
+			"ollama-cloud/glm-5.3",
+			"ollama-cloud/mistral-large-3:675b",
 		]);
 		// The other half of the partition, exhaustive over the same rows. Every
 		// gateway row claims no thinking at all, and the reason is a model in the
@@ -1375,6 +1487,7 @@ describe("the built-in catalog", () => {
 				host("opencode-go/deepseek-v4-pro"),
 				host("opencode-zen-oai/gpt-6-sol"),
 				host("opencode-go-oai/kimi-k3"),
+				host("ollama-cloud/kimi-k3"),
 			]).toEqual([
 				"https://api.anthropic.com",
 				"https://api.deepseek.com/v1",
@@ -1397,6 +1510,10 @@ describe("the built-in catalog", () => {
 				"https://opencode.ai/zen/go",
 				"https://opencode.ai/zen/v1",
 				"https://opencode.ai/zen/go/v1",
+				// The cloud host keeps its `/v1`, unlike the gateway's Anthropic
+				// pair: these rows are OpenAI-wire, and the native catalog API the
+				// lister asks is derived by stripping that suffix back off.
+				"https://ollama.com/v1",
 			]);
 			// One host each, not one per row: a provider that serves several of the
 			// rows above under different URLs is a shape this table does not have.
@@ -1434,10 +1551,25 @@ describe("the built-in catalog", () => {
 			const model = resolveModel(ref);
 			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
 		}
-		// And no first-party vendor beyond these two is in that situation, so the
-		// rule stays a fact about them rather than a description of the whole table.
+		// The third family in that situation, and the widest instance of it: the
+		// cloud host states a window per model and its `show` page has no field for
+		// an output cap at all, so all eighteen rows carry the window — the rows
+		// here and every row the local daemon's listing synthesizes later, since
+		// the same native API is the only source either of them has.
+		const ollamaCloud = BUILT_IN_REFS.filter((ref) => ref.startsWith("ollama-cloud/"));
+		expect(ollamaCloud.length).toBeGreaterThan(0);
+		for (const ref of ollamaCloud) {
+			const model = resolveModel(ref);
+			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
+		}
+		// And no vendor beyond these three is in that situation, so the rule stays
+		// a fact about them rather than a description of the whole table.
 		const others = BUILT_IN_REFS.filter(
-			(ref) => !ref.startsWith("minimax/") && !ref.startsWith("mistral/") && !isReseller(ref),
+			(ref) =>
+				!ref.startsWith("minimax/") &&
+				!ref.startsWith("mistral/") &&
+				!ref.startsWith("ollama-cloud/") &&
+				!isReseller(ref),
 		).filter((ref) => resolveModel(ref)?.maxOutputTokens === resolveModel(ref)?.contextWindow);
 		expect(others).toEqual([]);
 		// The resellers are the third case, and the one this test had to be widened
@@ -1662,6 +1794,19 @@ describe("ids that were retired", () => {
 			.map((ref) => ref.slice(ref.indexOf("/") + 1))
 			.filter((id) => RESELLER_PROVIDERS.has(resolveModel(id)?.provider ?? ""));
 		expect([...new Set(landing)]).toEqual([]);
+		// The same question for the cloud rows, which joined the gateway rule when
+		// they landed: `minimax-m3` and `kimi-k3` are the vendor's own rows and
+		// resolve to the vendor, while `gemma4:31b` belongs to nobody else, so its
+		// bare form resolves to nothing — and the hint is what names the cloud row.
+		expect(resolveModel("minimax-m3")?.provider).toBe("minimax");
+		expect(resolveModel("gemma4:31b")).toBeUndefined();
+		const cloudLanding = BUILT_IN_REFS.filter((ref) => ref.startsWith("ollama-cloud/"))
+			.map((ref) => ref.slice(ref.indexOf("/") + 1))
+			.filter((id) => {
+				const provider = resolveModel(id)?.provider;
+				return provider === "ollama" || provider === "ollama-cloud" || RESELLER_PROVIDERS.has(provider ?? "");
+			});
+		expect([...new Set(cloudLanding)]).toEqual([]);
 	});
 });
 
@@ -1758,5 +1903,10 @@ describe("where a bare id can be bought", () => {
 		expect(gatewayProvidersFor("opencode-zen/gpt-5-codex")).toEqual([]);
 		expect(gatewayProvidersFor("opencode-ze/gpt-5-codex")).toEqual([]);
 		expect(gatewayProvidersFor("nope")).toEqual([]);
+		// The cloud gateway's turn, with both sides of its shadowing: `gemma4:31b`
+		// is nobody else's model, so its bare name names the cloud row; `minimax-m3`
+		// is MiniMax's own, so the bare name already works and nothing fires.
+		expect(gatewayProvidersFor("gemma4:31b")).toEqual(["ollama-cloud"]);
+		expect(gatewayProvidersFor("minimax-m3")).toEqual([]);
 	});
 });

@@ -4,10 +4,12 @@ import {
 	allModels,
 	applyBaseUrlOverrides,
 	type DiscoveredModel,
+	dynamicProviderTemplates,
 	resolveApiKey,
 	setProviderCatalogue,
 } from "./model.ts";
 import { listAnthropicModels } from "./providers/anthropic.ts";
+import { listOllamaModels } from "./providers/ollama.ts";
 import { listOpenAIModels, type OpenAIModelsClientLike } from "./providers/openai-compat.ts";
 import type { Model } from "./types.ts";
 
@@ -52,7 +54,7 @@ export async function refreshModelCatalog(options?: {
 	signal?: AbortSignal;
 	models?: Model[];
 }): Promise<CatalogRefresh | undefined> {
-	const candidates = options?.models ?? providersWithKeys();
+	const candidates = options?.models ?? providersToProbe();
 	if (candidates.length === 0) return undefined;
 
 	// One deadline for the whole refresh, plus whatever the caller uses to give
@@ -91,13 +93,18 @@ export async function refreshModelCatalog(options?: {
 }
 
 /**
- * One model per provider that has a key: the probe needs a credential and a base
- * URL, and every model of a provider answers the same listing.
+ * One model per provider worth asking: the probe needs a base URL and, where
+ * the provider takes one, a credential, and every model of a provider answers
+ * the same listing. A provider whose rows name no key variable is asked
+ * anyway — the local daemon serves the one catalog that exists nowhere but its
+ * own answer, so skipping it would be skipping the only half that discovery
+ * can state at all. Its template stands in for a row, because there is no row.
  */
-function providersWithKeys(): Model[] {
+function providersToProbe(): Model[] {
 	const byProvider = new Map<string, Model>();
-	for (const model of allModels()) {
-		if (byProvider.has(model.provider) || !resolveApiKey(model)) continue;
+	for (const model of [...allModels(), ...dynamicProviderTemplates()]) {
+		if (byProvider.has(model.provider)) continue;
+		if (model.apiKeyEnv !== undefined && !resolveApiKey(model)) continue;
 		byProvider.set(model.provider, model);
 	}
 	return [...byProvider.values()];
@@ -110,6 +117,13 @@ export async function probeProvider(
 	signal?: AbortSignal,
 	openaiClient?: OpenAIModelsClientLike,
 ): Promise<DiscoveredListing | undefined> {
+	if (model.provider === "ollama" || model.provider === "ollama-cloud") {
+		// The chat wire is OpenAI's, but the catalog is not part of any wire here:
+		// `/v1/models` states ids and nothing else, and a row needs limits and a
+		// thinking flag, so the native API is the only one worth asking.
+		const listing = await listOllamaModels(model, { signal });
+		return { provider: model.provider, models: listing.models, complete: listing.complete };
+	}
 	if (model.api === "anthropic-messages") {
 		const listing = await listAnthropicModels(model, { signal });
 		return { provider: model.provider, models: listing.models, complete: listing.complete };

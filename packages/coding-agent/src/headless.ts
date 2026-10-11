@@ -21,6 +21,8 @@ import {
 	type CacheTracker,
 	cacheTotals,
 	createTrackedStreamFn,
+	dynamicProviderTemplates,
+	refreshModelCatalog,
 	resolveModel,
 	type StreamFn,
 	totalsHitRate,
@@ -162,7 +164,17 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// to use, and a `-p` run that ignored it made the same prompt behave
 	// differently in two modes for no reason the user could see.
 	const modelRef = options.modelRef ?? settings.model ?? "anthropic/claude-sonnet-5";
-	const model = resolveModel(modelRef);
+	let model = resolveModel(modelRef);
+	if (!model && settings.modelDiscovery !== false) {
+		// The REPL refreshes the whole catalog in the background at startup; a `-p`
+		// run stays off the network by default for the reason `modelDiscovery`
+		// documents. The one targeted exception: a ref only a listing can name —
+		// the local Ollama daemon's loadout — resolved to nothing, and nothing but
+		// asking that daemon (the keyless provider, the only one in the template
+		// list) will ever name it.
+		await refreshModelCatalog({ models: dynamicProviderTemplates() });
+		model = resolveModel(modelRef);
+	}
 	if (!model) {
 		console.error(`Unknown model: ${modelRef}`);
 		return 1;
