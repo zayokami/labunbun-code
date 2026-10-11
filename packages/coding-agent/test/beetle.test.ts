@@ -1308,11 +1308,13 @@ describe("model picker", () => {
 			"Beetle · Ringo (builder) — model 4/4",
 		]);
 
-		// Row 0 is the session model; the rest mirror /model's rows.
+		// Row 0 is the session model; the rest mirror /model's rows — display name
+		// on the label, and the id that gets stored named in the description.
 		const first = log[0];
 		expect(first?.items[0]?.label).toBe("* Follow the session model");
 		expect(first?.items[0]?.description).toBe("faux/live-session");
-		expect(first?.items[1]?.label).toBe("  faux/alpha");
+		expect(first?.items[1]?.label).toBe("  alpha");
+		expect(first?.items[1]?.description).toContain("faux/alpha ·");
 		expect(first?.items[1]?.description).toContain("200k context");
 		expect(first?.initialIndex).toBe(0);
 	});
@@ -1347,7 +1349,8 @@ describe("model picker", () => {
 			models: [testModel("alpha"), testModel("beta")],
 		});
 		expect(log[0]?.initialIndex).toBe(2);
-		expect(log[0]?.items[2]?.label).toBe("* faux/beta");
+		expect(log[0]?.items[2]?.label).toBe("* beta");
+		expect(log[0]?.items[2]?.description).toContain("faux/beta ·");
 		expect(log[0]?.items[0]?.label).toBe("  Follow the session model");
 		expect(log[1]?.initialIndex).toBe(0); // an explicit session value opens on row 0
 	});

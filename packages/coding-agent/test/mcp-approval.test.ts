@@ -36,6 +36,7 @@ function makeCtx(overrides: Partial<AppCommandContext> = {}): AppCommandContext 
 		compaction: () => ({}) as never,
 		mcpConnections: [],
 		mcpConfig: {},
+		mcpLoadErrors: [],
 		pendingMcpApprovals: [],
 		sessionStore: () => undefined,
 		theme: { theme: DARK_THEME, available: [DARK_THEME.name], problems: [] },

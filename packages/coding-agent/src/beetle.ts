@@ -31,6 +31,7 @@ import {
 	AgentSession,
 	type AnyTool,
 	buildTool,
+	collectReadOnlyToolNames,
 	evaluatePermissions,
 	type NetworkAxis,
 	type PermissionMode,
@@ -788,10 +789,15 @@ export class BeetleBand {
 			trimOldToolResults: options.trimOldToolResults,
 			report: (text) => options.report?.(`[beetle] ${DISPLAY_NAME[name]}: ${text}`),
 		});
+		const memberTools = this.#memberTools(name);
+		// The member's plan gate reads the same declarations the session's does,
+		// taken from the table this seat actually has (which includes `BandMessage`,
+		// a tool that declares itself read-only and must stay admitted in plan mode).
+		const readOnlyToolNames = collectReadOnlyToolNames(memberTools);
 		const session = new AgentSession({
 			model: initialModel,
 			systemPrompt: memberSystemPrompt(name),
-			tools: this.#memberTools(name),
+			tools: memberTools,
 			cwd: options.cwd,
 			maxTurns: options.maxTurns,
 			deps: {
@@ -806,6 +812,7 @@ export class BeetleBand {
 						sandbox: ctx.sandbox,
 						rules: options.getPermissionRules?.() ?? [],
 						cwd: options.cwd,
+						readOnlyToolNames,
 					});
 					if (decision.behavior !== "ask") return decision;
 					// The bus and the board are the calls that must survive an "ask":
@@ -1081,8 +1088,11 @@ export async function pickBeetleModels(options: PickBeetleModelsOptions): Promis
 				description: options.sessionModel,
 			},
 			...models.map((model, row) => ({
-				label: `${active === row + 1 ? "* " : "  "}${model.provider}/${model.id}`,
-				description: `${Math.round(model.contextWindow / 1000)}k context${resolveApiKey(model) ? "" : " — no API key"}`,
+				// The display name leads and the id rides the description, the same
+				// shape /model uses: "claude-sonnet-5" tells a human less than
+				// "Claude Sonnet 5", but the id is what gets stored, so both show.
+				label: `${active === row + 1 ? "* " : "  "}${model.name}`,
+				description: `${model.provider}/${model.id} · ${Math.round(model.contextWindow / 1000)}k context${resolveApiKey(model) ? "" : " — no API key"}`,
 			})),
 		];
 		const title = `Beetle · ${DISPLAY_NAME[member]} (${BEETLE_ROLES[member]}) — model ${i + 1}/4`;

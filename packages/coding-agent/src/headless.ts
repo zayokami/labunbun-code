@@ -9,7 +9,13 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AgentEvent, PermissionMode, SandboxMode } from "@labunbun/agent";
-import { AgentSession, evaluatePermissions, formatRetryNotice, SessionStore } from "@labunbun/agent";
+import {
+	AgentSession,
+	collectReadOnlyToolNames,
+	evaluatePermissions,
+	formatRetryNotice,
+	SessionStore,
+} from "@labunbun/agent";
 import {
 	type AgentMessage,
 	type CacheTracker,
@@ -18,7 +24,17 @@ import {
 	resolveModel,
 	type StreamFn,
 	totalsHitRate,
+	withModelFallback,
 } from "@labunbun/ai";
+import {
+	connectAllMcpServers,
+	disconnectAllMcpServers,
+	loadApprovedMcpServers,
+	loadMcpConfig,
+	loadProjectMcpServerNames,
+	type McpServerConfig,
+	parseMcpServersRecord,
+} from "@labunbun/mcp";
 import { createAllTools } from "@labunbun/tools";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
 import { createCompactionWiring } from "./compaction-wiring.ts";
@@ -34,6 +50,7 @@ import {
 	formatIgnoredKeysNotice,
 	loadSettings,
 	networkAxisFrom,
+	type RawSettingsInput,
 	resolveMode,
 } from "./settings.ts";
 import {
@@ -67,6 +84,11 @@ export interface HeadlessOptions {
 	 * `process.env` and hope every loader it does not know about re-resolves.
 	 */
 	home?: string;
+	/**
+	 * Settings delivered as a JSON object on the command line (`--settings`),
+	 * merged over every file tier. Parsed and shape-checked in `main.ts`.
+	 */
+	flagSettings?: RawSettingsInput;
 	/**
 	 * The model transport. Injected by tests, which is the only way to run this
 	 * path without a network or a bill; production leaves it out and gets the
@@ -125,7 +147,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const format = options.outputFormat ?? "text";
 	const home = options.home ?? homedir();
 
-	const loadedSettings = loadSettings(cwd, undefined, home);
+	const loadedSettings = loadSettings(cwd, options.flagSettings, home);
 	const { settings } = loadedSettings;
 	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
 	if (ignoredNotice) console.error(`Warning: ${ignoredNotice}`);
@@ -135,9 +157,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	applySettingsEnv(settings);
 	applyCatalogSettings(settings);
 
-	const model = resolveModel(options.modelRef ?? "anthropic/claude-sonnet-5");
+	// `settings.model` is the fallback between the flag and the built-in default,
+	// the same order the REPL resolves in: the setting is documented as the model
+	// to use, and a `-p` run that ignored it made the same prompt behave
+	// differently in two modes for no reason the user could see.
+	const modelRef = options.modelRef ?? settings.model ?? "anthropic/claude-sonnet-5";
+	const model = resolveModel(modelRef);
 	if (!model) {
-		console.error(`Unknown model: ${options.modelRef}`);
+		console.error(`Unknown model: ${modelRef}`);
 		return 1;
 	}
 	// Warned, not refused, for the reason the interactive picker filters these rows
@@ -213,6 +240,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const transport: { streamFn: StreamFn; tracker?: CacheTracker } = options.streamFn
 		? { streamFn: options.streamFn }
 		: createTrackedStreamFn({ policy: settings.cache });
+	// The same fallback the REPL wraps around its transport, from the same
+	// setting: a `-p` run that ignored `fallbackModels` kept failing on a model
+	// whose provider was down while an interactive run of the same prompt would
+	// have moved on. The tracker stays underneath, so the JSON result still
+	// reports what the cache did on whichever model actually answered.
+	const fallbackChain = (settings.fallbackModels ?? [])
+		.map((ref) => resolveModel(ref))
+		.filter((m): m is NonNullable<typeof m> => Boolean(m));
+	const streamFn = withModelFallback(transport.streamFn, () => fallbackChain);
 
 	// Everything the REPL has always put in front of the model and a `-p` run
 	// did not: the memory files, the skills, and the agents a Task call can spawn.
@@ -241,14 +277,49 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// nowhere else to say so, and a skill the author believes is loaded is worse
 	// than no skill.
 	for (const note of skillNotes) console.error(`Skills: ${note}`);
+	// ---- MCP servers ----
+	// A `-p` run has no dialog to approve a project-defined server with, so the
+	// gate cannot be lifted by asking — an unapproved one is skipped, but skipped
+	// loudly, because "no server connected" and "your server was withheld" are
+	// the same transcript until something says which. User-scope servers (the
+	// user's own `~/.labunbun/.mcp.json`) and `settings.json`'s `mcpServers` are
+	// the user's own configuration and need no approval; project `.mcp.json`
+	// names still go through the ledger the REPL writes.
+	const mcpLoad = loadMcpConfig(cwd, home);
+	const settingsMcp = parseMcpServersRecord(settings.mcpServers, "settings.json");
+	const mcpConfig: Record<string, McpServerConfig> = { ...mcpLoad.servers, ...settingsMcp.servers };
+	for (const error of [...mcpLoad.errors, ...settingsMcp.errors]) {
+		console.error(`Warning: MCP config: ${error.path} — ${error.message}`);
+	}
+	const projectMcpServerNames = loadProjectMcpServerNames(cwd);
+	const approvedProjectMcpServers = loadApprovedMcpServers(cwd, home);
+	const runnableMcpServers: Record<string, McpServerConfig> = {};
+	const withheldMcpServers: string[] = [];
+	for (const [name, config] of Object.entries(mcpConfig)) {
+		const needsApproval = projectMcpServerNames.has(name) && settingsMcp.servers[name] === undefined;
+		if (needsApproval && !approvedProjectMcpServers.has(name)) withheldMcpServers.push(name);
+		else runnableMcpServers[name] = config;
+	}
+	if (withheldMcpServers.length > 0) {
+		console.error(
+			`Warning: skipping unapproved project MCP server${withheldMcpServers.length === 1 ? "" : "s"} ` +
+				`${withheldMcpServers.join(", ")} — approve in an interactive session (/mcp approve <name>).`,
+		);
+	}
+	const mcpConnections = await connectAllMcpServers(runnableMcpServers);
+	for (const connection of mcpConnections) {
+		if (connection.error) console.error(`Warning: MCP server ${connection.serverName}: ${connection.error}`);
+	}
+	const mcpTools = mcpConnections.flatMap((connection) => connection.tools);
+
 	// Read at the call, like the REPL's: the definition list is a getter because a
 	// definition approved mid-session joins it, and the store because a sidechain
 	// belongs to whichever session is live.
 	const subagentTools = createSubagentTools({
-		streamFn: transport.streamFn,
+		streamFn,
 		model: () => model,
 		resolveModel,
-		allTools: tools,
+		allTools: [...tools, ...mcpTools],
 		definitions: () => agentDefinitions,
 		store: () => store,
 		permissionMode: () => effectiveMode,
@@ -269,10 +340,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		trimOldToolResults: settings.trimOldToolResults,
 		report: (text) => console.error(text),
 	});
-	// MCP servers are deliberately not connected here: `-p` has no dialog to
-	// approve a project-defined server with, and an unapproved one must not be
-	// reachable just because nobody was watching.
-	const allTools = [...tools, ...subagentTools];
+	const allTools = [...tools, ...mcpTools, ...subagentTools];
+	// The plan gate's read-only answer, from the tool objects themselves (see
+	// `collectReadOnlyToolNames`). A constant here: unlike the REPL, nothing
+	// appends tools to this session mid-run.
+	const readOnlyToolNames = collectReadOnlyToolNames(allTools);
 
 	// A `-p` run is a session like any other, and one that runs out of room
 	// unattended has nobody to type `/compact`: before this it ended on the
@@ -284,7 +356,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const compactionWiring = createCompactionWiring({
 		model,
 		store,
-		streamFn: transport.streamFn,
+		streamFn,
 		trimOldToolResults: settings.trimOldToolResults,
 		report: (text) => console.error(text),
 		readFile: (path) => {
@@ -314,7 +386,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		sandbox: effectiveSandbox,
 		network: effectiveNetwork,
 		deps: {
-			streamFn: transport.streamFn,
+			streamFn,
 			// Constant in a `-p` run — nothing moves it mid-run — but read per request
 			// like the REPL's, so the settings value lands on the wire through the
 			// same seam in both modes.
@@ -331,6 +403,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 					sandbox: ctx.sandbox,
 					rules,
 					cwd,
+					readOnlyToolNames,
 				});
 				if (decision.behavior === "ask") {
 					return {
@@ -453,6 +526,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			for (const message of advisoryHookFailures("SessionEnd", endOutcome)) {
 				console.error(`Warning: ${message}`);
 			}
+			await disconnectAllMcpServers(mcpConnections);
 			return 1;
 		}
 	}
@@ -520,6 +594,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	for (const message of advisoryHookFailures("SessionEnd", sessionEnd)) {
 		console.error(`Warning: ${message}`);
 	}
+	// The stdio servers are child processes, and the transports are what keep
+	// them attached: closing here is the difference between a `-p` run that ends
+	// cleanly and one that leaves a server process behind on every invocation.
+	await disconnectAllMcpServers(mcpConnections);
 	return reason === "completed" ? 0 : reason === "aborted" ? 130 : 1;
 }
 
@@ -537,13 +615,17 @@ function finalAssistantText(messages: AgentMessage[]): string {
 }
 
 function totalUsage(messages: AgentMessage[]): Record<string, number> {
-	const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	// `reasoning` is a subset of `output`, reported beside it rather than added
+	// into it — the same relationship `Usage` declares on the wire, so a reader
+	// can subtract it back out and a sum of the fields never counts it twice.
+	const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
 	for (const m of messages) {
 		if (m.role !== "assistant") continue;
 		totals.input += m.usage.input ?? 0;
 		totals.output += m.usage.output ?? 0;
 		totals.cacheRead += m.usage.cacheRead ?? 0;
 		totals.cacheWrite += m.usage.cacheWrite ?? 0;
+		totals.reasoning += m.usage.reasoning ?? 0;
 	}
 	return totals;
 }

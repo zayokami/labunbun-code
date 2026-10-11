@@ -12,6 +12,7 @@ import {
 	AgentSession,
 	type CompactionManager,
 	collectActivity,
+	collectReadOnlyToolNames,
 	compactionThreshold,
 	contextBreakdown,
 	DEFAULT_MODE_CHOICE,
@@ -57,11 +58,14 @@ import {
 import {
 	connectAllMcpServers,
 	connectMcpServer,
+	disconnectAllMcpServers,
 	loadApprovedMcpServers,
 	loadMcpConfig,
 	loadProjectMcpServerNames,
+	type McpConfigError,
 	type McpConnection,
 	type McpServerConfig,
+	parseMcpServersRecord,
 	approveMcpServer as persistMcpApproval,
 } from "@labunbun/mcp";
 import {
@@ -155,6 +159,7 @@ import {
 	type LoadedSettings,
 	loadSettings,
 	networkAxisFrom,
+	type RawSettingsInput,
 	resolveMode,
 	type Settings,
 	shadowedChoiceNotice,
@@ -212,6 +217,12 @@ export interface InteractiveOptions {
 	/** Home directory for user-owned state; injectable so tests don't touch the real one. */
 	home?: string;
 	/**
+	 * Settings delivered as a JSON object on the command line (`--settings`),
+	 * merged over every file tier. Parsed and shape-checked in `main.ts`, where a
+	 * malformed value can exit 2 before anything reads it.
+	 */
+	flagSettings?: RawSettingsInput;
+	/**
 	 * Read a DualShock 4 this run (the --gamepad flag). Overrides the setting for
 	 * one session and writes nothing — a flag that edited the user's file would
 	 * make "try it once" impossible.
@@ -236,7 +247,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	if (shouldRunWizard({ home })) await runWizard(cwd, home);
 
 	// ---- settings & providers ----
-	const loadedSettings = loadSettings(cwd, undefined, home);
+	const loadedSettings = loadSettings(cwd, options.flagSettings, home);
 	const { settings } = loadedSettings;
 	// Say out loud what a file inside this project asked for and did not get —
 	// silence here would look like the setting simply didn't work.
@@ -511,15 +522,29 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// so they need one-time approval, persisted under the user's home directory
 	// (~/.labunbun/projects/<cwd>/mcp-approved.json) where repo contents cannot
 	// pre-approve them.
-	const mcpConfig = loadMcpConfig(cwd);
+	const mcpLoad = loadMcpConfig(cwd, home);
+	// `settings.json`'s `mcpServers` is user-tier (a project file cannot set it),
+	// so a name it defines is the user's own configuration and it wins over a
+	// project `.mcp.json` entry of the same name — including the gate below:
+	// what the user wrote themselves does not need the user's approval.
+	const settingsMcp = parseMcpServersRecord(settings.mcpServers, "settings.json");
+	const mcpLoadErrors: McpConfigError[] = [...mcpLoad.errors, ...settingsMcp.errors];
+	const mcpConfig: Record<string, McpServerConfig> = { ...mcpLoad.servers, ...settingsMcp.servers };
 	const projectMcpServerNames = loadProjectMcpServerNames(cwd);
 	const approvedProjectMcpServers = loadApprovedMcpServers(cwd, home);
 	const approvedMcpServers = new Set(
-		Object.keys(mcpConfig).filter((name) => !projectMcpServerNames.has(name) || approvedProjectMcpServers.has(name)),
+		Object.keys(mcpConfig).filter(
+			(name) =>
+				!projectMcpServerNames.has(name) ||
+				settingsMcp.servers[name] !== undefined ||
+				approvedProjectMcpServers.has(name),
+		),
 	);
 	const mcpConnections = await connectAllMcpServers(mcpConfig, approvedMcpServers);
 	const mcpTools = mcpConnections.flatMap((c) => c.tools);
-	const pendingMcpApprovals = [...projectMcpServerNames].filter((name) => !approvedProjectMcpServers.has(name));
+	const pendingMcpApprovals = [...projectMcpServerNames].filter(
+		(name) => settingsMcp.servers[name] === undefined && !approvedProjectMcpServers.has(name),
+	);
 
 	// ---- subagents, skills, plan mode ----
 	/** The live session. Declared before the tools that read it through a getter. */
@@ -603,11 +628,19 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// session, and the spills belong to whichever one is live.
 		spillOutput: (request) => writeToolOutput(request, { cwd, sessionId: sessionIdHolder.current, home }),
 		canUseTool: async (toolName, input, ctx) => {
+			// The plan gate's read-only answer, taken from the live tool objects
+			// rather than from the engine's static name list — see
+			// `collectReadOnlyToolNames`. Read per call, not snapshotted at startup,
+			// because the session's tools change under it: `/mcp approve` appends the
+			// server's tools, and a band starting appends `BandMessage`, which
+			// declares itself read-only and must stay admitted in plan mode.
+			const readOnlyToolNames = collectReadOnlyToolNames(sessionRef?.tools ?? allTools);
 			const decision = evaluatePermissions(toolName, input, {
 				mode: ctx.mode,
 				sandbox: ctx.sandbox,
 				rules: [...baseRules, ...sessionRules],
 				cwd,
+				readOnlyToolNames,
 			});
 			if (decision.behavior !== "ask") return decision;
 			// No handle means nothing can answer — a `-p` run reached this code, or
@@ -680,6 +713,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 					sandbox: live.sandbox,
 					rules: [...baseRules, ...sessionRules],
 					cwd,
+					readOnlyToolNames: collectReadOnlyToolNames(live.tools),
 				});
 				if (after.behavior === "deny") return after;
 			}
@@ -1190,6 +1224,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				compaction: compactionWiring.manager,
 				mcpConnections,
 				mcpConfig,
+				mcpLoadErrors,
 				pendingMcpApprovals,
 				sessionStore: () => store,
 				loadedSettings,
@@ -1218,6 +1253,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Held-back skill folders, one line each: the same "a definition that was not
 	// loaded looks identical from the prompt" reason as the withheld tier above.
 	for (const note of skillNotes) pushInfo(handle, `Skill not loaded: ${note}`);
+
+	// MCP config that could not be read, said at startup for the same reason: a
+	// `.mcp.json` with a typo used to read as "no servers configured", and the
+	// server it defined simply never arrived with nothing on screen to say why.
+	for (const error of mcpLoadErrors) pushInfo(handle, `MCP config: ${error.path} — ${error.message}`);
 
 	// The controller, now that there is somewhere to say what happened. Started
 	// after the mount so the first line — including a failure — lands in a
@@ -1320,6 +1360,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// interest in it, so a pad left open would keep the process from exiting.
 	padWatch.stop();
 	pad.close();
+
+	// MCP stdio servers are child processes, and a transport left open is a child
+	// left behind a REPL that has already quit. Best effort — a close that fails
+	// must not hold the exit — and before the summary below, so the line about how
+	// to come back is written while nothing else is still unwinding.
+	await disconnectAllMcpServers(mcpConnections);
 
 	// How to come back to this conversation. Printed here rather than through the
 	// REPL because the Ink frame owns the screen: a line written while it is up is
@@ -1582,6 +1628,8 @@ interface AppCommandContext {
 	compaction(): CompactionManager;
 	mcpConnections: McpConnection[];
 	mcpConfig: Record<string, McpServerConfig>;
+	/** Config files (and `settings.json` entries) that could not be read, for /mcp to name. */
+	mcpLoadErrors: McpConfigError[];
 	pendingMcpApprovals: string[];
 	sessionStore(): SessionStore | undefined;
 	/** Theme resolved at startup; `/theme` reads its name and available list. */
@@ -1962,9 +2010,13 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const active = models.findIndex((m) => current && m.provider === current.provider && m.id === current.id);
 				const items = models.map((m, i) => {
 					const hasKey = Boolean(resolveApiKey(m));
+					// The display name leads and the wire reference follows: two rows
+					// reading `anthropic/claude-sonnet-5` and `anthropic/claude-sonnet-5-1`
+					// are a choice nobody can make at a glance, and the id is still what
+					// /model <ref> takes, so it stays on the row rather than being lost.
 					return {
-						label: `${i === active ? "* " : "  "}${m.provider}/${m.id}`,
-						description: `${Math.round(m.contextWindow / 1000)}k context${hasKey ? "" : " — no API key"}`,
+						label: `${i === active ? "* " : "  "}${m.name}`,
+						description: `${m.provider}/${m.id} · ${Math.round(m.contextWindow / 1000)}k context${hasKey ? "" : " — no API key"}`,
 					};
 				});
 				const index = await handleRef.pickFromList("Switch model", items, { initialIndex: Math.max(active, 0) });
@@ -2134,8 +2186,8 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				return true;
 			}
 
-			if (ctx.mcpConnections.length === 0 && ctx.pendingMcpApprovals.length === 0) {
-				pushInfo(ctx.handle, "No MCP servers configured (.mcp.json or ~/.labunbun/.mcp.json).");
+			if (ctx.mcpConnections.length === 0 && ctx.pendingMcpApprovals.length === 0 && ctx.mcpLoadErrors.length === 0) {
+				pushInfo(ctx.handle, "No MCP servers configured (.mcp.json, settings.json, or ~/.labunbun/.mcp.json).");
 				return true;
 			}
 			const lines = ctx.mcpConnections.map((c) => {
@@ -2144,6 +2196,11 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			});
 			for (const name of ctx.pendingMcpApprovals) {
 				lines.push(`  ${name}: pending approval — run /mcp approve ${name}`);
+			}
+			// A file that failed to parse is why a server the user wrote is absent
+			// from the list above; without these rows the list reads as complete.
+			for (const error of ctx.mcpLoadErrors) {
+				lines.push(`  ! ${error.path}: ${error.message}`);
 			}
 			pushInfo(ctx.handle, `MCP servers:\n${lines.join("\n")}`);
 			return true;
@@ -2263,7 +2320,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			}
 			const checkpoints = listCheckpoints(rewindStore);
 			if (checkpoints.length === 0) {
-				pushInfo(ctx.handle, "No checkpoints yet — they are captured before every Edit/Write.");
+				pushInfo(
+					ctx.handle,
+					"No checkpoints yet — one is captured before every Edit/Write. A file that cannot be read, or is over 200k characters, is not captured.",
+				);
 				return true;
 			}
 			const arg = text.split(/\s+/)[1];
