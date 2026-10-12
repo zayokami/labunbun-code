@@ -42,7 +42,7 @@ export function shellPickerItems(
 	now = Date.now(),
 ): Array<{ label: string; description: string }> {
 	return shells.map((shell) => ({
-		label: `${shell.id}  ${elide(shell.command)}`,
+		label: `${shell.id}  ${elideShellCommand(shell.command)}`,
 		description: [shell.status, shell.exitCode !== null ? `exit ${shell.exitCode}` : undefined, shellAge(shell, now)]
 			.filter(Boolean)
 			.join(" · "),
@@ -73,8 +73,12 @@ export function resolveShellId(arg: string, shells: BackgroundShell[]): Backgrou
 	return shells.find((shell) => shell.id.toLowerCase() === wanted || shell.id.toLowerCase() === `shell_${wanted}`);
 }
 
-/** Keep the head of a command — the tail is usually the flags, the head is what it is. */
-function elide(command: string): string {
+/**
+ * Keep the head of a command — the tail is usually the flags, the head is what
+ * it is. Shared with `/tasks`, whose shell branches must read as the same kind
+ * of row as this screen's picker.
+ */
+export function elideShellCommand(command: string): string {
 	const oneLine = command.replace(/\s+/g, " ").trim();
 	return oneLine.length > COMMAND_CHARS ? `${oneLine.slice(0, COMMAND_CHARS - 1)}…` : oneLine;
 }

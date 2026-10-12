@@ -213,6 +213,7 @@ import {
 } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { bindTaskStore, restoreTasks, saveTasks } from "./task-snapshot.ts";
+import { formatTaskTree } from "./task-tree.ts";
 import {
 	loadThemeFiles,
 	persistThemeChoice,
@@ -1960,6 +1961,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/status", "Show model, context usage, cost, and settings at a glance"],
 		["/stop", "Stop a background shell: /stop [id]"],
 		["/subagents", "List subagents, and act on one: /subagents [stop|retry|log] [id] — no id opens a picker"],
+		["/tasks", "Show the task tree: this session, its subagents, and its background shells"],
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/think", `Show or set how hard the model thinks: /think [${THINKING_LEVELS.join("|")}]`],
 		["/tree", "Show the session branch tree"],
@@ -2419,6 +2421,23 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				return true;
 			}
 			pushInfo(ctx.handle, formatSubagentList(all, Date.now()));
+			return true;
+		}
+		case "/tasks": {
+			// The tree is read, never acted on: the verbs live on /subagents and
+			// /stop, and this screen is where their targets are read off. Fresh
+			// reads of all three sources, because a subagent may have ended and a
+			// shell died since the last time anything asked.
+			const shells: BackgroundShell[] = [...ctx.backgroundShells.list(), ...(ctx.recoveredShells ?? [])];
+			pushInfo(
+				ctx.handle,
+				formatTaskTree({
+					mainRunning: session?.isRunning === true,
+					subagents: ctx.subagents.list(),
+					shells,
+					now: Date.now(),
+				}),
+			);
 			return true;
 		}
 		case "/export": {
