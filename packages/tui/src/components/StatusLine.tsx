@@ -100,6 +100,7 @@ export function StatusLine({
 	contextInfo,
 	outputEstimate,
 	activity,
+	activitySince,
 	thinkingMs,
 	pad,
 }: {
@@ -115,6 +116,13 @@ export function StatusLine({
 	 * turn, so the time and the model are still the ones on the screen.
 	 */
 	activity?: string;
+	/**
+	 * When the activity began, for the seconds shown beside it. The wait it names
+	 * can run for half a minute, and the word alone cannot tell a slow call from
+	 * a stuck one. Absent for an activity nothing stamped — the row then shows
+	 * the word by itself.
+	 */
+	activitySince?: number;
 	/**
 	 * How long the current thinking span has run, for the word ladder. Only the
 	 * thinking label climbs it, and only while no `activity` holds the label —
@@ -144,6 +152,17 @@ export function StatusLine({
 			}`
 		: "";
 
+	// The activity's own seconds ride in its label — the turn's elapsed time is
+	// already on the row, and a wait inside it that runs for most of the turn
+	// needs a number of its own to read as slow rather than stuck. Rendered from
+	// the spinner's own tick (80ms while an activity is up), so the count moves.
+	const activityLabel =
+		activity === undefined
+			? undefined
+			: activitySince === undefined
+				? activity
+				: `${activity} (${formatElapsed(Date.now() - activitySince)})`;
+
 	if (phase === "idle" && !activity) {
 		const battery = <BatterySegment pad={pad} />;
 		if (!contextPart && !pad?.battery) return null;
@@ -160,7 +179,7 @@ export function StatusLine({
 		// offered either — there is nothing for it to interrupt but a command.
 		return (
 			<Text color={theme.accent}>
-				{FRAMES[frame]} {activity}{" "}
+				{FRAMES[frame]} {activityLabel}{" "}
 				<Text dimColor>
 					({modelName}
 					{contextPart})
@@ -170,7 +189,7 @@ export function StatusLine({
 	}
 	const outputPart = outputEstimate && outputEstimate > 0 ? ` · ~${formatTokens(outputEstimate)} out` : "";
 	// The thinking label climbs the word ladder; every other phase has one word.
-	const label = activity ?? (phase === "thinking" ? thinkingWord(thinkingMs ?? 0) : PHASE_LABEL[phase]);
+	const label = activityLabel ?? (phase === "thinking" ? thinkingWord(thinkingMs ?? 0) : PHASE_LABEL[phase]);
 	return (
 		<Text color={theme.accent}>
 			{FRAMES[frame]} {label}{" "}

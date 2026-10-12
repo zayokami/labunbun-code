@@ -165,6 +165,29 @@ describe("StatusLine", () => {
 		unmount();
 	});
 
+	test("a compaction's own seconds ride in its label, next to the turn's clock", () => {
+		// The row already carries how long the turn has run; the number the wait
+		// needs is how long *this* pass has been going — a summary can be most of
+		// the turn, and "Summarizing…" alone cannot tell a slow call from a stuck
+		// one. Two numbers, two spans, told apart by which one the parenthesis
+		// belongs to.
+		const { lastFrame, unmount } = render(
+			withTheme(
+				<StatusLine
+					phase="thinking"
+					modelName="test-model"
+					elapsedMs={3_000}
+					activity="Summarizing context…"
+					activitySince={Date.now() - 12_000}
+				/>,
+			),
+		);
+		const frame = flatFrame(lastFrame() ?? "");
+		expect(frame).toContain("Summarizing context… (12s)");
+		expect(frame).toContain("3s");
+		unmount();
+	});
+
 	test("a long thought climbs the ladder, on its own clock", () => {
 		// Two numbers, two spans: the parenthesis keeps counting the turn, the
 		// label counts the thinking run inside it.

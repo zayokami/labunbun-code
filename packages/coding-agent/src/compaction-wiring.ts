@@ -27,13 +27,55 @@ import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE, formatTo
  * a `-p` run that pauses for a summarization with no output reads as a hang.
  * The finished line carries what the user can act on — why it ran, and how much
  * it moved — because that number is the whole reason the pause was worth it.
+ *
+ * A phase whose news is only worth an in-place repaint — the reply arriving,
+ * the two adoption steps — returns "", and a caller that writes to an
+ * append-only stream skips it: for a stream, an empty line is a different
+ * report, not a shorter one. The ladder's descent does get words, because it
+ * rewrites the bytes the cache was just read from and starts another full
+ * request — length news wherever the wait is being watched.
  */
 export function compactionPhaseText(phase: CompactionPhase): string {
-	if (phase.kind === "start") return "Compacting context…";
-	if (phase.kind === "failed") {
-		return `Compaction failed (${phase.trigger}): the summary could not be written. Continuing with the context as it is.`;
+	switch (phase.kind) {
+		case "preparing":
+			return "Compacting context…";
+		case "summarizing":
+			return phase.mode === "requesting" && phase.attempt > 1
+				? `The summary request did not fit; retrying on a smaller context (attempt ${phase.attempt})…`
+				: "";
+		case "validating":
+		case "resuming":
+			return "";
+		case "failed":
+			return `Compaction failed (${phase.trigger}): the summary could not be written. Continuing with the context as it is.`;
+		case "done":
+			return `Context compacted (${phase.trigger}): ${formatTokens(phase.preTokens)} → ${formatTokens(phase.postTokens)} tokens.`;
 	}
-	return `Context compacted (${phase.trigger}): ${formatTokens(phase.preTokens)} → ${formatTokens(phase.postTokens)} tokens.`;
+}
+
+/**
+ * The status row's word for a phase, or nothing once the pass is over.
+ *
+ * The same lifecycle `compactionPhaseText` tells, said for a position instead
+ * of a stream: a row is repainted in place, so it can afford a word for every
+ * state the pass moves through. The seconds between "the request is out" and
+ * "a reply is coming back" are the whole wait, and the phases with nothing
+ * worth a stderr line are exactly the ones the row exists to show.
+ */
+export function compactionActivityText(phase: CompactionPhase): string | undefined {
+	switch (phase.kind) {
+		case "preparing":
+			return "Compacting context…";
+		case "summarizing":
+			return "Summarizing context…";
+		case "validating":
+			return "Validating summary…";
+		case "resuming":
+			return "Rebuilding context…";
+		case "done":
+		case "failed":
+			return undefined;
+	}
 }
 
 export interface CompactionWiringOptions {
@@ -90,8 +132,12 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 
 	const build = (forModel: Model, forStore: SessionStore | undefined): CompactionManager => {
 		const phase = (event: CompactionPhase): void => {
-			if (options.onPhase) options.onPhase(event);
-			else options.report(compactionPhaseText(event));
+			if (options.onPhase) {
+				options.onPhase(event);
+			} else {
+				const text = compactionPhaseText(event);
+				if (text) options.report(text);
+			}
 			if (event.kind !== "done") return;
 			// Counted after the record went in, so this includes the pass being
 			// reported — and counted over the whole file rather than the active

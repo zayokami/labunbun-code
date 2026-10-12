@@ -133,6 +133,14 @@ export interface UiState {
 	 */
 	contextActivity?: string;
 	/**
+	 * When the activity above began, in epoch milliseconds, for the seconds the
+	 * status row shows beside it — a summary can run for half a minute, and a
+	 * word alone cannot tell a slow call from a stuck one. Stamped once, when an
+	 * activity first appears, and cleared with it, so the clock spans the whole
+	 * compaction rather than restarting at every phase it moves through.
+	 */
+	contextActivitySince?: number;
+	/**
 	 * The `/status` card, shown over the prompt until Esc or the next submit.
 	 * Not modal: it reports on the run, it does not block it.
 	 */

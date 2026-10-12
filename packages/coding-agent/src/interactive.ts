@@ -112,7 +112,7 @@ import {
 	findCommand,
 	type LocalCommandContext,
 } from "./commands.ts";
-import { compactionPhaseText, createCompactionWiring } from "./compaction-wiring.ts";
+import { compactionActivityText, compactionPhaseText, createCompactionWiring } from "./compaction-wiring.ts";
 import { contextRows, contextSummaryLine, isContextLow, lowContextWarning } from "./context-report.ts";
 import { CostTracker, formatCostReport } from "./cost-tracker.ts";
 import { sessionToMarkdown } from "./export-session.ts";
@@ -443,14 +443,27 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// to the second half — it prints its own summary of the same event, and
 		// two lines for one compaction is the app talking over itself.
 		onPhase: (phase) => {
-			// The store directly, the way `pushInfo` does: this is one field of the
-			// UI state with no behaviour of its own, and a handle method for it would
-			// be a second name for a `set`.
-			handle?.store.set((state) => ({
-				...state,
-				contextActivity: phase.kind === "start" ? compactionPhaseText(phase) : undefined,
-			}));
-			if (phase.kind !== "start" && phase.trigger !== "manual") pushInfo(handle, compactionPhaseText(phase));
+			// The store directly, the way `pushInfo` does: one word and one clock
+			// with no behaviour of their own, and a handle method for them would be
+			// a second name for a `set`. The clock is stamped when the pass first
+			// says something and cleared with the last word, so the row's seconds
+			// span the whole compaction rather than restarting at every phase.
+			handle?.store.set((state) => {
+				const activity = compactionActivityText(phase);
+				return {
+					...state,
+					contextActivity: activity,
+					contextActivitySince: activity === undefined ? undefined : (state.contextActivitySince ?? Date.now()),
+				};
+			});
+			// Only the endings reach the transcript, in the manager's words: the
+			// states before them are the row's job, since a line about a wait the
+			// row is already showing would outlive the wait. `/compact` is the
+			// exception — it prints its own summary of the same ending, and two
+			// lines for one compaction is the app talking over itself.
+			if ((phase.kind === "done" || phase.kind === "failed") && phase.trigger !== "manual") {
+				pushInfo(handle, compactionPhaseText(phase));
+			}
 		},
 		readFile: (path) => {
 			try {
@@ -836,6 +849,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if (event.type === "retry") {
 				pushInfo(handle, formatRetryNotice(event));
 			}
+			// The loop compacts between requests and emits `turn_start` only after
+			// that decision has been applied, so this is the first moment the *new*
+			// context's size can be published — the size the request about to go
+			// out will carry. Refreshing on the `turn_end` below alone left the row
+			// showing the number a summary had already replaced, for a whole turn.
+			if (event.type === "turn_start") refreshContextInfo(target);
 			if (event.type === "turn_end" || event.type === "agent_end") {
 				refreshContextInfo(target);
 				// Said once per crossing. A warning repeated on every turn is a

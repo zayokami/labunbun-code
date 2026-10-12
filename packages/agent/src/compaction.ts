@@ -516,17 +516,24 @@ type CompactionPass =
  * A compaction is the one thing a session does that costs a full-price model
  * call, takes as long as a whole turn, and leaves the transcript's shape
  * changed — and until this existed, none of that reached whoever was watching
- * the screen. The three kinds are a lifecycle rather than a log: every `start`
- * ends, with a summary or without one, because a caller that paints a status
- * while the work is in flight needs the second ending as much as the first or
- * the status outlives the attempt.
+ * the screen. The kinds are a lifecycle rather than a log. `preparing` opens
+ * every pass; `summarizing` brackets each attempt at the request — `requesting`
+ * from the moment it goes out until the first bytes arrive, `responding` after
+ * — and its `attempt` counts the ladder. `validating` announces the reply that
+ * made it back, with the size that would be kept, and `resuming` the rebuild
+ * that adopts it. Every pass ends in exactly one of `done` or `failed`,
+ * because a caller that paints a status while the work is in flight needs the
+ * ending as much as the start, or the status outlives the attempt.
  *
  * `failed` is not the breaker's news: the breaker counts to three and speaks
  * long after, when the session is stuck. This is one attempt that did not
  * happen, said while the user can still see what caused it.
  */
 export type CompactionPhase =
-	| { kind: "start" }
+	| { kind: "preparing" }
+	| { kind: "summarizing"; attempt: number; mode: "requesting" | "responding" }
+	| { kind: "validating"; summaryChars: number }
+	| { kind: "resuming" }
 	| { kind: "done"; preTokens: number; postTokens: number; trigger: CompactionTrigger }
 	| { kind: "failed"; trigger: CompactionTrigger };
 
@@ -738,8 +745,12 @@ export class CompactionManager {
 			// Before the call, not after: this is the last moment at which the wait
 			// it announces has not started, and the wait is the whole point of saying
 			// it — a summary is a full-prefix request that can take half a minute.
-			this.#deps.onPhase?.({ kind: "start" });
+			this.#deps.onPhase?.({ kind: "preparing" });
 			const { summary, model } = await this.#summarize(context, prefix, options.focus);
+			// The reply is in; what remains is rebuilding the transcript it replaces
+			// — boundary, re-injected files, retained suffix. Quick, but it is still
+			// the pass working, and the last chance to say the pass has not ended.
+			this.#deps.onPhase?.({ kind: "resuming" });
 			const reinjected = this.#reinjectFiles(prefix);
 			const boundary = compactionBoundary(summary, { reinjected, retainedRequests: retainedRequests(prefix) });
 			const messages = [boundary, ...suffix];
@@ -881,6 +892,11 @@ export class CompactionManager {
 				this.#deps.summarizerModel.maxOutputTokens,
 				Math.max(1_024, this.#config.contextWindow - estimateContextUsage(summarizeRequest) - HARD_LIMIT_RESERVE),
 			);
+			// The attempt is announced before its first byte and flipped when the
+			// first byte arrives: to a watcher those are the two different waits —
+			// a request being accepted, then a reply being written — and `attempt`
+			// is what tells a descent down the ladder from the first try.
+			this.#deps.onPhase?.({ kind: "summarizing", attempt: retries + 1, mode: "requesting" });
 			// Before the send, not after: the tracker reads the cause the next
 			// recorded request consumes, and for this attempt that request is the
 			// one about to go out.
@@ -889,6 +905,7 @@ export class CompactionManager {
 			const model = this.#deps.summarizerModel;
 			let text = "";
 			let servedBy = model.id;
+			let announcedResponse = false;
 			// Whether the provider refused this attempt for size. Anything else that
 			// goes wrong is a real failure and keeps its own meaning.
 			let tooBig = false;
@@ -896,7 +913,13 @@ export class CompactionManager {
 				thinkingLevel: "off",
 				maxOutputTokens,
 			})) {
-				if (event.type === "text_delta") text += event.delta;
+				if (event.type === "text_delta") {
+					if (!announcedResponse) {
+						announcedResponse = true;
+						this.#deps.onPhase?.({ kind: "summarizing", attempt: retries + 1, mode: "responding" });
+					}
+					text += event.delta;
+				}
 				// The stream may be fallback-wrapped: report whoever answered.
 				if (event.type === "done" && event.message.model) servedBy = event.message.model;
 				if (event.type === "error") {
@@ -908,8 +931,15 @@ export class CompactionManager {
 				}
 			}
 			if (!tooBig) {
+				const summary = stripAnalysis(text);
+				// Said before the empty check, with the size that would be kept: the
+				// check is the one thing that can still end this attempt, and a
+				// validating step a failure skips would leave the two endings without
+				// the one step they share. A reply that came back empty is announced
+				// here as nothing to keep, and then fails — in that order.
+				this.#deps.onPhase?.({ kind: "validating", summaryChars: summary.length });
 				if (!text.trim()) throw new Error("compaction produced empty summary");
-				return { summary: stripAnalysis(text), model: servedBy };
+				return { summary, model: servedBy };
 			}
 
 			// Every step down sends strictly less, so this terminates — at the

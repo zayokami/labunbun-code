@@ -198,6 +198,7 @@ export function REPL({
 	const picker = useStore(store, (s) => s.picker);
 	const contextInfo = useStore(store, (s) => s.contextInfo);
 	const contextActivity = useStore(store, (s) => s.contextActivity);
+	const contextActivitySince = useStore(store, (s) => s.contextActivitySince);
 	const statusCard = useStore(store, (s) => s.statusCard);
 	const activity = useStore(store, (s) => s.activity);
 	const backgroundShells = useStore(store, (s) => s.backgroundShells);
@@ -774,6 +775,7 @@ export function REPL({
 							elapsedMs={elapsedMs}
 							contextInfo={contextInfo}
 							activity={contextActivity}
+							activitySince={contextActivitySince}
 							thinkingMs={thinkingMs}
 							outputEstimate={estimateOutputTokens(streamingText.length)}
 							pad={padStatus}

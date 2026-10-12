@@ -156,9 +156,16 @@ describe("recovering from a refusal for size", () => {
 		// The wait had a name while it lasted, and the transcript kept the line
 		// that outlives it: a summary is a full-prefix call the user is paying for
 		// and cannot otherwise see. The row is the app's, not the manager's — the
-		// phase is routed through the interactive handle's store — and it is set
-		// back the moment the summary lands.
-		expect(activity).toEqual(["Compacting context…", null]);
+		// phases are routed through the interactive handle's store — and it is
+		// set back the moment the summary lands. Every state the pass moves
+		// through is a change a reader of the row could have seen.
+		expect(activity).toEqual([
+			"Compacting context…",
+			"Summarizing context…",
+			"Validating summary…",
+			"Rebuilding context…",
+			null,
+		]);
 		expect(
 			infos.filter((info) => /^Context compacted \(overflow\): [\d.]+k → [\d.]+k tokens\.$/.test(info)),
 		).toHaveLength(1);
@@ -244,7 +251,19 @@ describe("recovering from a refusal for size", () => {
 		// this reporting must not tell, because the spinner is the only thing on
 		// screen while it is up.
 		expect(infos.filter((info) => info.startsWith("Compaction failed (auto):"))).toHaveLength(3);
-		expect(activity).toEqual(["Compacting context…", null, "Compacting context…", null, "Compacting context…", null]);
+		// Three rounds, each opened and each closed: the failure never leaves the
+		// row on a word the pass is no longer doing.
+		expect(activity).toEqual([
+			"Compacting context…",
+			"Summarizing context…",
+			null,
+			"Compacting context…",
+			"Summarizing context…",
+			null,
+			"Compacting context…",
+			"Summarizing context…",
+			null,
+		]);
 		// The turns themselves still ran: a compaction that fails is a loss of
 		// headroom, not a broken session, as long as the request still fits.
 		expect(replies).toEqual(["completed", "completed", "completed", "completed", "completed"]);

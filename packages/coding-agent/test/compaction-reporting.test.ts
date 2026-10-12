@@ -46,6 +46,7 @@ async function run(steps: unknown[], commands: string[], settleWith: string) {
 		import * as tui from "@labunbun/tui";
 		const infos = [];
 		const activity = [];
+		const activitySince = [];
 		const replies = [];
 		const steps = ${JSON.stringify(steps)};
 		let call = 0;
@@ -71,11 +72,19 @@ async function run(steps: unknown[], commands: string[], settleWith: string) {
 				// lines, and the status row's word for a summary in flight.
 				let state = { entries: [] };
 				let shown = state.contextActivity;
+				let shownSince = state.contextActivitySince;
 				return {
 					setTasks() {}, setContextInfo() {}, setBackgroundShells() {},
 					store: { set(update) {
 						state = typeof update === "function" ? update(state) : { ...state, ...update };
-						if (state.contextActivity !== shown) { activity.push(state.contextActivity); shown = state.contextActivity; }
+						// The stamp is recorded beside the word, as one pair: a change of
+						// either is a thing someone watching the row could have seen.
+						if (state.contextActivity !== shown || state.contextActivitySince !== shownSince) {
+							activity.push(state.contextActivity);
+							activitySince.push(state.contextActivitySince ?? null);
+							shown = state.contextActivity;
+							shownSince = state.contextActivitySince;
+						}
 					} },
 					waitUntilExit: async () => {
 						await session.prompt("hello");
@@ -94,7 +103,7 @@ async function run(steps: unknown[], commands: string[], settleWith: string) {
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
 		const exitCode = await runInteractive(${JSON.stringify({ cwd: home, theme: "dark" })});
-		console.log(JSON.stringify({ exitCode, infos, activity, replies }));
+		console.log(JSON.stringify({ exitCode, infos, activity, activitySince, replies }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
@@ -116,6 +125,7 @@ async function run(steps: unknown[], commands: string[], settleWith: string) {
 			// "cleared" crosses the process boundary as null: the field is set back
 			// to undefined, which JSON has no word for.
 			activity: (string | null)[];
+			activitySince: (number | null)[];
 			replies: boolean[];
 		}),
 		stderr,
@@ -126,7 +136,7 @@ const SUMMARY = { text: "<summary>1. Primary Request: hello</summary>" };
 
 describe("a compaction the user asked for", () => {
 	test("is reported once, by the command, not twice by the app", async () => {
-		const { infos, activity, replies } = await run(
+		const { infos, activity, activitySince, replies } = await run(
 			[{ text: "first answer" }, { text: "second answer" }, SUMMARY],
 			["/compact"],
 			"Conversation compacted",
@@ -142,8 +152,24 @@ describe("a compaction the user asked for", () => {
 		expect(infos.some((info) => info.startsWith("Context compacted (auto)"))).toBe(false);
 
 		// And while it ran, the row said so — at a prompt where no turn is running,
-		// which is the only place this compaction happens.
-		expect(activity).toEqual(["Compacting context…", null]);
+		// which is the only place this compaction happens. The changes it went
+		// through are the state machine: the pass opens, the request phase names
+		// the wait, the reply is validated, the transcript is rebuilt — and then
+		// the row is given back to the prompt.
+		expect(activity).toEqual([
+			"Compacting context…",
+			"Summarizing context…",
+			"Validating summary…",
+			"Rebuilding context…",
+			null,
+		]);
+		// And its clock spans the whole pass, not each phase: stamped with the
+		// first word and carried unchanged through every change, so the seconds
+		// on the row count the compaction — an unstamped or per-phase stamp would
+		// show nothing, or reset to zero four times inside a single wait.
+		expect(activitySince[0]).toBeGreaterThan(0);
+		expect(new Set(activitySince.slice(0, 4)).size).toBe(1);
+		expect(activitySince[4]).toBeNull();
 	});
 
 	test("a summary that fails still stops the wait it announced", async () => {
@@ -151,7 +177,7 @@ describe("a compaction the user asked for", () => {
 		// manager's own failure line is not printed here — `/compact` answers for
 		// itself, and its answer is the same event told once — but the row has to
 		// be cleared either way, or the screen claims work that is over.
-		const { infos, activity } = await run(
+		const { infos, activity, activitySince } = await run(
 			[{ text: "first answer" }, { text: "second answer" }, { throw: "summarizer down" }],
 			["/compact"],
 			"/compact failed",
@@ -162,6 +188,10 @@ describe("a compaction the user asked for", () => {
 		// (The failure text is the retry policy's wrapper around the provider's
 		// error, which is why the middle is matched rather than written out.)
 		expect(infos).toEqual(["Compacting conversation…", expect.stringMatching(/^\/compact failed: .*summarizer down$/)]);
-		expect(activity).toEqual(["Compacting context…", null]);
+		// The request phase was reached — the call had gone out before it failed —
+		// and the failure cleared the row it had started, clock and all.
+		expect(activity).toEqual(["Compacting context…", "Summarizing context…", null]);
+		expect(activitySince[0]).toBe(activitySince[1]);
+		expect(activitySince[2]).toBeNull();
 	});
 });

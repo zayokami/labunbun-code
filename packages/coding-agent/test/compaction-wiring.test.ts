@@ -249,7 +249,7 @@ describe("what a compaction says while it runs", () => {
 
 		await harness.check({ systemPrompt: "", messages: overThreshold() });
 
-		expect(harness.reports[0]).toBe(compactionPhaseText({ kind: "start" }));
+		expect(harness.reports[0]).toBe(compactionPhaseText({ kind: "preparing" }));
 		expect(harness.reports[1]).toMatch(/^Context compacted \(auto\): [\d.]+k → [\d.]+k tokens\.$/);
 		// And in the order the phrase means — what it was, then what it became. The
 		// fixture compacts a context of old tool results into a summary, so it got
@@ -269,9 +269,62 @@ describe("what a compaction says while it runs", () => {
 		expect(await harness.check({ systemPrompt: "", messages: overThreshold() })).toBeNull();
 
 		expect(harness.reports).toEqual([
-			compactionPhaseText({ kind: "start" }),
+			compactionPhaseText({ kind: "preparing" }),
 			compactionPhaseText({ kind: "failed", trigger: "auto" }),
 		]);
+	});
+
+	test("a summary that had to shrink before it fit says so, once per descent", async () => {
+		// The descent rewrites the bytes the previous request left in the cache
+		// and spends another full request, so it is the one mid-flight event worth
+		// a line of its own: the wait got longer and the bill got bigger, and
+		// neither is visible from the two lines that bracket the pass.
+		let attempts = 0;
+		const harness = wiring({
+			trimOldToolResults: false,
+			streamFn: (model, context, streamOptions) => {
+				attempts++;
+				if (attempts === 1) {
+					return fauxProvider([
+						{ stopReason: "error", errorMessage: "too long", errorKind: "context_overflow" },
+					]).streamFn(model, context, streamOptions);
+				}
+				return fauxProvider([{ text: "<summary>1. Request: the files</summary>" }]).streamFn(
+					model,
+					context,
+					streamOptions,
+				);
+			},
+		});
+
+		// Two rounds of old tool results with a second request between them, and a
+		// final request that `keepSuffix` retains: the ladder's last rung drops
+		// the oldest round, so the prefix has to hold one older than the round
+		// that survives. Over the threshold either way.
+		const messages: AgentMessage[] = [userMessage("read those files")];
+		for (let i = 0; i < 3; i++) {
+			messages.push(toolResultMessage(`call_a${i}`, "Read", [textContent("x".repeat(20_000))]));
+		}
+		messages.push(userMessage("and check these too"));
+		for (let i = 0; i < 2; i++) {
+			messages.push(toolResultMessage(`call_b${i}`, "Read", [textContent("x".repeat(20_000))]));
+		}
+		messages.push(userMessage("now summarize the findings"));
+
+		await harness.check({ systemPrompt: "", messages });
+
+		// Exactly one line per descent — the second attempt's own request phase —
+		// between the opening line and the one that closes the pass.
+		expect(harness.reports.slice(0, 2)).toEqual([
+			compactionPhaseText({ kind: "preparing" }),
+			compactionPhaseText({ kind: "summarizing", attempt: 2, mode: "requesting" }),
+		]);
+		expect(harness.reports).toHaveLength(3);
+		// The closing line's own shape is pinned by the test above; here it only
+		// has to be the ending. It comes out small enough to lose the `k` suffix
+		// — the oldest round is gone and the rest of the prefix was summarized —
+		// which is why this pattern makes the suffix optional.
+		expect(harness.reports[2]).toMatch(/^Context compacted \(auto\): [\d.]+k → [\d.]+k? tokens\.$/);
 	});
 
 	test("an app with its own place for them gets the phases instead of the text", async () => {
@@ -282,7 +335,14 @@ describe("what a compaction says while it runs", () => {
 
 		await harness.check({ systemPrompt: "", messages: overThreshold() });
 
-		expect(phases.map((phase) => phase.kind)).toEqual(["start", "done"]);
+		expect(phases.map((phase) => phase.kind)).toEqual([
+			"preparing",
+			"summarizing",
+			"summarizing",
+			"validating",
+			"resuming",
+			"done",
+		]);
 		expect(harness.reports).toEqual([]);
 	});
 });

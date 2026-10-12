@@ -24,6 +24,14 @@ afterEach(() => {
 interface Reported {
 	usedTokens: number;
 	threshold: number;
+	/**
+	 * How many model calls had been recorded when this measurement was
+	 * published. Two numbers with the same count were published at the same
+	 * point of the run; the count is what lets a test say *when* a reading was
+	 * taken, which is the whole question for a refresh that has to beat the
+	 * request it describes.
+	 */
+	requests: number;
 }
 
 interface Sent {
@@ -92,7 +100,7 @@ async function run(options: { writeSettings?: (home: string) => void; steps?: St
 				let state = { entries: [] };
 				return {
 					setTasks() {}, setBackgroundShells() {}, setStatusCard() {},
-					setContextInfo(info) { reported.push(info); },
+					setContextInfo(info) { reported.push({ ...info, requests: requests.length }); },
 					store: { set(update) { state = typeof update === "function" ? update(state) : { ...state, ...update }; } },
 					waitUntilExit: async () => {
 						// Only what each turn added: the entries accumulate, and a warning
@@ -183,6 +191,36 @@ describe("the context indicator", () => {
 		const { reported } = await withSettings();
 		expect(reported.length).toBeGreaterThan(1);
 		expect(reported[0]?.usedTokens).toBeGreaterThan(0);
+	});
+
+	test("the rebuilt size is published before the next request, not a turn later", async () => {
+		// The loop compacts between requests and only then starts the next turn,
+		// so a refresh hung on `turn_end` alone was one whole turn late at the one
+		// moment the number matters most: right after a summary replaced the
+		// context. The measurement has to be up by the time the request it
+		// describes goes out — otherwise the row reports the size that was just
+		// paid to get rid of.
+		const { requests, reported } = await run({
+			writeSettings,
+			steps: [
+				// Past the threshold (178,808 for this window), so the second prompt
+				// compacts before its request goes anywhere.
+				{ text: "first answer", usage: { input: 185_000, output: 10, cacheRead: 0, cacheWrite: 0 } },
+				{ text: "<summary>1. Primary Request: keep going</summary>" },
+				{ text: "second answer" },
+			],
+			prompts: ["one", "two"],
+		});
+
+		// Three calls: the first turn, the summary, the second turn. A measurement
+		// carrying a count of two was published while the summary had gone out and
+		// the next main request had not — the window the fix is about.
+		expect(requests).toHaveLength(3);
+		const between = reported.filter((entry) => entry.requests === 2);
+		expect(between).toHaveLength(1);
+		// And it is the *new* size, not the one the summary replaced: the boundary
+		// and its retained tail carry no usage record of the old transcript.
+		expect(between[0]?.usedTokens ?? 0).toBeLessThan(100_000);
 	});
 });
 
