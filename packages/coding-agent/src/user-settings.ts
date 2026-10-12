@@ -7,7 +7,7 @@
  * discard whatever the user has in there.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { stripBom } from "./json-text.ts";
@@ -68,9 +68,37 @@ function readUserSettings(path: string): Record<string, unknown> {
 	}
 }
 
+/**
+ * The mode to give the replacement file: the mode of the file it replaces, so
+ * a user who tightened the permissions on their settings file (it can hold
+ * env vars) keeps them; undefined for a first write, which leaves the default.
+ */
+function existingMode(path: string): number | undefined {
+	try {
+		return statSync(path).mode & 0o777;
+	} catch {
+		return undefined;
+	}
+}
+
 function writeUserSettings(path: string, home: string, data: Record<string, unknown>): void {
 	mkdirSync(join(home, ".labunbun"), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+	// Replaced, never rewritten in place. The bytes land in a sibling file and
+	// are renamed over the target, so a process that dies mid-write leaves the
+	// old file whole — the settings every later read-merge-write and the next
+	// startup depend on — instead of a truncated one they would all refuse.
+	const tmp = `${path}.tmp`;
+	try {
+		writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf8", mode: existingMode(path) });
+		renameSync(tmp, path);
+	} catch (error) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			// No temp file to remove (the write failed before it existed).
+		}
+		throw error;
+	}
 }
 
 /** Persist the model choice made via /model. */
