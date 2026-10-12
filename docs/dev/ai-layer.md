@@ -349,6 +349,8 @@ The retry wrapper is the throw boundary of the stream protocol. Adapters let SDK
 - The backoff is `min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs)`, and the jitter keeps half of it fixed and randomizes the other half (`packages/ai/src/retry.ts:238`). Retries from parallel sessions on the same schedule otherwise synchronize with each other, and a delay that can shrink to nothing retries at once. The jitter applies to the exponential backoff only, because a `Retry-After` is the server's own number. Both live under the caller's cap.
 - A `Retry-After` value wins over the jittered backoff, and the code clamps the result to `maxDelayMs` (`packages/ai/src/retry.ts:229`).
 - The notice goes to `streamOptions.onRetry` first, then to the wrapper's own `onRetry` (`packages/ai/src/retry.ts:238`). The caller that knows which turn is on retry is also the one with a place to say so.
+- The backoff wait passes through `sleepUnlessAborted`, so the caller's signal can end it (`packages/ai/src/retry.ts:239`). The loop read the signal nowhere inside the wait before that, and a wait can run to `maxDelayMs` — thirty seconds, which is also the number a `Retry-After: 30` asks for. An interrupt during the backoff went unseen until it ran out.
+- `sleepUnlessAborted` races the sleep against that signal and throws its reason (`packages/ai/src/retry.ts:262`). `abortErrorOf` keeps the reason the caller passed, and shapes anything else into the platform's `AbortError`, the name `isAbortError` reads as the interrupt (`packages/ai/src/retry.ts:246`).
 
 #### The stall watchdog
 

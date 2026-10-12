@@ -238,8 +238,50 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 					message: error instanceof Error ? error.message : String(error),
 				};
 				await (streamOptions?.onRetry ?? options.onRetry)?.(notice);
-				await sleep(delayMs);
+				await sleepUnlessAborted(sleep, delayMs, streamOptions?.signal);
 			}
 		}
 	};
+}
+
+/** The caller's abort as a thrown error, keeping whatever reason it carried. */
+function abortErrorOf(signal: AbortSignal): unknown {
+	const reason: unknown = signal.reason;
+	if (reason instanceof Error) return reason;
+	// Shaped like the platform default so every layer above reads it as an
+	// interrupt via isAbortError.
+	return Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+}
+
+/**
+ * Sleep, unless the caller aborts first.
+ *
+ * A wait can run to `maxDelayMs` — thirty seconds, which is also the number a
+ * `Retry-After: 30` asks for — and nothing inside it reads the signal. Without
+ * the race, an interrupt during the backoff goes unseen until the sleep runs
+ * out: Esc does nothing for the rest of the wait, however long that is.
+ */
+async function sleepUnlessAborted(
+	sleep: (ms: number) => Promise<void>,
+	delayMs: number,
+	signal: AbortSignal | undefined,
+): Promise<void> {
+	const waiting = sleep(delayMs);
+	// The abort can win the race and leave the wait running; the loser still
+	// needs a handler or its settlement surfaces as an unhandled rejection.
+	waiting.catch(() => {});
+	if (!signal) return waiting;
+	if (signal.aborted) throw abortErrorOf(signal);
+	let onAbort: (() => void) | undefined;
+	try {
+		await Promise.race([
+			waiting,
+			new Promise<never>((_, reject) => {
+				onAbort = () => reject(abortErrorOf(signal));
+				signal.addEventListener("abort", onAbort, { once: true });
+			}),
+		]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
 }

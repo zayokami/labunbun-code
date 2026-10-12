@@ -357,6 +357,52 @@ describe("abort handling", () => {
 		expect(slept).toBe(false);
 	});
 
+	// The same interrupt, one step later: the ladder is already running and
+	// sitting in its backoff wait, which can run to `maxDelayMs` — thirty
+	// seconds, and that is also the number a `Retry-After: 30` asks for. The
+	// loop read the signal nowhere inside that wait, so Esc went unseen for
+	// however long the server's header said.
+	test("an abort during the backoff ends the wait instead of sleeping it out", async () => {
+		let sleptFor = -1;
+		let inBackoff: () => void = () => {};
+		const backoffStarted = new Promise<void>((resolve) => {
+			inBackoff = resolve;
+		});
+		const { fn, calls } = failingStreamFn(
+			99,
+			Object.assign(new Error("busy"), { status: 503, headers: { "retry-after": "30" } }),
+		);
+		const controller = new AbortController();
+		const wrapped = withRetry(fn, {
+			baseDelayMs: 1,
+			// A wait the test holds open: only the abort can end it, so a
+			// wrapper that slept it out would leave the pump unanswered and
+			// fail the race below rather than pass it late.
+			sleep: (ms) => {
+				sleptFor = ms;
+				inBackoff();
+				return new Promise<void>(() => {});
+			},
+		});
+
+		const pump = collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { signal: controller.signal }));
+		await backoffStarted;
+		expect(calls()).toBe(1);
+		controller.abort();
+		const outcome = await Promise.race([
+			pump.then(
+				() => "completed",
+				(error: unknown) => (isAbortError(error) ? "aborted" : `failed: ${String(error)}`),
+			),
+			new Promise<string>((resolve) => setTimeout(() => resolve("still sleeping"), 250)),
+		]);
+		expect(outcome).toBe("aborted");
+		expect(sleptFor).toBe(30_000);
+		// The abort ended the ladder, not just the wait: no second request
+		// against a conversation the user has already cancelled.
+		expect(calls()).toBe(1);
+	});
+
 	test("an abort error thrown by the adapter propagates even without the signal", async () => {
 		// biome-ignore lint/correctness/useYield: the abort must surface before any event exists
 		const fn: StreamFn = async function* () {
