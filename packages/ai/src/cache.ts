@@ -46,6 +46,12 @@ const CAPABILITIES: Readonly<Record<string, CacheCapability>> = {
 	// the report calls a prefix cacheable, and erring low there says "the provider
 	// may have chosen not to" rather than "the provider could not".
 	openai: { mode: "automatic", minPrefixTokens: 1024, incrementTokens: 128, ttl: [], promptCacheKey: true },
+	// The subscription backend: the backend's own client sends `prompt_cache_key`
+	// on every request, so the key is not selectable here — it is standard. It
+	// publishes no floor or increment of its own; the row borrows the public
+	// API's numbers, erring the same way and for the same reason as the comment
+	// above: a low floor says "the provider may have chosen not to".
+	chatgpt: { mode: "automatic", minPrefixTokens: 1024, incrementTokens: 128, ttl: [], promptCacheKey: true },
 	deepseek: { mode: "automatic", minPrefixTokens: 0, incrementTokens: 1, ttl: [], promptCacheKey: false },
 	// Kimi's own guide describes caching as automatic and says the previous prompt
 	// must exceed 256 tokens; it documents no routing key. Third-party clients

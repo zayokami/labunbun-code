@@ -569,4 +569,27 @@ describe("the missing-key pre-flight", () => {
 			else process.env.ANTHROPIC_API_KEY = saved;
 		}
 	});
+
+	test("the same door for a ChatGPT subscription: the adapter's login error, no ladder", async () => {
+		// The twin of the test above, and its own claim: the fast path in
+		// `withRetry` marks *both* subscription error classes, so the second
+		// adapter's signed-out error leaves before the ladder the same way. Without
+		// the second `instanceof` this test does not fail — it sits on the ladder's
+		// own backoff until the runner's timeout, which is the failure mode the
+		// verbatim assertion below is chosen to expose on the day it runs.
+		const chatgptModel: Model = {
+			...FAUX_MODEL,
+			id: "gpt-6.1-sol",
+			api: "chatgpt-responses",
+			provider: "chatgpt",
+			baseUrl: "http://127.0.0.1:9",
+			apiKeyEnv: undefined,
+		};
+		const events = await collect(createDefaultStreamFn()(chatgptModel, { systemPrompt: "", messages: [] }));
+		expect(events.at(-1)?.type).toBe("error");
+		// Verbatim, with no "after N attempt(s)" prefix, for the reason above.
+		expect((events.at(-1) as any).message.errorMessage).toBe(
+			"Not signed in to a ChatGPT subscription for gpt-6.1-sol: run /login.",
+		);
+	});
 });

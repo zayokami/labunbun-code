@@ -12,6 +12,12 @@ const KIMI_BASE = "https://api.moonshot.ai/v1";
 const GOOGLE_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/";
 /** OpenAI's own host — the API this client's compat adapter was written against. */
 const OPENAI_BASE = "https://api.openai.com/v1";
+/**
+ * The ChatGPT subscription backend — the same vendor's models behind the
+ * subscription door, at the endpoint the codex client uses. Its wire is the
+ * Responses wire with structural adjustments; see `providers/chatgpt-responses.ts`.
+ */
+const CHATGPT_CODEX_BASE = "https://chatgpt.com/backend-api/codex";
 /** Z.AI's international host. */
 const GLM_BASE = "https://api.z.ai/api/paas/v4";
 /** DeepSeek's OpenAI-compatible host. */
@@ -155,12 +161,12 @@ function anthropicModel(
 }
 
 // Long-form design notes: docs/dev/ai-layer.md
-/** One model on one OpenAI wire; both wires share this body. */
+/** One model on one OpenAI wire; all three wires share this body. */
 function openAIModel(
-	api: "openai-completions" | "openai-responses",
+	api: "openai-completions" | "openai-responses" | "chatgpt-responses",
 	provider: string,
 	baseUrl: string,
-	apiKeyEnv: string,
+	apiKeyEnv: string | undefined,
 	id: string,
 	name: string,
 	opts: {
@@ -184,6 +190,11 @@ function openAIModel(
 		 * about what the session wanted made on the user's behalf.
 		 */
 		reasoningEfforts?: readonly ("minimal" | "low" | "medium" | "high")[];
+		/**
+		 * The lite wire shape, off the subscription catalog's own flag. See
+		 * {@link Model.responsesLite}.
+		 */
+		responsesLite?: boolean;
 		toolCalling?: false;
 		pricing: ModelPricing;
 	},
@@ -194,12 +205,16 @@ function openAIModel(
 		api,
 		provider,
 		baseUrl,
-		apiKeyEnv,
+		// Omitted when there is none: a subscription row has no variable that
+		// carries its credential, and naming one anyway would invent a way in
+		// that does not exist.
+		...(apiKeyEnv ? { apiKeyEnv } : {}),
 		// Omitted rather than empty when there is none, so "no other variable works"
 		// and "this model never said" stay distinguishable.
 		...(opts.apiKeyEnvFallbacks ? { apiKeyEnvFallbacks: opts.apiKeyEnvFallbacks } : {}),
 		...(opts.toolReasoningEffort ? { toolReasoningEffort: opts.toolReasoningEffort } : {}),
 		...(opts.reasoningEfforts ? { reasoningEfforts: opts.reasoningEfforts } : {}),
+		...(opts.responsesLite === true ? { responsesLite: true as const } : {}),
 		...(opts.toolCalling === false ? { toolCalling: false as const } : {}),
 		contextWindow: opts.contextWindow,
 		maxOutputTokens: opts.maxOutputTokens,
@@ -218,6 +233,36 @@ function openAICompatModel(
 	opts: Parameters<typeof openAIModel>[6],
 ): Model {
 	return openAIModel("openai-completions", provider, baseUrl, apiKeyEnv, id, name, opts);
+}
+
+// Long-form design notes: docs/dev/ai-layer.md
+/**
+ * A model behind the ChatGPT subscription, off the codex backend's own catalog.
+ * There is no `apiKeyEnv`, and the absence is the statement: the only way in is
+ * the OAuth grant the login flow mints. Prices are zero for the reason
+ * ollama-cloud's are — the plan is a subscription and no per-token rate exists
+ * to transcribe — and `maxOutputTokens` carries the window because the catalog
+ * publishes no output cap of its own.
+ */
+function chatGptModel(
+	id: string,
+	name: string,
+	opts: {
+		contextWindow: number;
+		maxOutputTokens: number;
+		responsesLite?: boolean;
+	},
+): Model {
+	return openAIModel("chatgpt-responses", "chatgpt", CHATGPT_CODEX_BASE, undefined, id, name, {
+		contextWindow: opts.contextWindow,
+		maxOutputTokens: opts.maxOutputTokens,
+		reasoning: true,
+		// The catalog's levels run low through ultra — `minimal` is ours, not
+		// this backend's, so the accepted subset starts at low.
+		reasoningEfforts: ["low", "medium", "high"],
+		...(opts.responsesLite === true ? { responsesLite: true as const } : {}),
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	});
 }
 
 // Long-form design notes: docs/dev/ai-layer.md
@@ -926,6 +971,28 @@ const BUILT_IN_MODELS: Model[] = [
 		reasoning: true,
 		pricing: openAIPricing(0.2, 1.2, 0.02),
 	}),
+	// The ChatGPT subscription: the same vendor's models behind the subscription
+	// door, off the backend's own catalog. The seven lite rows wrap their tools
+	// in the request frame; GPT-5.5 does not. The catalog's three hidden slugs
+	// (two daybreak variants, the auto-review model) are not registered, and the
+	// max context ceiling its rows publish beyond 272k is for its own compaction
+	// to spend, not a window this client may fill.
+	chatGptModel("gpt-6-astra", "GPT-6 Astra", { contextWindow: 272_000, maxOutputTokens: 272_000, responsesLite: true }),
+	chatGptModel("gpt-6.1-sol", "GPT-6.1 Sol", { contextWindow: 272_000, maxOutputTokens: 272_000, responsesLite: true }),
+	chatGptModel("gpt-6-sol", "GPT-6 Sol", { contextWindow: 272_000, maxOutputTokens: 272_000, responsesLite: true }),
+	chatGptModel("gpt-6-luna", "GPT-6 Luna", { contextWindow: 272_000, maxOutputTokens: 272_000, responsesLite: true }),
+	chatGptModel("gpt-5.6-sol", "GPT-5.6 Sol", { contextWindow: 272_000, maxOutputTokens: 272_000, responsesLite: true }),
+	chatGptModel("gpt-5.6-terra", "GPT-5.6 Terra", {
+		contextWindow: 272_000,
+		maxOutputTokens: 272_000,
+		responsesLite: true,
+	}),
+	chatGptModel("gpt-5.6-luna", "GPT-5.6 Luna", {
+		contextWindow: 272_000,
+		maxOutputTokens: 272_000,
+		responsesLite: true,
+	}),
+	chatGptModel("gpt-5.5", "GPT-5.5", { contextWindow: 272_000, maxOutputTokens: 272_000 }),
 	// Google, over its OpenAI-compatibility endpoint — which its docs still call
 	// beta and which drops parameters it does not recognise, so these rows promise
 	// a little less than a native integration would. 3.8 Flash is the current Flash

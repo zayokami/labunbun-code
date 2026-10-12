@@ -30,7 +30,7 @@ afterEach(() => {
  * host test below reads resolved models, so every one of these is borrowed for
  * the duration — this file otherwise asserts the shipped table, and inheriting
  * the machine's configuration would make a developer's proxy a test failure. All
- * fifteen, not just the one that happened to be set: the point is that no machine
+ * sixteen, not just the one that happened to be set: the point is that no machine
  * can change the answer.
  *
  * The `finally` is the whole restore path, and deliberately not an `afterEach`
@@ -45,6 +45,7 @@ const BASE_URL_VARS = [
 	"KIMI_BASE_URL",
 	"GLM_BASE_URL",
 	"OPENAI_BASE_URL",
+	"CHATGPT_BASE_URL",
 	"GOOGLE_BASE_URL",
 	"MINIMAX_BASE_URL",
 	"MISTRAL_BASE_URL",
@@ -118,6 +119,14 @@ const BUILT_IN_REFS = [
 	"openai/gpt-5.6-sol",
 	"openai/gpt-5.6-terra",
 	"openai/gpt-5.6-luna",
+	"chatgpt/gpt-6-astra",
+	"chatgpt/gpt-6.1-sol",
+	"chatgpt/gpt-6-sol",
+	"chatgpt/gpt-6-luna",
+	"chatgpt/gpt-5.6-sol",
+	"chatgpt/gpt-5.6-terra",
+	"chatgpt/gpt-5.6-luna",
+	"chatgpt/gpt-5.5",
 	"google/gemini-3.8-flash",
 	"google/gemini-3.1-pro-preview",
 	"minimax/minimax-m3",
@@ -743,6 +752,18 @@ describe("the built-in catalog", () => {
 			["openai/gpt-5.6-sol", 4, 20, 0.4, 5],
 			["openai/gpt-5.6-terra", 2, 12, 0.2, 2.5],
 			["openai/gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25],
+			// The ChatGPT subscription's eight, at zero for the same structural
+			// reason the Ollama Cloud rows state below: the plan bills a
+			// subscription, no per-token rate exists to transcribe, and the zero
+			// reads as "this table cannot price it" rather than as "free".
+			["chatgpt/gpt-6-astra", 0, 0, 0, 0],
+			["chatgpt/gpt-6.1-sol", 0, 0, 0, 0],
+			["chatgpt/gpt-6-sol", 0, 0, 0, 0],
+			["chatgpt/gpt-6-luna", 0, 0, 0, 0],
+			["chatgpt/gpt-5.6-sol", 0, 0, 0, 0],
+			["chatgpt/gpt-5.6-terra", 0, 0, 0, 0],
+			["chatgpt/gpt-5.6-luna", 0, 0, 0, 0],
+			["chatgpt/gpt-5.5", 0, 0, 0, 0],
 			["google/gemini-3.8-flash", 0.75, 3.75, 0.075, 0],
 			["google/gemini-3.1-pro-preview", 2, 12, 0.2, 0],
 			// A fourth rate regime, and the only vendor here that states a cache
@@ -1089,6 +1110,18 @@ describe("the built-in catalog", () => {
 			["openai/gpt-5.6-sol", 1_050_000, 128_000],
 			["openai/gpt-5.6-terra", 1_050_000, 128_000],
 			["openai/gpt-5.6-luna", 1_050_000, 128_000],
+			// The subscription backend publishes a window and no output cap — its
+			// catalogue's rows carry a `context_window` and nothing shaped like a
+			// token limit — so the third column is the window itself, the same
+			// reading as the MiniMax and Ollama rows around it.
+			["chatgpt/gpt-6-astra", 272_000, 272_000],
+			["chatgpt/gpt-6.1-sol", 272_000, 272_000],
+			["chatgpt/gpt-6-sol", 272_000, 272_000],
+			["chatgpt/gpt-6-luna", 272_000, 272_000],
+			["chatgpt/gpt-5.6-sol", 272_000, 272_000],
+			["chatgpt/gpt-5.6-terra", 272_000, 272_000],
+			["chatgpt/gpt-5.6-luna", 272_000, 272_000],
+			["chatgpt/gpt-5.5", 272_000, 272_000],
 			["google/gemini-3.8-flash", 1_048_576, 65_536],
 			["google/gemini-3.1-pro-preview", 1_048_576, 65_536],
 			// MiniMax publishes a window per model and no output cap for any of
@@ -1511,6 +1544,7 @@ describe("the built-in catalog", () => {
 				host("kimi/kimi-k3"),
 				host("glm/glm-5.3"),
 				host("openai/gpt-6-sol"),
+				host("chatgpt/gpt-6.1-sol"),
 				host("google/gemini-3.8-flash"),
 				host("minimax/minimax-m3"),
 				host("mistral/mistral-large-4"),
@@ -1529,6 +1563,11 @@ describe("the built-in catalog", () => {
 				"https://api.moonshot.ai/v1",
 				"https://api.z.ai/api/paas/v4",
 				"https://api.openai.com/v1",
+				// The subscription door: the codex backend, where
+				// `/backend-api/codex` is part of the endpoint rather than a
+				// prefix the SDK strips — the Responses client appends
+				// `/responses` to whatever base it is given.
+				"https://chatgpt.com/backend-api/codex",
 				"https://generativelanguage.googleapis.com/v1beta/openai/",
 				"https://api.minimax.io/v1",
 				"https://api.mistral.ai/v1",
@@ -1597,13 +1636,25 @@ describe("the built-in catalog", () => {
 			const model = resolveModel(ref);
 			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
 		}
-		// And no vendor beyond these three is in that situation, so the rule stays
+		// The fourth family, and the reason is the catalogue's own shape: the
+		// subscription backend's rows publish a `context_window` and nothing
+		// shaped like an output cap, so all eight carry the window — the larger
+		// ceiling a few of them publish beyond it belongs to the backend's own
+		// compaction, not to a client's request.
+		const chatgpt = BUILT_IN_REFS.filter((ref) => ref.startsWith("chatgpt/"));
+		expect(chatgpt.length).toBeGreaterThan(0);
+		for (const ref of chatgpt) {
+			const model = resolveModel(ref);
+			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
+		}
+		// And no vendor beyond these four is in that situation, so the rule stays
 		// a fact about them rather than a description of the whole table.
 		const others = BUILT_IN_REFS.filter(
 			(ref) =>
 				!ref.startsWith("minimax/") &&
 				!ref.startsWith("mistral/") &&
 				!ref.startsWith("ollama-cloud/") &&
+				!ref.startsWith("chatgpt/") &&
 				!isReseller(ref),
 		).filter((ref) => resolveModel(ref)?.maxOutputTokens === resolveModel(ref)?.contextWindow);
 		expect(others).toEqual([]);

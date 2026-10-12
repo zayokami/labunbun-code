@@ -95,15 +95,22 @@ export async function refreshModelCatalog(options?: {
 /**
  * One model per provider worth asking: the probe needs a base URL and, where
  * the provider takes one, a credential, and every model of a provider answers
- * the same listing. A provider whose rows name no key variable is asked
- * anyway — the local daemon serves the one catalog that exists nowhere but its
- * own answer, so skipping it would be skipping the only half that discovery
- * can state at all. Its template stands in for a row, because there is no row.
+ * the same listing. A provider whose rows name no key variable is asked when a
+ * listing call exists for it — the local daemon serves the one catalog that
+ * exists nowhere but its own answer, so skipping it would be skipping the only
+ * half that discovery can state at all. Its template stands in for a row,
+ * because there is no row.
  */
 function providersToProbe(): Model[] {
 	const byProvider = new Map<string, Model>();
 	for (const model of [...allModels(), ...dynamicProviderTemplates()]) {
 		if (byProvider.has(model.provider)) continue;
+		// The subscription backend's rows are keyless too and still not asked:
+		// no listing call exists for its wire — its catalogue is fetched by the
+		// backend's own client behind the sign-in — so a probe would return "no
+		// answer" by construction, and counting it as an ask would be
+		// bookkeeping about a request nobody makes.
+		if (model.api === "chatgpt-responses") continue;
 		if (model.apiKeyEnv !== undefined && !resolveApiKey(model)) continue;
 		byProvider.set(model.provider, model);
 	}

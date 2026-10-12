@@ -111,6 +111,48 @@ export {
 	type RefreshClaudeTokenOptions,
 	refreshClaudeToken,
 } from "./providers/anthropic-oauth.ts";
+export {
+	CHATGPT_OAUTH_AUTHORIZE_URL,
+	CHATGPT_OAUTH_CLIENT_ID,
+	CHATGPT_OAUTH_ISSUER,
+	CHATGPT_OAUTH_SCOPE,
+	CHATGPT_OAUTH_TOKEN_URL,
+	CHATGPT_ORIGINATOR,
+	CHATGPT_REFRESH_FALLBACK_MS,
+	CHATGPT_REFRESH_WINDOW_MS,
+	type ChatGptAuthorizeOptions,
+	type ChatGptCredentialStore,
+	type ChatGptDeviceCode,
+	type ChatGptIdTokenClaims,
+	type ChatGptOAuthCredential,
+	ChatGptOAuthError,
+	type ChatGptTokenGrant,
+	type ChatGptTokenProvider,
+	type ChatGptTokenProviderOptions,
+	type CompleteChatGptDeviceLoginOptions,
+	chatGptAuthorizeUrl,
+	chatGptJwtExpiresAt,
+	chatGptRefreshDue,
+	completeChatGptDeviceLogin,
+	createChatGptOAuthState,
+	createChatGptPkce,
+	createChatGptTokenProvider,
+	type ExchangeChatGptCodeOptions,
+	exchangeChatGptCode,
+	parseChatGptIdToken,
+	type RefreshChatGptTokenOptions,
+	refreshChatGptToken,
+	requestChatGptDeviceCode,
+} from "./providers/chatgpt-oauth.ts";
+export {
+	buildChatGptRequest,
+	CHATGPT_FUNCTION_NAMESPACE,
+	type ChatGptRequestParams,
+	type ChatGptStreamFnOptions,
+	chatGptHeaders,
+	createChatGptStreamFn,
+	subscriptionMissingError,
+} from "./providers/chatgpt-responses.ts";
 export { FAUX_MODEL, type FauxProvider, type FauxStep, fauxProvider } from "./providers/faux.ts";
 export {
 	buildOpenAIRequest,
@@ -188,6 +230,8 @@ import { withCacheTracker } from "./cache-tracker.ts";
 import { apiKeyEnvNames, MissingApiKeyError, resolveApiKey } from "./model.ts";
 import { createAnthropicStreamFn } from "./providers/anthropic.ts";
 import type { ClaudeTokenProvider } from "./providers/anthropic-oauth.ts";
+import type { ChatGptTokenGrant, ChatGptTokenProvider } from "./providers/chatgpt-oauth.ts";
+import { createChatGptStreamFn } from "./providers/chatgpt-responses.ts";
 import { createOpenAIStreamFn } from "./providers/openai-compat.ts";
 import { createResponsesStreamFn, type ResponsesClientLike } from "./providers/openai-responses.ts";
 import { withRetry } from "./retry.ts";
@@ -222,6 +266,20 @@ export interface StreamFnOptions {
 	 * says no, requests fall back to the api-key path.
 	 */
 	credentials?: ClaudeTokenProvider;
+	/**
+	 * Where a ChatGPT subscription's bearer comes from, consulted per request by
+	 * the `chatgpt-responses` adapter. Same transport-scoped reasoning as
+	 * `credentials` above; there is no api-key fallback on this wire — the
+	 * subscription is the only way in, so an unavailable provider surfaces as
+	 * the adapter's own "not signed in" error, which names the login.
+	 */
+	chatgptCredentials?: ChatGptTokenProvider;
+	/**
+	 * The ChatGPT client, taking the grant rather than nothing: the bearer is
+	 * per-request, and a test that proves the 401 recovery re-mints needs the
+	 * second request's grant to be the observable one.
+	 */
+	chatgptClientFactory?: (grant: ChatGptTokenGrant) => ResponsesClientLike;
 	/**
 	 * How long a request may go without a single stream event before it is
 	 * declared stalled and torn down. The failure it bounds is the one no
@@ -274,12 +332,18 @@ function dispatchStreamFn(settings: StreamFnOptions): StreamFn {
 		policy: settings.policy,
 		clientFactory: settings.responsesClientFactory,
 	});
+	const chatgpt = createChatGptStreamFn({
+		policy: settings.policy,
+		credentials: settings.chatgptCredentials,
+		clientFactory: settings.chatgptClientFactory,
+	});
 	return (model, context, options) => {
 		const missingKey = missingApiKey(model, options, model.provider === "anthropic" && settings.credentials != null);
 		if (missingKey) throw missingKey;
 		if (model.api === "anthropic-messages") return anthropic(model, context, options);
 		if (model.api === "openai-completions") return openai(model, context, options);
 		if (model.api === "openai-responses") return responses(model, context, options);
+		if (model.api === "chatgpt-responses") return chatgpt(model, context, options);
 		throw new Error(`Unsupported API: ${model.api}`);
 	};
 }

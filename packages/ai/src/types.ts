@@ -154,8 +154,8 @@ export function textContent(text: string): TextContent {
 // ---------------------------------------------------------------------------
 
 // Long-form design notes: docs/dev/ai-layer.md
-/** The three wires this app speaks. */
-export type ApiId = "anthropic-messages" | "openai-completions" | "openai-responses";
+/** The four wires this app speaks. `chatgpt-responses` is the Responses wire as the ChatGPT subscription backend speaks it. */
+export type ApiId = "anthropic-messages" | "openai-completions" | "openai-responses" | "chatgpt-responses";
 
 /**
  * The thinking levels a session can ask for, as a runtime list. Anything that
@@ -217,6 +217,14 @@ export interface Model<Api extends ApiId = ApiId> {
 	// Long-form design notes: docs/dev/ai-layer.md
 	/** The efforts this model accepts on its own wire, when that is a proper subset of ours. */
 	reasoningEfforts?: readonly Exclude<ThinkingLevel, "off">[];
+	// Long-form design notes: docs/dev/ai-layer.md
+	/**
+	 * The ChatGPT backend's Responses Lite shape, off the catalog codex ships:
+	 * tools ride inside an `additional_tools` input item wrapped in a namespace,
+	 * top-level `tools` and `instructions` are not sent, and reasoning carries
+	 * `context: "all_turns"`.
+	 */
+	responsesLite?: boolean;
 	// Long-form design notes: docs/dev/ai-layer.md
 	/** `false` when this model cannot call tools on the wire its own row names. */
 	toolCalling?: false;

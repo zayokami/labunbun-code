@@ -4,6 +4,7 @@
 import { MessageBuilder } from "./message-builder.ts";
 import { MissingApiKeyError } from "./model.ts";
 import { ClaudeOAuthError } from "./providers/anthropic-oauth.ts";
+import { ChatGptOAuthError } from "./providers/chatgpt-oauth.ts";
 import type { AssistantMessageEvent, Context, Model, RetryNotice, StreamFn, StreamOptions } from "./types.ts";
 
 export interface RetryOptions {
@@ -187,8 +188,9 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				// The same impossibility for a subscription: no amount of waiting
 				// produces a sign-in. Only the errors that say the session cannot be
 				// repaired carry the mark — a token endpoint having a bad day
-				// (invalidGrant: false) is exactly what the ladder is for.
-				if (error instanceof ClaudeOAuthError && error.invalidGrant) {
+				// (invalidGrant: false) is exactly what the ladder is for. Both
+				// subscription adapters share the shape, so both share this door.
+				if ((error instanceof ClaudeOAuthError || error instanceof ChatGptOAuthError) && error.invalidGrant) {
 					const builder = new MessageBuilder(model.provider, model.id);
 					yield builder.error(error.message);
 					return;
