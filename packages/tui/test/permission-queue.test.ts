@@ -161,6 +161,89 @@ describe("permission queue", () => {
 });
 
 /**
+ * Asks from below, and asks that stop being asked.
+ *
+ * A subagent's tool call joins the session's own queue through a funnel, which
+ * makes two things the queue's business: the dialog has to name the subagent
+ * the answer is for, and stopping a subagent has to take its question off the
+ * screen — without touching anyone else's, because the session's own asks are
+ * queued in the same place.
+ */
+describe("forwarded asks", () => {
+	test("the dialog carries the source of a forwarded ask", async () => {
+		const { queue, current } = harness();
+		const forwarded = queue.request("Write", { file_path: "a" }, 'subagent "Fix the flaky test" (sidechain-42-abcd)');
+		expect(current()?.source).toBe('subagent "Fix the flaky test" (sidechain-42-abcd)');
+
+		// The session's own asks have no source, and the field stays off.
+		const own = queue.request("Bash", { command: "ls" });
+		current()?.resolve(true, false);
+		expect(current()?.source).toBeUndefined();
+
+		current()?.resolve(true, false);
+		expect(await forwarded).toBe(true);
+		expect(await own).toBe(true);
+	});
+
+	test("an aborted ask leaves the queue and settles as denied", async () => {
+		const { queue, current } = harness();
+		const controller = new AbortController();
+		const aborted = queue.request("Write", { file_path: "a" }, "subagent x", controller.signal);
+		const queued = queue.request("Bash", { command: "ls" });
+
+		controller.abort();
+
+		expect(await aborted).toBe(false);
+		// The next ask took the dialog, and the count dropped with the removal.
+		expect(current()?.toolName).toBe("Bash");
+		expect(current()?.queueLength).toBe(1);
+
+		current()?.resolve(true, false);
+		expect(await queued).toBe(true);
+	});
+
+	test("an abort of a queued ask leaves the one on screen alone", async () => {
+		const { queue, current } = harness();
+		const controller = new AbortController();
+		const onScreen = queue.request("Write", { file_path: "a" });
+		const behind = queue.request("Bash", { command: "rm -rf build" }, "subagent x", controller.signal);
+
+		controller.abort();
+
+		expect(await behind).toBe(false);
+		// The session's own question is untouched, and its count is honest again.
+		expect(current()?.toolName).toBe("Write");
+		expect(current()?.queueLength).toBe(1);
+
+		current()?.resolve(false, false);
+		expect(await onScreen).toBe(false);
+		expect(current()).toBeNull();
+	});
+
+	test("an abort after the answer changes nothing", async () => {
+		const { queue, current } = harness();
+		const controller = new AbortController();
+		const answered = queue.request("Write", { file_path: "a" }, "subagent x", controller.signal);
+		current()?.resolve(true, false);
+		expect(await answered).toBe(true);
+
+		controller.abort();
+		// The listener went with the answer: nothing to withdraw, nothing shown.
+		expect(current()).toBeNull();
+	});
+
+	test("an ask whose signal is already aborted never reaches the dialog", async () => {
+		const { queue, current, screens } = harness();
+		const controller = new AbortController();
+		controller.abort();
+		const answer = queue.request("Write", { file_path: "a" }, "subagent x", controller.signal);
+		expect(await answer).toBe(false);
+		expect(screens()).toBe(0);
+		expect(current()).toBeUndefined();
+	});
+});
+
+/**
  * What "don't ask again" is allowed to cover.
  *
  * Answering every queued request with the same tool name was correct only while

@@ -802,6 +802,7 @@ export function REPL({
 							inputFull={dialog.inputFull}
 							options={dialog.options}
 							queueLength={dialog.queueLength}
+							source={dialog.source}
 							onResolve={(allow, alwaysAllow) => dialog.resolve(allow, alwaysAllow)}
 							pad={pad}
 						/>

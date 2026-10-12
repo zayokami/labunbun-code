@@ -231,6 +231,13 @@ export interface PermissionDialogState {
 	 * appearing to repeat itself.
 	 */
 	queueLength?: number;
+	/**
+	 * Who raised the request when that is not this session: an ask forwarded
+	 * from a subagent ("subagent \"…\" (sidechain-…)"), so the answer does not
+	 * have to guess which worker is waiting on it. Absent for the session's own
+	 * calls, which are the only kind this dialog used to show.
+	 */
+	source?: string;
 	resolve: (allow: boolean, alwaysAllow: boolean) => void;
 }
 

@@ -656,6 +656,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		compactionTuning,
 		report: (text) => pushInfo(handle, text),
 		registry: subagentRegistry,
+		// The subagent's asks join the session's own dialog — one queue for every
+		// level. Read through the holder, not captured: the tools are built before
+		// `mountRepl` returns, and an ask that somehow landed before the REPL
+		// exists must fail closed rather than wait on a dialog that cannot be.
+		requestPermission: (toolName, input, source, signal) => {
+			const app = handle;
+			if (!app) return Promise.resolve(false);
+			return app.requestPermission(toolName, input, source, signal);
+		},
 	});
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd);
 	// What the trust gate is withholding for this directory. Project-tier agent

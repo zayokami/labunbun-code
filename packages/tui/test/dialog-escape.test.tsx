@@ -39,13 +39,14 @@ function setup() {
 	const view = render(<REPL getSession={() => session} store={store} modelName="test" onExit={() => {}} />);
 
 	const answers: Array<[boolean, boolean]> = [];
-	const openDialog = (toolName: string) =>
+	const openDialog = (toolName: string, source?: string) =>
 		store.set((state) => ({
 			...state,
 			dialog: {
 				callId: `perm-${toolName}`,
 				toolName,
 				inputPreview: `Allow ${toolName}?`,
+				source,
 				resolve: (allow, alwaysAllow) => answers.push([allow, alwaysAllow]),
 			},
 		}));
@@ -58,6 +59,7 @@ function setup() {
 		streaming,
 		release,
 		stdin: view.stdin,
+		lastFrame: () => view.lastFrame(),
 		unmount: () => {
 			unsubscribe();
 			view.unmount();
@@ -108,6 +110,37 @@ describe("Esc inside a permission dialog", () => {
 
 		h.release.resolve();
 		await delay(150);
+		h.unmount();
+	}, 20_000);
+});
+
+/**
+ * The attribution line, painted by the whole tree.
+ *
+ * PermissionDialog has its own test for the line, and the queue has one for
+ * carrying the source to it; what neither covers is the line in between —
+ * REPL handing `dialog.source` down. A prop dropped there leaves every unit
+ * green and the screen silent, so this renders the real REPL and reads the
+ * frame the user would.
+ */
+describe("a forwarded ask, through the real REPL", () => {
+	test("shows the asker on the dialog", async () => {
+		const h = setup();
+		await delay(40);
+		h.openDialog("Write", 'subagent "Fix the flaky test" (sidechain-42-abcd)');
+
+		// Poll to the invariant rather than trusting one fixed window: under a
+		// full-suite load Ink's paint can land after any delay short enough to
+		// keep this file fast, and a fixed window is exactly when that shows.
+		const wanted = 'Requested by subagent "Fix the flaky test" (sidechain-42-abcd)';
+		const deadline = Date.now() + 5000;
+		let frame = "";
+		while (Date.now() < deadline) {
+			frame = (h.lastFrame() ?? "").replace(/\s+/g, " ");
+			if (frame.includes(wanted)) break;
+			await delay(20);
+		}
+		expect(frame).toContain(wanted);
 		h.unmount();
 	}, 20_000);
 });

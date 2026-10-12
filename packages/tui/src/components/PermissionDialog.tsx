@@ -20,6 +20,12 @@ export interface PermissionDialogProps {
 	/** Requests queued behind this one, including it (see PermissionDialogState). */
 	queueLength?: number;
 	/**
+	 * Who raised the request when that is not this session: an ask forwarded
+	 * from a subagent (see PermissionDialogState.source). Absent for the
+	 * session's own calls.
+	 */
+	source?: string;
+	/**
 	 * The controller, when there is one. It may answer this dialog only if the
 	 * user turned that on — see `PadBridge.allowApprove`, which is a user-tier
 	 * setting nothing below it can raise.
@@ -48,6 +54,7 @@ export function PermissionDialog({
 	options,
 	onResolve,
 	queueLength,
+	source,
 	pad,
 }: PermissionDialogProps) {
 	const theme = useTheme();
@@ -124,6 +131,7 @@ export function PermissionDialog({
 				Permission required
 				{queueLength !== undefined && queueLength > 1 ? ` (+${queueLength - 1} more waiting)` : ""}
 			</Text>
+			{source ? <Text dimColor>Requested by {source}</Text> : null}
 			<Text>
 				Tool{" "}
 				<Text color={theme.toolName} bold>

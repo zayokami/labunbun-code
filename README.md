@@ -164,6 +164,8 @@ LaBunbun Code reads MCP servers from `.mcp.json` and `~/.labunbun/.mcp.json`. It
 
 The `Task` tool starts a subagent. The tool keeps the conversation of a finished subagent in memory. Use `SendMessage` to continue it. Use `TaskStop` to stop it. Use `/subagents` to see the state and the age of each subagent.
 
+Subagents use the permission dialog of the session. The dialog shows the subagent name. The `/subagents` command shows the subagent as `waiting` while the question is open.
+
 Put an agent definition in `~/.labunbun/agents/` or in `<project>/.labunbun/agents/`. The file name ends in `.md`. The file has a frontmatter block. The frontmatter key `name` gives the agent type. The frontmatter key `description` gives the text that the model reads. The frontmatter key `tools` gives a list of tool names. The frontmatter key `model` gives the model. The frontmatter key `maxTurns` gives a limit. The rest of the file is the system prompt of the subagent.
 
 ### The four-agent band

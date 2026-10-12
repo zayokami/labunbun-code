@@ -10,7 +10,13 @@
 import { describe, expect, test } from "bun:test";
 import { createStore } from "@labunbun/tui";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
-import { formatSubagentList, orderSubagents, subagentAgeMs, subagentCountsLine } from "../src/subagent-commands.ts";
+import {
+	formatSubagentList,
+	orderSubagents,
+	subagentAgeMs,
+	subagentCountsLine,
+	subagentSourceLabel,
+} from "../src/subagent-commands.ts";
 import { type SubagentHandle, SubagentRegistry } from "../src/subagent-registry.ts";
 
 const NOW = 1_700_000_000_000;
@@ -22,6 +28,7 @@ function handle(overrides: Partial<SubagentHandle> = {}): SubagentHandle {
 		title: "Fix the flaky test",
 		startedAt: NOW - 12_000,
 		endedAt: 0,
+		pendingAsks: 0,
 		state: "live",
 		session: {} as never,
 		notes: [],
@@ -48,6 +55,14 @@ describe("orderSubagents", () => {
 			"s-recent",
 			"s-old",
 		]);
+	});
+
+	test("a waiting subagent stays in the live group, oldest first", () => {
+		// Waiting is a sub-state of live, so it sorts where running does: the
+		// group order is about what is happening now, and a blocked run is now.
+		const early = handle({ sidechainId: "s-early", startedAt: NOW - 30_000, pendingAsks: 1 });
+		const late = handle({ sidechainId: "s-late", startedAt: NOW - 5_000 });
+		expect(orderSubagents([late, early]).map((h) => h.sidechainId)).toEqual(["s-early", "s-late"]);
 	});
 });
 
@@ -86,6 +101,13 @@ describe("subagentCountsLine", () => {
 	test("one subagent is not one subagents", () => {
 		expect(subagentCountsLine([handle()])).toBe("1 subagent: 1 running");
 	});
+
+	test("waiting buckets between running and the ended", () => {
+		const waiting = handle({ pendingAsks: 1 });
+		const running = handle();
+		const done = handle({ state: "finished", endReason: "completed", endedAt: 1 });
+		expect(subagentCountsLine([done, waiting, running])).toBe("3 subagents: 1 running, 1 waiting, 1 completed");
+	});
 });
 
 describe("formatSubagentList", () => {
@@ -111,6 +133,11 @@ describe("formatSubagentList", () => {
 		// what SendMessage takes, so a row without one is a dead end.
 		expect(flat(lines[1])).toBe("running general-purpose 12s Fix the flaky test (sidechain-42-abcd)");
 		expect(flat(lines[2])).toBe("completed general-purpose 5s Write the migration (sidechain-41-efgh)");
+	});
+
+	test("a waiting row says waiting, not running", () => {
+		const lines = formatSubagentList([handle({ pendingAsks: 1 })], NOW).split("\n");
+		expect(flat(lines[1] ?? "")).toBe("waiting general-purpose 12s Fix the flaky test (sidechain-42-abcd)");
 	});
 
 	test("the columns line up, so a wall of rows stays readable", () => {
@@ -164,5 +191,14 @@ describe("the /subagents command", () => {
 		expect(shown).toContain("Scan the repo");
 		expect(shown).toContain("sidechain-live-1");
 		expect(shown).toContain("sidechain-done-1");
+	});
+});
+
+describe("subagentSourceLabel", () => {
+	test("names the subagent the way its listing row does: title and full id", () => {
+		// The person answering reads this off the permission dialog; both halves
+		// have a job — the title identifies, the id addresses (SendMessage and
+		// TaskStop both take it).
+		expect(subagentSourceLabel(handle())).toBe('subagent "Fix the flaky test" (sidechain-42-abcd)');
 	});
 });

@@ -46,6 +46,7 @@ function sceneScript(
 		const STEPS = ${scene.steps};
 		const POINTED_AT = ${JSON.stringify(scene.pointedAt ?? "")};
 		const requests = [];
+		const asks = [];
 		let call = 0;
 		let target = "";
 		let switched = false;
@@ -95,7 +96,15 @@ function sceneScript(
 					store: { set(update) {
 						state = typeof update === "function" ? update(state) : { ...state, ...update };
 					} },
-					requestPermission: async () => true,
+					// The scene's user: consulted about every ask, recorded, and
+					// approving everything except edits. A yes to an ask and an
+					// outright allow look identical in a subagent's tool record, and
+					// telling those two apart under the live mode is what the /mode
+					// scene reads — so edits are the one thing the fake answers no to.
+					requestPermission: async (toolName, _input, source) => {
+						asks.push({ toolName, source });
+						return toolName !== "Write";
+					},
 					askUser: async () => null,
 					clearPermissionRequest() {}, clearQuestionRequest() {},
 					// Answered by what the session says, not by where it sits in the list:
@@ -116,7 +125,7 @@ function sceneScript(
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
 		await runInteractive(${JSON.stringify({ cwd: options.cwd, home: options.home, theme: "dark" })});
-		console.log(JSON.stringify({ requests, target, switched, promptResult, inserted, infos: infos() }));
+		console.log(JSON.stringify({ requests, asks, target, switched, promptResult, inserted, infos: infos() }));
 	`;
 }
 
@@ -256,11 +265,11 @@ describe("a subagent spawned after /mode agent", () => {
 		const cwd = tempDir("lbb-taskmode-cwd-");
 		const home = tempDir("lbb-taskmode-home-");
 		// No permission rules at all, so the mode is the only thing that differs
-		// between the two runs: in the startup mode an edit is an unresolved ask
-		// and the subagent fails closed (it has no dialog to ask through), and
-		// under agent it is allowed outright. Plan mode is not the mode to reach
-		// for here — it denies the Task call itself, and then there is no
-		// subagent to observe.
+		// between the two runs: in the startup mode an edit is an ask, the scene's
+		// user denies it, and the subagent records "Write: error"; under agent it
+		// is allowed outright and the record says "Write: ok". Plan mode is not
+		// the mode to reach for here — it denies the Task call itself, and then
+		// there is no subagent to observe.
 		//
 		// `/mode agent` also puts the sandbox on that axis, so what is under test
 		// is inheritance of the *pair*, not just of the mode name.
@@ -284,5 +293,16 @@ describe("a subagent spawned after /mode agent", () => {
 		// Denied before the switch and allowed after it — the subagent's own
 		// record of what its tools did, read back from the session file.
 		expect(subagentToolCalls(cwd, home)).toEqual([["Write: error"], ["Write: ok"]]);
+		// The denial was an answer, not a wall: the edit went to the scene's user
+		// through the app's own permission flow, labeled with the subagent that
+		// raised it. One edit ask and no more — a run still under the startup mode
+		// after the switch would have asked again, and a build that never reaches
+		// the user (the silent fail-closed this funnel replaced) would have asked
+		// no one and left the same two records behind.
+		const editAsks = (outcome.asks as Array<{ toolName: string; source: string }>).filter(
+			(ask) => ask.toolName === "Write",
+		);
+		expect(editAsks).toHaveLength(1);
+		expect(editAsks[0]?.source).toMatch(/^subagent "look it up" \(sidechain-.+\)$/);
 	}, 30_000);
 });

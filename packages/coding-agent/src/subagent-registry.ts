@@ -33,13 +33,23 @@ export type SubagentState = "live" | "finished" | "stopped";
  * handle. `finished` is three outcomes at once -- completed, failed, and cut
  * short -- and `stopped` is anchored work that is no longer addressable; both
  * flatten into the same vocabulary so a listing can mean one thing per word.
+ * `waiting` is the one sub-state of running worth its own word: the run is
+ * alive but blocked on a human's answer to a permission ask, and calling that
+ * "running" would claim progress the user is the one withholding.
  */
-export type SubagentStatus = "running" | "completed" | "failed" | "cancelled";
+export type SubagentStatus = "running" | "waiting" | "completed" | "failed" | "cancelled";
 
 /** What a status needs from the handle it describes. */
 export interface SubagentProgress {
 	state: SubagentState;
 	endReason?: AgentEndReason;
+	/**
+	 * Asks a human is looking at right now, when the record keeps count.
+	 * Optional so a caller that only narrates an outcome ("this finished as
+	 * error") can say that with nothing else; a handle that never recorded an
+	 * ask has none pending, which is the safe reading of absence.
+	 */
+	pendingAsks?: number;
 }
 
 /**
@@ -51,7 +61,7 @@ export interface SubagentProgress {
  * only means "cannot be continued"; the work keeps the outcome it reached.
  */
 export function subagentStatus(handle: SubagentProgress): SubagentStatus {
-	if (handle.state === "live") return "running";
+	if (handle.state === "live") return (handle.pendingAsks ?? 0) > 0 ? "waiting" : "running";
 	if (handle.state === "stopped") return handle.endReason === "completed" ? "completed" : "cancelled";
 	if (handle.endReason === "completed") return "completed";
 	if (handle.endReason === "aborted") return "cancelled";
@@ -73,6 +83,14 @@ export interface SubagentHandle extends SubagentProgress {
 	finishedAt?: number;
 	/** Finish order, for eviction; larger ended later. 0 while live. */
 	endedAt: number;
+	/**
+	 * Asks from this run sitting in the session's permission queue. A live
+	 * handle with a nonzero count displays as `waiting` — the listing reads it
+	 * off this same object while the dialog is up. A count rather than a flag
+	 * because a turn runs its concurrency-safe tools in parallel: one run can
+	 * honestly have two questions open at once.
+	 */
+	pendingAsks: number;
 	/**
 	 * The nested session, kept alive after its first run so that a continuation
 	 * continues the same conversation. That is the whole difference between
@@ -133,6 +151,24 @@ export class SubagentRegistry {
 		handle.state = "stopped";
 		handle.endedAt = ++this.#endSeq;
 		this.#evictOldest();
+	}
+
+	/**
+	 * An ask from this handle reached the session's queue: while it sits there
+	 * the handle displays as `waiting`, which is not running — it is blocked on
+	 * a human, and the listing should say so for exactly that long.
+	 */
+	askStarted(handle: SubagentHandle): void {
+		handle.pendingAsks += 1;
+	}
+
+	/**
+	 * The answer landed (or the ask was withdrawn, which aborts included): back
+	 * to running. Floored at zero because an end without a matching start would
+	 * otherwise leave a negative count for the next derivation to trip over.
+	 */
+	askEnded(handle: SubagentHandle): void {
+		handle.pendingAsks = Math.max(0, handle.pendingAsks - 1);
 	}
 
 	/** Drop the oldest non-live handles down to the cap; never a live one. */

@@ -28,6 +28,7 @@ import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import { type CompactionTuning, createCompactionWiring } from "./compaction-wiring.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
+import { subagentSourceLabel } from "./subagent-commands.ts";
 import { MAX_RETAINED_SUBAGENTS, type SubagentHandle, SubagentRegistry } from "./subagent-registry.ts";
 
 export interface AgentDefinition {
@@ -211,6 +212,15 @@ export interface TaskToolContext {
 	 * a private one, and the tools behave identically either way.
 	 */
 	registry?: SubagentRegistry;
+	/**
+	 * Where a subagent's "ask" goes when the session has a permission queue:
+	 * the ask joins the session's own dialog, labeled with the subagent that
+	 * raised it, and the boolean answer comes back as the verdict. Absent — a
+	 * `-p` run, a test — an ask fails closed, which is what every subagent did
+	 * before this funnel existed. `signal` is the subagent run's own: the queue
+	 * may use it to withdraw the ask the moment the run is stopped.
+	 */
+	requestPermission?: (toolName: string, input: unknown, source: string, signal?: AbortSignal) => Promise<boolean>;
 }
 
 export const GENERAL_PURPOSE: AgentDefinition = {
@@ -418,8 +428,11 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 					// which is the same call-time shape the axes above travel by.
 					thinkingLevel: ctx.thinkingLevel,
 					checkCompaction: subagentWiring.checkCompaction,
-					// Subagents inherit the parent's rules but have no dialog of their
-					// own to resolve an "ask" — fail closed rather than hang or auto-allow.
+					// Subagents inherit the parent's rules; an "ask" goes up to the
+					// session's own queue when the host wired the funnel, labeled with
+					// this subagent so the person answering knows who is asking. A host
+					// without a dialog — a `-p` run, a test — gets no funnel, and there
+					// an ask fails closed rather than hanging or auto-allowing.
 					canUseTool: permissionMode
 						? async (toolName, permInput, permCtx) => {
 								const decision = evaluatePermissions(toolName, permInput, {
@@ -429,14 +442,30 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 									cwd: toolCtx.cwd,
 									readOnlyToolNames,
 								});
-								if (decision.behavior === "ask") {
+								if (decision.behavior !== "ask") return decision;
+								const ask = ctx.requestPermission;
+								if (!ask) {
 									return {
 										behavior: "deny",
 										message:
 											decision.message ?? `Permission required for ${toolName} (subagents cannot prompt interactively)`,
 									};
 								}
-								return decision;
+								// The record says `waiting` for exactly as long as the ask is
+								// up: the run is alive but not progressing, and that is the
+								// one thing a person watching the listing needs to see. The
+								// signal travels along so the queue can withdraw the ask the
+								// moment the run is stopped, abort included.
+								registry.askStarted(handle);
+								try {
+									const allowed = await ask(toolName, permInput, subagentSourceLabel(handle), permCtx.signal);
+									if (allowed) return { behavior: "allow" };
+									// The session's own words for this, so a denial reads the
+									// same wherever it was decided.
+									return { behavior: "deny", message: "User denied permission" };
+								} finally {
+									registry.askEnded(handle);
+								}
 							}
 						: undefined,
 				},
@@ -455,6 +484,7 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 				session: subSession,
 				notes,
 				state: "live",
+				pendingAsks: 0,
 				endedAt: 0,
 			};
 			registry.register(handle);

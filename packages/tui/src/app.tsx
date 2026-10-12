@@ -89,7 +89,17 @@ export interface ReplAppOptions {
 export interface ReplAppHandle {
 	store: Store<UiState>;
 	waitUntilExit: () => Promise<void>;
-	requestPermission: (toolName: string, input: unknown) => Promise<boolean>;
+	/**
+	 * Ask for permission; resolves true when allowed.
+	 *
+	 * `source` names who raised the ask when that is not this session — an ask
+	 * forwarded from a subagent's funnel, shown on the dialog so the user knows
+	 * which worker is blocked on the answer. `signal` withdraws the ask: on
+	 * abort it leaves the queue and resolves false, so a stopped subagent
+	 * cannot leave its question on the screen. The session's own calls pass
+	 * neither.
+	 */
+	requestPermission: (toolName: string, input: unknown, source?: string, signal?: AbortSignal) => Promise<boolean>;
 	/** Show a structured question dialog; resolves with answers or null on cancel. */
 	askUser: (
 		questions: Array<{

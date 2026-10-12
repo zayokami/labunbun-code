@@ -17,6 +17,7 @@ function handle(overrides: Partial<SubagentHandle> = {}): SubagentHandle {
 		title: "Research the thing",
 		startedAt: 1_000,
 		endedAt: 0,
+		pendingAsks: 0,
 		state: "live",
 		session: {} as never,
 		notes: [],
@@ -54,6 +55,28 @@ describe("subagentStatus", () => {
 		expect(subagentStatus(handle({ state: "stopped", endReason: "aborted" }))).toBe("cancelled");
 		// Stopped while live: the run was cut short, and there is no outcome.
 		expect(subagentStatus(handle({ state: "stopped" }))).toBe("cancelled");
+	});
+
+	// A live run blocked on a human is not "running": that word claims progress
+	// the user is the one withholding. Waiting says so for exactly as long as
+	// an ask is up.
+	test("a live run with an ask pending reads as waiting", () => {
+		expect(subagentStatus(handle({ state: "live", pendingAsks: 1 }))).toBe("waiting");
+		// Two asks is still one waiting run, not two rows.
+		expect(subagentStatus(handle({ state: "live", pendingAsks: 2 }))).toBe("waiting");
+	});
+
+	// The same direction every unknown in this file fails in: a record that
+	// never counted an ask has none pending, so absence reads as running.
+	test("a progress record that never counted an ask is running, not waiting", () => {
+		expect(subagentStatus({ state: "live" })).toBe("running");
+	});
+
+	// Waiting is a sub-state of live and nothing more: whatever a stale count
+	// says, an ended handle keeps the outcome it reached.
+	test("waiting never overrides an outcome that already landed", () => {
+		expect(subagentStatus(handle({ state: "finished", endReason: "completed", pendingAsks: 1 }))).toBe("completed");
+		expect(subagentStatus(handle({ state: "stopped", pendingAsks: 1 }))).toBe("cancelled");
 	});
 });
 
@@ -147,5 +170,32 @@ describe("SubagentRegistry", () => {
 		expect(registry.get("sidechain-8-x")).toBeUndefined();
 		expect(registry.get("sidechain-0-x")).toBeDefined();
 		expect(registry.list()).toHaveLength(8);
+	});
+
+	test("askStarted and askEnded raise and lower the waiting count", () => {
+		const registry = new SubagentRegistry();
+		const target = handle();
+		registry.register(target);
+		expect(subagentStatus(target)).toBe("running");
+
+		registry.askStarted(target);
+		expect(subagentStatus(target)).toBe("waiting");
+		// A turn runs its concurrency-safe tools in parallel: two questions can
+		// be up at once, and one answer is not both.
+		registry.askStarted(target);
+		registry.askEnded(target);
+		expect(subagentStatus(target)).toBe("waiting");
+
+		registry.askEnded(target);
+		expect(subagentStatus(target)).toBe("running");
+	});
+
+	test("an end without a start cannot drive the count negative", () => {
+		const registry = new SubagentRegistry();
+		const target = handle();
+		registry.register(target);
+		registry.askEnded(target);
+		expect(target.pendingAsks).toBe(0);
+		expect(subagentStatus(target)).toBe("running");
 	});
 });

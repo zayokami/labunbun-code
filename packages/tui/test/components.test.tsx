@@ -523,6 +523,31 @@ describe("PermissionDialog", () => {
 		expect(flatFrame(lastFrame() ?? "")).not.toContain("Ctrl+A");
 		unmount();
 	});
+
+	test("a forwarded ask names the subagent that raised it", async () => {
+		const { lastFrame, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Write"
+					inputPreview="x.ts"
+					source={'subagent "Fix the flaky test" (sidechain-42-abcd)'}
+					onResolve={() => {}}
+				/>,
+			),
+		);
+		await delay(30);
+		expect(flatFrame(lastFrame() ?? "")).toContain('Requested by subagent "Fix the flaky test" (sidechain-42-abcd)');
+		unmount();
+	});
+
+	test("the session's own asks carry no source line", async () => {
+		const { lastFrame, unmount } = render(
+			withTheme(<PermissionDialog toolName="Bash" inputPreview="ls" onResolve={() => {}} />),
+		);
+		await delay(30);
+		expect(flatFrame(lastFrame() ?? "")).not.toContain("Requested by");
+		unmount();
+	});
 });
 
 describe("ui-state reducer", () => {

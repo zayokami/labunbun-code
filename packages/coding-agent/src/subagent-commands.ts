@@ -29,8 +29,19 @@ export function subagentAgeMs(handle: SubagentHandle, now: number): number {
 	return Math.max(0, (handle.finishedAt ?? now) - handle.startedAt);
 }
 
+/**
+ * The dialog's "who is asking" label for an ask forwarded from a subagent.
+ * Built beside the listing so both name the same run the same way: the title
+ * the person recognizes, and the full id — the one string SendMessage and
+ * TaskStop take — so a stuck ask can be answered and its asker stopped from
+ * the same reading.
+ */
+export function subagentSourceLabel(handle: SubagentHandle): string {
+	return `subagent "${handle.title}" (${handle.sidechainId})`;
+}
+
 /** The order statuses are grouped and counted in; the lifecycle's own order. */
-const STATUS_ORDER: SubagentStatus[] = ["running", "completed", "failed", "cancelled"];
+const STATUS_ORDER: SubagentStatus[] = ["running", "waiting", "completed", "failed", "cancelled"];
 
 /** `2 running, 1 failed` — only the buckets that have anything in them. */
 export function subagentCountsLine(handles: SubagentHandle[]): string {

@@ -43,8 +43,16 @@ export interface PermissionRequestQueueOptions {
 }
 
 export interface PermissionRequestQueue {
-	/** Ask for permission; resolves true when allowed. Answered in arrival order. */
-	request: (toolName: string, input: unknown) => Promise<boolean>;
+	/**
+	 * Ask for permission; resolves true when allowed. Answered in arrival order.
+	 *
+	 * `source` names who raised the ask when that is not this session — an ask
+	 * forwarded from a subagent, carried to the dialog so the answer knows which
+	 * worker is waiting. `signal` withdraws the ask: on abort the request leaves
+	 * the queue and resolves false, which is how a stopped subagent's question
+	 * gets off the screen without touching any other ask.
+	 */
+	request: (toolName: string, input: unknown, source?: string, signal?: AbortSignal) => Promise<boolean>;
 	/** Deny everything still pending — for a run that is being aborted. */
 	clear: () => void;
 }
@@ -59,8 +67,17 @@ export interface PermissionRequestQueue {
  *
  * So requests queue: the oldest is shown, and answering it shows the next.
  */
+/** One request waiting its turn for the single dialog. */
+interface PendingRequest {
+	toolName: string;
+	input: unknown;
+	/** Who raised it, when that was not this session (see `request`). */
+	source?: string;
+	resolve: (allow: boolean) => void;
+}
+
 export function createPermissionQueue(options: PermissionRequestQueueOptions): PermissionRequestQueue {
-	const pending: Array<{ toolName: string; input: unknown; resolve: (allow: boolean) => void }> = [];
+	const pending: PendingRequest[] = [];
 
 	const show = (): void => {
 		const next = pending[0];
@@ -75,6 +92,7 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 			inputFull: options.fullPreview?.(next.toolName, next.input),
 			options: permissionOptions(next.toolName, next.input, options.cwd),
 			queueLength: pending.length,
+			source: next.source,
 			resolve: (allow, alwaysAllow) => {
 				pending.shift();
 				if (allow && alwaysAllow) {
@@ -105,9 +123,39 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 	};
 
 	return {
-		request: (toolName, input) =>
+		request: (toolName, input, source, signal) =>
 			new Promise<boolean>((resolve) => {
-				pending.push({ toolName, input, resolve });
+				// An ask whose run is already cancelled has no answer coming, and a
+				// dialog for a cancelled call asks about something that no longer has
+				// a subject. Denied here rather than queued, so nothing orphaned ever
+				// reaches the screen.
+				if (signal?.aborted) {
+					resolve(false);
+					return;
+				}
+				let settled = false;
+				const settle = (allow: boolean): void => {
+					if (settled) return;
+					settled = true;
+					signal?.removeEventListener("abort", onAbort);
+					resolve(allow);
+				};
+				// The abort withdraws this one request, not the queue: a stopped
+				// subagent's ask must not take the session's own pending question down
+				// with it. `clear` stays the whole-queue verdict for an aborted run;
+				// this is the per-ask exit, and the re-show keeps the dialog's counted
+				// "more waiting" honest.
+				const onAbort = (): void => {
+					const index = pending.indexOf(entry);
+					if (index !== -1) {
+						pending.splice(index, 1);
+						show();
+					}
+					settle(false);
+				};
+				const entry: PendingRequest = { toolName, input, source, resolve: settle };
+				pending.push(entry);
+				signal?.addEventListener("abort", onAbort, { once: true });
 				show();
 			}),
 		clear: () => {

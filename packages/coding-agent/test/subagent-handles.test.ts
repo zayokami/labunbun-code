@@ -420,3 +420,182 @@ describe("the lifecycle record", () => {
 		expect(listed?.finishedAt).toBeGreaterThan(0);
 	});
 });
+
+/**
+ * What a subagent's "ask" is: before the funnel, a denial with an
+ * explanation; with one, a question in the session's own dialog, labeled with
+ * the subagent that raised it, with the record reading `waiting` while the
+ * person thinks. These tests drive the seam the host wires
+ * (`requestPermission` on the tool context) with stubs — what the queue does
+ * with the ask (showing it, answering it, withdrawing it on abort) is the
+ * queue's business and is covered where it lives.
+ *
+ * A note on failure shape: every assertion that can go red lives after every
+ * await has settled. An assertion throwing mid-flight would abandon a
+ * subagent run still awaiting its answer, and a pending promise outlives the
+ * test that abandoned it.
+ */
+describe("the ask funnel", () => {
+	test("a yes runs the tool, and the ask names the subagent that raised it", async () => {
+		const asked: Array<{ tool: string; source: string }> = [];
+		// The tool answers with a marker that only execution produces. The call's
+		// own arguments sit in the same next request the result does, so a tool
+		// that echoes its input would let a denial satisfy the "it ran" line.
+		const markedEcho = buildTool({
+			name: "echo",
+			description: "echo",
+			inputSchema: z.object({ text: z.string() }),
+			call: async () => ({ content: [{ type: "text", text: "TOOL-EXECUTED-7c1e" }] }),
+		});
+		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "in" } }] }, { text: "REPORT" }]);
+		const [task] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [markedEcho],
+			definitions: () => [],
+			permissionMode: () => "ask",
+			sandbox: () => "workspace-write",
+			getPermissionRules: () => [],
+			requestPermission: async (toolName, _input, source) => {
+				asked.push({ tool: toolName, source });
+				return true;
+			},
+		});
+
+		const result = await task.call({ description: "fix the flaky test", prompt: "go" }, callCtx());
+		expect(text(result)).toContain("REPORT");
+		// The yes was honoured: the approved call actually ran, and its result
+		// reached the model's next request.
+		expect(JSON.stringify(faux.receivedContexts[1]?.messages)).toContain("TOOL-EXECUTED-7c1e");
+		// The label carries what an answer needs: what the subagent is doing,
+		// and the id that addresses it — the same pair a /subagents row shows.
+		expect(asked).toEqual([{ tool: "echo", source: `subagent "fix the flaky test" (${idOf(result)})` }]);
+	});
+
+	test("a no denies the call with the session's own words", async () => {
+		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "ran" } }] }, { text: "REPORT" }]);
+		const [task] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: () => [],
+			permissionMode: () => "ask",
+			sandbox: () => "workspace-write",
+			getPermissionRules: () => [],
+			requestPermission: async () => false,
+		});
+
+		const result = await task.call({ description: "x", prompt: "go" }, callCtx());
+		expect(text(result)).toContain("REPORT");
+		// The model read the denial in the second request: the same sentence a
+		// denied call in the main session receives, so a denial reads the same
+		// wherever it was decided.
+		expect(JSON.stringify(faux.receivedContexts[1]?.messages)).toContain("User denied permission");
+	});
+
+	test("without a host funnel the ask still fails closed, with the old words", async () => {
+		// A `-p` run has no dialog to reach, and neither does a test that wires
+		// no funnel: the ask must stay a denial rather than a hang or a pass.
+		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "ran" } }] }, { text: "REPORT" }]);
+		const [task] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: () => [],
+			permissionMode: () => "ask",
+			sandbox: () => "workspace-write",
+			getPermissionRules: () => [],
+		});
+
+		const result = await task.call({ description: "x", prompt: "go" }, callCtx());
+		expect(text(result)).toContain("REPORT");
+		expect(JSON.stringify(faux.receivedContexts[1]?.messages)).toContain("subagents cannot prompt interactively");
+	});
+
+	test("while the answer is pending the record says waiting, and the run's signal rides along", async () => {
+		const registry = new SubagentRegistry();
+		const entered = Promise.withResolvers<void>();
+		const answered = Promise.withResolvers<boolean>();
+		let seenSignal: AbortSignal | undefined;
+		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "ran" } }] }, { text: "REPORT" }]);
+		const [task] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: () => [],
+			permissionMode: () => "ask",
+			sandbox: () => "workspace-write",
+			getPermissionRules: () => [],
+			registry,
+			requestPermission: async (_tool, _input, _source, signal) => {
+				seenSignal = signal;
+				entered.resolve();
+				return answered.promise;
+			},
+		});
+
+		const call = task.call({ description: "x", prompt: "go" }, callCtx());
+		// Give up on a funnel that never fires rather than hanging the file; the
+		// red lands below, after the run has been released either way.
+		await within(entered.promise, 2000);
+		const statusWhilePending = subagentStatus(registry.list()[0] ?? { state: "finished" });
+		const signalAbortedWhilePending = seenSignal?.aborted;
+
+		answered.resolve(true);
+		const result = await within(call, 2000);
+
+		expect(statusWhilePending).toBe("waiting");
+		// The subagent's own run signal, not the parent's: the queue needs it to
+		// withdraw a stopped subagent's ask.
+		expect(signalAbortedWhilePending).toBe(false);
+		expect(result && text(result)).toContain("REPORT");
+		// The ask ended with the answer: the record is done, not still waiting.
+		expect(subagentStatus(registry.list()[0] ?? { state: "live" })).toBe("completed");
+		// ...and the count went back down with the answer: a pendingAsks left
+		// standing would keep the next listing reading waiting for a run that is
+		// already moving again.
+		expect(registry.list()[0]?.pendingAsks).toBe(0);
+	});
+
+	test("a stop while the ask is pending aborts the signal the queue holds", async () => {
+		const registry = new SubagentRegistry();
+		const entered = Promise.withResolvers<void>();
+		const fallback = Promise.withResolvers<void>();
+		let seenSignal: AbortSignal | undefined;
+		const faux = fauxProvider([{ toolCalls: [{ name: "echo", arguments: { text: "ran" } }] }, { text: "REPORT" }]);
+		const [task, , taskStop] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [echoTool()],
+			definitions: () => [],
+			permissionMode: () => "ask",
+			sandbox: () => "workspace-write",
+			getPermissionRules: () => [],
+			registry,
+			// Stands in for the session's queue: settles when the run's signal
+			// aborts, which is how the real one withdraws a stopped ask.
+			requestPermission: (_tool, _input, _source, signal) => {
+				seenSignal = signal;
+				entered.resolve();
+				return new Promise<boolean>((resolve) => {
+					signal?.addEventListener("abort", () => resolve(false), { once: true });
+					void fallback.promise.then(() => resolve(false));
+				});
+			},
+		});
+
+		const call = task.call({ description: "x", prompt: "go" }, callCtx());
+		await within(entered.promise, 2000);
+
+		const stopped = await taskStop.call({ sidechain_id: registry.list()[0]?.sidechainId ?? "" }, callCtx());
+		// The abort settles the stub on its own; this release is a fallback so a
+		// stop failing to abort shows up as a failed assertion rather than as a
+		// test that never finishes.
+		fallback.resolve();
+		const result = await call;
+
+		expect(text(stopped)).toContain("was stopped");
+		expect(seenSignal?.aborted).toBe(true);
+		expect(text(result)).toContain("[subagent ended: aborted]");
+	});
+});
