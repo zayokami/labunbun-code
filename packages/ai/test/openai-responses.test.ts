@@ -310,6 +310,68 @@ describe("mapResponsesStream", () => {
 		expect(done.message.stopReason).toBe("refusal");
 	});
 
+	test("a refusal the wire streamed takes the turn, with the model's own words", async () => {
+		// The refusal channel, not the text one: the explanation arrives as
+		// `response.refusal.delta` and the turn still completes. Read as an
+		// unknown event, the completed envelope is a content-less `stop`, which
+		// the session seals as "The model returned an empty response" — the one
+		// report that hides what the model actually said.
+		const events = await collect(
+			mapResponsesStream(
+				raw([
+					{ type: "response.refusal.delta", output_index: 0, delta: "I can't help " },
+					{ type: "response.refusal.delta", output_index: 0, delta: "with that." },
+					{ type: "response.refusal.done", output_index: 0, refusal: "I can't help with that." },
+					{ type: "response.completed", response: { status: "completed" } },
+				]),
+				"openai",
+				MODEL.id,
+			),
+		);
+		const done = events.at(-1);
+		expect(done.type).toBe("done");
+		expect(done.message.stopReason).toBe("refusal");
+		expect(done.message.errorMessage).toBe("I can't help with that.");
+		// A refusal is not an answer: it must not become a text block the next
+		// request would replay as one.
+		expect(done.message.content).toHaveLength(0);
+
+		// The done event carries the whole text by itself, for a stream whose
+		// deltas were dropped or coalesced on the way.
+		const onlyDone = await collect(
+			mapResponsesStream(
+				raw([
+					{ type: "response.refusal.done", output_index: 0, refusal: "Not this one." },
+					{ type: "response.completed", response: { status: "completed" } },
+				]),
+				"openai",
+				MODEL.id,
+			),
+		);
+		expect(onlyDone.at(-1).message.stopReason).toBe("refusal");
+		expect(onlyDone.at(-1).message.errorMessage).toBe("Not this one.");
+	});
+
+	test("a turn that produced text keeps its stop, refusal part or not", async () => {
+		// The refusal takes the turn only when there is nothing else in it. A turn
+		// that did stream an answer is a `stop`, and ending the run on a stray
+		// refusal part would throw away the answer already delivered.
+		const events = await collect(
+			mapResponsesStream(
+				raw([
+					{ type: "response.output_text.delta", output_index: 0, delta: "here it is" },
+					{ type: "response.refusal.delta", output_index: 1, delta: "hmm" },
+					{ type: "response.completed", response: { status: "completed" } },
+				]),
+				"openai",
+				MODEL.id,
+			),
+		);
+		const done = events.at(-1);
+		expect(done.message.stopReason).toBe("stop");
+		expect(done.message.errorMessage).toBeUndefined();
+	});
+
 	test("an empty stream is an error, not a silent empty answer", async () => {
 		const events = await collect(mapResponsesStream(raw([]), "openai", MODEL.id));
 		expect(events.at(-1).type).toBe("error");

@@ -532,6 +532,45 @@ describe("mapOpenAIStream", () => {
 		expect((events.at(-1) as any).message.stopReason).toBe("refusal");
 	});
 
+	test("a refusal the wire streamed takes the turn, with the model's own words", async () => {
+		// The refusal field, not content: the model's answer arrives there and
+		// the turn finishes normally. Read as an empty delta, the turn is a
+		// content-less `stop`, which the session seals as "The model returned an
+		// empty response" — the one report that hides what the model said.
+		const events = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { refusal: "I can't do that." }, finish_reason: null }] },
+					{ choices: [{ delta: {}, finish_reason: "stop" }] },
+				]),
+				"openai",
+				"gpt-5.5",
+			),
+		);
+		const done = events.at(-1);
+		expect(done.type).toBe("done");
+		expect((done as any).message.stopReason).toBe("refusal");
+		expect((done as any).message.errorMessage).toBe("I can't do that.");
+		// A refusal is not an answer: it must not become a text block the next
+		// request would replay as one.
+		expect((done as any).message.content).toHaveLength(0);
+
+		// And the boundary: a turn that streamed an answer keeps its stop, so a
+		// stray refusal cannot end a run that already has something to show.
+		const answered = await collect(
+			mapOpenAIStream(
+				raw([
+					{ choices: [{ delta: { content: "here it is" }, finish_reason: null }] },
+					{ choices: [{ delta: { refusal: "hmm" }, finish_reason: null }] },
+					{ choices: [{ delta: {}, finish_reason: "stop" }] },
+				]),
+				"openai",
+				"gpt-5.5",
+			),
+		);
+		expect((answered.at(-1) as any).message.stopReason).toBe("stop");
+	});
+
 	test("eos and eos_token are normal stops, not unknown reasons", async () => {
 		// Real terminal values from TGI-style clones. Every unmapped reason is
 		// an error now, so these entries are what keeps the strictness from

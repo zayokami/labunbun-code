@@ -51,6 +51,8 @@ export interface ResponsesRawEvent {
 	type: string;
 	/** Text deltas, on both the output-text and the reasoning-summary events. */
 	delta?: string;
+	/** The finalized refusal text on `response.refusal.done`. */
+	refusal?: string;
 	/** Function-call argument deltas arrive keyed by item rather than by index. */
 	item_id?: string;
 	output_index?: number;
@@ -271,6 +273,8 @@ export async function* mapResponsesStream(
 	let usage: ResponsesEnvelope["usage"];
 	let incompleteReason: string | undefined;
 	let failure: string | undefined;
+	/** The explanation a declining turn streams instead of an answer. */
+	let refusalText = "";
 	let sawEvent = false;
 
 	/** Content index for a wire output slot, allocated the first time it is used. */
@@ -368,6 +372,21 @@ export async function* mapResponsesStream(
 				if (event.item?.encrypted_content) encrypted = event.item.encrypted_content;
 				break;
 			}
+			case "response.refusal.delta": {
+				// A refusal is an answer on its own channel: the wire leaves the
+				// text slot empty and streams the explanation here. Ignored as an
+				// unknown event, a declined turn arrives looking like a model that
+				// said nothing at all.
+				if (event.delta) refusalText += event.delta;
+				break;
+			}
+			case "response.refusal.done": {
+				// A well-formed stream repeats the finished text here. Used only
+				// when the deltas produced nothing, like the function-call
+				// arguments above.
+				if (!refusalText && event.refusal) refusalText = event.refusal;
+				break;
+			}
 			case "response.completed":
 			case "response.incomplete":
 			case "response.failed": {
@@ -411,7 +430,17 @@ export async function* mapResponsesStream(
 		yield builder.textEnd(textIndex);
 	}
 
-	const stop = resolveStopReason(status, incompleteReason, openCalls.size);
+	let stop = resolveStopReason(status, incompleteReason, openCalls.size);
+
+	// A refused turn completes, so the refusal is what the explanation has to
+	// replace: sealed as a content-less `stop`, the session reports "The model
+	// returned an empty response" and the reason the model gave is thrown away.
+	// A turn that streamed text keeps its stop — the answer is there, and a
+	// stray refusal part does not un-say it.
+	if (stop === "stop" && textIndex === -1 && refusalText) {
+		stop = "refusal";
+		builder.message.errorMessage = refusalText;
+	}
 
 	if (usage) {
 		const cacheRead = cachedTokensFrom(usage) ?? builder.message.usage.cacheRead;
