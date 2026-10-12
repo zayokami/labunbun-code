@@ -120,8 +120,12 @@ describe("beginChatGptLogin", () => {
 		expect(url.searchParams.get("response_type")).toBe("code");
 		expect(url.searchParams.get("scope")).toContain("offline_access");
 		expect(url.searchParams.get("originator")).toBe("codex_cli_rs");
-		// The exact registered literal: the console refuses any other path.
-		expect(CHATGPT_LOGIN_REDIRECT_URL).toBe(`http://localhost:${CHATGPT_LOGIN_PORT}/auth/callback`);
+		// The exact registered literal, spelled out: the console refuses any other
+		// host, port, or path. Comparing against the constant would re-derive both
+		// sides and pass for any port — the mutation driver survived exactly that
+		// before this literal pin existed.
+		expect(CHATGPT_LOGIN_REDIRECT_URL).toBe("http://localhost:1455/auth/callback");
+		expect(CHATGPT_LOGIN_PORT).toBe(1455);
 	});
 
 	test("honors a custom redirect", () => {

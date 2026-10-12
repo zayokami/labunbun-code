@@ -89,7 +89,12 @@ describe("beginClaudeLogin", () => {
 		expect(url.searchParams.get("code_challenge_method")).toBe("S256");
 		expect(url.searchParams.get("response_type")).toBe("code");
 		expect(url.searchParams.get("scope")).toContain("user:inference");
-		expect(CLAUDE_LOGIN_REDIRECT_URL).toContain(String(CLAUDE_LOGIN_PORT));
+		// The exact registered literal, spelled out: the console refuses any other
+		// host, port, or path. Comparing against the constant would re-derive both
+		// sides and pass for any port — the ChatGPT sibling survived exactly that
+		// mutation before its literal pin existed.
+		expect(CLAUDE_LOGIN_REDIRECT_URL).toBe("http://localhost:1455/callback");
+		expect(CLAUDE_LOGIN_PORT).toBe(1455);
 	});
 
 	test("honors a custom redirect for the manual flow", () => {
