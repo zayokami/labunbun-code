@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { type AnyTool, buildTool, type PermissionMode, SessionStore, type ToolResult } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { z } from "zod";
+import { SubagentRegistry, subagentStatus } from "../src/subagent-registry.ts";
 import { createSubagentTools } from "../src/subagents.ts";
 
 function echoTool(): AnyTool {
@@ -352,5 +353,70 @@ describe("subagent handles", () => {
 		const result = await call;
 		expect(text(result)).toContain("[subagent ended: aborted]");
 		expect(faux.receivedContexts).toHaveLength(2);
+	});
+});
+
+/**
+ * The registry the host reads: the same run the tests above drive, seen from
+ * outside the tool closure. The end-to-end path matters here — a record that
+ * never gets a finish, or a title that never gets taken from the call, is
+ * invisible to tests that only exercise the registry directly.
+ */
+describe("the lifecycle record", () => {
+	test("a finished spawn is observable: title, state, and both timestamps", async () => {
+		const registry = new SubagentRegistry();
+		const faux = fauxProvider([{ text: "REPORT" }]);
+		const [task] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [],
+			definitions: () => [],
+			registry,
+		});
+
+		const before = Date.now();
+		const result = await task.call({ description: "fix the flaky test", prompt: "go" }, callCtx());
+		const listed = registry.list();
+		expect(listed).toHaveLength(1);
+		expect(listed[0]?.sidechainId).toBe(idOf(result));
+		expect(listed[0]?.title).toBe("fix the flaky test");
+		expect(listed[0]?.startedAt).toBeGreaterThanOrEqual(before);
+		expect(listed[0]?.finishedAt).toBeGreaterThanOrEqual(listed[0]?.startedAt ?? Number.POSITIVE_INFINITY);
+		expect(subagentStatus(listed[0] ?? { state: "live" })).toBe("completed");
+	});
+
+	test("a stop while running reads as cancelled, not completed", async () => {
+		const registry = new SubagentRegistry();
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-record-")),
+			mkdtempSync(join(tmpdir(), "lbb-record-home-")),
+		);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const faux = fauxProvider([{ toolCalls: [{ name: "gate", arguments: {} }] }, { text: "never reached" }]);
+		const [task, , taskStop] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [gatedTool(() => entered.resolve(), release.promise)],
+			definitions: () => [],
+			store: () => store,
+			registry,
+		});
+
+		const call = task.call({ description: "x", prompt: "block" }, callCtx());
+		await entered.promise;
+
+		// While it runs, the record says so.
+		const live = registry.list()[0];
+		expect(subagentStatus(live ?? { state: "finished" })).toBe("running");
+
+		await taskStop.call({ sidechain_id: liveIdOf(store) }, callCtx());
+		release.resolve();
+		await call;
+
+		const [listed] = registry.list();
+		expect(subagentStatus(listed ?? { state: "live" })).toBe("cancelled");
+		// The run did end, however it ended, so the end time is stamped.
+		expect(listed?.finishedAt).toBeGreaterThan(0);
 	});
 });

@@ -162,7 +162,7 @@ LaBunbun Code reads MCP servers from `.mcp.json` and `~/.labunbun/.mcp.json`. It
 
 ### Subagents
 
-The `Task` tool starts a subagent. The tool keeps the conversation of a finished subagent in memory. Use `SendMessage` to continue it. Use `TaskStop` to stop it.
+The `Task` tool starts a subagent. The tool keeps the conversation of a finished subagent in memory. Use `SendMessage` to continue it. Use `TaskStop` to stop it. Use `/subagents` to see the state and the age of each subagent.
 
 Put an agent definition in `~/.labunbun/agents/` or in `<project>/.labunbun/agents/`. The file name ends in `.md`. The file has a frontmatter block. The frontmatter key `name` gives the agent type. The frontmatter key `description` gives the text that the model reads. The frontmatter key `tools` gives a list of tool names. The frontmatter key `model` gives the model. The frontmatter key `maxTurns` gives a limit. The rest of the file is the system prompt of the subagent.
 
@@ -488,6 +488,7 @@ Use these commands in the terminal.
 | `/resume` | Open an earlier session in this directory. |
 | `/export [path]` | Export the session to a Markdown file. |
 | `/agents [approve]` | List the agent definitions, then load the ones of this project. |
+| `/subagents` | List the subagents of this session, with their state and age. |
 | `/mcp [approve <name>]` | List the MCP servers, then approve one. |
 | `/activity [7d\|30d\|all]` | Show the days that you used this, and the current streak. |
 | `/think [level]` | Set how hard the model thinks. The values are `off`, `minimal`, `low`, `medium`, `high`. |

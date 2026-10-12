@@ -185,6 +185,8 @@ import {
 	skillsAsCommands,
 	withheldProjectSkills,
 } from "./skills.ts";
+import { formatSubagentList } from "./subagent-commands.ts";
+import { SubagentRegistry } from "./subagent-registry.ts";
 import {
 	type AgentDefinition,
 	createSubagentTools,
@@ -631,6 +633,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 */
 	let thinkingLevel: ThinkingLevel | undefined = settings.thinkingLevel;
 	const agentDefinitions = loadAgentDefinitions(cwd);
+	// The host's own registry, so `/subagents` can see lifecycles the REPL
+	// did not spawn — the tools hold no display state of their own.
+	const subagentRegistry = new SubagentRegistry();
 	const subagentTools = createSubagentTools({
 		streamFn,
 		// Read through the session, not captured: /model swaps the model and
@@ -650,6 +655,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		trimOldToolResults: settings.trimOldToolResults,
 		compactionTuning,
 		report: (text) => pushInfo(handle, text),
+		registry: subagentRegistry,
 	});
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd);
 	// What the trust gate is withholding for this directory. Project-tier agent
@@ -1301,6 +1307,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				agentDefinitions,
 				withheldAgents,
 				withheldSkills,
+				subagents: subagentRegistry,
 				pad,
 				padWatch,
 				compaction: compactionWiring.manager,
@@ -1699,6 +1706,11 @@ interface AppCommandContext {
 	withheldAgents: AgentDefinition[];
 	withheldSkills: Skill[];
 	/**
+	 * The subagent lifecycle table the Task tool records into; `/subagents`
+	 * is the one screen that says what every spawned subagent is doing.
+	 */
+	subagents: SubagentRegistry;
+	/**
 	 * The controller, when this session has one. Null only for a caller that
 	 * builds a context without one — every interactive session has a runtime,
 	 * switched on or not, because `/gamepad on` has to be able to reach it.
@@ -1871,6 +1883,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/rewind", "Restore a file from a checkpoint: /rewind [number]"],
 		["/status", "Show model, context usage, cost, and settings at a glance"],
 		["/stop", "Stop a background shell: /stop [id]"],
+		["/subagents", "List subagents this session spawned, with their state and age"],
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/think", `Show or set how hard the model thinks: /think [${THINKING_LEVELS.join("|")}]`],
 		["/tree", "Show the session branch tree"],
@@ -2219,6 +2232,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				if (index === null || index >= running.length) return;
 				stop(running[index]);
 			})();
+			return true;
+		}
+		case "/subagents": {
+			pushInfo(ctx.handle, formatSubagentList(ctx.subagents.list(), Date.now()));
 			return true;
 		}
 		case "/export": {

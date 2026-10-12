@@ -28,6 +28,7 @@ import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import { type CompactionTuning, createCompactionWiring } from "./compaction-wiring.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
+import { MAX_RETAINED_SUBAGENTS, type SubagentHandle, SubagentRegistry } from "./subagent-registry.ts";
 
 export interface AgentDefinition {
 	agentType: string;
@@ -202,6 +203,14 @@ export interface TaskToolContext {
 	 * second policy nobody chose.
 	 */
 	compactionTuning?: CompactionTuning;
+	/**
+	 * Where the host wants lifecycles recorded, when it wants to see them.
+	 *
+	 * Injected rather than returned so a caller with nothing to observe — a
+	 * test, an embedder — keeps the exact call it had: no registry named means
+	 * a private one, and the tools behave identically either way.
+	 */
+	registry?: SubagentRegistry;
 }
 
 export const GENERAL_PURPOSE: AgentDefinition = {
@@ -232,36 +241,6 @@ export function agentCatalogue(definitions: AgentDefinition[]): string {
 }
 
 /**
- * How many finished subagents a session keeps addressable.
- *
- * A finished handle holds a whole nested conversation in memory — that is the
- * point, since continuing it is what SendMessage is for — so the registry is
- * capped. The number is memory first and aging second: a run that finished
- * eight subagents ago is history in every sense.
- */
-const MAX_RETAINED_SUBAGENTS = 8;
-
-/** Where a subagent is in its life: running, ready to continue, or cancelled. */
-type SubagentState = "live" | "finished" | "stopped";
-
-interface SubagentHandle {
-	sidechainId: string;
-	agentType: string;
-	/**
-	 * The nested session, kept alive after its first run so that a continuation
-	 * continues the same conversation. That is the whole difference between
-	 * SendMessage and a second Task call, so the session must outlive the call
-	 * that spawned it.
-	 */
-	session: AgentSession;
-	/** What its own context management did, accumulated across runs. */
-	notes: string[];
-	state: SubagentState;
-	/** Finish order, for eviction; larger ended later. 0 while live. */
-	endedAt: number;
-}
-
-/**
  * The subagent tools, sharing one registry, in a fixed order: Task, then
  * SendMessage, then TaskStop.
  *
@@ -270,19 +249,11 @@ interface SubagentHandle {
  * means nothing, so the three tools must see the same map.
  */
 export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
-	/** Finished handles, addressable until evicted. */
-	const handles = new Map<string, SubagentHandle>();
-	let endSeq = 0;
-
-	/** Drop the oldest non-live handles down to the cap; never a live one. */
-	const evictOldest = (): void => {
-		const ended = [...handles.values()].filter((handle) => handle.state !== "live");
-		if (ended.length <= MAX_RETAINED_SUBAGENTS) return;
-		ended.sort((a, b) => a.endedAt - b.endedAt);
-		for (const handle of ended.slice(0, ended.length - MAX_RETAINED_SUBAGENTS)) {
-			handles.delete(handle.sidechainId);
-		}
-	};
+	/**
+	 * The shared table of handles, addressable until evicted: the host's own
+	 * when it injected one to watch, a private one nobody reads otherwise.
+	 */
+	const registry = ctx.registry ?? new SubagentRegistry();
 
 	/**
 	 * Run one prompt on a handle, and mark where the run left it.
@@ -307,22 +278,23 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 		const onAbort = () => handle.session.abort();
 		handle.state = "live";
 		signal.addEventListener("abort", onAbort, { once: true });
+		// A throw out of prompt() is a failure ending too: the registry hears
+		// about every end, not only the ones that come back politely.
+		let outcome: AgentEndReason = "error";
 		try {
 			const promptPromise = handle.session.prompt(text);
 			// The cancel can land before prompt() created its controller, where
 			// abort() is a no-op on a null controller; re-check now that one exists.
 			if (signal.aborted) handle.session.abort();
-			return { reason: await promptPromise, events };
+			outcome = await promptPromise;
+			return { reason: outcome, events };
 		} finally {
 			signal.removeEventListener("abort", onAbort);
 			unsubscribe();
 			// A TaskStop during the run has already moved the state, and its
-			// verdict — never resumed — outranks the run simply ending.
-			if (handle.state === "live") {
-				handle.state = "finished";
-				handle.endedAt = ++endSeq;
-				evictOldest();
-			}
+			// verdict — never resumed — outranks the run simply ending. That
+			// precedence lives in the registry, where both endings arrive.
+			registry.finish(handle, outcome);
 		}
 	};
 
@@ -475,12 +447,17 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 			const handle: SubagentHandle = {
 				sidechainId,
 				agentType: definition.agentType,
+				// The description the tool has always asked for, finally used for
+				// what it was always good for: a one-line label for the listing.
+				// Folded and trimmed so a listing stays one line per row.
+				title: input.description.replace(/\s+/g, " ").trim() || "(no description)",
+				startedAt: Date.now(),
 				session: subSession,
 				notes,
 				state: "live",
 				endedAt: 0,
 			};
-			handles.set(sidechainId, handle);
+			registry.register(handle);
 			store?.appendCustom("subagent_start", { sidechainId, agentType: definition.agentType, prompt: input.prompt });
 
 			const { reason, events } = await runPrompt(handle, input.prompt, toolCtx.signal);
@@ -540,7 +517,7 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 			"- Continue a subagent when its work needs a follow-up; it already has the whole task in context.\n" +
 			"- A running subagent gets the message at its next turn; a finished one runs it as a new prompt.",
 		call: async (input, toolCtx) => {
-			const handle = handles.get(input.sidechain_id);
+			const handle = registry.get(input.sidechain_id);
 			if (!handle) return unknownHandle(input.sidechain_id);
 			if (handle.state === "stopped") {
 				return {
@@ -624,15 +601,13 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 		}),
 		prompt: "- Only for cancelling a subagent; stopping one that finished keeps its report where it was returned.",
 		call: async (input) => {
-			const handle = handles.get(input.sidechain_id);
+			const handle = registry.get(input.sidechain_id);
 			if (!handle) return unknownHandle(input.sidechain_id);
 			if (handle.state === "stopped") {
 				return { content: [textContent(`Subagent ${input.sidechain_id} was already stopped.`)] };
 			}
 			const wasLive = handle.state === "live";
-			handle.state = "stopped";
-			handle.endedAt = ++endSeq;
-			evictOldest();
+			registry.stop(handle);
 			if (wasLive) handle.session.abort();
 			return {
 				content: [
