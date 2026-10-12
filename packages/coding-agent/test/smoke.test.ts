@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLI_NAME, CODING_AGENT_VERSION } from "../src/index.ts";
-import { main } from "../src/main.ts";
+import { main, parseArgs } from "../src/main.ts";
 
 describe("@labunbun/coding-agent smoke", () => {
 	test("reports its version", () => {
@@ -41,5 +41,27 @@ describe("flags that cannot mean anything are refused, not dropped", () => {
 			console.error = original;
 		}
 		expect(errors.join("\n")).toContain("Invalid --settings");
+	});
+});
+
+describe("the provider word after login/logout", () => {
+	// parseArgs only: the subcommands themselves open browsers and reach the
+	// keychain, so the word that routes them is tested at the parse layer,
+	// where nothing else can happen.
+	test("bare login and logout mean the Claude flow", () => {
+		expect(parseArgs(["login"])).toMatchObject({ subcommand: "login", loginProvider: null });
+		expect(parseArgs(["logout"])).toMatchObject({ subcommand: "logout", loginProvider: null });
+	});
+
+	test("chatgpt and claude after the subcommand name the provider", () => {
+		expect(parseArgs(["login", "chatgpt"])).toMatchObject({ subcommand: "login", loginProvider: "chatgpt" });
+		expect(parseArgs(["logout", "chatgpt"])).toMatchObject({ subcommand: "logout", loginProvider: "chatgpt" });
+		expect(parseArgs(["login", "claude"])).toMatchObject({ subcommand: "login", loginProvider: "claude" });
+	});
+
+	test("the provider word is consumed, and flags after it still parse", () => {
+		const args = parseArgs(["login", "chatgpt", "--version"]);
+		expect(args.loginProvider).toBe("chatgpt");
+		expect(args.version).toBe(true);
 	});
 });
