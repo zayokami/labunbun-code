@@ -235,8 +235,19 @@ export class SessionStore {
 		this.entries.push(entry);
 		this.#leafId = entry.id;
 		this.#linear = null;
-		mkdirSync(dirname(this.path), { recursive: true });
-		appendFileSync(this.path, `${JSON.stringify(entry)}\n`, "utf8");
+		const line = `${JSON.stringify(entry)}\n`;
+		// Write first, create the directory only when it is actually missing: a
+		// `mkdirSync` over an existing directory is still a filesystem round trip
+		// (~0.2ms on Windows) and this runs once per message. ENOENT is that case
+		// and nothing else, so the retry lands the line exactly where creating the
+		// directory up front would have — including after something removed it.
+		try {
+			appendFileSync(this.path, line, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			mkdirSync(dirname(this.path), { recursive: true });
+			appendFileSync(this.path, line, "utf8");
+		}
 	}
 
 	appendMessage(message: AgentMessage): SessionEntry {

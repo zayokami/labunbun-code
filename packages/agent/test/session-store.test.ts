@@ -11,7 +11,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AgentMessage } from "@labunbun/ai";
 import { newEntryId, SessionStore } from "../src/session-store.ts";
 
@@ -343,5 +343,31 @@ describe("a session file that is not there", () => {
 	test("entry ids are unique enough to keep a chain straight", () => {
 		const ids = new Set(Array.from({ length: 2000 }, () => newEntryId()));
 		expect(ids.size).toBe(2000);
+	});
+});
+
+describe("where an append writes", () => {
+	// The directory is created on demand rather than assumed, because the append
+	// attempts the write first and only falls back to creating it. These two
+	// cases are the ones that fallback exists for: nothing there yet, and
+	// something removed what was there between two messages.
+	test("a first append creates the directory chain", () => {
+		const path = join(tmpDir("lbb-store-fresh-"), "nested", "deeper", "session.jsonl");
+		const store = new SessionStore(path);
+
+		store.appendMessage(user("hello"));
+
+		expect(texts(SessionStore.load(path).messages())).toEqual(["hello"]);
+	});
+
+	test("an append after the directory is gone still lands", () => {
+		const store = newStore([user("first")]);
+		rmSync(dirname(store.path), { recursive: true, force: true });
+
+		store.appendMessage(user("second"));
+
+		// The file went with the directory, so only the new line is readable —
+		// what matters is that the append did not fail and did not go nowhere.
+		expect(texts(SessionStore.load(store.path).messages())).toEqual(["second"]);
 	});
 });
