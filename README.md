@@ -162,7 +162,7 @@ LaBunbun Code reads MCP servers from `.mcp.json` and `~/.labunbun/.mcp.json`. It
 
 ### Subagents
 
-The `Task` tool starts a subagent. The tool keeps the conversation of a finished subagent in memory. Use `SendMessage` to continue it. Use `TaskStop` to stop it. Use `/subagents` to see the state and the age of each subagent.
+The `Task` tool starts a subagent. The tool keeps the conversation of a finished subagent in memory. Use `SendMessage` to continue it. Use `TaskStop` to stop it. Use `/subagents` to see the state and the age of each subagent. Use `/subagents stop <id>` to cancel one. Use `/subagents retry <id>` to run a failed one again. Use `/subagents log <id>` to read the conversation of one. Without an id, each verb shows a picker.
 
 Subagents use the permission dialog of the session. The dialog shows the subagent name. The `/subagents` command shows the subagent as `waiting` while the question is open.
 
@@ -490,7 +490,7 @@ Use these commands in the terminal.
 | `/resume` | Open an earlier session in this directory. |
 | `/export [path]` | Export the session to a Markdown file. |
 | `/agents [approve]` | List the agent definitions, then load the ones of this project. |
-| `/subagents` | List the subagents of this session, with their state and age. |
+| `/subagents [stop\|retry\|log] [id]` | List the subagents of this session, with their state and age. Stop one, retry a failed one, or read the log of one. |
 | `/mcp [approve <name>]` | List the MCP servers, then approve one. |
 | `/activity [7d\|30d\|all]` | Show the days that you used this, and the current streak. |
 | `/think [level]` | Set how hard the model thinks. The values are `off`, `minimal`, `low`, `medium`, `high`. |

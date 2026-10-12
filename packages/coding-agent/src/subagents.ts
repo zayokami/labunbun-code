@@ -223,6 +223,45 @@ export interface TaskToolContext {
 	requestPermission?: (toolName: string, input: unknown, source: string, signal?: AbortSignal) => Promise<boolean>;
 }
 
+/** What a spawn reads from the call it runs under: where, and the cancel that ends it. */
+export interface SubagentSpawnScope {
+	/** The working directory the nested session runs in. */
+	cwd: string;
+	/**
+	 * The caller's cancel, when there is one. Absent for a retry — a person's
+	 * restart is not a tool call inside a turn — which is stopped through the
+	 * handle instead (the same abort `/subagents stop` and TaskStop send).
+	 */
+	signal?: AbortSignal;
+}
+
+/**
+ * What a person watching the fleet can do beyond reading the listing: end a
+ * run and repeat one that ended badly.
+ *
+ * The mechanics are the tools' own — `stop` is the TaskStop halt, `retry` is
+ * the Task spawn — because a control surface with its own copy of either is a
+ * control surface that drifts from the thing it claims to do.
+ */
+export interface SubagentControl {
+	/**
+	 * End a subagent's run. A live run is aborted; a finished handle is only
+	 * marked never-resumed. Returns whether the run was live when this landed.
+	 */
+	stop(handle: SubagentHandle): boolean;
+	/**
+	 * Run the handle's original task again as a fresh subagent: new id, new
+	 * conversation, same prompt and same terms. `onSpawned` fires with the new
+	 * handle once it is registered and before the first request goes out; the
+	 * returned promise settles with the run's result when it ends.
+	 */
+	retry(
+		handle: SubagentHandle,
+		scope: SubagentSpawnScope,
+		onSpawned?: (handle: SubagentHandle) => void,
+	): Promise<ToolResult>;
+}
+
 export const GENERAL_PURPOSE: AgentDefinition = {
 	agentType: "general-purpose",
 	whenToUse: "General-purpose agent for researching questions and executing multi-step tasks",
@@ -252,13 +291,13 @@ export function agentCatalogue(definitions: AgentDefinition[]): string {
 
 /**
  * The subagent tools, sharing one registry, in a fixed order: Task, then
- * SendMessage, then TaskStop.
+ * SendMessage, then TaskStop — and the user-side `control` over the same fleet.
  *
  * They are created together because the id a Task call returns is the only way
  * back to the session behind it: an id nobody holds a map for is an id that
- * means nothing, so the three tools must see the same map.
+ * means nothing, so the tools and the controls must see the same map.
  */
-export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
+export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, AnyTool, SubagentControl] {
 	/**
 	 * The shared table of handles, addressable until evicted: the host's own
 	 * when it injected one to watch, a private one nobody reads otherwise.
@@ -338,7 +377,209 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 		isError: true,
 	});
 
-	/** Spawn: a nested AgentSession per invocation, addressable by its id line. */
+	/**
+	 * The Task call's input. One schema for both callers — the tool the model
+	 * invokes and a retry of a call that already happened — so the two cannot
+	 * disagree about what a Task call is.
+	 */
+	const taskInputSchema = z.object({
+		description: z.string().describe("A short (3-5 word) description of the task"),
+		prompt: z.string().describe("The complete task for the agent to perform"),
+		subagent_type: z.string().optional().describe('One of the agent types listed above (default "general-purpose")'),
+		max_turns: z.number().int().positive().optional(),
+	});
+
+	/**
+	 * Spawn: a nested AgentSession per invocation, addressable by its id line.
+	 *
+	 * The body behind both ways in — the model's Task call and a person's
+	 * `/subagents retry` — so the two cannot drift about what a spawn is.
+	 * `onSpawned` fires with the handle once it is registered and before the
+	 * first request goes out: the tool result only exists when the run ends,
+	 * and a retry wants to print the new id while the run is still going.
+	 *
+	 * What a spawn reads from its call is where it runs (`cwd`) and the cancel
+	 * that ends it (`signal`); a spawn with no signal — a retry — is ended
+	 * through the handle instead, which sends the same abort TaskStop sends.
+	 */
+	const spawnSubagent = async (
+		input: z.infer<typeof taskInputSchema>,
+		scope: SubagentSpawnScope,
+		onSpawned?: (handle: SubagentHandle) => void,
+	): Promise<ToolResult> => {
+		const definitions = [GENERAL_PURPOSE, ...ctx.definitions()];
+		const requested = input.subagent_type ?? "general-purpose";
+		const definition = definitions.find((d) => d.agentType === requested);
+		if (!definition) {
+			const available = definitions.map((d) => d.agentType).join(", ");
+			return {
+				content: [textContent(`Unknown agent type: ${requested}. Available: ${available}`)],
+				isError: true,
+			};
+		}
+
+		// A spawn always has a cancel to hand the nested run. A retry has no
+		// caller tool call holding one, so it gets a signal that never fires:
+		// the way to end a retried run is `/subagents stop` (or TaskStop),
+		// which aborts the session through the handle.
+		const signal = scope.signal ?? new AbortController().signal;
+
+		const tools = definition.tools ? ctx.allTools.filter((t) => definition.tools?.includes(t.name)) : ctx.allTools;
+		// The subagent's plan gate reads the same declaration the parent's does.
+		// Computed from this definition's tool list, not the parent's: a plan-mode
+		// subagent restricted to read tools should not inherit an answer about
+		// tools it does not have.
+		const readOnlyToolNames = collectReadOnlyToolNames(tools);
+		const store = ctx.store?.();
+		const permissionMode = ctx.permissionMode?.();
+		const sandbox = ctx.sandbox?.();
+		const network = ctx.network?.();
+		// A definition may name its own model. One that no longer resolves falls
+		// back to the session's — said out loud, because a subagent quietly
+		// running on a different model than its definition asks for is the kind
+		// of thing that gets diagnosed as the model having a bad day.
+		const named = definition.model;
+		const resolved = named ? ctx.resolveModel?.(named) : undefined;
+		if (named && !resolved) {
+			ctx.report?.(`[${definition.agentType}] Unknown model "${named}" — running on the session model instead.`);
+		}
+		const model = resolved ?? ctx.model();
+
+		/** What the subagent did to its own context; lives on its handle so
+		 *  continuations can record what each run added. */
+		const notes: string[] = [];
+		// A subagent has a context window of its own and can fill it: a research
+		// task that reads a repository is exactly the shape that does. It has no
+		// store — a subagent's transcript is kept as start/end entries, not as a
+		// conversation to resume — so its compactions are recorded nowhere and
+		// reported here instead.
+		const subagentWiring = createCompactionWiring({
+			model,
+			store: undefined,
+			streamFn: ctx.streamFn,
+			trimOldToolResults: ctx.trimOldToolResults,
+			tuning: ctx.compactionTuning,
+			report: (text) => {
+				notes.push(text);
+				ctx.report?.(`[${definition.agentType}] ${text}`);
+			},
+		});
+
+		const subSession = new AgentSession({
+			model,
+			systemPrompt: ctx.systemPromptFor?.(definition) ?? agentSystemPrompt(definition),
+			tools,
+			maxTurns: input.max_turns ?? definition.maxTurns,
+			cwd: scope.cwd,
+			permissionMode,
+			sandbox,
+			network,
+			deps: {
+				streamFn: ctx.streamFn,
+				// The parent's reader, not its current answer: a `/think` that lands
+				// while the subagent runs is seen by the subagent's next request,
+				// which is the same call-time shape the axes above travel by.
+				thinkingLevel: ctx.thinkingLevel,
+				checkCompaction: subagentWiring.checkCompaction,
+				// Subagents inherit the parent's rules; an "ask" goes up to the
+				// session's own queue when the host wired the funnel, labeled with
+				// this subagent so the person answering knows who is asking. A host
+				// without a dialog — a `-p` run, a test — gets no funnel, and there
+				// an ask fails closed rather than hanging or auto-allowing.
+				canUseTool: permissionMode
+					? async (toolName, permInput, permCtx) => {
+							const decision = evaluatePermissions(toolName, permInput, {
+								mode: permCtx.mode,
+								sandbox: permCtx.sandbox,
+								rules: ctx.getPermissionRules?.() ?? [],
+								cwd: scope.cwd,
+								readOnlyToolNames,
+							});
+							if (decision.behavior !== "ask") return decision;
+							const ask = ctx.requestPermission;
+							if (!ask) {
+								return {
+									behavior: "deny",
+									message:
+										decision.message ?? `Permission required for ${toolName} (subagents cannot prompt interactively)`,
+								};
+							}
+							// The record says `waiting` for exactly as long as the ask is
+							// up: the run is alive but not progressing, and that is the
+							// one thing a person watching the listing needs to see. The
+							// signal travels along so the queue can withdraw the ask the
+							// moment the run is stopped, abort included.
+							registry.askStarted(handle);
+							try {
+								const allowed = await ask(toolName, permInput, subagentSourceLabel(handle), permCtx.signal);
+								if (allowed) return { behavior: "allow" };
+								// The session's own words for this, so a denial reads the
+								// same wherever it was decided.
+								return { behavior: "deny", message: "User denied permission" };
+							} finally {
+								registry.askEnded(handle);
+							}
+						}
+					: undefined,
+			},
+		});
+
+		// Sidechain persistence: record start + final transcript in the parent tree.
+		const sidechainId = `sidechain-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+		const handle: SubagentHandle = {
+			sidechainId,
+			agentType: definition.agentType,
+			// The description the tool has always asked for, finally used for
+			// what it was always good for: a one-line label for the listing.
+			// Folded and trimmed so a listing stays one line per row.
+			title: input.description.replace(/\s+/g, " ").trim() || "(no description)",
+			// Kept whole, so a retry re-asks the same question on the same
+			// terms: the prompt, and the cap the call set if it set one.
+			prompt: input.prompt,
+			maxTurns: input.max_turns,
+			startedAt: Date.now(),
+			session: subSession,
+			notes,
+			state: "live",
+			pendingAsks: 0,
+			endedAt: 0,
+		};
+		registry.register(handle);
+		// The handle is in the table and the first request has not gone out:
+		// the one moment a caller can learn the new id before the run ends.
+		onSpawned?.(handle);
+		store?.appendCustom("subagent_start", { sidechainId, agentType: definition.agentType, prompt: input.prompt });
+
+		const { reason, events } = await runPrompt(handle, input.prompt, signal);
+		const finalText = finalReport(subSession);
+		store?.appendCustom("subagent_end", {
+			sidechainId,
+			reason,
+			toolCalls: events,
+			messages: subSession.messages.length,
+			notes,
+			report: finalText,
+		});
+
+		// Interrupted subagents report the interruption, not a summary that
+		// happens to trail off mid-thought. The id line rides along so the
+		// conversation can be picked back up: an interrupted run keeps its
+		// messages, and SendMessage continues from them.
+		if (signal.aborted) {
+			return {
+				content: [textContent(`Tool execution aborted\n\n${idLine(sidechainId)}`)],
+				isError: true,
+				details: { sidechainId, agentType: definition.agentType, reason },
+			};
+		}
+
+		const summary = reason === "completed" ? finalText : `${finalText}\n\n[subagent ended: ${reason}]`;
+		return {
+			content: [textContent(`${summary}\n\n${idLine(sidechainId)}`)],
+			details: { sidechainId, agentType: definition.agentType, reason },
+		};
+	};
+
 	const task = buildTool({
 		name: "Task",
 		description:
@@ -347,178 +588,14 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 			"SendMessage to continue the subagent, or to TaskStop to cancel it. Use for parallel research " +
 			"or isolating context-heavy work from the main conversation.\n\nAgent types (pass the name as subagent_type):\n" +
 			agentCatalogue(ctx.definitions()),
-		inputSchema: z.object({
-			description: z.string().describe("A short (3-5 word) description of the task"),
-			prompt: z.string().describe("The complete task for the agent to perform"),
-			subagent_type: z.string().optional().describe('One of the agent types listed above (default "general-purpose")'),
-			max_turns: z.number().int().positive().optional(),
-		}),
+		inputSchema: taskInputSchema,
 		prompt:
 			"- Launch subagents for context-heavy, self-contained work (research, broad searches).\n" +
 			"- Always include a complete, self-contained prompt — subagents don't see this conversation.\n" +
 			"- Multiple Task calls run concurrently when safe.\n" +
 			"- Every result ends with a [subagent id: …] line — the handle SendMessage and TaskStop take.",
 		isConcurrencySafe: () => true,
-		call: async (input, toolCtx) => {
-			const definitions = [GENERAL_PURPOSE, ...ctx.definitions()];
-			const requested = input.subagent_type ?? "general-purpose";
-			const definition = definitions.find((d) => d.agentType === requested);
-			if (!definition) {
-				const available = definitions.map((d) => d.agentType).join(", ");
-				return {
-					content: [textContent(`Unknown agent type: ${requested}. Available: ${available}`)],
-					isError: true,
-				};
-			}
-
-			const tools = definition.tools ? ctx.allTools.filter((t) => definition.tools?.includes(t.name)) : ctx.allTools;
-			// The subagent's plan gate reads the same declaration the parent's does.
-			// Computed from this definition's tool list, not the parent's: a plan-mode
-			// subagent restricted to read tools should not inherit an answer about
-			// tools it does not have.
-			const readOnlyToolNames = collectReadOnlyToolNames(tools);
-			const store = ctx.store?.();
-			const permissionMode = ctx.permissionMode?.();
-			const sandbox = ctx.sandbox?.();
-			const network = ctx.network?.();
-			// A definition may name its own model. One that no longer resolves falls
-			// back to the session's — said out loud, because a subagent quietly
-			// running on a different model than its definition asks for is the kind
-			// of thing that gets diagnosed as the model having a bad day.
-			const named = definition.model;
-			const resolved = named ? ctx.resolveModel?.(named) : undefined;
-			if (named && !resolved) {
-				ctx.report?.(`[${definition.agentType}] Unknown model "${named}" — running on the session model instead.`);
-			}
-			const model = resolved ?? ctx.model();
-
-			/** What the subagent did to its own context; lives on its handle so
-			 *  continuations can record what each run added. */
-			const notes: string[] = [];
-			// A subagent has a context window of its own and can fill it: a research
-			// task that reads a repository is exactly the shape that does. It has no
-			// store — a subagent's transcript is kept as start/end entries, not as a
-			// conversation to resume — so its compactions are recorded nowhere and
-			// reported here instead.
-			const subagentWiring = createCompactionWiring({
-				model,
-				store: undefined,
-				streamFn: ctx.streamFn,
-				trimOldToolResults: ctx.trimOldToolResults,
-				tuning: ctx.compactionTuning,
-				report: (text) => {
-					notes.push(text);
-					ctx.report?.(`[${definition.agentType}] ${text}`);
-				},
-			});
-
-			const subSession = new AgentSession({
-				model,
-				systemPrompt: ctx.systemPromptFor?.(definition) ?? agentSystemPrompt(definition),
-				tools,
-				maxTurns: input.max_turns ?? definition.maxTurns,
-				cwd: toolCtx.cwd,
-				permissionMode,
-				sandbox,
-				network,
-				deps: {
-					streamFn: ctx.streamFn,
-					// The parent's reader, not its current answer: a `/think` that lands
-					// while the subagent runs is seen by the subagent's next request,
-					// which is the same call-time shape the axes above travel by.
-					thinkingLevel: ctx.thinkingLevel,
-					checkCompaction: subagentWiring.checkCompaction,
-					// Subagents inherit the parent's rules; an "ask" goes up to the
-					// session's own queue when the host wired the funnel, labeled with
-					// this subagent so the person answering knows who is asking. A host
-					// without a dialog — a `-p` run, a test — gets no funnel, and there
-					// an ask fails closed rather than hanging or auto-allowing.
-					canUseTool: permissionMode
-						? async (toolName, permInput, permCtx) => {
-								const decision = evaluatePermissions(toolName, permInput, {
-									mode: permCtx.mode,
-									sandbox: permCtx.sandbox,
-									rules: ctx.getPermissionRules?.() ?? [],
-									cwd: toolCtx.cwd,
-									readOnlyToolNames,
-								});
-								if (decision.behavior !== "ask") return decision;
-								const ask = ctx.requestPermission;
-								if (!ask) {
-									return {
-										behavior: "deny",
-										message:
-											decision.message ?? `Permission required for ${toolName} (subagents cannot prompt interactively)`,
-									};
-								}
-								// The record says `waiting` for exactly as long as the ask is
-								// up: the run is alive but not progressing, and that is the
-								// one thing a person watching the listing needs to see. The
-								// signal travels along so the queue can withdraw the ask the
-								// moment the run is stopped, abort included.
-								registry.askStarted(handle);
-								try {
-									const allowed = await ask(toolName, permInput, subagentSourceLabel(handle), permCtx.signal);
-									if (allowed) return { behavior: "allow" };
-									// The session's own words for this, so a denial reads the
-									// same wherever it was decided.
-									return { behavior: "deny", message: "User denied permission" };
-								} finally {
-									registry.askEnded(handle);
-								}
-							}
-						: undefined,
-				},
-			});
-
-			// Sidechain persistence: record start + final transcript in the parent tree.
-			const sidechainId = `sidechain-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-			const handle: SubagentHandle = {
-				sidechainId,
-				agentType: definition.agentType,
-				// The description the tool has always asked for, finally used for
-				// what it was always good for: a one-line label for the listing.
-				// Folded and trimmed so a listing stays one line per row.
-				title: input.description.replace(/\s+/g, " ").trim() || "(no description)",
-				startedAt: Date.now(),
-				session: subSession,
-				notes,
-				state: "live",
-				pendingAsks: 0,
-				endedAt: 0,
-			};
-			registry.register(handle);
-			store?.appendCustom("subagent_start", { sidechainId, agentType: definition.agentType, prompt: input.prompt });
-
-			const { reason, events } = await runPrompt(handle, input.prompt, toolCtx.signal);
-			const finalText = finalReport(subSession);
-			store?.appendCustom("subagent_end", {
-				sidechainId,
-				reason,
-				toolCalls: events,
-				messages: subSession.messages.length,
-				notes,
-				report: finalText,
-			});
-
-			// Interrupted subagents report the interruption, not a summary that
-			// happens to trail off mid-thought. The id line rides along so the
-			// conversation can be picked back up: an interrupted run keeps its
-			// messages, and SendMessage continues from them.
-			if (toolCtx.signal.aborted) {
-				return {
-					content: [textContent(`Tool execution aborted\n\n${idLine(sidechainId)}`)],
-					isError: true,
-					details: { sidechainId, agentType: definition.agentType, reason },
-				};
-			}
-
-			const summary = reason === "completed" ? finalText : `${finalText}\n\n[subagent ended: ${reason}]`;
-			return {
-				content: [textContent(`${summary}\n\n${idLine(sidechainId)}`)],
-				details: { sidechainId, agentType: definition.agentType, reason },
-			};
-		},
+		call: (input, toolCtx) => spawnSubagent(input, toolCtx),
 	});
 
 	/**
@@ -615,6 +692,20 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 	});
 
 	/**
+	 * End a run, by the same mechanics wherever it is asked for: the model's
+	 * TaskStop and the person's `/subagents stop` must not be two things that
+	 * drift. The handle is marked never-resumed before the abort lands, the
+	 * order `runPrompt`'s ending arbitration depends on — a stop already in
+	 * flight outranks the run simply ending.
+	 */
+	const halt = (handle: SubagentHandle): boolean => {
+		const wasLive = handle.state === "live";
+		registry.stop(handle);
+		if (wasLive) handle.session.abort();
+		return wasLive;
+	};
+
+	/**
 	 * Cancel: abort a running subagent, or mark a finished one so it is never
 	 * continued. Stopping does not undo anything the subagent already did —
 	 * its side effects stand, and its partial report stays where it was
@@ -636,9 +727,7 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 			if (handle.state === "stopped") {
 				return { content: [textContent(`Subagent ${input.sidechain_id} was already stopped.`)] };
 			}
-			const wasLive = handle.state === "live";
-			registry.stop(handle);
-			if (wasLive) handle.session.abort();
+			const wasLive = halt(handle);
 			return {
 				content: [
 					textContent(
@@ -652,5 +741,28 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 		},
 	});
 
-	return [task, sendMessage, taskStop];
+	/**
+	 * The user-side surface over the same fleet: `/subagents stop|retry` must
+	 * reach a person exactly what TaskStop and Task reach the model. Built
+	 * here, from the same `halt` and the same `spawnSubagent`, so there is one
+	 * implementation of each and nothing to keep in step.
+	 */
+	const control: SubagentControl = {
+		stop: (handle) => halt(handle),
+		retry: (handle, scope, onSpawned) =>
+			spawnSubagent(
+				{
+					// The label was folded at spawn time; as a fresh description it
+					// is still what the row says, which is what the person picked.
+					description: handle.title,
+					prompt: handle.prompt,
+					subagent_type: handle.agentType,
+					max_turns: handle.maxTurns,
+				},
+				scope,
+				onSpawned,
+			),
+	};
+
+	return [task, sendMessage, taskStop, control];
 }

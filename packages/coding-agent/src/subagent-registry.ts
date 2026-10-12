@@ -92,6 +92,20 @@ export interface SubagentHandle extends SubagentProgress {
 	 */
 	pendingAsks: number;
 	/**
+	 * The original Task prompt, kept so the task can be asked again.
+	 *
+	 * A retry owned by the person watching must re-ask the same question, and
+	 * the prompt is only otherwise in the parent model's conversation — asking
+	 * the model to repeat a call it already made is the work this saves.
+	 */
+	prompt: string;
+	/**
+	 * The original Task call's `max_turns`, when it set one. A retry runs on
+	 * the same terms as the attempt it repeats; dropping a cap silently would
+	 * make the retry a different task than the one that failed.
+	 */
+	maxTurns?: number;
+	/**
 	 * The nested session, kept alive after its first run so that a continuation
 	 * continues the same conversation. That is the whole difference between
 	 * SendMessage and a second Task call, so the session must outlive the call

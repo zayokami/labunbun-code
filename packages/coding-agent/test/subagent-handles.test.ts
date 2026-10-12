@@ -1,5 +1,6 @@
 /**
- * Subagent handles: what SendMessage and TaskStop make of an id.
+ * Subagent handles: what SendMessage and TaskStop make of an id, and the
+ * user-side control that stops and retries through the same mechanics.
  *
  * Task used to be one-shot — spawn, report, gone — so a follow-up meant a
  * fresh subagent that had none of the first one's context. The handle, the id
@@ -16,7 +17,7 @@ import { join } from "node:path";
 import { type AnyTool, buildTool, type PermissionMode, SessionStore, type ToolResult } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { z } from "zod";
-import { SubagentRegistry, subagentStatus } from "../src/subagent-registry.ts";
+import { type SubagentHandle, SubagentRegistry, subagentStatus } from "../src/subagent-registry.ts";
 import { createSubagentTools } from "../src/subagents.ts";
 
 function echoTool(): AnyTool {
@@ -597,5 +598,110 @@ describe("the ask funnel", () => {
 		expect(text(stopped)).toContain("was stopped");
 		expect(seenSignal?.aborted).toBe(true);
 		expect(text(result)).toContain("[subagent ended: aborted]");
+	});
+});
+
+/**
+ * The user-side controls: the same mechanics the tools use, reached by a
+ * person instead of the model. A stop must be the TaskStop abort, and a retry
+ * must be the Task spawn — a stop that only marked a record while the run
+ * kept streaming would read as working while doing nothing.
+ */
+describe("the control surface", () => {
+	test("control.retry re-runs the original task as a fresh subagent, on the same terms", async () => {
+		const faux = fauxProvider([{ text: "FIRST REPORT" }, { text: "SECOND REPORT" }]);
+		const registry = new SubagentRegistry();
+		const [task, , , control] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [],
+			definitions: () => [],
+			registry,
+		});
+
+		await task.call({ description: "x", prompt: "reproduce the flake", max_turns: 3 }, callCtx());
+		const original = registry.list()[0];
+		if (!original) throw new Error("no handle registered");
+		expect(original.prompt).toBe("reproduce the flake");
+		expect(original.maxTurns).toBe(3);
+
+		let spawned: SubagentHandle | undefined;
+		const done = control.retry(original, { cwd: process.cwd() }, (handle) => {
+			spawned = handle;
+		});
+		// The new id is readable before the run ends — the moment the transcript
+		// note "Retrying … as <id>" is printed from.
+		expect(spawned?.sidechainId).toBeDefined();
+		expect(spawned?.sidechainId).not.toBe(original.sidechainId);
+		expect(spawned?.prompt).toBe("reproduce the flake");
+		expect(spawned?.maxTurns).toBe(3);
+
+		const result = await within(done, 5000);
+		expect(result).toBeDefined();
+		expect(text(result as ToolResult)).toContain("SECOND REPORT");
+
+		// A fresh conversation: the retry request carries the original prompt and
+		// none of the first run's report — retry re-asks the task, it does not
+		// continue it (that is SendMessage's job).
+		const second = JSON.stringify(faux.receivedContexts[1]?.messages);
+		expect(second).toContain("reproduce the flake");
+		expect(second).not.toContain("FIRST REPORT");
+		expect(registry.list()).toHaveLength(2);
+		expect(registry.list()[1]?.state).toBe("finished");
+	});
+
+	test("control.stop aborts a live run — the same abort TaskStop sends", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const faux = fauxProvider([{ toolCalls: [{ name: "gate", arguments: {} }] }, { text: "never reached" }]);
+		const registry = new SubagentRegistry();
+		const [task, sendMessage, , control] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [gatedTool(() => entered.resolve(), release.promise)],
+			definitions: () => [],
+			registry,
+		});
+
+		const call = task.call({ description: "x", prompt: "block" }, callCtx());
+		await entered.promise;
+		const live = registry.list()[0];
+		if (!live) throw new Error("no handle registered");
+		expect(subagentStatus(live)).toBe("running");
+
+		expect(control.stop(live)).toBe(true);
+		const result = await within(call, 5000);
+		expect(result).toBeDefined();
+		expect(text(result as ToolResult)).toContain("[subagent ended: aborted]");
+		expect(live.state).toBe("stopped");
+
+		// The same verdict TaskStop leaves: not continued, and the refusal does
+		// not run the subagent anyway.
+		const refused = await sendMessage.call({ sidechain_id: live.sidechainId, message: "go on" }, callCtx());
+		expect(refused.isError).toBe(true);
+		expect(faux.receivedContexts).toHaveLength(1);
+	});
+
+	test("control.stop on a finished handle only marks it never-resumed", async () => {
+		const faux = fauxProvider([{ text: "REPORT" }]);
+		const registry = new SubagentRegistry();
+		const [task, sendMessage, , control] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [],
+			definitions: () => [],
+			registry,
+		});
+
+		await task.call({ description: "x", prompt: "do it" }, callCtx());
+		const done = registry.list()[0];
+		if (!done) throw new Error("no handle registered");
+		expect(control.stop(done)).toBe(false);
+		expect(done.state).toBe("stopped");
+		// The outcome the run reached survives the stop — it did finish.
+		expect(subagentStatus(done)).toBe("completed");
+
+		const refused = await sendMessage.call({ sidechain_id: done.sidechainId, message: "more" }, callCtx());
+		expect(refused.isError).toBe(true);
 	});
 });

@@ -15,6 +15,7 @@ function handle(overrides: Partial<SubagentHandle> = {}): SubagentHandle {
 		sidechainId: "sidechain-1-aaaa",
 		agentType: "general-purpose",
 		title: "Research the thing",
+		prompt: "Research the thing",
 		startedAt: 1_000,
 		endedAt: 0,
 		pendingAsks: 0,

@@ -346,7 +346,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// Read at the call, like the REPL's: the definition list is a getter because a
 	// definition approved mid-session joins it, and the store because a sidechain
 	// belongs to whichever session is live.
-	const subagentTools = createSubagentTools({
+	const [taskTool, sendMessageTool, taskStopTool] = createSubagentTools({
 		streamFn,
 		model: () => model,
 		resolveModel,
@@ -372,6 +372,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		compactionTuning,
 		report: (text) => console.error(text),
 	});
+	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
 	const allTools = [...tools, ...mcpTools, ...subagentTools];
 	// The plan gate's read-only answer, from the tool objects themselves (see
 	// `collectReadOnlyToolNames`). A constant here: unlike the REPL, nothing

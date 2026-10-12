@@ -185,13 +185,20 @@ import {
 	skillsAsCommands,
 	withheldProjectSkills,
 } from "./skills.ts";
-import { formatSubagentList } from "./subagent-commands.ts";
-import { SubagentRegistry } from "./subagent-registry.ts";
+import {
+	formatRetryEnding,
+	formatSubagentList,
+	formatSubagentLog,
+	resolveSubagentId,
+	subagentPickerItems,
+} from "./subagent-commands.ts";
+import { type SubagentHandle, SubagentRegistry, subagentStatus } from "./subagent-registry.ts";
 import {
 	type AgentDefinition,
 	createSubagentTools,
 	GENERAL_PURPOSE,
 	loadAgentDefinitions,
+	type SubagentControl,
 	withheldProjectAgents,
 } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
@@ -636,7 +643,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// The host's own registry, so `/subagents` can see lifecycles the REPL
 	// did not spawn — the tools hold no display state of their own.
 	const subagentRegistry = new SubagentRegistry();
-	const subagentTools = createSubagentTools({
+	const [taskTool, sendMessageTool, taskStopTool, subagentControl] = createSubagentTools({
 		streamFn,
 		// Read through the session, not captured: /model swaps the model and
 		// /resume swaps the session a sidechain is written into, and a subagent
@@ -666,6 +673,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			return app.requestPermission(toolName, input, source, signal);
 		},
 	});
+	// The three tools as one list for every consumer that spreads them; the
+	// control rides beside them for the command layer only.
+	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd);
 	// What the trust gate is withholding for this directory. Project-tier agent
 	// definitions and skills load only after one approval (`project-trust.ts`), and
@@ -1317,6 +1327,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				withheldAgents,
 				withheldSkills,
 				subagents: subagentRegistry,
+				subagentControl,
 				pad,
 				padWatch,
 				compaction: compactionWiring.manager,
@@ -1720,6 +1731,12 @@ interface AppCommandContext {
 	 */
 	subagents: SubagentRegistry;
 	/**
+	 * The same fleet, from the acting side: `/subagents stop|retry` ends and
+	 * restarts runs with the mechanics TaskStop and Task use — one
+	 * implementation of each, which is the point of holding it here.
+	 */
+	subagentControl: SubagentControl;
+	/**
 	 * The controller, when this session has one. Null only for a caller that
 	 * builds a context without one — every interactive session has a runtime,
 	 * switched on or not, because `/gamepad on` has to be able to reach it.
@@ -1892,7 +1909,7 @@ export function appCommandTable(): Array<[string, string]> {
 		["/rewind", "Restore a file from a checkpoint: /rewind [number]"],
 		["/status", "Show model, context usage, cost, and settings at a glance"],
 		["/stop", "Stop a background shell: /stop [id]"],
-		["/subagents", "List subagents this session spawned, with their state and age"],
+		["/subagents", "List subagents, and act on one: /subagents [stop|retry|log] [id] — no id opens a picker"],
 		["/theme", "Show or switch the theme: /theme [name|auto]"],
 		["/think", `Show or set how hard the model thinks: /think [${THINKING_LEVELS.join("|")}]`],
 		["/tree", "Show the session branch tree"],
@@ -2244,7 +2261,95 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return true;
 		}
 		case "/subagents": {
-			pushInfo(ctx.handle, formatSubagentList(ctx.subagents.list(), Date.now()));
+			// Bare `/subagents` lists; the three verbs act. Same shape as
+			// `/ps` and `/stop`: an id argument acts directly, no argument opens
+			// a picker over what the verb applies to.
+			const [verb, ...rest] = text.split(/\s+/).slice(1);
+			const arg = rest.join(" ").trim();
+			const all = ctx.subagents.list();
+			// Resolve `<id>` or pick from `eligible`; when neither applies, say
+			// why nothing happened instead of acting on the wrong run.
+			const resolveTarget = async (
+				eligible: SubagentHandle[],
+				pickerTitle: string,
+				emptyLine: string,
+			): Promise<SubagentHandle | null> => {
+				if (arg) {
+					const found = resolveSubagentId(arg, all);
+					if (!found) {
+						pushInfo(ctx.handle, `No subagent "${arg}". /subagents lists them.`);
+						return null;
+					}
+					return found;
+				}
+				if (eligible.length === 0) {
+					pushInfo(ctx.handle, emptyLine);
+					return null;
+				}
+				if (!ctx.handle) return null;
+				const index = await ctx.handle.pickFromList(pickerTitle, subagentPickerItems(eligible, Date.now()));
+				return index === null ? null : (eligible[index] ?? null);
+			};
+			if (verb === "stop" || verb === "retry" || verb === "log") {
+				void (async () => {
+					if (verb === "stop") {
+						const target = await resolveTarget(
+							all.filter((handle) => handle.state === "live"),
+							"Stop a subagent",
+							"No subagents are running.",
+						);
+						if (!target) return;
+						if (target.state === "stopped") {
+							pushInfo(ctx.handle, `${target.sidechainId} was already stopped.`);
+							return;
+						}
+						const wasLive = ctx.subagentControl.stop(target);
+						pushInfo(
+							ctx.handle,
+							wasLive
+								? `Stopped ${target.sidechainId}; it will not be resumed.`
+								: `${target.sidechainId} had already ended; it is now marked stopped and will not be continued.`,
+						);
+						return;
+					}
+					if (verb === "retry") {
+						const retryable = all.filter((handle) => {
+							const status = subagentStatus(handle);
+							return status === "failed" || status === "cancelled";
+						});
+						const target = await resolveTarget(retryable, "Retry a subagent", "No failed subagents to retry.");
+						if (!target) return;
+						const status = subagentStatus(target);
+						if (status !== "failed" && status !== "cancelled") {
+							pushInfo(
+								ctx.handle,
+								`${target.sidechainId} is ${status}; only failed or cancelled subagents can be retried.`,
+							);
+							return;
+						}
+						// A fresh conversation on the same terms; SendMessage is the door
+						// for continuing the old one. No turn holds this run's cancel —
+						// it is stopped with `/subagents stop`, like any other subagent.
+						const done = ctx.subagentControl.retry(target, { cwd: ctx.cwd }, (spawned) =>
+							pushInfo(ctx.handle, `Retrying "${target.title}" as ${spawned.sidechainId}.`),
+						);
+						void done.then(
+							(result) => pushInfo(ctx.handle, formatRetryEnding(target.sidechainId, result)),
+							(error) =>
+								pushInfo(
+									ctx.handle,
+									`Retry of ${target.sidechainId} failed: ${error instanceof Error ? error.message : String(error)}`,
+								),
+						);
+						return;
+					}
+					const target = await resolveTarget(all, "Show a subagent's log", "No subagents have run in this session.");
+					if (!target) return;
+					pushInfo(ctx.handle, formatSubagentLog(target, Date.now()));
+				})();
+				return true;
+			}
+			pushInfo(ctx.handle, formatSubagentList(all, Date.now()));
 			return true;
 		}
 		case "/export": {
