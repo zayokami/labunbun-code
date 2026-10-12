@@ -8,10 +8,15 @@
  * and is covered where the manager is.
  */
 import { describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BackgroundShell } from "@labunbun/tools";
 import { createStore, DARK_THEME, LIVE_OUTPUT_LINES } from "@labunbun/tui";
 import { formatShellOutput, resolveShellId, shellAge, shellPickerItems } from "../src/background-commands.ts";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
+import type { RecoveredShell } from "../src/shell-ledger.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -145,9 +150,16 @@ describe("the /ps and /stop commands", () => {
 		refreshes: () => number;
 		/** Every picker that was opened, with the rows it was given. */
 		picked: Array<{ title: string; labels: string[] }>;
+		/** The live recovered list the context was handed, for splice assertions. */
+		recovered: RecoveredShell[];
 	}
 
-	function makeCtx(shells: BackgroundShell[], output = "boot\nlistening on :3000\n"): Ctx {
+	function makeCtx(
+		shells: BackgroundShell[],
+		output = "boot\nlistening on :3000\n",
+		recovered: RecoveredShell[] = [],
+		pick: number | null = 0,
+	): Ctx {
 		const store = createStore<{ entries: Array<{ kind: string; text: string }> }>({ entries: [] });
 		const killed: string[] = [];
 		let refreshes = 0;
@@ -158,9 +170,10 @@ describe("the /ps and /stop commands", () => {
 				store,
 				pickFromList: (title: string, items: Array<{ label: string }>) => {
 					picked.push({ title, labels: items.map((item) => item.label) });
-					return Promise.resolve(0);
+					return Promise.resolve(pick);
 				},
 			},
+			recoveredShells: recovered,
 			backgroundShells: {
 				list: () => shells,
 				output: () => output,
@@ -190,7 +203,14 @@ describe("the /ps and /stop commands", () => {
 			hotSwapSession: async () => {},
 			switchModel: () => false,
 		} as unknown as AppCommandContext;
-		return { ctx, infos: () => store.get().entries.map((e) => e.text), killed, refreshes: () => refreshes, picked };
+		return {
+			ctx,
+			infos: () => store.get().entries.map((e) => e.text),
+			killed,
+			refreshes: () => refreshes,
+			picked,
+			recovered,
+		};
 	}
 
 	test("/ps with nothing to show says so and never opens a picker", async () => {
@@ -255,4 +275,72 @@ describe("the /ps and /stop commands", () => {
 		expect(t.infos().join("\n")).toContain("No background shells are running.");
 		expect(t.picked).toEqual([]);
 	});
+
+	test("/ps lists recovered shells beside this run's, and reads their log from the file", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-ps-"));
+		try {
+			const log = join(dir, "old.log");
+			writeFileSync(log, "still serving\n");
+			const old: RecoveredShell = {
+				...shell({ id: "pid-4242", command: "vite", outputFile: log }),
+				pid: 4242,
+				recovered: true,
+			};
+			// The picker lands on the second row: the recovered shell, which has no
+			// manager entry behind it — its output can only come from the log file
+			// the ledger recorded at its start.
+			const t = makeCtx([shell({ id: "shell_1" })], "fresh\n", [old], 1);
+			handleAppCommand("/ps", t.ctx);
+			await tick();
+			expect(t.picked[0].labels).toEqual(["shell_1  npm run dev", "pid-4242  vite"]);
+			expect(t.infos().join("\n")).toContain("pid-4242:");
+			expect(t.infos().join("\n")).toContain("still serving");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("/stop with no argument offers recovered shells too", async () => {
+		const old: RecoveredShell = {
+			...shell({ id: "pid-777", command: "node server.js" }),
+			pid: 777,
+			recovered: true,
+		};
+		// Cancel the picker: this test is about what is offered, and the kill path
+		// has its own test — cancelling is the one choice that cannot touch a pid.
+		const t = makeCtx([], undefined, [old], null);
+		handleAppCommand("/stop", t.ctx);
+		await tick();
+		expect(t.picked.map((p) => p.title)).toEqual(["Stop a background shell"]);
+		expect(t.picked[0].labels).toEqual(["pid-777  node server.js"]);
+		expect(t.infos()).toEqual([]);
+	});
+
+	test("/stop ends a recovered shell by pid — there is no handle to hand the manager", async () => {
+		// No `> nul`: the win32 shell is a POSIX one, where that redirect is a
+		// file named `nul` in the working directory, not the null device.
+		// `stdio: "ignore"` already silences the output.
+		const command = process.platform === "win32" ? "ping -n 30 127.0.0.1" : "sleep 30";
+		const proc = spawn(command, { shell: true, stdio: "ignore", windowsHide: true });
+		const pid = proc.pid;
+		if (pid === undefined) throw new Error("spawn produced no pid");
+		try {
+			const old: RecoveredShell = { ...shell({ id: `pid-${pid}` }), pid, recovered: true };
+			const t = makeCtx([], undefined, [old]);
+			handleAppCommand(`/stop pid-${pid}`, t.ctx);
+			await tick();
+			expect(t.infos().join("\n")).toContain(`Stopped pid-${pid}`);
+			// Stopped must also leave the offered list, or the next `/stop` offers
+			// a shell that is already gone.
+			expect(t.recovered).toHaveLength(0);
+
+			// The signal really went to the process. Poll the invariant rather than
+			// awaiting `exited` — a pairing that broke would leave a ping running
+			// for its full 30 seconds, and a test that waits that out is a hang.
+			for (let i = 0; i < 100 && proc.exitCode === null; i++) await new Promise((r) => setTimeout(r, 50));
+			expect(proc.exitCode).not.toBeNull();
+		} finally {
+			proc.kill("SIGKILL");
+		}
+	}, 15_000);
 });

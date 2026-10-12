@@ -329,6 +329,21 @@ function createExecCapture(dir: string) {
 	};
 }
 
+/**
+ * How long a child's pipes may keep draining after the process has exited.
+ *
+ * The `close` event means "exited and drained", and it is the drain that can
+ * fail: on Windows, killing a Git Bash with `taskkill /T` while it is
+ * mid-fork was measured to leave a half-forked `bash.exe` child alive holding
+ * the inherited stdio handles — the shell is dead and `exit` fires on
+ * schedule, but `close` never arrives. A command that leaves an ordinary
+ * background process behind (`sleep 15 & echo ok`: the shell exits in under a
+ * second while the sleep keeps the pipe) has the same shape with no kill at
+ * all. The grace bounds the wait; a command whose pipes close normally
+ * settles in milliseconds and clears the timer unseen.
+ */
+const EXIT_DRAIN_GRACE_MS = 2_000;
+
 export class ChildProcessExecOperations implements ExecOperations {
 	#shell: ReturnType<typeof detectShell>;
 	// Long-form design notes: docs/dev/tools.md
@@ -679,7 +694,20 @@ export class ChildProcessExecOperations implements ExecOperations {
 				else stderr += note;
 				finish(127);
 			});
-			child.on("close", (code) => finish(killed ? 124 : (code ?? 0)));
+			// Settling on `close` alone waits for a drain that can never finish:
+			// see EXIT_DRAIN_GRACE_MS for the measured shapes. `exit` is the
+			// process ending, which always arrives; `close` is the normal, prompt
+			// path and cancels the grace; whichever comes first settles the call.
+			const end = (code: number | null) => finish(killed ? 124 : (code ?? 0));
+			let exitGrace: ReturnType<typeof setTimeout> | null = null;
+			child.on("exit", (code) => {
+				if (settled) return;
+				exitGrace = setTimeout(() => end(code), EXIT_DRAIN_GRACE_MS);
+			});
+			child.on("close", (code) => {
+				if (exitGrace) clearTimeout(exitGrace);
+				end(code);
+			});
 		});
 	}
 }

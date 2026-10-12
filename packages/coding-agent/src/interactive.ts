@@ -75,6 +75,7 @@ import {
 	describeSandboxBackend,
 	describeWritableRoots,
 	detectRuntime,
+	killPidTree,
 	networkConfinement,
 	type Operations,
 	ReadFileState,
@@ -176,6 +177,14 @@ import {
 	type Settings,
 	shadowedChoiceNotice,
 } from "./settings.ts";
+import {
+	attachShellLedger,
+	formatShellRecovery,
+	isRecoveredShell,
+	type RecoveredShell,
+	readShellLedger,
+	recoveredShellOutput,
+} from "./shell-ledger.ts";
 import { createShellPassthrough } from "./shell-passthrough.ts";
 import {
 	loadSkillsWithNotes,
@@ -401,6 +410,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// is explained rather than contradicted.
 	if (damageNotice) console.error(`Warning: ${damageNotice}`);
 
+	// What the previous run left behind: shells still running with nobody
+	// watching them, and shells that ended with nobody watching. Printed here
+	// for the same reason as the warning above — a fresh session reads an empty
+	// ledger and says nothing.
+	const shellRecovery = readShellLedger(store);
+	const recoveryNotice = formatShellRecovery(shellRecovery);
+	if (recoveryNotice) console.error(`Warning: ${recoveryNotice}`);
+
 	// ---- tools & session ----
 	const taskStore = new TaskStore();
 	// The list survives the process by living in the session file: this run starts
@@ -419,6 +436,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// the same shells the Bash tool started; the factory would otherwise make a
 	// private manager nobody else can see.
 	const backgroundShells = new BackgroundShellManager(detectRuntime(), ops);
+	// Every shell this session starts goes onto the session file too, so a
+	// later run can find the ones that outlive this process — and stop them.
+	const detachShellLedger = attachShellLedger(backgroundShells, () => store);
 	// Results too large for the context go here instead of being thrown away, and
 	// Read is allowed back into this directory to fetch them.
 	const tools = createAllTools(cwd, {
@@ -1304,6 +1324,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				getSession: () => sessionRef,
 				handle,
 				backgroundShells,
+				// The shells the ledger recovered: `/ps` lists them beside this run's,
+				// and `/stop` ends one by pid. The live array the report counted, so a
+				// shell stopped here is gone from the next picker too.
+				recoveredShells: shellRecovery.alive,
 				refreshBackgroundShells: publishShells,
 				settings,
 				cwd,
@@ -1461,6 +1485,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	catalogAbort.abort();
 	unsubTasks();
 	detachShellNotices();
+	detachShellLedger();
 	clearInterval(shellPoll);
 	// A band member mid-request is an in-flight request like any other, and
 	// nothing is waiting for its answer once the user has quit.
@@ -1663,6 +1688,12 @@ interface AppCommandContext {
 	handle: ReplAppHandle | null;
 	/** The shells the Bash tool started; `/ps` and `/stop` act on these. */
 	backgroundShells: BackgroundShellAccess;
+	/**
+	 * Shells a previous run left running, recovered from the session ledger.
+	 * They are offered beside this run's shells; stopping one goes by pid,
+	 * because there is no handle here for a process from another process.
+	 */
+	recoveredShells?: RecoveredShell[];
 	/** Republish the status row after a shell changes state outside the poll. */
 	refreshBackgroundShells(): void;
 	settings: Settings;
@@ -2215,7 +2246,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		}
 		case "/ps": {
 			void (async () => {
-				const shells = ctx.backgroundShells.list();
+				const shells: BackgroundShell[] = [...ctx.backgroundShells.list(), ...(ctx.recoveredShells ?? [])];
 				if (shells.length === 0) {
 					pushInfo(ctx.handle, "No background shells.");
 					return;
@@ -2226,19 +2257,38 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const shell = shells[index];
 				// The tail, not the whole file: the question is what it is saying now,
 				// and a dev server's log is mostly the first ten lines over and over.
-				pushInfo(ctx.handle, formatShellOutput(shell.id, ctx.backgroundShells.output(shell.id)));
+				const output = isRecoveredShell(shell) ? recoveredShellOutput(shell) : ctx.backgroundShells.output(shell.id);
+				pushInfo(ctx.handle, formatShellOutput(shell.id, output));
 			})();
 			return true;
 		}
 		case "/stop": {
 			const arg = text.split(/\s+/).slice(1).join(" ").trim();
 			const stop = (shell: BackgroundShell): void => {
+				if (isRecoveredShell(shell)) {
+					// No handle exists here for a process another process started, so
+					// the kill goes by pid — the same mechanics the manager uses on its
+					// own shells. A pid that no longer answers is reported as gone
+					// rather than stopped, which would claim a kill that never happened.
+					const killed = killPidTree(shell.pid);
+					if (killed) {
+						const at = ctx.recoveredShells?.indexOf(shell) ?? -1;
+						if (at >= 0) ctx.recoveredShells?.splice(at, 1);
+					}
+					pushInfo(
+						ctx.handle,
+						killed
+							? `Stopped ${shell.id} — it was left running by a previous run.`
+							: `${shell.id} is not running any more.`,
+					);
+					return;
+				}
 				const killed = ctx.backgroundShells.kill(shell.id);
 				ctx.refreshBackgroundShells();
 				pushInfo(ctx.handle, killed ? `Stopped ${shell.id}.` : `${shell.id} is not running.`);
 			};
 			void (async () => {
-				const all = ctx.backgroundShells.list();
+				const all: BackgroundShell[] = [...ctx.backgroundShells.list(), ...(ctx.recoveredShells ?? [])];
 				if (arg) {
 					const target = resolveShellId(arg, all);
 					if (!target) {

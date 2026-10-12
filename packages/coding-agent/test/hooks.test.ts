@@ -101,7 +101,7 @@ describe("PreToolUse blocking", () => {
 	});
 
 	test("timeout kills hung hooks", async () => {
-		const command = process.platform === "win32" ? `ping -n 10 127.0.0.1 > nul` : `sleep 5`;
+		const command = process.platform === "win32" ? `ping -n 10 127.0.0.1` : `sleep 5`;
 		const runtime = snapshotHooks({ Notification: [{ hooks: [{ command, timeout: 300 }] }] });
 		const started = Date.now();
 		const outcome = await runtime.run("Notification", {});

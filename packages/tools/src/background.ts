@@ -43,6 +43,43 @@ export interface BackgroundShell {
 	startTime: number;
 	status: ShellStatus;
 	exitCode: number | null;
+	/**
+	 * The OS process id, when the spawn produced one. Carried on the record
+	 * rather than re-read from the ChildProcess so a record that leaves the
+	 * manager — one written to the session ledger — keeps the one field a
+	 * later run can probe and kill with.
+	 */
+	pid?: number;
+}
+
+// Long-form design notes: docs/dev/tools.md
+/**
+ * End a process tree by pid, best effort — the same mechanics `kill` gives a
+ * tracked shell, for a process no manager here ever held: one a previous run
+ * left running, found again through the session ledger. Returns whether an
+ * attempt was made; a pid this process can no longer reach is false.
+ */
+export function killPidTree(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	if (process.platform === "win32") {
+		const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+		killer.on("error", () => {
+			// taskkill itself failed to spawn — fall back to the direct signal so
+			// the process doesn't linger while we've already reported it killed.
+			try {
+				process.kill(pid);
+			} catch {
+				// already gone
+			}
+		});
+		return true;
+	}
+	try {
+		process.kill(pid);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 interface ShellEntry {
@@ -73,6 +110,10 @@ export class BackgroundShellManager {
 	readonly #entries = new Map<string, ShellEntry>();
 	/** Who to tell when a shell finishes on its own; see `onComplete`. */
 	readonly #exitHandlers = new Set<(shell: BackgroundShell) => void>();
+	/** Who to tell when a shell is tracked; see `onSpawned`. */
+	readonly #spawnHandlers = new Set<(shell: BackgroundShell) => void>();
+	/** Who to tell at every end, kill included; see `onSettled`. */
+	readonly #settleHandlers = new Set<(shell: BackgroundShell) => void>();
 	readonly #shell = detectShell();
 	/** Injected for the same reason as `ChildProcessExecOperations`'s: so a test on
 	 * one platform can exercise the wrapping branch for another. */
@@ -109,6 +150,18 @@ export class BackgroundShellManager {
 	}
 
 	// Long-form design notes: docs/dev/tools.md
+	/** The spawn announcements. A subscriber's bug is not the shell's problem. */
+	#onSpawned(info: BackgroundShell): void {
+		for (const handler of this.#spawnHandlers) {
+			try {
+				handler(info);
+			} catch {
+				// The same stance as the end handlers below.
+			}
+		}
+	}
+
+	// Long-form design notes: docs/dev/tools.md
 	/** The first end event a shell reports, and the only one acted on. */
 	#onEnded(entry: ShellEntry): void {
 		if (entry.endedAt !== undefined) return;
@@ -122,6 +175,13 @@ export class BackgroundShellManager {
 					// record down with it — the same stance as `AgentSession`'s
 					// event dispatch.
 				}
+			}
+		}
+		for (const handler of this.#settleHandlers) {
+			try {
+				handler(entry.info);
+			} catch {
+				// Same stance again: the record-keeper's bug is not the shell's.
 			}
 		}
 		this.#evictEnded();
@@ -148,6 +208,28 @@ export class BackgroundShellManager {
 	onComplete(handler: (shell: BackgroundShell) => void): () => void {
 		this.#exitHandlers.add(handler);
 		return () => this.#exitHandlers.delete(handler);
+	}
+
+	/**
+	 * Subscribe to shells the moment they are tracked — the record is in the
+	 * map and the process is running. This is where the ledger hears about a
+	 * shell, so a later run can find it by pid. Returns the unsubscribe.
+	 */
+	onSpawned(handler: (shell: BackgroundShell) => void): () => void {
+		this.#spawnHandlers.add(handler);
+		return () => this.#spawnHandlers.delete(handler);
+	}
+
+	/**
+	 * Subscribe to every end — completed and killed alike. `onComplete` is the
+	 * session-facing announcement and stays silent about kills, which are the
+	 * user's own doing; this is the record-keeper's hook, because a ledger fed
+	 * only by natural endings would leave every killed shell looking forever
+	 * running. Returns the unsubscribe.
+	 */
+	onSettled(handler: (shell: BackgroundShell) => void): () => void {
+		this.#settleHandlers.add(handler);
+		return () => this.#settleHandlers.delete(handler);
 	}
 
 	// Long-form design notes: docs/dev/tools.md
@@ -200,6 +282,7 @@ export class BackgroundShellManager {
 			startTime: Date.now(),
 			status: "running",
 			exitCode: null,
+			pid: proc.pid,
 		};
 		const entry: ShellEntry = { info, proc };
 		this.#entries.set(id, entry);
@@ -210,6 +293,10 @@ export class BackgroundShellManager {
 		proc.stdout?.on("data", append);
 		proc.stderr?.on("data", append);
 		this.#attachExit(entry, append);
+		// After the exit wiring, so a shell that dies faster than the caller can
+		// look still announces its start before its end — the ledger's pairing
+		// needs the start on file whichever way the race goes.
+		this.#onSpawned(info);
 
 		return info;
 	}
@@ -237,10 +324,12 @@ export class BackgroundShellManager {
 			startTime: input.startTime,
 			status: "running",
 			exitCode: null,
+			pid: input.child.pid,
 		};
 		const entry: ShellEntry = { info, proc: input.child };
 		this.#entries.set(id, entry);
 		this.#attachExit(entry, logAppender(outputFile));
+		this.#onSpawned(info);
 
 		return info;
 	}
@@ -293,16 +382,7 @@ export class BackgroundShellManager {
 	kill(id: string): boolean {
 		const entry = this.#entries.get(id);
 		if (entry?.info.status !== "running" || !entry.proc.pid) return false;
-		if (process.platform === "win32") {
-			const killer = spawn("taskkill", ["/pid", String(entry.proc.pid), "/T", "/F"], { windowsHide: true });
-			killer.on("error", () => {
-				// taskkill itself failed to spawn — fall back to the direct signal so
-				// the process doesn't linger while we've already reported it killed.
-				entry.proc.kill();
-			});
-		} else {
-			entry.proc.kill();
-		}
+		killPidTree(entry.proc.pid);
 		entry.info.status = "killed";
 		return true;
 	}

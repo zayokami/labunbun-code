@@ -683,3 +683,50 @@ describe("a session file that lost a line", () => {
 		]);
 	}, 30_000);
 });
+
+describe("the shells a previous run left behind", () => {
+	test("a shell still running is reported on resume, named for /stop", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+		// This process's own pid: alive by construction on whichever machine runs
+		// the suite, and it is the probe — not a spawn — that is under test.
+		store.appendCustom("shell_start", {
+			shellId: "shell_1",
+			pid: process.pid,
+			command: "npm run dev",
+			cwd,
+			startedAt: Date.now(),
+			outputFile: join(cwd, "dev.log"),
+		});
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain(`pid-${process.pid}`);
+		expect(result.stderr).toContain("still running");
+		expect(result.stderr).toContain("/stop");
+	}, 30_000);
+
+	test("a shell the ledger saw end is counted as ended, not reported as running", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+		store.appendCustom("shell_start", {
+			shellId: "shell_1",
+			pid: process.pid,
+			command: "npm run dev",
+			cwd,
+			startedAt: Date.now(),
+			outputFile: join(cwd, "dev.log"),
+		});
+		store.appendCustom("shell_end", { pid: process.pid, status: "killed", exitCode: null });
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		// Paired: not a shell to stop, and the probe is never asked about a pid
+		// the ledger already closed out — this process is alive either way, so
+		// only the pairing can explain the absence.
+		expect(result.stderr).not.toContain("still running");
+		expect(result.stderr).toContain("1 background shell from a previous run has ended.");
+	}, 30_000);
+});

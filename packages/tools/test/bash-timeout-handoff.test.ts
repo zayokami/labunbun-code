@@ -51,8 +51,14 @@ interface Handoff {
 const SLOW_WITH_OUTPUT =
 	process.platform === "win32" ? "echo first && ping -n 5 127.0.0.1" : "echo first; sleep 2; echo second";
 
-/** Runs long enough that only a kill ends it inside a test's lifetime. */
-const LONG_RUNNING = process.platform === "win32" ? "ping -n 30 127.0.0.1 > nul" : "sleep 30";
+/**
+ * Runs long enough that only a kill ends it inside a test's lifetime.
+ *
+ * No `> nul` on the ping: the win32 shell here is Git Bash, where that
+ * redirect is not the null device but a file named `nul` written to the
+ * working directory. The output goes to the shell's pipes either way.
+ */
+const LONG_RUNNING = process.platform === "win32" ? "ping -n 30 127.0.0.1" : "sleep 30";
 
 /**
  * How far a wall-clock lower bound may fall short of the nominal window.
@@ -169,6 +175,24 @@ describe("exec timeout handoff", () => {
 		handoff.killTree();
 		await Promise.race([once(handoff.child, "close"), new Promise((resolve) => setTimeout(resolve, 5_000))]);
 	}, 15_000);
+
+	test("a pipe that outlives its process does not hold the call open — the exit starts a drain grace", async () => {
+		const ops = new ChildProcessExecOperations();
+
+		// The shell exits in under a second; the `sleep` it left behind holds the
+		// stdout pipe, so `close` — "exited and drained" — stays quiet for the
+		// sleep's whole life. A call that waits on `close` alone reads as ≥15s on
+		// this row; the exit-started grace is what bounds it.
+		const started = Date.now();
+		const result = await ops.exec({ command: "sleep 15 & echo ok", cwd: process.cwd(), timeoutMs: 0 });
+
+		expect(result.stdout).toContain("ok");
+		expect(result.killed).toBe(false);
+		expect(result.exitCode).toBe(0);
+		// A 15s sleep against a 2s grace: the bound sits far above the grace's
+		// reading and far below the pipe-wait's.
+		expect(Date.now() - started).toBeLessThan(10_000);
+	}, 20_000);
 });
 
 describe("adopt (unit)", () => {

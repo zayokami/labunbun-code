@@ -190,7 +190,7 @@ describe("background shells (real spawn)", () => {
 
 	test("kill terminates a running shell", async () => {
 		const manager = new BackgroundShellManager();
-		const command = process.platform === "win32" ? "ping -n 30 127.0.0.1 > nul" : "sleep 30";
+		const command = process.platform === "win32" ? "ping -n 30 127.0.0.1" : "sleep 30";
 		const shell = await manager.start(command, process.cwd());
 		await new Promise((r) => setTimeout(r, 300));
 
@@ -215,7 +215,7 @@ describe("background shells (real spawn)", () => {
 		const missing = await outputTool.call({ shell_id: "nope" }, ctx);
 		expect(missing.isError).toBe(true);
 
-		const command = process.platform === "win32" ? "ping -n 30 127.0.0.1 > nul" : "sleep 30";
+		const command = process.platform === "win32" ? "ping -n 30 127.0.0.1" : "sleep 30";
 		const shell = await manager.start(command, process.cwd());
 		const out = await outputTool.call({ shell_id: shell.id }, ctx);
 		expect((out.content[0] as any).text).toContain("still running");
