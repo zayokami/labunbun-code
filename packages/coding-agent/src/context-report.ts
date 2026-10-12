@@ -12,7 +12,8 @@
  * `/status`: this layer knows what the numbers mean, the card knows how rows
  * look.
  */
-import type { CompactionTrigger, ContextBreakdown } from "@labunbun/agent";
+import { createHash } from "node:crypto";
+import type { CompactionTrigger, ContextBreakdown, PreservedFile } from "@labunbun/agent";
 
 const LOW_CONTEXT_WARN_FRACTION = 0.8;
 
@@ -28,6 +29,60 @@ export interface CompactionHistoryEntry {
 	trigger: CompactionTrigger;
 	preTokens: number;
 	postTokens: number;
+	/** The touched files the pass fingerprinted; absent in records that predate this. */
+	preservedFiles?: PreservedFile[];
+}
+
+/**
+ * How the last compaction's kept files read against the disk now.
+ *
+ * The recorded fingerprint is the whole reason a summary can be trusted about
+ * a file at all: "the summary still describes this file" is a claim about the
+ * file as it was, and a later reader needs something to compare against. This
+ * is that comparison, in the one place a user goes to ask what the context
+ * holds.
+ */
+export interface PreservedFilesDrift {
+	/** The files the record names. */
+	total: number;
+	/** Fingerprinted then, and byte-identical now. */
+	unchanged: number;
+	/** Fingerprinted then, different now. */
+	changed: number;
+	/** Fingerprinted then, not readable now (deleted, moved, permissions). */
+	unreadable: number;
+	/** No fingerprint to compare — unreadable at compaction time, or an older record. */
+	unfingerprinted: number;
+}
+
+/** Read each named file and compare it against the fingerprint the pass took. */
+export function preservedFilesDrift(
+	files: PreservedFile[],
+	readFile: (path: string) => string | null,
+): PreservedFilesDrift {
+	const drift: PreservedFilesDrift = {
+		total: files.length,
+		unchanged: 0,
+		changed: 0,
+		unreadable: 0,
+		unfingerprinted: 0,
+	};
+	for (const file of files) {
+		const path = typeof file === "string" ? file : file.path;
+		const hash = typeof file === "string" ? undefined : file.hash;
+		if (hash === undefined) {
+			drift.unfingerprinted++;
+			continue;
+		}
+		const content = readFile(path);
+		if (content === null || content === undefined) {
+			drift.unreadable++;
+			continue;
+		}
+		if (createHash("sha256").update(content).digest("hex") === hash) drift.unchanged++;
+		else drift.changed++;
+	}
+	return drift;
 }
 
 /**
@@ -62,7 +117,7 @@ export function formatTokens(tokens: number): string {
 export function contextRows(
 	breakdown: ContextBreakdown,
 	limits: ContextLimits,
-	options: { memoryChars?: number; compactions?: CompactionHistory } = {},
+	options: { memoryChars?: number; compactions?: CompactionHistory; keptFiles?: PreservedFilesDrift } = {},
 ): Array<[string, string]> {
 	const rows: Array<[string, string]> = [
 		["System prompt", formatTokens(breakdown.systemPromptTokens)],
@@ -84,7 +139,7 @@ export function contextRows(
 		// tokens, it is the part of that prompt the user owns and can edit.
 		rows.push(["Memory", `${formatTokens(Math.ceil(options.memoryChars / 4))} (part of the system prompt)`]);
 	}
-	rows.push(...compactionRows(options.compactions));
+	rows.push(...compactionRows(options.compactions, options.keptFiles));
 	rows.push(
 		["Free before auto-compact", formatTokens(Math.max(0, limits.threshold - breakdown.usedTokens))],
 		["Reserved beyond that", formatTokens(Math.max(0, limits.hardLimit - limits.threshold))],
@@ -106,7 +161,10 @@ export function contextRows(
  * a migrated compaction carries no measured `postTokens`, so it says so rather
  * than reporting a size of nothing, which would read as the best pass ever.
  */
-function compactionRows(compactions: CompactionHistory | undefined): Array<[string, string]> {
+function compactionRows(
+	compactions: CompactionHistory | undefined,
+	keptFiles: PreservedFilesDrift | undefined,
+): Array<[string, string]> {
 	if (!compactions) return [];
 	if (compactions.count === 0) return [["Compactions", "none yet"]];
 	const rows: Array<[string, string]> = [["Compactions", `${compactions.count} this session`]];
@@ -115,8 +173,26 @@ function compactionRows(compactions: CompactionHistory | undefined): Array<[stri
 		const sizes =
 			last.postTokens > 0 ? `${formatTokens(last.preTokens)} → ${formatTokens(last.postTokens)}` : "size not recorded";
 		rows.push(["Last compaction", `${last.trigger} · ${sizes}`]);
+		// The same question one level down: the sizes say the summary replaced
+		// half the context, this says whether the half it kept about the files
+		// still holds. Only shown beside a last compaction — a drift with no
+		// summary to check it against is a comparison to nothing.
+		if (keptFiles && keptFiles.total > 0) rows.push(keptFilesRow(keptFiles));
 	}
 	return rows;
+}
+
+function keptFilesRow(drift: PreservedFilesDrift): [string, string] {
+	if (drift.unfingerprinted === drift.total) return ["Kept files", `${drift.total} kept, no fingerprints to compare`];
+	if (drift.changed === 0 && drift.unreadable === 0 && drift.unfingerprinted === 0) {
+		return ["Kept files", `${drift.total} kept, unchanged since the summary`];
+	}
+	const parts: string[] = [];
+	if (drift.changed > 0) parts.push(`${drift.changed} changed since the summary`);
+	if (drift.unreadable > 0) parts.push(`${drift.unreadable} unreadable now`);
+	if (drift.unfingerprinted > 0) parts.push(`${drift.unfingerprinted} without a fingerprint`);
+	if (drift.unchanged > 0) parts.push(`${drift.unchanged} unchanged`);
+	return ["Kept files", parts.join(", ")];
 }
 
 /** The one line `/context` leaves in the transcript, where the card cannot scroll. */

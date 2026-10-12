@@ -14,7 +14,14 @@
  * to have no compaction at all: the machinery existed, the wiring was in one
  * function nobody else could reach.
  */
-import { type AgentDeps, CompactionManager, type CompactionPhase, type SessionStore } from "@labunbun/agent";
+import {
+	type AgentDeps,
+	CompactionManager,
+	type CompactionPhase,
+	type CompactionVerification,
+	type SessionStore,
+	SUMMARY_SECTIONS,
+} from "@labunbun/agent";
 import type { Model, StreamFn } from "@labunbun/ai";
 import { rewriteCause } from "./cache-report.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE, formatTokens } from "./context-report.ts";
@@ -51,6 +58,87 @@ export function compactionPhaseText(phase: CompactionPhase): string {
 		case "done":
 			return `Context compacted (${phase.trigger}): ${formatTokens(phase.preTokens)} → ${formatTokens(phase.postTokens)} tokens.`;
 	}
+}
+
+/**
+ * The receipt under the finished line: what the pass can prove about itself.
+ *
+ * A compaction is the one rewrite of the transcript the user cannot inspect
+ * afterwards — the replaced half is gone — so the report names what the
+ * account actually carries: how much of the conversation was summarized
+ * against how much survives verbatim, whether every section the prompt asks
+ * for is in the reply, whether the touched files got fingerprints to compare
+ * against later, and whether the session file took the record at all. The
+ * warnings at the end are the reason this exists: a summary that quietly lost
+ * its decisions section, or a record the session file refused, is news at the
+ * exact moment the user is looking for what changed.
+ */
+export function compactionReceiptLines(verification: CompactionVerification): string[] {
+	const lines: string[] = [];
+	const messages = (count: number) => (count === 1 ? "message" : "messages");
+	lines.push(
+		verification.summarized === 0
+			? `Nothing fell outside the kept turn; ${keptVerbatim(verification.kept, true)}.`
+			: `Summarized ${verification.summarized} ${messages(verification.summarized)}; ${keptVerbatim(verification.kept, false)}.`,
+	);
+	const totalFiles = verification.filesReadable + verification.filesUnreadable;
+	if (totalFiles > 0) {
+		const files = totalFiles === 1 ? "file" : "files";
+		lines.push(
+			verification.filesUnreadable === 0
+				? `Fingerprinted ${totalFiles} ${files}, so /context can say later whether ${totalFiles === 1 ? "it has" : "they have"} changed.`
+				: verification.filesReadable === 0
+					? `No fingerprints: none of the ${totalFiles} touched ${files} could be read at compaction time.`
+					: `Fingerprinted ${verification.filesReadable} of ${totalFiles} ${files}; ` +
+						`${verification.filesUnreadable} could not be read at compaction time and got none.`,
+		);
+	}
+	const sections = missingSectionsWarning(verification);
+	lines.push(sections ?? `All ${SUMMARY_SECTIONS.length} summary sections are present.`);
+	const record = recordWarning(verification);
+	if (record) lines.push(record);
+	return lines;
+}
+
+/**
+ * "the last 3 survive verbatim", with the singular spelled out — `all` says
+ * whether the kept messages are the whole turn, since "the last 2" would claim
+ * a cut that did not happen.
+ */
+function keptVerbatim(kept: number, all: boolean): string {
+	if (kept === 0) return "nothing survives verbatim";
+	if (kept === 1) return all ? "the message survives verbatim" : "the last message survives verbatim";
+	return all ? `all ${kept} survive verbatim` : `the last ${kept} survive verbatim`;
+}
+
+/**
+ * The warnings alone, for a surface that wants news and not numbers.
+ *
+ * The receipt's counts are for a transcript a person is reading; a `-p` run's
+ * stream gets two lines per pass and should keep them — but a missing section
+ * or a refused record is news on every surface, whoever is watching.
+ */
+export function compactionWarnings(verification: CompactionVerification): string[] {
+	return [missingSectionsWarning(verification), recordWarning(verification)].filter(
+		(warning): warning is string => warning !== undefined,
+	);
+}
+
+function missingSectionsWarning(verification: CompactionVerification): string | undefined {
+	if (verification.missingSections.length === 0) return undefined;
+	// Three names then a count: the message has to stay one line, and the first
+	// few headers are enough to tell the user which state went missing.
+	const named = verification.missingSections.slice(0, 3).join(", ");
+	const more = verification.missingSections.length > 3 ? ` and ${verification.missingSections.length - 3} more` : "";
+	return (
+		`Warning: the summary is missing ${verification.missingSections.length} of ${SUMMARY_SECTIONS.length} sections ` +
+		`(${named}${more}) — the continuation may not carry what they hold.`
+	);
+}
+
+function recordWarning(verification: CompactionVerification): string | undefined {
+	if (verification.recorded !== false) return undefined;
+	return "Warning: the session file did not record this compaction — a resume will replay the conversation without this summary.";
 }
 
 /**
@@ -137,6 +225,13 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 			} else {
 				const text = compactionPhaseText(event);
 				if (text) options.report(text);
+				// The receipt's numbers are for a transcript a REPL paints, and its
+				// two-line shape here is pinned by tests; its warnings are news on
+				// every surface, a `-p` run's stream included. On a clean pass this
+				// adds nothing, so the common shape stays two lines.
+				if (event.kind === "done") {
+					for (const warning of compactionWarnings(event.verification)) options.report(warning);
+				}
 			}
 			if (event.kind !== "done") return;
 			// Counted after the record went in, so this includes the pass being

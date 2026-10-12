@@ -16,6 +16,7 @@ import {
 	COMPACTION_REFILLING_NOTICE,
 	type CompactionPhase,
 	SessionStore,
+	SUMMARY_SECTIONS,
 } from "@labunbun/agent";
 import {
 	type AgentMessage,
@@ -319,12 +320,37 @@ describe("what a compaction says while it runs", () => {
 			compactionPhaseText({ kind: "preparing" }),
 			compactionPhaseText({ kind: "summarizing", attempt: 2, mode: "requesting" }),
 		]);
-		expect(harness.reports).toHaveLength(3);
+		// Four, not three: the fixture's reply carries a single header of the
+		// eleven, so the pass ends with its ending line and the one warning the
+		// receipt contributes to a stream.
+		expect(harness.reports).toHaveLength(4);
 		// The closing line's own shape is pinned by the test above; here it only
 		// has to be the ending. It comes out small enough to lose the `k` suffix
 		// — the oldest round is gone and the rest of the prefix was summarized —
 		// which is why this pattern makes the suffix optional.
 		expect(harness.reports[2]).toMatch(/^Context compacted \(auto\): [\d.]+k → [\d.]+k? tokens\.$/);
+		expect(harness.reports[3]).toContain("Warning: the summary is missing");
+	});
+
+	test("a clean pass stays two lines; a reply missing its sections is news on the stream", async () => {
+		// The receipt's counts belong to a transcript a REPL paints — here the
+		// two-line shape is the contract. Its warnings are the exception: a `-p`
+		// run that depended on a summary which quietly dropped the decisions or
+		// the pending work should hear it while the run can still react, not
+		// discover it in the next summary's account of this one.
+		const complete = `<summary>${SUMMARY_SECTIONS.map((header) => `${header}:\n[content]`).join("\n")}</summary>`;
+		const clean = wiring({
+			trimOldToolResults: false,
+			streamFn: fauxProvider([{ text: complete }]).streamFn,
+		});
+		await clean.check({ systemPrompt: "", messages: overThreshold() });
+		expect(clean.reports).toHaveLength(2);
+		expect(clean.reports[1]).toMatch(/^Context compacted \(auto\): [\d.]+k → [\d.]+k? tokens\.$/);
+
+		const lossy = wiring({ trimOldToolResults: false });
+		await lossy.check({ systemPrompt: "", messages: overThreshold() });
+		expect(lossy.reports).toHaveLength(3);
+		expect(lossy.reports[2]).toContain("Warning: the summary is missing 11 of 11 sections");
 	});
 
 	test("an app with its own place for them gets the phases instead of the text", async () => {
@@ -387,7 +413,10 @@ describe("the warning about compacting too often", () => {
 		await harness.check({ systemPrompt: "", messages: overThreshold() });
 
 		expect(harness.reports).not.toContain(COMPACTION_ACCURACY_NOTICE);
-		expect(harness.reports).toHaveLength(2);
+		// The report of what happened, and nothing about a count: the two lines
+		// of the pass, plus the fixture reply's missing-sections warning — which
+		// is the kind of news even a storeless run is owed.
+		expect(harness.reports).toHaveLength(3);
 	});
 });
 

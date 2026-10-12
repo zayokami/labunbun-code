@@ -9,6 +9,7 @@ import {
 	COMPACTION_DISABLED_NOTICE,
 	COMPACTION_REFILLING_NOTICE,
 	CompactionManager,
+	type CompactionPhase,
 	compactionBoundary,
 	compactionThreshold,
 	contextBreakdown,
@@ -20,8 +21,10 @@ import {
 	keepSuffix,
 	LENGTH_RECOVERY_MESSAGE,
 	microcompact,
+	missingSummarySections,
 	retainedRequests,
 	SUMMARY_PROMPT,
+	SUMMARY_SECTIONS,
 	stripAnalysis,
 } from "../src/compaction.ts";
 import { SessionStore } from "../src/session-store.ts";
@@ -479,6 +482,41 @@ describe("SUMMARY_PROMPT", () => {
 		expect(SUMMARY_PROMPT).toContain("7. Files Modified");
 		expect(SUMMARY_PROMPT).toContain("A user message is only what the user typed");
 		expect(SUMMARY_PROMPT).toContain("Be exhaustive on sections 8-11");
+	});
+
+	test("the section list and the prompt cannot drift apart", () => {
+		// SUMMARY_SECTIONS is the checklist a reply is verified against, and the
+		// prompt is what the model was actually asked for. A header phrased in one
+		// and not the other is either a warning about a section nobody requested
+		// or a section nothing checks — and the closing line's range has to move
+		// with the list, or "be exhaustive" points at headings that no longer end
+		// the prompt.
+		for (const header of SUMMARY_SECTIONS) expect(SUMMARY_PROMPT).toContain(header);
+		expect(SUMMARY_SECTIONS.every((header, index) => header.startsWith(`${index + 1}. `))).toBe(true);
+		expect(SUMMARY_PROMPT).toContain(
+			`Be exhaustive on sections ${SUMMARY_SECTIONS.length - 3}-${SUMMARY_SECTIONS.length}`,
+		);
+	});
+});
+
+describe("missingSummarySections", () => {
+	/** A reply that wrote every header the prompt lists, each with content. */
+	const complete = `${SUMMARY_SECTIONS.map((header) => `${header}:\n[content]`).join("\n")}\n`;
+
+	test("a complete reply is missing nothing", () => {
+		expect(missingSummarySections(complete)).toEqual([]);
+	});
+
+	test("names what a reply left out, by the headers the prompt asked for", () => {
+		const reply = complete.replace("6. Key Decisions", "Some choices were made");
+		expect(missingSummarySections(reply)).toEqual(["6. Key Decisions"]);
+	});
+
+	test("a header that dropped its number still counts as present", () => {
+		// The check exists to catch missing state, not missing punctuation: a
+		// reply titled "Pending Tasks" plainly carries the section, and a warning
+		// about it would teach the user to ignore the warnings.
+		expect(missingSummarySections(complete.replace("9. Pending Tasks", "Pending Tasks"))).toEqual([]);
 	});
 });
 
@@ -983,6 +1021,87 @@ describe("CompactionManager", () => {
 			{ path: "/gone.ts" },
 			{ path: "/present.ts", hash: createHash("sha256").update("const answer = 42;").digest("hex") },
 		]);
+	});
+
+	test("the done phase carries what the pass could check about its own product", async () => {
+		// The receipt a caller prints is only as true as this object: how much went
+		// into the summary against what survived verbatim, whether the reply
+		// carried the sections it was asked for, which files got fingerprints —
+		// and whether the session file took the record at all.
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-compact-")),
+			mkdtempSync(join(tmpdir(), "lbb-compact-home-")),
+		);
+		const phases: CompactionPhase[] = [];
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "<summary>1. Request: x</summary>", usage: { input: 10, output: 10 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			store,
+			readFile: (path) => (path === "/present.ts" ? "const answer = 42;" : null),
+			onPhase: (phase) => phases.push(phase),
+		});
+		const messages: AgentMessage[] = [
+			userMessage("the earlier request"),
+			assistantMessage({
+				content: [{ type: "toolCall", id: "0", name: "Edit", arguments: JSON.stringify({ file_path: "/present.ts" }) }],
+				usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			}),
+			assistantMessage({
+				content: [{ type: "toolCall", id: "1", name: "Read", arguments: JSON.stringify({ file_path: "/gone.ts" }) }],
+			}),
+			userMessage("the current ask"),
+		];
+		for (const message of messages) store.appendMessage(message);
+		const compacted = await manager.compact({ systemPrompt: "sys", messages }, { trigger: "manual" });
+
+		const done = phases.at(-1);
+		if (done?.kind !== "done") throw new Error("expected a done phase");
+		// The stub reply carries no header at all, so every section is named — the
+		// check is about the reply in hand, not the prompt.
+		expect(done.verification).toEqual({
+			recorded: true,
+			summarized: 3,
+			kept: 1,
+			missingSections: [...SUMMARY_SECTIONS],
+			filesReadable: 1,
+			filesUnreadable: 1,
+		});
+		// Stated against the context that came back, so the two halves of the
+		// count cannot both be wrong in the same direction: keepSuffix kept the
+		// last user message, and the boundary stands in front of exactly those.
+		expect(compacted.messages).toHaveLength(1 + done.verification.kept);
+		// And the same object is what `/compact` reads back: a phase listener has
+		// no way to hand anything to a command's return value.
+		expect(manager.lastVerification()).toEqual(done.verification);
+	});
+
+	test("a record the session file refused is said so, not left to look recorded", async () => {
+		// appendCompaction refuses when the suffix is not the file's own tail —
+		// the store here has never seen the compacted messages. The in-memory
+		// context is replaced all the same, and before this the refusal vanished:
+		// the next resume replayed the file as if no summary had run.
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-compact-")),
+			mkdtempSync(join(tmpdir(), "lbb-compact-home-")),
+		);
+		const phases: CompactionPhase[] = [];
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "<summary>1. Request: x</summary>", usage: { input: 10, output: 10 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			store,
+			onPhase: (phase) => phases.push(phase),
+		});
+		const messages: AgentMessage[] = [userMessage("one"), assistantMessage({}), userMessage("two")];
+		// Deliberately not appended to the store: the file's tail is empty.
+		await manager.compact({ systemPrompt: "sys", messages });
+
+		const done = phases.at(-1);
+		if (done?.kind !== "done") throw new Error("expected a done phase");
+		expect(done.verification.recorded).toBe(false);
+		expect(manager.lastVerification()?.recorded).toBe(false);
+		// And nothing landed in the file — the flag is the only trace, which is
+		// exactly why it has to reach the report.
+		expect(store.compactions()).toHaveLength(0);
 	});
 
 	test("the summary request itself shrinks instead of failing when it is too large", async () => {

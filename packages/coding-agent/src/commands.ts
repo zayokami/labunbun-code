@@ -9,6 +9,7 @@
  */
 import type { AgentSession, CompactionManager } from "@labunbun/agent";
 import { estimateContextUsage } from "@labunbun/agent";
+import { compactionReceiptLines } from "./compaction-wiring.ts";
 import { playDaisyBell } from "./daisy-bell.ts";
 import { runMigration } from "./migrate.ts";
 import { type MigrationDialogBridge, runMigrationWizard } from "./migrate-wizard.ts";
@@ -130,7 +131,16 @@ export function builtInCommands(): Command[] {
 				ctx.refreshContext?.();
 				const after = estimateContextUsage(compacted);
 				const freed = Math.max(0, before - after);
-				return `Conversation compacted: ~${freed.toLocaleString()} tokens freed (${before.toLocaleString()} → ${after.toLocaleString()}).`;
+				const headline = `Conversation compacted: ~${freed.toLocaleString()} tokens freed (${before.toLocaleString()} → ${after.toLocaleString()}).`;
+				// The receipt under the headline. The app's automatic report
+				// suppresses itself for this trigger precisely so this line can be the
+				// full account, and what the pass verified about its own product is
+				// the half the numbers cannot tell. Read from the manager right after
+				// the pass it ran: a phase listener has no way to hand the
+				// verification back to a command's return value.
+				const verification = ctx.compaction.lastVerification();
+				const receipt = verification ? compactionReceiptLines(verification) : [];
+				return [headline, ...receipt].join("\n");
 			},
 		},
 		{

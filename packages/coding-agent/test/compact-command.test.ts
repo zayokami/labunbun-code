@@ -98,8 +98,15 @@ describe("/compact", () => {
 		const reloaded = SessionStore.load(h.store.path);
 		expect(reloaded.contextMessages()).toEqual(h.session.messages);
 
-		// The report is about what actually happened.
-		expect(result).toMatch(/^Conversation compacted: ~[\d,]+ tokens freed \([\d,]+ → [\d,]+\)\.$/);
+		// The report is about what actually happened: the headline, then the
+		// receipt's lines under it — this command is their only surface for a
+		// manual pass, since the app suppresses the manager's own report for it.
+		const [headline, counts, ...rest] = (result ?? "").split("\n");
+		expect(headline).toMatch(/^Conversation compacted: ~[\d,]+ tokens freed \([\d,]+ → [\d,]+\)\.$/);
+		// Three messages in, and the newest turn is kept: the request and its
+		// answer went into the summary, "and now this" survives verbatim.
+		expect(counts).toBe("Summarized 2 messages; the last message survives verbatim.");
+		expect(rest.at(-1)).toContain("Warning: the summary is missing 11 of 11 sections");
 		expect(h.infos).toEqual(["Compacting conversation…"]);
 	});
 

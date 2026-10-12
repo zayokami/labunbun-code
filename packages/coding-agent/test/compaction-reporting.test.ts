@@ -21,6 +21,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SUMMARY_SECTIONS } from "@labunbun/agent";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -196,6 +197,47 @@ describe("a compaction the user asked for", () => {
 		expect(activitySince[0]).toBeGreaterThan(0);
 		expect(new Set(activitySince.slice(0, 4)).size).toBe(1);
 		expect(activitySince[4]).toBeNull();
+	});
+
+	test("under the line comes the receipt: what the pass could prove about itself", async () => {
+		// The command is the one report for a manual pass, so the receipt rides
+		// under its headline — the half the token counts cannot tell. The stub
+		// reply carries one header of eleven, so the block has to name what the
+		// continuation will not have, at the moment the user is reading for what
+		// changed.
+		const { infos } = await run(
+			[{ text: "first answer" }, { text: "second answer" }, SUMMARY],
+			["/compact"],
+			"Conversation compacted",
+		);
+
+		const receipt = infos.find((info) => info.startsWith("Conversation compacted"));
+		expect(receipt?.split("\n")).toEqual([
+			expect.stringMatching(/^Conversation compacted: ~[\d,]+ tokens freed/),
+			// Two prompts were sent and the summary keeps the newest turn: the ask
+			// and its answer. Stated in messages, not tokens, because that is what
+			// the user can count in the transcript.
+			"Summarized 2 messages; the last 2 survive verbatim.",
+			expect.stringMatching(/^Warning: the summary is missing 11 of 11 sections \(/),
+		]);
+	});
+
+	test("a summary that carries every section earns the plain receipt", async () => {
+		// The other half of the same contract: with nothing wrong, the receipt
+		// says what is true and stops — no warning is invented to fill the block.
+		const complete = `<summary>${SUMMARY_SECTIONS.map((header) => `${header}:\n[content]`).join("\n")}</summary>`;
+		const { infos } = await run(
+			[{ text: "first answer" }, { text: "second answer" }, { text: complete }],
+			["/compact"],
+			"Conversation compacted",
+		);
+
+		const receipt = infos.find((info) => info.startsWith("Conversation compacted"));
+		expect(receipt?.split("\n")).toEqual([
+			expect.stringMatching(/^Conversation compacted: ~[\d,]+ tokens freed/),
+			"Summarized 2 messages; the last 2 survive verbatim.",
+			"All 11 summary sections are present.",
+		]);
 	});
 
 	test("a summary that fails still stops the wait it announced", async () => {

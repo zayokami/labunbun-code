@@ -72,6 +72,47 @@ Let me analyze the conversation chronologically to capture all essential context
 
 Be exhaustive on sections 8-11: future turns depend on them for continuity.`;
 
+/**
+ * The section headers `SUMMARY_PROMPT` asks for, in order.
+ *
+ * Data rather than prose because two readers need the same list: the prompt
+ * itself, and the check that a reply carried every section. A header edited in
+ * one place and not the other is a section nothing verifies — or a warning
+ * about a section the prompt no longer asks for. The test beside this pins the
+ * two together.
+ */
+export const SUMMARY_SECTIONS = [
+	"1. Primary Request and Intent",
+	"2. Key Technical Concepts",
+	"3. Files and Code Sections",
+	"4. Errors and Fixes",
+	"5. Problem Solving",
+	"6. Key Decisions",
+	"7. Files Modified",
+	"8. All User Messages",
+	"9. Pending Tasks",
+	"10. Current Work",
+	"11. Next Step",
+] as const;
+
+/**
+ * The sections a summary does not carry.
+ *
+ * A warning, never a gate: a reply that renamed a header has still written the
+ * section its content needs, and failing the pass over a cosmetic difference
+ * would trade a paid-for summary for nothing. The numbered header and the bare
+ * title each match alone — "6. Key Decisions" and a header that drops the
+ * number both count — and a title mentioned mid-sentence counting as present
+ * is the price of not refusing a summary over its punctuation.
+ */
+export function missingSummarySections(summary: string): string[] {
+	return SUMMARY_SECTIONS.filter((header) => {
+		if (summary.includes(header)) return false;
+		const title = header.replace(/^\d+\.\s*/, "");
+		return !summary.includes(title);
+	});
+}
+
 const HARD_LIMIT_RESERVE = 3_000;
 const MAX_OUTPUT_TOKENS_RESERVE_CAP = 20_000;
 const DEFAULT_RESERVE = 13_000;
@@ -538,6 +579,37 @@ type CompactionPass =
 	| { kind: "reduced"; context: Context; cleared: TrimmedToolResults };
 
 /**
+ * What a finished pass can prove about itself, for whoever reports it.
+ *
+ * A compaction is the one rewrite of the transcript the user cannot inspect
+ * afterwards — the replaced half is gone — and until this existed the only
+ * word about a pass was its size line, which says what moved and nothing about
+ * whether what moved is complete. Every field is something the pass can check
+ * about its own product: how much went into the summary against how much
+ * survived verbatim, whether the reply carried every section the prompt asks
+ * for, whether the touched files were fingerprinted (and how many could not
+ * be), and whether the session file took the record at all.
+ */
+export interface CompactionVerification {
+	/**
+	 * Whether the session file took the record. `undefined` — not `false` —
+	 * without a store: nothing was asked of a file that does not exist, and a
+	 * warning about that would be invented.
+	 */
+	recorded?: boolean;
+	/** Messages replaced by the summary. */
+	summarized: number;
+	/** Messages that survive verbatim after the boundary. */
+	kept: number;
+	/** Headers from `SUMMARY_SECTIONS` the reply does not carry. */
+	missingSections: string[];
+	/** Touched files fingerprinted at the boundary. */
+	filesReadable: number;
+	/** Touched files that could not be read then, so carry no fingerprint. */
+	filesUnreadable: number;
+}
+
+/**
  * A summarization in flight, and how it ended.
  *
  * A compaction is the one thing a session does that costs a full-price model
@@ -550,7 +622,9 @@ type CompactionPass =
  * made it back, with the size that would be kept, and `resuming` the rebuild
  * that adopts it. Every pass ends in exactly one of `done` or `failed`,
  * because a caller that paints a status while the work is in flight needs the
- * ending as much as the start, or the status outlives the attempt.
+ * ending as much as the start, or the status outlives the attempt. `done`
+ * carries a `CompactionVerification` beside its sizes — what the pass could
+ * check about its own product, for the receipt a caller prints.
  *
  * `failed` is not the breaker's news: the breaker counts to three and speaks
  * long after, when the session is stuck. This is one attempt that did not
@@ -561,7 +635,13 @@ export type CompactionPhase =
 	| { kind: "summarizing"; attempt: number; mode: "requesting" | "responding" }
 	| { kind: "validating"; summaryChars: number }
 	| { kind: "resuming" }
-	| { kind: "done"; preTokens: number; postTokens: number; trigger: CompactionTrigger }
+	| {
+			kind: "done";
+			preTokens: number;
+			postTokens: number;
+			trigger: CompactionTrigger;
+			verification: CompactionVerification;
+	  }
 	| { kind: "failed"; trigger: CompactionTrigger };
 
 export interface CompactionManagerDeps {
@@ -608,6 +688,15 @@ export class CompactionManager {
 	#rapidRefills = 0;
 	/** Size the context was left at by the last compaction, or null if none ran. */
 	#lastPostTokens: number | null = null;
+	/**
+	 * What the most recent passed compaction verified about itself.
+	 *
+	 * Kept for the same reason as the size beside it: the phase report reaches
+	 * whoever watches phases, but `/compact` prints its own receipt, and a
+	 * listener cannot hand anything back to a command's return value. The next
+	 * pass overwrites it — this field is "the last one", not "yours".
+	 */
+	#lastVerification: CompactionVerification | undefined;
 
 	constructor(config: CompactionConfig, deps: CompactionManagerDeps) {
 		this.#config = config;
@@ -801,22 +890,43 @@ export class CompactionManager {
 			}
 			this.#checksSinceCompact = 0;
 			this.#lastPostTokens = estimateContextUsage({ ...context, messages });
-			this.#deps.store?.appendCompaction({
-				boundary,
-				suffix,
-				summary,
-				preservedFiles: preservedFilesWithHashes(context.messages, this.#deps.readFile),
-				preTokens,
-				postTokens: this.#lastPostTokens,
-				// Which model actually wrote this. The stream may be fallback-wrapped,
-				// so the model we asked is not necessarily the one that answered, and
-				// a summary no one can attribute is a summary no one can trust.
-				model,
-				trigger,
-			});
+			const preservedFiles = preservedFilesWithHashes(context.messages, this.#deps.readFile);
+			// The record is a pass's durable half, and the one part that could
+			// silently not happen: appendCompaction refuses when the suffix is not
+			// the session file's own tail, and the refusal used to vanish — the
+			// in-memory context was replaced while the file kept the old transcript,
+			// and the next resume replayed it as if no summary had run. The return
+			// value is the only place that answer exists, so it is read here and
+			// carried on the done phase. Undefined, not false, without a store:
+			// nothing was asked of a file that does not exist.
+			const recorded =
+				this.#deps.store === undefined
+					? undefined
+					: this.#deps.store.appendCompaction({
+							boundary,
+							suffix,
+							summary,
+							preservedFiles,
+							preTokens,
+							postTokens: this.#lastPostTokens,
+							// Which model actually wrote this. The stream may be fallback-wrapped,
+							// so the model we asked is not necessarily the one that answered, and
+							// a summary no one can attribute is a summary no one can trust.
+							model,
+							trigger,
+						}) !== null;
+			const verification: CompactionVerification = {
+				recorded,
+				summarized: prefix.length,
+				kept: suffix.length,
+				missingSections: missingSummarySections(summary),
+				filesReadable: preservedFiles.filter((file) => typeof file !== "string" && file.hash !== undefined).length,
+				filesUnreadable: preservedFiles.filter((file) => typeof file === "string" || file.hash === undefined).length,
+			};
+			this.#lastVerification = verification;
 			// After the record, so a listener that reads the store's compaction list
 			// on this news sees the one being reported rather than the previous one.
-			this.#deps.onPhase?.({ kind: "done", preTokens, postTokens: this.#lastPostTokens, trigger });
+			this.#deps.onPhase?.({ kind: "done", preTokens, postTokens: this.#lastPostTokens, trigger, verification });
 
 			return { ...context, messages };
 		} catch (error) {
@@ -824,6 +934,11 @@ export class CompactionManager {
 			this.#deps.onPhase?.({ kind: "failed", trigger });
 			throw error;
 		}
+	}
+
+	/** What the last passed compaction verified, for a caller printing its own receipt. */
+	lastVerification(): CompactionVerification | undefined {
+		return this.#lastVerification;
 	}
 
 	/**

@@ -8,13 +8,16 @@
  * bar does.
  */
 import { describe, expect, test } from "bun:test";
-import type { ContextBreakdown } from "@labunbun/agent";
+import { createHash } from "node:crypto";
+import type { ContextBreakdown, PreservedFile } from "@labunbun/agent";
 import {
 	type ContextLimits,
 	contextRows,
 	contextSummaryLine,
 	isContextLow,
 	lowContextWarning,
+	type PreservedFilesDrift,
+	preservedFilesDrift,
 } from "../src/context-report.ts";
 
 const BREAKDOWN: ContextBreakdown = {
@@ -125,6 +128,102 @@ describe("what the rows say about compaction", () => {
 			"Free before auto-compact",
 			"Reserved beyond that",
 		]);
+	});
+});
+
+describe("preservedFilesDrift", () => {
+	const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+	test("tells an unchanged file, a changed one, and every way of not knowing apart", () => {
+		// Four answers a fingerprint can give, and only one of them is agreement:
+		// the same bytes, different bytes, nothing readable to compare against now,
+		// and no fingerprint from before to compare with at all. Folding any two
+		// of these together is how "unreadable then" would read as "unchanged".
+		// Two unchanged files against one changed, on purpose: with one of each,
+		// flipping the comparison swaps the buckets and leaves the counts equal —
+		// this assertion would pass on the exact bug it exists to catch.
+		const files: PreservedFile[] = [
+			{ path: "/same.ts", hash: sha("same") },
+			{ path: "/also-same.ts", hash: sha("also same") },
+			{ path: "/edited.ts", hash: sha("old content") },
+			{ path: "/deleted.ts", hash: sha("was here") },
+			{ path: "/no-hash.ts" },
+			"bare-string-legacy.ts",
+		];
+		const drift = preservedFilesDrift(files, (path) =>
+			path === "/same.ts"
+				? "same"
+				: path === "/also-same.ts"
+					? "also same"
+					: path === "/edited.ts"
+						? "new content"
+						: null,
+		);
+		expect(drift).toEqual({ total: 6, unchanged: 2, changed: 1, unreadable: 1, unfingerprinted: 2 });
+	});
+});
+
+describe("the kept-files row", () => {
+	const compactions = { count: 1, last: { trigger: "auto" as const, preTokens: 118_000, postTokens: 6_200 } };
+	const drift = (parts: Partial<PreservedFilesDrift>): PreservedFilesDrift => ({
+		total: 0,
+		unchanged: 0,
+		changed: 0,
+		unreadable: 0,
+		unfingerprinted: 0,
+		...parts,
+	});
+
+	test("says which kept files still match the summary, and which do not", () => {
+		// The row a user checks before trusting the summary about a file: the
+		// record's whole claim is "the summary still describes this", and this is
+		// the claim tested against the disk.
+		expect(
+			rowOf(
+				contextRows(BREAKDOWN, LIMITS, { compactions, keptFiles: drift({ total: 2, unchanged: 2 }) }),
+				"Kept files",
+			),
+		).toBe("2 kept, unchanged since the summary");
+		expect(
+			rowOf(
+				contextRows(BREAKDOWN, LIMITS, { compactions, keptFiles: drift({ total: 2, changed: 1, unchanged: 1 }) }),
+				"Kept files",
+			),
+		).toBe("1 changed since the summary, 1 unchanged");
+		expect(
+			rowOf(
+				contextRows(BREAKDOWN, LIMITS, {
+					compactions,
+					keptFiles: drift({ total: 3, changed: 1, unreadable: 1, unchanged: 1 }),
+				}),
+				"Kept files",
+			),
+		).toBe("1 changed since the summary, 1 unreadable now, 1 unchanged");
+	});
+
+	test("no fingerprints reads as exactly that, not as unchanged", () => {
+		// A migrated record or a pass that could not read the files: there is
+		// nothing to compare, and a row that said "unchanged" would be agreement
+		// no one checked for.
+		expect(
+			rowOf(
+				contextRows(BREAKDOWN, LIMITS, { compactions, keptFiles: drift({ total: 2, unfingerprinted: 2 }) }),
+				"Kept files",
+			),
+		).toBe("2 kept, no fingerprints to compare");
+	});
+
+	test("absent without a drift, like every other row about nothing", () => {
+		expect(rowOf(contextRows(BREAKDOWN, LIMITS, { compactions }), "Kept files")).toBeUndefined();
+		expect(
+			rowOf(
+				contextRows(BREAKDOWN, LIMITS, {
+					compactions,
+					keptFiles: drift({ total: 0 }),
+				}),
+				"Kept files",
+			),
+		).toBeUndefined();
 	});
 });
 

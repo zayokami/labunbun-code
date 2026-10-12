@@ -169,6 +169,14 @@ describe("recovering from a refusal for size", () => {
 		expect(
 			infos.filter((info) => /^Context compacted \(overflow\): [\d.]+k → [\d.]+k tokens\.$/.test(info)),
 		).toHaveLength(1);
+		// And the receipt follows that line: the automatic pass is the one nobody
+		// asked for, which is exactly where "the summary is missing its decisions
+		// section" is worth saying — the run continues on this summary either way.
+		// Found by its warning rather than its first line: this fixture's whole
+		// turn fits the kept suffix, so the receipt opens on that fact instead of
+		// a summarized count.
+		const receipt = infos.filter((info) => info.includes("Warning: the summary is missing 11 of 11 sections"));
+		expect(receipt).toHaveLength(1);
 	}, 30_000);
 
 	test("a vetoing PreCompact hook cannot send the request it just refused", async () => {

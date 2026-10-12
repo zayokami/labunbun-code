@@ -25,6 +25,7 @@ export {
 	CompactionManager,
 	type CompactionManagerDeps,
 	type CompactionPhase,
+	type CompactionVerification,
 	type ContextBreakdown,
 	compactionBoundary,
 	compactionThreshold,
@@ -38,7 +39,9 @@ export {
 	keepSuffix,
 	LENGTH_RECOVERY_MESSAGE,
 	microcompact,
+	missingSummarySections,
 	SUMMARY_PROMPT,
+	SUMMARY_SECTIONS,
 	stripAnalysis,
 } from "./compaction.ts";
 export { partitionToolCalls, type ToolBatch } from "./concurrency.ts";
@@ -122,6 +125,7 @@ export {
 	type CompactionRecord,
 	type CompactionTrigger,
 	newEntryId,
+	type PreservedFile,
 	type SessionEntry,
 	SessionStore,
 	sanitizeCwd,

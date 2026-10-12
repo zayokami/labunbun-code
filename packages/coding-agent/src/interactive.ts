@@ -112,8 +112,19 @@ import {
 	findCommand,
 	type LocalCommandContext,
 } from "./commands.ts";
-import { compactionActivityText, compactionPhaseText, createCompactionWiring } from "./compaction-wiring.ts";
-import { contextRows, contextSummaryLine, isContextLow, lowContextWarning } from "./context-report.ts";
+import {
+	compactionActivityText,
+	compactionPhaseText,
+	compactionReceiptLines,
+	createCompactionWiring,
+} from "./compaction-wiring.ts";
+import {
+	contextRows,
+	contextSummaryLine,
+	isContextLow,
+	lowContextWarning,
+	preservedFilesDrift,
+} from "./context-report.ts";
 import { CostTracker, formatCostReport } from "./cost-tracker.ts";
 import { sessionToMarkdown } from "./export-session.ts";
 import { createFileCompleter } from "./file-completions.ts";
@@ -233,6 +244,21 @@ export interface InteractiveOptions {
 	 * real source.
 	 */
 	padSource?: PadSource;
+}
+
+/**
+ * A file's text, or null when it cannot be read — one answer for the two
+ * readers that compare files against a record: the compaction that fingerprints
+ * them, and `/context` that checks the fingerprints against the disk. They must
+ * agree about what "unreadable" means, or a file one of them could not open
+ * reads as changed to the other.
+ */
+function readFileOrNull(path: string): string | null {
+	try {
+		return readFileSync(path, "utf8");
+	} catch {
+		return null;
+	}
 }
 
 export async function runInteractive(options: InteractiveOptions = {}): Promise<number> {
@@ -464,6 +490,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if ((phase.kind === "done" || phase.kind === "failed") && phase.trigger !== "manual") {
 				pushInfo(handle, compactionPhaseText(phase));
 			}
+			// The receipt: what the pass can prove about itself, under the size line
+			// it just printed. One entry rather than a line each, because it is one
+			// report — the /compact path prints the same block under its own
+			// headline, from `lastVerification`, and the two must read alike.
+			if (phase.kind === "done" && phase.trigger !== "manual") {
+				pushInfo(handle, compactionReceiptLines(phase.verification).join("\n"));
+			}
 			// The pass re-rooted the chain before it ended — the boundary hangs off
 			// the root, so the chain no longer runs through the task snapshots above
 			// it. Putting the list back here is what makes a restart after a summary
@@ -471,13 +504,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// manager appends the boundary before it announces the pass as over.
 			if (phase.kind === "done") saveTasks(taskStore, store);
 		},
-		readFile: (path) => {
-			try {
-				return readFileSync(path, "utf8");
-			} catch {
-				return null;
-			}
-		},
+		readFile: readFileOrNull,
 		preCompact: async () => {
 			if (!hooksRuntime.has("PreCompact")) return { blocked: false };
 			const outcome = await hooksRuntime.run("PreCompact", {
@@ -2392,12 +2419,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// a compaction is recorded, and a resumed session's earlier ones happened
 			// before this manager was built.
 			const store = ctx.sessionStore();
+			const last = store?.compactions().at(-1);
 			ctx.handle?.setStatusCard({
 				title: "Context",
 				context: { usedTokens: breakdown.usedTokens, threshold: limits.threshold },
 				details: contextRows(breakdown, limits, {
 					memoryChars: ctx.memory?.length ?? 0,
-					compactions: store ? { count: store.compactionCount(), last: store.compactions().at(-1) } : undefined,
+					compactions: store ? { count: store.compactionCount(), last } : undefined,
+					// The first reader of the fingerprints the last pass recorded:
+					// "the summary still describes this file" is a claim about the
+					// file as it was, and only a hash taken then can check it.
+					keptFiles: last?.preservedFiles ? preservedFilesDrift(last.preservedFiles, readFileOrNull) : undefined,
 				}),
 			});
 			pushInfo(ctx.handle, contextSummaryLine(breakdown, limits));

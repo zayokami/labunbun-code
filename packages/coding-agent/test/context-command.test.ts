@@ -8,7 +8,8 @@
  * that was actually loaded.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -199,5 +200,38 @@ describe("/context", () => {
 		handleAppCommand("/context", h.ctx);
 		expect(rowOf(h.cards[0], "Compactions")).toBeUndefined();
 		expect(rowOf(h.cards[0], "Last compaction")).toBeUndefined();
+	});
+
+	test("a kept file reads against the disk: unchanged first, changed once it moves", () => {
+		// The first reader of the fingerprints a pass records. The card is where
+		// "the summary still describes these files" stops being a promise the
+		// record makes and becomes a claim checked in front of the user.
+		const dir = mkdtempSync(join(tmpdir(), "lbb-context-drift-"));
+		const file = join(dir, "kept.ts");
+		writeFileSync(file, "const before = 1;");
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-context-store-")),
+			mkdtempSync(join(tmpdir(), "lbb-context-home-")),
+		);
+		const tail = [userMessage("request")];
+		for (const message of tail) store.appendMessage(message);
+		store.appendCompaction({
+			boundary: userMessage("[boundary]"),
+			suffix: tail,
+			summary: "1. Request: x",
+			preservedFiles: [{ path: file, hash: createHash("sha256").update("const before = 1;").digest("hex") }],
+			preTokens: 90_000,
+			postTokens: 5_000,
+			model: "faux-1",
+			trigger: "auto",
+		});
+		const h = makeCtx({ store });
+
+		handleAppCommand("/context", h.ctx);
+		expect(rowOf(h.cards[0], "Kept files")).toBe("1 kept, unchanged since the summary");
+
+		writeFileSync(file, "const after = 2;");
+		handleAppCommand("/context", h.ctx);
+		expect(rowOf(h.cards[1], "Kept files")).toBe("1 changed since the summary");
 	});
 });
