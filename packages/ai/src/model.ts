@@ -24,6 +24,8 @@ const MISTRAL_BASE = "https://api.mistral.ai/v1";
 const OLLAMA_CLOUD_BASE = "https://ollama.com/v1";
 /** The local daemon's default address; a user who moved it sets `OLLAMA_BASE_URL`. */
 const OLLAMA_LOCAL_BASE = "http://localhost:11434/v1";
+/** OpenRouter's host. One wire, OpenAI's — the `/v1` stays for the same reason the Zen pair's does. */
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 // The gateway's two plans, on two wires each. The two spellings of one plan differ
 // only by a path prefix, and the difference is the SDK's, not a convenience: the
 // Anthropic client appends `/v1/messages` to whatever base it is given, so it
@@ -41,9 +43,11 @@ const OPENCODE_GO_OAI_BASE = "https://opencode.ai/zen/go/v1";
 // Long-form design notes: docs/dev/ai-layer.md
 /**
  * Providers that are a route to a model rather than a home for one: the four
- * gateway ids, plus Ollama. Cloud and local alike serve models other vendors
- * make, so a bare id only they carry resolves to nothing and gets the
- * "offered by" hint instead of a silent route.
+ * gateway ids, both Ollama hosts, and OpenRouter. Each serves models other
+ * vendors make, so a bare id only they carry resolves to nothing and gets the
+ * "offered by" hint instead of a silent route. OpenRouter's rows spell the
+ * vendor's own name first, so they are also the case where the refused id
+ * itself contains a slash — the hint's first use on a multi-part spelling.
  */
 const GATEWAY_PROVIDERS = new Set([
 	"opencode-zen",
@@ -52,6 +56,7 @@ const GATEWAY_PROVIDERS = new Set([
 	"opencode-go-oai",
 	"ollama",
 	"ollama-cloud",
+	"openrouter",
 ]);
 
 /** 10 * 1.25 is 1.25, but 0.1 * 3 leaves floating-point dust in a price table. */
@@ -1146,6 +1151,89 @@ const BUILT_IN_MODELS: Model[] = [
 			pricing,
 		}),
 	),
+	// OpenRouter, last: one host on OpenAI's wire, selling other vendors' models
+	// under ids that spell the vendor first. Six flagships, not a catalog — the
+	// host lists hundreds, and the startup probe reads the rest out of its own
+	// listing, which answers without a key while the calls these rows carry do
+	// not. Swept 2026-10-12 from `https://openrouter.ai/api/v1/models`. Cache
+	// columns are the host's own numbers, and where a row differs from the
+	// vendor's own card the comment on the row says so. `reasoning: false`
+	// everywhere: the listing names `reasoning_effort` among each id's accepted
+	// parameters, but nothing there states what an effort maps to behind the
+	// route, and a field left off leaves each model at the host's default.
+	// `/think` still sends a level the user names.
+	// The host's numbers equal the first-party row's, cache read included.
+	openAICompatModel(
+		"openrouter",
+		OPENROUTER_BASE,
+		"OPENROUTER_API_KEY",
+		"anthropic/claude-fable-5.1",
+		"Claude Fable 5.1",
+		{
+			contextWindow: 1_000_000,
+			maxOutputTokens: 128_000,
+			reasoning: false,
+			pricing: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
+		},
+	),
+	// The host's base is 0.15/0.6/0.003, doubled on DeepSeek's weekday peak
+	// windows (01:00-04:00, 06:00-10:00 UTC); the peak band is pinned here, as
+	// the first-party rows and the Zen row for this model do.
+	openAICompatModel(
+		"openrouter",
+		OPENROUTER_BASE,
+		"OPENROUTER_API_KEY",
+		"deepseek/deepseek-v4.1-flash",
+		"DeepSeek V4.1 Flash",
+		{
+			contextWindow: 1_048_576,
+			maxOutputTokens: 393_216,
+			reasoning: false,
+			pricing: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+		},
+	),
+	// Base matches Google's own row; the host alone states a write rate (0.0417),
+	// where the Google row's 0 stands for storage metered by the hour — a charge
+	// this table cannot express.
+	openAICompatModel(
+		"openrouter",
+		OPENROUTER_BASE,
+		"OPENROUTER_API_KEY",
+		"google/gemini-3.8-flash",
+		"Gemini 3.8 Flash",
+		{
+			contextWindow: 1_048_576,
+			maxOutputTokens: 65_536,
+			reasoning: false,
+			pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.0417 },
+		},
+	),
+	// The host's rate, not the vendor's: 0.73/10 against the Kimi row's 3/15, and
+	// no write rate in the listing at all.
+	openAICompatModel("openrouter", OPENROUTER_BASE, "OPENROUTER_API_KEY", "moonshotai/kimi-k3", "Kimi K3", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 943_718,
+		reasoning: false,
+		pricing: { input: 0.73, output: 10, cacheRead: 0.55, cacheWrite: 0 },
+	}),
+	// Base band; above a 272k-token prompt the host charges 4/15/0.2/5. The
+	// first-party row is Responses-only — here the host's listing accepts `tools`
+	// on this wire, and the host is the party these calls reach.
+	openAICompatModel("openrouter", OPENROUTER_BASE, "OPENROUTER_API_KEY", "openai/gpt-6.1-sol", "GPT-6.1 Sol", {
+		contextWindow: 1_050_000,
+		maxOutputTokens: 128_000,
+		reasoning: false,
+		pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+	}),
+	// The base band; above a 200k-token prompt the host charges 4/12/1. These
+	// numbers are the Go plan's, not the Zen plan's — same model, two plans, two
+	// rates — while the output cap is the host's own, 450k against the plans' 500k.
+	openAICompatModel("openrouter", OPENROUTER_BASE, "OPENROUTER_API_KEY", "x-ai/grok-4.7", "Grok 4.7", {
+		contextWindow: 500_000,
+		maxOutputTokens: 450_000,
+		reasoning: false,
+		pricing: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+	}),
 ];
 
 // Long-form design notes: docs/dev/ai-layer.md

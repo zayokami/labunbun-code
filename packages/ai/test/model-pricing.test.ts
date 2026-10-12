@@ -30,7 +30,7 @@ afterEach(() => {
  * host test below reads resolved models, so every one of these is borrowed for
  * the duration — this file otherwise asserts the shipped table, and inheriting
  * the machine's configuration would make a developer's proxy a test failure. All
- * fourteen, not just the one that happened to be set: the point is that no machine
+ * fifteen, not just the one that happened to be set: the point is that no machine
  * can change the answer.
  *
  * The `finally` is the whole restore path, and deliberately not an `afterEach`
@@ -52,6 +52,7 @@ const BASE_URL_VARS = [
 	"OPENCODE_GO_BASE_URL",
 	"OPENCODE_ZEN_OAI_BASE_URL",
 	"OPENCODE_GO_OAI_BASE_URL",
+	"OPENROUTER_BASE_URL",
 	// Ollama's two roots are one pair: only the cloud one redirects a row this
 	// file asserts, but the local daemon's variable redirects the same provider
 	// family, and a borrowed pair is one line here rather than a debugging
@@ -403,6 +404,14 @@ const BUILT_IN_REFS = [
 	"opencode-go-oai/qwen3.8-flash",
 	"opencode-go-oai/qwen3.8-max",
 	"opencode-go-oai/space-bunny",
+	// OpenRouter's six, in the table's own order: the sweep described beside the
+	// rows in `model.ts`.
+	"openrouter/anthropic/claude-fable-5.1",
+	"openrouter/deepseek/deepseek-v4.1-flash",
+	"openrouter/google/gemini-3.8-flash",
+	"openrouter/moonshotai/kimi-k3",
+	"openrouter/openai/gpt-6.1-sol",
+	"openrouter/x-ai/grok-4.7",
 ];
 
 /**
@@ -1027,6 +1036,12 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/qwen3.8-flash", 0.15, 0.47, 0.016, 0.2],
 			["opencode-go-oai/qwen3.8-max", 2, 6, 0.25, 2.5],
 			["opencode-go-oai/space-bunny", 0.15, 0.6, 0.03, 0],
+			["openrouter/anthropic/claude-fable-5.1", 10, 50, 0.25, 12.5],
+			["openrouter/deepseek/deepseek-v4.1-flash", 0.3, 1.2, 0.006, 0],
+			["openrouter/google/gemini-3.8-flash", 0.75, 3.75, 0.075, 0.0417],
+			["openrouter/moonshotai/kimi-k3", 0.73, 10, 0.55, 0],
+			["openrouter/openai/gpt-6.1-sol", 2, 10, 0.1, 2.5],
+			["openrouter/x-ai/grok-4.7", 2, 6, 0.5, 0],
 		]);
 	});
 
@@ -1363,6 +1378,12 @@ describe("the built-in catalog", () => {
 			["opencode-go-oai/qwen3.8-flash", 1_000_000, 131_072],
 			["opencode-go-oai/qwen3.8-max", 1_000_000, 131_072],
 			["opencode-go-oai/space-bunny", 1_048_576, 524_288],
+			["openrouter/anthropic/claude-fable-5.1", 1_000_000, 128_000],
+			["openrouter/deepseek/deepseek-v4.1-flash", 1_048_576, 393_216],
+			["openrouter/google/gemini-3.8-flash", 1_048_576, 65_536],
+			["openrouter/moonshotai/kimi-k3", 1_048_576, 943_718],
+			["openrouter/openai/gpt-6.1-sol", 1_050_000, 128_000],
+			["openrouter/x-ai/grok-4.7", 500_000, 450_000],
 		]);
 	});
 
@@ -1444,6 +1465,16 @@ describe("the built-in catalog", () => {
 			"ollama-cloud/gemma4:31b",
 			"ollama-cloud/glm-5.3",
 			"ollama-cloud/mistral-large-3:675b",
+			// OpenRouter's six, and the reason is one layer up from the plans': the
+			// host's listing names `reasoning_effort` among every one of these ids'
+			// accepted parameters, but nothing states what an effort maps to behind
+			// the route, so no row claims "medium" and the default sends nothing.
+			"openrouter/anthropic/claude-fable-5.1",
+			"openrouter/deepseek/deepseek-v4.1-flash",
+			"openrouter/google/gemini-3.8-flash",
+			"openrouter/moonshotai/kimi-k3",
+			"openrouter/openai/gpt-6.1-sol",
+			"openrouter/x-ai/grok-4.7",
 		]);
 		// The other half of the partition, exhaustive over the same rows. Every
 		// gateway row claims no thinking at all, and the reason is a model in the
@@ -1487,6 +1518,7 @@ describe("the built-in catalog", () => {
 				host("opencode-go/deepseek-v4-pro"),
 				host("opencode-zen-oai/gpt-6-sol"),
 				host("opencode-go-oai/kimi-k3"),
+				host("openrouter/anthropic/claude-fable-5.1"),
 				host("ollama-cloud/kimi-k3"),
 			]).toEqual([
 				"https://api.anthropic.com",
@@ -1510,6 +1542,9 @@ describe("the built-in catalog", () => {
 				"https://opencode.ai/zen/go",
 				"https://opencode.ai/zen/v1",
 				"https://opencode.ai/zen/go/v1",
+				// OpenRouter's one host, OpenAI-wire, so the `/v1` stays — and the
+				// catalog the probe reads is `/models` on the same prefix.
+				"https://openrouter.ai/api/v1",
 				// The cloud host keeps its `/v1`, unlike the gateway's Anthropic
 				// pair: these rows are OpenAI-wire, and the native catalog API the
 				// lister asks is derived by stripping that suffix back off.
@@ -1908,5 +1943,12 @@ describe("where a bare id can be bought", () => {
 		// is MiniMax's own, so the bare name already works and nothing fires.
 		expect(gatewayProvidersFor("gemma4:31b")).toEqual(["ollama-cloud"]);
 		expect(gatewayProvidersFor("minimax-m3")).toEqual([]);
+		// OpenRouter's turn, and the first refused spelling that itself contains a
+		// slash: the host sells `anthropic/claude-fable-5.1` — dots, not the dashes
+		// the Anthropic row answers to — so a user who typed the vendor's name
+		// first lands on a hint instead of a dead end.
+		expect(gatewayProvidersFor("anthropic/claude-fable-5.1")).toEqual(["openrouter"]);
+		// And nothing fires for the spelling the first-party row already owns.
+		expect(gatewayProvidersFor("claude-fable-5-1")).toEqual([]);
 	});
 });

@@ -15,6 +15,7 @@ import {
 	type CatalogProbe,
 	type DiscoveredListing,
 	formatCatalogNotice,
+	probeProvider,
 	refreshModelCatalog,
 } from "../src/discovery.ts";
 import { missingApiKey } from "../src/index.ts";
@@ -28,7 +29,7 @@ import {
 	setProviderCatalogue,
 } from "../src/model.ts";
 import { listAnthropicModels } from "../src/providers/anthropic.ts";
-import { listOpenAIModels } from "../src/providers/openai-compat.ts";
+import { listOpenAIModels, listOpenRouterModels } from "../src/providers/openai-compat.ts";
 import type { Model } from "../src/types.ts";
 
 afterEach(() => {
@@ -62,6 +63,9 @@ const KEY_VARS = [
 	// variable (`env: ["OPENCODE_API_KEY"]` on both of them), so one exported
 	// key reaches whichever plan the user bought.
 	"OPENCODE_API_KEY",
+	// OpenRouter's key. Its listing answers without one, but the rows this
+	// table's pins carry make calls that do not.
+	"OPENROUTER_API_KEY",
 ];
 
 /** Every Anthropic id in the built-in table, in table order. A complete listing
@@ -389,6 +393,7 @@ describe("what the answer changes", () => {
 describe("what a provider answers with", () => {
 	const anthropic = modelOf("anthropic/claude-opus-5");
 	const deepseek = modelOf("deepseek/deepseek-flash");
+	const openrouter = modelOf("openrouter/anthropic/claude-fable-5.1");
 
 	test("an Anthropic page is read for its id, its name and both limits", async () => {
 		const client = {
@@ -475,6 +480,69 @@ describe("what a provider answers with", () => {
 		// input to the compaction threshold.
 		expect(await listOpenAIModels(deepseek, { client })).toEqual({
 			models: [{ id: "a" }, { id: "b", contextWindow: 262_144 }, { id: "c" }],
+			complete: true,
+		});
+	});
+
+	test("an OpenRouter listing states a name and both limits; only facts become them", async () => {
+		const client = {
+			models: {
+				list: async () => ({
+					data: [
+						{
+							id: "a/b",
+							name: "Vendor: B",
+							context_length: 1_000_000,
+							top_provider: { max_completion_tokens: 128_000 },
+						},
+						// A zero and a null are fields filled in, not facts — and where a
+						// field is absent the row just loses it, the reverse of the generic
+						// reader, which keeps the window and drops everything the page adds.
+						{ id: "c/d", context_length: 0, top_provider: { max_completion_tokens: null } },
+						{ id: "e/f", name: "F", context_length: 65_536 },
+						{},
+					],
+				}),
+			},
+		};
+		expect(await listOpenRouterModels(openrouter, { client })).toEqual({
+			models: [
+				{ id: "a/b", displayName: "Vendor: B", contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+				{ id: "c/d" },
+				{ id: "e/f", displayName: "F", contextWindow: 65_536 },
+			],
+			complete: true,
+		});
+	});
+
+	test("the openrouter probe reads the host's page, not the generic one", async () => {
+		// The dispatch is load-bearing: the generic reader would drop both the name
+		// and the cap, and a synthesized row missing either limit is not built at
+		// all — six pinned rows would then be all OpenRouter ever offered.
+		const client = {
+			models: {
+				list: async () => ({
+					data: [
+						{
+							id: "anthropic/claude-fable-5.1",
+							name: "Anthropic: Claude Fable 5.1",
+							context_length: 1_000_000,
+							top_provider: { max_completion_tokens: 128_000 },
+						},
+					],
+				}),
+			},
+		};
+		expect(await probeProvider(openrouter, undefined, client)).toEqual({
+			provider: "openrouter",
+			models: [
+				{
+					id: "anthropic/claude-fable-5.1",
+					displayName: "Anthropic: Claude Fable 5.1",
+					contextWindow: 1_000_000,
+					maxOutputTokens: 128_000,
+				},
+			],
 			complete: true,
 		});
 	});

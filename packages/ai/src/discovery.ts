@@ -10,7 +10,7 @@ import {
 } from "./model.ts";
 import { listAnthropicModels } from "./providers/anthropic.ts";
 import { listOllamaModels } from "./providers/ollama.ts";
-import { listOpenAIModels, type OpenAIModelsClientLike } from "./providers/openai-compat.ts";
+import { listOpenAIModels, listOpenRouterModels, type OpenAIModelsClientLike } from "./providers/openai-compat.ts";
 import type { Model } from "./types.ts";
 
 /**
@@ -122,6 +122,14 @@ export async function probeProvider(
 		// `/v1/models` states ids and nothing else, and a row needs limits and a
 		// thinking flag, so the native API is the only one worth asking.
 		const listing = await listOllamaModels(model, { signal });
+		return { provider: model.provider, models: listing.models, complete: listing.complete };
+	}
+	if (model.provider === "openrouter") {
+		// The chat wire is OpenAI's, but the catalog is the host's own dialect on
+		// the same endpoint: a name and both limits per id, where the generic
+		// reader keeps ids and at most a window — and `synthesizeModel` needs both
+		// limits before it builds a row at all.
+		const listing = await listOpenRouterModels(model, { client: openaiClient, signal });
 		return { provider: model.provider, models: listing.models, complete: listing.complete };
 	}
 	if (model.api === "anthropic-messages") {

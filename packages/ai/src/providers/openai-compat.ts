@@ -458,10 +458,21 @@ export { parseToolArguments };
 // Catalog listing
 // ---------------------------------------------------------------------------
 
-/** `GET /models` answers with one page and no cursor — this is the whole shape. */
+/**
+ * `GET /models` answers with one page and no cursor — this is the whole shape.
+ * The fields below `context_length` are OpenRouter's: same endpoint, same
+ * client, a host that states more about each id than the vendors do.
+ */
 export interface OpenAIModelPage {
-	/** `context_length` is Kimi's; the other vendors answer with an id and nothing else. */
-	data?: Array<{ id?: string; context_length?: number }>;
+	/** `context_length` is Kimi's and OpenRouter's; the other vendors answer with an id and nothing else. */
+	data?: Array<{
+		id?: string;
+		context_length?: number;
+		/** OpenRouter's display name for the id. */
+		name?: string;
+		/** OpenRouter's output cap, stated under this key rather than as a plain field. */
+		top_provider?: { max_completion_tokens?: number | null } | null;
+	}>;
 }
 
 export interface OpenAIModelsClientLike {
@@ -481,6 +492,34 @@ export async function listOpenAIModels(
 		if (!entry.id) continue;
 		const window = entry.context_length;
 		models.push(typeof window === "number" && window > 0 ? { id: entry.id, contextWindow: window } : { id: entry.id });
+	}
+	return { models, complete: true };
+}
+
+// Long-form design notes: docs/dev/ai-layer.md
+/**
+ * OpenRouter answers the same request the readers above make, with more in it:
+ * a display name and both limits per id, which is a synthesized row's whole
+ * requirement — the generic reader drops the cap, and a row missing either
+ * limit is not built at all. The prices in the page are deliberately not read:
+ * a discovered row is unpriced by design, and the notice says to declare one.
+ */
+export async function listOpenRouterModels(
+	model: Model,
+	options?: { client?: OpenAIModelsClientLike; signal?: AbortSignal },
+): Promise<{ models: DiscoveredModel[]; complete: boolean }> {
+	const client = options?.client ?? (await defaultModelsClient(model));
+	const response = await client.models.list({ signal: options?.signal });
+	const models: DiscoveredModel[] = [];
+	for (const entry of response.data ?? []) {
+		if (!entry.id) continue;
+		const discovered: DiscoveredModel = { id: entry.id };
+		if (entry.name) discovered.displayName = entry.name;
+		const window = entry.context_length;
+		if (typeof window === "number" && window > 0) discovered.contextWindow = window;
+		const cap = entry.top_provider?.max_completion_tokens;
+		if (typeof cap === "number" && cap > 0) discovered.maxOutputTokens = cap;
+		models.push(discovered);
 	}
 	return { models, complete: true };
 }
