@@ -3,6 +3,7 @@
 This directory holds the long-form design notes for the labunbun repository. Each document carries notes that moved out of the source comments. The source keeps a short comment with a pointer, `// Long-form design notes: docs/dev/<topic>.md`.
 
 - [AI layer](ai-layer.md): the model registry, the prompt cache rules, and the three wire adapters in `packages/ai`.
+- [ChatGPT subscription](chatgpt-subscription.md): the app-side sign-in for a ChatGPT subscription — the credential store, the two login shapes, and where the app wires them.
 - [Claude subscription](claude-subscription.md): the app-side sign-in for a Claude subscription — the credential store, the login flow, and where the app wires them.
 - [Command classifier](command-classifier.md): the classifier that reports whether one command line can destroy data, and the permission engine that runs it.
 - [Migration framework](migration-framework.md): how the framework reads another agent's files and writes them into labunbun.

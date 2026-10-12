@@ -1,0 +1,38 @@
+# The ChatGPT subscription, app side
+
+`packages/ai` owns the wire: PKCE, the authorize URL, the token endpoint, the device flow, and the bearer-token provider (`providers/chatgpt-oauth.ts`), plus the `chatgpt-responses` adapter that spends the bearer; the long-form notes for both are in ai-layer.md. This document covers the app around them: where the credential lives between runs, the two shapes of the sign-in, and the commands that drive them.
+
+## The credential store
+
+The store is `createChatGptCredentialStore` (`packages/coding-agent/src/chatgpt-auth.ts:56`). It is the Claude store's shape — keychain first through `Bun.secrets`, a 0600 file when no secret service answers — with one deliberate difference: its own file name. The probe for a keychain is structural (`packages/coding-agent/src/chatgpt-auth.ts:41`), so the module loads on a runtime without that API and answers "no keychain" instead of throwing.
+
+- The fallback is a 0600 file at `~/.labunbun/.chatgpt-credentials.json` (`packages/coding-agent/src/chatgpt-auth.ts:58`), written through a temp file and a rename so a reader never sees half a token (`packages/coding-agent/src/chatgpt-auth.ts:87`). The Claude store's generic `.credentials.json` predates the second subscription, and one file for both logins would let the two disagree about which token is current. The fallback says so once, out loud (`packages/coding-agent/src/chatgpt-auth.ts:137`), with the keychain-refused variant naming the same contract after a failed write (`packages/coding-agent/src/chatgpt-auth.ts:133`).
+- Load reads the keychain first and falls through to the file when the keychain has no entry or cannot answer (`packages/coding-agent/src/chatgpt-auth.ts:105`). One entry that IS present is one answer: a malformed keychain entry resolves to null and does not fall through to a file from another era (`packages/coding-agent/src/chatgpt-auth.ts:111`). Two stores, one credential — the second is never consulted to paper over the first.
+- Save writes the keychain and removes any fallback-era file in the same breath (`packages/coding-agent/src/chatgpt-auth.ts:123`), so the two can never disagree about which token is current. Clear empties both (`packages/coding-agent/src/chatgpt-auth.ts:141`), because a sign-out that leaves one copy behind is not a sign-out.
+- Tests always inject the keychain (`keychain: null` or a fake). The default probe has no test on purpose — see the gaps below.
+
+## The sign-in flow
+
+The flow is `chatgpt-login.ts`. It has two shapes — the browser dance on the codex client's registered callback, and the device code for machines whose loopback no browser can reach — and both end in the same exchange and the same store. There is no paste: the console has no page that shows a `code#state`, so the repair when the port cannot be taken is the device flow.
+
+- `beginChatGptLogin` draws fresh PKCE and state and builds the authorize URL (`packages/coding-agent/src/chatgpt-login.ts:49`). The redirect is the reference client's registered localhost callback — `http://localhost:1455/auth/callback` (`packages/coding-agent/src/chatgpt-login.ts:35`); `localhost`, not `127.0.0.1`, and a fixed port, because that is the string that is registered (`packages/coding-agent/src/chatgpt-login.ts:32`).
+- `startChatGptCallbackServer` binds the shared loopback listener (`callback-server.ts`) to the console's path and this layer's error type (`packages/coding-agent/src/chatgpt-login.ts:68`). The bind failure it rejects with is the one rejection the flow recovers from, by switching to the device sign-in.
+- `chatGptLoginFlow` is the whole sign-in (`packages/coding-agent/src/chatgpt-login.ts:115`). The browser path prints the URL, opens it, waits, exchanges the code (`packages/coding-agent/src/chatgpt-login.ts:152`), and stores. When the port cannot be bound — another instance holds it, a policy forbids listening — the flow says why, requests a device code, prints the URL and the code, opens the browser there too, and polls until approval completes the exchange (`packages/coding-agent/src/chatgpt-login.ts:135`). It returns the credential itself and not the Claude flow's two-case result: the device fallback completes in-process, so nothing can end pending.
+- `chatGptSignedInLine` is the one sentence both callers show after a successful sign-in, with the plan type when the grant names one (`packages/coding-agent/src/chatgpt-login.ts:164`).
+- `clearChatGptSubscription` removes the stored credential and reports whether one was there (`packages/coding-agent/src/chatgpt-login.ts:178`) — one function so the answer cannot come from a load some other path already made stale, and so the REPL and the CLI word their output from the same fact.
+- The CLI wrappers are `runChatGptLoginCli` and `runChatGptLogoutCli` (`packages/coding-agent/src/chatgpt-login.ts:217`). No wrapper reads a paste: there is nothing to paste.
+
+## What the app wires
+
+- Both transports pass the token provider to `createTrackedStreamFn` beside the Claude one: the REPL at `packages/coding-agent/src/interactive.ts:522` and a `-p` run at `packages/coding-agent/src/headless.ts:279` (the factory is `createChatGptCredentials`, `packages/coding-agent/src/chatgpt-auth.ts:155`). How an adapter decides which bearer signs a request — and that these model rows have no API-key fallback at all — lives in ai-layer.md.
+- The REPL commands are `/login chatgpt` and `/logout chatgpt` (`packages/coding-agent/src/interactive.ts:2873`). The sign-in runs fire-and-forget behind a module-level flag (`packages/coding-agent/src/interactive.ts:2032`) instead of the Claude flow's stored pending login: the device fallback finishes on its own once approved, so there is no paste to keep across sessions. A second `/login chatgpt` while one runs is refused, and a word after `chatgpt` gets the no-code note, because there is no code to hand this flow.
+- The hooks behind both commands are injectable (`packages/coding-agent/src/chatgpt-login.ts:190`; wired at `packages/coding-agent/src/interactive.ts:2044`), so a test — and an embedder — can drive `/login chatgpt` and `/logout chatgpt` without a browser, a network, or the real keychain of the machine running them.
+- The CLI subcommands are `labunbun login chatgpt` and `labunbun logout chatgpt` (`packages/coding-agent/src/main.ts:324`). The provider word is consumed while parsing (`packages/coding-agent/src/main.ts:139`) — after the subcommand, before the flag loop that would otherwise reject it as an unknown argument — and a bare or `claude` word keeps the Claude flow.
+
+## Known gaps
+
+- A signed-in ChatGPT subscription is not a key in any sense: the wire's rows name no key variable, and a request without a grant gets this layer's own refusal — marked `invalidGrant` so "run /login" is shown at once. There is no environment or API-key path onto these rows.
+- Three paths have no test that can run without touching an operator's own machine: the system-keychain probe, the two transport wiring lines, and the `main()` subcommand dispatch. The parse of the provider word is tested at the parse layer (`smoke.test.ts`), where nothing else can happen.
+- The device flow's polling and its 403/404-as-pending rule are tested against a fake fetch. The real backend's intervals, expiry, and approval behavior are unverified until a machine runs them.
+- The lite rows' frame shape (`additional_tools`), the default effort, and whether the backend's catalog endpoint accepts the subscription bearer are real-machine acceptance items, listed as such rather than asserted here.
+- The 0600 file-mode assertion is POSIX-only; on Windows the mode check is skipped by design. CI runs the POSIX check on every push.

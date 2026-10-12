@@ -56,6 +56,8 @@ A model that the vendor serves on only one wire is on only that wire. A reseller
 
 You can use a Claude subscription in place of an Anthropic API key. Run `labunbun login`. The tool opens a browser for the sign-in. Use `/login` inside a session for the same flow. The tool stores the credential in the OS keychain. A machine with no keychain uses a private file under `~/.labunbun` instead, and the tool says so. A subscription outranks the `ANTHROPIC_API_KEY` variable. Use `labunbun logout` or `/logout` to remove the credential.
 
+You can use a ChatGPT subscription for the ChatGPT models. Run `labunbun login chatgpt`. The tool opens a browser for the sign-in. If the local port is not available, the tool shows a device code instead, and you approve it in any browser. Use `/login chatgpt` inside a session for the same flow. The credential follows the same keychain-first rule as the Claude subscription, with the same private-file fallback. Use `labunbun logout chatgpt` or `/logout chatgpt` to remove the credential.
+
 ### Permission, sandbox, and network
 
 LaBunbun Code has three independent axes. Each axis has its own values.
@@ -438,6 +440,8 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
    bun run dev login
    ```
 
+   Use `bun run dev login chatgpt` for a ChatGPT subscription instead.
+
 3. Start the session.
 
    ```bash
@@ -484,8 +488,8 @@ Use these commands in the terminal.
 |---------|---------|
 | `/status` | Show the model, the context use, the cost, and the settings. |
 | `/model [provider/id]` | Show the model, or change it. |
-| `/login [code#state]` | Sign in to a Claude subscription. The tool opens a browser. |
-| `/logout` | Sign out of the Claude subscription. |
+| `/login [claude\|chatgpt\|<code#state>]` | Sign in to a subscription. The tool opens a browser. A pasted code completes the Claude sign-in. |
+| `/logout [claude\|chatgpt]` | Sign out of a subscription. |
 | `/mode [mode]` | Show the permission mode, or change it. |
 | `/permissions` | Show the permission mode and the rules. |
 | `/doctor` | Check the environment, the settings, and the provider. |
