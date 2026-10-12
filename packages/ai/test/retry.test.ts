@@ -403,6 +403,39 @@ describe("abort handling", () => {
 		expect(calls()).toBe(1);
 	});
 
+	test("an abort that lands before the backoff never waits it out", async () => {
+		// The window this pins: the abort arrives between the failed attempt
+		// and the wait's start. A listener attached to an already-aborted
+		// signal never fires, so the race inside the wait cannot see this one
+		// — only the pre-check can. The abort lands in `onRetry`, which runs
+		// exactly in that gap.
+		const { fn, calls } = failingStreamFn(
+			99,
+			Object.assign(new Error("busy"), { status: 503, headers: { "retry-after": "30" } }),
+		);
+		const controller = new AbortController();
+		const wrapped = withRetry(fn, {
+			baseDelayMs: 1,
+			onRetry: () => controller.abort(),
+			// Held open, so a wrapper that built the race anyway would leave
+			// this test pending rather than pass it late.
+			sleep: () => new Promise<void>(() => {}),
+		});
+
+		const pump = collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }, { signal: controller.signal }));
+		const outcome = await Promise.race([
+			pump.then(
+				() => "completed",
+				(error: unknown) => (isAbortError(error) ? "aborted" : `failed: ${String(error)}`),
+			),
+			new Promise<string>((resolve) => setTimeout(() => resolve("still sleeping"), 250)),
+		]);
+		expect(outcome).toBe("aborted");
+		// The abort ended the ladder: no second request against a
+		// conversation the user has already cancelled.
+		expect(calls()).toBe(1);
+	});
+
 	test("an abort error thrown by the adapter propagates even without the signal", async () => {
 		// biome-ignore lint/correctness/useYield: the abort must surface before any event exists
 		const fn: StreamFn = async function* () {

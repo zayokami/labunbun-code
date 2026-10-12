@@ -87,6 +87,20 @@ describe("/rewind over checkpoint entries this build cannot fully read", () => {
 		expect(h.info()).toContain("cannot be read");
 	});
 
+	test("a null payload is refused rather than crashed on", () => {
+		const h = harness();
+		writeFileSync(h.target, "still here", "utf8");
+		// JSON `null` where every other entry has an object: the shape gate
+		// has to catch it before any field is read, because a field check on
+		// null is a crash, not a refusal.
+		h.store.appendCustom("file_checkpoint", null);
+
+		expect(handleAppCommand("/rewind 0", h.ctx)).toBe(true);
+
+		expect(readFileSync(h.target, "utf8")).toBe("still here");
+		expect(h.info()).toContain("cannot be read");
+	});
+
 	test("an unreadable entry between two good ones shifts no numbering", () => {
 		const h = harness();
 		writeFileSync(h.target, "on disk now", "utf8");
