@@ -195,6 +195,28 @@ describe("startClaudeCallbackServer", () => {
 		}
 	});
 
+	test("an error redirect with a wrong or missing state does not end the wait", async () => {
+		const server = await startClaudeCallbackServer({ state: "s-1", port: 0, timeoutMs: 5_000 });
+		try {
+			// The shape any web page the user visits can send mid-sign-in — a simple
+			// GET to loopback, no preflight — with the state absent or misspelled.
+			// It does not belong to this sign-in, so it gets the same 400 as any
+			// other stray request and the wait goes on.
+			const noState = await fetch(`http://127.0.0.1:${server.port}/callback?error=access_denied`);
+			expect(noState.status).toBe(400);
+			const wrongState = await fetch(`http://127.0.0.1:${server.port}/callback?error=access_denied&state=other`);
+			expect(wrongState.status).toBe(400);
+
+			// The redirect that really belongs to this sign-in still lands, which
+			// is only observable if the strays did not reject the wait first.
+			const good = await fetch(`http://127.0.0.1:${server.port}/callback?code=c-1&state=s-1`);
+			expect(good.status).toBe(200);
+			expect(await server.wait).toEqual({ code: "c-1", state: "s-1" });
+		} finally {
+			server.close();
+		}
+	});
+
 	test("answers other paths with 404", async () => {
 		const server = await startClaudeCallbackServer({ state: "s-1", port: 0, timeoutMs: 5_000 });
 		try {

@@ -6,8 +6,10 @@
  * is registered to redirect to and the error type their layer throws. The
  * server carries everything else, including the two rules that are easy to
  * get wrong twice: a redirect whose state does not match answers 400 and
- * keeps listening, and the bind failure — port taken, listening forbidden —
- * is the one rejection a caller recovers from by switching flows.
+ * keeps listening — an error redirect included, because a state-less request
+ * to loopback is just as likely to be a stray as a mis-dialed tab — and the
+ * bind failure — port taken, listening forbidden — is the one rejection a
+ * caller recovers from by switching flows.
  */
 
 import { spawn } from "node:child_process";
@@ -104,14 +106,11 @@ export function startOAuthCallbackServer(options: {
 				respondHtml(response, 404, page("Not found", "This port waits for the sign-in redirect only."));
 				return;
 			}
-			const error = url.searchParams.get("error");
-			if (error) {
-				const detail = url.searchParams.get("error_description") ?? error;
-				respondHtml(response, 400, page("Sign-in refused", `${escapeHtml(detail)} Return to the terminal.`));
-				settle(() => rejectCode(options.makeError(`The console refused the sign-in: ${detail}`)));
-				return;
-			}
-			const code = url.searchParams.get("code") ?? "";
+			// The state check runs before everything else, an error redirect
+			// included: the console's error responses carry the state back (RFC
+			// 6749 requires it), and a request without it — the shape any page the
+			// user visits can send to loopback — is a stray that must not end the
+			// sign-in the user is still completing.
 			const state = url.searchParams.get("state") ?? "";
 			if (state !== options.state) {
 				respondHtml(
@@ -119,6 +118,14 @@ export function startOAuthCallbackServer(options: {
 					400,
 					page("Wrong sign-in", "This redirect did not match the sign-in this terminal started."),
 				);
+				return;
+			}
+			const code = url.searchParams.get("code") ?? "";
+			const error = url.searchParams.get("error");
+			if (error) {
+				const detail = url.searchParams.get("error_description") ?? error;
+				respondHtml(response, 400, page("Sign-in refused", `${escapeHtml(detail)} Return to the terminal.`));
+				settle(() => rejectCode(options.makeError(`The console refused the sign-in: ${detail}`)));
 				return;
 			}
 			if (code === "") {
