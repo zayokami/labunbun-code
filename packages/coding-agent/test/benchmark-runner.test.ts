@@ -26,7 +26,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
 	type Candidate,
 	classifyRun,
@@ -591,5 +591,70 @@ describe("a real verify of one known task", () => {
 			}
 		},
 		600_000,
+	);
+});
+
+// ---------------------------------------------------------------------------
+// PATH independence
+// ---------------------------------------------------------------------------
+
+/**
+ * A copy of `PATH` with every directory that actually provides a `bun` removed.
+ *
+ * Computed by looking for the executable rather than by matching directory
+ * names: bun lives under `.bun/bin` on a developer machine, in a tool-cache
+ * directory on CI, and as `bun.exe` on Windows — a name-based guess would miss
+ * one of those and quietly test nothing on the platform it was pointed at.
+ */
+function pathWithoutBun(): string {
+	return (process.env.PATH ?? "")
+		.split(delimiter)
+		.filter((dir) => dir !== "" && !existsSync(join(dir, "bun")) && !existsSync(join(dir, "bun.exe")))
+		.join(delimiter);
+}
+
+describe("a task run with no bun on PATH", () => {
+	HISTORY(
+		"spawns the task on the harness's own runtime, not on a name looked up later",
+		async () => {
+			// **Why this one needs a child process.** Spawning `["bun", …]` by name
+			// resolves against the environment block the harness process started
+			// with — not against `process.env` mutated after start, and not against
+			// the `env` option of the spawn; both were measured, both change nothing.
+			// So the only way to build "no bun resolvable" inside a test is to be a
+			// process that started that way: a child bun runs one real
+			// `verifyCandidate` with every bun-providing directory stripped from its
+			// PATH. A regression to spawning `"bun"` by name fails right here with
+			// `Executable not found in $PATH: "bun"` — the shape of the bug this row
+			// exists for: the harness invoked by absolute path from a shell whose
+			// PATH has no bun of its own.
+			const moduleUrl = new URL("../../../scripts/benchmark.ts", import.meta.url).href;
+			const script = `
+				import { discoverCandidates, verifyCandidate } from ${JSON.stringify(moduleUrl)};
+				const repoRoot = ${JSON.stringify(REPO_ROOT)};
+				const found = await discoverCandidates({ repoRoot, limit: 250 });
+				const candidate = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
+				if (candidate === undefined) throw new Error("e24c8a6 is not in this history");
+				// install: false — the spawn under test is the test run itself, and the
+				// verdict is not the subject here: only a spawn that could not start at
+				// all sets the error, and asserting its absence is the whole row.
+				const outcome = await verifyCandidate(candidate, { repoRoot, install: false });
+				if (outcome.error !== undefined) {
+					console.error("task spawn failed: " + outcome.error);
+					process.exit(1);
+				}
+				console.log("task spawn ran: " + outcome.verdict);
+			`;
+			const child = spawnSync(process.execPath, ["-e", script], {
+				env: { ...process.env, PATH: pathWithoutBun() },
+				encoding: "utf8",
+				timeout: 150_000,
+				killSignal: "SIGKILL",
+			});
+			expect(child.stderr ?? "").not.toContain("task spawn failed");
+			expect(child.stdout ?? "").toContain("task spawn ran:");
+			expect(child.status).toBe(0);
+		},
+		180_000,
 	);
 });

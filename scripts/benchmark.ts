@@ -76,6 +76,20 @@ export function worktreeDir(hash: string): string {
 // Running processes
 // ---------------------------------------------------------------------------
 
+/**
+ * The bun that task processes are spawned on — by path, never by name.
+ *
+ * Resolving `"bun"` uses the environment block the harness process started
+ * with: not `process.env` mutated after start, and not the `env` option of the
+ * spawn — both were measured. So a shell that invokes the harness by absolute
+ * path while its PATH has no bun (`~/.bun/bin/bun test …`) would kill every
+ * task with `Executable not found in $PATH: "bun"` although the harness itself
+ * ran fine, which is exactly what a full-suite run from such a shell did.
+ * Tasks ride on the runtime executing this file, which is also the only bun the
+ * classifier's recorded outputs were measured against.
+ */
+const BUN = process.execPath;
+
 export interface RunResult {
 	code: number;
 	stdout: string;
@@ -656,7 +670,7 @@ export async function verifyCandidate(candidate: Candidate, options: VerifyOptio
 
 		if (install) {
 			progress("  bun install (~40s, the worktree has no node_modules)");
-			const installed = await run(["bun", "install"], { cwd: dir, timeoutMs: 600_000, env });
+			const installed = await run([BUN, "install"], { cwd: dir, timeoutMs: 600_000, env });
 			installMs = installed.ms;
 			if (installed.code !== 0) {
 				reason = "bun install failed — the worktree has no dependencies to run a test against";
@@ -672,7 +686,7 @@ export async function verifyCandidate(candidate: Candidate, options: VerifyOptio
 		if (options.afterSetup) await options.afterSetup(dir);
 
 		progress("  bun test");
-		const test = await run(["bun", "test", candidate.testFile], { cwd: dir, timeoutMs, env });
+		const test = await run([BUN, "test", candidate.testFile], { cwd: dir, timeoutMs, env });
 		testMs = test.ms;
 		const classification = classifyRun(test);
 		verdict = classification.verdict;
