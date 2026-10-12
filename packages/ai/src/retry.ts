@@ -3,6 +3,7 @@
 
 import { MessageBuilder } from "./message-builder.ts";
 import { MissingApiKeyError } from "./model.ts";
+import { ClaudeOAuthError } from "./providers/anthropic-oauth.ts";
 import type { AssistantMessageEvent, Context, Model, RetryNotice, StreamFn, StreamOptions } from "./types.ts";
 
 export interface RetryOptions {
@@ -178,6 +179,16 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				// that earn "one more shot", so without this it takes the whole ladder
 				// — two minutes of silence — to report a key that was never there.
 				if (error instanceof MissingApiKeyError) {
+					const builder = new MessageBuilder(model.provider, model.id);
+					yield builder.error(error.message);
+					return;
+				}
+
+				// The same impossibility for a subscription: no amount of waiting
+				// produces a sign-in. Only the errors that say the session cannot be
+				// repaired carry the mark — a token endpoint having a bad day
+				// (invalidGrant: false) is exactly what the ladder is for.
+				if (error instanceof ClaudeOAuthError && error.invalidGrant) {
 					const builder = new MessageBuilder(model.provider, model.id);
 					yield builder.error(error.message);
 					return;

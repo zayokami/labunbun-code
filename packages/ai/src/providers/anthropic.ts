@@ -10,7 +10,7 @@ import {
 	resolveCacheTtl,
 } from "../cache.ts";
 import { MessageBuilder, parseToolArguments } from "../message-builder.ts";
-import { type DiscoveredModel, resolveApiKey } from "../model.ts";
+import { apiKeyEnvNames, type DiscoveredModel, resolveApiKey } from "../model.ts";
 import { looksLikeContextOverflow, statusCodeOf } from "../retry.ts";
 import { composeSignals } from "../signals.ts";
 import type {
@@ -23,6 +23,7 @@ import type {
 	ThinkingLevel,
 	WireTool,
 } from "../types.ts";
+import { ClaudeOAuthError, type ClaudeTokenProvider } from "./anthropic-oauth.ts";
 
 // ---------------------------------------------------------------------------
 // Raw wire types (structural subset of the SDK's stream events, kept local so
@@ -111,6 +112,16 @@ interface AnthropicBlockBinding {
 /** The beta that lets a thinking block be dropped instead of failing the request. */
 export const THINKING_BLOCK_BINDING_BETA = "thinking-binding-controls-2026-08-01";
 
+// Long-form design notes: docs/dev/ai-layer.md
+/**
+ * The beta a bearer-authenticated request must carry; without it the API
+ * reads the subscription token as a plain one and refuses it. The SDK's
+ * credentials path appends this itself — sending it here too makes the
+ * requirement visible (and testable) at this layer instead of a fact about
+ * the SDK's internals.
+ */
+export const OAUTH_BETA = "oauth-2025-04-20";
+
 /**
  * Beta headers this model needs on every request, or nothing.
  *
@@ -118,8 +129,11 @@ export const THINKING_BLOCK_BINDING_BETA = "thinking-binding-controls-2026-08-01
  * request body, and `buildAnthropicRequest` — the piece that is pure and
  * therefore the one the tests drive — cannot see them.
  */
-export function anthropicBetaHeaders(model: Model): Record<string, string> {
-	return model.thinkingBlockBinding ? { "anthropic-beta": THINKING_BLOCK_BINDING_BETA } : {};
+export function anthropicBetaHeaders(model: Model, options?: { oauth?: boolean }): Record<string, string> {
+	const betas: string[] = [];
+	if (model.thinkingBlockBinding) betas.push(THINKING_BLOCK_BINDING_BETA);
+	if (options?.oauth) betas.push(OAUTH_BETA);
+	return betas.length > 0 ? { "anthropic-beta": betas.join(",") } : {};
 }
 
 export interface AnthropicRequestParams {
@@ -582,6 +596,12 @@ export interface AnthropicStreamFnOptions {
 	policy?: CachePolicy;
 	/** Told once when a TTL the policy asked for was refused and a fallback is in force. */
 	onCacheNotice?: (notice: CacheNotice) => void;
+	/**
+	 * Where a Claude subscription's bearer token comes from. Consulted per
+	 * request for the first-party rows only; when `available()` says no, the
+	 * request falls back to the api-key path.
+	 */
+	credentials?: ClaudeTokenProvider;
 }
 
 // Long-form design notes: docs/dev/ai-layer.md
@@ -606,23 +626,47 @@ export function createAnthropicStreamFn(options: AnthropicStreamFnOptions = {}) 
 	// session either, and re-learning that on every request means paying a failed
 	// request to be told the same thing.
 	let rung = 0;
+	// Subscription credentials ride only on the first-party rows: a reseller row
+	// borrows this wire's shape, not Anthropic's login, and must never be handed
+	// a bearer meant for api.anthropic.com.
+	const storedCredentials = options.credentials;
 
 	return async function* anthropicStream(
 		model: Model,
 		context: Context,
 		streamOptions?: StreamOptions,
 	): AsyncGenerator<AssistantMessageEvent> {
+		const credentials = model.provider === "anthropic" ? storedCredentials : undefined;
+		// One forced refresh is the whole recovery: a second 401 on a token
+		// minted moments ago is the account's answer, not a stale token's.
+		// Per stream request, unlike the TTL rung.
+		let authRetried = false;
 		while (true) {
+			const oauthAvailable = credentials ? await credentials.available() : false;
+			// The subscription was configured but nothing is signed in and no key
+			// can stand in: say the one thing that helps, before a keyless client
+			// dials and comes back with the API's own phrasing.
+			if (credentials && !oauthAvailable && streamOptions?.apiKey == null && resolveApiKey(model) == null) {
+				throw new ClaudeOAuthError(
+					`Not signed in to a Claude subscription for ${model.id}: run /login, or set ${
+						apiKeyEnvNames(model)[0] ?? "ANTHROPIC_API_KEY"
+					}.`,
+					{ invalidGrant: true },
+				);
+			}
+			const oauthActive = oauthAvailable && streamOptions?.apiKey == null;
 			const ttl = ladder[Math.min(rung, ladder.length - 1)];
 			const cache: AnthropicCacheRequest = {
 				explicit: options.policy?.explicitBreakpoints ?? true,
 				ttl,
 			};
-			const client = options.clientFactory ? options.clientFactory() : await defaultClient(model, streamOptions);
+			const client = options.clientFactory
+				? options.clientFactory()
+				: await defaultClient(model, streamOptions, oauthActive ? credentials : undefined);
 			const params = buildAnthropicRequest(model, context, streamOptions, cache);
 			// Per request rather than on the client, so that a model without the
 			// flag is not carrying a header meant for another one.
-			const betaHeaders = anthropicBetaHeaders(model);
+			const betaHeaders = anthropicBetaHeaders(model, { oauth: oauthActive });
 			// The caller's headers ride along, with the model's beta headers on
 			// top: a beta header is a requirement of the wire this row names, so
 			// it wins a collision against an incidental one.
@@ -635,6 +679,19 @@ export function createAnthropicStreamFn(options: AnthropicStreamFnOptions = {}) 
 					Object.keys(headers).length > 0 ? { headers } : undefined,
 				)) as unknown as AsyncIterable<AnthropicRawStreamEvent>;
 			} catch (error) {
+				if (statusCodeOf(error) === 401 && credentials && oauthActive && !authRetried) {
+					authRetried = true;
+					// A 401 says the token is bad however fresh its stamp looks; the
+					// forced mint bypasses the freshness window and re-saves, and the
+					// retry goes out on the new token. A refresh that fails leaves the
+					// original 401 as the better answer — it is what the API said.
+					try {
+						await credentials({ forceRefresh: true });
+						continue;
+					} catch {
+						throw error;
+					}
+				}
 				// The downgrade happens here, below `withRetry`, because a 400 is not a
 				// status that wrapper retries — it is right not to, and the consequence
 				// is that the one class of 400 we can fix ourselves has to be fixed
@@ -658,15 +715,47 @@ export function createAnthropicStreamFn(options: AnthropicStreamFnOptions = {}) 
 	};
 }
 
-async function defaultClient(model: Model, options?: StreamOptions): Promise<AnthropicClientLike> {
+// Long-form design notes: docs/dev/ai-layer.md
+/** Which credential the SDK client is built with — the one decision about auth this layer makes. */
+export interface AnthropicAuthOptions {
+	apiKey?: string | null;
+	authToken?: string | null;
+	credentials?: ClaudeTokenProvider;
+}
+
+/**
+ * The auth trio for a client construction, separate from the construction so
+ * the choice is drivable by a test without a network or an SDK instance.
+ *
+ * Precedence: an explicit per-call key first (the most deliberate statement
+ * there is), then the stored subscription (the order Claude Code uses — a
+ * logged-in account is a statement too), then the environment. The
+ * credentials branch passes `authToken: null` because the SDK otherwise
+ * adopts `ANTHROPIC_AUTH_TOKEN` from the environment, and a set authToken
+ * makes it ignore `credentials` entirely.
+ */
+export function anthropicAuthOptions(
+	model: Model,
+	streamOptions?: StreamOptions,
+	credentials?: ClaudeTokenProvider,
+): AnthropicAuthOptions {
+	if (streamOptions?.apiKey != null) return { apiKey: streamOptions.apiKey };
+	if (credentials) return { apiKey: null, authToken: null, credentials };
+	return { apiKey: resolveApiKey(model) ?? "" };
+}
+
+async function defaultClient(
+	model: Model,
+	options?: StreamOptions,
+	credentials?: ClaudeTokenProvider,
+): Promise<AnthropicClientLike> {
 	const { default: Anthropic } = await import("@anthropic-ai/sdk");
-	const apiKey = options?.apiKey ?? resolveApiKey(model) ?? "";
 	// Both signals must reach the request: the SDK puts its own on the init —
 	// its timeout timer aborts through that one — so replacing it with the
 	// caller's alone would leave the timeout with no listener.
 	const callerSignal = options?.signal;
 	return new Anthropic({
-		apiKey,
+		...anthropicAuthOptions(model, options, credentials),
 		baseURL: model.baseUrl || undefined,
 		maxRetries: 0, // our retry wrapper owns retry policy
 		fetch: callerSignal

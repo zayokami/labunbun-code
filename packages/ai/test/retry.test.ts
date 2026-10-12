@@ -509,11 +509,64 @@ describe("the missing-key pre-flight", () => {
 		}
 	});
 
+	test("a subscription may stand in for the key, so the pre-flight lets the request through", async () => {
+		// Whether a sign-in exists is only knowable asynchronously, and this check
+		// is not: with `subscription` set the request passes through, and the
+		// adapter raises the login error at request time if nothing answers —
+		// which names the remedy, where the key error would name a variable that
+		// is not it.
+		await withNoKey(() => {
+			expect(missingApiKey(model, undefined, true)).toBeUndefined();
+		});
+		// And it is the flag doing that: the same call without it is exactly the
+		// error this describe is about.
+		await withNoKey(() => {
+			expect(missingApiKey(model)).toBeInstanceOf(MissingApiKeyError);
+		});
+	});
+
 	test("the default stream fn ends the turn on a missing key instead of dialling", async () => {
 		await withNoKey(async () => {
 			const events = await collect(createDefaultStreamFn()(model, { systemPrompt: "", messages: [] }));
 			expect(events.at(-1)?.type).toBe("error");
 			expect((events.at(-1) as any).message.errorMessage).toContain("set FAUX_API_KEY");
 		});
+	});
+
+	test("a sign-in stands in for the key, and the adapter's login error is what surfaces", async () => {
+		// The other half of the pre-flight's `subscription` flag: the flag lives in
+		// index.ts's dispatch and travels with the credential provider into the
+		// adapter. Without either hop, a signed-out subscription with no env key
+		// dies at the pre-flight with the key error, which names the wrong remedy.
+		// The base URL is loopback for the same reason as above: the failing form
+		// of this test must not leave the machine.
+		const anthropicModel: Model = {
+			...FAUX_MODEL,
+			id: "claude-sonnet-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "http://127.0.0.1:9",
+			apiKeyEnv: "ANTHROPIC_API_KEY",
+		};
+		const saved = process.env.ANTHROPIC_API_KEY;
+		delete process.env.ANTHROPIC_API_KEY;
+		try {
+			const credentials = Object.assign(async () => ({ token: "sk-ant-oat-stub", expiresAt: null }), {
+				available: async () => false,
+			});
+			const events = await collect(
+				createDefaultStreamFn({ credentials })(anthropicModel, { systemPrompt: "", messages: [] }),
+			);
+			expect(events.at(-1)?.type).toBe("error");
+			// Verbatim, with no "after N attempt(s)" prefix: the ladder must not
+			// have run — the error is marked unrecoverable and goes straight to
+			// the user (this test would time out on the ladder's own backoff).
+			expect((events.at(-1) as any).message.errorMessage).toBe(
+				"Not signed in to a Claude subscription for claude-sonnet-5: run /login, or set ANTHROPIC_API_KEY.",
+			);
+		} finally {
+			if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = saved;
+		}
 	});
 });

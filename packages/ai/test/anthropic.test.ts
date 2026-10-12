@@ -2,15 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { cacheCapability } from "../src/cache.ts";
 import {
 	type AnthropicClientLike,
+	anthropicAuthOptions,
 	anthropicBetaHeaders,
 	buildAnthropicRequest,
 	convertMessages,
 	createAnthropicStreamFn,
 	mapAnthropicStream,
+	OAUTH_BETA,
 	planAnthropicBreakpoints,
 	previousRequestTail,
 	THINKING_BLOCK_BINDING_BETA,
 } from "../src/providers/anthropic.ts";
+import { ClaudeOAuthError } from "../src/providers/anthropic-oauth.ts";
 import type { Context, Model, ThinkingLevel, Usage, UserContent } from "../src/types.ts";
 import { assistantMessage, toolResultMessage, userMessage } from "../src/types.ts";
 
@@ -985,14 +988,18 @@ async function* okStream(): AsyncGenerator<Record<string, unknown>, void, unknow
  * a client per call — so a factory here is the shape, not a simplification.
  */
 function fakeClient(
-	answer: (params: Record<string, unknown>, call: number) => AsyncIterable<unknown>,
+	answer: (
+		params: Record<string, unknown>,
+		call: number,
+		options?: { headers?: Record<string, string> },
+	) => AsyncIterable<unknown>,
 ): () => AnthropicClientLike {
 	let call = 0;
 	return () => ({
 		messages: {
-			create: async (params: Record<string, unknown>) => {
+			create: async (params: Record<string, unknown>, options?: { headers?: Record<string, string> }) => {
 				call++;
-				return answer(params, call);
+				return answer(params, call, options);
 			},
 		},
 	});
@@ -1123,5 +1130,234 @@ describe("createAnthropicStreamFn — the TTL ladder", () => {
 		await collect(streamFn(MODEL, longCtx()));
 		expect(cacheControlOf(seen[0]?.system)).toBeUndefined();
 		expect(cacheControlOf(seen[0]?.messages && (seen[0].messages as any[]).at(-1)?.content)).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The Claude subscription
+// ---------------------------------------------------------------------------
+
+/**
+ * A credential provider a test drives: what it answers, and what it was asked.
+ * The provider itself is exercised in `anthropic-oauth.test.ts`; here it only
+ * has to be an honest stand-in for the seam this layer sits on.
+ */
+function credentialsStub(
+	options: {
+		available?: boolean;
+		mint?: (call?: { forceRefresh?: boolean }) => { token: string; expiresAt: number | null };
+	} = {},
+) {
+	const mints: Array<{ forceRefresh?: boolean } | undefined> = [];
+	let availableCalls = 0;
+	const provider = Object.assign(
+		async (call?: { forceRefresh?: boolean }): Promise<{ token: string; expiresAt: number | null }> => {
+			mints.push(call);
+			return options.mint ? options.mint(call) : { token: "sk-ant-oat-stub", expiresAt: null };
+		},
+		{
+			available: async () => {
+				availableCalls++;
+				return options.available ?? true;
+			},
+		},
+	);
+	return { provider, mints, availableCalls: () => availableCalls };
+}
+
+describe("createAnthropicStreamFn — the Claude subscription", () => {
+	test("a 401 is answered with one forced refresh, and the retry goes out on the fresh token", async () => {
+		const seen: Array<{ headers?: Record<string, string> } | undefined> = [];
+		const credentials = credentialsStub();
+		const streamFn = createAnthropicStreamFn({
+			credentials: credentials.provider,
+			clientFactory: fakeClient((_params, call, options) => {
+				seen.push(options);
+				if (call === 1) throw statusError(401, "invalid bearer token");
+				return okStream();
+			}),
+		});
+		const events = await collect(streamFn(MODEL, ctx()));
+		expect(events.at(-1)?.type).toBe("done");
+		// Two dials, both on the bearer: a fresh token behind the second request
+		// is what proves the loop went round rather than the error being swallowed.
+		expect(seen).toEqual([
+			{ headers: { "anthropic-beta": OAUTH_BETA } },
+			{ headers: { "anthropic-beta": OAUTH_BETA } },
+		]);
+		expect(credentials.mints).toEqual([{ forceRefresh: true }]);
+	});
+
+	test("a second 401 is the account's answer, not a stale token's, and is thrown as-is", async () => {
+		let dials = 0;
+		const credentials = credentialsStub();
+		const streamFn = createAnthropicStreamFn({
+			credentials: credentials.provider,
+			clientFactory: fakeClient(() => {
+				dials++;
+				throw statusError(401, "invalid bearer token");
+			}),
+		});
+		await expect(collect(streamFn(MODEL, ctx()))).rejects.toThrow("invalid bearer token");
+		expect(dials).toBe(2);
+		expect(credentials.mints).toEqual([{ forceRefresh: true }]);
+	});
+
+	test("a refresh that itself fails leaves the API's own 401 as the answer", async () => {
+		let dials = 0;
+		const credentials = credentialsStub({
+			mint: (call) => {
+				if (call?.forceRefresh) throw new ClaudeOAuthError("the session is gone: run /login again");
+				return { token: "sk-ant-oat-stub", expiresAt: null };
+			},
+		});
+		const streamFn = createAnthropicStreamFn({
+			credentials: credentials.provider,
+			clientFactory: fakeClient(() => {
+				dials++;
+				throw statusError(401, "invalid bearer token");
+			}),
+		});
+		await expect(collect(streamFn(MODEL, ctx()))).rejects.toThrow("invalid bearer token");
+		expect(dials).toBe(1);
+	});
+
+	test("nothing signed in and no key: the login is named before any dial", async () => {
+		const saved = process.env.ANTHROPIC_API_KEY;
+		delete process.env.ANTHROPIC_API_KEY;
+		try {
+			let created = 0;
+			const credentials = credentialsStub({ available: false });
+			const streamFn = createAnthropicStreamFn({
+				credentials: credentials.provider,
+				clientFactory: () => {
+					created++;
+					return { messages: { create: async () => okStream() } };
+				},
+			});
+			const error = await collect(streamFn(MODEL, ctx())).catch((thrown: unknown) => thrown);
+			expect((error as ClaudeOAuthError).message).toBe(
+				"Not signed in to a Claude subscription for claude-sonnet-5: run /login, or set ANTHROPIC_API_KEY.",
+			);
+			// Terminal, and marked so: the retry ladder reads this mark to fail
+			// fast rather than sleep two minutes before showing the login.
+			expect((error as ClaudeOAuthError).invalidGrant).toBe(true);
+			expect(created).toBe(0);
+		} finally {
+			if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = saved;
+		}
+	});
+
+	test("a key present when the sign-in is not: the request goes out as a key request", async () => {
+		const saved = process.env.ANTHROPIC_API_KEY;
+		process.env.ANTHROPIC_API_KEY = "sk-env";
+		try {
+			const seen: Array<{ headers?: Record<string, string> } | undefined> = [];
+			const credentials = credentialsStub({ available: false });
+			const streamFn = createAnthropicStreamFn({
+				credentials: credentials.provider,
+				clientFactory: fakeClient((_params, _call, options) => {
+					seen.push(options);
+					return okStream();
+				}),
+			});
+			const events = await collect(streamFn(MODEL, ctx()));
+			expect(events.at(-1)?.type).toBe("done");
+			// No oauth beta and no mint: a configured-but-empty subscription is a
+			// fallback, not a claim, and the key path is exactly as it was.
+			expect(seen).toEqual([undefined]);
+			expect(credentials.mints).toEqual([]);
+		} finally {
+			if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = saved;
+		}
+	});
+
+	test("the bearer request carries the oauth beta, after the row's own", async () => {
+		expect(OAUTH_BETA).toBe("oauth-2025-04-20");
+		const seen: Array<{ headers?: Record<string, string> } | undefined> = [];
+		const credentials = credentialsStub();
+		const streamFn = createAnthropicStreamFn({
+			credentials: credentials.provider,
+			clientFactory: fakeClient((_params, _call, options) => {
+				seen.push(options);
+				return okStream();
+			}),
+		});
+		await collect(streamFn(BINDING_MODEL, longCtx()));
+		await collect(streamFn(MODEL, longCtx()));
+		await collect(streamFn(MODEL, longCtx(), { apiKey: "sk-explicit" }));
+		await collect(streamFn(MODEL, longCtx(), { headers: { "anthropic-beta": "spoofed" } }));
+		expect(seen).toEqual([
+			{ headers: { "anthropic-beta": `${THINKING_BLOCK_BINDING_BETA},${OAUTH_BETA}` } },
+			{ headers: { "anthropic-beta": OAUTH_BETA } },
+			undefined,
+			// The model's beta wins the collision, exactly as it does without
+			// credentials: it is a requirement of the wire, not a preference.
+			{ headers: { "anthropic-beta": OAUTH_BETA } },
+		]);
+	});
+
+	test("a reseller row on the same wire is never handed the subscription", async () => {
+		const seen: Array<{ headers?: Record<string, string> } | undefined> = [];
+		const credentials = credentialsStub();
+		const streamFn = createAnthropicStreamFn({
+			credentials: credentials.provider,
+			clientFactory: fakeClient((_params, _call, options) => {
+				seen.push(options);
+				throw statusError(401, "invalid x-api-key");
+			}),
+		});
+		await expect(collect(streamFn(GATEWAY, ctx()))).rejects.toThrow("invalid x-api-key");
+		// One dial, no beta, and the credentials never consulted: a 401 here is
+		// not a stale-token problem, and the bearer belongs to api.anthropic.com —
+		// this row is not it.
+		expect(seen).toEqual([undefined]);
+		expect(credentials.availableCalls()).toBe(0);
+		expect(credentials.mints).toEqual([]);
+	});
+
+	test("an explicit per-call key keeps the subscription out of the retry path", async () => {
+		let dials = 0;
+		const credentials = credentialsStub();
+		const streamFn = createAnthropicStreamFn({
+			credentials: credentials.provider,
+			clientFactory: fakeClient(() => {
+				dials++;
+				throw statusError(401, "invalid x-api-key");
+			}),
+		});
+		await expect(collect(streamFn(MODEL, ctx(), { apiKey: "sk-explicit" }))).rejects.toThrow("invalid x-api-key");
+		expect(dials).toBe(1);
+		expect(credentials.mints).toEqual([]);
+	});
+
+	test("the auth trio: explicit key, then the subscription, then the environment", async () => {
+		const credentials = credentialsStub();
+		expect(anthropicAuthOptions(MODEL, { apiKey: "sk-explicit" }, credentials.provider)).toEqual({
+			apiKey: "sk-explicit",
+		});
+		// `authToken: null` is not decoration: the SDK adopts ANTHROPIC_AUTH_TOKEN
+		// from the environment when it is not told otherwise, and a set authToken
+		// makes it ignore `credentials` entirely.
+		expect(anthropicAuthOptions(MODEL, undefined, credentials.provider)).toEqual({
+			apiKey: null,
+			authToken: null,
+			credentials: credentials.provider,
+		});
+		const saved = process.env.ANTHROPIC_API_KEY;
+		try {
+			delete process.env.ANTHROPIC_API_KEY;
+			// The empty string, not null: these are the keyless rows' path, and a
+			// null here would take the SDK down the credentials branch with
+			// nothing to mint from.
+			expect(anthropicAuthOptions(MODEL)).toEqual({ apiKey: "" });
+			process.env.ANTHROPIC_API_KEY = "sk-env";
+			expect(anthropicAuthOptions(MODEL)).toEqual({ apiKey: "sk-env" });
+		} finally {
+			if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = saved;
+		}
 	});
 });

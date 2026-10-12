@@ -72,18 +72,45 @@ export { type CostBreakdown, computeCost, formatCost } from "./pricing.ts";
 
 // Providers
 export {
+	type AnthropicAuthOptions,
 	type AnthropicBreakpointPlan,
 	type AnthropicCacheRequest,
 	type AnthropicRawStreamEvent,
 	type AnthropicRequestParams,
 	type AnthropicStreamFnOptions,
+	anthropicAuthOptions,
 	buildAnthropicRequest,
 	convertMessages as convertMessagesForAnthropic,
 	createAnthropicStreamFn,
 	mapAnthropicStream,
+	OAUTH_BETA,
 	planAnthropicBreakpoints,
 	previousRequestTail,
 } from "./providers/anthropic.ts";
+export {
+	CLAUDE_OAUTH_AUTHORIZE_URL,
+	CLAUDE_OAUTH_CLIENT_ID,
+	CLAUDE_OAUTH_MANUAL_REDIRECT_URL,
+	CLAUDE_OAUTH_SCOPES,
+	CLAUDE_OAUTH_TOKEN_URL,
+	CLAUDE_REFRESH_WINDOW_MS,
+	type ClaudeAuthorizeOptions,
+	type ClaudeCredentialStore,
+	type ClaudeOAuthCredential,
+	ClaudeOAuthError,
+	type ClaudeTokenProvider,
+	type ClaudeTokenProviderOptions,
+	claudeAuthorizeUrl,
+	claudeRefreshDue,
+	createClaudeTokenProvider,
+	createOAuthState,
+	createPkce,
+	type ExchangeClaudeCodeOptions,
+	exchangeClaudeCode,
+	parseClaudeAuthorizationInput,
+	type RefreshClaudeTokenOptions,
+	refreshClaudeToken,
+} from "./providers/anthropic-oauth.ts";
 export { FAUX_MODEL, type FauxProvider, type FauxStep, fauxProvider } from "./providers/faux.ts";
 export {
 	buildOpenAIRequest,
@@ -160,6 +187,7 @@ import type { CacheTracker } from "./cache-tracker.ts";
 import { withCacheTracker } from "./cache-tracker.ts";
 import { apiKeyEnvNames, MissingApiKeyError, resolveApiKey } from "./model.ts";
 import { createAnthropicStreamFn } from "./providers/anthropic.ts";
+import type { ClaudeTokenProvider } from "./providers/anthropic-oauth.ts";
 import { createOpenAIStreamFn } from "./providers/openai-compat.ts";
 import { createResponsesStreamFn, type ResponsesClientLike } from "./providers/openai-responses.ts";
 import { withRetry } from "./retry.ts";
@@ -187,6 +215,14 @@ export interface StreamFnOptions {
 	 */
 	responsesClientFactory?: () => ResponsesClientLike;
 	/**
+	 * Where a Claude subscription's bearer token comes from. Travels with the
+	 * transport for the same reason `onCacheNotice` does: one account per
+	 * process, and the refresh policy it carries outlives any one request.
+	 * Consulted per request for the anthropic provider; when its `available()`
+	 * says no, requests fall back to the api-key path.
+	 */
+	credentials?: ClaudeTokenProvider;
+	/**
 	 * How long a request may go without a single stream event before it is
 	 * declared stalled and torn down. The failure it bounds is the one no
 	 * timeout inside the SDK covers: a connection that was accepted and then
@@ -196,13 +232,24 @@ export interface StreamFnOptions {
 }
 
 // Long-form design notes: docs/dev/ai-layer.md
-/** The error a model fails with when no key resolves, or undefined when one does. */
-export function missingApiKey(model: Model, options?: StreamOptions): MissingApiKeyError | undefined {
+/**
+ * The error a model fails with when no key resolves, or undefined when one
+ * does. `subscription` tells it a sign-in may be standing in for the key —
+ * the check itself is sync and cannot ask; an unavailable subscription then
+ * surfaces as the adapter's own "not signed in" error at request time, which
+ * names the login instead of the environment variable.
+ */
+export function missingApiKey(
+	model: Model,
+	options?: StreamOptions,
+	subscription = false,
+): MissingApiKeyError | undefined {
 	if (options?.apiKey) return undefined;
 	// A row naming no variable wants no key: the local daemon. The distinction
 	// is drawn off the empty name list, because the error below would otherwise
 	// name a variable that does not exist.
 	if (apiKeyEnvNames(model).length === 0) return undefined;
+	if (subscription) return undefined;
 	return resolveApiKey(model) ? undefined : new MissingApiKeyError(model);
 }
 
@@ -216,6 +263,7 @@ function dispatchStreamFn(settings: StreamFnOptions): StreamFn {
 	const anthropic = createAnthropicStreamFn({
 		policy: settings.policy,
 		onCacheNotice: settings.onCacheNotice,
+		credentials: settings.credentials,
 	});
 	const openai = createOpenAIStreamFn({ policy: settings.policy });
 	// Same `policy`, no `onCacheNotice`: the notices this adapter can raise are the
@@ -227,7 +275,7 @@ function dispatchStreamFn(settings: StreamFnOptions): StreamFn {
 		clientFactory: settings.responsesClientFactory,
 	});
 	return (model, context, options) => {
-		const missingKey = missingApiKey(model, options);
+		const missingKey = missingApiKey(model, options, model.provider === "anthropic" && settings.credentials != null);
 		if (missingKey) throw missingKey;
 		if (model.api === "anthropic-messages") return anthropic(model, context, options);
 		if (model.api === "openai-completions") return openai(model, context, options);
