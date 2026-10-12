@@ -95,6 +95,23 @@ describe("withCacheTracker", () => {
 		expect(records[1]?.gapMs).toBeGreaterThanOrEqual(0);
 	});
 
+	test("the session's live message array tracks extension then rewind", async () => {
+		// The loop's own shape: one array that grows by push, every request
+		// carrying the earlier messages by reference — not freshly built objects.
+		// Reused objects must fingerprint as the same units (an extension), while
+		// a message swapped at an index is a rewind exactly as before.
+		const { streamFn, tracker } = withCacheTracker(stubStream());
+		const live: Context["messages"] = [userMessage("one")];
+		await drain(streamFn(model(), ctx(live)));
+		live.push(userMessage("two"));
+		await drain(streamFn(model(), ctx(live)));
+		live[1] = userMessage("TWO");
+		await drain(streamFn(model(), ctx(live)));
+
+		expect(tracker.records().map((record) => record.kind)).toEqual(["first", "extension", "rewind"]);
+		expect(tracker.records()[2]?.divergence).toEqual({ scope: "messages", messageIndex: 1 });
+	});
+
 	test("two requests with no message array change at all", async () => {
 		// The second request here is byte-identical to the first — what a retry
 		// attempt looks like — and must be labelled as one, not as an extension.

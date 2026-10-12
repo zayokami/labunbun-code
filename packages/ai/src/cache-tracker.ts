@@ -113,13 +113,34 @@ function messageText(message: AgentMessage): string {
 	return `r\x00${message.toolCallId}\x00${parts.join("\x01")}`;
 }
 
+/**
+ * Fingerprints already computed, keyed by message object.
+ *
+ * The session loop re-sends its whole transcript on every request while only
+ * ever appending to it, so hashing each message per request makes a long
+ * session quadratic in its own history. Messages are finalized copies that
+ * nobody edits afterwards (see `MessageBuilder.done`), so the bytes a message
+ * contributes are fixed for its lifetime and the one hash can be kept. Weak,
+ * so a transcript that is dropped takes its entries with it — and shared
+ * across trackers, since the answer depends on the message alone.
+ */
+const fingerprints = new WeakMap<AgentMessage, string>();
+
+function fingerprintOf(message: AgentMessage): string {
+	const cached = fingerprints.get(message);
+	if (cached !== undefined) return cached;
+	const fingerprint = hash64(messageText(message));
+	fingerprints.set(message, fingerprint);
+	return fingerprint;
+}
+
 // Long-form design notes: docs/dev/ai-layer.md
 /** The request as comparable units: tools, system prompt, then one per message. */
 export function contextFingerprints(context: Context): string[] {
 	const units: string[] = [];
 	units.push(hash64(`tools\x00${context.tools?.length ? JSON.stringify(context.tools) : ""}`));
 	units.push(hash64(`system\x00${context.systemPrompt}`));
-	for (const message of context.messages) units.push(hash64(messageText(message)));
+	for (const message of context.messages) units.push(fingerprintOf(message));
 	return units;
 }
 
