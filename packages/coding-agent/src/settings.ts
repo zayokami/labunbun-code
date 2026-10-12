@@ -131,6 +131,29 @@ export const SettingsSchema = z.object({
 	// Long-form design notes: docs/dev/migration-framework.md
 	/** Let the cheap rung run by itself when the context crosses the compaction threshold. */
 	trimOldToolResults: z.boolean().optional(),
+	// Long-form design notes: docs/dev/migration-framework.md
+	/**
+	 * The compaction knobs, for a conversation the defaults manage the wrong
+	 * way: which model writes the summaries, how much headroom is kept below the
+	 * window, and where the trigger line sits. The arithmetic itself is
+	 * `compactionThreshold`'s, in the agent package.
+	 */
+	compaction: z
+		.object({
+			/** The model that writes summaries; the session's own model when unset. */
+			model: z.string().optional(),
+			/** Tokens kept free below the window when the trigger line is computed. */
+			reserveTokens: z.number().int().positive().optional(),
+			/**
+			 * The trigger line as a percent of the window. When set it replaces the
+			 * reserve arithmetic rather than feeding it — a session the user wants
+			 * to compact early says so directly. Bounded on both ends: a line at 0%
+			 * would compact before the first request could be sent, and one at 100%
+			 * sits past the point where requests are refused.
+			 */
+			thresholdPercent: z.number().gt(0).lt(100).optional(),
+		})
+		.optional(),
 	/**
 	 * Ask each provider with a key — and each one that takes no key at all, like
 	 * the local Ollama daemon — what it serves, once at startup, and let the
@@ -295,6 +318,11 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	pricing: "denied",
 	cache: "denied",
 	trimOldToolResults: "denied",
+	// The same cost class as `model` and `trimOldToolResults` together: it names
+	// the model that spends on the conversation and decides when the transcript
+	// is rewritten, and a cloned repository choosing either is the move `model`
+	// is already denied for.
+	compaction: "denied",
 	// The same cost class as `cache` and `trimOldToolResults`: it decides how much
 	// the model chews on the user's own conversation — what the turns are billed,
 	// and how fast the context fills — and a repo has no business choosing that.

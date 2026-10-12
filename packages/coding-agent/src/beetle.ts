@@ -41,7 +41,7 @@ import {
 import { type Model, missingApiKey, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
 import { TASK_BOARD_TOOL_NAMES } from "@labunbun/tools";
 import { z } from "zod";
-import { type CompactionWiring, createCompactionWiring } from "./compaction-wiring.ts";
+import { type CompactionTuning, type CompactionWiring, createCompactionWiring } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { offeredModels } from "./model-offer.ts";
 
@@ -435,6 +435,8 @@ export interface BeetleBandOptions {
 	canRunModel?: (model: Model) => boolean;
 	thinkingLevel?: () => ThinkingLevel | undefined;
 	trimOldToolResults?: boolean;
+	/** `settings.compaction`, passed through whole — see `TaskToolContext`. */
+	compactionTuning?: CompactionTuning;
 	maxTurns?: number;
 	/**
 	 * Stop the whole band once its four transcripts price past this many USD.
@@ -787,6 +789,7 @@ export class BeetleBand {
 			store: undefined,
 			streamFn: options.streamFn,
 			trimOldToolResults: options.trimOldToolResults,
+			tuning: options.compactionTuning,
 			report: (text) => options.report?.(`[beetle] ${DISPLAY_NAME[name]}: ${text}`),
 		});
 		const memberTools = this.#memberTools(name);

@@ -26,7 +26,7 @@ import {
 import type { Model, StreamFn, ThinkingLevel } from "@labunbun/ai";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
-import { createCompactionWiring } from "./compaction-wiring.ts";
+import { type CompactionTuning, createCompactionWiring } from "./compaction-wiring.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
 
 export interface AgentDefinition {
@@ -195,6 +195,13 @@ export interface TaskToolContext {
 	report?: (text: string) => void;
 	/** `settings.trimOldToolResults`, passed through to the subagent's own manager. */
 	trimOldToolResults?: boolean;
+	/**
+	 * `settings.compaction`, passed through whole: a subagent manages its own
+	 * context, and one compacting by different rules than the session that
+	 * spawned it — a different summarizer, a different trigger line — would be a
+	 * second policy nobody chose.
+	 */
+	compactionTuning?: CompactionTuning;
 }
 
 export const GENERAL_PURPOSE: AgentDefinition = {
@@ -416,6 +423,7 @@ export function createSubagentTools(ctx: TaskToolContext): AnyTool[] {
 				store: undefined,
 				streamFn: ctx.streamFn,
 				trimOldToolResults: ctx.trimOldToolResults,
+				tuning: ctx.compactionTuning,
 				report: (text) => {
 					notes.push(text);
 					ctx.report?.(`[${definition.agentType}] ${text}`);

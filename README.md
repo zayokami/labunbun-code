@@ -115,6 +115,8 @@ The tool first makes old tool results smaller. It replaces each old tool result 
 
 Set `trimOldToolResults: false` to skip the first step. Use `/trim` to run the first step on request. Use `/context` to see what the window contains. The indicator counts the system prompt and the tool schemas.
 
+The `compaction` settings change this behavior. Set `compaction.model` to choose the model that writes the summaries. Set `compaction.thresholdPercent` to compact at a percent of the window. Set `compaction.reserveTokens` to change the space that the trigger line keeps free.
+
 ### Prompt cache
 
 A provider bills a prompt in two parts. The first part comes from the cache. The second part the provider reads again. The cache uses the start of the prompt as its key. Only an exact match is a hit.
@@ -546,7 +548,7 @@ The tool reads the settings files in this order. A later file has a higher prior
 
 A project file is controlled by its repository. The tool does not read these keys from a project file:
 
-`model`, `fallbackModels`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `modelDiscovery`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `permissions.allow`, `permissions.additionalDirectories`.
+`model`, `fallbackModels`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `compaction`, `modelDiscovery`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `permissions.allow`, `permissions.additionalDirectories`.
 
 A repository must not choose its own model. A repository must not choose its own confinement. A repository must not approve its own tool calls. A repository must not turn the network off.
 
@@ -574,6 +576,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `networkAccess` | `enabled`, `restricted` | User |
 | `networkDomains` | An array of strings and objects | User |
 | `trimOldToolResults` | A boolean. The value `true` is the default. | User |
+| `compaction` | An object with the keys `model`, `reserveTokens`, and `thresholdPercent` | User |
 | `modelDiscovery` | A boolean. The value `true` is the default. | User |
 | `backgroundShellNotifications` | A boolean. The value `true` is the default. | User |
 | `env` | An object of environment variables | User |

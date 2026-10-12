@@ -39,7 +39,7 @@ import {
 } from "@labunbun/mcp";
 import { createAllTools } from "@labunbun/tools";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
-import { createCompactionWiring } from "./compaction-wiring.ts";
+import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
@@ -185,6 +185,25 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	if (model.toolCalling === false) {
 		console.error(`Warning: ${noToolCallingNotice(model)}`);
 	}
+
+	// `settings.compaction`, resolved once and shared down the same seams
+	// `trimOldToolResults` travels — the session's manager, each subagent's, each
+	// beetle member's. The refresh the summarizer resolution may need is the
+	// targeted one above rather than a full catalog walk: a `-p` run stays off
+	// the network by default, and the exception it already makes covers exactly
+	// the case a configured summarizer can be — a model only a listing can name.
+	const compactionSettings = settings.compaction;
+	const compactionSummarizer = await resolveCompactionSummarizer(compactionSettings?.model, () =>
+		settings.modelDiscovery !== false ? refreshModelCatalog({ models: dynamicProviderTemplates() }) : undefined,
+	);
+	if (compactionSummarizer.warning) console.error(compactionSummarizer.warning);
+	const compactionTuning: CompactionTuning | undefined = compactionSettings
+		? {
+				summarizerModel: compactionSummarizer.model,
+				reserveTokens: compactionSettings.reserveTokens,
+				thresholdPercent: compactionSettings.thresholdPercent,
+			}
+		: undefined;
 
 	// Spilling applies here too: a `-p` run reads a repository like any other
 	// session, and a build log that does not fit is no more reproducible for
@@ -350,6 +369,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		thinkingLevel: () => settings.thinkingLevel,
 		getPermissionRules: () => rules,
 		trimOldToolResults: settings.trimOldToolResults,
+		compactionTuning,
 		report: (text) => console.error(text),
 	});
 	const allTools = [...tools, ...mcpTools, ...subagentTools];
@@ -370,6 +390,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		store,
 		streamFn,
 		trimOldToolResults: settings.trimOldToolResults,
+		tuning: compactionTuning,
 		report: (text) => console.error(text),
 		readFile: (path) => {
 			try {

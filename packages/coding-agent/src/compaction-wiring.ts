@@ -22,7 +22,7 @@ import {
 	type SessionStore,
 	SUMMARY_SECTIONS,
 } from "@labunbun/agent";
-import type { Model, StreamFn } from "@labunbun/ai";
+import { type Model, missingApiKey, resolveModel, type StreamFn } from "@labunbun/ai";
 import { rewriteCause } from "./cache-report.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE, formatTokens } from "./context-report.ts";
 
@@ -166,6 +166,64 @@ export function compactionActivityText(phase: CompactionPhase): string | undefin
 	}
 }
 
+/**
+ * `settings.compaction`, resolved by the host that owns the settings.
+ *
+ * A struct rather than three more flat options because it travels two hops —
+ * through the subagent tool context and the beetle band options — and three
+ * fields threaded twice is three places for one of them to be dropped. The
+ * summarizer is the resolved model rather than a ref for the same reason: the
+ * one step that can wait on a provider's catalog belongs at startup, once, not
+ * inside a wiring that `/model` rebuilds.
+ */
+export interface CompactionTuning {
+	/** The model summaries are written with; the session's model when undefined. */
+	summarizerModel?: Model;
+	/** `settings.compaction.reserveTokens`, into the threshold arithmetic. */
+	reserveTokens?: number;
+	/** `settings.compaction.thresholdPercent`, when the line is named outright. */
+	thresholdPercent?: number;
+}
+
+/**
+ * `settings.compaction.model`, resolved once at startup.
+ *
+ * Resolution is a host's job because only the host knows how to wait for a
+ * catalog — the REPL's background refresh, a `-p` run's targeted one — so the
+ * second look is a callback: a ref nothing matched yet may be one a provider is
+ * about to name. A ref that still resolves to nothing, or to a model whose key
+ * is missing, comes back as a warning rather than an error, where the host
+ * decides: an unknown summarizer degrades context management, while an unknown
+ * session model means no first request at all, and only the second of those
+ * stops the app.
+ */
+export async function resolveCompactionSummarizer(
+	ref: string | undefined,
+	refreshCatalog: () => Promise<unknown> | undefined,
+): Promise<{ model?: Model; warning?: string }> {
+	if (!ref) return {};
+	let model = resolveModel(ref);
+	if (!model) {
+		await refreshCatalog();
+		model = resolveModel(ref);
+	}
+	if (!model) {
+		return { warning: `Warning: unknown compaction model "${ref}" — the session's model will write summaries.` };
+	}
+	// Checked here rather than left to the first summarization: a pass that dies
+	// on a missing key trips the breaker, and the user would find out from an
+	// unmanaged context instead of a line at startup.
+	const missing = missingApiKey(model);
+	if (missing) {
+		return {
+			warning:
+				`Warning: ${missing.message} — the session's model will write summaries.\n` +
+				`Example: export ${missing.envNames[0]}=sk-...`,
+		};
+	}
+	return { model };
+}
+
 export interface CompactionWiringOptions {
 	/** The model whose window the thresholds come from. `rebuild` may change it. */
 	model: Model;
@@ -183,6 +241,12 @@ export interface CompactionWiringOptions {
 	 * behaves differently from the session the user just watched.
 	 */
 	trimOldToolResults?: boolean;
+	/**
+	 * `settings.compaction`, when the file carries one. The summarizer outlives
+	 * a `/model` rebuild: the user chose who writes summaries, and the session
+	 * model is just what answers.
+	 */
+	tuning?: CompactionTuning;
 	readFile?: (path: string) => string | null;
 	/**
 	 * The `PreCompact` hook, when the app has one. A veto defers a pass the
@@ -250,11 +314,13 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				contextWindow: forModel.contextWindow,
 				maxOutputTokens: forModel.maxOutputTokens,
 				microcompactFirst: options.trimOldToolResults !== false,
+				reserveTokens: options.tuning?.reserveTokens,
+				thresholdPercent: options.tuning?.thresholdPercent,
 			},
 			{
 				streamFn: options.streamFn,
 				store: forStore,
-				summarizerModel: forModel,
+				summarizerModel: options.tuning?.summarizerModel ?? forModel,
 				readFile: options.readFile,
 				onPhase: phase,
 				// The summary goes out over the session's own prefix, so the cache

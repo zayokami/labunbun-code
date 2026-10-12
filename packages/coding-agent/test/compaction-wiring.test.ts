@@ -20,15 +20,17 @@ import {
 } from "@labunbun/agent";
 import {
 	type AgentMessage,
+	clearCustomModels,
 	FAUX_MODEL,
 	fauxProvider,
 	type Model,
+	registerOpenAICompatibleProvider,
 	type StreamFn,
 	textContent,
 	toolResultMessage,
 	userMessage,
 } from "@labunbun/ai";
-import { compactionPhaseText, createCompactionWiring } from "../src/compaction-wiring.ts";
+import { compactionPhaseText, createCompactionWiring, resolveCompactionSummarizer } from "../src/compaction-wiring.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE } from "../src/context-report.ts";
 
 /** A window small enough to reach the threshold with a handful of tool results. */
@@ -446,5 +448,137 @@ describe("the threshold the wiring acts on", () => {
 		created.rebuild({ ...FAUX_MODEL, contextWindow: 200_000, maxOutputTokens: 8_192 }, undefined);
 
 		expect(created.manager().limits()).toMatchObject({ contextWindow: 200_000, threshold: 178_808 });
+	});
+});
+
+describe("the compaction tuning", () => {
+	test("a configured percent is the trigger line the manager acts on", () => {
+		// The default on this window is the 60% floor — 24k — because the reserves
+		// outweigh it. The configured line replaces that arithmetic, and the number
+		// read here is the manager's own: `/context` asks it rather than
+		// recomputing, so this is the line the user will see there.
+		const created = createCompactionWiring({
+			model: MODEL,
+			store: undefined,
+			streamFn: fauxProvider([{ text: "x" }]).streamFn,
+			report: () => {},
+			tuning: { thresholdPercent: 50 },
+		});
+
+		expect(created.manager().limits().threshold).toBe(20_000);
+	});
+
+	test("a configured reserve replaces the default in the formula", () => {
+		// 40k − 8k − 5k is 27k — above the floor, where the default 13k reserve
+		// would have left the floor in charge at 24k.
+		const created = createCompactionWiring({
+			model: MODEL,
+			store: undefined,
+			streamFn: fauxProvider([{ text: "x" }]).streamFn,
+			report: () => {},
+			tuning: { reserveTokens: 5_000 },
+		});
+
+		expect(created.manager().limits().threshold).toBe(27_000);
+	});
+
+	test("a configured summarizer writes the summary, and a rebuild cannot move it", async () => {
+		// Who answers and who summarizes come apart: `/model` rebuilding the wiring
+		// is a change of the former, and the user's choice of summarizer outlives
+		// it.
+		const seen: string[] = [];
+		const summarizer: Model = { ...FAUX_MODEL, id: "faux-summarizer" };
+		const streamFn: StreamFn = async function* (model, context, streamOptions) {
+			seen.push(model.id);
+			yield* fauxProvider([{ text: "<summary>1. Request: the files</summary>" }]).streamFn(
+				model,
+				context,
+				streamOptions,
+			);
+		};
+		const created = createCompactionWiring({
+			model: MODEL,
+			store: undefined,
+			streamFn,
+			report: () => {},
+			trimOldToolResults: false,
+			tuning: { summarizerModel: summarizer },
+		});
+		created.rebuild({ ...MODEL, id: "faux-after-swap" }, undefined);
+
+		await created.checkCompaction({ systemPrompt: "", messages: overThreshold() });
+
+		expect(seen).toEqual(["faux-summarizer"]);
+	});
+});
+
+describe("resolveCompactionSummarizer", () => {
+	test("no ref is nothing to resolve, and nothing to say", async () => {
+		let refreshes = 0;
+		const result = await resolveCompactionSummarizer(undefined, async () => {
+			refreshes++;
+		});
+
+		expect(result).toEqual({});
+		expect(refreshes).toBe(0);
+	});
+
+	test("an unknown ref asks for one refresh, then falls back with a line", async () => {
+		// The refresh is the host's second look — a ref the table does not know may
+		// be one a provider is about to name — and one look is enough: a listing
+		// that did not name it a moment ago will not name it now.
+		let refreshes = 0;
+		const result = await resolveCompactionSummarizer("no-such/provider-model", async () => {
+			refreshes++;
+		});
+
+		expect(refreshes).toBe(1);
+		expect(result.model).toBeUndefined();
+		expect(result.warning).toContain('unknown compaction model "no-such/provider-model"');
+	});
+
+	test("the second look's answer is used, not the first miss", async () => {
+		// What the callback is for: a ref only a provider's answer can name — the
+		// local daemon's loadout — resolves on the retry after the refresh. The
+		// provider appears during the refresh, which is the ordering the daemon has.
+		const before = process.env.LBB_TUNING_LATE_KEY;
+		process.env.LBB_TUNING_LATE_KEY = "test-key";
+		try {
+			const result = await resolveCompactionSummarizer("tuning-late/m1", async () => {
+				registerOpenAICompatibleProvider({
+					id: "tuning-late",
+					baseUrl: "https://tuning-late.invalid/v1",
+					apiKeyEnv: "LBB_TUNING_LATE_KEY",
+					models: [{ id: "m1", contextWindow: 128_000, maxOutputTokens: 8_192 }],
+				});
+			});
+
+			expect(result.model?.id).toBe("m1");
+			expect(result.warning).toBeUndefined();
+		} finally {
+			if (before === undefined) delete process.env.LBB_TUNING_LATE_KEY;
+			else process.env.LBB_TUNING_LATE_KEY = before;
+			clearCustomModels();
+		}
+	});
+
+	test("a model whose key is missing falls back naming the key", async () => {
+		// Registered under a variable nothing sets: the closest reachable stand-in
+		// for a machine that configured a cloud summarizer and did not export its
+		// key — on a developer machine, the catalog's real variables may be set.
+		registerOpenAICompatibleProvider({
+			id: "tuning-missing",
+			baseUrl: "https://tuning-missing.invalid/v1",
+			apiKeyEnv: "LBB_TUNING_TEST_MISSING_KEY",
+			models: [{ id: "m1", contextWindow: 128_000, maxOutputTokens: 8_192 }],
+		});
+		try {
+			const result = await resolveCompactionSummarizer("tuning-missing/m1", async () => {});
+
+			expect(result.model).toBeUndefined();
+			expect(result.warning).toContain("LBB_TUNING_TEST_MISSING_KEY");
+		} finally {
+			clearCustomModels();
+		}
 	});
 });

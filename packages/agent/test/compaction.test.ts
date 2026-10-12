@@ -73,6 +73,18 @@ describe("thresholds", () => {
 		const config = { contextWindow: 20_000, maxOutputTokens: 100, reserveTokens: 100 };
 		expect(compactionThreshold(config)).toBeLessThan(hardContextLimit(config));
 	});
+
+	test("a configured percent is the trigger line, not an input to the arithmetic", () => {
+		// 80% of a roomy window is just that number — the reserves play no part.
+		expect(compactionThreshold({ contextWindow: 200_000, maxOutputTokens: 8_192, thresholdPercent: 80 })).toBe(160_000);
+		// On a small window the named share stays the named share rather than being
+		// raised to the 60% floor: a user who names a percent named a percent.
+		expect(compactionThreshold({ contextWindow: 16_000, maxOutputTokens: 8_192, thresholdPercent: 10 })).toBe(1_600);
+		// Still clamped under the hard limit, where a pass could no longer run —
+		// the same ceiling the reserve arithmetic is held to.
+		const hot = { contextWindow: 200_000, maxOutputTokens: 8_192, thresholdPercent: 99 };
+		expect(compactionThreshold(hot)).toBe(hardContextLimit(hot) - 1);
+	});
 });
 
 describe("estimateContextTokens", () => {

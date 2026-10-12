@@ -113,10 +113,12 @@ import {
 	type LocalCommandContext,
 } from "./commands.ts";
 import {
+	type CompactionTuning,
 	compactionActivityText,
 	compactionPhaseText,
 	compactionReceiptLines,
 	createCompactionWiring,
+	resolveCompactionSummarizer,
 } from "./compaction-wiring.ts";
 import {
 	contextRows,
@@ -321,6 +323,24 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		return 1;
 	}
 
+	// ---- compaction settings ----
+	// `settings.compaction`, resolved once: the summarizer is a property of the
+	// conversation, not of the session model `/model` swaps, so the wiring is
+	// handed the model rather than a reader. A summarizer that will not resolve
+	// warns and falls back where an unknown session model above stops the app —
+	// compaction degrades; a session that cannot send its first request does not
+	// exist.
+	const compactionSettings = settings.compaction;
+	const compactionSummarizer = await resolveCompactionSummarizer(compactionSettings?.model, () => catalogRefresh);
+	if (compactionSummarizer.warning) console.error(compactionSummarizer.warning);
+	const compactionTuning: CompactionTuning | undefined = compactionSettings
+		? {
+				summarizerModel: compactionSummarizer.model,
+				reserveTokens: compactionSettings.reserveTokens,
+				thresholdPercent: compactionSettings.thresholdPercent,
+			}
+		: undefined;
+
 	// ---- session persistence: resume, continue, or new ----
 	let store: SessionStore | undefined;
 	/** Said out loud below: a resumed conversation that is missing messages. */
@@ -461,6 +481,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		store,
 		streamFn,
 		trimOldToolResults: settings.trimOldToolResults,
+		tuning: compactionTuning,
 		report: (text) => pushInfo(handle, text),
 		// A summary runs for as long as a turn does and used to say nothing at
 		// all: the screen sat on "Thinking…" while a full-prefix request was
@@ -627,6 +648,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		thinkingLevel: () => thinkingLevel,
 		getPermissionRules: () => [...baseRules, ...sessionRules],
 		trimOldToolResults: settings.trimOldToolResults,
+		compactionTuning,
 		report: (text) => pushInfo(handle, text),
 	});
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd);
@@ -1105,6 +1127,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		canRunModel: (candidate) => missingApiKey(candidate) === undefined,
 		thinkingLevel: () => thinkingLevel,
 		trimOldToolResults: settings.trimOldToolResults,
+		compactionTuning,
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
 		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
 		network: () => sessionRef?.network ?? effectiveNetwork,

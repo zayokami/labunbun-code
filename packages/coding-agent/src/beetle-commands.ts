@@ -32,6 +32,7 @@ import {
 	readBeetleState,
 	writeBeetleState,
 } from "./beetle-state.ts";
+import type { CompactionTuning } from "./compaction-wiring.ts";
 import { writeUserSettingsNestedPatch } from "./user-settings.ts";
 
 /** The slice of a status card `/beetle status` draws; the rest is the UI's. */
@@ -87,6 +88,8 @@ export interface BeetleSurfaceDeps {
 	canRunModel: (model: Model) => boolean;
 	thinkingLevel: () => ThinkingLevel | undefined;
 	trimOldToolResults?: boolean;
+	/** `settings.compaction`, passed through to each member's own manager. */
+	compactionTuning?: CompactionTuning;
 	permissionMode: () => PermissionMode | undefined;
 	sandbox: () => SandboxMode | undefined;
 	network: () => NetworkAxis | undefined;
@@ -309,6 +312,7 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 			canRunModel: deps.canRunModel,
 			thinkingLevel: deps.thinkingLevel,
 			trimOldToolResults: deps.trimOldToolResults,
+			compactionTuning: deps.compactionTuning,
 			maxTurns: deps.maxTurns,
 			maxCostUSD: deps.maxCostUSD,
 			stallNoticeMs: stallNoticeMsFrom(deps.stallNoticeMinutes),

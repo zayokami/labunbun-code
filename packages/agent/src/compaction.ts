@@ -32,6 +32,14 @@ export interface CompactionConfig {
 	maxOutputTokens: number;
 	reserveTokens?: number;
 	/**
+	 * An explicit trigger line as a percent of the window, from
+	 * `settings.compaction.thresholdPercent`. When set it *is* the line — it
+	 * replaces the reserve arithmetic rather than feeding it — and is clamped
+	 * only under the hard limit, for the reason {@link compactionThreshold}
+	 * documents.
+	 */
+	thresholdPercent?: number;
+	/**
 	 * Whether the cheap rung runs on its own when the threshold is crossed.
 	 *
 	 * The app turns this on, and the flag's own default is off for a reason worth
@@ -160,16 +168,24 @@ const THRASH_GROWTH_FRACTION = 0.05;
  * summarization call each time. Below the point where the reserves fit, the rule
  * degrades to a share of the window instead.
  *
+ * `thresholdPercent`, when configured, replaces both halves: the number named
+ * is the line. It does not fall back to the proportional share — 10% of a small
+ * window stays 10% — because a user who names a percent named a percent.
+ *
  * It is also kept strictly under the hard limit. A threshold at or above it
  * would mean the only request the compactor is ever consulted about is one that
  * can no longer be sent at all — the moment compaction could have helped is the
  * moment it is too late.
  */
 export function compactionThreshold(config: CompactionConfig): number {
+	const ceiling = hardContextLimit(config) - 1;
+	if (config.thresholdPercent !== undefined) {
+		return Math.max(0, Math.min(Math.floor((config.contextWindow * config.thresholdPercent) / 100), ceiling));
+	}
 	const outputReserve = Math.min(config.maxOutputTokens, MAX_OUTPUT_TOKENS_RESERVE_CAP);
 	const reserved = config.contextWindow - outputReserve - (config.reserveTokens ?? DEFAULT_RESERVE);
 	const proportional = Math.floor(config.contextWindow * MIN_THRESHOLD_FRACTION);
-	return Math.max(0, Math.min(Math.max(reserved, proportional), hardContextLimit(config) - 1));
+	return Math.max(0, Math.min(Math.max(reserved, proportional), ceiling));
 }
 
 export function hardContextLimit(config: CompactionConfig): number {

@@ -76,6 +76,29 @@ describe("SettingsSchema", () => {
 		expect(SettingsSchema.safeParse({ cache: { promptCacheRetention: "1h" } }).success).toBe(false);
 	});
 
+	test("a compaction block names the model, the headroom and the line", () => {
+		const parsed = SettingsSchema.parse({
+			compaction: { model: "some/cheap-model", reserveTokens: 30_000, thresholdPercent: 85 },
+		});
+		expect(parsed.compaction).toEqual({
+			model: "some/cheap-model",
+			reserveTokens: 30_000,
+			thresholdPercent: 85,
+		});
+		// Absent is the state of every session that never asked: the arithmetic's
+		// own defaults stay in charge.
+		expect(SettingsSchema.parse({}).compaction).toBeUndefined();
+		// A percent is bounded on both ends: 0% would compact before the first
+		// request could be sent, and 100% sits past the point where requests are
+		// refused — caught at load time rather than silently clamped.
+		expect(SettingsSchema.safeParse({ compaction: { thresholdPercent: 0 } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ compaction: { thresholdPercent: 100 } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ compaction: { thresholdPercent: -5 } }).success).toBe(false);
+		// Headroom is a count of tokens: zero and fractions are typos, not budgets.
+		expect(SettingsSchema.safeParse({ compaction: { reserveTokens: 0 } }).success).toBe(false);
+		expect(SettingsSchema.safeParse({ compaction: { reserveTokens: 1.5 } }).success).toBe(false);
+	});
+
 	test("the thinking level is one of the levels the session can ask for", () => {
 		// Every member of the list, not a sample: the schema derives from
 		// `THINKING_LEVELS`, and this is the statement that the derivation covers
