@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -457,13 +458,27 @@ describe("SUMMARY_PROMPT", () => {
 	test("asks for the user's original request by name", () => {
 		// The retention rule keeps the newest requests verbatim and says nothing
 		// about the first one; the prompt is the only thing that carries that. Its
-		// other instructions are weighted toward the recent turns — section 6 is
-		// where "be exhaustive" points — so a summary that is not asked for the
-		// original request describes the work without saying what it was for, and
-		// each further compaction leaves the question a little further behind.
+		// other instructions are weighted toward the recent turns — the closing
+		// line points "be exhaustive" at sections 8-11 — so a summary that is not
+		// asked for the original request describes the work without saying what it
+		// was for, and each further compaction leaves the question a little further
+		// behind.
 		const asked = SUMMARY_PROMPT.indexOf("ORIGINAL request");
 		expect(asked).toBeGreaterThan(-1);
 		expect(asked).toBeLessThan(SUMMARY_PROMPT.indexOf("2. Key Technical Concepts"));
+	});
+
+	test("asks for the decisions and the files by name, and fences off what a user message is", () => {
+		// Three things a later turn cannot reconstruct from the summary alone: why
+		// a choice was made (so it is not silently reversed), which files changed
+		// (so a stale description is not read as current), and the user's words
+		// themselves. The last one needs the fence: tool results and file contents
+		// read like prose, and a summarizer that counts one as a user message
+		// invents an instruction no one gave.
+		expect(SUMMARY_PROMPT).toContain("6. Key Decisions");
+		expect(SUMMARY_PROMPT).toContain("7. Files Modified");
+		expect(SUMMARY_PROMPT).toContain("A user message is only what the user typed");
+		expect(SUMMARY_PROMPT).toContain("Be exhaustive on sections 8-11");
 	});
 });
 
@@ -926,6 +941,48 @@ describe("CompactionManager", () => {
 		// summary no one can audit.
 		const marker = store.entries.find((e) => e.type === "compaction");
 		expect(marker?.type === "compaction" ? marker.model : undefined).toBe("deepseek-chat");
+	});
+
+	test("each preserved file carries a fingerprint of what it held at the boundary", async () => {
+		// The record makes a claim — "the summary still describes this file" — and a
+		// hash taken at the boundary is what lets a later pass tell a claim still
+		// true from one the file has moved past. A file the reader cannot open is
+		// recorded without a hash rather than with a made-up one: "unreadable then"
+		// and "unchanged since" are different answers, and only one is agreement.
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-compact-")),
+			mkdtempSync(join(tmpdir(), "lbb-compact-home-")),
+		);
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "<summary>1. Request: x</summary>", usage: { input: 10, output: 10 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			store,
+			readFile: (path) => (path === "/present.ts" ? "const answer = 42;" : null),
+		});
+		const messages: AgentMessage[] = [
+			userMessage("the earlier request"),
+			assistantMessage({
+				content: [{ type: "toolCall", id: "0", name: "Edit", arguments: JSON.stringify({ file_path: "/present.ts" }) }],
+				usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			}),
+			assistantMessage({
+				content: [{ type: "toolCall", id: "1", name: "Read", arguments: JSON.stringify({ file_path: "/gone.ts" }) }],
+			}),
+			userMessage("the current ask"),
+		];
+		// Through the store, as a real turn is: the record names the tail it stands
+		// in front of, and a tail the file has never seen is refused.
+		for (const message of messages) store.appendMessage(message);
+		await manager.compact({ systemPrompt: "sys", messages }, { trigger: "manual" });
+
+		// Read back from the file rather than the live array: the fingerprint is
+		// part of what a later session loads, so that is the copy under test.
+		const marker = SessionStore.load(store.path).entries.find((e) => e.type === "compaction");
+		if (marker?.type !== "compaction") throw new Error("expected a compaction record");
+		expect(marker.preservedFiles).toEqual([
+			{ path: "/gone.ts" },
+			{ path: "/present.ts", hash: createHash("sha256").update("const answer = 42;").digest("hex") },
+		]);
 	});
 
 	test("the summary request itself shrinks instead of failing when it is too large", async () => {

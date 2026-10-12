@@ -36,7 +36,7 @@ afterEach(() => {
  * work: `/compact` is dispatched fire-and-forget, so the answer is read out of
  * the store rather than returned.
  */
-async function run(steps: unknown[], commands: string[], settleWith: string) {
+async function run(steps: unknown[], commands: string[], settleWith: string, options: Record<string, unknown> = {}) {
 	const home = mkdtempSync(join(tmpdir(), "lbb-compact-report-"));
 	roots.push(home);
 
@@ -48,6 +48,7 @@ async function run(steps: unknown[], commands: string[], settleWith: string) {
 		const activity = [];
 		const activitySince = [];
 		const replies = [];
+		let taskSubjects = null;
 		const steps = ${JSON.stringify(steps)};
 		let call = 0;
 		mock.module("@labunbun/ai", () => ({
@@ -58,6 +59,20 @@ async function run(steps: unknown[], commands: string[], settleWith: string) {
 				if (step.throw) throw Object.assign(new Error(step.throw), { status: 400 });
 				const builder = new ai.MessageBuilder(model.provider, model.id);
 				yield builder.start();
+				if (step.toolCalls) {
+					// A tool call, delivered the way a provider delivers one: opened,
+					// streamed in a fragment, closed, and ended with the stop reason
+					// that sends the loop off to execute it.
+					let index = 0;
+					for (const toolCall of step.toolCalls) {
+						yield builder.toolCallStart(index, toolCall.id, toolCall.name);
+						yield builder.toolCallDelta(index, JSON.stringify(toolCall.arguments));
+						yield builder.toolCallEnd(index);
+						index++;
+					}
+					yield builder.done("toolUse", step.usage);
+					return;
+				}
 				yield builder.textStart(0);
 				yield builder.textDelta(0, step.text);
 				yield builder.textEnd(0);
@@ -97,13 +112,22 @@ async function run(steps: unknown[], commands: string[], settleWith: string) {
 							await new Promise((resolve) => setTimeout(resolve, 5));
 						}
 						for (const entry of state.entries) if (entry.kind === "info") infos.push(entry.text);
+						// What the run leaves in its session file, read the way a restart
+						// reads it: the newest session under this home, walked from its
+						// active leaf. Null means no list is on that chain at all.
+						const { SessionStore } = await import("@labunbun/agent");
+						const { readTaskSnapshot } = await import("./src/task-snapshot.ts");
+						const newest = SessionStore.listSessions(${JSON.stringify(home)}, ${JSON.stringify(home)})[0];
+						const loaded = newest ? SessionStore.load(newest.path) : null;
+						const snapshot = loaded ? readTaskSnapshot(loaded) : undefined;
+						taskSubjects = snapshot ? snapshot.map((task) => task.subject) : null;
 					}
 				};
 			}
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
-		const exitCode = await runInteractive(${JSON.stringify({ cwd: home, theme: "dark" })});
-		console.log(JSON.stringify({ exitCode, infos, activity, activitySince, replies }));
+		const exitCode = await runInteractive(${JSON.stringify({ cwd: home, theme: "dark", ...options })});
+		console.log(JSON.stringify({ exitCode, infos, activity, activitySince, replies, taskSubjects }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
@@ -127,6 +151,8 @@ async function run(steps: unknown[], commands: string[], settleWith: string) {
 			activity: (string | null)[];
 			activitySince: (number | null)[];
 			replies: boolean[];
+			/** The task subjects on the saved chain, or null when it holds no list. */
+			taskSubjects: string[] | null;
 		}),
 		stderr,
 	};
@@ -193,5 +219,42 @@ describe("a compaction the user asked for", () => {
 		expect(activity).toEqual(["Compacting context…", "Summarizing context…", null]);
 		expect(activitySince[0]).toBe(activitySince[1]);
 		expect(activitySince[2]).toBeNull();
+	});
+
+	test("the plan survives the pass: the list is carried onto the chain a restart reads", async () => {
+		// The chain a compaction leaves is rooted at its boundary, so the task
+		// snapshots written above it stop being the session's — including the one
+		// this turn's own TaskCreate wrote moments earlier. Without the app putting
+		// the list back when the pass ends, `--continue` opens on a conversation
+		// whose model is told to work through a list the strip no longer shows.
+		//
+		// Driven through a real TaskCreate call rather than by touching the store:
+		// what has to hold is the path tasks actually arrive through.
+		const { taskSubjects } = await run(
+			[
+				{
+					toolCalls: [
+						{
+							id: "call-1",
+							name: "TaskCreate",
+							arguments: { subject: "Run the suite", description: "bun test before pushing" },
+						},
+					],
+				},
+				{ text: "created" },
+				{ text: "second answer" },
+				SUMMARY,
+			],
+			["/compact"],
+			"Conversation compacted",
+			// A board write is undecided by anything else, so under `ask` this
+			// TaskCreate reaches the permission dialog — and a scripted run has no
+			// one to answer one: this harness's handle carries no
+			// `requestPermission`. The run uses the mode that answers by itself,
+			// so the test watches the chain, not a dialog.
+			{ permissionMode: "agent" },
+		);
+
+		expect(taskSubjects).toEqual(["Run the suite"]);
 	});
 });

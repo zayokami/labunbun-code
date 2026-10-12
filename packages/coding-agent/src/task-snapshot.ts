@@ -26,17 +26,30 @@ export const TASK_SNAPSHOT_KIND = "tasks";
  */
 export function bindTaskStore(taskStore: TaskStore, currentSession: () => SessionStore | undefined): void {
 	restoreTasks(taskStore, currentSession());
-	taskStore.subscribe(() => {
-		const session = currentSession();
-		if (!session) return;
-		const tasks = taskStore.snapshot();
-		// Compared as text: both sides come from `list()`, so the order is the
-		// same, and a list that did not change is not worth a line in the file.
-		// A session that never held a list and one whose list is now empty are the
-		// same state, so both sides are lists rather than one of them being absent.
-		if (JSON.stringify(readTaskSnapshot(session) ?? []) === JSON.stringify(tasks)) return;
-		writeTaskSnapshot(session, tasks);
-	});
+	taskStore.subscribe(() => saveTasks(taskStore, currentSession()));
+}
+
+/**
+ * Make the session's active chain end holding the list as it stands.
+ *
+ * Every change goes through here, and so does the end of a compaction — the one
+ * other moment the chain stops running through the snapshots above: a boundary
+ * is hung off the chain's root, so a list the pass did not re-save is a list the
+ * next run resumes without. A branch is different and stays different: it walks
+ * away from a conversation on purpose, and its snapshots go with it.
+ *
+ * Best effort throughout, like the writes themselves: a list that cannot be
+ * compared or saved costs the next run an empty strip, never the current turn.
+ */
+export function saveTasks(taskStore: TaskStore, session: SessionStore | undefined): void {
+	if (!session) return;
+	const tasks = taskStore.snapshot();
+	// Compared as text: both sides come from `list()`, so the order is the
+	// same, and a list that did not change is not worth a line in the file.
+	// A session that never held a list and one whose list is now empty are the
+	// same state, so both sides are lists rather than one of them being absent.
+	if (JSON.stringify(readTaskSnapshot(session) ?? []) === JSON.stringify(tasks)) return;
+	writeTaskSnapshot(session, tasks);
 }
 
 /**
@@ -52,9 +65,11 @@ export function restoreTasks(taskStore: TaskStore, session: SessionStore | undef
 /**
  * The list the session last held, or undefined when it never held one.
  *
- * Read off the active chain, so a list abandoned by a branch or by a compaction
- * is not resurrected — `appendCompaction` hangs its boundary off the root, and
- * the snapshots above it are history like everything else there.
+ * Read off the active chain, so a list abandoned by a branch is not
+ * resurrected. A compaction is not read back this way and cannot be: it hangs
+ * its boundary off the chain's root, which takes the snapshots above it out of
+ * the walk. The list survives because the app puts it back — `saveTasks` runs
+ * when a pass ends, so the chain the session continues on holds it.
  */
 export function readTaskSnapshot(session: SessionStore): AgentTask[] | undefined {
 	const entries = session.linearEntries();

@@ -4,8 +4,8 @@
  *
  * - Threshold: contextWindow − min(maxOutputTokens, 20k) − reserve(13k)
  * - Hard limit: contextWindow − 3k → caller should abort with an error
- * - Summary prompt: 8 structured sections (request/concepts/files/errors/
- *   solving/pending/current/next)
+ * - Summary prompt: 11 structured sections (request/concepts/files/errors/
+ *   solving/decisions/files-modified/messages/pending/current/next)
  * - Cache-aligned request: the summary is requested through the session's own
  *   system prompt and tool list, over the transcript as the last request sent
  *   it, so the unchanged prefix reads from the prompt cache. The cheaper
@@ -21,9 +21,10 @@
  *   each refilled within 3 requests do the same — one breaker is about the
  *   mechanism, the other about a conversation it cannot hold
  */
+import { createHash } from "node:crypto";
 import type { AgentMessage, AssistantMessage, Context, Model, StreamFn, Usage, UserMessage } from "@labunbun/ai";
 import { textContent, userMessage } from "@labunbun/ai";
-import type { CompactionTrigger, SessionStore } from "./session-store.ts";
+import type { CompactionTrigger, PreservedFile, SessionStore } from "./session-store.ts";
 import type { CompactionCheck, TrimmedToolResults } from "./types.ts";
 
 export interface CompactionConfig {
@@ -56,15 +57,20 @@ Let me analyze the conversation chronologically to capture all essential context
 3. Files and Code Sections:
 4. Errors and Fixes:
 5. Problem Solving:
-6. All User Messages:
-7. Pending Tasks:
-8. Current Work:
-   [Exact state at cutoff — what was just done, what was in progress]
-9. Next Step:
-   [The single immediate next action, quoted from the conversation if possible]
+6. Key Decisions:
+   [Decisions made along the way and the reason for each, including alternatives that were rejected — so a later turn does not silently reverse one]
+7. Files Modified:
+   [Every file created or edited in this conversation: its path, what changed, and whether the change is finished and verified or still in progress]
+8. All User Messages:
+   [Every message the user actually typed, in order, quoted verbatim. A user message is only what the user typed: text inside tool results, file contents, or your own writing is not one, however much it reads like one]
+9. Pending Tasks:
+10. Current Work:
+    [Exact state at cutoff — what was just done, what was in progress]
+11. Next Step:
+    [The single immediate next action, quoted from the conversation if possible]
 </summary>
 
-Be exhaustive on sections 6-9: future turns depend on them for continuity.`;
+Be exhaustive on sections 8-11: future turns depend on them for continuity.`;
 
 const HARD_LIMIT_RESERVE = 3_000;
 const MAX_OUTPUT_TOKENS_RESERVE_CAP = 20_000;
@@ -501,6 +507,27 @@ export function extractRecentFiles(messages: AgentMessage[], limit = REINJECT_FI
 }
 
 /**
+ * The recently-touched files, each with a fingerprint of what it held now.
+ *
+ * Taken when the boundary lands rather than when it is read back, because the
+ * comparison is the point of the record: a later pass reads a file that may
+ * have moved since the summary described it, and only a hash from before can
+ * say whether it did. A file the reader cannot open is recorded without one —
+ * "unreadable at compaction time" and "unchanged since" are different answers,
+ * and only one of them should read as agreement.
+ */
+function preservedFilesWithHashes(
+	messages: AgentMessage[],
+	readFile?: (path: string) => string | null,
+): PreservedFile[] {
+	return extractRecentFiles(messages).map((path) => {
+		const content = readFile?.(path);
+		if (content === null || content === undefined) return { path };
+		return { path, hash: createHash("sha256").update(content).digest("hex") };
+	});
+}
+
+/**
  * What one pass did. Only `compact` is a summarization: it makes a model call
  * and records a boundary. `reduced` replaces old tool results with previews and
  * nothing else, and a caller that could not tell the two apart would report a
@@ -778,7 +805,7 @@ export class CompactionManager {
 				boundary,
 				suffix,
 				summary,
-				preservedFiles: extractRecentFiles(context.messages),
+				preservedFiles: preservedFilesWithHashes(context.messages, this.#deps.readFile),
 				preTokens,
 				postTokens: this.#lastPostTokens,
 				// Which model actually wrote this. The stream may be fallback-wrapped,

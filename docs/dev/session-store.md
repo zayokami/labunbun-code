@@ -47,7 +47,7 @@
 
 ### Compaction
 
-- A compaction entry records the boundary message, the summary, and the `preservedFiles` list. It also records the token counts before and after, the model that wrote the summary, and the trigger (`CompactionRecord`, `packages/agent/src/session-store.ts:56`).
+- A compaction entry records the boundary message, the summary, and the `preservedFiles` list. A preserved file is a path with a hash of the file's content at that moment, so a later pass can tell a file the summary still describes from one that has changed. The hash is absent when the file could not be read (`PreservedFile`, `packages/agent/src/session-store.ts:79`). The entry also records the token counts before and after, the model that wrote the summary, and the trigger (`CompactionRecord`, `packages/agent/src/session-store.ts:56`).
 - The boundary message lives on the compaction entry itself, not as a separate message entry. The store writes the boundary and the record of it together. A torn pair resumes from a summary whose context is already gone (`packages/agent/src/session-store.ts:35`).
 - `appendCompaction` turns the active chain into `[root, boundary, ..suffix]`. The boundary hangs off the chain root, not off the last replaced entry. It stands in place of everything above it, so the old entries stay off the chain (`packages/agent/src/session-store.ts:341`).
 - The replaced entries stay in the file as an abandoned branch. History is never rewritten, and `/tree` can still branch back into it.

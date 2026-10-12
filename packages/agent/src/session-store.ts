@@ -39,7 +39,7 @@ export type SessionEntry =
 			 */
 			message: AgentMessage;
 			summary: string;
-			preservedFiles: string[];
+			preservedFiles: PreservedFile[];
 			preTokens: number;
 			postTokens: number;
 			/** Which model wrote the summary. */
@@ -59,12 +59,24 @@ export interface CompactionRecord {
 	/** Messages kept verbatim below it, in order. */
 	suffix: AgentMessage[];
 	summary: string;
-	preservedFiles: string[];
+	preservedFiles: PreservedFile[];
 	preTokens: number;
 	postTokens: number;
 	model: string;
 	trigger: CompactionTrigger;
 }
+
+/**
+ * A file a compaction kept a reference to, and what it held at that moment.
+ *
+ * The hash is a fingerprint of the file's content when the boundary landed, so
+ * a later reader can tell a file the summary still describes from one that has
+ * moved on since — the difference between a re-injected section that is still
+ * true and one that is now a lie. It is absent when the file could not be read
+ * at compaction time, which is a different state from "unchanged", and a
+ * session file written before fingerprints existed holds the bare path.
+ */
+export type PreservedFile = string | { path: string; hash?: string };
 
 function isMessageEntry(entry: SessionEntry): entry is Extract<SessionEntry, { type: "message" }> {
 	return entry.type === "message";

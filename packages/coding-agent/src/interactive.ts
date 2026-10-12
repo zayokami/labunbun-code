@@ -180,7 +180,7 @@ import {
 	withheldProjectAgents,
 } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
-import { bindTaskStore, restoreTasks } from "./task-snapshot.ts";
+import { bindTaskStore, restoreTasks, saveTasks } from "./task-snapshot.ts";
 import {
 	loadThemeFiles,
 	persistThemeChoice,
@@ -464,6 +464,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			if ((phase.kind === "done" || phase.kind === "failed") && phase.trigger !== "manual") {
 				pushInfo(handle, compactionPhaseText(phase));
 			}
+			// The pass re-rooted the chain before it ended — the boundary hangs off
+			// the root, so the chain no longer runs through the task snapshots above
+			// it. Putting the list back here is what makes a restart after a summary
+			// start from the plan; `done` is the first moment it can, since the
+			// manager appends the boundary before it announces the pass as over.
+			if (phase.kind === "done") saveTasks(taskStore, store);
 		},
 		readFile: (path) => {
 			try {

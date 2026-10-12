@@ -11,8 +11,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
+import { userMessage } from "@labunbun/ai";
 import { TaskStore } from "@labunbun/tools";
-import { bindTaskStore, readTaskSnapshot, restoreTasks, TASK_SNAPSHOT_KIND } from "../src/task-snapshot.ts";
+import { bindTaskStore, readTaskSnapshot, restoreTasks, saveTasks, TASK_SNAPSHOT_KIND } from "../src/task-snapshot.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -161,6 +162,43 @@ describe("a task list saved in a session", () => {
 		bindTaskStore(tasks, () => store);
 
 		expect(tasks.list().map((t) => t.subject)).toEqual(["the plan that stands"]);
+	});
+
+	test("a compaction is a re-rooting, not an abandonment: saving carries the list across", () => {
+		const store = freshStore();
+		const tasks = new TaskStore();
+		bindTaskStore(tasks, () => store);
+		tasks.create("Run the suite", "bun test");
+
+		// What a compaction does to the file: the boundary hangs off the chain's
+		// root, so the chain no longer runs through the snapshot above it — the
+		// list stops being readable before anything is saved again.
+		expect(
+			store.appendCompaction({
+				boundary: userMessage("[Conversation compacted to stay within the context window.]"),
+				suffix: [],
+				summary: "1. Primary Request: run the suite",
+				preservedFiles: [],
+				preTokens: 90_000,
+				postTokens: 1_000,
+				model: "faux-1",
+				trigger: "auto",
+			}),
+		).not.toBeNull();
+		expect(readTaskSnapshot(store)).toBeUndefined();
+
+		// The pass ending is when the app puts it back, onto the chain the session
+		// now continues on — and that write is the difference between a restart
+		// finding the plan and opening on an empty strip.
+		saveTasks(tasks, store);
+		expect(readTaskSnapshot(store)?.map((t) => t.subject)).toEqual(["Run the suite"]);
+		expect(readTaskSnapshot(SessionStore.load(store.path))?.map((t) => t.subject)).toEqual(["Run the suite"]);
+
+		// And a chain that already holds the list is not written to again: this
+		// runs at every pass ending, changed or not.
+		const written = snapshots(store.path).length;
+		saveTasks(tasks, store);
+		expect(snapshots(store.path)).toHaveLength(written);
 	});
 
 	test("a restored list cannot be edited from outside, and a session that is not there changes nothing", () => {
