@@ -105,6 +105,13 @@ import { attachShellNotices } from "./background-notifications.ts";
 import { beetleUsage, parseBeetleCommand } from "./beetle.ts";
 import { type BeetleSurface, createBeetleSurface, createToolChangeLatch } from "./beetle-commands.ts";
 import { cacheStatusLine, formatCacheReport } from "./cache-report.ts";
+import { createChatGptCredentialStore, createChatGptCredentials } from "./chatgpt-auth.ts";
+import {
+	type ChatGptAuthHooks,
+	chatGptLoginFlow,
+	chatGptSignedInLine,
+	clearChatGptSubscription,
+} from "./chatgpt-login.ts";
 import { createClaudeCredentialStore, createClaudeCredentials } from "./claude-auth.ts";
 import {
 	type ClaudeAuthHooks,
@@ -507,13 +514,16 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Tracked, so `/cache` can report what the provider actually did with each
 	// request. The tracker sees every request the app makes — the loop, the
 	// compaction summary, each subagent — because they all come through here.
-	// The credentials provider rides along for the same reason: every request
-	// that ends at the anthropic adapter gets the subscription mint when one
-	// is signed in, and `/login` swaps the stored credential under it.
+	// The credentials providers ride along for the same reason: every request
+	// that ends at the anthropic or chatgpt-responses adapter gets the
+	// subscription mint when one is signed in, and `/login` swaps the stored
+	// credential under it.
 	const credentials = createClaudeCredentials({ home });
+	const chatgptCredentials = createChatGptCredentials({ home });
 	const { streamFn: baseStreamFn, tracker: cacheTracker } = createTrackedStreamFn({
 		policy: settings.cache,
 		credentials,
+		chatgptCredentials,
 	});
 	const fallbackChain = (settings.fallbackModels ?? [])
 		.map((ref) => resolveModel(ref))
@@ -1846,6 +1856,13 @@ interface AppCommandContext {
 	 * test runner's side is indistinguishable from working code.
 	 */
 	claudeAuth?: ClaudeAuthHooks;
+	/**
+	 * The ChatGPT subscription surface, for `/login chatgpt` and
+	 * `/logout chatgpt`. Optional for the same reason as `claudeAuth` above:
+	 * a context built by hand has to be able to drive both commands without a
+	 * browser, a network, or the operator's own keychain.
+	 */
+	chatgptAuth?: ChatGptAuthHooks;
 }
 
 function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
@@ -1976,8 +1993,11 @@ export function appCommandTable(): Array<[string, string]> {
 		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
 		["/gamepad", "Control the session from a DualShock 4: /gamepad [on|off|status|watch|list|reset|approve|rumble]"],
-		["/login", "Sign in to a Claude subscription: /login, then /login <code#state> if it asks you to paste"],
-		["/logout", "Sign out of the Claude subscription (the API-key path keeps working)"],
+		[
+			"/login",
+			"Sign in to a subscription: /login [claude|chatgpt|<code#state>] — the Claude flow may ask you to paste",
+		],
+		["/logout", "Sign out of a subscription: /logout [claude|chatgpt]"],
 		["/mcp", "List configured MCP servers and their tools"],
 		["/mode", "Show or set the permission mode: /mode [mode]"],
 		["/model", "Show or switch the model: /model [provider/id]"],
@@ -2006,6 +2026,10 @@ export function appCommandTable(): Array<[string, string]> {
  */
 let pendingClaudeLogin: PendingClaudeLogin | null = null;
 let claudeLoginRunning = false;
+// No pending state for the ChatGPT flow: its fallback is the device code,
+// which the flow polls to completion inside one `/login chatgpt`, so there is
+// never a half-finished sign-in for a later command to pick up.
+let chatgptLoginRunning = false;
 
 function claudeAuthOf(ctx: AppCommandContext): ClaudeAuthHooks {
 	return (
@@ -2013,6 +2037,15 @@ function claudeAuthOf(ctx: AppCommandContext): ClaudeAuthHooks {
 			store: () => createClaudeCredentialStore({ home: ctx.home }),
 			login: claudeLoginFlow,
 			complete: completeClaudeLogin,
+		}
+	);
+}
+
+function chatgptAuthOf(ctx: AppCommandContext): ChatGptAuthHooks {
+	return (
+		ctx.chatgptAuth ?? {
+			store: () => createChatGptCredentialStore({ home: ctx.home }),
+			login: chatGptLoginFlow,
 		}
 	);
 }
@@ -2829,7 +2862,47 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return true;
 		}
 		case "/login": {
-			const input = text.trim().slice("/login".length).trim();
+			const trimmed = text.trim().slice("/login".length).trim();
+			const words = trimmed === "" ? [] : trimmed.split(/\s+/);
+			// The first word may name the subscription. With no name — or with
+			// "claude" — this is the Claude flow it has always been, and a bare
+			// first word is the paste the manual flow asked for. A paste whose
+			// code happened to read exactly "chatgpt" would be misread as a
+			// name; the console's codes are long random strings, so the trade
+			// is deliberate.
+			if (words[0] === "chatgpt") {
+				if (words.length > 1) {
+					pushInfo(
+						ctx.handle,
+						"The ChatGPT sign-in takes no code — approve it in the browser. Run /login chatgpt to start.",
+					);
+					return true;
+				}
+				if (chatgptLoginRunning) {
+					pushInfo(
+						ctx.handle,
+						"A ChatGPT sign-in is already running. Finish it in the browser, or approve the device code it printed.",
+					);
+					return true;
+				}
+				chatgptLoginRunning = true;
+				void (async () => {
+					try {
+						const auth = chatgptAuthOf(ctx);
+						const credential = await auth.login({
+							store: auth.store(),
+							note: (line) => pushInfo(ctx.handle, line),
+						});
+						pushInfo(ctx.handle, chatGptSignedInLine(credential));
+					} catch (error) {
+						pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
+					} finally {
+						chatgptLoginRunning = false;
+					}
+				})();
+				return true;
+			}
+			const input = words[0] === "claude" ? words.slice(1).join(" ") : trimmed;
 			const auth = claudeAuthOf(ctx);
 			// An argument is the paste the manual flow asked for; no argument
 			// starts a sign-in. One case for both, because the URL the user is
@@ -2887,6 +2960,22 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// Fire-and-forget like the other network-touching commands: the
 			// keychain write can block on a system dialog, and the prompt must
 			// stay usable while it does.
+			if (text.split(/\s+/)[1]?.toLowerCase() === "chatgpt") {
+				void (async () => {
+					try {
+						const had = await clearChatGptSubscription(chatgptAuthOf(ctx).store());
+						pushInfo(
+							ctx.handle,
+							had
+								? "Signed out of the ChatGPT subscription. The next request to a ChatGPT model asks for a sign-in."
+								: "No ChatGPT subscription was signed in.",
+						);
+					} catch (error) {
+						pushInfo(ctx.handle, `Could not sign out: ${error instanceof Error ? error.message : error}`);
+					}
+				})();
+				return true;
+			}
 			void (async () => {
 				try {
 					const had = await clearClaudeSubscription(claudeAuthOf(ctx).store());

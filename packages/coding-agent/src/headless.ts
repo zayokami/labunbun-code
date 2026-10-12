@@ -38,6 +38,7 @@ import {
 	parseMcpServersRecord,
 } from "@labunbun/mcp";
 import { createAllTools } from "@labunbun/tools";
+import { createChatGptCredentials } from "./chatgpt-auth.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
 import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
@@ -272,11 +273,13 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// The Claude subscription, when one is signed in. A `-p` run reads the
 	// same stored sign-in the REPL does, and the anthropic adapter prefers it
 	// over the environment key, so headless and interactive cannot disagree
-	// about which credential served a request.
+	// about which credential served a request. The ChatGPT subscription rides
+	// the same reasoning on its own wire.
 	const credentials = createClaudeCredentials({ home });
+	const chatgptCredentials = createChatGptCredentials({ home });
 	const transport: { streamFn: StreamFn; tracker?: CacheTracker } = options.streamFn
 		? { streamFn: options.streamFn }
-		: createTrackedStreamFn({ policy: settings.cache, credentials });
+		: createTrackedStreamFn({ policy: settings.cache, credentials, chatgptCredentials });
 	// The same fallback the REPL wraps around its transport, from the same
 	// setting: a `-p` run that ignored `fallbackModels` kept failing on a model
 	// whose provider was down while an interactive run of the same prompt would
