@@ -342,7 +342,7 @@ function createExecCapture(dir: string) {
  * all. The grace bounds the wait; a command whose pipes close normally
  * settles in milliseconds and clears the timer unseen.
  */
-const EXIT_DRAIN_GRACE_MS = 2_000;
+export const EXIT_DRAIN_GRACE_MS = 2_000;
 
 export class ChildProcessExecOperations implements ExecOperations {
 	#shell: ReturnType<typeof detectShell>;

@@ -19,6 +19,7 @@ import { describe, expect, test } from "bun:test";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { BackgroundShellManager } from "../src/background.ts";
+import { EXIT_DRAIN_GRACE_MS } from "../src/operations.ts";
 
 /** A stand-in process: the manager only ever subscribes to it. */
 function fakeProc(): EventEmitter {
@@ -221,9 +222,73 @@ describe("lifecycle hooks", () => {
 		expect(spawned).toEqual([shell.pid]);
 
 		expect(manager.kill(shell.id)).toBe(true);
-		// The close lands a moment after the signal. Poll the invariant rather
-		// than sleeping a fixed window a loaded machine can outrun.
+		// The end lands a moment after the signal — a `close` when the pipes
+		// drain on schedule, the bounded drain grace when they cannot. Poll the
+		// invariant rather than sleeping a fixed window a loaded machine can
+		// outrun.
 		for (let i = 0; i < 200 && settled.length === 0; i++) await new Promise((r) => setTimeout(r, 25));
 		expect(settled).toEqual(["killed"]);
+	}, 10_000);
+
+	test("an exit whose close never comes still settles inside the drain grace", async () => {
+		const manager = new BackgroundShellManager();
+		const settled: string[] = [];
+		manager.onSettled((shell) => settled.push(shell.status));
+
+		const proc = fakeProc();
+		const id = adopt(manager, "sleep 30", proc);
+		const shell = manager.get(id);
+		if (!shell) throw new Error("adopt returned an id the manager does not know");
+		// The exact shape a Windows kill leaves (see EXIT_DRAIN_GRACE_MS): the
+		// record says killed, the process delivers `exit` on schedule, and a
+		// half-forked child holding the pipes means `close` never arrives.
+		shell.status = "killed";
+		proc.emit("exit", 1);
+
+		// The grace is the bound: poll an invariant past it, not a tight window.
+		const deadline = Date.now() + EXIT_DRAIN_GRACE_MS + 2_000;
+		while (Date.now() < deadline && settled.length === 0) await new Promise((r) => setTimeout(r, 50));
+		expect(settled).toEqual(["killed"]);
+		expect(manager.get(id)?.exitCode).toBe(1);
+		expect(manager.output(id).match(/\[exit code:/g)).toHaveLength(1);
+
+		// A close that limps in after the grace still updates the record — the
+		// exit code it always overwrote — but the end is written exactly once.
+		proc.emit("close", null);
+		expect(settled).toEqual(["killed"]);
+		expect(manager.get(id)?.exitCode).toBe(0);
+		expect(manager.output(id).match(/\[exit code:/g)).toHaveLength(1);
+	}, 10_000);
+
+	test("a close inside the grace settles at once — the grace is a bound, not a delay", () => {
+		const manager = new BackgroundShellManager();
+		const settled: string[] = [];
+		manager.onSettled((shell) => settled.push(shell.status));
+
+		const proc = fakeProc();
+		adopt(manager, "echo done", proc);
+		proc.emit("exit", 0);
+		// Synchronous: a close is the normal end and must not wait out a timer
+		// that exists only for the end that never comes.
+		proc.emit("close", 0);
+		expect(settled).toEqual(["completed"]);
+	});
+
+	test("an exit after the spawn error arms no grace — the shell already ended", async () => {
+		const manager = new BackgroundShellManager();
+		const settled: string[] = [];
+		manager.onSettled((shell) => settled.push(shell.status));
+
+		const proc = fakeProc();
+		const id = adopt(manager, "definitely-not-on-path", proc);
+		proc.emit("error", new Error("spawn definitely-not-on-path ENOENT"));
+		expect(settled).toEqual(["completed"]);
+
+		// A spawn that failed has no end left to give: an `exit` after the
+		// error must not arm the grace and, moments later, overwrite the record.
+		proc.emit("exit", 0);
+		await new Promise((r) => setTimeout(r, EXIT_DRAIN_GRACE_MS + 500));
+		expect(settled).toEqual(["completed"]);
+		expect(manager.get(id)?.exitCode).toBe(127);
 	}, 10_000);
 });

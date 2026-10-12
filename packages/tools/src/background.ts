@@ -5,7 +5,7 @@ import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
-import { defaultOperations, detectShell, type ExecOperations } from "./operations.ts";
+import { defaultOperations, detectShell, EXIT_DRAIN_GRACE_MS, type ExecOperations } from "./operations.ts";
 import { detectRuntime, resolveSandboxExecution, type SandboxRuntime } from "./sandbox/index.ts";
 
 /** How much of a shell's log one read may bring back. */
@@ -141,11 +141,32 @@ export class BackgroundShellManager {
 			entry.info.exitCode = 127;
 			this.#onEnded(entry);
 		});
-		entry.proc.on("close", (code) => {
+		// Settling on `close` alone can wait on a drain that never finishes:
+		// see EXIT_DRAIN_GRACE_MS for the measured shapes — the shell is dead
+		// and `exit` fires on schedule while a half-forked child holds the
+		// inherited pipes. `exit` starts the same bounded grace the foreground
+		// path uses; a `close` inside it is the normal, prompt end and cancels
+		// the timer; whichever arrives first writes the end. A late `close`
+		// still lands its exit code on the record, as it always did, but adds
+		// no second line to the log — one end, one `[exit code]` line.
+		let exitLine = false;
+		const settle = (code: number | null) => {
 			if (entry.info.status !== "killed") entry.info.status = "completed";
 			entry.info.exitCode = code ?? 0;
-			append(`\n[exit code: ${entry.info.exitCode}]`);
+			if (!exitLine) {
+				exitLine = true;
+				append(`\n[exit code: ${entry.info.exitCode}]`);
+			}
 			this.#onEnded(entry);
+		};
+		let exitGrace: ReturnType<typeof setTimeout> | null = null;
+		entry.proc.on("exit", (code) => {
+			if (entry.endedAt !== undefined) return;
+			exitGrace = setTimeout(() => settle(code), EXIT_DRAIN_GRACE_MS);
+		});
+		entry.proc.on("close", (code) => {
+			if (exitGrace) clearTimeout(exitGrace);
+			settle(code);
 		});
 	}
 
