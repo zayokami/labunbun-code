@@ -335,10 +335,15 @@ describe("the /ps and /stop commands", () => {
 			expect(t.recovered).toHaveLength(0);
 
 			// The signal really went to the process. Poll the invariant rather than
-			// awaiting `exited` — a pairing that broke would leave a ping running
-			// for its full 30 seconds, and a test that waits that out is a hang.
-			for (let i = 0; i < 100 && proc.exitCode === null; i++) await new Promise((r) => setTimeout(r, 50));
-			expect(proc.exitCode).not.toBeNull();
+			// awaiting `exited` — a pairing that broke would leave the process
+			// running for its full 30 seconds, and a test that waits that out is a
+			// hang. "Ended" has to read both channels: a POSIX death by SIGTERM
+			// reports `signalCode` and leaves `exitCode` null, so a check on
+			// `exitCode` alone waits out the whole window on linux and macOS while
+			// passing on Windows, where the kill lands as an exit code of its own.
+			const ended = () => proc.exitCode !== null || proc.signalCode !== null;
+			for (let i = 0; i < 100 && !ended(); i++) await new Promise((r) => setTimeout(r, 50));
+			expect(ended()).toBe(true);
 		} finally {
 			proc.kill("SIGKILL");
 		}
