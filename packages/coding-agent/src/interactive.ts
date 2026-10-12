@@ -27,7 +27,6 @@ import {
 	type PermissionMode,
 	type PermissionRule,
 	type SandboxMode,
-	type SessionEntry,
 	SessionStore,
 	windowStartFor,
 } from "@labunbun/agent";
@@ -1718,14 +1717,39 @@ interface CheckpointInfo {
 	content: string;
 }
 
-function listCheckpoints(store: SessionStore): CheckpointInfo[] {
-	return store
-		.linearEntries()
-		.filter((e): e is Extract<SessionEntry, { type: "custom" }> => e.type === "custom" && e.kind === "file_checkpoint")
-		.map((e) => {
-			const data = e.data as { path?: string; content?: string; at?: number };
-			return { entryId: e.id, path: data.path ?? "?", at: data.at ?? 0, content: data.content ?? "" };
-		});
+/** The checkpoints a session holds, and the entries under the same kind it cannot read. */
+interface CheckpointListing {
+	checkpoints: CheckpointInfo[];
+	/**
+	 * Entries this build cannot turn into a restore — a damaged line, or a
+	 * payload another writer left. Counted rather than dropped in silence, so
+	 * `/rewind` can say the file has something it is not showing.
+	 */
+	unreadable: number;
+}
+
+function listCheckpoints(store: SessionStore): CheckpointListing {
+	const checkpoints: CheckpointInfo[] = [];
+	let unreadable = 0;
+	for (const entry of store.linearEntries()) {
+		if (entry.type !== "custom" || entry.kind !== "file_checkpoint") continue;
+		// Data read back from the file is checked rather than trusted. The
+		// content is about to be written over a real file, and defaulting a
+		// missing field used to write the empty string over the file the entry
+		// named — a restore that silently truncated it instead.
+		const data: unknown = entry.data;
+		if (typeof data !== "object" || data === null) {
+			unreadable++;
+			continue;
+		}
+		const record = data as Record<string, unknown>;
+		if (typeof record.path !== "string" || typeof record.content !== "string" || typeof record.at !== "number") {
+			unreadable++;
+			continue;
+		}
+		checkpoints.push({ entryId: entry.id, path: record.path, at: record.at, content: record.content });
+	}
+	return { checkpoints, unreadable };
 }
 
 interface AppCommandContext {
@@ -2700,11 +2724,13 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				pushInfo(ctx.handle, "No session store in this session.");
 				return true;
 			}
-			const checkpoints = listCheckpoints(rewindStore);
+			const { checkpoints, unreadable } = listCheckpoints(rewindStore);
 			if (checkpoints.length === 0) {
 				pushInfo(
 					ctx.handle,
-					"No checkpoints yet — one is captured before every Edit/Write. A file that cannot be read, or is over 200k characters, is not captured.",
+					unreadable > 0
+						? `${unreadable} checkpoint ${unreadable === 1 ? "entry" : "entries"} in this session cannot be read — nothing to restore.`
+						: "No checkpoints yet — one is captured before every Edit/Write. A file that cannot be read, or is over 200k characters, is not captured.",
 				);
 				return true;
 			}
@@ -2714,7 +2740,14 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					.slice(-10)
 					.reverse()
 					.map((c, i) => `${checkpoints.length - 1 - i}. ${new Date(c.at).toLocaleTimeString()}  ${c.path}`);
-				pushInfo(ctx.handle, `Checkpoints (newest first). Restore with /rewind <number>:\n${lines.join("\n")}`);
+				const skipped =
+					unreadable > 0
+						? `\n${unreadable} unreadable checkpoint ${unreadable === 1 ? "entry" : "entries"} skipped.`
+						: "";
+				pushInfo(
+					ctx.handle,
+					`Checkpoints (newest first). Restore with /rewind <number>:\n${lines.join("\n")}${skipped}`,
+				);
 				return true;
 			}
 			const index = Number(arg);
