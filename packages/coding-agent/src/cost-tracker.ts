@@ -11,7 +11,7 @@
  * has no price for contributes tokens and no money — `/cost` says which, rather
  * than reporting a total that quietly omits it.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
@@ -124,11 +124,43 @@ export class CostTracker {
 	persist(): void {
 		if (!this.#path) return;
 		try {
-			mkdirSync(dirname(this.#path), { recursive: true });
-			writeFileSync(this.#path, JSON.stringify(this.#state, null, 2), "utf8");
+			saveCostState(this.#path, this.#state);
 		} catch {
 			// best-effort persistence
 		}
+	}
+}
+
+/**
+ * Write the ledger by replacement: the bytes land in a sibling file and are
+ * renamed over the target, so a process killed mid-write leaves the previous
+ * complete ledger — not a truncated one the next load would quarantine,
+ * dropping the directory's whole cost history from `/cost`.
+ *
+ * Throws if the write fails; `persist()` is the caller that decides this is
+ * best-effort. The no-op alternative would trade a lost write for a lost file.
+ */
+export function saveCostState(path: string, state: CostState): void {
+	mkdirSync(dirname(path), { recursive: true });
+	// The replacement carries the mode of the file it replaces, so a user who
+	// tightened it does not find it loosened by the next persist.
+	let mode: number | undefined;
+	try {
+		mode = statSync(path).mode & 0o777;
+	} catch {
+		// No file yet — the default mode applies.
+	}
+	const tmp = `${path}.tmp`;
+	try {
+		writeFileSync(tmp, JSON.stringify(state, null, 2), { encoding: "utf8", mode });
+		renameSync(tmp, path);
+	} catch (error) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			// No temp file to remove (the write failed before it existed).
+		}
+		throw error;
 	}
 }
 
