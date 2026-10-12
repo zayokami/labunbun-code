@@ -370,6 +370,20 @@ function stripUntrustedKeys(
 	if (typeof data !== "object" || data === null || Array.isArray(data)) return { data, ignored: [] };
 	const out: Record<string, unknown> = { ...(data as Record<string, unknown>) };
 	const ignored: IgnoredSettingsKey[] = [];
+	// `__proto__` is never a settings key, and `JSON.parse` gives it an own data
+	// property that every copy in this loader hands along — `mergeSettings` used
+	// to assign it, which fires Object.prototype's accessor setter instead, so
+	// the merged object's prototype became the repo's object and any key inside
+	// it read as an inherited setting. Dropped (and reported) here as well as
+	// skipped in the merge, so the repo's value never reaches the schema parse
+	// of the tier either.
+	if (Object.hasOwn(out, "__proto__")) {
+		// `Reflect.deleteProperty`, not the delete operator, because a `__proto__`
+		// member access is what the noProto lint bans — and this one is a key in
+		// JSON, not a prototype operation.
+		Reflect.deleteProperty(out, "__proto__");
+		ignored.push({ source, key: "__proto__" });
+	}
 	for (const [key, policy] of Object.entries(PROJECT_TIER_KEY_POLICY)) {
 		if (policy !== "denied" || !(key in out)) continue;
 		delete out[key];
@@ -378,6 +392,10 @@ function stripUntrustedKeys(
 	const permissions = out.permissions;
 	if (typeof permissions === "object" && permissions !== null && !Array.isArray(permissions)) {
 		const kept: Record<string, unknown> = { ...(permissions as Record<string, unknown>) };
+		if (Object.hasOwn(kept, "__proto__")) {
+			Reflect.deleteProperty(kept, "__proto__");
+			ignored.push({ source, key: "permissions.__proto__" });
+		}
 		for (const [key, policy] of Object.entries(PROJECT_TIER_PERMISSION_KEY_POLICY)) {
 			if (policy !== "denied" || !(key in kept)) continue;
 			delete kept[key];
@@ -470,6 +488,11 @@ export function mergeSettings<T>(base: T, override: unknown): T {
 	if (typeof override !== "object" || override === null || Array.isArray(override)) return override as T;
 	const out: Record<string, unknown> = { ...(base as Record<string, unknown>) };
 	for (const [key, value] of Object.entries(override)) {
+		// `__proto__` is never a settings key, and `out[key] = value` for it would
+		// invoke Object.prototype's accessor setter — retargeting the merged
+		// object's prototype at the override's value, whose keys would then read
+		// as inherited settings. Skipped rather than assigned, at every depth.
+		if (key === "__proto__") continue;
 		out[key] = key in out ? mergeSettings(out[key], value) : value;
 	}
 	return out as T;

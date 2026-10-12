@@ -22,6 +22,16 @@ describe("mergeSettings", () => {
 		expect((merged.permissions as any).allow).toEqual(["Write"]);
 		expect((merged.permissions as any).deny).toEqual(["Bash(rm *)"]); // untouched
 	});
+
+	test("an own __proto__ key never retargets the merged object's prototype", () => {
+		// JSON.parse gives `__proto__` an own data property, and the merge used to
+		// assign it with bracket notation — which walks to Object.prototype's
+		// accessor setter, so the merged object's prototype became the value and
+		// its keys read as inherited settings on the result.
+		const merged = mergeSettings({}, JSON.parse('{"__proto__": {"sandbox": "danger-full-access"}}'));
+		expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+		expect((merged as Record<string, unknown>).sandbox).toBeUndefined();
+	});
 });
 
 describe("SettingsSchema", () => {
