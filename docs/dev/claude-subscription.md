@@ -1,0 +1,36 @@
+# The Claude subscription, app side
+
+`packages/ai` owns the wire: PKCE, the authorize URL, the token endpoint, and the bearer-token provider (`providers/anthropic-oauth.ts`; its long-form notes are in ai-layer.md). This document covers the app around it: where the credential lives between runs, the two shapes of the sign-in, and the commands that drive them.
+
+## The credential store
+
+The store is `createClaudeCredentialStore` (`packages/coding-agent/src/claude-auth.ts:60`). The OS keychain is the first choice, reached through `Bun.secrets`: the Windows Credential Manager, the macOS keychain, and libsecret on Linux. The probe for it is structural (`packages/coding-agent/src/claude-auth.ts:64`), so the module loads on a runtime without that API and answers "no keychain" instead of throwing.
+
+- The fallback is a 0600 file at `~/.labunbun/.credentials.json`, written through a temp file and a rename so a reader never sees half a token (`packages/coding-agent/src/claude-auth.ts:94`). A machine without a secret service is a real machine — a container, a CI runner — and the fallback says so once, out loud (`packages/coding-agent/src/claude-auth.ts:68`). The warning is the contract: a fallback nobody is told about is a fallback the user believes is a keychain.
+- Load reads the keychain first and falls through to the file when the keychain has no entry or cannot answer (`packages/coding-agent/src/claude-auth.ts:109`). One entry that IS present is one answer: a malformed keychain entry resolves to null and does not fall through to a file from another era (`packages/coding-agent/src/claude-auth.ts:113`). Two stores, one credential — the second is never consulted to paper over the first.
+- Save writes the keychain and removes any fallback-era file in the same breath (`packages/coding-agent/src/claude-auth.ts:127`), so the two can never disagree about which token is current. Clear empties both (`packages/coding-agent/src/claude-auth.ts:145`), because a sign-out that leaves one copy behind is not a sign-out.
+- Tests always inject the keychain (`keychain: null` or a fake). The default probe has no test on purpose — see the gaps below.
+
+## The sign-in flow
+
+The flow is `claude-login.ts`. It has two shapes, and both end in the same exchange and the same store.
+
+- `beginClaudeLogin` draws fresh PKCE and state and builds the authorize URL (`packages/coding-agent/src/claude-login.ts:47`). The default redirect is the console's registered localhost callback on port 1455; the manual shape overrides it with the console's paste page.
+- `completeClaudeLogin` turns what came back into a stored credential (`packages/coding-agent/src/claude-login.ts:79`). A paste without a state is accepted — the page shows `code#state`, and a user who copied only the code should not be told the code is wrong. A paste with a DIFFERENT state is refused before any exchange: that is a redirect from some other sign-in, and its code would bind the session to an account the user did not open here.
+- `startClaudeCallbackServer` listens on loopback and resolves with the code (`packages/coding-agent/src/claude-login.ts:140`). A redirect whose state does not match answers 400 and KEEPS listening (`packages/coding-agent/src/claude-login.ts:196`): a stray request to the port — a scanner, an old tab — must not end the sign-in the user is still completing. A callback carrying `error` rejects with the console's reason; a matching state with no code rejects; a timeout, an abort, and a bind failure each have their own exit. A settled wait releases the port, and the response asks the browser not to keep the connection, so the listener closes the moment the page is delivered.
+- The resolver's promise rejects as well as resolves, and the caller may attach a microtask later; the module holds a catch handle internally so a fast rejection cannot surface as an unhandled rejection.
+- `claudeLoginFlow` is the whole sign-in (`packages/coding-agent/src/claude-login.ts:314`). The browser path opens the URL, listens, and completes. When the port cannot be bound — another instance holds it, a policy forbids listening — the flow falls back to the console's manual page, opens it too, and either reads a paste through `askCode` or returns the pending login (`packages/coding-agent/src/claude-login.ts:326`). The returned pending login is what lets the REPL complete a sign-in minutes after the URL was printed.
+- `openSystemBrowser` is best effort, always (`packages/coding-agent/src/claude-login.ts:261`): the URL is printed either way, so a missing opener is a copy and a paste. On Windows the URL goes through a verbatim `cmd /c start` string, because the URL carries `&` and cmd would read it as a command separator.
+- The CLI wrappers are `runClaudeLoginCli` and `runClaudeLogoutCli` (`packages/coding-agent/src/claude-login.ts:434`). Their paste reader refuses a non-terminal stdin up front (`packages/coding-agent/src/claude-login.ts:414`) instead of waiting forever on an input nobody can type into.
+
+## What the app wires
+
+- Both transports hand the same token provider to `createTrackedStreamFn`: the REPL at `packages/coding-agent/src/interactive.ts:513` and a `-p` run at `packages/coding-agent/src/headless.ts:276`. The anthropic adapter decides what to do with it per request, including the precedence order — a per-call key outranks the stored login, which outranks the environment's key. That matrix lives in ai-layer.md.
+- The REPL commands are `/login` and `/logout` (`packages/coding-agent/src/interactive.ts:2831`). The sign-in a manual paste belongs to is module state (`packages/coding-agent/src/interactive.ts:2007`): there is one REPL per process, and a session swap must not discard a sign-in in progress. The hooks behind both commands are injectable (`packages/coding-agent/src/interactive.ts:2010`), so a test — and an embedder — can drive `/login` and `/logout` without a browser, a network, or the real keychain of the machine running them.
+- The CLI subcommands are `labunbun login` and `labunbun logout` (`packages/coding-agent/src/main.ts:303`). They run before the API-key check, like `yoshi`: signing in is how someone gets a working setup, so it cannot require one first.
+
+## Known gaps
+
+- A signed-in subscription does not turn the Anthropic catalog probe on. Discovery's gate is the environment and the settings, and the probe bullet in ai-layer.md's Discovery section is the honest record.
+- Three paths have no test that can run without touching an operator's own machine: the system-keychain probe, the two transport wiring lines, and the `main()` subcommand dispatch. The mutation driver for the batch left exactly those survivors, and they are listed in the commit message rather than covered by a test that would have to reach a real keychain or open a real browser.
+- The 0600 file-mode assertion is POSIX-only; on Windows the mode check is skipped, and the batch's file-mode mutant survives there by design. CI runs the POSIX check on every push.

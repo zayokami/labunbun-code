@@ -47,6 +47,7 @@ function systemKeychain(): KeychainLike | null {
 	return secrets && typeof secrets.get === "function" ? secrets : null;
 }
 
+// Long-form design notes: docs/dev/claude-subscription.md
 /**
  * The file-backed store, keychain-first.
  *

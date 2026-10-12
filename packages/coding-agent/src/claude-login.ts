@@ -42,7 +42,7 @@ export interface PendingClaudeLogin {
 	redirectUri: string;
 }
 
-// Long-form design notes: docs/dev/ai-layer.md
+// Long-form design notes: docs/dev/claude-subscription.md
 /** The first half of a sign-in: fresh PKCE and state, and the URL to open. */
 export function beginClaudeLogin(options: { redirectUri?: string } = {}): PendingClaudeLogin {
 	const redirectUri = options.redirectUri ?? CLAUDE_LOGIN_REDIRECT_URL;
@@ -66,7 +66,7 @@ export interface CompleteClaudeLoginArgs {
 	now?: () => number;
 }
 
-// Long-form design notes: docs/dev/ai-layer.md
+// Long-form design notes: docs/dev/claude-subscription.md
 /**
  * The second half: turn what came back into a stored credential.
  *
@@ -126,7 +126,7 @@ function respondHtml(response: ServerResponse, status: number, html: string): vo
 	response.end(html);
 }
 
-// Long-form design notes: docs/dev/ai-layer.md
+// Long-form design notes: docs/dev/claude-subscription.md
 /**
  * Listen on loopback for the console's redirect.
  *
@@ -252,7 +252,7 @@ export function startClaudeCallbackServer(options: {
 	});
 }
 
-// Long-form design notes: docs/dev/ai-layer.md
+// Long-form design notes: docs/dev/claude-subscription.md
 /**
  * Open the system browser at `url`. Best effort, always: the URL is printed
  * either way, so an opener that is missing turns into a copy and a paste
@@ -309,7 +309,7 @@ function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-// Long-form design notes: docs/dev/ai-layer.md
+// Long-form design notes: docs/dev/claude-subscription.md
 /** The whole sign-in, from a fresh PKCE to a stored credential. */
 export async function claudeLoginFlow(options: ClaudeLoginFlowOptions): Promise<ClaudeLoginResult> {
 	const note = options.note ?? ((): void => {});
