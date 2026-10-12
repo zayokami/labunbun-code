@@ -129,6 +129,7 @@ import {
 	preservedFilesDrift,
 } from "./context-report.ts";
 import { CostTracker, formatCostReport } from "./cost-tracker.ts";
+import { createExitGuard } from "./exit-guard.ts";
 import { sessionToMarkdown } from "./export-session.ts";
 import { createFileCompleter } from "./file-completions.ts";
 import {
@@ -1370,6 +1371,24 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				setThinkingLevel,
 				beetle: beetleSurface,
 			}),
+		// Every exit request the REPL serves -- /exit, /quit, the idle double
+		// Ctrl+C -- comes through the guard first, so the question about what
+		// is still running is asked with the screen still up. The facts are
+		// read fresh per request: shells and subagents start and end between
+		// one exit attempt and the next.
+		onExitRequest: createExitGuard({
+			work: () => ({
+				turnRunning: sessionRef?.isRunning === true,
+				subagents: subagentRegistry.list().filter((entry) => entry.state === "live").length,
+				shells:
+					backgroundShells.list().filter((shell) => shell.status === "running").length + shellRecovery.alive.length,
+			}),
+			cancelPicker: () => handle?.clearPickerRequest(),
+			ask: (question) => {
+				if (!handle) throw new Error("the REPL is not mounted");
+				return handle.askUser([question]);
+			},
+		}),
 	});
 
 	// Said out loud, because a definition that was not loaded and a definition that

@@ -191,6 +191,31 @@ describe("a bare slash", () => {
 	});
 });
 
+/**
+ * The exit command only reports the request: whether it is granted is the
+ * app's to decide (the guard that asks about running work lives upstream).
+ * Both spellings must hand over the identical request, and nothing else.
+ */
+describe("/exit", () => {
+	test("both spellings hand the request to onExit, and touch nothing else", () => {
+		const store = createStore<UiState>(initialUiState(true));
+		let exits = 0;
+		const context = {
+			store,
+			modelName: "m",
+			onExit: () => {
+				exits += 1;
+			},
+		};
+		handleCommand("/exit", context);
+		handleCommand("/quit", context);
+		expect(exits).toBe(2);
+		// No info line, no transcript change: an exit that didn't happen must
+		// not leave a trace claiming it did.
+		expect(store.get().entries).toEqual([]);
+	});
+});
+
 describe("idle Ctrl+C double-press", () => {
 	test("a single press never exits", () => {
 		expect(ctrlCShouldExit(0, 1000)).toBe(false);

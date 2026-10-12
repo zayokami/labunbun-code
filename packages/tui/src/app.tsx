@@ -56,6 +56,19 @@ export interface ReplAppOptions {
 	onMidRunText?: (text: string) => boolean;
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
+	/**
+	 * Consulted when the user asks to leave — `/exit`, `/quit`, or the idle
+	 * double Ctrl+C — before anything unmounts. Return true to leave; false
+	 * keeps the session up, with the screen still here for whatever the hook
+	 * has to ask or say.
+	 *
+	 * The question "what is still running" is the app layer's to answer: its
+	 * registries hold the truth, and this package has no business knowing
+	 * about subagents or background shells. A hook that throws is treated as
+	 * true — a guard that cannot answer must not become an app nobody can
+	 * exit.
+	 */
+	onExitRequest?: () => boolean | Promise<boolean>;
 	/** Slash-command suggestions for autocomplete. */
 	commandSuggestions?: Array<[string, string]>;
 	/** Candidate file paths for @-mention completion in the prompt. */
@@ -134,6 +147,15 @@ export interface ReplAppHandle {
 	 * run's question will never be answered, and its caller is still awaiting it.
 	 */
 	clearQuestionRequest: () => void;
+	/**
+	 * Dismiss an open picker as canceled, if one is up. The same caller-side
+	 * need again: something else is about to take the screen — a confirmation
+	 * asked while a list is still up — and a list left up would move and
+	 * confirm with the same keys as the dialog under it, so one Enter would
+	 * answer both. Cancelling lands as the null Esc would have given it, any
+	 * preview undone.
+	 */
+	clearPickerRequest: () => void;
 	setContextInfo(info: { usedTokens: number; threshold: number }): void;
 	/** Show the `/status` card over the prompt; null dismisses it. */
 	setStatusCard(card: StatusCardData | null): void;
@@ -228,6 +250,55 @@ function ThemedTree({ store, children }: { store: Store<UiState>; children: Reac
 }
 
 /**
+ * Cancel whatever picker is on screen, if one is up, landing as the null Esc
+ * would have given it.
+ *
+ * The two calls are, in order, the ones `ListPickerDialog` makes for its own
+ * escape: a preview the caller asked to be able to undo is undone, then the
+ * list resolves as canceled. Nothing here needs a mounted tree — the picker is
+ * whatever the store holds — which is what lets `clearPickerRequest` be the
+ * same two lines rather than a second implementation of them.
+ */
+export function cancelOpenPicker(store: Store<UiState>): void {
+	const picker = store.get().picker;
+	if (!picker) return;
+	picker.onCancel?.();
+	picker.resolve(null);
+}
+
+/**
+ * Route the REPL's exit request through the app's guard.
+ *
+ * The REPL reports the request and forgets it — its `onExit` returns nothing —
+ * so the guard's answer is awaited here and the unmount happens only on
+ * "leave". The decision table is a function of its own rather than a closure
+ * inside `mountRepl` so it can be tested without mounting: this is the TUI's
+ * whole share of the exit guard.
+ */
+export function createExitHandler(
+	request: (() => boolean | Promise<boolean>) | undefined,
+	unmount: () => void,
+): () => void {
+	return () => {
+		if (!request) {
+			unmount();
+			return;
+		}
+		void (async () => {
+			let proceed: boolean;
+			try {
+				proceed = await request();
+			} catch {
+				// Fail open, per the option's own doc: a guard that cannot
+				// answer must not become an app nobody can leave.
+				proceed = true;
+			}
+			if (proceed) unmount();
+		})();
+	};
+}
+
+/**
  * Mount the REPL. The returned handle exposes the permission bridge the
  * app layer wires into `deps.canUseTool`.
  */
@@ -269,7 +340,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				getSession={() => sessionHolder.current}
 				store={store}
 				modelName={options.modelName}
-				onExit={() => instance.unmount()}
+				onExit={createExitHandler(options.onExitRequest, () => instance.unmount())}
 				onCommand={options.onCommand}
 				onSubmitText={options.onSubmitText}
 				onMidRunText={options.onMidRunText}
@@ -372,6 +443,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		askUser: questionSlot.ask,
 		clearPermissionRequest: permissionQueue.clear,
 		clearQuestionRequest: questionSlot.clear,
+		clearPickerRequest: () => cancelOpenPicker(store),
 	};
 }
 

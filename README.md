@@ -505,7 +505,7 @@ Use these commands in the terminal.
 | `/hal` | Play a sound. |
 | `/clear` | Clear the display. The session and the model context stay. |
 | `/help` | Show this list. |
-| `/exit` | Stop the session. |
+| `/exit` | Stop the session. It asks first while a run, subagents, or background shells are still active. |
 
 The command `/migrate` is the previous name of `/yoshi`. The command `/quit` is an alias of `/exit`.
 
