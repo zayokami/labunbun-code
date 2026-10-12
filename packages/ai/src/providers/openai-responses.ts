@@ -448,12 +448,17 @@ export function resolveStopReason(
 	status: string | undefined,
 	incompleteReason: string | undefined,
 	toolCallCount: number,
-): "stop" | "toolUse" | "length" | "error" {
+): "stop" | "toolUse" | "length" | "refusal" | "error" {
 	// No terminal event at all: the stream ended without saying how. The mapper
 	// rejects this before ever reaching here; the function keeps the same
 	// answer so its contract does not depend on the caller remembering that.
 	if (status === undefined) return "error";
 	if (status === "incomplete" && incompleteReason === "max_output_tokens") return "length";
+	// A filtered response is the provider refusing the turn on content policy —
+	// the outcome Chat Completions spells `content_filter`, with the same reason
+	// there. `length` would send the turn back with more room, and then three
+	// more times, to report output the model was never going to write.
+	if (status === "incomplete" && incompleteReason === "content_filter") return "refusal";
 	if (status === "failed" || status === "cancelled") return "error";
 	if (status === "incomplete") return "length";
 	return toolCallCount > 0 ? "toolUse" : "stop";

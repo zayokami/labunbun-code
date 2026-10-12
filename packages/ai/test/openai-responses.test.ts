@@ -285,6 +285,31 @@ describe("mapResponsesStream", () => {
 		expect(partial.content[1]).toMatchObject({ type: "text", text: "answer" });
 	});
 
+	test("a content-filtered response is a refusal, not a turn that ran out of room", async () => {
+		// `incomplete` is the status both of a turn that hit the output limit and
+		// of one the provider filtered; the reason is the only thing that tells
+		// them apart. As `length`, the session loop escalates
+		// max_output_tokens once and then continues up to three more times,
+		// against a filter that will not move, and the run ends blaming an
+		// output limit the model never hit — the same wrong remedy `content_filter`
+		// would be on Chat Completions, which maps it to a refusal.
+		const events = await collect(
+			mapResponsesStream(
+				raw([
+					{
+						type: "response.incomplete",
+						response: { status: "incomplete", incomplete_details: { reason: "content_filter" } },
+					},
+				]),
+				"openai",
+				MODEL.id,
+			),
+		);
+		const done = events.at(-1);
+		expect(done.type).toBe("done");
+		expect(done.message.stopReason).toBe("refusal");
+	});
+
 	test("an empty stream is an error, not a silent empty answer", async () => {
 		const events = await collect(mapResponsesStream(raw([]), "openai", MODEL.id));
 		expect(events.at(-1).type).toBe("error");
@@ -348,7 +373,8 @@ describe("resolveStopReason", () => {
 		["completed with no calls", "completed", undefined, 0, "stop"],
 		["completed with a call", "completed", undefined, 1, "toolUse"],
 		["incomplete on max_output_tokens", "incomplete", "max_output_tokens", 0, "length"],
-		["incomplete for another reason", "incomplete", "content_filter", 0, "length"],
+		["incomplete on content_filter", "incomplete", "content_filter", 0, "refusal"],
+		["incomplete for a reason we do not know", "incomplete", "some_future_reason", 0, "length"],
 		["failed", "failed", undefined, 0, "error"],
 		["cancelled", "cancelled", undefined, 0, "error"],
 		["no terminal event at all", undefined, undefined, 0, "error"],
