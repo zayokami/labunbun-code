@@ -105,6 +105,15 @@ import { attachShellNotices } from "./background-notifications.ts";
 import { beetleUsage, parseBeetleCommand } from "./beetle.ts";
 import { type BeetleSurface, createBeetleSurface, createToolChangeLatch } from "./beetle-commands.ts";
 import { cacheStatusLine, formatCacheReport } from "./cache-report.ts";
+import { createClaudeCredentialStore, createClaudeCredentials } from "./claude-auth.ts";
+import {
+	type ClaudeAuthHooks,
+	claudeLoginFlow,
+	clearClaudeSubscription,
+	completeClaudeLogin,
+	type PendingClaudeLogin,
+	signedInLine,
+} from "./claude-login.ts";
 import {
 	builtInCommands,
 	type Command,
@@ -498,7 +507,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Tracked, so `/cache` can report what the provider actually did with each
 	// request. The tracker sees every request the app makes — the loop, the
 	// compaction summary, each subagent — because they all come through here.
-	const { streamFn: baseStreamFn, tracker: cacheTracker } = createTrackedStreamFn({ policy: settings.cache });
+	// The credentials provider rides along for the same reason: every request
+	// that ends at the anthropic adapter gets the subscription mint when one
+	// is signed in, and `/login` swaps the stored credential under it.
+	const credentials = createClaudeCredentials({ home });
+	const { streamFn: baseStreamFn, tracker: cacheTracker } = createTrackedStreamFn({
+		policy: settings.cache,
+		credentials,
+	});
 	const fallbackChain = (settings.fallbackModels ?? [])
 		.map((ref) => resolveModel(ref))
 		.filter((m): m is NonNullable<typeof m> => Boolean(m));
@@ -1821,6 +1837,15 @@ interface AppCommandContext {
 	 * answer rather than throw.
 	 */
 	beetle?: BeetleSurface;
+	/**
+	 * The Claude subscription surface, for `/login` and `/logout`. Optional
+	 * because a context built by hand — a test, an embedder — has to be able
+	 * to drive both commands without a browser, a network, or the keychain of
+	 * the machine running the tests: a `/logout` that reached the real store
+	 * would sign the operator out of their own subscription, which from the
+	 * test runner's side is indistinguishable from working code.
+	 */
+	claudeAuth?: ClaudeAuthHooks;
 }
 
 function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
@@ -1951,6 +1976,8 @@ export function appCommandTable(): Array<[string, string]> {
 		["/export", "Export this session to a Markdown file: /export [path]"],
 		["/fork", "Branch the session from an entry id: /fork <id>"],
 		["/gamepad", "Control the session from a DualShock 4: /gamepad [on|off|status|watch|list|reset|approve|rumble]"],
+		["/login", "Sign in to a Claude subscription: /login, then /login <code#state> if it asks you to paste"],
+		["/logout", "Sign out of the Claude subscription (the API-key path keeps working)"],
 		["/mcp", "List configured MCP servers and their tools"],
 		["/mode", "Show or set the permission mode: /mode [mode]"],
 		["/model", "Show or switch the model: /model [provider/id]"],
@@ -1967,6 +1994,27 @@ export function appCommandTable(): Array<[string, string]> {
 		["/tree", "Show the session branch tree"],
 		["/vim", "Turn modal vim editing in the prompt on or off: /vim [on|off]"],
 	];
+}
+
+/**
+ * The sign-in the REPL is waiting on, if any.
+ *
+ * The browser path completes inside `/login`; the manual path returns a
+ * pending login whose code arrives as the argument of a later `/login`. Module
+ * state rather than context state because there is one REPL per process, and
+ * a session swap (/resume) must not discard a sign-in in progress.
+ */
+let pendingClaudeLogin: PendingClaudeLogin | null = null;
+let claudeLoginRunning = false;
+
+function claudeAuthOf(ctx: AppCommandContext): ClaudeAuthHooks {
+	return (
+		ctx.claudeAuth ?? {
+			store: () => createClaudeCredentialStore({ home: ctx.home }),
+			login: claudeLoginFlow,
+			complete: completeClaudeLogin,
+		}
+	);
 }
 
 function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
@@ -2777,6 +2825,81 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				if (index === null) return;
 				apply(resolved[index]);
 				save(names[index], resolved[index]);
+			})();
+			return true;
+		}
+		case "/login": {
+			const input = text.trim().slice("/login".length).trim();
+			const auth = claudeAuthOf(ctx);
+			// An argument is the paste the manual flow asked for; no argument
+			// starts a sign-in. One case for both, because the URL the user is
+			// holding is the one this REPL printed, and it must survive until
+			// the code it shows comes back.
+			if (input !== "") {
+				const pending = pendingClaudeLogin;
+				if (!pending) {
+					pushInfo(ctx.handle, "No sign-in is waiting for a code. Run /login first, then paste what the page shows.");
+					return true;
+				}
+				void (async () => {
+					try {
+						const credential = await auth.complete({ input, pending, store: auth.store() });
+						pendingClaudeLogin = null;
+						pushInfo(ctx.handle, signedInLine(credential));
+					} catch (error) {
+						// The pending login stays: the usual failure is a mis-paste,
+						// and a fresh URL would invalidate the code still on screen.
+						pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
+					}
+				})();
+				return true;
+			}
+			if (claudeLoginRunning) {
+				pushInfo(
+					ctx.handle,
+					"A sign-in is already running. Finish it in the browser, or paste its code with /login <code#state>.",
+				);
+				return true;
+			}
+			claudeLoginRunning = true;
+			void (async () => {
+				try {
+					const result = await auth.login({
+						store: auth.store(),
+						note: (line) => pushInfo(ctx.handle, line),
+					});
+					if (result.kind === "pending") {
+						pendingClaudeLogin = result.pending;
+						pushInfo(ctx.handle, "When the page shows the code, run: /login <code#state>");
+					} else {
+						pendingClaudeLogin = null;
+						pushInfo(ctx.handle, signedInLine(result.credential));
+					}
+				} catch (error) {
+					pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
+				} finally {
+					claudeLoginRunning = false;
+				}
+			})();
+			return true;
+		}
+		case "/logout": {
+			// Fire-and-forget like the other network-touching commands: the
+			// keychain write can block on a system dialog, and the prompt must
+			// stay usable while it does.
+			void (async () => {
+				try {
+					const had = await clearClaudeSubscription(claudeAuthOf(ctx).store());
+					pendingClaudeLogin = null;
+					pushInfo(
+						ctx.handle,
+						had
+							? "Signed out of the Claude subscription. The next request falls back to the API-key path."
+							: "No Claude subscription was signed in.",
+					);
+				} catch (error) {
+					pushInfo(ctx.handle, `Could not sign out: ${error instanceof Error ? error.message : error}`);
+				}
 			})();
 			return true;
 		}

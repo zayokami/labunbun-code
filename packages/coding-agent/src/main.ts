@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { PERMISSION_MODES, type PermissionMode, SANDBOX_MODES, type SandboxMode } from "@labunbun/agent";
 import { chunkWritesForConPTY, isConPTYHost } from "@labunbun/tui";
+import { runClaudeLoginCli, runClaudeLogoutCli } from "./claude-login.ts";
 import { runHeadless } from "./headless.ts";
 import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
@@ -51,6 +52,8 @@ export function validateModeFlags(args: { permissionMode: string | null; sandbox
  * still works, so the old scripts and the muscle memory keep running.
  */
 const SUBCOMMANDS = new Map([
+	["login", "login"],
+	["logout", "logout"],
 	["yoshi", "yoshi"],
 	["migrate", "yoshi"],
 ]);
@@ -213,6 +216,8 @@ function printHelp(): void {
 Usage:
   labunbun                     Interactive REPL
   labunbun -p "<prompt>"       Headless: run one prompt and print the result
+  labunbun login               Sign in to a Claude subscription (a browser opens)
+  labunbun logout              Sign out of the Claude subscription
   labunbun yoshi               Import settings from another agent tool
   labunbun --version           Show version
 
@@ -291,6 +296,15 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 		}
 		console.log(result.report);
 		return result.applied && result.applied.failed.length > 0 ? 1 : 0;
+	}
+
+	// The subscription subcommands run here for the same reason: signing in is
+	// how someone gets a working setup, so it cannot require one first.
+	if (args.subcommand === "login") {
+		return runClaudeLoginCli({ home: options.home });
+	}
+	if (args.subcommand === "logout") {
+		return runClaudeLogoutCli({ home: options.home });
 	}
 
 	// yoshi's own flags without the subcommand word used to parse and then be

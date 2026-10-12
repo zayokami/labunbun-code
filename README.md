@@ -54,6 +54,8 @@ At startup the tool asks each provider that has an API key which models the prov
 
 A model that the vendor serves on only one wire is on only that wire. A reseller can serve the same model on the other wire. The tool lists the model on its wire. The tool does not offer the model as a session model. Use `/model` to see the list.
 
+You can use a Claude subscription in place of an Anthropic API key. Run `labunbun login`. The tool opens a browser for the sign-in. Use `/login` inside a session for the same flow. The tool stores the credential in the OS keychain. A machine with no keychain uses a private file under `~/.labunbun` instead, and the tool says so. A subscription outranks the `ANTHROPIC_API_KEY` variable. Use `labunbun logout` or `/logout` to remove the credential.
+
 ### Permission, sandbox, and network
 
 LaBunbun Code has three independent axes. Each axis has its own values.
@@ -430,6 +432,12 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
    export DEEPSEEK_API_KEY=sk-...
    ```
 
+   Or sign in to a Claude subscription. This step needs no API key.
+
+   ```bash
+   bun run dev login
+   ```
+
 3. Start the session.
 
    ```bash
@@ -476,6 +484,8 @@ Use these commands in the terminal.
 |---------|---------|
 | `/status` | Show the model, the context use, the cost, and the settings. |
 | `/model [provider/id]` | Show the model, or change it. |
+| `/login [code#state]` | Sign in to a Claude subscription. The tool opens a browser. |
+| `/logout` | Sign out of the Claude subscription. |
 | `/mode [mode]` | Show the permission mode, or change it. |
 | `/permissions` | Show the permission mode and the rules. |
 | `/doctor` | Check the environment, the settings, and the provider. |

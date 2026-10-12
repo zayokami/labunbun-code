@@ -38,6 +38,7 @@ import {
 	parseMcpServersRecord,
 } from "@labunbun/mcp";
 import { createAllTools } from "@labunbun/tools";
+import { createClaudeCredentials } from "./claude-auth.ts";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
 import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
@@ -268,9 +269,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	 * an injected transport (a test, an embedder) is used as it comes, and the
 	 * tracker-shaped fields in the result become null rather than invented.
 	 */
+	// The Claude subscription, when one is signed in. A `-p` run reads the
+	// same stored sign-in the REPL does, and the anthropic adapter prefers it
+	// over the environment key, so headless and interactive cannot disagree
+	// about which credential served a request.
+	const credentials = createClaudeCredentials({ home });
 	const transport: { streamFn: StreamFn; tracker?: CacheTracker } = options.streamFn
 		? { streamFn: options.streamFn }
-		: createTrackedStreamFn({ policy: settings.cache });
+		: createTrackedStreamFn({ policy: settings.cache, credentials });
 	// The same fallback the REPL wraps around its transport, from the same
 	// setting: a `-p` run that ignored `fallbackModels` kept failing on a model
 	// whose provider was down while an interactive run of the same prompt would
