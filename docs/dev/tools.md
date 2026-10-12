@@ -50,7 +50,7 @@ The cut in the pipeline recognizes the header and reuses the file from the execu
 
 Both streams over the bound at once put two truncation notices in one result. The pipeline's cut reads only the first, so the second count goes stale. This build accepts that. The file holds every character either way, and a marker format with ordinals is not worth the rare case.
 
-The background manager keeps one log file per shell, named `lbb-<id>.log` in the temp directory. Ids have the form `shell_<n>` from a module counter. `MAX_SHELL_OUTPUT_CHARS` is 30000, the most that one read returns. `MAX_RETAINED_SHELLS` is 16.
+The background manager keeps one log file per shell in the temp directory, named `lbb-<id>-<random>.log`. The random suffix makes the path unguessable, so nobody can put a file or a link at it first. The manager creates the file with `wx` and mode 0600, because the log can hold anything a command printed. Ids have the form `shell_<n>` from a module counter. `MAX_SHELL_OUTPUT_CHARS` is 30000, the most that one read returns. `MAX_RETAINED_SHELLS` is 16.
 
 `readTail` returns the last `maxChars` of a file without a read of the whole file. One character is at most four UTF-8 bytes. A byte window of `4 * maxChars` always holds at least that many characters. The window opens at `bytes - window`.
 

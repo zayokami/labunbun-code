@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BackgroundShellManager, readTail } from "../src/background.ts";
+import { type BackgroundShell, BackgroundShellManager, readTail } from "../src/background.ts";
 import { createBashOutputTool, createKillBashTool } from "../src/bash.ts";
 import { htmlToText, parseDuckDuckGoResults } from "../src/web.ts";
 
@@ -223,4 +225,87 @@ describe("background shells (real spawn)", () => {
 		const killed = await killTool.call({ shell_id: shell.id }, ctx);
 		expect((killed.content[0] as any).text).toContain(`Killed ${shell.id}`);
 	}, 10_000);
+});
+
+/**
+ * Where a shell's log lands, and who can reach it.
+ *
+ * The path used to be `lbb-<id>.log` in the shared temp directory — guessable
+ * from any earlier run — and `writeFileSync` follows a symlink and truncates
+ * whatever sits at the path. On a machine with more than one account, another
+ * local user could pre-plant the name and have command output written into a
+ * file of their choosing (or the user's own file truncated). The children
+ * below are fake — `adopt` is the same write path a real adoption takes — so
+ * nothing here depends on a shell or a clock.
+ */
+function adoptFake(manager: BackgroundShellManager, stdout: string): BackgroundShell {
+	const proc = new EventEmitter();
+	return manager.adopt({
+		child: proc as unknown as ChildProcess,
+		command: "echo secret",
+		cwd: process.cwd(),
+		startTime: Date.now(),
+		stdout,
+		stderr: "",
+	});
+}
+
+/** The path the next shell's log would take under the old, predictable naming. */
+function legacyLogPathAfter(shell: BackgroundShell): string {
+	return join(tmpdir(), `lbb-shell_${Number(shell.id.slice("shell_".length)) + 1}.log`);
+}
+
+describe("shell log files", () => {
+	test("a file planted at the old predictable log path is never written to", () => {
+		const manager = new BackgroundShellManager();
+		const first = adoptFake(manager, "");
+		const planted = legacyLogPathAfter(first);
+		writeFileSync(planted, "planted before the shell started");
+
+		const second = adoptFake(manager, "the shell's own output");
+
+		// Neither truncated nor appended to: the planted path is not the log.
+		expect(readFileSync(planted, "utf8")).toBe("planted before the shell started");
+		expect(second.outputFile).not.toBe(planted);
+		expect(readFileSync(second.outputFile, "utf8")).toContain("the shell's own output");
+	});
+});
+
+/** Creating a file symlink needs a privilege the Windows CI runner does not hold; no link can be planted there. */
+const canSymlink = (() => {
+	const dir = mkdtempSync(join(tmpdir(), "lbb-symlink-probe-"));
+	try {
+		symlinkSync(join(dir, "target"), join(dir, "link"));
+		return true;
+	} catch {
+		return false;
+	}
+})();
+
+const describeSymlink = canSymlink ? describe : describe.skip;
+
+describeSymlink("shell log files (symlink)", () => {
+	test("a planted symlink is not followed, and the log is private", () => {
+		const manager = new BackgroundShellManager();
+		const first = adoptFake(manager, "");
+		const planted = legacyLogPathAfter(first);
+		rmSync(planted, { force: true });
+		const victim = join(mkdtempSync(join(tmpdir(), "lbb-victim-")), "dotfile");
+		writeFileSync(victim, "the user's own file");
+		symlinkSync(victim, planted);
+
+		const second = adoptFake(manager, "SECRET command output");
+
+		// The link was not replaced and not written through: the file behind it
+		// never saw the shell, and the log that did is the manager's own path.
+		expect(lstatSync(planted).isSymbolicLink()).toBe(true);
+		expect(readFileSync(victim, "utf8")).toBe("the user's own file");
+		expect(readFileSync(second.outputFile, "utf8")).toContain("SECRET command output");
+
+		// The log can hold anything a command printed, so owners only. Windows
+		// reports a synthesized mode, so the promise is posix-only.
+		if (process.platform !== "win32") {
+			expect(statSync(second.outputFile).mode & 0o777).toBe(0o600);
+		}
+	});
 });

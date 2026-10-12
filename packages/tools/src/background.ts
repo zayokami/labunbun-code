@@ -1,6 +1,7 @@
 // Background shell manager: long-running and adopted shells, their logs, and their bound.
 // Long-form design notes: docs/dev/tools.md
 import { type ChildProcess, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -90,6 +91,24 @@ interface ShellEntry {
 }
 
 let shellCounter = 0;
+
+// Long-form design notes: docs/dev/tools.md
+/**
+ * Create the log file for a shell, exclusively and privately.
+ *
+ * The name used to be `lbb-<id>.log` — predictable from any earlier run — and
+ * `writeFileSync` truncates an existing file and follows a symlink to its
+ * target, so another local user could pre-plant the path and have the shell's
+ * output land on a file of their choosing, or the user's file truncated. The
+ * random suffix makes the name unguessable, `wx` refuses anything already at
+ * the path, and 0600 keeps a log that can hold anything the command printed
+ * to its owner.
+ */
+function createLogFile(id: string, initial: string): string {
+	const outputFile = join(tmpdir(), `lbb-${id}-${randomBytes(8).toString("hex")}.log`);
+	writeFileSync(outputFile, initial, { flag: "wx", mode: 0o600 });
+	return outputFile;
+}
 
 /**
  * A best-effort log writer. A shell's output is diagnostic: failing to append a
@@ -258,8 +277,7 @@ export class BackgroundShellManager {
 	async start(command: string, cwd: string, sandbox?: SandboxPolicy): Promise<BackgroundShell> {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
-		const outputFile = join(tmpdir(), `lbb-${id}.log`);
-		writeFileSync(outputFile, "");
+		const outputFile = createLogFile(id, "");
 
 		const { command: shellCommand, args } = this.#shell;
 		const resolution = sandbox
@@ -334,8 +352,7 @@ export class BackgroundShellManager {
 	}): BackgroundShell {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
-		const outputFile = join(tmpdir(), `lbb-${id}.log`);
-		writeFileSync(outputFile, input.stdout + input.stderr);
+		const outputFile = createLogFile(id, input.stdout + input.stderr);
 
 		const info: BackgroundShell = {
 			id,
