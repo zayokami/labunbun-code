@@ -17,16 +17,12 @@ import {
 	type ClaudeTokenProvider,
 	createClaudeTokenProvider,
 } from "@labunbun/ai";
+import type { KeychainLike } from "./keychain.ts";
 
 /** The keychain entry. One account per process, so one named entry. */
 export const CLAUDE_SUBSCRIPTION_KEYCHAIN = { service: "labunbun", name: "claude-subscription" } as const;
 
-/** The three calls the store needs. `Bun.secrets` matches this shape. */
-export interface KeychainLike {
-	get(options: { service: string; name: string }): Promise<string | null>;
-	set(options: { service: string; name: string; value: string }): Promise<void>;
-	delete(options: { service: string; name: string }): Promise<boolean>;
-}
+export type { KeychainLike };
 
 export interface ClaudeAuthOptions {
 	/** The directory user state lives under; defaults to the real home. */
