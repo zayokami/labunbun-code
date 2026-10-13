@@ -3,7 +3,7 @@
  * permission dialog bridge), renders the Ink app, and returns an exit code.
  */
 
-import type { ActivityRange, AgentSession, PermissionMode } from "@labunbun/agent";
+import type { ActivityRange, AgentSession, ModeChoice, PermissionMode } from "@labunbun/agent";
 import { describeModeChoice } from "@labunbun/agent";
 import type { PadBridge } from "@labunbun/gamepad";
 import { render } from "ink";
@@ -56,6 +56,12 @@ export interface ReplAppOptions {
 	onMidRunText?: (text: string) => boolean;
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
+	/**
+	 * Called after Shift+Tab moves the session's two axes, with the row it landed
+	 * on. The app layer records the change — the session file is where a restart
+	 * reads the mode from — and only this package sees the key.
+	 */
+	onModeChange?: (choice: ModeChoice) => void;
 	/**
 	 * Consulted when the user asks to leave — `/exit`, `/quit`, or the idle
 	 * double Ctrl+C — before anything unmounts. Return true to leave; false
@@ -345,6 +351,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				onSubmitText={options.onSubmitText}
 				onMidRunText={options.onMidRunText}
 				onMemoryShortcut={options.onMemoryShortcut}
+				onModeChange={options.onModeChange}
 				commandSuggestions={options.commandSuggestions}
 				completeFiles={options.completeFiles}
 				dirName={options.dirName}

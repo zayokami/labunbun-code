@@ -14,7 +14,7 @@
  * same starting state and asserts the opposite outcome.
  */
 import { describe, expect, test } from "bun:test";
-import { AgentSession, MODE_CHOICES, type PermissionMode, type SandboxMode } from "@labunbun/agent";
+import { AgentSession, MODE_CHOICES, type ModeChoice, type PermissionMode, type SandboxMode } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { render } from "ink-testing-library";
 import type React from "react";
@@ -40,7 +40,7 @@ const SHIFT_TAB = "\x1b[Z";
  */
 const COMMANDS: Array<[string, string]> = [["/help", "show the help list"]];
 
-function setup(pair?: { mode: PermissionMode; sandbox: SandboxMode }) {
+function setup(pair?: { mode: PermissionMode; sandbox: SandboxMode }, onModeChange?: (choice: ModeChoice) => void) {
 	const faux = fauxProvider([{ text: "unused" }]);
 	const session = new AgentSession({
 		model: FAUX_MODEL,
@@ -52,7 +52,14 @@ function setup(pair?: { mode: PermissionMode; sandbox: SandboxMode }) {
 	// badge assertions would pass on a store that never got a label at all.
 	const store = createStore<UiState>(initialUiState(false, false, MODE_CHOICES[0].label));
 	const view = render(
-		<REPL getSession={() => session} store={store} modelName="test" commandSuggestions={COMMANDS} onExit={() => {}} />,
+		<REPL
+			getSession={() => session}
+			store={store}
+			modelName="test"
+			commandSuggestions={COMMANDS}
+			onExit={() => {}}
+			onModeChange={onModeChange}
+		/>,
 	);
 	return {
 		store,
@@ -193,5 +200,37 @@ describe("Shift+Tab in the prompt", () => {
 		await delay(40);
 		expect(/│([^│]*)│/.exec((view.lastFrame() ?? "").replace(/\s+/g, " "))?.[1]?.trim()).toBe("/help");
 		view.unmount();
+	}, 20_000);
+
+	/**
+	 * The other half of the key: what the app layer hears.
+	 *
+	 * The prompt owns Shift+Tab and the session has no event for `setMode`, so the
+	 * callback is the only way a press reaches the session file. A press that moved
+	 * the screen and stayed silent would pass every test above — this is the one
+	 * that fails when the report is dropped, and it pins that the report names the
+	 * row the session actually landed in rather than one the prompt guessed.
+	 */
+	test("a press reports the row it landed on, once", async () => {
+		const changes: ModeChoice[] = [];
+		const h = setup({ mode: "ask", sandbox: "workspace-write" }, (choice) => changes.push(choice));
+		await delay(40);
+		expect(changes).toHaveLength(0);
+
+		await h.press(SHIFT_TAB);
+
+		expect(changes).toHaveLength(1);
+		expect(changes[0]).toMatchObject({ id: "plan", mode: "plan", sandbox: "workspace-write" });
+		// The report is the state, not a second opinion about it.
+		expect({ mode: changes[0]?.mode, sandbox: changes[0]?.sandbox }).toEqual(h.axes());
+
+		// The control: the key one byte over still completes a command, and reports
+		// nothing — the callback belongs to the cycle branch, not to any Tab.
+		h.stdin.write("/h");
+		await delay(40);
+		await h.press("\t");
+		expect(h.buffer()).toBe("/help");
+		expect(changes).toHaveLength(1);
+		h.unmount();
 	}, 20_000);
 });

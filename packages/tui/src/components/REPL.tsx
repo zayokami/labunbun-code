@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentSession } from "@labunbun/agent";
-import { cycleModeChoice, describeModeChoice } from "@labunbun/agent";
+import { cycleModeChoice, describeModeChoice, type ModeChoice } from "@labunbun/agent";
 import { type PadBridge, padPalette } from "@labunbun/gamepad";
 import { Box, Text, useInput, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -76,6 +76,13 @@ export interface ReplProps {
 	onMidRunText?: (text: string) => boolean;
 	/** "#" input prefix — append a memory note instead of prompting. */
 	onMemoryShortcut?: (note: string) => void;
+	/**
+	 * Called after Shift+Tab moves the session's two axes, with the row it moved
+	 * to. The app layer needs this to record the change: the session has no event
+	 * for `setMode`, and everything `/mode` does about a change — the prompt's
+	 * badge, the session file — this key has to do too.
+	 */
+	onModeChange?: (choice: ModeChoice) => void;
 	/** Slash-command suggestions for autocomplete. */
 	commandSuggestions?: Array<[string, string]>;
 	/** Candidate file paths for @-mention completion in the prompt. */
@@ -183,6 +190,7 @@ export function REPL({
 	onSubmitText,
 	onMidRunText,
 	onMemoryShortcut,
+	onModeChange,
 	commandSuggestions,
 	completeFiles,
 	history,
@@ -236,7 +244,11 @@ export function REPL({
 		const next = cycleModeChoice({ mode: session.permissionMode, sandbox: session.sandbox });
 		session.setMode(next.mode, next.sandbox);
 		store.set((s) => ({ ...s, modeLabel: next.label }));
-	}, [getSession, store]);
+		// Told as well as shown. `/mode` records the change on the way to the same
+		// place; this key is the other way both axes move, and a session file that
+		// only knew about the typed route would forget the keyed one.
+		onModeChange?.(next);
+	}, [getSession, store, onModeChange]);
 	const modelName = useStore(store, (s) => s.modelName) || modelNameProp;
 	// Ink's own writer, not `process.stdout`: it knows where the frame it drew is,
 	// so it can take it down and put it back around whatever we write.

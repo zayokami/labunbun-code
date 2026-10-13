@@ -164,6 +164,13 @@ import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import {
+	readPolicySnapshot,
+	resolveStartupAxes,
+	savePolicySnapshot,
+	sessionRulesFrom,
+	storedRules,
+} from "./policy-snapshot.ts";
+import {
 	approveProjectDefinitions,
 	type DefinitionKind,
 	describeWithheld,
@@ -479,28 +486,68 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	pruneToolOutput(cwd, { home });
 	const sessionRules: PermissionRule[] = [];
 	const baseRules: PermissionRule[] = collectPermissionRules(loadedSettings);
-	// Both axes, resolved together. Three sources in the order the user would
-	// expect: the flag or picker entry, then settings, then the default. The
-	// default is `MODE_CHOICES[0]` rather than a hardcoded pair, so "what does
-	// this start in" has exactly one answer in the repo.
+	// What the session being opened — or continued — was running under: the rules
+	// it granted, and the three axes it moved. Read before the axes resolve,
+	// because the snapshot is one of the sources they resolve from. A session with
+	// no snapshot yields undefined and changes nothing below.
+	const loadedPolicy = store ? readPolicySnapshot(store) : undefined;
+	if (loadedPolicy) sessionRules.push(...sessionRulesFrom(loadedPolicy.rules));
+	// All three axes, resolved together, from the sources `resolveStartupAxes`
+	// documents in order: the flag or picker entry, the session's own snapshot,
+	// settings, the default row. The default is `MODE_CHOICES[0]` rather than a
+	// hardcoded pair, so "what does this start in" has exactly one answer in the
+	// repo.
 	//
 	// A `modeId` names one row of that table and therefore both axes at once, so
 	// it takes precedence over the two separate options: passed together with a
 	// contradicting `--permission-mode`, it is the picker entry the user picked.
 	const choice = findModeChoice(options.modeId ?? "");
-	const requestedMode = choice?.mode ?? options.permissionMode ?? settings.permissionMode ?? DEFAULT_MODE_CHOICE.mode;
-	const requestedSandbox = choice?.sandbox ?? options.sandbox ?? settings.sandbox ?? DEFAULT_MODE_CHOICE.sandbox;
+	const {
+		mode: requestedMode,
+		sandbox: requestedSandbox,
+		network: effectiveNetwork,
+	} = resolveStartupAxes({
+		choice,
+		flagMode: options.permissionMode,
+		flagSandbox: options.sandbox,
+		policy: loadedPolicy,
+		settingsMode: settings.permissionMode,
+		settingsSandbox: settings.sandbox,
+		settingsNetwork: networkAxisFrom(settings),
+		fallback: DEFAULT_MODE_CHOICE,
+	});
 	const {
 		mode: effectiveMode,
 		sandbox: effectiveSandbox,
 		downgradeReason,
 	} = resolveMode({ mode: requestedMode, sandbox: requestedSandbox }, loadedSettings);
-	// The third axis, resolved from settings only. Deliberately not part of
-	// `resolveMode`: that function exists to apply managed-settings downgrades,
-	// and the network axis is not in the project-tier key policy, so there is
-	// nothing for it to say. It is computed here for the same reason the other
-	// two are — one value, derived once, rather than each session site deciding.
-	const effectiveNetwork = networkAxisFrom(settings);
+
+	/**
+	 * Record the policy the session is running under, when it differs from the one
+	 * the session file already holds.
+	 *
+	 * Called at the moments the policy changes rather than on a timer: a grant
+	 * (`onAlwaysAllow`), a `/mode`, a Shift+Tab, and the end of a compaction —
+	 * which re-roots the chain and so drops the snapshot above the boundary, the
+	 * same reason `saveTasks` runs there. All four go through this one function so
+	 * the snapshot has one shape and one comparison.
+	 *
+	 * Read through `sessionRef` and `store` rather than captured, because both are
+	 * rebound by an in-app `/resume`: a snapshot taken from a captured session
+	 * would record the axes of the conversation the user just left.
+	 */
+	function persistPolicy(): void {
+		const live = sessionRef;
+		if (!live) return;
+		savePolicySnapshot(store, {
+			at: Date.now(),
+			rules: storedRules(sessionRules),
+			mode: live.permissionMode,
+			sandbox: live.sandbox,
+			network: live.network,
+		});
+	}
+
 	let handle: ReplAppHandle | null = null;
 
 	// Memory files (LABUNBUN.md / AGENTS.md), part of the system prompt. `home` is
@@ -579,7 +626,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// it. Putting the list back here is what makes a restart after a summary
 			// start from the plan; `done` is the first moment it can, since the
 			// manager appends the boundary before it announces the pass as over.
-			if (phase.kind === "done") saveTasks(taskStore, store);
+			//
+			// The policy goes back for the same reason and in the same breath: the
+			// rules the user granted and the axes they chose are above the boundary
+			// too, and a summary that cost the session its grants would make /compact
+			// a way to be asked everything again.
+			if (phase.kind === "done") {
+				saveTasks(taskStore, store);
+				persistPolicy();
+			}
 		},
 		readFile: readFileOrNull,
 		preCompact: async () => {
@@ -1043,11 +1098,20 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * conversation being left behind had been told to work under, the one
 	 * arriving is told too.
 	 *
-	 * Which is why both axes are read off `current` rather than off the startup
-	 * values. Resuming a session used to reset the mode to whatever this process
-	 * launched in, so a `/mode agent` picked five minutes ago became `ask` again
-	 * on `/resume` — the sentence above promised continuity and the argument
-	 * underneath it delivered the opposite.
+	 * The axes and the rules come from the *incoming* session's own snapshot when
+	 * it has one, and from the outgoing session's axes when it does not. The
+	 * fallback is what this used to do unconditionally, for the reason given
+	 * there: resuming a session used to reset the mode to whatever this process
+	 * launched in, so a `/mode agent` picked five minutes ago became `ask` again on
+	 * `/resume`. What it could not do is the other half — a session that recorded
+	 * `plan` has to arrive in `plan`, or the file says one thing and the screen
+	 * another.
+	 *
+	 * The rules are replaced rather than merged, and that is the security half: a
+	 * grant made minutes ago in the conversation being left is scoped to *that*
+	 * conversation, and carrying it into another one would answer for a session the
+	 * user never granted it in. A session with no snapshot ends up with no session
+	 * rules, which is the safe direction.
 	 */
 	async function hotSwapSession(summary: SessionSummary): Promise<void> {
 		const loaded = loadSessionForResume(summary.path);
@@ -1058,15 +1122,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		if (sessionRef?.isRunning) sessionRef.abort();
 
 		const current = sessionRef;
+		const incomingPolicy = readPolicySnapshot(loaded.store);
+		sessionRules.length = 0;
+		if (incomingPolicy) sessionRules.push(...sessionRulesFrom(incomingPolicy.rules));
 		const next = new AgentSession({
 			model: current?.model ?? startupModel,
 			systemPrompt,
 			tools: [...(current?.tools ?? allTools)],
 			store: loaded.store,
 			cwd,
-			permissionMode: current?.permissionMode ?? effectiveMode,
-			sandbox: current?.sandbox ?? effectiveSandbox,
-			network: current?.network ?? effectiveNetwork,
+			permissionMode: incomingPolicy?.mode ?? current?.permissionMode ?? effectiveMode,
+			sandbox: incomingPolicy?.sandbox ?? current?.sandbox ?? effectiveSandbox,
+			network: incomingPolicy?.network ?? current?.network ?? effectiveNetwork,
 			deps: sessionDeps,
 		});
 		next.messages.push(...loaded.messages);
@@ -1286,7 +1353,17 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				behavior: "allow",
 				source: "session",
 			});
+			// And onto the session file, which is what makes the answer outlive the
+			// process: a grant is the one decision here the user cannot redo without
+			// being asked again, so it is worth the line.
+			persistPolicy();
 		},
+		// Shift+Tab moves both axes without passing through the app layer — the REPL
+		// owns that key, and the session has no event for `setMode` — so this is how a
+		// change made there reaches the file. The REPL applies it to the session
+		// before calling this, which is why nothing is passed: the axes are read from
+		// the live session, the same place `/mode`'s persist reads them.
+		onModeChange: () => persistPolicy(),
 		// Whether the queue may answer a pending request from that grant instead of
 		// asking. The queue has already matched the rule; this is the second half —
 		// the engine's own answer, under the rules *including* the one just pushed and
@@ -1373,6 +1450,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				},
 				baseRules,
 				sessionRules,
+				persistPolicy,
 				commands,
 				agentDefinitions,
 				withheldAgents,
@@ -1812,6 +1890,16 @@ interface AppCommandContext {
 	};
 	baseRules: PermissionRule[];
 	sessionRules: PermissionRule[];
+	/**
+	 * Record the session's policy — the rules and the three axes — in the session
+	 * file. Called by `/mode`, which is the one command that moves the axes.
+	 *
+	 * Optional because a context assembled by hand has no session file behind it
+	 * and nothing to record into; `/mode` has to work there exactly as it does
+	 * with one, which is also why the call site reads it as optional rather than
+	 * assuming it. Supplied by `runInteractive`, where it is `persistPolicy`.
+	 */
+	persistPolicy?(): void;
 	commands: Command[];
 	/**
 	 * The live definition lists, the same arrays the session's tools read:
@@ -2631,6 +2719,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// whatever Shift+Tab last set, which is the one way this pair can
 				// disagree after the wiring landed.
 				publishModeLabel(ctx.handle, target.label);
+				// And onto the session file, so a mode picked here is the mode the
+				// session resumes under rather than one this process happened to be in.
+				ctx.persistPolicy?.();
 				pushInfo(ctx.handle, `Mode: ${target.label} (${target.mode} · sandbox ${target.sandbox})`);
 			} else {
 				// No argument opens the same list `/model` and `/theme` do, rather than
@@ -2663,6 +2754,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					// be worst: a controller user who picked `Plan` and saw `Agent` under
 					// their finger.
 					publishModeLabel(ctx.handle, chosen.label);
+					// The file gets it for the same reason, and this is the path where
+					// forgetting it would be least visible: a controller user cannot
+					// even retype the choice.
+					ctx.persistPolicy?.();
 					pushInfo(ctx.handle, `Mode: ${chosen.label} (${chosen.mode} · sandbox ${chosen.sandbox})`);
 				})();
 			}
