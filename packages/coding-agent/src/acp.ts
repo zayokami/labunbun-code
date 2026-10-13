@@ -77,6 +77,7 @@ import { type CompactionTuning, createCompactionWiring, resolveCompactionSummari
 import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
+import { writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
 import {
 	budgetVerdict,
@@ -98,6 +99,7 @@ import {
 	resolveMode,
 } from "./settings.ts";
 import { loadSkillsWithNotes, skillDiscoveryBlock, skillDiscoveryBudgetChars } from "./skills.ts";
+import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
 
@@ -531,6 +533,8 @@ interface PermissionState {
 
 interface LiveSession {
 	session: AgentSession;
+	/** The file the session's turns go to — what the close-out note is written through. */
+	store: SessionStore;
 	sessionId: string;
 	cwd: string;
 	permissions: PermissionState;
@@ -814,9 +818,33 @@ class AcpAgent implements acp.Agent {
 		return meaning.allow ? { behavior: "allow" } : { behavior: "deny", message: "User denied permission" };
 	}
 
-	/** The `SessionEnd` runs the process still owes its sessions. */
+	/**
+	 * What the process still owes its sessions: a close-out note each, then the
+	 * `SessionEnd` runs.
+	 *
+	 * The note goes down first, the order the REPL writes its own in — it
+	 * describes the state the session ended in, not the state after the hooks
+	 * below ran. Every open session gets one (a connection can hold several),
+	 * written through the store its turns went to, a resumed session's own file
+	 * included. The counts are this host's structural zeros: no background
+	 * shells (it starts none) and no live subagents (an editor session builds no
+	 * `Task` tool, so it cannot spawn one); the recovered-shell zero is the
+	 * writer's documented drop rather than a written field. Best effort, like
+	 * every ledger write: a note that cost the shutdown would be worse than a
+	 * session that closes out in silence.
+	 */
 	async shutdown(): Promise<void> {
 		for (const live of this.#sessions.values()) {
+			try {
+				writeMissionRecord(live.store, {
+					reason: "exit",
+					shellsRunning: 0,
+					subagentsLive: 0,
+					shellsRecovered: 0,
+				});
+			} catch {
+				// best effort — see above
+			}
 			const outcome = await live.hooks.runtime.run("SessionEnd", {
 				session_id: live.sessionId,
 				cwd: live.cwd,
@@ -910,6 +938,11 @@ class AcpAgent implements acp.Agent {
 			home,
 			writableRoots: settings.permissions.additionalDirectories,
 		});
+		// No subagent tools are built here — an editor session has no `Task` — so
+		// this host writes no `subagent_start`/`subagent_end` entries for anything
+		// to pair: there is no store getter to wire because there is no spawner.
+		// The ledger's read side below still speaks for a session a REPL or a `-p`
+		// run left a dead run in (see `missions.md` for the decision).
 		// A resumed session hands in the store its file was loaded into, and every
 		// turn after the replay appends through that same store. Opening the file
 		// a second time here would leave two ledgers over one path — the replay
@@ -920,6 +953,18 @@ class AcpAgent implements acp.Agent {
 		if (!sessionId) throw acp.RequestError.internalError({ message: "the session store produced no id" });
 		pruneToolOutput(cwd);
 		const rules = collectPermissionRules(loadedSettings);
+
+		// The one startup notice this host prints, from one of the three ledgers:
+		// the subagent runs a previous process left unfinished, read from the very
+		// file a load resumed. The same line the REPL prints, on stderr because
+		// stdout is frames only — and it needs no new/load branch of its own, since
+		// a fresh session reads an empty ledger and says nothing. The mission
+		// summary and the shell recovery warning stay REPL-only: both sentences
+		// send the reader to `/ps`, which no editor session has (the decision is
+		// recorded in `mission-ledger.ts`). Nothing here becomes a protocol frame:
+		// there is no session/update for a notice, and this one is not an update.
+		const subagentNotice = formatSubagentRecovery(readSubagentLedger(store));
+		if (subagentNotice) process.stderr.write(`Warning: ${subagentNotice}\n`);
 
 		// The defaults are the REPL's, not headless's: an editor has a person in
 		// front of it, and an "ask" that reaches them is the whole point of the
@@ -1061,6 +1106,7 @@ class AcpAgent implements acp.Agent {
 		if (resumed) session.messages.push(...resumed.messages);
 		const live: LiveSession = {
 			session,
+			store,
 			sessionId,
 			cwd,
 			permissions,

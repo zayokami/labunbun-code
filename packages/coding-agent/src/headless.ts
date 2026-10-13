@@ -46,6 +46,7 @@ import { type CompactionTuning, createCompactionWiring, resolveCompactionSummari
 import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
+import { writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
 import {
 	budgetVerdict,
@@ -80,6 +81,8 @@ import {
 	skillsAsCommands,
 	withheldProjectSkills,
 } from "./skills.ts";
+import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts";
+import { SubagentRegistry } from "./subagent-registry.ts";
 import { createSubagentTools, loadAgentDefinitions, withheldProjectAgents } from "./subagents.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "./tool-output.ts";
@@ -330,11 +333,20 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		store = SessionStore.startNew(cwd, home);
 	}
 
-	// The recovery protocol's one line, at the same moment the REPL prints it:
-	// what the resumed ledger says the last run was doing, and where to look
-	// next. A fresh session reads an empty ledger and prints nothing. stderr,
-	// like every other startup notice here — `-p`'s stdout is the answer.
+	// The recovery notices, at the same moment the REPL prints them and in its
+	// order. A fresh session reads empty ledgers and prints nothing, so neither
+	// line needs a `--resume` branch of its own. stderr, like every other
+	// startup notice here — `-p`'s stdout is the answer.
 	if (store) {
+		// The subagent orphan notice, and only that one of the three: the mission
+		// summary and the shell recovery warning both send the reader to `/ps`,
+		// which does not exist in a `-p` run (see `mission-ledger.ts` for the
+		// decision). A run that died mid-flight is exactly what a scripted caller
+		// resuming a session needs to hear about.
+		const subagentNotice = formatSubagentRecovery(readSubagentLedger(store));
+		if (subagentNotice) console.error(`Warning: ${subagentNotice}`);
+		// The recovery protocol's own line: what the resumed ledger says the last
+		// run was doing, and where to look next.
 		const resumeSummary = formatResumeSummary(readToolCheckpoints(store.entries));
 		if (resumeSummary) console.error(resumeSummary);
 	}
@@ -497,6 +509,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// under-report every run that fanned out. In memory only — a `-p` run keeps
 	// no project ledger.
 	const subagentUsage = new CostTracker();
+	// The fleet as the host watches it, the same table the REPL injects: the
+	// close-out note's live count has to be read from the registry the tools
+	// write to, or it would be a claim rather than an observation.
+	const subagentRegistry = new SubagentRegistry();
 	// Read at the call, like the REPL's: the definition list is a getter because a
 	// definition approved mid-session joins it, and the store because a sidechain
 	// belongs to whichever session is live.
@@ -515,6 +531,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		allTools: () => [...tools, ...mcpTools],
 		definitions: () => agentDefinitions,
 		store: () => store,
+		registry: subagentRegistry,
 		permissionMode: () => effectiveMode,
 		// Both axes, because a subagent that got different ones from the session
 		// that spawned it would be running under a policy nobody chose. `sandbox`
@@ -733,6 +750,39 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		}
 	});
 
+	/**
+	 * The close-out note, at every controlled end of the run.
+	 *
+	 * The same note the REPL leaves at teardown, read by the next run the same
+	 * way: how this one ended, and what it was still holding. The fields mirror
+	 * the REPL's call site — a `-p` run has no background shells to count, the
+	 * live subagents come from the registry the tools write to, and the
+	 * recovered-shell count is this host's structural zero, since it attaches
+	 * no shell ledger to recover one from. `reason: "exit"` is the one value
+	 * every host writes; a run that dies mid-flight writes nothing at all, and
+	 * that absence is how a crash is told from an exit.
+	 *
+	 * Every controlled exit calls this — the prompt's normal end, an aborted
+	 * one, and a prompt a hook blocked before the model — and nothing else
+	 * does: a throw out of the run is a crash, and a crash must leave the
+	 * session note-less. `--no-session` has no store and stays silent, the way
+	 * it writes nothing else. Best effort, like the REPL's: a note that cost
+	 * the exit would be worse than a session that closes out in silence.
+	 */
+	const writeCloseoutNote = (): void => {
+		if (!store) return;
+		try {
+			writeMissionRecord(store, {
+				reason: "exit",
+				shellsRunning: 0,
+				subagentsLive: subagentRegistry.list().filter((handle) => handle.state === "live").length,
+				shellsRecovered: 0,
+			});
+		} catch {
+			// best effort — see above
+		}
+	};
+
 	// UserPromptSubmit gates the single headless prompt. A block exits non-zero
 	// without ever reaching the model, so scripted callers can detect it.
 	if (hooksRuntime.has("UserPromptSubmit")) {
@@ -745,6 +795,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		hookContext.push(...outcome.addedContext);
 		if (outcome.blocked) {
 			console.error(`[prompt blocked by UserPromptSubmit hook${outcome.reason ? `: ${outcome.reason}` : ""}]`);
+			// The run ends here under its own control — the prompt was never sent
+			// — so the session closes out like any other controlled ending rather
+			// than looking like a run that died.
+			writeCloseoutNote();
 			const endOutcome = await hooksRuntime.run("SessionEnd", { session_id: sessionId, cwd });
 			for (const message of advisoryHookFailures("SessionEnd", endOutcome)) {
 				console.error(`Warning: ${message}`);
@@ -815,6 +869,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	} else if (store) {
 		console.error(`[session saved: ${store.path}]`);
 	}
+
+	// The run is over and ended under its own control, so the close-out note goes
+	// down before the teardown below — the same order the REPL writes its own in,
+	// and for the same reason: the counts describe the state the run ended in.
+	writeCloseoutNote();
 
 	// SessionEnd is last, and its failures never change the exit code.
 	const sessionEnd = await hooksRuntime.run("SessionEnd", { session_id: sessionId, cwd });

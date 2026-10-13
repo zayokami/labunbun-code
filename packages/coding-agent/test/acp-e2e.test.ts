@@ -321,6 +321,21 @@ function seedConversation(f: Fixture): SessionStore {
 	return store;
 }
 
+/** Every JSONL line of a session file, parsed. */
+function fileEntries(path: string): Array<{ type?: string; kind?: string; data?: Record<string, unknown> }> {
+	return readFileSync(path, "utf8")
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.map((line) => JSON.parse(line) as { type?: string; kind?: string; data?: Record<string, unknown> });
+}
+
+/** The close-out notes a session file holds, in file order. */
+function missionNotes(path: string): Array<Record<string, unknown>> {
+	return fileEntries(path)
+		.filter((entry) => entry.type === "custom" && entry.kind === "mission")
+		.map((entry) => entry.data ?? {});
+}
+
 describe("the ACP server, end to end", () => {
 	test("initialize, session/new and session/prompt answer in frames, and stdout carries nothing else", async () => {
 		const f = fixture([{ text: "hello from the stub" }]);
@@ -587,5 +602,79 @@ describe("the ACP server, end to end", () => {
 			expect(prompt.error?.code).toBe(-32602);
 			expect(f.stub.requests).toHaveLength(0);
 		});
+	}, 60_000);
+
+	test("every open session closes out at shutdown, a new one and a loaded one alike", async () => {
+		const f = fixture([{ text: "closing" }, { text: "closing too" }]);
+		const seeded = seedConversation(f);
+		const seededId = seeded.sessionId ?? "";
+		expect(seededId).not.toBe("");
+		let newId = "";
+		const client = await withAcp(f, ["acp"], async (client) => {
+			newId = await openSession(client, f.dir);
+			const first = await client.promptResult(await client.startPrompt(newId, "say bye"));
+			expect(first.error).toBeUndefined();
+			expect(first.result?.stopReason).toBe("end_turn");
+			// A second, resumed session on the same connection — the protocol and
+			// this host both allow several, and each open store gets its own note.
+			const loaded = await client.request("session/load", { sessionId: seededId, cwd: f.dir, mcpServers: [] });
+			expect(loaded.error).toBeUndefined();
+			const second = await client.promptResult(await client.startPrompt(seededId, "and again"));
+			expect(second.error).toBeUndefined();
+			expect(second.result?.stopReason).toBe("end_turn");
+		});
+		// `withAcp` closed stdin, so the child ran its shutdown and exited before
+		// either stream ended — the notes are on disk by this line.
+		expect(client.exitCode).toBe(0);
+
+		const byId = new Map(SessionStore.listSessions(f.dir, f.home).map((session) => [session.sessionId, session.path]));
+		const freshPath = byId.get(newId);
+		if (!freshPath) throw new Error(`no session file for ${newId}`);
+		const notes = missionNotes(freshPath);
+		expect(notes).toHaveLength(1);
+		const record = notes[0] ?? {};
+		expect(record.reason).toBe("exit");
+		expect(record.shellsRunning).toBe(0);
+		expect(record.subagentsLive).toBe(0);
+		expect(typeof record.at).toBe("number");
+		// The zero recovered-shell count is dropped by the writer rather than
+		// written: this host attaches no shell ledger to recover one from.
+		expect(record).not.toHaveProperty("shellsRecovered");
+		// The loaded session closed out in its own file, not the new one's.
+		const loadedNotes = missionNotes(seeded.path);
+		expect(loadedNotes).toHaveLength(1);
+		expect(loadedNotes[0]?.reason).toBe("exit");
+	}, 60_000);
+
+	test("session/load prints the orphan subagent notice on stderr, and stdout stays frames", async () => {
+		const f = fixture([{ text: "unused" }]);
+		const store = seedConversation(f);
+		// What a previous process left in the file: a subagent run nobody
+		// finished, and a close-out naming two background shells — whose summary
+		// must NOT print here, because its sentence sends the reader to `/ps`, a
+		// command no editor session has.
+		store.appendCustom("subagent_start", { sidechainId: "sidechain-orphan", agentType: "researcher" });
+		store.appendCustom("mission", { at: Date.now() - 30_000, reason: "exit", shellsRunning: 2, subagentsLive: 0 });
+		const sessionId = store.sessionId ?? "";
+
+		const client = await withAcp(f, ["acp"], async (client) => {
+			await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+			const response = await client.request("session/load", { sessionId, cwd: f.dir, mcpServers: [] });
+			expect(response.error).toBeUndefined();
+		});
+		await client.drained;
+		await client.stderrDrained;
+
+		expect(client.stderr()).toContain(
+			"Warning: 1 subagent run from a previous run never finished: sidechain-orphan (researcher)",
+		);
+		expect(client.stderr()).not.toContain("see /ps");
+		// The notice is stderr only: stdout is frames and nothing else, exactly as
+		// the purity assertion in the first test of this file demands.
+		expect(client.junk).toEqual([]);
+		expect(client.rawLines.length).toBe(client.frames.length);
+		for (const frame of client.frames) {
+			expect(frame.jsonrpc).toBe("2.0");
+		}
 	}, 60_000);
 });

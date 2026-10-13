@@ -11,11 +11,14 @@
  * ended with shells still running" from "the last run died with nothing on the
  * books" — and no way at all to tell a normal exit from a crash.
  *
- * So teardown writes one `mission` entry: when the run ended, why, and the
- * counts it ended with. On resume the next run reads the newest one back and
- * says one line about it — the shells a previous session left, and that `/ps`
- * shows them. The write is best effort and stays best effort: a note that cost
- * the teardown would be worse than a session that closes out in silence.
+ * So every host writes one `mission` entry when its run ends under its own
+ * control: when it ended, why, and the counts it ended with. On resume the next
+ * run reads the newest one back and says one line about it — the shells a
+ * previous session left, and that `/ps` shows them. The write is best effort
+ * and stays best effort: a note that cost the teardown would be worse than a
+ * session that closes out in silence. And a run with no controlled ending — a
+ * process killed mid-flight — leaves no note at all, which is how a crash is
+ * told from an exit.
  *
  * The read side is defensive the way the other ledgers' are: the file is
  * append-only and written line by line, so a note that does not parse costs
@@ -32,7 +35,12 @@ export const MISSION_KIND = "mission";
 export interface MissionRecord {
 	/** The wall clock at teardown. */
 	at: number;
-	/** Why the run ended. A normal quit is `"exit"`; nothing else writes one yet. */
+	/**
+	 * Why the run ended. A controlled end — a normal quit, a `-p` run that
+	 * reached its own end, an ACP session whose connection closed — is `"exit"`,
+	 * the one value every host writes. A crash writes no note at all, so absence
+	 * is the other half of this vocabulary.
+	 */
 	reason: string;
 	/** Background shells this run was still tracking as running at teardown. */
 	shellsRunning: number;
@@ -105,6 +113,11 @@ export function readMissionRecord(session: { linearEntries(): readonly LedgerEnt
  * the orphan notice, which names each run — the summary would say the same
  * news in a smaller voice. And nothing at all when nothing was left: a line
  * whose whole content is "the last run ended" is not worth the scroll back.
+ *
+ * The REPL's line, and only its: the sentence sends the reader to `/ps`, so the
+ * two hosts without that command — a `-p` run and an ACP session — read the
+ * note but never print this summary. They still write notes of their own,
+ * because the next REPL to open the session is the reader this line is for.
  */
 export function formatMissionSummary(record: MissionRecord | undefined): string | undefined {
 	if (!record) return undefined;

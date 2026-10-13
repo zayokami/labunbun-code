@@ -1,19 +1,22 @@
 /**
- * The tool ledger and the recovery protocol in `-p` runs, through the real CLI.
+ * The tool ledger, the mission close-out and the recovery notices in `-p` runs,
+ * through the real CLI.
  *
  * Batch B wired the ledger's write points in the REPL only: the events existed
  * on both sides, and a `-p` run left no record of what it did. Unit-testing the
  * shared writer cannot catch a call site that was never attached — the gap this
  * file covers is a fact about the process, so it is asserted from outside one,
- * the way `hook-wiring.test.ts` asserts its events.
+ * the way `hook-wiring.test.ts` asserts its events. The same is true of the
+ * close-out note and the orphan notice: the writers and readers are unit-tested
+ * elsewhere, and what is asserted here is that this host calls them.
  *
  * Two fixtures, deliberately small:
  *
- *   - **the write point** needs a tool to really run, so its model is the local
- *     stub (`startCacheStub`) and the tool is a real `bun test` over a real
- *     failing test file — the failing-test names asserted below are the runner's
- *     own words, not a string this test wrote into a fake result.
- *   - **the recovery line** needs no model at all: a blocking `UserPromptSubmit`
+ *   - **the write points** need a tool to really run, so their model is the
+ *     local stub (`startCacheStub`) and the tool is a real `bun test` over a
+ *     real failing test file — the failing-test names asserted below are the
+ *     runner's own words, not a string this test wrote into a fake result.
+ *   - **the startup notices** need no model at all: a blocking `UserPromptSubmit`
  *     hook stops the run before the first request, so the only credentials in
  *     play are the fake key the stub fixture names and none at all in the rest.
  *     The home is a temp directory either way; the real one is never read.
@@ -25,6 +28,7 @@ import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
 import { assistantMessage, userMessage } from "@labunbun/ai";
 import { type StubStep, startCacheStub } from "../../ai/test/cache-stub-server.ts";
+import { readMissionRecord } from "../src/mission-ledger.ts";
 
 const CLI = join(import.meta.dir, "..", "bin", "labunbun.ts");
 
@@ -244,5 +248,102 @@ describe("a -p run", () => {
 
 		expect(result.exitCode).toBe(2);
 		expect(result.stderr).toContain("--no-session cannot be combined with --resume");
+	}, 60_000);
+
+	test("a completed run leaves a mission close-out in its session file", async () => {
+		const home = scratch("lbb-cphl-f-home-");
+		const cwd = scratch("lbb-cphl-f-proj-");
+		const stub = startCacheStub({ steps: [{ text: "all done" }], modelId: "stub-model" });
+		stubs.push(stub);
+		stubHome(home, stub);
+
+		const result = await runCli(cwd, ["-p", "finish up"], home, { STUB_KEY: "stub-key-for-tests" });
+
+		expect(result.exitCode).toBe(0);
+		const path = newestSessionPath(cwd, home);
+		const notes = fileEntries(path).filter((entry) => entry.type === "custom" && entry.kind === "mission");
+		expect(notes).toHaveLength(1);
+		const record = notes[0]?.data ?? {};
+		expect(record.reason).toBe("exit");
+		expect(record.shellsRunning).toBe(0);
+		expect(record.subagentsLive).toBe(0);
+		expect(typeof record.at).toBe("number");
+		// The zero recovered-shell count is dropped by the writer rather than
+		// written: this host attaches no shell ledger to recover one from, and a
+		// field that only ever says none is noise on a line read once.
+		expect(record).not.toHaveProperty("shellsRecovered");
+		// The shape on file is the shape the next run reads, through the real
+		// reader — the property that makes the note worth writing at all.
+		const read = readMissionRecord(SessionStore.load(path));
+		expect(read?.reason).toBe("exit");
+		expect(read?.shellsRunning).toBe(0);
+		expect(read?.subagentsLive).toBe(0);
+	}, 60_000);
+
+	test("a resumed run prints the orphan subagent notice, and not the summary that sends it to /ps", async () => {
+		const home = scratch("lbb-cphl-g-home-");
+		const cwd = scratch("lbb-cphl-g-proj-");
+
+		// The session a previous run left: a close-out that names two background
+		// shells (whose sentence a `-p` run must NOT print — it points at `/ps`),
+		// and a subagent run that never finished.
+		const planted = SessionStore.startNew(cwd, home);
+		planted.appendCustom("mission", { at: Date.now() - 30_000, reason: "exit", shellsRunning: 2, subagentsLive: 0 });
+		planted.appendCustom("subagent_start", { sidechainId: "sidechain-planted", agentType: "researcher" });
+		planted.appendMessage(userMessage("PLANTED QUESTION"));
+		planted.appendMessage(
+			assistantMessage({ content: [{ type: "text", text: "PLANTED ANSWER" }], stopReason: "stop" }),
+		);
+		blockingHome(home, cwd, "stop here");
+
+		const sessionId = planted.sessionId;
+		if (!sessionId) throw new Error("expected a session id");
+		const result = await runCli(cwd, ["-p", "carry on", "--resume", sessionId], home);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain(
+			"Warning: 1 subagent run from a previous run never finished: sidechain-planted (researcher)",
+		);
+		// The other two sentences stay REPL-only: both send the reader to `/ps`,
+		// which does not exist here.
+		expect(result.stderr).not.toContain("/ps");
+		expect(result.stderr).not.toContain("previous session left");
+		// Startup notice first, then the block: the line is what the run said
+		// before it was stopped, not a side effect of stopping.
+		expect(result.stderr.indexOf("never finished")).toBeLessThan(result.stderr.indexOf("stop here"));
+		// stderr, not stdout: `-p`'s stdout is the answer stream.
+		expect(result.stdout).not.toContain("never finished");
+		// A blocked prompt is a controlled end too: the session closes out like
+		// any other run that reached its end, rather than reading as one that
+		// died mid-flight. Two notes now — the planted one, and this run's.
+		const notes = fileEntries(planted.path).filter((entry) => entry.type === "custom" && entry.kind === "mission");
+		expect(notes).toHaveLength(2);
+		expect(notes.at(-1)?.data?.reason).toBe("exit");
+	}, 60_000);
+
+	test("a fresh session prints no orphan notice", async () => {
+		const home = scratch("lbb-cphl-h-home-");
+		const cwd = scratch("lbb-cphl-h-proj-");
+		blockingHome(home, cwd, "stop here");
+
+		const result = await runCli(cwd, ["-p", "hello"], home);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("stop here");
+		expect(result.stderr).not.toContain("never finished");
+		expect(result.stderr).not.toContain("/ps");
+	}, 60_000);
+
+	test("--no-session writes no close-out note anywhere", async () => {
+		const home = scratch("lbb-cphl-i-home-");
+		const cwd = scratch("lbb-cphl-i-proj-");
+		blockingHome(home, cwd, "stop here");
+
+		const result = await runCli(cwd, ["-p", "hello", "--no-session"], home);
+
+		// The run ends under its own control — the same exit that writes a note
+		// when a store exists — and writes nothing, because there is no store.
+		expect(result.exitCode).toBe(1);
+		expect(SessionStore.listSessions(cwd, home)).toEqual([]);
 	}, 60_000);
 });
