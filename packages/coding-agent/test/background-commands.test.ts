@@ -14,7 +14,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackgroundShell } from "@labunbun/tools";
 import { createStore, DARK_THEME, LIVE_OUTPUT_LINES } from "@labunbun/tui";
-import { formatShellOutput, resolveShellId, shellAge, shellPickerItems } from "../src/background-commands.ts";
+import {
+	formatShellOutput,
+	recoveredStopFailureMessage,
+	resolveShellId,
+	shellAge,
+	shellPickerItems,
+} from "../src/background-commands.ts";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
 import type { RecoveredShell } from "../src/shell-ledger.ts";
 
@@ -381,7 +387,12 @@ describe("the /ps and /stop commands", () => {
 			};
 			const t = makeCtx([], undefined, [old]);
 			handleAppCommand(`/stop pid-${pid}`, t.ctx);
-			await tick();
+			// The kill is awaited inside the command now: taskkill's exit code is
+			// the confirmation, and that is a round trip, not a tick.
+			const deadline = Date.now() + 10_000;
+			while (!t.infos().join("\n").includes(`Stopped pid-${pid}`) && Date.now() < deadline) {
+				await new Promise((r) => setTimeout(r, 25));
+			}
 			expect(t.infos().join("\n")).toContain(`Stopped pid-${pid}`);
 			// Stopped must also leave the offered list, or the next `/stop` offers
 			// a shell that is already gone.
@@ -401,4 +412,41 @@ describe("the /ps and /stop commands", () => {
 			proc.kill("SIGKILL");
 		}
 	}, 15_000);
+
+	test("/stop on a recovered shell whose process is gone reports the failed kill, and does not splice", async () => {
+		// A process that was real and has ended: the kill now resolves false —
+		// taskkill's exit code on Windows, ESRCH elsewhere — and the failure must
+		// neither read as a stop nor drop the row from what `/stop` offers next.
+		const proc =
+			process.platform === "win32"
+				? spawn("cmd", ["/c", "exit"], { stdio: "ignore", windowsHide: true })
+				: spawn("true", [], { stdio: "ignore" });
+		await new Promise((r) => proc.once("exit", r));
+		const pid = proc.pid;
+		if (pid === undefined) throw new Error("spawn produced no pid");
+		const old: RecoveredShell = {
+			...shell({ id: `pid-${pid}` }),
+			pid,
+			recovered: true,
+			liveness: "running",
+			observedAt: NOW,
+		};
+		const t = makeCtx([], undefined, [old]);
+		handleAppCommand(`/stop pid-${pid}`, t.ctx);
+		const deadline = Date.now() + 10_000;
+		while (t.infos().length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+		expect(t.infos().join("\n")).toContain(`pid-${pid} is not running any more.`);
+		expect(t.infos().join("\n")).not.toContain("Stopped");
+		expect(t.recovered).toHaveLength(1);
+	}, 15_000);
+});
+
+describe("recoveredStopFailureMessage", () => {
+	test("a failed kill is reported by what the pid turned out to be", () => {
+		expect(recoveredStopFailureMessage("pid-9", "dead")).toBe("pid-9 is not running any more.");
+		expect(recoveredStopFailureMessage("pid-9", "alive")).toBe("pid-9 could not be stopped — it is still running.");
+		expect(recoveredStopFailureMessage("pid-9", "unknown")).toBe(
+			"pid-9 could not be stopped — a probe could not say whether it is still running.",
+		);
+	});
 });

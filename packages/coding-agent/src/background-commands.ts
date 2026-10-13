@@ -12,7 +12,7 @@
 
 import type { BackgroundShell } from "@labunbun/tools";
 import { LIVE_OUTPUT_LINES, liveOutputLines } from "@labunbun/tui";
-import { isRecoveredShell, shellStateWord } from "./shell-ledger.ts";
+import { isRecoveredShell, type PidState, shellStateWord } from "./shell-ledger.ts";
 
 /** Longest command shown in the picker before it is elided. */
 const COMMAND_CHARS = 60;
@@ -75,6 +75,19 @@ export function formatShellOutput(id: string, text: string, maxLines: number = L
 	const drawn = body.some((line) => line.trim() !== "");
 	const lines = drawn ? [`${id}:`, ...body.map((line) => `  ${line}`)] : [`${id}: (no output yet)`];
 	return lines.join("\n");
+}
+
+/**
+ * What `/stop` says when a recovered shell's kill did not take. The pid is
+ * asked rather than guessed: a kill that came back false can mean the process
+ * is gone, that it refused the signal (EPERM — it is there, simply not ours),
+ * or that the probe itself failed, and each of those is a different sentence.
+ * "Is not running any more" would be a claim only the first supports.
+ */
+export function recoveredStopFailureMessage(id: string, state: PidState): string {
+	if (state === "dead") return `${id} is not running any more.`;
+	if (state === "unknown") return `${id} could not be stopped — a probe could not say whether it is still running.`;
+	return `${id} could not be stopped — it is still running.`;
 }
 
 /**

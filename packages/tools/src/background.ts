@@ -57,23 +57,32 @@ export interface BackgroundShell {
 /**
  * End a process tree by pid, best effort — the same mechanics `kill` gives a
  * tracked shell, for a process no manager here ever held: one a previous run
- * left running, found again through the session ledger. Returns whether an
- * attempt was made; a pid this process can no longer reach is false.
+ * left running, found again through the session ledger. Resolves true only
+ * when the kill was delivered and confirmed; a pid this process cannot reach
+ * — or a taskkill that ran and failed — is false, so no caller reports a stop
+ * that did not happen.
  */
-export function killPidTree(pid: number): boolean {
+export async function killPidTree(pid: number): Promise<boolean> {
 	if (!Number.isInteger(pid) || pid <= 0) return false;
 	if (process.platform === "win32") {
-		const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
-		killer.on("error", () => {
-			// taskkill itself failed to spawn — fall back to the direct signal so
-			// the process doesn't linger while we've already reported it killed.
-			try {
-				process.kill(pid);
-			} catch {
-				// already gone
-			}
+		// taskkill is the only tree kill Windows has, and its failure used to be
+		// silent: the caller heard "attempted" and said "stopped" while the
+		// process kept running. Exit 0 is the confirmation; a non-zero exit —
+		// not found, access denied — is a kill that did not happen.
+		return new Promise<boolean>((resolve) => {
+			const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+			killer.on("error", () => {
+				// taskkill itself failed to spawn — fall back to the direct signal so
+				// the process doesn't linger while we've already reported it killed.
+				try {
+					process.kill(pid);
+					resolve(true);
+				} catch {
+					resolve(false);
+				}
+			});
+			killer.on("close", (code) => resolve(code === 0));
 		});
-		return true;
 	}
 	try {
 		process.kill(pid);
@@ -420,7 +429,10 @@ export class BackgroundShellManager {
 	kill(id: string): boolean {
 		const entry = this.#entries.get(id);
 		if (entry?.info.status !== "running" || !entry.proc.pid) return false;
-		killPidTree(entry.proc.pid);
+		// Fire-and-forget: for a shell in hand the end is confirmed by the
+		// process's own close event, which settles the record and the ledger.
+		// Only a pid with no handle left to watch needs the awaited exit code.
+		void killPidTree(entry.proc.pid);
 		entry.info.status = "killed";
 		return true;
 	}

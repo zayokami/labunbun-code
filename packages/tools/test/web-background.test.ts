@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type BackgroundShell, BackgroundShellManager, readTail } from "../src/background.ts";
+import { type BackgroundShell, BackgroundShellManager, killPidTree, readTail } from "../src/background.ts";
 import { createBashOutputTool, createKillBashTool } from "../src/bash.ts";
 import { htmlToText, parseDuckDuckGoResults } from "../src/web.ts";
 
@@ -225,6 +225,41 @@ describe("background shells (real spawn)", () => {
 		const killed = await killTool.call({ shell_id: shell.id }, ctx);
 		expect((killed.content[0] as any).text).toContain(`Killed ${shell.id}`);
 	}, 10_000);
+});
+
+/**
+ * Ending a process no manager here ever held — the ledger's recovered shells.
+ *
+ * The answer is the kill's own outcome, not the attempt: on Windows the kill
+ * is a `taskkill` child whose exit code is the only confirmation, and it used
+ * to be discarded, so every call said true while the process kept running.
+ */
+describe("killPidTree", () => {
+	test("a pid that has already ended is false — an attempt is not a kill", async () => {
+		const child =
+			process.platform === "win32"
+				? spawn("cmd", ["/c", "exit"], { stdio: "ignore", windowsHide: true })
+				: spawn("true", [], { stdio: "ignore" });
+		await new Promise((resolve) => child.once("exit", resolve));
+		const pid = child.pid;
+		if (pid === undefined) throw new Error("spawn produced no pid");
+		expect(await killPidTree(pid)).toBe(false);
+	}, 15_000);
+
+	test("a running process is truly ended, and the answer says so", async () => {
+		const child =
+			process.platform === "win32"
+				? spawn("ping", ["-n", "30", "127.0.0.1"], { stdio: "ignore", windowsHide: true })
+				: spawn("sleep", ["30"], { stdio: "ignore" });
+		const pid = child.pid;
+		if (pid === undefined) throw new Error("spawn produced no pid");
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(await killPidTree(pid)).toBe(true);
+		// The OS really let go of it — a true answer must not mean "asked".
+		const ended = () => child.exitCode !== null || child.signalCode !== null;
+		for (let i = 0; i < 100 && !ended(); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(ended()).toBe(true);
+	}, 15_000);
 });
 
 /**

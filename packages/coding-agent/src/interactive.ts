@@ -98,6 +98,7 @@ import { createAskUserQuestionTool } from "./ask-user.ts";
 import {
 	BACKGROUND_SHELL_POLL_MS,
 	formatShellOutput,
+	recoveredStopFailureMessage,
 	resolveShellId,
 	shellPickerItems,
 } from "./background-commands.ts";
@@ -218,6 +219,7 @@ import {
 	formatShellRecovery,
 	isRecoveredShell,
 	observeRecoveredShells,
+	probePidState,
 	type RecoveredShell,
 	readShellLedger,
 	recoveredShellOutput,
@@ -2711,23 +2713,25 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		}
 		case "/stop": {
 			const arg = text.split(/\s+/).slice(1).join(" ").trim();
-			const stop = (shell: BackgroundShell): void => {
+			const stop = async (shell: BackgroundShell): Promise<void> => {
 				if (isRecoveredShell(shell)) {
 					// No handle exists here for a process another process started, so
-					// the kill goes by pid — the same mechanics the manager uses on its
-					// own shells. A pid that no longer answers is reported as gone
-					// rather than stopped, which would claim a kill that never happened.
-					const killed = killPidTree(shell.pid);
+					// the kill goes by pid — and, unlike the manager's, it is awaited:
+					// taskkill on Windows used to fail in silence, and a shell that
+					// kept running must not leave a "stopped" row behind. Only a kill
+					// that was confirmed true earns the splice, the removal from the
+					// rows `/stop` and `/ps` offer next.
+					const killed = await killPidTree(shell.pid);
 					if (killed) {
 						const at = ctx.recoveredShells?.indexOf(shell) ?? -1;
 						if (at >= 0) ctx.recoveredShells?.splice(at, 1);
+						pushInfo(ctx.handle, `Stopped ${shell.id} — it was left running by a previous run.`);
+						return;
 					}
-					pushInfo(
-						ctx.handle,
-						killed
-							? `Stopped ${shell.id} — it was left running by a previous run.`
-							: `${shell.id} is not running any more.`,
-					);
+					// The kill did not take. The pid is asked what became of it rather
+					// than guessed at: "gone" was one way for the attempt to fail and
+					// "still running" another, and the row stays either way.
+					pushInfo(ctx.handle, recoveredStopFailureMessage(shell.id, probePidState(shell.pid)));
 					return;
 				}
 				const killed = ctx.backgroundShells.kill(shell.id);
@@ -2742,7 +2746,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 						pushInfo(ctx.handle, `No shell "${arg}". /ps lists them.`);
 						return;
 					}
-					stop(target);
+					await stop(target);
 					return;
 				}
 				const running = all.filter((shell) => shell.status === "running");
@@ -2753,7 +2757,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				if (!ctx.handle) return;
 				const index = await ctx.handle.pickFromList("Stop a background shell", shellPickerItems(running));
 				if (index === null || index >= running.length) return;
-				stop(running[index]);
+				await stop(running[index]);
 			})();
 			return true;
 		}
