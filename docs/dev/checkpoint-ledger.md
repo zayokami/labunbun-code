@@ -2,7 +2,7 @@
 
 The tool ledger is the record of what the agent did while it ran. The session file already holds the conversation, the compaction history and the task list, and none of them say which tools were called, whether they worked, or what the files they touched held on either side. The ledger is that answer: one `custom` entry per finished tool call, plus the file snapshots `/rewind` restores from. It is what `/checkpoint` renders, what the recovery line at startup summarizes, and the state a restore has to exist before anything can be put back.
 
-The shape, the writer and the readers live in `packages/coding-agent/src/checkpoint-log.ts`. One writer serves both hosts — the REPL builds it at `packages/coding-agent/src/interactive.ts:1045` and a `-p` run at `packages/coding-agent/src/headless.ts:594` — because both run the same tool loop and both have to leave the same record of it.
+The shape, the writer and the readers live in `packages/coding-agent/src/checkpoint-log.ts`. One writer serves both hosts — the REPL builds it at `packages/coding-agent/src/interactive.ts:1097` and a `-p` run at `packages/coding-agent/src/headless.ts:599` — because both run the same tool loop and both have to leave the same record of it.
 
 ## The three entry kinds
 
@@ -17,7 +17,7 @@ Every append is best effort (`appendEntry`, `checkpoint-log.ts:665`): a checkpoi
 The readers differ on purpose:
 
 - `/checkpoint` reads over every entry in the file, not the active chain (`readToolCheckpoints`, `checkpoint-log.ts:502`). The question is what this session did, and a compaction is exactly the moment the chain stops holding the calls above it.
-- `/rewind` reads `store.linearEntries()` (`listCheckpoints`, `interactive.ts:2158`). A restore payload outside the live chain is not offered, which is why the compaction pass has to put the latest one back: `resendCheckpointsAcrossCompaction` (`checkpoint-log.ts:561`) re-appends the newest `file_checkpoint` per path and every shell start no end has closed, at the moment the boundary is written (`interactive.ts:764`). Older checkpoints for a path are deliberately left behind — after a summary the useful thing to restore is the newest state of a file, not its whole editing history.
+- `/rewind` reads `store.linearEntries()` (`listCheckpoints`, `interactive.ts:2219`). A restore payload outside the live chain is not offered, which is why the compaction pass has to put the latest one back: `resendCheckpointsAcrossCompaction` (`checkpoint-log.ts:561`) re-appends the newest `file_checkpoint` per path and every shell start no end has closed, at the moment the boundary is written (`interactive.ts:765`). Older checkpoints for a path are deliberately left behind — after a summary the useful thing to restore is the newest state of a file, not its whole editing history.
 
 ## What one `checkpoint` entry holds
 
@@ -38,32 +38,32 @@ The readers differ on purpose:
 - `noteAfterMutation` records the post-call hash, and only when the call reported success: a failed edit left the file as it was, so "the hash after" would be the before side wearing the wrong label (`checkpoint-log.ts:361-364`).
 - `noteToolEnd` writes the entry (`checkpoint-log.ts:367`).
 
-The hook-shaped methods run before the user's own hooks at their call sites (`interactive.ts:1190`, `headless.ts:666`), so a hook that blocks a call still leaves the ledger saying what was attempted, and the before-fingerprint is taken before anything else could touch the file. A file lands in `filesTouched` only when a validated call reached its before hook: an input the schema refused never named a file this build fingerprinted, and a row for it would be a claim built on input nothing accepted (`checkpoint-log.ts:374-381`).
+The hook-shaped methods run before the user's own hooks at their call sites (`interactive.ts:1242-1258`, `headless.ts:671`), so a hook that blocks a call still leaves the ledger saying what was attempted, and the before-fingerprint is taken before anything else could touch the file. A file lands in `filesTouched` only when a validated call reached its before hook: an input the schema refused never named a file this build fingerprinted, and a row for it would be a claim built on input nothing accepted (`checkpoint-log.ts:374-381`).
 
 ## `/checkpoint`
 
-The command (`interactive.ts:2647`) renders, from the ledger alone: how many tool calls are recorded and how many failed; the last call with its time and input summary; the next step the newest call recorded; the failing tests of the newest failing test run, by name; the files touched, each read against the disk now with one of four verdicts — `unchanged`, `changed`, `missing`, `unfingerprinted` (`TouchedFileState`, `checkpoint-log.ts:107`; a later call on the same path replaces the earlier fingerprint, `checkpoint-log.ts:520`); a task summary from the session's task board; and the context use against the auto-compact threshold.
+The command (`interactive.ts:2716`) renders, from the ledger alone: how many tool calls are recorded and how many failed; the last call with its time and input summary; the next step the newest call recorded; the failing tests of the newest failing test run, by name; the files touched, each read against the disk now with one of four verdicts — `unchanged`, `changed`, `missing`, `unfingerprinted` (`TouchedFileState`, `checkpoint-log.ts:107`; a later call on the same path replaces the earlier fingerprint, `checkpoint-log.ts:520`); a task summary from the session's task board; and the context use against the auto-compact threshold.
 
 ## `/rewind`
 
-The listing takes the last ten file checkpoints, newest first, and numbers them for `/rewind <number>` (`interactive.ts:3384`). Entries that fail the shape check are counted and skipped rather than defaulted — the content is about to be written over a real file, and defaulting a missing field used to write the empty string over the file the entry named (`interactive.ts:2161-2170`). A restore writes the stored content back (`interactive.ts:3423`) and then records itself with `recordRewind` (`interactive.ts:3429`), after the write succeeded: a restore that failed must not be logged as one that happened.
+The listing takes the last ten file checkpoints, newest first, and numbers them for `/rewind <number>` (`interactive.ts:3477-3480`). Entries that fail the shape check are counted and skipped rather than defaulted — the content is about to be written over a real file, and defaulting a missing field used to write the empty string over the file the entry named (`interactive.ts:2163-2172`). A restore writes the stored content back (`interactive.ts:3433`) and then records itself with `recordRewind` (`interactive.ts:3439`), after the write succeeded: a restore that failed must not be logged as one that happened.
 
 ## The recovery line
 
 `formatResumeSummary` (`checkpoint-log.ts:459`) is the first move of the recovery protocol. The line is `Resumed: last <tool> <ok|failed> at <time>, <n> tool call(s) recorded[, <n> file(s) touched][, <n> failing test(s)]. Next: <step>. /checkpoint shows the ledger; /rewind restores a file.` — the file and test clauses appear only when the ledger holds them, and `Next:` only when the newest call recorded one. Undefined when nothing was recorded, which is what lets a fresh session print nothing without a branch of its own.
 
-Both hosts print it to stderr at startup, at the same moment and for the same reason — it is startup context for the transcript that is about to render, not part of the answer: `interactive.ts:539`, `headless.ts:350`. (In headless mode stderr is the only stream it could go to; `-p`'s stdout is the answer.)
+Both hosts print it to stderr at startup, at the same moment and for the same reason — it is startup context for the transcript that is about to render, not part of the answer: `interactive.ts:547-548`, `headless.ts:350`. (In headless mode stderr is the only stream it could go to; `-p`'s stdout is the answer.)
 
 ## Resuming a session
 
 - `findSession` (`session-resume.ts:69`) matches an exact id first, then a substring. An empty token finds nothing: `includes("")` is true for every session, so without the guard a bare `--resume` would match whichever session came first.
 - `-c` lands on the most recently touched session with something in it (`resolveContinueTarget`, `session-resume.ts:86`). Skipping empty shells is the point: every process start writes a header-only file, so the newest file is usually a session nobody said anything in.
 - `loadSessionForResume` (`session-resume.ts:122`) rebuilds the model-facing transcript through `contextMessages()` — a compacted session resumes from its boundary — and repairs tool pairing with `repairToolPairing`, reporting how many messages the repair removed. Dropping both halves of a torn tool call costs one call and keeps a recoverable session from becoming one the provider rejects.
-- `damagedSessionNotice` (`session-resume.ts:148`) names the two losses separately, because one damaged line can produce both and a user should not read one lost line as two lost things: `Session file damaged: <n> damaged line(s) and <m> message(s) removed with its tool call (<path>). The rest of the conversation is intact.` The REPL prints it as `Warning: …` before the transcript (`interactive.ts:501`); headless prints it to stderr (`headless.ts:310`).
+- `damagedSessionNotice` (`session-resume.ts:148`) names the two losses separately, because one damaged line can produce both and a user should not read one lost line as two lost things: `Session file damaged: <n> damaged line(s) and <m> message(s) removed with its tool call (<path>). The rest of the conversation is intact.` The REPL prints it as `Warning: …` before the transcript (`interactive.ts:509`); headless prints it to stderr (`headless.ts:310`).
 
-A resume target that matches but cannot be rebuilt — its header is gone — starts a new session and says so (`Could not read session <id> — starting a new one.`, `interactive.ts:478`, `headless.ts:314`). A missing id stops the run with `Session not found: <id>` (`interactive.ts:464`; headless returns exit 1, `headless.ts:304-305`). An empty `-c` target says `No previous session to continue — starting a new one.` (`interactive.ts:493`, `headless.ts:329`).
+A resume target that matches but cannot be rebuilt — its header is gone — starts a new session and says so (`Could not read session <id> — starting a new one.`, `interactive.ts:485`, `headless.ts:314`). A missing id stops the run with `Session not found: <id>` (`interactive.ts:471`; headless returns exit 1, `headless.ts:304-305`). An empty `-c` target says `No previous session to continue — starting a new one.` (`interactive.ts:500`, `headless.ts:329`).
 
-The exit line tells the user how to come back: `To resume: labunbun --resume <last 8>` (`exitSummaryLine`, `session-resume.ts:170-175`; written after the REPL unmounts so the frame cannot erase it, `interactive.ts:1995-2000`). The tail of the id is used because an id opens with an ISO timestamp: the first eight characters are the same for every session started in the same month.
+The exit line tells the user how to come back: `To resume: labunbun --resume <last 8>` (`exitSummaryLine`, `session-resume.ts:170-175`; written after the REPL unmounts so the frame cannot erase it, `interactive.ts:2056-2061`). The tail of the id is used because an id opens with an ISO timestamp: the first eight characters are the same for every session started in the same month.
 
 ## Deliberate limits
 

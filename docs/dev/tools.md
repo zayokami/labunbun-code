@@ -298,9 +298,9 @@ This call is the only production writer of that record, and until it existed the
 
 The rule exists in the reference build as code. In `edit.ts` it exists as prose only, and the prompt tells the model to read the file before an edit (`packages/tools/src/edit.ts:62`). Nothing checked it. A prompt line is a request, and a model, or an injected instruction inside a file it never opened, can decline a request. The mechanism is a recorded read, and this is the record.
 
-More than one session is alive in a single process, which is why this is an instance and not a module-level singleton. `/resume` builds a second `AgentSession` around the same tool array (`packages/coding-agent/src/interactive.ts:915`), and every test case that wants a tool set builds its own. A module-level `let` hands the gate content that a different conversation saw, which is exactly the hole that the gate closes. So this is an ordinary object.
+More than one session is alive in a single process, which is why this is an instance and not a module-level singleton. `/resume` builds a second `AgentSession` around the same tool array (`packages/coding-agent/src/interactive.ts:1432`), and every test case that wants a tool set builds its own. A module-level `let` hands the gate content that a different conversation saw, which is exactly the hole that the gate closes. So this is an ordinary object.
 
-`createAllTools` makes one per tool set unless the caller passes its own. The app passes its own precisely so that the `/resume` swap can clear it (`packages/coding-agent/src/interactive.ts:957`). `createReadTool` receives the same instance that the Edit tool gets. Nothing here is reachable without a caller that passes it in.
+`createAllTools` makes one per tool set unless the caller passes its own. The app passes its own precisely so that the `/resume` swap can clear it (`packages/coding-agent/src/interactive.ts:567`). `createReadTool` receives the same instance that the Edit tool gets. Nothing here is reachable without a caller that passes it in.
 
 The code normalises the lookup key for separators and for case on the platforms whose filesystem is case-insensitive. On Windows and macOS `Repo/FOO.ts` and `repo/foo.ts` are one file. On Linux they are two files, so a fold there merges records for files that the model never read as one. The path that Edit resolves with `guardWritablePath` and the path that Read resolved with `guardPathContainment` land on the same entry. `caseInsensitivePaths` answers the case question in one place (`packages/tools/src/containment.ts:21`).
 
@@ -324,7 +324,7 @@ An edit tool that re-records after a successful edit knows the new content. It d
 
 `forget` drops one path, and the gate then reads `undefined`, which is the same answer that a file never read gets. `paths` lists every tracked path as recorded, in insertion order. `clear` forgets everything, for a session swap.
 
-`/resume` reuses the tool array that it already built. The conversation that arrives later can then "recall" reads from the earlier one. Its Edit gate then accepts a file that conversation was never shown. `hotSwapSession` calls `clear` next to `restoreTasks` (`packages/coding-agent/src/interactive.ts:950`), which is the other piece of session state that must follow the conversation and not the process.
+`/resume` reuses the tool array that it already built. The conversation that arrives later can then "recall" reads from the earlier one. Its Edit gate then accepts a file that conversation was never shown. `hotSwapSession` calls `clear` next to `restoreTasks` (`packages/coding-agent/src/interactive.ts:1474`), which is the other piece of session state that must follow the conversation and not the process.
 
 ### Search tools: Grep, Glob, LS, and ignore files
 
@@ -552,7 +552,7 @@ TaskCreate and TaskUpdate are not concurrency safe. TaskList and TaskGet are rea
 
 The same executor goes to the background manager. A backgrounded command then joins the proxy of the foreground one, and no second listener opens that nothing closes.
 
-`readState` is one per tool set. `createAllTools` runs once at startup in both entry points (`packages/coding-agent/src/interactive.ts:369`, `packages/coding-agent/src/headless.ts:192`). A second tool set in the same process is then a second call and a second store. A module-level singleton is readable from any conversation. A tool set that outlives its conversation is why the app passes its own and clears it. The `/resume` case inherits the array, so the store must follow the conversation and not the process.
+`readState` is one per tool set. `createAllTools` runs once at startup in both entry points (`packages/coding-agent/src/interactive.ts:565`, `packages/coding-agent/src/headless.ts:278`). A second tool set in the same process is then a second call and a second store. A module-level singleton is readable from any conversation. A tool set that outlives its conversation is why the app passes its own and clears it. The `/resume` case inherits the array, so the store must follow the conversation and not the process.
 
 Edit's first gate reads the same store that Read writes. The gate refuses an edit on a file that this session never read. The two tools must look at one store, or the gate refuses everything. Write takes the same read-only root list, and not because it may write there. A root that the policy calls readable only is exactly the root that `decideWrite` must refuse. A policy that only Read knows about is a policy that the shell and the write tools disagree with.
 

@@ -539,7 +539,7 @@ Press Ctrl+T to show the watch panel. The panel shows the tail of one background
 
 Use `--output-format text` for plain text. Use `--output-format json` for one JSON object. Use `--output-format stream-json` for one JSON object per event.
 
-A headless run that opens a stored session (`--resume <id>` or `-c`) prints the recovery line to stderr when the ledger holds one. The answer stays the only thing on stdout.
+A headless run that opens a stored session (`--resume <id>` or `-c`) prints the recovery line to stderr when the ledger holds one. It also warns about the subagent runs that a previous process left unfinished. The answer stays the only thing on stdout.
 
 ### Editor sessions
 
