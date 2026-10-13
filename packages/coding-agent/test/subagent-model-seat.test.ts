@@ -238,3 +238,130 @@ describe("subagent usage booking", () => {
 		expect(bookings.every((booking) => booking.seat.role === "light")).toBe(true);
 	});
 });
+
+/**
+ * The light seat's budget, at the three doors into a run.
+ *
+ * The tool does no arithmetic: the host books the spend (`onUsage`) and the
+ * host answers "over, or not" (`budgetGate`) — so these tests drive the gate
+ * with a fake and assert where it is asked and what each door does with a
+ * refusal. The spawn and the continuation hand the sentence back as the tool
+ * result, because the model that ordered the work is the reader who has to
+ * act; a crossing mid-run aborts that subagent, and the sentence is said out
+ * loud because the ending alone reads only "aborted". A gate that must not be
+ * asked — a definition's own model, which is not a role seat — leaves the run
+ * alone however far over the seat itself is.
+ */
+describe("the light seat's budget gate", () => {
+	const sentence =
+		"Budget reached: $2.5000 spent of the $2.0000 budget for roles.light. Raise roles.light.budgetUSD or switch models.";
+
+	test("a spawn is refused before it starts, with the sentence as the result", async () => {
+		const subFaux = fauxProvider([{ text: "should not run" }]);
+		const { models, streamFn } = recordedModels(subFaux);
+		const [taskTool] = createSubagentTools({
+			streamFn,
+			model: () => PARENT,
+			lightModel: () => LIGHT,
+			allTools: [echoTool()],
+			definitions: () => [],
+			budgetGate: (role) => (role === "light" ? sentence : null),
+		});
+
+		const result = await callTool(taskTool, { description: "x", prompt: "do it" });
+
+		expect(result.isError).toBe(true);
+		expect((result.content[0] as { text: string }).text).toContain(sentence);
+		expect((result.content[0] as { text: string }).text).toContain("No subagent was started.");
+		// Nothing was sent for the refused run: the refusal precedes the request.
+		expect(models).toEqual([]);
+	});
+
+	test("a definition's own model is not a seat, so the gate is never asked", async () => {
+		// Only the light seat's spend is attributable — the label carries the role
+		// only when the seat answered — so only its budget can apply. A run on an
+		// agent's own model answers even with the light seat deep in the red.
+		const subFaux = fauxProvider([{ text: "done" }]);
+		const { models, streamFn } = recordedModels(subFaux);
+		const asked: string[] = [];
+		const [taskTool] = createSubagentTools({
+			streamFn,
+			model: () => PARENT,
+			lightModel: () => LIGHT,
+			resolveModel: (ref) => (ref === "other-model" ? OTHER : undefined),
+			allTools: [echoTool()],
+			definitions: () => [{ agentType: "quick", whenToUse: "Small jobs", source: "user", model: "other-model" }],
+			budgetGate: (role) => {
+				asked.push(role);
+				return sentence;
+			},
+		});
+
+		const result = await callTool(taskTool, { description: "x", prompt: "do it", subagent_type: "quick" });
+
+		expect(result.isError).toBeFalsy();
+		expect(asked).toEqual([]);
+		expect(models).toEqual(["other-model"]);
+	});
+
+	test("the turn that crosses the ceiling ends that run, after the booking landed", async () => {
+		// The running gate: the spend is booked first (`onUsage`), then the gate
+		// is asked — a fake that goes over exactly when the booking lands. The
+		// abort ends the subagent's own session, so the next request never goes
+		// out while the parent's run is untouched.
+		const subFaux = fauxProvider([
+			{ text: "step 1", toolCalls: [{ name: "echo", arguments: { text: "hi" } }], usage: { input: 1_000 } },
+			{ text: "should not run" },
+		]);
+		const { models, streamFn } = recordedModels(subFaux);
+		const reports: string[] = [];
+		let booked = 0;
+		const [taskTool] = createSubagentTools({
+			streamFn,
+			model: () => PARENT,
+			lightModel: () => LIGHT,
+			allTools: [echoTool()],
+			definitions: () => [],
+			report: (text) => reports.push(text),
+			onUsage: (_provider, _model, usage) => {
+				booked += usage.input;
+			},
+			budgetGate: () => (booked > 0 ? sentence : null),
+		});
+
+		const result = await callTool(taskTool, { description: "x", prompt: "do it" });
+
+		// The crossing turn was paid for and its tool ran; the one after it was
+		// never sent.
+		expect(models).toEqual(["light-model"]);
+		expect(reports.join("\n")).toContain(sentence);
+		expect((result.content[0] as { text: string }).text).toContain("[subagent ended: aborted]");
+	});
+
+	test("a continuation is refused when the seat went over after the spawn", async () => {
+		const subFaux = fauxProvider([{ text: "first" }, { text: "should not run" }]);
+		const { models, streamFn } = recordedModels(subFaux);
+		let refuse = false;
+		const [taskTool, sendMessageTool] = createSubagentTools({
+			streamFn,
+			model: () => PARENT,
+			lightModel: () => LIGHT,
+			allTools: [echoTool()],
+			definitions: () => [],
+			budgetGate: () => (refuse ? sentence : null),
+		});
+
+		const first = await callTool(taskTool, { description: "x", prompt: "do it" });
+		const id = /\[subagent id: (sidechain-[^\]]+)\]/.exec((first.content[0] as { text: string }).text)?.[1];
+		expect(id).toBeTruthy();
+		refuse = true;
+
+		const second = await callTool(sendMessageTool, { sidechain_id: id, message: "again" });
+
+		expect(second.isError).toBe(true);
+		expect((second.content[0] as { text: string }).text).toContain(sentence);
+		expect((second.content[0] as { text: string }).text).toContain("was not continued");
+		// Only the spawn's request was made.
+		expect(models).toEqual(["light-model"]);
+	});
+});
