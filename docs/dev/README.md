@@ -10,6 +10,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 - [Crash consistency](crash-consistency.md): what survives a killed process — the files replaced by a rename, the files appended to, and the writes still made in place.
 - [Migration framework](migration-framework.md): how the framework reads another agent's files and writes them into labunbun.
 - [Migration sources](migration-sources.md): what the module for each source knows about the product it reads.
+- [Model roles](model-roles.md): the five seats of `settings.roles` — how each resolves fail-soft, the fallback chains, and the budget rule that refuses a request past its ceiling.
 - [Output limits](output-limits.md): the bounds on tool output per result and per round, and the capture of a stream that has not finished.
 - [Sandbox](sandbox.md): the sandbox policy as a value, its three platform back ends, and the network proxy.
 - [Session store](session-store.md): the JSONL session tree, its append-only form, branches, and compaction.
