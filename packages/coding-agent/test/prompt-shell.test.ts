@@ -53,6 +53,15 @@ describe("createFileCompleter", () => {
 
 	test("mtime order puts newer files first", async () => {
 		const completer = createFileCompleter(root, { ttlMs: 0 });
+		// Both timestamps are set explicitly, a minute apart. Asking only for
+		// "newer than it was created" quietly depends on the two creation ticks
+		// being distinguishable: on a filesystem with quantized timestamps both
+		// can land in the same tick, the walker's stable sort then leaves them in
+		// walk order, and the test fails for a reason that is the runner's
+		// filesystem rather than this walker — measured on the Windows CI runner,
+		// where the two creation writes and this test share one coarse tick.
+		const old = new Date(Date.now() - 60_000);
+		utimesSync(join(root, "src", "alpha.ts"), old, old);
 		const now = new Date();
 		utimesSync(join(root, "src", "nested", "beta.ts"), now, now);
 		const files = await completer("");
