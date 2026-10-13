@@ -125,6 +125,7 @@ class AcpClient {
 	readonly stderrDrained: Promise<void>;
 	#stderrText = "";
 	#nextId = 0;
+	#exitCode: number | undefined;
 	readonly #proc: ChildPipes;
 
 	constructor(proc: ChildPipes) {
@@ -237,7 +238,13 @@ class AcpClient {
 
 	async close(): Promise<number> {
 		await this.#proc.stdin.end();
-		return await this.#proc.exited;
+		this.#exitCode = await this.#proc.exited;
+		return this.#exitCode;
+	}
+
+	/** The exit code, once `close` (or a failed body's `kill`) has resolved. */
+	get exitCode(): number | undefined {
+		return this.#exitCode;
 	}
 }
 
@@ -346,12 +353,17 @@ describe("the ACP server, end to end", () => {
 		}
 	}, 60_000);
 
-	test("--acp is the same server", async () => {
+	test("--acp is the same server, and closing stdin ends it with exit 0", async () => {
 		const f = fixture([{ text: "unused" }]);
-		await withAcp(f, ["--acp"], async (client) => {
+		const client = await withAcp(f, ["--acp"], async (client) => {
 			const init = await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
 			expect(init.result?.protocolVersion).toBe(1);
 		});
+		// The end of stdin is the client's way of ending the session, and the
+		// measured behaviour on Windows is that the child then leaves by itself:
+		// exit 0, not a signal and not a hang. (stdin carries no byte that could be
+		// mistaken for a shutdown request, so this is the only supported ending.)
+		expect(client.exitCode).toBe(0);
 	}, 60_000);
 
 	test("a flag this mode cannot honor is refused, not parsed and dropped", async () => {
