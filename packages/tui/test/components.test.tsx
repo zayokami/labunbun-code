@@ -276,6 +276,7 @@ describe("background shell row", () => {
 		id,
 		command: `run ${id}`,
 		status,
+		tail: [],
 	});
 
 	test("says nothing at all until something is actually running", () => {

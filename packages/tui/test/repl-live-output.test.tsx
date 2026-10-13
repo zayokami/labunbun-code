@@ -77,7 +77,7 @@ describe("the background shell row in the REPL", () => {
 
 		store.set((s) => ({
 			...s,
-			backgroundShells: [{ id: "shell_1", command: "npm run dev", status: "running" }],
+			backgroundShells: [{ id: "shell_1", command: "npm run dev", status: "running", tail: [] }],
 		}));
 		await delay(30);
 		const running = view.lastFrame() ?? "";
@@ -87,7 +87,7 @@ describe("the background shell row in the REPL", () => {
 		// what the user reads to know the port is free again.
 		store.set((s) => ({
 			...s,
-			backgroundShells: [{ id: "shell_1", command: "npm run dev", status: "completed" }],
+			backgroundShells: [{ id: "shell_1", command: "npm run dev", status: "completed", tail: [] }],
 		}));
 		await delay(30);
 		expect(view.lastFrame() ?? "").not.toContain("background shell");

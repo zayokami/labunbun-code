@@ -65,6 +65,18 @@ export interface UiBackgroundShell {
 	id: string;
 	command: string;
 	status: "running" | "completed" | "killed";
+	/**
+	 * The end of the shell's output so far, newest last, already trimmed to the
+	 * window a reader wants (`liveOutputLines`). Pushed with the same poll that
+	 * carries the row, because the manager keeps its output on disk and reading
+	 * it is the app layer's job — the panel that draws this takes no file of its
+	 * own and no clock.
+	 *
+	 * Part of the value, not beside it: the store only changes when the publisher
+	 * says this list is *different*, and a tail that is not compared would be a
+	 * dev server that visibly never prints again. See `sameShells`.
+	 */
+	tail: string[];
 }
 
 /**

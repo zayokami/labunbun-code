@@ -86,6 +86,7 @@ import {
 	AUTO_THEME_NAME,
 	describeEditor,
 	editorShadowNotice,
+	liveOutputLines,
 	mountRepl,
 	opposingEditorKey,
 	type ReplAppHandle,
@@ -1833,6 +1834,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	handle?.setTasks(taskStore.summary());
 
 	/**
+	 * Tail lines republished per shell on every tick.
+	 *
+	 * A budget, not a taste: the watch panel may draw twelve rows, of which two
+	 * are its border, one is the honest "as of last poll" line and one is the
+	 * shell's own header — eight lines of output for the shell on screen. This
+	 * is deliberately per shell and not per selected shell: which one is being
+	 * watched is the panel's decision, and handing it a fresh tail for the one
+	 * it wants would mean a second publisher and a second cadence.
+	 */
+	const SHELL_TAIL_LINES = 8;
+
+	/**
 	 * Background shells → the status row.
 	 *
 	 * The manager has no change events, so this polls — the same shape as the task
@@ -1841,10 +1854,19 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * walk and no render. Killing a shell publishes immediately rather than
 	 * waiting out the interval: the row disappearing is the confirmation the
 	 * command worked.
+	 *
+	 * Each row carries the end of the shell's own output as well, because the
+	 * tail lives on disk in the manager and only this layer may read it — the
+	 * panel that draws it is a render of what it was handed and nothing else.
 	 */
 	const publishShells = () => {
 		handle?.setBackgroundShells(
-			backgroundShells.list().map((shell) => ({ id: shell.id, command: shell.command, status: shell.status })),
+			backgroundShells.list().map((shell) => ({
+				id: shell.id,
+				command: shell.command,
+				status: shell.status,
+				tail: liveOutputLines(backgroundShells.output(shell.id), SHELL_TAIL_LINES),
+			})),
 		);
 	};
 	const shellPoll = setInterval(publishShells, BACKGROUND_SHELL_POLL_MS);

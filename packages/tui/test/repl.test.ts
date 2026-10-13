@@ -36,7 +36,7 @@ function loadedState(): UiState {
 		question: { questions: [{ question: "?", header: "h", options: [] }], resolve: () => {} },
 		picker: { title: "t", items: [], resolve: () => {} },
 		statusCard: { model: "m", details: [["Cost", "$0"]] },
-		backgroundShells: [{ id: "s1", command: "npm run dev", status: "running" }],
+		backgroundShells: [{ id: "s1", command: "npm run dev", status: "running", tail: [] }],
 		queued: [{ id: "q1", text: "next", mode: "queue" }],
 		theme: LIGHT_THEME,
 		modelName: "anthropic/claude-sonnet-5",
@@ -237,11 +237,56 @@ describe("idle Ctrl+C double-press", () => {
  * Getting it wrong is invisible in tests that only ever look at one frame.
  */
 describe("sameShells", () => {
-	const shell = (id: string, status: "running" | "completed", command = "npm run dev") => ({ id, command, status });
+	const shell = (id: string, status: "running" | "completed", command = "npm run dev", tail: string[] = []) => ({
+		id,
+		command,
+		status,
+		tail,
+	});
 
 	test("the same list, freshly built, counts as unchanged", () => {
 		expect(sameShells([shell("shell_1", "running")], [shell("shell_1", "running")])).toBe(true);
 		expect(sameShells([], [])).toBe(true);
+	});
+
+	/**
+	 * The tail is the one field that changes on almost every tick of a shell that
+	 * is saying anything, so it is the one field whose omission from the compare
+	 * would be invisible in the way that matters most: the publisher keeps the
+	 * old array, the store never hears the new value, and the watch panel shows
+	 * the output the shell had when it was first polled — forever, with nothing
+	 * failing anywhere. Both directions of the equality are pinned here, and the
+	 * pair is the difference between "a dev server that prints" and "a dev server
+	 * that printed once".
+	 */
+	test("a tail that grew by one line is a change, and a rebuilt equal tail is not", () => {
+		expect(sameShells([shell("shell_1", "running", "npm run dev", ["listening"])], [shell("shell_1", "running")])).toBe(
+			false,
+		);
+		expect(
+			sameShells(
+				[shell("shell_1", "running", "npm run dev", ["listening"])],
+				[shell("shell_1", "running", "npm run dev", ["listening"])],
+			),
+		).toBe(true);
+	});
+
+	// Same length, different content: the window slides rather than grows, which is
+	// exactly how a live tail behaves once it is longer than the window. A compare
+	// that only looked at the count would call this "unchanged".
+	test("a tail of the same length with different lines is a change", () => {
+		expect(
+			sameShells(
+				[shell("shell_1", "running", "npm run dev", ["compiling", "bundling"])],
+				[shell("shell_1", "running", "npm run dev", ["bundling", "ready in 300 ms"])],
+			),
+		).toBe(false);
+		expect(
+			sameShells(
+				[shell("shell_1", "running", "npm run dev", ["bundling", "ready in 300 ms"])],
+				[shell("shell_1", "running", "npm run dev", ["compiling", "bundling"])],
+			),
+		).toBe(false);
 	});
 
 	test("nothing to say is not the same as something to say", () => {

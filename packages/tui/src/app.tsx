@@ -221,11 +221,33 @@ export interface ReplAppHandle {
  *
  * The app layer polls the shell manager, so this runs every couple of seconds
  * forever: it decides between "nothing to say" and a full tree render.
+ *
+ * The tail is compared line by line, which is the difference between a watch
+ * panel that updates and one that only ever shows what the shell printed before
+ * it was first polled. A field that reaches the store without reaching this
+ * function is a field the store silently refuses to hear about — the publisher
+ * keeps the old array, so nothing downstream can tell the new value existed.
+ * The comparison is cheap in the case that matters: the first line that differs
+ * answers `false`, and an unchanged tail is one pass over lines that were just
+ * built by slicing a string.
  */
 export function sameShells(a: UiBackgroundShell[], b: UiBackgroundShell[]): boolean {
 	if (a === b) return true;
 	if (a.length !== b.length) return false;
-	return a.every((shell, i) => shell.id === b[i].id && shell.status === b[i].status && shell.command === b[i].command);
+	return a.every(
+		(shell, i) =>
+			shell.id === b[i].id &&
+			shell.status === b[i].status &&
+			shell.command === b[i].command &&
+			sameTail(shell.tail, b[i].tail),
+	);
+}
+
+/** Element-wise, and length first: two tails are the same window or they are not. */
+function sameTail(a: string[], b: string[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	return a.every((line, i) => line === b[i]);
 }
 
 /**
