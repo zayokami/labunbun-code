@@ -2881,7 +2881,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				return true;
 			}
 			const lines = ctx.mcpConnections.map((c) => {
-				const status = c.error ? `✗ ${c.error}` : `✓ ${c.tools.length} tools`;
+				// Prompts are discovered next to the tools and were reported by
+				// nothing: a count the user cannot read is a capability the server
+				// may as well not have.
+				const status = c.error ? `✗ ${c.error}` : `✓ ${c.tools.length} tools, ${c.prompts.length} prompts`;
 				return `  ${c.serverName}: ${status}`;
 			});
 			for (const name of ctx.pendingMcpApprovals) {

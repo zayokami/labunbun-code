@@ -69,6 +69,24 @@ describe("/mcp command", () => {
 		expect(text).toContain("/mcp approve alpha");
 	});
 
+	// A server's prompts were discovered, stored on the connection, and read by
+	// nothing: the list reported the tools and dropped the half of the answer
+	// that says what else the server offers.
+	test("a connected server's row counts its prompts as well as its tools", () => {
+		const ctx = makeCtx({
+			mcpConnections: [
+				{
+					serverName: "alpha",
+					client: null,
+					tools: [{ name: "mcp__alpha__a" }],
+					prompts: [{ name: "p1" }, { name: "p2" }],
+				},
+			] as never,
+		});
+		handleAppCommand("/mcp", ctx);
+		expect(infoTexts(ctx).join("\n")).toContain("alpha: ✓ 1 tools, 2 prompts");
+	});
+
 	test("approve on an unknown/non-pending server reports no pending approval", () => {
 		const ctx = makeCtx({ pendingMcpApprovals: [] });
 		handleAppCommand("/mcp approve alpha", ctx);
