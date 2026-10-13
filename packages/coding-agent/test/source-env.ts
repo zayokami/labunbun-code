@@ -17,7 +17,8 @@
  *
  * So the list lives here rather than in each file, and `MIGRATION_ENV_VARS`
  * covers every variable a source reads by name: a variable read by any
- * `*-home.ts` or `*-read.ts` module, plus the three `XDG_*_HOME` bases. Adding a
+ * `*-home.ts` or `*-read.ts` module, plus the three `XDG_*_HOME` bases and the
+ * odd knob like the startup trace's. Adding a
  * source that reads a new variable means adding one line here — and
  * `source-env-coverage.test.ts` is what tells you that you forgot, because the
  * list used to be maintained by hand with nothing checking it, and the variable
@@ -41,8 +42,11 @@ export const MIGRATION_ENV_VARS_EXEMPT: Readonly<Record<string, string>> = {
 };
 
 /**
- * Every variable a source root can be relocated by. `USERPROFILE` and `HOME`
- * are absent on purpose — see {@link MIGRATION_ENV_VARS_EXEMPT} for why, which is
+ * Every variable a source reads by name. Nearly all of them relocate a source
+ * root; `LBB_STARTUP_TRACE` is a switch rather than a location and is listed
+ * for the same hermeticity reason — the fixture that neutralizes the
+ * relocations must neutralize the knobs too. `USERPROFILE` and `HOME` are
+ * absent on purpose — see {@link MIGRATION_ENV_VARS_EXEMPT} for why, which is
  * the same reason but in a place a test can read.
  *
  * **The list is hand-maintained, not derived.** `source-env-coverage.test.ts`
@@ -57,6 +61,7 @@ export const MIGRATION_ENV_VARS: readonly string[] = [
 	"GROK_HOME",
 	"KIMI_CODE_HOME",
 	"KIMI_SHARE_DIR",
+	"LBB_STARTUP_TRACE",
 	"MAVIS_DATA_DIR",
 	"MIMOCODE_AUTH_CONTENT",
 	"MIMOCODE_CONFIG",
@@ -111,7 +116,7 @@ export function rememberEnv(name: string): void {
 }
 
 /**
- * Clear the source-relocating variables for the duration of a test, and hand
+ * Clear the variables a source reads by name for the duration of a test, and hand
  * back the function that puts them back.
  *
  * A test that wants one of these variables says so itself, after this call, and
