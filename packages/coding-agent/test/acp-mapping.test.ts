@@ -13,12 +13,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentEvent } from "@labunbun/agent";
-import { assistantMessage } from "@labunbun/ai";
+import { assistantMessage, toolResultMessage, userMessage } from "@labunbun/ai";
 import {
 	acpPermissionOptions,
 	permissionFromOptionId,
 	permissionModeFromModeId,
 	promptTextFrom,
+	replayUpdatesForMessages,
 	sessionModesFor,
 	stopReasonFor,
 	toolKindFor,
@@ -163,6 +164,145 @@ describe("tool updates", () => {
 
 	test("a subagent prompt is a title, not a wall of text", () => {
 		expect(toolTitleFor("Task", { description: "audit the parser" })).toBe("Task: audit the parser");
+	});
+});
+
+describe("history replay", () => {
+	test("the stored conversation becomes frames in file order, one per piece", () => {
+		// A turn as a session file holds it: the question, thinking, a tool call
+		// and its result, then the answer that used the result.
+		const messages = [
+			userMessage("what does the config say"),
+			assistantMessage({
+				content: [
+					{ type: "thinking", thinking: "checking the config" },
+					{ type: "text", text: "let me look" },
+					{ type: "toolCall", id: "call_1", name: "Read", arguments: JSON.stringify({ file_path: "config.json" }) },
+				],
+			}),
+			toolResultMessage("call_1", "Read", [{ type: "text", text: "port = 8080" }]),
+			assistantMessage({ content: [{ type: "text", text: "the port is 8080" }] }),
+		];
+		expect(replayUpdatesForMessages(messages)).toEqual([
+			{ sessionUpdate: "user_message_chunk", content: { type: "text", text: "what does the config say" } },
+			{ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "checking the config" } },
+			{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "let me look" } },
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "call_1",
+				title: "Read: config.json",
+				kind: "read",
+				status: "pending",
+				rawInput: { file_path: "config.json" },
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "call_1",
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: "port = 8080" } }],
+				rawOutput: { content: "port = 8080", isError: false },
+			},
+			{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "the port is 8080" } },
+		]);
+	});
+
+	test("parallel calls finish in the order their results sit in the file", () => {
+		const updates = replayUpdatesForMessages([
+			assistantMessage({
+				content: [
+					{ type: "toolCall", id: "call_a", name: "Read", arguments: '{"file_path":"a.ts"}' },
+					{ type: "toolCall", id: "call_b", name: "Read", arguments: '{"file_path":"b.ts"}' },
+				],
+			}),
+			toolResultMessage("call_b", "Read", [{ type: "text", text: "b" }]),
+			toolResultMessage("call_a", "Read", [{ type: "text", text: "a" }]),
+		]);
+		expect(
+			updates.map((update) =>
+				update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update"
+					? `${update.sessionUpdate}:${update.toolCallId}`
+					: update.sessionUpdate,
+			),
+		).toEqual(["tool_call:call_a", "tool_call:call_b", "tool_call_update:call_b", "tool_call_update:call_a"]);
+	});
+
+	test("a call whose result never came is announced and left pending", () => {
+		// `pending` is the live announcement's own status and the only value that
+		// claims nothing: the file does not say the call failed, finished, or is
+		// running now.
+		const updates = replayUpdatesForMessages([
+			assistantMessage({
+				content: [{ type: "toolCall", id: "call_9", name: "Bash", arguments: '{"command":"bun test"}' }],
+			}),
+		]);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "call_9",
+				title: "Bash: bun test",
+				kind: "execute",
+				status: "pending",
+				rawInput: { command: "bun test" },
+			},
+		]);
+	});
+
+	test("a result whose call is gone is still shown, over a row built from the result", () => {
+		// The damaged-file case: the announcement is reconstructed from what the
+		// result itself knows. Dropping the result instead would quietly shorten
+		// the conversation the editor shows.
+		const updates = replayUpdatesForMessages([
+			toolResultMessage("call_3", "Bash", [{ type: "text", text: "boom" }], true),
+		]);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "tool_call",
+				toolCallId: "call_3",
+				title: "Bash",
+				kind: "execute",
+				status: "pending",
+				rawInput: {},
+			},
+			{
+				sessionUpdate: "tool_call_update",
+				toolCallId: "call_3",
+				status: "failed",
+				content: [{ type: "content", content: { type: "text", text: "boom" } }],
+				rawOutput: { content: "boom", isError: true },
+			},
+		]);
+	});
+
+	test("an image the user attached is replayed as an image chunk, not dropped", () => {
+		expect(
+			replayUpdatesForMessages([
+				userMessage([
+					{ type: "text", text: "look at this" },
+					{ type: "image", mimeType: "image/png", data: "AAAA" },
+				]),
+			]),
+		).toEqual([
+			{ sessionUpdate: "user_message_chunk", content: { type: "text", text: "look at this" } },
+			{ sessionUpdate: "user_message_chunk", content: { type: "image", data: "AAAA", mimeType: "image/png" } },
+		]);
+	});
+
+	test("a call whose arguments never parsed keeps its raw text as the input", () => {
+		const [update] = replayUpdatesForMessages([
+			assistantMessage({ content: [{ type: "toolCall", id: "call_4", name: "Bash", arguments: "{not json" }] }),
+		]);
+		expect(update).toEqual({
+			sessionUpdate: "tool_call",
+			toolCallId: "call_4",
+			title: "Bash",
+			kind: "execute",
+			status: "pending",
+			rawInput: { input: "{not json" },
+		});
+	});
+
+	test("a message with nothing to show contributes no frames", () => {
+		expect(replayUpdatesForMessages([assistantMessage()])).toEqual([]);
 	});
 });
 

@@ -60,12 +60,14 @@ import {
 	SessionStore,
 } from "@labunbun/agent";
 import {
+	type AgentMessage,
 	type CacheTracker,
 	createTrackedStreamFn,
 	dynamicProviderTemplates,
 	refreshModelCatalog,
 	resolveModel,
 	type StreamFn,
+	type ToolResultContent,
 	withModelFallback,
 } from "@labunbun/ai";
 import { createAllTools } from "@labunbun/tools";
@@ -285,16 +287,7 @@ export function updatesForEvent(event: AgentEvent): SessionUpdate[] {
 		case "message_update":
 			return messageUpdates(event);
 		case "tool_execution_start":
-			return [
-				{
-					sessionUpdate: "tool_call",
-					toolCallId: event.callId,
-					title: toolTitleFor(event.toolName, event.input),
-					kind: toolKindFor(event.toolName),
-					status: "pending",
-					rawInput: asRecord(event.input) ?? { input: event.input },
-				},
-			];
+			return [toolCallAnnouncement(event.callId, event.toolName, event.input)];
 		case "tool_execution_update":
 			return [{ sessionUpdate: "tool_call_update", toolCallId: event.callId, status: "in_progress" }];
 		case "tool_execution_end":
@@ -302,6 +295,25 @@ export function updatesForEvent(event: AgentEvent): SessionUpdate[] {
 		default:
 			return [];
 	}
+}
+
+/**
+ * One `tool_call` frame — the announcement the live stream makes when a call
+ * starts, and that a replay makes for a call the history holds.
+ *
+ * One function rather than two spellings of the same object, so a replayed call
+ * and a live one are the same frame down to `rawInput`, which is what lets an
+ * editor treat them alike.
+ */
+function toolCallAnnouncement(callId: string, toolName: string, input: unknown): SessionUpdate {
+	return {
+		sessionUpdate: "tool_call",
+		toolCallId: callId,
+		title: toolTitleFor(toolName, input),
+		kind: toolKindFor(toolName),
+		status: "pending",
+		rawInput: asRecord(input) ?? { input },
+	};
 }
 
 function messageUpdates(event: Extract<AgentEvent, { type: "message_update" }>): SessionUpdate[] {
@@ -320,23 +332,144 @@ function messageUpdates(event: Extract<AgentEvent, { type: "message_update" }>):
 }
 
 function toolResultUpdate(event: Extract<AgentEvent, { type: "tool_execution_end" }>): SessionUpdate {
-	const text = event.result.content
+	return toolResultUpdateFor(event.callId, event.result.content, event.result.isError);
+}
+
+/**
+ * The frame that finishes a tool call, from the result alone.
+ *
+ * Shared between the live stream and a replay, so the completion of a stored
+ * call reads exactly like the completion of one that just ran. `isError` is the
+ * app's word for what the protocol calls "failed", and it is what the editor
+ * colours by: a command that exited 1 is a failed call, not a completed one.
+ */
+function toolResultUpdateFor(callId: string, content: ToolResultContent[], isError: boolean): SessionUpdate {
+	const text = content
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
 		.join("");
 	const update: SessionUpdate = {
 		sessionUpdate: "tool_call_update",
-		toolCallId: event.callId,
-		// `isError` is the app's word for what the protocol calls "failed", and it
-		// is what the editor colours by: a command that exited 1 is a failed call,
-		// not a completed one.
-		status: event.result.isError ? "failed" : "completed",
+		toolCallId: callId,
+		status: isError ? "failed" : "completed",
 	};
 	if (text !== "") {
 		update.content = [{ type: "content", content: { type: "text", text } }];
-		update.rawOutput = { content: text, isError: event.result.isError };
+		update.rawOutput = { content: text, isError };
 	}
 	return update;
+}
+
+/**
+ * The input a stored tool call was made with.
+ *
+ * `ToolCall.arguments` is raw JSON text in the message model (parsed once, when
+ * the block completes), so a replay parses it here — the same object the live
+ * stream already had in hand at `tool_execution_start`.
+ */
+function toolInputFrom(argumentsText: string): unknown {
+	try {
+		return JSON.parse(argumentsText);
+	} catch {
+		// A call whose arguments did not parse as JSON still gets a row: the raw
+		// text is what the file holds, and dropping the call would hide that it
+		// happened at all. The title falls back to the tool's own name.
+		return argumentsText;
+	}
+}
+
+/**
+ * A user message as the protocol's chunk frames, one per content block.
+ *
+ * A plain string is the common case — this app's REPL and prompt path both
+ * store text — and arrives as one text chunk. Blocks arrive when the user
+ * attached an image: the protocol's image block has the same shape the app
+ * stores (`mimeType` plus base64 `data`), so an attached image is replayed
+ * rather than silently dropped from the conversation the editor shows.
+ */
+function userMessageChunks(message: Extract<AgentMessage, { role: "user" }>): SessionUpdate[] {
+	if (typeof message.content === "string") {
+		return [{ sessionUpdate: "user_message_chunk", content: { type: "text", text: message.content } }];
+	}
+	return message.content.map((block): SessionUpdate => {
+		if (block.type === "text") {
+			return { sessionUpdate: "user_message_chunk", content: { type: "text", text: block.text } };
+		}
+		return {
+			sessionUpdate: "user_message_chunk",
+			content: { type: "image", data: block.data, mimeType: block.mimeType },
+		};
+	});
+}
+
+/**
+ * The frames that show a stored conversation, in the order the file holds it.
+ *
+ * `session/load`'s contract is that the entire history reaches the client as
+ * `session/update` notifications before the load response does. Everything the
+ * editor draws for a resumed session is drawn from this list, so a message left
+ * out here is a message the user cannot see. The input is the store's full
+ * linear history (`messages()`), deliberately not the model-facing view
+ * (`contextMessages()`): a compaction boundary is a statement about what the
+ * *model* is sent next, and a client showing the session shows the conversation
+ * the person had, including the part the boundary dropped from future requests.
+ *
+ * The pairing rules, and why each one is what it is:
+ *
+ *   - An assistant tool call and the result message that answers it become the
+ *     same two frames the live stream sent: `tool_call`, then
+ *     `tool_call_update` (completed/failed). The update is emitted where the
+ *     result sits in the file, so parallel calls finish in the order they
+ *     actually finished rather than the order they were announced.
+ *   - A tool call with no result on the path — an interrupted turn, or a
+ *     damaged line that took the result — becomes `tool_call` alone, with
+ *     status `pending`: that is the value the live announcement carried, and
+ *     the others would each claim something the file does not say.
+ *     `in_progress` claims the call is running now; `completed`/`failed` claim
+ *     an outcome that was never recorded.
+ *   - A result whose call is missing (the damaged line took the call instead)
+ *     is announced first, from what the result itself knows — its tool name and
+ *     no input — and finished right after. The client needs a row to attach the
+ *     outcome to, and dropping the result instead would quietly shorten the
+ *     conversation.
+ */
+export function replayUpdatesForMessages(messages: AgentMessage[]): SessionUpdate[] {
+	const updates: SessionUpdate[] = [];
+	/** The calls announced so far, so a result is only announced once. */
+	const announced = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "user") {
+			updates.push(...userMessageChunks(message));
+			continue;
+		}
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type === "text") {
+					updates.push({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: block.text } });
+					continue;
+				}
+				if (block.type === "thinking") {
+					updates.push({
+						sessionUpdate: "agent_thought_chunk",
+						content: { type: "text", text: block.thinking },
+					});
+					continue;
+				}
+				updates.push(toolCallAnnouncement(block.id, block.name, toolInputFrom(block.arguments)));
+				announced.add(block.id);
+			}
+			continue;
+		}
+		if (!announced.has(message.toolCallId)) {
+			// The empty record is the honest input: the file no longer holds what
+			// the call was made with, and inventing one would show a person an
+			// argument list nobody ever typed.
+			updates.push(toolCallAnnouncement(message.toolCallId, message.toolName, {}));
+			announced.add(message.toolCallId);
+		}
+		updates.push(toolResultUpdateFor(message.toolCallId, message.content, message.isError));
+	}
+	return updates;
 }
 
 /**
