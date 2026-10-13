@@ -26,7 +26,10 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionStore } from "@labunbun/agent";
+import { assistantMessage, toolResultMessage, userMessage } from "@labunbun/ai";
 import { type StubStep, startCacheStub } from "../../ai/test/cache-stub-server.ts";
+import { shortSessionId } from "../src/session-resume.ts";
 
 const CLI = join(import.meta.dir, "..", "bin", "labunbun.ts");
 
@@ -296,6 +299,28 @@ async function openSession(client: AcpClient, cwd: string): Promise<string> {
 	return sessionId;
 }
 
+/**
+ * A conversation a previous run would have left behind, in the fixture's home
+ * under the project directory the child reads: a turn with thinking, a tool
+ * call and its result, and the answer that used the result.
+ */
+function seedConversation(f: Fixture): SessionStore {
+	const store = SessionStore.startNew(f.dir, f.home);
+	store.appendMessage(userMessage("what does the config say"));
+	store.appendMessage(
+		assistantMessage({
+			content: [
+				{ type: "thinking", thinking: "checking the config" },
+				{ type: "text", text: "let me look" },
+				{ type: "toolCall", id: "call_1", name: "Read", arguments: JSON.stringify({ file_path: "config.json" }) },
+			],
+		}),
+	);
+	store.appendMessage(toolResultMessage("call_1", "Read", [{ type: "text", text: "port = 8080" }]));
+	store.appendMessage(assistantMessage({ content: [{ type: "text", text: "the port is 8080" }] }));
+	return store;
+}
+
 describe("the ACP server, end to end", () => {
 	test("initialize, session/new and session/prompt answer in frames, and stdout carries nothing else", async () => {
 		const f = fixture([{ text: "hello from the stub" }]);
@@ -472,6 +497,95 @@ describe("the ACP server, end to end", () => {
 			expect(response.error).toBeUndefined();
 			expect(response.result?.stopReason).toBe("cancelled");
 			expect(existsSync(f.out)).toBe(false);
+		});
+	}, 60_000);
+
+	test("session/load replays the stored conversation before it answers, and the loaded session runs", async () => {
+		const f = fixture([{ text: "the config says 8080" }]);
+		const store = seedConversation(f);
+		const sessionId = store.sessionId ?? "";
+		expect(sessionId).not.toBe("");
+
+		await withAcp(f, ["acp"], async (client) => {
+			await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+			// The short tail — the spelling `--resume` prints and a person types —
+			// has to resolve to the session the full id names.
+			const response = await client.request("session/load", {
+				sessionId: shortSessionId(sessionId),
+				cwd: f.dir,
+				mcpServers: [],
+			});
+			expect(response.error).toBeUndefined();
+			const modes = response.result?.modes as { currentModeId?: string; availableModes?: unknown[] } | undefined;
+			expect(modes?.currentModeId).toBe("ask");
+			expect(modes?.availableModes).toHaveLength(3);
+			// `models` is UNSTABLE in the protocol, so it is not filled in.
+			expect(response.result?.models).toBeUndefined();
+
+			// Every replay frame is on the wire before the response. The ordering
+			// is the method's contract, and a real stream is the only place it is
+			// observable.
+			const responseIndex = client.frames.indexOf(response);
+			const replayed = client.updates();
+			expect(replayed.map((update) => update.sessionUpdate)).toEqual([
+				"user_message_chunk",
+				"agent_thought_chunk",
+				"agent_message_chunk",
+				"tool_call",
+				"tool_call_update",
+				"agent_message_chunk",
+			]);
+			for (const [index, frame] of client.frames.entries()) {
+				if (frame.method === "session/update") expect(index).toBeLessThan(responseIndex);
+			}
+			// The frames carry the file's own content, not just its shape.
+			expect((replayed[0]?.content as { text?: string } | undefined)?.text).toBe("what does the config say");
+			const call = replayed[3] as { toolCallId?: string; title?: string; kind?: string; status?: string };
+			expect(call.toolCallId).toBe("call_1");
+			expect(call.title).toBe("Read: config.json");
+			expect(call.kind).toBe("read");
+			expect(call.status).toBe("pending");
+			const finished = replayed[4] as { toolCallId?: string; status?: string };
+			expect(finished.toolCallId).toBe("call_1");
+			expect(finished.status).toBe("completed");
+			expect((replayed[5]?.content as { text?: string } | undefined)?.text).toBe("the port is 8080");
+
+			// The session is alive: a new turn runs, and the model request carries
+			// the conversation the replay showed.
+			const promptId = await client.startPrompt(sessionId, "and the host?");
+			const answer = await client.promptResult(promptId);
+			expect(answer.error).toBeUndefined();
+			expect(answer.result?.stopReason).toBe("end_turn");
+			const lastRequest = JSON.stringify(f.stub.requests.at(-1)?.body ?? {});
+			expect(lastRequest).toContain("what does the config say");
+			expect(lastRequest).toContain("the port is 8080");
+			// The new turn was appended through the store the replay read from:
+			// one open file, not two.
+			expect(readFileSync(store.path, "utf8")).toContain("and the host?");
+		});
+	}, 60_000);
+
+	test("session/load with an id nothing saved is invalidParams, and starts no session", async () => {
+		const f = fixture([{ text: "unused" }]);
+		await withAcp(f, ["acp"], async (client) => {
+			await client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+			const response = await client.request("session/load", {
+				sessionId: "no-such-session",
+				cwd: f.dir,
+				mcpServers: [],
+			});
+			expect(response.result).toBeUndefined();
+			expect(response.error?.code).toBe(-32602);
+			expect(JSON.stringify(response.error)).toContain("no-such-session");
+			// Nothing was replayed, and the failed id did not come into being as a
+			// session a prompt could reach.
+			expect(client.updates()).toEqual([]);
+			const prompt = await client.request("session/prompt", {
+				sessionId: "no-such-session",
+				prompt: [{ type: "text", text: "hello?" }],
+			});
+			expect(prompt.error?.code).toBe(-32602);
+			expect(f.stub.requests).toHaveLength(0);
 		});
 	}, 60_000);
 });
