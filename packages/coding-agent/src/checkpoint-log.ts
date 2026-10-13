@@ -25,8 +25,12 @@
  * history silently.
  */
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import type { SessionEntry, SessionStore } from "@labunbun/agent";
+import type { ToolResultMessage } from "@labunbun/ai";
+import type { AgentTask } from "@labunbun/tools";
 import { SHELL_END_KIND, SHELL_START_KIND } from "./shell-ledger.ts";
+import { readTaskSnapshot } from "./task-snapshot.ts";
 
 /** The `custom` entry kind one finished tool call records; on disk, so it is fixed. */
 export const TOOL_CHECKPOINT_KIND = "checkpoint";
@@ -69,6 +73,26 @@ export interface ToolCheckpoint {
 	inputSummary?: string;
 	/** True when `inputSummary` was cut to fit {@link INPUT_SUMMARY_MAX_CHARS}. */
 	truncated?: boolean;
+	/**
+	 * The failing tests the call's result reported, in the order the runner
+	 * printed them — set only when the call ran a test command, failed, and its
+	 * output carried recognizable failure lines (see {@link failedTestsFromTestOutput}
+	 * for the one shape this build reads).
+	 */
+	failedTests?: string[];
+	/**
+	 * How many failing test names did not fit {@link FAILED_TESTS_MAX}. When
+	 * present, the total number of failures is `failedTests.length` plus this —
+	 * the count is the runner's even when the names are capped.
+	 */
+	failedTestsOmitted?: number;
+	/**
+	 * The step the session itself said it was on when this call ended:
+	 * the in-progress task's label, or the first pending task's subject, read
+	 * off the session's own task board (see {@link nextStepFromTasks}). Derived
+	 * from that record, never invented — absent when the board had no open work.
+	 */
+	nextStep?: string;
 }
 
 /** What `/rewind` records when it restored a file. */
@@ -146,6 +170,313 @@ export function summarizeToolInput(input: unknown): { text: string; truncated: b
 		return { text: `${value.slice(0, INPUT_SUMMARY_MAX_CHARS)}…`, truncated: true };
 	}
 	return undefined;
+}
+
+/** How many failing test names one checkpoint keeps; the rest live on as a count. */
+export const FAILED_TESTS_MAX = 20;
+
+/**
+ * One failure line of a bun test report: `(fail) <name>`, with bun's optional
+ * `[16.00ms]` timing suffix.
+ *
+ * This is the only shape the recognizer reads. The project's own workflow runs
+ * `bun test`, so the shape that matters is the one this build can have seen;
+ * every other runner's failure format (a mocha dot report, a jest list, a
+ * pytest summary) is left alone rather than guessed at, because a checkpoint
+ * that named the wrong test would be worse than one that named none.
+ */
+const BUN_FAIL_LINE = /^\s*\(fail\)\s+(.+?)(?:\s+\[\d+(?:\.\d+)?m?s\])?\s*$/;
+
+/**
+ * Whether a shell command is a test run this build may read failures out of.
+ *
+ * A small fixed pattern set, matched segment by segment so a compound command
+ * (`cd x && bun test`) still counts while a mention of a test command inside an
+ * argument (`echo "run bun test"`) does not — the match is anchored at the
+ * command word of each segment. The list is deliberately short: the only
+ * failure shape this build understands is bun's, and a gate wide enough to
+ * admit scripts whose output merely looked test-shaped would be parsing
+ * arbitrary output for lines that only look like failure lines.
+ */
+export function looksLikeTestRun(command: string): boolean {
+	for (const segment of command.split(/&&|\|\||[;|\n]/)) {
+		const words = segment.trim().split(/\s+/).filter(Boolean);
+		// Leading environment assignments (`NODE_ENV=test bun test`) are the
+		// command's surroundings, not the command.
+		let index = 0;
+		while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index] ?? "")) index++;
+		const binary = unquote(words[index] ?? "")
+			.replace(/.*[\\/]/, "")
+			.replace(/\.(exe|cmd)$/i, "");
+		const subcommand = unquote(words[index + 1] ?? "");
+		const afterSubcommand = unquote(words[index + 2] ?? "");
+		if (binary === "bun" && subcommand === "test") return true;
+		if (binary === "bun" && subcommand === "run" && afterSubcommand === "test") return true;
+		if ((binary === "npm" || binary === "pnpm" || binary === "yarn") && subcommand === "test") return true;
+		if (
+			(binary === "npm" || binary === "pnpm" || binary === "yarn") &&
+			subcommand === "run" &&
+			afterSubcommand === "test"
+		) {
+			return true;
+		}
+		// Invoked by name or by path (`./node_modules/.bin/vitest`).
+		if (binary === "vitest" || binary === "jest") return true;
+	}
+	return false;
+}
+
+/** A shell word without the quotes a caller may have wrapped the binary in. */
+function unquote(word: string): string {
+	return word.replace(/^["']/, "").replace(/["']$/, "");
+}
+
+/**
+ * The failing test names a test run's result reported, or undefined when none.
+ *
+ * Read line by line over the whole result. Names come out in report order and
+ * duplicates are kept — two suites can each hold a test with the same name, and
+ * a recognizer that cannot see the file of a failure line has no business
+ * deciding they are the same test. Over the cap the names stop but the count
+ * does not: `omitted` carries what did not fit.
+ */
+export function failedTestsFromTestOutput(text: string): { names: string[]; omitted: number } | undefined {
+	const names: string[] = [];
+	let total = 0;
+	for (const line of text.split(/\r?\n/)) {
+		const match = BUN_FAIL_LINE.exec(line);
+		const name = match?.[1];
+		if (name === undefined) continue;
+		total++;
+		if (names.length < FAILED_TESTS_MAX) names.push(name);
+	}
+	if (total === 0) return undefined;
+	return { names, omitted: total - names.length };
+}
+
+/**
+ * The next step as the session's task board states it.
+ *
+ * The board is the plan the session itself wrote down, so this reads it rather
+ * than inventing anything: the first in-progress task (its present-continuous
+ * `activeForm` when it has one — "Running tests" reads as a step, "Run tests"
+ * as a to-do — else its subject), or the first pending task's subject when
+ * nothing is in progress. `tasks` arrives in the board's own order, lowest id
+ * first, and no open task is the honest answer `undefined`: a board whose work
+ * is all completed has no next step, and resurrecting the last one would be the
+ * ledger making work up.
+ */
+export function nextStepFromTasks(tasks: readonly AgentTask[]): string | undefined {
+	const active = tasks.find((task) => task.status === "in_progress");
+	if (active) return active.activeForm ?? active.subject;
+	return tasks.find((task) => task.status === "pending")?.subject;
+}
+
+/** The one file-content cap a rewind checkpoint keeps. Over it the hash still goes in; the copy does not. */
+const CHECKPOINT_MAX_CHARS = 200_000;
+
+/** The result of one finished tool call, as the loop's end event carries it. */
+export interface ToolEndEvent {
+	callId: string;
+	toolName: string;
+	result: ToolResultMessage;
+}
+
+/** The writer of the tool ledger — see {@link createToolLedger}. */
+export interface ToolLedger {
+	/** The input each running call was announced with; the end event carries none. */
+	noteToolStart(callId: string, input: unknown): void;
+	/** Record one finished call. One entry, best effort. */
+	noteToolEnd(event: ToolEndEvent): void;
+	/** The before side of an Edit/Write: the rewind snapshot and the pre-call fingerprint. */
+	noteBeforeMutation(toolName: string, input: unknown): void;
+	/** The after side: the post-call fingerprint, or null when the call failed. */
+	noteAfterMutation(toolName: string, input: unknown, isError: boolean): void;
+}
+
+/**
+ * One writer for the ledger, shared by the REPL and `-p` runs.
+ *
+ * Both apps run the same tool loop, so both have to leave the same record of
+ * it: a `checkpoint` entry per finished call, the `file_checkpoint` a /rewind
+ * restores from, and the fingerprints on either side of an Edit or Write. This
+ * holds the pieces that only make sense together — the input each running call
+ * was announced with, and the file a mutation is mid-way through — because
+ * splitting them across two call sites is how the two modes drifted the last
+ * time: batch B wired the REPL's events and left headless's unwired.
+ *
+ * The two hook-shaped methods run before the user's own hooks at their call
+ * sites, so a hook that blocks a call still sees the ledger say what was
+ * attempted, and the fingerprint of the before side is taken before anything
+ * else could touch the file.
+ */
+export function createToolLedger(options: {
+	/** The session to write into, read per call: `/resume` swaps the store under a running app. */
+	store(): SessionStore | undefined;
+	/** Read a file, or null when it is absent or unreadable. */
+	readFile(path: string): string | null;
+}): ToolLedger {
+	const startedInputs = new Map<string, unknown>();
+	const pendingFiles = new Map<string, { path: string; beforeHash: string | null; afterHash: string | null }>();
+
+	function snapshotBeforeMutation(store: SessionStore, input: unknown): void {
+		const filePath = filePathFromInput(input);
+		if (filePath === undefined) return;
+		let beforeHash: string | null = null;
+		try {
+			if (existsSync(filePath)) {
+				const content = readFileSync(filePath, "utf8");
+				beforeHash = sha256Of(content);
+				// Over the cap the content is not inlined — a session file is not
+				// where a 200k file's copy belongs — but the hash still is: the
+				// entry can say the file changed on this call even when /rewind
+				// cannot restore it.
+				if (content.length <= CHECKPOINT_MAX_CHARS) {
+					store.appendCustom(FILE_CHECKPOINT_KIND, { path: filePath, content, at: Date.now() });
+				}
+			}
+		} catch {
+			// best-effort — never block the tool call on checkpoint failure
+		}
+		pendingFiles.set(filePath, { path: filePath, beforeHash, afterHash: null });
+	}
+
+	return {
+		noteToolStart(callId, input) {
+			startedInputs.set(callId, input);
+		},
+
+		noteBeforeMutation(toolName, input) {
+			if (toolName !== "Edit" && toolName !== "Write") return;
+			const store = options.store();
+			if (!store) return;
+			snapshotBeforeMutation(store, input);
+		},
+
+		noteAfterMutation(toolName, input, isError) {
+			if (toolName !== "Edit" && toolName !== "Write") return;
+			const filePath = filePathFromInput(input);
+			if (filePath === undefined) return;
+			const pending = pendingFiles.get(filePath);
+			// Read only when the call reported success: a failed edit left the
+			// file as it was (or never created it), so "the hash after" would be
+			// the before side wearing the wrong label.
+			if (pending) pending.afterHash = isError ? null : hashFileOrNull(filePath, options.readFile);
+		},
+
+		noteToolEnd(event) {
+			const input = startedInputs.get(event.callId);
+			startedInputs.delete(event.callId);
+			let filesTouched: CheckpointFile[] | undefined;
+			if (event.toolName === "Edit" || event.toolName === "Write") {
+				const filePath = input === undefined ? undefined : filePathFromInput(input);
+				const pending = filePath === undefined ? undefined : pendingFiles.get(filePath);
+				if (filePath !== undefined) pendingFiles.delete(filePath);
+				// Only a pending state means a validated call reached its before
+				// hook: an input the schema refused never named a file this build
+				// fingerprinted, and a row for it would be a claim built on input
+				// nothing accepted.
+				if (pending) {
+					filesTouched = [{ path: pending.path, beforeHash: pending.beforeHash, afterHash: pending.afterHash }];
+				}
+			}
+			const store = options.store();
+			if (!store) return;
+			const record: ToolCheckpoint = {
+				at: Date.now(),
+				callId: event.callId,
+				toolName: event.toolName,
+				isError: event.result.isError,
+			};
+			if (input !== undefined) {
+				const summary = summarizeToolInput(input);
+				if (summary) {
+					record.inputSummary = summary.text;
+					if (summary.truncated) record.truncated = true;
+				}
+			}
+			if (filesTouched) record.filesTouched = filesTouched;
+			// Failures are read only off a call that failed: a run that reported
+			// success is done, whatever its output happens to contain, and output
+			// is quoted back and summarized all over this transcript.
+			const command = commandFromInput(input);
+			if (event.result.isError && command !== undefined && looksLikeTestRun(command)) {
+				const failures = failedTestsFromTestOutput(toolResultText(event.result));
+				if (failures) {
+					record.failedTests = failures.names;
+					if (failures.omitted > 0) record.failedTestsOmitted = failures.omitted;
+				}
+			}
+			const nextStep = nextStepFromTasks(readTaskSnapshot(store) ?? []);
+			if (nextStep) record.nextStep = nextStep;
+			writeToolCheckpoint(store, record);
+		},
+	};
+}
+
+/** The shell command a tool input names, when it carries one as a string. */
+function commandFromInput(input: unknown): string | undefined {
+	if (typeof input !== "object" || input === null) return undefined;
+	const command = (input as { command?: unknown }).command;
+	return typeof command === "string" && command.length > 0 ? command : undefined;
+}
+
+/** The text blocks of a tool result, joined the way the transcript renders them. */
+function toolResultText(result: ToolResultMessage): string {
+	const parts: string[] = [];
+	for (const block of result.content) {
+		if (block.type === "text") parts.push(block.text);
+	}
+	return parts.join("\n");
+}
+
+/** The most recent test failures the ledger recorded, or undefined when none were. */
+export function latestTestFailures(
+	checkpoints: readonly ToolCheckpoint[],
+): { at: number; names: string[]; omitted: number } | undefined {
+	for (let i = checkpoints.length - 1; i >= 0; i--) {
+		const checkpoint = checkpoints[i];
+		if (!checkpoint?.failedTests) continue;
+		return { at: checkpoint.at, names: checkpoint.failedTests, omitted: checkpoint.failedTestsOmitted ?? 0 };
+	}
+	return undefined;
+}
+
+/**
+ * One line saying what the resumed session was doing — the recovery protocol's
+ * first move, printed by both apps at startup when the ledger has anything to
+ * say.
+ *
+ * Everything in it is read out of the ledger, the same facts `/checkpoint`
+ * renders in full: the last call and when, how much is recorded, how many files
+ * the calls named, the failing-test count the newest test run reported, and the
+ * next step the board stated — each from the newest entry that can carry it,
+ * which for `nextStep` means the last call, because "the plan as of the newest
+ * thing that happened" is the only version of it that is still true. Undefined
+ * when nothing was recorded, which is what lets a fresh session print nothing
+ * without a branch of its own.
+ */
+export function formatResumeSummary(checkpoints: readonly ToolCheckpoint[]): string | undefined {
+	const last = checkpoints[checkpoints.length - 1];
+	if (!last) return undefined;
+	const clauses = [
+		`last ${last.toolName} ${last.isError ? "failed" : "ok"} at ${new Date(last.at).toLocaleTimeString()}`,
+	];
+	clauses.push(`${checkpoints.length} tool ${checkpoints.length === 1 ? "call" : "calls"} recorded`);
+	const files = new Set<string>();
+	for (const checkpoint of checkpoints) {
+		for (const file of checkpoint.filesTouched ?? []) files.add(file.path);
+	}
+	if (files.size > 0) clauses.push(`${files.size} file${files.size === 1 ? "" : "s"} touched`);
+	const failures = latestTestFailures(checkpoints);
+	if (failures) {
+		const count = failures.names.length + failures.omitted;
+		clauses.push(`${count} failing test${count === 1 ? "" : "s"}`);
+	}
+	let line = `Resumed: ${clauses.join(", ")}.`;
+	if (last.nextStep) line += ` Next: ${last.nextStep}.`;
+	line += " /checkpoint shows the ledger; /rewind restores a file.";
+	return line;
 }
 
 /** Record one finished tool call. Best effort — see {@link appendEntry}. */
@@ -296,6 +627,14 @@ function checkpointRecord(data: unknown): ToolCheckpoint | null {
 	const record: ToolCheckpoint = { at: d.at, callId: d.callId, toolName: d.toolName, isError: d.isError };
 	if (typeof d.inputSummary === "string") record.inputSummary = d.inputSummary;
 	if (d.truncated === true) record.truncated = true;
+	if (Array.isArray(d.failedTests)) {
+		const names = d.failedTests.filter((name): name is string => typeof name === "string" && name.length > 0);
+		if (names.length > 0) record.failedTests = names;
+	}
+	if (typeof d.failedTestsOmitted === "number" && Number.isInteger(d.failedTestsOmitted) && d.failedTestsOmitted > 0) {
+		record.failedTestsOmitted = d.failedTestsOmitted;
+	}
+	if (typeof d.nextStep === "string" && d.nextStep.length > 0) record.nextStep = d.nextStep;
 	if (Array.isArray(d.filesTouched)) {
 		const files: CheckpointFile[] = [];
 		for (const raw of d.filesTouched) {

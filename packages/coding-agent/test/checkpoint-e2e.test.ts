@@ -75,7 +75,7 @@ interface Scene {
 async function runScene(
 	scene: Scene,
 	options: { cwd: string; home: string },
-): Promise<{ code: number; infos: string[] }> {
+): Promise<{ code: number; infos: string[]; stderr: string }> {
 	const script = `
 		import { mock } from "bun:test";
 		import * as ai from "@labunbun/ai";
@@ -156,7 +156,7 @@ async function runScene(
 		proc.exited,
 	]);
 	expect(exitCode, stderr).toBe(0);
-	return JSON.parse(stdout.trim()) as { code: number; infos: string[] };
+	return { ...(JSON.parse(stdout.trim()) as { code: number; infos: string[] }), stderr };
 }
 
 describe("a session's finished tool calls", () => {
@@ -303,5 +303,63 @@ describe("a compaction pass", () => {
 		const chainShells = linear.filter((entry) => entry.type === "custom" && entry.kind === "shell_start");
 		expect(chainShells).toHaveLength(1);
 		expect(chainShells[0]?.id === copiedShell?.id).toBe(true);
+	}, 30_000);
+});
+
+describe("a resumed session", () => {
+	test("says one line about what the ledger holds, on stderr, before the prompt", async () => {
+		const cwd = tempDir("lbb-cpe2e-c-cwd-");
+		const home = tempDir("lbb-cpe2e-c-home-");
+		const target = join(cwd, "notes.txt");
+
+		// The session a previous run left behind: a conversation, and the ledger
+		// its finished calls wrote — including the failed test run and the plan
+		// the board held at the last call.
+		const planted = SessionStore.startNew(cwd, home);
+		planted.appendCustom("checkpoint", {
+			at: Date.now() - 60_000,
+			callId: "c1",
+			toolName: "Write",
+			isError: false,
+			filesTouched: [{ path: target, beforeHash: null, afterHash: null }],
+			inputSummary: "notes.txt",
+		});
+		planted.appendCustom("checkpoint", {
+			at: Date.now() - 30_000,
+			callId: "c2",
+			toolName: "Bash",
+			isError: true,
+			inputSummary: "bun test",
+			failedTests: ["parser > rejects empty"],
+			nextStep: "Fixing the parser",
+		});
+		planted.appendMessage(userMessage("PLANTED QUESTION"));
+		planted.appendMessage(
+			assistantMessage({ content: [{ type: "text", text: "PLANTED ANSWER" }], stopReason: "stop" }),
+		);
+
+		const outcome = await runScene(
+			{
+				continueLast: true,
+				steps: [{ text: "ok" }],
+				run: `await session.prompt("what is next");`,
+			},
+			{ cwd, home },
+		);
+
+		expect(outcome.code).toBe(0);
+		const stderr = outcome.stderr;
+		expect(stderr).toContain("Resumed: last Bash failed at ");
+		expect(stderr).toContain("2 tool calls recorded");
+		expect(stderr).toContain("1 file touched");
+		expect(stderr).toContain("1 failing test");
+		expect(stderr).toContain("Next: Fixing the parser.");
+		expect(stderr).toContain("/checkpoint shows the ledger; /rewind restores a file.");
+		// The clauses come in the order a reader needs them, not just present.
+		expect(stderr.indexOf("2 tool calls recorded")).toBeLessThan(stderr.indexOf("1 failing test"));
+		expect(stderr.indexOf("1 failing test")).toBeLessThan(stderr.indexOf("Next: Fixing the parser."));
+		// Startup notice, not REPL output: the recovery line does not become a
+		// frame the transcript keeps.
+		expect(outcome.infos.join("\n")).not.toContain("Resumed:");
 	}, 30_000);
 });

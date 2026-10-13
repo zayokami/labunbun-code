@@ -3,7 +3,7 @@
  * permission engine + dialog bridge → Ink REPL with app-level commands.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import {
@@ -113,18 +113,14 @@ import {
 	clearChatGptSubscription,
 } from "./chatgpt-login.ts";
 import {
-	FILE_CHECKPOINT_KIND,
-	filePathFromInput,
-	hashFileOrNull,
+	createToolLedger,
+	formatResumeSummary,
+	latestTestFailures,
 	readToolCheckpoints,
 	recordRewind,
 	resendCheckpointsAcrossCompaction,
-	sha256Of,
-	summarizeToolInput,
-	type ToolCheckpoint,
 	type TouchedFileReport,
 	touchedFileReports,
-	writeToolCheckpoint,
 } from "./checkpoint-log.ts";
 import { createClaudeCredentialStore, createClaudeCredentials } from "./claude-auth.ts";
 import {
@@ -457,6 +453,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const shellRecovery = readShellLedger(store);
 	const recoveryNotice = formatShellRecovery(shellRecovery);
 	if (recoveryNotice) console.error(`Warning: ${recoveryNotice}`);
+
+	// The recovery protocol's one line: what the resumed ledger says the last
+	// run was doing — last call, files touched, failing tests, next step — and
+	// where to look next. A fresh session reads an empty ledger and prints
+	// nothing, so this needs no --resume branch of its own. stderr, like the
+	// notices above: startup context for the transcript that is about to render,
+	// not something a pinned REPL frame should hold.
+	const resumeSummary = formatResumeSummary(readToolCheckpoints(store.entries));
+	if (resumeSummary) console.error(resumeSummary);
 
 	// ---- tools & session ----
 	const taskStore = new TaskStore();
@@ -851,24 +856,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	});
 
 	/**
-	 * The file a running Edit/Write is mid-way through, between its before-hook
-	 * and its end event.
-	 *
-	 * Keyed by path because the loop hooks never see the call id, and a path is
-	 * the one name both halves — `beforeToolCall` (which snapshots and hashes the
-	 * before side) and the `tool_execution_end` subscriber (which writes the
-	 * entry) — agree on. One entry per path is all there can be: Edit and Write
-	 * are both serialized (`isConcurrencySafe: () => false`), so two calls for
-	 * the same file cannot be in flight at once, and a subagent's calls run
-	 * through its own session's hooks, not these.
+	 * The ledger writer: one entry per finished call, the /rewind snapshots, and
+	 * the fingerprints on either side of an Edit or Write. Defined in
+	 * `checkpoint-log.ts` and wired from the same event points a `-p` run uses,
+	 * so the two modes cannot drift about what a call leaves behind — headless
+	 * recorded none of this until the seam existed. Its two mutation notes run
+	 * before the user's own hooks below, for the reason stated at each note.
 	 */
-	const pendingFileStates = new Map<string, { path: string; beforeHash: string | null; afterHash: string | null }>();
-	/**
-	 * The input each running tool call was announced with, for the subscriber.
-	 * `tool_execution_start` carries the input and `tool_execution_end` does not,
-	 * so the end handler can summarize an input only if it kept the start.
-	 */
-	const startedToolInputs = new Map<string, unknown>();
+	const ledger = createToolLedger({ store: () => store, readFile: readFileOrNull });
 
 	/**
 	 * Named so a hot-swap can hand the SAME deps object to the next session.
@@ -1001,10 +996,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				// File checkpoint before mutations — powers /rewind — and the
 				// before side of the call's own ledger entry, from the same read:
 				// a second read here would be a different moment for no reason.
-				if (store && (toolName === "Edit" || toolName === "Write")) {
-					const snapshot = snapshotCheckpoint(store, input);
-					if (snapshot) pendingFileStates.set(snapshot.path, { ...snapshot, afterHash: null });
-				}
+				ledger.noteBeforeMutation(toolName, input);
 				if (!hooksRuntime.has("PreToolUse")) return undefined;
 				const outcome = await hooksRuntime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
 				reportHookErrors(
@@ -1015,18 +1007,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				return undefined;
 			},
 			afterToolCall: async (toolName, input, result) => {
-				// The after side of the call's ledger entry. Read only when the call
-				// reported success: a failed edit left the file as it was (or never
-				// created it), so "the hash after" would be the before side wearing
-				// the wrong label. A file gone or unreadable by now is null — the
-				// absence of a fingerprint, which is not a claim about the file.
-				if (toolName === "Edit" || toolName === "Write") {
-					const filePath = filePathFromInput(input);
-					if (filePath !== undefined) {
-						const pending = pendingFileStates.get(filePath);
-						if (pending) pending.afterHash = result.isError ? null : hashFileOrNull(filePath, readFileOrNull);
-					}
-				}
+				// The after side of the call's ledger entry — a file gone or
+				// unreadable by now hashes to null, the absence of a fingerprint,
+				// which is not a claim about the file.
+				ledger.noteAfterMutation(toolName, input, result.isError);
 				if (!hooksRuntime.has("PostToolUse")) return undefined;
 				const outcome = await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
 				// Advisory: the call already ran, so a block has nothing to stop.
@@ -1089,45 +1073,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// turn — the latch explains why it cannot register where the change does.
 			toolChangeLatch.observe(event);
 			// The tool ledger: one `custom` entry per finished call — what ran,
-			// whether it worked, and the file fingerprints Edit and Write took.
-			// Written from this subscription rather than the loop so the main loop
-			// stays untouched. The input is taken at the start event because the
-			// end event does not carry one.
-			if (event.type === "tool_execution_start") {
-				startedToolInputs.set(event.callId, event.input);
-			}
-			if (event.type === "tool_execution_end") {
-				const input = startedToolInputs.get(event.callId);
-				startedToolInputs.delete(event.callId);
-				const record: ToolCheckpoint = {
-					at: Date.now(),
-					callId: event.callId,
-					toolName: event.toolName,
-					isError: event.result.isError,
-				};
-				if (input !== undefined) {
-					const summary = summarizeToolInput(input);
-					if (summary) {
-						record.inputSummary = summary.text;
-						if (summary.truncated) record.truncated = true;
-					}
-				}
-				if (event.toolName === "Edit" || event.toolName === "Write") {
-					const filePath = input === undefined ? undefined : filePathFromInput(input);
-					const pending = filePath === undefined ? undefined : pendingFileStates.get(filePath);
-					if (filePath !== undefined) pendingFileStates.delete(filePath);
-					// Only a pending state means a validated call reached its before
-					// hook: an input the schema refused never named a file this build
-					// fingerprinted, and a row for it would be a claim built on input
-					// nothing accepted.
-					if (pending) {
-						record.filesTouched = [
-							{ path: pending.path, beforeHash: pending.beforeHash, afterHash: pending.afterHash },
-						];
-					}
-				}
-				if (store) writeToolCheckpoint(store, record);
-			}
+			// whether it worked, the file fingerprints Edit and Write took, the
+			// failing tests a failed test run reported, and the next step the
+			// board stated. Written from this subscription rather than the loop
+			// so the main loop stays untouched; the input is taken at the start
+			// event because the end event does not carry one.
+			if (event.type === "tool_execution_start") ledger.noteToolStart(event.callId, event.input);
+			if (event.type === "tool_execution_end") ledger.noteToolEnd(event);
 			if (event.type === "turn_end") {
 				costTracker.recordUsage(event.message.provider, event.message.model, event.message.usage);
 				costTracker.persist();
@@ -1934,40 +1886,6 @@ function appendMemoryNote(note: string): void {
 	}
 }
 
-const CHECKPOINT_MAX_CHARS = 200_000;
-
-/**
- * Snapshot a file's content before Edit/Write mutates it (for /rewind), and
- * fingerprint it for the call's own ledger entry.
- *
- * Both answers come out of the one read, because they describe the one moment:
- * the content is what `/rewind` would restore, the hash is what a later reader
- * compares the disk against. Null means no path could be named (the before side
- * of a brand-new file is also null — there was no file to read, and that is a
- * different fact from "it could not be read", both of which are the absence of
- * a fingerprint rather than a claim about one).
- */
-function snapshotCheckpoint(store: SessionStore, input: unknown): { path: string; beforeHash: string | null } | null {
-	const filePath = filePathFromInput(input);
-	if (filePath === undefined) return null;
-	let beforeHash: string | null = null;
-	try {
-		if (existsSync(filePath)) {
-			const content = readFileSync(filePath, "utf8");
-			beforeHash = sha256Of(content);
-			// Over the cap the content is not inlined — a session file is not where
-			// a 200k file's copy belongs — but the hash still is: the entry can say
-			// the file changed on this call even when /rewind cannot restore it.
-			if (content.length <= CHECKPOINT_MAX_CHARS) {
-				store.appendCustom(FILE_CHECKPOINT_KIND, { path: filePath, content, at: Date.now() });
-			}
-		}
-	} catch {
-		// best-effort — never block the tool call on checkpoint failure
-	}
-	return { path: filePath, beforeHash };
-}
-
 interface CheckpointInfo {
 	entryId: string;
 	path: string;
@@ -2492,6 +2410,18 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					const summary = last.inputSummary ? ` (${last.inputSummary})` : "";
 					const when = new Date(last.at).toLocaleTimeString();
 					lines.push(`Last: ${last.toolName} ${last.isError ? "failed" : "ok"} at ${when}${summary}.`);
+				}
+				// The step the newest call recorded, and the newest test run that
+				// reported failures — with the names, because a count alone says a
+				// run failed without saying what did. The run's time is printed so
+				// a list that is turns old reads as old rather than as news.
+				if (last?.nextStep) lines.push(`Next: ${last.nextStep}`);
+				const failures = latestTestFailures(checkpoints);
+				if (failures) {
+					const count = failures.names.length + failures.omitted;
+					lines.push(`Failing tests (${count}, from the run at ${new Date(failures.at).toLocaleTimeString()}):`);
+					for (const name of failures.names) lines.push(`  ${name}`);
+					if (failures.omitted > 0) lines.push(`  …and ${failures.omitted} more not named.`);
 				}
 			}
 			// The files against the disk now: what the newest call on each path
