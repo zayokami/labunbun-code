@@ -467,16 +467,19 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
 | `--permission-mode <mode>` | Set the permission mode. The values are `ask`, `plan`, `agent`. |
 | `--sandbox <mode>` | Set the sandbox. The values are `workspace-write`, `danger-full-access`. |
 | `--max-turns <n>` | Stop after this many turns. This option works in headless mode only. |
-| `--no-session` | Do not store the session. This option works in headless mode only. |
-| `--resume <id>` | Open this session in the terminal. |
-| `-c`, `--continue` | Open the last session in this directory. |
+| `--no-session` | Do not store the session. This option works in headless mode only. It does not work with `--resume` or `-c`. |
+| `--resume <id>` | Open this session in the terminal. A headless run continues the session with the prompt of the run. |
+| `-c`, `--continue` | Open the last session in this directory. A headless run continues it with the prompt of the run. |
 | `--output-format <format>` | Set the output format. The values are `text`, `json`, `stream-json`. |
 | `--gamepad` | Use the controller for this run. The tool does not write a setting. |
 | `--no-gamepad` | Do not use the controller for this run. |
+| `--acp` | Serve the Agent Client Protocol on stdio. Use this option for an editor. It is the same as the `acp` subcommand. |
 | `--help`, `-h` | Show the options. |
 | `--version`, `-v` | Show the version. |
 
 Every option takes the next argument. The tool does not accept `--option=value`.
+
+The tool stops with an error when `--acp` shares a command line with `-p`, `--resume`, `-c`, `--no-session`, `--output-format`, or a gamepad option.
 
 The default model is `anthropic/claude-sonnet-5`. The number of turns has no limit by default.
 
@@ -500,6 +503,7 @@ Use these commands in the terminal.
 | `/cache` | Show the prompt cache hit rate and its ceiling. |
 | `/compact [focus]` | Summarize the conversation. |
 | `/trim` | Replace old tool results with short previews. |
+| `/checkpoint` | Show the tool ledger: the last call, the files that it touched, the tasks, and the context use. |
 | `/rewind [number]` | Restore a file from a checkpoint. The tool lists the last 10 checkpoints. |
 | `/fork <id>` | Start a new session from an entry. Use `/tree` to find the id. |
 | `/tree` | Show the branches of the session. |
@@ -528,9 +532,23 @@ Use these commands in the terminal.
 
 The command `/migrate` is the previous name of `/yoshi`. The command `/quit` is an alias of `/exit`.
 
+Press Ctrl+T to show the watch panel. The panel shows the tail of one background shell and takes no keys of its own. The tool shows the last running shell, or the last shell that ended. The panel is a snapshot from the two-second poll, and it says so. Press Ctrl+T or Escape to close it. The key does nothing while a dialog, a question, the command picker, or the transcript is open. Under the Emacs editor, the engine takes `C-t`, so the key does not reach the panel.
+
 ### Headless output
 
 Use `--output-format text` for plain text. Use `--output-format json` for one JSON object. Use `--output-format stream-json` for one JSON object per event.
+
+A headless run that opens a stored session (`--resume <id>` or `-c`) prints the recovery line to stderr when the ledger holds one. The answer stays the only thing on stdout.
+
+### Editor sessions
+
+The `acp` subcommand serves the Agent Client Protocol on stdio. An editor starts the command and speaks JSON-RPC over the pipe.
+
+```bash
+bun run dev acp
+```
+
+The server reports the `loadSession` capability. The editor can open a new session or a stored one, send a prompt, and receive the updates as they stream. The tool replays a stored session to the editor before the open returns. The permission modes are the same three as the terminal: `ask`, `plan`, `agent`. A decision of `ask` becomes a question to the editor. Warnings go to stderr, because stdout carries the protocol.
 
 ## Configuration
 
@@ -570,7 +588,7 @@ The tool reads the settings files in this order. A later file has a higher prior
 
 A project file is controlled by its repository. The tool does not read these keys from a project file:
 
-`model`, `fallbackModels`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `compaction`, `modelDiscovery`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `permissions.allow`, `permissions.additionalDirectories`.
+`model`, `fallbackModels`, `roles`, `thinkingLevel`, `permissionMode`, `sandbox`, `networkAccess`, `networkDomains`, `env`, `providers`, `hooks`, `mcpServers`, `pricing`, `cache`, `trimOldToolResults`, `compaction`, `modelDiscovery`, `backgroundShellNotifications`, `gamepad`, `beetle`, `allowManagedPermissionRulesOnly`, `disableBypassPermissionsMode`, `permissions.allow`, `permissions.additionalDirectories`.
 
 A repository must not choose its own model. A repository must not choose its own confinement. A repository must not approve its own tool calls. A repository must not turn the network off.
 
@@ -592,6 +610,7 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 |-----|--------|------|
 | `model` | `provider/id` | User |
 | `fallbackModels` | An array of `provider/id`. The tool tries each model in order. | User |
+| `roles` | An object of the five seats `main`, `plan`, `compaction`, `light`, and `local`. Each seat has `provider`, `model`, `fallback`, and `budgetUSD`. | User |
 | `thinkingLevel` | `off`, `minimal`, `low`, `medium`, `high` | User |
 | `permissionMode` | `ask`, `plan`, `agent` | User |
 | `sandbox` | `workspace-write`, `danger-full-access` | User |
@@ -617,6 +636,10 @@ A headless run has no dialog. The tool does not load the definitions of an unapp
 | `permissions.allow` | An array of rules | Any |
 | `permissions.deny` | An array of rules | Any |
 | `permissions.additionalDirectories` | An array of paths | Any |
+
+Each seat in `roles` can set `budgetUSD`. The budget is opt-in: a seat with no value has no ceiling. The tool compares the spend against the budget before each request and refuses the request when the spend is over the value. The refusal names the setting: `Budget reached: $2.5000 spent of the $2.0000 budget for roles.main. Raise roles.main.budgetUSD or switch models.`
+
+A request on the session's own loop counts the whole session, subagent runs included. The gate before a subagent run counts the share that the `light` seat itself spent. A model that no seat names is not gated. The `local` seat resolves, but no feature reads it yet, and the tool warns at startup when one is set.
 
 ### Add a provider
 
