@@ -199,6 +199,18 @@ export function builtInCommands(): Command[] {
 			call: async () => (await playDaisyBell()).message,
 		},
 		{
+			// Vim's `:help uganda` in this app's slash-command form. Deliberately
+			// not gated to Vim mode: Vim does not hide its charityware page behind
+			// an option, and the sentence addresses whoever typed the command.
+			name: "help-uganda",
+			description: "Where the Vim mode came from, and the Uganda charity Vim asks you to support",
+			type: "local",
+			call: () =>
+				"LaBunbun’s Vim feature was inspired by Vim’s source code.\n" +
+				"Vim is completely free and open-source software. If you like LaBunbun’s Vim feature, " +
+				"please donate to help children in need in Uganda! https://www.vim.org/sponsor/",
+		},
+		{
 			name: "trim",
 			description: "Replace old tool results with short previews to free context without summarizing",
 			type: "local",
