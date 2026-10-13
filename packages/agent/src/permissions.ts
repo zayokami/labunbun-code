@@ -5,24 +5,48 @@
  *   Bash · Bash(git *) · Bash(npm run *) · Edit(src/**) · Read(~/.ssh/*)
  *   mcp__github · mcp__github__*
  *
+ * A rule's behavior used to be one of two values, which could not express the
+ * request "run my file edits, but bring me git commits": that is neither an
+ * allow of the command nor a denial of it. `ask` is the third value, and the
+ * difference from the others is that it decides for the *dialog*, not for the
+ * call — a match stops an unattended run and hands the call to a human.
+ *
  * Evaluation order, and the order is the security property:
  *
  *   1. deny rules, across every source. No mode and no sandbox setting gets to
  *      reach past them — a rule the user wrote is a floor, not a preference.
- *   2. the dangerous-command classifier, for Bash. Also above every mode, and
+ *   2. `plan`'s read-only tool list, which is a deny and so sits above the ask
+ *      and allow rules for the same reason step 1 does.
+ *   3. the dangerous-command classifier, for Bash. Also above every mode, and
  *      also above `danger-full-access`: turning the sandbox off is not a request
- *      to stop classifying.
- *   3. `plan`'s read-only tool list, which is a deny and so sits above the
- *      allow rules for the same reason step 1 does.
- *   4. among allows, the first match decides, and there is deliberately no
+ *      to stop classifying. A match is still terminal here — an ask rule below
+ *      it cannot soften a `deny` into a question.
+ *   4. ask rules, across every source. A match returns `ask` and nothing below
+ *      it (no allow rule, no mode) turns that into a run. This is the step the
+ *      third behavior exists for.
+ *   5. among allows, the first match decides, and there is deliberately no
  *      precedence between sources — every allow produces the same answer, so
  *      which one matched is not observable. `RULE_SOURCE_ORDER` still fixes the
  *      order rules are *collected* in, because that is what makes a rule's
  *      reported source stable.
- *   5. the mode's own answer to "nothing decided it": `agent` runs it, `ask`
+ *   6. the mode's own answer to "nothing decided it": `agent` runs it, `ask`
  *      brings it to a person.
  *
- * Step 2 is a filter, not a gate, and the difference matters at step 5: a
+ * The two ties, decided rather than left to the loop order:
+ *
+ *   - deny over ask. Step 1 runs first and returns, so a call matching both is
+ *     refused. An ask never lifts a floor.
+ *   - ask over allow. A standing allow ("don't ask again", which is the widest
+ *     grant a session can hold) is exactly what an ask rule exists to punch
+ *     through — ask me every time for git commits is written *because* some
+ *     broad grant would otherwise swallow them. If allow won, the ask rule
+ *     would work until the first broad grant and then go quiet, which is the
+ *     one failure a user cannot see. The dialog keeps its side of the bargain
+ *     the other way: an "always allow" answered for a scope replaces the
+ *     session's ask rule of that same scope (the app layer does the
+ *     replacement), so the button still means what it says.
+ *
+ * Step 3 is a filter, not a gate, and the difference matters at step 6: a
  * command the classifier does not recognise falls through to `agent` mode and
  * runs. What the classifier buys is that the commands it *does* recognise stop
  * there — it is not a whitelist, and nothing upstream treats its silence as
@@ -58,7 +82,13 @@ export interface PermissionRule {
 	toolName: string;
 	/** Raw specifier inside Tool(...); absent = bare tool rule. */
 	specifier?: string;
-	behavior: "allow" | "deny";
+	/**
+	 * What a match decides. `allow` runs the call, `deny` refuses it, and `ask`
+	 * neither: it forces the question, in every mode, including the ones that
+	 * would have run the call unattended. See the evaluation order above for how
+	 * the three rank against each other.
+	 */
+	behavior: "allow" | "deny" | "ask";
 	source: RuleSource;
 }
 
@@ -169,10 +199,17 @@ export function extractBashFilePaths(command: string): string[] {
 const FILE_TOOL_NAMES = new Set(["Read", "Edit", "Write", "NotebookEdit"]);
 
 /**
- * Does a Bash command touch a file that a file-tool deny rule protects?
- * Returns the offending path so the denial can name it.
+ * Does a Bash command touch a file that a file-tool rule protects? Returns the
+ * offending path so the verdict can name it.
+ *
+ * Asked of deny rules and of ask rules, and **not** of allow rules: a file deny
+ * or ask is a statement about what the user wants held back, and Bash would be
+ * an open bypass around either one — the deny case unrefused a whole category
+ * of writes, the ask case silently unasked. An allow is one-directional by
+ * design (granting a file tool says nothing about the shell), so it is excluded
+ * here rather than symmetrically included.
  */
-function bashHitsFileDenyRule(rule: PermissionRule, input: unknown, cwd: string): string | null {
+function bashHitsFileRule(rule: PermissionRule, input: unknown, cwd: string): string | null {
 	if (!FILE_TOOL_NAMES.has(rule.toolName) || rule.specifier === undefined) return null;
 	if (typeof input !== "object" || input === null) return null;
 	const command = (input as Record<string, unknown>).command;
@@ -279,9 +316,11 @@ export interface PermissionEngineConfig {
 }
 
 /**
- * Rule-based evaluation. Returns allow/deny when rules or modes decide;
- * returns ask when a human decision is needed. The caller (app layer) turns
- * remaining asks into a dialog — or, when there is nobody to ask, a deny.
+ * Rule-based evaluation. Returns allow/deny when rules or modes decide; returns
+ * ask when a human decision is needed — an ask rule demanded one, the
+ * classifier flagged the command in a mode that asks, or the mode left the call
+ * undecided. The caller (app layer) turns remaining asks into a dialog — or,
+ * when there is nobody to ask, a deny.
  */
 export function evaluatePermissions(
 	toolName: string,
@@ -297,7 +336,7 @@ export function evaluatePermissions(
 		// A file deny rule also covers shell commands that read that file —
 		// otherwise Bash is an open bypass around every file deny rule.
 		if (toolName === "Bash") {
-			const path = bashHitsFileDenyRule(rule, input, config.cwd);
+			const path = bashHitsFileRule(rule, input, config.cwd);
 			if (path !== null) {
 				return {
 					behavior: "deny",
@@ -354,7 +393,33 @@ export function evaluatePermissions(
 		if (match) return decideDangerous(match, config.mode);
 	}
 
-	// 4. Among allows, the first match decides. Which one that is depends on the
+	// 4. Ask rules, across every source, above every allow and above every mode.
+	//    A match comes back `ask` — the one verdict no mode resolves by itself:
+	//    `agent` would otherwise have run the call, and the dialog is the entire
+	//    point of the rule. This is where "file edits go through, but git commits
+	//    come to me" is expressed, and it is checked before the allow loop below
+	//    for the reason the file header pins down: an ask rule is written to
+	//    survive the broad grants that would otherwise swallow it.
+	for (const rule of config.rules) {
+		if (rule.behavior !== "ask") continue;
+		if (ruleMatches(rule, toolName, input, config.cwd)) {
+			return { behavior: "ask", message: `Asked by ${rule.source} rule: ${formatRule(rule)}` };
+		}
+		// The deny loop's Bash cross-check, asked of ask rules too: a file the
+		// user wants to be consulted about is one the shell should not reach
+		// silently either.
+		if (toolName === "Bash") {
+			const path = bashHitsFileRule(rule, input, config.cwd);
+			if (path !== null) {
+				return {
+					behavior: "ask",
+					message: `Asked by ${rule.source} rule: ${formatRule(rule)} (command accesses "${path}")`,
+				};
+			}
+		}
+	}
+
+	// 5. Among allows, the first match decides. Which one that is depends on the
 	//    order `config.rules` arrives in, so there is deliberately no precedence
 	//    between sources here: every allow produces the same answer, and a rule
 	//    that only *looked* stronger because it was later would be an ordering
@@ -367,7 +432,7 @@ export function evaluatePermissions(
 		}
 	}
 
-	// 5. The mode's own answer to "nothing decided it": `agent` runs it,
+	// 6. The mode's own answer to "nothing decided it": `agent` runs it,
 	//    `ask` brings it to a person.
 	return { behavior: config.mode === "agent" ? "allow" : "ask" };
 }
@@ -380,13 +445,23 @@ function readBashCommand(input: unknown): string | undefined {
 }
 
 // Long-form design notes: docs/dev/command-classifier.md
-/** What a classified command becomes, per mode. */
+/**
+ * What a classified command becomes, per mode.
+ *
+ * The `agent` arm's message used to end "No permission mode runs this without
+ * an explicit rule naming it", which promises an escape hatch that does not
+ * exist: `evaluatePermissions` calls this at step 3, above both the ask loop and
+ * the allow loop, so no rule — allow or ask — lifts the refusal. What actually
+ * spends a classified command is a person answering the dialog, which only
+ * `ask` mode offers, and the message says that instead of pointing at a rule
+ * that would not work.
+ */
 function decideDangerous(match: DangerousCommandMatch, mode: PermissionMode): PermissionResult {
 	const why = `Blocked as a dangerous command: ${match.rule}`;
 	if (mode === "agent") {
 		return {
 			behavior: "deny",
-			message: `${why}. No permission mode runs this without an explicit rule naming it.`,
+			message: `${why}. The refusal is final in this mode: no allow or ask rule lifts it, and only a person — answering the dialog in ask mode — can decide to spend it.`,
 		};
 	}
 	return { behavior: "ask", message: why };
@@ -464,8 +539,16 @@ export function formatRule(rule: PermissionRule): string {
 	return rule.specifier !== undefined ? `${rule.toolName}(${rule.specifier})` : rule.toolName;
 }
 
-/** Parse a settings `permissions.allow` / `permissions.deny` string array. */
-export function parseRuleList(entries: string[], behavior: "allow" | "deny", source: RuleSource): PermissionRule[] {
+/**
+ * Parse a settings rule string array — `permissions.allow`, `permissions.deny`,
+ * or `permissions.ask`. The behavior is the list's name, not a field of its
+ * entries; the syntax inside each string is the same for all three.
+ */
+export function parseRuleList(
+	entries: string[],
+	behavior: PermissionRule["behavior"],
+	source: RuleSource,
+): PermissionRule[] {
 	const rules: PermissionRule[] = [];
 	for (const entry of entries) {
 		const parsed = parseRuleText(entry);

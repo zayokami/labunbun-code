@@ -48,7 +48,12 @@ export interface StoredPolicyRule {
 	toolName: string;
 	/** Raw specifier inside `Tool(...)`; absent = bare tool rule. */
 	specifier?: string;
-	behavior: "allow" | "deny";
+	/**
+	 * Which verdict the rule stands for. The type mirrors the engine's, `ask`
+	 * included: a session that answers with a rule is holding a policy, and the
+	 * file is where a policy survives a restart.
+	 */
+	behavior: PermissionRule["behavior"];
 }
 
 export interface PolicySnapshot {

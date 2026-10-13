@@ -95,7 +95,7 @@ describe("inputMatchesSpecifier", () => {
 });
 
 describe("evaluatePermissions", () => {
-	const rules = (entries: Array<[string, "allow" | "deny"]>): PermissionRule[] =>
+	const rules = (entries: Array<[string, PermissionRule["behavior"]]>): PermissionRule[] =>
 		entries.map(([text, behavior]) => {
 			const parsed = parseRuleText(text);
 			if (!parsed) throw new Error(`invalid rule text in test fixture: ${text}`);
@@ -144,7 +144,7 @@ describe("evaluatePermissions", () => {
 	/**
 	 * The same property on the other deny path.
 	 *
-	 * A file deny rule is extended across the shell (`bashHitsFileDenyRule`), and
+	 * A file deny rule is extended across the shell (`bashHitsFileRule`), and
 	 * that extension is a *second* place a mode could have short-circuited. It is
 	 * a different branch of `evaluatePermissions` from the bare-tool match above,
 	 * so a test on the bare-tool branch says nothing about it — the deny scan
@@ -479,6 +479,15 @@ describe("evaluatePermissions", () => {
 		expect(parsed).toHaveLength(1);
 	});
 
+	test("parseRuleList carries the ask behavior", () => {
+		// All three behaviors travel the same path: the array's name is the
+		// behavior, so the `permissions.ask` list reuses the allow/deny parser
+		// rather than growing a second one.
+		expect(parseRuleList(["Bash(git commit *)"], "ask", "userSettings")).toEqual([
+			{ toolName: "Bash", specifier: "git commit *", behavior: "ask", source: "userSettings" },
+		]);
+	});
+
 	/**
 	 * MCP rules are written as bare tool names (`mcp__github`), not in
 	 * `Tool(specifier)` form, so they need their own matching. Both directions are
@@ -529,6 +538,184 @@ describe("evaluatePermissions", () => {
 		};
 		expect(evaluatePermissions("mcp__github__create_issue", {}, config).behavior).toBe("allow");
 		expect(evaluatePermissions("mcp__github__delete_repo", {}, config).behavior).toBe("deny");
+	});
+
+	/**
+	 * The third behavior, `ask`, and the mode it exists for is `agent`.
+	 *
+	 * In `ask` and `plan` a dialog appears anyway, so a test written there would
+	 * pass on the mode's own answer and say nothing about the rule. `agent` is
+	 * where an ask rule has to override the mode's promise that everything runs
+	 * unattended — and that promise is what such a rule is written against.
+	 *
+	 * The block pins the two ties the file header decides rather than leaves to
+	 * loop order:
+	 *
+	 *   - deny over ask: step 1 returns before the ask loop, so an ask never
+	 *     lifts a floor;
+	 *   - ask over allow: step 4 sits above the allow loop, because a standing
+	 *     allow is exactly what an ask rule is written to punch through.
+	 *
+	 * Specificity never enters either one: a match is boolean, and the behaviors
+	 * rank, not the patterns. `Bash(git commit *) ask` beats a bare `Bash allow`
+	 * not because it is more specific but because ask is consulted first.
+	 */
+	describe("rules that ask", () => {
+		test("an ask rule forces the dialog even in agent mode", () => {
+			const config = {
+				mode: "agent" as const,
+				sandbox: SANDBOX,
+				rules: rules([["Bash(git commit *)", "ask"]]),
+				cwd: CWD,
+			};
+			const decision = evaluatePermissions("Bash", { command: "git commit -m x" }, config);
+			expect(decision.behavior).toBe("ask");
+			if (decision.behavior !== "ask") throw new Error("unreachable");
+			// The message names the rule that asked, which is most of what the
+			// dialog has to show about why it opened.
+			expect(decision.message).toContain("Asked by projectSettings rule: Bash(git commit *)");
+			// Control: the specifier bounds the rule, so a sibling git command still
+			// runs unattended.
+			expect(evaluatePermissions("Bash", { command: "git status" }, config).behavior).toBe("allow");
+		});
+
+		test("a bare-tool ask rule reaches every call of its tool, and no other tool", () => {
+			const config = { mode: "agent" as const, sandbox: SANDBOX, rules: rules([["Bash", "ask"]]), cwd: CWD };
+			expect(evaluatePermissions("Bash", { command: "git status" }, config).behavior).toBe("ask");
+			// `Write` is not named, so agent mode still runs it unattended: a rule
+			// constrains one tool, not the session.
+			expect(evaluatePermissions("Write", { file_path: "a.txt", content: "" }, config).behavior).toBe("allow");
+		});
+
+		test("deny beats ask regardless of order", () => {
+			// Both orders, because the two behaviors live in separate loops: the
+			// outcome has to be a property of the behaviors, not of which loop a
+			// future refactor happens to run first. The first order is also the
+			// pointed one — the ask rule is the *broader* match and the deny still
+			// wins, which is what "an ask never lifts a floor" means.
+			const orders: Array<Array<[string, PermissionRule["behavior"]]>> = [
+				[
+					["Bash(git *)", "ask"],
+					["Bash(git commit *)", "deny"],
+				],
+				[
+					["Bash(git commit *)", "deny"],
+					["Bash(git *)", "ask"],
+				],
+			];
+			for (const entries of orders) {
+				const config = { mode: "agent" as const, sandbox: SANDBOX, rules: rules(entries), cwd: CWD };
+				const decision = evaluatePermissions("Bash", { command: "git commit -m x" }, config);
+				expect(decision.behavior).toBe("deny");
+				if (decision.behavior !== "deny") throw new Error("unreachable");
+				// The refusing rule is named too, so the assertion cannot be satisfied
+				// by some other refusal happening to fire instead.
+				expect(decision.message).toContain("Denied by projectSettings rule: Bash(git commit *)");
+			}
+		});
+
+		test("an ask rule survives the broad allow that would otherwise swallow it", () => {
+			// The shape the behavior exists for: a session-wide "stop asking about
+			// Bash" grant, and the one command family the user still wants to see.
+			// Were the allow loop consulted first, the commit would run unattended —
+			// the one failure a user cannot see, because nothing would be shown.
+			const config = {
+				mode: "agent" as const,
+				sandbox: SANDBOX,
+				rules: rules([
+					["Bash", "allow"],
+					["Bash(git commit *)", "ask"],
+				]),
+				cwd: CWD,
+			};
+			expect(evaluatePermissions("Bash", { command: "git commit -m x" }, config).behavior).toBe("ask");
+			// Control: the allow rule still does its own job for everything the ask
+			// rule does not name.
+			expect(evaluatePermissions("Bash", { command: "git status" }, config).behavior).toBe("allow");
+		});
+
+		test("the classifier's refusal is not softened into a question by an ask rule", () => {
+			// Step 3 above step 4: an ask rule naming `rm` cannot turn agent mode's
+			// hard refusal into a dialog, because the classifier returns before the
+			// ask loop runs. The message pins *which* step answered — the assertion
+			// on "Asked by" would catch a reroute that happened to say deny some
+			// other way.
+			const config = { mode: "agent" as const, sandbox: SANDBOX, rules: rules([["Bash", "ask"]]), cwd: CWD };
+			const decision = evaluatePermissions("Bash", { command: "rm -rf /" }, config);
+			expect(decision.behavior).toBe("deny");
+			if (decision.behavior !== "deny") throw new Error("unreachable");
+			expect(decision.message).toContain("Blocked as a dangerous command");
+			expect(decision.message).not.toContain("Asked by");
+			// The refusal no longer points at a rule as a way through: no rule lifts
+			// this one, and that is the sentence that used to say otherwise.
+			expect(decision.message).toContain("no allow or ask rule lifts it");
+			// Control, both halves: the same ask rule does reach an ordinary command
+			// (so the rule is live), and in `ask` mode the classified command is the
+			// classifier's to ask about — its message, not the rule's.
+			expect(evaluatePermissions("Bash", { command: "ls" }, config).behavior).toBe("ask");
+			const asked = evaluatePermissions("Bash", { command: "rm -rf /" }, { ...config, mode: "ask" as const });
+			expect(asked.behavior).toBe("ask");
+			if (asked.behavior !== "ask") throw new Error("unreachable");
+			expect(asked.message).toContain("Blocked as a dangerous command");
+		});
+
+		test("plan's deny outranks an ask rule", () => {
+			// Plan is a deny at step 2, above the ask loop for the same reason it is
+			// above the allow loop: in a mode that promises no writes, a dialog whose
+			// `yes` writes anyway is the promise broken by one keystroke.
+			const config = { mode: "plan" as const, sandbox: SANDBOX, rules: rules([["Write", "ask"]]), cwd: CWD };
+			const decision = evaluatePermissions("Write", { file_path: "a.txt", content: "" }, config);
+			expect(decision.behavior).toBe("deny");
+			if (decision.behavior !== "deny") throw new Error("unreachable");
+			expect(decision.message).toContain("Plan mode");
+			// Control: a read-only tool the plan gate admits does reach the dialog,
+			// and the message proves the rule opened it rather than the mode's own
+			// undecided fallback (which also answers `ask`, without a message).
+			const read = evaluatePermissions("Read", { file_path: "a.txt" }, { ...config, rules: rules([["Read", "ask"]]) });
+			expect(read.behavior).toBe("ask");
+			if (read.behavior !== "ask") throw new Error("unreachable");
+			expect(read.message).toContain("Asked by projectSettings rule: Read");
+		});
+
+		test("a file ask rule reaches the shell that touches the same file", () => {
+			// The Bash cross-check is asked of ask rules the way it is asked of deny
+			// rules, and for the same open-bypass reason: a file the user wants to be
+			// consulted about must not be writable silently through the shell.
+			const config = {
+				mode: "agent" as const,
+				sandbox: SANDBOX,
+				rules: rules([["Write(secret/**)", "ask"]]),
+				cwd: CWD,
+			};
+			const decision = evaluatePermissions("Bash", { command: "echo x > secret/key" }, config);
+			expect(decision.behavior).toBe("ask");
+			if (decision.behavior !== "ask") throw new Error("unreachable");
+			// The verdict names the path it caught, so the dialog can say why it
+			// opened.
+			expect(decision.message).toContain('command accesses "secret/key"');
+			// Control: the same redirection into an unprotected directory runs
+			// unattended in agent mode, and the file tool itself is still asked
+			// about.
+			expect(evaluatePermissions("Bash", { command: "echo x > public/key" }, config).behavior).toBe("allow");
+			expect(evaluatePermissions("Write", { file_path: "secret/key", content: "" }, config).behavior).toBe("ask");
+		});
+
+		test("a file-tool allow does not extend to the shell", () => {
+			// The extension is deliberately one-directional: a grant written for a
+			// file tool says nothing about the shell (see `bashHitsFileRule`), so a
+			// `Write` allow does not quietly become a `Bash` allow for a command
+			// that writes the same file. `ask` mode is what makes the difference
+			// observable: the shell call lands on the mode's own answer rather than
+			// on the grant.
+			const config = {
+				mode: "ask" as const,
+				sandbox: SANDBOX,
+				rules: rules([["Write(secret/**)", "allow"]]),
+				cwd: CWD,
+			};
+			expect(evaluatePermissions("Write", { file_path: "secret/key", content: "" }, config).behavior).toBe("allow");
+			expect(evaluatePermissions("Bash", { command: "echo x > secret/key" }, config).behavior).toBe("ask");
+		});
 	});
 });
 
