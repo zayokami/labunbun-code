@@ -43,7 +43,7 @@ import { createClaudeCredentials } from "./claude-auth.ts";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
 import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
-import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
+import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
 import { withheldDefinitionNotice } from "./project-trust.ts";
@@ -456,39 +456,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 				}
 				return decision;
 			},
-			hooks: {
-				composeUserMessage: (text) => {
-					// Hook context is composed into the user message as it is created, so
-					// the stored transcript is what every later request replays. The
-					// version of this that attached it to the first request only made the
-					// prompt the hook contributed to unrepeatable: the second request of a
-					// tool loop sent the same message without it, and every token after
-					// that message was charged at full price again.
-					//
-					// Drained rather than kept: a second prompt in the same run is a
-					// different message, and it gets whatever that prompt's own hooks
-					// contributed.
-					const context = hookContext.splice(0, hookContext.length);
-					if (context.length === 0) return text;
-					return `${context.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
-				},
-				beforeToolCall: async (toolName, input) => {
-					if (!hooksRuntime.has("PreToolUse")) return undefined;
-					const outcome = await hooksRuntime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
-					for (const error of outcome.errors) console.error(`Warning: PreToolUse hook failed: ${error}`);
-					if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
-					return undefined;
-				},
-				afterToolCall: async (toolName, input) => {
-					if (!hooksRuntime.has("PostToolUse")) return undefined;
-					const outcome = await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
-					// Advisory: the call already ran, so a block has nothing to stop.
-					for (const message of advisoryHookFailures("PostToolUse", outcome)) {
-						console.error(`Warning: ${message}`);
-					}
-					return undefined;
-				},
-			},
+			// The same three callbacks the ACP route wires, from one definition
+			// (`sessionHookDeps`), so the two unattended entry points cannot drift
+			// about when hook context joins a user message.
+			hooks: sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd }),
 		},
 	});
 

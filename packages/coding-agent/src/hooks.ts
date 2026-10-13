@@ -14,6 +14,7 @@
  * hooks mid-run.
  */
 import { spawn } from "node:child_process";
+import type { LoopHooks } from "@labunbun/agent";
 import { z } from "zod";
 
 export const HOOK_EVENTS = [
@@ -157,6 +158,51 @@ export function advisoryHookFailures(event: HookEventName, outcome: HookOutcome)
 		messages.push(`${event} hook reported failure${outcome.reason ? `: ${outcome.reason}` : ""}`);
 	}
 	return messages;
+}
+
+/**
+ * The session-level hook deps every unattended entry point wires the same way —
+ * `-p` runs and ACP sessions.
+ *
+ * One definition rather than one per entry point, because the subtle half is not
+ * the three callbacks but the timing in `composeUserMessage`: hook context is
+ * folded into the user message at the moment it is stored, and a second copy of
+ * that rule is a second place it can be got wrong. `context` is the array the
+ * caller's `SessionStart`/`UserPromptSubmit` runs pushed into; it is drained
+ * rather than read, so a second prompt in the same run carries only what its own
+ * prompt contributed.
+ */
+export function sessionHookDeps(options: { runtime: HooksRuntime; context: string[]; cwd: string }): LoopHooks {
+	const { runtime, context, cwd } = options;
+	return {
+		// Hook context is composed into the user message as it is created, so the
+		// stored transcript is what every later request replays. Attaching it to the
+		// first request only would make the prompt the hook contributed to
+		// unrepeatable: the second request of a tool loop would send the same message
+		// without it, and every token after that message would be charged at full
+		// price again.
+		composeUserMessage: (text) => {
+			const added = context.splice(0, context.length);
+			if (added.length === 0) return text;
+			return `${added.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
+		},
+		beforeToolCall: async (toolName, input) => {
+			if (!runtime.has("PreToolUse")) return undefined;
+			const outcome = await runtime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
+			for (const error of outcome.errors) console.error(`Warning: PreToolUse hook failed: ${error}`);
+			if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
+			return undefined;
+		},
+		afterToolCall: async (toolName, input) => {
+			if (!runtime.has("PostToolUse")) return undefined;
+			const outcome = await runtime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
+			// Advisory: the call already ran, so a block has nothing to stop.
+			for (const message of advisoryHookFailures("PostToolUse", outcome)) {
+				console.error(`Warning: ${message}`);
+			}
+			return undefined;
+		},
+	};
 }
 
 interface CommandHookResult {
