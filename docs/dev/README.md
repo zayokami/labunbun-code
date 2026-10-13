@@ -2,6 +2,7 @@
 
 This directory holds the long-form design notes for the labunbun repository. Each document carries notes that moved out of the source comments. The source keeps a short comment with a pointer, `// Long-form design notes: docs/dev/<topic>.md`.
 
+- [Agent Client Protocol](acp.md): the editor-facing server over stdio — the frames it emits, the modes it advertises, the permission round trip, and what `session/load` replays.
 - [AI layer](ai-layer.md): the model registry, the prompt cache rules, and the three wire adapters in `packages/ai`.
 - [ChatGPT subscription](chatgpt-subscription.md): the app-side sign-in for a ChatGPT subscription — the credential store, the two login shapes, and where the app wires them.
 - [Checkpoint ledger](checkpoint-ledger.md): the record of what the agent did — the entry one finished tool call leaves, the file snapshots `/rewind` restores from, and the recovery line a resumed session prints.
