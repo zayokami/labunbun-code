@@ -6,7 +6,7 @@ Whether this TUI can show two things at once. The request behind the note is one
 - **A read-only watch panel is possible**, in the frame that already repaints on every keystroke, while the user keeps typing. It cannot be the transcript, but it can be the thing the request is usually about: a background shell's output tail.
 - **A full-screen workspace with real panes is mechanically available** (ink 7.1.1 ships an unused alternate screen; measured) at the price of the terminal scrollback, a full clear-and-reprint on the frame path measured on Windows, and an input-focus system this app has never had. It is the last phase of the plan, gated on whether the watch panel earns it.
 
-Nothing here has shipped. No source file points at this note; the design is a gate, not a record.
+P1 of this plan has shipped (`3e97a67..5f636bf`): the read-only watch panel, `packages/tui/src/components/WatchPanel.tsx`, opened by `Ctrl+T` and closed by it or Escape (`packages/tui/src/components/REPL.tsx:566-571`, `:550`). The rest of the note is still a gate rather than a record: no source file points at it, the full-screen workspace (design A) is not built, and the panel cannot pick or mark which shell's tail it shows. What shipped against this plan, and what each open decision settled to, is recorded under P1 and the open decisions below.
 
 ## What a pane would be for
 
@@ -16,12 +16,12 @@ Four candidates were weighed, by what the user is looking at and where that data
 | --- | --- | --- | --- |
 | Waiting on a dev server started with `run_in_background` | The shell's recent output, live | `list()` and `output()` on the shell manager (`packages/tools/src/background.ts:413`, `:419`), a 2 s poll (`packages/coding-agent/src/background-commands.ts:25`), a tail formatter (`:56`), a one-line status row (`packages/tui/src/components/StatusLine.tsx:90`) | Yes — every piece exists |
 | Waiting on a subagent | Its status, and what it is doing | Listing and ordering (`packages/coding-agent/src/subagent-commands.ts:18`, `:68`), a retention cap of eight (`packages/coding-agent/src/subagent-registry.ts:26`); no live subscription to a running handle's stream exists | Listing yes, live stream no |
-| Reviewing what the agent changed | A diff that updates as it works | The file checkpoints `/rewind` restores from are written before each Edit/Write mutates a file (`packages/coding-agent/src/interactive.ts:1116`); nothing computes a live diff | No — new plumbing |
+| Reviewing what the agent changed | A diff that updates as it works | The file checkpoints `/rewind` restores from are written before each Edit/Write mutates a file (`packages/coding-agent/src/checkpoint-log.ts:322`, called from `packages/coding-agent/src/interactive.ts:1190`); nothing computes a live diff | No — new plumbing |
 | Watching the task list | The tree | Already inline above the prompt: `TaskStrip` (`packages/tui/src/components/REPL.tsx:782`) | Done — nothing to add |
 
 The user stories reduce to two shapes, and only one of them needs a pane:
 
-1. "I started a ten-minute build in the background and I want to keep working while it runs, watching its tail." The status row already names the shell; the tail currently costs four keystrokes and a picker (`/ps`, `packages/coding-agent/src/interactive.ts:2657-2674`) and then arrives as one static info block in the transcript — the opposite of watching.
+1. "I started a ten-minute build in the background and I want to keep working while it runs, watching its tail." The status row already names the shell; the tail currently costs four keystrokes and a picker (`/ps`, `packages/coding-agent/src/interactive.ts:2917-2933`) and then arrives as one static info block in the transcript — the opposite of watching.
 2. "Show me the transcript beside the thing I am watching." This is the one that cannot be built under the current model, and the rest of the document says why.
 
 ## The rendering model a pane has to live in
@@ -87,9 +87,9 @@ The key inventory is tight, and one part of it is closed by measurement:
 
 **Risks.** Real-terminal behavior of `1049h` under Windows Console/ConPTY (unverified); dialogs and pickers rendered from inside a workspace; the theme-repaint remount path (`packages/tui/src/app.tsx:238-246`) replayed into a fullscreen context; copy from the alternate screen.
 
-### B. A watch panel in the frame (read-only, toggled) — recommended
+### B. A watch panel in the frame (read-only, toggled) — shipped as P1
 
-**Shape.** A bordered panel in the same bottom block the activity panel already occupies (`packages/tui/src/components/REPL.tsx:837`), toggled by a key, closed by the same key or Escape. It renders rows and takes no keys of its own, so the prompt keeps the keyboard and typing continues while it is open — which is the point. Phases widen the sources; P1 is one background shell's tail on the existing 2 s cadence.
+**Shape.** A bordered panel in the same bottom block the activity panel already occupies (`packages/tui/src/components/REPL.tsx:869`, the panel itself at `:883`), toggled by a key, closed by the same key or Escape. It renders rows and takes no keys of its own, so the prompt keeps the keyboard and typing continues while it is open — which is the point. Phases widen the sources; P1 is one background shell's tail on the existing 2 s cadence.
 
 **Trade-offs.**
 - No new rendering machinery: same frame, same paint contract, and a test template that already exists (`packages/tui/test/activity-panel.test.tsx:209`).
@@ -98,7 +98,7 @@ The key inventory is tight, and one part of it is closed by measurement:
 - It spends vertical budget against the ceiling above. The height must be clamped from `useWindowSize().rows` — the precedent cited here was wrong about what it is: `packages/tui/src/components/ActivityPanel.tsx:325` reads `columns`, and nothing in this tree reads `rows`, so the panel is that hook's first user and its tests need a fixture that overrides `rows` the way the activity panel's tests override `columns` — with a reserve for the live tail, streaming preview, status block and a multi-line prompt — and the reserve needs a real-terminal check, because the spike measured the fake-TTY path only.
 - It must answer the recorded `Ctrl+O` wrinkle: while the panel is open, `Ctrl+O` either wins (panel hides with the screen and returns with it) or is muted; silence is not an option, and the choice needs a pinning test.
 
-**Implementation surface.** REPL state, one key, one render slot; a `WatchPanel.tsx`; the poll in `packages/coding-agent/src/interactive.ts:1807-1815` grows a tail per shell (or the app handle grows a getter, `packages/tui/src/app.tsx:188`); a shortcuts row (`packages/tui/src/shortcuts.ts:67`); tests modeled on `packages/tui/test/repl-transcript.test.tsx:70` and `packages/tui/test/activity-panel.test.tsx:209`.
+**Implementation surface.** REPL state, one key, one render slot; `packages/tui/src/components/WatchPanel.tsx`; the poll in `packages/coding-agent/src/interactive.ts:1899-1912` publishes each shell's tail (`SHELL_TAIL_LINES = 8`, `:1883`) through the app handle (`setBackgroundShells`, `packages/tui/src/app.tsx:188`); a shortcuts row (`packages/tui/src/shortcuts.ts:122`); tests in `packages/tui/test/watch-panel.test.tsx`, modeled on `packages/tui/test/repl-transcript.test.tsx:70` and `packages/tui/test/activity-panel.test.tsx:209`.
 
 **Risks.** The height ceiling (measured path, fake TTY only); a tail that lags 2 s behind a noisy shell (acceptable for watching, wrong for debugging — the panel should say what it is); a second source of truth for "which shell am I watching" if the user stops the shell from elsewhere.
 
@@ -120,6 +120,8 @@ The key inventory is tight, and one part of it is closed by measurement:
 The spine is **B**, with **C** as its natural enlargement (a panel key held with a modifier, or a pager inside the panel, becomes a screen when a source outgrows the height budget), and **A** deferred behind evidence.
 
 ### P1 — watch panel, background shells only
+
+**Shipped** at `3e97a67..5f636bf`. Two details landed differently than this plan wrote them — the panel cannot select or mark which shell's tail it is showing (it watches the last running shell, else the last, `packages/tui/src/components/WatchPanel.tsx:69-74`), and its header rows carry id, command and status but no `shellAge` (`:147-152`) — and none of P2 or P3 is built. The key and the placement were settled from the recommendations below (`Ctrl+T`, the bottom band); the shipped panel adds one refusal this plan did not name: `Ctrl+T` is ignored while the transcript is up (`packages/tui/src/components/REPL.tsx:566-571`).
 
 - Toggle `Ctrl+T` (recommendation; see open decisions), Escape closes. While open the prompt keeps every key and the panel takes none. While a dialog is up, the toggle key is ignored — the least surprising of the available rules until "a modal screen owns the view-switch key" is written for real.
 - Content: one header row per running shell (id, elided command, `shellAge`, all already written — `packages/coding-agent/src/background-commands.ts:28`) and the tail of the selected shell, newest first by start order, from `liveOutputLines`/`formatShellOutput` (`packages/coding-agent/src/background-commands.ts:56`).
@@ -171,7 +173,7 @@ Two readings that carried the design: #1 is the constraint (the transcript is no
 
 ## Open decisions
 
-Each needs a user call before P1 starts:
+Each needed a user call before P1 started. The first three were settled by the shipped panel, from the recommendations here — `Ctrl+T`, the bottom band, background shells only; the fourth is still open:
 
 1. **The toggle key.** Recommendation: `Ctrl+T` — unclaimed by the app, the prompt and the vim engine, and reachable in the default editor mode; under the emacs editor the engine eats it exactly as it already eats `Ctrl+O` (`packages/tui/src/emacs.ts:726`, `packages/tui/src/shortcuts.ts:112-116`), and the panel's shortcuts row must say so the way the `Ctrl+O` row does. The alternative is `Ctrl+V`, cleaner in-tree still (no engine claims it, `packages/tui/src/vim.ts:2579-2587`) but exposed to terminal-level paste — Windows Terminal's default keymap sends `Ctrl+V` to paste — which is a ten-second check on the user's real terminal that this machine cannot make (no PTY). If `Ctrl+V` survives that check it is the better key; otherwise `Ctrl+T` is the fallback and the emacs caveat is a recorded trade, not a surprise. Function keys are ruled out by measurement, not preference.
 2. **Panel placement.** Recommendation: the bottom band above the prompt, where the activity panel already lives. The right-column variant is a P2 question and only at wide terminals; a right column splits the live area, not the transcript, and may read as a split without being one.
