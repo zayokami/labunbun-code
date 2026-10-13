@@ -661,6 +661,107 @@ describe("differential fixes", () => {
 	});
 });
 
+describe("blank lines stop the word walks", () => {
+	test("w halts on the blank line, and b on the one its step lands on", () => {
+		// The two reads of one rule: `fwd_word`'s white loop asks at its top and
+		// leaves the caret on the blank line; `bck_word`'s check follows the
+		// step that arrived, so `b` stops on the line it just reached.
+		expect(motionForwardWord("a\n\nb", 0)).toBe(2);
+		expect(motionForwardWord("a\n\nb", 2)).toBe(3); // and off it again
+		expect(motionBackWord("a\n\nb", 3)).toBe(2);
+		// Standing on the blank line already, `b` steps off before the check
+		// runs and never sees it again — it keeps going, out of the "a", to
+		// the file start.
+		expect(motionBackWord("a\n\nb", 2)).toBe(0);
+		// A line of blanks is not blank in that sense — the walk crosses it.
+		expect(motionForwardWord("a\n \nb", 0)).toBe(4);
+		expect(motionBackWord("a\n \nb", 4)).toBe(0); // crosses back to "a"
+	});
+
+	test("dw on a blank line's neighbour deletes one character", () => {
+		// The last step's eol guard halts on the line's own break, so the walk
+		// never reaches the blank line: one `w` takes the "a" and stops.
+		const one = editor("a\n\nb", 0);
+		one.engine.handleKey("d", one.key());
+		one.engine.handleKey("w", one.key());
+		expect(one.state.text).toBe("\n\nb");
+		expect(one.state.cursor).toBe(0);
+
+		const two = editor("a\n\nb", 0);
+		two.engine.handleKey("d", two.key());
+		two.engine.handleKey("2", two.key());
+		two.engine.handleKey("w", two.key());
+		expect(two.state.text).toBe("b"); // the blank line goes linewise
+		expect(two.state.cursor).toBe(0);
+
+		const three = editor("a\n\nb", 0);
+		three.engine.handleKey("d", three.key());
+		three.engine.handleKey("3", three.key());
+		three.engine.handleKey("w", three.key());
+		expect(three.state.text).toBe("");
+	});
+
+	test("from the blank line itself dw takes the break in front of the word", () => {
+		const d = editor("a\n\nb", 2);
+		d.engine.handleKey("d", d.key());
+		d.engine.handleKey("w", d.key());
+		expect(d.state.text).toBe("a\nb");
+		expect(d.state.cursor).toBe(2);
+
+		const d2 = editor("a\n\nb", 2);
+		d2.engine.handleKey("d", d2.key());
+		d2.engine.handleKey("2", d2.key());
+		d2.engine.handleKey("w", d2.key());
+		expect(d2.state.text).toBe("a");
+		expect(d2.state.cursor).toBe(0);
+	});
+
+	test("the linewise promotion reads where the range ends", () => {
+		// `x a\n\nb` from the "a": the caret is past its line's indent, so the
+		// col-0 fold pulls the end back onto the break instead of going
+		// linewise — "x " keeps its trailing space.
+		const pull = editor("x a\n\nb", 2);
+		pull.engine.handleKey("d", pull.key());
+		pull.engine.handleKey("2", pull.key());
+		pull.engine.handleKey("w", pull.key());
+		expect(pull.state.text).toBe("x \nb");
+		expect(pull.state.cursor).toBe(1);
+
+		// Same keys from column zero on "  aa\nbb\ncc": the final step's walk
+		// would cross the break, but the eol clamp halts it on line one's own
+		// break — still one line, so still characterwise: only "  aa" goes.
+		const one = editor("  aa\nbb\ncc", 0);
+		one.engine.handleKey("d", one.key());
+		one.engine.handleKey("2", one.key());
+		one.engine.handleKey("w", one.key());
+		expect(one.state.text).toBe("\nbb\ncc");
+		expect(one.state.cursor).toBe(0);
+
+		// One line longer and the clamp stops on the second line's break: the
+		// range spans two lines, and that is what promotes it linewise.
+		const promo = editor("ab\ncd\nef", 0);
+		promo.engine.handleKey("d", promo.key());
+		promo.engine.handleKey("2", promo.key());
+		promo.engine.handleKey("w", promo.key());
+		expect(promo.state.text).toBe("ef");
+	});
+
+	test("b crossing a blank line backward, and y leaving the text alone", () => {
+		const d = editor("a\n\nb", 3);
+		d.engine.handleKey("d", d.key());
+		d.engine.handleKey("b", d.key());
+		expect(d.state.text).toBe("a\nb");
+		expect(d.state.cursor).toBe(2);
+
+		const y = editor("x a\n\nb", 2);
+		y.engine.handleKey("y", y.key());
+		y.engine.handleKey("2", y.key());
+		y.engine.handleKey("w", y.key());
+		expect(y.state.text).toBe("x a\n\nb");
+		expect(y.state.cursor).toBe(2);
+	});
+});
+
 describe("the NORMAL cursor stays on a character", () => {
 	test("Esc out of insert steps back onto the character just typed", () => {
 		const e = editor("", 0);

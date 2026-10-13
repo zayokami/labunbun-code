@@ -309,6 +309,19 @@ const EOL_LEADING = "aa bb\n  cc dd";
 /** The cpo test's four lines, and the caret `fb` leaves on the `b` of `bar`. */
 const EOL_CPO = `one \n     bar\n    e\t        \nzwei`;
 
+/**
+ * Blank lines, which the two word walks stop on: `fwd_word`'s white loop breaks
+ * at column zero of a blank line (textobject.c:412-413) and `bck_word`'s stops
+ * when the step that arrived landed there (textobject.c:457-459). A line of
+ * blanks is not blank in that sense, and `EMPTY_SPACE` is the control.
+ */
+const EMPTY_ONE = "a\n\nb";
+const EMPTY_TWO = "a\n\n\nb";
+const EMPTY_SPACE = "a\n \nb";
+const EMPTY_LATE = "a\n\nb\nc";
+const EMPTY_HEAD = "x a\n\nb";
+const EMPTY_BEFORE = "ab\n\nb";
+
 const CASES = [
 	// wanted column: MAXCOL and short lines
 	[["$", "j"], A, 0],
@@ -1762,6 +1775,65 @@ const CASES = [
 	[["d", "3", "2", "w"], "one two three four five six seven eight nine ten", 0],
 	[["d", "4", "w"], "one two three four", 0],
 	[["d", "5", "w"], "one two three four", 0],
+
+	// The blank line under the walks. The two cursors that arrive at one do so
+	// by different reads: `w` stops the caret *on* the blank line (its white
+	// loop asks at the top of each pass), while `b` stops it on the one the
+	// step that arrived just reached. Under an operator the last step's `eol`
+	// guard halts on either side of a break — on it from inside a line, past
+	// it when the step starts on the break — and the col-0 fold
+	// (ops.c:4279-4307) plus the linewise delete promotion (ops.c:806-826)
+	// turn the two readings into different deletions: `dw` at 0 takes one
+	// character, `d2w` at 0 takes lines. Every case below was measured.
+	[["w"], EMPTY_ONE, 0],
+	[["2", "w"], EMPTY_ONE, 0],
+	[["3", "w"], EMPTY_ONE, 0],
+	[["W"], EMPTY_ONE, 0],
+	[["b"], EMPTY_ONE, 3],
+	[["2", "b"], EMPTY_ONE, 3],
+	[["B"], EMPTY_ONE, 3],
+	[["e"], EMPTY_ONE, 0],
+	[["w"], EMPTY_ONE, 2],
+	[["b"], EMPTY_ONE, 2],
+	[["w"], EMPTY_SPACE, 0],
+	[["2", "w"], EMPTY_SPACE, 0],
+	[["b"], EMPTY_SPACE, 4],
+	[["w"], EMPTY_TWO, 0],
+	[["2", "w"], EMPTY_TWO, 0],
+	[["3", "w"], EMPTY_TWO, 0],
+	[["2", "w"], "x\na\n\nb", 2],
+	[["d", "w"], EMPTY_ONE, 0],
+	[["d", "2", "w"], EMPTY_ONE, 0],
+	[["d", "3", "w"], EMPTY_ONE, 0],
+	[["d", "w"], EMPTY_ONE, 2],
+	[["d", "2", "w"], EMPTY_ONE, 2],
+	[["y", "2", "w"], EMPTY_ONE, 2],
+	[["d", "w"], EMPTY_ONE, 3],
+	[["d", "b"], EMPTY_ONE, 3],
+	[["d", "2", "w"], EMPTY_TWO, 0],
+	[["d", "3", "w"], EMPTY_TWO, 0],
+	[["d", "w"], EMPTY_BEFORE, 3],
+	[["d", "2", "w"], EMPTY_LATE, 0],
+	[["d", "2", "w"], EMPTY_HEAD, 2],
+	[["d", "w"], EMPTY_HEAD, 2],
+	[["y", "2", "w"], EMPTY_HEAD, 2],
+	[["c", "2", "w", "\x1b"], EMPTY_HEAD, 2],
+	[["d", "2", "w"], "x a\nz\nb", 2],
+	[["d", "2", "w"], "  aa\nbb\ncc", 0],
+	[["2", "d", "2", "w"], "ab\ncd\nef", 0],
+	[["d", "2", "w"], "ab\ncd", 1],
+	[["d", "2", "w"], "ab\nc\nd", 1],
+	[["d", "2", "w"], "ab\ncde\nd", 1],
+	[["y", "2", "w"], "ab\nc\nd", 1],
+	[["d", "w"], "ab\ncd", 1],
+	[["d", "2", "w"], "ab\ncd\nef", 0],
+	[["d", "3", "w"], "ab\ncd\nef", 3],
+	[["d", "2", "b"], "ab\ncd\nef", 3],
+	[["d", "2", "w"], EOL_THREE, 6],
+	[["y", "3", "w"], EOL_THREE, 6],
+	[["d", "3", "w"], EOL_THREE, 6],
+	[["y", "2", "w"], EOL_THREE, 6],
+	[["c", "2", "w", "\x1b"], EOL_THREE, 6],
 
 	// Not here: anything with the caret on the `\n` of `"ab\ncd"`. Vim has no
 	// line-break character to put a caret on — `cursor(1, 3)` clamps onto the

@@ -1206,14 +1206,28 @@ export function motionForwardWord(text: string, pos: number, big = false): numbe
 	if (startCls !== 0) {
 		while (i < n && charClass(text, i, big) === startCls) i = nextChar(text, i);
 	}
-	while (i < n && charClass(text, i, big) === 0) i = nextChar(text, i);
+	while (i < n && charClass(text, i, big) === 0) {
+		// A blank line stops the walk: `fwd_word` breaks when the whitespace
+		// loop stands at column zero of an empty line (textobject.c:412-413),
+		// and the check sits at the top of the loop. The line under the caret
+		// at entry is never examined — `inc_cursor` has already moved off it —
+		// which is what the `i > pos` guard keeps true here.
+		if (i > pos && text[i] === "\n" && lineStart(text, i) === i) break;
+		i = nextChar(text, i);
+	}
 	return i;
 }
 
 export function motionBackWord(text: string, pos: number, big = false): number {
 	if (pos <= 0) return 0;
 	let i = prevChar(text, pos);
-	while (i > 0 && charClass(text, i, big) === 0) i = prevChar(text, i);
+	while (i > 0 && charClass(text, i, big) === 0) {
+		// `bck_word` stops on a blank line (textobject.c:457-459): the check
+		// sits at the top of the step that arrived, so the line the walk has
+		// just reached is examined before stepping past it.
+		if (text[i] === "\n" && lineStart(text, i) === i) return i;
+		i = prevChar(text, i);
+	}
 	const c = charClass(text, i, big);
 	while (i > 0 && charClass(text, prevChar(text, i), big) === c) i = prevChar(text, i);
 	return i;
@@ -2223,6 +2237,15 @@ function deleteGoesLinewise(text: string, start: number, endPos: number, inclusi
 	if (at < rest) return false;
 	// `inindent(0)` counts the blanks in front of the start and asks whether the
 	// cursor has not passed them.
+	return inindentAt(text, start);
+}
+
+/**
+ * `inindent(0)` (indent.c:1100): whether every character in front of `start` on
+ * its own line is a blank — true for a caret at column zero, and the question
+ * the col-0 fold and the linewise delete promotion both ask of a range.
+ */
+function inindentAt(text: string, start: number): boolean {
 	for (let i = lineStart(text, start); i < start; i++) {
 		if (text[i] !== " " && text[i] !== "\t") return false;
 	}
@@ -4103,6 +4126,41 @@ export class VimEngine {
 				if (endRange) range = endRange;
 			}
 		}
+		// ops.c:4279-4307 — an exclusive word-motion end that came to rest at the
+		// first column of a later line comes back one line: onto the break in
+		// front of that line when the caret had left its own line's indent, or
+		// linewise over the lines walked when it had not ("strange, but that's
+		// the way vi does it"). Only the word motions arrive here exclusive — `$`
+		// carries vim's inclusive flag on its far end and `e` is inclusive too,
+		// and vim's own gate reads that flag before folding anything.
+		const wordMotion = motion === "w" || motion === "W" || motion === "b" || motion === "B";
+		if (
+			wordMotion &&
+			!range.inclusive &&
+			range.end > range.start &&
+			range.end === lineStart(text, range.end) &&
+			lineOf(text, range.end) > lineOf(text, range.start)
+		) {
+			if (inindentAt(text, range.start)) {
+				const firstLine = lineOf(text, range.start);
+				const lastLine = lineOf(text, range.end) - 1;
+				const { start, end, removeFrom } = lineRange(text, firstLine, lastLine);
+				this.#runLinewise(operator, start, end, removeFrom);
+				return;
+			}
+			range = { start: range.start, end: prevChar(text, range.end), inclusive: false };
+		}
+		// ops.c:806-826 on top, deletes only: a characterwise delete that spans
+		// lines and ends where its last line holds nothing but blanks becomes
+		// linewise — the same promotion the text objects above already get.
+		if (operator === "d" && wordMotion) {
+			const endPos = range.inclusive ? prevChar(text, range.end) : range.end;
+			if (deleteGoesLinewise(text, range.start, endPos, range.inclusive)) {
+				const { start, end, removeFrom } = lineRange(text, lineOf(text, range.start), lineOf(text, endPos));
+				this.#runLinewise("d", start, end, removeFrom);
+				return;
+			}
+		}
 		this.#runOperator(operator, range.start, range.end, range.inclusive);
 	}
 
@@ -4315,7 +4373,20 @@ export class VimEngine {
 				// `dd` and a clamp applied to every step would never leave line one.
 				for (let i = 0; i < count; i++) {
 					const next = motionForwardWord(text, target, motion === "W");
-					target = i === count - 1 ? Math.min(next, lineEndExclusive(text, target)) : next;
+					// The last step is the one the eol guard binds, and it reads
+					// differently on the two sides of a break. Walking inside a
+					// line it halts on the line's break: vim lands on the NUL
+					// column, `adjust_cursor` folds one back, and the region
+					// still opens after the line's last character. Already
+					// standing on a blank line's break — where the previous step
+					// left it — the caret crosses first, and the guard halts at
+					// the next line's first column, one position further.
+					target =
+						i === count - 1
+							? text[target] === "\n"
+								? nextChar(text, target)
+								: Math.min(next, lineEndExclusive(text, target))
+							: next;
 				}
 				break;
 			case "b":
