@@ -51,6 +51,36 @@ describe("shellAge", () => {
 	test("a start time in the future reads as just started", () => {
 		expect(shellAge(shell({ startTime: NOW + 5000 }), NOW)).toBe("0s");
 	});
+
+	// A recovered shell seen to end freezes: the age anchors at the last
+	// observation, not at whatever `now` the next screen renders with — an age
+	// that kept advancing would be counting this program's watch, not the
+	// shell's life.
+	test("a recovered shell that ended stops aging at its last observation", () => {
+		const ended: RecoveredShell = {
+			...shell({ id: "pid-9", startTime: NOW - 120_000 }),
+			pid: 9,
+			recovered: true,
+			liveness: "ended",
+			observedAt: NOW - 60_000,
+		};
+		expect(shellAge(ended, NOW)).toBe("1m");
+		expect(shellAge(ended, NOW + 3_600_000)).toBe("1m");
+	});
+
+	test("a recovered shell still running ages with the clock; one never heard from is frozen", () => {
+		const running: RecoveredShell = {
+			...shell({ id: "pid-9", startTime: NOW - 60_000 }),
+			pid: 9,
+			recovered: true,
+			liveness: "running",
+			observedAt: NOW - 50_000,
+		};
+		expect(shellAge(running, NOW)).toBe("1m");
+		const unknown: RecoveredShell = { ...running, liveness: "unknown" };
+		expect(shellAge(unknown, NOW)).toBe("10s");
+		expect(shellAge(unknown, NOW + 3_600_000)).toBe("10s");
+	});
 });
 
 describe("shellPickerItems", () => {
@@ -84,6 +114,19 @@ describe("shellPickerItems", () => {
 	test("the head survives eliding — that is the part that says what it is", () => {
 		const item = shellPickerItems([shell({ command: `bun run dev ${" --flag".repeat(20)}` })], NOW)[0];
 		expect(item.label).toContain("bun run dev");
+	});
+
+	test("a recovered shell's description says what the last probe settled, not the status it was born with", () => {
+		const ended: RecoveredShell = {
+			...shell({ id: "pid-9", startTime: NOW - 120_000 }),
+			pid: 9,
+			recovered: true,
+			liveness: "ended",
+			observedAt: NOW - 60_000,
+		};
+		expect(shellPickerItems([ended], NOW)[0].description).toBe("ended · 1m");
+		const unknown: RecoveredShell = { ...ended, liveness: "unknown" };
+		expect(shellPickerItems([unknown], NOW)[0].description).toBe("unknown · 1m");
 	});
 });
 
@@ -285,6 +328,8 @@ describe("the /ps and /stop commands", () => {
 				...shell({ id: "pid-4242", command: "vite", outputFile: log }),
 				pid: 4242,
 				recovered: true,
+				liveness: "running",
+				observedAt: NOW,
 			};
 			// The picker lands on the second row: the recovered shell, which has no
 			// manager entry behind it — its output can only come from the log file
@@ -305,6 +350,8 @@ describe("the /ps and /stop commands", () => {
 			...shell({ id: "pid-777", command: "node server.js" }),
 			pid: 777,
 			recovered: true,
+			liveness: "running",
+			observedAt: NOW,
 		};
 		// Cancel the picker: this test is about what is offered, and the kill path
 		// has its own test — cancelling is the one choice that cannot touch a pid.
@@ -325,7 +372,13 @@ describe("the /ps and /stop commands", () => {
 		const pid = proc.pid;
 		if (pid === undefined) throw new Error("spawn produced no pid");
 		try {
-			const old: RecoveredShell = { ...shell({ id: `pid-${pid}` }), pid, recovered: true };
+			const old: RecoveredShell = {
+				...shell({ id: `pid-${pid}` }),
+				pid,
+				recovered: true,
+				liveness: "running",
+				observedAt: NOW,
+			};
 			const t = makeCtx([], undefined, [old]);
 			handleAppCommand(`/stop pid-${pid}`, t.ctx);
 			await tick();

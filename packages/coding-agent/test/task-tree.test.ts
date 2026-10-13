@@ -47,6 +47,8 @@ function recovered(overrides: Partial<RecoveredShell> = {}): RecoveredShell {
 		...shell({ id: "pid-1234", startTime: NOW - 12 * 60_000 }),
 		pid: 1234,
 		recovered: true,
+		liveness: "running",
+		observedAt: NOW,
 		...overrides,
 	};
 }
@@ -90,6 +92,18 @@ describe("formatTaskTree", () => {
 	test("a recovered shell is marked as from a previous run, beside the pid that names it", () => {
 		const lines = formatTaskTree({ mainRunning: false, subagents: [], shells: [recovered()], now: NOW }).split("\n");
 		expect(flat(lines[1] ?? "")).toBe("└─ shell running 12m npm run dev (pid-1234, from a previous run)");
+	});
+
+	test("a recovered shell seen to end says ended, and its age stops at the observation", () => {
+		const lines = formatTaskTree({
+			mainRunning: false,
+			subagents: [],
+			shells: [recovered({ liveness: "ended", observedAt: NOW - 2 * 60_000 })],
+			now: NOW,
+		}).split("\n");
+		// startTime is NOW minus 12m and death was observed at NOW minus 2m: the
+		// row shows the ten minutes the shell lived on, not the two so far since.
+		expect(flat(lines[1] ?? "")).toBe("└─ shell ended 10m npm run dev (pid-1234, from a previous run)");
 	});
 
 	test("every branch but the last wears ├─, the last wears └─", () => {

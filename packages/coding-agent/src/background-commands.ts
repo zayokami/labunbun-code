@@ -12,6 +12,7 @@
 
 import type { BackgroundShell } from "@labunbun/tools";
 import { LIVE_OUTPUT_LINES, liveOutputLines } from "@labunbun/tui";
+import { isRecoveredShell, shellStateWord } from "./shell-ledger.ts";
 
 /** Longest command shown in the picker before it is elided. */
 const COMMAND_CHARS = 60;
@@ -24,9 +25,15 @@ const COMMAND_CHARS = 60;
  */
 export const BACKGROUND_SHELL_POLL_MS = 2000;
 
-/** How long a shell has been going, coarse enough to read at a glance. */
+/**
+ * How long a shell has been going, coarse enough to read at a glance. For a
+ * recovered shell that is no longer running, "going" ends at the last
+ * observation: the moment of death was never recorded, and an age that kept
+ * advancing would be counting this program's watch, not the shell's life.
+ */
 export function shellAge(shell: BackgroundShell, now = Date.now()): string {
-	const seconds = Math.max(0, Math.round((now - shell.startTime) / 1000));
+	const end = isRecoveredShell(shell) && shell.liveness !== "running" ? shell.observedAt : now;
+	const seconds = Math.max(0, Math.round((end - shell.startTime) / 1000));
 	if (seconds < 60) return `${seconds}s`;
 	const minutes = Math.floor(seconds / 60);
 	if (minutes < 60) return `${minutes}m`;
@@ -43,7 +50,14 @@ export function shellPickerItems(
 ): Array<{ label: string; description: string }> {
 	return shells.map((shell) => ({
 		label: `${shell.id}  ${elideShellCommand(shell.command)}`,
-		description: [shell.status, shell.exitCode !== null ? `exit ${shell.exitCode}` : undefined, shellAge(shell, now)]
+		// `shellStateWord`: a recovered shell says what the last probe settled —
+		// running, ended, or the probe's own failure — not the manager's status
+		// it was born wearing.
+		description: [
+			shellStateWord(shell),
+			shell.exitCode !== null ? `exit ${shell.exitCode}` : undefined,
+			shellAge(shell, now),
+		]
 			.filter(Boolean)
 			.join(" · "),
 	}));

@@ -217,6 +217,7 @@ import {
 	excludeManagedShells,
 	formatShellRecovery,
 	isRecoveredShell,
+	observeRecoveredShells,
 	type RecoveredShell,
 	readShellLedger,
 	recoveredShellOutput,
@@ -455,6 +456,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	let shellRecovery = readShellLedger(store);
 	const recoveryNotice = formatShellRecovery(shellRecovery);
 	if (recoveryNotice) console.error(`Warning: ${recoveryNotice}`);
+	// The same recovered shells in one live array, which is what `/ps` lists,
+	// `/stop` splices and the exit guard counts: the buckets are the read's
+	// verdicts, this is the set the commands mutate between one screen and the
+	// next. Both are reassigned together by a hot swap; nothing else touches it.
+	let recoveredShells: RecoveredShell[] = [...shellRecovery.alive, ...shellRecovery.unknown];
 
 	// The other thing a dead process leaves behind: subagent runs that began
 	// and were never seen to end. Nothing about them can be revived — a
@@ -1258,6 +1264,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			readShellLedger(loaded.store),
 			backgroundShells.list().flatMap((shell) => (shell.pid === undefined ? [] : [shell.pid])),
 		);
+		recoveredShells = [...shellRecovery.alive, ...shellRecovery.unknown];
 		const incomingShellNotice = formatShellRecovery(shellRecovery);
 		if (incomingShellNotice) pushInfo(handle, `Warning: ${incomingShellNotice}`);
 	}
@@ -1565,9 +1572,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				handle,
 				backgroundShells,
 				// The shells the ledger recovered: `/ps` lists them beside this run's,
-				// and `/stop` ends one by pid. The live array the report counted, so a
-				// shell stopped here is gone from the next picker too.
-				recoveredShells: shellRecovery.alive,
+				// and `/stop` ends one by pid. Re-observed per command — a shell seen
+				// to end says so on this screen, not only on the one it was read on —
+				// and it is the live array the report counted, so a shell stopped here
+				// is gone from the next picker too.
+				recoveredShells: observeRecoveredShells(recoveredShells),
 				refreshBackgroundShells: publishShells,
 				settings,
 				cwd,
@@ -1622,7 +1631,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				turnRunning: sessionRef?.isRunning === true,
 				subagents: subagentRegistry.list().filter((entry) => entry.state === "live").length,
 				shells:
-					backgroundShells.list().filter((shell) => shell.status === "running").length + shellRecovery.alive.length,
+					backgroundShells.list().filter((shell) => shell.status === "running").length +
+					// Re-observed here too: a recovered shell seen to end is not
+					// something exiting would interrupt, and a shell whose probe
+					// cannot answer is counted -- the guard must not promise a quiet
+					// exit about a shell that may still be running.
+					observeRecoveredShells(recoveredShells).filter((shell) => shell.liveness !== "ended").length,
 			}),
 			cancelPicker: () => handle?.clearPickerRequest(),
 			ask: (question) => {

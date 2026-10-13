@@ -37,6 +37,7 @@ function sceneScript(options: { cwd: string; after?: string }): string {
 		let pickedIndex = null;
 		let resumed = false;
 		let infos = () => [];
+		let probeRows = [];
 		mock.module("@labunbun/ai", () => ({
 			...ai,
 			resolveApiKey: () => "local-test-key",
@@ -86,7 +87,7 @@ function sceneScript(options: { cwd: string; after?: string }): string {
 		}));
 		const { runInteractive } = await import("./src/interactive.ts");
 		await runInteractive(${JSON.stringify({ cwd: options.cwd, theme: "dark" })});
-		console.log(JSON.stringify({ pickerItems, pickedIndex, infos: infos(), resumed }));
+		console.log(JSON.stringify({ pickerItems, pickedIndex, infos: infos(), resumed, probeRows }));
 	`;
 }
 
@@ -99,6 +100,7 @@ async function runScene(
 	pickedIndex: number | null;
 	infos: string[];
 	resumed: boolean;
+	probeRows: string[];
 }> {
 	const proc = Bun.spawn([process.execPath, "--eval", sceneScript({ cwd: options.cwd, after })], {
 		cwd: join(import.meta.dir, ".."),
@@ -187,5 +189,75 @@ describe("the /resume picker", () => {
 		expect(labels.some((label) => label.startsWith(`pid-${process.pid}`))).toBe(true);
 		// And the swap says so, in the voice startup uses for the same fact.
 		expect(outcome.infos.join("\n")).toContain("1 background shell from a previous run is still running");
+	}, 30_000);
+
+	test("a resumed shell seen to die stops claiming running, and its age freezes there", async () => {
+		const home = tempDir("lbb-resume-picker-home-");
+		const cwd = tempDir("lbb-resume-picker-cwd-");
+		const planted = SessionStore.startNew(cwd, home);
+		planted.appendMessage(userMessage("PLANTED QUESTION"));
+		// The process the planted ledger points at, owned by this test: it lives
+		// far longer than the scene needs, and the scene ends it at a moment the
+		// scene itself chooses — never on a race with the child's own exit.
+		const shellProc = Bun.spawn([process.execPath, "--eval", "setTimeout(() => process.exit(0), 60_000)"], {
+			stdio: ["ignore", "ignore", "ignore"],
+		});
+		const pid = shellProc.pid;
+		try {
+			planted.appendCustom("shell_start", {
+				shellId: "shell_1",
+				pid,
+				command: "npm run dev",
+				cwd,
+				startedAt: Date.now(),
+				outputFile: join(cwd, "dev.log"),
+			});
+
+			const outcome = await runScene(
+				{ cwd, home },
+				{},
+				`
+				const nextRow = async () => {
+					const seenBefore = pickerItems.length;
+					await onCommand("/ps");
+					const deadline = Date.now() + 8000;
+					while (Date.now() < deadline) {
+						const fresh = pickerItems.slice(seenBefore).find((item) => item.label.startsWith("pid-"));
+						if (fresh) return fresh.description;
+						await new Promise((resolve) => setTimeout(resolve, 10));
+					}
+					return "";
+				};
+				probeRows.push(await nextRow());
+				process.kill(${pid}, "SIGKILL");
+				const goneDeadline = Date.now() + 8000;
+				for (;;) {
+					try {
+						process.kill(${pid}, 0);
+					} catch {
+						break;
+					}
+					if (Date.now() > goneDeadline) break;
+					await new Promise((resolve) => setTimeout(resolve, 20));
+				}
+				probeRows.push(await nextRow());
+				await new Promise((resolve) => setTimeout(resolve, 1500));
+				probeRows.push(await nextRow());
+				`,
+			);
+
+			// The first look found it alive, as the OS still did.
+			expect(outcome.probeRows[0]?.startsWith("running")).toBe(true);
+			// The second look asked again: the process is killed and gone, so the
+			// row switches to the terminal word instead of repeating the read-time
+			// verdict — this is the lazy observation, end to end.
+			expect(outcome.probeRows[1]?.startsWith("ended")).toBe(true);
+			// And once ended the age stops moving: a later screen shows the same
+			// number, not one counting this program's watch.
+			expect(outcome.probeRows[2]).toBe(outcome.probeRows[1]);
+		} finally {
+			if (shellProc.exitCode === null) shellProc.kill("SIGKILL");
+			await shellProc.exited;
+		}
 	}, 30_000);
 });

@@ -24,6 +24,14 @@
  * take anything else down. The read side is defensive the same way: the file
  * is append-only and written line by line, and a line that does not parse
  * costs only itself.
+ *
+ * Liveness is the one thing the file cannot say: it records that a shell ran,
+ * not whether it still does. That question is asked of the OS and has three
+ * answers, not two — alive, gone, and a failure of the probe itself, which is
+ * neither. This module keeps all three apart: alive is the only answer read as
+ * running, gone is terminal and freezes what the row shows, and an
+ * unanswerable probe is reported as unknown rather than quietly counted among
+ * the ended.
  */
 import { type BackgroundShell, readTail } from "@labunbun/tools";
 
@@ -31,6 +39,12 @@ import { type BackgroundShell, readTail } from "@labunbun/tools";
 export const SHELL_START_KIND = "shell_start";
 /** The session-file kind of a shell's end — a completion and a kill alike. */
 export const SHELL_END_KIND = "shell_end";
+
+/** The three answers a liveness probe can give; see the module header. */
+export type PidState = "alive" | "dead" | "unknown";
+
+/** What a recovered shell's last observation settled, in the row's own words. */
+export type RecoveredLiveness = "running" | "ended" | "unknown";
 
 /** How much of a recovered shell's log one read brings back; the manager's own window. */
 const RECOVERED_OUTPUT_CHARS = 30_000;
@@ -67,6 +81,20 @@ export interface ShellEndRecord {
 export interface RecoveredShell extends BackgroundShell {
 	pid: number;
 	recovered: true;
+	/**
+	 * The tri-state the last probe settled. "running" while the pid answers —
+	 * EPERM included, the process is there and simply not ours to signal —
+	 * "ended" once it is gone, "unknown" when the probe itself could not
+	 * answer. "ended" is terminal: nothing here revives a shell.
+	 */
+	liveness: RecoveredLiveness;
+	/**
+	 * When liveness was written. While the shell runs it is only the last
+	 * sighting; once the shell is not running, the age display anchors here —
+	 * the moment of death is recorded nowhere, and an age that kept advancing
+	 * would be counting this program's watch, not the shell's life.
+	 */
+	observedAt: number;
 }
 
 /** Whether a shell came from the ledger rather than from this run's manager. */
@@ -80,23 +108,37 @@ export interface ShellRecovery {
 	alive: RecoveredShell[];
 	/** Started and no longer running — ended on the ledger, or ended without one. The number is all there is to say. */
 	ended: number;
+	/** Started, no end on the ledger, and the probe could not answer: reported as itself, not as either of the other two. */
+	unknown: RecoveredShell[];
 }
 
 /**
- * Whether a pid names a live process.
- *
- * EPERM counts as alive: it means the process is there and simply not ours to
- * signal, and "it is still running" is the truthful answer — the other way
- * would report a running shell as gone because of who owns it.
+ * What one probe of a pid can say: it is there — EPERM included, the process
+ * exists and simply is not ours to signal, and "still running" is the truthful
+ * answer — it is gone (ESRCH, the one answer that is evidence of death), or
+ * the probe itself failed (anything else), which is evidence of neither.
  */
-export function probePid(pid: number): boolean {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
+export function probePidState(pid: number): PidState {
+	if (!Number.isInteger(pid) || pid <= 0) return "dead";
 	try {
 		process.kill(pid, 0);
-		return true;
+		return "alive";
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "EPERM") return "alive";
+		if (code === "ESRCH") return "dead";
+		return "unknown";
 	}
+}
+
+/**
+ * Whether a pid names a live process. The boolean the reader was first built
+ * on, kept for the callers that predate the tri-state: only an affirmative
+ * probe counts — a shell the probe cannot reach is not claimed running, and
+ * callers that need to keep the third answer apart ask {@link probePidState}.
+ */
+export function probePid(pid: number): boolean {
+	return probePidState(pid) === "alive";
 }
 
 /** The one shape this module reads out of the session file: a `custom` entry and its payload. */
@@ -176,7 +218,7 @@ export function attachShellLedger(
  */
 export function readShellLedger(
 	session: { linearEntries(): readonly LedgerEntry[] },
-	isAlive: (pid: number) => boolean = probePid,
+	probe: (pid: number) => PidState = probePidState,
 ): ShellRecovery {
 	const open = new Map<number, ShellStartRecord>();
 	let ended = 0;
@@ -196,17 +238,78 @@ export function readShellLedger(
 		}
 	}
 	const alive: RecoveredShell[] = [];
+	const unknown: RecoveredShell[] = [];
 	for (const start of open.values()) {
-		if (isAlive(start.pid)) {
-			alive.push(recoveredShell(start));
+		const state = probe(start.pid);
+		if (state === "alive") {
+			alive.push(recoveredShell(start, "running"));
 			continue;
 		}
-		// Started, never ended on the ledger, and no longer there: it ended
+		if (state === "unknown") {
+			// The probe itself failed. That is neither evidence of life nor
+			// evidence of death, so the shell is reported as what it is — a
+			// shell nobody has heard from — and it is not counted among the
+			// ended, which would be asserting something the probe denied.
+			unknown.push(recoveredShell(start, "unknown"));
+			continue;
+		}
+		// Started, never ended on the ledger, and the pid is gone: it ended
 		// while nobody was listening — a crash, a kill, a reboot. The count is
 		// the whole of what can honestly be said about it.
 		ended += 1;
 	}
-	return { alive, ended };
+	return { alive, ended, unknown };
+}
+
+/**
+ * Ask the OS again about one recovered shell and write what it said into it.
+ *
+ * The read at resume is one look at one moment; a shell that was running then
+ * can be gone now, and until something asks again the row keeps saying
+ * "running" about a pid that no longer answers. This is the asking — done at
+ * the moments the user is about to see the answer (the `/ps` list, the exit
+ * guard's count), not on a timer: a probe is cheap but the OS is not asked
+ * about a shell nobody is looking at.
+ *
+ * "ended" is terminal. Once a shell is seen gone it is never probed again and
+ * never revived — the pid can be recycled, and a later probe answering "there
+ * is a process with this number" is not evidence it is the same shell. The
+ * moment of death is recorded nowhere, so `observedAt` freezes at the last
+ * look and the age stops counting this program's watch instead of the shell.
+ */
+export function observeRecoveredShell(shell: RecoveredShell, now = Date.now()): RecoveredLiveness {
+	if (shell.liveness === "ended") return "ended";
+	const state = probePidState(shell.pid);
+	if (state === "dead") {
+		shell.liveness = "ended";
+		shell.status = "completed";
+	} else {
+		// "alive" or a probe that could not say: either way the shell has not
+		// been seen to end, and nothing here invents an ending for it.
+		shell.liveness = state === "alive" ? "running" : "unknown";
+	}
+	shell.observedAt = now;
+	return shell.liveness;
+}
+
+/**
+ * Observe a batch from one `now`. One clock for the batch, so the rows a user
+ * is looking at were asked about at the same moment and two shells that end
+ * together do not freeze a tick apart. Returns the same array, observed.
+ */
+export function observeRecoveredShells(shells: RecoveredShell[], now = Date.now()): RecoveredShell[] {
+	for (const shell of shells) observeRecoveredShell(shell, now);
+	return shells;
+}
+
+/**
+ * The word a row gives a shell's state: the manager's status for a shell this
+ * run holds, the last probe's liveness for a recovered one. The manager only
+ * ever settles a shell for good; a recovered shell can go from running to
+ * ended between two looks, and the row has to say so.
+ */
+export function shellStateWord(shell: BackgroundShell): string {
+	return isRecoveredShell(shell) ? shell.liveness : shell.status;
 }
 
 /**
@@ -227,6 +330,14 @@ export function formatShellRecovery(recovery: ShellRecovery): string | undefined
 				: `${recovery.alive.length} background shells from previous runs are still running: ${ids} — /ps reads a log, /stop ends one.`,
 		);
 	}
+	if (recovery.unknown.length > 0) {
+		const ids = recovery.unknown.map((shell) => shell.id).join(", ");
+		sentences.push(
+			recovery.unknown.length === 1
+				? `1 background shell from a previous run is in an unknown state: ${ids} — the probe could not say whether it is still running; /ps reads its log, /stop tries to end it.`
+				: `${recovery.unknown.length} background shells from previous runs are in an unknown state: ${ids} — the probe could not say whether they are still running; /ps reads a log, /stop tries to end one.`,
+		);
+	}
 	if (recovery.ended > 0) {
 		sentences.push(
 			recovery.ended === 1
@@ -245,13 +356,19 @@ export function formatShellRecovery(recovery: ShellRecovery): string | undefined
  * written there because the session was. That shell has a handle: `/ps` lists
  * it already and the exit guard counts it already. Without this, coming back
  * to that session would show one shell twice — once by id and once by pid —
- * and count it twice against the batch being interrupted. The ended count is
- * the file's, untouched: a pid the manager tracks is not a shell the previous
- * run left ended.
+ * and count it twice against the batch being interrupted. The same goes for a
+ * shell the probe could not answer about: hearing nothing from a pid the
+ * manager is watching changes nothing about what the manager can say. The
+ * ended count is the file's, untouched: a pid the manager tracks is not a
+ * shell the previous run left ended.
  */
 export function excludeManagedShells(recovery: ShellRecovery, managedPids: Iterable<number>): ShellRecovery {
 	const managed = new Set(managedPids);
-	return { alive: recovery.alive.filter((shell) => !managed.has(shell.pid)), ended: recovery.ended };
+	return {
+		alive: recovery.alive.filter((shell) => !managed.has(shell.pid)),
+		ended: recovery.ended,
+		unknown: recovery.unknown.filter((shell) => !managed.has(shell.pid)),
+	};
 }
 
 /**
@@ -299,8 +416,8 @@ function endRecord(data: unknown): ShellEndRecord | null {
 	};
 }
 
-/** The shell a start record describes, as the command layer sees it. */
-function recoveredShell(start: ShellStartRecord): RecoveredShell {
+/** The shell a start record describes, as the command layer sees it, wearing the liveness the last probe gave it. */
+function recoveredShell(start: ShellStartRecord, liveness: RecoveredLiveness): RecoveredShell {
 	return {
 		id: `pid-${start.pid}`,
 		command: start.command,
@@ -311,5 +428,7 @@ function recoveredShell(start: ShellStartRecord): RecoveredShell {
 		exitCode: null,
 		pid: start.pid,
 		recovered: true,
+		liveness,
+		observedAt: Date.now(),
 	};
 }

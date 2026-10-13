@@ -24,7 +24,7 @@
 import type { BackgroundShell } from "@labunbun/tools";
 import { formatElapsed } from "@labunbun/tui";
 import { elideShellCommand, shellAge } from "./background-commands.ts";
-import { isRecoveredShell } from "./shell-ledger.ts";
+import { isRecoveredShell, shellStateWord } from "./shell-ledger.ts";
 import { orderSubagents, subagentAgeMs } from "./subagent-commands.ts";
 import { type SubagentHandle, subagentStatus } from "./subagent-registry.ts";
 
@@ -58,7 +58,9 @@ function subagentRow(handle: SubagentHandle, now: number): string {
 }
 
 function shellRow(shell: BackgroundShell, now: number): string {
-	const status = shell.status.padEnd(STATUS_WIDTH);
+	// `shellStateWord`: a recovered shell's row carries the liveness the last
+	// probe settled, so a shell seen to end stops reading "running" here.
+	const status = shellStateWord(shell).padEnd(STATUS_WIDTH);
 	const age = shellAge(shell, now).padEnd(AGE_WIDTH);
 	// A recovered shell was started by a process that is gone. The mark is what
 	// explains the row's pid-shaped id to someone who never typed it here, and
