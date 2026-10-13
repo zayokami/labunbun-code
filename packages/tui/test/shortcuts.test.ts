@@ -134,6 +134,25 @@ describe("shortcutGroups", () => {
 		expect(ctrlR("none")).toBe("search history");
 	});
 
+	test("the Ctrl+T row admits the watch panel is unreachable under emacs", () => {
+		// The third instance of the `Ctrl+R` failure and the second of the `Ctrl+O`
+		// one, added with the row itself: `C-t` is reserved `transpose-chars` in
+		// `emacs.ts`, so the engine eats it before the host can see it, and the
+		// panel is not merely hard to reach from emacs, it is unreachable. The
+		// proof is the same one the Ctrl+O test makes — the row's claim is checked
+		// against `RESERVED_KEYS` rather than taken on trust.
+		const ctrlT = (editor: "none" | "vim" | "emacs") =>
+			shortcutGroups({ editor, vimMode: "normal" })
+				.find((g) => g.title === "Prompt")
+				?.rows.find(([k]) => k === "Ctrl+T")?.[1];
+		expect(ctrlT("emacs")).toContain("taken");
+		expect(ctrlT("none")).toBe("watch panel");
+		// Vim hands a ctrl combo it does not run to the host (`vim.ts`), so the row
+		// is the same one there as at an empty prompt.
+		expect(ctrlT("vim")).toBe("watch panel");
+		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-t");
+	});
+
 	test("the Ctrl+O row admits the transcript is unreachable under emacs", () => {
 		// The second instance of the `Ctrl+R` failure, ten lines apart in `shortcuts.ts`, and the
 		// reason it is worth a test of its own: the file's own header says a shortcut list that
@@ -236,8 +255,16 @@ describe("splitShortcutGroups", () => {
 		expect(right.length).toBeGreaterThan(0);
 		// Balanced by rows: a column twice the height of the other wastes the
 		// width the two-column layout was for.
+		//
+		// The number is this list's arithmetic and not a taste. Prompt plus its
+		// title is twelve rows and the Vim and Commands groups behind it are nine
+		// between them, so no split that keeps the groups whole and in order comes
+		// closer than three — the old bound of two described the list before the
+		// watch panel's row existed, not a property the splitter has. It is still
+		// asserting the thing the sentence above says: a lopsided split (the
+		// eighteen-versus-three one, say) fails this.
 		const height = (column: typeof left) => column.reduce((sum, g) => sum + g.rows.length + 1, 0);
-		expect(Math.abs(height(left) - height(right))).toBeLessThanOrEqual(2);
+		expect(Math.abs(height(left) - height(right))).toBeLessThanOrEqual(3);
 	});
 
 	test("a single group lands in the first column, not spread across both", () => {

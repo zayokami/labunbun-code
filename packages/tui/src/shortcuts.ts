@@ -114,6 +114,12 @@ export function shortcutGroups(opts: {
 				// unavailable. Two rows in one file got this wrong the same way before either
 				// was fixed, so the wording is the honest one for both.
 				["Ctrl+O", emacs ? "taken — open-line is not in this build" : "transcript"],
+				// The same admission as the row above, for the same reason and one key
+				// later: `EmacsEngine` claims `C-t` as reserved `transpose-chars`, so
+				// under emacs the host never sees the key and the panel cannot be opened
+				// at all. Under vim it works without a caveat — a ctrl combo that is not
+				// one of the few the engine runs is handed to the host on purpose.
+				["Ctrl+T", emacs ? "taken — transpose-chars is not in this build" : "watch panel"],
 				["Ctrl+L", "clear screen"],
 				["Ctrl+C", "exit (twice when idle)"],
 			],
