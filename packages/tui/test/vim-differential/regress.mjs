@@ -870,6 +870,27 @@ const CASES = [
 	[["*"], THREE_AS, 14],
 	[["$"], THREE_AS, 14],
 	[["0"], THREE_AS, 14],
+	// `r<CR>` is vim's line split (`nv_replace`'s CAR arm), and the one Enter an
+	// armed key takes from the host: the character under the caret becomes a line
+	// break and the caret lands on the character after it. The count's characters
+	// become ONE break, not `count` of them. A run that reaches the line's end
+	// leaves the original break standing (`a\n\ncd`), one that ends the buffer
+	// opens the empty last line, and an empty line has no character to replace.
+	[["r", "\r"], "abcd", 1],
+	[["r", "\r"], "abcd", 0],
+	[["r", "\r"], "ab cd", 2],
+	[["r", "\r"], "abcd", 3],
+	[["2", "r", "\r"], "abcd", 1],
+	[["3", "r", "\r"], "abcd", 1],
+	[["r", "\r"], "a\nbcd", 2],
+	[["r", "\r"], "a\nbcd", 3],
+	[["r", "\r"], "ab\ncd", 1],
+	[["r", "\r"], "abcdef", 5],
+	[["3", "r", "\r"], "abcd", 2],
+	[["2", "r", "\r"], "ab\ncd", 1],
+	[["r", "\r"], "a\n\nb", 2],
+	[["r", "\r", "x"], "abcd", 1],
+	[["r", "\r", "u"], "abcd", 1],
 	// `g*`/`g#` are the same search and `dg*` the same range: `nv_ident` reads
 	// `cap->cmdchar == 'g'` only to decide on the anchor, and never asks whether an
 	// operator is waiting. The glued runs are the two positions the spellings are

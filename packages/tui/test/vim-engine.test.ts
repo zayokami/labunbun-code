@@ -330,6 +330,37 @@ describe("operators and edits", () => {
 		expect(typed("abc\ndef", 2, "9", "r", "X")).toEqual({ text: "abc\ndef", writes: 0 });
 	});
 
+	test("r<CR> splits the line at the caret", () => {
+		// Enter is the host's key — an armed `f`/`t`/count still submits — but vim
+		// carves out one exception: `r<CR>` is a command, the character under the
+		// caret becoming a line break (nv_replace's CAR arm), with the caret on
+		// the character after it. The count's characters become ONE break.
+		const run = (text: string, cursor: number, keys: Array<string | "CR">) => {
+			const e = editor(text, cursor);
+			for (const k of keys) {
+				if (k === "CR") e.engine.handleKey("\r", e.key({ return: true }));
+				else e.engine.handleKey(k, e.key());
+			}
+			return { text: e.state.text, cursor: e.state.cursor };
+		};
+		expect(run("abcd", 1, ["r", "CR"])).toEqual({ text: "a\ncd", cursor: 2 });
+		expect(run("abcd", 0, ["r", "CR"])).toEqual({ text: "\nbcd", cursor: 1 });
+		expect(run("abcd", 3, ["r", "CR"])).toEqual({ text: "abc\n", cursor: 4 });
+		expect(run("a\nbcd", 2, ["r", "CR"])).toEqual({ text: "a\n\ncd", cursor: 3 });
+		expect(run("ab\ncd", 1, ["r", "CR"])).toEqual({ text: "a\n\ncd", cursor: 2 });
+		expect(run("abcd", 1, ["2", "r", "CR"])).toEqual({ text: "a\nd", cursor: 2 });
+		expect(run("abcd", 1, ["3", "r", "CR"])).toEqual({ text: "a\n", cursor: 2 });
+		// A short line refuses, as it does for any other replacement, and an
+		// empty line has no character to replace.
+		expect(run("abcd", 2, ["3", "r", "CR"])).toEqual({ text: "abcd", cursor: 2 });
+		expect(run("a\n\nb", 2, ["r", "CR"])).toEqual({ text: "a\n\nb", cursor: 2 });
+		// One entry on the undo stack: the split is one write.
+		expect(run("abcd", 1, ["r", "CR", "u"])).toEqual({ text: "abcd", cursor: 1 });
+		// Anywhere else, Enter still belongs to the host: the pending command is
+		// dropped instead of run, which here leaves the `x` to do the work.
+		expect(run("abcd", 1, ["f", "CR", "x"])).toEqual({ text: "acd", cursor: 1 });
+	});
+
 	test("~ toggles case and advances (a→A, B→b)", () => {
 		const e = editor("aBc", 0);
 		e.engine.handleKey("~", e.key());

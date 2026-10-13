@@ -2778,8 +2778,18 @@ export class VimEngine {
 		if (this.#curswant === null) this.#wantHere();
 		// Enter is the host's: it submits the prompt. A half-typed command is
 		// abandoned rather than allowed to swallow the send — `f` then Enter must
-		// submit, not go silent because one more key was expected.
+		// submit, not go silent because one more key was expected. `r` is the one
+		// exception vim itself carves out — `r<CR>` is a command with a visible
+		// effect, the character under the caret becoming a line break (nv_replace's
+		// CAR arm) — so an armed `r` takes this Enter instead of the host.
 		if (key.return) {
+			if (this.#pendingChar === "r") {
+				const count = this.#pendingCharCount;
+				this.#pendingChar = null;
+				this.#replaceChar("\r", count);
+				this.#resetPending();
+				return true;
+			}
 			this.#resetPending();
 			return false;
 		}
@@ -3703,6 +3713,21 @@ export class VimEngine {
 		let available = 0;
 		for (let p = pos; p < lineEnd; p = nextChar(text, p)) available++;
 		if (available < count) return;
+		if (char === "\r" || char === "\n") {
+			// `r<CR>` is vim's line split, and the count's characters become ONE
+			// line break, not `count` of them: measured `2r<CR>` on the "b" of
+			// `abcd` leaves `a\nd`, and the caret lands on the character after
+			// the break — the one that was `count` places along, or the empty
+			// last line when the run ended the buffer. The refusal above is the
+			// line's, and it reads the same here (`3r<CR>` on the "c" of `abcd`
+			// changes nothing).
+			let splitAt = pos;
+			for (let i = 0; i < count; i++) splitAt = nextChar(text, splitAt);
+			const out = text.slice(0, pos) + "\n" + text.slice(splitAt);
+			this.#ops.setAll(out, settleCursor(out, pos + 1));
+			this.#wantHere();
+			return;
+		}
 		let end = pos;
 		for (let i = 0; i < count; i++) end = nextChar(text, end);
 		let replacement = "";
