@@ -203,10 +203,15 @@ describe("hook event coverage", () => {
 		//
 		// The agent's own hook is still there for embedders that need a view — this
 		// is about the two apps, which have a transcript to keep stable.
+		//
+		// The composition moved with the shared `sessionHookDeps` into hooks.ts:
+		// headless keeps the seam by calling it, interactive still composes inline.
+		const read = (file: string) => readFileSync(join(import.meta.dir, "..", "src", file), "utf8");
 		for (const file of ["interactive.ts", "headless.ts"]) {
-			const source = readFileSync(join(import.meta.dir, "..", "src", file), "utf8");
-			expect(source).not.toContain("transformContext");
-			expect(source).toContain("composeUserMessage");
+			expect(read(file)).not.toContain("transformContext");
 		}
+		expect(read("hooks.ts")).toContain("composeUserMessage");
+		expect(read("headless.ts")).toContain("sessionHookDeps");
+		expect(read("interactive.ts")).toContain("composeUserMessage");
 	});
 });
