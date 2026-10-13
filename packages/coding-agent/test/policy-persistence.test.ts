@@ -19,7 +19,7 @@
  * disk at all.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findModeChoice, type PermissionRule, SessionStore } from "@labunbun/agent";
@@ -41,7 +41,15 @@ afterEach(() => {
 });
 
 function tempDir(prefix: string): string {
-	const dir = mkdtempSync(join(tmpdir(), prefix));
+	// Physical spelling on purpose: on macOS `tmpdir()` is `/var/folders/...`,
+	// which is a symlink to `/private/var/folders/...`. The app under test
+	// reaches this directory through its own resolution (getcwd, spawn cwd), so
+	// a fixture that keeps the symbolic spelling hands the sandbox a profile
+	// path the kernel's resolution of the same directory does not match — the
+	// spelling trap `docs/dev/sandbox.md` records for the simulated layer, met
+	// again by the `!` command's real sandboxed write. Production always runs
+	// with process.cwd(), which is already physical; the fixture now is too.
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 	roots.push(dir);
 	return dir;
 }
@@ -125,6 +133,8 @@ interface Report {
 	}>;
 	/** The transcript's own lines (`pushInfo`), which is where commands answer. */
 	infos: string[];
+	/** Every `toolUse` entry the transcript accumulated, finished state included. */
+	tools: Array<{ toolName: string; inputPreview: string; resultText: string; isError: boolean }>;
 	/** The startup session's axes, read after the run. */
 	axes: AxisReport | null;
 	/** The axes of the session an in-app /resume swapped in, when one did. */
@@ -228,6 +238,18 @@ async function scenario(input: {
 		}));
 		const infos = () =>
 			handle.store.get().entries.filter((entry) => entry.kind === "info").map((entry) => entry.text);
+		// The toolUse entries, finished state and all: the "!" command's own
+		// record. Without it a failed write is one bare false in the assertion
+		// diff, and the shell's words — the thing that says WHY — are dropped.
+		const tools = () =>
+			handle.store.get().entries
+				.filter((entry) => entry.kind === "toolUse")
+				.map((entry) => ({
+					toolName: entry.toolName,
+					inputPreview: entry.inputPreview,
+					resultText: entry.resultText || "",
+					isError: entry.isError === true,
+				}));
 		const waitFor = async (ready, ms) => {
 			const end = Date.now() + ms;
 			while (Date.now() < end) {
@@ -333,7 +355,7 @@ async function scenario(input: {
 		const swappedAxes = swapped
 			? { mode: swapped.permissionMode, sandbox: swapped.sandbox, network: swapped.network }
 			: null;
-		console.log(JSON.stringify({ exitCode, dialogs, prompts, infos: infos(), axes, swapped: swappedAxes, pickMiss }));
+		console.log(JSON.stringify({ exitCode, dialogs, prompts, infos: infos(), tools: tools(), axes, swapped: swappedAxes, pickMiss }));
 	`;
 	const proc = Bun.spawn([process.execPath, "--eval", script], {
 		cwd: join(import.meta.dir, ".."),
@@ -1054,6 +1076,12 @@ describe("a ! command", () => {
 		// The ordinary command reached the shell — the redirect ran and the file is
 		// on disk.
 		expect(existsSync(join(cwd, "ran.txt"))).toBe(true);
+		// And the command's own record says it succeeded — exit code included, so a
+		// future refusal prints the shell's words in this diff instead of a bare
+		// `false`.
+		const shell = result.tools.find((tool) => tool.inputPreview === "echo hi > ran.txt");
+		expect(shell?.resultText).toContain("[exit code: 0]");
+		expect(shell?.isError).toBe(false);
 		// The denied one did not: the engine's deny is a floor the prefix cannot
 		// lift, so the refusal is reported and the file the rm named still exists.
 		const refusals = result.infos.filter((text) => text.startsWith("! refused"));

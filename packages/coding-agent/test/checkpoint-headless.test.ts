@@ -19,7 +19,7 @@
  *     The home is a temp directory either way; the real one is never read.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "@labunbun/agent";
@@ -36,9 +36,18 @@ afterAll(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-/** A temp directory that is cleaned up with the run. */
+/**
+ * A temp directory that is cleaned up with the run.
+ *
+ * Physical spelling on purpose: on macOS `tmpdir()` is `/var/folders/...`, a
+ * symlink to `/private/var/folders/...`. The child CLI keys its session store
+ * by its own `process.cwd()`, which the kernel reports physically, while this
+ * process would keep the symbolic spelling — and the two would look in
+ * different project directories for the same run. Production hands
+ * `process.cwd()` to the store on both sides; the fixture now does the same.
+ */
 function scratch(prefix: string): string {
-	const dir = mkdtempSync(join(tmpdir(), prefix));
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 	roots.push(dir);
 	return dir;
 }
