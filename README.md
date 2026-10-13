@@ -164,6 +164,8 @@ The maximum timeout is 600000 ms.
 
 LaBunbun Code reads MCP servers from `.mcp.json` and `~/.labunbun/.mcp.json`. It supports the stdio transport and the StreamableHTTP transport. Each tool name starts with `mcp__`, then the server name, then the tool name. Use `/mcp approve <name>` to approve a server in the project file.
 
+The client listens for the list change notifications of a server. When the tool list changes, the session uses the new tools with no restart. Use `/mcp prompts <server>` to show the prompts of a server, and `/mcp prompt <server> <name> [key=value ...]` to render one. Use `/mcp resources <server>` to show its resources, and `/mcp resource <server> <uri>` to read one. The prompt and resource screens are for reading only. They never enter the conversation.
+
 ### Subagents
 
 The `Task` tool starts a subagent. The tool keeps the conversation of a finished subagent in memory. Use `SendMessage` to continue it. Use `TaskStop` to stop it. Use `/subagents` to see the state and the age of each subagent. Use `/subagents stop <id>` to cancel one. Use `/subagents retry <id>` to run a failed one again. Use `/subagents log <id>` to read the conversation of one. Without an id, each verb shows a picker.
@@ -508,7 +510,7 @@ Use these commands in the terminal.
 | `/ps` | List the background shells. Show what one has printed. |
 | `/stop [id]` | Stop a background shell. This includes a shell that a previous run left running. |
 | `/tasks` | Show the task tree. The tree shows this session, its subagents, and its background shells. |
-| `/mcp [approve <name>]` | List the MCP servers, then approve one. |
+| `/mcp [approve <name>\|prompts <server>\|prompt <server> <name>\|resources <server>\|resource <server> <uri>]` | List the MCP servers, approve one, or read a prompt or a resource. |
 | `/activity [7d\|30d\|all]` | Show the days that you used this, and the current streak. |
 | `/think [level]` | Set how hard the model thinks. The values are `off`, `minimal`, `low`, `medium`, `high`. |
 | `/theme [name\|auto]` | Show the themes, or change the theme. |
