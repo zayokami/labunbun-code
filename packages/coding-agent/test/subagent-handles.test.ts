@@ -116,7 +116,7 @@ describe("subagent handles", () => {
 		const [task, sendMessage] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [],
 		});
 
@@ -144,7 +144,7 @@ describe("subagent handles", () => {
 		const [task, sendMessage, taskStop] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [],
 		});
 
@@ -178,7 +178,7 @@ describe("subagent handles", () => {
 		const [task, sendMessage, taskStop] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [gatedTool(() => entered.resolve(), release.promise)],
+			allTools: () => [gatedTool(() => entered.resolve(), release.promise)],
 			definitions: () => [],
 			store: () => store,
 		});
@@ -217,7 +217,7 @@ describe("subagent handles", () => {
 		const [task, sendMessage] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [gatedTool(() => entered.resolve(), release.promise)],
+			allTools: () => [gatedTool(() => entered.resolve(), release.promise)],
 			definitions: () => [],
 			store: () => store,
 		});
@@ -255,7 +255,7 @@ describe("subagent handles", () => {
 		const [task, sendMessage] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			store: () => store,
 			permissionMode: () => mode,
@@ -291,7 +291,7 @@ describe("subagent handles", () => {
 		const [task, sendMessage] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [],
 		});
 
@@ -334,7 +334,7 @@ describe("subagent handles", () => {
 		const [task, sendMessage, taskStop] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [gatedTool(() => entered.resolve("entered"), release.promise)],
+			allTools: () => [gatedTool(() => entered.resolve("entered"), release.promise)],
 			definitions: () => [],
 			store: () => store,
 		});
@@ -370,7 +370,7 @@ describe("the lifecycle record", () => {
 		const [task] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [],
 			registry,
 		});
@@ -398,7 +398,7 @@ describe("the lifecycle record", () => {
 		const [task, , taskStop] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [gatedTool(() => entered.resolve(), release.promise)],
+			allTools: () => [gatedTool(() => entered.resolve(), release.promise)],
 			definitions: () => [],
 			store: () => store,
 			registry,
@@ -452,7 +452,7 @@ describe("the ask funnel", () => {
 		const [task] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [markedEcho],
+			allTools: () => [markedEcho],
 			definitions: () => [],
 			permissionMode: () => "ask",
 			sandbox: () => "workspace-write",
@@ -478,7 +478,7 @@ describe("the ask funnel", () => {
 		const [task] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			permissionMode: () => "ask",
 			sandbox: () => "workspace-write",
@@ -501,7 +501,7 @@ describe("the ask funnel", () => {
 		const [task] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			permissionMode: () => "ask",
 			sandbox: () => "workspace-write",
@@ -522,7 +522,7 @@ describe("the ask funnel", () => {
 		const [task] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			permissionMode: () => "ask",
 			sandbox: () => "workspace-write",
@@ -567,7 +567,7 @@ describe("the ask funnel", () => {
 		const [task, , taskStop] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			permissionMode: () => "ask",
 			sandbox: () => "workspace-write",
@@ -614,7 +614,7 @@ describe("the control surface", () => {
 		const [task, , , control] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [],
 			registry,
 		});
@@ -658,7 +658,7 @@ describe("the control surface", () => {
 		const [task, sendMessage, , control] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [gatedTool(() => entered.resolve(), release.promise)],
+			allTools: () => [gatedTool(() => entered.resolve(), release.promise)],
 			definitions: () => [],
 			registry,
 		});
@@ -688,7 +688,7 @@ describe("the control surface", () => {
 		const [task, sendMessage, , control] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [],
 			registry,
 		});
@@ -729,7 +729,7 @@ describe("a subagent run that dies by exception", () => {
 		const [task, , , control] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [],
 			store: () => store,
 			registry,
@@ -771,7 +771,7 @@ describe("a subagent run that dies by exception", () => {
 		const [task, sendMessage] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [],
 			store: () => store,
 			registry,

@@ -507,7 +507,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// definition names its own model.
 		lightModel: () => resolvedRoles.light.model,
 		resolveModel,
-		allTools: [...tools, ...mcpTools],
+		// A getter like the REPL's, but one that always answers the same list: a
+		// `-p` run attaches no `onToolsChanged` (see above), so nothing moves
+		// `tools` or the session's own registry mid-run — the two stay equal, as
+		// the read-only note below says. Reading `mcpConnections` live here would
+		// hand a subagent a tool the parent session never got.
+		allTools: () => [...tools, ...mcpTools],
 		definitions: () => agentDefinitions,
 		store: () => store,
 		permissionMode: () => effectiveMode,

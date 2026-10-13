@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { AgentSession } from "@labunbun/agent";
+import { AgentSession, buildTool } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { loadApprovedMcpServers, loadProjectMcpServerNames, type McpConnection } from "@labunbun/mcp";
 import { createStore, DARK_THEME } from "@labunbun/tui";
+import { z } from "zod";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
+import { createMcpToolRefreshHandler } from "../src/mcp-tool-refresh.ts";
 
 const FIXTURE_SERVER = join(
 	dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
@@ -106,6 +108,17 @@ describe("/mcp command", () => {
 			mcpConfig: { fixture: { command: process.execPath, args: [FIXTURE_SERVER] } },
 			cache: { report: () => "", statusLine: () => "", note: (cause) => cacheCauses.push(cause) },
 		});
+		// The REPL's refresh handler, wired the way `interactive.ts` wires it.
+		// A connection that appears after startup has to carry it too, or this
+		// server's later tool-list changes would reach the main session never —
+		// while the subagent table and the band, which read the connections
+		// live, would move ahead of it.
+		const refreshNotes: string[] = [];
+		ctx.onMcpToolsChanged = createMcpToolRefreshHandler({
+			getSession: ctx.getSession,
+			connections: ctx.mcpConnections,
+			noteCacheChange: (cause) => refreshNotes.push(cause),
+		});
 
 		handleAppCommand("/mcp approve fixture", ctx);
 		// Connection is async (fire-and-forget inside handleAppCommand); wait for it.
@@ -123,6 +136,27 @@ describe("/mcp command", () => {
 		// app knows it: registered, `/cache` names the rewrite; unregistered, the
 		// next request reads as a bug.
 		expect(cacheCauses).toEqual(["mcp tools added"]);
+
+		// The command wired the handler onto the connection it opened, and a
+		// later change on that server now reaches the session: replace the array
+		// the way the client does on `tools/list_changed` and fire the hook.
+		const approved = ctx.mcpConnections.find((c) => c.serverName === "fixture");
+		if (!approved) throw new Error("approved connection missing from context");
+		expect(approved.onToolsChanged).toBe(ctx.onMcpToolsChanged);
+		// A real tool: the session builds each one's wire schema in setTools, so
+		// a name-only stub would fail for a reason that is not this test's.
+		approved.tools = [
+			...approved.tools,
+			buildTool({
+				name: "mcp__fixture__late",
+				description: "late",
+				inputSchema: z.object({}),
+				call: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			}),
+		];
+		approved.onToolsChanged?.();
+		expect(session.tools.map((t: { name: string }) => t.name)).toContain("mcp__fixture__late");
+		expect(refreshNotes).toEqual(["mcp tools changed"]);
 	}, 20_000);
 });
 

@@ -129,7 +129,7 @@ function makeHarness(
 		home,
 		cwd: process.cwd(),
 		allTools: [],
-		mcpTools: [],
+		mcpTools: () => [],
 		streamFn,
 		model: () => session.model,
 		resolveModel: (ref) => byRef.get(ref),

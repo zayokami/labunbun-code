@@ -425,8 +425,13 @@ export interface BeetleBandOptions {
 	streamFn: StreamFn;
 	/** The worker tool table (the one subagents draw from). */
 	allTools: AnyTool[];
-	/** Tools outside the worker table that pass through to every seat (MCP). */
-	mcpTools?: AnyTool[];
+	/**
+	 * Tools outside the worker table that pass through to every seat (MCP).
+	 * Read when the band is constructed — the `/beetle` command — rather than
+	 * captured when these options were put together at REPL startup: a seat's
+	 * table has to be the connections of that moment, the way a subagent's is.
+	 */
+	mcpTools?: () => AnyTool[];
 	/** The session model, read at the call. */
 	model: () => Model;
 	/** Resolve a configured ref, or undefined while it cannot be resolved yet. */
@@ -862,16 +867,21 @@ export class BeetleBand {
 
 	#memberTools(name: BeetleMember): AnyTool[] {
 		const all = this.#options.allTools;
+		// Read here — the call is the band's own construction — rather than
+		// captured by whoever built the options: those are built once at REPL
+		// startup, and `/beetle` constructs the band much later, so a tool the
+		// connections gained in between has to be in the seats' table.
+		const mcp = this.#options.mcpTools?.() ?? [];
 		const kept =
 			name === "paul"
-				? [...all, ...(this.#options.mcpTools ?? [])]
+				? [...all, ...mcp]
 				: [
 						...all.filter(
 							(tool) =>
 								(READ_SEAT_TOOL_NAMES as readonly string[]).includes(tool.name) ||
 								(TASK_BOARD_TOOL_NAMES as readonly string[]).includes(tool.name),
 						),
-						...(this.#options.mcpTools ?? []),
+						...mcp,
 					];
 		const bandTool = createBandMessageTool(
 			(to, message, opts) => this.deliver({ kind: "member", name }, to, message, opts),

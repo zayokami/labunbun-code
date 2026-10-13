@@ -168,7 +168,15 @@ export interface TaskToolContext {
 	 * model was retired is a fallback, not a failed spawn.
 	 */
 	resolveModel?: (ref: string) => Model | undefined;
-	allTools: AnyTool[];
+	/**
+	 * The worker tool table, read at the call like `model` above: a server that
+	 * gains a tool mid-session, or a server approved after it, has to reach a
+	 * subagent spawned afterwards. The host hands a getter over its live
+	 * connections rather than the list it started with — a captured one would
+	 * freeze the table at process start, and the tool would be one the subagent
+	 * can never call.
+	 */
+	allTools: () => AnyTool[];
 	/** Read at the call: a definition approved mid-session joins the list. */
 	definitions: () => AgentDefinition[];
 	/** Read at the call: `/resume` swaps the session a sidechain is written into. */
@@ -499,7 +507,8 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// which aborts the session through the handle.
 		const signal = scope.signal ?? new AbortController().signal;
 
-		const tools = definition.tools ? ctx.allTools.filter((t) => definition.tools?.includes(t.name)) : ctx.allTools;
+		const allTools = ctx.allTools();
+		const tools = definition.tools ? allTools.filter((t) => definition.tools?.includes(t.name)) : allTools;
 		// The subagent's plan gate reads the same declaration the parent's does.
 		// Computed from this definition's tool list, not the parent's: a plan-mode
 		// subagent restricted to read tools should not inherit an answer about

@@ -81,7 +81,13 @@ export interface BeetleSurfaceDeps {
 	cwd: string;
 	/** The worker table members draw from; MCP is the separate list (see BeetleBandOptions). */
 	allTools: AnyTool[];
-	mcpTools: AnyTool[];
+	/**
+	 * The separate list (see BeetleBandOptions), passed through as the getter
+	 * the band reads when `/beetle` constructs it — long after this context was
+	 * assembled at REPL startup, so a tool the connections gained in between
+	 * reaches the seats.
+	 */
+	mcpTools: () => AnyTool[];
 	streamFn: StreamFn;
 	model: () => Model;
 	resolveModel: (ref: string) => Model | undefined;

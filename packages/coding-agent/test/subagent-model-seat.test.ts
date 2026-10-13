@@ -60,7 +60,7 @@ describe("the light model seat", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => LIGHT,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 		});
 
@@ -77,7 +77,7 @@ describe("the light model seat", () => {
 			model: () => PARENT,
 			lightModel: () => LIGHT,
 			resolveModel: (ref) => (ref === "other-model" ? OTHER : undefined),
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [{ agentType: "quick", whenToUse: "Small jobs", source: "user", model: "other-model" }],
 		});
 
@@ -97,7 +97,7 @@ describe("the light model seat", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => undefined,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 		});
 
@@ -118,7 +118,7 @@ describe("the light model seat", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => current,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 		});
 
@@ -154,7 +154,7 @@ describe("subagent usage booking", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => LIGHT,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			onUsage,
 		});
@@ -177,7 +177,7 @@ describe("subagent usage booking", () => {
 			model: () => PARENT,
 			lightModel: () => LIGHT,
 			resolveModel: (ref) => (ref === "other-model" ? OTHER : undefined),
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [{ agentType: "quick", whenToUse: "Small jobs", source: "user", model: "other-model" }],
 			onUsage,
 		});
@@ -198,7 +198,7 @@ describe("subagent usage booking", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => undefined,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			onUsage,
 		});
@@ -224,7 +224,7 @@ describe("subagent usage booking", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => LIGHT,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			onUsage,
 		});
@@ -263,7 +263,7 @@ describe("the light seat's budget gate", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => LIGHT,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			budgetGate: (role) => (role === "light" ? sentence : null),
 		});
@@ -289,7 +289,7 @@ describe("the light seat's budget gate", () => {
 			model: () => PARENT,
 			lightModel: () => LIGHT,
 			resolveModel: (ref) => (ref === "other-model" ? OTHER : undefined),
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [{ agentType: "quick", whenToUse: "Small jobs", source: "user", model: "other-model" }],
 			budgetGate: (role) => {
 				asked.push(role);
@@ -320,7 +320,7 @@ describe("the light seat's budget gate", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => LIGHT,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			report: (text) => reports.push(text),
 			onUsage: (_provider, _model, usage) => {
@@ -346,7 +346,7 @@ describe("the light seat's budget gate", () => {
 			streamFn,
 			model: () => PARENT,
 			lightModel: () => LIGHT,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			budgetGate: () => (refuse ? sentence : null),
 		});

@@ -183,6 +183,7 @@ import {
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { CLI_NAME } from "./index.ts";
+import { createMcpToolRefreshHandler } from "./mcp-tool-refresh.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { formatMissionSummary, readMissionRecord, writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
@@ -853,37 +854,24 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		),
 	);
 	const mcpConnections = await connectAllMcpServers(mcpConfig, approvedMcpServers);
-	const mcpTools = mcpConnections.flatMap((c) => c.tools);
 	const pendingMcpApprovals = [...projectMcpServerNames].filter(
 		(name) => settingsMcp.servers[name] === undefined && !approvedProjectMcpServers.has(name),
 	);
 	/**
 	 * A server that changed its tool list mid-session, wired to the live session.
-	 *
-	 * The tools sit in the session's registry, so a change the client can see is
-	 * only real once the session's list moves — the same rewrite `/mcp approve`
-	 * makes when it appends a newly approved server's tools. Non-MCP tools are
-	 * kept by name filter rather than rebuilt from `allTools`: the session's
-	 * array is the one place a mid-run addition lives, and rebuilding from a
-	 * startup snapshot would drop it.
-	 *
-	 * The session is read through `sessionRef` at the call, never captured:
-	 * `/resume` swaps it, and a connection outlives the swap — a rebuilt list has
-	 * to land on the conversation that is live when the notification arrives.
+	 * The handler and its reasoning live in `mcp-tool-refresh.ts`, with the test
+	 * that holds them; `sessionRef` below is read through the arrow at the call,
+	 * never captured, so a `/resume` swap lands the rebuilt list on the live
+	 * conversation — the arrow defers evaluation past the declaration below, and
+	 * this wiring already relies on that ordering.
 	 */
-	function onMcpToolsChanged(): void {
-		const target = sessionRef;
-		if (!target) return;
-		target.setTools([
-			...target.tools.filter((tool) => !tool.name.startsWith("mcp__")),
-			...mcpConnections.flatMap((c) => c.tools),
-		]);
-		// The tool block sits above the system prompt and transcript, and a
-		// provider keys its cache on it: one changed tool discards every tier
-		// below. The server asked for the change and this wiring is what declares
-		// it — unregistered, `/cache` would name the next request a rewind bug.
-		cacheTracker.note("mcp tools changed");
-	}
+	const onMcpToolsChanged = createMcpToolRefreshHandler({
+		getSession: () => sessionRef,
+		connections: mcpConnections,
+		// Read at the call like the session: the tracker is created above and
+		// survives every swap.
+		noteCacheChange: (cause) => cacheTracker.note(cause),
+	});
 	for (const connection of mcpConnections) connection.onToolsChanged = onMcpToolsChanged;
 
 	// ---- subagents, skills, plan mode ----
@@ -935,7 +923,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// parent's — which is why the seat is read here rather than captured.
 		lightModel: () => resolvedRoles.light.model,
 		resolveModel,
-		allTools: [...tools, ...mcpTools],
+		// Read at the call, not captured: a subagent spawned after a mid-session
+		// tool addition (tools/list_changed, or `/mcp approve`) has to see it.
+		allTools: () => [...tools, ...mcpConnections.flatMap((c) => c.tools)],
 		definitions: () => agentDefinitions,
 		store: () => store,
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
@@ -1024,7 +1014,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		askUser: (questions, signal) => (handle ? askUserOrAbort(handle, questions, signal) : Promise.resolve(null)),
 	});
 
-	const allTools = [...tools, ...mcpTools, ...subagentTools, ...planTools, askUserTool];
+	// Startup list for the session, the system prompt and the pre-session
+	// fallbacks; the session's own list then moves with the servers (see
+	// `onMcpToolsChanged` above), so this is a seed, not the truth.
+	const allTools = [...tools, ...mcpConnections.flatMap((c) => c.tools), ...subagentTools, ...planTools, askUserTool];
 
 	const systemPrompt = buildSystemPrompt(allTools, {
 		cwd,
@@ -1526,7 +1519,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// table that included MCP and the separate list both would hand every
 		// seat its MCP tools twice.
 		allTools: tools,
-		mcpTools,
+		// Read when the band is built (the `/beetle` command), not here at REPL
+		// startup: a tool the connections gained in between has to reach the seats.
+		mcpTools: () => mcpConnections.flatMap((c) => c.tools),
 		streamFn,
 		model: () => sessionRef?.model ?? model,
 		resolveModel,
@@ -1780,6 +1775,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				padWatch,
 				compaction: compactionWiring.manager,
 				mcpConnections,
+				onMcpToolsChanged,
 				mcpConfig,
 				mcpLoadErrors,
 				pendingMcpApprovals,
@@ -2303,6 +2299,14 @@ interface AppCommandContext {
 	/** Read at dispatch time; a swap or model switch rebuilds the manager. */
 	compaction(): CompactionManager;
 	mcpConnections: McpConnection[];
+	/**
+	 * The tool-list-change handler the startup connections carry (see
+	 * `mcp-tool-refresh.ts`). Optional because a context assembled by hand — a
+	 * test, an embedder — has no live session to rewrite; `/mcp approve` only
+	 * uses it to wire the connection it just opened, so a server approved
+	 * mid-run gets its later changes into the session like any other.
+	 */
+	onMcpToolsChanged?: () => void;
 	mcpConfig: Record<string, McpServerConfig>;
 	/** Config files (and `settings.json` entries) that could not be read, for /mcp to name. */
 	mcpLoadErrors: McpConfigError[];
@@ -3120,6 +3124,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				persistMcpApproval(ctx.cwd, serverName, ctx.home);
 				void connectMcpServer(serverName, config).then((connection) => {
 					ctx.mcpConnections.push(connection);
+					// This connection appeared after the startup attach loop ran its
+					// one pass, so it is wired here or a later tool-list change on
+					// this server reaches nobody: the session would keep the list
+					// this approval handed it, while the workers that read the
+					// connections live would move ahead of it.
+					if (ctx.onMcpToolsChanged) connection.onToolsChanged = ctx.onMcpToolsChanged;
 					const index = ctx.pendingMcpApprovals.indexOf(serverName);
 					if (index !== -1) ctx.pendingMcpApprovals.splice(index, 1);
 					// Tools sit above the system prompt and the transcript, and a

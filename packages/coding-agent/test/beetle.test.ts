@@ -198,7 +198,9 @@ function makeBand(options: BandFixtureOptions): BandFixture {
 		cwd: process.cwd(),
 		streamFn: faux.streamFn,
 		allTools: options.tools ?? [],
-		mcpTools: options.mcpTools,
+		// The fixture takes an array; the band reads a getter (a live list in
+		// the app). Handing it a constant one here keeps the fixture in charge.
+		mcpTools: () => options.mcpTools ?? [],
 		model: () => FAUX_MODEL,
 		resolveModel: options.resolve ?? ((ref) => refs.get(ref)),
 		canRunModel: options.canRunModel ?? (() => true),

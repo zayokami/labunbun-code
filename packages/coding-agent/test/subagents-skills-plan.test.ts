@@ -89,7 +89,7 @@ describe("Task tool (subagents)", () => {
 		const ctx = {
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			store: () => store,
 		};
@@ -113,6 +113,62 @@ describe("Task tool (subagents)", () => {
 		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
 	});
 
+	// The table a subagent draws from is read at the spawn, not when the tools
+	// were built: a server that adds a tool mid-session (`tools/list_changed`)
+	// or a server approved after startup has to reach the very next subagent.
+	// Captured, this was the list from process start and the tool was one the
+	// subagent could never call — the spawn path had to be held, not just the
+	// type.
+	test("a tool added after the tools were built reaches the next spawn", async () => {
+		const ran: string[] = [];
+		const late = buildTool({
+			name: "late",
+			description: "late",
+			inputSchema: z.object({ text: z.string() }),
+			call: async (input: any) => {
+				ran.push(input.text);
+				return { content: [{ type: "text", text: "late ran" }] };
+			},
+		});
+		const subScript = [
+			{ toolCalls: [{ name: "late", arguments: { text: "late ran" } }] },
+			{ text: "SUBAGENT FINAL REPORT" },
+		];
+		const subFaux = fauxProvider(subScript);
+		// The getter builds a fresh array per call, like the app's — a fake that
+		// pushed into one array would let a captured read pass the test, which is
+		// exactly the mutation this holds.
+		const base: AnyTool[] = [echoTool()];
+		let extra: AnyTool[] = [];
+		const [taskTool] = createSubagentTools({
+			streamFn: subFaux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: () => [...base, ...extra],
+			definitions: () => [],
+		});
+
+		// Added after the tools were built, before the spawn.
+		extra = [late];
+
+		const result = await taskTool.call(
+			{ description: "run sub", prompt: "do the thing" },
+			{
+				callId: "t1",
+				signal: new AbortController().signal,
+				cwd: process.cwd(),
+				sandbox: "workspace-write" as const,
+				network: { access: "enabled" as const, domains: [] },
+				onUpdate: () => {},
+			},
+		);
+
+		expect(result.isError).toBeFalsy();
+		expect((result.content[0] as any).text).toContain("SUBAGENT FINAL REPORT");
+		// The late tool actually ran inside the nested session; a captured table
+		// would have left this empty with the report intact.
+		expect(ran).toEqual(["late ran"]);
+	});
+
 	test("a subagent that runs out of room compacts its own context and keeps going", async () => {
 		// A subagent has a context window of its own, and the research task it is
 		// given is exactly the shape that fills one. Without its own compaction, a
@@ -127,7 +183,7 @@ describe("Task tool (subagents)", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 		});
 
@@ -167,7 +223,7 @@ describe("Task tool (subagents)", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: fauxProvider([]).streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => definitions,
 		});
 
@@ -181,7 +237,7 @@ describe("Task tool (subagents)", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: fauxProvider([]).streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [],
+			allTools: () => [],
 			definitions: () => [{ agentType: "bare", whenToUse: "", source: "user" }],
 		});
 		expect(taskTool.description).toContain("- bare");
@@ -237,7 +293,7 @@ describe("Task tool (subagents)", () => {
 		const ctx = {
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			permissionMode: () => "ask" as const,
 			sandbox: () => "workspace-write" as const,
@@ -269,7 +325,7 @@ describe("Task tool (subagents)", () => {
 		const ctx = {
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			permissionMode: () => "ask" as const,
 			sandbox: () => "workspace-write" as const,
@@ -313,7 +369,7 @@ describe("Task tool (subagents)", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [
 				{ agentType: "scribe", whenToUse: "Writes things", source: "user", body: "You write terse commit messages." },
 			],
@@ -337,7 +393,7 @@ describe("Task tool (subagents)", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [{ agentType: "scribe", whenToUse: "Writes things", source: "user", body: "Body." }],
 			systemPromptFor: () => "OVERRIDE",
 		});
@@ -396,7 +452,7 @@ describe("Task tool (subagents)", () => {
 			const [taskTool] = createSubagentTools({
 				streamFn: subFaux.streamFn,
 				model: () => FAUX_MODEL,
-				allTools: [stallingTool(() => entered.resolve())],
+				allTools: () => [stallingTool(() => entered.resolve())],
 				definitions: () => [],
 			});
 
@@ -436,7 +492,7 @@ describe("Task tool (subagents)", () => {
 			const [taskTool] = createSubagentTools({
 				streamFn: subFaux.streamFn,
 				model: () => FAUX_MODEL,
-				allTools: [stallingTool(() => entered.resolve())],
+				allTools: () => [stallingTool(() => entered.resolve())],
 				definitions: () => [],
 			});
 			const parentFaux = fauxProvider([
@@ -513,7 +569,7 @@ describe("what the Task tool reads at the call", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn,
 			model: () => current,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 		});
 
@@ -539,7 +595,7 @@ describe("what the Task tool reads at the call", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			store: () => store,
 		});
@@ -576,7 +632,7 @@ describe("what the Task tool reads at the call", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: subFaux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [],
 			store: () => store,
 			permissionMode: () => mode,
@@ -607,7 +663,7 @@ describe("what the Task tool reads at the call", () => {
 			streamFn,
 			model: () => FAUX_MODEL,
 			resolveModel: (ref) => (ref === "other-model" ? OTHER : undefined),
-			allTools: [echoTool()],
+			allTools: () => [echoTool()],
 			definitions: () => [
 				{ agentType: "quick", whenToUse: "Small jobs", source: "user", model: "other-model" },
 				{ agentType: "retired", whenToUse: "Old jobs", source: "user", model: "gone-model" },

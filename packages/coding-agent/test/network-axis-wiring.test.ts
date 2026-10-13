@@ -123,7 +123,7 @@ describe("what a subagent inherits", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [recordingTool(seen)],
+			allTools: () => [recordingTool(seen)],
 			definitions: () => [],
 			// What a `networkAccess: "restricted"` session would hand down.
 			network: () => ({ access: "restricted", domains: [{ pattern: "*.npmjs.org", permission: "allow" }] }),
@@ -158,7 +158,7 @@ describe("what a subagent inherits", () => {
 		const [taskTool] = createSubagentTools({
 			streamFn: faux.streamFn,
 			model: () => FAUX_MODEL,
-			allTools: [recordingTool(seen)],
+			allTools: () => [recordingTool(seen)],
 			definitions: () => [],
 		});
 		await taskTool.call(
