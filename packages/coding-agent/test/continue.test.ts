@@ -730,3 +730,46 @@ describe("the shells a previous run left behind", () => {
 		expect(result.stderr).toContain("1 background shell from a previous run has ended.");
 	}, 30_000);
 });
+
+describe("the subagents a previous run left behind", () => {
+	test("a run with no end on file is reported on resume, and not promised a revival", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+		// A spawn that began and whose process never wrote the end: the shape a
+		// killed process leaves. The subagent itself is gone — it lived in that
+		// process — so the notice must say so rather than read like something
+		// that can be waited on or resumed.
+		store.appendCustom("subagent_start", {
+			sidechainId: "sidechain-old-run",
+			agentType: "general-purpose",
+			prompt: "research the thing",
+		});
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain("sidechain-old-run (general-purpose)");
+		expect(result.stderr).toContain("never finished");
+		expect(result.stderr).toContain("cannot be resumed");
+		expect(result.stderr).toContain("start a new Task");
+	}, 30_000);
+
+	test("a run whose end is on file is not reported", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+		store.appendCustom("subagent_start", {
+			sidechainId: "sidechain-done",
+			agentType: "general-purpose",
+			prompt: "research the thing",
+		});
+		store.appendCustom("subagent_end", { sidechainId: "sidechain-done", reason: "completed" });
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		// Paired: the run finished before the process did, so there is nothing
+		// left behind to report — by id or by sentence.
+		expect(result.stderr).not.toContain("sidechain-done");
+		expect(result.stderr).not.toContain("never finished");
+	}, 30_000);
+});

@@ -29,6 +29,7 @@ import { z } from "zod";
 import { type CompactionTuning, createCompactionWiring } from "./compaction-wiring.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
 import { subagentSourceLabel } from "./subagent-commands.ts";
+import { SUBAGENT_END_KIND, SUBAGENT_START_KIND } from "./subagent-ledger.ts";
 import { MAX_RETAINED_SUBAGENTS, type SubagentHandle, SubagentRegistry } from "./subagent-registry.ts";
 
 export interface AgentDefinition {
@@ -553,7 +554,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// The handle is in the table and the first request has not gone out:
 		// the one moment a caller can learn the new id before the run ends.
 		onSpawned?.(handle);
-		store?.appendCustom("subagent_start", { sidechainId, agentType: definition.agentType, prompt: input.prompt });
+		store?.appendCustom(SUBAGENT_START_KIND, { sidechainId, agentType: definition.agentType, prompt: input.prompt });
 
 		// The end entry is the start's pair, and it is written on the way out
 		// however the run leaves: a throw out of prompt() used to skip this
@@ -566,7 +567,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		try {
 			reason = await runPrompt(handle, input.prompt, signal, events);
 		} finally {
-			store?.appendCustom("subagent_end", {
+			store?.appendCustom(SUBAGENT_END_KIND, {
 				sidechainId,
 				reason,
 				toolCalls: events,
@@ -691,7 +692,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			try {
 				reason = await runPrompt(handle, input.message, toolCtx.signal, events);
 			} finally {
-				store?.appendCustom("subagent_end", {
+				store?.appendCustom(SUBAGENT_END_KIND, {
 					sidechainId: handle.sidechainId,
 					reason,
 					toolCalls: events,

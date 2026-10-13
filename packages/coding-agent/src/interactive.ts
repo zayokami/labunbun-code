@@ -236,6 +236,7 @@ import {
 	resolveSubagentId,
 	subagentPickerItems,
 } from "./subagent-commands.ts";
+import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts";
 import { type SubagentHandle, SubagentRegistry, subagentStatus } from "./subagent-registry.ts";
 import {
 	type AgentDefinition,
@@ -453,6 +454,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const shellRecovery = readShellLedger(store);
 	const recoveryNotice = formatShellRecovery(shellRecovery);
 	if (recoveryNotice) console.error(`Warning: ${recoveryNotice}`);
+
+	// The other thing a dead process leaves behind: subagent runs that began
+	// and were never seen to end. Nothing about them can be revived — a
+	// subagent lives in memory, and its conversation was never written down —
+	// so the notice says what was left and what to do instead, and says it
+	// here with the warning above: a fresh session reads an empty ledger.
+	const subagentNotice = formatSubagentRecovery(readSubagentLedger(store));
+	if (subagentNotice) console.error(`Warning: ${subagentNotice}`);
 
 	// The recovery protocol's one line: what the resumed ledger says the last
 	// run was doing — last call, files touched, failing tests, next step — and
