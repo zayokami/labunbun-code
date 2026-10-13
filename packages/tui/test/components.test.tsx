@@ -93,6 +93,29 @@ describe("MessageList", () => {
 		expect(frame).not.toContain("line 4"); // the oldest is dropped, not scrolled past
 	});
 
+	// A failed MCP call has no output to stream and is not over yet: the client
+	// sends the reason on the same update channel, and it was the one shape the
+	// reducer dropped — so the call that timed out told the screen nothing.
+	test("an MCP error arrives on the update channel instead of being dropped", () => {
+		let state: UiState = initialUiState();
+		state = reduceEvent(state, {
+			type: "tool_execution_start",
+			callId: "c1",
+			toolName: "mcp__fixture__sleep",
+			input: { ms: 60_000 },
+		});
+		state = reduceEvent(state, {
+			type: "tool_execution_update",
+			callId: "c1",
+			toolName: "mcp__fixture__sleep",
+			partial: { mcpError: "fixture/sleep timed out after 300ms" },
+		});
+		expect(state.liveOutputs.c1).toBe("fixture/sleep timed out after 300ms");
+
+		const { lastFrame } = render(withTheme(<MessageList entries={state.entries} liveOutputs={state.liveOutputs} />));
+		expect(flatFrame(lastFrame() ?? "")).toContain("fixture/sleep timed out after 300ms");
+	});
+
 	test("the result replaces the stream", () => {
 		const entry = { kind: "toolUse" as const, callId: "c1", toolName: "Bash", inputPreview: "build" };
 		// The reducer drops the stream when the result lands, but a renderer that

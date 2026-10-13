@@ -292,17 +292,24 @@ function previewInput(input: unknown): string {
 }
 
 /**
- * The text a tool streamed, whatever shape it wrapped it in.
+ * The text an update contributes to the running tool's window, whatever shape it
+ * wrapped it in.
  *
  * `partial` is `unknown` by design — every tool decides what progress looks like
- * — so the only thing worth rendering here is text, and a tool whose update is a
- * percentage or a count simply has nothing for the output window.
+ * — so the only things worth rendering here are text and the reason a call
+ * failed: a tool whose update is a percentage or a count has nothing for the
+ * output window, and an MCP call that failed reports why on this channel before
+ * its result lands. Dropping that report left a server that timed out saying
+ * nothing at all on screen.
  */
 function streamedText(partial: unknown): string | undefined {
 	if (typeof partial === "string") return partial;
 	if (typeof partial !== "object" || partial === null) return undefined;
-	const value = (partial as Record<string, unknown>).partialOutput;
-	return typeof value === "string" ? value : undefined;
+	const record = partial as Record<string, unknown>;
+	const value = record.partialOutput;
+	if (typeof value === "string") return value;
+	const mcpError = record.mcpError;
+	return typeof mcpError === "string" && mcpError !== "" ? mcpError : undefined;
 }
 
 /** Extract the primary preview for common tools (command, path, pattern). */
