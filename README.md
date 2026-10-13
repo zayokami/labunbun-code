@@ -471,6 +471,7 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
 | `--resume <id>` | Open this session in the terminal. A headless run continues the session with the prompt of the run. |
 | `-c`, `--continue` | Open the last session in this directory. A headless run continues it with the prompt of the run. |
 | `--output-format <format>` | Set the output format. The values are `text`, `json`, `stream-json`. |
+| `--settings <json>` | Merge this settings object over the settings files for one run. The value is JSON. A value that is not valid JSON stops the run. |
 | `--gamepad` | Use the controller for this run. The tool does not write a setting. |
 | `--no-gamepad` | Do not use the controller for this run. |
 | `--acp` | Serve the Agent Client Protocol on stdio. Use this option for an editor. It is the same as the `acp` subcommand. |
