@@ -28,7 +28,7 @@ function tempDir(prefix: string): string {
 }
 
 /** A REPL that records instead of painting; Enter picks the first row. */
-function sceneScript(options: { cwd: string }): string {
+function sceneScript(options: { cwd: string; after?: string }): string {
 	return `
 		import { mock } from "bun:test";
 		import * as ai from "@labunbun/ai";
@@ -79,6 +79,7 @@ function sceneScript(options: { cwd: string }): string {
 							await new Promise((resolve) => setTimeout(resolve, 10));
 						}
 						resumed = session.messages.some((m) => JSON.stringify(m.content).includes("PLANTED QUESTION"));
+						${options.after ?? ""}
 					}
 				};
 			}
@@ -92,13 +93,14 @@ function sceneScript(options: { cwd: string }): string {
 async function runScene(
 	options: { cwd: string; home: string },
 	env: Record<string, string> = {},
+	after?: string,
 ): Promise<{
 	pickerItems: Array<{ label: string; description: string }>;
 	pickedIndex: number | null;
 	infos: string[];
 	resumed: boolean;
 }> {
-	const proc = Bun.spawn([process.execPath, "--eval", sceneScript(options)], {
+	const proc = Bun.spawn([process.execPath, "--eval", sceneScript({ cwd: options.cwd, after })], {
 		cwd: join(import.meta.dir, ".."),
 		env: { ...process.env, HOME: options.home, USERPROFILE: options.home, ...env },
 		stdin: "ignore",
@@ -148,5 +150,42 @@ describe("the /resume picker", () => {
 		const outcome = await runScene({ cwd, home }, { LBB_THROW_ON_SWAP: "1" });
 
 		expect(outcome.infos.join("\n")).toContain("Resume failed: swap wiring exploded");
+	}, 30_000);
+
+	test("a resumed session's shell ledger is read at the swap — /ps lists what it left", async () => {
+		const home = tempDir("lbb-resume-picker-home-");
+		const cwd = tempDir("lbb-resume-picker-cwd-");
+		const planted = SessionStore.startNew(cwd, home);
+		planted.appendMessage(userMessage("PLANTED QUESTION"));
+		// A shell the planted session's previous run left running. This test
+		// process's own pid, alive by construction while the scene probes it —
+		// the read, not the process, is what is under test.
+		planted.appendCustom("shell_start", {
+			shellId: "shell_1",
+			pid: process.pid,
+			command: "npm run dev",
+			cwd,
+			startedAt: Date.now(),
+			outputFile: join(cwd, "dev.log"),
+		});
+
+		const outcome = await runScene(
+			{ cwd, home },
+			{},
+			`await onCommand("/ps");
+			const psDeadline = Date.now() + 8000;
+			while (!pickerItems.some((item) => item.label.startsWith("pid-")) && Date.now() < psDeadline) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}`,
+		);
+
+		expect(outcome.resumed).toBe(true);
+		// The row came from the ledger read at the swap: startup read the empty
+		// session this process began in, so without a re-read the picker has no
+		// pid to offer and /stop has nothing to end.
+		const labels = outcome.pickerItems.map((item) => item.label);
+		expect(labels.some((label) => label.startsWith(`pid-${process.pid}`))).toBe(true);
+		// And the swap says so, in the voice startup uses for the same fact.
+		expect(outcome.infos.join("\n")).toContain("1 background shell from a previous run is still running");
 	}, 30_000);
 });

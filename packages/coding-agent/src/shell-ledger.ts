@@ -238,6 +238,23 @@ export function formatShellRecovery(recovery: ShellRecovery): string | undefined
 }
 
 /**
+ * The recovery minus the shells this process's own manager is already tracking.
+ *
+ * A `/resume` can land on a session whose ledger still holds an open start for
+ * a shell this process started while that session was live — the start was
+ * written there because the session was. That shell has a handle: `/ps` lists
+ * it already and the exit guard counts it already. Without this, coming back
+ * to that session would show one shell twice — once by id and once by pid —
+ * and count it twice against the batch being interrupted. The ended count is
+ * the file's, untouched: a pid the manager tracks is not a shell the previous
+ * run left ended.
+ */
+export function excludeManagedShells(recovery: ShellRecovery, managedPids: Iterable<number>): ShellRecovery {
+	const managed = new Set(managedPids);
+	return { alive: recovery.alive.filter((shell) => !managed.has(shell.pid)), ended: recovery.ended };
+}
+
+/**
  * The end of a recovered shell's log, or the reason there is none. The manager
  * answers this for its own shells; a recovered one has no entry to look up, so
  * the log file recorded at its start is read directly — and a file since

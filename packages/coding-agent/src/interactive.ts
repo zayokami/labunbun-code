@@ -214,6 +214,7 @@ import {
 } from "./settings.ts";
 import {
 	attachShellLedger,
+	excludeManagedShells,
 	formatShellRecovery,
 	isRecoveredShell,
 	type RecoveredShell,
@@ -451,7 +452,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// watching them, and shells that ended with nobody watching. Printed here
 	// for the same reason as the warning above — a fresh session reads an empty
 	// ledger and says nothing.
-	const shellRecovery = readShellLedger(store);
+	let shellRecovery = readShellLedger(store);
 	const recoveryNotice = formatShellRecovery(shellRecovery);
 	if (recoveryNotice) console.error(`Warning: ${recoveryNotice}`);
 
@@ -1245,6 +1246,20 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		refreshContextInfo(next);
 		sessionRef = next;
 		pushInfo(handle, `Resumed session ${shortSessionId(summary.sessionId)} (${loaded.messages.length} messages).`);
+		// The incoming session's own shell ledger, read the way startup reads
+		// one: the shells the record leaves open belong to whichever session
+		// owns it, and `/ps`, `/stop`, `/tasks` and the exit guard all read the
+		// set this variable holds — read once at startup, it would otherwise go
+		// on describing the session just left. Shells this process itself holds
+		// handles for are excluded: they are already listed and already counted,
+		// and the incoming file may well record one — it was the live session
+		// when the shell started.
+		shellRecovery = excludeManagedShells(
+			readShellLedger(loaded.store),
+			backgroundShells.list().flatMap((shell) => (shell.pid === undefined ? [] : [shell.pid])),
+		);
+		const incomingShellNotice = formatShellRecovery(shellRecovery);
+		if (incomingShellNotice) pushInfo(handle, `Warning: ${incomingShellNotice}`);
 	}
 
 	/** Switch the active model mid-session (/model). Returns false when refused. */

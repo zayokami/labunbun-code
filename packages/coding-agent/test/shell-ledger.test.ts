@@ -16,6 +16,7 @@ import { join } from "node:path";
 import type { BackgroundShell } from "@labunbun/tools";
 import {
 	attachShellLedger,
+	excludeManagedShells,
 	formatShellRecovery,
 	isRecoveredShell,
 	probePid,
@@ -172,6 +173,26 @@ describe("probePid", () => {
 
 	test("ESRCH is not alive", () => {
 		withKillError("ESRCH", () => expect(probePid(4)).toBe(false));
+	});
+});
+
+describe("excludeManagedShells", () => {
+	test("a recovered pid this run already tracks is dropped, the ended count is untouched", () => {
+		const alive = readShellLedger(
+			store([custom(SHELL_START_KIND, start(111)), custom(SHELL_START_KIND, start(222))]),
+			() => true,
+		).alive;
+		const filtered = excludeManagedShells({ alive, ended: 3 }, [111]);
+		expect(filtered.alive.map((shell) => shell.id)).toEqual(["pid-222"]);
+		// A pid the manager holds is not a shell the previous run left ended —
+		// the count is the file's, and the drop is not a quiet ending.
+		expect(filtered.ended).toBe(3);
+	});
+
+	test("nothing managed changes nothing", () => {
+		const alive = readShellLedger(store([custom(SHELL_START_KIND, start(111))]), () => true).alive;
+		const filtered = excludeManagedShells({ alive, ended: 0 }, []);
+		expect(filtered.alive.map((shell) => shell.id)).toEqual(["pid-111"]);
 	});
 });
 
