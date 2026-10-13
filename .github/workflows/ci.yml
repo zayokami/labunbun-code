@@ -43,7 +43,14 @@ defaults:
 concurrency:
   # The pull_request number is null on a push, so this falls through to the ref:
   # a PR run groups by PR and cancels its own superseded run, while every push
-  # to main gets its own group and is never cancelled by a PR.
+  # to main resolves to the same string, refs/heads/main. A PR can never cancel
+  # a push run. One push also never cancels another's in-progress run, because
+  # cancel-in-progress is PR-only — but that flag governs only in-progress runs.
+  # GitHub separately cancels a previously *pending* run in a group whenever a
+  # newer entry queues, so two pushes back to back, or a re-run of an old
+  # commit's workflow queued behind the current one, lose the older entrant:
+  # measured here on 2026-10-13, when the re-runs of 5836985 and 0660d6d came
+  # back "cancelled" without a human touching them.
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
