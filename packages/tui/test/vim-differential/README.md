@@ -746,21 +746,36 @@ command started on. A count of one is unchanged, because the first step is the l
 one; that is why the `d2w` and `dw` cases in `CASES` are the **controls** for this
 group rather than cases of it.
 
-Four things in the shape space are *not* this rule and are left for their own round,
-each named here because the grid found them and this section is where the numbers
-live. A 15-buffer × 8-caret × 20-key sweep (1920 comparisons) went from 242
-disagreements to 48, and the 48 are all of:
+The things in the shape space that are *not* this rule were left for their own
+round when this section was written. They were the sweep's remaining 48
+disagreements (242 → 48 over a 15-buffer × 8-caret × 20-key sweep, 1920
+comparisons), and they are the three rules below. That round has since landed
+(`5836985`), so each now describes vim's rule, the engine's answer to it, and the
+cases that pin the two together:
 
 - **`w` stops *on* an empty line** (`textobject.c:407-413`: the white loop breaks on
   `col == 0 && *ml_get_curline() == NUL`) and that empty line **spends one
-  repetition** of the count. `motionForwardWord` has no such rule — it treats the
-  break as ordinary class-0 and steps over it. Every `d2w` on `a\nb\nc\nd` is
-  affected.
-- **`b` stops on an empty line too** (`:449-462`, `LINEEMPTY`) and walks straight
-  through a line that is only blanks. `motionBackWord` has the same gap, which is why
-  `b`/`B` show up in the 48 as well.
-- **A delete that reaches the end of the buffer's last line takes the break in front
-  of it**: `d3w` on `aa bb\ncc dd\nee` at 6 gives `aa bb` in vim and `aa bb\n` here.
+  repetition** of the count. `motionForwardWord` now carries the rule — its
+  whitespace walk breaks at column zero of a blank line — pinned by `EMPTY_ONE`,
+  `EMPTY_TWO` and `EMPTY_LATE` under `w`, `2w`, `3w` and the operator forms;
+  `EMPTY_SPACE`, a line holding only blanks, is the control, because that is not
+  blank in this sense.
+- **`b` stops on an empty line too** (`:449-462`, `LINEEMPTY`) and still crosses
+  a line that is only blanks. `motionBackWord` now returns at the break the
+  arriving step landed on (`:457-459`), which is why the `b` and `B` cases over
+  `EMPTY_ONE` sit beside the `EMPTY_SPACE` controls.
+- **A delete that reaches the end of the buffer's last line takes the break in
+  front of it**: `d3w` on `aa bb\ncc dd\nee` at 6 gives `aa bb` in vim, and now in
+  the engine too. `ops.c:4279-4307`: a charwise, non-inclusive end that came to
+  rest in column zero of a later line folds back one line — linewise when the
+  start is still inside its line's indent (`inindent(0)`), onto the previous
+  line's last character, inclusive, otherwise ("strange, but that's the way vi
+  does it", `:4280`). `d3w` on `EOL_THREE` at 6 is the case, beside `d2w`, `2w`,
+  `3w`, `y2w` and `y3w` at the same caret.
+
+The later round's evidence is the 49 cases it added to `CASES` (counted in
+`5836985`'s message) and a unit block in `test/vim-engine.test.ts` holding the
+same caret positions.
 
 The evidence for the round is 33 cases in `CASES` (947 → 980), five unit tests, and
 four new mutants (E1–E4) — one for each shape the rule can take: the clamp on every
