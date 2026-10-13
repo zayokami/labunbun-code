@@ -43,7 +43,7 @@ import { createToolLedger, formatResumeSummary, readToolCheckpoints } from "./ch
 import { createClaudeCredentials } from "./claude-auth.ts";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
 import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
-import { costStateFromMessages } from "./cost-tracker.ts";
+import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
@@ -134,6 +134,8 @@ interface JsonResult {
 	type: "result";
 	subtype: "success" | "error_max_turns" | "error_during_execution" | "error_aborted";
 	cost_usd: number;
+	/** The part of `cost_usd` subagent runs spent, so a script can attribute it. */
+	subagent_cost_usd: number;
 	duration_ms: number;
 	num_turns: number;
 	result: string;
@@ -473,6 +475,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	}
 	const mcpTools = mcpConnections.flatMap((connection) => connection.tools);
 
+	// Subagent spend, accumulated as it happens: a subagent's conversation never
+	// enters this run's messages, so a bill computed from them alone would
+	// under-report every run that fanned out. In memory only — a `-p` run keeps
+	// no project ledger.
+	const subagentUsage = new CostTracker();
 	// Read at the call, like the REPL's: the definition list is a getter because a
 	// definition approved mid-session joins it, and the store because a sidechain
 	// belongs to whichever session is live.
@@ -504,6 +511,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		trimOldToolResults: settings.trimOldToolResults,
 		compactionTuning,
 		report: (text) => console.error(text),
+		// The subagent's own usage, into the accumulator above; the JSON result
+		// reports the part beside the bill it is included in.
+		onUsage: (provider, modelId, usage, seat) => subagentUsage.recordUsage(provider, modelId, usage, 0, seat),
 	});
 	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
 	const allTools = [...tools, ...mcpTools, ...subagentTools];
@@ -718,7 +728,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// Costed from the transcript's own usage records, against the prices the
 			// model resolves to — the same arithmetic `/cost` does, so a scripted run
 			// and an interactive one disagree about the bill only if the prices differ.
-			cost_usd: costStateFromMessages(session.messages).totalCostUSD,
+			// The subagents' spend is added in, and named beside it: their
+			// conversations never enter this transcript, so a sum of the messages
+			// alone under-reported every run that fanned out.
+			cost_usd: costStateFromMessages(session.messages).totalCostUSD + subagentUsage.state.totalCostUSD,
+			subagent_cost_usd: subagentUsage.state.totalCostUSD,
 			duration_ms: Date.now() - startedAt,
 			num_turns: turns,
 			result: finalText,

@@ -43,6 +43,7 @@ const SEED: CostState = {
 			cacheWriteTokens: 40,
 			reasoningTokens: 10,
 			costUSD: 0.5,
+			subagentCostUSD: 0,
 		},
 	},
 };
@@ -61,6 +62,7 @@ function nextState(): CostState {
 				cacheWriteTokens: 0,
 				reasoningTokens: 0,
 				costUSD: 0,
+				subagentCostUSD: 0,
 			},
 		},
 	};

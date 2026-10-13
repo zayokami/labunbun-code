@@ -863,6 +863,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// The host's own registry, so `/subagents` can see lifecycles the REPL
 	// did not spawn — the tools hold no display state of their own.
 	const subagentRegistry = new SubagentRegistry();
+	/**
+	 * The ledger every usage record books into, subagents included. Constructed
+	 * before the subagent tools because their booking reaches it at spawn time;
+	 * construction reads nothing but cwd, and the session seeding happens below,
+	 * where the store knows what the conversation holds.
+	 */
+	const costTracker = new CostTracker(cwd);
 	const [taskTool, sendMessageTool, taskStopTool, subagentControl] = createSubagentTools({
 		streamFn,
 		// Read through the session, not captured: /model swaps the model and
@@ -887,6 +894,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		trimOldToolResults: settings.trimOldToolResults,
 		compactionTuning,
 		report: (text) => pushInfo(handle, text),
+		// A subagent's spend, into the same ledger as the session's: its
+		// conversation never enters the parent's transcript, so this is the only
+		// booking it gets. Persisted at once, like the session's own turn_end.
+		onUsage: (provider, modelId, usage, seat) => {
+			costTracker.recordUsage(provider, modelId, usage, 0, seat);
+			costTracker.persist();
+		},
 		registry: subagentRegistry,
 		// The subagent's asks join the session's own dialog — one queue for every
 		// level. Read through the holder, not captured: the tools are built before
@@ -1145,7 +1159,6 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	}
 
 	// ---- cost tracking + context indicator + session-scoped listeners ----
-	const costTracker = new CostTracker(cwd);
 	// "This session" is the conversation being opened, not the project it lives
 	// in: a resumed one arrives having already spent what its messages record, and
 	// leaving that out would make /cost report less the moment a session continues.

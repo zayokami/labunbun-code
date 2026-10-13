@@ -22,6 +22,7 @@ const SESSION: CostState = {
 			cacheWriteTokens: 0,
 			reasoningTokens: 0,
 			costUSD: 0.25,
+			subagentCostUSD: 0,
 		},
 	},
 };
@@ -37,6 +38,7 @@ const PROJECT: CostState = {
 			cacheWriteTokens: 0,
 			reasoningTokens: 0,
 			costUSD: 12.5,
+			subagentCostUSD: 0,
 		},
 	},
 };
@@ -83,6 +85,7 @@ describe("/cost", () => {
 					cacheWriteTokens: 0,
 					reasoningTokens: 0,
 					costUSD: 0,
+					subagentCostUSD: 0,
 				},
 			},
 		};

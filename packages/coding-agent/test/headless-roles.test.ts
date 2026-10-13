@@ -247,3 +247,52 @@ describe("the compaction seat", () => {
 		expect(result.requests).toEqual(["main", "summarizer", "main"]);
 	});
 });
+
+/**
+ * The subagent booking, end to end: a `-p` run that fans out must bill what
+ * its subagent spent. The subagent's conversation never enters the transcript
+ * `cost_usd` is computed from, so before the booking existed this run would
+ * report $0 for the one paid request it made. The light seat is the subagent's
+ * model here, which puts the seat's name on the booking's middle request.
+ */
+describe("subagent spend in a -p run", () => {
+	test("the subagent's spend is included in cost_usd and named in subagent_cost_usd", async () => {
+		const harness = makeHarness();
+		writeFileSync(
+			harness.settingsPath,
+			JSON.stringify({
+				modelDiscovery: false,
+				providers: roleProvider(),
+				roles: { light: { model: "roleprov/summarizer" } },
+				// $1/$1 per Mtok on both rows, so the arithmetic below is nothing
+				// but the recorded usage times a price the settings file names.
+				pricing: {
+					"roleprov/main": { input: 1, output: 1 },
+					"roleprov/summarizer": { input: 1, output: 1 },
+				},
+			}),
+		);
+
+		const result = await runCaptured(harness, {
+			modelRef: "roleprov/main",
+			steps: [
+				{
+					toolCalls: [{ name: "Task", arguments: { description: "read the file", prompt: "read big.txt and report" } }],
+				},
+				{ text: "sub report", usage: { input: 1_000_000, output: 1_000_000 } },
+				{ text: "done" },
+			],
+		});
+
+		expect(result.code).toBe(0);
+		// The middle request went to the light seat — the subagent's own model —
+		// and its usage is the only spend in this run.
+		expect(result.requests).toEqual(["main", "summarizer", "main"]);
+		const json = JSON.parse(result.stdout);
+		expect(json.subagent_cost_usd).toBeCloseTo(2, 10);
+		// And the bill includes it rather than reporting it twice or not at all:
+		// the session's own turns carried no usage.
+		expect(json.cost_usd).toBeCloseTo(2, 10);
+		expect(json.result).toBe("done");
+	});
+});

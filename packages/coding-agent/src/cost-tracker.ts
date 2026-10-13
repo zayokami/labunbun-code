@@ -16,6 +16,26 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
 import { type AgentMessage, computeCost, resolveModel, type Usage } from "@labunbun/ai";
+import type { RoleName } from "./model-roles.ts";
+
+/**
+ * The label a usage record carries when it was not the session's own model
+ * call — today, a subagent's run.
+ *
+ * A subagent's conversation never reaches the parent's transcript, so no
+ * message in it records what the run spent; the booking that carries this
+ * label is the only record of it. `kind` is the part the ledger reads and
+ * splits by: the record accumulates into the model bucket's `subagentCostUSD`
+ * beside the session's own spend. `role` names the seat that answered, when a
+ * seat did — a subagent on the light role names it, while one on its
+ * definition's own model or on the parent's model has no role. It stays on
+ * the label rather than becoming a per-model rollup, which would have to lie
+ * the moment two roles spend on the same model.
+ */
+export interface UsageSeat {
+	kind: "subagent";
+	role?: RoleName;
+}
 
 export interface ModelUsage {
 	inputTokens: number;
@@ -29,6 +49,12 @@ export interface ModelUsage {
 	 */
 	reasoningTokens: number;
 	costUSD: number;
+	/**
+	 * The part of `costUSD` that subagent runs spent — a subset of it, like
+	 * `reasoningTokens` is of output. The money is the same spend and sits in
+	 * the same totals; this only says who spent it.
+	 */
+	subagentCostUSD: number;
 }
 
 export interface CostState {
@@ -42,7 +68,14 @@ export function emptyCostState(): CostState {
 }
 
 /** Fold one usage record into a state, priced by whatever the model resolves to. */
-function accumulate(state: CostState, provider: string, modelId: string, usage: Usage, durationMs: number): void {
+function accumulate(
+	state: CostState,
+	provider: string,
+	modelId: string,
+	usage: Usage,
+	durationMs: number,
+	seat?: UsageSeat,
+): void {
 	const key = `${provider}/${modelId}`;
 	const model = resolveModel(`${provider}/${modelId}`);
 	const breakdown = computeCost(usage, model?.pricing);
@@ -53,6 +86,7 @@ function accumulate(state: CostState, provider: string, modelId: string, usage: 
 		cacheWriteTokens: 0,
 		reasoningTokens: 0,
 		costUSD: 0,
+		subagentCostUSD: 0,
 	};
 	existing.inputTokens += usage.input;
 	existing.outputTokens += usage.output;
@@ -60,6 +94,9 @@ function accumulate(state: CostState, provider: string, modelId: string, usage: 
 	existing.cacheWriteTokens += usage.cacheWrite;
 	existing.reasoningTokens += usage.reasoning ?? 0;
 	existing.costUSD += breakdown.total;
+	// The split, not a second bucket: this spend is in the totals either way,
+	// and this line only records whose it was.
+	if (seat?.kind === "subagent") existing.subagentCostUSD += breakdown.total;
 	state.modelsUsage[key] = existing;
 	state.totalCostUSD += breakdown.total;
 	state.totalDurationMs += durationMs;
@@ -115,10 +152,14 @@ export class CostTracker {
 		this.#session = costStateFromMessages(messages);
 	}
 
-	/** Feed one assistant message's usage into both totals. */
-	recordUsage(provider: string, modelId: string, usage: Usage, durationMs = 0): void {
-		accumulate(this.#state, provider, modelId, usage, durationMs);
-		accumulate(this.#session, provider, modelId, usage, durationMs);
+	/**
+	 * Feed one assistant message's usage into both totals. `seat` labels a
+	 * record that was not the session's own call — a subagent's run — so the
+	 * bucket it lands in shows the share (see UsageSeat).
+	 */
+	recordUsage(provider: string, modelId: string, usage: Usage, durationMs = 0, seat?: UsageSeat): void {
+		accumulate(this.#state, provider, modelId, usage, durationMs, seat);
+		accumulate(this.#session, provider, modelId, usage, durationMs, seat);
 	}
 
 	persist(): void {
@@ -173,7 +214,12 @@ export function loadCostState(path: string): CostState {
 				key,
 				// `reasoningTokens` arrived with the field; an entry persisted before
 				// it backfills to zero rather than reading as `undefined` in sums.
-				{ ...usage, reasoningTokens: usage.reasoningTokens ?? 0 },
+				// `subagentCostUSD` backfills the same way.
+				{
+					...usage,
+					reasoningTokens: usage.reasoningTokens ?? 0,
+					subagentCostUSD: usage.subagentCostUSD ?? 0,
+				},
 			]),
 		);
 		return {
@@ -236,7 +282,11 @@ export function formatCostState(state: CostState, label: string): string {
 		// its own: it is a subset of that count, and a line beside it would read
 		// as a second, additive total. Models that never report it show nothing.
 		const reasoning = usage.reasoningTokens > 0 ? ` (${usage.reasoningTokens.toLocaleString()} reasoning)` : "";
-		lines.push(`  ${key}: ${totalTokens(usage)} tokens${reasoning}, $${usage.costUSD.toFixed(4)}`);
+		// The subagent share rides the model's money as a subset, for the same
+		// reason the reasoning share rides its tokens: a line of its own would
+		// read as a second, additive amount.
+		const subagents = usage.subagentCostUSD > 0 ? ` · $${usage.subagentCostUSD.toFixed(4)} from subagents` : "";
+		lines.push(`  ${key}: ${totalTokens(usage)} tokens${reasoning}, $${usage.costUSD.toFixed(4)}${subagents}`);
 		lines.push(`    ${cacheChannels(usage)}`);
 	}
 	return lines.join("\n");

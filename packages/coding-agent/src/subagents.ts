@@ -23,10 +23,11 @@ import {
 	type SessionStore,
 	type ToolResult,
 } from "@labunbun/agent";
-import type { Model, StreamFn, ThinkingLevel } from "@labunbun/ai";
+import type { Model, StreamFn, ThinkingLevel, Usage } from "@labunbun/ai";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import { type CompactionTuning, createCompactionWiring } from "./compaction-wiring.ts";
+import type { UsageSeat } from "./cost-tracker.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
 import { subagentSourceLabel } from "./subagent-commands.ts";
 import { SUBAGENT_END_KIND, SUBAGENT_START_KIND } from "./subagent-ledger.ts";
@@ -216,6 +217,19 @@ export interface TaskToolContext {
 	 */
 	compactionTuning?: CompactionTuning;
 	/**
+	 * Where a subagent's token usage goes — one call per completed turn, with
+	 * the seat label it is booked under.
+	 *
+	 * A subagent's conversation never reaches the parent's transcript, so no
+	 * message in it records what the run spent; without this hook that spend is
+	 * booked nowhere. The label says what produced it: kind "subagent", and the
+	 * role whose seat answered (`light`) when a seat did — a run on its
+	 * definition's own model or on the parent's model has no role to name.
+	 * Absent (an embedder, a test), nothing is booked, which is what every host
+	 * did before the hook existed.
+	 */
+	onUsage?: (provider: string, modelId: string, usage: Usage, seat: UsageSeat) => void;
+	/**
 	 * Where the host wants lifecycles recorded, when it wants to see them.
 	 *
 	 * Injected rather than returned so a caller with nothing to observe — a
@@ -316,6 +330,14 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 	const registry = ctx.registry ?? new SubagentRegistry();
 
 	/**
+	 * The seat label per handle. `runPrompt` is shared by Task and SendMessage
+	 * and sees only the handle, so the label computed at the spawn travels
+	 * beside it rather than through the signature — and a continued subagent
+	 * books under the seat it was spawned on, not the caller's.
+	 */
+	const seats = new WeakMap<SubagentHandle, UsageSeat>();
+
+	/**
 	 * Run one prompt on a handle, and mark where the run left it.
 	 *
 	 * Shared by Task and SendMessage so the mechanics cannot drift: in both
@@ -338,6 +360,12 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		const unsubscribe = handle.session.on((event) => {
 			if (event.type === "tool_execution_end") {
 				events.push(`${event.toolName}: ${event.result.isError ? "error" : "ok"}`);
+			}
+			if (event.type === "turn_end") {
+				// The run's own spend, booked where the host listens: the subagent's
+				// transcript is not kept, so no later reader could cost it.
+				const seat = seats.get(handle);
+				if (seat) ctx.onUsage?.(event.message.provider, event.message.model, event.message.usage, seat);
 			}
 		});
 		const onAbort = () => handle.session.abort();
@@ -464,7 +492,12 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// definition can — `resolveRoles` already dropped a light model that did
 		// not resolve or had no key — so a misconfigured light seat is a warning
 		// at startup, not a line per spawn.
-		const model = resolved ?? ctx.lightModel?.() ?? ctx.model();
+		const light = ctx.lightModel?.();
+		const model = resolved ?? light ?? ctx.model();
+		// The label this run's usage is booked under: the kind says a subagent
+		// spent it, and the role names the seat only when the seat answered — a
+		// definition's own model and the parent's are not role seats.
+		const seat: UsageSeat = { kind: "subagent", role: !resolved && light ? "light" : undefined };
 
 		/** What the subagent did to its own context; lives on its handle so
 		 *  continuations can record what each run added. */
@@ -566,6 +599,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			endedAt: 0,
 		};
 		registry.register(handle);
+		seats.set(handle, seat);
 		// The handle is in the table and the first request has not gone out:
 		// the one moment a caller can learn the new id before the run ends.
 		onSpawned?.(handle);

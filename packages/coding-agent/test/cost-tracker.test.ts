@@ -133,6 +133,42 @@ describe("CostTracker.recordUsage", () => {
 		expect(tracker.state.totalCostUSD).toBe(0);
 	});
 
+	test("a subagent record books the split into the same bucket", () => {
+		// The seat label rides the booking: kind "subagent" (the part the ledger
+		// reads) and the role whose seat answered.
+		const tracker = new CostTracker();
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000 }), 0, {
+			kind: "subagent",
+			role: "light",
+		});
+		const bucket = tracker.state.modelsUsage["anthropic/claude-sonnet-5"];
+		// The money is in the bill either way — a subagent's spend is the
+		// session's spend — and the split only says whose it was.
+		expect(bucket.costUSD).toBeCloseTo(2, 10);
+		expect(bucket.subagentCostUSD).toBeCloseTo(2, 10);
+		expect(tracker.sessionState.modelsUsage["anthropic/claude-sonnet-5"]?.subagentCostUSD).toBeCloseTo(2, 10);
+	});
+
+	test("a record without a seat leaves the subagent split at zero", () => {
+		const tracker = new CostTracker();
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000 }));
+		const bucket = tracker.state.modelsUsage["anthropic/claude-sonnet-5"];
+		expect(bucket.costUSD).toBeCloseTo(2, 10);
+		expect(bucket.subagentCostUSD).toBe(0);
+	});
+
+	test("the subagent split accumulates beside the session's own spend", () => {
+		const tracker = new CostTracker();
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000 }));
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000 }), 0, { kind: "subagent" });
+		const bucket = tracker.state.modelsUsage["anthropic/claude-sonnet-5"];
+		expect(bucket.costUSD).toBeCloseTo(4, 10);
+		expect(bucket.subagentCostUSD).toBeCloseTo(2, 10);
+		// The split is a subset, never a second total: it can exceed neither the
+		// bucket nor the bill it is quoted under.
+		expect(bucket.subagentCostUSD).toBeLessThanOrEqual(bucket.costUSD);
+	});
+
 	test("a tracker with no cwd keeps state in memory and persists nothing", () => {
 		const tracker = new CostTracker();
 		tracker.recordUsage("p", "m", usage({ input: 5 }));
@@ -159,6 +195,7 @@ describe("loadCostState", () => {
 					cacheWriteTokens: 4,
 					reasoningTokens: 1,
 					costUSD: 1.5,
+					subagentCostUSD: 0.25,
 				},
 			},
 		};
@@ -182,6 +219,24 @@ describe("loadCostState", () => {
 			}),
 		);
 		expect(loadCostState(path).modelsUsage["p/m"]?.reasoningTokens).toBe(0);
+	});
+
+	// The same arrival for the subagent split: an entry persisted before the
+	// field existed has no such key, and the reader backfills zero so the sums
+	// describe "no subagent spend recorded" rather than `undefined`.
+	test("an entry persisted before subagentCostUSD existed backfills to zero", () => {
+		const path = tmpFile();
+		writeFileSync(
+			path,
+			JSON.stringify({
+				totalCostUSD: 1,
+				totalDurationMs: 0,
+				modelsUsage: {
+					"p/m": { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 1 },
+				},
+			}),
+		);
+		expect(loadCostState(path).modelsUsage["p/m"]?.subagentCostUSD).toBe(0);
 	});
 
 	// Cost data is a convenience, not a record of truth: a corrupt file should
@@ -272,6 +327,7 @@ describe("formatCostState", () => {
 						cacheWriteTokens: 40,
 						reasoningTokens: 0,
 						costUSD: 0.5,
+						subagentCostUSD: 0,
 					},
 				},
 			},
@@ -296,6 +352,7 @@ describe("formatCostState", () => {
 						cacheWriteTokens: 0,
 						reasoningTokens: 0,
 						costUSD: 0,
+						subagentCostUSD: 0,
 					},
 					"p/b": {
 						inputTokens: 2,
@@ -304,6 +361,7 @@ describe("formatCostState", () => {
 						cacheWriteTokens: 0,
 						reasoningTokens: 0,
 						costUSD: 0,
+						subagentCostUSD: 0,
 					},
 				},
 			},
@@ -335,12 +393,59 @@ describe("formatCostState", () => {
 						cacheWriteTokens: 0,
 						reasoningTokens: 0,
 						costUSD: 0,
+						subagentCostUSD: 0,
 					},
 				},
 			},
 			"This session",
 		);
 		expect(text).toContain("cache: 900 read (90.0%) · 0 written · 100 full price");
+	});
+
+	test("the subagent share rides the model line, marked as the subagents'", () => {
+		const text = formatCostState(
+			{
+				totalCostUSD: 0.5,
+				totalDurationMs: 0,
+				modelsUsage: {
+					"p/m": {
+						inputTokens: 1,
+						outputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						reasoningTokens: 0,
+						costUSD: 0.5,
+						subagentCostUSD: 0.2,
+					},
+				},
+			},
+			"This session",
+		);
+		// Beside the money rather than on a line of its own: it is a subset of
+		// the amount it follows, and a second money line would read as additive.
+		expect(text).toContain("p/m: 1 tokens, $0.5000 · $0.2000 from subagents");
+	});
+
+	test("a model only the session itself used says nothing about subagents", () => {
+		const text = formatCostState(
+			{
+				totalCostUSD: 0.5,
+				totalDurationMs: 0,
+				modelsUsage: {
+					"p/m": {
+						inputTokens: 1,
+						outputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						reasoningTokens: 0,
+						costUSD: 0.5,
+						subagentCostUSD: 0,
+					},
+				},
+			},
+			"This session",
+		);
+		expect(text).not.toContain("subagents");
 	});
 });
 
@@ -394,6 +499,7 @@ describe("formatCostReport", () => {
 			cacheWriteTokens: 0,
 			reasoningTokens: 0,
 			costUSD: 0,
+			subagentCostUSD: 0,
 		};
 		const text = formatCostReport(emptyCostState(), {
 			totalCostUSD: 0,
@@ -412,6 +518,7 @@ describe("formatCostReport", () => {
 			cacheWriteTokens: 0,
 			reasoningTokens: 0,
 			costUSD: 2,
+			subagentCostUSD: 0,
 		};
 		const text = formatCostReport(emptyCostState(), {
 			totalCostUSD: 2,

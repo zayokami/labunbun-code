@@ -13,8 +13,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { type AnyTool, buildTool } from "@labunbun/agent";
-import { FAUX_MODEL, fauxProvider, type Model, type StreamFn } from "@labunbun/ai";
+import { FAUX_MODEL, fauxProvider, type Model, type StreamFn, type Usage } from "@labunbun/ai";
 import { z } from "zod";
+import type { UsageSeat } from "../src/cost-tracker.ts";
 import { createSubagentTools } from "../src/subagents.ts";
 
 const PARENT: Model = FAUX_MODEL;
@@ -126,5 +127,114 @@ describe("the light model seat", () => {
 		await callTool(taskTool, { description: "x", prompt: "do it", subagent_type: "general-purpose" });
 
 		expect(models).toEqual(["light-model", PARENT.id]);
+	});
+});
+
+/**
+ * The booking, not the ledger: a subagent's usage must reach the host's hook
+ * with the seat label it is booked under — kind "subagent" plus the role when
+ * a role seat answered — because nothing else records it. The subagent's
+ * transcript never enters the parent's, so a host that drops this hook books
+ * the spend nowhere. The ledger it lands in is cost-tracker.test.ts's subject.
+ */
+describe("subagent usage booking", () => {
+	function bookingsOf() {
+		const bookings: Array<{ provider: string; model: string; input: number; output: number; seat: UsageSeat }> = [];
+		const onUsage = (provider: string, modelId: string, usage: Usage, seat: UsageSeat) => {
+			bookings.push({ provider, model: modelId, input: usage.input, output: usage.output, seat });
+		};
+		return { bookings, onUsage };
+	}
+
+	test("a run on the light seat books its usage under the light role", async () => {
+		const subFaux = fauxProvider([{ text: "sub done", usage: { input: 10, output: 5 } }]);
+		const { streamFn } = recordedModels(subFaux);
+		const { bookings, onUsage } = bookingsOf();
+		const [taskTool] = createSubagentTools({
+			streamFn,
+			model: () => PARENT,
+			lightModel: () => LIGHT,
+			allTools: [echoTool()],
+			definitions: () => [],
+			onUsage,
+		});
+
+		await callTool(taskTool, { description: "x", prompt: "do it", subagent_type: "general-purpose" });
+
+		expect(bookings).toEqual([
+			{ provider: "faux", model: "light-model", input: 10, output: 5, seat: { kind: "subagent", role: "light" } },
+		]);
+	});
+
+	test("a definition's own model books with no role to name", async () => {
+		// The seat only names itself when the seat answered: a definition's own
+		// model is the agent's choice, not a role's.
+		const subFaux = fauxProvider([{ text: "sub done", usage: { input: 1, output: 2 } }]);
+		const { streamFn } = recordedModels(subFaux);
+		const { bookings, onUsage } = bookingsOf();
+		const [taskTool] = createSubagentTools({
+			streamFn,
+			model: () => PARENT,
+			lightModel: () => LIGHT,
+			resolveModel: (ref) => (ref === "other-model" ? OTHER : undefined),
+			allTools: [echoTool()],
+			definitions: () => [{ agentType: "quick", whenToUse: "Small jobs", source: "user", model: "other-model" }],
+			onUsage,
+		});
+
+		await callTool(taskTool, { description: "x", prompt: "do it", subagent_type: "quick" });
+
+		expect(bookings).toHaveLength(1);
+		expect(bookings[0].model).toBe("other-model");
+		expect(bookings[0].seat.kind).toBe("subagent");
+		expect(bookings[0].seat.role).toBeUndefined();
+	});
+
+	test("a run on the parent's model books with no role either", async () => {
+		const subFaux = fauxProvider([{ text: "sub done", usage: { input: 1, output: 2 } }]);
+		const { streamFn } = recordedModels(subFaux);
+		const { bookings, onUsage } = bookingsOf();
+		const [taskTool] = createSubagentTools({
+			streamFn,
+			model: () => PARENT,
+			lightModel: () => undefined,
+			allTools: [echoTool()],
+			definitions: () => [],
+			onUsage,
+		});
+
+		await callTool(taskTool, { description: "x", prompt: "do it", subagent_type: "general-purpose" });
+
+		expect(bookings).toHaveLength(1);
+		expect(bookings[0].model).toBe(PARENT.id);
+		expect(bookings[0].seat.role).toBeUndefined();
+	});
+
+	test("a continuation books under the seat it was spawned on", async () => {
+		// SendMessage runs the same `runPrompt` as Task and holds only the
+		// handle, so the label travels beside the handle: the follow-up books
+		// under the spawn's seat rather than against whatever answers now.
+		const subFaux = fauxProvider([
+			{ text: "first", usage: { input: 1, output: 0 } },
+			{ text: "second", usage: { input: 2, output: 0 } },
+		]);
+		const { streamFn } = recordedModels(subFaux);
+		const { bookings, onUsage } = bookingsOf();
+		const [taskTool, sendMessageTool] = createSubagentTools({
+			streamFn,
+			model: () => PARENT,
+			lightModel: () => LIGHT,
+			allTools: [echoTool()],
+			definitions: () => [],
+			onUsage,
+		});
+
+		const first = await callTool(taskTool, { description: "x", prompt: "do it", subagent_type: "general-purpose" });
+		const id = /\[subagent id: (sidechain-[^\]]+)\]/.exec((first.content[0] as { text: string }).text)?.[1];
+		expect(id).toBeTruthy();
+		await callTool(sendMessageTool, { sidechain_id: id, message: "again" });
+
+		expect(bookings.map((booking) => booking.input)).toEqual([1, 2]);
+		expect(bookings.every((booking) => booking.seat.role === "light")).toBe(true);
 	});
 });
