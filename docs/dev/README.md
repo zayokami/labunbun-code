@@ -4,6 +4,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 
 - [AI layer](ai-layer.md): the model registry, the prompt cache rules, and the three wire adapters in `packages/ai`.
 - [ChatGPT subscription](chatgpt-subscription.md): the app-side sign-in for a ChatGPT subscription — the credential store, the two login shapes, and where the app wires them.
+- [Checkpoint ledger](checkpoint-ledger.md): the record of what the agent did — the entry one finished tool call leaves, the file snapshots `/rewind` restores from, and the recovery line a resumed session prints.
 - [Claude subscription](claude-subscription.md): the app-side sign-in for a Claude subscription — the credential store, the login flow, and where the app wires them.
 - [Command classifier](command-classifier.md): the classifier that reports whether one command line can destroy data, and the permission engine that runs it.
 - [Crash consistency](crash-consistency.md): what survives a killed process — the files replaced by a rename, the files appended to, and the writes still made in place.
