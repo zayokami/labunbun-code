@@ -95,6 +95,24 @@ export const OpenAICompatibleProviderSchema = z.object({
 	),
 });
 
+/**
+ * One seat of the role stack, as a settings file writes it.
+ *
+ * Every field is optional so a half-written entry still parses: an entry that
+ * names no model is a configuration mistake, and `resolveRoles` says so and
+ * ignores it — a parse error here would drop the whole settings file instead,
+ * which is the opposite of fail-soft. The reference syntax matches the one
+ * session models have always used (see `model-roles.ts` for the exact rule):
+ * `model` alone is a bare id or a `provider/model` reference, and `provider`
+ * names the serving side explicitly, which is the only way to reach a gateway
+ * row — bare ids never resolve to one.
+ */
+export const RoleEntrySchema = z.object({
+	provider: z.string().optional(),
+	model: z.string().optional(),
+	fallback: z.array(z.string()).optional(),
+});
+
 export const SettingsSchema = z.object({
 	model: z.string().optional(),
 	/** Model references tried in order when the primary errors before streaming. */
@@ -254,6 +272,34 @@ export const SettingsSchema = z.object({
 	 * the published number wrong for the bill it is meant to describe.
 	 */
 	// Long-form design notes: docs/dev/migration-framework.md
+	/**
+	 * The role stack: which model each seat of the session runs on.
+	 *
+	 * Compatible services do not have compatible abilities: one OpenAI-shaped
+	 * endpoint can take a tool call, another can only chat, and a gateway serves
+	 * ids its vendors never named. A role names one seat — the main
+	 * conversation, plan mode, compaction, subagents, local work — and lets it
+	 * pin a provider beside the model, plus its own fallback order, independently
+	 * of every other seat.
+	 *
+	 * Resolution is fail-soft and lives in `model-roles.ts`: a reference that
+	 * names nothing (or a model whose key is missing) warns on stderr and leaves
+	 * the role on its host default, where an unknown `model` still stops the app.
+	 */
+	roles: z
+		.object({
+			/** The main conversation's default model, when nothing more explicit picks one. */
+			main: RoleEntrySchema.optional(),
+			/** The model plan mode runs on while planning. */
+			plan: RoleEntrySchema.optional(),
+			/** The model that writes compaction summaries; aliases `compaction.model`. */
+			compaction: RoleEntrySchema.optional(),
+			/** Where subagents run, unless their own definition names a model. */
+			light: RoleEntrySchema.optional(),
+			/** The local seat (a machine-local daemon); read and resolved, no consumer yet. */
+			local: RoleEntrySchema.optional(),
+		})
+		.optional(),
 	/** The /beetle band: which model each of the four members runs. */
 	beetle: z
 		.object({
@@ -334,6 +380,10 @@ export const PROJECT_TIER_KEY_POLICY: Record<keyof Settings, "denied" | "repo"> 
 	// the model chews on the user's own conversation — what the turns are billed,
 	// and how fast the context fills — and a repo has no business choosing that.
 	thinkingLevel: "denied",
+	// `model` and `fallbackModels` once over, applied per seat: a repository that
+	// could name the models would be choosing what the user's conversation spends
+	// on — and `roles.compaction` aliases a key already denied above.
+	roles: "denied",
 	// Not a lockdown but the same rule: whether this startup asks the network a
 	// question is the user's decision, not the repository's.
 	modelDiscovery: "denied",

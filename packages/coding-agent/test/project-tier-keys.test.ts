@@ -47,6 +47,7 @@ describe("the project tier's key policy", () => {
 			"trimOldToolResults",
 			"compaction",
 			"thinkingLevel",
+			"roles",
 			"modelDiscovery",
 			"gamepad",
 			"beetle",
