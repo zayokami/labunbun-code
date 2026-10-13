@@ -19,7 +19,7 @@
  * disk at all.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findModeChoice, type PermissionRule, SessionStore } from "@labunbun/agent";
@@ -97,8 +97,11 @@ interface StepSpec {
 }
 
 type Op =
-	| { op: "prompt"; text: string; always?: boolean }
+	/** `always` answers the standing grant, `ask` the standing ask; neither answers once. */
+	| { op: "prompt"; text: string; always?: boolean; ask?: boolean }
 	| { op: "command"; text: string }
+	/** The user pressing Enter on a "!" line: the REPL's prompt-submit path. */
+	| { op: "submit"; text: string }
 	/** What Shift+Tab does in the REPL: move the session, then report the row. */
 	| { op: "shiftTab" }
 	| { op: "waitInfo"; match: string }
@@ -240,14 +243,16 @@ async function scenario(input: {
 		// A request, not a redraw: the queue re-runs its show on every arrival, so
 		// a stale dialog object for the same request must not be answered — the
 		// answer has to land on the newest object holding that request's text.
-		const answerAll = (always) => {
+		// The choice is the row pressed: "once", "always" (the grant), or "ask"
+		// (the fourth answer, alwaysAsk), mirroring what PermissionDialog calls.
+		const answerAll = (choice) => {
 			for (const dialog of shown) {
 				if (answered.has(dialog.inputPreview)) continue;
 				const live = latest(dialog.inputPreview);
 				if (!live) continue;
 				answered.add(dialog.inputPreview);
 				dialogs.push(dialog.inputPreview);
-				live.resolve(true, always);
+				live.resolve(true, choice === "always", choice === "ask");
 			}
 		};
 		async function runPrompt(op) {
@@ -261,7 +266,7 @@ async function scenario(input: {
 			);
 			const deadline = Date.now() + 20000;
 			while (!settled && Date.now() < deadline) {
-				answerAll(op.always === true);
+				answerAll(op.always === true ? "always" : op.ask === true ? "ask" : "once");
 				await sleep(5);
 			}
 			if (!settled) outcome = "timeout";
@@ -289,6 +294,11 @@ async function scenario(input: {
 					await runPrompt(op);
 				} else if (op.op === "command") {
 					optionsRef.onCommand(op.text);
+				} else if (op.op === "submit") {
+					// Exactly the REPL's Enter handler: awaited, because a "!" line is
+					// taken by this path and the run may finish before a floating
+					// promise pushes its entries.
+					await optionsRef.onSubmitText(op.text);
 				} else if (op.op === "shiftTab") {
 					// Exactly the REPL's cycle: move the session, then report the row.
 					const next = cycleModeChoice({ mode: session.permissionMode, sandbox: session.sandbox });
@@ -864,4 +874,232 @@ describe("an in-app /resume", () => {
 		const rules = result.infos.filter((text) => text.includes("Rules (")).at(-1);
 		expect(rules).toContain("Rules (0):");
 	}, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// Rules that ask: the dialog is the destination, not a detour
+// ---------------------------------------------------------------------------
+
+describe("an ask rule", () => {
+	test("brings a git commit to a person in agent mode, and leaves Write alone", async () => {
+		const { home, cwd } = workspace();
+
+		const asked = await scenario({
+			cwd,
+			home,
+			options: {
+				permissionMode: "agent",
+				sandbox: "danger-full-access",
+				flagSettings: { permissions: { ask: ["Bash(git commit *)"] } },
+			},
+			steps: [
+				{ toolCalls: [{ name: "Bash", arguments: { command: "git commit -m golden" } }] },
+				{ text: "commit attempted" },
+				{ toolCalls: [{ name: "Write", arguments: { file_path: join(cwd, "sub", "fresh.txt"), content: "fresh" } }] },
+				{ text: "wrote" },
+			],
+			ops: [
+				{ op: "prompt", text: "commit" },
+				{ op: "prompt", text: "write" },
+			],
+		});
+
+		// The rule's whole point: agent mode runs the undecided, and this call still
+		// reached the screen. Answered "yes, once" by the harness, it then ran — a
+		// result came back, so the dialog was an ask and not a silent denial.
+		expect(asked.axes?.mode).toBe("agent");
+		expect(asked.prompts[0]?.dialogs).toHaveLength(1);
+		expect(asked.prompts[0]?.dialogs[0]).toContain("git commit");
+		expect(asked.prompts[0]?.results).toHaveLength(1);
+		// And it does not leak into the rest of the turn: Write raised nothing, and
+		// the file it wrote is on disk.
+		expect(asked.prompts[1]?.dialogs).toEqual([]);
+		expect(existsSync(join(cwd, "sub", "fresh.txt"))).toBe(true);
+
+		// The control: the same commit, the same mode, no ask rule — zero dialogs.
+		// So the dialog above is the rule's doing and not agent mode's.
+		const control = await scenario({
+			cwd,
+			home,
+			options: { permissionMode: "agent", sandbox: "danger-full-access" },
+			steps: [{ toolCalls: [{ name: "Bash", arguments: { command: "git commit -m golden" } }] }, { text: "done" }],
+			ops: [{ op: "prompt", text: "commit" }],
+		});
+		expect(control.axes?.mode).toBe("agent");
+		expect(control.prompts[0]?.dialogs).toEqual([]);
+		expect(control.prompts[0]?.results).toHaveLength(1);
+	}, 60_000);
+
+	test("answered with 'ask me every time', it survives the restart and still asks", async () => {
+		const { home, cwd } = workspace();
+
+		const first = await scenario({
+			cwd,
+			home,
+			options: {
+				permissionMode: "agent",
+				flagSettings: { permissions: { ask: ["Bash(git commit *)"] } },
+			},
+			steps: [
+				{ toolCalls: [{ name: "Bash", arguments: { command: "git commit -m one" } }] },
+				{ text: "attempted" },
+				{ toolCalls: [{ name: "Bash", arguments: { command: "git commit -m two" } }] },
+				{ text: "attempted" },
+			],
+			ops: [
+				// The fourth answer on the seeded dialog's commit: yes to this call,
+				// and a session rule that keeps the scope asking.
+				{ op: "prompt", text: "first", ask: true },
+				{ op: "prompt", text: "second" },
+			],
+		});
+
+		expect(first.prompts[0]?.dialogs).toHaveLength(1);
+		// In force within the run: the very next match comes back to the screen,
+		// in a mode that would otherwise run it.
+		expect(first.prompts[1]?.dialogs).toHaveLength(1);
+
+		// What the fourth answer left on disk: an ask rule at the scope the option
+		// named (`git `, the first word), under the session source.
+		const [saved] = SessionStore.listSessions(cwd, home);
+		if (!saved) throw new Error("expected the run to persist a session");
+		const savedStore = SessionStore.load(saved.path);
+		expect(readPolicySnapshot(savedStore)?.rules).toEqual([{ toolName: "Bash", specifier: "git *", behavior: "ask" }]);
+		expect(readPolicySnapshot(savedStore)?.mode).toBe("agent");
+
+		// The restart, with no flags at all: the mode and the rule both have to come
+		// out of the file for the dialog below to happen — agent mode runs what
+		// nothing asks about, so a reader that dropped the ask rule would run this
+		// commit silently.
+		const resumed = await scenario({
+			cwd,
+			home,
+			options: { resumeSessionId: saved.sessionId },
+			steps: [{ toolCalls: [{ name: "Bash", arguments: { command: "git commit -m three" } }] }, { text: "attempted" }],
+			ops: [
+				{ op: "prompt", text: "third" },
+				{ op: "command", text: "/permissions" },
+			],
+		});
+		expect(resumed.axes?.mode).toBe("agent");
+		expect(resumed.prompts[0]?.dialogs).toHaveLength(1);
+		expect(resumed.prompts[0]?.results).toHaveLength(1);
+		// And the rule is listed as the ask it is: the padded column, the scope,
+		// and the session source a restored rule has.
+		const rules = resumed.infos.find((text) => text.includes("Rules ("));
+		expect(rules).toContain("ask   Bash(git *)  [session]");
+	}, 60_000);
+
+	test("is closed by a grant at the identical scope, and only there", async () => {
+		const { home, cwd } = workspace();
+
+		const result = await scenario({
+			cwd,
+			home,
+			options: {
+				permissionMode: "agent",
+				flagSettings: { permissions: { ask: ["Bash(git commit *)"] } },
+			},
+			steps: [
+				{ toolCalls: [{ name: "Bash", arguments: { command: "git commit -m one" } }] },
+				{ text: "attempted" },
+				{ toolCalls: [{ name: "Bash", arguments: { command: "git commit -m two" } }] },
+				{ text: "attempted" },
+				// Not a commit: outside the seeded rule's scope, inside the grant's —
+				// the one command that can tell the two session rules apart.
+				{ toolCalls: [{ name: "Bash", arguments: { command: "git status" } }] },
+				{ text: "attempted" },
+			],
+			ops: [
+				{ op: "prompt", text: "first", ask: true },
+				{ op: "prompt", text: "second", always: true },
+				{ op: "prompt", text: "third" },
+			],
+		});
+
+		// ask -> dialog; the grant answering the same scope -> no dialog on the next
+		// match. That last zero holds only because the identical ask rule was
+		// dropped: ask is decided above allow, so a surviving one would outvote the
+		// grant it just answered.
+		expect(result.prompts.map((prompt) => prompt.dialogs.length)).toEqual([1, 1, 0]);
+		expect(result.prompts[2]?.results).toHaveLength(1);
+
+		const [saved] = SessionStore.listSessions(cwd, home);
+		if (!saved) throw new Error("expected the run to persist a session");
+		expect(readPolicySnapshot(SessionStore.load(saved.path))?.rules).toEqual([
+			{ toolName: "Bash", specifier: "git *", behavior: "allow" },
+		]);
+	}, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// The "!" passthrough: the prefix skips the model, not the policy
+// ---------------------------------------------------------------------------
+
+describe("a ! command", () => {
+	test("runs when the engine says yes, and is refused by a deny rule", async () => {
+		const { home, cwd } = workspace();
+
+		const result = await scenario({
+			cwd,
+			home,
+			options: { flagSettings: { permissions: { deny: ["Bash(rm *)"] } } },
+			steps: [{ text: "unused" }],
+			ops: [
+				{ op: "submit", text: "!echo hi > ran.txt" },
+				{ op: "submit", text: "!rm ran.txt" },
+			],
+		});
+
+		// The ordinary command reached the shell — the redirect ran and the file is
+		// on disk.
+		expect(existsSync(join(cwd, "ran.txt"))).toBe(true);
+		// The denied one did not: the engine's deny is a floor the prefix cannot
+		// lift, so the refusal is reported and the file the rm named still exists.
+		const refusals = result.infos.filter((text) => text.startsWith("! refused"));
+		expect(refusals).toHaveLength(1);
+		expect(refusals[0]).toContain("Denied by cliArg rule: Bash(rm *)");
+		expect(existsSync(join(cwd, "ran.txt"))).toBe(true);
+	}, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// An old file the reader cannot read: skipped, not guessed into a grant
+// ---------------------------------------------------------------------------
+
+describe("a stored rule without a behavior", () => {
+	test("is refused with its whole snapshot, and no grant is invented", async () => {
+		const { home, cwd } = workspace();
+		seededSession(cwd, home, "old format marker", {
+			at: 1,
+			// A shape no writer of this format ever produced — the field has been
+			// written since the first snapshot. The reader still meets it on disk,
+			// and the wrong guess is the dangerous one: defaulting the behavior
+			// reads as `allow`, which runs a call nobody granted, in the plan mode
+			// the same snapshot names.
+			rules: [{ toolName: "Bash", specifier: "git *" }],
+			mode: "plan",
+			sandbox: "workspace-write",
+			network: { access: "enabled", domains: [] },
+		});
+
+		const [saved] = SessionStore.listSessions(cwd, home);
+		if (!saved) throw new Error("expected the seeded session");
+
+		const resumed = await scenario({
+			cwd,
+			home,
+			options: { resumeSessionId: saved.sessionId },
+			steps: [{ text: "unused" }],
+			ops: [{ op: "command", text: "/permissions" }],
+		});
+
+		// The unreadable snapshot is skipped whole — the axes are the settings and
+		// the default row, not the snapshot's plan...
+		expect(resumed.axes?.mode).toBe("ask");
+		// ...and nothing came out of it either: no rule was invented for the field
+		// the reader could not read.
+		const rules = resumed.infos.find((text) => text.includes("Rules ("));
+		expect(rules).toContain("Rules (0):");
+	}, 30_000);
 });

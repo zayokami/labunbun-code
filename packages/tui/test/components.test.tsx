@@ -503,6 +503,27 @@ describe("PermissionDialog", () => {
 		unmount();
 	});
 
+	test("the ask row's number answers with the ask flag, not with a grant", async () => {
+		// The row and the resolve call are two halves that can drift: a digit wired
+		// to the wrong answer would look right on screen and grant the wrong thing.
+		const decisions: Array<[boolean, boolean, boolean | undefined]> = [];
+		const { stdin, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Bash"
+					inputPreview="git status"
+					options={permissionOptions("Bash", { command: "git status" }, process.cwd())}
+					onResolve={(allow, always, ask) => decisions.push([allow, always, ask])}
+				/>,
+			),
+		);
+		await delay(30);
+		stdin.write("3");
+		await delay(30);
+		expect(decisions).toEqual([[true, false, true]]);
+		unmount();
+	});
+
 	test("without a scoped rule the label promises only the tool", async () => {
 		const { lastFrame, unmount } = render(
 			withTheme(<PermissionDialog toolName="WebFetch" inputPreview="url" onResolve={() => {}} />),
