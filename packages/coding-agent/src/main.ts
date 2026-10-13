@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { PERMISSION_MODES, type PermissionMode, SANDBOX_MODES, type SandboxMode } from "@labunbun/agent";
 import { chunkWritesForConPTY, isConPTYHost } from "@labunbun/tui";
+import { runAcp } from "./acp.ts";
 import { runChatGptLoginCli, runChatGptLogoutCli } from "./chatgpt-login.ts";
 import { runClaudeLoginCli, runClaudeLogoutCli } from "./claude-login.ts";
 import { runHeadless } from "./headless.ts";
@@ -57,6 +58,7 @@ const SUBCOMMANDS = new Map([
 	["logout", "logout"],
 	["yoshi", "yoshi"],
 	["migrate", "yoshi"],
+	["acp", "acp"],
 ]);
 
 interface CliArgs {
@@ -212,6 +214,12 @@ export function parseArgs(argv: string[]): CliArgs {
 				// spelling this command had before it was renamed.
 				args.subcommand = "yoshi";
 				break;
+			case "--acp":
+				// Alias for the subcommand, the way `--yoshi` is one: an editor's
+				// launch command is a single argv template, and a leading bare word
+				// is the one thing some of them cannot write.
+				args.subcommand = "acp";
+				break;
 			case "--only":
 				args.only = rest[++i] ?? null;
 				break;
@@ -235,6 +243,7 @@ function printHelp(): void {
 Usage:
   labunbun                     Interactive REPL
   labunbun -p "<prompt>"       Headless: run one prompt and print the result
+  labunbun acp                 Serve the Agent Client Protocol on stdio (for editors)
   labunbun login [claude|chatgpt]   Sign in to a subscription (a browser opens)
   labunbun logout [claude|chatgpt]  Sign out of a subscription
   labunbun yoshi               Import settings from another agent tool
@@ -251,6 +260,7 @@ Options:
       --resume <id>            Resume a saved session
   -c, --continue               Continue the most recent session
       --output-format <f>      Headless output: text | json | stream-json
+      --acp                    Same as the \`acp\` subcommand
       --settings <json>        Settings for this run as a JSON object (wins over files)
       --gamepad                Read a DualShock 4 this run (or --no-gamepad)
   -h, --help                   Show this help
@@ -294,7 +304,16 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	// One install for every mode: on a Windows console a single write past the
 	// buffer budget strands the viewport where it was, and this process is about
 	// to emit whole-transcript reprints. See `conpty.ts` in the tui package.
-	if (isConPTYHost()) chunkWritesForConPTY(process.stdout);
+	//
+	// Every mode but ACP. That stdout carries newline-delimited JSON-RPC and
+	// nothing else, and the transform below is written for a console's viewport,
+	// not for a frame stream: it inspects its argument with
+	// `data.lastIndexOf("\n")`, which over the `Uint8Array` that
+	// `Writable.toWeb` hands it is `-1` — so it falls through to cutting every
+	// 8 KiB raw. That is byte-preserving over a pipe (measured), and it is an
+	// accident of type coercion either way; the ACP path keeps its frames away
+	// from it.
+	if (isConPTYHost() && args.subcommand !== "acp") chunkWritesForConPTY(process.stdout);
 
 	// Subcommands run before model resolution and the API-key check: importing a
 	// configuration is exactly what someone does when they have no working
@@ -382,6 +401,38 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	if (flags.error !== undefined) {
 		console.error(flags.error);
 		return 2;
+	}
+
+	// The ACP server: an editor starts this and speaks JSON-RPC over stdio until
+	// it closes the pipe. Before the `-p` branch because the two are different
+	// modes of the same binary, and after `--settings` and both axis flags because
+	// it reads them the same way the other two modes do.
+	if (args.subcommand === "acp") {
+		// Flags this mode has no use for, rejected rather than parsed and dropped —
+		// the failure class the yoshi flags taught this file twice. `-p` and
+		// `--resume` name a different mode's behavior, `--no-session` its opposite,
+		// and `--output-format` and `--gamepad` are the REPL's and a one-shot run's.
+		const conflicting: Array<[keyof CliArgs, string]> = [
+			["print", "-p"],
+			["resume", "--resume"],
+			["continueLast", "-c"],
+			["noSession", "--no-session"],
+			["outputFormat", "--output-format"],
+			["gamepad", "--gamepad/--no-gamepad"],
+		];
+		const stray = conflicting.filter(([key]) => args[key] !== null && args[key] !== false).map(([, flag]) => flag);
+		if (stray.length > 0) {
+			console.error(`${stray.join(", ")} cannot be combined with \`acp\` (see --help)`);
+			return 2;
+		}
+		return runAcp({
+			modelRef: args.model ?? undefined,
+			permissionMode: flags.mode,
+			sandbox: flags.sandbox,
+			maxTurns: args.maxTurns ?? undefined,
+			flagSettings,
+			home: options.home,
+		});
 	}
 
 	if (args.print !== null) {
