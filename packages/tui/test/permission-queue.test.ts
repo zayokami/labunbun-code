@@ -15,6 +15,7 @@ import type { PermissionDialogState } from "../src/ui-state.ts";
 function harness(cwd?: string, canAutoResolve?: (toolName: string, input: unknown) => boolean) {
 	const shown: Array<PermissionDialogState | null> = [];
 	const alwaysAllowed: Array<[string, unknown]> = [];
+	const alwaysAsked: Array<[string, unknown]> = [];
 	const consulted: Array<[string, unknown]> = [];
 	const queue = createPermissionQueue({
 		show: (dialog) => shown.push(dialog),
@@ -22,6 +23,7 @@ function harness(cwd?: string, canAutoResolve?: (toolName: string, input: unknow
 		fullPreview: (toolName, input) => `${toolName} full:\n${JSON.stringify(input, null, 2)}`,
 		cwd,
 		onAlwaysAllow: (toolName, input) => alwaysAllowed.push([toolName, input]),
+		onAlwaysAsk: (toolName, input) => alwaysAsked.push([toolName, input]),
 		...(canAutoResolve
 			? {
 					canAutoResolve: (toolName: string, input: unknown) => {
@@ -34,6 +36,7 @@ function harness(cwd?: string, canAutoResolve?: (toolName: string, input: unknow
 	return {
 		queue,
 		alwaysAllowed,
+		alwaysAsked,
 		/** Every call the policy hook was asked about, in order. */
 		consulted,
 		/** The dialog currently on screen. */
@@ -128,6 +131,30 @@ describe("permission queue", () => {
 
 		current()?.resolve(false, false);
 		expect(await other).toBe(false);
+	});
+
+	// The mirror of the grant: "yes, and keep asking" resolves this call and
+	// settles nothing else in the queue — the requests behind it are what the
+	// user just said they want to be asked about, so auto-answering them would be
+	// the option working backwards. The callback is what the app layer turns into
+	// a session ask rule; the queue only reports the decision.
+	test("always-ask answers this call and leaves the rest queued", async () => {
+		const { queue, alwaysAllowed, alwaysAsked, current } = harness();
+		const first = queue.request("Bash", { command: "git status" });
+		const sibling = queue.request("Bash", { command: "git commit -m x" });
+
+		current()?.resolve(true, false, true);
+
+		expect(await first).toBe(true);
+		expect(alwaysAsked).toEqual([["Bash", { command: "git status" }]]);
+		// Not a grant, and the queue does not pretend otherwise: the sibling is
+		// still on screen, still waiting for a person.
+		expect(alwaysAllowed).toEqual([]);
+		expect(current()?.toolName).toBe("Bash");
+		expect(current()?.queueLength).toBe(1);
+
+		current()?.resolve(false, false);
+		expect(await sibling).toBe(false);
 	});
 
 	test("clear denies every pending request, not just the one on screen", async () => {

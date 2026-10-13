@@ -815,7 +815,7 @@ export function REPL({
 							options={dialog.options}
 							queueLength={dialog.queueLength}
 							source={dialog.source}
-							onResolve={(allow, alwaysAllow) => dialog.resolve(allow, alwaysAllow)}
+							onResolve={(allow, alwaysAllow, alwaysAsk) => dialog.resolve(allow, alwaysAllow, alwaysAsk)}
 							pad={pad}
 						/>
 					) : null}

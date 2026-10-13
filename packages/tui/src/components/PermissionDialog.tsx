@@ -16,7 +16,7 @@ export interface PermissionDialogProps {
 	 * the widest truthful wording is used (the bare tool).
 	 */
 	options?: PermissionOption[];
-	onResolve: (allow: boolean, alwaysAllow: boolean) => void;
+	onResolve: (allow: boolean, alwaysAllow: boolean, alwaysAsk?: boolean) => void;
 	/** Requests queued behind this one, including it (see PermissionDialogState). */
 	queueLength?: number;
 	/**
@@ -35,8 +35,9 @@ export interface PermissionDialogProps {
 
 /**
  * Permission dialog: 1) allow once  2) always allow, scoped to this command or
- * this directory this session  3) deny. Esc denies. The promise passed in via
- * onResolve comes from the app-layer canUseTool implementation.
+ * this directory this session  3) yes, and keep asking for the same scope  4)
+ * deny. Esc denies. The promise passed in via onResolve comes from the
+ * app-layer canUseTool implementation.
  *
  * The options are named for their consequences rather than for their position —
  * "don't ask again" used to grant the whole tool, so approving `git status` also
@@ -102,7 +103,7 @@ export function PermissionDialog({
 		}
 		const standing = answers.find((answer) => answer.alwaysAllow);
 		const answer = action.phase === "hold" && standing ? standing : answers[selected % answers.length];
-		onResolve(answer.allow, answer.alwaysAllow);
+		onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
 		return true;
 	});
 
@@ -112,16 +113,16 @@ export function PermissionDialog({
 		else if (key.ctrl && input === "a") setExpanded((e) => !e);
 		else if (key.return) {
 			const answer = answers[selected % answers.length];
-			onResolve(answer.allow, answer.alwaysAllow);
+			onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
 		} else if (key.escape) {
 			onResolve(false, false);
 		} else if (input === "y") {
 			onResolve(true, false);
 		} else if (input === "n") {
 			onResolve(false, false);
-		} else if (input === "1" || input === "2" || input === "3") {
+		} else if (input === "1" || input === "2" || input === "3" || input === "4") {
 			const answer = answers[Number(input) - 1];
-			if (answer) onResolve(answer.allow, answer.alwaysAllow);
+			if (answer) onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
 		}
 	});
 

@@ -238,7 +238,14 @@ export interface PermissionDialogState {
 	 * calls, which are the only kind this dialog used to show.
 	 */
 	source?: string;
-	resolve: (allow: boolean, alwaysAllow: boolean) => void;
+	/**
+	 * The answer, with the two standing extras. `alwaysAllow` records a session
+	 * grant for the scope the user was looking at; `alwaysAsk` records a session
+	 * ask rule instead — they are opposite answers and never both true
+	 * (permission-options). Optional so a caller that predates the fourth answer
+	 * still resolves the plain ones.
+	 */
+	resolve: (allow: boolean, alwaysAllow: boolean, alwaysAsk?: boolean) => void;
 }
 
 export interface UiQuestion {

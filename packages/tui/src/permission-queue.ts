@@ -21,6 +21,13 @@ export interface PermissionRequestQueueOptions {
 	 */
 	onAlwaysAllow?: (toolName: string, input: unknown) => void;
 	/**
+	 * Called when the user answers "ask me every time", with the input they were
+	 * looking at. The app layer records a session rule with the `ask` behavior,
+	 * which is what brings the next match of the same scope back to this dialog:
+	 * the opposite of `onAlwaysAllow`, and the scope is computed the same way.
+	 */
+	onAlwaysAsk?: (toolName: string, input: unknown) => void;
+	/**
 	 * May this queued call be answered from a grant the user just made, rather
 	 * than by asking about it?
 	 *
@@ -93,7 +100,7 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 			options: permissionOptions(next.toolName, next.input, options.cwd),
 			queueLength: pending.length,
 			source: next.source,
-			resolve: (allow, alwaysAllow) => {
+			resolve: (allow, alwaysAllow, alwaysAsk) => {
 				pending.shift();
 				if (allow && alwaysAllow) {
 					options.onAlwaysAllow?.(next.toolName, next.input);
@@ -115,6 +122,11 @@ export function createPermissionQueue(options: PermissionRequestQueueOptions): P
 						if (options.canAutoResolve && !options.canAutoResolve(queued.toolName, queued.input)) continue;
 						pending.splice(i, 1)[0]?.resolve(true);
 					}
+				} else if (allow && alwaysAsk) {
+					// Nothing queued is settled here, deliberately: the answer says the
+					// user wants matches of this scope *asked about*, and the requests
+					// behind this one are exactly that — each will be shown in its turn.
+					options.onAlwaysAsk?.(next.toolName, next.input);
 				}
 				show();
 				next.resolve(allow);

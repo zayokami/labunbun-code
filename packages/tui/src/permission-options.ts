@@ -1,5 +1,5 @@
 /**
- * The three answers an approval dialog offers, named for what each one actually
+ * The four answers an approval dialog offers, named for what each one actually
  * does.
  *
  * "Always allow" is the dangerous one: what it grants depends on the tool, and
@@ -7,6 +7,15 @@
  * command the user was looking at. Each option now says the scope it applies to,
  * and says "(this session)" because that is the truth — the rule lives in memory
  * only, and approving a command never edits the user's settings file.
+ *
+ * "Ask me every time" is the counterpart, and it exists because a grant is the
+ * one answer the user cannot take back: for the rest of the session, nothing
+ * re-opens a question that "don't ask again" closed. Answering with the
+ * opposite — yes to this call, plus a rule that keeps the *next* match of the
+ * same scope coming back to a person — is how a user spends an allowance while
+ * keeping the question. Its label names the same scope as the grant, computed
+ * from the same specifier, and the app layer records it the same way: a session
+ * rule, which survives a resume (interactive.ts, policy-snapshot.ts).
  *
  * Pure, so the labels and the specifier they correspond to can be asserted
  * together: a label that names a prefix the rule does not actually grant is the
@@ -18,6 +27,12 @@ export interface PermissionOption {
 	label: string;
 	allow: boolean;
 	alwaysAllow: boolean;
+	/**
+	 * Yes to this call, and a rule that keeps later matches of the same scope
+	 * coming back to the dialog. Exclusive with `alwaysAllow`: one answer widens
+	 * the session's policy and the other narrows it, and no answer does both.
+	 */
+	alwaysAsk: boolean;
 }
 
 const FILE_TOOLS = new Set(["Edit", "Write", "Read", "NotebookEdit"]);
@@ -69,23 +84,38 @@ function fileSpecifier(filePath: string, cwd?: string): string | undefined {
 	return `${rel.slice(0, cut)}/**`;
 }
 
-export function alwaysAllowLabel(toolName: string, input: unknown, cwd?: string): string {
+/**
+ * What a standing answer covers, as a phrase both labels share: the grant and
+ * the ask are opposites, but they name the same scope, and two parallel branch
+ * trees would sooner or later disagree about it — which is the exact mismatch
+ * these labels exist to prevent.
+ */
+function scopePhrase(toolName: string, input: unknown, cwd?: string): string {
 	const specifier = ruleSpecifierFor(toolName, input, cwd);
-	if (specifier === undefined) return `Yes, and don't ask again for ${toolName} (this session)`;
+	if (specifier === undefined) return `for ${toolName}`;
 	if (toolName === "Bash") {
-		if (specifier === "*") return "Yes, and don't ask again for any command (this session)";
+		if (specifier === "*") return "for any command";
 		// A single-word command keeps the bare word: there is no prefix to widen,
 		// so promising one would overstate what the rule covers.
-		if (!specifier.endsWith(" *")) return `Yes, and don't ask again for \`${specifier}\` (this session)`;
-		return `Yes, and don't ask again for commands starting with \`${specifier.slice(0, -2)} \` (this session)`;
+		if (!specifier.endsWith(" *")) return `for \`${specifier}\``;
+		return `for commands starting with \`${specifier.slice(0, -2)} \``;
 	}
-	return `Yes, and don't ask again for files under \`${specifier.slice(0, -3)}/\` (this session)`;
+	return `for files under \`${specifier.slice(0, -3)}/\``;
+}
+
+export function alwaysAllowLabel(toolName: string, input: unknown, cwd?: string): string {
+	return `Yes, and don't ask again ${scopePhrase(toolName, input, cwd)} (this session)`;
+}
+
+export function alwaysAskLabel(toolName: string, input: unknown, cwd?: string): string {
+	return `Yes, and ask me every time ${scopePhrase(toolName, input, cwd)} (this session)`;
 }
 
 export function permissionOptions(toolName: string, input: unknown, cwd?: string): PermissionOption[] {
 	return [
-		{ label: "Yes, just this once", allow: true, alwaysAllow: false },
-		{ label: alwaysAllowLabel(toolName, input, cwd), allow: true, alwaysAllow: true },
-		{ label: "No, and tell the model what to do differently", allow: false, alwaysAllow: false },
+		{ label: "Yes, just this once", allow: true, alwaysAllow: false, alwaysAsk: false },
+		{ label: alwaysAllowLabel(toolName, input, cwd), allow: true, alwaysAllow: true, alwaysAsk: false },
+		{ label: alwaysAskLabel(toolName, input, cwd), allow: true, alwaysAllow: false, alwaysAsk: true },
+		{ label: "No, and tell the model what to do differently", allow: false, alwaysAllow: false, alwaysAsk: false },
 	];
 }

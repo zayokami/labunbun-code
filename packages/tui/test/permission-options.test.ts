@@ -10,7 +10,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
-import { alwaysAllowLabel, permissionOptions, ruleSpecifierFor } from "../src/permission-options.ts";
+import { alwaysAllowLabel, alwaysAskLabel, permissionOptions, ruleSpecifierFor } from "../src/permission-options.ts";
 
 /**
  * A workspace root in the spelling *this* platform resolves. A literal
@@ -80,16 +80,67 @@ describe("alwaysAllowLabel", () => {
 	});
 });
 
+describe("alwaysAskLabel", () => {
+	test("promises the question where the grant promises silence", () => {
+		// The two labels share the scope phrase by construction (one function), and
+		// this pins that they stay a single word apart: the grant says it will stop
+		// asking for exactly what the ask says it will keep asking about.
+		const allow = alwaysAllowLabel("Bash", { command: "git status" }, CWD);
+		const ask = alwaysAskLabel("Bash", { command: "git status" }, CWD);
+		expect(ask).toBe(allow.replace("don't ask again", "ask me every time"));
+	});
+
+	test("names the scope the specifier covers", () => {
+		expect(alwaysAskLabel("Bash", { command: "git status" }, CWD)).toBe(
+			"Yes, and ask me every time for commands starting with `git ` (this session)",
+		);
+		expect(alwaysAskLabel("Bash", { command: "make" }, CWD)).toBe(
+			"Yes, and ask me every time for `make` (this session)",
+		);
+		expect(alwaysAskLabel("Edit", { file_path: "src/a.ts" }, CWD)).toBe(
+			"Yes, and ask me every time for files under `src/` (this session)",
+		);
+	});
+
+	test("an unscoped tool says the tool by name", () => {
+		expect(alwaysAskLabel("WebFetch", { url: "u" }, CWD)).toBe(
+			"Yes, and ask me every time for WebFetch (this session)",
+		);
+	});
+});
+
 describe("permissionOptions", () => {
-	test("three answers, ordered once / always / no", () => {
+	test("four answers, ordered once / always / ask-every-time / no", () => {
 		const options = permissionOptions("Bash", { command: "git status" }, CWD);
-		expect(options).toHaveLength(3);
-		expect(options[0]).toEqual({ label: "Yes, just this once", allow: true, alwaysAllow: false });
+		expect(options).toHaveLength(4);
+		expect(options[0]).toEqual({
+			label: "Yes, just this once",
+			allow: true,
+			alwaysAllow: false,
+			alwaysAsk: false,
+		});
 		expect(options[1].label).toBe(alwaysAllowLabel("Bash", { command: "git status" }, CWD));
 		expect(options[1].allow).toBe(true);
 		expect(options[1].alwaysAllow).toBe(true);
-		expect(options[2].allow).toBe(false);
+		expect(options[1].alwaysAsk).toBe(false);
+		expect(options[2].label).toBe(alwaysAskLabel("Bash", { command: "git status" }, CWD));
+		// Yes to this call — and a stay on the question, which is the one thing
+		// that makes it worth a row of its own rather than a wider "no".
+		expect(options[2].allow).toBe(true);
 		expect(options[2].alwaysAllow).toBe(false);
-		expect(options[2].label).toContain("tell the model");
+		expect(options[2].alwaysAsk).toBe(true);
+		expect(options[3].allow).toBe(false);
+		expect(options[3].alwaysAllow).toBe(false);
+		expect(options[3].alwaysAsk).toBe(false);
+		expect(options[3].label).toContain("tell the model");
+	});
+
+	// Exclusive by construction, checked anyway: the dialog reads `alwaysAsk` as
+	// "yes to this call", so an option setting both flags would both widen and
+	// narrow the session's policy at once, whichever branch the app layer took.
+	test("no answer is both a grant and a stay", () => {
+		for (const option of permissionOptions("Bash", { command: "git status" }, CWD)) {
+			expect(option.alwaysAllow && option.alwaysAsk).toBe(false);
+		}
 	});
 });

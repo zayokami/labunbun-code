@@ -92,6 +92,12 @@ export interface ReplAppOptions {
 	 */
 	onAlwaysAllow?: (toolName: string, input: unknown) => void;
 	/**
+	 * Called with "ask me every time" decisions so the app can record a session
+	 * rule that keeps the same scope coming back to the dialog. The mirror of
+	 * `onAlwaysAllow`, scope derived from the same input.
+	 */
+	onAlwaysAsk?: (toolName: string, input: unknown) => void;
+	/**
 	 * Whether a call the queue matched against a fresh grant may be answered
 	 * without asking. Supplied by the app layer because the rules and the mode
 	 * are its to know; the TUI can only match, never decide.
@@ -368,6 +374,7 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		fullPreview: toolFullView,
 		cwd: options.cwd,
 		onAlwaysAllow: options.onAlwaysAllow,
+		onAlwaysAsk: options.onAlwaysAsk,
 		canAutoResolve: options.canAutoResolve,
 	});
 

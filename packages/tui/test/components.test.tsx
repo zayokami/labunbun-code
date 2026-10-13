@@ -496,7 +496,10 @@ describe("PermissionDialog", () => {
 		const frame = flatFrame(lastFrame() ?? "");
 		expect(frame).toContain("1. Yes, just this once");
 		expect(frame).toContain("commands starting with `git ` (this session)");
-		expect(frame).toContain("3. No, and tell the model what to do differently");
+		// The fourth answer is the third row: yes to this call, and a stay for the
+		// question — named with the same scope as the grant above it.
+		expect(frame).toContain("3. Yes, and ask me every time for commands starting with `git ` (this session)");
+		expect(frame).toContain("4. No, and tell the model what to do differently");
 		unmount();
 	});
 

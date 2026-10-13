@@ -1444,15 +1444,43 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// Scoped to what the user was looking at: `Bash(git *)`, not all of Bash.
 			// No specifier means the tool could not be scoped, and the rule is the
 			// bare tool — which is what every "don't ask again" answer used to mean.
+			const specifier = ruleSpecifierFor(toolName, input, cwd);
+			// An ask rule at this exact scope is the one thing that would outvote the
+			// grant just made: ask is decided above allow, so "ask me every time for
+			// `git `" answered earlier would keep raising the dialog this answer just
+			// closed. Only the identical scope is dropped — a wider ask (`Bash(git *)`
+			// under a `Bash(git commit *)` grant) still speaks for the calls this
+			// grant does not name, and dropping it would widen the grant past the
+			// answer the user gave.
+			for (let i = sessionRules.length - 1; i >= 0; i--) {
+				const rule = sessionRules[i];
+				if (rule?.behavior === "ask" && rule.toolName === toolName && rule.specifier === specifier) {
+					sessionRules.splice(i, 1);
+				}
+			}
 			sessionRules.push({
 				toolName,
-				specifier: ruleSpecifierFor(toolName, input, cwd),
+				specifier,
 				behavior: "allow",
 				source: "session",
 			});
 			// And onto the session file, which is what makes the answer outlive the
 			// process: a grant is the one decision here the user cannot redo without
 			// being asked again, so it is worth the line.
+			persistPolicy();
+		},
+		onAlwaysAsk: (toolName, input) => {
+			// The mirror of the grant above, scoped the same way: yes to this call,
+			// plus a session rule that keeps the next match of the scope coming back
+			// to the dialog. No existing rule is dropped for it: ask is decided above
+			// allow, so this rule answers even over a standing grant for the same
+			// scope, and the grant stays for the session that no longer holds the ask.
+			sessionRules.push({
+				toolName,
+				specifier: ruleSpecifierFor(toolName, input, cwd),
+				behavior: "ask",
+				source: "session",
+			});
 			persistPolicy();
 		},
 		// Shift+Tab moves both axes without passing through the app layer — the REPL
@@ -2470,6 +2498,13 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/permissions": {
 			if (!session) return true;
 			const rules = [...ctx.baseRules, ...ctx.sessionRules];
+			// The left column is padded to the widest behavior ("allow") so the tool
+			// names line up when the three behaviors mix.
+			const behaviorLabel = (behavior: PermissionRule["behavior"]): string => {
+				if (behavior === "allow") return "allow";
+				if (behavior === "deny") return "deny ";
+				return "ask  ";
+			};
 			const lines = [
 				`Mode: ${session.permissionMode} · sandbox: ${session.sandbox}`,
 				// Printed here rather than left to the mode hints, because this is
@@ -2511,8 +2546,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				}),
 				`Rules (${rules.length}):`,
 				...rules.map(
-					(r) =>
-						`  ${r.behavior === "allow" ? "allow" : "deny "} ${r.toolName}${r.specifier ? `(${r.specifier})` : ""}  [${r.source}]`,
+					(r) => `  ${behaviorLabel(r.behavior)} ${r.toolName}${r.specifier ? `(${r.specifier})` : ""}  [${r.source}]`,
 				),
 			];
 			pushInfo(ctx.handle, lines.join("\n") || "(none)");
