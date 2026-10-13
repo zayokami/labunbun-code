@@ -8,11 +8,15 @@ import {
 	connectAllMcpServers,
 	connectMcpServer,
 	disconnectAllMcpServers,
+	getPrompt,
+	listPrompts,
+	listResources,
 	loadApprovedMcpServers,
 	loadMcpConfig,
 	loadProjectMcpServerNames,
 	type McpConnection,
 	McpServerConfigSchema,
+	readResource,
 	sanitizeMcpError,
 } from "../src/client.ts";
 
@@ -62,6 +66,20 @@ function resultText(message: { content: any[] }): string {
 	return message.content.map((block) => (block.type === "text" ? String(block.text ?? "") : "")).join("");
 }
 
+/**
+ * A condition that has to become true from the server's own asynchrony — a
+ * notification arriving over stdio — rather than from anything the test can
+ * await directly. Polled rather than slept for: a fixed sleep is either slower
+ * than it needs to be or the flake.
+ */
+async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+	const start = Date.now();
+	while (!condition()) {
+		if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for the condition");
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+}
+
 describe("McpServerConfigSchema", () => {
 	test("stdio and http variants", () => {
 		expect(McpServerConfigSchema.safeParse({ command: "bun", args: ["x.ts"] }).success).toBe(true);
@@ -83,6 +101,9 @@ describe("connectMcpServer (fixture stdio server)", () => {
 		}
 
 		expect(connection.tools.map((t) => t.name).sort()).toEqual([
+			"mcp__fixture__add-prompt",
+			"mcp__fixture__add-resource",
+			"mcp__fixture__add-tool",
 			"mcp__fixture__big",
 			"mcp__fixture__echo",
 			"mcp__fixture__shape",
@@ -208,6 +229,7 @@ describe("list pagination", () => {
 		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
 
 		expect(connection.tools.map((t) => t.name).sort()).toEqual([
+			"mcp__paginated__bump",
 			"mcp__paginated__five",
 			"mcp__paginated__four",
 			"mcp__paginated__one",
@@ -237,6 +259,181 @@ describe("list pagination", () => {
 		]);
 		// ...and the connection is usable rather than abandoned on a timeout.
 		expect(connection.error).toBeUndefined();
+	}, 20_000);
+});
+
+describe("list_changed notifications", () => {
+	// The server announces the change itself; nothing polls it. Without a handler
+	// the SDK drops the notification without a trace and the session serves the
+	// connect-time list forever — the tests below are the ones that can tell the
+	// two worlds apart.
+	test("tools/list_changed rebuilds the connection's tools and calls onToolsChanged", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		expect(connection.tools.map((tool) => tool.name)).not.toContain("mcp__fixture__late-1");
+
+		let changes = 0;
+		connection.onToolsChanged = () => {
+			changes += 1;
+		};
+		const addTool = connection.tools.find((tool) => tool.name === "mcp__fixture__add-tool");
+		if (!addTool) throw new Error("fixture add-tool missing");
+
+		const result = await addTool.call({}, callCtx());
+		expect(result.isError).toBeFalsy();
+
+		await waitFor(() => connection.tools.some((tool) => tool.name === "mcp__fixture__late-1"));
+		await waitFor(() => changes === 1);
+		// The rebuilt tool is wired to the same live client, not a description of
+		// one: it can be called without a reconnect.
+		const late = connection.tools.find((tool) => tool.name === "mcp__fixture__late-1");
+		if (!late) throw new Error("refreshed tool missing");
+		const called = await late.call({}, callCtx());
+		expect(called.isError).toBeFalsy();
+		expect(resultText(called)).toContain("late-1 answered");
+	}, 20_000);
+
+	// The refresh walks every page, which is the only thing that can be true: the
+	// paginated fixture serves four pages after the bump, and a refresh that read
+	// one page would look exactly this green with two tools in the list.
+	test("a refresh collects every page, not just the first", async () => {
+		const connection = await connectMcpServer("paginated", {
+			command: process.execPath,
+			args: [PAGINATED_SERVER],
+		});
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+
+		let changed = false;
+		connection.onToolsChanged = () => {
+			changed = true;
+		};
+		const bump = connection.tools.find((tool) => tool.name === "mcp__paginated__bump");
+		if (!bump) throw new Error("fixture bump tool missing");
+		await bump.call({}, callCtx());
+
+		await waitFor(() => changed);
+		expect(connection.tools.map((tool) => tool.name).sort()).toEqual([
+			"mcp__paginated__bump",
+			"mcp__paginated__five",
+			"mcp__paginated__four",
+			"mcp__paginated__one",
+			"mcp__paginated__seven-0",
+			"mcp__paginated__six-0",
+			"mcp__paginated__three",
+			"mcp__paginated__two",
+		]);
+	}, 20_000);
+
+	test("prompts/list_changed refreshes the prompt snapshot", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		expect(connection.prompts.map((prompt) => prompt.name)).toEqual(["greet"]);
+
+		const addPrompt = connection.tools.find((tool) => tool.name === "mcp__fixture__add-prompt");
+		if (!addPrompt) throw new Error("fixture add-prompt missing");
+		await addPrompt.call({}, callCtx());
+
+		await waitFor(() => connection.prompts.some((prompt) => prompt.name === "late-prompt-1"));
+	}, 20_000);
+
+	test("resources/list_changed refreshes the resource snapshot", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		expect(connection.resources).toHaveLength(0);
+
+		const addResource = connection.tools.find((tool) => tool.name === "mcp__fixture__add-resource");
+		if (!addResource) throw new Error("fixture add-resource missing");
+		await addResource.call({}, callCtx());
+
+		await waitFor(() => connection.resources.some((resource) => resource.uri === "file:///fixture/late-resource-1"));
+	}, 20_000);
+
+	// The failure half: a server that stops answering its list must not take the
+	// working snapshot down with it, and the failure must land where /mcp (and
+	// stderr) can say it — silently keeping the old tools is indistinguishable
+	// from a server that changed nothing.
+	test("a failed refresh keeps the last snapshot and names the failure", async () => {
+		const connection = await connectMcpServer("fixture", {
+			command: process.execPath,
+			args: [FIXTURE_SERVER, "fail-refresh"],
+		});
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+		const before = connection.tools.map((tool) => tool.name);
+		let changes = 0;
+		connection.onToolsChanged = () => {
+			changes += 1;
+		};
+
+		const warnings: string[] = [];
+		const original = console.error;
+		console.error = (message: unknown) => warnings.push(String(message));
+		try {
+			const addTool = connection.tools.find((tool) => tool.name === "mcp__fixture__add-tool");
+			if (!addTool) throw new Error("fixture add-tool missing");
+			await addTool.call({}, callCtx());
+			await waitFor(() => connection.error !== undefined);
+		} finally {
+			console.error = original;
+		}
+
+		expect(connection.error).toContain("tools refresh failed");
+		expect(warnings.join("\n")).toContain("MCP server fixture");
+		// The snapshot is the one from connect: the change was announced but could
+		// not be read back, and an empty or partial list would be a guess.
+		expect(connection.tools.map((tool) => tool.name)).toEqual(before);
+		expect(changes).toBe(0);
+	}, 20_000);
+});
+
+describe("prompt and resource reads (the /mcp consumer surface)", () => {
+	test("listPrompts and getPrompt round-trip through the server", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+
+		const prompts = await listPrompts(connection.client);
+		expect(prompts.map((prompt) => prompt.name)).toEqual(["greet"]);
+		expect(prompts[0]?.description).toBe("Greets someone by name");
+
+		const rendered = await getPrompt(connection.client, "greet", { name: "Ada" });
+		expect(rendered.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(rendered.messages[0]?.content[0]).toEqual({ type: "text", text: "greet name=Ada" });
+	}, 20_000);
+
+	test("listResources and readResource carry text and blob contents", async () => {
+		const connection = await connectMcpServer("fixture", { command: process.execPath, args: [FIXTURE_SERVER] });
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+
+		const resources = await listResources(connection.client);
+		expect(resources).toEqual([
+			{ uri: "file:///fixture/note.txt", name: "note.txt", mimeType: "text/plain" },
+			{ uri: "file:///fixture/blob.bin", name: "blob.bin", mimeType: "application/octet-stream" },
+		]);
+
+		const text = await readResource(connection.client, "file:///fixture/note.txt");
+		expect(text).toEqual([{ uri: "file:///fixture/note.txt", mimeType: "text/plain", text: "the note body" }]);
+
+		const blob = await readResource(connection.client, "file:///fixture/blob.bin");
+		expect(blob[0]?.mimeType).toBe("application/octet-stream");
+		expect(Buffer.from(blob[0]?.blob ?? "", "base64").toString("utf8")).toBe("blob bytes");
+	}, 20_000);
+
+	// The bound `tools/call` already had, on every other request: a server that
+	// accepts and never answers must not leave the /mcp screen waiting forever.
+	// The fixture answers everything except the read, which it holds open — the
+	// timeout has to come from the client side, and the message has to name the
+	// request, since nothing about it will arrive from the server.
+	test("a request the server never answers is bounded, and says so", async () => {
+		const connection = await connectMcpServer("fixture", {
+			command: process.execPath,
+			args: [FIXTURE_SERVER, "stall-read"],
+		});
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+
+		const started = Date.now();
+		await expect(readResource(connection.client, "file:///fixture/note.txt", { timeoutMs: 300 })).rejects.toThrow(
+			"resources/read file:///fixture/note.txt timed out after 300ms",
+		);
+		expect(Date.now() - started).toBeLessThan(3_000);
 	}, 20_000);
 });
 
@@ -577,7 +774,7 @@ describe("disconnectAllMcpServers", () => {
 	test("asks every opened connection to close, swallows a failed close, skips the ones that never opened", async () => {
 		const closed: string[] = [];
 		const fake = (name: string, client: unknown): McpConnection =>
-			({ serverName: name, client, tools: [], prompts: [] }) as McpConnection;
+			({ serverName: name, client, tools: [], prompts: [], resources: [] }) as McpConnection;
 		const opened = fake("opened", {
 			close: async () => {
 				closed.push("opened");
