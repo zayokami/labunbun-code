@@ -254,6 +254,7 @@ import {
 	skillsAsCommands,
 	withheldProjectSkills,
 } from "./skills.ts";
+import { markStartup } from "./startup-trace.ts";
 import {
 	formatRetryEnding,
 	formatSubagentList,
@@ -344,6 +345,7 @@ function readFileOrNull(path: string): string | null {
 }
 
 export async function runInteractive(options: InteractiveOptions = {}): Promise<number> {
+	markStartup("interactive: enter");
 	const cwd = options.cwd ?? process.cwd();
 	const home = options.home ?? homedir();
 
@@ -356,6 +358,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- settings & providers ----
 	const loadedSettings = loadSettings(cwd, options.flagSettings, home);
 	const { settings } = loadedSettings;
+	markStartup("settings loaded");
 	// Say out loud what a file inside this project asked for and did not get —
 	// silence here would look like the setting simply didn't work.
 	const ignoredNotice = formatIgnoredKeysNotice(loadedSettings.ignoredKeys);
@@ -366,6 +369,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	applySettingsEnv(settings);
 	// Models and prices the settings file declares, before anything resolves one.
 	applyCatalogSettings(settings);
+	markStartup("catalog settings applied");
 
 	// ---- catalog refresh ----
 	// Ask each provider what it serves, in the background. Started before the
@@ -387,6 +391,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// where every other startup warning does.
 	const resolvedRoles = await resolveRoles(settings.roles, () => catalogRefresh);
 	for (const warning of resolvedRoles.warnings) console.error(warning);
+	markStartup("roles resolved");
 
 	// ---- model ----
 	// Priority, most explicit first: the per-run `--model`, the model the user
@@ -414,6 +419,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Narrowed alias: closures below (hot-swap) read the startup model without
 	// re-narrowing.
 	const startupModel: Model = model;
+	markStartup("model resolved");
 	// `missingApiKey` rather than a bare key read: the local daemon's rows name
 	// no variable at all, and that absence means "nothing to miss", not a name
 	// to export.
@@ -497,6 +503,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	} else {
 		store = SessionStore.startNew(cwd, home);
 	}
+	markStartup("store opened");
 	// Before the transcript is on screen, so the count the user is about to read
 	// is explained rather than contradicted.
 	if (damageNotice) console.error(`Warning: ${damageNotice}`);
@@ -581,6 +588,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Best effort, and before anything can spill: an expired file is one the
 	// context cannot be pointing at, since nothing has run yet this session.
 	pruneToolOutput(cwd, { home });
+	markStartup("tool output pruned");
 	const sessionRules: PermissionRule[] = [];
 	const baseRules: PermissionRule[] = collectPermissionRules(loadedSettings);
 	// What the session being opened — or continued — was running under: the rules
@@ -652,6 +660,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// home the code reads but does not honour is how a test run ends up reading
 	// the operator's own memory files.
 	const memory = loadMemoryFiles(cwd, home);
+	markStartup("memory loaded");
 
 	// ---- model fallback chain ----
 	// Tracked, so `/cache` can report what the provider actually did with each
@@ -806,6 +815,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	// ---- user hooks (snapshotted at startup against mid-session injection) ----
 	const hooksRuntime = snapshotHooks(settings.hooks);
+	markStartup("hooks snapshotted");
 	/**
 	 * Session-scoped mutable state lives behind holders. An in-app /resume or a
 	 * /model switch rebinds them without invalidating any closure that captured
@@ -853,7 +863,22 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				approvedProjectMcpServers.has(name),
 		),
 	);
-	const mcpConnections = await connectAllMcpServers(mcpConfig, approvedMcpServers);
+	// Started, not awaited: a connect spawns server processes and waits on
+	// their handshakes, and a slow one held the whole window for its startup
+	// (measured: five seconds). The session mounts on the local tools; the
+	// connections land in this array when they answer — every reader below
+	// holds it by reference — and the wiring below moves their tools into the
+	// live session at that point, through the same path a mid-session
+	// `tools/list_changed` takes.
+	const mcpConnections: McpConnection[] = [];
+	const mcpConnectStarted = connectAllMcpServers(mcpConfig, approvedMcpServers);
+	// Set at the `allTools` snapshot below: the session is then born with the
+	// connections already in its list, and no refresh is owed for them.
+	let mcpToolsSeededAtBirth = false;
+	// One refresh only — from the connect landing or from the mount, whichever
+	// is second.
+	let mcpToolsRefreshed = false;
+	markStartup("mcp connect started");
 	const pendingMcpApprovals = [...projectMcpServerNames].filter(
 		(name) => settingsMcp.servers[name] === undefined && !approvedProjectMcpServers.has(name),
 	);
@@ -872,7 +897,37 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// survives every swap.
 		noteCacheChange: (cause) => cacheTracker.note(cause),
 	});
-	for (const connection of mcpConnections) connection.onToolsChanged = onMcpToolsChanged;
+	/**
+	 * Move the arrived connections' tools into the live session, once, from
+	 * whichever side is second — the connect landing, or the mount. Both call
+	 * sites below consult this, and the latch makes the pair one refresh. A
+	 * session born with the connections already in its list (they landed
+	 * before the `allTools` snapshot) needs no refresh at all: the snapshot
+	 * flag says so. `sessionRef` is read through the variable, never captured,
+	 * for the same reason as the handler above.
+	 */
+	const refreshMcpToolsOnce = (): void => {
+		if (mcpToolsRefreshed || mcpToolsSeededAtBirth) {
+			mcpToolsRefreshed = true;
+			return;
+		}
+		if (!sessionRef || mcpConnections.length === 0) return;
+		mcpToolsRefreshed = true;
+		onMcpToolsChanged();
+	};
+	// The connections, when they answer: into the array every reader holds by
+	// reference, the refresh handler on each, and one refresh for the session
+	// that mounted without them. The rejection is handled because there is no
+	// caller to hand it to; a failed server already reports itself as an
+	// `error` row on its connection.
+	void mcpConnectStarted
+		.then((connections) => {
+			mcpConnections.push(...connections);
+			markStartup("mcp connected");
+			for (const connection of connections) connection.onToolsChanged = onMcpToolsChanged;
+			refreshMcpToolsOnce();
+		})
+		.catch(() => {});
 
 	// ---- subagents, skills, plan mode ----
 	/** The live session. Declared before the tools that read it through a getter. */
@@ -970,6 +1025,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// control rides beside them for the command layer only.
 	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd);
+	markStartup("definitions+skills loaded");
 	// What the trust gate is withholding for this directory. Project-tier agent
 	// definitions and skills load only after one approval (`project-trust.ts`), and
 	// these two lists are what the startup notice and `/agents` speak for. The
@@ -1018,6 +1074,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// fallbacks; the session's own list then moves with the servers (see
 	// `onMcpToolsChanged` above), so this is a seed, not the truth.
 	const allTools = [...tools, ...mcpConnections.flatMap((c) => c.tools), ...subagentTools, ...planTools, askUserTool];
+	// Whether the birth list above already holds the MCP connections; read by
+	// the refresh wiring above.
+	mcpToolsSeededAtBirth = mcpConnections.length > 0;
 
 	const systemPrompt = buildSystemPrompt(allTools, {
 		cwd,
@@ -1816,6 +1875,8 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		}),
 	});
 
+	markStartup("REPL mounted");
+	refreshMcpToolsOnce();
 	// Said out loud, because a definition that was not loaded and a definition that
 	// never existed look identical from the prompt: without this line a repository's
 	// skill simply stops answering and nothing on screen says there was one. MCP has
@@ -1982,6 +2043,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// left behind a REPL that has already quit. Best effort — a close that fails
 	// must not hold the exit — and before the summary below, so the line about how
 	// to come back is written while nothing else is still unwinding.
+	// The startup connect may still be in flight when the window closes: give
+	// it a moment to land so its servers are closed rather than orphaned, but
+	// never hold a quit for the full connect budget.
+	await Promise.race([mcpConnectStarted.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 2000))]);
 	await disconnectAllMcpServers(mcpConnections);
 
 	// How to come back to this conversation. Printed here rather than through the
