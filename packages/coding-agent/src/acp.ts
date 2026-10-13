@@ -77,6 +77,7 @@ import { type CompactionTuning, createCompactionWiring, resolveCompactionSummari
 import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
+import { createModelChainResolver, resolveRoles, roleOrder } from "./model-roles.ts";
 import {
 	applyCatalogSettings,
 	applySettingsEnv,
@@ -657,9 +658,24 @@ class AcpAgent implements acp.Agent {
 		applySettingsEnv(settings);
 		applyCatalogSettings(settings);
 
-		const modelRef = options.modelRef ?? settings.model ?? "anthropic/claude-sonnet-5";
-		let model = resolveModel(modelRef);
-		if (!model && settings.modelDiscovery !== false) {
+		// `settings.roles`, resolved once: fail-soft like the REPL's and the `-p`
+		// run's, warned on stderr because stdout is frames only. An editor session
+		// has no plan mode and no subagents, so the plan and light seats are
+		// resolved but unused here — a warning about one is still worth its line,
+		// since the same settings file serves the terminal.
+		const resolvedRoles = await resolveRoles(settings.roles, () =>
+			settings.modelDiscovery !== false ? refreshModelCatalog({ models: dynamicProviderTemplates() }) : undefined,
+		);
+		// No prefix added: these strings carry their own "Warning: ", unlike the
+		// bare sentence `noToolCallingNotice` returns.
+		for (const warning of resolvedRoles.warnings) process.stderr.write(`${warning}\n`);
+
+		// The same priority the REPL resolves in: the explicit `--model`, then the
+		// user's persisted choice, then `roles.main`, then the built-in default.
+		const builtinModelRef = "anthropic/claude-sonnet-5";
+		const modelRef = options.modelRef ?? settings.model;
+		let model = modelRef ? resolveModel(modelRef) : (resolvedRoles.main.model ?? resolveModel(builtinModelRef));
+		if (!model && modelRef && settings.modelDiscovery !== false) {
 			// The same targeted exception headless makes: a ref only a listing can
 			// name is worth one catalog refresh, and nothing else here reaches the
 			// network on its own.
@@ -669,22 +685,32 @@ class AcpAgent implements acp.Agent {
 		if (!model) {
 			// A throw rather than a stderr line and an exit code: the editor asked
 			// for a session, and there is one thing it needs to know.
-			throw acp.RequestError.internalError({ message: `Unknown model: ${modelRef}` });
+			throw acp.RequestError.internalError({ message: `Unknown model: ${modelRef ?? builtinModelRef}` });
 		}
 		if (model.toolCalling === false) process.stderr.write(`Warning: ${noToolCallingNotice(model)}\n`);
 
+		// `roles.compaction.model` is the newer spelling of the same choice and
+		// wins where both are set; the older `settings.compaction.model` keeps
+		// working alone.
 		const compactionSettings = settings.compaction;
-		const compactionSummarizer = await resolveCompactionSummarizer(compactionSettings?.model, () =>
-			settings.modelDiscovery !== false ? refreshModelCatalog({ models: dynamicProviderTemplates() }) : undefined,
-		);
+		const compactionSummarizer = resolvedRoles.compaction.model
+			? { model: resolvedRoles.compaction.model }
+			: await resolveCompactionSummarizer(compactionSettings?.model, () =>
+					settings.modelDiscovery !== false ? refreshModelCatalog({ models: dynamicProviderTemplates() }) : undefined,
+				);
 		if (compactionSummarizer.warning) process.stderr.write(`Warning: ${compactionSummarizer.warning}\n`);
-		const compactionTuning: CompactionTuning | undefined = compactionSettings
-			? {
-					summarizerModel: compactionSummarizer.model,
-					reserveTokens: compactionSettings.reserveTokens,
-					thresholdPercent: compactionSettings.thresholdPercent,
-				}
-			: undefined;
+		// The tuning struct exists when either key named the summarizer: with only
+		// `roles.compaction.model` set there are no knobs, but the model still has
+		// to travel — a struct built only for `settings.compaction` would leave the
+		// role resolved and never read, and the session model would summarize.
+		const compactionTuning: CompactionTuning | undefined =
+			compactionSettings || compactionSummarizer.model
+				? {
+						summarizerModel: compactionSummarizer.model,
+						reserveTokens: compactionSettings?.reserveTokens,
+						thresholdPercent: compactionSettings?.thresholdPercent,
+					}
+				: undefined;
 
 		const tools = createAllTools(cwd, {
 			readOnlyRoots: [toolOutputRoot(cwd)],
@@ -735,10 +761,25 @@ class AcpAgent implements acp.Agent {
 					credentials: createClaudeCredentials({ home }),
 					chatgptCredentials: createChatGptCredentials({ home }),
 				});
-		const fallbackChain = (settings.fallbackModels ?? [])
+		// The fallback chain is per-role now: `resolveChain` receives the model
+		// that actually failed, and the seat it belongs to decides what comes
+		// next — the role's own `fallback` list first, then `settings.fallbackModels`
+		// as the net under everything. The main order is anchored at `roles.main`
+		// (falling back to the session model when the seat is unset), so an
+		// explicit `--model` landing inside the list still descends below its slot.
+		// An editor session has no plan mode and spawns no `Task` subagents, so
+		// the plan and light seats contribute no orders here.
+		const globalFallbacks = (settings.fallbackModels ?? [])
 			.map((ref) => resolveModel(ref))
 			.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
-		const streamFn = withModelFallback(transport.streamFn, () => fallbackChain);
+		const mainSeat = resolvedRoles.main.model ?? model;
+		const roleOrders = [
+			roleOrder(mainSeat, resolvedRoles.main.fallback, globalFallbacks),
+			...(resolvedRoles.compaction.model
+				? [roleOrder(resolvedRoles.compaction.model, resolvedRoles.compaction.fallback, globalFallbacks)]
+				: []),
+		];
+		const streamFn = withModelFallback(transport.streamFn, createModelChainResolver(roleOrders, globalFallbacks));
 
 		const memory = loadMemoryFiles(cwd, home);
 		const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);

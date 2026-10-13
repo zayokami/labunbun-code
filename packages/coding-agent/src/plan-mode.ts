@@ -11,8 +11,9 @@ import {
 	type PermissionMode,
 	type SandboxMode,
 } from "@labunbun/agent";
-import { textContent } from "@labunbun/ai";
+import { type Model, textContent } from "@labunbun/ai";
 import { z } from "zod";
+import { sameModel } from "./model-roles.ts";
 
 export interface PlanModeCallbacks {
 	enterPlanMode(): void;
@@ -33,6 +34,25 @@ export interface PlanApprovalUi {
 }
 
 /**
+ * The plan seat, when the host has one: the model plan mode runs on.
+ *
+ * `planModel` reads the resolved `roles.plan` model at the call; an undefined
+ * answer means the seat is unconfigured and the session keeps its model, which
+ * is what every host did before roles existed. `onModelSwapped` fires after the
+ * session's model moves — on entry and again on restore — so the host can
+ * rebuild whatever binds to a model (the compaction wiring, the threshold, the
+ * status row) the way a `/model` switch does, minus the persistence: entering
+ * plan mode is not the user choosing a model, so nothing is written to their
+ * settings. One surface deliberately does not swap: `/mode plan` typed at the
+ * prompt sets the mode without planning a task, and it keeps the session's
+ * model — the seat is for the planning cycle the tools drive.
+ */
+export interface PlanModelSwap {
+	planModel: () => Model | undefined;
+	onModelSwapped?: (next: Model) => void;
+}
+
+/**
  * Wire plan-mode tools to a live session and REPL handle.
  *
  * Mode bookkeeping is deliberately session-captured at call time: the approval
@@ -47,20 +67,31 @@ export interface PlanApprovalUi {
  * ExitPlanMode as a sandboxed `agent`, and nothing said so. Entering plan mode
  * does not change the sandbox, so restoring the pair is what "put it back how
  * you found it" actually means.
+ *
+ * The model is saved beside the pair when a plan seat exists and actually
+ * moved, and restored on approval with the two axes: plan mode that switched
+ * models on entry and kept the plan model after approval would leave the
+ * session running on the planner, one prompt after the user said go.
  */
 export function createPlanModeCallbacks(
 	getSession: () => AgentSession | null,
 	getUi: () => PlanApprovalUi | null,
+	swap?: PlanModelSwap,
 ): PlanModeCallbacks {
-	const previousModes = new WeakMap<AgentSession, { mode: PermissionMode; sandbox: SandboxMode }>();
+	const previousModes = new WeakMap<AgentSession, { mode: PermissionMode; sandbox: SandboxMode; model: Model }>();
 	return {
 		enterPlanMode: () => {
 			const session = getSession();
 			if (!session) return;
 			if (session.permissionMode !== "plan") {
-				previousModes.set(session, { mode: session.permissionMode, sandbox: session.sandbox });
+				previousModes.set(session, { mode: session.permissionMode, sandbox: session.sandbox, model: session.model });
 			}
 			session.setMode("plan");
+			const planModel = swap?.planModel();
+			if (planModel && !sameModel(planModel, session.model)) {
+				session.setModel(planModel);
+				swap?.onModelSwapped?.(planModel);
+			}
 		},
 		requestPlanApproval: async (plan, signal) => {
 			// Capture everything before the await: the session that entered plan
@@ -71,7 +102,7 @@ export function createPlanModeCallbacks(
 			if (!session || !ui) {
 				return { approved: false, feedback: "No interactive session to approve the plan" };
 			}
-			const previous =
+			const previous: { mode: PermissionMode; sandbox: SandboxMode; model?: Model } =
 				session.permissionMode === "plan"
 					? (previousModes.get(session) ?? { ...DEFAULT_MODE_CHOICE })
 					: { mode: session.permissionMode, sandbox: session.sandbox };
@@ -100,6 +131,21 @@ export function createPlanModeCallbacks(
 			// Keep the saved pair across rejection/retry; consume it only on approval.
 			session.setMode(previous.mode, previous.sandbox);
 			previousModes.delete(session);
+			// The plan seat goes back with the pair, but only when the seat is what
+			// is in effect: a `/model` swapped mid-plan is the user's own choice and
+			// outranks the restore, which is why the session model is compared
+			// against the plan model rather than assumed.
+			const planModel = swap?.planModel();
+			if (
+				swap &&
+				previous.model &&
+				planModel &&
+				sameModel(session.model, planModel) &&
+				!sameModel(previous.model, session.model)
+			) {
+				session.setModel(previous.model);
+				swap.onModelSwapped?.(previous.model);
+			}
 			return { approved: true };
 		},
 	};

@@ -47,6 +47,7 @@ import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
+import { createModelChainResolver, resolveRoles, roleOrder } from "./model-roles.ts";
 import { withheldDefinitionNotice } from "./project-trust.ts";
 import {
 	damagedSessionNotice,
@@ -189,13 +190,26 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	applySettingsEnv(settings);
 	applyCatalogSettings(settings);
 
+	// `settings.roles`, resolved once before anything resolves a model, the way
+	// the REPL resolves it: fail-soft, with the same targeted refresh a `-p` run
+	// already makes for a ref only a listing can name. The warnings go to stderr
+	// where everything else a scripted run says goes.
+	const resolvedRoles = await resolveRoles(settings.roles, () =>
+		settings.modelDiscovery !== false ? refreshModelCatalog({ models: dynamicProviderTemplates() }) : undefined,
+	);
+	for (const warning of resolvedRoles.warnings) console.error(warning);
+
 	// `settings.model` is the fallback between the flag and the built-in default,
 	// the same order the REPL resolves in: the setting is documented as the model
 	// to use, and a `-p` run that ignored it made the same prompt behave
-	// differently in two modes for no reason the user could see.
-	const modelRef = options.modelRef ?? settings.model ?? "anthropic/claude-sonnet-5";
-	let model = resolveModel(modelRef);
-	if (!model && settings.modelDiscovery !== false) {
+	// differently in two modes for no reason the user could see. `roles.main`
+	// sits between that setting and the built-in default — the role stack's
+	// statement about the main seat, which an explicit ask of either kind wins
+	// over, exactly as in the REPL.
+	const builtinModelRef = "anthropic/claude-sonnet-5";
+	const modelRef = options.modelRef ?? settings.model;
+	let model = modelRef ? resolveModel(modelRef) : (resolvedRoles.main.model ?? resolveModel(builtinModelRef));
+	if (!model && modelRef && settings.modelDiscovery !== false) {
 		// The REPL refreshes the whole catalog in the background at startup; a `-p`
 		// run stays off the network by default for the reason `modelDiscovery`
 		// documents. The one targeted exception: a ref only a listing can name —
@@ -206,7 +220,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		model = resolveModel(modelRef);
 	}
 	if (!model) {
-		console.error(`Unknown model: ${modelRef}`);
+		console.error(`Unknown model: ${modelRef ?? builtinModelRef}`);
 		return 1;
 	}
 	// Warned, not refused, for the reason the interactive picker filters these rows
@@ -222,18 +236,29 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// targeted one above rather than a full catalog walk: a `-p` run stays off
 	// the network by default, and the exception it already makes covers exactly
 	// the case a configured summarizer can be — a model only a listing can name.
+	// `roles.compaction.model` is the newer spelling of the same choice and wins
+	// where both are set; the older `settings.compaction.model` keeps working
+	// alone, which is what keeps every configuration written before the role
+	// stack did.
 	const compactionSettings = settings.compaction;
-	const compactionSummarizer = await resolveCompactionSummarizer(compactionSettings?.model, () =>
-		settings.modelDiscovery !== false ? refreshModelCatalog({ models: dynamicProviderTemplates() }) : undefined,
-	);
+	const compactionSummarizer = resolvedRoles.compaction.model
+		? { model: resolvedRoles.compaction.model }
+		: await resolveCompactionSummarizer(compactionSettings?.model, () =>
+				settings.modelDiscovery !== false ? refreshModelCatalog({ models: dynamicProviderTemplates() }) : undefined,
+			);
 	if (compactionSummarizer.warning) console.error(compactionSummarizer.warning);
-	const compactionTuning: CompactionTuning | undefined = compactionSettings
-		? {
-				summarizerModel: compactionSummarizer.model,
-				reserveTokens: compactionSettings.reserveTokens,
-				thresholdPercent: compactionSettings.thresholdPercent,
-			}
-		: undefined;
+	// The tuning struct exists when either key named the summarizer: with only
+	// `roles.compaction.model` set there are no knobs, but the model still has to
+	// travel — a struct built only for `settings.compaction` would leave the role
+	// resolved and never read, and the session model would summarize.
+	const compactionTuning: CompactionTuning | undefined =
+		compactionSettings || compactionSummarizer.model
+			? {
+					summarizerModel: compactionSummarizer.model,
+					reserveTokens: compactionSettings?.reserveTokens,
+					thresholdPercent: compactionSettings?.thresholdPercent,
+				}
+			: undefined;
 
 	// Spilling applies here too: a `-p` run reads a repository like any other
 	// session, and a build log that does not fit is no more reproducible for
@@ -363,14 +388,28 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		? { streamFn: options.streamFn }
 		: createTrackedStreamFn({ policy: settings.cache, credentials, chatgptCredentials });
 	// The same fallback the REPL wraps around its transport, from the same
-	// setting: a `-p` run that ignored `fallbackModels` kept failing on a model
+	// settings: a `-p` run that ignored `fallbackModels` kept failing on a model
 	// whose provider was down while an interactive run of the same prompt would
-	// have moved on. The tracker stays underneath, so the JSON result still
-	// reports what the cache did on whichever model actually answered.
-	const fallbackChain = (settings.fallbackModels ?? [])
+	// have moved on. The chain is computed from the model that failed and
+	// descends the order that owns it — the main and compaction seats, then the
+	// light seat for a subagent's requests, and the global `fallbackModels` as
+	// the net they share. There is no plan order here: a `-p` run has no plan
+	// mode. The tracker stays underneath, so the JSON result still reports what
+	// the cache did on whichever model actually answered.
+	const globalFallbacks = (settings.fallbackModels ?? [])
 		.map((ref) => resolveModel(ref))
 		.filter((m): m is NonNullable<typeof m> => Boolean(m));
-	const streamFn = withModelFallback(transport.streamFn, () => fallbackChain);
+	const mainSeat = resolvedRoles.main.model ?? model;
+	const roleOrders = [
+		roleOrder(mainSeat, resolvedRoles.main.fallback, globalFallbacks),
+		...(resolvedRoles.compaction.model
+			? [roleOrder(resolvedRoles.compaction.model, resolvedRoles.compaction.fallback, globalFallbacks)]
+			: []),
+		...(resolvedRoles.light.model
+			? [roleOrder(resolvedRoles.light.model, resolvedRoles.light.fallback, globalFallbacks)]
+			: []),
+	];
+	const streamFn = withModelFallback(transport.streamFn, createModelChainResolver(roleOrders, globalFallbacks));
 
 	// Everything the REPL has always put in front of the model and a `-p` run
 	// did not: the memory files, the skills, and the agents a Task call can spawn.
@@ -440,6 +479,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const [taskTool, sendMessageTool, taskStopTool] = createSubagentTools({
 		streamFn,
 		model: () => model,
+		// `roles.light`, when one is configured: where subagents run unless their
+		// definition names its own model.
+		lightModel: () => resolvedRoles.light.model,
 		resolveModel,
 		allTools: [...tools, ...mcpTools],
 		definitions: () => agentDefinitions,

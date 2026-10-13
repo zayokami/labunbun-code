@@ -151,6 +151,16 @@ export interface TaskToolContext {
 	 */
 	model: () => Model;
 	/**
+	 * `settings.roles.light`, when the host has one: where subagents run unless
+	 * their own definition names a model.
+	 *
+	 * The precedence runs definition first, then the role, then the parent's
+	 * model: a definition's `model:` is one agent's deliberate choice, the role
+	 * is the seat's default, and the parent is what a host with no light role
+	 * has always done. Read at the call like `model` above, for the same reason.
+	 */
+	lightModel?: () => Model | undefined;
+	/**
 	 * Resolve an agent definition's `model:` frontmatter to a model, or undefined
 	 * when the name means nothing — a definition left in a directory after its
 	 * model was retired is a fallback, not a failed spawn.
@@ -449,7 +459,12 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		if (named && !resolved) {
 			ctx.report?.(`[${definition.agentType}] Unknown model "${named}" — running on the session model instead.`);
 		}
-		const model = resolved ?? ctx.model();
+		// The seat, in precedence order: the definition's own model, then the
+		// light role's, then the parent's. The role cannot fail here the way the
+		// definition can — `resolveRoles` already dropped a light model that did
+		// not resolve or had no key — so a misconfigured light seat is a warning
+		// at startup, not a line per spawn.
+		const model = resolved ?? ctx.lightModel?.() ?? ctx.model();
 
 		/** What the subagent did to its own context; lives on its handle so
 		 *  continuations can record what each run added. */

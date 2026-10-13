@@ -176,6 +176,7 @@ import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { formatMissionSummary, readMissionRecord, writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
+import { createModelChainResolver, resolveRoles, roleOrder } from "./model-roles.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import {
 	readPolicySnapshot,
@@ -358,17 +359,37 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const catalogRefresh =
 		settings.modelDiscovery === false ? undefined : refreshModelCatalog({ signal: catalogAbort.signal });
 
+	// ---- model roles ----
+	// `settings.roles`, resolved once: who answers, who plans, who summarizes,
+	// where subagents run. Fail-soft — an unknown reference or a missing key
+	// warns on stderr and leaves the seat on its host default — because a role
+	// is a convenience, and a convenience that stops the app is worse than one
+	// that does not apply. The warning lands here, before anything is on screen,
+	// where every other startup warning does.
+	const resolvedRoles = await resolveRoles(settings.roles, () => catalogRefresh);
+	for (const warning of resolvedRoles.warnings) console.error(warning);
+
 	// ---- model ----
-	const modelRef = options.modelRef ?? settings.model ?? "anthropic/claude-sonnet-5";
-	let model = resolveModel(modelRef);
-	if (!model && catalogRefresh) {
+	// Priority, most explicit first: the per-run `--model`, the model the user
+	// last chose (written to their settings by `/model`), then `roles.main` —
+	// the role stack's statement about what the main seat defaults to — and
+	// finally the built-in default, which `roles.main` exists to replace. This
+	// is also what keeps `/model` working beside a role: a switch persists to
+	// `model`, and a persisted choice outranks the role's default, exactly as
+	// the user's explicit ask should.
+	const builtinModelRef = "anthropic/claude-sonnet-5";
+	const modelRef = options.modelRef ?? settings.model;
+	let model = modelRef ? resolveModel(modelRef) : (resolvedRoles.main.model ?? resolveModel(builtinModelRef));
+	if (!model && modelRef && catalogRefresh) {
 		// A ref the table does not know may be one a provider is about to name:
-		// wait for the listing once, then ask again.
+		// wait for the listing once, then ask again. An explicit ask that still
+		// resolves to nothing is a hard error below — the role only ever answers
+		// for a seat nothing more explicit filled.
 		await catalogRefresh;
 		model = resolveModel(modelRef);
 	}
 	if (!model) {
-		console.error(`Unknown model: ${modelRef}`);
+		console.error(`Unknown model: ${modelRef ?? builtinModelRef}`);
 		return 1;
 	}
 	// Narrowed alias: closures below (hot-swap) read the startup model without
@@ -389,17 +410,26 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// handed the model rather than a reader. A summarizer that will not resolve
 	// warns and falls back where an unknown session model above stops the app —
 	// compaction degrades; a session that cannot send its first request does not
-	// exist.
+	// exist. `roles.compaction.model` is the newer spelling of the same choice
+	// and wins where both are set; the older key keeps working alone, which is
+	// what keeps every configuration written before the role stack did.
 	const compactionSettings = settings.compaction;
-	const compactionSummarizer = await resolveCompactionSummarizer(compactionSettings?.model, () => catalogRefresh);
+	const compactionSummarizer = resolvedRoles.compaction.model
+		? { model: resolvedRoles.compaction.model }
+		: await resolveCompactionSummarizer(compactionSettings?.model, () => catalogRefresh);
 	if (compactionSummarizer.warning) console.error(compactionSummarizer.warning);
-	const compactionTuning: CompactionTuning | undefined = compactionSettings
-		? {
-				summarizerModel: compactionSummarizer.model,
-				reserveTokens: compactionSettings.reserveTokens,
-				thresholdPercent: compactionSettings.thresholdPercent,
-			}
-		: undefined;
+	// The tuning struct exists when either key named the summarizer: with only
+	// `roles.compaction.model` set there are no knobs, but the model still has to
+	// travel — a struct built only for `settings.compaction` would leave the role
+	// resolved and never read, and the session model would summarize.
+	const compactionTuning: CompactionTuning | undefined =
+		compactionSettings || compactionSummarizer.model
+			? {
+					summarizerModel: compactionSummarizer.model,
+					reserveTokens: compactionSettings?.reserveTokens,
+					thresholdPercent: compactionSettings?.thresholdPercent,
+				}
+			: undefined;
 
 	// ---- session persistence: resume, continue, or new ----
 	let store: SessionStore | undefined;
@@ -619,10 +649,30 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		credentials,
 		chatgptCredentials,
 	});
-	const fallbackChain = (settings.fallbackModels ?? [])
+	// The chain handed to the pipeline is computed from the model that failed —
+	// the parameter the old fixed list ignored — and descends the order that
+	// owns it: the main seat from `roles.main` (still anchored at the role's
+	// model when an explicit `--model` moved the session, so the rungs below
+	// wherever it landed are walked), then the plan, compaction and light seats
+	// for requests they make, and the global `settings.fallbackModels` as the
+	// net every one of them shares.
+	const globalFallbacks = (settings.fallbackModels ?? [])
 		.map((ref) => resolveModel(ref))
 		.filter((m): m is NonNullable<typeof m> => Boolean(m));
-	const streamFn = withModelFallback(baseStreamFn, () => fallbackChain);
+	const mainSeat = resolvedRoles.main.model ?? model;
+	const roleOrders = [
+		roleOrder(mainSeat, resolvedRoles.main.fallback, globalFallbacks),
+		...(resolvedRoles.plan.model
+			? [roleOrder(resolvedRoles.plan.model, resolvedRoles.plan.fallback, globalFallbacks)]
+			: []),
+		...(resolvedRoles.compaction.model
+			? [roleOrder(resolvedRoles.compaction.model, resolvedRoles.compaction.fallback, globalFallbacks)]
+			: []),
+		...(resolvedRoles.light.model
+			? [roleOrder(resolvedRoles.light.model, resolvedRoles.light.fallback, globalFallbacks)]
+			: []),
+	];
+	const streamFn = withModelFallback(baseStreamFn, createModelChainResolver(roleOrders, globalFallbacks));
 
 	// Compaction, shared with the headless run and every subagent through the
 	// same wiring. Recreated on /resume or /model switch — the manager binds to
@@ -820,6 +870,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// spawned after either must follow the user's choice rather than the one
 		// that was in force when the REPL started.
 		model: () => sessionRef?.model ?? model,
+		// `roles.light`, when the user configured one: the seat subagents run on
+		// unless their definition names its own model. A subagent's own
+		// compaction window comes from this model, exactly as it would from the
+		// parent's — which is why the seat is read here rather than captured.
+		lightModel: () => resolvedRoles.light.model,
 		resolveModel,
 		allTools: [...tools, ...mcpTools],
 		definitions: () => agentDefinitions,
@@ -866,6 +921,24 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 						requestPermission: (toolName, input, signal) => requestPermissionOrAbort(app, toolName, input, signal),
 					}
 				: null;
+		},
+		// `roles.plan`, when the user configured one: the planning cycle runs on
+		// the plan seat and approval moves the session back. The swap carries the
+		// consequences of a `/model` switch — the compaction wiring, the threshold
+		// and the status row all bind to a model — but not its persistence: enter
+		// and exit are a cycle, not a choice, and the user's saved model must come
+		// out the way it went in.
+		{
+			planModel: () => resolvedRoles.plan.model,
+			onModelSwapped: (next) => {
+				compactionWiring.rebuild(next, store);
+				thresholdHolder.current = compactionThreshold({
+					contextWindow: next.contextWindow,
+					maxOutputTokens: next.maxOutputTokens,
+				});
+				handle?.setModelName(`${next.provider}/${next.id}`);
+				if (sessionRef) refreshContextInfo(sessionRef);
+			},
 		},
 	);
 	const planTools = createPlanModeTools(planCallbacks);
