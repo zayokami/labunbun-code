@@ -67,6 +67,7 @@ import {
 	approveMcpServer as persistMcpApproval,
 } from "@labunbun/mcp";
 import {
+	type AgentTask,
 	type BackgroundShell,
 	BackgroundShellManager,
 	createAllTools,
@@ -111,6 +112,20 @@ import {
 	chatGptSignedInLine,
 	clearChatGptSubscription,
 } from "./chatgpt-login.ts";
+import {
+	FILE_CHECKPOINT_KIND,
+	filePathFromInput,
+	hashFileOrNull,
+	readToolCheckpoints,
+	recordRewind,
+	resendCheckpointsAcrossCompaction,
+	sha256Of,
+	summarizeToolInput,
+	type ToolCheckpoint,
+	type TouchedFileReport,
+	touchedFileReports,
+	writeToolCheckpoint,
+} from "./checkpoint-log.ts";
 import { createClaudeCredentialStore, createClaudeCredentials } from "./claude-auth.ts";
 import {
 	type ClaudeAuthHooks,
@@ -139,6 +154,7 @@ import {
 import {
 	contextRows,
 	contextSummaryLine,
+	formatTokens,
 	isContextLow,
 	lowContextWarning,
 	preservedFilesDrift,
@@ -631,9 +647,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// rules the user granted and the axes they chose are above the boundary
 			// too, and a summary that cost the session its grants would make /compact
 			// a way to be asked everything again.
+			//
+			// And the same put-back for the other two readers the re-root strands:
+			// the file checkpoints `/rewind` restores from, and the shell starts
+			// the next resume pairs. Right here for the same reason — `done` is
+			// the first moment the boundary is in the file.
 			if (phase.kind === "done") {
 				saveTasks(taskStore, store);
 				persistPolicy();
+				resendCheckpointsAcrossCompaction(store);
 			}
 		},
 		readFile: readFileOrNull,
@@ -816,6 +838,26 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	});
 
 	/**
+	 * The file a running Edit/Write is mid-way through, between its before-hook
+	 * and its end event.
+	 *
+	 * Keyed by path because the loop hooks never see the call id, and a path is
+	 * the one name both halves — `beforeToolCall` (which snapshots and hashes the
+	 * before side) and the `tool_execution_end` subscriber (which writes the
+	 * entry) — agree on. One entry per path is all there can be: Edit and Write
+	 * are both serialized (`isConcurrencySafe: () => false`), so two calls for
+	 * the same file cannot be in flight at once, and a subagent's calls run
+	 * through its own session's hooks, not these.
+	 */
+	const pendingFileStates = new Map<string, { path: string; beforeHash: string | null; afterHash: string | null }>();
+	/**
+	 * The input each running tool call was announced with, for the subscriber.
+	 * `tool_execution_start` carries the input and `tool_execution_end` does not,
+	 * so the end handler can summarize an input only if it kept the start.
+	 */
+	const startedToolInputs = new Map<string, unknown>();
+
+	/**
 	 * Named so a hot-swap can hand the SAME deps object to the next session.
 	 * Its closures read only holder-bound or let-bound state (compaction,
 	 * store, sessionIdHolder, handle), so they stay correct across swaps.
@@ -943,9 +985,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				return `${hookContext.join("\n\n")}\n\n---\n\n${text}`.trimEnd();
 			},
 			beforeToolCall: async (toolName, input) => {
-				// File checkpoint before mutations — powers /rewind.
+				// File checkpoint before mutations — powers /rewind — and the
+				// before side of the call's own ledger entry, from the same read:
+				// a second read here would be a different moment for no reason.
 				if (store && (toolName === "Edit" || toolName === "Write")) {
-					snapshotCheckpoint(store, input);
+					const snapshot = snapshotCheckpoint(store, input);
+					if (snapshot) pendingFileStates.set(snapshot.path, { ...snapshot, afterHash: null });
 				}
 				if (!hooksRuntime.has("PreToolUse")) return undefined;
 				const outcome = await hooksRuntime.run("PreToolUse", { tool_name: toolName, tool_input: input, cwd });
@@ -956,7 +1001,19 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				if (outcome.blocked) return { block: true, reason: outcome.reason ?? "Blocked by PreToolUse hook" };
 				return undefined;
 			},
-			afterToolCall: async (toolName, input) => {
+			afterToolCall: async (toolName, input, result) => {
+				// The after side of the call's ledger entry. Read only when the call
+				// reported success: a failed edit left the file as it was (or never
+				// created it), so "the hash after" would be the before side wearing
+				// the wrong label. A file gone or unreadable by now is null — the
+				// absence of a fingerprint, which is not a claim about the file.
+				if (toolName === "Edit" || toolName === "Write") {
+					const filePath = filePathFromInput(input);
+					if (filePath !== undefined) {
+						const pending = pendingFileStates.get(filePath);
+						if (pending) pending.afterHash = result.isError ? null : hashFileOrNull(filePath, readFileOrNull);
+					}
+				}
 				if (!hooksRuntime.has("PostToolUse")) return undefined;
 				const outcome = await hooksRuntime.run("PostToolUse", { tool_name: toolName, tool_input: input, cwd });
 				// Advisory: the call already ran, so a block has nothing to stop.
@@ -1018,6 +1075,46 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			// The band's setTools rewrite, registered on the main session's own next
 			// turn — the latch explains why it cannot register where the change does.
 			toolChangeLatch.observe(event);
+			// The tool ledger: one `custom` entry per finished call — what ran,
+			// whether it worked, and the file fingerprints Edit and Write took.
+			// Written from this subscription rather than the loop so the main loop
+			// stays untouched. The input is taken at the start event because the
+			// end event does not carry one.
+			if (event.type === "tool_execution_start") {
+				startedToolInputs.set(event.callId, event.input);
+			}
+			if (event.type === "tool_execution_end") {
+				const input = startedToolInputs.get(event.callId);
+				startedToolInputs.delete(event.callId);
+				const record: ToolCheckpoint = {
+					at: Date.now(),
+					callId: event.callId,
+					toolName: event.toolName,
+					isError: event.result.isError,
+				};
+				if (input !== undefined) {
+					const summary = summarizeToolInput(input);
+					if (summary) {
+						record.inputSummary = summary.text;
+						if (summary.truncated) record.truncated = true;
+					}
+				}
+				if (event.toolName === "Edit" || event.toolName === "Write") {
+					const filePath = input === undefined ? undefined : filePathFromInput(input);
+					const pending = filePath === undefined ? undefined : pendingFileStates.get(filePath);
+					if (filePath !== undefined) pendingFileStates.delete(filePath);
+					// Only a pending state means a validated call reached its before
+					// hook: an input the schema refused never named a file this build
+					// fingerprinted, and a row for it would be a claim built on input
+					// nothing accepted.
+					if (pending) {
+						record.filesTouched = [
+							{ path: pending.path, beforeHash: pending.beforeHash, afterHash: pending.afterHash },
+						];
+					}
+				}
+				if (store) writeToolCheckpoint(store, record);
+			}
 			if (event.type === "turn_end") {
 				costTracker.recordUsage(event.message.provider, event.message.model, event.message.usage);
 				costTracker.persist();
@@ -1465,6 +1562,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				mcpLoadErrors,
 				pendingMcpApprovals,
 				sessionStore: () => store,
+				taskSnapshot: () => taskStore.snapshot(),
 				loadedSettings,
 				theme: resolvedTheme,
 				refreshContextInfo,
@@ -1775,17 +1873,36 @@ function appendMemoryNote(note: string): void {
 
 const CHECKPOINT_MAX_CHARS = 200_000;
 
-/** Snapshot a file's content before Edit/Write mutates it (for /rewind). */
-function snapshotCheckpoint(store: SessionStore, input: unknown): void {
+/**
+ * Snapshot a file's content before Edit/Write mutates it (for /rewind), and
+ * fingerprint it for the call's own ledger entry.
+ *
+ * Both answers come out of the one read, because they describe the one moment:
+ * the content is what `/rewind` would restore, the hash is what a later reader
+ * compares the disk against. Null means no path could be named (the before side
+ * of a brand-new file is also null — there was no file to read, and that is a
+ * different fact from "it could not be read", both of which are the absence of
+ * a fingerprint rather than a claim about one).
+ */
+function snapshotCheckpoint(store: SessionStore, input: unknown): { path: string; beforeHash: string | null } | null {
+	const filePath = filePathFromInput(input);
+	if (filePath === undefined) return null;
+	let beforeHash: string | null = null;
 	try {
-		const filePath = (input as { file_path?: unknown }).file_path;
-		if (typeof filePath !== "string" || !existsSync(filePath)) return;
-		const content = readFileSync(filePath, "utf8");
-		if (content.length > CHECKPOINT_MAX_CHARS) return; // too large to inline
-		store.appendCustom("file_checkpoint", { path: filePath, content, at: Date.now() });
+		if (existsSync(filePath)) {
+			const content = readFileSync(filePath, "utf8");
+			beforeHash = sha256Of(content);
+			// Over the cap the content is not inlined — a session file is not where
+			// a 200k file's copy belongs — but the hash still is: the entry can say
+			// the file changed on this call even when /rewind cannot restore it.
+			if (content.length <= CHECKPOINT_MAX_CHARS) {
+				store.appendCustom(FILE_CHECKPOINT_KIND, { path: filePath, content, at: Date.now() });
+			}
+		}
 	} catch {
 		// best-effort — never block the tool call on checkpoint failure
 	}
+	return { path: filePath, beforeHash };
 }
 
 interface CheckpointInfo {
@@ -1828,6 +1945,24 @@ function listCheckpoints(store: SessionStore): CheckpointListing {
 		checkpoints.push({ entryId: entry.id, path: record.path, at: record.at, content: record.content });
 	}
 	return { checkpoints, unreadable };
+}
+
+/**
+ * One row of `/checkpoint`'s file list: the verdict, the path, and — where the
+ * verdict is not "unchanged" — what the verdict means. The four states are the
+ * ones `preservedFilesDrift` names for a compaction's fingerprints, because it
+ * is the same question one level down.
+ */
+function touchedFileLine(report: TouchedFileReport): string {
+	const note =
+		report.state === "changed"
+			? " — no longer matches the hash the last call recorded"
+			: report.state === "missing"
+				? " — not on disk now (deleted, moved, or unreadable)"
+				: report.state === "unfingerprinted"
+					? " — the last call took no hash"
+					: "";
+	return `${report.state.padEnd(15)}${report.path}${note}`;
 }
 
 interface AppCommandContext {
@@ -1941,6 +2076,12 @@ interface AppCommandContext {
 	mcpLoadErrors: McpConfigError[];
 	pendingMcpApprovals: string[];
 	sessionStore(): SessionStore | undefined;
+	/**
+	 * The session's task list, as copies, for `/checkpoint`. Optional because a
+	 * context built by hand — a test, an embedder — has no board behind it, and
+	 * the report has to say "none" rather than throw.
+	 */
+	taskSnapshot?(): AgentTask[];
 	/** Theme resolved at startup; `/theme` reads its name and available list. */
 	theme: ResolvedTheme;
 	/** Republish the context indicator for a session whose context just changed. */
@@ -2098,6 +2239,7 @@ export function appCommandTable(): Array<[string, string]> {
 			"Run a four-agent band that works until stopped: /beetle [<task>|status|off|models|say <member> <text>]",
 		],
 		["/cache", "Show prompt-cache hit rate, its ceiling, and any prefix rewinds"],
+		["/checkpoint", "Show the tool ledger: the last call, files touched, tasks, and context use"],
 		["/context", "Show what the context window is made of, and what is left"],
 		["/cost", "Show token usage and cost for this conversation, then for this project"],
 		["/doctor", "Check the environment, settings, and provider setup"],
@@ -2265,6 +2407,60 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		}
 		case "/cache": {
 			pushInfo(ctx.handle, ctx.cache ? ctx.cache.report() : "This session does not track the prompt cache.");
+			return true;
+		}
+		case "/checkpoint": {
+			const checkpointStore = ctx.sessionStore();
+			// Read over every entry in the file, not the active chain: the question
+			// is what this session did, and a compaction is exactly the moment the
+			// chain stops holding the calls above the boundary. The entries a pass
+			// re-sent keep this answer whole either way.
+			const checkpoints = checkpointStore ? readToolCheckpoints(checkpointStore.entries) : [];
+			const lines: string[] = [];
+			if (checkpoints.length === 0) {
+				lines.push("No tool calls recorded yet — one checkpoint is written when each call ends.");
+			} else {
+				const failed = checkpoints.filter((checkpoint) => checkpoint.isError).length;
+				const last = checkpoints[checkpoints.length - 1];
+				lines.push(
+					`Checkpoints — ${checkpoints.length} tool ${checkpoints.length === 1 ? "call" : "calls"} recorded, ${failed} failed.`,
+				);
+				if (last) {
+					const summary = last.inputSummary ? ` (${last.inputSummary})` : "";
+					const when = new Date(last.at).toLocaleTimeString();
+					lines.push(`Last: ${last.toolName} ${last.isError ? "failed" : "ok"} at ${when}${summary}.`);
+				}
+			}
+			// The files against the disk now: what the newest call on each path
+			// recorded, and whether that still describes the file.
+			const files = touchedFileReports(checkpoints, readFileOrNull);
+			if (files.length > 0) {
+				lines.push(`Files touched (${files.length}), read against the disk now:`);
+				for (const file of files) lines.push(`  ${touchedFileLine(file)}`);
+			}
+			const tasks = ctx.taskSnapshot?.() ?? [];
+			if (tasks.length === 0) {
+				lines.push("Tasks: none.");
+			} else {
+				const done = tasks.filter((task) => task.status === "completed").length;
+				const active = tasks.filter((task) => task.status === "in_progress").length;
+				lines.push(
+					`Tasks (${tasks.length}): ${done} done, ${active} in progress, ${tasks.length - done - active} pending.`,
+				);
+				const open = tasks.filter((task) => task.status !== "completed");
+				for (const task of open.slice(0, 10)) lines.push(`  #${task.id} [${task.status}] ${task.subject}`);
+				if (open.length > 10) lines.push(`  …and ${open.length - 10} more.`);
+			}
+			if (session) {
+				const used = estimateContextUsage(session.currentContext());
+				const limits = ctx.compaction().limits();
+				lines.push(
+					`Context: ${formatTokens(used)} tokens used of ${formatTokens(limits.threshold)} before auto-compact.`,
+				);
+			} else {
+				lines.push("Context: no live session to measure.");
+			}
+			pushInfo(ctx.handle, lines.join("\n"));
 			return true;
 		}
 		case "/cost": {
@@ -2853,6 +3049,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			const checkpoint = checkpoints[index];
 			try {
 				writeFileSync(checkpoint.path, checkpoint.content, "utf8");
+				// The rollback itself is recorded, so a later reader can tell a
+				// workspace that was rolled back from one that was merely edited —
+				// the drift a restore leaves behind has no tool call to explain it.
+				// Only after the write succeeded: a restore that failed must not be
+				// logged as one that happened.
+				recordRewind(rewindStore, checkpoint.path, checkpoint.entryId);
 				pushInfo(
 					ctx.handle,
 					`Restored ${checkpoint.path} to the ${new Date(checkpoint.at).toLocaleTimeString()} state.`,
