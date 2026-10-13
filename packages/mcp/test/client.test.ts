@@ -19,6 +19,7 @@ import {
 const TEST_DIR = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const FIXTURE_SERVER = join(TEST_DIR, "fixture-server.ts");
 const STALLING_SERVER = join(TEST_DIR, "fixture-stalling-server.ts");
+const PAGINATED_SERVER = join(TEST_DIR, "fixture-paginated-server.ts");
 
 function callCtx(overrides: { signal?: AbortSignal; onUpdate?: (update: any) => void } = {}) {
 	return {
@@ -193,6 +194,50 @@ describe("connect timeout", () => {
 		expect(working?.error).toBeUndefined();
 		expect(working?.tools.length).toBeGreaterThan(0);
 	}, 30_000);
+});
+
+describe("list pagination", () => {
+	// The fixture serves five tools and three prompts, two per page. One page is
+	// exactly what a client that ignores `nextCursor` collects, and it looks
+	// like a complete answer: nothing in a tool list says how long it should be.
+	test("every page of tools and prompts is collected, not just the first", async () => {
+		const connection = await connectMcpServer("paginated", {
+			command: process.execPath,
+			args: [PAGINATED_SERVER],
+		});
+		if (connection.error) throw new Error(`fixture failed: ${connection.error}`);
+
+		expect(connection.tools.map((t) => t.name).sort()).toEqual([
+			"mcp__paginated__five",
+			"mcp__paginated__four",
+			"mcp__paginated__one",
+			"mcp__paginated__three",
+			"mcp__paginated__two",
+		]);
+		expect(connection.prompts.map((p) => p.name).sort()).toEqual(["alpha", "beta", "gamma"]);
+	}, 20_000);
+
+	// A cursor that never advances turns the loop into a busy wait against a
+	// server that is answering, so the connect budget is not the backstop it is
+	// for a server that says nothing: the loop has to notice on its own.
+	test("a cursor the server repeats ends the walk instead of looping forever", async () => {
+		// A budget far past the test's own timeout: if the walk does not end by
+		// itself, this test hangs and fails rather than passing on a timeout.
+		const connection = await connectMcpServer(
+			"stuck",
+			{ command: process.execPath, args: [PAGINATED_SERVER, "repeat"] },
+			{ timeoutMs: 120_000 },
+		);
+		// Both distinct pages arrived...
+		expect(connection.tools.map((t) => t.name).sort()).toEqual([
+			"mcp__stuck__four",
+			"mcp__stuck__one",
+			"mcp__stuck__three",
+			"mcp__stuck__two",
+		]);
+		// ...and the connection is usable rather than abandoned on a timeout.
+		expect(connection.error).toBeUndefined();
+	}, 20_000);
 });
 
 describe("call timeout", () => {

@@ -3,7 +3,7 @@
  * tools into the agent Tool registry under `mcp__<server>__<tool>` names.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { type AnyTool, buildTool, sanitizeCwd, type ToolResult } from "@labunbun/agent";
@@ -207,6 +207,45 @@ async function withTimeout<T>(work: Promise<T>, onTimeout: () => void, timeoutMs
 	}
 }
 
+/**
+ * Every page of a list request, in the order the server hands them out.
+ *
+ * Both list calls take an optional `cursor` and answer an optional
+ * `nextCursor`, and a server is free to split a list across pages. The call
+ * that passes no cursor gets the first page and nothing says how many pages
+ * follow, so reading one result is indistinguishable from a complete list —
+ * a server with 200 tools looked exactly like a server with the 50 that fit in
+ * page one, and the missing ones were missing without a word.
+ *
+ * `label` names the list in the one warning this can print, because that
+ * warning is the only trace a broken walk leaves.
+ */
+async function listEveryPage<TPage extends { nextCursor?: string }>(
+	label: string,
+	requestPage: (cursor: string | undefined) => Promise<TPage>,
+): Promise<TPage[]> {
+	const pages: TPage[] = [];
+	// The cursors already used to ask for a page. A server that repeats one is
+	// not advancing, and asking again with it would return the same page for as
+	// long as the connect budget lasts — a busy wait, not a slow server. The
+	// pages collected so far are real, so they are kept and the list is reported
+	// short rather than discarded.
+	const asked = new Set<string>();
+	let cursor: string | undefined;
+	for (;;) {
+		const page = await requestPage(cursor);
+		pages.push(page);
+		const next = page.nextCursor;
+		if (!next) return pages;
+		if (asked.has(next)) {
+			console.error(`Warning: ${label} repeated the page cursor "${next}"; the list from this server is incomplete.`);
+			return pages;
+		}
+		asked.add(next);
+		cursor = next;
+	}
+}
+
 export interface ConnectMcpOptions {
 	/** Connect + discovery budget. Defaults to CONNECT_TIMEOUT_MS. */
 	timeoutMs?: number;
@@ -248,12 +287,18 @@ export async function connectMcpServer(
 		// A server that accepts the connection but never answers would otherwise
 		// hang startup forever — every server gets a bounded window to finish
 		// connecting and reporting its capabilities.
-		const { toolList, promptList } = await withTimeout(
+		const { toolPages, promptPages } = await withTimeout(
 			(async () => {
 				await client.connect(transport);
 				return {
-					toolList: await client.listTools(),
-					promptList: await client.listPrompts().catch(() => ({ prompts: [] })),
+					toolPages: await listEveryPage(`${serverName}/tools/list`, (cursor) =>
+						client.listTools(cursor ? { cursor } : undefined),
+					),
+					// A server that does not implement prompts has none; that is a
+					// server without prompts, not a failed connection.
+					promptPages: await listEveryPage(`${serverName}/prompts/list`, (cursor) =>
+						client.listPrompts(cursor ? { cursor } : undefined),
+					).catch(() => []),
 				};
 			})(),
 			() => void client.close().catch(() => {}),
@@ -261,91 +306,95 @@ export async function connectMcpServer(
 		);
 
 		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
-		const tools: AnyTool[] = (toolList.tools ?? []).map((mcpTool) =>
-			buildTool({
-				name: `mcp__${serverName}__${mcpTool.name}`,
-				description: mcpTool.description ?? `MCP tool ${mcpTool.name} from ${serverName}`,
-				inputSchema: jsonSchemaToZod(
-					(mcpTool.inputSchema ?? { type: "object" }) as Record<string, unknown>,
-				) as z.ZodType,
-				isReadOnly: () => false,
-				isConcurrencySafe: () => true,
-				// No maxResultSizeChars override on purpose: the result flows
-				// through the same pipeline budget as every other tool, so a
-				// server cannot outgrow the conversation by answering over the
-				// wire, and the same truncation marker says what was cut.
-				call: async (input, ctx): Promise<ToolResult> => {
-					// A run cancelled before the call starts must not reach the server:
-					// an abort event does not replay for listeners added after it, so
-					// the already-aborted case is handled rather than subscribed to.
-					if (ctx.signal.aborted) {
-						return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
-					}
-					// Two ways out of a call, two signals: the run's (Esc) and this
-					// call's own timer (a server that accepts the request and never
-					// answers). Aborting the request — rather than racing a timeout
-					// promise — is also what tells the server the call is off: the
-					// SDK turns it into notifications/cancelled.
-					const controller = new AbortController();
-					let timedOut = false;
-					const forward = () => controller.abort();
-					ctx.signal.addEventListener("abort", forward, { once: true });
-					const timer = setTimeout(() => {
-						timedOut = true;
-						controller.abort();
-					}, callTimeoutMs);
-					try {
-						const result = await client.callTool(
-							{ name: mcpTool.name, arguments: input as Record<string, unknown> },
-							undefined,
-							{
-								signal: controller.signal,
-							},
-						);
-						const content = Array.isArray(result.content)
-							? result.content.map((block) =>
-									(block as { type: string; text?: string }).type === "text"
-										? { type: "text" as const, text: String((block as { text?: string }).text ?? "") }
-										: { type: "text" as const, text: JSON.stringify(block) },
-								)
-							: [{ type: "text" as const, text: JSON.stringify(result) }];
-						return { content, isError: Boolean(result.isError) };
-					} catch (error) {
-						// Checked before the run's signal: both paths end in an abort, and
-						// when the timer is what fired, "the server never answered" is the
-						// cause worth naming.
-						if (timedOut) {
-							const message = `${serverName}/${mcpTool.name} timed out after ${callTimeoutMs}ms`;
+		const tools: AnyTool[] = toolPages
+			.flatMap((page) => page.tools ?? [])
+			.map((mcpTool) =>
+				buildTool({
+					name: `mcp__${serverName}__${mcpTool.name}`,
+					description: mcpTool.description ?? `MCP tool ${mcpTool.name} from ${serverName}`,
+					inputSchema: jsonSchemaToZod(
+						(mcpTool.inputSchema ?? { type: "object" }) as Record<string, unknown>,
+					) as z.ZodType,
+					isReadOnly: () => false,
+					isConcurrencySafe: () => true,
+					// No maxResultSizeChars override on purpose: the result flows
+					// through the same pipeline budget as every other tool, so a
+					// server cannot outgrow the conversation by answering over the
+					// wire, and the same truncation marker says what was cut.
+					call: async (input, ctx): Promise<ToolResult> => {
+						// A run cancelled before the call starts must not reach the server:
+						// an abort event does not replay for listeners added after it, so
+						// the already-aborted case is handled rather than subscribed to.
+						if (ctx.signal.aborted) {
+							return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
+						}
+						// Two ways out of a call, two signals: the run's (Esc) and this
+						// call's own timer (a server that accepts the request and never
+						// answers). Aborting the request — rather than racing a timeout
+						// promise — is also what tells the server the call is off: the
+						// SDK turns it into notifications/cancelled.
+						const controller = new AbortController();
+						let timedOut = false;
+						const forward = () => controller.abort();
+						ctx.signal.addEventListener("abort", forward, { once: true });
+						const timer = setTimeout(() => {
+							timedOut = true;
+							controller.abort();
+						}, callTimeoutMs);
+						try {
+							const result = await client.callTool(
+								{ name: mcpTool.name, arguments: input as Record<string, unknown> },
+								undefined,
+								{
+									signal: controller.signal,
+								},
+							);
+							const content = Array.isArray(result.content)
+								? result.content.map((block) =>
+										(block as { type: string; text?: string }).type === "text"
+											? { type: "text" as const, text: String((block as { text?: string }).text ?? "") }
+											: { type: "text" as const, text: JSON.stringify(block) },
+									)
+								: [{ type: "text" as const, text: JSON.stringify(result) }];
+							return { content, isError: Boolean(result.isError) };
+						} catch (error) {
+							// Checked before the run's signal: both paths end in an abort, and
+							// when the timer is what fired, "the server never answered" is the
+							// cause worth naming.
+							if (timedOut) {
+								const message = `${serverName}/${mcpTool.name} timed out after ${callTimeoutMs}ms`;
+								ctx.onUpdate({ mcpError: message });
+								return {
+									content: [{ type: "text", text: `MCP call failed: ${message}` }],
+									isError: true,
+								};
+							}
+							// The SDK rejects the pending request when the signal aborts — that
+							// is the run being cancelled, not an MCP server failure.
+							if (ctx.signal.aborted) {
+								return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
+							}
+							const message = sanitizeMcpError(error instanceof Error ? error.message : String(error), config);
 							ctx.onUpdate({ mcpError: message });
 							return {
 								content: [{ type: "text", text: `MCP call failed: ${message}` }],
 								isError: true,
 							};
+						} finally {
+							clearTimeout(timer);
+							ctx.signal.removeEventListener("abort", forward);
 						}
-						// The SDK rejects the pending request when the signal aborts — that
-						// is the run being cancelled, not an MCP server failure.
-						if (ctx.signal.aborted) {
-							return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
-						}
-						const message = sanitizeMcpError(error instanceof Error ? error.message : String(error), config);
-						ctx.onUpdate({ mcpError: message });
-						return {
-							content: [{ type: "text", text: `MCP call failed: ${message}` }],
-							isError: true,
-						};
-					} finally {
-						clearTimeout(timer);
-						ctx.signal.removeEventListener("abort", forward);
-					}
-				},
-			}),
-		);
+					},
+				}),
+			);
 
 		return {
 			serverName,
 			client,
 			tools,
-			prompts: (promptList.prompts ?? []).map((p) => ({ name: p.name, description: p.description })),
+			prompts: promptPages
+				.flatMap((page) => page.prompts ?? [])
+				.map((p) => ({ name: p.name, description: p.description })),
 		};
 	} catch (error) {
 		return {
@@ -491,6 +540,34 @@ export function loadApprovedMcpServers(cwd: string, home: string = homedir()): S
 	}
 }
 
+/**
+ * Write a JSON store by replacement: the bytes land in a sibling file and are
+ * renamed over the target, so a process that dies mid-write leaves the previous
+ * complete file rather than a truncated one.
+ *
+ * Truncation is the failure worth this much care here: the store is read back
+ * as the whole set of approvals, and a half-written file parses as nothing, so
+ * the cost of a torn write is not one lost approval but every approval the
+ * project ever collected. Throws when the write fails, leaving the caller to
+ * decide whether a store it could not save is worth failing over; the temp file
+ * does not survive the failure either way.
+ */
+// Long-form design notes: docs/dev/crash-consistency.md
+function writeJsonAtomic(path: string, data: Record<string, unknown>): void {
+	const tmp = `${path}.tmp`;
+	try {
+		writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+		renameSync(tmp, path);
+	} catch (error) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			// No temp file to remove (the write failed before it existed).
+		}
+		throw error;
+	}
+}
+
 /** Persist one more approved server name (creates the file/dir as needed). */
 export function approveMcpServer(cwd: string, serverName: string, home: string = homedir()): void {
 	const path = approvalStorePath(cwd, home);
@@ -523,7 +600,7 @@ export function approveMcpServer(cwd: string, serverName: string, home: string =
 	approved.add(serverName);
 	existing.approvedMcpServers = [...approved];
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(existing, null, 2)}\n`, "utf8");
+	writeJsonAtomic(path, existing);
 }
 
 /** Connect all configured servers in parallel. */
