@@ -825,3 +825,17 @@ If LaBunbun Code saves you time, you can support the development.
 ## License
 
 MIT © 2026 zayoka. Read [LICENSE](./LICENSE).
+
+LaBunbun is free software licensed under the MIT License.
+
+If you enjoy this software, please help children living in war zones and those affected by disasters. Children are the future and hope of our world, and every child deserves the chance to grow up healthy, safe, and strong. Every child, wherever they live, has the right to a bright future!
+
+To all the children of the world:
+
+The world needs you to help create a better tomorrow. Whatever your dream may be, if you believe in it and work toward it, you can make a difference. Believe in yourself.
+
+We encourage you to donate through the official donation pages of UNICEF, your national Red Cross society, Doctors Without Borders, or the Heal Los Angeles Foundation.
+
+LaBunbun thanks everyone working to create a better future. You are all true heroes.
+
+We Are The World.
