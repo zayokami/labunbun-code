@@ -170,9 +170,16 @@ export const SettingsSchema = z.object({
 		.object({
 			allow: z.array(z.string()).default([]),
 			deny: z.array(z.string()).default([]),
+			/**
+			 * Rules whose match still comes to a person, in every mode — the one
+			 * behavior no mode resolves on its own. Nothing runs because of this
+			 * list, so like `deny` it is a tightening and a project file may carry
+			 * it (see the project tier's key policy).
+			 */
+			ask: z.array(z.string()).default([]),
 			additionalDirectories: z.array(z.string()).default([]),
 		})
-		.default({ allow: [], deny: [], additionalDirectories: [] }),
+		.default({ allow: [], deny: [], ask: [], additionalDirectories: [] }),
 	// Long-form design notes: docs/dev/migration-framework.md
 	/** The DualShock 4: whether one is read, and what its buttons do. */
 	gamepad: z
@@ -355,6 +362,11 @@ export const PROJECT_TIER_PERMISSION_KEY_POLICY: Record<keyof Settings["permissi
 	allow: "denied",
 	additionalDirectories: "denied",
 	deny: "repo",
+	// Tightening, like `deny`: an ask rule never runs a call, it only adds a
+	// question — and one the user answers. A repo that made commands ask more
+	// often has constrained what the session does on its own behalf, not widened
+	// anything it does.
+	ask: "repo",
 };
 
 /**
@@ -555,7 +567,9 @@ const RULE_SOURCE_BY_SETTINGS_SOURCE: Record<SettingsSourceName, RuleSource> = {
  *
  * Order follows the settings hierarchy, so later tiers win among allows, and
  * `/permissions` can show which file a rule came from. Deny rules win
- * regardless of tier, so this ordering only affects allows and display.
+ * regardless of tier, and ask rules are consulted before allows, so this
+ * ordering only affects the allow list and display — within a tier the three
+ * behaviors are pushed in the severity order the engine reads them.
  */
 export function collectPermissionRules(loaded: LoadedSettings): PermissionRule[] {
 	const order: SettingsSourceName[] = ["user", "project", "local", "policy", "flag"];
@@ -575,6 +589,7 @@ export function collectPermissionRules(loaded: LoadedSettings): PermissionRule[]
 		if (managedOnly && ruleSource !== "policy" && ruleSource !== "cliArg") continue;
 		rules.push(
 			...parseRuleList(tier.permissions.deny, "deny", ruleSource),
+			...parseRuleList(tier.permissions.ask, "ask", ruleSource),
 			...parseRuleList(tier.permissions.allow, "allow", ruleSource),
 		);
 	}

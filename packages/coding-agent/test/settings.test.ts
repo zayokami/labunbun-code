@@ -53,6 +53,9 @@ describe("SettingsSchema", () => {
 			},
 		});
 		expect(parsed.permissions.deny).toEqual([]);
+		// The ask list defaults with the rest of the block: a file that says
+		// nothing about it holds no ask rules.
+		expect(parsed.permissions.ask).toEqual([]);
 		expect(parsed.providers?.openaiCompatible[0].id).toBe("custom");
 		// Both axes survive a parse. They are separate keys, and a test that only
 		// set `permissionMode` would pass against a schema that had quietly dropped

@@ -414,6 +414,42 @@ describe("permission rule tiers", () => {
 		);
 	});
 
+	test("an ask list travels with the ask behavior, tag, and parser", () => {
+		withSettingsTiers(
+			{ user: { permissions: { allow: [], deny: [], ask: ["Bash(git commit *)", "bad(rule"] } } },
+			(cwd, home) => {
+				// The list's name is the behavior, exactly as for allow and deny —
+				// and a malformed entry is dropped rather than guessed at.
+				expect(collectPermissionRules(loadSettings(cwd, undefined, home))).toEqual([
+					{ toolName: "Bash", specifier: "git commit *", behavior: "ask", source: "userSettings" },
+				]);
+			},
+		);
+	});
+
+	test("a repo may tighten with ask rules, the same way it may deny", () => {
+		withSettingsTiers(
+			{
+				project: {
+					permissions: {
+						allow: ["Bash(curl *)"],
+						deny: [],
+						ask: ["Bash(git commit *)"],
+					},
+				},
+			},
+			(cwd, home) => {
+				const rules = collectPermissionRules(loadSettings(cwd, undefined, home));
+				// The widening list is still dropped...
+				expect(rules.some((r) => r.behavior === "allow")).toBe(false);
+				// ...while the tightening one arrives, tagged to the repo tier.
+				expect(rules).toEqual([
+					{ toolName: "Bash", specifier: "git commit *", behavior: "ask", source: "projectSettings" },
+				]);
+			},
+		);
+	});
+
 	test("the collected order is RULE_SOURCE_ORDER's order", () => {
 		withSettingsTiers(
 			{
@@ -438,19 +474,21 @@ describe("permission rule tiers", () => {
 	test("allowManagedPermissionRulesOnly discards non-managed rules", () => {
 		withSettingsTiers(
 			{
-				user: { permissions: { allow: ["Bash(curl *)"], deny: [] } },
+				user: { permissions: { allow: ["Bash(curl *)"], deny: [], ask: ["Bash(git commit *)"] } },
 				project: { permissions: { allow: ["Write"], deny: [] } },
 				local: { permissions: { allow: ["Bash(rm -rf *)"], deny: [] } },
 				policy: {
 					allowManagedPermissionRulesOnly: true,
-					permissions: { allow: ["Read"], deny: ["Read(**/.env)"] },
+					permissions: { allow: ["Read"], deny: ["Read(**/.env)"], ask: ["Bash(git push *)"] },
 				},
 			},
 			(cwd, home) => {
 				const rules = collectPermissionRules(loadSettings(cwd, undefined, home));
 				expect(rules.every((r) => r.source === "policy")).toBe(true);
-				// The policy tier's own rules survive intact.
+				// The policy tier's own rules survive intact — the ask list included.
 				expect(rules.some((r) => r.behavior === "deny" && r.specifier === "**/.env")).toBe(true);
+				expect(rules.some((r) => r.behavior === "ask" && r.specifier === "git push *")).toBe(true);
+				expect(rules.some((r) => r.behavior === "ask" && r.source === "userSettings")).toBe(false);
 				expect(rules.some((r) => r.toolName === "Write")).toBe(false);
 			},
 		);

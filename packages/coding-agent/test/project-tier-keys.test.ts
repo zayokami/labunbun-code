@@ -64,10 +64,12 @@ describe("the project tier's key policy", () => {
 		// Read off a parsed default rather than the schema's internals: the keys a
 		// settings file can hold are the keys the parse produces.
 		const subKeys = Object.keys(SettingsSchema.parse({}).permissions);
-		expect([...subKeys].sort()).toEqual(["additionalDirectories", "allow", "deny"]);
+		expect([...subKeys].sort()).toEqual(["additionalDirectories", "allow", "ask", "deny"]);
 		expect(Object.keys(PROJECT_TIER_PERMISSION_KEY_POLICY).sort()).toEqual([...subKeys].sort());
-		// Tightening is always safe; both widening keys are not.
+		// Tightening is always safe; both widening keys are not. Ask sits on the
+		// tightening side: a rule that can only add a question never runs a call.
 		expect(PROJECT_TIER_PERMISSION_KEY_POLICY.deny).toBe("repo");
+		expect(PROJECT_TIER_PERMISSION_KEY_POLICY.ask).toBe("repo");
 		expect(PROJECT_TIER_PERMISSION_KEY_POLICY.allow).toBe("denied");
 		expect(PROJECT_TIER_PERMISSION_KEY_POLICY.additionalDirectories).toBe("denied");
 	});
