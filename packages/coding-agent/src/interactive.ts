@@ -471,7 +471,6 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// One shared Operations instance: the "!" shell passthrough and the Bash
 	// tool must resolve shells and kill process trees identically.
 	const ops: Operations = defaultOperations();
-	const shellPassthrough = createShellPassthrough({ cwd, ops });
 	// Owned here rather than inside createAllTools so `/ps` and `/stop` can reach
 	// the same shells the Bash tool started; the factory would otherwise make a
 	// private manager nobody else can see.
@@ -755,6 +754,20 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// ---- subagents, skills, plan mode ----
 	/** The live session. Declared before the tools that read it through a getter. */
 	let sessionRef: AgentSession | null = null;
+	// The "!" shell passthrough, built after the session for the same reason the
+	// tools are: its sandbox and network axes are read through `sessionRef` per
+	// run, so a `/mode` or Shift+Tab lands on the next "!" the way it lands on
+	// the next Bash call. The root inputs mirror `createAllTools` above (`home`,
+	// the configured writable roots), so both paths hand the policy resolver the
+	// same facts.
+	const shellPassthrough = createShellPassthrough({
+		cwd,
+		ops,
+		sandbox: () => sessionRef?.sandbox ?? effectiveSandbox,
+		network: () => sessionRef?.network ?? effectiveNetwork,
+		home,
+		writableRoots: settings.permissions.additionalDirectories,
+	});
 	/**
 	 * How hard the model should think, seeded from settings and moved by
 	 * `/think`. Declared before the session and the Task tool for the same reason
@@ -1505,11 +1518,33 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			}).behavior === "allow",
 		onSubmitText: async (text) => {
 			appendHistory(text, cwd);
-			// "!cmd" runs the shell directly — no model, no permission prompt (the
-			// user typed the command themselves). The handled verdict keeps the
-			// REPL from also pushing a user entry or prompting.
+			// "!cmd" runs the shell directly — no model, no dialog. The handled
+			// verdict keeps the REPL from also pushing a user entry or prompting.
 			if (text.startsWith("!")) {
-				if (handle) await shellPassthrough.run(text.slice(1).trim(), handle.store);
+				const command = text.slice(1).trim();
+				// The prefix skips the model, not the policy. A deny is a floor in this
+				// session — a deny rule, plan mode, or a command the classifier refuses
+				// outright — and "I typed it myself" is not a rule that lifts one. An
+				// `ask` verdict is treated as answered, because here the person and the
+				// author of the command are the same one: a dialog asking "may I run
+				// what you just typed" would be theater.
+				if (command) {
+					const verdict = evaluatePermissions(
+						"Bash",
+						{ command },
+						{
+							mode: sessionRef?.permissionMode ?? effectiveMode,
+							sandbox: sessionRef?.sandbox ?? effectiveSandbox,
+							rules: [...baseRules, ...sessionRules],
+							cwd,
+						},
+					);
+					if (verdict.behavior === "deny") {
+						pushInfo(handle, `! refused — ${verdict.message}`);
+						return { handled: true };
+					}
+				}
+				if (handle) await shellPassthrough.run(command, handle.store);
 				return { handled: true };
 			}
 			// A line addressed to a member while a band is on stage is the user

@@ -1,13 +1,15 @@
 /**
  * The @-mention file completer and the "!" shell passthrough, against a real
  * temp project tree and fake exec respectively. The passthrough is asserted
- * through the store entries it writes — the same data the renderer consumes.
+ * through the store entries it writes — the same data the renderer consumes —
+ * and through what it hands the executor: the sandbox policy, built per run.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SandboxMode, SandboxPolicy } from "@labunbun/agent";
 import type { Operations } from "@labunbun/tools";
 import { createStore, initialUiState } from "@labunbun/tui";
 import { createFileCompleter } from "../src/file-completions.ts";
@@ -61,20 +63,33 @@ describe("createFileCompleter", () => {
 function scriptOps(script: Array<{ out?: string; code?: number; killed?: boolean }>): {
 	ops: Operations;
 	calls: string[];
+	sandboxes: Array<SandboxPolicy | undefined>;
 } {
 	let at = 0;
 	const calls: string[] = [];
+	const sandboxes: Array<SandboxPolicy | undefined> = [];
 	// Only exec is implemented — the passthrough touches nothing else.
 	const execOnly: Pick<Operations, "exec"> = {
 		exec: async (options) => {
 			calls.push(options.command);
+			sandboxes.push(options.sandbox);
 			const step = script[Math.min(at, script.length - 1)];
 			at++;
 			options.onOutput?.(step.out ?? "");
 			return { stdout: "", stderr: "", exitCode: step.code ?? 0, killed: step.killed ?? false };
 		},
 	};
-	return { calls, ops: { ...emptyFs(), ...execOnly } as Operations };
+	return { calls, sandboxes, ops: { ...emptyFs(), ...execOnly } as Operations };
+}
+
+/** The passthrough with benign axes; tests that care about the axes build their own. */
+function makePassthrough(ops: Operations): ReturnType<typeof createShellPassthrough> {
+	return createShellPassthrough({
+		cwd: root,
+		ops,
+		sandbox: () => "workspace-write",
+		network: () => ({ access: "enabled", domains: [] }),
+	});
 }
 
 /** Fill the filesystem half of Operations with throwing stubs. */
@@ -99,7 +114,7 @@ function emptyFs(): Operations {
 describe("createShellPassthrough", () => {
 	test("streams output into a user entry plus a toolUse entry with exit code", async () => {
 		const { ops } = scriptOps([{ out: "file one\nfile two\n" }]);
-		const passthrough = createShellPassthrough({ cwd: root, ops });
+		const passthrough = makePassthrough(ops);
 		const store = createStore(initialUiState());
 
 		await passthrough.run("ls -la", store);
@@ -117,7 +132,7 @@ describe("createShellPassthrough", () => {
 
 	test("a non-zero exit marks the entry as an error", async () => {
 		const { ops } = scriptOps([{ out: "not found\n", code: 127 }]);
-		const passthrough = createShellPassthrough({ cwd: root, ops });
+		const passthrough = makePassthrough(ops);
 		const store = createStore(initialUiState());
 		await passthrough.run("nope", store);
 
@@ -129,11 +144,62 @@ describe("createShellPassthrough", () => {
 
 	test("a bare ! prints usage instead of executing anything", async () => {
 		const { ops, calls } = scriptOps([]);
-		const passthrough = createShellPassthrough({ cwd: root, ops });
+		const passthrough = makePassthrough(ops);
 		const store = createStore(initialUiState());
 		await passthrough.run("", store);
 
 		expect(calls).toEqual([]);
 		expect(store.get().entries[0]).toEqual({ kind: "info", text: "Usage: ! <command>" });
+	});
+
+	// The "!" path used to exec with no policy at all, which made a typed command
+	// the way around the sandbox axis the session was displaying. Now it builds
+	// the same policy the Bash tool would have.
+	test("a run goes to the executor under the sandbox the axes describe", async () => {
+		const { ops, sandboxes } = scriptOps([{ out: "ok\n" }]);
+		const passthrough = createShellPassthrough({
+			cwd: root,
+			ops,
+			sandbox: () => "workspace-write",
+			network: () => ({ access: "restricted", domains: [] }),
+			// A home inside the temp tree, so the resolved cache roots are this
+			// test's own and not the operator's.
+			home: root,
+		});
+		const store = createStore(initialUiState());
+		await passthrough.run("pwd", store);
+
+		expect(sandboxes).toHaveLength(1);
+		const policy = sandboxes[0];
+		if (!policy) throw new Error("expected a policy to be handed to exec");
+		// The axis in the shape the backends read. Both halves have to travel: a
+		// policy stripped of its network answer is a hole with a fileSystem on it.
+		expect(policy.fileSystem.kind).toBe("restricted");
+		expect(policy.network).toBe("restricted");
+		// The workspace is the first writable entry, as in the Bash tool's policy.
+		expect(policy.fileSystem.entries[0]?.access).toBe("write");
+	});
+
+	// Read per run, not captured at construction: `/mode` moves the axis
+	// mid-session, and a frozen policy would keep applying the old sandbox to the
+	// next "!" the user runs — the same defect the Bash tool's own "read per
+	// call" comment names.
+	test("a mid-session mode change reaches the next !", async () => {
+		const { ops, sandboxes } = scriptOps([{ out: "a\n" }, { out: "b\n" }]);
+		let sandbox: SandboxMode = "workspace-write";
+		const passthrough = createShellPassthrough({
+			cwd: root,
+			ops,
+			sandbox: () => sandbox,
+			network: () => ({ access: "enabled", domains: [] }),
+		});
+		const store = createStore(initialUiState());
+
+		await passthrough.run("pwd", store);
+		sandbox = "danger-full-access";
+		await passthrough.run("pwd", store);
+
+		expect(sandboxes[0]?.fileSystem.kind).toBe("restricted");
+		expect(sandboxes[1]?.fileSystem.kind).toBe("unrestricted");
 	});
 });

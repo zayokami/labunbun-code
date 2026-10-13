@@ -48,6 +48,10 @@ export {
 	type SandboxBackend,
 	sandboxBackendFor,
 } from "./sandbox/index.ts";
+// The policy builder itself, for callers that exec a command outside the Bash
+// tool — the "!" shell passthrough — and must run it under the same sandbox the
+// tool would have built.
+export { workspacePolicy } from "./sandbox/workspace-policy.ts";
 export { type AgentTask, createTaskTools, TASK_BOARD_TOOL_NAMES, type TaskStatus, TaskStore } from "./tasks.ts";
 export {
 	createWebFetchTool,
