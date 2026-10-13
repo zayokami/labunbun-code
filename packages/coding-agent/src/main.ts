@@ -445,6 +445,21 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			console.error(`Invalid output format: ${args.outputFormat} (text | json | stream-json)`);
 			return 2;
 		}
+		// `--no-session` writes nothing and a resume target reads what a previous
+		// run wrote: honored together, one of them would be silently ignored —
+		// the failure class the acp conflict list above exists to prevent.
+		const sessionFlags = (
+			[
+				["resume", "--resume"],
+				["continueLast", "-c"],
+			] as const
+		)
+			.filter(([key]) => args[key] !== null && args[key] !== false)
+			.map(([, flag]) => flag);
+		if (args.noSession && sessionFlags.length > 0) {
+			console.error(`--no-session cannot be combined with ${sessionFlags.join(", ")} (see --help)`);
+			return 2;
+		}
 		return runHeadless({
 			prompt: args.print,
 			modelRef: args.model ?? undefined,
@@ -452,6 +467,8 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 			sandbox: flags.sandbox,
 			maxTurns: args.maxTurns ?? undefined,
 			noSession: args.noSession,
+			resumeSessionId: args.resume ?? undefined,
+			continueLast: args.continueLast,
 			outputFormat: (args.outputFormat as never) ?? undefined,
 			flagSettings,
 			home: options.home,

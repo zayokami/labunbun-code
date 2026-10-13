@@ -39,6 +39,7 @@ import {
 } from "@labunbun/mcp";
 import { createAllTools } from "@labunbun/tools";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
+import { createToolLedger, formatResumeSummary, readToolCheckpoints } from "./checkpoint-log.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
 import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
@@ -47,6 +48,13 @@ import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts
 import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
 import { withheldDefinitionNotice } from "./project-trust.ts";
+import {
+	damagedSessionNotice,
+	findSession,
+	listSessions,
+	loadSessionForResume,
+	resolveContinueTarget,
+} from "./session-resume.ts";
 import {
 	applyCatalogSettings,
 	applySettingsEnv,
@@ -70,6 +78,15 @@ import { pruneToolOutput, toolOutputRoot, toolSpillDir, writeToolOutput } from "
 
 export type OutputFormat = "text" | "json" | "stream-json";
 
+/** Read a file, or null when it is absent or unreadable — the readers' shared answer. */
+function readFileOrNull(path: string): string | null {
+	try {
+		return readFileSync(path, "utf8");
+	} catch {
+		return null;
+	}
+}
+
 export interface HeadlessOptions {
 	prompt: string;
 	modelRef?: string;
@@ -77,6 +94,17 @@ export interface HeadlessOptions {
 	sandbox?: SandboxMode;
 	maxTurns?: number;
 	noSession?: boolean;
+	/**
+	 * Resume a saved session by id (`--resume <id>`), and its shorthand: the
+	 * most recent one (`continueLast`, `-c`). Both mirror the REPL's loadout —
+	 * the repaired transcript is restored and the ledger's recovery line goes to
+	 * stderr — because a scripted run continuing yesterday's conversation has the
+	 * same question to answer as a person doing it. `--no-session` alongside
+	 * either is rejected in `main.ts`: one writes nothing, the other reads what a
+	 * previous run wrote, and honoring either would silently drop the other.
+	 */
+	resumeSessionId?: string;
+	continueLast?: boolean;
 	cwd?: string;
 	outputFormat?: OutputFormat;
 	/**
@@ -222,7 +250,61 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		home,
 		writableRoots: settings.permissions.additionalDirectories,
 	});
-	const store = options.noSession ? undefined : SessionStore.startNew(cwd, home);
+	// ---- session persistence: resume, continue, or new ----
+	// The same three-way choice the REPL makes at startup, from the same
+	// functions: `-p` ignored `--resume`/`-c` before this (the flags parsed and
+	// went nowhere), and a scripted run of a saved conversation resumed from
+	// nothing while the flags said otherwise.
+	let store: SessionStore | undefined;
+	/** The repaired transcript `loadSessionForResume` handed back, restored below. */
+	let resumedMessages: AgentMessage[] | undefined;
+	if (options.noSession) {
+		store = undefined;
+	} else if (options.resumeSessionId) {
+		const resumeId = options.resumeSessionId;
+		const match = findSession(listSessions(cwd, home), resumeId);
+		if (!match) {
+			console.error(`Session not found: ${resumeId}`);
+			return 1;
+		}
+		const loaded = loadSessionForResume(match.path);
+		if (loaded) {
+			store = loaded.store;
+			const damage = damagedSessionNotice(loaded.store, loaded.removed);
+			if (damage) console.error(`Warning: ${damage}`);
+			resumedMessages = loaded.messages;
+		} else {
+			console.error(`Could not read session ${resumeId} — starting a new one.`);
+			store = SessionStore.startNew(cwd, home);
+		}
+	} else if (options.continueLast) {
+		const target = resolveContinueTarget(cwd, home);
+		if (target) {
+			const loaded = loadSessionForResume(target.path);
+			store = loaded?.store;
+			if (loaded) {
+				const damage = damagedSessionNotice(loaded.store, loaded.removed);
+				if (damage) console.error(`Warning: ${damage}`);
+				resumedMessages = loaded.messages;
+			}
+		}
+		if (!store) {
+			console.error("No previous session to continue — starting a new one.");
+			store = SessionStore.startNew(cwd, home);
+		}
+	} else {
+		store = SessionStore.startNew(cwd, home);
+	}
+
+	// The recovery protocol's one line, at the same moment the REPL prints it:
+	// what the resumed ledger says the last run was doing, and where to look
+	// next. A fresh session reads an empty ledger and prints nothing. stderr,
+	// like every other startup notice here — `-p`'s stdout is the answer.
+	if (store) {
+		const resumeSummary = formatResumeSummary(readToolCheckpoints(store.entries));
+		if (resumeSummary) console.error(resumeSummary);
+	}
+
 	pruneToolOutput(cwd);
 	const rules = collectPermissionRules(loadedSettings);
 	// Headless runs unattended, so there is nobody to ask: the default is the
@@ -402,15 +484,17 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		trimOldToolResults: settings.trimOldToolResults,
 		tuning: compactionTuning,
 		report: (text) => console.error(text),
-		readFile: (path) => {
-			try {
-				return readFileSync(path, "utf8");
-			} catch {
-				return null;
-			}
-		},
+		readFile: readFileOrNull,
 		noteRewrite: (cause) => transport.tracker?.note(cause),
 	});
+
+	// The tool ledger, through the same writer the REPL runs: one entry per
+	// finished call, the /rewind snapshots, the file fingerprints, the failing
+	// tests a failed test run reported, and the next step the board states.
+	// Before this, a `-p` run left none of it — the events below existed and
+	// nothing at this end read them.
+	const ledger = createToolLedger({ store: () => store, readFile: readFileOrNull });
+	const hookDeps = sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd });
 
 	const session = new AgentSession({
 		model,
@@ -458,10 +542,29 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			},
 			// The same three callbacks the ACP route wires, from one definition
 			// (`sessionHookDeps`), so the two unattended entry points cannot drift
-			// about when hook context joins a user message.
-			hooks: sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd }),
+			// about when hook context joins a user message. The tool ledger's two
+			// mutation notes wrap them, running first — the REPL's order — so the
+			// before-side fingerprint is taken before any other hook could touch
+			// the file, and a hook that blocks a call still leaves the ledger
+			// saying what was attempted.
+			hooks: {
+				...hookDeps,
+				beforeToolCall: async (toolName, input, ctx) => {
+					ledger.noteBeforeMutation(toolName, input);
+					return hookDeps.beforeToolCall?.(toolName, input, ctx);
+				},
+				afterToolCall: async (toolName, input, result) => {
+					ledger.noteAfterMutation(toolName, input, result.isError);
+					return hookDeps.afterToolCall?.(toolName, input, result);
+				},
+			},
 		},
 	});
+
+	// The transcript a resume handed back, into the session that will carry it.
+	// A newly started store has none, and a compacted one resumes from its
+	// boundary — the same seed the REPL applies at startup.
+	if (store) session.messages.push(...(resumedMessages ?? store.contextMessages()));
 
 	const startedAt = Date.now();
 	let lastAssistantText = "";
@@ -483,6 +586,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	session.on((event: AgentEvent) => {
 		if (event.type === "turn_start") turns++;
 		if (event.type === "agent_end") endErrorMessage = event.errorMessage;
+
+		// The tool ledger, from the same two events the REPL's subscription
+		// feeds it. Nothing here touches stdout: the formats below own that.
+		if (event.type === "tool_execution_start") ledger.noteToolStart(event.callId, event.input);
+		if (event.type === "tool_execution_end") ledger.noteToolEnd(event);
 
 		// On stderr, not stdout: a `-p` run may be piped, and the wait for a retry
 		// is not part of the answer being piped. It is still said out loud — the
