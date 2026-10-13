@@ -10,6 +10,11 @@ import { type AnyTool, buildTool, sanitizeCwd, type ToolResult } from "@labunbun
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+	PromptListChangedNotificationSchema,
+	ResourceListChangedNotificationSchema,
+	ToolListChangedNotificationSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 export const McpServerConfigSchema = z.union([
@@ -69,12 +74,37 @@ export function sanitizeMcpError(message: string, config: McpServerConfig): stri
 	return out;
 }
 
+/** One resource a server lists, as much of it as this client keeps. */
+export interface McpResourceSummary {
+	uri: string;
+	name?: string;
+	mimeType?: string;
+}
+
 export interface McpConnection {
 	serverName: string;
 	client: Client;
+	/**
+	 * The adapted tools, as of the last successful `tools/list` walk. Replaced
+	 * when the server announces a tool list change (see the handlers in
+	 * {@link connectMcpServer}); the field is what a host reads, so it is
+	 * written rather than made a fresh connection for.
+	 */
 	tools: AnyTool[];
 	prompts: Array<{ name: string; description?: string }>;
+	/** The resource snapshot, refreshed when the server announces a change. */
+	resources: McpResourceSummary[];
 	error?: string;
+	/**
+	 * The host's hook for a tool list that changed while the session runs.
+	 *
+	 * Absent by default: a host that never sets it (a `-p` run, whose process
+	 * ends before a change could matter) still gets the refreshed `tools`, but
+	 * nothing is told to move the list into a live session. The REPL sets it so
+	 * the agent's registry follows the server, the way `/mcp approve` already
+	 * appends a newly approved server's tools.
+	 */
+	onToolsChanged?: () => void;
 }
 
 /**
@@ -253,6 +283,314 @@ export interface ConnectMcpOptions {
 	callTimeoutMs?: number;
 }
 
+/** Budget for one request against an already-connected server. */
+export interface McpRequestOptions {
+	/** Defaults to CALL_TIMEOUT_MS, the same bound a `tools/call` gets. */
+	timeoutMs?: number;
+}
+
+/**
+ * One request against a connected server, bounded the way a tool call is.
+ *
+ * `tools/call` was not the only request a hung server could hold open: a list
+ * or a read on a server that accepts the request and never answers would leave
+ * the `/mcp` screen, or a notification refresh, waiting forever — and the same
+ * server that earned the call budget will earn its way into these. Aborting the
+ * request rather than racing a timer is also what tells the server the request
+ * is off: the SDK turns the aborted signal into `notifications/cancelled`.
+ */
+async function withCallBudget<T>(
+	label: string,
+	timeoutMs: number,
+	work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+	const controller = new AbortController();
+	let timedOut = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		controller.abort();
+	}, timeoutMs);
+	try {
+		return await work(controller.signal);
+	} catch (error) {
+		// The server's own refusal and the timer's abort both land as a rejection;
+		// when the timer is what fired, "the server never answered" is the cause
+		// worth naming (the same split the call path makes).
+		if (timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms`);
+		throw error;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * Every page of a list request, bounded. `label` serves both the walk's
+ * repeated-cursor warning and the timeout message, so a bare wrapper and the
+ * refresh inside `connectMcpServer` differ only in whether it names the server.
+ */
+async function listPagesFrom<TPage extends { nextCursor?: string }>(
+	label: string,
+	timeoutMs: number,
+	requestPage: (cursor: string | undefined, signal: AbortSignal) => Promise<TPage>,
+): Promise<TPage[]> {
+	return withCallBudget(label, timeoutMs, (signal) => listEveryPage(label, (cursor) => requestPage(cursor, signal)));
+}
+
+/**
+ * Every prompt a connected server offers.
+ *
+ * The connection's `prompts` is a snapshot for the row that counts them; this
+ * reads the server itself, so `/mcp prompts` shows the list as of the command
+ * that asked rather than the one as of connect time.
+ */
+async function listPromptsFrom(
+	label: string,
+	client: Client,
+	timeoutMs: number,
+): Promise<Array<{ name: string; description?: string }>> {
+	const pages = await listPagesFrom(label, timeoutMs, (cursor, signal) =>
+		client.listPrompts(cursor ? { cursor } : undefined, { signal }),
+	);
+	return pages
+		.flatMap((page) => page.prompts ?? [])
+		.map((prompt) => ({ name: prompt.name, description: prompt.description }));
+}
+
+/** As {@link listPrompts}, with the caller's own label (the connect path names the server). */
+export async function listPrompts(
+	client: Client,
+	options?: McpRequestOptions,
+): Promise<Array<{ name: string; description?: string }>> {
+	return listPromptsFrom("prompts/list", client, options?.timeoutMs ?? CALL_TIMEOUT_MS);
+}
+
+/** Every resource a connected server lists, every page of it. */
+async function listResourcesFrom(label: string, client: Client, timeoutMs: number): Promise<McpResourceSummary[]> {
+	const pages = await listPagesFrom(label, timeoutMs, (cursor, signal) =>
+		client.listResources(cursor ? { cursor } : undefined, { signal }),
+	);
+	return pages
+		.flatMap((page) => page.resources ?? [])
+		.map((resource) => ({ uri: resource.uri, name: resource.name, mimeType: resource.mimeType }));
+}
+
+/** As {@link listResourcesFrom}, exported for `/mcp resources`. */
+export async function listResources(client: Client, options?: McpRequestOptions): Promise<McpResourceSummary[]> {
+	return listResourcesFrom("resources/list", client, options?.timeoutMs ?? CALL_TIMEOUT_MS);
+}
+
+/** One entry of a `resources/read` answer: `text` or `blob`, exactly one. */
+export interface McpResourceContents {
+	uri: string;
+	mimeType?: string;
+	text?: string;
+	/** Base64, as it came over the wire. */
+	blob?: string;
+}
+
+/** The contents of one resource, bounded like a call. */
+export async function readResource(
+	client: Client,
+	uri: string,
+	options?: McpRequestOptions,
+): Promise<McpResourceContents[]> {
+	return withCallBudget(`resources/read ${uri}`, options?.timeoutMs ?? CALL_TIMEOUT_MS, async (signal) => {
+		const result = await client.readResource({ uri }, { signal });
+		return (result.contents ?? []).map((entry) =>
+			"text" in entry
+				? { uri: entry.uri, mimeType: entry.mimeType, text: entry.text }
+				: { uri: entry.uri, mimeType: entry.mimeType, blob: entry.blob },
+		);
+	});
+}
+
+/**
+ * One content block of a prompt message, flattened to the fields a screen can
+ * print. A prompt is a template, not a document: the point of the `/mcp prompt`
+ * view is to show what the server would hand the model, so blocks that hold
+ * bytes a terminal cannot show are named and counted rather than mangled.
+ */
+export interface McpPromptBlock {
+	type: string;
+	text?: string;
+	mimeType?: string;
+	/** The uri of an embedded resource or a resource link. */
+	uri?: string;
+}
+
+export interface McpPromptMessage {
+	role: string;
+	content: McpPromptBlock[];
+}
+
+export interface McpPrompt {
+	description?: string;
+	messages: McpPromptMessage[];
+}
+
+/** One wire block, flattened. Unknown shapes keep their `type` and nothing else. */
+function toPromptBlock(block: unknown): McpPromptBlock {
+	const record = block as {
+		type?: string;
+		text?: string;
+		mimeType?: string;
+		uri?: string;
+		resource?: { uri?: string; mimeType?: string };
+	};
+	switch (record?.type) {
+		case "text":
+			return { type: "text", text: record.text ?? "" };
+		case "image":
+		case "audio":
+			return { type: record.type, mimeType: record.mimeType };
+		case "resource":
+			return { type: "resource", uri: record.resource?.uri, mimeType: record.resource?.mimeType };
+		case "resource_link":
+			return { type: "resource_link", uri: record.uri, mimeType: record.mimeType };
+		default:
+			// An unknown block survives as its type name: printing nothing would read
+			// as "the message was empty", which is a claim about the server.
+			return { type: record?.type ?? "unknown" };
+	}
+}
+
+/** Render one prompt with arguments, bounded like a call. */
+export async function getPrompt(
+	client: Client,
+	name: string,
+	args: Record<string, string> = {},
+	options?: McpRequestOptions,
+): Promise<McpPrompt> {
+	return withCallBudget(`prompts/get ${name}`, options?.timeoutMs ?? CALL_TIMEOUT_MS, async (signal) => {
+		const result = await client.getPrompt({ name, arguments: args }, { signal });
+		return {
+			description: result.description,
+			// One wire block per message — the schema says so — carried as a list
+			// because a prompt block is a content block, and content is plural
+			// everywhere else in this codebase.
+			messages: (result.messages ?? []).map((message) => ({
+				role: message.role,
+				content: [toPromptBlock(message.content)],
+			})),
+		};
+	});
+}
+
+/**
+ * Adapt one walk of a server's tool definitions into agent tools under the
+ * `mcp__<server>__<tool>` naming.
+ *
+ * Its own function because two callers walk the list now: the initial discovery
+ * and the rebuild a `tools/list_changed` notification triggers. Both have to
+ * produce the same tools — same names, same validation, same call path — or a
+ * tool gained mid-session would be a different tool than the ones that connected.
+ */
+function adaptTools(
+	serverName: string,
+	config: McpServerConfig,
+	client: Client,
+	definitions: Array<{ name: string; description?: string; inputSchema?: unknown }>,
+	callTimeoutMs: number,
+): AnyTool[] {
+	return definitions.map((mcpTool) =>
+		buildTool({
+			name: `mcp__${serverName}__${mcpTool.name}`,
+			description: mcpTool.description ?? `MCP tool ${mcpTool.name} from ${serverName}`,
+			inputSchema: jsonSchemaToZod((mcpTool.inputSchema ?? { type: "object" }) as Record<string, unknown>) as z.ZodType,
+			isReadOnly: () => false,
+			isConcurrencySafe: () => true,
+			// No maxResultSizeChars override on purpose: the result flows
+			// through the same pipeline budget as every other tool, so a
+			// server cannot outgrow the conversation by answering over the
+			// wire, and the same truncation marker says what was cut.
+			call: async (input, ctx): Promise<ToolResult> => {
+				// A run cancelled before the call starts must not reach the server:
+				// an abort event does not replay for listeners added after it, so
+				// the already-aborted case is handled rather than subscribed to.
+				if (ctx.signal.aborted) {
+					return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
+				}
+				// Two ways out of a call, two signals: the run's (Esc) and this
+				// call's own timer (a server that accepts the request and never
+				// answers). Aborting the request — rather than racing a timeout
+				// promise — is also what tells the server the call is off: the
+				// SDK turns it into notifications/cancelled.
+				const controller = new AbortController();
+				let timedOut = false;
+				const forward = () => controller.abort();
+				ctx.signal.addEventListener("abort", forward, { once: true });
+				const timer = setTimeout(() => {
+					timedOut = true;
+					controller.abort();
+				}, callTimeoutMs);
+				try {
+					const result = await client.callTool(
+						{ name: mcpTool.name, arguments: input as Record<string, unknown> },
+						undefined,
+						{
+							signal: controller.signal,
+						},
+					);
+					const content = Array.isArray(result.content)
+						? result.content.map((block) =>
+								(block as { type: string; text?: string }).type === "text"
+									? { type: "text" as const, text: String((block as { text?: string }).text ?? "") }
+									: { type: "text" as const, text: JSON.stringify(block) },
+							)
+						: [{ type: "text" as const, text: JSON.stringify(result) }];
+					return { content, isError: Boolean(result.isError) };
+				} catch (error) {
+					// Checked before the run's signal: both paths end in an abort, and
+					// when the timer is what fired, "the server never answered" is the
+					// cause worth naming.
+					if (timedOut) {
+						const message = `${serverName}/${mcpTool.name} timed out after ${callTimeoutMs}ms`;
+						ctx.onUpdate({ mcpError: message });
+						return {
+							content: [{ type: "text", text: `MCP call failed: ${message}` }],
+							isError: true,
+						};
+					}
+					// The SDK rejects the pending request when the signal aborts — that
+					// is the run being cancelled, not an MCP server failure.
+					if (ctx.signal.aborted) {
+						return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
+					}
+					const message = sanitizeMcpError(error instanceof Error ? error.message : String(error), config);
+					ctx.onUpdate({ mcpError: message });
+					return {
+						content: [{ type: "text", text: `MCP call failed: ${message}` }],
+						isError: true,
+					};
+				} finally {
+					clearTimeout(timer);
+					ctx.signal.removeEventListener("abort", forward);
+				}
+			},
+		}),
+	);
+}
+
+/** Every tool a connected server offers, adapted under the `mcp__<server>__` naming. */
+async function listToolsFrom(
+	label: string,
+	serverName: string,
+	config: McpServerConfig,
+	client: Client,
+	timeoutMs: number,
+): Promise<AnyTool[]> {
+	const pages = await listPagesFrom(label, timeoutMs, (cursor, signal) =>
+		client.listTools(cursor ? { cursor } : undefined, { signal }),
+	);
+	return adaptTools(
+		serverName,
+		config,
+		client,
+		pages.flatMap((page) => page.tools ?? []),
+		timeoutMs,
+	);
+}
+
 /** Connect to one MCP server and adapt its tools. Never throws. */
 export async function connectMcpServer(
 	serverName: string,
@@ -266,6 +604,7 @@ export async function connectMcpServer(
 			client: null as never,
 			tools: [],
 			prompts: [],
+			resources: [],
 			error: `invalid config: ${sanitizeMcpError(parsed.error.message, config)}`,
 		};
 	}
@@ -284,124 +623,109 @@ export async function connectMcpServer(
 					});
 
 		const client = new Client({ name: "labunbun", version: "0.1.0" });
+		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
+		/** The object the host holds; the notification handlers refresh it in place. */
+		const connection: McpConnection = { serverName, client, tools: [], prompts: [], resources: [] };
+
+		// A refresh that fails keeps the last good snapshot: a server that stopped
+		// answering one of its lists has not thereby withdrawn what it already
+		// handed out, and dropping the tools would take a working session down with
+		// a broken one. The failure goes to both audiences the message has — the
+		// `/mcp` row that shows `connection.error`, and stderr, the one channel a
+		// host with no screen at all (a `-p` run) reads.
+		let refreshFailed = false;
+		const noteRefreshFailure = (list: string, error: unknown): void => {
+			const message = sanitizeMcpError(error instanceof Error ? error.message : String(error), config);
+			refreshFailed = true;
+			connection.error = `${list} refresh failed: ${message}`;
+			console.error(`Warning: MCP server ${serverName}: ${list} refresh failed: ${message}`);
+		};
+		const noteRefreshSuccess = (): void => {
+			// A row that keeps the ✗ of a failure that has since been repaired is the
+			// same lie in the other direction.
+			if (!refreshFailed) return;
+			refreshFailed = false;
+			connection.error = undefined;
+		};
+		// Whether a notification-driven refresh has written the field yet. The
+		// initial walk must not overwrite a newer answer with the snapshot it
+		// started from, and a server is free to announce a change while that walk
+		// is still running.
+		let toolsRefreshed = false;
+		let promptsRefreshed = false;
+
 		// A server that accepts the connection but never answers would otherwise
 		// hang startup forever — every server gets a bounded window to finish
 		// connecting and reporting its capabilities.
-		const { toolPages, promptPages } = await withTimeout(
+		await withTimeout(
 			(async () => {
 				await client.connect(transport);
-				return {
-					toolPages: await listEveryPage(`${serverName}/tools/list`, (cursor) =>
-						client.listTools(cursor ? { cursor } : undefined),
-					),
-					// A server that does not implement prompts has none; that is a
-					// server without prompts, not a failed connection.
-					promptPages: await listEveryPage(`${serverName}/prompts/list`, (cursor) =>
-						client.listPrompts(cursor ? { cursor } : undefined),
-					).catch(() => []),
-				};
+
+				// A server that adds, removes or replaces a tool mid-session says so on
+				// the wire, and the SDK drops a notification that has no handler — there
+				// is no fallback handler — so without these the session would serve the
+				// list it saw at connect time for the rest of its life, and a tool the
+				// server gained would be one the model can never call. Registered before
+				// the first walk, so a change announced during discovery lands here
+				// instead of falling into the gap between connect and the walk's end.
+				client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+					try {
+						connection.tools = await listToolsFrom(
+							`${serverName}/tools/list`,
+							serverName,
+							config,
+							client,
+							callTimeoutMs,
+						);
+					} catch (error) {
+						noteRefreshFailure("tools", error);
+						return;
+					}
+					toolsRefreshed = true;
+					noteRefreshSuccess();
+					// The one list a running session has to be told about: prompts and
+					// resources are read on demand, the tools are held by the agent.
+					connection.onToolsChanged?.();
+				});
+				client.setNotificationHandler(PromptListChangedNotificationSchema, async () => {
+					try {
+						connection.prompts = await listPromptsFrom(`${serverName}/prompts/list`, client, callTimeoutMs);
+					} catch (error) {
+						noteRefreshFailure("prompts", error);
+						return;
+					}
+					promptsRefreshed = true;
+					noteRefreshSuccess();
+				});
+				client.setNotificationHandler(ResourceListChangedNotificationSchema, async () => {
+					try {
+						connection.resources = await listResourcesFrom(`${serverName}/resources/list`, client, callTimeoutMs);
+					} catch (error) {
+						noteRefreshFailure("resources", error);
+						return;
+					}
+					noteRefreshSuccess();
+				});
+
+				// Discovery. A server that does not implement prompts has none; that
+				// is a server without prompts, not a failed connection.
+				const tools = await listToolsFrom(`${serverName}/tools/list`, serverName, config, client, callTimeoutMs);
+				if (!toolsRefreshed) connection.tools = tools;
+				const prompts = await listPromptsFrom(`${serverName}/prompts/list`, client, callTimeoutMs).catch(() => []);
+				if (!promptsRefreshed) connection.prompts = prompts;
 			})(),
 			() => void client.close().catch(() => {}),
 			options?.timeoutMs ?? CONNECT_TIMEOUT_MS,
 		);
 
-		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
-		const tools: AnyTool[] = toolPages
-			.flatMap((page) => page.tools ?? [])
-			.map((mcpTool) =>
-				buildTool({
-					name: `mcp__${serverName}__${mcpTool.name}`,
-					description: mcpTool.description ?? `MCP tool ${mcpTool.name} from ${serverName}`,
-					inputSchema: jsonSchemaToZod(
-						(mcpTool.inputSchema ?? { type: "object" }) as Record<string, unknown>,
-					) as z.ZodType,
-					isReadOnly: () => false,
-					isConcurrencySafe: () => true,
-					// No maxResultSizeChars override on purpose: the result flows
-					// through the same pipeline budget as every other tool, so a
-					// server cannot outgrow the conversation by answering over the
-					// wire, and the same truncation marker says what was cut.
-					call: async (input, ctx): Promise<ToolResult> => {
-						// A run cancelled before the call starts must not reach the server:
-						// an abort event does not replay for listeners added after it, so
-						// the already-aborted case is handled rather than subscribed to.
-						if (ctx.signal.aborted) {
-							return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
-						}
-						// Two ways out of a call, two signals: the run's (Esc) and this
-						// call's own timer (a server that accepts the request and never
-						// answers). Aborting the request — rather than racing a timeout
-						// promise — is also what tells the server the call is off: the
-						// SDK turns it into notifications/cancelled.
-						const controller = new AbortController();
-						let timedOut = false;
-						const forward = () => controller.abort();
-						ctx.signal.addEventListener("abort", forward, { once: true });
-						const timer = setTimeout(() => {
-							timedOut = true;
-							controller.abort();
-						}, callTimeoutMs);
-						try {
-							const result = await client.callTool(
-								{ name: mcpTool.name, arguments: input as Record<string, unknown> },
-								undefined,
-								{
-									signal: controller.signal,
-								},
-							);
-							const content = Array.isArray(result.content)
-								? result.content.map((block) =>
-										(block as { type: string; text?: string }).type === "text"
-											? { type: "text" as const, text: String((block as { text?: string }).text ?? "") }
-											: { type: "text" as const, text: JSON.stringify(block) },
-									)
-								: [{ type: "text" as const, text: JSON.stringify(result) }];
-							return { content, isError: Boolean(result.isError) };
-						} catch (error) {
-							// Checked before the run's signal: both paths end in an abort, and
-							// when the timer is what fired, "the server never answered" is the
-							// cause worth naming.
-							if (timedOut) {
-								const message = `${serverName}/${mcpTool.name} timed out after ${callTimeoutMs}ms`;
-								ctx.onUpdate({ mcpError: message });
-								return {
-									content: [{ type: "text", text: `MCP call failed: ${message}` }],
-									isError: true,
-								};
-							}
-							// The SDK rejects the pending request when the signal aborts — that
-							// is the run being cancelled, not an MCP server failure.
-							if (ctx.signal.aborted) {
-								return { content: [{ type: "text", text: "Tool execution aborted" }], isError: true };
-							}
-							const message = sanitizeMcpError(error instanceof Error ? error.message : String(error), config);
-							ctx.onUpdate({ mcpError: message });
-							return {
-								content: [{ type: "text", text: `MCP call failed: ${message}` }],
-								isError: true,
-							};
-						} finally {
-							clearTimeout(timer);
-							ctx.signal.removeEventListener("abort", forward);
-						}
-					},
-				}),
-			);
-
-		return {
-			serverName,
-			client,
-			tools,
-			prompts: promptPages
-				.flatMap((page) => page.prompts ?? [])
-				.map((p) => ({ name: p.name, description: p.description })),
-		};
+		return connection;
 	} catch (error) {
 		return {
 			serverName,
 			client: null as never,
 			tools: [],
 			prompts: [],
+			resources: [],
 			error: sanitizeMcpError(error instanceof Error ? error.message : String(error), config),
 		};
 	}
@@ -612,7 +936,14 @@ export async function connectAllMcpServers(
 	return Promise.all(
 		Object.entries(configs).map(async ([name, config]) => {
 			if (approvedServers && !approvedServers.has(name)) {
-				return { serverName: name, client: null as never, tools: [], prompts: [], error: "not approved" };
+				return {
+					serverName: name,
+					client: null as never,
+					tools: [],
+					prompts: [],
+					resources: [],
+					error: "not approved",
+				};
 			}
 			return connectMcpServer(name, config, options);
 		}),
