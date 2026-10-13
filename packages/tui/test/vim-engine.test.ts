@@ -3828,6 +3828,22 @@ describe(">> and << shift whole lines", () => {
 		expect(run("\ta\n\tb", 0, "<", "j")).toEqual({ text: "a\nb", cursor: 0 });
 	});
 
+	test("a counted $ shifts exactly its lines, however far the buffer runs", () => {
+		// The range reaches past the target line's break so deletes take it with
+		// them, but a shift reads only the lines between the two ends: `2$` names
+		// two lines, a count past the buffer clamps (`4$` over three lines takes
+		// all three — `cursor_down` stops at the last line, it does not fail),
+		// and from the last line a counted `$` is refused, as `2j` there is.
+		expect(run("aa\nbb\ncc\ndd", 0, ">", "2", "$")).toEqual({ text: "\taa\n\tbb\ncc\ndd", cursor: 1 });
+		expect(run("aa\nbb\ncc\ndd", 0, ">", "3", "$")).toEqual({ text: "\taa\n\tbb\n\tcc\ndd", cursor: 1 });
+		expect(run("aa\nbb\ncc", 0, ">", "2", "$")).toEqual({ text: "\taa\n\tbb\ncc", cursor: 1 });
+		expect(run("aa\nbb\ncc", 0, ">", "4", "$")).toEqual({ text: "\taa\n\tbb\n\tcc", cursor: 1 });
+		expect(run("aa\nbb\n\ncc", 0, ">", "3", "$")).toEqual({ text: "\taa\n\tbb\n\ncc", cursor: 1 });
+		expect(run("aa\nbb\ncc\ndd", 3, ">", "2", "$")).toEqual({ text: "aa\n\tbb\n\tcc\ndd", cursor: 4 });
+		expect(run("  aa\n  bb\ncc\ndd", 0, "<", "2", "$")).toEqual({ text: "aa\nbb\ncc\ndd", cursor: 0 });
+		expect(run("aa\nbb\ncc\ndd", 9, ">", "2", "$")).toEqual({ text: "aa\nbb\ncc\ndd", cursor: 9 });
+	});
+
 	test("a motion that stays on the line shifts one line", () => {
 		// `w` with an operator stops at the line break (vim's fwd_word stop_at_break),
 		// so it names one line even when the buffer continues below.

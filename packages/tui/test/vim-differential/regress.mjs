@@ -393,6 +393,30 @@ const CASES = [
 	[["d", "2", "$"], "ab\ncdef", 0],
 	[["d", "2", "$"], "ab\ncdef\nghi", 0],
 	[["d", "3", "$"], "abc\ndef\nghi", 0],
+	// A counted `$` under a shift: the range reaches one character past the
+	// target line's break so deletes take the break with them, but the motion
+	// itself lands ON that line (`cursor_down(count - 1)`, normal.c:4128) and
+	// `op_shift` reads only the lines between its ends (ops.c:155) — so `>2$`
+	// shifts two lines, not three. A count that runs past the buffer clamps
+	// (`>4$` over three lines shifts all three, `>5$` all four); a count asked
+	// for FROM the last line is a refusal like `j`'s, for shift and delete
+	// alike. Empty lines are in the span but have no indent to change.
+	[[">", "2", "$"], "aa\nbb\ncc\ndd", 0],
+	[[">", "3", "$"], "aa\nbb\ncc\ndd", 0],
+	[[">", "2", "$"], "aa\nbb\ncc", 0],
+	[[">", "3", "$"], "aa\nbb\ncc", 0],
+	[[">", "4", "$"], "aa\nbb\ncc", 0],
+	[[">", "5", "$"], "aa\nbb\ncc\ndd", 0],
+	[[">", "2", "$"], "aa\nbb\n\ncc", 0],
+	[[">", "3", "$"], "aa\nbb\n\ncc", 0],
+	[["<", "2", "$"], "  aa\n  bb\ncc\ndd", 0],
+	[[">", "2", "$"], "aa\nbb\ncc\ndd", 3],
+	[[">", "2", "$"], "aa\nbb\ncc\ndd", 6],
+	[[">", "3", "$"], "aa\nbb\ncc\ndd", 3],
+	[[">", "2", "$"], "aa\nbb\ncc\ndd", 9],
+	[["d", "2", "$"], "aa\nbb\ncc\ndd", 9],
+	[["y", "2", "$"], "aa\nbb\ncc\ndd", 0],
+	[[">", "$"], "aa\nbb\ncc\ndd", 0],
 	// `k` on the first line is the same refusal as `j` on the last (`cursor_up`).
 	// The column it skips is not reachable from there — MAXCOL is the only wanted
 	// column that can disagree with the caret, and only a refused count arms it off

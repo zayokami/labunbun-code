@@ -4241,7 +4241,14 @@ export class VimEngine {
 		if (!range) return;
 		// The motion's landing end — for a backward motion that is where the range
 		// starts, since `#motionRange` orders its two ends.
-		const landingLine = lineOf(text, range.start === from ? range.end : range.start);
+		let landingAt = range.start === from ? range.end : range.start;
+		// A counted `$` reaches one character past the target line's break — the
+		// delete path needs that to take the break with it — but the motion itself
+		// lands ON the line (`cursor_down(count - 1)`, normal.c:4128), and a shift
+		// reads only the lines between its two ends (op_shift loops `line_count`
+		// times, ops.c:155). Fold the overshoot before asking which line it names.
+		if (motion === "$" && count > 1) landingAt = prevChar(text, landingAt);
+		const landingLine = lineOf(text, landingAt);
 		const cursorLine = lineOf(text, from);
 		const firstLine = Math.min(cursorLine, landingLine);
 		const lastLine = Math.max(cursorLine, landingLine);
