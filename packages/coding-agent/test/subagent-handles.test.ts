@@ -705,3 +705,92 @@ describe("the control surface", () => {
 		expect(refused.isError).toBe(true);
 	});
 });
+
+/**
+ * The ledger's pairing contract: every `subagent_start` gets a `subagent_end`,
+ * a run that dies by exception included.
+ *
+ * A throw out of prompt() used to skip the end write entirely, leaving a start
+ * that any later reader — a resume, a task tree — can only interpret as a run
+ * that never ended. The throw is injected at the session because the seam
+ * under test is exactly "whatever comes out of runPrompt": the ledger write
+ * has to sit on the way out, throw or no throw. The rejected promise is the
+ * real abnormal-end shape too — prompt() rejects before its own loop for
+ * everything outside its try, the "already running" guard included.
+ */
+describe("a subagent run that dies by exception", () => {
+	test("a spawn that throws still writes its end — the start is never left unpaired", async () => {
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-throw-")),
+			mkdtempSync(join(tmpdir(), "lbb-throw-home-")),
+		);
+		const faux = fauxProvider([{ text: "FIRST REPORT" }]);
+		const registry = new SubagentRegistry();
+		const [task, , , control] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [],
+			definitions: () => [],
+			store: () => store,
+			registry,
+		});
+
+		await task.call({ description: "x", prompt: "do it" }, callCtx());
+		const original = registry.list()[0];
+		if (!original) throw new Error("no handle registered");
+
+		const done = control.retry(original, { cwd: process.cwd() }, (spawned) => {
+			spawned.session.prompt = async () => {
+				throw new Error("subagent run exploded (test)");
+			};
+		});
+		await expect(done).rejects.toThrow("subagent run exploded (test)");
+
+		const ledger = store.linearEntries().filter((e) => e.type === "custom") as unknown as Array<{
+			kind: string;
+			data: { sidechainId: string; reason?: string };
+		}>;
+		const starts = ledger.filter((e) => e.kind === "subagent_start");
+		const ends = ledger.filter((e) => e.kind === "subagent_end");
+		// One end per start, in order: the first run paired the ordinary way,
+		// the second threw and paired anyway.
+		expect(starts.map((e) => e.data.sidechainId)).toHaveLength(2);
+		expect(ends.map((e) => e.data.sidechainId)).toEqual(starts.map((e) => e.data.sidechainId));
+		// And the thrown run's end says how it ended — "error", not a polite
+		// default a run that simply finished would carry.
+		expect(ends[1]?.data.reason).toBe("error");
+	});
+
+	test("a continuation that throws records its end too", async () => {
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-throw-cont-")),
+			mkdtempSync(join(tmpdir(), "lbb-throw-cont-home-")),
+		);
+		const faux = fauxProvider([{ text: "FIRST REPORT" }]);
+		const registry = new SubagentRegistry();
+		const [task, sendMessage] = createSubagentTools({
+			streamFn: faux.streamFn,
+			model: () => FAUX_MODEL,
+			allTools: [],
+			definitions: () => [],
+			store: () => store,
+			registry,
+		});
+
+		const first = await task.call({ description: "x", prompt: "do it" }, callCtx());
+		const handle = registry.list()[0];
+		if (!handle) throw new Error("no handle registered");
+		handle.session.prompt = async () => {
+			throw new Error("continuation exploded (test)");
+		};
+
+		const call = sendMessage.call({ sidechain_id: idOf(first), message: "more" }, callCtx());
+		await expect(call).rejects.toThrow("continuation exploded (test)");
+
+		const ends = store
+			.linearEntries()
+			.filter((e) => e.type === "custom" && (e as { kind?: string }).kind === "subagent_end")
+			.map((e) => (e as unknown as { data: { reason: string } }).data.reason);
+		expect(ends).toEqual(["completed", "error"]);
+	});
+});

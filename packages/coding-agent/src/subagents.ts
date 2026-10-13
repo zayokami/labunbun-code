@@ -312,13 +312,18 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 	 * things Esc means only the outer one happens — the reported bug was a
 	 * subagent that kept streaming after the user cancelled, holding the
 	 * parent's tool batch open.
+	 *
+	 * `events` is the caller's, not the run's: a throw out of prompt() leaves
+	 * the caller holding what the subagent did before it died, and the ledger
+	 * entry written on the way out needs those events whichever way the run
+	 * ends.
 	 */
 	const runPrompt = async (
 		handle: SubagentHandle,
 		text: string,
 		signal: AbortSignal,
-	): Promise<{ reason: AgentEndReason; events: string[] }> => {
-		const events: string[] = [];
+		events: string[],
+	): Promise<AgentEndReason> => {
 		const unsubscribe = handle.session.on((event) => {
 			if (event.type === "tool_execution_end") {
 				events.push(`${event.toolName}: ${event.result.isError ? "error" : "ok"}`);
@@ -336,7 +341,7 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 			// abort() is a no-op on a null controller; re-check now that one exists.
 			if (signal.aborted) handle.session.abort();
 			outcome = await promptPromise;
-			return { reason: outcome, events };
+			return outcome;
 		} finally {
 			signal.removeEventListener("abort", onAbort);
 			unsubscribe();
@@ -550,16 +555,28 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		onSpawned?.(handle);
 		store?.appendCustom("subagent_start", { sidechainId, agentType: definition.agentType, prompt: input.prompt });
 
-		const { reason, events } = await runPrompt(handle, input.prompt, signal);
+		// The end entry is the start's pair, and it is written on the way out
+		// however the run leaves: a throw out of prompt() used to skip this
+		// write, leaving a start that can only be read as a run that never
+		// ended. `reason` defaults to "error" so an abnormal exit is recorded
+		// as one, and the report and message count are read after the throw —
+		// whatever the subagent managed before it died is still worth keeping.
+		const events: string[] = [];
+		let reason: AgentEndReason = "error";
+		try {
+			reason = await runPrompt(handle, input.prompt, signal, events);
+		} finally {
+			store?.appendCustom("subagent_end", {
+				sidechainId,
+				reason,
+				toolCalls: events,
+				messages: subSession.messages.length,
+				notes,
+				report: finalReport(subSession),
+			});
+		}
+
 		const finalText = finalReport(subSession);
-		store?.appendCustom("subagent_end", {
-			sidechainId,
-			reason,
-			toolCalls: events,
-			messages: subSession.messages.length,
-			notes,
-			report: finalText,
-		});
 
 		// Interrupted subagents report the interruption, not a summary that
 		// happens to trail off mid-thought. The id line rides along so the
@@ -665,16 +682,26 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 
 			const store = ctx.store?.();
 			const notesBefore = handle.notes.length;
-			const { reason, events } = await runPrompt(handle, input.message, toolCtx.signal);
+			// The same pairing contract the spawn keeps: a continuation that
+			// throws still writes its end, with reason "error" and whatever the
+			// run managed first — a failed continuation is a fact about the
+			// subagent a later reader should find, not a gap.
+			const events: string[] = [];
+			let reason: AgentEndReason = "error";
+			try {
+				reason = await runPrompt(handle, input.message, toolCtx.signal, events);
+			} finally {
+				store?.appendCustom("subagent_end", {
+					sidechainId: handle.sidechainId,
+					reason,
+					toolCalls: events,
+					messages: handle.session.messages.length,
+					notes: handle.notes.slice(notesBefore),
+					report: finalReport(handle.session),
+				});
+			}
+
 			const finalText = finalReport(handle.session);
-			store?.appendCustom("subagent_end", {
-				sidechainId: handle.sidechainId,
-				reason,
-				toolCalls: events,
-				messages: handle.session.messages.length,
-				notes: handle.notes.slice(notesBefore),
-				report: finalText,
-			});
 
 			if (toolCtx.signal.aborted) {
 				return {
