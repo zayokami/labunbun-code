@@ -799,6 +799,120 @@ describe("context overflow", () => {
 	});
 });
 
+/**
+ * The host's budget gate, in the loop.
+ *
+ * The loop knows nothing about money: the judge is a dependency, and what is
+ * under test here is only the contract around it — when it is consulted, what
+ * it is told, and what a refusal does. The arithmetic itself belongs to the
+ * host (`budgetVerdict` in the coding-agent package) and is tested there.
+ */
+describe("the budget gate", () => {
+	function budgetSession(
+		checkBudget: NonNullable<ConstructorParameters<typeof AgentSession>[0]["deps"]>["checkBudget"],
+		steps: FauxStep[] = [{ text: "answer" }],
+		tools: AnyTool[] = [],
+	) {
+		const faux = fauxProvider(steps);
+		const sent: AgentMessage[][] = [];
+		const streamFn: StreamFn = async function* (model, context, options) {
+			sent.push([...context.messages]);
+			yield* faux.streamFn(model, context, options);
+		};
+		const session = new AgentSession({ model: FAUX_MODEL, tools, deps: { streamFn, checkBudget } });
+		const events: AgentEvent[] = [];
+		session.on((event) => {
+			events.push(event);
+		});
+		return { session, sent, events };
+	}
+
+	test("a blocked check ends the run without sending anything", async () => {
+		// The point of checking before the call rather than reacting to a provider
+		// error: the refusal lands before the request exists, and the message is
+		// the reason the run ended — the transcript holds no error of its own to
+		// fall back on.
+		const { session, sent, events } = budgetSession(() => ({
+			action: "blocked",
+			message: "Budget reached: $2.5000 spent of the $2.0000 budget for roles.main.",
+		}));
+
+		expect(await session.prompt("still here")).toBe("error");
+		expect(sent).toHaveLength(0);
+		const end = events.find((event) => event.type === "agent_end");
+		expect(end?.type === "agent_end" ? end.errorMessage : undefined).toBe(
+			"Budget reached: $2.5000 spent of the $2.0000 budget for roles.main.",
+		);
+		// The prompt is not lost: it is in the history, so a session that later
+		// has room (a raised ceiling, a different model) carries it.
+		expect(session.messages.at(-1)).toMatchObject({ role: "user", content: "still here" });
+	});
+
+	test("no judge means no check — the behaviour every host had", async () => {
+		const { session, sent } = budgetSession(undefined, [{ text: "one" }, { text: "two" }]);
+
+		expect(await session.prompt("first")).toBe("completed");
+		expect(await session.prompt("second")).toBe("completed");
+		expect(sent).toHaveLength(2);
+	});
+
+	test("the judge is told the model about to answer and the turns completed", async () => {
+		// Called before every model call, so the count is what has finished rather
+		// than what has been attempted — the same convention the turn limit above
+		// it uses.
+		const seen: Array<{ turns: number; model: string }> = [];
+		const { session, sent } = budgetSession(
+			(info) => {
+				seen.push({ turns: info.turns, model: info.model.id });
+				return { action: "ok" };
+			},
+			[{ toolCalls: [{ name: "echo", arguments: { text: "hi" } }] }, { text: "done" }],
+			[echoTool()],
+		);
+
+		expect(await session.prompt("go")).toBe("completed");
+		expect(sent).toHaveLength(2);
+		expect(seen).toEqual([
+			{ turns: 0, model: FAUX_MODEL.id },
+			{ turns: 1, model: FAUX_MODEL.id },
+		]);
+	});
+
+	test("the model it is handed is the one in force, not the one at construction", async () => {
+		// A `/model` switch mid-session (and plan mode's swap) moves the seat, and
+		// the ceiling that applies is the one that seat carries.
+		const seen: string[] = [];
+		const { session } = budgetSession((info) => {
+			seen.push(info.model.id);
+			return { action: "ok" };
+		});
+		session.setModel({ ...FAUX_MODEL, id: "moved" });
+
+		expect(await session.prompt("go")).toBe("completed");
+		expect(seen).toEqual(["moved"]);
+	});
+
+	test("a run that crosses its ceiling mid-run stops at the next check, turn kept", async () => {
+		// The check is per turn, not per run: a subagent or a long tool loop can
+		// start inside its budget and end outside it, and the turn that crossed the
+		// line is not thrown away — what it did already happened.
+		let spend = 0;
+		const { session, sent, events } = budgetSession(
+			() => (spend > 2 ? { action: "blocked", message: "over" } : { action: "ok" }),
+			[{ toolCalls: [{ name: "echo", arguments: { text: "hi" } }] }, { text: "done" }],
+			[echoTool({ call: async (input: any) => { spend = 5; return { content: [{ type: "text", text: input.text }] }; } })],
+		);
+
+		expect(await session.prompt("go")).toBe("error");
+		// One request: the turn that ran before the spend moved. The answer the
+		// model would have given next was never asked for.
+		expect(sent).toHaveLength(1);
+		expect(toolResultsOf(session.messages)).toHaveLength(1);
+		const end = events.find((event) => event.type === "agent_end");
+		expect(end?.type === "agent_end" ? end.errorMessage : undefined).toBe("over");
+	});
+});
+
 describe("a round of tool output, on its way into the history", () => {
 	/** Four results of this size are 400k together: twice the round budget. */
 	const RESULT_CHARS = 100_000;

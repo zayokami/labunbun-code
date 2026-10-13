@@ -13,6 +13,7 @@ import type {
 	AssistantMessageEvent,
 	Context,
 	JsonSchemaObject,
+	Model,
 	StreamFn,
 	ThinkingLevel,
 	ToolResultContent,
@@ -421,6 +422,20 @@ export interface AgentDeps {
 	 * to decide again.
 	 */
 	checkCompaction?: (context: Context, options?: { force?: boolean }) => Promise<CompactionCheck | null>;
+	/**
+	 * Consulted before every model call, after the turn limit and before the
+	 * compaction check: `ok` sends the turn as it is, and `blocked` ends the run
+	 * with the message the user can act on — before the request exists, so a
+	 * ceiling that has been reached costs nothing to enforce.
+	 *
+	 * The loop hands over the model that is about to answer and how many turns
+	 * have completed. The arithmetic — what has been spent, against which
+	 * ceiling — is the host's, because the host is the only layer that knows
+	 * what the session has cost; this layer deliberately has no idea what a
+	 * dollar is. A host that supplies nothing (an embedder, a test) checks
+	 * nothing, which is the behaviour every host had before the seam existed.
+	 */
+	checkBudget?: (info: { turns: number; model: Model }) => { action: "ok" } | { action: "blocked"; message: string };
 	/**
 	 * How hard the model should think, read per request so a change made
 	 * mid-session lands on the next model call rather than the next session.

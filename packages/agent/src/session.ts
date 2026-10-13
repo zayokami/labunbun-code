@@ -353,6 +353,22 @@ export class AgentSession {
 					reason = "max_turns";
 					break;
 				}
+				// Before context preparation and the compaction check, because it is
+				// the cheapest question and the one that can end the run: a session
+				// that has spent its ceiling must not pay for a summary or a trim on
+				// the way out, and the refusal has to land before the request exists
+				// rather than as a provider error after the money is gone. `turns`
+				// counts what reached a `turn_end`, like the limit above it.
+				if (this.#deps.checkBudget) {
+					const verdict = this.#deps.checkBudget({ turns, model: this.#model });
+					if (verdict.action === "blocked") {
+						// The same ending the compaction check gives a blocked run:
+						// nothing was sent, and the message is the whole explanation.
+						errorMessage = verdict.message;
+						reason = "error";
+						break;
+					}
+				}
 				// ---- context preparation ----
 				let context: Context = {
 					systemPrompt: this.#systemPrompt,
