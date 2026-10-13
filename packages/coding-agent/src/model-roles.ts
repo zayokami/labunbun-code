@@ -13,6 +13,12 @@
  * leaves the role on the host's own default. A role is a convenience, and a
  * convenience that stops the app is worse than one that does not apply.
  *
+ * An entry may also state `budgetUSD`: a ceiling on what that seat's
+ * conversation may spend. The rule for when a ceiling has been reached lives
+ * here ({@link budgetVerdict}) and so does the lookup a host builds once
+ * ({@link seatsByRef}), so the REPL, a `-p` run and an editor session cannot
+ * disagree about when a seat is over its budget.
+ *
  * The reference syntax is the session model's, read from `resolveModel` in
  * `packages/ai/src/model.ts` and pinned here:
  *
@@ -42,6 +48,16 @@ export interface RoleResolution {
 	 * pipeline through {@link roleOrder}.
 	 */
 	fallback: Model[];
+	/**
+	 * `roles.<role>.budgetUSD`, when the entry stated one.
+	 *
+	 * It rides the resolution rather than the raw settings because the two are
+	 * one decision: an entry whose model did not resolve is ignored whole, and a
+	 * budget that survived that would be a ceiling on a seat that never runs —
+	 * which reads as enforcement and is none. An entry that resolved carries its
+	 * budget, and a seat that did not run has nothing to enforce it against.
+	 */
+	budgetUSD?: number;
 }
 
 export interface ResolvedRoles {
@@ -133,7 +149,7 @@ export async function resolveRoles(
 			const candidate = resolveModel(ref);
 			if (candidate && !missingApiKey(candidate)) fallback.push(candidate);
 		}
-		resolved[name] = { model, fallback };
+		resolved[name] = { model, fallback, budgetUSD: entry.budgetUSD };
 	}
 	return resolved;
 }
@@ -141,6 +157,104 @@ export async function resolveRoles(
 /** Two rows the same model, by the identity `resolveModel` guarantees. */
 export function sameModel(a: Model, b: Model): boolean {
 	return a.id === b.id && a.provider === b.provider;
+}
+
+/**
+ * A seat's spending ceiling, in the form its consumers pass around: the role's
+ * name — which the refusal sentence owes the reader, because it is the settings
+ * key they have to go and change — and `roles.<role>.budgetUSD` when the entry
+ * stated one.
+ *
+ * A seat with no `budgetUSD` is law-abiding by construction, which is what lets
+ * a host keep one table of every seat instead of branching around the ones that
+ * have no ceiling: {@link budgetVerdict} answers `ok` for them.
+ */
+export interface RoleBudget {
+	role: RoleName;
+	budgetUSD?: number;
+}
+
+/** The judge's answer. `blocked` carries the sentence a host ends the run with. */
+export type BudgetVerdict = { action: "ok" } | { action: "blocked"; message: string };
+
+/**
+ * Did a seat spend past its ceiling?
+ *
+ * Two rules, both deliberate:
+ *
+ * - **A seat with no budget is ok.** Unset `budgetUSD` is the pre-budget
+ *   behaviour, and a check that blocked there would end runs nobody asked it
+ *   to end.
+ * - **The comparison is strict**: spending exactly the budget is not over it.
+ *   The rule beetle's `maxCostUSD` uses, and for the same reason — a ceiling
+ *   is a limit, and a run that has spent exactly its limit has not crossed
+ *   anything. The next spend crosses it, and the check that runs before that
+ *   spend is where the refusal belongs, so a run is never cut off a fraction
+ *   under the number its user wrote.
+ *
+ * `spentUSD` is the number the caller vouches for, and it is *the seat's* spend:
+ * for a seat about to answer on the session's own loop it is the session's
+ * cumulative spend at that moment (subagent runs included — their money is
+ * booked into the same session total, so a fan-out counts against the seat that
+ * ordered it), and for the light seat's subagent gates it is the part of the
+ * session total the seat itself spent, because that is the only share that can
+ * be attributed to a seat at all. The sentence names the setting either way.
+ */
+export function budgetVerdict(spentUSD: number, budget: RoleBudget): BudgetVerdict {
+	if (budget.budgetUSD === undefined || spentUSD <= budget.budgetUSD) return { action: "ok" };
+	return {
+		action: "blocked",
+		message:
+			`Budget reached: $${spentUSD.toFixed(4)} spent of the $${budget.budgetUSD.toFixed(4)} budget for ` +
+			`roles.${budget.role}. Raise roles.${budget.role}.budgetUSD or switch models.`,
+	};
+}
+
+/** The key a resolved model answers to: `${provider}/${id}`, the spelling catalogs and ledgers use. */
+export function modelRefKey(model: Model): string {
+	return `${model.provider}/${model.id}`;
+}
+
+/**
+ * Which role owns which model ref — the table a host consults when it has a
+ * model about to answer and needs the ceiling that model's seat carries.
+ *
+ * Keyed by ref because that is all the loop can see: a request is a model, and
+ * which seat asked for it is not something the wire says. When two roles name
+ * the same model the first in {@link ROLE_NAMES} order owns the ref, so a shared
+ * model gets one label and one ceiling rather than two contradicting ones.
+ *
+ * A role that resolved no model owns no ref, and that is the same statement as
+ * "it can carry no budget": an entry without a model is ignored whole by
+ * `resolveRoles`. A ref no role names belongs to no seat and is never gated.
+ */
+export function seatsByRef(resolved: ResolvedRoles): Map<string, RoleBudget> {
+	const seats = new Map<string, RoleBudget>();
+	for (const role of ROLE_NAMES) {
+		const seat = resolved[role];
+		if (!seat.model) continue;
+		const ref = modelRefKey(seat.model);
+		if (!seats.has(ref)) seats.set(ref, { role, budgetUSD: seat.budgetUSD });
+	}
+	return seats;
+}
+
+/**
+ * The ceilings `settings.roles` states, per role.
+ *
+ * For the readers that have the settings rather than the resolution — `/cost`
+ * prints a line per role that has a ceiling — and it reads the raw entries on
+ * purpose: a role whose model never resolved still has its ceiling listed,
+ * because "$0.0000 of $2.0000" beside a seat that is not running is how a user
+ * finds out the budget was configured for a seat that never got one.
+ */
+export function roleCeilings(roles: RoleSettings | undefined): Partial<Record<RoleName, number>> {
+	const ceilings: Partial<Record<RoleName, number>> = {};
+	for (const role of ROLE_NAMES) {
+		const budgetUSD = roles?.[role]?.budgetUSD;
+		if (budgetUSD !== undefined) ceilings[role] = budgetUSD;
+	}
+	return ceilings;
 }
 
 /**

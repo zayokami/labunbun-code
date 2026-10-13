@@ -11,7 +11,16 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { clearCustomModels, FAUX_MODEL, type Model, registerOpenAICompatibleProvider } from "@labunbun/ai";
-import { createModelChainResolver, resolveRoles, roleOrder, sameModel } from "../src/model-roles.ts";
+import {
+	budgetVerdict,
+	createModelChainResolver,
+	modelRefKey,
+	resolveRoles,
+	roleCeilings,
+	roleOrder,
+	sameModel,
+	seatsByRef,
+} from "../src/model-roles.ts";
 
 afterEach(() => {
 	// The catalog's custom-provider map is process-global, and this file is not
@@ -174,6 +183,125 @@ describe("resolveRoles", () => {
 			expect(result.light.model?.id).toBe("m1");
 			expect(result.warnings).toHaveLength(1);
 		});
+	});
+});
+
+describe("budgetVerdict", () => {
+	test("a seat with no budget is ok, whatever it spent", () => {
+		// The ceiling is the whole mechanism: without one there is nothing to
+		// cross, and the pre-budget behaviour is what an unconfigured seat means.
+		expect(budgetVerdict(12.5, { role: "main" })).toEqual({ action: "ok" });
+	});
+
+	test("spending under the budget is ok, and spending exactly it is not over it", () => {
+		// The comparison is strict, the rule beetle's maxCostUSD uses: a run that
+		// has spent exactly its limit has not crossed anything, and cutting it off
+		// a hair under the number its user wrote is the failure this avoids.
+		expect(budgetVerdict(1, { role: "main", budgetUSD: 2 })).toEqual({ action: "ok" });
+		expect(budgetVerdict(2, { role: "main", budgetUSD: 2 })).toEqual({ action: "ok" });
+	});
+
+	test("spending past the budget is blocked, with a sentence that says what to change", () => {
+		const verdict = budgetVerdict(2.5, { role: "main", budgetUSD: 2 });
+		expect(verdict.action).toBe("blocked");
+		if (verdict.action !== "blocked") throw new Error("expected a blocked verdict");
+		// What was spent, what the ceiling was, and the two ways out — a refusal
+		// that only says "no" leaves the user guessing which number to edit.
+		expect(verdict.message).toBe(
+			"Budget reached: $2.5000 spent of the $2.0000 budget for roles.main. Raise roles.main.budgetUSD or switch models.",
+		);
+	});
+
+	test("the sentence names the seat it is about", () => {
+		const verdict = budgetVerdict(3, { role: "light", budgetUSD: 1 });
+		expect(verdict.action === "blocked" ? verdict.message : "").toContain("roles.light.budgetUSD");
+	});
+});
+
+describe("resolveRoles carries a seat's budget", () => {
+	test("a resolved seat carries the budget its entry stated", async () => {
+		await withKeys(["LBB_ROLES_BUDGET_KEY"], async () => {
+			registerProvider("roles-budget", "LBB_ROLES_BUDGET_KEY", ["m1"]);
+			const result = await resolveRoles({ main: { model: "roles-budget/m1", budgetUSD: 5 } }, async () => {});
+
+			expect(result.main.budgetUSD).toBe(5);
+			expect(result.light.budgetUSD).toBeUndefined();
+		});
+	});
+
+	test("an entry that did not resolve carries no budget — the seat is ignored whole", async () => {
+		// A ceiling that survived a dropped seat would read as enforcement and be
+		// none: there is no seat left to enforce it against.
+		const result = await resolveRoles({ main: { model: "no-such-model", budgetUSD: 5 } }, async () => {});
+
+		expect(result.main.model).toBeUndefined();
+		expect(result.main.budgetUSD).toBeUndefined();
+		expect(result.warnings).toHaveLength(1);
+	});
+});
+
+describe("seatsByRef", () => {
+	test("each resolved seat answers to its model ref, with its own ceiling", async () => {
+		await withKeys(["LBB_ROLES_SEATS_KEY"], async () => {
+			registerProvider("roles-seats", "LBB_ROLES_SEATS_KEY", ["m1", "m2"]);
+			const result = await resolveRoles(
+				{
+					main: { model: "roles-seats/m1", budgetUSD: 5 },
+					light: { model: "roles-seats/m2", budgetUSD: 1 },
+				},
+				async () => {},
+			);
+			const seats = seatsByRef(result);
+
+			expect(seats.get("roles-seats/m1")).toEqual({ role: "main", budgetUSD: 5 });
+			expect(seats.get("roles-seats/m2")).toEqual({ role: "light", budgetUSD: 1 });
+			// A ref no role names is nobody's seat: the gate that finds nothing here
+			// is the same "ok" an unconfigured budget answers.
+			expect(seats.get("roles-seats/m3")).toBeUndefined();
+		});
+	});
+
+	test("two roles on one ref leave the first in role order owning it", async () => {
+		// Keyed by ref because a request is a model and nothing on the wire says
+		// which seat asked: the shared model gets one label and one ceiling.
+		await withKeys(["LBB_ROLES_SHARED_KEY"], async () => {
+			registerProvider("roles-shared", "LBB_ROLES_SHARED_KEY", ["m1"]);
+			const result = await resolveRoles(
+				{
+					main: { model: "roles-shared/m1", budgetUSD: 5 },
+					light: { model: "roles-shared/m1", budgetUSD: 1 },
+				},
+				async () => {},
+			);
+
+			expect(seatsByRef(result).get("roles-shared/m1")).toEqual({ role: "main", budgetUSD: 5 });
+		});
+	});
+
+	test("a seat that resolved no model owns no ref", async () => {
+		const result = await resolveRoles({ main: { model: "no-such/model" } }, async () => {});
+
+		expect(seatsByRef(result).size).toBe(0);
+	});
+});
+
+describe("roleCeilings", () => {
+	test("states the configured ceilings and nothing for the seats without one", () => {
+		expect(roleCeilings({ light: { model: "p/m", budgetUSD: 2 }, plan: { model: "p/m" }, local: {} })).toEqual({
+			light: 2,
+		});
+	});
+
+	test("no roles section is no ceilings", () => {
+		expect(roleCeilings(undefined)).toEqual({});
+	});
+});
+
+describe("modelRefKey", () => {
+	test("is the provider and id spelling the catalog and the ledger use", () => {
+		expect(modelRefKey({ ...FAUX_MODEL, provider: "anthropic", id: "claude-sonnet-5" })).toBe(
+			"anthropic/claude-sonnet-5",
+		);
 	});
 });
 

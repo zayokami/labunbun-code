@@ -111,6 +111,20 @@ export const RoleEntrySchema = z.object({
 	provider: z.string().optional(),
 	model: z.string().optional(),
 	fallback: z.array(z.string()).optional(),
+	/**
+	 * A ceiling, in USD, on what this seat's conversation may spend: once the
+	 * session has spent past it, a request that seat is about to make is
+	 * refused before it is sent — see `budgetVerdict` in `model-roles.ts` for
+	 * the exact rule (strictly over, not equal, and no budget means no
+	 * ceiling).
+	 *
+	 * Like every other field here it is only honoured on an entry that
+	 * resolved: a seat whose model did not resolve is ignored whole, budget
+	 * included, and `resolveRoles` says so. Positive because a ceiling of zero
+	 * is not a budget — it is a seat that may never run, and the honest way to
+	 * say that is to stop configuring it.
+	 */
+	budgetUSD: z.number().positive().optional(),
 });
 
 export const SettingsSchema = z.object({
@@ -279,8 +293,8 @@ export const SettingsSchema = z.object({
 	 * endpoint can take a tool call, another can only chat, and a gateway serves
 	 * ids its vendors never named. A role names one seat — the main
 	 * conversation, plan mode, compaction, subagents, local work — and lets it
-	 * pin a provider beside the model, plus its own fallback order, independently
-	 * of every other seat.
+	 * pin a provider beside the model, plus its own fallback order and spending
+	 * ceiling, independently of every other seat.
 	 *
 	 * Resolution is fail-soft and lives in `model-roles.ts`: a reference that
 	 * names nothing (or a model whose key is missing) warns on stderr and leaves
