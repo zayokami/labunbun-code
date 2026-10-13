@@ -834,51 +834,48 @@ the wanted column with it, so the `j` landed beside it). Mutant `S37`.
 
 ## Known gaps
 
-`fuzz.mjs` and a hand probe found three real defects in the `>`/`<` shift
-operators that are **not fixed** and are deliberately not in `CASES` — a case that
-fails is not a case, it is a bug report:
+The shift defects this section used to open with are **fixed, and each is now a
+case in `CASES`** — a fixed defect leaves this section the way a bug report
+becomes a case:
 
-- `>2$` and `>3$` shift one line more than vim does. The counted-`$` range ends
-  past the line break, and `#shiftByMotion` reads the offset *after* that break as
-  the next line.
-- `>2w` shifts one line; vim shifts two.
-- `>gg` and `>2gg` from below the first line do nothing at all, and leave the
-  caret where it was.
+- `>2$` and `>3$` shifted one line too many: the counted-`$` range ends past the
+  line break, and `#shiftByMotion` read the offset *after* it as the next line.
+  The counted-`$` block in `CASES` carries the fold, the clamp and the refusal.
+- `>2w` did not shift at all in the two shapes re-measured at `071a797`, the
+  commit that wrote the bullet — the buffer came back untouched where the bullet
+  says one line was shifted. Fixed; the cases sit beside the counted-`$` block.
+- `>gg`/`>2gg` could not be reproduced broken, even at `071a797`: every shape
+  tried — below the first line, counted from the last, on indented and blank
+  first lines — came back green. The cases pin the four plainest shapes now.
 
-### `r` and `<CR>`, measured and left
+### `r` and `<CR>`: the NORMAL half is done, the Visual half is left
 
-Not a disagreement this harness cannot judge — both answers are readable, and the
-reason the gap is here rather than in `CASES` is only that a case in `CASES` has
-to be green. The two modes do **different** things with the key, which is what
-made this worth writing down rather than summarising as "a line break":
+`r<CR>` is the one command the two modes answer with *different visible effects*,
+which is what made this worth writing down rather than summarising as "a line
+break":
 
-- **NORMAL.** `r<CR>` does not go through the operator. It deletes the characters
-  the count covered and then runs an insert that breaks the line once —
-  `normal.c:4925-4939`, "*Strange vi behaviour: Only one newline is inserted*" —
-  so `3r<CR>` would remove three characters and leave one break. Measured at
-  column 2 of `"abcdef"`: `"ab\ndef"` with the caret at 3, which is the first
-  character of the new line.
-- **Visual.** A Visual `r` goes to `nv_operator` (`normal.c:4866-4880`), which
-  writes the character over each selected one, and a CR is a character there — a
-  literal `\r` *inside* the line, not a break. Measured: `vlr<CR>` on
-  `"abcdef"` reads back as `"\r\rcdef"`, two CRs and no new line.
+- **NORMAL.** Implemented: the character under the caret becomes a line break and
+  the caret lands on the character after it (`r<CR>` at 2 of `"abcdef"` gives
+  `"ab\ndef"` at 3), the count's characters become the one break (`2r<CR>` gives
+  `"ab\nef"`), and a count the line cannot cover still refuses. Vim reaches the
+  same buffer through an insert that breaks the line once — `normal.c:4925-4939`,
+  "*Strange vi behaviour: Only one newline is inserted*" — and the engine's own
+  half is pinned in `vim-engine.test.ts`, with six differential shapes in
+  `CASES`.
+- **Visual.** Still a gap. A Visual `r` goes to `nv_operator`
+  (`normal.c:4866-4880`), which writes the character over each selected one, and
+  a CR is a character there — a literal `\r` *inside* the line, not a break.
+  Measured: `vlr<CR>` on `"abcdef"` from 1 reads back as `"a\r\rdef"` with the
+  caret at the selection's start; the engine leaves the line alone (Enter
+  abandons the armed `r`), so the buffer — and the caret — disagree.
 
-The engine cancels in both, so `fuzz.mjs` drops a `CR` straight after an `r` by
-name (a guaranteed mismatch otherwise) and `vim-engine.test.ts` pins what the
-engine does instead. Both halves also want a redo form — vim's is an insert-mode
-edit rather than a `r`, which is why `invoke_edit` is called with the `r` — so
-this is a small feature with a sharp edge in it, and it is the first thing on the
-list after the text objects rather than something to bolt onto this round.
-
-### Visual `gU` and `gu`, measured and left
-
-`gU` in NORMAL mode with no motion does nothing in both editors, and neither
-implements the Visual form. Measured: `vjgU` on `"ab\ncd"` gives `"AB\nCd"` in
-vim — characterwise, and the caret leaves Visual — where the engine is still in
-Visual with the buffer untouched. `vlgu` on `"ABCdef"` gives `"abCdef"`. A
-selection is the only place the two halves of `gU` differ, because the NORMAL form
-is a motion-plus-operator and the Visual form is the operator alone, so this is
-one missing branch rather than a missing command.
+`fuzz.mjs` keeps both halves out of the sweep without meaning to: its bare-CR
+rule reads the key alone, so an `r`-taken CR is dropped along with a bare one.
+For the NORMAL half that is coverage the instrument is leaving on the table
+rather than a gap it cannot judge — the shapes above compare cleanly today. The
+Visual half also wants a redo form — vim's is an insert-mode edit rather than a
+`r`, which is why `invoke_edit` is called with the `r` — so it stays on the list
+after the text objects rather than bolted onto a round.
 
 ### Search, measured and left
 

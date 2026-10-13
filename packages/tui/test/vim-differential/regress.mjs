@@ -417,6 +417,19 @@ const CASES = [
 	[["d", "2", "$"], "aa\nbb\ncc\ndd", 9],
 	[["y", "2", "$"], "aa\nbb\ncc\ndd", 0],
 	[[">", "$"], "aa\nbb\ncc\ndd", 0],
+	// The other shift defects the README's Known gaps section used to carry,
+	// measured fixed: a counted `w` lands on the line of the word it reaches and
+	// the shift takes the whole lines between its ends (ops.c:155 — the same read
+	// the counted `$` above needed), so `>2w` shifts two lines when 2w stays on
+	// the second and three when it reaches the third. `gg`/`2gg` are `nv_goto`
+	// (normal.c:6857 — a count in front is the line to go to, clamped to the
+	// buffer): a shift to that line covers the lines between, below the first
+	// line as readily as above — `>gg` from the last of three lines shifts all
+	// three.
+	[[">", "2", "w"], "one\ntwo\nthree", 0],
+	[[">", "2", "w"], "one\ntwo three", 0],
+	[[">", "g", "g"], "a\nb\nc", 4],
+	[[">", "2", "g", "g"], "a\nb\nc", 4],
 	// `k` on the first line is the same refusal as `j` on the last (`cursor_up`).
 	// The column it skips is not reachable from there — MAXCOL is the only wanted
 	// column that can disagree with the caret, and only a refused count arms it off
@@ -1879,6 +1892,109 @@ const CASES = [
 	[["d", "3", "w"], EOL_THREE, 6],
 	[["y", "2", "w"], EOL_THREE, 6],
 	[["c", "2", "w", "\x1b"], EOL_THREE, 6],
+
+	// --- the case operators: `gu`, `gU`, `g~`, and their Visual forms ---------
+	//
+	// nv_operator hands the doubled key to nv_lineop (normal.c:6523-6524), whose
+	// beginline(BL_WHITE|BL_FIX) (normal.c:6578) lands a one-line map on the first
+	// non-blank — unless do_pending_operator (ops.c:4053-4069) pulls the caret
+	// back to the operator's own start, which is what keeps a counted line form
+	// exactly where it began. op_tilde maps whatever the range reaches and holds
+	// nothing in a register, so a range with no cased characters changes nothing
+	// and is not an undo step — only the caret moves.
+	[["g", "u", "w"], "AbC dEf", 0],
+	[["g", "U", "w"], "AbC dEf", 0],
+	[["g", "~", "w"], "AbC dEf", 0],
+	[["g", "~", "w"], "AbC dEf", 1],
+	[["2", "g", "U", "w"], "AbC dEf", 0],
+	[["g", "U", "2", "w"], "a b c d e", 0],
+	[["g", "U", "$"], "ab cd", 2],
+	[["g", "U", "0"], "ab cd", 3],
+	[["g", "U", "e"], "ab cd", 0],
+	[["g", "U", "f", "d"], "ab cd ef", 0],
+	[["g", "~", "h"], "AbCd", 3],
+	[["g", "~", "0"], "AbCd", 3],
+	[["g", "~", "e"], "Abc def", 0],
+	[["g", "U", "j"], "ab", 1],
+	[["g", "u", "\x1b"], "AbC", 0],
+	[["g", "~", "w"], "foo\nbar", 0],
+	[["g", "~", "2", "w"], "foo\nbar", 0],
+	[["g", "~", "2", "w"], "  foo\nbar", 0],
+	// a linewise motion maps whole lines and lands where a yank would
+	[["g", "u", "j"], "AB\nCD\nEF", 0],
+	[["g", "u", "k"], "AB\nCD\nEF", 6],
+	[["g", "u", "G"], "AB\nCD\nEF", 0],
+	[["g", "u", "g", "g"], "AB\nCD\nEF", 6],
+	[["g", "u", "k"], "  AB\n  CD\n  EF", 8],
+	[["g", "u", "j"], "  AB\n  CD", 2],
+	[["g", "u", "2", "j"], "AB\nCD\nEF", 0],
+	// text objects land on the object's start
+	[["g", "U", "i", "w"], "abc def", 0],
+	[["g", "u", "i", "w"], "abc def", 4],
+	[["g", "U", "a", "w"], "abc def", 2],
+	[["g", "U", "i", "w"], "abc def", 2],
+	[["g", "U", "a", "w"], "123", 1],
+	[["g", "U", "i", "("], "f(a\n  b\n)", 5],
+	[["g", "~", "a", "("], "f(a\n  b\n)", 5],
+	// paragraphs land in column 0, indented ones too
+	[["g", "U", "a", "p"], "one\n\ntwo", 0],
+	[["g", "U", "a", "p"], "x\nab cd\n\nef", 4],
+	[["g", "U", "a", "p"], "  x\n  ab cd\n\nef", 5],
+	[["g", "U", "i", "p"], "ab\n\ncd", 0],
+	// the doubled forms, and where a count-1 lands
+	[["g", "u", "u"], "AbC dEf", 0],
+	[["g", "U", "U"], "AbC dEf", 0],
+	[["g", "~", "~"], "AbC dEf", 0],
+	[["g", "U", "U"], "  foo bar", 6],
+	[["g", "U", "U"], "  foo bar", 1],
+	[["g", "U", "U"], "  foo bar", 2],
+	[["g", "U", "U"], "ab\ncd\nef", 4],
+	[["2", "g", "U", "U"], "ab\ncd\nef", 4],
+	[["2", "g", "u", "u"], "AB\nCD\nEF", 3],
+	[["2", "g", "U", "U"], "  ab\n  cd", 3],
+	[["g", "U", "U"], "  ab\n  cd", 3],
+	[["g", "U", "U"], "  ab", 2],
+	[["g", "U", "U"], "  ab", 1],
+	[["g", "U", "U"], "123", 2],
+	// the last line refuses the count; a count that fits clamps
+	[["2", "g", "U", "U"], "ab\ncd", 3],
+	[["2", "g", "U", "U"], "AbC\ndeF", 5],
+	[["2", "g", "~", "~"], "ab\ncd", 0],
+	[["3", "g", "U", "U"], "ab\ncd\nef", 4],
+	// a count keeps the caret where it began
+	[["2", "g", "u", "u"], "AbC\ndeF", 1],
+	[["2", "g", "U", "U"], "AbC\ndeF", 2],
+	[["2", "g", "U", "U"], "AbC\ndeF", 4],
+	// the gugu aliases, and the count they carry
+	[["g", "u", "g", "u"], "Abc def", 0],
+	[["2", "g", "u", "g", "u"], "AbC\nDeF", 0],
+	[["2", "g", "U", "g", "U"], "abc\ndef", 0],
+	[["2", "g", "~", "g", "~"], "Ab\nCd", 3],
+	[["2", "g", "u", "g", "u"], "Abc def", 0],
+	// a wrong-case key under the waiting operator clears it and does nothing
+	[["g", "u", "U"], "Abc def", 0],
+	[["g", "U", "u"], "Abc def", 0],
+	[["g", "u", "~"], "Abc def", 0],
+	[["g", "~", "u"], "Abc def", 0],
+	[["g", "~", "U"], "Abc def", 0],
+	[["g", "U", "~"], "Abc def", 0],
+	[["g", "u", "g", "U"], "Abc def", 0],
+	[["g", "U", "g", "u"], "Abc def", 0],
+	[["g", "u", "g", "~"], "Abc def", 0],
+	// visual
+	[["v", "l", "g", "U"], "abcdef", 1],
+	[["v", "l", "g", "u"], "abcdef", 1],
+	[["v", "l", "g", "~"], "AbC dEf", 0],
+	[["V", "g", "u"], "  AbC\n  dEf", 7],
+	[["V", "j", "g", "U"], "  AbC\n  dEf", 7],
+	[["V", "g", "~"], "  AbC\n  dEf", 7],
+	[["v", "j", "g", "U"], "ab\ncd", 0],
+	[["v", "l", "g", "u"], "ABCdef", 0],
+	[["v", "g", "~"], "a", 0],
+	// the case map is one undo step, and a map that changed nothing is none
+	[["g", "U", "w", "u"], "AbC", 0],
+	[["g", "u", "g", "u", "u"], "AbC\ndeF", 0],
+	[["g", "U", "U", "g", "U", "U", "u", "u"], "Ab\ncd", 0],
 
 	// Not here: anything with the caret on the `\n` of `"ab\ncd"`. Vim has no
 	// line-break character to put a caret on — `cursor(1, 3)` clamps onto the

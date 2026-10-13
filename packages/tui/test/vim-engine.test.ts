@@ -3796,6 +3796,68 @@ describe("~ toggles case", () => {
 	});
 });
 
+describe("the g case operators", () => {
+	test("guw lowercases the motion's range and leaves the caret at its start", () => {
+		const e = editor("AbC dEf", 0);
+		for (const k of ["g", "u", "w"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe("abc dEf");
+		expect(e.state.cursor).toBe(0);
+	});
+
+	test("gUU uppercase whole lines and settles on the first non-blank", () => {
+		const e = editor("  foo bar", 6);
+		for (const k of ["g", "U", "U"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe("  FOO BAR");
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("g~ toggles across a paste token without touching its spelling", () => {
+		// A token's letters are its format, the same contract `~` and Visual
+		// `u`/`U` keep: casing them stops the token matching and the payload
+		// behind it is unreachable at submit.
+		const e = editor(`${PASTE_TOKEN} Ab`, 0);
+		for (const k of ["g", "~", "$"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe(`${PASTE_TOKEN} aB`);
+		expect(e.writes()).toBe(1);
+	});
+
+	test("a map that changes nothing is not a write and so not an undo step", () => {
+		// op_tilde keeps no register and setAll is the host's undo step: `gUU`
+		// over "123 456" is the caret walk alone, and a `u` after it reaches past
+		// the map — measured against vim (the `gUUgUUuu` case in regress.mjs).
+		const e = editor("123 456", 0);
+		for (const k of ["g", "U", "U"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe("123 456");
+		expect(e.state.cursor).toBe(0);
+		expect(e.writes()).toBe(0);
+	});
+
+	test("`.` repeats the last case command with its motion", () => {
+		const e = editor("ab cd ef", 0);
+		for (const k of ["g", "U", "w"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe("AB cd ef");
+		e.engine.handleKey("w", e.key());
+		e.engine.handleKey(".", e.key());
+		expect(e.state.text).toBe("AB CD ef");
+	});
+
+	test("a counted line map refuses on the last line instead of clamping", () => {
+		const e = editor("ab\ncd", 3);
+		for (const k of ["2", "g", "U", "U"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe("ab\ncd");
+		expect(e.state.cursor).toBe(3);
+		expect(e.writes()).toBe(0);
+	});
+
+	test("the Visual form maps the selection", () => {
+		const e = editor("abcdef", 1);
+		for (const k of ["v", "l", "g", "U"]) e.engine.handleKey(k, e.key());
+		expect(e.state.text).toBe("aBCdef");
+		expect(e.state.cursor).toBe(1);
+		expect(e.writes()).toBe(1);
+	});
+});
+
 describe(">> and << shift whole lines", () => {
 	/** Type the keys and hand back the buffer and the caret. */
 	const run = (text: string, cursor: number, ...keys: string[]) => {

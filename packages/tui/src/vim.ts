@@ -2325,7 +2325,25 @@ const FIND_MOTIONS = new Set(["f", "F", "t", "T"]);
 const LINEWISE_MOTIONS = new Set(["gg", "G", "j", "k", "+", "-"]);
 
 /** `d`, `c`, `y` — and `>`/`<`, whose doubled form shifts instead of editing. */
-type Operator = "d" | "c" | "y" | ">" | "<";
+type Operator = "d" | "c" | "y" | ">" | "<" | "gu" | "gU" | "g~";
+
+/**
+ * The `g`-prefixed case operators: vim's OP_LOWER, OP_UPPER and OP_TILDE. They
+ * take motions and text objects like `d` does, but map the case of what they
+ * cover and never touch the register.
+ */
+function isCaseOperator(operator: Operator): operator is "gu" | "gU" | "g~" {
+	return operator === "gu" || operator === "gU" || operator === "g~";
+}
+
+function caseKindOf(operator: "gu" | "gU" | "g~"): "upper" | "lower" | "toggle" {
+	return operator === "gu" ? "lower" : operator === "gU" ? "upper" : "toggle";
+}
+
+/** One run of characters through a case kind — shared by operators and Visual. */
+function mapCase(run: string, kind: "upper" | "lower" | "toggle"): string {
+	return kind === "upper" ? run.toUpperCase() : kind === "lower" ? run.toLowerCase() : swapCase(run);
+}
 
 /**
  * A cap on `[count]`. Vim's own limit is 2^31, which on a 60fps terminal means
@@ -2883,11 +2901,12 @@ export class VimEngine {
 				this.#applyOperator(operator, terminalMotion, count * this.#takeCount());
 				return true;
 			}
-			if (input === operator) {
+			if (input === operator || (isCaseOperator(operator) && input === operator[1])) {
 				this.#pending = null;
 				const effective = count * this.#takeCount();
-				// `>>` shifts that many lines; `dd` deletes them.
+				// `>>` shifts that many lines; `dd` deletes them; `guu` maps them.
 				if (operator === ">" || operator === "<") this.#shiftLines(effective, operator === ">");
+				else if (isCaseOperator(operator)) this.#caseLines(caseKindOf(operator), effective);
 				else this.#applyLinewise(operator, effective);
 				return true;
 			}
@@ -3006,6 +3025,16 @@ export class VimEngine {
 			} else if (input === "J" && !operator) {
 				// `gJ`: join without the space, and keep the next line's indent.
 				this.#joinLines(count, true);
+			} else if (!operator && (input === "u" || input === "U" || input === "~")) {
+				// `gu`, `gU`, `g~`: a case operator that waits for a motion the way
+				// `d` does. The key is not a command of its own here — nv_g_cmd
+				// dispatches u/U/~ to nv_operator (normal.c:6270-6271), which puts
+				// the op_type up and leaves the arithmetic to do_pending_operator.
+				this.#pending = {
+					operator: input === "u" ? "gu" : input === "U" ? "gU" : "g~",
+					count,
+					explicit,
+				};
 			} else if (input === "*" || input === "#") {
 				// `g*` and `g#` are the same search as `*` and `#`, and `dg*` is the
 				// same range as `d*` — `nv_ident` reads `cap->cmdchar == 'g'` only to
@@ -3021,6 +3050,15 @@ export class VimEngine {
 				// two spellings are documented to separate.
 				if (operator) this.#applyOperator(operator, input, count, undefined, explicit);
 				else this.#identCommand(input, count);
+			} else if (operator && isCaseOperator(operator) && input === operator[1]) {
+				// The `gugu`-style alias: a second `g` before the doubling key. vim's
+				// nv_undo/nv_Undo/nv_tilde translate `<Visual>u` to `<Visual>gu` and
+				// hand the key straight back to nv_operator (normal.c:4804, :6472,
+				// :6502), which finds the op_type equal to the pending one and calls
+				// nv_lineop — the same place `guu` lands, with the count the operator
+				// was armed with. A different key (`gugU` after `gu`) fails the
+				// equality and falls to checkclearopbeep: no line operation at all.
+				this.#caseLines(caseKindOf(operator), count);
 			}
 			return true; // any non-g key after g is swallowed
 		}
@@ -3972,6 +4010,16 @@ export class VimEngine {
 				this.#shiftLines(span.lastLine - span.firstLine + 1, operator === ">", 1, nthLineStart(text, span.firstLine));
 				return;
 			}
+			if (isCaseOperator(operator)) {
+				// A case operator maps the whole lines and parks the caret in column
+				// 0 of the paragraph's first line — current_par writes the start
+				// column as part of the object (`oap->start = {start_lnum, 0}`), and
+				// a case operator has no register to restore it from: measured
+				// `gUap` putting the caret on column 0 even of an indented paragraph.
+				const { start, end } = lineRange(text, span.firstLine, span.lastLine);
+				this.#caseRange(caseKindOf(operator), start, end, nthLineStart(text, span.firstLine));
+				return;
+			}
 			const { start, end, removeFrom } = lineRange(text, span.firstLine, span.lastLine);
 			this.#runLinewise(operator, start, end, removeFrom);
 			// A linewise *yank* through a text object parks the caret on the object's
@@ -4018,6 +4066,10 @@ export class VimEngine {
 				this.#emptyObject(operator, quote.start);
 				return;
 			}
+			if (isCaseOperator(operator)) {
+				this.#caseRange(caseKindOf(operator), quote.start, quote.end + (quote.inclusive ? 1 : 0));
+				return;
+			}
 			this.#runOperator(operator, quote.start, quote.end + (quote.inclusive ? 1 : 0), quote.inclusive);
 			return;
 		}
@@ -4057,6 +4109,17 @@ export class VimEngine {
 			// bracket. `di(` there changes no text and `ci(` still enters insert.
 			if (block.empty) {
 				this.#emptyObject(operator, block.start);
+				return;
+			}
+			if (isCaseOperator(operator)) {
+				// The object's own text, brackets and all: op_tilde maps what the
+				// range covers, and a case operator pastes nothing, so the linewise
+				// form's trip through the line machinery buys it nothing — the line
+				// heads a linewise range would add hold no cased characters the
+				// object did not already cover, and what is outside the object stays
+				// untouched (`gUi(` does not touch the `f` of `f(a\n  b\n)`). The
+				// caret rests at the object's start.
+				this.#caseRange(caseKindOf(operator), block.start, block.end, block.start);
 				return;
 			}
 			// A linewise object goes through the line machinery whole, and the
@@ -4103,6 +4166,10 @@ export class VimEngine {
 			this.#shiftLines(lastLine - firstLine + 1, operator === ">", 1, nthLineStart(text, firstLine));
 			return;
 		}
+		if (isCaseOperator(operator)) {
+			this.#caseRange(caseKindOf(operator), found.start, found.end);
+			return;
+		}
 		if (operator === "d" && deleteGoesLinewise(text, found.start, found.end - 1, true)) {
 			// Linewise, which also makes the register linewise — `d2iwp` pastes two
 			// lines back, not the two characters the object held.
@@ -4129,6 +4196,16 @@ export class VimEngine {
 		if (span === false) return;
 		if (span) {
 			const { start, end, removeFrom } = lineRange(text, span.firstLine, span.lastLine);
+			if (isCaseOperator(operator)) {
+				// A linewise motion under a case operator maps whole lines — the
+				// caret lands on the motion's own landing only when that is behind
+				// the operator's start; do_pending_operator (ops.c:4053-4069) pulls
+				// it back to the operator's start otherwise, the same rule the yank
+				// branch of `#runLinewise` follows.
+				const from = this.#ops.getCursor();
+				this.#caseRange(caseKindOf(operator), start, end, span.landing < from ? span.landing : from);
+				return;
+			}
 			this.#runLinewise(operator, start, end, removeFrom, span.landing);
 			return;
 		}
@@ -4170,6 +4247,13 @@ export class VimEngine {
 				const firstLine = lineOf(text, range.start);
 				const lastLine = lineOf(text, range.end) - 1;
 				const { start, end, removeFrom } = lineRange(text, firstLine, lastLine);
+				if (isCaseOperator(operator)) {
+					// The lined-up case: the motion walked whole lines and the caret
+					// stays at the operator's own start, which for a case operator is
+					// inside the text rather than at a line head.
+					this.#caseRange(caseKindOf(operator), start, end, range.start);
+					return;
+				}
 				this.#runLinewise(operator, start, end, removeFrom);
 				return;
 			}
@@ -4185,6 +4269,15 @@ export class VimEngine {
 				this.#runLinewise("d", start, end, removeFrom);
 				return;
 			}
+		}
+		if (isCaseOperator(operator)) {
+			// The character range, `[start, end)` — op_tilde's `if (!oap->inclusive)
+			// dec(&end)` (ops.c:1481-1482) folds an exclusive end exactly the way
+			// #motionRange already did, so the two agree and nothing shifts. The
+			// caret rests at the range's start (`gUe` on "ab cd" keeps the `a`'s
+			// column), which is where do_pending_operator leaves it.
+			this.#caseRange(caseKindOf(operator), range.start, range.end);
+			return;
 		}
 		this.#runOperator(operator, range.start, range.end, range.inclusive);
 	}
@@ -4598,6 +4691,61 @@ export class VimEngine {
 		this.#runLinewise(operator, start, end, removeFrom);
 	}
 
+	/**
+	 * `gu`/`gU`/`g~`: map the case of the characters between `start` and `end`,
+	 * the end exclusive the way the edit operators take it (the operator's range
+	 * arrives with its inclusive end already folded in — see #motionRange, and
+	 * op_tilde's own `if (!oap->inclusive) dec(&end)` is the same fold, so the
+	 * two agree byte for byte).
+	 *
+	 * Nothing goes into a register, and a range with no cased characters changes
+	 * nothing and is not an undo step — only the caret moves to `landing`. Vim
+	 * lands there all the same: the beginline that closes the operator
+	 * (normal.c:6578) runs whether or not the map rewrote a byte, so `gUw` over
+	 * "123 456" parks the caret on the "4"'s word.
+	 */
+	#caseRange(kind: "upper" | "lower" | "toggle", start: number, end: number, landing = start): void {
+		const text = this.#ops.getText();
+		const stop = Math.min(text.length, Math.max(start, end));
+		const segment = text.slice(start, stop);
+		// A paste token inside the range keeps its spelling, the rule the visual
+		// form already follows: a token's own letters are its format, and casing
+		// them would leave the payload behind them unreachable at submit.
+		const mapped = mapOutsidePasteTokens(text, start, stop, (run) => mapCase(run, kind));
+		if (mapped !== segment) this.#ops.setAll(text.slice(0, start) + mapped + text.slice(stop), landing);
+		else this.#ops.setCursor(landing);
+		this.#wantHere();
+	}
+
+	/**
+	 * The doubled form: `guu`, `gUU`, `g~~` — and the `gugu`-style aliases that
+	 * reach the same place through the g latch. nv_operator sends a key equal to
+	 * the pending op_type to nv_lineop (normal.c:6523-6524), which builds a
+	 * linewise range and hands it to op_tilde; swapchar does the mapping
+	 * (ops.c:1584).
+	 *
+	 * Two details of nv_lineop ride along. Its `cursor_down(count - 1)` fails on
+	 * the last line and the failure clears the operator instead of clamping —
+	 * `2gUU` on the final line does nothing, exactly as `2dd` does not take the
+	 * one line it could have (see #applyLinewise). And its last act is
+	 * beginline(BL_WHITE|BL_FIX) (normal.c:6578): one line lands on its first
+	 * non-blank, but do_pending_operator (ops.c:4053-4069) pulls the cursor back
+	 * to the operator's own start when the beginline would go behind it — so
+	 * from mid-line a count-1 map settles on the first non-blank or does not
+	 * move, whichever is nearer, and a longer count keeps the caret where it
+	 * began.
+	 */
+	#caseLines(kind: "upper" | "lower" | "toggle", count: number): void {
+		const text = this.#ops.getText();
+		const from = this.#ops.getCursor();
+		const startLine = lineOf(text, from);
+		if (count > 1 && startLine === lineCount(text) - 1) return;
+		const endLine = Math.min(lineCount(text) - 1, startLine + count - 1);
+		const { start, end } = lineRange(text, startLine, endLine);
+		const head = settleCursor(text, motionFirstNonBlank(text, nthLineStart(text, startLine)));
+		this.#caseRange(kind, start, end, count > 1 ? from : Math.min(from, head));
+	}
+
 	#applyToLineEnd(operator: "d" | "c", count: number): void {
 		const text = this.#ops.getText();
 		const start = this.#ops.getCursor();
@@ -5006,11 +5154,12 @@ export class VimEngine {
 			// that breaks the line once (normal.c:4925-4939, "Strange vi behaviour: Only
 			// one newline is inserted"), so it reads back as `"ab\ndef"` with the caret
 			// at 3. Both are comparable — the harness reads the first back as a `\r`
-			// and the second as a `\n` because that is what each of them *is* — and
-			// neither is implemented. So this is a feature gap wearing a disagreement's
-			// clothes, and it is named as one in the differential README's Known gaps
-			// with the two measurements, rather than here as something the instrument
-			// cannot judge.
+			// and the second as a `\n` because that is what each of them *is*. The
+			// NORMAL half is implemented (#replaceChar splits the line once). The
+			// Visual half is still a feature gap wearing a disagreement's clothes,
+			// and it is named as one in the differential README's Known gaps with
+			// its measurement, rather than here as something the instrument cannot
+			// judge.
 			if (key.escape || key.backspace || key.delete || input.length === 0) return true;
 			// The operator is recorded before the change runs, the way every other
 			// visual operator's size is: what #finishKeyLog does with a `r` is the
@@ -5029,10 +5178,19 @@ export class VimEngine {
 		}
 		if (key.return) return false; // host submits
 
-		// `g` in visual mode waits for the one command it has here, `gJ`.
+		// `g` in visual mode waits for one more key: `gJ` joins, and `gu`/`gU`/`g~`
+		// are the case commands the same spellings are in NORMAL mode, run over the
+		// selection. vim reaches them by translating `vgu` back to the `gu` operator
+		// (nv_undo rewrites cmdchar to 'g', nchar to 'u', normal.c:4801-4804) with
+		// the Visual range standing in for the motion, and op_tilde maps that range
+		// in one step. The redo size is recorded under the selection's own command,
+		// so the replay re-runs the same case map.
 		if (this.#visualPendingG) {
 			this.#visualPendingG = false;
 			if (input === "J") this.#overSelection("gJ", () => this.#joinSelection(true));
+			else if (input === "u") this.#overSelection("u", () => this.#caseSelection("lower"));
+			else if (input === "U") this.#overSelection("U", () => this.#caseSelection("upper"));
+			else if (input === "~") this.#overSelection("~", () => this.#caseSelection("toggle"));
 			return true;
 		}
 
@@ -5502,9 +5660,7 @@ export class VimEngine {
 		// A paste token inside the selection keeps its spelling: a token's own
 		// letters are its format, and uppercasing any of them makes the payload
 		// behind it unreachable at submit.
-		const swapped = mapOutsidePasteTokens(text, start, end, (run) =>
-			kind === "upper" ? run.toUpperCase() : kind === "lower" ? run.toLowerCase() : swapCase(run),
-		);
+		const swapped = mapOutsidePasteTokens(text, start, end, (run) => mapCase(run, kind));
 		// A selection with no cased characters changes nothing: exit visual without
 		// recording an edit that did not happen.
 		if (swapped !== segment) this.#ops.setAll(text.slice(0, start) + swapped + text.slice(end), start);

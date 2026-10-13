@@ -98,9 +98,10 @@ const KEYS = {
 	// command that reads a key of its own and a Visual mode that had no answer for
 	// it, which no `regress.mjs` case was asking about, and putting `r` in the set
 	// is what turned up the count refusal below. Two exclusions come with it, both
-	// named in `uncomparable()`: a half-typed `r` at the end (below), and `r` `<CR>`,
-	// which vim carries out and the engine cancels (a named gap, not a key this
-	// instrument cannot send).
+	// written down below: a half-typed `r` at the end, and `r` `<CR>` — whose NORMAL
+	// half the engine now carries out and matches (the `regress.mjs` `r` `CR` cases
+	// pin it) but which the bare-CR rule still drops, because that rule reads the key
+	// alone; the Visual half is the remaining gap, written up in the README.
 	r: ["r", {}],
 	d: ["d", {}],
 	y: ["y", {}],
@@ -186,33 +187,38 @@ function intoLatch(seq, i) {
 }
 
 /**
- * The three sequences that answer a different question in the two editors, named so
- * that a mismatch which is neither can be told apart from one that is.
+ * The three sequences that have answered a different question in the two editors,
+ * named so that a mismatch which is neither can be told apart from one that is.
  *
  *  - A `CR` with no latch open. Vim binds it to `nv_down` + `beginline`, which is
  *    this engine's `+`; the engine hands Enter to the host so a newline in the REPL
  *    submits. The buffers agree and the host's half of the answer cannot be
  *    compared, so the whole sequence is dropped rather than the key. (It is not a
  *    *search* latch case: `/foo<CR>` is comparable, and the comment on `CR` above
- *    is why `CR` is in the set at all.)
+ *    is why `CR` is in the set at all. The rule as coded admits only a CR whose
+ *    predecessor is the opener, so a search with a pattern typed before its CR is
+ *    over-dropped along with the bare ones — measured comparable, kept out as
+ *    conservative rather than as a gap.)
  *  - A `BS` or `DEL` with a latch open. In vim both are an editing key of the
  *    command line — `BS` cancels it outright, `DEL` erases under the cursor — and
  *    neither is a command the engine reads on that path. Without a latch the same
  *    two keys are ordinary motions and stay in the set.
- *  - A `CR` right after an `r`. Vim's `r` reads that key as the character to write
- *    and does two different things with it: in NORMAL it breaks the line once
- *    (`normal.c:4925-4939`), in Visual it writes a literal `\r` over each selected
- *    character (`normal.c:4866-4880`). The engine cancels instead. Both answers are
- *    readable — this is a named feature gap, not something the instrument cannot
- *    measure — and a sequence carrying it is a guaranteed mismatch, so it is dropped
- *    by name with the measurements in the README's Known gaps. The engine's own
- *    side of it is in `vim-engine.test.ts`.
+ *  - A `CR` right after an `r`. No rule below is written for it — the bare-CR rule
+ *    catches the same key first, reading the key alone — but it is named because
+ *    it is real: vim's `r` reads the CR as its character and breaks the line once
+ *    in NORMAL (`normal.c:4925-4939`), the engine now does the same and
+ *    `regress.mjs` pins it, so for NORMAL this is coverage the sweep is leaving on
+ *    the table rather than a gap it cannot judge. The Visual half — vim writes a
+ *    literal `\r` (`normal.c:4866-4880`) — is still a gap, measured in the README's
+ *    Known gaps. The dedicated rule that used to sit here could never fire and is
+ *    gone; what drops these sequences is the bare-CR rule's over-drop, and
+ *    admitting them means knowing what an `r` has already eaten, a change of its
+ *    own.
  */
 function uncomparable(seq) {
 	for (let i = 0; i < seq.length; i++) {
 		if (seq[i] === "CR" && !intoLatch(seq, i)) return true;
 		if ((seq[i] === "BS" || seq[i] === "DEL") && intoLatch(seq, i)) return true;
-		if (seq[i] === "CR" && seq[i - 1] === "r") return true;
 	}
 	return false;
 }
