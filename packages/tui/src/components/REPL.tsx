@@ -29,6 +29,7 @@ import { StatusCard } from "./StatusCard.tsx";
 import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
 import { TerminalTitle } from "./TerminalTitle.tsx";
+import { WatchPanel } from "./WatchPanel.tsx";
 
 /** Verdict from the app layer's prompt gate (UserPromptSubmit hooks). */
 export interface PromptSubmitVerdict {
@@ -494,6 +495,11 @@ export function REPL({
 	const [transcriptMode, setTranscriptMode] = useState(false);
 	const [transcriptOffset, setTranscriptOffset] = useState(0);
 	const TRANSCRIPT_PAGE = 10;
+	// The watch panel's open state, and only that: what it draws comes from the
+	// store's `backgroundShells`, so there is no second copy of the shells to keep
+	// in step. It is kept — not remounted — across a visit to the transcript, so a
+	// panel left open is a panel still open when the screen closes.
+	const [watchOpen, setWatchOpen] = useState(false);
 
 	useInput((input, key) => {
 		// The key list is dismissed by either key, and while it is up the prompt is
@@ -533,9 +539,34 @@ export function REPL({
 			store.set((s) => (s.activity ? { ...s, activity: null } : s));
 			return;
 		}
+		// The watch panel's Escape, and its place in this order is the rule: below
+		// the activity panel's block above, so with both open one Escape closes the
+		// heatmap and the next one closes the panel — neither can swallow a key the
+		// user aimed at the other. Not while the transcript is up, though: the panel
+		// is off the screen then, and a panel nobody can see answering Escape would
+		// be a change of visible state that happened while it was invisible, on a
+		// key that belongs to the screen that *is* on screen. The panel stays open
+		// behind the transcript, exactly as it was.
+		if (watchOpen && !transcriptMode && key.escape) {
+			setWatchOpen(false);
+			return;
+		}
 		if (key.ctrl && input === "o") {
 			setTranscriptMode((v) => !v);
 			setTranscriptOffset(0);
+			return;
+		}
+		// Ctrl+T opens the watch panel. Both refusals are written out rather than
+		// inherited from where this branch sits, because each is a rule of its own:
+		// a dialog owns the keyboard while one is open, and the transcript is a
+		// screen that owns the view-switch keys — the rule the `Ctrl+O` branch above
+		// is the recorded exception to. A refused key does nothing rather than
+		// explaining itself: the panel is not a command, and nothing on screen would
+		// be improved by a sentence about a key that just said no.
+		if (key.ctrl && input === "t") {
+			if (dialog || question || picker) return;
+			if (transcriptMode) return;
+			setWatchOpen((v) => !v);
 			return;
 		}
 		if (transcriptMode) {
@@ -842,6 +873,14 @@ export function REPL({
 							onClose={() => store.set((s) => (s.activity ? { ...s, activity: null } : s))}
 						/>
 					)}
+					{/* The watch panel, below the heatmap: the heatmap is an overlay on a
+					    question the user asked, while this is a band that belongs to the
+					    prompt, and the band is the one still there after Escape has closed
+					    the overlay. `!transcriptMode` is spelled out even though this slot
+					    is inside the non-transcript branch — the branch is the reason the
+					    panel is *not* drawn there, and the condition is the reason the
+					    state it comes back to is the state it left. */}
+					{watchOpen && !transcriptMode && <WatchPanel shells={backgroundShells} />}
 					{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
 					<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
 				</>

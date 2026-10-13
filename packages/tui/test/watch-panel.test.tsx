@@ -10,7 +10,10 @@
  * the one that matters is the frame.
  */
 import { describe, expect, test } from "bun:test";
+import { AgentSession } from "@labunbun/agent";
+import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { render } from "ink-testing-library";
+import { connectSessionToStore, REPL } from "../src/components/REPL.tsx";
 import {
 	selectWatchShell,
 	WATCH_PANEL_DESIRED_ROWS,
@@ -18,7 +21,8 @@ import {
 	WatchPanel,
 	watchPanelHeight,
 } from "../src/components/WatchPanel.tsx";
-import type { UiBackgroundShell } from "../src/ui-state.ts";
+import { createStore } from "../src/store.ts";
+import { initialUiState, type UiBackgroundShell, type UiState } from "../src/ui-state.ts";
 
 const shell = (id: string, over: Partial<UiBackgroundShell> = {}): UiBackgroundShell => ({
 	id,
@@ -207,4 +211,163 @@ describe("the panel", () => {
 		expect(await drawnAt(13)).toBe(watchPanelHeight(13));
 		expect(await drawnAt(24)).toBe(watchPanelHeight(24));
 	});
+});
+
+/**
+ * Ctrl+T at the REPL: what it opens, what it refuses to open, and what happens
+ * to the keys around it.
+ *
+ * The panel is the first panel here that is *not* a screen, so the tests are
+ * about the prompt as much as about the panel: the draft has to survive it, the
+ * typing has to reach the prompt while it is open, and the two screens the REPL
+ * already has have to keep their keys. The harness is the transcript's
+ * (`repl-transcript.test.tsx`), because the claim "the buffer is the buffer, not
+ * a repaint of it" is only checkable by sending what was typed.
+ */
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitFor(done: () => boolean, timeoutMs = 2000): Promise<void> {
+	for (let waited = 0; waited < timeoutMs; waited += 10) {
+		if (done()) return;
+		await delay(10);
+	}
+}
+
+/** The two control bytes this file presses: `Ctrl+O` is 0x0f and `Ctrl+T` is 0x14. */
+const CTRL_O = "\x0f";
+const CTRL_T = "\x14";
+
+function replSetup() {
+	const faux = fauxProvider([{ text: "n/a" }]);
+	const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
+	const store = createStore<UiState>({
+		...initialUiState(),
+		backgroundShells: [shell("shell_1", { command: "npm run dev", tail: ["VITE v5 ready"] })],
+	});
+	const unsubscribe = connectSessionToStore(session, store);
+	const view = render(<REPL getSession={() => session} store={store} modelName="test" onExit={() => {}} />);
+	return {
+		store,
+		/** Ink pads and wraps frames; the assertions are about what a user reads. */
+		frame: () => (view.lastFrame() ?? "").replace(/\s+/g, " "),
+		write: async (keys: string) => {
+			view.stdin.write(keys);
+			await delay(30);
+		},
+		asked: () =>
+			store
+				.get()
+				.entries.filter((entry) => entry.kind === "user")
+				.map((entry) => entry.text),
+		finish: () => {
+			unsubscribe();
+			view.unmount();
+		},
+	};
+}
+
+describe("Ctrl+T at the REPL", () => {
+	test("opens the panel over a working prompt, and what is typed next goes to the prompt", async () => {
+		const h = replSetup();
+		await h.write("a draft");
+		expect(h.frame()).toContain("a draft");
+
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("VITE v5 ready");
+		// The difference from the transcript in one assertion: the prompt is still
+		// painted under the panel, holding what it held.
+		expect(h.frame()).toContain("a draft");
+
+		await h.write(" typed");
+		expect(h.frame()).toContain("a draft typed");
+
+		// And it is the buffer, not a redraw of it: the key that sends sends what the
+		// user wrote, with the panel still open over it.
+		await h.write("\r");
+		await waitFor(() => h.asked().length > 0);
+		expect(h.asked()).toEqual(["a draft typed"]);
+		h.finish();
+	}, 20_000);
+
+	test("closes on the same key, and on Escape", async () => {
+		const h = replSetup();
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("VITE v5 ready");
+		await h.write(CTRL_T);
+		expect(h.frame()).not.toContain("VITE v5 ready");
+
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("VITE v5 ready");
+		await h.write("\x1b");
+		expect(h.frame()).not.toContain("VITE v5 ready");
+		h.finish();
+	}, 20_000);
+
+	test("a dialog owns the keyboard while one is up, so the toggle does nothing", async () => {
+		const h = replSetup();
+		h.store.set((s) => ({
+			...s,
+			dialog: { callId: "c1", toolName: "Bash", inputPreview: "rm -rf build", resolve: () => {} },
+		}));
+		// The write is a commit before the key is: the handler reads the render it
+		// was built in, and a key sent in the same tick as the store write would be
+		// answered by the render before it — which is a fact about the harness, not
+		// about the mask.
+		await delay(30);
+		expect(h.frame()).toContain("Bash");
+		await h.write(CTRL_T);
+		// Both halves: the dialog is up, and the panel is not — an assertion on the
+		// absence alone would pass on a frame that failed to render anything.
+		expect(h.frame()).toContain("Bash");
+		expect(h.frame()).not.toContain("VITE v5 ready");
+		h.finish();
+	}, 20_000);
+
+	test("the transcript owns the view keys: Ctrl+T is ignored there, and the panel comes back as it was", async () => {
+		const h = replSetup();
+		await h.write(CTRL_T);
+		await h.write(CTRL_O);
+		expect(h.frame()).toContain("Transcript ");
+		expect(h.frame()).not.toContain("VITE v5 ready");
+
+		// One press, and that is the point: a key that reached the panel here would
+		// close it, so the state the screen gives back is the state it took. Two
+		// presses to undo the first would hide exactly the bug this catches.
+		await h.write(CTRL_T);
+
+		await h.write(CTRL_O);
+		expect(h.frame()).toContain("VITE v5 ready");
+		h.finish();
+	}, 20_000);
+
+	// The rule that makes "the panel returns" safe: while the transcript is up the
+	// panel is not on screen, so it must not answer the key that leaves the screen.
+	// Asserted in that order — Escape once, and the panel is still there behind.
+	test("Escape on the transcript closes the screen and leaves the hidden panel alone", async () => {
+		const h = replSetup();
+		await h.write(CTRL_T);
+		await h.write(CTRL_O);
+		await h.write("\x1b");
+		expect(h.frame()).not.toContain("Transcript ");
+		expect(h.frame()).toContain("VITE v5 ready");
+		h.finish();
+	}, 20_000);
+
+	test("with the heatmap open, Escape closes the heatmap first and the panel second", async () => {
+		const h = replSetup();
+		h.store.set((s) => ({ ...s, activity: { home: undefined, range: "all" } }));
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("Activity");
+		expect(h.frame()).toContain("VITE v5 ready");
+
+		// One Escape, one panel: the order matters, and it is the REPL's own — the
+		// activity block is above the watch panel's in the key handler.
+		await h.write("\x1b");
+		expect(h.frame()).not.toContain("Activity");
+		expect(h.frame()).toContain("VITE v5 ready");
+
+		await h.write("\x1b");
+		expect(h.frame()).not.toContain("VITE v5 ready");
+		h.finish();
+	}, 20_000);
 });
