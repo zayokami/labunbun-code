@@ -351,6 +351,7 @@ describe("the policy snapshot as a value", () => {
 			{ toolName: "Bash", specifier: "git *", behavior: "allow", source: "userSettings" },
 			{ toolName: "Read", behavior: "allow", source: "session" },
 			{ toolName: "Write", specifier: "out/**", behavior: "deny", source: "policy" },
+			{ toolName: "Bash", specifier: "git commit *", behavior: "ask", source: "session" },
 		];
 
 		const stored = storedRules(rules);
@@ -358,13 +359,16 @@ describe("the policy snapshot as a value", () => {
 			{ toolName: "Bash", specifier: "git *", behavior: "allow" },
 			{ toolName: "Read", behavior: "allow" },
 			{ toolName: "Write", specifier: "out/**", behavior: "deny" },
+			{ toolName: "Bash", specifier: "git commit *", behavior: "ask" },
 		]);
 		// What a file holds is what this session's user granted, whatever tier a
-		// rule was loaded from before it was copied here.
+		// rule was loaded from before it was copied here — and a rule that asks
+		// travels the same path: what the session holds, the file holds.
 		expect(sessionRulesFrom(stored)).toEqual([
 			{ toolName: "Bash", specifier: "git *", behavior: "allow", source: "session" },
 			{ toolName: "Read", behavior: "allow", source: "session" },
 			{ toolName: "Write", specifier: "out/**", behavior: "deny", source: "session" },
+			{ toolName: "Bash", specifier: "git commit *", behavior: "ask", source: "session" },
 		]);
 	});
 
@@ -451,6 +455,60 @@ describe("what the file keeps", () => {
 		savePolicySnapshot(store, snapshot({ mode: "plan" }));
 		store.appendCustom("policy", { nope: true });
 		expect(readPolicySnapshot(store)?.mode).toBe("plan");
+	});
+
+	test("an ask rule is stored and comes back as ask", () => {
+		const store = scratch();
+
+		savePolicySnapshot(store, snapshot({ rules: [{ toolName: "Bash", specifier: "git commit *", behavior: "ask" }] }));
+
+		// The file holds it...
+		const [entry] = policyEntries(store);
+		if (entry?.type !== "custom") throw new Error("expected the snapshot to be written");
+		expect((entry.data as { rules?: unknown }).rules).toEqual([
+			{ toolName: "Bash", specifier: "git commit *", behavior: "ask" },
+		]);
+		// ...and the reader accepts it. A guard that knew only allow/deny would
+		// drop the whole snapshot on meeting one, which is how a session's ask
+		// rule would quietly stop being in force after a restart.
+		expect(readPolicySnapshot(store)?.rules).toEqual([
+			{ toolName: "Bash", specifier: "git commit *", behavior: "ask" },
+		]);
+		expect(sessionRulesFrom(readPolicySnapshot(store)?.rules ?? [])).toEqual([
+			{ toolName: "Bash", specifier: "git commit *", behavior: "ask", source: "session" },
+		]);
+	});
+
+	test("a rule with no behavior is refused, not guessed into a grant", () => {
+		const store = scratch();
+
+		// Every snapshot this format has ever had came from `storedRules`, which
+		// has written `behavior` since the first one — so a rule without it is not
+		// a legacy shape to translate, it is a field this build cannot read.
+		// Defaulting it to `allow` would invent a grant out of a malformed rule,
+		// and a grant runs calls: the one direction this reader must not guess in.
+		store.appendCustom("policy", {
+			at: 1,
+			rules: [{ toolName: "Bash", specifier: "git *" }],
+			mode: "agent",
+			sandbox: "workspace-write",
+			network: { access: "enabled", domains: [] },
+		});
+		expect(readPolicySnapshot(store)).toBeUndefined();
+
+		// And the refusal is boxed to the one snapshot: with a valid policy below
+		// the unreadable tail, the older answer stands rather than the session
+		// starting from nothing.
+		savePolicySnapshot(store, snapshot({ mode: "plan" }));
+		store.appendCustom("policy", {
+			at: 3,
+			rules: [{ toolName: "Read" }],
+			mode: "agent",
+			sandbox: "workspace-write",
+			network: { access: "enabled", domains: [] },
+		});
+		expect(readPolicySnapshot(store)?.mode).toBe("plan");
+		expect(readPolicySnapshot(store)?.rules).toEqual([]);
 	});
 });
 

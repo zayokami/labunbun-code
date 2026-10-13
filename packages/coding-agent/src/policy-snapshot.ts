@@ -216,10 +216,26 @@ function isNetworkAxis(value: unknown): value is NetworkAxis {
 	});
 }
 
+/**
+ * A stored rule, with the field that decides what a match does checked hardest.
+ *
+ * All three behaviors are accepted: `ask` is something a session can hold (the
+ * dialog writes one), and a guard that knew only allow/deny would invalidate the
+ * whole snapshot on meeting one — which is how a session's ask rule would
+ * quietly stop being in force after a restart.
+ *
+ * The shape that is *not* accepted is a missing `behavior`, and the refusal is
+ * deliberate rather than a gap in backward compatibility. Every snapshot this
+ * format has ever had came from `storedRules`, which has written the field since
+ * the first one, so a rule without one is not a legacy shape to translate — it
+ * is a field this build cannot read. Defaulting it to `allow` would invent a
+ * grant out of a malformed rule, and a grant runs calls: the one direction a
+ * reader of this file must never guess in.
+ */
 function isStoredRule(value: unknown): value is StoredPolicyRule {
 	if (typeof value !== "object" || value === null) return false;
 	const rule = value as Partial<StoredPolicyRule>;
 	if (typeof rule.toolName !== "string" || rule.toolName.length === 0) return false;
-	if (rule.behavior !== "allow" && rule.behavior !== "deny") return false;
+	if (rule.behavior !== "allow" && rule.behavior !== "deny" && rule.behavior !== "ask") return false;
 	return rule.specifier === undefined || typeof rule.specifier === "string";
 }
