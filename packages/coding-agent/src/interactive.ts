@@ -174,6 +174,7 @@ import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
+import { formatMissionSummary, readMissionRecord, writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import {
@@ -450,6 +451,15 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// Before the transcript is on screen, so the count the user is about to read
 	// is explained rather than contradicted.
 	if (damageNotice) console.error(`Warning: ${damageNotice}`);
+
+	// The last run's own close-out note, read from the session being continued:
+	// when and why that run ended, and what it was still holding when it did.
+	// One line, and it comes before the recovery notices below because it is
+	// the context they belong to — a session that ended cleanly knowing it had
+	// shells running is a different story from one that died mid-flight. A
+	// fresh session has no note to read and says nothing.
+	const missionSummary = formatMissionSummary(readMissionRecord(store));
+	if (missionSummary) console.error(missionSummary);
 
 	// What the previous run left behind: shells still running with nobody
 	// watching them, and shells that ended with nobody watching. Printed here
@@ -1756,6 +1766,24 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	}
 
 	await handle.waitUntilExit();
+	// ---- Close-out: the note the next run reads. Written the moment the REPL
+	// is done, while the session is still whole — the shell ledger's detach
+	// below is about to stop feeding it, and the counts have to describe the
+	// state this run actually ended in, not the state after its own teardown
+	// began dismantling it. Best effort, like the ledger writes: a note that
+	// cost the teardown would be worse than a session that closes out in
+	// silence. `store` is read through the variable, so a `/resume` earlier in
+	// the run means the note lands in the session it swapped to.
+	try {
+		writeMissionRecord(store, {
+			reason: "exit",
+			shellsRunning: backgroundShells.list().filter((shell) => shell.status === "running").length,
+			subagentsLive: subagentRegistry.list().filter((entry) => entry.state === "live").length,
+			shellsRecovered: observeRecoveredShells(recoveredShells).filter((shell) => shell.liveness !== "ended").length,
+		});
+	} catch {
+		// best effort — see above
+	}
 	// Nothing is waiting for the answer, and an in-flight request would hold the
 	// process open after the user has quit.
 	catalogAbort.abort();

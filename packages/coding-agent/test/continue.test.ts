@@ -773,3 +773,86 @@ describe("the subagents a previous run left behind", () => {
 		expect(result.stderr).not.toContain("never finished");
 	}, 30_000);
 });
+
+describe("the close-out a previous run left in the file", () => {
+	test("the note's shells are summarized on resume, before the warning that names them", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+		// A coherent pair, the way a real teardown writes them: the ledger has
+		// the shell, and the close-out says the run ended knowing about it.
+		store.appendCustom("shell_start", {
+			shellId: "shell_1",
+			pid: process.pid,
+			command: "npm run dev",
+			cwd,
+			startedAt: Date.now(),
+			outputFile: join(cwd, "dev.log"),
+		});
+		store.appendCustom("mission", { at: Date.now(), reason: "exit", shellsRunning: 1, subagentsLive: 0 });
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toContain("previous session left 1 background shell, see /ps");
+		// The summary is the context for the warning; the warning is the detail.
+		expect(result.stderr.indexOf("previous session left 1 background shell, see /ps")).toBeLessThan(
+			result.stderr.indexOf("from a previous run is still running"),
+		);
+	}, 30_000);
+
+	test("no note on file is nothing to say", async () => {
+		const { home, cwd } = fixture();
+		seed(cwd, home, "old");
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).not.toContain("previous session left");
+	}, 30_000);
+
+	test("a note that ended with nothing left is nothing to say — zero is not a count of shells", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+		store.appendCustom("mission", { at: Date.now(), reason: "exit", shellsRunning: 0, subagentsLive: 0 });
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).not.toContain("previous session left");
+		expect(result.stderr).not.toContain("0 background shells");
+	}, 30_000);
+
+	test("a normal teardown writes the close-out note, last, into the session it was using", async () => {
+		const { home, cwd } = fixture();
+		const store = seed(cwd, home, "old");
+
+		const result = await startup(home, cwd, { continueLast: true });
+
+		expect(result.exitCode).toBe(0);
+		// The run really ended normally — the note is the evidence of the ending,
+		// so it must only appear for runs that reached the end of `runInteractive`.
+		const lines = readFileSync(store.path, "utf8").trim().split("\n");
+		const entries = lines.map((line) => JSON.parse(line) as { type: string; kind?: string; data?: unknown });
+		const notes = entries.filter((entry) => entry.kind === "mission");
+		expect(notes).toHaveLength(1);
+		// Last: written at teardown, after everything the run did, and nothing
+		// the run does writes after it.
+		expect(entries[entries.length - 1]?.kind).toBe("mission");
+		const data = notes[0]?.data as {
+			at: number;
+			reason: string;
+			shellsRunning: number;
+			subagentsLive: number;
+			shellsRecovered?: number;
+		};
+		expect(data.reason).toBe("exit");
+		expect(Number.isInteger(data.at)).toBe(true);
+		expect(data.at).toBeLessThanOrEqual(Date.now());
+		// This run held no shell and ran no subagent, and never recovered one —
+		// so the counts are honest zeros, and a zero `shellsRecovered` is left
+		// out of the record rather than written as "none".
+		expect(data.shellsRunning).toBe(0);
+		expect(data.subagentsLive).toBe(0);
+		expect(data).not.toHaveProperty("shellsRecovered");
+	}, 30_000);
+});
