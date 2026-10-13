@@ -27,7 +27,7 @@
  * comes back on the next start — the question is asked again rather than the
  * answer being remembered, which is the same shape the MCP gate has.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
@@ -99,6 +99,34 @@ export function isProjectTierTrusted(cwd: string, kind: DefinitionKind, home: st
 	return loadTrustedDefinitionKinds(cwd, home).has(kind);
 }
 
+/**
+ * Write the ledger by replacement: the bytes land in a sibling file and are
+ * renamed over the target, so a process that dies mid-write leaves the previous
+ * complete ledger rather than a truncated one.
+ *
+ * The ledger is read back as the whole record of what this project may load, so
+ * a torn write does not cost one decision — it drops every tier at once, and
+ * the user is asked to approve again with nothing on screen explaining why.
+ * Throws when the write fails, leaving the caller to decide whether a decision
+ * it could not record is worth failing over; the temp file does not survive the
+ * failure either way.
+ */
+// Long-form design notes: docs/dev/crash-consistency.md
+function writeLedgerAtomic(path: string, data: Record<string, unknown>): void {
+	const tmp = `${path}.tmp`;
+	try {
+		writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+		renameSync(tmp, path);
+	} catch (error) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			// No temp file to remove (the write failed before it existed).
+		}
+		throw error;
+	}
+}
+
 /** Persist a trust decision, creating the file and its directory as needed. */
 export function approveProjectDefinitions(cwd: string, kinds: DefinitionKind[], home: string = homedir()): void {
 	const path = trustStorePath(cwd, home);
@@ -136,5 +164,5 @@ export function approveProjectDefinitions(cwd: string, kinds: DefinitionKind[], 
 	for (const kind of kinds) trusted.add(kind);
 	existing.trustedDefinitionKinds = KINDS.filter((kind) => trusted.has(kind));
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(existing, null, 2)}\n`, "utf8");
+	writeLedgerAtomic(path, existing);
 }
