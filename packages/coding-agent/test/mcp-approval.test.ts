@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AgentSession } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
-import { loadApprovedMcpServers, loadProjectMcpServerNames } from "@labunbun/mcp";
+import { loadApprovedMcpServers, loadProjectMcpServerNames, type McpConnection } from "@labunbun/mcp";
 import { createStore, DARK_THEME } from "@labunbun/tui";
 import { type AppCommandContext, handleAppCommand } from "../src/interactive.ts";
 
@@ -148,5 +148,163 @@ describe("end-to-end project-server approval gate (loadProjectMcpServerNames + l
 		writeFileSync(join(dir, ".labunbun", "settings.local.json"), JSON.stringify({ approvedMcpServers: ["evil"] }));
 
 		expect(loadApprovedMcpServers(dir, home).has("evil")).toBe(false);
+	});
+});
+
+describe("/mcp read subcommands (prompts and resources)", () => {
+	/**
+	 * A connection whose client answers the way a real server would, without a
+	 * process behind it: the reads are what these tests drive, and a stub keeps
+	 * them deterministic. The shapes are the wire's — `listPrompts` answers
+	 * `{ prompts }`, `getPrompt` echoes its arguments back, `readResource`
+	 * answers `{ contents }` with a blob entry as base64.
+	 */
+	function connected(clientOverrides: Record<string, unknown> = {}): McpConnection {
+		return {
+			serverName: "fixture",
+			client: {
+				listPrompts: async () => ({ prompts: [{ name: "greet", description: "Greets someone by name" }] }),
+				getPrompt: async (request: { arguments?: Record<string, string> }) => {
+					const args = Object.entries(request.arguments ?? {})
+						.map(([key, value]) => `${key}=${value}`)
+						.join(" ");
+					return {
+						description: "Greets someone by name",
+						messages: [
+							{ role: "user", content: { type: "text", text: `greet ${args}`.trimEnd() } },
+							{ role: "assistant", content: { type: "text", text: "hello" } },
+						],
+					};
+				},
+				listResources: async () => ({
+					resources: [{ uri: "file:///fixture/note.txt", name: "note.txt", mimeType: "text/plain" }],
+				}),
+				readResource: async ({ uri }: { uri: string }) => ({
+					contents:
+						uri === "file:///fixture/blob.bin"
+							? [{ uri, mimeType: "application/octet-stream", blob: Buffer.from("blob bytes").toString("base64") }]
+							: [{ uri, mimeType: "text/plain", text: "the note body" }],
+				}),
+				...clientOverrides,
+			} as never,
+			tools: [],
+			prompts: [{ name: "greet" }],
+			resources: [],
+		};
+	}
+
+	/** The reads are dispatched fire-and-forget; their entries land a microtask later. */
+	async function settle(): Promise<void> {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+
+	test("prompts renders each name with its description", async () => {
+		const ctx = makeCtx({ mcpConnections: [connected()] });
+		handleAppCommand("/mcp prompts fixture", ctx);
+		await settle();
+		const text = infoTexts(ctx).join("\n");
+		expect(text).toContain('Prompts on MCP server "fixture"');
+		expect(text).toContain("greet — Greets someone by name");
+	});
+
+	test("a missing or unknown server answers with the usage", () => {
+		const ctx = makeCtx({ mcpConnections: [connected()] });
+		handleAppCommand("/mcp prompts", ctx);
+		expect(infoTexts(ctx).join("\n")).toContain("Usage: /mcp prompts <server>");
+
+		handleAppCommand("/mcp prompts nope", ctx);
+		const text = infoTexts(ctx).join("\n");
+		expect(text).toContain("Usage: /mcp prompts <server>");
+		expect(text).toContain('Unknown or unconnected MCP server: "nope"');
+	});
+
+	test("prompt renders each message by role, with the arguments the user passed", async () => {
+		const ctx = makeCtx({ mcpConnections: [connected()] });
+		handleAppCommand("/mcp prompt fixture greet name=Ada", ctx);
+		await settle();
+		const text = infoTexts(ctx).join("\n");
+		expect(text).toContain('Prompt "greet" on MCP server "fixture"');
+		// The server echoed the argument; the line shows it as the message a
+		// prompt would hand the model, not a summary of one.
+		expect(text).toContain("  user: greet name=Ada");
+		expect(text).toContain("  assistant: hello");
+	});
+
+	test("a block a terminal cannot show is named, and its bytes stay out of the entry", async () => {
+		const ctx = makeCtx({
+			mcpConnections: [
+				connected({
+					getPrompt: async () => ({
+						messages: [{ role: "user", content: { type: "image", mimeType: "image/png", data: "AAAB" } }],
+					}),
+				}),
+			],
+		});
+		handleAppCommand("/mcp prompt fixture pic", ctx);
+		await settle();
+		const text = infoTexts(ctx).join("\n");
+		expect(text).toContain("  user: [image image/png]");
+		expect(text).not.toContain("AAAB");
+	});
+
+	test("a bare argument gets the key=value shape instead of being passed along", () => {
+		const ctx = makeCtx({ mcpConnections: [connected()] });
+		handleAppCommand("/mcp prompt fixture greet nope", ctx);
+		const text = infoTexts(ctx).join("\n");
+		expect(text).toContain("Usage: /mcp prompt <server> <name> [key=value ...]");
+		expect(text).toContain('got "nope"');
+	});
+
+	test("prompt and resource without their subject answer with the usage", () => {
+		const ctx = makeCtx({ mcpConnections: [connected()] });
+		handleAppCommand("/mcp prompt fixture", ctx);
+		expect(infoTexts(ctx).join("\n")).toContain("Usage: /mcp prompt <server> <name> [key=value ...]");
+		handleAppCommand("/mcp resource fixture", ctx);
+		expect(infoTexts(ctx).join("\n")).toContain("Usage: /mcp resource <server> <uri>");
+	});
+
+	test("resources renders each uri with its name and type", async () => {
+		const ctx = makeCtx({ mcpConnections: [connected()] });
+		handleAppCommand("/mcp resources fixture", ctx);
+		await settle();
+		const text = infoTexts(ctx).join("\n");
+		expect(text).toContain('Resources on MCP server "fixture"');
+		expect(text).toContain("file:///fixture/note.txt — note.txt (text/plain)");
+	});
+
+	test("resource shows text directly and names a blob by size", async () => {
+		const ctx = makeCtx({ mcpConnections: [connected()] });
+		handleAppCommand("/mcp resource fixture file:///fixture/note.txt", ctx);
+		await settle();
+		expect(infoTexts(ctx).join("\n")).toContain("the note body");
+
+		handleAppCommand("/mcp resource fixture file:///fixture/blob.bin", ctx);
+		await settle();
+		// "blob bytes" decoded is 10 bytes; the base64 itself never shows.
+		const text = infoTexts(ctx).join("\n");
+		expect(text).toContain("[binary application/octet-stream, 10 bytes]");
+		expect(text).not.toContain("YmxvYiBieXRlcw==");
+	});
+
+	test("a failed read says so rather than leaving a blank screen", async () => {
+		const ctx = makeCtx({
+			mcpConnections: [
+				connected({
+					listPrompts: async () => {
+						throw new Error("the server went away");
+					},
+				}),
+			],
+		});
+		handleAppCommand("/mcp prompts fixture", ctx);
+		await settle();
+		expect(infoTexts(ctx).join("\n")).toContain('MCP prompts/list on "fixture" failed: the server went away');
+	});
+
+	test("the server list names the read commands", () => {
+		const ctx = makeCtx({ mcpConnections: [connected()] });
+		handleAppCommand("/mcp", ctx);
+		expect(infoTexts(ctx).join("\n")).toContain("Read one's prompts or resources");
 	});
 });

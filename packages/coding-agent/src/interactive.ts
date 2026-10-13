@@ -57,14 +57,22 @@ import {
 	connectAllMcpServers,
 	connectMcpServer,
 	disconnectAllMcpServers,
+	getPrompt,
+	listPrompts,
+	listResources,
 	loadApprovedMcpServers,
 	loadMcpConfig,
 	loadProjectMcpServerNames,
 	type McpConfigError,
 	type McpConnection,
+	type McpPrompt,
+	type McpPromptBlock,
+	type McpResourceContents,
+	type McpResourceSummary,
 	type McpServerConfig,
 	parseMcpServersRecord,
 	approveMcpServer as persistMcpApproval,
+	readResource,
 } from "@labunbun/mcp";
 import {
 	type AgentTask,
@@ -89,6 +97,7 @@ import {
 	liveOutputLines,
 	mountRepl,
 	opposingEditorKey,
+	RESULT_TEXT_CAP,
 	type ReplAppHandle,
 	resolveBuiltInTheme,
 	resolveEditingMode,
@@ -848,6 +857,34 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const pendingMcpApprovals = [...projectMcpServerNames].filter(
 		(name) => settingsMcp.servers[name] === undefined && !approvedProjectMcpServers.has(name),
 	);
+	/**
+	 * A server that changed its tool list mid-session, wired to the live session.
+	 *
+	 * The tools sit in the session's registry, so a change the client can see is
+	 * only real once the session's list moves — the same rewrite `/mcp approve`
+	 * makes when it appends a newly approved server's tools. Non-MCP tools are
+	 * kept by name filter rather than rebuilt from `allTools`: the session's
+	 * array is the one place a mid-run addition lives, and rebuilding from a
+	 * startup snapshot would drop it.
+	 *
+	 * The session is read through `sessionRef` at the call, never captured:
+	 * `/resume` swaps it, and a connection outlives the swap — a rebuilt list has
+	 * to land on the conversation that is live when the notification arrives.
+	 */
+	function onMcpToolsChanged(): void {
+		const target = sessionRef;
+		if (!target) return;
+		target.setTools([
+			...target.tools.filter((tool) => !tool.name.startsWith("mcp__")),
+			...mcpConnections.flatMap((c) => c.tools),
+		]);
+		// The tool block sits above the system prompt and transcript, and a
+		// provider keys its cache on it: one changed tool discards every tier
+		// below. The server asked for the change and this wiring is what declares
+		// it — unregistered, `/cache` would name the next request a rewind bug.
+		cacheTracker.note("mcp tools changed");
+	}
+	for (const connection of mcpConnections) connection.onToolsChanged = onMcpToolsChanged;
 
 	// ---- subagents, skills, plan mode ----
 	/** The live session. Declared before the tools that read it through a getter. */
@@ -2447,7 +2484,10 @@ export function appCommandTable(): Array<[string, string]> {
 			"Sign in to a subscription: /login [claude|chatgpt|<code#state>] — the Claude flow may ask you to paste",
 		],
 		["/logout", "Sign out of a subscription: /logout [claude|chatgpt]"],
-		["/mcp", "List configured MCP servers and their tools"],
+		[
+			"/mcp",
+			"List MCP servers, approve one, or read prompts and resources: /mcp [approve <name>|prompts <server>|prompt <server> <name> [key=value ...]|resources <server>|resource <server> <uri>]",
+		],
 		["/mode", "Show or set the permission mode: /mode [mode]"],
 		["/model", "Show or switch the model: /model [provider/id]"],
 		["/permissions", "Show the active permission mode and rules"],
@@ -3066,7 +3106,7 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return true;
 		}
 		case "/mcp": {
-			const [, sub, serverName] = text.split(/\s+/);
+			const [, sub, serverName, ...rest] = text.split(/\s+/);
 			if (sub === "approve" && serverName) {
 				if (!ctx.pendingMcpApprovals.includes(serverName)) {
 					pushInfo(ctx.handle, `No pending approval for "${serverName}". See /mcp for the list.`);
@@ -3098,6 +3138,110 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				return true;
 			}
 
+			// The read-only consumer surface: what a server offers besides tools.
+			// Each read goes to the live server rather than to the connect-time
+			// snapshot, because the answer as of the command is the point of asking.
+			// Everything here renders as a transcript entry and never enters the
+			// conversation. Nothing here is gated on a second approval: the dialog
+			// already preceded the connection, and showing a prompt the server
+			// defined, or reading a resource it itself listed, is a smaller act
+			// than the `tools/call` the model may already make at any turn.
+			if (sub === "prompts") {
+				if (!serverName) {
+					pushInfo(ctx.handle, MCP_SUBCOMMAND_USAGE.prompts);
+					return true;
+				}
+				const connection = connectedMcpServer(ctx, serverName);
+				if (!connection) {
+					pushInfo(ctx.handle, mcpUnknownServer("prompts", serverName));
+					return true;
+				}
+				void (async () => {
+					try {
+						const prompts = await listPrompts(connection.client);
+						pushInfo(ctx.handle, capInfoText(formatMcpPrompts(connection.serverName, prompts)));
+					} catch (error) {
+						pushInfo(ctx.handle, mcpReadFailure("prompts/list", connection.serverName, error));
+					}
+				})();
+				return true;
+			}
+			if (sub === "prompt") {
+				const [name, ...pairs] = rest;
+				if (!serverName || !name) {
+					pushInfo(ctx.handle, MCP_SUBCOMMAND_USAGE.prompt);
+					return true;
+				}
+				const connection = connectedMcpServer(ctx, serverName);
+				if (!connection) {
+					pushInfo(ctx.handle, mcpUnknownServer("prompt", serverName));
+					return true;
+				}
+				// A bare token is a typo the server would silently drop: the wire
+				// says key=value, so anything else is answered with the shape that
+				// works rather than passed along.
+				const malformed = pairs.find((pair) => !pair.includes("="));
+				if (malformed !== undefined) {
+					pushInfo(ctx.handle, `${MCP_SUBCOMMAND_USAGE.prompt}\nArguments must be key=value (got "${malformed}").`);
+					return true;
+				}
+				const args: Record<string, string> = {};
+				for (const pair of pairs) {
+					const at = pair.indexOf("=");
+					args[pair.slice(0, at)] = pair.slice(at + 1);
+				}
+				void (async () => {
+					try {
+						const prompt = await getPrompt(connection.client, name, args);
+						pushInfo(ctx.handle, capInfoText(formatMcpPrompt(connection.serverName, name, prompt)));
+					} catch (error) {
+						pushInfo(ctx.handle, mcpReadFailure(`prompts/get "${name}"`, connection.serverName, error));
+					}
+				})();
+				return true;
+			}
+			if (sub === "resources") {
+				if (!serverName) {
+					pushInfo(ctx.handle, MCP_SUBCOMMAND_USAGE.resources);
+					return true;
+				}
+				const connection = connectedMcpServer(ctx, serverName);
+				if (!connection) {
+					pushInfo(ctx.handle, mcpUnknownServer("resources", serverName));
+					return true;
+				}
+				void (async () => {
+					try {
+						const resources = await listResources(connection.client);
+						pushInfo(ctx.handle, capInfoText(formatMcpResources(connection.serverName, resources)));
+					} catch (error) {
+						pushInfo(ctx.handle, mcpReadFailure("resources/list", connection.serverName, error));
+					}
+				})();
+				return true;
+			}
+			if (sub === "resource") {
+				const uri = rest[0];
+				if (!serverName || !uri) {
+					pushInfo(ctx.handle, MCP_SUBCOMMAND_USAGE.resource);
+					return true;
+				}
+				const connection = connectedMcpServer(ctx, serverName);
+				if (!connection) {
+					pushInfo(ctx.handle, mcpUnknownServer("resource", serverName));
+					return true;
+				}
+				void (async () => {
+					try {
+						const contents = await readResource(connection.client, uri);
+						pushInfo(ctx.handle, capInfoText(formatMcpResource(connection.serverName, uri, contents)));
+					} catch (error) {
+						pushInfo(ctx.handle, mcpReadFailure(`resources/read "${uri}"`, connection.serverName, error));
+					}
+				})();
+				return true;
+			}
+
 			if (ctx.mcpConnections.length === 0 && ctx.pendingMcpApprovals.length === 0 && ctx.mcpLoadErrors.length === 0) {
 				pushInfo(ctx.handle, "No MCP servers configured (.mcp.json, settings.json, or ~/.labunbun/.mcp.json).");
 				return true;
@@ -3116,6 +3260,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// from the list above; without these rows the list reads as complete.
 			for (const error of ctx.mcpLoadErrors) {
 				lines.push(`  ! ${error.path}: ${error.message}`);
+			}
+			if (ctx.mcpConnections.length > 0) {
+				lines.push("Read one's prompts or resources: /mcp prompts <server>, /mcp resources <server>");
 			}
 			pushInfo(ctx.handle, `MCP servers:\n${lines.join("\n")}`);
 			return true;
@@ -3769,6 +3916,109 @@ export interface BackgroundShellAccess {
 
 function pushInfo(handle: ReplAppHandle | null, text: string): void {
 	handle?.store.set((s) => ({ ...s, entries: [...s.entries, { kind: "info", text }] }));
+}
+
+/**
+ * The usage of each `/mcp` read subcommand, in one place so the line an error
+ * prints and the row `/help` carries cannot drift apart.
+ */
+const MCP_SUBCOMMAND_USAGE = {
+	prompts: "Usage: /mcp prompts <server>",
+	prompt: "Usage: /mcp prompt <server> <name> [key=value ...]",
+	resources: "Usage: /mcp resources <server>",
+	resource: "Usage: /mcp resource <server> <uri>",
+} as const;
+
+/**
+ * Cap for one `/mcp` entry, the same bound the "!" passthrough applies to what
+ * it writes: a resource read can be any size the server likes, and a transcript
+ * entry is not where all of it has to live.
+ */
+function capInfoText(text: string): string {
+	return text.length > RESULT_TEXT_CAP ? text.slice(0, RESULT_TEXT_CAP) : text;
+}
+
+/** The connection a `/mcp` read should go to: by name, and only if it opened. */
+function connectedMcpServer(ctx: AppCommandContext, serverName: string | undefined): McpConnection | undefined {
+	if (!serverName) return undefined;
+	return ctx.mcpConnections.find((connection) => connection.serverName === serverName && connection.client);
+}
+
+/** What a named-but-not-connected server gets: the usage, and the name's absence. */
+function mcpUnknownServer(sub: keyof typeof MCP_SUBCOMMAND_USAGE, serverName: string): string {
+	return (
+		`${MCP_SUBCOMMAND_USAGE[sub]}\n` +
+		`Unknown or unconnected MCP server: "${serverName}" — /mcp lists the servers this session is connected to.`
+	);
+}
+
+/**
+ * One failed `/mcp` read. A silent screen would read as a server with nothing
+ * to show, which is a claim about the server rather than about the request.
+ */
+function mcpReadFailure(request: string, serverName: string, error: unknown): string {
+	return `MCP ${request} on "${serverName}" failed: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+/** One `prompts/list` answer as the `/mcp prompts` entry. */
+function formatMcpPrompts(serverName: string, prompts: Array<{ name: string; description?: string }>): string {
+	if (prompts.length === 0) return `MCP server "${serverName}" lists no prompts.`;
+	// Name first, because it is what `/mcp prompt <server> <name>` addresses.
+	const lines = prompts.map((prompt) => `  ${prompt.name}${prompt.description ? ` — ${prompt.description}` : ""}`);
+	return `Prompts on MCP server "${serverName}":\n${lines.join("\n")}`;
+}
+
+/** One block of a prompt message, flattened to what a terminal can show. */
+function renderMcpPromptBlock(block: McpPromptBlock): string {
+	switch (block.type) {
+		case "text":
+			return block.text ?? "";
+		case "image":
+		case "audio":
+			// Named and counted rather than mangled: the bytes behind it are base64
+			// that would fill the entry and say nothing.
+			return `[${block.type} ${block.mimeType ?? "unknown type"}]`;
+		case "resource":
+		case "resource_link":
+			return `[${block.type} ${block.uri ?? "unknown uri"}]`;
+		default:
+			return `[${block.type}]`;
+	}
+}
+
+/** One `prompts/get` answer as the `/mcp prompt` entry. */
+function formatMcpPrompt(serverName: string, name: string, prompt: McpPrompt): string {
+	// The messages are what the server would hand the model, shown as they would
+	// be read — role by role, in the server's own order.
+	const header = `Prompt "${name}" on MCP server "${serverName}"${prompt.description ? ` — ${prompt.description}` : ""}:`;
+	if (prompt.messages.length === 0) return `${header}\n  (no messages)`;
+	const lines = prompt.messages.map(
+		(message) => `  ${message.role}: ${message.content.map(renderMcpPromptBlock).join(" ")}`,
+	);
+	return [header, ...lines].join("\n");
+}
+
+/** One `resources/list` answer as the `/mcp resources` entry. */
+function formatMcpResources(serverName: string, resources: McpResourceSummary[]): string {
+	if (resources.length === 0) return `MCP server "${serverName}" lists no resources.`;
+	// The uri comes first: it is what `/mcp resource <server> <uri>` addresses.
+	const lines = resources.map(
+		(resource) =>
+			`  ${resource.uri}${resource.name ? ` — ${resource.name}` : ""}${resource.mimeType ? ` (${resource.mimeType})` : ""}`,
+	);
+	return `Resources on MCP server "${serverName}":\n${lines.join("\n")}`;
+}
+
+/** One `resources/read` answer as the `/mcp resource` entry. */
+function formatMcpResource(serverName: string, uri: string, contents: McpResourceContents[]): string {
+	if (contents.length === 0) return `MCP resource "${uri}" on "${serverName}" answered no contents.`;
+	const parts = contents.map((entry) => {
+		if (entry.text !== undefined) return entry.text;
+		// A blob is bytes a terminal cannot show; its size is the honest part.
+		const bytes = Buffer.from(entry.blob ?? "", "base64").length;
+		return `[binary ${entry.mimeType ?? "unknown type"}, ${bytes} bytes]`;
+	});
+	return `Resource "${uri}" on MCP server "${serverName}":\n${parts.join("\n")}`;
 }
 
 /**

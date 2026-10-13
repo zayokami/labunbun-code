@@ -481,6 +481,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		);
 	}
 	const mcpConnections = await connectAllMcpServers(runnableMcpServers);
+	// No `onToolsChanged` is attached on purpose: a `-p` run is one shot and ends
+	// before a tool-list change could reach anyone, so there is no live session
+	// to move a new list into. A server that announces a change mid-run still
+	// refreshes its own connection snapshot; this process has nothing to do with
+	// it. The REPL, which outlives its servers' changes, wires the callback
+	// (see runInteractive).
 	for (const connection of mcpConnections) {
 		if (connection.error) console.error(`Warning: MCP server ${connection.serverName}: ${connection.error}`);
 	}
