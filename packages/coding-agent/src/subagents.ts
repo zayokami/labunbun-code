@@ -28,6 +28,7 @@ import { textContent } from "@labunbun/ai";
 import { z } from "zod";
 import { type CompactionTuning, createCompactionWiring } from "./compaction-wiring.ts";
 import type { UsageSeat } from "./cost-tracker.ts";
+import type { RoleName } from "./model-roles.ts";
 import { isProjectTierTrusted } from "./project-trust.ts";
 import { subagentSourceLabel } from "./subagent-commands.ts";
 import { SUBAGENT_END_KIND, SUBAGENT_START_KIND } from "./subagent-ledger.ts";
@@ -230,6 +231,23 @@ export interface TaskToolContext {
 	 */
 	onUsage?: (provider: string, modelId: string, usage: Usage, seat: UsageSeat) => void;
 	/**
+	 * Is the seat this run answers on already over its ceiling? A refusal
+	 * sentence when it is, `null` when the run may spend.
+	 *
+	 * The host answers from its own accounting, because only it has it: a
+	 * subagent books its turns through `onUsage` and nothing ever hands the
+	 * total back, the way the session loop's own `AgentDeps.checkBudget` reads
+	 * the host's ledger before every request of its own. Asked at all three
+	 * doors into a subagent run: a fresh spawn (before a request can be paid
+	 * for), a finished handle continued by SendMessage, and — after the
+	 * booking of a live run's turn — the crossing that happened mid-run, which
+	 * aborts that subagent and nothing else. Read at the call, like every
+	 * other reader here: the number moves between one door and the next.
+	 * Absent (an embedder, a test), no door is gated, which is what every host
+	 * did before the hook existed.
+	 */
+	budgetGate?: (role: RoleName) => string | null;
+	/**
 	 * Where the host wants lifecycles recorded, when it wants to see them.
 	 *
 	 * Injected rather than returned so a caller with nothing to observe — a
@@ -366,6 +384,19 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 				// transcript is not kept, so no later reader could cost it.
 				const seat = seats.get(handle);
 				if (seat) ctx.onUsage?.(event.message.provider, event.message.model, event.message.usage, seat);
+				// The running gate, after the booking above, which is what makes it
+				// see the crossing: the spend that just landed may be the one that
+				// took the seat over its ceiling. The abort ends this subagent's run
+				// — the handle's own session, what `/subagents stop` sends — not the
+				// parent's, and the sentence is said out loud because the ending
+				// that reaches the parent otherwise reads only "aborted".
+				if (seat?.role) {
+					const refusal = ctx.budgetGate?.(seat.role);
+					if (refusal) {
+						ctx.report?.(refusal);
+						handle.session.abort();
+					}
+				}
 			}
 		});
 		const onAbort = () => handle.session.abort();
@@ -498,6 +529,19 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 		// spent it, and the role names the seat only when the seat answered — a
 		// definition's own model and the parent's are not role seats.
 		const seat: UsageSeat = { kind: "subagent", role: !resolved && light ? "light" : undefined };
+		// The spending gate, before the run exists: a seat already over its
+		// ceiling must not send anything, and the refusal is a tool result
+		// because the model that ordered the work is the reader who has to do
+		// something else (a smaller task, or a budget it asks the user to raise).
+		if (seat.role) {
+			const refusal = ctx.budgetGate?.(seat.role);
+			if (refusal) {
+				return {
+					content: [textContent(`${refusal}\n\nNo subagent was started.`)],
+					isError: true,
+				};
+			}
+		}
 
 		/** What the subagent did to its own context; lives on its handle so
 		 *  continuations can record what each run added. */
@@ -715,6 +759,21 @@ export function createSubagentTools(ctx: TaskToolContext): [AnyTool, AnyTool, An
 					],
 					details: { sidechainId: input.sidechain_id, queued: true },
 				};
+			}
+
+			// The third door into a subagent run: a finished handle continued by
+			// this call. The spawn gate never saw it and the running gate can only
+			// fire after a turn has already been paid for, so a seat over its
+			// ceiling is refused here, before this continuation sends anything.
+			const seat = seats.get(handle);
+			if (seat?.role) {
+				const refusal = ctx.budgetGate?.(seat.role);
+				if (refusal) {
+					return {
+						content: [textContent(`${refusal}\n\nThe subagent was not continued.`)],
+						isError: true,
+					};
+				}
 			}
 
 			// The axes are read again, not remembered: a mode or a plan entered

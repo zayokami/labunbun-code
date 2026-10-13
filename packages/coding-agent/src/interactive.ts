@@ -176,7 +176,15 @@ import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { formatMissionSummary, readMissionRecord, writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
-import { createModelChainResolver, resolveRoles, roleCeilings, roleOrder } from "./model-roles.ts";
+import {
+	budgetVerdict,
+	createModelChainResolver,
+	modelRefKey,
+	resolveRoles,
+	roleCeilings,
+	roleOrder,
+	seatsByRef,
+} from "./model-roles.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import {
 	readPolicySnapshot,
@@ -660,6 +668,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		.map((ref) => resolveModel(ref))
 		.filter((m): m is NonNullable<typeof m> => Boolean(m));
 	const mainSeat = resolvedRoles.main.model ?? model;
+	// Which seat owns which model ref, and the ceiling it carries — the lookup
+	// the budget gate runs on every request (see the session deps below). Built
+	// here from the same resolution as the orders, because the two are one
+	// decision: the seat a model belongs to is what decides both where its
+	// fallbacks descend from and whose budget it spends.
+	const seatTable = seatsByRef(resolvedRoles);
 	const roleOrders = [
 		roleOrder(mainSeat, resolvedRoles.main.fallback, globalFallbacks),
 		...(resolvedRoles.plan.model
@@ -901,6 +915,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			costTracker.recordUsage(provider, modelId, usage, 0, seat);
 			costTracker.persist();
 		},
+		// The light seat's spending gate, read at every door into a subagent
+		// run. The spend is the share this seat itself booked —
+		// `roleCostUSD.light`, the only share attributable to a seat — against
+		// the ceiling the user set on `roles.light`; a seat with none answers
+		// `null` for every call, which is the pre-budget behaviour.
+		budgetGate: (role) => {
+			const verdict = budgetVerdict(costTracker.sessionState.roleCostUSD[role] ?? 0, {
+				role,
+				budgetUSD: resolvedRoles[role].budgetUSD,
+			});
+			return verdict.action === "blocked" ? verdict.message : null;
+		},
 		registry: subagentRegistry,
 		// The subagent's asks join the session's own dialog — one queue for every
 		// level. Read through the holder, not captured: the tools are built before
@@ -1090,6 +1116,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// and subagents. What is left here is what only the interactive app has:
 		// the PreCompact hook, whose veto it reports, and the transcript.
 		checkCompaction: compactionWiring.checkCompaction,
+		// The spending ceiling, asked before every request of this seat's own
+		// loop: the model about to answer names the seat (a model no seat owns
+		// is never gated), and the spend is the session's cumulative total at
+		// that moment — the conversation in front of the user, subagents
+		// included, since their money is booked into the same total. Read
+		// through the tracker rather than captured: `/resume` reseeds it and
+		// every turn moves it, and `/model` moves which seat is answering.
+		checkBudget: ({ model: answering }) => {
+			const seat = seatTable.get(modelRefKey(answering));
+			if (!seat) return { action: "ok" };
+			return budgetVerdict(costTracker.sessionState.totalCostUSD, seat);
+		},
 		hooks: {
 			composeUserMessage: (text) => {
 				// Hook-contributed context drains on the message it belongs to, at the

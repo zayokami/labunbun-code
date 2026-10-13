@@ -47,7 +47,14 @@ import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
-import { createModelChainResolver, resolveRoles, roleOrder } from "./model-roles.ts";
+import {
+	budgetVerdict,
+	createModelChainResolver,
+	modelRefKey,
+	resolveRoles,
+	roleOrder,
+	seatsByRef,
+} from "./model-roles.ts";
 import { withheldDefinitionNotice } from "./project-trust.ts";
 import {
 	damagedSessionNotice,
@@ -402,6 +409,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		.map((ref) => resolveModel(ref))
 		.filter((m): m is NonNullable<typeof m> => Boolean(m));
 	const mainSeat = resolvedRoles.main.model ?? model;
+	// Which seat owns which model ref, and the ceiling it carries — the lookup
+	// the budget gate runs on every request, from the same resolution as the
+	// orders because the seat a model belongs to decides both.
+	const seatTable = seatsByRef(resolvedRoles);
 	const roleOrders = [
 		roleOrder(mainSeat, resolvedRoles.main.fallback, globalFallbacks),
 		...(resolvedRoles.compaction.model
@@ -514,6 +525,18 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// The subagent's own usage, into the accumulator above; the JSON result
 		// reports the part beside the bill it is included in.
 		onUsage: (provider, modelId, usage, seat) => subagentUsage.recordUsage(provider, modelId, usage, 0, seat),
+		// The light seat's spending gate, read at every door into a subagent
+		// run. The spend is the share this seat itself booked —
+		// `roleCostUSD.light` on the accumulator's session view — against the
+		// ceiling the user set on `roles.light`; a seat with none answers
+		// `null` for every call.
+		budgetGate: (role) => {
+			const verdict = budgetVerdict(subagentUsage.sessionState.roleCostUSD[role] ?? 0, {
+				role,
+				budgetUSD: resolvedRoles[role].budgetUSD,
+			});
+			return verdict.action === "blocked" ? verdict.message : null;
+		},
 	});
 	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
 	const allTools = [...tools, ...mcpTools, ...subagentTools];
@@ -548,7 +571,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const ledger = createToolLedger({ store: () => store, readFile: readFileOrNull });
 	const hookDeps = sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd });
 
-	const session = new AgentSession({
+	// Annotated because `checkBudget` below reads this very session's messages:
+	// without the annotation the type would be inferred from its own initializer.
+	const session: AgentSession = new AgentSession({
 		model,
 		systemPrompt: buildSystemPrompt(allTools, {
 			cwd,
@@ -571,6 +596,19 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			// same seam in both modes.
 			thinkingLevel: () => settings.thinkingLevel,
 			checkCompaction: compactionWiring.checkCompaction,
+			// The spending ceiling, asked before every request of this run's own
+			// loop. The model about to answer names the seat (a model no seat
+			// owns is never gated), and the spend is the run's cumulative total
+			// at that moment: the transcript, re-costed from its own usage
+			// records — which is what makes a resumed conversation count what it
+			// already spent — plus the subagent accumulator, whose bookings never
+			// enter the transcript. The same sum the JSON result reports.
+			checkBudget: ({ model: answering }) => {
+				const seat = seatTable.get(modelRefKey(answering));
+				if (!seat) return { action: "ok" };
+				const spent = costStateFromMessages(session.messages).totalCostUSD + subagentUsage.state.totalCostUSD;
+				return budgetVerdict(spent, seat);
+			},
 			spillOutput: (request) => writeToolOutput(request, { cwd, sessionId }),
 			// Headless has no interactive dialog, so an unresolved "ask" fails
 			// closed rather than hanging: there is nobody to ask, and waiting

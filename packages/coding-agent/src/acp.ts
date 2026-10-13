@@ -74,10 +74,18 @@ import * as acp from "@zed-industries/agent-client-protocol";
 import { createChatGptCredentials } from "./chatgpt-auth.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
 import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
+import { costStateFromMessages } from "./cost-tracker.ts";
 import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
-import { createModelChainResolver, resolveRoles, roleOrder } from "./model-roles.ts";
+import {
+	budgetVerdict,
+	createModelChainResolver,
+	modelRefKey,
+	resolveRoles,
+	roleOrder,
+	seatsByRef,
+} from "./model-roles.ts";
 import { damagedSessionNotice, findSession, listSessions, loadSessionForResume } from "./session-resume.ts";
 import {
 	applyCatalogSettings,
@@ -962,6 +970,10 @@ class AcpAgent implements acp.Agent {
 			.map((ref) => resolveModel(ref))
 			.filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
 		const mainSeat = resolvedRoles.main.model ?? model;
+		// Which seat owns which model ref, and the ceiling it carries — the
+		// lookup the budget gate runs on every request, from the same resolution
+		// as the orders because the seat a model belongs to decides both.
+		const seatTable = seatsByRef(resolvedRoles);
 		const roleOrders = [
 			roleOrder(mainSeat, resolvedRoles.main.fallback, globalFallbacks),
 			...(resolvedRoles.compaction.model
@@ -1000,7 +1012,9 @@ class AcpAgent implements acp.Agent {
 			readOnlyToolNames: collectReadOnlyToolNames(tools),
 			announced: [],
 		};
-		const session = new AgentSession({
+		// Annotated because `checkBudget` below reads this very session's
+		// messages: without it the type would be inferred from its own initializer.
+		const session: AgentSession = new AgentSession({
 			model,
 			systemPrompt: buildSystemPrompt(tools, {
 				cwd,
@@ -1020,6 +1034,19 @@ class AcpAgent implements acp.Agent {
 				streamFn,
 				thinkingLevel: () => settings.thinkingLevel,
 				checkCompaction: compactionWiring.checkCompaction,
+				// The spending ceiling, asked before every request: the model
+				// about to answer names the seat (a model no seat owns is never
+				// gated), and the spend is this conversation's cumulative total
+				// at that moment, re-costed from the transcript's own usage
+				// records — an editor session has no ledger of its own, and its
+				// messages are the record every host's JSON result is costed
+				// from. A resumed conversation counts what it already spent,
+				// because the costed messages are the ones it was resumed with.
+				checkBudget: ({ model: answering }) => {
+					const seat = seatTable.get(modelRefKey(answering));
+					if (!seat) return { action: "ok" };
+					return budgetVerdict(costStateFromMessages(session.messages).totalCostUSD, seat);
+				},
 				spillOutput: (request) => writeToolOutput(request, { cwd, sessionId, home }),
 				// The difference from headless, and the point of this batch: an
 				// unresolved "ask" becomes a question with four answers instead of a
