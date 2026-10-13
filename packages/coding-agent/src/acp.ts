@@ -11,24 +11,22 @@
  * ## What this implements
  *
  * The mandatory half of the agent side: `initialize`, `session/new`,
- * `session/prompt`, `session/cancel`, `authenticate` — plus `session/set_mode`,
- * small enough to keep `session/new`'s `modes` from advertising ids nothing can
- * set — and the `session/update` notifications that carry a turn's progress.
- * Sessions are `AgentSession`s: the same loop, tools, settings, permission
- * engine and hooks a `-p` run and the REPL use, assembled through the same
- * helpers `headless.ts` calls, so a turn cannot behave one way under `-p` and
- * another way under an editor.
+ * `session/load`, `session/prompt`, `session/cancel`, `authenticate` — plus
+ * `session/set_mode`, small enough to keep `session/new`'s `modes` from
+ * advertising ids nothing can set — and the `session/update` notifications that
+ * carry a turn's progress and, for a loaded session, its whole stored history
+ * before the load response is answered. Sessions are `AgentSession`s: the same
+ * loop, tools, settings, permission engine and hooks a `-p` run and the REPL
+ * use, assembled through the same helpers `headless.ts` calls, so a turn cannot
+ * behave one way under `-p` and another way under an editor.
  *
  * ## What this does not implement (second batch)
  *
- *   - `session/load` and history replay. `loadSession: false` is advertised, so
- *     a client that understands ACP will not call it — and the method is left
- *     unimplemented rather than answering with a lie.
  *   - `fs/read_text_file` and `fs/write_text_file`. The client's filesystem is
  *     unreachable from here; the local tools are used instead.
  *   - `terminal/*`. Commands run through the session's own Bash tool.
- *   - `mcpServers` from `session/new`. The servers the user configured are not
- *     connected either; the tools are the local set.
+ *   - `mcpServers` from `session/new` and `session/load`. The servers the user
+ *     configured are not connected either; the tools are the local set.
  *   - `authMethods` and a real `authenticate` (see that method below).
  *   - `available_commands_update`, and with it the expansion of a prompt that
  *     names a skill: the editor's command surface is a second batch, and a
@@ -80,6 +78,7 @@ import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks
 import { loadMemoryFiles } from "./memory.ts";
 import { noToolCallingNotice } from "./model-offer.ts";
 import { createModelChainResolver, resolveRoles, roleOrder } from "./model-roles.ts";
+import { damagedSessionNotice, findSession, listSessions, loadSessionForResume } from "./session-resume.ts";
 import {
 	applyCatalogSettings,
 	applySettingsEnv,
@@ -532,6 +531,18 @@ interface LiveSession {
 	running: boolean;
 }
 
+/**
+ * The open store `loadSession` is resuming, on its way into the new session.
+ *
+ * `messages` is the repaired, model-facing transcript (`loadSessionForResume`'s
+ * output), which seeds the session; the store travels beside it so the replay
+ * and every turn that follows read and write the same open file.
+ */
+interface ResumedSession {
+	store: SessionStore;
+	messages: AgentMessage[];
+}
+
 class AcpAgent implements acp.Agent {
 	#conn: acp.AgentSideConnection | undefined;
 	readonly #options: AcpOptions;
@@ -562,9 +573,10 @@ class AcpAgent implements acp.Agent {
 		return {
 			protocolVersion: acp.PROTOCOL_VERSION,
 			agentCapabilities: {
-				// No `session/load` (see the file header), and no prompt capabilities:
-				// image, audio and embedded-context blocks are not interpreted.
-				loadSession: false,
+				// `session/load` is implemented (the method below replays the stored
+				// history), and no prompt capabilities: image, audio and
+				// embedded-context blocks are not interpreted.
+				loadSession: true,
 				promptCapabilities: {},
 			},
 		};
@@ -589,6 +601,45 @@ class AcpAgent implements acp.Agent {
 		const live = await this.#createSession(cwd);
 		this.#sessions.set(live.sessionId, live);
 		return { sessionId: live.sessionId, modes: sessionModesFor(live.session.permissionMode) };
+	}
+
+	async loadSession(params: acp.LoadSessionRequest): Promise<acp.LoadSessionResponse> {
+		const cwd = params.cwd.trim() === "" ? process.cwd() : resolve(params.cwd);
+		// `mcpServers` is ignored, exactly as `session/new` ignores it (see the
+		// file header): the servers are not connected, and the tools are the local
+		// set.
+		const home = this.#options.home ?? homedir();
+		// The lookup `--resume` uses, from the same functions: an exact id first,
+		// then a token that names one — so a client carrying the id from
+		// `session/new`, and a person who typed the short tail, both land in the
+		// session they meant.
+		const match = findSession(listSessions(cwd, home), params.sessionId);
+		if (!match) throw acp.RequestError.invalidParams({ message: `unknown session ${params.sessionId}` });
+		const loaded = loadSessionForResume(match.path);
+		if (!loaded) throw acp.RequestError.invalidParams({ message: `unknown session ${params.sessionId}` });
+		// The same disclosure the terminal resume prints, on stderr because stdout
+		// is frames only: a resumed conversation that is shorter than it was must
+		// not be presented as whole.
+		const damage = damagedSessionNotice(loaded.store, loaded.removed);
+		if (damage) process.stderr.write(`Warning: ${damage}\n`);
+
+		const live = await this.#createSession(cwd, loaded);
+		// The whole history, one frame per message piece, in file order — awaited
+		// one at a time so every replay frame is on the wire before the load
+		// response tells the client the session is ready. That ordering is the
+		// protocol's contract for this method, not a nicety: a client that draws
+		// the session when the response arrives must already have the frames.
+		for (const update of replayUpdatesForMessages(loaded.store.messages())) {
+			await this.#update(live.sessionId, update);
+		}
+		// Registered only now, after the replay: `session/prompt` and
+		// `session/cancel` resolve sessions through this map, and a request that
+		// raced the replay must not find a session whose history is still
+		// arriving.
+		this.#sessions.set(live.sessionId, live);
+		// No `models` in the response: it is UNSTABLE in the protocol, the same
+		// reason `session/set_model` is not implemented (see the file header).
+		return { modes: sessionModesFor(live.session.permissionMode) };
 	}
 
 	async setSessionMode(params: acp.SetSessionModeRequest): Promise<acp.SetSessionModeResponse> {
@@ -780,7 +831,7 @@ class AcpAgent implements acp.Agent {
 	// to cover both would be a second, worse definition of "a session".
 	// -----------------------------------------------------------------------
 
-	async #createSession(cwd: string): Promise<LiveSession> {
+	async #createSession(cwd: string, resumed?: ResumedSession): Promise<LiveSession> {
 		const options = this.#options;
 		const home = options.home ?? homedir();
 
@@ -851,7 +902,12 @@ class AcpAgent implements acp.Agent {
 			home,
 			writableRoots: settings.permissions.additionalDirectories,
 		});
-		const store = SessionStore.startNew(cwd, home);
+		// A resumed session hands in the store its file was loaded into, and every
+		// turn after the replay appends through that same store. Opening the file
+		// a second time here would leave two ledgers over one path — the replay
+		// read from one, the new turns written by the other — which is why the
+		// parameter exists rather than a path.
+		const store = resumed?.store ?? SessionStore.startNew(cwd, home);
 		const sessionId = store.sessionId;
 		if (!sessionId) throw acp.RequestError.internalError({ message: "the session store produced no id" });
 		pruneToolOutput(cwd);
@@ -972,6 +1028,10 @@ class AcpAgent implements acp.Agent {
 				hooks: sessionHookDeps({ runtime: hooksRuntime, context: hookContext, cwd }),
 			},
 		});
+		// The transcript a resume handed back, into the session that will carry
+		// it — the same seeding `headless.ts` does for `--resume`. A session that
+		// was just started has none.
+		if (resumed) session.messages.push(...resumed.messages);
 		const live: LiveSession = {
 			session,
 			sessionId,

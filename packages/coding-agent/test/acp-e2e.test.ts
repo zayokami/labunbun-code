@@ -306,9 +306,10 @@ describe("the ACP server, end to end", () => {
 			});
 			expect(init.result?.protocolVersion).toBe(1);
 			// The capability object is a claim about behaviour, so it is asserted
-			// whole: no `loadSession`, and no prompt capability this agent does not
-			// have — an empty object, not a missing field.
-			expect(init.result?.agentCapabilities).toEqual({ loadSession: false, promptCapabilities: {} });
+			// whole: `session/load` is implemented (the load tests below call it),
+			// and no prompt capability this agent does not have — an empty object,
+			// not a missing field.
+			expect(init.result?.agentCapabilities).toEqual({ loadSession: true, promptCapabilities: {} });
 
 			// No auth methods are advertised, and the client asks anyway: the answer
 			// is an empty success rather than an error nobody can act on.
