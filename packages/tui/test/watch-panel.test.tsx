@@ -126,6 +126,8 @@ describe("the panel", () => {
 	test("an empty list says so instead of drawing an empty frame", () => {
 		const view = render(<WatchPanel shells={[]} />);
 		expect(view.lastFrame()).toContain("No background shells.");
+		// No list, no marker: the gutter exists to point at a row, and there is none.
+		expect(view.lastFrame()).not.toContain("▶");
 		view.unmount();
 	});
 
@@ -134,11 +136,12 @@ describe("the panel", () => {
 	test("one header per shell, naming it and saying whether it is still going", () => {
 		const view = render(<WatchPanel shells={[shell("shell_1"), shell("shell_2", { status: "completed" })]} />);
 		const frame = view.lastFrame() ?? "";
-		expect(frame).toContain("shell_1");
-		expect(frame).toContain("run shell_1");
-		expect(frame).toContain("running");
-		expect(frame).toContain("shell_2");
-		expect(frame).toContain("completed");
+		// Exact rows including the gutter: shell_1 is the last running shell, the
+		// one the tail follows, so its row opens on the marker; shell_2's does not.
+		// Loose substrings would pass on headers with no gutter at all and would
+		// not pin which row carries the marker.
+		expect(frame).toContain("▶ shell_1  run shell_1  running");
+		expect(frame).toContain("  shell_2  run shell_2  completed");
 		view.unmount();
 	});
 
@@ -164,13 +167,55 @@ describe("the panel", () => {
 		view.unmount();
 	});
 
+	// The marker answers the question the headers alone cannot: with several
+	// shells they all look alike, so the row whose tail is below must be nameable.
+	// Two markers would be a lie about which tail it is, and none is the gap the
+	// marker exists to close.
+	test("marks the running shell's header — and that shell is the one whose tail is drawn", () => {
+		const view = render(
+			<WatchPanel
+				shells={[
+					shell("shell_1", { status: "completed", tail: ["from the old one"] }),
+					shell("shell_2", { tail: ["from the new one"] }),
+				]}
+			/>,
+		);
+		const marked = rows(view).filter((row) => row.includes("▶"));
+		expect(marked).toHaveLength(1);
+		expect(marked[0]).toContain("shell_2");
+		// The marked row is a header, not a tail row: the id it names is the one
+		// with the drawable gutter, and the tail text that appears is that shell's.
+		expect(marked[0]).not.toContain("shell_1");
+		const frame = view.lastFrame() ?? "";
+		expect(frame).toContain("from the new one");
+		expect(frame).not.toContain("from the old one");
+		view.unmount();
+	});
+
+	test("with every shell ended, the marker is on the last one — the fallback the tail follows", () => {
+		const view = render(
+			<WatchPanel shells={[shell("shell_1", { status: "completed" }), shell("shell_2", { status: "killed" })]} />,
+		);
+		const marked = rows(view).filter((row) => row.includes("▶"));
+		expect(marked).toHaveLength(1);
+		expect(marked[0]).toContain("shell_2");
+		view.unmount();
+	});
+
+	test("a lone shell is marked, because it is the one being read", () => {
+		const view = render(<WatchPanel shells={[shell("shell_1")]} />);
+		expect(view.lastFrame()).toContain("▶ shell_1");
+		view.unmount();
+	});
+
 	test("elides a command that will not fit, keeping the id and the status word", () => {
 		const command = "npm run dev -- --host 0.0.0.0 --port 5173 --strictPort --force --logLevel info --debug";
 		const view = render(<WatchPanel shells={[shell("shell_1", { command })]} />);
 		const frame = view.lastFrame() ?? "";
 		expect(frame).not.toContain("--logLevel info");
 		expect(frame).toContain("…");
-		expect(frame).toContain("shell_1");
+		// The gutter and the two load-bearing columns survive the elision.
+		expect(frame).toContain("▶ shell_1");
 		expect(frame).toContain("running");
 		view.unmount();
 	});

@@ -28,7 +28,13 @@
  * **It renders what it was handed.** Which shell the tail belongs to is
  * {@link selectWatchShell}; nothing here reads a file, spawns a timer or reaches
  * the shell manager — that is the app layer's half, and it is why this file has
- * no import from `@labunbun/tools`.
+ * no import from `@labunbun/tools`. That shell is marked, not chosen: its header
+ * row opens on a `▶` gutter (every other row carries two blank columns there, so
+ * the headers stay aligned) and it is the only row so marked, which is what tells
+ * a reader whose tail the rows below belong to. The selection itself is
+ * unchanged — the last running shell, else the last — and picking a shell by key
+ * is still not built: no key was ever decided for it, and the panel must keep
+ * taking no keys.
  */
 import { Box, Text, useWindowSize } from "ink";
 import { useTheme } from "../theme.ts";
@@ -85,10 +91,10 @@ const POLL_NOTE = "as of last poll (2s)";
 /**
  * The panel. Handed the published rows and nothing else.
  *
- * Layout, top to bottom: the poll note, one header per shell, then the tail of
- * the selected shell. The note is never what gets cut, the headers are cut to
- * whole rows, and the tail takes what is left — down to nothing on a terminal
- * with no room to spare.
+ * Layout, top to bottom: the poll note, one header per shell with the selected
+ * shell's row opening on a `▶` gutter, then the tail of that same shell. The
+ * note is never what gets cut, the headers are cut to whole rows, and the tail
+ * takes what is left — down to nothing on a terminal with no room to spare.
  */
 export function WatchPanel({ shells }: { shells: UiBackgroundShell[] }) {
 	const theme = useTheme();
@@ -119,7 +125,10 @@ export function WatchPanel({ shells }: { shells: UiBackgroundShell[] }) {
 					// Keyed by the shell id: two shells cannot share one, and a shell that
 					// ends leaves the list entirely rather than changing into another.
 					<Text key={shell.id} wrap="truncate">
-						{shellHeader(shell, width)}
+						{/* The marker and the tail compare against the one `selected` this
+						render already computed, so they cannot disagree about which shell
+						is being read. */}
+						{shellHeader(shell, width, shell === selected)}
 					</Text>
 				))
 			)}
@@ -137,15 +146,26 @@ export function WatchPanel({ shells }: { shells: UiBackgroundShell[] }) {
 	);
 }
 
+/** The gutter on the header of the shell whose tail is on screen. */
+const SELECTED_GUTTER = "▶ ";
+/** The gutter on every other header: two columns, so the rows stay aligned. */
+const PLAIN_GUTTER = "  ";
+
 /**
  * One shell's header row: who, what, and whether it is still going.
+ *
+ * The row opens on a two-column gutter — `▶ ` for the selected shell, two
+ * spaces for the others — which is what tells a reader whose tail the rows
+ * below belong to. The gutter is folded into the width budget (it rides in
+ * {@link before}), so it costs the command exactly two columns of room and the
+ * elision is otherwise untouched.
  *
  * The command is the only part that may be elided. The id and the status word
  * are what the row is for — a wide command that pushed "running" off the edge
  * would be a row that answers neither of the two questions a watcher has.
  */
-function shellHeader(shell: UiBackgroundShell, width: number): string {
-	const before = `${shell.id}  `;
+function shellHeader(shell: UiBackgroundShell, width: number, selected: boolean): string {
+	const before = `${selected ? SELECTED_GUTTER : PLAIN_GUTTER}${shell.id}  `;
 	const after = `  ${shell.status}`;
 	const room = Math.max(0, width - before.length - after.length);
 	return `${before}${elide(shell.command, room)}${after}`;
