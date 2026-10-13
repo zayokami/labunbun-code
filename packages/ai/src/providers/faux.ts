@@ -6,7 +6,15 @@
  */
 
 import { MessageBuilder } from "../message-builder.ts";
-import type { AssistantMessageEvent, Context, Model, StopReason, StreamFn, ToolCall } from "../types.ts";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	Model,
+	StopReason,
+	StreamFn,
+	ToolCall,
+} from "../types.ts";
 
 export const FAUX_MODEL: Model = {
 	id: "faux-1",
@@ -44,8 +52,9 @@ export interface FauxStep {
 	stopReason?: Exclude<StopReason, "pending">;
 	/** Error message when stopReason is "error"/"aborted", or a refusal's explanation. */
 	errorMessage?: string;
-	/** Classification for a scripted error, e.g. "context_overflow". */
-	errorKind?: "context_overflow";
+	/** Classification for a scripted error, e.g. "context_overflow". The union
+	 * is the message's own field, so the double cannot drift from it. */
+	errorKind?: AssistantMessage["errorKind"];
 	usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
 	/** Thrown (not emitted) when the model call receives a mismatching context. */
 	assertContext?: (context: Context, callIndex: number) => void;

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { withModelFallback } from "../src/fallback.ts";
 import { MessageBuilder } from "../src/message-builder.ts";
 import { FAUX_MODEL } from "../src/providers/faux.ts";
-import type { AssistantMessageEvent, Model, StreamFn } from "../src/types.ts";
+import type { AssistantMessage, AssistantMessageEvent, Model, StreamFn } from "../src/types.ts";
 import { userMessage } from "../src/types.ts";
 
 const FALLBACK_MODEL: Model = {
@@ -17,13 +17,16 @@ async function collect(events: AsyncIterable<AssistantMessageEvent>) {
 	return out;
 }
 
-function scriptedStreamFn(behavior: (model: Model) => "ok" | "error" | "throw-after-content"): StreamFn {
+function scriptedStreamFn(
+	behavior: (model: Model) => "ok" | "error" | "throw-after-content",
+	errorKind?: AssistantMessage["errorKind"],
+): StreamFn {
 	return async function* (model, _context, _options) {
 		const builder = new MessageBuilder(model.provider, model.id);
 		yield builder.start();
 		const behaviorKind = behavior(model);
 		if (behaviorKind === "error") {
-			yield builder.error(`${model.id} unavailable`);
+			yield builder.error(`${model.id} unavailable`, errorKind ? { errorKind } : {});
 			return;
 		}
 		yield builder.textStart(0);
@@ -89,6 +92,44 @@ describe("withModelFallback", () => {
 		const terminal = events.at(-1);
 		expect(terminal?.type).toBe("error");
 		expect((terminal as any).message.errorKind).toBe("context_overflow");
+	});
+
+	// The safe half of the same policy: kinds whose remedy is another model.
+	// A rate limit, an overload or a refused credential is a fact about this
+	// model, not about the request, and the next model — or the next
+	// provider's key — may answer where this one will not.
+	for (const kind of ["rate_limit", "overload", "auth"] as const) {
+		test(`a ${kind} failure walks to the next model`, async () => {
+			const base = scriptedStreamFn((model) => (model.id === FAUX_MODEL.id ? "error" : "ok"), kind);
+			const wrapped = withModelFallback(base, () => [FALLBACK_MODEL]);
+
+			const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [userMessage("hi")] }));
+
+			expect(events.at(-1)?.type).toBe("done");
+			expect((events.at(-1) as any).message.content[0].text).toBe(`answer from ${FALLBACK_MODEL.id}`);
+		});
+	}
+
+	test("a kind this version does not know stops the walk", async () => {
+		// The allowlist's other edge: the set is closed, and a label this
+		// version cannot reason about is treated like the overflow it might
+		// be, not like the unlabelled wordings that walk. A producer adding a
+		// kind opts into the walk by adding it to FALLBACK_SAFE_KINDS.
+		const unknownKind = "safety_block" as unknown as AssistantMessage["errorKind"];
+		const base = scriptedStreamFn((model) => (model.id === FAUX_MODEL.id ? "error" : "ok"), unknownKind);
+		const calledFor: string[] = [];
+		const recording: StreamFn = async function* (model, context, options) {
+			calledFor.push(model.id);
+			yield* base(model, context, options);
+		};
+		const wrapped = withModelFallback(recording, () => [FALLBACK_MODEL]);
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [userMessage("hi")] }));
+
+		expect(calledFor).toEqual([FAUX_MODEL.id]);
+		const terminal = events.at(-1);
+		expect(terminal?.type).toBe("error");
+		expect((terminal as any).message.errorKind).toBe("safety_block");
 	});
 
 	// Without this guard an interrupt thrown before the first byte would be

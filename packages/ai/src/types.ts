@@ -102,8 +102,17 @@ export interface AssistantMessage {
 	stopReason: StopReason;
 	errorMessage?: string;
 	// Long-form design notes: docs/dev/ai-layer.md
-	/** Why the request failed, when the reason is one the caller can act on. */
-	errorKind?: "context_overflow";
+	/**
+	 * Why the request failed, when the reason is one the caller can act on.
+	 *
+	 * The one reader is the fallback walk: `rate_limit`, `overload` and `auth`
+	 * are failures another model may answer, so the chain descends on them;
+	 * `context_overflow` is not — the same context will not fit anywhere with
+	 * the same window — and ends the walk with this message as it stands. An
+	 * absent kind is an unclassified failure, and the walk keeps it: provider
+	 * wordings that match no rule have always been retried on the next model.
+	 */
+	errorKind?: "context_overflow" | "rate_limit" | "overload" | "auth";
 	timestamp: number;
 }
 

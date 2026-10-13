@@ -318,6 +318,60 @@ describe("context overflow classification", () => {
 	});
 });
 
+// Which terminal statuses carry a label, and which label — the values the
+// fallback walk reads (the walk itself is fallback.test.ts's subject). The
+// exhausted forms are the ones that matter: a 429 or 529 only reaches the
+// terminal branch after its attempts run out, so the label has to survive
+// that path, not just the first-attempt one.
+describe("terminal error kinds", () => {
+	test("a 429 that exhausts its attempts is labelled rate_limit", async () => {
+		const { fn, calls } = failingStreamFn(99, Object.assign(new Error("rate limited"), { status: 429 }));
+		const wrapped = withRetry(fn, { baseDelayMs: 1, maxAttempts: 2, sleep: async () => {} });
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+
+		expect(calls()).toBe(2);
+		const terminal = events.at(-1);
+		expect(terminal?.type).toBe("error");
+		expect((terminal as any).message.errorKind).toBe("rate_limit");
+	});
+
+	test("a 529 that exhausts the overloaded cap is labelled overload", async () => {
+		// The cap's 3 attempts, not the ladder's 10 — and that path is the only
+		// way a 529 ends, so the label has to come out of it.
+		const { fn, calls } = failingStreamFn(99, Object.assign(new Error("overloaded"), { status: 529 }));
+		const wrapped = withRetry(fn, { baseDelayMs: 1, sleep: async () => {} });
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+
+		expect(calls()).toBe(3);
+		expect((events.at(-1) as any).message.errorKind).toBe("overload");
+	});
+
+	test("a 401 is labelled auth on the first attempt", async () => {
+		const { fn, calls } = failingStreamFn(99, Object.assign(new Error("unauthorized"), { status: 401 }));
+		const wrapped = withRetry(fn, { baseDelayMs: 1 });
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+
+		expect(calls()).toBe(1);
+		expect((events.at(-1) as any).message.errorKind).toBe("auth");
+	});
+
+	test("a 503 exhausts its attempts and stays unlabelled", async () => {
+		// The complement of the rows above: only statuses that name a
+		// walk-relevant situation carry a kind. A generic outage keeps the
+		// unclassified shape, and with it the walk's existing behaviour.
+		const { fn, calls } = failingStreamFn(99, Object.assign(new Error("down"), { status: 503 }));
+		const wrapped = withRetry(fn, { baseDelayMs: 1, maxAttempts: 2, sleep: async () => {} });
+
+		const events = await collect(wrapped(FAUX_MODEL, { systemPrompt: "", messages: [] }));
+
+		expect(calls()).toBe(2);
+		expect((events.at(-1) as any).message.errorKind).toBeUndefined();
+	});
+});
+
 describe("abort handling", () => {
 	function abortError(): Error {
 		return Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
@@ -538,6 +592,9 @@ describe("missing API key", () => {
 		expect((terminal as any).message.errorMessage).toBe(
 			"Missing API key for faux: set FAUX_API_KEY in your environment.",
 		);
+		// Labelled like any refused credential: the fallback walk may take the
+		// request to a model whose key does exist.
+		expect((terminal as any).message.errorKind).toBe("auth");
 	});
 });
 
@@ -643,6 +700,9 @@ describe("the missing-key pre-flight", () => {
 			expect((events.at(-1) as any).message.errorMessage).toBe(
 				"Not signed in to a Claude subscription for claude-sonnet-5: run /login, or set ANTHROPIC_API_KEY.",
 			);
+			// `auth`, same as the missing-key door: another model may not need
+			// the subscription this one could not reach.
+			expect((events.at(-1) as any).message.errorKind).toBe("auth");
 		} finally {
 			if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
 			else process.env.ANTHROPIC_API_KEY = saved;
@@ -670,5 +730,7 @@ describe("the missing-key pre-flight", () => {
 		expect((events.at(-1) as any).message.errorMessage).toBe(
 			"Not signed in to a ChatGPT subscription for gpt-6.1-sol: run /login.",
 		);
+		// The second door carries the same label as the first.
+		expect((events.at(-1) as any).message.errorKind).toBe("auth");
 	});
 });

@@ -5,7 +5,15 @@ import { MessageBuilder } from "./message-builder.ts";
 import { MissingApiKeyError } from "./model.ts";
 import { ClaudeOAuthError } from "./providers/anthropic-oauth.ts";
 import { ChatGptOAuthError } from "./providers/chatgpt-oauth.ts";
-import type { AssistantMessageEvent, Context, Model, RetryNotice, StreamFn, StreamOptions } from "./types.ts";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	Model,
+	RetryNotice,
+	StreamFn,
+	StreamOptions,
+} from "./types.ts";
 
 export interface RetryOptions {
 	maxAttempts?: number;
@@ -133,6 +141,24 @@ function retryAfterMsOf(error: unknown): number | null {
 	return null;
 }
 
+/**
+ * The kind of a terminal failure, where its status names one of the situations
+ * the fallback walk acts on.
+ *
+ * Only statuses the ladder has finished with reach here: a 429 or 529 that
+ * exhausted its attempts is a fact about this model's capacity, and a 401 or
+ * 403 is a fact about its credential — neither changes by being sent to the
+ * same model again, while another model, or another provider with its own
+ * key, may still answer. Statuses outside those stay unlabelled; an
+ * unlabelled failure keeps the walk for the reason it always has.
+ */
+function terminalErrorKind(status: number | null): AssistantMessage["errorKind"] {
+	if (status === 429) return "rate_limit";
+	if (status === 529) return "overload";
+	if (status === 401 || status === 403) return "auth";
+	return undefined;
+}
+
 export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): StreamFn {
 	const maxAttempts = options.maxAttempts ?? DEFAULTS.maxAttempts;
 	const baseDelayMs = options.baseDelayMs ?? DEFAULTS.baseDelayMs;
@@ -181,7 +207,10 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				// — two minutes of silence — to report a key that was never there.
 				if (error instanceof MissingApiKeyError) {
 					const builder = new MessageBuilder(model.provider, model.id);
-					yield builder.error(error.message);
+					// Labelled `auth` like any other refused credential: another
+					// model may hold the key this one is missing, so the walk is
+					// still on the table for the caller that configured one.
+					yield builder.error(error.message, { errorKind: "auth" });
 					return;
 				}
 
@@ -192,7 +221,10 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				// subscription adapters share the shape, so both share this door.
 				if ((error instanceof ClaudeOAuthError || error instanceof ChatGptOAuthError) && error.invalidGrant) {
 					const builder = new MessageBuilder(model.provider, model.id);
-					yield builder.error(error.message);
+					// The same label as the missing key above: a session that cannot
+					// sign in will not sign in on the next attempt, but a model on
+					// another provider does not share the dead credential.
+					yield builder.error(error.message, { errorKind: "auth" });
 					return;
 				}
 
@@ -206,15 +238,18 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 
 				// Overflow is terminal on the first try, including the status-less case
 				// that would otherwise earn a retry: the request is not going to get
-				// smaller by being sent again.
+				// smaller by being sent again. The other terminal statuses — exhausted
+				// 429s and 529s, refused credentials — are labelled so the fallback
+				// walk can tell them from an overflow and act on each.
 				if (overflow || !retryable || attemptsUsed >= attemptCap) {
 					const builder = new MessageBuilder(model.provider, model.id);
 					const message = error instanceof Error ? error.message : String(error);
+					const kind = overflow ? ("context_overflow" as const) : terminalErrorKind(status);
 					yield builder.error(
 						overflow
 							? `The request is larger than ${model.id}'s context window: ${message}`
 							: `Request failed after ${attemptsUsed} attempt(s): ${message}`,
-						overflow ? { errorKind: "context_overflow" } : {},
+						kind ? { errorKind: kind } : {},
 					);
 					return;
 				}
