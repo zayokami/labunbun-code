@@ -505,9 +505,13 @@ describe("formatCostState", () => {
 	test("a configured ceiling prints the seat's spend against it", () => {
 		// A budget the user set and cannot see the state of is one they find out
 		// about by being refused; this line is the one that lets them look first.
-		const text = formatCostState({ ...emptyCostState(), totalCostUSD: 0.5, roleCostUSD: { light: 0.42 } }, "This session", {
-			light: 2,
-		});
+		const text = formatCostState(
+			{ ...emptyCostState(), totalCostUSD: 0.5, roleCostUSD: { light: 0.42 } },
+			"This session",
+			{
+				light: 2,
+			},
+		);
 
 		expect(text).toContain("roles.light: $0.4200 of $2.0000");
 	});

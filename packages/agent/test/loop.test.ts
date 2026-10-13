@@ -900,7 +900,14 @@ describe("the budget gate", () => {
 		const { session, sent, events } = budgetSession(
 			() => (spend > 2 ? { action: "blocked", message: "over" } : { action: "ok" }),
 			[{ toolCalls: [{ name: "echo", arguments: { text: "hi" } }] }, { text: "done" }],
-			[echoTool({ call: async (input: any) => { spend = 5; return { content: [{ type: "text", text: input.text }] }; } })],
+			[
+				echoTool({
+					call: async (input: any) => {
+						spend = 5;
+						return { content: [{ type: "text", text: input.text }] };
+					},
+				}),
+			],
 		);
 
 		expect(await session.prompt("go")).toBe("error");

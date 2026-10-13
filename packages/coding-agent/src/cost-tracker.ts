@@ -311,11 +311,7 @@ function cacheChannels(usage: ModelUsage): string {
  * user finds out the seat never ran. The spend is already inside the model
  * buckets above; the ceiling is the one number they cannot show.
  */
-export function formatCostState(
-	state: CostState,
-	label: string,
-	ceilings?: Partial<Record<RoleName, number>>,
-): string {
+export function formatCostState(state: CostState, label: string, ceilings?: Partial<Record<RoleName, number>>): string {
 	const lines = [`${label}: $${state.totalCostUSD.toFixed(4)}`];
 	for (const [key, usage] of Object.entries(state.modelsUsage)) {
 		// The reasoning share rides the token count rather than getting a line of
