@@ -231,6 +231,7 @@ export class SessionStore {
 		return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
 	}
 
+	// Long-form design notes: docs/dev/crash-consistency.md
 	append(entry: SessionEntry): void {
 		this.entries.push(entry);
 		this.#leafId = entry.id;

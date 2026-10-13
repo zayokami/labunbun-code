@@ -6,6 +6,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 - [ChatGPT subscription](chatgpt-subscription.md): the app-side sign-in for a ChatGPT subscription — the credential store, the two login shapes, and where the app wires them.
 - [Claude subscription](claude-subscription.md): the app-side sign-in for a Claude subscription — the credential store, the login flow, and where the app wires them.
 - [Command classifier](command-classifier.md): the classifier that reports whether one command line can destroy data, and the permission engine that runs it.
+- [Crash consistency](crash-consistency.md): what survives a killed process — the files replaced by a rename, the files appended to, and the writes still made in place.
 - [Migration framework](migration-framework.md): how the framework reads another agent's files and writes them into labunbun.
 - [Migration sources](migration-sources.md): what the module for each source knows about the product it reads.
 - [Output limits](output-limits.md): the bounds on tool output per result and per round, and the capture of a stream that has not finished.
