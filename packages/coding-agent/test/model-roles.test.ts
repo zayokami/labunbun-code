@@ -117,9 +117,56 @@ describe("resolveRoles", () => {
 				registerProvider("roles-late", "LBB_ROLES_LATE_KEY", ["m1"]);
 			});
 
-			expect(result.warnings).toEqual([]);
 			expect(result.local.model?.id).toBe("m1");
+			// It resolved, and the only line is the standing local notice — not a
+			// complaint about the ref.
+			expect(result.warnings).toEqual([
+				"Warning: roles.local is configured, but no feature consumes a local seat yet.",
+			]);
 		});
+	});
+
+	test("a configured local seat resolves and warns that nothing consumes it", async () => {
+		// The seat is resolved so it can be settled early, not because a feature
+		// reads it. A user who configures it must hear that from startup output
+		// rather than discover it from a question their session never answers.
+		await withKeys(["LBB_ROLES_LOCAL_KEY"], async () => {
+			registerProvider("roles-local", "LBB_ROLES_LOCAL_KEY", ["m1"]);
+			const result = await resolveRoles({ local: { model: "roles-local/m1" } }, async () => {});
+
+			expect(result.local.model?.id).toBe("m1");
+			expect(result.warnings).toEqual([
+				"Warning: roles.local is configured, but no feature consumes a local seat yet.",
+			]);
+		});
+	});
+
+	test("the local notice rides beside a resolution failure, not instead of it", async () => {
+		// Both facts are true of a typo'd local entry and both matter: the
+		// reference is broken, and fixing it still buys nothing.
+		const result = await resolveRoles({ local: { model: "no-such/local-model" } }, async () => {});
+
+		expect(result.local.model).toBeUndefined();
+		expect(result.warnings).toHaveLength(2);
+		expect(result.warnings[0]).toContain('unknown model "no-such/local-model" for roles.local');
+		expect(result.warnings[1]).toBe("Warning: roles.local is configured, but no feature consumes a local seat yet.");
+	});
+
+	test("a local entry with neither a provider nor a model gets only its own no-model line", async () => {
+		// Nothing is configured, so there is nothing to warn about beyond the fact
+		// the loop already states — the notice is for a seat someone meant to set.
+		const result = await resolveRoles({ local: {} }, async () => {});
+
+		expect(result.warnings).toEqual(["Warning: roles.local sets no model — ignored; the local role stays unset."]);
+	});
+
+	test("a local entry with only a provider is configured, and gets both lines", async () => {
+		const result = await resolveRoles({ local: { provider: "roles-local" } }, async () => {});
+
+		expect(result.warnings).toEqual([
+			"Warning: roles.local sets no model (only a provider) — ignored; the local role stays unset.",
+			"Warning: roles.local is configured, but no feature consumes a local seat yet.",
+		]);
 	});
 
 	test("a model whose key is missing falls back naming the key", async () => {

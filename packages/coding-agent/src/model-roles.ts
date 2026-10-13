@@ -19,6 +19,10 @@
  * ({@link seatsByRef}), so the REPL, a `-p` run and an editor session cannot
  * disagree about when a seat is over its budget.
  *
+ * One seat has no consumer: `local` resolves like the others and then warns
+ * that no feature reads it yet, because a seat that looks wired and answers
+ * nothing should say so at startup rather than be discovered by absence.
+ *
  * The reference syntax is the session model's, read from `resolveModel` in
  * `packages/ai/src/model.ts` and pinned here:
  *
@@ -150,6 +154,16 @@ export async function resolveRoles(
 			if (candidate && !missingApiKey(candidate)) fallback.push(candidate);
 		}
 		resolved[name] = { model, fallback, budgetUSD: entry.budgetUSD };
+	}
+	// The local seat has no consumer: no host reads `resolved.local` — the role
+	// orders are built from the other four — so a configured one is a seat that
+	// looks wired and answers nothing. Said out loud once, at startup, because
+	// the alternative is silence that reads as "the local daemon is handling
+	// this". The check reads the raw entry, not the resolution: a local seat
+	// that resolved perfectly is still unconsumed, and a user who fixes a bad
+	// reference should not have to discover that second fact by reading source.
+	if (roles.local?.model !== undefined || roles.local?.provider !== undefined) {
+		resolved.warnings.push("Warning: roles.local is configured, but no feature consumes a local seat yet.");
 	}
 	return resolved;
 }

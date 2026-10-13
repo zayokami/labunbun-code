@@ -310,7 +310,11 @@ export const SettingsSchema = z.object({
 			compaction: RoleEntrySchema.optional(),
 			/** Where subagents run, unless their own definition names a model. */
 			light: RoleEntrySchema.optional(),
-			/** The local seat (a machine-local daemon); read and resolved, no consumer yet. */
+			/**
+			 * The local seat (a machine-local daemon). No feature consumes it yet, so
+			 * `resolveRoles` warns when one is configured: a seat that looks wired
+			 * and is not has to say so itself.
+			 */
 			local: RoleEntrySchema.optional(),
 		})
 		.optional(),
