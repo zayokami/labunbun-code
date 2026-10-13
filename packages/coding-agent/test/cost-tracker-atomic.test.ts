@@ -46,6 +46,7 @@ const SEED: CostState = {
 			subagentCostUSD: 0,
 		},
 	},
+	roleCostUSD: { light: 0.25 },
 };
 
 /** The state the interrupted write was trying to save. */

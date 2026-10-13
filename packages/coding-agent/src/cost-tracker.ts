@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
 import { type AgentMessage, computeCost, resolveModel, type Usage } from "@labunbun/ai";
-import type { RoleName } from "./model-roles.ts";
+import { ROLE_NAMES, type RoleName } from "./model-roles.ts";
 
 /**
  * The label a usage record carries when it was not the session's own model
@@ -61,10 +61,29 @@ export interface CostState {
 	totalCostUSD: number;
 	totalDurationMs: number;
 	modelsUsage: Record<string, ModelUsage>;
+	/**
+	 * What each role seat spent, by role name — the same money as the totals,
+	 * cut the one other way a person asks about it ("what did the subagents
+	 * cost me?"), and the number the light seat's budget gate reads.
+	 *
+	 * Only the seats a usage record names appear, and today that is only the
+	 * seats a record *can* name: the label rides a subagent booking, so `light`
+	 * is the one role that ever shows up here — main, plan and compaction spend
+	 * is in the totals with no record saying which of the three it was. A role
+	 * absent from the map spent nothing bookable, and readers take that as zero
+	 * rather than as unknown.
+	 *
+	 * A resumed session opens these at zero, and that is not a bug to fix here:
+	 * a booking is not a message, so no transcript holds one and there is
+	 * nothing for a resume to re-derive them from. The project ledger keeps what
+	 * earlier sessions recorded; the session view starts where the conversation
+	 * that is open actually starts.
+	 */
+	roleCostUSD: Record<string, number>;
 }
 
 export function emptyCostState(): CostState {
-	return { totalCostUSD: 0, totalDurationMs: 0, modelsUsage: {} };
+	return { totalCostUSD: 0, totalDurationMs: 0, modelsUsage: {}, roleCostUSD: {} };
 }
 
 /** Fold one usage record into a state, priced by whatever the model resolves to. */
@@ -97,6 +116,11 @@ function accumulate(
 	// The split, not a second bucket: this spend is in the totals either way,
 	// and this line only records whose it was.
 	if (seat?.kind === "subagent") existing.subagentCostUSD += breakdown.total;
+	// The same split by seat: a record that names the role it was booked under
+	// adds to that role's total, and one that names none adds to nothing —
+	// guessing a seat for the session's own calls would be inventing an
+	// attribution the wire does not carry.
+	if (seat?.role) state.roleCostUSD[seat.role] = (state.roleCostUSD[seat.role] ?? 0) + breakdown.total;
 	state.modelsUsage[key] = existing;
 	state.totalCostUSD += breakdown.total;
 	state.totalDurationMs += durationMs;
@@ -226,6 +250,11 @@ export function loadCostState(path: string): CostState {
 			totalCostUSD: parsed.totalCostUSD ?? 0,
 			totalDurationMs: parsed.totalDurationMs ?? 0,
 			modelsUsage,
+			// The same arrival the entry fields above get: a ledger persisted
+			// before the role split existed has no such key, and reading it as
+			// `undefined` would hand every sum a gap. No key means no role spend
+			// was ever recorded, which is true of every file that predates it.
+			roleCostUSD: parsed.roleCostUSD ?? {},
 		};
 	} catch (error) {
 		// This file is read-modify-written on every persist: continuing with an
@@ -274,8 +303,19 @@ function cacheChannels(usage: ModelUsage): string {
  * One total, with the models under it. The label is required because "Total"
  * on its own is the ambiguity this module exists to remove: a number that could
  * be a conversation or a directory reads as whichever the user assumed.
+ *
+ * `ceilings` adds a line per seat that has one — `roles.light: $0.42 of
+ * $2.00` — because a budget the user set and cannot see the state of is a
+ * budget they will find out about by being refused. The lines print for every
+ * configured seat, a zero-spend one included: "$0.0000 of $2.0000" is how a
+ * user finds out the seat never ran. The spend is already inside the model
+ * buckets above; the ceiling is the one number they cannot show.
  */
-export function formatCostState(state: CostState, label: string): string {
+export function formatCostState(
+	state: CostState,
+	label: string,
+	ceilings?: Partial<Record<RoleName, number>>,
+): string {
 	const lines = [`${label}: $${state.totalCostUSD.toFixed(4)}`];
 	for (const [key, usage] of Object.entries(state.modelsUsage)) {
 		// The reasoning share rides the token count rather than getting a line of
@@ -289,12 +329,24 @@ export function formatCostState(state: CostState, label: string): string {
 		lines.push(`  ${key}: ${totalTokens(usage)} tokens${reasoning}, $${usage.costUSD.toFixed(4)}${subagents}`);
 		lines.push(`    ${cacheChannels(usage)}`);
 	}
+	for (const role of ROLE_NAMES) {
+		const ceiling = ceilings?.[role];
+		if (ceiling === undefined) continue;
+		lines.push(`  roles.${role}: $${(state.roleCostUSD[role] ?? 0).toFixed(4)} of $${ceiling.toFixed(4)}`);
+	}
 	return lines.join("\n");
 }
 
 /** What `/cost` prints: the conversation, then the project it belongs to. */
-export function formatCostReport(session: CostState, project: CostState): string {
-	const lines = [formatCostState(session, "This session"), formatCostState(project, "This project, all sessions")];
+export function formatCostReport(
+	session: CostState,
+	project: CostState,
+	ceilings?: Partial<Record<RoleName, number>>,
+): string {
+	const lines = [
+		formatCostState(session, "This session", ceilings),
+		formatCostState(project, "This project, all sessions", ceilings),
+	];
 	const unpriced = [...new Set([...Object.keys(session.modelsUsage), ...Object.keys(project.modelsUsage)])].filter(
 		(key) => !resolveModel(key)?.pricing,
 	);

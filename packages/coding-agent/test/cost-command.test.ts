@@ -25,6 +25,9 @@ const SESSION: CostState = {
 			subagentCostUSD: 0,
 		},
 	},
+	// The seat's own share, under the model bucket that holds the money: what
+	// the light gate reads and what a budget line reports against.
+	roleCostUSD: { light: 0.1 },
 };
 
 const PROJECT: CostState = {
@@ -41,13 +44,15 @@ const PROJECT: CostState = {
 			subagentCostUSD: 0,
 		},
 	},
+	roleCostUSD: { light: 1.5 },
 };
 
-function makeCtx() {
+function makeCtx(options: { roles?: Record<string, unknown> } = {}) {
 	const store = createStore<UiState>({ ...initialUiState(false) });
 	const ctx = {
 		getSession: () => undefined,
 		handle: { store },
+		settings: { roles: options.roles },
 		costTracker: { state: PROJECT, sessionState: SESSION },
 	} as unknown as AppCommandContext;
 	return { ctx, store };
@@ -88,8 +93,32 @@ describe("/cost", () => {
 					subagentCostUSD: 0,
 				},
 			},
+			roleCostUSD: {},
 		};
 		handleAppCommand("/cost", h.ctx);
 		expect(infoText(h.store)).toContain("No price is known for somebody/some-model");
+	});
+
+	test("a seat's ceiling and spend show up under both totals", () => {
+		// The line is the budget's only readable surface: a user who set
+		// roles.light.budgetUSD and cannot see how much of it the seat has spent
+		// finds out by being refused.
+		const h = makeCtx({ roles: { light: { model: "roleprov/summarizer", budgetUSD: 2 } } });
+
+		handleAppCommand("/cost", h.ctx);
+
+		const text = infoText(h.store);
+		expect(text).toContain("roles.light: $0.1000 of $2.0000");
+		// The project row reports the spend earlier sessions recorded against the
+		// same ceiling — the two numbers answer different questions.
+		expect(text).toContain("roles.light: $1.5000 of $2.0000");
+	});
+
+	test("a seat with no configured ceiling gets no line, even with spend recorded", () => {
+		const h = makeCtx();
+
+		handleAppCommand("/cost", h.ctx);
+
+		expect(infoText(h.store)).not.toContain("roles.");
 	});
 });

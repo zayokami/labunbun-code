@@ -27,7 +27,7 @@ function tmpFile(name = "costs.json"): string {
 
 describe("emptyCostState", () => {
 	test("starts at zero with no models", () => {
-		expect(emptyCostState()).toEqual({ totalCostUSD: 0, totalDurationMs: 0, modelsUsage: {} });
+		expect(emptyCostState()).toEqual({ totalCostUSD: 0, totalDurationMs: 0, modelsUsage: {}, roleCostUSD: {} });
 	});
 
 	test("returns a fresh object each call, so callers cannot alias the zero state", () => {
@@ -169,6 +169,32 @@ describe("CostTracker.recordUsage", () => {
 		expect(bucket.subagentCostUSD).toBeLessThanOrEqual(bucket.costUSD);
 	});
 
+	test("a record that names a role adds to that role's total, in both states", () => {
+		// The booking is the only place a seat's name travels beside the money, so
+		// it is the only place a per-role total can be fed from — and the session
+		// total is what the seat's budget gate reads.
+		const tracker = new CostTracker();
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000 }), 0, {
+			kind: "subagent",
+			role: "light",
+		});
+		expect(tracker.state.roleCostUSD.light).toBeCloseTo(2, 10);
+		expect(tracker.sessionState.roleCostUSD.light).toBeCloseTo(2, 10);
+		// A subset of the totals, like every other split here — never a second,
+		// additive amount.
+		expect(tracker.state.roleCostUSD.light).toBeLessThanOrEqual(tracker.state.totalCostUSD);
+	});
+
+	test("a record with no role to name adds to no role's total", () => {
+		// The session's own calls and a definition-modelled subagent cannot be
+		// attributed: nothing on the wire says which seat asked, and inventing one
+		// would be an attribution the data does not support.
+		const tracker = new CostTracker();
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000 }));
+		tracker.recordUsage("anthropic", "claude-sonnet-5", usage({ input: 1_000_000 }), 0, { kind: "subagent" });
+		expect(tracker.state.roleCostUSD).toEqual({});
+	});
+
 	test("a tracker with no cwd keeps state in memory and persists nothing", () => {
 		const tracker = new CostTracker();
 		tracker.recordUsage("p", "m", usage({ input: 5 }));
@@ -198,6 +224,9 @@ describe("loadCostState", () => {
 					subagentCostUSD: 0.25,
 				},
 			},
+			// Carried like any other field: a directory's recorded role spend has
+			// to survive the restart that the ledger exists for.
+			roleCostUSD: { light: 0.25 },
 		};
 		writeFileSync(path, JSON.stringify(state));
 		expect(loadCostState(path)).toEqual(state);
@@ -213,6 +242,7 @@ describe("loadCostState", () => {
 			JSON.stringify({
 				totalCostUSD: 1,
 				totalDurationMs: 0,
+				roleCostUSD: {},
 				modelsUsage: {
 					"p/m": { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 1 },
 				},
@@ -231,12 +261,31 @@ describe("loadCostState", () => {
 			JSON.stringify({
 				totalCostUSD: 1,
 				totalDurationMs: 0,
+				roleCostUSD: {},
 				modelsUsage: {
 					"p/m": { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 1 },
 				},
 			}),
 		);
 		expect(loadCostState(path).modelsUsage["p/m"]?.subagentCostUSD).toBe(0);
+	});
+
+	// The same arrival for the role split: a ledger written before the field
+	// existed has no key for it, and the reader backfills an empty map so the
+	// sums describe "no role spend recorded" rather than `undefined`.
+	test("a ledger persisted before roleCostUSD existed backfills to an empty map", () => {
+		const path = tmpFile();
+		writeFileSync(
+			path,
+			JSON.stringify({
+				totalCostUSD: 1,
+				totalDurationMs: 0,
+				modelsUsage: {
+					"p/m": { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, costUSD: 1 },
+				},
+			}),
+		);
+		expect(loadCostState(path).roleCostUSD).toEqual({});
 	});
 
 	// Cost data is a convenience, not a record of truth: a corrupt file should
@@ -254,13 +303,13 @@ describe("loadCostState", () => {
 	test("missing fields fall back to zero rather than undefined", () => {
 		const path = tmpFile();
 		writeFileSync(path, JSON.stringify({ totalCostUSD: 2 }));
-		expect(loadCostState(path)).toEqual({ totalCostUSD: 2, totalDurationMs: 0, modelsUsage: {} });
+		expect(loadCostState(path)).toEqual({ totalCostUSD: 2, totalDurationMs: 0, modelsUsage: {}, roleCostUSD: {} });
 	});
 
 	test("an explicit null for a field falls back to zero", () => {
 		const path = tmpFile();
-		writeFileSync(path, JSON.stringify({ totalCostUSD: null, modelsUsage: null }));
-		expect(loadCostState(path)).toEqual({ totalCostUSD: 0, totalDurationMs: 0, modelsUsage: {} });
+		writeFileSync(path, JSON.stringify({ totalCostUSD: null, modelsUsage: null, roleCostUSD: null }));
+		expect(loadCostState(path)).toEqual({ totalCostUSD: 0, totalDurationMs: 0, modelsUsage: {}, roleCostUSD: {} });
 	});
 });
 
@@ -319,6 +368,7 @@ describe("formatCostState", () => {
 			{
 				totalCostUSD: 0.5,
 				totalDurationMs: 0,
+				roleCostUSD: {},
 				modelsUsage: {
 					"p/m": {
 						inputTokens: 10,
@@ -344,6 +394,7 @@ describe("formatCostState", () => {
 			{
 				totalCostUSD: 0,
 				totalDurationMs: 0,
+				roleCostUSD: {},
 				modelsUsage: {
 					"p/a": {
 						inputTokens: 1,
@@ -385,6 +436,7 @@ describe("formatCostState", () => {
 			{
 				totalCostUSD: 0,
 				totalDurationMs: 0,
+				roleCostUSD: {},
 				modelsUsage: {
 					"p/cached": {
 						inputTokens: 100,
@@ -407,6 +459,7 @@ describe("formatCostState", () => {
 			{
 				totalCostUSD: 0.5,
 				totalDurationMs: 0,
+				roleCostUSD: {},
 				modelsUsage: {
 					"p/m": {
 						inputTokens: 1,
@@ -431,6 +484,7 @@ describe("formatCostState", () => {
 			{
 				totalCostUSD: 0.5,
 				totalDurationMs: 0,
+				roleCostUSD: {},
 				modelsUsage: {
 					"p/m": {
 						inputTokens: 1,
@@ -446,6 +500,33 @@ describe("formatCostState", () => {
 			"This session",
 		);
 		expect(text).not.toContain("subagents");
+	});
+
+	test("a configured ceiling prints the seat's spend against it", () => {
+		// A budget the user set and cannot see the state of is one they find out
+		// about by being refused; this line is the one that lets them look first.
+		const text = formatCostState({ ...emptyCostState(), totalCostUSD: 0.5, roleCostUSD: { light: 0.42 } }, "This session", {
+			light: 2,
+		});
+
+		expect(text).toContain("roles.light: $0.4200 of $2.0000");
+	});
+
+	test("a configured ceiling with nothing spent still prints", () => {
+		// "$0.0000 of $2.0000" is how a user finds out the seat they budgeted for
+		// never ran — the failure that silence would hide.
+		const text = formatCostState(emptyCostState(), "This session", { light: 2 });
+
+		expect(text).toContain("roles.light: $0.0000 of $2.0000");
+	});
+
+	test("no configured ceiling means no seat line, even where a role spent", () => {
+		// The lines are the budget's surface. Printing spend for every seat would
+		// put a second money line under every session that ever spawned a
+		// subagent, whether or not its user asked for a ceiling.
+		const text = formatCostState({ ...emptyCostState(), roleCostUSD: { light: 0.42 } }, "This session");
+
+		expect(text).not.toContain("roles.");
 	});
 });
 
@@ -505,6 +586,7 @@ describe("formatCostReport", () => {
 			totalCostUSD: 0,
 			totalDurationMs: 0,
 			modelsUsage: { "nobody/nothing": priced },
+			roleCostUSD: {},
 		});
 		expect(text).toContain("No price is known for nobody/nothing");
 		expect(text).toContain("settings.json");
@@ -524,7 +606,21 @@ describe("formatCostReport", () => {
 			totalCostUSD: 2,
 			totalDurationMs: 0,
 			modelsUsage: { "anthropic/claude-sonnet-5": bucket },
+			roleCostUSD: {},
 		});
 		expect(text).not.toContain("No price is known");
+	});
+
+	test("the ceilings reach both halves of the report, each against its own total", () => {
+		// "This session" is the number the gate enforces; the project row is what
+		// earlier sessions recorded, and a reader who sees one line per report
+		// would take the wrong one for the ceiling in force.
+		const session = { ...emptyCostState(), totalCostUSD: 0.25, roleCostUSD: { light: 0.1 } };
+		const project = { ...emptyCostState(), totalCostUSD: 3, roleCostUSD: { light: 1.5 } };
+
+		const text = formatCostReport(session, project, { light: 2 });
+
+		expect(text).toContain("roles.light: $0.1000 of $2.0000");
+		expect(text).toContain("roles.light: $1.5000 of $2.0000");
 	});
 });

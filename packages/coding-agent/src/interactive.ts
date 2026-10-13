@@ -176,7 +176,7 @@ import { CLI_NAME } from "./index.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { formatMissionSummary, readMissionRecord, writeMissionRecord } from "./mission-ledger.ts";
 import { noToolCallingNotice, offeredModels } from "./model-offer.ts";
-import { createModelChainResolver, resolveRoles, roleOrder } from "./model-roles.ts";
+import { createModelChainResolver, resolveRoles, roleCeilings, roleOrder } from "./model-roles.ts";
 import { createPlanModeCallbacks, createPlanModeTools, type PlanModeCallbacks } from "./plan-mode.ts";
 import {
 	readPolicySnapshot,
@@ -2611,7 +2611,14 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			return true;
 		}
 		case "/cost": {
-			pushInfo(ctx.handle, formatCostReport(ctx.costTracker.sessionState, ctx.costTracker.state));
+			// The ceilings come from the settings, not from a resolved stack: /cost
+			// answers what the file says, and a budget set for a seat whose model
+			// never resolved still shows, reading $0.0000 — which is how a user
+			// finds out the seat they budgeted for is not the one running.
+			pushInfo(
+				ctx.handle,
+				formatCostReport(ctx.costTracker.sessionState, ctx.costTracker.state, roleCeilings(ctx.settings?.roles)),
+			);
 			return true;
 		}
 		case "/permissions": {
