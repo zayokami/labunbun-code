@@ -464,6 +464,22 @@ const CASES = [
 	[["y", "\x1b[C"], "abcdef", 2],
 	[[">", "\x1b[B"], "ab\ncd", 0],
 	[["2", ">", "\x1b[B"], "ab\ncd\nef", 0],
+	// `<BS>` is the other terminal key with a command of its own: `nv_bs` is `h`
+	// with a wrap — at a line start it steps back onto the previous line's end,
+	// where `h` refuses — and under an operator it is the motion that names, so
+	// `d<BS>` is `dh` and at a line start it joins the two lines. `<Del>` is the
+	// opposite answer: not a motion at all, so vim abandons the pending operator
+	// without touching the buffer. The engine pins both in its own tests; this is
+	// the differential half, and the fuzzer's table carries both keys because of
+	// shapes like these.
+	[["\x7f"], "ab\ncdef\ngh", 3],
+	[["\x7f"], "ab\n\ncd", 4],
+	[["d", "\x7f"], "ab\ncdef\ngh", 4],
+	[["d", "\x7f"], "ab\ncdef\ngh", 3],
+	[["2", "d", "\x7f"], "abcdefgh", 5],
+	[["d", "2", "\x7f"], "abcdefgh", 5],
+	[["y", "\x7f"], "ab\ncdef\ngh", 3],
+	[["d", "\x1b[3~"], "abcdef", 3],
 	// visual-line delete on the last line
 	[["V", "d"], D, 5],
 	[["V", "d"], D, 7],
