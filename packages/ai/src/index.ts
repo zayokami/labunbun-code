@@ -155,6 +155,34 @@ export {
 } from "./providers/chatgpt-responses.ts";
 export { FAUX_MODEL, type FauxProvider, type FauxStep, fauxProvider } from "./providers/faux.ts";
 export {
+	buildCodeAssistRequest,
+	CODE_ASSIST_API_VERSION,
+	CODE_ASSIST_ENDPOINT,
+	type CodeAssistContent,
+	type CodeAssistFrame,
+	type CodeAssistGenerationConfig,
+	type CodeAssistPart,
+	type CodeAssistRequestParams,
+	type CodeAssistStreamFnOptions,
+	type CodeAssistThinkingConfig,
+	type CodeAssistTool,
+	type CodeAssistUsage,
+	codeAssistHeaders,
+	codeAssistThinkingConfig,
+	codeAssistUrl,
+	convertContents as convertContentsForCodeAssist,
+	createCodeAssistStreamFn,
+	DEFAULT_THINKING_BUDGET,
+	GEMINI_CLI_VERSION,
+	GeminiCodeAssistError,
+	type GeminiTokenGrant,
+	type GeminiTokenProvider,
+	geminiSubscriptionMissingError,
+	mapCodeAssistStream,
+	parseCodeAssistSse,
+	SYNTHETIC_THOUGHT_SIGNATURE,
+} from "./providers/gemini-code-assist.ts";
+export {
 	buildOpenAIRequest,
 	convertMessages as convertMessagesForOpenAI,
 	createOpenAIStreamFn,
@@ -232,6 +260,7 @@ import { createAnthropicStreamFn } from "./providers/anthropic.ts";
 import type { ClaudeTokenProvider } from "./providers/anthropic-oauth.ts";
 import type { ChatGptTokenGrant, ChatGptTokenProvider } from "./providers/chatgpt-oauth.ts";
 import { createChatGptStreamFn } from "./providers/chatgpt-responses.ts";
+import { createCodeAssistStreamFn, type GeminiTokenProvider } from "./providers/gemini-code-assist.ts";
 import { createOpenAIStreamFn } from "./providers/openai-compat.ts";
 import { createResponsesStreamFn, type ResponsesClientLike } from "./providers/openai-responses.ts";
 import { withRetry } from "./retry.ts";
@@ -280,6 +309,14 @@ export interface StreamFnOptions {
 	 * second request's grant to be the observable one.
 	 */
 	chatgptClientFactory?: (grant: ChatGptTokenGrant) => ResponsesClientLike;
+	/**
+	 * Where a Gemini subscription's bearer comes from, consulted per request by
+	 * the `gemini-code-assist` adapter. Same transport-scoped reasoning as
+	 * `chatgptCredentials` above; no api-key fallback on this wire either — the
+	 * subscription is the only way in, so an unavailable provider surfaces as
+	 * the adapter's own "not signed in" error, which names the login.
+	 */
+	geminiCredentials?: GeminiTokenProvider;
 	/**
 	 * How long a request may go without a single stream event before it is
 	 * declared stalled and torn down. The failure it bounds is the one no
@@ -337,6 +374,10 @@ function dispatchStreamFn(settings: StreamFnOptions): StreamFn {
 		credentials: settings.chatgptCredentials,
 		clientFactory: settings.chatgptClientFactory,
 	});
+	// No `policy` here either, for the reason the Responses wire has none of its
+	// own: this request carries no cache field, so there is nothing a cache
+	// setting could tune.
+	const codeAssist = createCodeAssistStreamFn({ credentials: settings.geminiCredentials });
 	return (model, context, options) => {
 		const missingKey = missingApiKey(model, options, model.provider === "anthropic" && settings.credentials != null);
 		if (missingKey) throw missingKey;
@@ -344,6 +385,7 @@ function dispatchStreamFn(settings: StreamFnOptions): StreamFn {
 		if (model.api === "openai-completions") return openai(model, context, options);
 		if (model.api === "openai-responses") return responses(model, context, options);
 		if (model.api === "chatgpt-responses") return chatgpt(model, context, options);
+		if (model.api === "gemini-code-assist") return codeAssist(model, context, options);
 		throw new Error(`Unsupported API: ${model.api}`);
 	};
 }

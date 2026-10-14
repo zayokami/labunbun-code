@@ -144,11 +144,11 @@ describe("asking the providers", () => {
 			// The keyed providers are skipped — asking without a key is a request
 			// that can only be rejected. The local Ollama template is not skipped:
 			// nothing is missing from it, and its catalog exists in no other place.
-			// The subscription backend's rows are keyless like the daemon and still
-			// absent here, because no listing call exists for their wire — so this
-			// exact list is also the pin: a chatgpt ref appearing here means the
-			// probe grew a call, and the question of what it asks with was answered
-			// on purpose rather than by drift.
+			// Both subscription backends' rows are keyless like the daemon and still
+			// absent here, because no listing call exists for their wires — so this
+			// exact list is also the pin: a chatgpt or gemini ref appearing here
+			// means the probe grew a call, and the question of what it asks with was
+			// answered on purpose rather than by drift.
 			expect(asked).toEqual(["ollama/local"]);
 		} finally {
 			restore();

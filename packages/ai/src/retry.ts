@@ -5,6 +5,7 @@ import { MessageBuilder } from "./message-builder.ts";
 import { MissingApiKeyError } from "./model.ts";
 import { ClaudeOAuthError } from "./providers/anthropic-oauth.ts";
 import { ChatGptOAuthError } from "./providers/chatgpt-oauth.ts";
+import { GeminiCodeAssistError } from "./providers/gemini-code-assist.ts";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -217,9 +218,16 @@ export function withRetry(streamFn: StreamFn, options: RetryOptions = {}): Strea
 				// The same impossibility for a subscription: no amount of waiting
 				// produces a sign-in. Only the errors that say the session cannot be
 				// repaired carry the mark — a token endpoint having a bad day
-				// (invalidGrant: false) is exactly what the ladder is for. Both
-				// subscription adapters share the shape, so both share this door.
-				if ((error instanceof ClaudeOAuthError || error instanceof ChatGptOAuthError) && error.invalidGrant) {
+				// (invalidGrant: false) is exactly what the ladder is for. All three
+				// subscription adapters share the shape, so all three share this
+				// door; the Gemini one arrives here as this package's own error
+				// because its login layer lives outside this package.
+				if (
+					(error instanceof ClaudeOAuthError ||
+						error instanceof ChatGptOAuthError ||
+						error instanceof GeminiCodeAssistError) &&
+					error.invalidGrant
+				) {
 					const builder = new MessageBuilder(model.provider, model.id);
 					// The same label as the missing key above: a session that cannot
 					// sign in will not sign in on the next attempt, but a model on

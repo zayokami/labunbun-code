@@ -109,8 +109,10 @@ function providersToProbe(): Model[] {
 		// no listing call exists for its wire — its catalogue is fetched by the
 		// backend's own client behind the sign-in — so a probe would return "no
 		// answer" by construction, and counting it as an ask would be
-		// bookkeeping about a request nobody makes.
-		if (model.api === "chatgpt-responses") continue;
+		// bookkeeping about a request nobody makes. The Gemini subscription's
+		// are in the same position for the same reason: a keyless row with no
+		// `GET /models` to ask.
+		if (model.api === "chatgpt-responses" || model.api === "gemini-code-assist") continue;
 		if (model.apiKeyEnv !== undefined && !resolveApiKey(model)) continue;
 		byProvider.set(model.provider, model);
 	}

@@ -163,8 +163,17 @@ export function textContent(text: string): TextContent {
 // ---------------------------------------------------------------------------
 
 // Long-form design notes: docs/dev/ai-layer.md
-/** The four wires this app speaks. `chatgpt-responses` is the Responses wire as the ChatGPT subscription backend speaks it. */
-export type ApiId = "anthropic-messages" | "openai-completions" | "openai-responses" | "chatgpt-responses";
+/**
+ * The five wires this app speaks. `chatgpt-responses` is the Responses wire as
+ * the ChatGPT subscription backend speaks it, and `gemini-code-assist` the
+ * generate-content wire as the Gemini subscription backend does.
+ */
+export type ApiId =
+	| "anthropic-messages"
+	| "openai-completions"
+	| "openai-responses"
+	| "chatgpt-responses"
+	| "gemini-code-assist";
 
 /**
  * The thinking levels a session can ask for, as a runtime list. Anything that

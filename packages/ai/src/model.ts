@@ -18,6 +18,13 @@ const OPENAI_BASE = "https://api.openai.com/v1";
  * Responses wire with structural adjustments; see `providers/chatgpt-responses.ts`.
  */
 const CHATGPT_CODEX_BASE = "https://chatgpt.com/backend-api/codex";
+/**
+ * The Gemini subscription backend — the vendor's models behind the Code Assist
+ * door, at the host its own client calls. The `/v1internal` method namespace is
+ * part of the path the adapter builds, so the base stops at the host; see
+ * `providers/gemini-code-assist.ts`.
+ */
+const CODE_ASSIST_BASE = "https://cloudcode-pa.googleapis.com";
 /** Z.AI's international host. */
 const GLM_BASE = "https://api.z.ai/api/paas/v4";
 /** DeepSeek's OpenAI-compatible host. */
@@ -161,9 +168,9 @@ function anthropicModel(
 }
 
 // Long-form design notes: docs/dev/ai-layer.md
-/** One model on one OpenAI wire; all three wires share this body. */
+/** One model on one wrapped wire; all four share this body. */
 function openAIModel(
-	api: "openai-completions" | "openai-responses" | "chatgpt-responses",
+	api: "openai-completions" | "openai-responses" | "chatgpt-responses" | "gemini-code-assist",
 	provider: string,
 	baseUrl: string,
 	apiKeyEnv: string | undefined,
@@ -261,6 +268,30 @@ function chatGptModel(
 		// this backend's, so the accepted subset starts at low.
 		reasoningEfforts: ["low", "medium", "high"],
 		...(opts.responsesLite === true ? { responsesLite: true as const } : {}),
+		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	});
+}
+
+// Long-form design notes: docs/dev/ai-layer.md
+/**
+ * A model behind the Gemini subscription (Code Assist), off the catalog the
+ * backend's own client serves. There is no `apiKeyEnv`, and the absence is the
+ * statement: the only way in is the OAuth grant the login flow mints. Prices
+ * are zero for the same reason the ChatGPT rows' are — the plan is a
+ * subscription and no per-token rate exists to transcribe — and
+ * `maxOutputTokens` carries the window because the catalog publishes no output
+ * cap of its own. Every row reasons, in the family's own shape: a budget for
+ * the 2.5 one, a level for everything after it.
+ */
+function geminiCodeAssistModel(
+	id: string,
+	name: string,
+	opts: { contextWindow: number; maxOutputTokens: number },
+): Model {
+	return openAIModel("gemini-code-assist", "gemini", CODE_ASSIST_BASE, undefined, id, name, {
+		contextWindow: opts.contextWindow,
+		maxOutputTokens: opts.maxOutputTokens,
+		reasoning: true,
 		pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	});
 }
@@ -1022,6 +1053,53 @@ const BUILT_IN_MODELS: Model[] = [
 		maxOutputTokens: 65_536,
 		apiKeyEnvFallbacks: ["GEMINI_API_KEY"],
 		pricing: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
+	}),
+	// The Gemini subscription: the same vendor's models behind the Code Assist
+	// door, off the id list its own client serves. Placed after the Google block
+	// for the reason the ChatGPT block sits after the OpenAI one: a bare id both
+	// catalogs carry must answer at the public API first, and only an id the
+	// subscription alone serves routes there bare. The windows are the only
+	// limits the catalog states — 1,048,576 across the Gemini rows and 256,000
+	// for the two Gemma ones — and no output cap is stated anywhere, so the
+	// output column carries the window.
+	geminiCodeAssistModel("gemini-3.1-pro-preview", "Gemini 3.1 Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+	}),
+	geminiCodeAssistModel("gemini-3.1-pro-preview-customtools", "Gemini 3.1 Pro (Custom Tools)", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+	}),
+	geminiCodeAssistModel("gemini-3-pro-preview", "Gemini 3 Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+	}),
+	geminiCodeAssistModel("gemini-3-flash-preview", "Gemini 3 Flash Preview", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+	}),
+	geminiCodeAssistModel("gemini-3.5-flash", "Gemini 3.5 Flash", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+	}),
+	geminiCodeAssistModel("gemini-3.8-flash", "Gemini 3.8 Flash", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+	}),
+	geminiCodeAssistModel("gemini-2.5-pro", "Gemini 2.5 Pro", { contextWindow: 1_048_576, maxOutputTokens: 1_048_576 }),
+	geminiCodeAssistModel("gemini-3-flash", "Gemini 3 Flash", { contextWindow: 1_048_576, maxOutputTokens: 1_048_576 }),
+	geminiCodeAssistModel("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+	}),
+	geminiCodeAssistModel("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 1_048_576,
+	}),
+	geminiCodeAssistModel("gemma-4-31b-it", "Gemma 4 31B IT", { contextWindow: 256_000, maxOutputTokens: 256_000 }),
+	geminiCodeAssistModel("gemma-4-26b-a4b-it", "Gemma 4 26B A4B IT", {
+		contextWindow: 256_000,
+		maxOutputTokens: 256_000,
 	}),
 	// MiniMax: five rows; `maxOutputTokens` carries the window and both consumers clamp it; M3 has no cache-write rate, and 512k/tier premiums apply.
 	// Long-form design notes: docs/dev/ai-layer.md

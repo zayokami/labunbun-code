@@ -30,8 +30,8 @@ afterEach(() => {
  * host test below reads resolved models, so every one of these is borrowed for
  * the duration — this file otherwise asserts the shipped table, and inheriting
  * the machine's configuration would make a developer's proxy a test failure. All
- * sixteen, not just the one that happened to be set: the point is that no machine
- * can change the answer.
+ * seventeen, not just the one that happened to be set: the point is that no
+ * machine can change the answer.
  *
  * The `finally` is the whole restore path, and deliberately not an `afterEach`
  * alongside the two lines above: `restoreEnv` only puts back what this function
@@ -46,6 +46,7 @@ const BASE_URL_VARS = [
 	"GLM_BASE_URL",
 	"OPENAI_BASE_URL",
 	"CHATGPT_BASE_URL",
+	"GEMINI_BASE_URL",
 	"GOOGLE_BASE_URL",
 	"MINIMAX_BASE_URL",
 	"MISTRAL_BASE_URL",
@@ -130,6 +131,18 @@ const BUILT_IN_REFS = [
 	"google/gemini-4-argon",
 	"google/gemini-3.8-flash",
 	"google/gemini-3.1-pro-preview",
+	"gemini/gemini-3.1-pro-preview",
+	"gemini/gemini-3.1-pro-preview-customtools",
+	"gemini/gemini-3-pro-preview",
+	"gemini/gemini-3-flash-preview",
+	"gemini/gemini-3.5-flash",
+	"gemini/gemini-3.8-flash",
+	"gemini/gemini-2.5-pro",
+	"gemini/gemini-3-flash",
+	"gemini/gemini-3.1-flash-lite",
+	"gemini/gemini-3.5-flash-lite",
+	"gemini/gemma-4-31b-it",
+	"gemini/gemma-4-26b-a4b-it",
 	"minimax/minimax-m3",
 	"minimax/minimax-m2.7",
 	"minimax/minimax-m2.7-highspeed",
@@ -769,6 +782,21 @@ describe("the built-in catalog", () => {
 			["google/gemini-4-argon", 2, 10, 0.1, 0],
 			["google/gemini-3.8-flash", 0.75, 3.75, 0.075, 0],
 			["google/gemini-3.1-pro-preview", 2, 12, 0.2, 0],
+			// The Gemini subscription's twelve, at the same structural zero the
+			// ChatGPT block above states: the plan is billed as a subscription and
+			// no per-token rate exists to transcribe.
+			["gemini/gemini-3.1-pro-preview", 0, 0, 0, 0],
+			["gemini/gemini-3.1-pro-preview-customtools", 0, 0, 0, 0],
+			["gemini/gemini-3-pro-preview", 0, 0, 0, 0],
+			["gemini/gemini-3-flash-preview", 0, 0, 0, 0],
+			["gemini/gemini-3.5-flash", 0, 0, 0, 0],
+			["gemini/gemini-3.8-flash", 0, 0, 0, 0],
+			["gemini/gemini-2.5-pro", 0, 0, 0, 0],
+			["gemini/gemini-3-flash", 0, 0, 0, 0],
+			["gemini/gemini-3.1-flash-lite", 0, 0, 0, 0],
+			["gemini/gemini-3.5-flash-lite", 0, 0, 0, 0],
+			["gemini/gemma-4-31b-it", 0, 0, 0, 0],
+			["gemini/gemma-4-26b-a4b-it", 0, 0, 0, 0],
 			// A fourth rate regime, and the only vendor here that states a cache
 			// write: M3's row is a real zero because its table lists no write rate,
 			// while every M2.x row states $0.375. M3's own figures are the standard
@@ -1128,6 +1156,22 @@ describe("the built-in catalog", () => {
 			["google/gemini-4-argon", 1_048_576, 65_536],
 			["google/gemini-3.8-flash", 1_048_576, 65_536],
 			["google/gemini-3.1-pro-preview", 1_048_576, 65_536],
+			// The Gemini subscription states a window per row and no output cap
+			// anywhere — 1,048,576 for every Gemini id and 256,000 for the two
+			// Gemma ones — so the third column is the window, the same reading as
+			// the subscription block above it.
+			["gemini/gemini-3.1-pro-preview", 1_048_576, 1_048_576],
+			["gemini/gemini-3.1-pro-preview-customtools", 1_048_576, 1_048_576],
+			["gemini/gemini-3-pro-preview", 1_048_576, 1_048_576],
+			["gemini/gemini-3-flash-preview", 1_048_576, 1_048_576],
+			["gemini/gemini-3.5-flash", 1_048_576, 1_048_576],
+			["gemini/gemini-3.8-flash", 1_048_576, 1_048_576],
+			["gemini/gemini-2.5-pro", 1_048_576, 1_048_576],
+			["gemini/gemini-3-flash", 1_048_576, 1_048_576],
+			["gemini/gemini-3.1-flash-lite", 1_048_576, 1_048_576],
+			["gemini/gemini-3.5-flash-lite", 1_048_576, 1_048_576],
+			["gemini/gemma-4-31b-it", 256_000, 256_000],
+			["gemini/gemma-4-26b-a4b-it", 256_000, 256_000],
 			// MiniMax publishes a window per model and no output cap for any of
 			// them, so the third column is the window itself rather than a
 			// published limit. Both consumers clamp it (20k for the compaction
@@ -1550,6 +1594,7 @@ describe("the built-in catalog", () => {
 				host("glm/glm-5.3"),
 				host("openai/gpt-6-sol"),
 				host("chatgpt/gpt-6.1-sol"),
+				host("gemini/gemini-3.1-pro-preview"),
 				host("google/gemini-3.8-flash"),
 				host("minimax/minimax-m3"),
 				host("mistral/mistral-large-4"),
@@ -1573,6 +1618,11 @@ describe("the built-in catalog", () => {
 				// prefix the SDK strips — the Responses client appends
 				// `/responses` to whatever base it is given.
 				"https://chatgpt.com/backend-api/codex",
+				// The Gemini subscription's host, and the reason it has no path
+				// suffix: the client method namespace (`/v1internal:streamGenerateContent`)
+				// is appended by this package's own wire, so the base the row carries is
+				// the bare origin the endpoint constant names.
+				"https://cloudcode-pa.googleapis.com",
 				"https://generativelanguage.googleapis.com/v1beta/openai/",
 				"https://api.minimax.io/v1",
 				"https://api.mistral.ai/v1",
@@ -1652,7 +1702,17 @@ describe("the built-in catalog", () => {
 			const model = resolveModel(ref);
 			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
 		}
-		// And no vendor beyond these four is in that situation, so the rule stays
+		// The fifth family, and the reason is the same shape one layer down: the
+		// code-assist client's own limit table states a window per id — 1,048,576
+		// for every Gemini one, 256,000 for the two Gemma ones — and states no
+		// output cap anywhere, so all twelve rows carry the window.
+		const gemini = BUILT_IN_REFS.filter((ref) => ref.startsWith("gemini/"));
+		expect(gemini.length).toBeGreaterThan(0);
+		for (const ref of gemini) {
+			const model = resolveModel(ref);
+			expect(model?.maxOutputTokens).toBe(model?.contextWindow);
+		}
+		// And no vendor beyond these five is in that situation, so the rule stays
 		// a fact about them rather than a description of the whole table.
 		const others = BUILT_IN_REFS.filter(
 			(ref) =>
@@ -1660,6 +1720,7 @@ describe("the built-in catalog", () => {
 				!ref.startsWith("mistral/") &&
 				!ref.startsWith("ollama-cloud/") &&
 				!ref.startsWith("chatgpt/") &&
+				!ref.startsWith("gemini/") &&
 				!isReseller(ref),
 		).filter((ref) => resolveModel(ref)?.maxOutputTokens === resolveModel(ref)?.contextWindow);
 		expect(others).toEqual([]);
