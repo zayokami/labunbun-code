@@ -3,20 +3,47 @@
  * a short guided flow replaces the dead end of "Missing API key — set
  * ANTHROPIC_API_KEY" as a user's very first experience.
  *
+ * The flow, in the order it runs: what this machine already holds (the
+ * detection block), how the user wants to pay for it (the four-way question —
+ * the two sign-in rows drive the real login flows), the questions that already
+ * existed (theme, editing model), the write, and — only when the detection
+ * block found a source — the import offer, run as a dry run the user confirms.
+ * The import runs after the write, not before: `--force` stays off, so the
+ * import only adds what is missing and every key the wizard just wrote
+ * survives the merge by construction (see `offerImport`).
+ *
  * Storage rules, matching the rest of the config system:
  * - The key VALUE goes into `settings.env`, which applySettingsEnv applies at
  *   startup (real environment variables always win over it).
  * - OpenAI-compatible providers store only the env var NAME in their spec.
+ * - A sign-in itself stores nothing here — the credential store holds it; only
+ *   the model it implies is written (a ChatGPT credential is useless with any
+ *   other model).
  *
  * Cancel writes an empty object so the wizard does not re-trigger on every
- * start; the user can configure by hand or via migrate instead.
+ * start; the user can configure by hand or via migrate instead. No answer may
+ * leave a state the app refuses to start in: a flow that ends with no
+ * credential at all still writes the file with whatever was chosen, and the
+ * REPL mounts anyway carrying the notice that names the fix.
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { AUTO_THEME_NAME, BUILT_IN_THEME_NAMES, DEFAULT_THEME } from "@labunbun/tui";
+import { apiKeyEnvNames, listModels } from "@labunbun/ai";
+import { AUTO_THEME_NAME, BUILT_IN_THEME_NAMES } from "@labunbun/tui";
+import { runChatGptLoginCli } from "./chatgpt-login.ts";
+import { runClaudeLoginCli } from "./claude-login.ts";
+import { detectSubscriptionSignIns, type SubscriptionSignIns } from "./credential-presence.ts";
+import {
+	detectSources,
+	MIGRATION_SOURCE_LABELS,
+	type MigrationSourceId,
+	type RunMigrationOptions,
+	runMigration,
+} from "./migrate.ts";
+import { SOURCE_ROOTS } from "./migrate-types.ts";
 
 export function userSettingsPath(home = homedir()): string {
 	return join(home, ".labunbun", "settings.json");
@@ -30,7 +57,7 @@ export function shouldRunWizard(opts: { home?: string; isTTY?: boolean } = {}): 
 
 /** Answers collected by the interactive flow; consumed only by the builder. */
 export interface WizardAnswers {
-	provider: "anthropic" | "openai-compatible";
+	provider: "anthropic" | "chatgpt" | "openai-compatible";
 	/** Pasted API key value, or null when it already lives in the environment. */
 	apiKey: string | null;
 	baseUrl: string;
@@ -49,14 +76,43 @@ export interface WizardAnswers {
 	emacsMode: boolean;
 }
 
+/**
+ * The model the anthropic answer runs on. A constant because two readers need
+ * the same reference: the settings this module builds, and {@link detectedAnthropicEnv},
+ * which resolves the row to learn which variables it reads.
+ */
+const WIZARD_ANTHROPIC_MODEL = "anthropic/claude-sonnet-5";
+
+/**
+ * The model a ChatGPT sign-in implies. The sign-in row exists because that
+ * credential is useless with any other model (decision 3 in the design note),
+ * so choosing it writes this reference. Spelled `provider/id` the way
+ * `settings.model` is; wizard.test.ts resolves it against `listModels()`, so a
+ * registry rename cannot leave a dead string here.
+ */
+export const WIZARD_CHATGPT_MODEL = "chatgpt/gpt-6-astra";
+
 /** Pure translation of answers into a schema-valid settings object. */
 export function buildWizardSettings(a: WizardAnswers): Record<string, unknown> {
+	const model =
+		a.provider === "anthropic"
+			? WIZARD_ANTHROPIC_MODEL
+			: a.provider === "chatgpt"
+				? WIZARD_CHATGPT_MODEL
+				: `custom/${a.modelId}`;
 	const base: Record<string, unknown> = {
-		model: a.provider === "anthropic" ? "anthropic/claude-sonnet-5" : `custom/${a.modelId}`,
+		model,
 		theme: a.theme,
 		vimMode: a.vimMode,
 		emacsMode: a.emacsMode,
 	};
+
+	if (a.provider === "chatgpt") {
+		// The credential is the sign-in, which the login flow already stored.
+		// The file's whole job for this answer is the model that credential
+		// can run; there is no key to write and no provider spec to describe.
+		return base;
+	}
 
 	if (a.provider === "anthropic") {
 		// Only write what was actually pasted; an empty hand never means
@@ -94,7 +150,14 @@ export function buildWizardSettings(a: WizardAnswers): Record<string, unknown> {
  * question.
  */
 export const WIZARD_THEME_CHOICES: readonly string[] = [...BUILT_IN_THEME_NAMES, AUTO_THEME_NAME];
-export const WIZARD_THEME_DEFAULT: string = DEFAULT_THEME.name;
+
+/**
+ * A bare Enter takes `auto` now that the terminal probe exists
+ * (`packages/tui/src/detect-appearance.ts`): a first-run user should get the
+ * theme that matches the terminal they are already looking at, and `auto` is
+ * the one answer that cannot be wrong about it.
+ */
+export const WIZARD_THEME_DEFAULT: string = AUTO_THEME_NAME;
 
 /**
  * The editing models the wizard offers, in the order they read best: nothing
@@ -102,6 +165,61 @@ export const WIZARD_THEME_DEFAULT: string = DEFAULT_THEME.name;
  * one that needs no thought.
  */
 export const WIZARD_EDITOR_CHOICES: readonly string[] = ["none", "vim", "emacs"];
+
+/** Which row of the payment question a bare Enter takes: `1`–`4`, top to bottom. */
+export type WizardProviderRow = "1" | "2" | "3" | "4";
+
+/**
+ * The row that is already true for this machine — Codex's default rule, same
+ * shape (`onboarding_screen.rs:169-175`: the sign-in when the account path is
+ * the allowed one, the key otherwise). A Claude config on disk means the Claude
+ * sign-in, a key variable already in the environment means the API-key row, and
+ * a bare machine gets row `1` because a sign-in needs nothing typed.
+ */
+export function wizardProviderDefault(found: {
+	claudeConfigured: boolean;
+	envKeysPresent: boolean;
+}): WizardProviderRow {
+	if (!found.claudeConfigured && found.envKeysPresent) return "3";
+	return "1";
+}
+
+/**
+ * The detection block's rows, one per finding, or none for a bare machine —
+ * the caller prints nothing then, which is the app's existing habit
+ * (`interactive.ts:1958-1960`).
+ *
+ * A source row names its tree via `SOURCE_ROOTS` (the home-relative spelling
+ * that exists to render a label), not a count: counts would mean running every
+ * source's read — the plan's work — before the user has answered anything.
+ */
+export function wizardDetectionLines(found: {
+	sources: readonly MigrationSourceId[];
+	envKeys: readonly string[];
+	signIns: SubscriptionSignIns;
+}): string[] {
+	const lines = found.sources.map((source) => `${MIGRATION_SOURCE_LABELS[source]} — ~/${SOURCE_ROOTS[source]}`);
+	for (const key of found.envKeys) lines.push(`${key} is set`);
+	if (found.signIns.claude) lines.push("Claude subscription signed in");
+	if (found.signIns.chatgpt) lines.push("ChatGPT subscription signed in");
+	return lines;
+}
+
+/**
+ * The import question, or undefined when there is nothing to offer — the
+ * caller asks nothing then, because a question whose only true answer is "no"
+ * is not a question.
+ *
+ * The wording deliberately does not carry the design sketch's "and this
+ * project's conversations": history is the one category this offer leaves out
+ * (it is the slowest and has the least claim on a first launch), and a question
+ * must not promise what its own plan will not count. `/yoshi` keeps offering it.
+ */
+export function importOfferLine(sources: readonly MigrationSourceId[]): string | undefined {
+	if (sources.length === 0) return undefined;
+	const names = sources.map((source) => MIGRATION_SOURCE_LABELS[source]).join(", ");
+	return `Import from ${names}? Settings, MCP servers, skills and agents. You will see the full plan before anything is written.`;
+}
 
 type Ask = (question: string) => Promise<string>;
 
@@ -176,18 +294,134 @@ async function readMasked(prompt: string): Promise<string> {
 }
 
 /**
+ * Every environment variable any shipped model row reads, that is set — the
+ * computation `/doctor` already makes (`doctor.ts:128-129`), hoisted rather
+ * than copied: a hand-kept list of names is a list that goes stale silently.
+ */
+function presentEnvKeys(): string[] {
+	const keys = [...new Set(listModels().flatMap((model) => apiKeyEnvNames(model)))].sort();
+	return keys.filter((key) => process.env[key]);
+}
+
+/**
+ * The variables the anthropic answer's row reads, that are set — resolved
+ * through the registry so the wizard cannot name a variable the row does not
+ * read (the row names `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`).
+ */
+function detectedAnthropicEnv(): string[] {
+	const row = listModels().find((model) => `${model.provider}/${model.id}` === WIZARD_ANTHROPIC_MODEL);
+	return row ? apiKeyEnvNames(row).filter((name) => process.env[name]) : [];
+}
+
+/**
+ * Screen C as a console question: dry run first, the report printed, one
+ * confirm over the whole plan, `--force` off throughout — the same shape
+ * `/yoshi` walks (`migrate-wizard.ts`), minus the category questions.
+ *
+ * After the write and never before it. The dry run's plan counts what applying
+ * would change in the tree as it stands; asking first would count writes the
+ * wizard's own file then alters, and the confirm would be over a plan that no
+ * longer describes the apply. Since the wizard's answers are on disk by now and
+ * `--force` is off, `claimScalar` skips every key already present — the import
+ * can add, never clobber, and the model chosen above survives by construction.
+ */
+async function offerImport(
+	ask: Ask,
+	opts: { home: string; cwd: string; sources: readonly MigrationSourceId[] },
+): Promise<void> {
+	const question = importOfferLine(opts.sources);
+	if (!question) return;
+	if ((await askChoice(ask, question, ["y", "n"], "y", "Y/n")) !== "y") return;
+
+	const options: RunMigrationOptions = {
+		home: opts.home,
+		cwd: opts.cwd,
+		only: ["settings", "assets"],
+		from: opts.sources.join(","),
+	};
+	const preview = runMigration(options);
+	if (preview.error) {
+		console.log(`  ${preview.error}`);
+		return;
+	}
+	console.log(`\n${preview.report}`);
+	// Nothing to confirm: the report above already says why each candidate was
+	// left alone, and asking to apply zero files is a question with one answer.
+	if (preview.plan.writes.length === 0) {
+		console.log("Nothing to write — the report above says why.");
+		return;
+	}
+
+	const confirm = await askChoice(
+		ask,
+		`Apply these ${preview.plan.writes.length} file(s)?`,
+		["apply", "cancel"],
+		"apply",
+		"apply/cancel",
+	);
+	if (confirm !== "apply") {
+		console.log("Nothing written (dry run only).");
+		return;
+	}
+
+	const applied = runMigration({ ...options, apply: true });
+	if (applied.error) {
+		console.log(`  ${applied.error}`);
+		return;
+	}
+	// No "restart to pick up" here, unlike `/yoshi`: the settings load happens
+	// after this wizard returns (`interactive.ts:380-383`), so what just landed
+	// is what this very session runs on.
+	console.log(applied.report);
+}
+
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/**
  * Run the guided setup and write the settings file. Ctrl+C anywhere lands in
- * the catch, leaving a minimal valid file so we do not re-prompt forever.
+ * the catch, leaving a minimal valid file so we do not re-prompt forever —
+ * but only when nothing was written yet, so a failure after the write cannot
+ * blank the answers that just landed.
  */
 export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 	console.log(`Welcome to labunbun — first-time setup. Press Enter to accept [defaults].\nProject directory: ${cwd}\n`);
 
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	const ask: Ask = (q) => rl.question(q);
+	let wrote = false;
 
 	try {
-		const providerAnswer = await askChoice(ask, "Model provider", ["anthropic", "openai-compatible"], "anthropic");
+		// Screen A: what this machine already knows. Printed only when it is
+		// non-empty; silence is the app's existing habit.
+		const sources = detectSources(home);
+		const envKeys = presentEnvKeys();
+		const signIns = await detectSubscriptionSignIns({ home });
+		const found = wizardDetectionLines({ sources, envKeys, signIns });
+		if (found.length > 0) {
+			console.log("Found on this machine:");
+			for (const line of found) console.log(`  ${line}`);
+			console.log("");
+		}
 
+		// Screen B: one question with four answers, defaulted to the row that is
+		// already true here.
+		const row = await askChoice(
+			ask,
+			[
+				"How do you want to use labunbun?",
+				"  1. Sign in with a Claude subscription      a browser opens; no API key needed",
+				"  2. Sign in with a ChatGPT subscription     the ChatGPT models, on your plan",
+				"  3. Use an API key                          paste it now, or export it yourself",
+				"  4. Use an OpenAI-compatible endpoint       DeepSeek, Kimi, GLM, a local daemon",
+			].join("\n"),
+			["1", "2", "3", "4"],
+			wizardProviderDefault({ claudeConfigured: sources.includes("claude-code"), envKeysPresent: envKeys.length > 0 }),
+			"1/2/3/4",
+		);
+
+		let provider: WizardAnswers["provider"] = "anthropic";
 		let apiKey: string | null = null;
 		let baseUrl = "";
 		let apiKeyEnvName = "CUSTOM_API_KEY";
@@ -196,10 +430,31 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		let maxOutputTokens = 8_192;
 		let reasoning = false;
 
-		if (providerAnswer === "anthropic") {
-			const pasted = await readMasked("API key (Enter if ANTHROPIC_API_KEY is already set): ");
-			apiKey = pasted.trim() === "" ? null : pasted.trim();
+		if (row === "1" || row === "2") {
+			// The real flows, wired to the terminal: row 1 falls back to a pasted
+			// `code#state`, row 2 to a device code, so neither needs a reachable
+			// loopback. A failed sign-in returns non-zero rather than throwing, and
+			// the flow continues either way — if no credential landed, the REPL
+			// still mounts and the startup notice names the fix.
+			const code = row === "1" ? await runClaudeLoginCli({ home }) : await runChatGptLoginCli({ home });
+			if (code === 0) {
+				provider = row === "1" ? "anthropic" : "chatgpt";
+			} else {
+				const retry = row === "1" ? "/login" : "/login chatgpt";
+				console.log(`  Sign-in did not finish — continuing. Run ${retry} in a session to retry.`);
+			}
+		} else if (row === "3") {
+			// The env pre-detection Codex's key screen has (`auth.rs:710-718`): a
+			// variable that is already set skips the paste and says so.
+			const detected = detectedAnthropicEnv();
+			if (detected.length > 0) {
+				console.log(`  Detected ${detected.join(" or ")} in the environment — no key needed here.`);
+			} else {
+				const pasted = await readMasked("API key (Enter if ANTHROPIC_API_KEY is already set): ");
+				apiKey = pasted.trim() === "" ? null : pasted.trim();
+			}
 		} else {
+			provider = "openai-compatible";
 			baseUrl = (await ask("Base URL (e.g. https://api.example.com/v1): ")).trim();
 			apiKeyEnvName = (await ask(`Env var NAME holding your API key [CUSTOM_API_KEY]: `)).trim() || "CUSTOM_API_KEY";
 			modelId = (await ask("Model id as the provider names it: ")).trim();
@@ -224,7 +479,7 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		const editing = await askChoice(ask, "Editing model", WIZARD_EDITOR_CHOICES, "none", "vim, emacs, or none");
 
 		const settings = buildWizardSettings({
-			provider: providerAnswer === "anthropic" ? "anthropic" : "openai-compatible",
+			provider,
 			apiKey,
 			baseUrl,
 			apiKeyEnvName,
@@ -240,10 +495,27 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		const path = userSettingsPath(home);
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-		console.log(`\nSettings written to ${path}. Type /help in a session to see commands.`);
-	} catch {
-		writeSettingsFile(userSettingsPath(home), {});
-		console.log("\nSetup skipped — rerun without a settings file, or edit ~/.labunbun/settings.json.");
+		wrote = true;
+		console.log(`\nSettings written to ${path}.`);
+
+		// Screen C, after the write — the ordering reasoning is in offerImport.
+		await offerImport(ask, { home, cwd, sources });
+
+		console.log("Type /help in a session to see commands.");
+	} catch (error) {
+		if (wrote) {
+			// The throw came after the write — the import half. The file stands;
+			// say where to finish the job rather than pretending nothing happened.
+			console.log(`\nThe import did not finish (${messageOf(error)}). Run /yoshi in a session to try again.`);
+		} else {
+			// Cancel writes an empty object so the wizard does not re-trigger on
+			// every start. The second clause is the changed part: the session
+			// starts regardless now, so the repair happens inside it.
+			writeSettingsFile(userSettingsPath(home), {});
+			console.log(
+				"\nSetup skipped — the session starts anyway. Run /login or /yoshi in it, or edit ~/.labunbun/settings.json.",
+			);
+		}
 	} finally {
 		rl.close();
 	}

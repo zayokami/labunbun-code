@@ -8,14 +8,21 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { listModels } from "@labunbun/ai";
 import { AUTO_THEME_NAME, BUILT_IN_THEME_NAMES } from "@labunbun/tui";
+import { NO_SIGN_INS } from "../src/credential-presence.ts";
+import { MIGRATION_SOURCE_LABELS, SOURCE_ROOTS } from "../src/migrate-types.ts";
 import {
 	askChoice,
 	buildWizardSettings,
+	importOfferLine,
 	shouldRunWizard,
 	userSettingsPath,
+	WIZARD_CHATGPT_MODEL,
 	WIZARD_THEME_CHOICES,
 	WIZARD_THEME_DEFAULT,
+	wizardDetectionLines,
+	wizardProviderDefault,
 } from "../src/wizard.ts";
 
 let home: string;
@@ -50,7 +57,10 @@ describe("the theme question", () => {
 	// it came to accept a set of names that could drift from the themes that exist.
 	test("offers every built-in plus auto, and no others", () => {
 		expect([...WIZARD_THEME_CHOICES]).toEqual([...BUILT_IN_THEME_NAMES, AUTO_THEME_NAME]);
-		expect(WIZARD_THEME_DEFAULT).toBe("dark");
+		// A bare Enter takes `auto`, not the dark default: the terminal probe
+		// exists, and `auto` is the one answer that cannot be wrong about the
+		// terminal the user is already looking at.
+		expect(WIZARD_THEME_DEFAULT).toBe("auto");
 	});
 
 	/** Drive the question with a scripted answer or two. */
@@ -70,8 +80,8 @@ describe("the theme question", () => {
 	});
 
 	test("an empty answer takes the default the prompt promised", async () => {
-		expect(await ask([""])).toBe("dark");
-		expect(await ask(["   "])).toBe("dark");
+		expect(await ask([""])).toBe("auto");
+		expect(await ask(["   "])).toBe("auto");
 	});
 
 	// The bug this replaces: an unrecognised name was rewritten to "auto" without
@@ -126,6 +136,34 @@ describe("buildWizardSettings", () => {
 		expect(settings.model).toBe("anthropic/claude-sonnet-5");
 	});
 
+	test("chatgpt path: the sign-in is the credential, so only the model it implies is written", () => {
+		const settings = buildWizardSettings({
+			provider: "chatgpt",
+			apiKey: null,
+			baseUrl: "",
+			apiKeyEnvName: "",
+			modelId: "",
+			contextWindow: 128_000,
+			maxOutputTokens: 8192,
+			reasoning: false,
+			theme: "auto",
+			vimMode: false,
+			emacsMode: false,
+		});
+		// The credential lives in the sign-in store, not here; the file's whole
+		// job for this answer is the model that credential can run. No env block
+		// and no provider spec — there is no key to write.
+		expect(settings).toEqual({ model: WIZARD_CHATGPT_MODEL, theme: "auto", vimMode: false, emacsMode: false });
+	});
+
+	test("the chatgpt model reference resolves in the registry", () => {
+		// The reference is a string in this file; the row is the registry's. A
+		// rename or retirement upstream turn this red, which is the point — the
+		// alternative is a sign-in that writes a model nothing can run.
+		const refs = listModels().map((model) => `${model.provider}/${model.id}`);
+		expect(refs).toContain(WIZARD_CHATGPT_MODEL);
+	});
+
 	test("openai-compatible path: provider spec holds the env var NAME; the key value rides in env", () => {
 		const settings = buildWizardSettings({
 			provider: "openai-compatible",
@@ -166,5 +204,53 @@ describe("buildWizardSettings", () => {
 			emacsMode: false,
 		});
 		expect(settings.env).toBeUndefined();
+	});
+});
+
+describe("wizardProviderDefault", () => {
+	test("the default row is the one that is already true for this machine", () => {
+		expect(wizardProviderDefault({ claudeConfigured: true, envKeysPresent: false })).toBe("1");
+		expect(wizardProviderDefault({ claudeConfigured: false, envKeysPresent: true })).toBe("3");
+		// A bare machine gets the sign-in row: it needs nothing typed.
+		expect(wizardProviderDefault({ claudeConfigured: false, envKeysPresent: false })).toBe("1");
+		// A Claude config outranks a stray key variable.
+		expect(wizardProviderDefault({ claudeConfigured: true, envKeysPresent: true })).toBe("1");
+	});
+});
+
+describe("wizardDetectionLines", () => {
+	test("a bare machine yields no lines — the block stays silent", () => {
+		expect(wizardDetectionLines({ sources: [], envKeys: [], signIns: NO_SIGN_INS })).toEqual([]);
+	});
+
+	test("each finding gets one row: a source names its tree, a variable and a sign-in their state", () => {
+		const lines = wizardDetectionLines({
+			sources: ["claude-code", "codex"],
+			envKeys: ["ANTHROPIC_API_KEY"],
+			signIns: { claude: true, chatgpt: false },
+		});
+		// The first row against its literal spelling, not just its parts: this is
+		// the rendering the user reads, `label — ~/tree`.
+		expect(lines[0]).toBe("Claude Code — ~/.claude");
+		expect(lines[1]).toBe(`${MIGRATION_SOURCE_LABELS.codex} — ~/${SOURCE_ROOTS.codex}`);
+		expect(lines[2]).toBe("ANTHROPIC_API_KEY is set");
+		expect(lines[3]).toBe("Claude subscription signed in");
+		expect(lines).toHaveLength(4);
+	});
+});
+
+describe("importOfferLine", () => {
+	test("no sources, no question", () => {
+		expect(importOfferLine([])).toBeUndefined();
+	});
+
+	test("names every detected source and promises the plan", () => {
+		const line = importOfferLine(["claude-code", "codex"]);
+		expect(line).toContain(MIGRATION_SOURCE_LABELS["claude-code"]);
+		expect(line).toContain(MIGRATION_SOURCE_LABELS.codex);
+		expect(line).toContain("full plan");
+		// History is the one category the first-run offer leaves out; the question
+		// must not promise the conversations its own plan will not count.
+		expect(line).not.toContain("conversation");
 	});
 });
