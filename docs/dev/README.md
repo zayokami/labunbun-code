@@ -14,6 +14,7 @@ This directory holds the long-form design notes for the labunbun repository. Eac
 - [Migration sources](migration-sources.md): what the module for each source knows about the product it reads.
 - [Missions](missions.md): what the last run left behind — the close-out note, the shell ledger a resume probes, the subagent orphan notice, the `/tasks` tree, and the exit guard.
 - [Model roles](model-roles.md): the five seats of `settings.roles` — how each resolves fail-soft, the fallback chains, and the budget rule that refuses a request past its ceiling.
+- [Out-of-box experience](oobe-design.md): what a brand-new user meets on a machine with no settings file and no credential — the call path from an empty home, what OpenAI's Codex CLI does in the same position, and the first-launch flow this app builds.
 - [Output limits](output-limits.md): the bounds on tool output per result and per round, and the capture of a stream that has not finished.
 - [Sandbox](sandbox.md): the sandbox policy as a value, its three platform back ends, and the network proxy.
 - [Session store](session-store.md): the JSONL session tree, its append-only form, branches, and compaction.
