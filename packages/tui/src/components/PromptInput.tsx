@@ -185,8 +185,18 @@ export function PromptInput({
 	// editor rather than implement it: the badge and the hint. The engine still
 	// takes `vim` alone, because the Emacs engine is not constructed from here.
 	const editor = resolveEditingMode({ vimMode: vim, emacsMode: emacs });
-	const { state, actions, historyUp, historyDown, pushHistory, getHistory, vimMode, handleEditorKey, selection } =
-		useTextInput(history, editor.mode);
+	const {
+		state,
+		actions,
+		historyUp,
+		historyDown,
+		pushHistory,
+		getHistory,
+		vimMode,
+		vimSearch,
+		handleEditorKey,
+		selection,
+	} = useTextInput(history, editor.mode);
 	const [suggestionIndex, setSuggestionIndex] = useState(0);
 	/** Ctrl+R state; null when the search is closed. */
 	const [search, setSearch] = useState<HistorySearchState | null>(null);
@@ -503,6 +513,23 @@ export function PromptInput({
 				setSearch(null);
 				return;
 			}
+			// In vim's normal mode `/` opens the engine's search line, and on an
+			// empty buffer that is a dead end for the one thing the placeholder says
+			// "/" does: there is nothing to search, and every key typed after it goes
+			// into a line the prompt does not draw. So on an empty buffer the key is
+			// the command door: the buffer takes the slash and the editor is sent to
+			// insert, after which the keys type and the list narrows exactly as when
+			// the command was typed by hand from insert mode. Anything half-typed in
+			// the engine (`d`, `2`, `"`) is cancelled first the way Escape cancels it,
+			// so it cannot fire on the next key behind the list. A buffer that is not
+			// empty keeps the key: there `/` is a search with something to search.
+			if (vim && vimMode === "normal" && input === "/" && !key.ctrl && !key.meta && state.text === "") {
+				handleEditorKey("", { escape: true });
+				actions.setBuffer("/", 1);
+				handleEditorKey("a", {});
+				setSuggestionIndex(0);
+				return;
+			}
 			if (handleEditorKey(input, key)) return;
 			if (search) {
 				// Everything else is the query while a search is open. The vim engine
@@ -773,6 +800,19 @@ export function PromptInput({
 								: line}
 						</Text>
 					))
+				)}
+				{vimSearch && (
+					// vim's own line, at the bottom of the box the way vim draws it at the
+					// bottom of the screen: the separator, the pattern so far, and a block
+					// caret. While it is open Enter belongs to it — it runs the search
+					// instead of submitting — so the hint says what the two keys do rather
+					// than leaving the level of the border the only sign anything is on.
+					<Text color={theme.text}>
+						{vimSearch.forward ? "/" : "?"}
+						{vimSearch.text}
+						<Text inverse> </Text>
+						<Text dimColor> Enter search · Esc cancel</Text>
+					</Text>
 				)}
 				<Text dimColor>
 					{/* The badge is vim's alone. Emacs has no mode to name, and a line

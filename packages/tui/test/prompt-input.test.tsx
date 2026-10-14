@@ -372,6 +372,98 @@ describe("slash command suggestions", () => {
 });
 
 /**
+ * `/` under the vim editor.
+ *
+ * In NORMAL the key is vim's search by right, and the engine takes it as one —
+ * on a buffer that has anything to search. On an *empty* buffer that search
+ * finds nothing and draws nothing, so there the prompt makes the key the
+ * command door its placeholder advertises: the whole point is that the key, the
+ * list, and the keys after it all behave exactly as if the command had been
+ * typed by hand from insert mode.
+ */
+describe("slash commands under vim", () => {
+	const COMMANDS: Array<[string, string]> = [
+		["/theme", "Show or switch theme"],
+		["/think", "Set thinking level"],
+	];
+
+	test("NORMAL / on an empty prompt opens the list and the keys after it type", async () => {
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} commandSuggestions={COMMANDS} vim />),
+		);
+		await delay(30);
+
+		stdin.write("/");
+		await delay(30);
+		// The door opened and the editor is typing in it: the list is up and the
+		// badge says the keys that follow are text, not commands.
+		expect(flat(lastFrame())).toContain("/theme");
+		expect(flat(lastFrame())).toContain("[INSERT]");
+
+		// "the" only matches /theme, so a narrowing list proves the letters landed
+		// in the buffer rather than being read as motions.
+		stdin.write("the");
+		await delay(30);
+		const frame = flat(lastFrame());
+		expect(frame).toContain("/theme");
+		expect(frame).not.toContain("/think");
+
+		stdin.write("\t");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["/theme"]);
+		unmount();
+	});
+
+	test("INSERT / still types into the buffer", async () => {
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={COMMANDS} vim />),
+		);
+		await delay(30);
+		stdin.write("i");
+		await delay(30);
+		stdin.write("/th");
+		await delay(30);
+		// Both entries match "/th" — the point is only that the list is up at all.
+		expect(flat(lastFrame())).toContain("/theme");
+		expect(flat(lastFrame())).toContain("/think");
+		unmount();
+	});
+
+	test("a buffer with text in it keeps / as the search, and the line is drawn", async () => {
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} commandSuggestions={COMMANDS} vim />),
+		);
+		await delay(30);
+		stdin.write("i");
+		stdin.write("ab");
+		stdin.write("\x1b"); // leave insert: the caret steps back onto "b"
+		await delay(30);
+
+		stdin.write("/");
+		await delay(30);
+		stdin.write("q");
+		await delay(30);
+		// The search line, on screen — without it every key from the `/` on went
+		// into something invisible.
+		const frame = flat(lastFrame());
+		expect(frame).toContain("/q");
+		expect(frame).toContain("ab"); // the buffer is still there, untouched
+
+		// Enter belongs to the search while the line is open: it must not submit.
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual([]);
+		expect(flat(lastFrame())).not.toContain("/q");
+		expect(flat(lastFrame())).toContain("ab");
+		unmount();
+	});
+});
+
+/**
  * Ctrl+R. The rule about vim is not re-implemented here — the vim engine claims
  * Ctrl+R for redo in normal and visual mode before this component sees it, and
  * that is the whole rule.
