@@ -786,44 +786,57 @@ the old behaviour was not pinned anywhere.
 
 ## What the fuzzer refuses to compare
 
-`fuzz.mjs` draws 1–3 keys from `KEYS` and drops three classes of sequence by name,
-in `uncomparable()`. Two of the three are about a **command line the fuzzer opens
-but cannot see**: a `/` or `?` puts the two editors on different sides of a latch —
-vim's is a real command line the next key is typed into, the engine's is a one-key
-read.
+`fuzz.mjs` draws 1–3 keys from `KEYS` and drops the sequences whose keys the two
+editors answer differently, by the walk in `uncomparable()` — one key at a time,
+because the states that change what a key means are states the key before it does
+not know about.
 
-- **A `CR` with no latch open.** Vim binds Enter to `nv_down` + `beginline`, which
-  is this engine's `+`; the engine hands Enter to the host, because in a REPL a
-  newline submits. The *buffer* agrees and the host's half of the answer has
-  nothing to compare against, so the whole sequence is dropped rather than the
-  key. This is **not** the search case: `/foo<CR>` is comparable, and `CR` is in
-  the key set for it.
-- **A `BS` or `DEL` with a latch open.** In vim both are editing keys of the
-  command line — `BS` cancels it outright, `DEL` erases under the cursor — and
-  neither is a command the engine reads on that path. Without a latch they are
-  ordinary motions and stay in the set.
-- **A `CR` straight after an `r`.** Both answers are readable and they agree — both
-  halves of the command are implemented, and `CASES` pins them — but the bare-CR
-  rule above reads the key alone, so a sequence carrying one is dropped along with
-  a bare one. That is coverage the instrument is leaving on the table rather than
-  a difference it cannot judge.
+- **An Enter no pending state is waiting for.** Vim reads a bare Enter as
+  `nv_down` + `beginline` — this engine's `+` — and reads one after an operator as
+  `+` too (`d<CR>` deletes two lines), while after an armed `g` it has no command
+  at all and beeps. This engine hands Enter to the host, because in a REPL a
+  newline submits. The *buffer* half could be compared and the host's cannot, so
+  the sequence is dropped. This is **not** the search case: an Enter inside a `/`
+  or `?` line runs the search in both editors and is comparable.
+- **An arrow or `<End>` inside a `/` or `?` line.** Vim's command line moves its
+  caret and this engine's does not, so everything typed after the move would land
+  at a different place in the two lines.
+- **A `+` or a `?` typed into a pattern.** `+` is the dialect the search section
+  below names — a literal in vim, a quantifier in JavaScript — and `?` is the
+  same kind (not magic in vim either). A pattern is compared as text by the
+  sweep, and a known dialect difference reported as a discovery would be noise.
+- **An `i`, an `a` or a mark key that is not naming a range.** A bare `i` or `a`
+  starts typing instead — the two editors measured on different sides of a mode
+  change — and away from an `i`/`a`, a `"` names a register and a `'` and a
+  `` ` `` name a mark, and all three read the key after them. Only a pair with its
+  object character behind it is comparable, and the skip that consumes the object
+  character is what keeps `di"` from being read as a `d` waiting for a register
+  name.
 
-A fourth rule, `textObjectOk()`, came with the text-object draw and is the same kind
-of thing: **an `i` or an `a` that is not naming a range starts typing instead**, and
-this engine hands what follows to the host rather than the buffer, so a sequence
-carrying one is measuring the two editors on different sides of a mode change. Three
-more keys are dropped for the same reason — away from an `i`/`a`, a `"` names a
-register and a `'` and a `` ` `` name a mark, and all three read the key after them.
+That `i`/`a` rule was wrong in its first version and the fuzzer found it on the
+**first run** of the new draw, which is the argument for having written it as a
+parser rather than as a pattern: it treated an operator as pending until an `i` or
+an `a` turned up, so `y` `d` `i` `}` read as *a `y` waiting, then a `d` waiting,
+then a text object*. `yd` is one command — a yank to end of line — and the `i`
+after it opens insert mode. Both editors agreed on the buffer (`café Ü}nïcödé`,
+the `}` typed in) and the only difference was the caret sitting one to the right
+of the character it went in at, which is the insert-mode answer rather than a
+text-object one. An operator is now spent by whatever key comes next, which is
+what a count between the two is for.
 
-That rule was wrong in its first version and the fuzzer found it on the **first run**
-of the new draw, which is the argument for having written it as a parser rather than
-as a pattern: it treated an operator as pending until an `i` or an `a` turned up, so
-`y` `d` `i` `}` read as *a `y` waiting, then a `d` waiting, then a text object*. `yd`
-is one command — a yank to end of line — and the `i` after it opens insert mode. Both
-editors agreed on the buffer (`café Ü}nïcödé`, the `}` typed in) and the only
-difference was the caret sitting one to the right of the character it went in at,
-which is the insert-mode answer rather than a text-object one. An operator is now
-spent by whatever key comes next, which is what a count between the two is for.
+The walk replaced lookback rules that read one key at a time, and what they
+over-dropped is measured now:
+
+- **`r<CR>`, and every Enter closing a typed pattern** (`/foo<CR>`), were dropped
+  as "a CR with no latch open": the rule asked whether the *previous* key was the
+  separator. Both halves of `r<CR>` are implemented and `CASES` pins them (the r
+  section below), and `/foo<CR>` was measured comparable when it was written down
+  as over-dropped rather than as a gap.
+- **`BS` and `DEL` inside a latch** were dropped as keys "the engine does not
+  read on that path". That stopped being true when `#search` became a real line —
+  it slices one code point on `<BS>` and ignores `<DEL>` at the end-of-line caret
+  both editors keep. Pattern text and the two editing keys at the line's end are
+  comparable, then; the arrows inside a line are what the walk drops.
 
 ### Why the text objects are not in `KEYS`
 
@@ -840,9 +853,12 @@ an `a`, one of the twelve characters the engine's `#applyTextObject` names a ran
 with, and up to one ordinary key on either side. The keys on either side are the
 point — `di"j` for where the caret lands, `yi"g g P` for what a range yank leaves in
 the register, `2di"` for whether the count reaches the object, `di".` for whether the
-redo replays it. **164 of the 583 checked sequences now carry a text object**, against
+redo replays it. **164 of the 575 checked sequences now carry a text object**, against
 0 before, and the summary line reports that number so the draw can be judged on what
-it actually produced rather than on what it was meant to.
+it actually produced rather than on what it was meant to. (The total was 583 before
+the admission walk replaced the lookback rules — it admits patterns, `r<CR>` and
+latch-editing keys it used to drop, and drops the arrow keys inside a line that it
+used to compare.)
 
 Everything else the fuzzer finds is compared, and it earned its keep on its first
 run in this round: `^ j` on `"abc\ndef"` at 1, out of 900 drawn sequences, was the
@@ -893,10 +909,11 @@ command's second key would quietly be a bare `r` waiting for one. Measured: the
 `.` writes the `\r` over the next line's character, the same as the original
 command, and `CASES` carries it.
 
-`fuzz.mjs` keeps `r`-taken CRs out of the sweep without meaning to — its bare-CR
-rule reads the key alone, so they are dropped along with bare ones. With both
-halves implemented that is coverage the instrument is leaving on the table rather
-than a gap it cannot judge: the shapes above compare cleanly today.
+`fuzz.mjs` used to keep `r`-taken CRs out of the sweep without meaning to — its
+bare-CR rule read the key alone, so they were dropped along with bare ones. The
+admission walk now knows what an `r` has already eaten and admits them; with both
+halves implemented and the shapes above comparing cleanly today, that coverage is
+back in the sweep.
 
 ### Search, measured and left
 

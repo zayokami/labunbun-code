@@ -21,14 +21,14 @@
  * are four keys long — `di"j`, `yi"g g P`, `2di"`, `di".` — and the draw is one to
  * three. So the table is left alone and the shape is drawn on purpose.
  *
- * Three more classes are dropped by name in `uncomparable()`: an Enter that is not
- * closing a `/` or `?` (vim calls it `+`; the engine hands it to the host so a
- * newline submits), a backspace or delete that *is* on one (vim edits the command
- * line, the engine does not read that key there), and an Enter straight after an
- * `r` (vim carries it out, the engine cancels — a named feature gap). A fourth
- * rule, `textObjectOk()`, comes with the text-object draw: an `i` or an `a` that
- * is not naming a range starts typing instead, and the engine gives what follows to
- * the host. The README says why with the measurements.
+ * The classes `uncomparable()` drops by name are the states the two editors do not
+ * share, and the walk there decides them one key at a time: an Enter that is not
+ * closing a `/` or `?` line and not the character an armed `r` is waiting for (vim
+ * reads a bare Enter as `+`; the engine hands it to the host so a newline submits),
+ * an arrow key on a `/` or `?` line (vim's command line moves its caret and the
+ * engine's does not), and an `i`, an `a` or a mark key that is not naming a range —
+ * which starts typing, or reads the key after it into a name. The README says why
+ * with the measurements.
  *
  *   bun run packages/tui/test/vim-differential/fuzz.mjs [iterations]
  *
@@ -97,11 +97,11 @@ const KEYS = {
 	// checking. It has earned its place twice over — the selection half is a
 	// command that reads a key of its own and a Visual mode that had no answer for
 	// it, which no `regress.mjs` case was asking about, and putting `r` in the set
-	// is what turned up the count refusal below. Two exclusions come with it, both
-	// written down below: a half-typed `r` at the end, and `r` `<CR>` — both halves
-	// of which the engine now carries out and matches (the `regress.mjs` `r` `CR`
-	// cases pin them, redo included) but which the bare-CR rule still drops, because
-	// that rule reads the key alone.
+	// is what turned up the count refusal below. One exclusion comes with it: a
+	// half-typed `r` at the end. `r<CR>` is comparable — the engine carries both
+	// halves out and the `regress.mjs` `r` `CR` cases pin them, redo included — and
+	// the walk in `uncomparable()` admits it as the character the armed `r` is
+	// waiting for, which the lookback rule it replaced could not see.
 	r: ["r", {}],
 	d: ["d", {}],
 	y: ["y", {}],
@@ -181,46 +181,116 @@ let checked = 0;
 let withObject = 0;
 let skipped = 0;
 
-/** Did the key at `i` go into a `/` or `?` line rather than into the buffer? */
-function intoLatch(seq, i) {
-	return i > 0 && (seq[i - 1] === "/" || seq[i - 1] === "?");
-}
-
 /**
- * The three sequences that have answered a different question in the two editors,
- * named so that a mismatch which is neither can be told apart from one that is.
+ * The walk that decides whether the two editors are being asked the same question,
+ * one key at a time — a state machine rather than a lookback rule at each key,
+ * because every state that changes what a key means is a state the key before it
+ * does not know about.
  *
- *  - A `CR` with no latch open. Vim binds it to `nv_down` + `beginline`, which is
- *    this engine's `+`; the engine hands Enter to the host so a newline in the REPL
- *    submits. The buffers agree and the host's half of the answer cannot be
- *    compared, so the whole sequence is dropped rather than the key. (It is not a
- *    *search* latch case: `/foo<CR>` is comparable, and the comment on `CR` above
- *    is why `CR` is in the set at all. The rule as coded admits only a CR whose
- *    predecessor is the opener, so a search with a pattern typed before its CR is
- *    over-dropped along with the bare ones — measured comparable, kept out as
- *    conservative rather than as a gap.)
- *  - A `BS` or `DEL` with a latch open. In vim both are an editing key of the
- *    command line — `BS` cancels it outright, `DEL` erases under the cursor — and
- *    neither is a command the engine reads on that path. Without a latch the same
- *    two keys are ordinary motions and stay in the set.
- *  - A `CR` right after an `r`. No rule below is written for it — the bare-CR rule
- *    catches the same key first, reading the key alone — but it is named because
- *    it is real: vim's `r` reads the CR as its character, a line break in NORMAL
- *    (`normal.c:4925-4939`) and a literal `\r` in a Visual selection
- *    (`normal.c:4866-4880`), and the engine now answers both the same way —
- *    `regress.mjs` pins both halves, the redo included — so this is coverage the
- *    sweep is leaving on the table rather than a gap it cannot judge. The
- *    dedicated rule that used to sit here could never fire and is gone; what drops
- *    these sequences is the bare-CR rule's over-drop, and admitting them means
- *    knowing what an `r` has already eaten, a change of its own.
+ * The states, and what an Enter means inside each:
+ *
+ *  - **A `/` or `?` line.** The engine's `#search` holds the whole line — it
+ *    accumulates, `<BS>` edits it one code point at a time, and Enter runs the
+ *    search rather than reaching the host — and vim's command line does the same.
+ *    An Enter here runs the search in both, so the sequence is comparable: the old
+ *    rule asked whether the *previous* key was the separator and therefore dropped
+ *    every pattern with a character typed before its Enter along with the bare
+ *    ones. What does diverge is the caret — the arrows and `<End>` move vim's
+ *    command line and the engine ignores them — so one of those anywhere inside a
+ *    line drops the sequence: everything typed after the move would land at a
+ *    different place in the two lines. A `+` or a `?` typed into a pattern drops
+ *    it too, and that one is the dialect rather than the caret: neither is magic
+ *    in vim, which reads both as literals where the engine's JavaScript reads
+ *    them as quantifiers — the dialect the README names as not implemented — and
+ *    a known difference reported as a discovery is noise.
+ *  - **An armed `r`.** The key it is waiting for is a character, Enter included:
+ *    the character under the caret becomes a line break, and both editors carry
+ *    that out (`regress.mjs` pins both halves, the redo included). Comparable, and
+ *    the old rule dropped it without cause.
+ *  - **An armed `g`.** Vim has no `g<CR>`; it beeps. The engine abandons the
+ *    pending `g` and hands the Enter to the host. Incomparable.
+ *  - **An operator in flight.** Vim reads a bare Enter as `+`, a motion, so
+ *    `d<CR>` deletes two lines; the engine abandons the operator and submits.
+ *    Incomparable. A count between the operator and its motion keeps the operator
+ *    waiting, in either order.
+ *  - **Nothing pending.** Vim moves (`+`), the engine submits. Incomparable.
+ *
+ * The `i`/`a` rule is the text-object draw's own and this same walk decides it: an
+ * `i` or an `a` that is not naming a range starts typing instead, which puts the
+ * two editors on different sides of a mode change, so only a pair with its object
+ * character behind it is comparable. It is written the way vim parses a command —
+ * an operator is spent by whatever key comes next, which is what a count between
+ * the two is for — because the first version of it was not: it treated an operator
+ * as pending until an `i` or an `a` turned up, so `y` `d` `i` `}` read as "a `y`
+ * waiting, then a `d` waiting, then a text object". `yd` is one command — a yank
+ * to the end of the line — and the `i` after it opens insert mode, where the `}`
+ * is typed into the buffer. The fuzzer found it on the first run of the
+ * structured draw.
+ *
+ * The quote, mark and register keys are the same kind of state: away from an
+ * `i`/`a` a `"` names a register and a `'` and a `` ` `` name a mark, and all
+ * three read the key after them — so they are dropped like a bare `i`/`a`, and the
+ * skip that consumes the object character is what keeps `di"` from being read as
+ * a `d` waiting for a register name.
  */
 function uncomparable(seq) {
+	/** `"operator"` waits for a motion or an object; `"r"` and `"g"` for the key that spends them. */
+	let armed = null;
+	/** Inside a `/` or `?` line, where every key is pattern text until Enter. */
+	let latch = false;
 	for (let i = 0; i < seq.length; i++) {
-		if (seq[i] === "CR" && !intoLatch(seq, i)) return true;
-		if ((seq[i] === "BS" || seq[i] === "DEL") && intoLatch(seq, i)) return true;
+		const key = seq[i];
+		if (latch) {
+			if (key === "CR") {
+				latch = false; // the pattern's Enter: both editors run the search
+				continue;
+			}
+			if (ARROW_KEYS.has(key)) return true; // vim's line moves its caret; the engine's does not
+			if (key === "+" || key === "?") return true; // literals in vim, quantifiers in JavaScript
+			continue; // pattern text, and `<BS>`/`<Del>` at the line's end: identical in the two
+		}
+		if (armed === "r") {
+			armed = null; // the character to write, Enter included
+			continue;
+		}
+		if (armed === "g") {
+			if (key === "CR") return true; // vim beeps where the engine abandons the `g` and submits
+			armed = null;
+			continue;
+		}
+		if (armed === "operator") {
+			if (key === "2" || key === "3") continue; // the count keeps the operator waiting
+			if (key === "CR") return true; // vim reads the bare Enter as `+`
+			if (key === "i" || key === "a") {
+				if (i + 1 >= seq.length) return true; // an object with no character: a latch only vim sits in
+				i += 1; // the object character, spent with the object
+				armed = null;
+				continue;
+			}
+			armed = null; // the motion; an `r` or `g` after an operator is spent, not armed
+			continue;
+		}
+		if (key === "CR") return true; // a bare Enter: vim moves (`+`), the engine submits
+		if (key === "/" || key === "?") {
+			latch = true;
+			continue;
+		}
+		if (OPERATORS.has(key)) {
+			armed = "operator";
+			continue;
+		}
+		if (LITERAL_KEYS.has(key)) {
+			armed = key;
+			continue;
+		}
+		if (QUOTE_KEYS.has(key)) return true; // a register or a mark: the key after it is read into a name
+		if (key === "i" || key === "a") return true; // a bare `i` or `a` starts typing
 	}
 	return false;
 }
+
+/** The keys that move vim's command line, kept out of the `/` and `?` states above. */
+const ARROW_KEYS = new Set(["UP", "DOWN", "LEFT", "RIGHT", "END"]);
 
 /** The operators in the set above. `>` and `<` are not: they are shift keys, and nothing else. */
 const OPERATORS = new Set(["d", "y"]);
@@ -239,68 +309,6 @@ const OPERATORS = new Set(["d", "y"]);
 const LITERAL_KEYS = new Set(["r", "g"]);
 /** The three quote characters, spelled the way the engine receives them. */
 const QUOTE_KEYS = new Set(['"', "'", "`"]);
-
-/**
- * A text object is two keys, and only one of them may be a bare word in the
- * sequence: `i` and `a` in NORMAL start typing, and this engine hands what follows
- * to the host rather than the buffer. So a sequence is comparable only where every
- * `i` and `a` is spelling a range — which needs an operator ahead of it, and needs
- * a key behind it, because the object character is the second half of the pair and
- * a pair with no second half is a latch the two editors are sitting inside
- * differently.
- *
- * The rule is written the way vim parses a command, and the first version of it
- * was not: it treated an operator as pending until an `i` or an `a` turned up, so
- * `y` `d` `i` `}` read as "a `y` waiting, then a `d` waiting, then a text object".
- * `yd` is one command — a yank to the end of the line — and the `i` after it opens
- * insert mode, where the `}` is typed into the buffer. The fuzzer found it on the
- * first run of the structured draw. So an operator here is spent by whatever key
- * comes next, which is what a count between the two is for, and the same is true
- * of the two literal keys.
- *
- * The quote keys are then either that object character's place or nothing worth
- * comparing: away from an `i`/`a` a `"` names a register, a `'` and a `` ` `` name a
- * mark, and all three read the key after them. The `i++` below is what keeps the
- * second half of a pair out of that test — `di"` must not be read as a `d` waiting
- * for a register name.
- */
-function textObjectOk(seq) {
-	/** `"operator"` waits for a motion or an object; `"literal"` for a character. */
-	let armed = null;
-	for (let i = 0; i < seq.length; i++) {
-		const key = seq[i];
-		if (armed === "literal") {
-			armed = null;
-			continue;
-		}
-		if (armed === "operator") {
-			// A count sits between the operator and the object in either order,
-			// and either way the operator is still waiting.
-			if (key === "2" || key === "3") continue;
-			if (key === "i" || key === "a") {
-				if (i + 1 >= seq.length) return false;
-				armed = null;
-				i++;
-				continue;
-			}
-			// Anything else is the operator's motion, and the operator is spent.
-			armed = null;
-			continue;
-		}
-		if (OPERATORS.has(key)) {
-			armed = "operator";
-			continue;
-		}
-		if (LITERAL_KEYS.has(key)) {
-			armed = "literal";
-			continue;
-		}
-		if (QUOTE_KEYS.has(key)) return false;
-		// A bare `i` or `a` types. That is the whole reason this function exists.
-		if (key === "i" || key === "a") return false;
-	}
-	return true;
-}
 
 /** `d`, `y`, and the four ways a count may sit in front of either. */
 const ARMED = [["d"], ["y"], ["2", "d"], ["3", "d"], ["2", "y"], ["3", "y"]];
@@ -329,9 +337,10 @@ function textObjectSeq() {
 	const seq = [];
 	if (rand() < 0.5) {
 		const pre = ALPHABET[Math.floor(rand() * ALPHABET.length)];
-		// A `/` or `?` right before the operator would swallow it into a search
-		// line, and the engine's latch for that is a one-key read where vim's is a
-		// real command line — the same reason `uncomparable()` drops `BS` there.
+		// A `/` or `?` right before the operator would swallow it into the search
+		// line — a real line in both editors, so the object would be compared as
+		// pattern text and never act on the buffer, which is the point of the
+		// draw — so the draw refuses to build it.
 		if (pre !== "/" && pre !== "?") seq.push(pre);
 	}
 	for (const key of ARMED[Math.floor(rand() * ARMED.length)]) seq.push(key);
@@ -360,16 +369,11 @@ for (let i = 0; i < ITERATIONS; i++) {
 	// No half-typed operator or count at the end — see the file comment. An `r` is
 	// one too: both editors would be waiting for the character to write.
 	if (["d", "y", "2", "3", "r"].includes(seq[seq.length - 1])) continue;
-	// Two named exclusions, both about a command line the fuzzer opens but cannot
-	// see. A `/` or `?` puts both editors on a different side of a latch: vim's is
-	// a real command line that the next key is typed into, and the engine's is a
-	// one-key read. What arrives next is therefore not the same key in the two.
+	// The named exclusions, by the walk in `uncomparable()`: a `/` or `?` line
+	// makes every key after it pattern text in both editors, an armed key changes
+	// what the next one does, and the walk is where each shape is judged — the
+	// text-object draw's `i`/`a` rule included.
 	if (uncomparable(seq)) continue;
-	// And the exclusion that comes with the text objects: an `i` or an `a` that is
-	// not naming a range starts typing instead, which puts the two editors on
-	// different sides of a mode change. Only a sequence that spells one throughout
-	// is comparable, and the structured draw is built to.
-	if (!textObjectOk(seq)) continue;
 
 	// A key the table above has no entry for is a printable one the text-object
 	// draw supplied — the twelve object characters, most of which are not commands
