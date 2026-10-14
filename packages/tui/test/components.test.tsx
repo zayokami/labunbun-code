@@ -462,6 +462,29 @@ describe("PermissionDialog", () => {
 		unmount();
 	});
 
+	// A move and the Enter it earned in one read, dispatched before React has
+	// committed the move: the same coalescing the picker's burst test pins. A
+	// confirm read from the rendered value answers row 0 — the row the screen
+	// was still showing — so a quick ↓+Enter silently selects "allow once" when
+	// the user reached "don't ask again".
+	test("a move and Enter in one read approve the moved row", async () => {
+		const decisions: Array<[boolean, boolean]> = [];
+		const { stdin, unmount } = render(
+			withTheme(
+				<PermissionDialog
+					toolName="Edit"
+					inputPreview="x.ts"
+					onResolve={(allow, always) => decisions.push([allow, always])}
+				/>,
+			),
+		);
+		await delay(30);
+		stdin.write("\x1b[B\r"); // down, then Enter, in the same read
+		await delay(30);
+		expect(decisions).toEqual([[true, true]]);
+		unmount();
+	});
+
 	test("Esc denies", async () => {
 		const decisions: Array<[boolean, boolean]> = [];
 		const { stdin, unmount } = render(

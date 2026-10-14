@@ -60,11 +60,27 @@ export function PermissionDialog({
 }: PermissionDialogProps) {
 	const theme = useTheme();
 	const [selected, setSelected] = useState(0);
+	/**
+	 * The stepping truth behind `selected`, which exists to paint. One read can
+	 * carry several keys — a held key's autorepeat, or a burst the terminal
+	 * coalesced — and the dispatcher runs them all before React has committed
+	 * the first move. A move and the Enter it earned, read from the rendered
+	 * value, would answer the row the screen was still showing a keystroke ago.
+	 * Every read of the highlight goes through this ref.
+	 */
+	const selectedRef = useRef(0);
 	const [expanded, setExpanded] = useState(false);
 	const answers = options ?? permissionOptions(toolName, undefined);
 	const body = expanded && inputFull ? inputFull : inputPreview;
 	/** The row a held ✕ takes — the one that stops the asking — or -1 for none. */
 	const standing = answers.findIndex((answer) => answer.alwaysAllow);
+
+	/** Move the highlight, wrapping. */
+	const step = (delta: number): void => {
+		const next = (((selectedRef.current + delta) % answers.length) + answers.length) % answers.length;
+		selectedRef.current = next;
+		setSelected(next);
+	};
 
 	const openedAt = useRef(Date.now());
 	usePadAction(pad, (action) => {
@@ -85,11 +101,11 @@ export function PermissionDialog({
 		// and tell the model what to do differently" is a *different* no from
 		// ○'s, and one only a person reading the screen would pick.
 		if (action.kind === "up" || action.kind === "left") {
-			setSelected((s) => (s + answers.length - 1) % answers.length);
+			step(-1);
 			return true;
 		}
 		if (action.kind === "down" || action.kind === "right") {
-			setSelected((s) => (s + 1) % answers.length);
+			step(1);
 			return true;
 		}
 		if (action.kind !== "confirm") return false;
@@ -102,17 +118,17 @@ export function PermissionDialog({
 			return true;
 		}
 		const standing = answers.find((answer) => answer.alwaysAllow);
-		const answer = action.phase === "hold" && standing ? standing : answers[selected % answers.length];
+		const answer = action.phase === "hold" && standing ? standing : answers[selectedRef.current % answers.length];
 		onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
 		return true;
 	});
 
 	useInput((input, key) => {
-		if (key.upArrow) setSelected((s) => (s + answers.length - 1) % answers.length);
-		else if (key.downArrow) setSelected((s) => (s + 1) % answers.length);
+		if (key.upArrow) step(-1);
+		else if (key.downArrow) step(1);
 		else if (key.ctrl && input === "a") setExpanded((e) => !e);
 		else if (key.return) {
-			const answer = answers[selected % answers.length];
+			const answer = answers[selectedRef.current % answers.length];
 			onResolve(answer.allow, answer.alwaysAllow, answer.alwaysAsk);
 		} else if (key.escape) {
 			onResolve(false, false);

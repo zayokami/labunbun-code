@@ -864,6 +864,12 @@ export function REPL({
 						<ListPickerDialog
 							title={picker.title}
 							items={picker.items}
+							// The row the list opens on, carried through from what the
+							// caller asked for: `/theme` opens on the active theme and
+							// `/model` on the active model, and a picker that always
+							// opens at the top makes the active row findable only by
+							// reading every label.
+							initialIndex={picker.initialIndex}
 							resolve={picker.resolve}
 							onHighlight={picker.onHighlight}
 							onCancel={picker.onCancel}

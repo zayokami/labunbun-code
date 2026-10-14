@@ -64,6 +64,33 @@ describe("QuestionDialog", () => {
 		d.unmount();
 	});
 
+	// The same coalescing the picker's burst test pins, one component over: a
+	// move and the Enter it earned can share one read, dispatched in one sweep
+	// before React commits the move. Confirming from the rendered value would
+	// answer "Rewrite" — the option the screen was still showing when the keys
+	// were dispatched.
+	test("a move and Enter in one read answer the moved option", async () => {
+		const d = open(SINGLE);
+		await delay(30);
+		d.stdin.write("\x1b[B\r"); // down, then Enter, in the same read
+		await delay(30);
+		expect(d.answers()).toEqual(["Patch it"]);
+		d.unmount();
+	});
+
+	// And the multi-select half: a move and the Space it earned, one read. A
+	// stale read would tick "TUI" — the box the highlight was on a keystroke
+	// ago — so the answer names a part the user never reached.
+	test("a move and Space in one read tick the moved box", async () => {
+		const d = open(MULTI);
+		await delay(30);
+		d.stdin.write("\x1b[B "); // down to Agent, then Space, in the same read
+		await delay(30);
+		expect(d.frame()).toContain("[x] Agent");
+		expect(d.frame()).toContain("[ ] TUI");
+		d.unmount();
+	});
+
 	test("a multi-select question gets checkboxes and a Space hint", async () => {
 		const d = open(MULTI);
 		await delay(30);

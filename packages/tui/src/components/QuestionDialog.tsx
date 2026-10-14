@@ -22,6 +22,15 @@ export function QuestionDialog({ questions, resolve, pad }: QuestionDialogState 
 	const theme = useTheme();
 	const [questionIndex, setQuestionIndex] = useState(0);
 	const [selected, setSelected] = useState(0);
+	/**
+	 * The stepping truth behind `selected`, which exists to paint. One read can
+	 * carry several keys — a held key's autorepeat, or a burst the terminal
+	 * coalesced — and the dispatcher runs them all before React has committed
+	 * the first move. A move and the Space or Enter it earned, read from the
+	 * rendered value, would answer the option the screen was still showing a
+	 * keystroke ago. Every read of the highlight goes through this ref.
+	 */
+	const selectedRef = useRef(0);
 	/** Labels toggled for the current question; only ever non-empty for a multi-select. */
 	const [picked, setPicked] = useState<string[]>([]);
 	const [answers, setAnswers] = useState<string[]>([]);
@@ -34,6 +43,7 @@ export function QuestionDialog({ questions, resolve, pad }: QuestionDialogState 
 		if (questionIndex + 1 < questions.length) {
 			setAnswers(next);
 			setQuestionIndex(questionIndex + 1);
+			selectedRef.current = 0;
 			setSelected(0);
 			setPicked([]);
 		} else {
@@ -44,12 +54,15 @@ export function QuestionDialog({ questions, resolve, pad }: QuestionDialogState 
 	/** Move the highlight, wrapping. */
 	const step = (delta: number): void => {
 		if (!current || current.options.length === 0) return;
-		setSelected((s) => (((s + delta) % current.options.length) + current.options.length) % current.options.length);
+		const count = current.options.length;
+		const next = (((selectedRef.current + delta) % count) + count) % count;
+		selectedRef.current = next;
+		setSelected(next);
 	};
 
 	/** Tick or untick the highlighted box. The pad's □ and the space bar. */
 	const toggle = (): void => {
-		const label = current?.options[selected]?.label;
+		const label = current?.options[selectedRef.current]?.label;
 		if (label === undefined) return;
 		setPicked((p) => (p.includes(label) ? p.filter((l) => l !== label) : [...p, label]));
 	};
@@ -57,7 +70,7 @@ export function QuestionDialog({ questions, resolve, pad }: QuestionDialogState 
 	/** Answer the question on screen. Enter and the pad's ✕ both land here. */
 	const confirm = (): void => {
 		if (!current || current.options.length === 0) return;
-		const label = current.options[selected]?.label ?? "";
+		const label = current.options[selectedRef.current]?.label ?? "";
 		if (!multi) {
 			advance(label);
 			return;

@@ -74,6 +74,15 @@ export function ListPickerDialog({
 		const whole = Number.isNaN(asked) ? 0 : Math.trunc(asked);
 		return Math.min(Math.max(whole, 0), Math.max(items.length - 1, 0));
 	});
+	/**
+	 * The stepping truth behind `selected`, which exists to paint. One read can
+	 * carry several keys — a held key's autorepeat, or a burst of presses the
+	 * terminal coalesced — and the dispatcher runs them all before React has
+	 * committed the row the first of them asked for. A step computed from the
+	 * rendered value would read the same position every time and collapse the
+	 * whole burst into one move; every action steps from this ref instead.
+	 */
+	const selectedRef = useRef(selected);
 
 	const cancel = () => {
 		onCancel?.();
@@ -83,7 +92,8 @@ export function ListPickerDialog({
 	/** Move the highlight, wrapping, and tell whoever is previewing it. */
 	const step = (delta: number): void => {
 		if (items.length === 0) return;
-		const next = (((selected + delta) % items.length) + items.length) % items.length;
+		const next = (((selectedRef.current + delta) % items.length) + items.length) % items.length;
+		selectedRef.current = next;
 		setSelected(next);
 		onHighlight?.(next);
 	};
@@ -119,7 +129,7 @@ export function ListPickerDialog({
 				step(VISIBLE_ROWS);
 				return true;
 			case "confirm":
-				resolve(selected);
+				resolve(selectedRef.current);
 				return true;
 			case "cancel":
 				cancel();
@@ -146,7 +156,7 @@ export function ListPickerDialog({
 			step(1);
 			return;
 		}
-		if (key.return) resolve(selected);
+		if (key.return) resolve(selectedRef.current);
 	});
 
 	if (items.length === 0) return null;
