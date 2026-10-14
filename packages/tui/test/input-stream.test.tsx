@@ -9,10 +9,14 @@
  * a live Ink render, and then press a key through it.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { render, Text, useInput } from "ink";
 import { createElement as h } from "react";
 import { detectAppearance } from "../src/detect-appearance.ts";
+import { installStdinTrace } from "../src/input-trace.ts";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -102,5 +106,47 @@ describe("Ink on a stream the probe has held", () => {
 			await delay(100);
 			expect(seen).toEqual(["DOWN"]);
 		});
+	});
+});
+
+/**
+ * The instrument itself. A trace that silently declines to wrap — or wraps
+ * when nobody asked — is worse than none: the log a user sends back after
+ * "keys do nothing" would be missing exactly the lines that answer it, and
+ * nothing would say so.
+ */
+describe("installStdinTrace", () => {
+	test("with the switch unset it leaves the stream untouched", () => {
+		const stdin = makeStdin();
+		installStdinTrace(stdin as unknown as NodeJS.ReadStream);
+		expect(Object.hasOwn(stdin, "on")).toBe(false);
+		expect(Object.hasOwn(stdin, "read")).toBe(false);
+	});
+
+	test("with a trace file it records reads, listener changes, and the state after each", () => {
+		const path = join(tmpdir(), `lbb-trace-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.log`);
+		process.env.LBB_INPUT_TRACE = path;
+		try {
+			const stdin = makeStdin() as unknown as NodeJS.ReadStream;
+			installStdinTrace(stdin);
+			const listener = () => {};
+			stdin.on("data", listener);
+			stdin.resume();
+			stdin.pause();
+			stdin.off("data", listener);
+			const log = readFileSync(path, "utf8");
+			expect(log).toContain("[stdin.install]");
+			expect(log).toContain("[stdin.on]");
+			expect(log).toContain("[stdin.resume]");
+			expect(log).toContain("[stdin.pause]");
+			expect(log).toContain("[stdin.off]");
+			// The state after the call is the point: `flowing` flipping from null
+			// through the resume and back is what a deaf-stream log has to show.
+			expect(log).toContain('"flowing"');
+			expect(log).toContain('"event":"data"');
+		} finally {
+			delete process.env.LBB_INPUT_TRACE;
+			rmSync(path, { force: true });
+		}
 	});
 });
