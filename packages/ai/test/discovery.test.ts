@@ -55,6 +55,7 @@ const KEY_VARS = [
 	"GLM_API_KEY",
 	"OPENAI_API_KEY",
 	"GEMINI_API_KEY",
+	"GOOGLE_API_KEY",
 	// Ollama's cloud account. The local daemon beside it names no variable at
 	// all, which is not a name this list could take away.
 	"OLLAMA_API_KEY",

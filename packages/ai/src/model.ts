@@ -995,18 +995,32 @@ const BUILT_IN_MODELS: Model[] = [
 	chatGptModel("gpt-5.5", "GPT-5.5", { contextWindow: 272_000, maxOutputTokens: 272_000 }),
 	// Google, over its OpenAI-compatibility endpoint — which its docs still call
 	// beta and which drops parameters it does not recognise, so these rows promise
-	// a little less than a native integration would. 3.8 Flash is the current Flash
-	// and 3.1 Pro the only published Pro-tier Gemini 3; the Flash row carries the
-	// price in force today, which its page says roughly doubles on 2027-01-01.
-	openAICompatModel("google", GOOGLE_OPENAI_BASE, "GEMINI_API_KEY", "gemini-3.8-flash", "Gemini 3.8 Flash", {
+	// a little less than a native integration would. The key page takes either
+	// GEMINI_API_KEY or GOOGLE_API_KEY and gives GOOGLE_API_KEY precedence when
+	// both are set — the order the rows below declare. 4 Argon is the current
+	// flagship — a Gemini 4 whose card states thinking at low/medium/high — and
+	// its figures are the promotional rates in force today, every priced channel
+	// of which doubles on 2026-12-01. 3.8 Flash is the current Flash and 3.1 Pro
+	// the only published Pro-tier Gemini 3; the Flash row carries the price in
+	// force today, which its page says roughly doubles on 2027-01-01.
+	openAICompatModel("google", GOOGLE_OPENAI_BASE, "GOOGLE_API_KEY", "gemini-4-argon", "Gemini 4 Argon", {
 		contextWindow: 1_048_576,
 		maxOutputTokens: 65_536,
 		reasoning: true,
-		pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
+		apiKeyEnvFallbacks: ["GEMINI_API_KEY"],
+		pricing: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
 	}),
-	openAICompatModel("google", GOOGLE_OPENAI_BASE, "GEMINI_API_KEY", "gemini-3.1-pro-preview", "Gemini 3.1 Pro", {
+	openAICompatModel("google", GOOGLE_OPENAI_BASE, "GOOGLE_API_KEY", "gemini-3.8-flash", "Gemini 3.8 Flash", {
 		contextWindow: 1_048_576,
 		maxOutputTokens: 65_536,
+		reasoning: true,
+		apiKeyEnvFallbacks: ["GEMINI_API_KEY"],
+		pricing: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
+	}),
+	openAICompatModel("google", GOOGLE_OPENAI_BASE, "GOOGLE_API_KEY", "gemini-3.1-pro-preview", "Gemini 3.1 Pro", {
+		contextWindow: 1_048_576,
+		maxOutputTokens: 65_536,
+		apiKeyEnvFallbacks: ["GEMINI_API_KEY"],
 		pricing: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 },
 	}),
 	// MiniMax: five rows; `maxOutputTokens` carries the window and both consumers clamp it; M3 has no cache-write rate, and 512k/tier premiums apply.

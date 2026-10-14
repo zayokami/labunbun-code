@@ -17,6 +17,8 @@ const TOUCHED = [
 	"ACME_AI_BASE_URL",
 	"KIMI_API_KEY",
 	"MOONSHOT_API_KEY",
+	"GEMINI_API_KEY",
+	"GOOGLE_API_KEY",
 ];
 const saved = new Map<string, string | undefined>();
 
@@ -145,6 +147,22 @@ describe("resolveApiKey", () => {
 		// The order is the precedence: whoever set both gets the one they set first.
 		setEnv("KIMI_API_KEY", "kimi-key");
 		expect(resolveApiKey(model)).toBe("kimi-key");
+	});
+
+	test("the Google rows take their key from either variable, the page's precedence first", () => {
+		// The key page accepts GEMINI_API_KEY or GOOGLE_API_KEY and states that
+		// when both are set, GOOGLE_API_KEY takes precedence — so that is the
+		// order the rows declare, and a machine carrying only the other name
+		// still works through the fallback.
+		const model = resolveModel("google/gemini-4-argon");
+		if (!model) throw new Error("expected the built-in model to resolve");
+		expect(apiKeyEnvNames(model)).toEqual(["GOOGLE_API_KEY", "GEMINI_API_KEY"]);
+		setEnv("GOOGLE_API_KEY", undefined);
+		setEnv("GEMINI_API_KEY", "gemini-key");
+		expect(resolveApiKey(model)).toBe("gemini-key");
+		// Both set: the page's precedence decides, not the table's habit.
+		setEnv("GOOGLE_API_KEY", "google-key");
+		expect(resolveApiKey(model)).toBe("google-key");
 	});
 
 	test("apiKeyEnvNames lists the primary first, for error messages", () => {

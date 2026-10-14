@@ -127,6 +127,7 @@ const BUILT_IN_REFS = [
 	"chatgpt/gpt-5.6-terra",
 	"chatgpt/gpt-5.6-luna",
 	"chatgpt/gpt-5.5",
+	"google/gemini-4-argon",
 	"google/gemini-3.8-flash",
 	"google/gemini-3.1-pro-preview",
 	"minimax/minimax-m3",
@@ -764,6 +765,8 @@ describe("the built-in catalog", () => {
 			["chatgpt/gpt-5.6-terra", 0, 0, 0, 0],
 			["chatgpt/gpt-5.6-luna", 0, 0, 0, 0],
 			["chatgpt/gpt-5.5", 0, 0, 0, 0],
+			// Argon's promotional window: every priced channel doubles on 2026-12-01.
+			["google/gemini-4-argon", 2, 10, 0.1, 0],
 			["google/gemini-3.8-flash", 0.75, 3.75, 0.075, 0],
 			["google/gemini-3.1-pro-preview", 2, 12, 0.2, 0],
 			// A fourth rate regime, and the only vendor here that states a cache
@@ -1122,6 +1125,7 @@ describe("the built-in catalog", () => {
 			["chatgpt/gpt-5.6-terra", 272_000, 272_000],
 			["chatgpt/gpt-5.6-luna", 272_000, 272_000],
 			["chatgpt/gpt-5.5", 272_000, 272_000],
+			["google/gemini-4-argon", 1_048_576, 65_536],
 			["google/gemini-3.8-flash", 1_048_576, 65_536],
 			["google/gemini-3.1-pro-preview", 1_048_576, 65_536],
 			// MiniMax publishes a window per model and no output cap for any of
@@ -1424,8 +1428,9 @@ describe("the built-in catalog", () => {
 		// `reasoning: true` makes the adapters ask for "medium" when the caller
 		// states no level, which is only safe where "medium" is a value the vendor
 		// takes. Every Anthropic row claims it and so do the seven OpenAI ones, the
-		// two DeepSeek ones (medium maps to high) and Gemini 3.8 Flash. What is
-		// listed here is the opposite decision, and it is the interesting one: K3's
+		// two DeepSeek ones (medium maps to high) and the Gemini rows with a stated
+		// vocabulary — 3.8 Flash and 4 Argon. What is listed here is the opposite
+		// decision, and it is the interesting one: K3's
 		// effort set is low/high/max and GLM-5.3's is max/high/low, so asking either
 		// for "medium" asks for a depth it has no word for.
 		//
