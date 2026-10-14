@@ -234,27 +234,32 @@ export function PromptInput({
 	 * `pasteTokenAt`); outside vim mode a stray keystroke in the host's own
 	 * editing can still, and such a token is then submitted literally.
 	 */
-	const submitCurrent = useCallback(() => {
-		const raw = state.text;
-		const text = expandPasteTokens(raw, pasteMapRef.current);
-		if (!text.trim()) return;
-		pushHistory(raw);
-		actions.clear();
-		setSuggestionIndex(0);
-		setCompletionPrefix(null);
-		// Mid-run there is nothing to submit to. Enter means "as soon as this turn
-		// can take it" — into the turn when it can (tools are running, so another
-		// model call is coming), otherwise queued behind it. The two are told apart
-		// because a steer is delivered *before* the next model call and a queue
-		// after the whole turn: picking the wrong one would silently reorder what
-		// the user said.
-		if (busy && onQueue && !isHostCommand(text)) {
-			if (canSteer && onSteer) onSteer(text);
-			else onQueue(text);
-			return;
-		}
-		onSubmit(text);
-	}, [state.text, actions, pushHistory, busy, onQueue, canSteer, onSteer, onSubmit]);
+	const submitText = useCallback(
+		(raw: string) => {
+			const text = expandPasteTokens(raw, pasteMapRef.current);
+			if (!text.trim()) return;
+			pushHistory(raw);
+			actions.clear();
+			setSuggestionIndex(0);
+			setCompletionPrefix(null);
+			// Mid-run there is nothing to submit to. Enter means "as soon as this turn
+			// can take it" — into the turn when it can (tools are running, so another
+			// model call is coming), otherwise queued behind it. The two are told apart
+			// because a steer is delivered *before* the next model call and a queue
+			// after the whole turn: picking the wrong one would silently reorder what
+			// the user said.
+			if (busy && onQueue && !isHostCommand(text)) {
+				if (canSteer && onSteer) onSteer(text);
+				else onQueue(text);
+				return;
+			}
+			onSubmit(text);
+		},
+		[actions, pushHistory, busy, onQueue, canSteer, onSteer, onSubmit],
+	);
+
+	/** Send what is in the buffer now. */
+	const submitCurrent = useCallback(() => submitText(state.text), [submitText, state.text]);
 
 	/** Press the key under the keyboard's cursor. */
 	const pressOskKey = useCallback(() => {
@@ -600,6 +605,15 @@ export function PromptInput({
 				return;
 			}
 			if (key.return && (input === "" || input === "\r")) {
+				// The list's footer says "Enter run", and while an entry is
+				// highlighted that entry is the thing to run: the prefix that opened
+				// the list is not a command — `/th` under a highlighted `/theme`
+				// answers "Unknown command: /th". A bare `/` is the exception: it asks
+				// for the command list, and that is the one answer Enter must keep.
+				if (suggestions.length > 0 && state.text !== "/") {
+					submitText(suggestions[suggestionIndex % suggestions.length][0]);
+					return;
+				}
 				submitCurrent();
 				return;
 			}

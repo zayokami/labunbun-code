@@ -309,6 +309,57 @@ describe("slash command suggestions", () => {
 		unmount();
 	});
 
+	test("Enter runs the highlighted entry, not the bare prefix", async () => {
+		// The footer promises "Enter run"; the prefix that opened the list is not a
+		// command — submitting `/th` under a highlighted `/theme` answers
+		// "Unknown command: /th".
+		const submitted: string[] = [];
+		const { stdin, lastFrame, unmount } = render(
+			withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} commandSuggestions={COMMANDS} />),
+		);
+		await delay(30);
+		stdin.write("/th");
+		await delay(30);
+		expect(flat(lastFrame())).toContain("/theme");
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["/theme"]);
+		unmount();
+	});
+
+	test("Enter runs whichever entry is highlighted", async () => {
+		const submitted: string[] = [];
+		const { stdin, unmount } = render(
+			withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} commandSuggestions={COMMANDS} />),
+		);
+		await delay(30);
+		stdin.write("/th");
+		await delay(30);
+		stdin.write("\x1b[B"); // down: /think is the highlighted one now
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["/think"]);
+		unmount();
+	});
+
+	test("a bare / still submits as-is: it asks for the command list", async () => {
+		// The app answers `/` with the full command list (repl.test pins that).
+		// Picking the first suggestion here would either run an arbitrary command
+		// or make that list unreachable.
+		const submitted: string[] = [];
+		const { stdin, unmount } = render(
+			withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} commandSuggestions={COMMANDS} />),
+		);
+		await delay(30);
+		stdin.write("/");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["/"]);
+		unmount();
+	});
+
 	test("Tab with no suggestions open does not insert anything", async () => {
 		const { stdin, lastFrame, unmount } = render(
 			withTheme(<PromptInput onSubmit={() => {}} commandSuggestions={COMMANDS} />),
@@ -410,6 +461,22 @@ describe("slash commands under vim", () => {
 		expect(frame).not.toContain("/think");
 
 		stdin.write("\t");
+		await delay(30);
+		stdin.write("\r");
+		await delay(30);
+		expect(submitted).toEqual(["/theme"]);
+		unmount();
+	});
+
+	test("NORMAL / then Enter runs the highlighted command without Tab", async () => {
+		const submitted: string[] = [];
+		const { stdin, unmount } = render(
+			withTheme(<PromptInput onSubmit={(t) => submitted.push(t)} commandSuggestions={COMMANDS} vim />),
+		);
+		await delay(30);
+		stdin.write("/");
+		await delay(30);
+		stdin.write("th");
 		await delay(30);
 		stdin.write("\r");
 		await delay(30);
