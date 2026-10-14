@@ -5144,22 +5144,28 @@ export class VimEngine {
 			// empty one would write nothing over every character of the selection —
 			// `vr<Right>` would delete it, measured against vim, which changes nothing.
 			//
-			// `<CR>` is the one key vim carries out here and this engine does not, and
-			// the two modes do *different* things with it, so it is worth writing the
-			// shape down rather than the summary. A Visual `r` goes to `nv_operator`
-			// (normal.c:4866-4880), which writes the character over each selected one —
-			// and a CR is a character there, a literal `\r` inside the line: `vlr<CR>`
-			// on `"abcdef"` reads back as `"\r\rcdef"`. A NORMAL `r<CR>` does not go
-			// through the operator at all; it deletes the characters and runs an insert
-			// that breaks the line once (normal.c:4925-4939, "Strange vi behaviour: Only
-			// one newline is inserted"), so it reads back as `"ab\ndef"` with the caret
-			// at 3. Both are comparable — the harness reads the first back as a `\r`
-			// and the second as a `\n` because that is what each of them *is*. The
-			// NORMAL half is implemented (#replaceChar splits the line once). The
-			// Visual half is still a feature gap wearing a disagreement's clothes,
-			// and it is named as one in the differential README's Known gaps with
-			// its measurement, rather than here as something the instrument cannot
-			// judge.
+			// `<CR>` is a character out here, and the two modes do *different* things
+			// with it, so it is worth writing the shape down rather than the summary.
+			// A Visual `r` goes to `nv_operator` (normal.c:4866-4880), which writes the
+			// character over each selected one — and a CR is a character there, a
+			// literal `\r` inside the line: `vlr<CR>` on `"abcdef"` reads back as
+			// `"\r\rcdef"`. A NORMAL `r<CR>` does not go through the operator at all;
+			// it deletes the characters and runs an insert that breaks the line once
+			// (normal.c:4925-4939, "Strange vi behaviour: Only one newline is
+			// inserted"), so it reads back as `"ab\ndef"` with the caret at 3. Both
+			// halves are implemented — the harness reads the first back as a `\r` and
+			// the second as a `\n` because that is what each of them *is*.
+			//
+			// The branch sits above the guard because the host delivers this key with
+			// an empty `input`, which the guard reads as one of the special keys that
+			// abandon the command. The redo records the `\r` itself as the command's
+			// second key: the replay feeds keys back as strings, and there this branch
+			// does not run — the ordinary write below takes the `\r` as its input.
+			if (key.return) {
+				this.#pendingVisual = { op: "r", geometry: this.#selectionGeometry(), more: ["\r"] };
+				this.#replaceSelection("\r");
+				return true;
+			}
 			if (key.escape || key.backspace || key.delete || input.length === 0) return true;
 			// The operator is recorded before the change runs, the way every other
 			// visual operator's size is: what #finishKeyLog does with a `r` is the

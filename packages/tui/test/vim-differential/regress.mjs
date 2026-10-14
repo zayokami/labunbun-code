@@ -1103,11 +1103,22 @@ const CASES = [
 	[["v", "l", "3", "r", "X"], "abcdef", 0],
 	[["v", "r", "2"], "abcdef", 0],
 	[["v", "l", "r", "2"], "abcdef", 0],
+	// `<CR>` is a character like any other here as well: `nv_operator` writes it
+	// into the line as a literal `\r`, not as a break, so `vlr<CR>` from 1 on
+	// `"abcdef"` reads back as `"a\r\rdef"` with the caret at the selection's
+	// start. It is also the one Visual `r` vim redoes as an insert-mode edit
+	// rather than a write — the redo case below says whether the recorded second
+	// key survives the replay.
+	[["v", "r", "\r"], "abcdef", 0],
+	[["v", "l", "r", "\r"], "abcdef", 1],
+	[["v", "j", "r", "\r"], SHORT_LINES, 0],
+	[["V", "r", "\r"], SHORT_LINES, 0],
 	// Escape cancels the half-typed character and leaves the selection open, and so
 	// does every other key that is not a character: vim reads that key with
 	// plain_vgetc and beeps without a change when it comes back as a special key,
 	// while a key taken as the character to write would write nothing over the
-	// selection and delete it. (`<CR>` is the exception and is in Known gaps.)
+	// selection and delete it. (`<CR>` is not one of them — it is a character and
+	// writes a literal `\r`; the block above carries that half.)
 	[["v", "l", "r", "\x1b"], "abcdef", 0],
 	[["v", "l", "r", "\x1b[C"], "abcdef", 0],
 	[["v", "l", "r", "\x1b[B"], "abcdef", 0],
@@ -1148,6 +1159,11 @@ const CASES = [
 	[["v", "r", "x", "j", "."], "xx\nyy", 0],
 	[["v", "l", "r", "x", "j", "."], "xx\nyy", 0],
 	[["x", "v", "r", "x", "j", "."], "xx\nyy", 0],
+	// The redo of a Visual `r<CR>` carries the CR as the command's second key: in
+	// vim the change is an insert-mode edit the redo replays with the `r`, and the
+	// CR is the character typed into it. A replay that lost the CR would be a
+	// bare `r` waiting for one.
+	[["v", "r", "\r", "j", "."], "abcdefgh\nij", 0],
 	// A `.` pressed with a selection open is not a redo at all, and the change
 	// the `r` made is still the redo afterwards. The `Gvl` is what makes that
 	// measurable: it writes an `X` over the last line were the redo to run.

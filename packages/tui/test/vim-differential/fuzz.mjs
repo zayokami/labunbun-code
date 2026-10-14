@@ -98,10 +98,10 @@ const KEYS = {
 	// command that reads a key of its own and a Visual mode that had no answer for
 	// it, which no `regress.mjs` case was asking about, and putting `r` in the set
 	// is what turned up the count refusal below. Two exclusions come with it, both
-	// written down below: a half-typed `r` at the end, and `r` `<CR>` — whose NORMAL
-	// half the engine now carries out and matches (the `regress.mjs` `r` `CR` cases
-	// pin it) but which the bare-CR rule still drops, because that rule reads the key
-	// alone; the Visual half is the remaining gap, written up in the README.
+	// written down below: a half-typed `r` at the end, and `r` `<CR>` — both halves
+	// of which the engine now carries out and matches (the `regress.mjs` `r` `CR`
+	// cases pin them, redo included) but which the bare-CR rule still drops, because
+	// that rule reads the key alone.
 	r: ["r", {}],
 	d: ["d", {}],
 	y: ["y", {}],
@@ -205,15 +205,14 @@ function intoLatch(seq, i) {
  *    two keys are ordinary motions and stay in the set.
  *  - A `CR` right after an `r`. No rule below is written for it — the bare-CR rule
  *    catches the same key first, reading the key alone — but it is named because
- *    it is real: vim's `r` reads the CR as its character and breaks the line once
- *    in NORMAL (`normal.c:4925-4939`), the engine now does the same and
- *    `regress.mjs` pins it, so for NORMAL this is coverage the sweep is leaving on
- *    the table rather than a gap it cannot judge. The Visual half — vim writes a
- *    literal `\r` (`normal.c:4866-4880`) — is still a gap, measured in the README's
- *    Known gaps. The dedicated rule that used to sit here could never fire and is
- *    gone; what drops these sequences is the bare-CR rule's over-drop, and
- *    admitting them means knowing what an `r` has already eaten, a change of its
- *    own.
+ *    it is real: vim's `r` reads the CR as its character, a line break in NORMAL
+ *    (`normal.c:4925-4939`) and a literal `\r` in a Visual selection
+ *    (`normal.c:4866-4880`), and the engine now answers both the same way —
+ *    `regress.mjs` pins both halves, the redo included — so this is coverage the
+ *    sweep is leaving on the table rather than a gap it cannot judge. The
+ *    dedicated rule that used to sit here could never fire and is gone; what drops
+ *    these sequences is the bare-CR rule's over-drop, and admitting them means
+ *    knowing what an `r` has already eaten, a change of its own.
  */
 function uncomparable(seq) {
 	for (let i = 0; i < seq.length; i++) {

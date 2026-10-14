@@ -286,9 +286,10 @@ arrives is cancelled by Escape and by every key that is not a character — the
 arrows, `<End>`, backspace and delete all beep and change nothing — because vim
 reads that key with `plain_vgetc` and bails when it comes back special
 (`normal.c:4857-4863`), while a key taken as the character would write the empty
-string over the selection and **delete** it. `<CR>` is the exception and is a
-named gap below. A pasted token inside the selection keeps its spelling, the same
-rule every other command that rewrites a selection follows.
+string over the selection and **delete** it. `<CR>` is not one of them: it is a
+character, and it writes a literal `\r` — the section below has the measurement.
+A pasted token inside the selection keeps its spelling, the same rule every other
+command that rewrites a selection follows.
 
 **A count in front of `v`/`V` is spent on the command itself.** `nv_visual`
 decrements it once and runs `nv_right`/`nv_down` with what is left
@@ -801,10 +802,11 @@ read.
   command line — `BS` cancels it outright, `DEL` erases under the cursor — and
   neither is a command the engine reads on that path. Without a latch they are
   ordinary motions and stay in the set.
-- **A `CR` straight after an `r`.** Both answers are readable and they differ; this
-  is a named feature gap rather than a limit of the instrument, and it is written
-  up under Known gaps below. It is dropped here only because a sequence carrying it
-  is a guaranteed mismatch.
+- **A `CR` straight after an `r`.** Both answers are readable and they agree — both
+  halves of the command are implemented, and `CASES` pins them — but the bare-CR
+  rule above reads the key alone, so a sequence carrying one is dropped along with
+  a bare one. That is coverage the instrument is leaving on the table rather than
+  a difference it cannot judge.
 
 A fourth rule, `textObjectOk()`, came with the text-object draw and is the same kind
 of thing: **an `i` or an `a` that is not naming a range starts typing instead**, and
@@ -863,34 +865,38 @@ becomes a case:
   tried — below the first line, counted from the last, on indented and blank
   first lines — came back green. The cases pin the four plainest shapes now.
 
-### `r` and `<CR>`: the NORMAL half is done, the Visual half is left
+### `r` and `<CR>`: both halves, and the redo shape that needed its own case
 
 `r<CR>` is the one command the two modes answer with *different visible effects*,
 which is what made this worth writing down rather than summarising as "a line
-break":
+break". Both halves are implemented — the Visual half landed after this section
+first described it as a gap:
 
-- **NORMAL.** Implemented: the character under the caret becomes a line break and
-  the caret lands on the character after it (`r<CR>` at 2 of `"abcdef"` gives
-  `"ab\ndef"` at 3), the count's characters become the one break (`2r<CR>` gives
-  `"ab\nef"`), and a count the line cannot cover still refuses. Vim reaches the
-  same buffer through an insert that breaks the line once — `normal.c:4925-4939`,
-  "*Strange vi behaviour: Only one newline is inserted*" — and the engine's own
-  half is pinned in `vim-engine.test.ts`, with six differential shapes in
-  `CASES`.
-- **Visual.** Still a gap. A Visual `r` goes to `nv_operator`
-  (`normal.c:4866-4880`), which writes the character over each selected one, and
-  a CR is a character there — a literal `\r` *inside* the line, not a break.
-  Measured: `vlr<CR>` on `"abcdef"` from 1 reads back as `"a\r\rdef"` with the
-  caret at the selection's start; the engine leaves the line alone (Enter
-  abandons the armed `r`), so the buffer — and the caret — disagree.
+- **NORMAL.** The character under the caret becomes a line break and the caret
+  lands on the character after it (`r<CR>` at 2 of `"abcdef"` gives `"ab\ndef"` at
+  3), the count's characters become the one break (`2r<CR>` gives `"ab\nef"`), and
+  a count the line cannot cover still refuses. Vim reaches the same buffer through
+  an insert that breaks the line once — `normal.c:4925-4939`, "*Strange vi
+  behaviour: Only one newline is inserted*" — pinned by six differential shapes in
+  `CASES` and the engine's own tests in `vim-engine.test.ts`.
+- **Visual.** A Visual `r` goes to `nv_operator` (`normal.c:4866-4880`), which
+  writes the character over each selected one, and a CR is a character there — a
+  literal `\r` *inside* the line, not a break: `vlr<CR>` from 1 on `"abcdef"`
+  reads back as `"a\r\rdef"` with the caret at the selection's start. Five
+  differential shapes pin it: the single and two-character writes, a charwise
+  selection that took a line break with it, a linewise one, and the redo.
 
-`fuzz.mjs` keeps both halves out of the sweep without meaning to: its bare-CR
-rule reads the key alone, so an `r`-taken CR is dropped along with a bare one.
-For the NORMAL half that is coverage the instrument is leaving on the table
-rather than a gap it cannot judge — the shapes above compare cleanly today. The
-Visual half also wants a redo form — vim's is an insert-mode edit rather than a
-`r`, which is why `invoke_edit` is called with the `r` — so it stays on the list
-after the text objects rather than bolted onto a round.
+The Visual redo is the shape worth its own paragraph, because vim reaches it by a
+different road than the write: the change is replayed as an insert-mode edit with
+the `r` (`invoke_edit`), not as a write, so a replay that lost the CR as the
+command's second key would quietly be a bare `r` waiting for one. Measured: the
+`.` writes the `\r` over the next line's character, the same as the original
+command, and `CASES` carries it.
+
+`fuzz.mjs` keeps `r`-taken CRs out of the sweep without meaning to — its bare-CR
+rule reads the key alone, so they are dropped along with bare ones. With both
+halves implemented that is coverage the instrument is leaving on the table rather
+than a gap it cannot judge: the shapes above compare cleanly today.
 
 ### Search, measured and left
 

@@ -4818,23 +4818,31 @@ describe("Visual `r` writes over the selection", () => {
 		}
 	});
 
-	test("`<CR>` cancels it as well, where vim would write a carriage return", () => {
-		// Not a line break: a Visual `r` goes to the operator, which writes the
-		// character over each selected one, and a CR is a character there — measured
-		// on 9.1, `vlr<CR>` on `"abcdef"` reads back as `"\r\rcdef"`, two literal CRs
-		// in one line. (The NORMAL form is the one that breaks the line, and by only
-		// one break however many characters the count covered; it is a second named
-		// gap and `vim.ts` says so where the guard is.) Both are in the differential
-		// README's Known gaps with the two measurements: this is a feature that is
-		// not implemented, not a difference the instrument cannot see.
+	test("`<CR>` writes a literal carriage return over the selection", () => {
+		// A Visual `r` goes to the operator, which writes the character over each
+		// selected one, and a CR is a character there — a literal `\r` inside the
+		// line, not a break: measured on 9.1, `vlr<CR>` on `"abcdef"` reads back as
+		// `"\r\rcdef"`, two literal CRs in one line. (The NORMAL form is the one that
+		// breaks the line, by one break however many characters the count covered —
+		// normal.c:4925-4939, the other half of the same rule.)
 		const e = editor("abcdef", 0);
 		for (const k of ["v", "l", "r"]) e.engine.handleKey(k, e.key());
 		e.engine.handleKey("", e.key({ return: true }));
-		expect({ text: e.state.text, writes: e.writes(), mode: e.engine.mode }).toEqual({
-			text: "abcdef",
-			writes: 0,
-			mode: "visual",
+		expect({ text: e.state.text, cursor: e.state.cursor, writes: e.writes(), mode: e.engine.mode }).toEqual({
+			text: "\r\rcdef",
+			cursor: 0,
+			writes: 1,
+			mode: "normal",
 		});
+		// And the redo carries the CR as the command's second key: the `.` below
+		// replays `r<CR>` over the next line's character. A redo that recorded the
+		// empty `input` the host delivered would replay a cancel instead.
+		const r = editor("abcdefgh\nij", 0);
+		for (const k of ["v", "r"]) r.engine.handleKey(k, r.key());
+		r.engine.handleKey("", r.key({ return: true }));
+		r.engine.handleKey("j", r.key());
+		r.engine.handleKey(".", r.key());
+		expect(r.state.text).toBe("\rbcdefgh\n\rj");
 	});
 
 	test("a pasted token inside the selection keeps its spelling", () => {
