@@ -188,7 +188,7 @@ export function wizardProviderDefault(found: {
 /**
  * The detection block's rows, one per finding, or none for a bare machine —
  * the caller prints nothing then, which is the app's existing habit
- * (`interactive.ts:1958-1960`).
+ * (`interactive.ts:1963-1965`).
  *
  * A source row names its tree via `SOURCE_ROOTS` (the home-relative spelling
  * that exists to render a label), not a count: counts would mean running every
@@ -371,7 +371,7 @@ async function offerImport(
 		return false;
 	}
 	// No "restart to pick up" here, unlike `/yoshi`: the settings load happens
-	// after this wizard returns (`interactive.ts:380-383`), so what just landed
+	// after this wizard returns (`interactive.ts:381-384`), so what just landed
 	// is what this very session runs on.
 	console.log(applied.report);
 	// True means an apply ran and reported no error — the caller records that

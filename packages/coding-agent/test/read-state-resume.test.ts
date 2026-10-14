@@ -1,7 +1,7 @@
 /**
  * What `/resume` does to the Edit gate's memory of reads.
  *
- * The tool array crosses a session swap unchanged (`interactive.ts:840`), so
+ * The tool array crosses a session swap unchanged (`interactive.ts:1491`), so
  * the Read records crossed it too: the incoming conversation started able to
  * edit a file it was never shown, because the *outgoing* one had read it. The
  * gate's question is "was this file read this session" and a swap is the one

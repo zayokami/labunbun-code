@@ -112,11 +112,11 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 	// one uses instead of opening a second listener that nothing would close.
 	const background = options.backgroundShells ?? new BackgroundShellManager(detectRuntime(), ops);
 	// One per tool set: `createAllTools` runs once at startup in both entry
-	// points (`interactive.ts:325`, `headless.ts:147`), so a second tool set in
+	// points (`interactive.ts:595`, `headless.ts:278`), so a second tool set in
 	// the same process is a second call and a second store. A module-level
 	// singleton would be readable from any conversation — and a tool set that
 	// outlives its conversation (`/resume` inherits the array) is why the app
-	// passes its own and clears it (`interactive.ts:875`) rather than leaning on
+	// passes its own and clears it (`interactive.ts:1497`) rather than leaning on
 	// a per-call store to stay correct.
 	const readState = options.readState ?? new ReadFileState();
 	const coreTools: AnyTool[] = [
