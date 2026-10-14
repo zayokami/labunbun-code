@@ -473,6 +473,14 @@ describe("the model", () => {
 		throw new Error("no model in this build's registry to test the claim against");
 	})();
 
+	/** A name this build's registry does not carry, so the claim must be refused. */
+	const FOREIGN = (() => {
+		for (const candidate of ["gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash"]) {
+			if (resolveModelReference(candidate) === undefined) return candidate;
+		}
+		throw new Error("every candidate name is in this build's registry");
+	})();
+
 	test("a name this build also carries is claimed, with the instance named", () => {
 		// The instance is not carried — nothing here resolves one — but it is the
 		// only record of which of T3's provider instances the model was pointed at,
@@ -488,9 +496,13 @@ describe("the model", () => {
 
 	test("a name only T3 knows is reported, because its model list is its own", () => {
 		// T3's picker is a list of providers it launches, not a shared registry, so
-		// "gpt-4o" here means whatever that T3 install was configured with. There is
-		// no lookup that would turn a coincidental name match into a correct one.
-		const { home } = t3Home({ defaultModelSelection: { instanceId: "antigravity", model: "gemini-3-pro-preview" } });
+		// a foreign name means whatever that T3 install was configured with. The
+		// fixture is probed rather than hardcoded, the way KNOWN above is: a
+		// hardcoded name stops being foreign the day the registry grows —
+		// "gemini-3-pro-preview" was this fixture until the subscription rows
+		// claimed it. There is no lookup that would turn a coincidental name match
+		// into a correct one.
+		const { home } = t3Home({ defaultModelSelection: { instanceId: "antigravity", model: FOREIGN } });
 		const planned = plan(home);
 		expect(settingsWritten(planned).model).toBeUndefined();
 		const detail = detailsMatching(planned, /provider registry/);
