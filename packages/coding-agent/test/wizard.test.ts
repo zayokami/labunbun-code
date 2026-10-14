@@ -15,6 +15,7 @@ import { MIGRATION_SOURCE_LABELS, SOURCE_ROOTS } from "../src/migrate-types.ts";
 import {
 	askChoice,
 	buildWizardSettings,
+	firstRunRecord,
 	importOfferLine,
 	shouldRunWizard,
 	userSettingsPath,
@@ -252,5 +253,27 @@ describe("importOfferLine", () => {
 		// History is the one category the first-run offer leaves out; the question
 		// must not promise the conversations its own plan will not count.
 		expect(line).not.toContain("conversation");
+	});
+});
+
+describe("firstRunRecord", () => {
+	test("stamps the run: the injected instant as ISO, both sign-in flags, the import verdict", () => {
+		const record = firstRunRecord({
+			signIns: { claude: true, chatgpt: false },
+			imported: true,
+			now: new Date("2026-10-14T08:30:00Z"),
+		});
+		expect(record).toEqual({
+			offeredAt: "2026-10-14T08:30:00.000Z",
+			signedIn: { claude: true, chatgpt: false },
+			imported: true,
+		});
+	});
+
+	test("a run that signed in nowhere and imported nothing still records — false is a fact here, not an absence", () => {
+		const record = firstRunRecord({ signIns: NO_SIGN_INS, imported: false, now: new Date(0) });
+		expect(record.offeredAt).toBe("1970-01-01T00:00:00.000Z");
+		expect(record.signedIn).toEqual({ claude: false, chatgpt: false });
+		expect(record.imported).toBe(false);
 	});
 });

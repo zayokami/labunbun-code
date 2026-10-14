@@ -14,6 +14,7 @@ import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { helpText } from "@labunbun/tui";
 import { builtInCommands, completeCommands } from "../src/commands.ts";
 import { COMPACTION_ACCURACY_NOTICE, lowContextWarning } from "../src/context-report.ts";
+import { missingCredentialNotice, NO_SIGN_INS } from "../src/credential-presence.ts";
 import { appCommandTable } from "../src/interactive.ts";
 import { withheldDefinitionNotice } from "../src/project-trust.ts";
 
@@ -81,12 +82,13 @@ describe("app command table", () => {
  * The messages that tell a stuck user what to type.
  *
  * They are written where the trouble is detected — the compaction manager says
- * the conversation no longer fits, the context report says it is nearly there —
- * which is a long way from the switch that decides what a command means. A line
+ * the conversation no longer fits, the context report says it is nearly there,
+ * the startup notice says no credential can run the model — which is a long way
+ * from the switch that decides what a command means. A line
  * that says `/new` reads as help and behaves as an error, and it is read at the
  * one moment the user has no room to work out what to do instead.
  */
-describe("advice about a context that is full", () => {
+describe("advice for a stuck user names real commands", () => {
 	/** Every command the user can type and have dispatched. */
 	function knownCommands(): Set<string> {
 		// The REPL answers these itself, and keeps them out of any caller's table.
@@ -119,6 +121,12 @@ describe("advice about a context that is full", () => {
 			// twice, and only a test can say whether either still names a real command.
 			withheldDefinitionNotice(withheld, "repl"),
 			withheldDefinitionNotice(withheld, "headless"),
+			// The startup notice for a machine with nothing that can run the model:
+			// same contract, and its fix names a login and an import. Both of the
+			// wires that name a command, anthropic (`/login`) and ChatGPT
+			// (`/login chatgpt`); the env-var wire names no command and is not here.
+			missingCredentialNotice({ ...FAUX_MODEL, provider: "anthropic" }, NO_SIGN_INS) ?? "",
+			missingCredentialNotice({ ...FAUX_MODEL, api: "chatgpt-responses" }, NO_SIGN_INS) ?? "",
 		];
 	}
 
@@ -134,13 +142,33 @@ describe("advice about a context that is full", () => {
 
 	test("every command they name is a command that exists", () => {
 		const known = knownCommands();
-		const named = advice().flatMap((text) => text.match(/\/[a-z-]+/g) ?? []);
+		// A slash followed by a lowercase word is a command — unless the slash is a
+		// path separator: the credential notice names its model as `provider/id`,
+		// and the tail of `anthropic/claude-sonnet-5` would otherwise scan as a
+		// command named `/claude-sonnet-` (the name class has no digits).
+		const named = advice().flatMap((text) => text.match(/(?<![\w/])\/[a-z-]+/g) ?? []);
 		// The scan has to be finding something, or the check below is vacuous.
 		expect(named.length).toBeGreaterThan(2);
 		expect(named).toContain("/compact");
+		// And the credential notice's own commands are in the scanned set, not
+		// skipped by the guard above.
+		expect(named).toContain("/login");
+		expect(named).toContain("/yoshi");
 		for (const name of named) {
 			expect(known.has(name), `${name} is named in advice but no command answers to it`).toBe(true);
 		}
+	});
+
+	test("the credential notice reaches the scan at all — both wires that name a command", () => {
+		// Non-vacuous: `undefined` here would mean the row read as runnable on a
+		// bare machine, the advice list silently carried `""`, and the scan above
+		// covered less than it claims.
+		const anthropic = missingCredentialNotice({ ...FAUX_MODEL, provider: "anthropic" }, NO_SIGN_INS);
+		expect(anthropic).toContain("/login to sign in");
+		// The model reference itself — the shape the path-separator guard exists for.
+		expect(anthropic).toContain("anthropic/faux-1");
+		const chatgpt = missingCredentialNotice({ ...FAUX_MODEL, api: "chatgpt-responses" }, NO_SIGN_INS);
+		expect(chatgpt).toContain("/login chatgpt");
 	});
 
 	test("the way out of a blocked request needs no model call", () => {

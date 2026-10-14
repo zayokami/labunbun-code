@@ -44,6 +44,7 @@ import {
 	runMigration,
 } from "./migrate.ts";
 import { SOURCE_ROOTS } from "./migrate-types.ts";
+import { writeUserSettingsPatch } from "./user-settings.ts";
 
 export function userSettingsPath(home = homedir()): string {
 	return join(home, ".labunbun", "settings.json");
@@ -328,10 +329,10 @@ function detectedAnthropicEnv(): string[] {
 async function offerImport(
 	ask: Ask,
 	opts: { home: string; cwd: string; sources: readonly MigrationSourceId[] },
-): Promise<void> {
+): Promise<boolean> {
 	const question = importOfferLine(opts.sources);
-	if (!question) return;
-	if ((await askChoice(ask, question, ["y", "n"], "y", "Y/n")) !== "y") return;
+	if (!question) return false;
+	if ((await askChoice(ask, question, ["y", "n"], "y", "Y/n")) !== "y") return false;
 
 	const options: RunMigrationOptions = {
 		home: opts.home,
@@ -342,14 +343,14 @@ async function offerImport(
 	const preview = runMigration(options);
 	if (preview.error) {
 		console.log(`  ${preview.error}`);
-		return;
+		return false;
 	}
 	console.log(`\n${preview.report}`);
 	// Nothing to confirm: the report above already says why each candidate was
 	// left alone, and asking to apply zero files is a question with one answer.
 	if (preview.plan.writes.length === 0) {
 		console.log("Nothing to write — the report above says why.");
-		return;
+		return false;
 	}
 
 	const confirm = await askChoice(
@@ -361,18 +362,49 @@ async function offerImport(
 	);
 	if (confirm !== "apply") {
 		console.log("Nothing written (dry run only).");
-		return;
+		return false;
 	}
 
 	const applied = runMigration({ ...options, apply: true });
 	if (applied.error) {
 		console.log(`  ${applied.error}`);
-		return;
+		return false;
 	}
 	// No "restart to pick up" here, unlike `/yoshi`: the settings load happens
 	// after this wizard returns (`interactive.ts:380-383`), so what just landed
 	// is what this very session runs on.
 	console.log(applied.report);
+	// True means an apply ran and reported no error — the caller records that
+	// fact. Nothing branches on it here: every earlier exit is a false whether
+	// the user declined or the machine had nothing to offer.
+	return true;
+}
+
+export interface FirstRunRecord {
+	offeredAt: string;
+	signedIn: SubscriptionSignIns;
+	imported: boolean;
+}
+
+/**
+ * Screen G: what the first run did, for the record. `signIns` is the state at
+ * the end of the run — a row-1/row-2 sign-in that finished flips its flag — and
+ * `imported` says an apply ran, not how many files it wrote (under the merge
+ * rules "two files" and "none needed" both look like success).
+ *
+ * Recorded, deliberately not read back: the startup notice about a missing
+ * credential stays condition-driven. This record is a log of one past run; a
+ * sign-in can expire or be revoked, so a record consulted as a suppressor
+ * would silence the notice exactly where it is true again.
+ */
+export function firstRunRecord(opts: { signIns: SubscriptionSignIns; imported: boolean; now: Date }): FirstRunRecord {
+	return {
+		offeredAt: opts.now.toISOString(),
+		// Spread, not a hand-picked pair: a sign-in kind added later is recorded
+		// by its own probe rather than silently dropped from the record.
+		signedIn: { ...opts.signIns },
+		imported: opts.imported,
+	};
 }
 
 function messageOf(error: unknown): string {
@@ -398,6 +430,10 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		const sources = detectSources(home);
 		const envKeys = presentEnvKeys();
 		const signIns = await detectSubscriptionSignIns({ home });
+		// Flipped true when a row-1/row-2 sign-in finishes with code 0, so the
+		// record below states what is on disk when the run ends — the probe just
+		// above ran before the login flows did.
+		const signedIn = { ...signIns };
 		const found = wizardDetectionLines({ sources, envKeys, signIns });
 		if (found.length > 0) {
 			console.log("Found on this machine:");
@@ -439,6 +475,8 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 			const code = row === "1" ? await runClaudeLoginCli({ home }) : await runChatGptLoginCli({ home });
 			if (code === 0) {
 				provider = row === "1" ? "anthropic" : "chatgpt";
+				if (row === "1") signedIn.claude = true;
+				else signedIn.chatgpt = true;
 			} else {
 				const retry = row === "1" ? "/login" : "/login chatgpt";
 				console.log(`  Sign-in did not finish — continuing. Run ${retry} in a session to retry.`);
@@ -499,7 +537,19 @@ export async function runWizard(cwd: string, home = homedir()): Promise<void> {
 		console.log(`\nSettings written to ${path}.`);
 
 		// Screen C, after the write — the ordering reasoning is in offerImport.
-		await offerImport(ask, { home, cwd, sources });
+		const imported = await offerImport(ask, { home, cwd, sources });
+
+		// Screen G: the record of what this run did. Merged through the settings
+		// patch so it cannot disturb the answers just written, and in its own
+		// try — the catch below reads any throw after the write as a failed
+		// import, which a failed note is not.
+		try {
+			writeUserSettingsPatch({ firstRun: firstRunRecord({ signIns: signedIn, imported, now: new Date() }) }, home);
+		} catch (error) {
+			// One line, never fatal: the file is already written and the session
+			// starts on it; a note that cannot land is not worth a failed start.
+			console.log(`  (first-run note not recorded: ${messageOf(error)})`);
+		}
 
 		console.log("Type /help in a session to see commands.");
 	} catch (error) {
