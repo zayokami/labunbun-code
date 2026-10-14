@@ -22,7 +22,7 @@ import { AgentSession } from "@labunbun/agent";
 import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { render } from "ink-testing-library";
 import { CLEAR_SCREEN, clearScreenSequence, connectSessionToStore, REPL } from "../src/components/REPL.tsx";
-import { chunkWritesForConPTY, MAX_CONPTY_WRITE } from "../src/conpty.ts";
+import { chunkWritesForConPTY, MAX_CONPTY_WRITE, stripScrollbackErase } from "../src/conpty.ts";
 import { createStore } from "../src/store.ts";
 import { initialUiState, type UiEntry, type UiState } from "../src/ui-state.ts";
 
@@ -128,6 +128,14 @@ describe("the wipe a Windows console gets", () => {
 	test("is the full wipe everywhere else", () => {
 		expect(clearScreenSequence(false)).toBe(CLEAR_SCREEN);
 	});
+
+	// The bridge between the two forms: a full wipe written for anywhere passes
+	// through the ConPTY writer and lands as the screen-stop one. The two sides
+	// above follow the host, but this equality may not — it has to hold on the
+	// host the writer runs on and in a fixture running anywhere else.
+	test("a full wipe becomes the console-takeable one on the way out", () => {
+		expect(stripScrollbackErase(clearScreenSequence(false))).toBe(clearScreenSequence(true));
+	});
 });
 
 // The reprint of a long transcript is one write, and a Windows console stops
@@ -154,9 +162,11 @@ test("a reprint leaves in pieces a Windows console can follow", async () => {
 	const after = h.view.frames.slice(mark);
 	// Every write stays within the budget the console follows...
 	for (const frame of after) expect(frame.length).toBeLessThanOrEqual(MAX_CONPTY_WRITE);
-	// ...the clear still leaves (ink appends the reprint to it, so it opens the
-	// first chunk of its write)...
-	expect(after.some((frame) => frame.includes(clearScreenSequence()))).toBe(true);
+	// ...the clear still leaves — in the form a console behind this writer can
+	// take. ink appends the reprint to it, so it opens the first chunk of its
+	// write; and the wipe that lands is the screen-stop one whatever form the
+	// host wrote, because the writer drops the scrollback erase on the way out.
+	expect(after.some((frame) => frame.includes(clearScreenSequence(true)))).toBe(true);
 	// ...no row is lost to a cut (side-by-side: the unit tests prove chunks join
 	// back byte for byte; this is the same stream through real ink)...
 	const joined = after.join("");
