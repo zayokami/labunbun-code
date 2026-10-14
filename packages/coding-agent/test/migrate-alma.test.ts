@@ -896,7 +896,7 @@ describe("alma: conversations", () => {
 
 describe("alma: registration", () => {
 	test("it holds the place it was appended at, and every id before it is untouched", () => {
-		expect(MIGRATION_SOURCE_IDS.indexOf("alma")).toBe(MIGRATION_SOURCE_IDS.length - 1);
+		expect(MIGRATION_SOURCE_IDS.indexOf("alma")).toBe(MIGRATION_SOURCE_IDS.indexOf("command-code") - 1);
 		expect(MIGRATION_SOURCE_LABELS.alma).toBe("Alma");
 		expect(SOURCE_ROOTS.alma).toBe(".config/alma");
 		expect(MIGRATION_SOURCE_IDS.indexOf("openclaw")).toBe(MIGRATION_SOURCE_IDS.indexOf("alma") - 1);
