@@ -245,7 +245,7 @@ export const QODER_MEMORY_ENTRY_PATTERN = /^\d{4}-\d{2}-\d{2}\.md$/u;
 export const QODER_MEMORY_INDEX_NAME = "MEMORY.md";
 
 // Long-form design notes: docs/dev/migration-sources.md
-/** Qoder's own hook event names, verbatim from the SDK: 18 events in the SDK's order, seven of which this build also runs. */
+/** Qoder's own hook event names, verbatim from the SDK: 18 events in the SDK's order, eight of which this build also runs. */
 export const QODER_HOOK_EVENTS: readonly string[] = [
 	"PreToolUse",
 	"PostToolUse",

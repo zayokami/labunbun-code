@@ -117,9 +117,11 @@ The tool summarizes the conversation when the context window fills. The summary 
 
 The tool first makes old tool results smaller. It replaces each old tool result with a short preview. This step makes no model call. The full text stays in the session file. The tool calls the model for a summary only if the first step did not free enough space.
 
+The tool also runs the first step after one hour with no activity. The provider's cache is cold at that moment, so a smaller context costs nothing extra.
+
 Set `trimOldToolResults: false` to skip the first step. Use `/trim` to run the first step on request. Use `/context` to see what the window contains. The indicator counts the system prompt and the tool schemas.
 
-The `compaction` settings change this behavior. Set `compaction.model` to choose the model that writes the summaries. Set `compaction.thresholdPercent` to compact at a percent of the window. Set `compaction.reserveTokens` to change the space that the trigger line keeps free.
+The `compaction` settings change this behavior. Set `compaction.model` to choose the model that writes the summaries. Set `compaction.thresholdPercent` to compact at a percent of the window. Set `compaction.reserveTokens` to change the space that the trigger line keeps free. Set `compaction.enabled` to `false` to stop the automatic passes. The manual commands still work. `/autocompact` changes this setting from the prompt.
 
 ### Prompt cache
 
@@ -506,6 +508,7 @@ Use these commands in the terminal.
 | `/cache` | Show the prompt cache hit rate and its ceiling. |
 | `/compact [focus]` | Summarize the conversation. |
 | `/trim` | Replace old tool results with short previews. |
+| `/autocompact [on\|off\|<percent>]` | Show or change the automatic compaction passes and their trigger line. |
 | `/checkpoint` | Show the tool ledger: the last call, the files that it touched, the tasks, and the context use. |
 | `/rewind [number]` | Restore a file from a checkpoint. The tool lists the last 10 checkpoints. |
 | `/fork <id>` | Start a new session from an entry. Use `/tree` to find the id. |

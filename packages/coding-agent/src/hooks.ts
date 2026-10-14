@@ -14,7 +14,7 @@
  * hooks mid-run.
  */
 import { spawn } from "node:child_process";
-import type { LoopHooks } from "@labunbun/agent";
+import type { CompactionTrigger, LoopHooks } from "@labunbun/agent";
 import { z } from "zod";
 
 export const HOOK_EVENTS = [
@@ -25,6 +25,7 @@ export const HOOK_EVENTS = [
 	"SessionEnd",
 	"Stop",
 	"PreCompact",
+	"PostCompact",
 	"Notification",
 ] as const;
 
@@ -54,7 +55,74 @@ export interface HookPayload {
 	prompt?: string;
 	session_id?: string;
 	cwd?: string;
+	/**
+	 * The compaction events' fields, on this one interface because it carries
+	 * every event's fields at once. The exact per-event shapes are
+	 * `PreCompactHookPayload` and `PostCompactHookPayload` below, and those are
+	 * what the firing sites should build; optional here so a caller that names
+	 * only the fields it has does not have to spell the rest.
+	 */
+	trigger?: CompactionTrigger;
+	custom_instructions?: string;
+	pre_tokens?: number;
+	post_tokens?: number;
 }
+
+/**
+ * What a `PreCompact` hook receives, fired while a veto still means something:
+ * a block defers the pass the estimate asked for, and the estimate will ask
+ * again on a later turn. One refusal cannot be deferred — a request the
+ * provider already refused would just be refused again — so the veto applies
+ * to estimate-driven passes, which is why `trigger` is part of the payload
+ * rather than something a hook has to guess.
+ *
+ * `trigger` is the compaction's own word for why the pass is running, the same
+ * `CompactionTrigger` the session store records for it: `auto` when the
+ * estimate tripped, `overflow` when a request did not fit and the pass is the
+ * recovery, `manual` when the user asked. `/compact` hands its arguments over
+ * as the focus text, which arrives as `custom_instructions` — absent when
+ * there is none.
+ *
+ * `session_id` and `cwd` stay optional because they are optional on
+ * `HookPayload`; every firing site passes both today.
+ */
+export interface PreCompactHookPayload {
+	session_id?: string;
+	cwd?: string;
+	trigger: CompactionTrigger;
+	custom_instructions?: string;
+}
+
+/**
+ * What a `PostCompact` hook receives, fired after the transcript has been
+ * rewritten: the pass is over, and `pre_tokens`/`post_tokens` are the estimate
+ * before and after — the same pair the compaction report shows the user.
+ *
+ * An observer event: `OBSERVER_HOOK_EVENTS` below, and nothing a config
+ * answers here can change the pass it is answering about. That is the whole
+ * difference from `PreCompact`, whose block still vetoes.
+ */
+export interface PostCompactHookPayload {
+	session_id?: string;
+	cwd?: string;
+	trigger: CompactionTrigger;
+	pre_tokens: number;
+	post_tokens: number;
+}
+
+/**
+ * Events that watch rather than steer: a hook under one of these is told what
+ * happened, and nothing it answers changes the run.
+ *
+ * `run()` still reports `blocked` for these the same as for every other event.
+ * A non-zero exit is a failure everywhere, and the contract routes it to
+ * `blocked` rather than `errors` — a runtime that special-cased it here would
+ * hide a hook that fails on every single compaction. It is the call site that
+ * decides what a block means: for an observer it is a line to report
+ * (`advisoryHookFailures`), never a veto, because the moment it describes has
+ * already passed.
+ */
+export const OBSERVER_HOOK_EVENTS: readonly HookEventName[] = ["PostCompact"];
 
 export interface HookOutcome {
 	/** A hook asked to block (PreToolUse deny / Stop prevention). */
@@ -113,7 +181,13 @@ export class HooksRuntime {
 		return this.#entries.some((e) => e.event === event);
 	}
 
-	/** Run all matching hooks for an event; never throws. */
+	/**
+	 * Run all matching hooks for an event; never throws.
+	 *
+	 * The payload reaches the hooks as it is handed over — serialized whole —
+	 * so a field this interface does not name still arrives. The per-event
+	 * interfaces above are the contract, not a filter.
+	 */
 	async run(event: HookEventName, payload: Omit<HookPayload, "event">): Promise<HookOutcome> {
 		const outcome = emptyOutcome();
 		const relevant = this.#entries.filter(
@@ -145,7 +219,7 @@ function matchesPattern(pattern: string, toolName: string): boolean {
 /**
  * Failure lines for an *advisory* event — one where a hook's "block" reply
  * carries no control-flow meaning (SessionStart, SessionEnd, Notification,
- * PostToolUse).
+ * PostToolUse, and the observer events in `OBSERVER_HOOK_EVENTS`).
  *
  * Per the hook contract a non-zero exit sets `blocked` rather than pushing to
  * `errors`, so a caller that reported only `errors` would silently swallow a

@@ -91,9 +91,10 @@ describe("SettingsSchema", () => {
 
 	test("a compaction block names the model, the headroom and the line", () => {
 		const parsed = SettingsSchema.parse({
-			compaction: { model: "some/cheap-model", reserveTokens: 30_000, thresholdPercent: 85 },
+			compaction: { enabled: false, model: "some/cheap-model", reserveTokens: 30_000, thresholdPercent: 85 },
 		});
 		expect(parsed.compaction).toEqual({
+			enabled: false,
 			model: "some/cheap-model",
 			reserveTokens: 30_000,
 			thresholdPercent: 85,
@@ -110,6 +111,14 @@ describe("SettingsSchema", () => {
 		// Headroom is a count of tokens: zero and fractions are typos, not budgets.
 		expect(SettingsSchema.safeParse({ compaction: { reserveTokens: 0 } }).success).toBe(false);
 		expect(SettingsSchema.safeParse({ compaction: { reserveTokens: 1.5 } }).success).toBe(false);
+		// The off switch is a boolean like the schema's others: absent and true
+		// parse to the states the app already had (absent key, true), and only the
+		// literal false turns the automatic passes off — a "yes" is a typo caught
+		// at load time, not a truthy string the app has to remember to distrust.
+		expect(SettingsSchema.parse({ compaction: { enabled: true } }).compaction).toEqual({ enabled: true });
+		expect(SettingsSchema.parse({ compaction: {} }).compaction).toEqual({});
+		expect(SettingsSchema.safeParse({ compaction: { enabled: false } }).success).toBe(true);
+		expect(SettingsSchema.safeParse({ compaction: { enabled: "yes" } }).success).toBe(false);
 	});
 
 	test("the thinking level is one of the levels the session can ask for", () => {

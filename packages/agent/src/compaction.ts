@@ -13,6 +13,13 @@
  *   only after the provider refuses the full request for size.
  * - After compaction, up to 5 recently-touched files are re-injected
  *   (50k char total budget) so active work continues seamlessly
+ * - `enabled: false` switches off the automatic side only: no summary the
+ *   threshold asks for and no idle trim, while `/compact` and a request the
+ *   provider already refused for size still compact — turning automatic
+ *   compaction off should not cost a run its recovery
+ * - Idle rung: an hour of quiet means the prompt cache is cold anyway, so the
+ *   old tool results become previews for free ahead of the next request — its
+ *   own trigger, and only when the saving clears a floor
  * - Summarizer: the session's own model, passed in by the caller. The summary
  *   request needs a credential and an endpoint, and those live on the model —
  *   a fabricated one has neither, so it fails 401 and takes compaction with it
@@ -30,6 +37,17 @@ import type { CompactionCheck, TrimmedToolResults } from "./types.ts";
 export interface CompactionConfig {
 	contextWindow: number;
 	maxOutputTokens: number;
+	/**
+	 * Whether either automatic pass runs at all. Undefined is today's behavior.
+	 *
+	 * `false` is a user saying the context should build up untouched: no summary
+	 * the threshold asks for, and no idle trim either — the setting is about the
+	 * automatic side, and previews of old results are that side. It is not a
+	 * statement about compaction as a feature: `/compact` still compacts, and a
+	 * request the provider already refused for size is still made room for,
+	 * because the alternative there is a run that can no longer send anything.
+	 */
+	enabled?: boolean;
 	reserveTokens?: number;
 	/**
 	 * An explicit trigger line as a percent of the window, from
@@ -154,6 +172,24 @@ const REINJECT_CHAR_BUDGET = 50_000;
 const TRIM_KEEP_LAST_RESULTS = 3;
 /** What each older tool result is cut down to by the cheap rung. */
 const TRIM_PER_RESULT_BUDGET = 2_000;
+/**
+ * Quiet stretch after which a rewrite of the prefix is free: past it the
+ * provider's prompt cache has expired, so the next request pays full price for
+ * the whole prefix whatever the old tool results still hold.
+ */
+export const IDLE_TRIM_GAP_MS = 3_600_000;
+/**
+ * Tool results the idle trim leaves whole. Wider than the cheap rung's keep,
+ * because nothing is chasing a line here — a cut that shrank the working set
+ * would be a loss the trim did not have to make.
+ */
+export const IDLE_TRIM_KEEP_RESULTS = 5;
+/**
+ * Estimated tokens an idle trim must free before any of it is applied.
+ * All-or-nothing on purpose: previews that free a rounding error of the window
+ * trade detail for nothing.
+ */
+export const IDLE_TRIM_MIN_SAVINGS_TOKENS = 20_000;
 /** Below the point where the reserves fit, compact at this share of the window. */
 const MIN_THRESHOLD_FRACTION = 0.6;
 /** Growth since the last compaction before another one is worth trying. */
@@ -471,15 +507,26 @@ export const LENGTH_RECOVERY_MESSAGE =
  * model's only clue that the history above it is a summary rather than the
  * conversation itself, so there is exactly one spelling of it in the codebase —
  * an imported session's boundary has to read like a native one.
+ *
+ * `transcriptPath` is the session file the replaced prefix still lives in.
+ * A summary is lossy on purpose, and the pointer is what a model reaches for
+ * when it needs a file's exact contents or a request's exact words instead of
+ * the retelling; a boundary with no local file behind it — an imported session,
+ * a caller with no store — carries none rather than naming a file nobody wrote.
  */
 export function compactionBoundary(
 	summary: string,
-	options: { reinjected?: string; retainedRequests?: string[]; timestamp?: number } = {},
+	options: { reinjected?: string; retainedRequests?: string[]; timestamp?: number; transcriptPath?: string } = {},
 ): ReturnType<typeof userMessage> {
 	const retained = options.retainedRequests?.length
 		? `\n\nEarlier requests from the user, kept verbatim:\n\n${options.retainedRequests.join("\n\n---\n\n")}`
 		: "";
-	const text = `${COMPACTION_BOUNDARY_LEAD}\n\n${summary}${retained}${options.reinjected ?? ""}`;
+	// After everything the other arguments put down, because the lead has to stay
+	// the first line: the four rules that recognize a boundary read it there.
+	const transcript = options.transcriptPath
+		? `\n\nThe full session transcript, the summarized part included, is kept on disk and can be read at: ${options.transcriptPath}`
+		: "";
+	const text = `${COMPACTION_BOUNDARY_LEAD}\n\n${summary}${retained}${options.reinjected ?? ""}${transcript}`;
 	return options.timestamp === undefined ? userMessage(text) : userMessage(text, options.timestamp);
 }
 
@@ -758,12 +805,19 @@ export class CompactionManager {
 	 * are not the same event to the user, the cache report or the session file.
 	 * `check()` is the only shape the loop asks for.
 	 */
-	async #pass(context: Context, options: { force?: boolean } = {}): Promise<CompactionPass | null> {
+	async #pass(context: Context, options: { force?: boolean; idleMs?: number } = {}): Promise<CompactionPass | null> {
 		// Every ask counts, including the ones answered "not yet": what the refill
 		// record measures is distance — how many turns of context went by between
 		// one compaction and the next — and a turn that was turned away is one of
 		// them.
 		this.#checksSinceCompact++;
+		// Automatic compaction, off. The user's setting covers the whole automatic
+		// side — the summary the threshold asks for and the cheap rung's previews —
+		// and nothing else: `/compact` never comes through here at all, and a
+		// forced pass is a request the provider has already refused for size, where
+		// "nothing" is not one of the answers left. Losing that recovery would turn
+		// a setting about automation into a run that cannot finish.
+		if (this.#config.enabled === false && options.force !== true) return null;
 		const tokens = estimateContextUsage(context);
 		const threshold = compactionThreshold(this.#config);
 		if (this.#config.microcompactFirst && tokens >= threshold) {
@@ -786,6 +840,15 @@ export class CompactionManager {
 		// second, and the breaker is a guess about future attempts, not a fact about
 		// this one.
 		if (!options.force) {
+			// The idle rung, ahead of the threshold's own gate because idle is its
+			// own trigger: a context under the line still pays for every old tool
+			// result it carries on the next request. Not past the hard limit —
+			// there the question is whether the request can be sent at all, and
+			// previews are not an answer to that.
+			if (tokens < hardContextLimit(this.#config)) {
+				const idle = this.#idleTrim(context, options.idleMs);
+				if (idle) return idle;
+			}
 			if (tokens < threshold) return null;
 			if (this.isTripped) return null;
 			// Anti-thrash. A compaction that has just run on a context this size is
@@ -818,9 +881,12 @@ export class CompactionManager {
 	 * reloads — which is the right shape for a change that is lossy in context and
 	 * lossless on disk. Returns null when there was nothing over the per-result
 	 * budget to cut, which is also what makes a second pass a no-op.
+	 *
+	 * `keepLastN` is the caller's to widen: the idle rung leaves the newest five
+	 * whole, since nothing is forcing the cut it makes.
 	 */
-	trim(context: Context): { context: Context; cleared: TrimmedToolResults } | null {
-		const trimmed = microcompact(context.messages);
+	trim(context: Context, keepLastN = TRIM_KEEP_LAST_RESULTS): { context: Context; cleared: TrimmedToolResults } | null {
+		const trimmed = microcompact(context.messages, keepLastN);
 		if (trimmed === context.messages) return null;
 		let results = 0;
 		let chars = 0;
@@ -837,6 +903,36 @@ export class CompactionManager {
 		return { context: { ...context, messages: trimmed }, cleared: { results, chars } };
 	}
 
+	/**
+	 * The idle rung: previews of the old tool results after a long quiet stretch.
+	 *
+	 * Wall clock is the trigger because the reason this is free is not in the
+	 * transcript. After a gap this long the provider's prompt cache has expired,
+	 * so the next request pays full price for the whole prefix whatever those
+	 * results hold — rewriting them before it costs nothing in cache terms and
+	 * that request is smaller for it. Otherwise it is the cheap rung: the same
+	 * previews, no model call, and a second pass over the same messages finds
+	 * nothing left to cut, which is what makes one trim per gap a property of the
+	 * previews rather than a rule someone has to remember. All-or-nothing against
+	 * the saving floor: a rewrite that frees a rounding error of the window would
+	 * give up detail and buy nothing with it.
+	 */
+	#idleTrim(context: Context, idleMs: number | undefined): CompactionPass | null {
+		// The flag is the user's answer to whether previews of old tool results are
+		// acceptable for this conversation, and this is that same rewrite — the
+		// trigger moving does not move it outside the permission.
+		if (!this.#config.microcompactFirst) return null;
+		if (idleMs === undefined || idleMs < IDLE_TRIM_GAP_MS) return null;
+		const reduced = this.trim(context, IDLE_TRIM_KEEP_RESULTS);
+		if (!reduced) return null;
+		if (Math.ceil(reduced.cleared.chars / CHARS_PER_TOKEN) < IDLE_TRIM_MIN_SAVINGS_TOKENS) return null;
+		// The same bookkeeping as the cheap rung at the threshold, for the same
+		// reason: the anti-thrash growth floor measures from the size the context
+		// was left at, and this pass left it smaller.
+		this.#lastPostTokens = estimateContextUsage(reduced.context);
+		return { kind: "reduced", ...reduced };
+	}
+
 	/** How much new context makes another summarization worth its cost. */
 	#thrashGrowth(): number {
 		return Math.max(1, Math.floor(this.#config.contextWindow * THRASH_GROWTH_FRACTION));
@@ -850,8 +946,13 @@ export class CompactionManager {
 	 * generic error, and with a fallback chain configured the same oversized
 	 * context is then replayed against the next model — so the run fails
 	 * identically on every later prompt, with nothing that says why.
+	 *
+	 * `idleMs` — how long the session has been quiet — is computed by the
+	 * caller: the manager has no clock, and the wall clock belongs to whoever
+	 * listens to the user. It is what offers the idle rung; a check made without
+	 * it behaves exactly as checks always did.
 	 */
-	async check(context: Context, options: { force?: boolean } = {}): Promise<CompactionCheck | null> {
+	async check(context: Context, options: { force?: boolean; idleMs?: number } = {}): Promise<CompactionCheck | null> {
 		const overHard = options.force === true || estimateContextUsage(context) >= hardContextLimit(this.#config);
 		try {
 			const pass = await this.#pass(context, options);
@@ -884,7 +985,14 @@ export class CompactionManager {
 			// the pass working, and the last chance to say the pass has not ended.
 			this.#deps.onPhase?.({ kind: "resuming" });
 			const reinjected = this.#reinjectFiles(prefix);
-			const boundary = compactionBoundary(summary, { reinjected, retainedRequests: retainedRequests(prefix) });
+			const boundary = compactionBoundary(summary, {
+				reinjected,
+				retainedRequests: retainedRequests(prefix),
+				// The file the prefix being replaced still lives in. No store — a
+				// subagent, the beetle band — means no file to name, and the boundary
+				// says nothing rather than pointing somewhere invented.
+				transcriptPath: this.#deps.store?.path,
+			});
 			const messages = [boundary, ...suffix];
 
 			// A success clears the count, manual or automatic: the breaker is a

@@ -291,7 +291,7 @@ The importer counts the credential blocks here so the report says what the scrub
 
 **Hooks**
 
-`HookEvent` is `#[serde(rename_all = "snake_case")]` (`crates/tui/src/hooks/config.rs:26-27`), and `ALL_HOOK_EVENTS` (`crates/tui/src/hooks/config.rs:81-97`) declares fifteen events. `as_str` (`crates/tui/src/hooks/config.rs:117-135`) is the persisted spelling, and the two agree exactly. Seven of the fifteen have a counterpart here and nine do not. The nine are the half that matters. A hook under an event this build does not fire is imported and never runs, which is a silent loss dressed as a successful migration.
+`HookEvent` is `#[serde(rename_all = "snake_case")]` (`crates/tui/src/hooks/config.rs:26-27`), and `ALL_HOOK_EVENTS` (`crates/tui/src/hooks/config.rs:81-97`) declares fifteen events. `as_str` (`crates/tui/src/hooks/config.rs:117-135`) is the persisted spelling, and the two agree exactly. Six of the fifteen have a counterpart here and nine do not. The nine are the half that matters. A hook under an event this build does not fire is imported and never runs, which is a silent loss dressed as a successful migration.
 
 The nine are spelled out rather than left to a default branch. The table's shape says "this is the whole list", and a variant added upstream is a diff here rather than a silent no-op. The table is exported for the row count, for the same reason the approval tables are.
 
@@ -842,7 +842,7 @@ The fuller desktop copy of the SDK rule is in `WV`. There the second half is a `
 
 **Hooks**
 
-- `QODER_HOOK_EVENTS` lists 18 events in the SDK's order. Seven of the 18 are events this build also runs, so those import. The other 11 are events only Qoder has, and each one is a hook that never fires here. The list turns that silent loss into a report line. `normalizeClaudeHooks` collects an unknown event into `droppedEvents`, and this list is what that collection is checked against.
+- `QODER_HOOK_EVENTS` lists 18 events in the SDK's order. Eight of the 18 are events this build also runs, so those import. The other 10 are events only Qoder has, and each one is a hook that never fires here. The list turns that silent loss into a report line. `normalizeClaudeHooks` collects an unknown event into `droppedEvents`, and this list is what that collection is checked against.
 - `Notification` is not in it, and this build runs that event while Qoder does not have it. The intersection is not the whole story in either direction. A source whose events were assumed to be a subset of this build's is wrong in exactly that way.
 
 **What the planner claims, and what it says in place of a claim**
@@ -904,7 +904,7 @@ The fuller desktop copy of the SDK rule is in `WV`. There the second half is a `
 - `once` means run this one time, and a dropped flag makes the hook run on every event, so those are skipped too. `async` runs the hook asynchronously, and a dropped flag makes the hook synchronous. That is the stricter direction and the one safe default. `asyncRewake` has no analogue at all.
 - A handler that is `http` rather than `command` has no analogue here, because this build runs shell commands and nothing else. `normalizeClaudeHandler` drops it and counts it, and the count reaches the report through the same path as the rest.
 - `QoderHookCount` walks the same three levels `hGr` does, event then group then handler. It treats anything outside the shape as no match, which is the tolerance `normalizeClaudeHooks` applies. It exists so the report can say `3 handlers were left off` from the file rather than from a guess about how many were there.
-- The event list is `QODER_HOOK_EVENTS`, 18 names with seven this build runs. The rest go to `droppedEvents`, which `normalizeClaudeHooks` collects so an event nobody here has a word for becomes a sentence rather than a silence. A skip line names those events, says the hooks under them never fire, and repeats the total.
+- The event list is `QODER_HOOK_EVENTS`, 18 names with eight this build runs. The rest go to `droppedEvents`, which `normalizeClaudeHooks` collects so an event nobody here has a word for becomes a sentence rather than a silence. A skip line names those events, says the hooks under them never fire, and repeats the total.
 - The plan lists the rest of the losses: handlers that were not shell commands, malformed entries, and timeouts the shared normalizer clamped.
 - A matcher leaves with a downgrade line. This build escapes a matcher's pattern characters, so a carried matcher matches a literal rather than the tool it names.
 - When no event produces a runnable hook, the skip line counts the events Qoder declares and names the ones this build does not have. On success the claim reads `N event(s) imported` with the downgrade list, or `imported verbatim` when every handler is a shell command. The event count comes from the normalized config.

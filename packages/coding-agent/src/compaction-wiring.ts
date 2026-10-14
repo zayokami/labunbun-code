@@ -18,6 +18,7 @@ import {
 	type AgentDeps,
 	CompactionManager,
 	type CompactionPhase,
+	type CompactionTrigger,
 	type CompactionVerification,
 	type SessionStore,
 	SUMMARY_SECTIONS,
@@ -183,6 +184,14 @@ export interface CompactionTuning {
 	reserveTokens?: number;
 	/** `settings.compaction.thresholdPercent`, when the line is named outright. */
 	thresholdPercent?: number;
+	/**
+	 * `settings.compaction.enabled`. False turns off the two passes the app
+	 * starts by itself — the automatic summary and the cheap trim ahead of it —
+	 * while the passes a person starts and the provider-refusal recovery stay.
+	 * The manager reads it from the config `build` makes, so `/autocompact`
+	 * flips this field and asks for a rebuild rather than waiting for a restart.
+	 */
+	enabled?: boolean;
 }
 
 /**
@@ -251,9 +260,16 @@ export interface CompactionWiringOptions {
 	/**
 	 * The `PreCompact` hook, when the app has one. A veto defers a pass the
 	 * estimate asked for; it cannot defer one the provider already refused — the
-	 * next request would be the same request and get the same refusal.
+	 * next request would be the same request and get the same refusal. The
+	 * trigger is handed through so the hook knows which of the three it was asked
+	 * about, without this layer interpreting the answer differently per value,
+	 * and `customInstructions` carries a manual pass's focus argument, which no
+	 * automatic pass has.
 	 */
-	preCompact?: () => Promise<{ blocked: boolean; reason?: string }>;
+	preCompact?: (
+		trigger: CompactionTrigger,
+		customInstructions?: string,
+	) => Promise<{ blocked: boolean; reason?: string }>;
 	/** Register a rewrite of the prefix with the cache tracker. */
 	noteRewrite?: (cause: string) => void;
 	/**
@@ -271,6 +287,16 @@ export interface CompactionWiring {
 	manager: () => CompactionManager;
 	/** Point the manager at another model's window and another store. */
 	rebuild: (forModel: Model, forStore: SessionStore | undefined) => void;
+	/**
+	 * The same `PreCompact` hook, askable from outside. `checkCompaction` consults
+	 * it for the passes it handles; `/compact` runs its summary through
+	 * `manager()` directly, so its veto is this door — one hook, one payload
+	 * shape, the trigger naming the caller.
+	 */
+	runPreCompact: (
+		trigger: CompactionTrigger,
+		customInstructions?: string,
+	) => Promise<{ blocked: boolean; reason?: string }>;
 }
 
 export function createCompactionWiring(options: CompactionWiringOptions): CompactionWiring {
@@ -316,6 +342,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 				microcompactFirst: options.trimOldToolResults !== false,
 				reserveTokens: options.tuning?.reserveTokens,
 				thresholdPercent: options.tuning?.thresholdPercent,
+				enabled: options.tuning?.enabled,
 			},
 			{
 				streamFn: options.streamFn,
@@ -339,16 +366,30 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 	// triggered off `isTripped` so a rebuild (which cannot be tripped) resets it,
 	// and a manager that trips again is announced again.
 	let breakerWarned = false;
+	/**
+	 * The idle rung's clock, kept here because the manager keeps none: the gap
+	 * between two checks is the time the session spent not making requests. A
+	 * person who walked away leaves one, and so does one very long tool call —
+	 * both leave the provider's cache as cold as the other, which is what makes
+	 * either the free moment to shrink the prefix.
+	 */
+	let lastCheckAt = Date.now();
 
 	return {
 		checkCompaction: async (context, checkOptions) => {
 			try {
-				const veto = await options.preCompact?.();
+				const veto = await options.preCompact?.(checkOptions?.force ? "overflow" : "auto");
 				if (veto?.blocked) {
 					options.report(`Compaction skipped by PreCompact hook${veto.reason ? `: ${veto.reason}` : ""}`);
 					return checkOptions?.force ? { action: "blocked", message: compaction.blockedMessage() } : null;
 				}
-				const decision = await compaction.check(context, checkOptions);
+				// The clock advances only when the manager is actually consulted:
+				// a check a veto sent home early must not eat the idle window the
+				// veto's own deferral was asked to keep for later.
+				const now = Date.now();
+				const idleMs = now - lastCheckAt;
+				lastCheckAt = now;
+				const decision = await compaction.check(context, { ...checkOptions, idleMs });
 				// Either action replaces part of the prefix, and the session adopts it
 				// itself one line later. Registering the cause here is what the cache
 				// report needs to tell a rewrite the app meant to make from one nothing
@@ -385,5 +426,7 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
 		rebuild: (forModel, forStore) => {
 			compaction = build(forModel, forStore);
 		},
+		runPreCompact: async (trigger, customInstructions) =>
+			(await options.preCompact?.(trigger, customInstructions)) ?? { blocked: false },
 	};
 }

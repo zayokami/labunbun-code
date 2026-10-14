@@ -15,6 +15,7 @@ import {
 	COMPACTION_DISABLED_NOTICE,
 	COMPACTION_REFILLING_NOTICE,
 	type CompactionPhase,
+	type CompactionTrigger,
 	SessionStore,
 	SUMMARY_SECTIONS,
 } from "@labunbun/agent";
@@ -30,7 +31,12 @@ import {
 	toolResultMessage,
 	userMessage,
 } from "@labunbun/ai";
-import { compactionPhaseText, createCompactionWiring, resolveCompactionSummarizer } from "../src/compaction-wiring.ts";
+import {
+	type CompactionTuning,
+	compactionPhaseText,
+	createCompactionWiring,
+	resolveCompactionSummarizer,
+} from "../src/compaction-wiring.ts";
 import { ACCURACY_NOTICE_AFTER_COMPACTIONS, COMPACTION_ACCURACY_NOTICE } from "../src/context-report.ts";
 
 /** A window small enough to reach the threshold with a handful of tool results. */
@@ -62,6 +68,10 @@ interface Harness {
 		context: { systemPrompt: string; messages: AgentMessage[] },
 		options?: { force?: boolean },
 	) => Promise<{ action: string } | null>;
+	runPreCompact: (
+		trigger: CompactionTrigger,
+		customInstructions?: string,
+	) => Promise<{ blocked: boolean; reason?: string }>;
 	summaries: () => number;
 	reports: string[];
 	causes: string[];
@@ -69,9 +79,14 @@ interface Harness {
 
 function wiring(
 	options: {
+		model?: Model;
 		trimOldToolResults?: boolean;
 		streamFn?: StreamFn;
-		preCompact?: () => Promise<{ blocked: boolean; reason?: string }>;
+		preCompact?: (
+			trigger: CompactionTrigger,
+			customInstructions?: string,
+		) => Promise<{ blocked: boolean; reason?: string }>;
+		tuning?: CompactionTuning;
 		store?: SessionStore;
 		phases?: CompactionPhase[];
 	} = {},
@@ -88,17 +103,19 @@ function wiring(
 	const reports: string[] = [];
 	const causes: string[] = [];
 	const created = createCompactionWiring({
-		model: MODEL,
+		model: options.model ?? MODEL,
 		store: options.store,
 		streamFn: counting,
 		report: (text) => reports.push(text),
 		trimOldToolResults: options.trimOldToolResults,
 		preCompact: options.preCompact,
+		tuning: options.tuning,
 		noteRewrite: (cause) => causes.push(cause),
 		onPhase: options.phases ? (phase) => options.phases?.push(phase) : undefined,
 	});
 	return {
 		check: created.checkCompaction as Harness["check"],
+		runPreCompact: created.runPreCompact,
 		summaries: () => summaries,
 		reports,
 		causes,
@@ -579,6 +596,84 @@ describe("resolveCompactionSummarizer", () => {
 			expect(result.warning).toContain("LBB_TUNING_TEST_MISSING_KEY");
 		} finally {
 			clearCustomModels();
+		}
+	});
+});
+
+describe("the doors the session opens itself", () => {
+	test("the manual ask is the same hook, one door out, with the focus argument", async () => {
+		// `/compact` runs its summary through the manager directly, so the veto the
+		// automatic pass honors inside `checkCompaction` has to be askable from
+		// outside — one hook, one payload shape, and the focus argument the
+		// automatic passes never have.
+		const seen: Array<[string, string | undefined]> = [];
+		const harness = wiring({
+			preCompact: async (trigger, customInstructions) => {
+				seen.push([trigger, customInstructions]);
+				return { blocked: true, reason: "mid-edit" };
+			},
+		});
+
+		const veto = await harness.runPreCompact("manual", "keep the migration details");
+
+		expect(veto).toEqual({ blocked: true, reason: "mid-edit" });
+		expect(seen).toEqual([["manual", "keep the migration details"]]);
+		// A session with no hook at all is an open door, not a closed one.
+		expect(await wiring().runPreCompact("manual")).toEqual({ blocked: false });
+	});
+
+	test("the switch reaches the manager this wiring builds, and only the automatic side hears it", async () => {
+		// The setting has to land in the config `build` makes — this wiring is where
+		// the host hands it over — and only the passes the app starts itself may
+		// stop: a refused request still has to be recoverable, so a forced pass
+		// runs with the switch off. The cheap rung is off so the forced pass's one
+		// remaining answer is the summary; with it on, the trim would legitimately
+		// answer first and this test would be about the rung order instead.
+		const harness = wiring({ trimOldToolResults: false, tuning: { enabled: false } });
+
+		expect(await harness.check({ systemPrompt: "", messages: overThreshold() })).toBeNull();
+		expect(harness.summaries()).toBe(0);
+
+		const forced = await harness.check({ systemPrompt: "", messages: overThreshold() }, { force: true });
+		expect(forced?.action).toBe("compact");
+		expect(harness.summaries()).toBe(1);
+	});
+});
+
+/** A window big enough that idle-trimmable old results sit far below the threshold. */
+const BIG_MODEL: Model = { ...FAUX_MODEL, contextWindow: 400_000, maxOutputTokens: 32_000 };
+
+/** Eight old results at 30k characters: ~60k tokens, and the oldest three over the idle floor. */
+function idleContext(): AgentMessage[] {
+	const messages: AgentMessage[] = [userMessage("read those files")];
+	for (let i = 0; i < 8; i++) messages.push(toolResultMessage(`call_${i}`, "Read", [textContent("x".repeat(30_000))]));
+	return messages;
+}
+
+describe("the idle rung's clock", () => {
+	test("an hour between checks turns old results into previews, without a model call", async () => {
+		// The clock is the wiring's, not the manager's — the manager only receives
+		// the number — so it is faked here: what is under test is what the wiring
+		// does with a gap. The gap's own threshold is a manager constant, pinned in
+		// the manager's tests, where an hour is a number rather than a wait.
+		const realNow = Date.now;
+		let fake = 1_800_000_000_000;
+		Date.now = () => fake;
+		try {
+			const harness = wiring({ model: BIG_MODEL, trimOldToolResults: true });
+			const context = { systemPrompt: "", messages: idleContext() };
+
+			// A fresh session is not idle, however old its tool results are.
+			expect(await harness.check(context)).toBeNull();
+
+			fake += 3_600_000;
+			const decision = await harness.check(context);
+
+			expect(decision?.action).toBe("reduced");
+			expect(harness.summaries()).toBe(0);
+			expect(harness.reports.join("\n")).toContain("Context trimmed");
+		} finally {
+			Date.now = realNow;
 		}
 	});
 });

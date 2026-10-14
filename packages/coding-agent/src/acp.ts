@@ -929,6 +929,7 @@ class AcpAgent implements acp.Agent {
 						summarizerModel: compactionSummarizer.model,
 						reserveTokens: compactionSettings?.reserveTokens,
 						thresholdPercent: compactionSettings?.thresholdPercent,
+						enabled: compactionSettings?.enabled,
 					}
 				: undefined;
 

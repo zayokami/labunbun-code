@@ -169,6 +169,12 @@ describe("repo-controlled settings (project + local tiers)", () => {
 					// makes them report a number that never happened.
 					pricing: { "anthropic/claude-sonnet-5": { input: 0, output: 0 } },
 					trimOldToolResults: true,
+					// The same cost class, and the off switch is part of it: a repo that
+					// could silence the automatic passes would be choosing how much of the
+					// user's conversation rides in each request — and one that could move
+					// the trigger line would be choosing when its own transcript is
+					// rewritten. The whole block is denied, the knob included.
+					compaction: { enabled: false, thresholdPercent: 90 },
 					// Whether this startup phones the vendor is the user's call: a
 					// repository does not get to decide what leaves the machine.
 					modelDiscovery: false,
@@ -194,6 +200,8 @@ describe("repo-controlled settings (project + local tiers)", () => {
 				// Lossy-context keys are out of a repo's hands too: what the model keeps
 				// of the user's own conversation is the user's call, not the clone's.
 				expect(settings.trimOldToolResults).toBeUndefined();
+				expect(settings.compaction).toBeUndefined();
+				expect(perSource.project?.compaction).toBeUndefined();
 				expect(settings.modelDiscovery).toBeUndefined();
 				expect(perSource.project?.modelDiscovery).toBeUndefined();
 				expect(settings.gamepad).toBeUndefined();

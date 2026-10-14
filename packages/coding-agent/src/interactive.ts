@@ -11,6 +11,7 @@ import {
 	type AgentDeps,
 	AgentSession,
 	type CompactionManager,
+	type CompactionTrigger,
 	collectActivity,
 	collectReadOnlyToolNames,
 	compactionThreshold,
@@ -107,6 +108,13 @@ import {
 } from "@labunbun/tui";
 import { activitySummaryLine } from "./activity-report.ts";
 import { createAskUserQuestionTool } from "./ask-user.ts";
+import {
+	applyAutocompactAction,
+	autocompactReport,
+	autocompactUsageLine,
+	parseAutocompactCommand,
+	userSettingsAutocompactIo,
+} from "./autocompact.ts";
 import {
 	BACKGROUND_SHELL_POLL_MS,
 	formatShellOutput,
@@ -470,12 +478,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// `roles.compaction.model` set there are no knobs, but the model still has to
 	// travel — a struct built only for `settings.compaction` would leave the role
 	// resolved and never read, and the session model would summarize.
-	const compactionTuning: CompactionTuning | undefined =
+	let compactionTuning: CompactionTuning | undefined =
 		compactionSettings || compactionSummarizer.model
 			? {
 					summarizerModel: compactionSummarizer.model,
 					reserveTokens: compactionSettings?.reserveTokens,
 					thresholdPercent: compactionSettings?.thresholdPercent,
+					enabled: compactionSettings?.enabled,
 				}
 			: undefined;
 
@@ -747,7 +756,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		// transcript gets the line that outlives it. `/compact` is the exception
 		// to the second half — it prints its own summary of the same event, and
 		// two lines for one compaction is the app talking over itself.
-		onPhase: (phase) => {
+		onPhase: async (phase) => {
 			// The store directly, the way `pushInfo` does: one word and one clock
 			// with no behaviour of their own, and a handle method for them would be
 			// a second name for a `set`. The clock is stamped when the pass first
@@ -795,14 +804,31 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				saveTasks(taskStore, store);
 				persistPolicy();
 				resendCheckpointsAcrossCompaction(store);
+				// The `PostCompact` event, for anything that wants to know a pass
+				// finished. It observes: a failing hook is a line, never a veto, and
+				// the sizes it reads are the pair the receipt above prints.
+				if (hooksRuntime.has("PostCompact")) {
+					const outcome = await hooksRuntime.run("PostCompact", {
+						session_id: sessionIdHolder.current,
+						cwd,
+						trigger: phase.trigger,
+						pre_tokens: phase.preTokens,
+						post_tokens: phase.postTokens,
+					});
+					reportHookErrors(handle, advisoryHookFailures("PostCompact", outcome));
+				}
 			}
 		},
 		readFile: readFileOrNull,
-		preCompact: async () => {
+		preCompact: async (trigger, customInstructions) => {
 			if (!hooksRuntime.has("PreCompact")) return { blocked: false };
 			const outcome = await hooksRuntime.run("PreCompact", {
 				session_id: sessionIdHolder.current,
 				cwd,
+				trigger,
+				// A manual pass's focus argument; undefined for the automatic
+				// passes, and dropped from the payload then.
+				custom_instructions: customInstructions,
 			});
 			reportHookErrors(
 				handle,
@@ -1870,6 +1896,22 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				pad,
 				padWatch,
 				compaction: compactionWiring.manager,
+				// The manual pass's veto door — the same hook the automatic pass
+				// consults inside the wiring, asked here because `/compact` runs its
+				// summary through the manager itself.
+				preCompact: (trigger, customInstructions) => compactionWiring.runPreCompact(trigger, customInstructions),
+				// `/autocompact` applies the change to this session, not only the
+				// file: the manager reads its switch from the config the wiring
+				// builds, so one rebuild after the flip is what makes the next
+				// check obey the report the command just printed. Mutated in place
+				// because the struct is shared with the subagent context and the
+				// beetle band — a replaced object would leave them on the old
+				// answer at their next spawn.
+				applyCompactionSettings: (patch) => {
+					if (!compactionTuning) compactionTuning = {};
+					Object.assign(compactionTuning, patch);
+					compactionWiring.rebuild(sessionRef?.model ?? model, store);
+				},
 				mcpConnections,
 				onMcpToolsChanged,
 				mcpConfig,
@@ -2418,6 +2460,21 @@ interface AppCommandContext {
 	padWatch: { toggle(): boolean; stop(): void };
 	/** Read at dispatch time; a swap or model switch rebuilds the manager. */
 	compaction(): CompactionManager;
+	/**
+	 * The `PreCompact` hook for the passes a command runs itself, `/compact`
+	 * being the one. The wiring consults the same hook inside `checkCompaction`;
+	 * this door exists so the manual pass is stoppable by it too. Optional
+	 * because a context assembled by hand has no hooks behind it.
+	 */
+	preCompact?(trigger: CompactionTrigger, customInstructions?: string): Promise<{ blocked: boolean; reason?: string }>;
+	/**
+	 * `/autocompact` applies a settings change to the running session, not only
+	 * to the file: the manager reads its switch and its trigger line from the
+	 * config the wiring builds, so this flips the tuning struct and rebuilds —
+	 * the next check then behaves like the command's own report says it will.
+	 * Optional because a context assembled by hand has no wiring to rebuild.
+	 */
+	applyCompactionSettings?(patch: { enabled?: boolean; thresholdPercent?: number }): void;
 	mcpConnections: McpConnection[];
 	/**
 	 * The tool-list-change handler the startup connections carry (see
@@ -2497,6 +2554,8 @@ function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
 		const localCtx: LocalCommandContext = {
 			session,
 			compaction: ctx.compaction(),
+			preCompact: async (trigger, customInstructions) =>
+				(await ctx.preCompact?.(trigger, customInstructions)) ?? { blocked: false },
 			cwd: ctx.cwd,
 			pushInfo: (info) => pushInfo(ctx.handle, info),
 			home: ctx.home,
@@ -2590,6 +2649,7 @@ export function appCommandTable(): Array<[string, string]> {
 	return [
 		["/activity", "Show a heatmap of the days you used this, and the streak: /activity [7d|30d|all]"],
 		["/agents", "List agent definitions, and load this project's: /agents [approve]"],
+		["/autocompact", "Switch the automatic compaction passes and their trigger line: /autocompact [on|off|<percent>]"],
 		[
 			"/beetle",
 			"Run a four-agent band that works until stopped: /beetle [<task>|status|off|models|say <member> <text>]",
@@ -2990,6 +3050,30 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				return true;
 			}
 			ctx.setThinkingLevel(level);
+			return true;
+		}
+		case "/autocompact": {
+			const parsed = parseAutocompactCommand(text.split(/\s+/).slice(1).join(" "));
+			if (parsed.kind === "usage") {
+				pushInfo(ctx.handle, autocompactUsageLine());
+				return true;
+			}
+			const io = userSettingsAutocompactIo(ctx.home);
+			try {
+				if (parsed.kind === "report") {
+					pushInfo(ctx.handle, autocompactReport(io.read()));
+					return true;
+				}
+				// The file first, then the running session: the report below
+				// describes what the next check will do, and it may only say that
+				// about a write that landed — a failed write leaves the session
+				// behaving as it did, and the user reads why.
+				const state = applyAutocompactAction(parsed, io);
+				ctx.applyCompactionSettings?.({ enabled: state.enabled, thresholdPercent: state.thresholdPercent });
+				pushInfo(ctx.handle, autocompactReport(state));
+			} catch (error) {
+				pushInfo(ctx.handle, error instanceof Error ? error.message : String(error));
+			}
 			return true;
 		}
 		case "/status": {

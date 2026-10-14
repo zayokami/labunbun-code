@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentSession, CompactionManager, SessionStore } from "@labunbun/agent";
+import { AgentSession, CompactionManager, type CompactionTrigger, SessionStore } from "@labunbun/agent";
 import {
 	type AgentMessage,
 	assistantMessage,
@@ -57,7 +57,15 @@ const compactCommand = (): LocalCommand => {
 	return command;
 };
 
-function makeHarness(summaryText: string) {
+function makeHarness(
+	summaryText: string,
+	hooks: {
+		preCompact?: (
+			trigger: CompactionTrigger,
+			customInstructions?: string,
+		) => Promise<{ blocked: boolean; reason?: string }>;
+	} = {},
+) {
 	const infos: string[] = [];
 	const prompted: string[] = [];
 	const faux = fauxProvider([{ text: summaryText, usage: { input: 10, output: 10 } }]);
@@ -75,6 +83,7 @@ function makeHarness(summaryText: string) {
 	const ctx = {
 		session,
 		compaction,
+		preCompact: hooks.preCompact,
 		cwd: dir,
 		pushInfo: (info: string) => infos.push(info),
 	} as LocalCommandContext;
@@ -114,6 +123,42 @@ describe("/compact", () => {
 		const h = makeHarness("<summary>\n1. Primary Request: x\n</summary>");
 		await h.command.call(h.ctx, "keep the migration details");
 		expect(h.prompted.join("\n")).toContain("Focus especially on: keep the migration details");
+	});
+
+	test("a PreCompact veto stops the pass before it spends", async () => {
+		// The veto has to come before the summary request and before the receipt:
+		// "skipped" followed by a freed-token count would be a report of a pass
+		// that never ran.
+		const seen: Array<[string, string | undefined]> = [];
+		const h = makeHarness("<summary>\n1. Primary Request: x\n</summary>", {
+			preCompact: async (trigger, customInstructions) => {
+				seen.push([trigger, customInstructions]);
+				return { blocked: true, reason: "mid-edit" };
+			},
+		});
+
+		const result = await h.command.call(h.ctx, "keep the migration details");
+
+		expect(result).toBe("Compaction skipped by PreCompact hook: mid-edit");
+		expect(seen).toEqual([["manual", "keep the migration details"]]);
+		expect(h.prompted).toEqual([]);
+		expect(h.infos).toEqual([]);
+		expect(h.session.messages).toHaveLength(3);
+	});
+
+	test("a hook that lets the pass through changes nothing about it", async () => {
+		const seen: string[] = [];
+		const h = makeHarness("<summary>\n1. Primary Request: x\n</summary>", {
+			preCompact: async (trigger) => {
+				seen.push(trigger);
+				return { blocked: false };
+			},
+		});
+
+		const result = await h.command.call(h.ctx, "");
+
+		expect(seen).toEqual(["manual"]);
+		expect((result ?? "").startsWith("Conversation compacted:")).toBe(true);
 	});
 
 	test("records the compaction so the summary can be audited", async () => {

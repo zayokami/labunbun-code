@@ -7,7 +7,7 @@
  * - "local-jsx": renders an interactive dialog (reserved; dialogs are wired
  *   directly through the TUI for now)
  */
-import type { AgentSession, CompactionManager } from "@labunbun/agent";
+import type { AgentSession, CompactionManager, CompactionTrigger } from "@labunbun/agent";
 import { estimateContextUsage } from "@labunbun/agent";
 import { compactionReceiptLines } from "./compaction-wiring.ts";
 import { playDaisyBell } from "./daisy-bell.ts";
@@ -29,6 +29,13 @@ export interface PromptCommand extends CommandBase {
 export interface LocalCommandContext {
 	session: AgentSession;
 	compaction?: CompactionManager;
+	/**
+	 * The `PreCompact` hook, as the automatic pass sees it. `/compact` asks it
+	 * directly because it runs its summary through the manager itself — without
+	 * this, the one pass the user explicitly asked for would be the one pass a
+	 * vetoing hook could not stop.
+	 */
+	preCompact?(trigger: CompactionTrigger, customInstructions?: string): Promise<{ blocked: boolean; reason?: string }>;
 	cwd: string;
 	pushInfo(text: string): void;
 	/**
@@ -118,6 +125,13 @@ export function builtInCommands(): Command[] {
 			type: "local",
 			call: async (ctx, args) => {
 				if (!ctx.compaction) return "Compaction is not available in this session.";
+				// The same veto the automatic pass honors, asked here because this
+				// pass is the user's own request — and the only place a hook can read
+				// the focus instructions the summary will be written with.
+				const veto = (await ctx.preCompact?.("manual", args.trim() || undefined)) ?? { blocked: false };
+				if (veto.blocked) {
+					return `Compaction skipped by PreCompact hook${veto.reason ? `: ${veto.reason}` : ""}`;
+				}
 				ctx.pushInfo("Compacting conversation…");
 				const context = ctx.session.currentContext();
 				const before = estimateContextUsage(context);

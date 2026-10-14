@@ -971,7 +971,7 @@ test("a relative cwd is named rather than written, and an absolute one is kept",
 test("the events Qoder declares that this build also runs are imported, and the rest are named", () => {
 	// Qoder's `hGr` takes **any** key as an event name and never enumerates them,
 	// because the dispatcher is in the runtime binary — so the only check available
-	// is against a list, and this build runs eight events of which Qoder has seven.
+	// is against a list, and this build runs nine events of which Qoder has eight.
 	// The intersection is not the whole story in either direction: `Notification`
 	// is one this build runs and Qoder does not have.
 	expect(QODER_HOOK_EVENTS).toHaveLength(18);

@@ -161,17 +161,45 @@ export const SettingsSchema = z.object({
 	 */
 	emacsMode: z.boolean().optional(),
 	// Long-form design notes: docs/dev/migration-framework.md
-	/** Let the cheap rung run by itself when the context crosses the compaction threshold. */
+	/**
+	 * Let the cheap rung run by itself: at the compaction threshold, and after an
+	 * hour of quiet where the provider's cache is cold anyway. The same
+	 * permission covers both moments — false leaves old results whole until
+	 * `/trim` is asked or a summary replaces them.
+	 */
 	trimOldToolResults: z.boolean().optional(),
 	// Long-form design notes: docs/dev/migration-framework.md
 	/**
 	 * The compaction knobs, for a conversation the defaults manage the wrong
-	 * way: which model writes the summaries, how much headroom is kept below the
-	 * window, and where the trigger line sits. The arithmetic itself is
-	 * `compactionThreshold`'s, in the agent package.
+	 * way: whether the automatic passes run at all, which model writes the
+	 * summaries, how much headroom is kept below the window, and where the
+	 * trigger line sits. The arithmetic itself is `compactionThreshold`'s, in
+	 * the agent package; `/autocompact` reads and writes the first and the last.
 	 */
 	compaction: z
 		.object({
+			/**
+			 * Off silences the passes the app takes by itself: the automatic
+			 * summary when the context crosses the trigger line, and the
+			 * automatic cheap trim that runs before one is paid for. Undefined
+			 * and true are the same state — the behavior every session had
+			 * before this key existed — so the knob only ever turns things off
+			 * that ran, never upgrades anything that did not.
+			 *
+			 * The scope is deliberate and is exactly two passes. The ones a
+			 * person starts (`/compact`, `/trim`) run on request whatever this
+			 * says, and so does the recovery pass after a provider refuses an
+			 * over-long request: that pass is not a habit of the app but the
+			 * only way forward for the conversation that is already too big,
+			 * and an off switch that reached it would be a decision to break
+			 * the next request. `/autocompact off` says as much in its line.
+			 *
+			 * It sits in this object rather than a key of its own because the
+			 * two are one question — what does automatic context management
+			 * cost this session — and a reader looking for the cost knobs
+			 * should find all of them, the off switch included, in one place.
+			 */
+			enabled: z.boolean().optional(),
 			/** The model that writes summaries; the session's own model when unset. */
 			model: z.string().optional(),
 			/** Tokens kept free below the window when the trigger line is computed. */

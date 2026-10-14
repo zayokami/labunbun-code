@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { AgentMessage, Context, Model, StreamFn } from "@labunbun/ai";
 import { assistantMessage, FAUX_MODEL, fauxProvider, textContent, toolResultMessage, userMessage } from "@labunbun/ai";
 import {
+	COMPACTION_BOUNDARY_LEAD,
 	COMPACTION_DISABLED_NOTICE,
 	COMPACTION_REFILLING_NOTICE,
 	CompactionManager,
@@ -18,6 +19,10 @@ import {
 	estimateContextUsage,
 	extractRecentFiles,
 	hardContextLimit,
+	IDLE_TRIM_GAP_MS,
+	IDLE_TRIM_KEEP_RESULTS,
+	IDLE_TRIM_MIN_SAVINGS_TOKENS,
+	isCompactionBoundary,
 	keepSuffix,
 	LENGTH_RECOVERY_MESSAGE,
 	microcompact,
@@ -1316,5 +1321,273 @@ describe("the cheap rung", () => {
 		const small = (id: string) => toolResultMessage(id, "Bash", [{ type: "text", text: "ok" }]);
 		const quiet = { systemPrompt: "sys", messages: ["a", "b", "c", "d", "e"].map(small) };
 		expect(manager.trim(quiet)).toBeNull();
+	});
+});
+
+describe("the boundary's transcript pointer", () => {
+	function textOf(message: AgentMessage | undefined): string {
+		return message?.role === "user" && typeof message.content === "string" ? message.content : "";
+	}
+
+	test("a store-backed compaction names the session file, after everything else", async () => {
+		// The summary is lossy on purpose; the file it was taken from is not. The
+		// pointer is what a model reaches for when it needs a file's exact contents
+		// or a request's exact words instead of the retelling — and it rides last,
+		// because the lead has to stay the first line the boundary's four readers
+		// look for.
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-boundary-")),
+			mkdtempSync(join(tmpdir(), "lbb-boundary-home-")),
+		);
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "<summary>1. Request: x</summary>", usage: { input: 10, output: 10 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+			store,
+		});
+		const messages: AgentMessage[] = [
+			userMessage("the earlier ask"),
+			assistantMessage({}),
+			userMessage("the current ask"),
+		];
+		for (const message of messages) store.appendMessage(message);
+
+		const compacted = await manager.compact({ systemPrompt: "", messages }, { trigger: "manual" });
+		const text = textOf(compacted.messages[0]);
+
+		expect(text.startsWith(COMPACTION_BOUNDARY_LEAD)).toBe(true);
+		expect(text).toContain(store.path);
+		expect(text.indexOf(store.path)).toBeGreaterThan(text.indexOf("1. Request: x"));
+	});
+
+	test("a boundary with no file behind it names none", async () => {
+		// A subagent and the beetle band run with no session file, and an imported
+		// boundary stands in for a transcript from another tool's world that may
+		// hold no local file at all. A pointer to a path nobody wrote would be
+		// worse than the silence, so both shapes come out of the same builder with
+		// no line.
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "<summary>1. Request: x</summary>", usage: { input: 10, output: 10 } }]).streamFn,
+			summarizerModel: SUMMARIZER,
+		});
+		const compacted = await manager.compact({
+			systemPrompt: "",
+			messages: [userMessage("the earlier ask"), assistantMessage({}), userMessage("the current ask")],
+		});
+		expect(textOf(compacted.messages[0])).not.toContain("can be read at");
+		// And this is what migration writes, through the same builder: the import
+		// call site passes no path, and its boundary reads like it always did.
+		expect(textOf(compactionBoundary("an imported summary", { timestamp: 1_000 }))).not.toContain("can be read at");
+	});
+
+	test("the rules that read a boundary still find one that carries the path", () => {
+		// The lead is shared by four co-dependent rules and each has to keep
+		// working: retention, and the estimator's answer to which usage records the
+		// rewrite outlived (both through the predicate beside this), plus the TUI
+		// replay, which reads that same predicate. They all look at the opening,
+		// and the paragraph went after everything, so nothing they read has moved.
+		const boundary = compactionBoundary("an earlier summary", { transcriptPath: "/sessions/abc.jsonl" });
+		expect(isCompactionBoundary(boundary)).toBe(true);
+		// Retention: a summary wearing a user's clothes is not one of the user's
+		// requests, pointer or not.
+		expect(retainedRequests([userMessage("the first ask"), boundary, userMessage("the newest ask")])).toEqual([
+			"the first ask",
+			"the newest ask",
+		]);
+		// The estimator: a usage record older than the boundary still cannot anchor
+		// through it, even though the boundary now weighs more than the lead alone.
+		// The answer is the character count over everything the list still holds.
+		const compactedAt = 1_000_000;
+		const dated = compactionBoundary("an earlier summary", {
+			transcriptPath: "/sessions/abc.jsonl",
+			timestamp: compactedAt,
+		});
+		const stale = assistantMessage({
+			usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 },
+			timestamp: compactedAt - 1_000,
+		});
+		expect(estimateContextTokens([stale, dated, userMessage("and now this", compactedAt + 1)])).toBe(
+			Math.ceil((textOf(dated).length + "and now this".length + "[]".length) / 4),
+		);
+	});
+});
+
+describe("automatic compaction switched off", () => {
+	const OFF = { ...CONFIG, enabled: false };
+
+	/** A manager whose one summary call would be counted, if one were ever made. */
+	function offManager(config: Partial<ConstructorParameters<typeof CompactionManager>[0]> = {}) {
+		const calls: number[] = [];
+		const faux = fauxProvider([{ text: "<summary>\n1. Request: x\n</summary>" }]);
+		const manager = new CompactionManager(
+			{ ...OFF, ...config },
+			{
+				streamFn: async function* (model, context, options) {
+					calls.push(context.messages.length);
+					yield* faux.streamFn(model, context, options);
+				},
+				summarizerModel: SUMMARIZER,
+			},
+		);
+		return { manager, calls };
+	}
+
+	/** Over the 67k threshold, under the 97k hard limit: what the threshold rung acts on. */
+	const over: Context = {
+		systemPrompt: "",
+		messages: [
+			userMessage("do the thing"),
+			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+		],
+	};
+
+	/** Old tool output in bulk: what a live cheap rung would cut first. */
+	function heavy(): Context {
+		const messages: AgentMessage[] = [userMessage("start")];
+		for (let i = 0; i < 6; i++) {
+			messages.push(assistantMessage({ content: [{ type: "toolCall", id: `c${i}`, name: "Bash", arguments: "{}" }] }));
+			messages.push(toolResultMessage(`c${i}`, "Bash", [{ type: "text", text: "x".repeat(60_000) }]));
+		}
+		messages.push(userMessage("what happened?"));
+		return { systemPrompt: "", messages };
+	}
+
+	test("an unforced check answers nothing, however far over the threshold", async () => {
+		// Off is off: the threshold does not get to ask, and the context is handed
+		// back exactly as it stands — no summary call, no decision.
+		const { manager, calls } = offManager();
+		expect(await manager.check(over)).toBeNull();
+		expect(calls).toEqual([]);
+	});
+
+	test("a forced check still compacts — off is not a way to end a run", async () => {
+		// `force` is the provider having already refused this request for size. With
+		// the automatic path switched off, refusing to compact here would leave a
+		// run that can neither send the request nor make room for it: the user's
+		// setting would end the session instead of the automation.
+		const { manager, calls } = offManager();
+		const decision = await manager.check(over, { force: true });
+		expect(decision?.action).toBe("compact");
+		expect(calls).toHaveLength(1);
+	});
+
+	test("the automatic trim stays off with it, at the threshold and on idle", async () => {
+		// The setting covers the automatic side, and previews of old tool results
+		// are that side. A `reduced` decision here would have rewritten the context
+		// the user asked to be left alone — with no model call anywhere in it to
+		// show the rewrite happened.
+		const { manager } = offManager({ microcompactFirst: true });
+		expect(await manager.check(heavy())).toBeNull();
+		// The idle trigger does not open a second door into it.
+		expect(await manager.check(heavy(), { idleMs: IDLE_TRIM_GAP_MS })).toBeNull();
+	});
+});
+
+describe("the idle trim", () => {
+	const RESULTS = 8;
+	const RESULT_CHARS = 30_000;
+
+	/**
+	 * Under the threshold and free of usage anchors, so size alone has nothing to
+	 * say: the idle trigger is the only thing left, and the old results are big
+	 * enough for the saving floor.
+	 */
+	function idleSession(results = RESULTS, resultChars = RESULT_CHARS): Context {
+		const messages: AgentMessage[] = [userMessage("start")];
+		for (let i = 0; i < results; i++) {
+			messages.push(assistantMessage({ content: [{ type: "toolCall", id: `c${i}`, name: "Bash", arguments: "{}" }] }));
+			messages.push(toolResultMessage(`c${i}`, "Bash", [{ type: "text", text: "x".repeat(resultChars) }]));
+		}
+		messages.push(userMessage("what happened?"));
+		return { systemPrompt: "", messages };
+	}
+
+	function idleManager(config: Partial<ConstructorParameters<typeof CompactionManager>[0]> = {}) {
+		const calls: number[] = [];
+		const faux = fauxProvider([{ text: "<summary>\n1. Request: x\n</summary>" }]);
+		const manager = new CompactionManager(
+			{ ...CONFIG, microcompactFirst: true, ...config },
+			{
+				streamFn: async function* (model, context, options) {
+					calls.push(context.messages.length);
+					yield* faux.streamFn(model, context, options);
+				},
+				summarizerModel: SUMMARIZER,
+			},
+		);
+		return { manager, calls };
+	}
+
+	test("an idle gap turns the old results into previews, keeping the newest five", async () => {
+		// The gap is the whole trigger: this context is under the threshold, so a
+		// size-driven check sends it as it is — and the rewrite is free anyway,
+		// because the prefix it touches has not been read from a warm cache since
+		// the gap began.
+		const { manager, calls } = idleManager();
+		const context = idleSession();
+		const before = estimateContextUsage(context);
+		expect(before).toBeLessThan(compactionThreshold(CONFIG)); // the fixture's point
+		expect(await manager.check(context)).toBeNull(); // size alone: not yet
+
+		const decision = await manager.check(context, { idleMs: IDLE_TRIM_GAP_MS });
+
+		expect(decision?.action).toBe("reduced");
+		if (decision?.action !== "reduced") throw new Error("expected a reduced decision");
+		expect(decision.cleared.results).toBe(RESULTS - IDLE_TRIM_KEEP_RESULTS);
+		expect(decision.cleared.chars).toBe((RESULTS - IDLE_TRIM_KEEP_RESULTS) * (RESULT_CHARS - 2_000));
+		expect(calls).toEqual([]); // no model call: the previews are the whole rung
+		expect(estimateContextUsage(decision.context)).toBeLessThan(before);
+
+		// The five newest results are the turn's working set, and they survive whole.
+		const kept = decision.context.messages.filter((m) => m.role === "toolResult").slice(-IDLE_TRIM_KEEP_RESULTS);
+		expect(kept).toHaveLength(IDLE_TRIM_KEEP_RESULTS);
+		for (const message of kept) expect((message as any).content[0].text).toHaveLength(RESULT_CHARS);
+	});
+
+	test("below the gap, and with no gap to go on, nothing happens", async () => {
+		const { manager, calls } = idleManager();
+		expect(await manager.check(idleSession(), { idleMs: IDLE_TRIM_GAP_MS - 1 })).toBeNull();
+		expect(await manager.check(idleSession())).toBeNull(); // no idleMs: the check the loop has always made
+		expect(calls).toEqual([]);
+	});
+
+	test("a saving under the floor is not applied at all", async () => {
+		// All-or-nothing: one result past the keep-five line frees a rounding error
+		// of the window, and previews that buy nothing are detail given away for
+		// free — which is not free.
+		const { manager } = idleManager();
+		const freed = (6 - IDLE_TRIM_KEEP_RESULTS) * (20_000 - 2_000);
+		expect(Math.ceil(freed / 4)).toBeLessThan(IDLE_TRIM_MIN_SAVINGS_TOKENS); // the fixture sits under the floor
+		expect(await manager.check(idleSession(6, 20_000), { idleMs: IDLE_TRIM_GAP_MS })).toBeNull();
+	});
+
+	test("with the cheap rung opted out, an idle gap changes nothing", async () => {
+		// The flag is the user's answer to whether previews of old tool results are
+		// acceptable for this conversation, and idle is that same rewrite — a
+		// trigger that moved is not a permission that widened.
+		const { manager } = idleManager({ microcompactFirst: false });
+		expect(await manager.check(idleSession(), { idleMs: IDLE_TRIM_GAP_MS })).toBeNull();
+	});
+
+	test("one trim per gap: the previews are not cut twice", async () => {
+		// The session adopts what the decision returned, so a second check — the
+		// gap has not moved — is handed the previews themselves and finds nothing
+		// left to cut. Same invariant the threshold rung has, and for the same
+		// reason: a preview fits its budget with the marker inside it.
+		const { manager } = idleManager();
+		const first = await manager.check(idleSession(), { idleMs: IDLE_TRIM_GAP_MS });
+		if (first?.action !== "reduced") throw new Error("expected a reduced decision");
+		expect(await manager.check(first.context, { idleMs: IDLE_TRIM_GAP_MS })).toBeNull();
+		expect(manager.trim(first.context, IDLE_TRIM_KEEP_RESULTS)).toBeNull();
+	});
+
+	test("a forced pass wins over an idle trim", async () => {
+		// `force` is a request the provider already refused for size: the pass that
+		// may not be deferred is the one that makes room for a request that has to
+		// go out. The idle trim is an optimization, and an optimization does not
+		// get to stand in front of a recovery.
+		const { manager, calls } = idleManager();
+		const decision = await manager.check(idleSession(), { idleMs: IDLE_TRIM_GAP_MS, force: true });
+		expect(decision?.action).toBe("compact");
+		expect(calls).toHaveLength(1);
 	});
 });

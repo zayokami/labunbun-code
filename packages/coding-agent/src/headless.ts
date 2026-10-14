@@ -269,6 +269,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 					summarizerModel: compactionSummarizer.model,
 					reserveTokens: compactionSettings?.reserveTokens,
 					thresholdPercent: compactionSettings?.thresholdPercent,
+					enabled: compactionSettings?.enabled,
 				}
 			: undefined;
 

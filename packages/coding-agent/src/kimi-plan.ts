@@ -252,8 +252,8 @@ const KIMI_DEFAULT_HOOK_TIMEOUT_SECONDS = 30;
 /**
  * Kimi's own hook event names, in the order `internal/types.ts` lists them.
  *
- * The eight this build also has are the ones that can carry over; the other
- * twelve are events kimi runs a hook for that have no counterpart here, so a hook
+ * The nine this build also has are the ones that can carry over; the other
+ * eleven are events kimi runs a hook for that have no counterpart here, so a hook
  * under one of them is named and left behind rather than written to a file where
  * nothing would ever call it.
  */
