@@ -812,6 +812,10 @@ Three checks are not in CI:
 - The Emacs citation test and the DeepSeek Harness test skip when they do not find their source.
 - `tsconfig.check.json` does not cover `packages/coding-agent/bin/`.
 
+## Contact
+
+Questions and bug reports: labunbun@zayoka.com
+
 ## Sponsor
 
 If LaBunbun Code saves you time, you can support the development.
