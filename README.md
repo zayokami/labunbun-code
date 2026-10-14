@@ -450,6 +450,8 @@ The keys `rumble` and `lightbar` both have the value `true` by default. Set a ke
    bun run dev
    ```
 
+   On a machine with no settings file, the first start runs the setup wizard. The wizard lists what the machine already holds — a variable you exported above is included — asks how to pay for the model, and writes the settings file. The wizard can also import the settings, MCP servers, skills, and agents of another tool. It shows the full plan before it writes anything.
+
    Use this command to run one prompt and print the result.
 
    ```bash

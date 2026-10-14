@@ -1,6 +1,6 @@
 # Out-of-box experience
 
-What a brand-new user meets when there is no `~/.labunbun/settings.json` and no credential anywhere on the machine, what OpenAI's Codex CLI does in the same position, and the first-launch flow this app should build. This is a design note: of §6's four batches, batches 1 and 2 are implemented (`149c620`, `9403213`); the one-shot record and the trust sentence are not. Two deviations rode in with batch 2, noted in place: the import offer runs after the settings write (§4 Screen C), and the trigger stays file-gated — the condition-driven re-offer from §3's verdict row is not built (§6). Screen F's notice landed early with batch 1 — a gate that warns instead of exiting needs the warning to exist.
+What a brand-new user meets when there is no `~/.labunbun/settings.json` and no credential anywhere on the machine, what OpenAI's Codex CLI does in the same position, and the first-launch flow this app should build. This is a design note: of §6's four batches, batches 1 through 3 are implemented (`149c620`, `9403213`, `64b62c1`); the trust sentence is not. Three deviations rode in with batches 2–3, noted in place: the import offer runs after the settings write (§4 Screen C), the trigger stays file-gated — the condition-driven re-offer from §3's verdict row is not built (§6) — and the one-shot record is written but never read (§4 Screen G). Screen F's notice landed early with batch 1 — a gate that warns instead of exiting needs the warning to exist.
 
 Every claim about this repository cites `path:line`. Every claim about Codex cites `path:line` inside `openai/codex` at `main`, fetched on 2026-10-14 with `gh api` and quoted verbatim; upstream moves, so re-fetch before quoting it again.
 
@@ -340,13 +340,15 @@ No credential for anthropic/claude-sonnet-5 yet — the first prompt will fail. 
 ```
 
 - `pushInfo` is the existing in-transcript startup channel (`interactive.ts:1921-1934`); the notice lands at `interactive.ts:1942-1948`, and the store probe runs only when the environment cannot already answer.
-- The line names two commands; batch 3 adds it to `help-commands.test.ts`'s advice list so that test holds it.
+- The line names two commands; batch 3 added it to `help-commands.test.ts`'s advice list, so that test now holds it (both wires that draw on a login, anthropic and ChatGPT).
 - When a credential resolves, say nothing. The app's rule is already "an unasked-for line on every startup is how a feature becomes noise" (`interactive.ts:1958-1960`).
 - The gate is gone — it lived at `interactive.ts:426-430` before batch 1; `:447-452` is the comment in its place. The session mounts and warns instead of exiting. Headless and ACP keep failing fast — a `-p` run has no transcript to warn into, and the request-time error already names the variable.
 
-### Screen G — the one-shot record
+### Screen G — the one-shot record — implemented (batch 3)
 
-Write one key in the user settings, `firstRun: { offeredAt, signedIn, imported }`, through the existing read-merge-write (`packages/coding-agent/src/user-settings.ts:15-32`). It exists to answer "should the notice in Screen F appear at all" and nothing else — not to gate Screen A, which stays condition-driven like Codex's (`lib.rs:2362-2386`), so a user who signs out sees the offer again.
+`wizard.ts` writes one key in the user settings, `firstRun: { offeredAt, signedIn, imported }`, through the existing read-merge-write (`packages/coding-agent/src/user-settings.ts:15-19`). `offeredAt` is the ISO instant of the write; `signedIn` is the state at the end of the run — a row-1/row-2 sign-in that finishes flips its flag — and `imported` says an apply ran, not how many files landed (under the merge rules "two files" and "none needed" are the same verdict). The write carries its own `try`: the wizard's outer catch reads any throw after the settings write as a failed import, and a failed note is not that.
+
+One deviation from this sketch, noted because it reverses it: the record is **written but never read**. The sketch had it answering "should the notice in Screen F appear at all". Batch 3 decided against that — the notice stays condition-driven. A record is a log of one past run, a sign-in can expire or be revoked, and a record consulted as a suppressor would hide the notice exactly where it has just become true again. Screen A also stays condition-driven like Codex's (`lib.rs:2362-2386`), so a user who signs out sees the offer again. The record's remaining job is diagnostic.
 
 ## 5. Open decisions
 
@@ -354,8 +356,9 @@ Write one key in the user settings, `firstRun: { offeredAt, signedIn, imported }
    *Recommendation:* keep it pre-REPL. It must run before `loadSettings` (`interactive.ts:380-383`) because it writes the file those settings come from, and a mounted REPL would need a session with no model. *Tradeoff:* the wizard is a second UI that cannot reuse ink, so it stays plain-text and has to be tested by driving readline.
 2. **Does a missing key still stop the interactive start?**
    *Recommendation:* no. Mount, warn once (Screen F), let `/login`, `/model` and `/yoshi` work. *Tradeoff:* a typo in `--model` now costs a failed first prompt instead of an early exit — but the early exit is currently the first thing a paying subscriber sees.
-3. **Should a sign-in write `model`?** A ChatGPT sign-in with the default `anthropic/claude-sonnet-5` still fails on the first prompt (`interactive.ts:429`).
+3. **Should a sign-in write `model`?** A ChatGPT sign-in with the default `anthropic/claude-sonnet-5` (`interactive.ts:428`) still fails on the first prompt.
    *Recommendation:* yes, for the ChatGPT flow only — write a chatgpt row, because that credential is useless with any other model. *Tradeoff:* `login` starts editing settings, which is a new side effect for a command whose whole job was the credential; the alternative is a louder Screen F that tells the user to run `/model`.
+   *Landed so far:* the wizard half, in batch 2 — the first-run ChatGPT row puts `chatgpt/gpt-6-astra` in the file it writes. The in-session `/login chatgpt` still does not touch `model` (no login flow calls `persistModelChoice`, whose only caller is `/model` at `interactive.ts:1544`), so a default-model session that signs in this way still fails its first prompt until `/model`. A residual gap, here so it is not rediscovered as a bug.
 4. **How far may the first-run import go on its own?**
    *Recommendation:* dry run always, then one confirm over the whole plan, `settings` + `assets` only, `--force` off. *Tradeoff:* more keystrokes than Codex's checkbox screen, and a user who says yes still has to read a report before anything lands. The alternative — auto-apply when exactly one source is detected — is the one path that can silently change a working configuration.
 5. **Project trust: prompt or notice?** We hold back repo-shipped agents/skills and say so (`project-trust.ts:87-95`); Codex blocks with a question and a git-root rule (`trust_directory.rs:69-152`).
@@ -381,12 +384,13 @@ Four batches. Line counts are rough, and no batch should be started before the d
 - Tests: `wizard.test.ts` already asserted the trigger and the translation; batch 2 added the chatgpt→settings mapping, the registry pin, the provider-default rule, the detection rows, and "import offer is absent when nothing is detected".
 - Deviations from this sketch, both noted in place: the import offer runs after the settings write (§4 Screen C), and the trigger stays the file check — the condition-driven re-offer from §3's verdict row is not built; the sync pre-settings gate and the whole-file write would need a merge story first.
 
-### Batch 3 — the first frame and the one-shot record (~60 lines + ~60 test)
+### Batch 3 — the first frame and the one-shot record — implemented (`64b62c1`; ~60 lines + ~55 test)
 
 - `interactive.ts`: the Screen F `pushInfo` — **landed early with batch 1**; what remains for this batch is its `help-commands.test.ts` row below.
-- `user-settings.ts`: the `firstRun` record (Screen G), written through `writeUserSettingsPatch` (`user-settings.ts:13-17`).
-- `help-commands.test.ts`: the new advice line joins the list that must name real commands.
-- Docs: README's installation section gains the wizard-first path; `docs/dev/migration-framework.md` can point here for the first-run offer.
+- `wizard.ts`: the `firstRun` record (Screen G) — the pure `firstRunRecord({ signIns, imported, now })` plus the write through `writeUserSettingsPatch` (`user-settings.ts:15-19`), in its own `try` so a failed note cannot read as a failed import. `offerImport` now returns whether an apply ran; the run tracks the post-login sign-in state for the record.
+- `help-commands.test.ts`: the new advice lines join the list that must name real commands — both wires the credential notice can name a login on. The scan regex needed a path-separator guard (`(?<![\w/])`): the notice names its model as `provider/id`, whose tail scanned as a command.
+- Docs: README's installation section gains the wizard-first path; `docs/dev/migration-framework.md` points here for the first-run offer.
+- Deviations from this sketch, noted in place: the record is written but deliberately never read — the Screen F notice stays condition-driven (§4 Screen G) — and `imported` records that an apply ran, not how many files landed.
 
 ### Batch 4 — the trust sentence, gated (~40 lines + ~40 test)
 
@@ -399,6 +403,7 @@ Four batches. Line counts are rough, and no batch should be started before the d
 | --- | --- |
 | The wizard runs only on a TTY, only with no settings file, and never again after a cancel | `packages/coding-agent/test/wizard.test.ts` |
 | Every command a startup notice names is dispatchable | `packages/coding-agent/test/help-commands.test.ts` |
+| The first-run record is stamped from one instant and both final sign-in states | `packages/coding-agent/test/wizard.test.ts` |
 | `/doctor`'s auth row reflects what the machine holds | `packages/coding-agent/test/doctor.test.ts` |
 | `/login` and `/logout` reach the real flows through the REPL | `packages/coding-agent/test/claude-commands.test.ts`, `chatgpt-commands.test.ts` |
 | A migration wizard answers nothing until the user answers | `packages/coding-agent/test/migrate-wizard.test.ts` |

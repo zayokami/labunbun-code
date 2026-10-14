@@ -155,6 +155,7 @@ The import writes session files for past conversations below `~/.labunbun/projec
 - A successful apply ends with `Restart to pick up the imported configuration`.
 - The dialog bridge is a structural slice of the REPL's app handle. The TUI's handle type satisfies it, and neither package imports the other's types.
 - `MigrationWizardContext` carries the dialog, the `cwd`, an optional `home` and `report`, where the output of each step goes. The REPL passes `pushInfo`.
+- The first-run wizard (`wizard.ts`) is the other caller of `runMigration`. It offers the import only when it found a source, and it runs after the settings write: the dry run must count the tree as it stands, and with `--force` off the import can only add, so the answers just written survive the merge. It asks one yes-or-no over `settings` and `assets` and never the history questions. Design: `docs/dev/oobe-design.md`.
 
 ## Why it is like this
 
