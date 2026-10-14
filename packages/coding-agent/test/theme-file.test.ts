@@ -3,14 +3,16 @@
  * not allowed to do — namely, stop the REPL from starting or take other themes
  * down with it.
  */
-import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUILT_IN_THEME_NAMES, DARK_THEME, LIGHT_THEME } from "@labunbun/tui";
+import { appearanceFromEnvironment, BUILT_IN_THEME_NAMES, DARK_THEME, LIGHT_THEME } from "@labunbun/tui";
 import {
+	cachedAppearance,
 	loadThemeFiles,
 	persistThemeChoice,
+	resetAppearanceCache,
 	resolveTheme,
 	selectableThemeNames,
 	ThemeFileSchema,
@@ -405,6 +407,109 @@ describe("resolveTheme", () => {
 		const resolved = await resolveTheme("dark", cwd, home);
 		expect(resolved.theme.accent).toBe("#c0ffee");
 		expect(resolved.available.filter((name) => name === "dark")).toHaveLength(1);
+	});
+});
+
+/**
+ * `auto` and the terminal: who is allowed to ask, and what a caller that may
+ * not ask gets instead.
+ *
+ * The probe is the one thing on this path that touches stdin — it stands the
+ * REPL's readers down for its timeout window — so the `/theme` picker's open
+ * path must resolve every row, `auto` included, without one. These tests pin
+ * that with the input trace as the witness: `detectAppearance` writes a
+ * `probe.enter` line the moment it is called, before it decides anything, so
+ * "no probe line in the file" is evidence about the whole call and not about
+ * the terminal state the test happened to run under.
+ */
+describe("resolveTheme probing", () => {
+	const originalColorFgBg = process.env.COLORFGBG;
+
+	beforeEach(() => {
+		// The guarded path answers from the environment, and the tests assert the
+		// dark default, so the environment is held to "unset". The probe cache is
+		// module-level and shared across this file, so it is dropped too —
+		// otherwise the first test to probe decides what every later one sees.
+		delete process.env.COLORFGBG;
+		resetAppearanceCache();
+	});
+	afterEach(() => {
+		resetAppearanceCache();
+		if (originalColorFgBg === undefined) delete process.env.COLORFGBG;
+		else process.env.COLORFGBG = originalColorFgBg;
+	});
+
+	/** Trace the probe into a scratch file for the duration of one test. */
+	function traced(): { path: string; log: () => string } {
+		const path = join(
+			tmpdir(),
+			`lbb-theme-probe-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.log`,
+		);
+		process.env.LBB_INPUT_TRACE = path;
+		return {
+			path,
+			log: () => (existsSync(path) ? readFileSync(path, "utf8") : ""),
+		};
+	}
+
+	test("the picker's open path resolves auto without asking the terminal", async () => {
+		const { home, cwd } = makeDirs();
+		const trace = traced();
+		try {
+			const resolved = await resolveTheme("auto", cwd, home, { allowProbe: false });
+			expect(resolved.theme).toBe(DARK_THEME);
+			expect(resolved.choice).toBe("auto");
+			expect(trace.log()).not.toContain("probe.enter");
+		} finally {
+			delete process.env.LBB_INPUT_TRACE;
+			rmSync(trace.path, { force: true });
+		}
+	});
+
+	// The guard is only meaningful if the unguarded path still probes: a
+	// resolveTheme that never asked the terminal at all would pass the test
+	// above, and the second `resolveTheme` pins the cache — the probe runs once
+	// per process, not once per call.
+	test("resolving auto without the guard probes, and only once", async () => {
+		const { home, cwd } = makeDirs();
+		const trace = traced();
+		try {
+			await resolveTheme("auto", cwd, home);
+			await resolveTheme("auto", cwd, home);
+			expect(trace.log().split("probe.enter").length - 1).toBe(1);
+		} finally {
+			delete process.env.LBB_INPUT_TRACE;
+			rmSync(trace.path, { force: true });
+		}
+	});
+
+	// Concurrent is the shape the old `/theme` open path had — `Promise.all`
+	// over every name, with `auto` among them — and the one the shared promise
+	// exists for: two callers racing on an empty cache must wait on one probe,
+	// not stand stdin down twice over. Sequential calls cannot tell `??=` from
+	// `=`; this one can.
+	test("concurrent resolves share one probe", async () => {
+		const { home, cwd } = makeDirs();
+		const trace = traced();
+		try {
+			await Promise.all([resolveTheme("auto", cwd, home), resolveTheme("auto", cwd, home)]);
+			expect(trace.log().split("probe.enter").length - 1).toBe(1);
+		} finally {
+			delete process.env.LBB_INPUT_TRACE;
+			rmSync(trace.path, { force: true });
+		}
+	});
+
+	test("the guarded answer is not cached, so the commit that chooses auto still probes", async () => {
+		const { home, cwd } = makeDirs();
+		const previewed = await resolveTheme("auto", cwd, home, { allowProbe: false });
+		expect(previewed.theme).toBe(DARK_THEME);
+		// The preview's environment read is a guess, not a finding: caching it
+		// would let the commit below skip the terminal and save the guess.
+		expect(cachedAppearance()).toBeUndefined();
+		const committed = await resolveTheme("auto", cwd, home);
+		expect(committed.theme).toBe(DARK_THEME);
+		expect(cachedAppearance()).toBe(appearanceFromEnvironment());
 	});
 });
 

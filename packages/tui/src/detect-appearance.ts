@@ -7,6 +7,7 @@
  * and the whole thing ends at `"dark"` rather than at an error — a failed probe
  * is the normal case on older terminals, not something to report.
  */
+import { inputTrace } from "./input-trace.ts";
 
 // Built rather than written as literals: an escape byte in a source file is
 // invisible in most editors and easily mangled by anything that rewrites it.
@@ -92,6 +93,16 @@ export function appearanceFromColorFgBg(value: string | undefined): Appearance |
 	return background <= 6 ? "dark" : "light";
 }
 
+/**
+ * Appearance from the standing environment only, without asking a terminal:
+ * `COLORFGBG` if it says anything, otherwise dark. Shared with callers that
+ * need an answer in a moment the terminal must not be asked — the `/theme`
+ * picker previewing `auto` — and with the probe itself as its fallback.
+ */
+export function appearanceFromEnvironment(env: NodeJS.ProcessEnv = process.env): Appearance {
+	return appearanceFromColorFgBg(env.COLORFGBG) ?? "dark";
+}
+
 /** Whether querying the terminal is appropriate at all. */
 function canProbe(stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream, env: NodeJS.ProcessEnv): boolean {
 	// CI logs and NO_COLOR setups are not interactive terminals; writing an
@@ -105,21 +116,43 @@ function canProbe(stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream, env: Nod
  * not a real terminal, ask via OSC 11, fall back to `COLORFGBG`, then default
  * to dark.
  *
- * Runs before the REPL mounts, and again from inside it when `/theme auto` is
- * picked. Mid-session the readers already on stdin — Ink's among them — are
- * stood down while the queries are outstanding and put back when the terminal
- * is done answering, so the replies are read here and not typed into the prompt.
+ * Runs before the REPL mounts — and only then, for a session that must keep
+ * its keyboard: the callers that run with a REPL on screen (the `/theme`
+ * picker previewing `auto`, `/doctor` naming it) resolve from the cached or
+ * standing appearance instead. When it does run mid-session the readers
+ * already on stdin — Ink's among them — are stood down while the queries are
+ * outstanding and put back when the terminal is done answering, so the replies
+ * are read here and not typed into the prompt.
  */
 export async function detectAppearance(options: DetectAppearanceOptions = {}): Promise<Appearance> {
 	const stdin = options.stdin ?? process.stdin;
 	const stdout = options.stdout ?? process.stdout;
 	const env = options.env ?? process.env;
-	const fromEnv = (): Appearance => appearanceFromColorFgBg(env.COLORFGBG) ?? "dark";
+	const fromEnv = (): Appearance => appearanceFromEnvironment(env);
 
-	if (!canProbe(stdin, stdout, env)) return fromEnv();
+	// Before the gate, so the trace also answers the other half of the question:
+	// was the probe even attempted, and if not, why not.
+	inputTrace("probe.enter", {
+		stdinTTY: stdin.isTTY,
+		stdoutTTY: stdout.isTTY,
+		CI: env.CI,
+		NO_COLOR: env.NO_COLOR,
+	});
+	if (!canProbe(stdin, stdout, env)) {
+		inputTrace("probe.skip", "not an interactive terminal, or CI/NO_COLOR is set");
+		return fromEnv();
+	}
 
 	const wasRaw = stdin.isRaw === true;
 	const wasPaused = stdin.isPaused();
+	/**
+	 * Whether the stream was reading on its own before the probe, as opposed to
+	 * merely not-paused. `readableFlowing` is three-valued — true is flowing,
+	 * false is paused, null is "nobody has asked it either way" — and a stream in
+	 * the null state answers `isPaused()` false, so this is the only way to tell
+	 * the two apart before the probe's own `resume()` moves null to true.
+	 */
+	const wasFlowing = stdin.readableFlowing === true;
 	/**
 	 * Whoever else is reading stdin — Ink, when `/theme auto` runs from inside the
 	 * REPL — is stood down for the duration. The reply is escape bytes, and a key
@@ -132,6 +165,13 @@ export async function detectAppearance(options: DetectAppearanceOptions = {}): P
 	 */
 	const displacedData = stdin.listeners("data") as Array<(...args: unknown[]) => void>;
 	const displacedReadable = stdin.listeners("readable") as Array<(...args: unknown[]) => void>;
+	inputTrace("probe.start", {
+		wasRaw,
+		wasPaused,
+		wasFlowing,
+		dataListeners: displacedData.length,
+		readableListeners: displacedReadable.length,
+	});
 	const restore = (): void => {
 		for (const listener of displacedData) stdin.on("data", listener);
 		for (const listener of displacedReadable) stdin.on("readable", listener);
@@ -169,7 +209,22 @@ export async function detectAppearance(options: DetectAppearanceOptions = {}): P
 			} catch {
 				// Nothing actionable: the stream may already be closed.
 			}
-			if (wasPaused) stdin.pause();
+			// Flow comes back the way it was found, not just the listeners. The
+			// probe resumes the stream itself, so a stream that was not already
+			// flowing is paused again: a paused one (`readableFlowing` false) for
+			// the old reason, and one that was undecided (null) because the probe's
+			// own resume() is the thing that moved it to true — `wasPaused` alone
+			// reads that state as "not paused" and would hand back a stream flowing
+			// in a way it never started in.
+			if (wasPaused || (!wasFlowing && stdin.readableFlowing === true)) stdin.pause();
+			inputTrace("probe.release", {
+				answer: answer ?? fromEnv(),
+				isRaw: stdin.isRaw,
+				isPaused: stdin.isPaused(),
+				flowing: stdin.readableFlowing,
+				dataListeners: stdin.listenerCount("data"),
+				readableListeners: stdin.listenerCount("readable"),
+			});
 			resolve(answer ?? fromEnv());
 		};
 
@@ -182,6 +237,7 @@ export async function detectAppearance(options: DetectAppearanceOptions = {}): P
 		};
 
 		function onData(chunk: Buffer | string): void {
+			inputTrace("probe.data", JSON.stringify(chunk.toString()));
 			buffer += chunk.toString();
 			const luminance = parseBackgroundLuminance(buffer);
 			// The two replies can share a chunk, so both are looked for in each one.

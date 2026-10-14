@@ -225,9 +225,14 @@ export async function runDoctorChecks(
 	// `auto` is the one choice that does not say what it resolved to, and saying
 	// what it resolved to is the only thing this row is for. Resolved through the
 	// same call the session uses, so a theme file that claims the detected
-	// appearance is reported here exactly as it is applied.
+	// appearance is reported here exactly as it is applied — but never by taking
+	// the keyboard back: `/doctor` runs with the REPL on screen, so it reads the
+	// cached probe answer (or, in a session that never probed, the standing
+	// environment) rather than standing stdin down for a fresh ask.
 	const resolvedName =
-		themeName === AUTO_THEME_NAME ? (await resolveTheme(themeName, cwd, home)).theme.name : themeName;
+		themeName === AUTO_THEME_NAME
+			? (await resolveTheme(themeName, cwd, home, { allowProbe: false })).theme.name
+			: themeName;
 	const label = resolvedName === themeName ? themeName : `${themeName} → ${resolvedName}`;
 	const themeDetails = [known ? label : `unknown theme "${themeName}" — using ${DEFAULT_THEME.name}`];
 	if (loadedThemes.themes.size > 0) themeDetails.push(`${loadedThemes.themes.size} from theme files`);

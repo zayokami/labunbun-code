@@ -37,6 +37,7 @@ export {
 export {
 	type Appearance,
 	appearanceFromColorFgBg,
+	appearanceFromEnvironment,
 	type DetectAppearanceOptions,
 	detectAppearance,
 	parseBackgroundLuminance,
@@ -52,6 +53,7 @@ export {
 } from "./editing-mode.ts";
 export { formatElapsed } from "./elapsed.ts";
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
+export { inputTrace, installStdinTrace } from "./input-trace.ts";
 export { LIVE_OUTPUT_LINES, liveOutputLines, livePreviewTargets } from "./live-output.ts";
 export { type Block, type InlineSpan, parseBlocks, parseInline } from "./markdown.ts";
 export {

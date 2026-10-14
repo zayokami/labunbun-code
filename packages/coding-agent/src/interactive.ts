@@ -94,6 +94,7 @@ import {
 	AUTO_THEME_NAME,
 	describeEditor,
 	editorShadowNotice,
+	installStdinTrace,
 	liveOutputLines,
 	mountRepl,
 	opposingEditorKey,
@@ -276,6 +277,7 @@ import { buildSystemPrompt } from "./system-prompt.ts";
 import { bindTaskStore, restoreTasks, saveTasks } from "./task-snapshot.ts";
 import { formatTaskTree } from "./task-tree.ts";
 import {
+	cachedAppearance,
 	loadThemeFiles,
 	persistThemeChoice,
 	type ResolvedTheme,
@@ -346,6 +348,10 @@ function readFileOrNull(path: string): string | null {
 
 export async function runInteractive(options: InteractiveOptions = {}): Promise<number> {
 	markStartup("interactive: enter");
+	// The input trace, when `LBB_INPUT_TRACE` asks for one: installed before any
+	// probe or render, so the log holds every handler that ever touched stdin,
+	// in order. Off costs one env read when the variable is unset.
+	installStdinTrace(process.stdin);
 	const cwd = options.cwd ?? process.cwd();
 	const home = options.home ?? homedir();
 
@@ -1615,7 +1621,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	// ---- theme ----
 	// Resolved before mounting: "auto" probes the terminal in raw mode, and Ink
-	// claims stdin the moment it renders.
+	// claims stdin the moment it renders. The probe's answer is cached inside
+	// theme-file.ts, so the runs that must not probe — the picker previewing
+	// `auto`, `/doctor` naming it — read what this one found.
 	const resolvedTheme = await resolveTheme(options.theme ?? settings.theme, cwd, home);
 
 	// ---- controller ----
@@ -3599,11 +3607,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				}
 
 				// No name: pick from a list that previews itself. Every theme is
-				// resolved up front — including `auto`, whose probe needs stdin and
-				// cannot run while the picker owns the keyboard — so a highlight
-				// recolors the screen in the same keystroke. Moving previews; only
-				// Enter (or an argument) commits, and the commit is what pays for
-				// wiping the screen and reprinting the transcript.
+				// resolved up front so a highlight recolors the screen in the same
+				// keystroke — and every row, `auto` included, resolves WITHOUT asking
+				// the terminal (`allowProbe: false`): a probe stands Ink's stdin
+				// listeners down for its timeout window, and doing that under a picker
+				// that is being typed into is exactly a window in which the keys being
+				// pressed reach nobody. `auto` previews from the appearance the
+				// session already knows — the startup probe's cached answer, or the
+				// standing environment — and choosing it commits below, where the
+				// terminal is asked once, after the picker is down. Moving previews;
+				// only Enter (or an argument) commits, and the commit is what pays
+				// for wiping the screen and reprinting the transcript.
 				//
 				// The list is read from disk here rather than taken from the startup
 				// snapshot: opening `/theme` is how a user reaches the file they just
@@ -3613,7 +3627,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				const previousAvailable = ctx.theme.available;
 				const loaded = loadThemeFiles(ctx.cwd, ctx.home);
 				const names = [...selectableThemeNames(loaded), AUTO_THEME_NAME];
-				const resolved = await Promise.all(names.map((name) => resolveTheme(name, ctx.cwd, ctx.home)));
+				const resolved = await Promise.all(
+					names.map((name) => resolveTheme(name, ctx.cwd, ctx.home, { allowProbe: false })),
+				);
 				if (!ctx.handle) return;
 				// Marked, and opened on, is the choice — what Enter would save — not
 				// the theme it resolved to. Under `auto` those differ, and marking the
@@ -3647,8 +3663,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					},
 				);
 				if (index === null) return;
-				apply(resolved[index]);
-				save(names[index], resolved[index]);
+				// `auto` chosen for real is the one commit that asks the terminal:
+				// the open path above could only preview it from the cached or
+				// standing appearance, so when no probe has run yet this re-resolve
+				// is where the keyboard is briefly held and handed back — with the
+				// picker down, and Enter the last key the list needed.
+				const chosen =
+					names[index] === AUTO_THEME_NAME && cachedAppearance() === undefined
+						? await resolveTheme(AUTO_THEME_NAME, ctx.cwd, ctx.home)
+						: resolved[index];
+				apply(chosen);
+				save(names[index], chosen);
 			})();
 			return true;
 		}

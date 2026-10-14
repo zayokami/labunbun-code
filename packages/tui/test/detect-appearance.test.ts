@@ -502,6 +502,27 @@ describe("detectAppearance sharing stdin with the REPL", () => {
 		await tick(30);
 		expect(reader.seen).toEqual(["typed"]);
 	});
+
+	// `readableFlowing` is three-valued: false is paused, true is flowing, null
+	// is neither — a stream nobody has asked anything of yet, which `isPaused()`
+	// reports as false. The probe's own resume() moves null to true; a release
+	// that only re-pauses streams it found *paused* leaves that flow on.
+	test("a stream that was neither paused nor flowing is left not flowing", async () => {
+		const stdin = fakeStreamStdin({ paused: false });
+		const stdout = fakeStdout();
+		pushReply(stdin, `${ESC}]11;rgb:0000/0000/0000${ESC}\\`, 5);
+		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 500 })).toBe("dark");
+		expect(stdin.readableFlowing).toBe(false);
+	});
+
+	test("a stream that was already flowing is left flowing", async () => {
+		const stdin = fakeStreamStdin({ paused: false });
+		stdin.resume();
+		const stdout = fakeStdout();
+		pushReply(stdin, `${ESC}]11;rgb:0000/0000/0000${ESC}\\`, 5);
+		expect(await detectAppearance({ stdin, stdout, env: {}, timeoutMs: 500 })).toBe("dark");
+		expect(stdin.readableFlowing).toBe(true);
+	});
 });
 
 /**

@@ -1,6 +1,7 @@
 import type { PadBridge } from "@labunbun/gamepad";
 import { Box, Text, useInput } from "ink";
 import { useRef, useState } from "react";
+import { inputTrace } from "../input-trace.ts";
 import { isAimedAt, usePadAction } from "../pad.ts";
 import { useTheme } from "../theme.ts";
 
@@ -85,6 +86,7 @@ export function ListPickerDialog({
 	const selectedRef = useRef(selected);
 
 	const cancel = () => {
+		inputTrace("picker.cancel");
 		onCancel?.();
 		resolve(null);
 	};
@@ -96,6 +98,7 @@ export function ListPickerDialog({
 		selectedRef.current = next;
 		setSelected(next);
 		onHighlight?.(next);
+		inputTrace("picker.step", { delta, to: next, items: items.length });
 	};
 
 	const openedAt = useRef(Date.now());
@@ -129,6 +132,7 @@ export function ListPickerDialog({
 				step(VISIBLE_ROWS);
 				return true;
 			case "confirm":
+				inputTrace("picker.resolve", { index: selectedRef.current, via: "pad" });
 				resolve(selectedRef.current);
 				return true;
 			case "cancel":
@@ -139,7 +143,17 @@ export function ListPickerDialog({
 		}
 	});
 
-	useInput((_input, key) => {
+	useInput((input, key) => {
+		// What the picker actually saw, for the `LBB_INPUT_TRACE` log: the first
+		// question about keys that "do nothing" is whether any of them arrived
+		// here at all, and the second is what they were parsed as.
+		inputTrace("picker.input", {
+			input: JSON.stringify(input),
+			up: key.upArrow,
+			down: key.downArrow,
+			ret: key.return,
+			esc: key.escape,
+		});
 		if (items.length === 0) {
 			if (key.escape || key.return) cancel();
 			return;
@@ -156,7 +170,10 @@ export function ListPickerDialog({
 			step(1);
 			return;
 		}
-		if (key.return) resolve(selectedRef.current);
+		if (key.return) {
+			inputTrace("picker.resolve", { index: selectedRef.current, via: "key" });
+			resolve(selectedRef.current);
+		}
 	});
 
 	if (items.length === 0) return null;

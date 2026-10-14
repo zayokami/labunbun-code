@@ -17,7 +17,9 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+	type Appearance,
 	AUTO_THEME_NAME,
+	appearanceFromEnvironment,
 	BUILT_IN_THEME_NAMES,
 	DEFAULT_THEME,
 	deriveTheme,
@@ -235,20 +237,81 @@ export interface ResolvedTheme {
 }
 
 /**
+ * The appearance the terminal reported, once anyone has asked it — and the
+ * shared promise for the single outstanding ask, so simultaneous callers wait
+ * on the same probe rather than standing stdin down twice over.
+ *
+ * The cache exists because the answer is a fact about the hardware, not about
+ * the caller: the startup resolution pays for the probe before Ink mounts, and
+ * every later question — the `/theme` picker previewing `auto`, `/doctor`
+ * naming what `auto` resolved to — reads what that probe found instead of
+ * taking the keyboard away from a REPL that is using it.
+ */
+let appearanceProbe: Promise<Appearance> | undefined;
+let appearanceResult: Appearance | undefined;
+
+/** Ask the terminal once and remember the answer; concurrent callers share one probe. */
+export function primeAppearance(): Promise<Appearance> {
+	appearanceProbe ??= detectAppearance().then((appearance) => {
+		appearanceResult = appearance;
+		return appearance;
+	});
+	return appearanceProbe;
+}
+
+/** The probed appearance, or undefined while no probe has run. */
+export function cachedAppearance(): Appearance | undefined {
+	return appearanceResult;
+}
+
+/** Drop the cached probe result. Exists so tests can isolate the module-level cache. */
+export function resetAppearanceCache(): void {
+	appearanceProbe = undefined;
+	appearanceResult = undefined;
+}
+
+export interface ResolveThemeOptions {
+	/**
+	 * Whether resolving `auto` may probe the terminal. False answers from the
+	 * cached probe or the standing environment instead — which is what every
+	 * caller that runs while the REPL owns the keyboard must pass: the probe
+	 * stands Ink's stdin listeners down for its timeout window, and keys pressed
+	 * inside that window reach nobody. Default (undefined) probes when no probe
+	 * has run yet, and reads the cache when one has.
+	 */
+	allowProbe?: boolean;
+}
+
+/**
  * Resolve a configured theme name to an actual theme.
  *
- * `"auto"` probes the terminal, which is why this is async. At startup it must be
- * awaited before the REPL mounts; called later, from `/theme auto`, the probe
- * takes stdin from Ink for its timeout window and hands it back.
+ * `"auto"` needs the terminal's appearance, which is why this is async. The
+ * probe behind it runs at most once per process ({@link primeAppearance}): at
+ * startup it must be awaited before the REPL mounts, and later callers get the
+ * cached answer — or, with `allowProbe: false`, the standing environment — so
+ * nothing has to take stdin away from a running REPL. The one mid-session
+ * commit that legitimately asks the terminal is `/theme auto` being chosen,
+ * when the picker is down and the choice is being written; the picker's own
+ * open path never probes.
  */
-export async function resolveTheme(name: string | undefined, cwd: string, home = homedir()): Promise<ResolvedTheme> {
+export async function resolveTheme(
+	name: string | undefined,
+	cwd: string,
+	home = homedir(),
+	options: ResolveThemeOptions = {},
+): Promise<ResolvedTheme> {
 	const loaded = loadThemeFiles(cwd, home);
 	const available = selectableThemeNames(loaded);
 	const problems = [...loaded.problems];
 
 	if (!name) return { theme: DEFAULT_THEME, choice: DEFAULT_THEME.name, available, problems };
 	if (name === AUTO_THEME_NAME) {
-		const appearance = await detectAppearance();
+		// Cached first, then the guard, then the probe. A guarded answer is a
+		// read of the environment, not a finding — it is deliberately not cached,
+		// so the commit that re-resolves `auto` for real still reaches the
+		// terminal instead of settling for the guess a preview used.
+		const appearance =
+			appearanceResult ?? (options.allowProbe === false ? appearanceFromEnvironment() : await primeAppearance());
 		// A theme file that states its appearance is a theme the author wrote for
 		// this background; the built-in is the fallback for a workspace that has
 		// none. Last one wins, the same rule the loader applies to the files

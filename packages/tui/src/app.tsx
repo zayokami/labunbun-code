@@ -15,6 +15,7 @@ import {
 	type PromptSubmitVerdict,
 	REPL,
 } from "./components/REPL.tsx";
+import { inputTrace } from "./input-trace.ts";
 import { createPermissionQueue } from "./permission-queue.ts";
 import { createQuestionSlot } from "./question-slot.ts";
 import { createStore, type Store, useStore } from "./store.ts";
@@ -497,9 +498,11 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 				}));
 			}),
 		setTheme: (theme) => {
+			inputTrace("ui.setTheme", theme.name);
 			applyTheme(store, theme);
 		},
 		previewTheme: (theme) => {
+			inputTrace("ui.previewTheme", theme.name);
 			previewTheme(store, theme);
 		},
 		setSession: (next) => {

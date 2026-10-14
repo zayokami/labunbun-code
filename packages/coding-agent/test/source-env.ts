@@ -43,11 +43,11 @@ export const MIGRATION_ENV_VARS_EXEMPT: Readonly<Record<string, string>> = {
 
 /**
  * Every variable a source reads by name. Nearly all of them relocate a source
- * root; `LBB_STARTUP_TRACE` is a switch rather than a location and is listed
- * for the same hermeticity reason — the fixture that neutralizes the
- * relocations must neutralize the knobs too. `USERPROFILE` and `HOME` are
- * absent on purpose — see {@link MIGRATION_ENV_VARS_EXEMPT} for why, which is
- * the same reason but in a place a test can read.
+ * root; `LBB_STARTUP_TRACE` and `LBB_INPUT_TRACE` are switches rather than
+ * locations and are listed for the same hermeticity reason — the fixture that
+ * neutralizes the relocations must neutralize the knobs too. `USERPROFILE` and
+ * `HOME` are absent on purpose — see {@link MIGRATION_ENV_VARS_EXEMPT} for
+ * why, which is the same reason but in a place a test can read.
  *
  * **The list is hand-maintained, not derived.** `source-env-coverage.test.ts`
  * checks it against the sources; that test is what keeps this comment honest.
@@ -61,6 +61,7 @@ export const MIGRATION_ENV_VARS: readonly string[] = [
 	"GROK_HOME",
 	"KIMI_CODE_HOME",
 	"KIMI_SHARE_DIR",
+	"LBB_INPUT_TRACE",
 	"LBB_STARTUP_TRACE",
 	"MAVIS_DATA_DIR",
 	"MIMOCODE_AUTH_CONTENT",
