@@ -18,7 +18,7 @@
  * is the async half, called by the surfaces that can afford a keychain read.
  */
 
-import { apiKeyEnvNames, type Model, resolveApiKey } from "@labunbun/ai";
+import { apiKeyEnvNames, type Model, missingApiKey, resolveApiKey } from "@labunbun/ai";
 import { createChatGptCredentialStore } from "./chatgpt-auth.ts";
 import { type ClaudeAuthOptions, createClaudeCredentialStore } from "./claude-auth.ts";
 
@@ -72,6 +72,20 @@ export function modelMayRun(model: Model, signIns: SubscriptionSignIns): boolean
 	if (apiKeyEnvNames(model).length === 0) return true;
 	if (resolveApiKey(model)) return true;
 	return model.provider === "anthropic" && signIns.claude;
+}
+
+/**
+ * The request path's own answer for one model, as a boolean, sync: the same
+ * `missingApiKey` call `dispatchStreamFn` makes (`packages/ai/src/index.ts:341`),
+ * with the subscription allowance this app's wiring gives the anthropic wire.
+ * The optimistic direction is the point — a keyless anthropic row is let
+ * through because a sign-in may be standing in for the key, and only the
+ * request itself can settle that. `/model`'s switch guard and the beetle band's
+ * `canRunModel` both read this, so neither can drift from the shape the request
+ * path sends.
+ */
+export function requestPathPermits(model: Model): boolean {
+	return missingApiKey(model, undefined, model.provider === "anthropic") === undefined;
 }
 
 /**

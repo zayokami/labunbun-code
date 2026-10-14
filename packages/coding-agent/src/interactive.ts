@@ -32,6 +32,7 @@ import {
 } from "@labunbun/agent";
 import {
 	type AgentMessage,
+	apiKeyEnvNames,
 	createTrackedStreamFn,
 	formatCatalogNotice,
 	gatewayProvidersFor,
@@ -172,6 +173,7 @@ import {
 	detectSubscriptionSignIns,
 	missingCredentialNotice,
 	NO_SIGN_INS,
+	requestPathPermits,
 	type SubscriptionSignIns,
 	unrunnableSuffix,
 } from "./credential-presence.ts";
@@ -1522,15 +1524,14 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			pushInfo(handle, unknownModelMessage(ref));
 			return false;
 		}
-		// The same mirror the band's `canRunModel` applies, and for the same
+		// The same helper the band's `canRunModel` reads, and for the same
 		// reason: a switch must not refuse what a request would run. On the
 		// anthropic wire a sign-in stands in for the key, so only the
 		// environment rows can fail this check — an actually-unsigned switch
 		// proceeds and its first request names the sign-in the way the
 		// adapter's own "not signed in" error does.
-		const missingKey = missingApiKey(next, undefined, next.provider === "anthropic");
-		if (missingKey) {
-			pushInfo(handle, `No API key for ${next.provider} — set ${missingKey.envNames.join(" or ")}. Model unchanged.`);
+		if (!requestPathPermits(next)) {
+			pushInfo(handle, `No API key for ${next.provider} — set ${apiKeyEnvNames(next).join(" or ")}. Model unchanged.`);
 			return false;
 		}
 		sessionRef?.setModel(next);
@@ -1613,12 +1614,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		streamFn,
 		model: () => sessionRef?.model ?? model,
 		resolveModel,
-		// The request path's rule, mirrored sync — the band spawns members from
-		// its constructor, where an await cannot reach. The anthropic wire's
-		// sign-in substitution is assumed because this app wires credentials:
-		// in the other direction the cost is a member whose first request
-		// names the missing sign-in, which is the same deal the session makes.
-		canRunModel: (candidate) => missingApiKey(candidate, undefined, candidate.provider === "anthropic") === undefined,
+		// The request path's rule, read off the shared helper — the band spawns
+		// members from its constructor, where an await cannot reach, and the
+		// optimistic direction costs a member whose first request names the
+		// missing sign-in, which is the same deal the session makes.
+		canRunModel: requestPathPermits,
 		thinkingLevel: () => thinkingLevel,
 		trimOldToolResults: settings.trimOldToolResults,
 		compactionTuning,

@@ -18,6 +18,7 @@ import {
 	missingCredentialNotice,
 	modelMayRun,
 	NO_SIGN_INS,
+	requestPathPermits,
 	type SubscriptionSignIns,
 	unrunnableSuffix,
 } from "../src/credential-presence.ts";
@@ -80,6 +81,30 @@ describe("modelMayRun", () => {
 
 	test("a sign-in does not leak onto other providers' rows", () => {
 		expect(modelMayRun(envRow, signIns({ claude: true, chatgpt: true }))).toBe(false);
+	});
+});
+
+describe("requestPathPermits", () => {
+	test("the anthropic wire is let through on the subscription allowance alone", () => {
+		// `anthropicRow` names FAUX_API_KEY, which no test sets — this is the
+		// no-key machine, and the allowance (not the environment) is what lets
+		// the row pass. Dropping the allowance turns this red; that is the bug
+		// the guard at `/model` and the band's `canRunModel` both exist for.
+		expect(requestPathPermits(anthropicRow)).toBe(true);
+	});
+
+	test("an env-keyed row on another provider needs its variable", () => {
+		expect(requestPathPermits(envRow)).toBe(false);
+		process.env.CREDENTIAL_TEST_KEY = "cr-test";
+		try {
+			expect(requestPathPermits(envRow)).toBe(true);
+		} finally {
+			delete process.env.CREDENTIAL_TEST_KEY;
+		}
+	});
+
+	test("a row naming no variable is never refused", () => {
+		expect(requestPathPermits(keylessRow)).toBe(true);
 	});
 });
 
