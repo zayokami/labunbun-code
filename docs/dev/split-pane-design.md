@@ -173,12 +173,12 @@ Two readings that carried the design: #1 is the constraint (the transcript is no
 
 ## Open decisions
 
-Each needed a user call before P1 started. The first three were settled by the shipped panel, from the recommendations here — `Ctrl+T`, the bottom band, background shells only; the fourth is still open:
+Each needed a user call before P1 started. The first three were settled by the shipped panel, from the recommendations here — `Ctrl+T`, the bottom band, background shells only. The fourth was settled by a user call on 2026-10-14, along the same lines:
 
 1. **The toggle key.** Recommendation: `Ctrl+T` — unclaimed by the app, the prompt and the vim engine, and reachable in the default editor mode; under the emacs editor the engine eats it exactly as it already eats `Ctrl+O` (`packages/tui/src/emacs.ts:726`, `packages/tui/src/shortcuts.ts:112-116`), and the panel's shortcuts row must say so the way the `Ctrl+O` row does. The alternative is `Ctrl+V`, cleaner in-tree still (no engine claims it, `packages/tui/src/vim.ts:2579-2587`) but exposed to terminal-level paste — Windows Terminal's default keymap sends `Ctrl+V` to paste — which is a ten-second check on the user's real terminal that this machine cannot make (no PTY). If `Ctrl+V` survives that check it is the better key; otherwise `Ctrl+T` is the fallback and the emacs caveat is a recorded trade, not a surprise. Function keys are ruled out by measurement, not preference.
 2. **Panel placement.** Recommendation: the bottom band above the prompt, where the activity panel already lives. The right-column variant is a P2 question and only at wide terminals; a right column splits the live area, not the transcript, and may read as a split without being one.
 3. **P1 scope.** Recommendation: background shells only — the one source whose plumbing is complete. Subagents and diffs are P2/P3 questions with their own unknowns.
-4. **Is the full-screen workspace (A) a goal at all?** Recommendation: not now; keep it as P3 and revisit only if the watch panel's usage shows people needing the transcript and the watch *at once*, with the scrollback trade accepted explicitly.
+4. **Is the full-screen workspace (A) a goal at all?** Decided — **not now; A stays P3** (user call, 2026-10-14). The trigger to revisit is the one recommended here: the watch panel's actual usage shows people needing the transcript and the watch *at once*, with the scrollback trade accepted explicitly at that point. Until the trigger fires, no design work is owed on A — the focus audit, selection and the diff pane stay attached to this entry, not to the panel that shipped.
 
 ## Tests that hold these claims
 
