@@ -168,6 +168,13 @@ import {
 	preservedFilesDrift,
 } from "./context-report.ts";
 import { CostTracker, formatCostReport } from "./cost-tracker.ts";
+import {
+	detectSubscriptionSignIns,
+	missingCredentialNotice,
+	NO_SIGN_INS,
+	type SubscriptionSignIns,
+	unrunnableSuffix,
+} from "./credential-presence.ts";
 import { createExitGuard } from "./exit-guard.ts";
 import { sessionToMarkdown } from "./export-session.ts";
 import { createFileCompleter } from "./file-completions.ts";
@@ -312,6 +319,15 @@ export interface InteractiveOptions {
 	/** Home directory for user-owned state; injectable so tests don't touch the real one. */
 	home?: string;
 	/**
+	 * The subscription sign-ins, when the caller already knows them. Absent
+	 * (production) means: read the credential stores — but only when the
+	 * environment cannot settle the startup model on its own. A test passes a
+	 * value so the machine running it — where the operator may well be signed
+	 * in — cannot decide what the test sees, and so no test reads a real
+	 * keychain.
+	 */
+	signIns?: SubscriptionSignIns;
+	/**
 	 * Settings delivered as a JSON object on the command line (`--settings`),
 	 * merged over every file tier. Parsed and shape-checked in `main.ts`, where a
 	 * malformed value can exit 2 before anything reads it.
@@ -426,14 +442,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// re-narrowing.
 	const startupModel: Model = model;
 	markStartup("model resolved");
-	// `missingApiKey` rather than a bare key read: the local daemon's rows name
-	// no variable at all, and that absence means "nothing to miss", not a name
-	// to export.
-	const missingStartupKey = missingApiKey(model);
-	if (missingStartupKey) {
-		console.error(`${missingStartupKey.message}\nExample: export ${missingStartupKey.envNames[0]}=sk-...`);
-		return 1;
-	}
+	// There is deliberately no credential gate here. The gate that used to
+	// `return 1` read only the environment, so it refused exactly the machines
+	// that had already done the work `/login` asks for — a subscription-only
+	// box could not start. The session now mounts either way: a model that
+	// cannot run fails its first prompt the way the request path fails it, and
+	// the startup notice below says so before anything is typed.
 
 	// ---- compaction settings ----
 	// `settings.compaction`, resolved once: the summarizer is a property of the
@@ -1508,7 +1522,13 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			pushInfo(handle, unknownModelMessage(ref));
 			return false;
 		}
-		const missingKey = missingApiKey(next);
+		// The same mirror the band's `canRunModel` applies, and for the same
+		// reason: a switch must not refuse what a request would run. On the
+		// anthropic wire a sign-in stands in for the key, so only the
+		// environment rows can fail this check — an actually-unsigned switch
+		// proceeds and its first request names the sign-in the way the
+		// adapter's own "not signed in" error does.
+		const missingKey = missingApiKey(next, undefined, next.provider === "anthropic");
 		if (missingKey) {
 			pushInfo(handle, `No API key for ${next.provider} — set ${missingKey.envNames.join(" or ")}. Model unchanged.`);
 			return false;
@@ -1580,6 +1600,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 			handle ? handle.pickFromList(title, items, { initialIndex }) : Promise.resolve(null),
 		home,
 		cwd,
+		// The picker's annotation asks the same question `/model` does, and the
+		// answer is read per opening because `/login` may have landed in between.
+		signIns: () => detectSubscriptionSignIns({ home }),
 		// The worker table, MCP apart — the split BeetleBandOptions documents; a
 		// table that included MCP and the separate list both would hand every
 		// seat its MCP tools twice.
@@ -1590,7 +1613,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		streamFn,
 		model: () => sessionRef?.model ?? model,
 		resolveModel,
-		canRunModel: (candidate) => missingApiKey(candidate) === undefined,
+		// The request path's rule, mirrored sync — the band spawns members from
+		// its constructor, where an await cannot reach. The anthropic wire's
+		// sign-in substitution is assumed because this app wires credentials:
+		// in the other direction the cost is a member whose first request
+		// names the missing sign-in, which is the same deal the session makes.
+		canRunModel: (candidate) => missingApiKey(candidate, undefined, candidate.provider === "anthropic") === undefined,
 		thinkingLevel: () => thinkingLevel,
 		trimOldToolResults: settings.trimOldToolResults,
 		compactionTuning,
@@ -1904,6 +1932,20 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// `.mcp.json` with a typo used to read as "no servers configured", and the
 	// server it defined simply never arrived with nothing on screen to say why.
 	for (const error of mcpLoadErrors) pushInfo(handle, `MCP config: ${error.path} — ${error.message}`);
+
+	// A model the machine cannot run fails its first prompt — and that failure
+	// is where the story ends unless someone says so first. One line, before
+	// the user types: what is missing, and the ways to fix it. The store probe
+	// runs only when the environment cannot already answer, so the keychain is
+	// never on the startup path of a machine with a key — and a test's signIns
+	// seam skips it entirely.
+	const startupSignIns =
+		options.signIns ??
+		(missingApiKey(startupModel) || startupModel.api === "chatgpt-responses"
+			? await detectSubscriptionSignIns({ home })
+			: NO_SIGN_INS);
+	const startupNotice = missingCredentialNotice(startupModel, startupSignIns);
+	if (startupNotice) pushInfo(handle, startupNotice);
 
 	// The controller, now that there is somewhere to say what happened. Started
 	// after the mount so the first line — including a failure — lands in a
@@ -2907,15 +2949,18 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// Opened on the model in use, so Enter without moving anything keeps
 				// it rather than switching to whichever happens to be first.
 				const active = models.findIndex((m) => current && m.provider === current.provider && m.id === current.id);
+				// Read when the picker opens, not cached from startup: `/login` may
+				// have landed since, and the rows must show what that changed.
+				const signIns = await detectSubscriptionSignIns({ home: ctx.home });
 				const items = models.map((m, i) => {
-					const hasKey = missingApiKey(m) === undefined;
+					const suffix = unrunnableSuffix(m, signIns);
 					// The display name leads and the wire reference follows: two rows
 					// reading `anthropic/claude-sonnet-5` and `anthropic/claude-sonnet-5-1`
 					// are a choice nobody can make at a glance, and the id is still what
 					// /model <ref> takes, so it stays on the row rather than being lost.
 					return {
 						label: `${i === active ? "* " : "  "}${m.name}`,
-						description: `${m.provider}/${m.id} · ${Math.round(m.contextWindow / 1000)}k context${hasKey ? "" : " — no API key"}`,
+						description: `${m.provider}/${m.id} · ${Math.round(m.contextWindow / 1000)}k context${suffix ? ` — ${suffix}` : ""}`,
 					};
 				});
 				const index = await handleRef.pickFromList("Switch model", items, { initialIndex: Math.max(active, 0) });
@@ -3547,8 +3592,19 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			void (async () => {
 				const { runDoctorChecks, formatDoctorReport } = await import("./doctor.ts");
 				// The runtime's own config, so /doctor and /gamepad cannot disagree
-				// about which bindings are readable.
-				const checks = await runDoctorChecks(ctx.settings, ctx.cwd, ctx.home, ctx.theme.choice, ctx.pad?.config);
+				// about which bindings are readable. The sign-ins are read live —
+				// the Auth row is about the machine now, and `/login` may have
+				// landed since startup.
+				const checks = await runDoctorChecks(
+					ctx.settings,
+					ctx.cwd,
+					ctx.home,
+					ctx.theme.choice,
+					ctx.pad?.config,
+					undefined,
+					undefined,
+					await detectSubscriptionSignIns({ home: ctx.home }),
+				);
 				pushInfo(ctx.handle, formatDoctorReport(checks));
 			})();
 			return true;

@@ -38,11 +38,12 @@ import {
 	type PermissionRule,
 	type SandboxMode,
 } from "@labunbun/agent";
-import { type Model, missingApiKey, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
+import { type Model, type StreamFn, type ThinkingLevel, textContent } from "@labunbun/ai";
 import { TASK_BOARD_TOOL_NAMES } from "@labunbun/tools";
 import { z } from "zod";
 import { type CompactionTuning, type CompactionWiring, createCompactionWiring } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
+import { NO_SIGN_INS, type SubscriptionSignIns, unrunnableSuffix } from "./credential-presence.ts";
 import { offeredModels } from "./model-offer.ts";
 
 export const BEETLE_MEMBERS = ["john", "paul", "george", "ringo"] as const;
@@ -1071,6 +1072,14 @@ export interface PickBeetleModelsOptions {
 	current?: Partial<BeetleModels>;
 	/** The offered rows; injected for tests, `offeredModels()` in the app. */
 	models?: Model[];
+	/**
+	 * The machine's subscription sign-ins, read when asked — the rows carry the
+	 * same availability the request path enforces, and the one input it cannot
+	 * read itself is a keychain. Absent means "none": the answer a machine that
+	 * never signed in gives, which keeps every caller that predates
+	 * subscriptions exactly as informative as it was.
+	 */
+	signIns?: () => Promise<SubscriptionSignIns>;
 }
 
 /**
@@ -1085,6 +1094,7 @@ export interface PickBeetleModelsOptions {
  */
 export async function pickBeetleModels(options: PickBeetleModelsOptions): Promise<BeetleModels | null> {
 	const models = options.models ?? offeredModels();
+	const signIns = options.signIns ? await options.signIns() : NO_SIGN_INS;
 	const result = {} as BeetleModels;
 	for (let i = 0; i < BEETLE_MEMBERS.length; i++) {
 		const member = BEETLE_MEMBERS[i];
@@ -1100,13 +1110,16 @@ export async function pickBeetleModels(options: PickBeetleModelsOptions): Promis
 				label: `${active === 0 ? "* " : "  "}Follow the session model`,
 				description: options.sessionModel,
 			},
-			...models.map((model, row) => ({
+			...models.map((model, row) => {
+				const suffix = unrunnableSuffix(model, signIns);
 				// The display name leads and the id rides the description, the same
 				// shape /model uses: "claude-sonnet-5" tells a human less than
 				// "Claude Sonnet 5", but the id is what gets stored, so both show.
-				label: `${active === row + 1 ? "* " : "  "}${model.name}`,
-				description: `${model.provider}/${model.id} · ${Math.round(model.contextWindow / 1000)}k context${missingApiKey(model) ? " — no API key" : ""}`,
-			})),
+				return {
+					label: `${active === row + 1 ? "* " : "  "}${model.name}`,
+					description: `${model.provider}/${model.id} · ${Math.round(model.contextWindow / 1000)}k context${suffix ? ` — ${suffix}` : ""}`,
+				};
+			}),
 		];
 		const title = `Beetle · ${DISPLAY_NAME[member]} (${BEETLE_ROLES[member]}) — model ${i + 1}/4`;
 		const index = await options.pick(title, items, active);

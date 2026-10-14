@@ -9,6 +9,7 @@ import { DEFAULT_SANDBOX_FOR_MODE, needsNetworkProxy, networkConfinementReason }
 import { apiKeyEnvNames, listModels } from "@labunbun/ai";
 import { detectNativeBackend, detectShell, networkConfinement, sandboxBackendFor } from "@labunbun/tools";
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
+import type { SubscriptionSignIns } from "./credential-presence.ts";
 import { changedBindings, type PadConfig } from "./gamepad-runtime.ts";
 import { networkAxisFrom, type Settings } from "./settings.ts";
 import { loadThemeFiles, resolveTheme } from "./theme-file.ts";
@@ -67,6 +68,14 @@ export const COMMAND_PATHS_WITHOUT_SANDBOX = ["hooks", "MCP stdio servers", "MCP
  * and the "Linux without bubblewrap" case would be reachable only on a Linux box.
  * Probing for real is still the default, because that is the honest question to
  * ask in production; a test that wants the case says which one it means.
+ *
+ * `signIns` is the eighth, and like `hasNativeBackend` it is a seam rather than
+ * an answer: whether a subscription is signed in is a keychain question no
+ * environment read can settle, and a test must not ask the real one — the
+ * operator's own sign-in would flip the Auth row and the test would pass or
+ * fail by machine. A caller with the answer (the REPL, which reads it live)
+ * passes it; without one the row reports the environment only, which is
+ * exactly what it reported before this parameter existed.
  */
 export async function runDoctorChecks(
 	settings: Settings,
@@ -76,6 +85,7 @@ export async function runDoctorChecks(
 	pad?: PadConfig,
 	platform: string = process.platform,
 	hasNativeBackend?: boolean,
+	signIns?: SubscriptionSignIns,
 ): Promise<DoctorCheck[]> {
 	const checks: DoctorCheck[] = [];
 
@@ -117,10 +127,20 @@ export async function runDoctorChecks(
 	// covers custom providers too, which is the other half of what a user can hold.
 	const keys = [...new Set(listModels().flatMap((model) => apiKeyEnvNames(model)))].sort();
 	const present = keys.filter((k) => process.env[k]);
+	// A sign-in is a credential the environment cannot show, and a row that only
+	// listed variables called a signed-in machine's Auth a failure. The caller
+	// supplies the answer when it has one (the REPL reads it live).
+	const signedIn = [
+		...(signIns?.claude ? ["Claude subscription"] : []),
+		...(signIns?.chatgpt ? ["ChatGPT subscription"] : []),
+	];
 	checks.push({
 		name: "Auth",
-		status: present.length > 0 ? "ok" : "fail",
-		detail: present.length > 0 ? present.join(", ") : `none of ${keys.join(", ")} set`,
+		status: present.length > 0 || signedIn.length > 0 ? "ok" : "fail",
+		detail:
+			present.length > 0 || signedIn.length > 0
+				? [...present, ...signedIn].join(", ")
+				: `none of ${keys.join(", ")} set`,
 	});
 
 	// Model resolution

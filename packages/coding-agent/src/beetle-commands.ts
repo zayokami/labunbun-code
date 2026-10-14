@@ -33,6 +33,7 @@ import {
 	writeBeetleState,
 } from "./beetle-state.ts";
 import type { CompactionTuning } from "./compaction-wiring.ts";
+import type { SubscriptionSignIns } from "./credential-presence.ts";
 import { writeUserSettingsNestedPatch } from "./user-settings.ts";
 
 /** The slice of a status card `/beetle status` draws; the rest is the UI's. */
@@ -77,6 +78,12 @@ export interface BeetleSurfaceDeps {
 	pick: (title: string, items: BeetlePickOption[], initialIndex: number) => Promise<number | null>;
 	/** The picker's rows; defaults to `offeredModels()` inside pickBeetleModels. */
 	models?: Model[];
+	/**
+	 * The subscription sign-ins for the picker's annotation, read when the
+	 * picker opens. Absent means "none": a caller that never asks gets exactly
+	 * the pre-subscription rows.
+	 */
+	signIns?: () => Promise<SubscriptionSignIns>;
 	home: string | undefined;
 	cwd: string;
 	/** The worker table members draw from; MCP is the separate list (see BeetleBandOptions). */
@@ -261,6 +268,7 @@ export function createBeetleSurface(deps: BeetleSurfaceDeps): BeetleSurface {
 		return pickBeetleModels({
 			pick: deps.pick,
 			models: deps.models,
+			signIns: deps.signIns,
 			sessionModel: session ? `${session.model.provider}/${session.model.id}` : "the session model",
 			current,
 		});

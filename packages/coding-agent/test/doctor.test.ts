@@ -72,6 +72,33 @@ describe("runDoctorChecks", () => {
 		expect(report).toMatch(/[✓!✗] Runtime:/);
 	});
 
+	// A sign-in is a credential the environment cannot show; the row used to
+	// call a signed-in machine's Auth a failure. The sign-ins are passed as a
+	// value rather than asked of the real keychain — see the `signIns` parameter.
+	test("a signed-in subscription makes the Auth row ok with no environment key", async () => {
+		const { home, cwd } = makeDirs();
+		const checks = await runDoctorChecks(
+			SettingsSchema.parse({}),
+			cwd,
+			home,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ claude: true, chatgpt: true },
+		);
+		const auth = checks.find((c) => c.name === "Auth");
+		expect(auth?.status).toBe("ok");
+		expect(auth?.detail).toContain("Claude subscription");
+		expect(auth?.detail).toContain("ChatGPT subscription");
+	});
+
+	test("with no sign-ins supplied the Auth row is the environment's row alone", async () => {
+		const { home, cwd } = makeDirs();
+		const checks = await runDoctorChecks(SettingsSchema.parse({}), cwd, home);
+		expect(checks.find((c) => c.name === "Auth")?.detail).not.toContain("subscription");
+	});
+
 	// The probe writes a file to prove the directory is writable, and used to do
 	// it in the operator's real home on every run.
 	test("the session-store probe runs in the given home, and cleans up after itself", async () => {
