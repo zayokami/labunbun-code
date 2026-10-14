@@ -48,6 +48,20 @@ import {
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
 /**
+ * How far back the walks below go.
+ *
+ * They assert against commits named by hash, so the window has to reach them —
+ * and a fixed one silently stops doing that as the repository grows. Measured
+ * on 2026-10-14 at HEAD 808ddc4: with the limit at 250, `14983d4` sat 251
+ * commits back and `a3d94d4` 253, and their two rows went red on a developer
+ * machine while CI stayed green — the shallow checkout skips every `HISTORY`
+ * row, so nobody sees the rot there. Walking the whole history is the same
+ * choice `scripts/benchmark.ts` makes for its verify path, and it cannot age
+ * out.
+ */
+const HISTORY_LIMIT = 100_000;
+
+/**
  * Whether this checkout carries the history the rows below read, decided once.
  *
  * **`actions/checkout` defaults to `fetch-depth: 1`,** so on CI `git log` cannot
@@ -406,7 +420,7 @@ describe("discoverCandidates", () => {
 
 	async function candidates(): Promise<Awaited<ReturnType<typeof discoverCandidates>>> {
 		if (discovery === undefined) {
-			discovery = await discoverCandidates({ repoRoot: REPO_ROOT, limit: 250 });
+			discovery = await discoverCandidates({ repoRoot: REPO_ROOT, limit: HISTORY_LIMIT });
 		}
 		return discovery;
 	}
@@ -503,7 +517,7 @@ describe("worktree teardown", () => {
 			// test file out of git before it calls `afterSetup`, so an invented hash
 			// would fail earlier for an unrelated reason and the throw this test is
 			// about would never be reached.
-			const found = await discoverCandidates({ repoRoot: REPO_ROOT, limit: 250 });
+			const found = await discoverCandidates({ repoRoot: REPO_ROOT, limit: HISTORY_LIMIT });
 			const candidate = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
 			expect(candidate).toBeDefined();
 
@@ -558,7 +572,7 @@ describe("a real verify of one known task", () => {
 
 			const before = { status: await status(), worktrees: await worktrees(), head: await head() };
 
-			const found = await discoverCandidates({ repoRoot: REPO_ROOT, limit: 250 });
+			const found = await discoverCandidates({ repoRoot: REPO_ROOT, limit: HISTORY_LIMIT });
 			const candidate = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
 			expect(candidate).toBeDefined();
 
@@ -632,7 +646,7 @@ describe("a task run with no bun on PATH", () => {
 			const script = `
 				import { discoverCandidates, verifyCandidate } from ${JSON.stringify(moduleUrl)};
 				const repoRoot = ${JSON.stringify(REPO_ROOT)};
-				const found = await discoverCandidates({ repoRoot, limit: 250 });
+				const found = await discoverCandidates({ repoRoot, limit: ${HISTORY_LIMIT} });
 				const candidate = found.kept.find((c) => c.hash.startsWith("e24c8a6"));
 				if (candidate === undefined) throw new Error("e24c8a6 is not in this history");
 				// install: false — the spawn under test is the test run itself, and the
