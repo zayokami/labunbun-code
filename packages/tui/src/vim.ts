@@ -2420,6 +2420,18 @@ export class VimEngine {
 	/** Selection range while in a visual mode (start < end). */
 	selection: { start: number; end: number } | null = null;
 
+	/**
+	 * The `/` or `?` line being typed, or null when there is none.
+	 *
+	 * While the latch is open it takes every key — until now invisibly: the host
+	 * drawing the buffer had no way to show that the keystrokes were going
+	 * somewhere, and on vim's own screen this line is exactly how it says so.
+	 * The host draws it from here.
+	 */
+	get searchLine(): { forward: boolean; text: string } | null {
+		return this.#search === null ? null : { forward: this.#search.forward, text: this.#search.line };
+	}
+
 	#ops: VimOps;
 	#anchor = 0;
 	#pending: { operator: Operator; count: number; explicit: boolean } | null = null;

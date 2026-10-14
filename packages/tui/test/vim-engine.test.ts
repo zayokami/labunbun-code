@@ -1176,6 +1176,32 @@ describe("search", () => {
 		expect(down.state.cursor).toBe(2);
 	});
 
+	test("the line being typed is the one searchLine reports, and it closes on both exits", () => {
+		// The host draws this line; without it every key from the `/` to the Enter
+		// that runs the search was invisible on the prompt.
+		const e = editor("abc def", 1);
+		expect(e.engine.searchLine).toBeNull();
+		e.engine.handleKey("/", e.key());
+		expect(e.engine.searchLine).toEqual({ forward: true, text: "" });
+		for (const ch of "de") e.engine.handleKey(ch, e.key());
+		expect(e.engine.searchLine).toEqual({ forward: true, text: "de" });
+		// `<BS>` edits the pattern, and the line follows it.
+		e.engine.handleKey("", e.key({ backspace: true }));
+		expect(e.engine.searchLine).toEqual({ forward: true, text: "d" });
+		// Enter runs the search and closes the line.
+		expect(e.engine.handleKey("", e.key({ return: true }))).toBe(true);
+		expect(e.engine.searchLine).toBeNull();
+
+		// `?` is the same latch, searching the other way.
+		const back = editor("abc def", 0);
+		back.engine.handleKey("?", back.key());
+		expect(back.engine.searchLine).toEqual({ forward: false, text: "" });
+		// Escape drops it: the line closes and nothing runs.
+		expect(back.engine.handleKey("", back.key({ escape: true }))).toBe(true);
+		expect(back.engine.searchLine).toBeNull();
+		expect(back.state.cursor).toBe(0);
+	});
+
 	test("a count steps over matches and wraps round them", () => {
 		// Three matches and a count of 3 or 4 is the whole of the modulo: 2, 0, 2 for
 		// counts 2, 3, 4. A list of the matches ahead plus the ones behind, indexed

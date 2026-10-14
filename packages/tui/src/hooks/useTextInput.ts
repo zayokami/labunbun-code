@@ -381,9 +381,15 @@ export function useTextInput(initialHistory: string[] = [], editor: EditorKind =
 			return consumed;
 		}
 		const engine = current.engine as VimEngine;
-		const before = `${engine.mode}:${JSON.stringify(engine.selection)}`;
+		// The search line rides along because it is drawn: every key from `/` to the
+		// Enter that runs it changes nothing else this screen shows, so a tick that
+		// watched only mode and selection would leave the line frozen at whatever
+		// was on it at the first key.
+		const shape = (e: VimEngine) =>
+			`${e.mode}:${JSON.stringify(e.selection)}:${e.searchLine ? `${e.searchLine.forward ? "/" : "?"}${e.searchLine.text}` : ""}`;
+		const before = shape(engine);
 		const consumed = engine.handleKey(input, shared);
-		if (consumed && `${engine.mode}:${JSON.stringify(engine.selection)}` !== before) {
+		if (consumed && shape(engine) !== before) {
 			setRenderTick((t) => t + 1);
 		}
 		return consumed;
@@ -393,6 +399,8 @@ export function useTextInput(initialHistory: string[] = [], editor: EditorKind =
 	// "insert" whenever vim is not the editor, which is what the badge and the
 	// hint line read. Emacs has no modes, so there is nothing for them to say.
 	const vimMode: VimMode = vimEngine ? vimEngine.mode : "insert";
+	/** The `/` or `?` line the engine is taking keys into, for the prompt to draw. */
+	const vimSearch = vimEngine ? vimEngine.searchLine : null;
 	/**
 	 * The highlighted range, from whichever engine is up.
 	 *
@@ -422,6 +430,7 @@ export function useTextInput(initialHistory: string[] = [], editor: EditorKind =
 		pushHistory,
 		getHistory,
 		vimMode,
+		vimSearch,
 		handleEditorKey,
 		selection,
 	};
