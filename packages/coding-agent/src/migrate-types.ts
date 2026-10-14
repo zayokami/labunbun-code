@@ -9,6 +9,7 @@ import { almaConfigDir, almaDetectionRoots } from "./alma-home.ts";
 import { antigravityConfigDir, antigravityDataDirs } from "./antigravity-home.ts";
 import { CODEWHALE_DEFAULT_DIR, codewhaleDefaultRoots, resolveCodewhaleHome } from "./codewhale-home.ts";
 import { codexRoot } from "./codex-home.ts";
+import { COMMAND_CODE_DEFAULT_DIR } from "./command-code-home.ts";
 import { cursorDetectionRoots, cursorUserRoot } from "./cursor-home.ts";
 import { DSH_DEFAULT_DIR, dshRoot } from "./dsh-home.ts";
 import { GROK_DEFAULT_DIR, grokRoot } from "./grok-home.ts";
@@ -46,7 +47,8 @@ export type MigrationSourceId =
 	| "codewhale"
 	| "mimocode-code"
 	| "openclaw"
-	| "alma";
+	| "alma"
+	| "command-code";
 
 /**
  * Ordered as the picker and `--from` list them. New sources are appended: the
@@ -73,6 +75,7 @@ export const MIGRATION_SOURCE_IDS: MigrationSourceId[] = [
 	"mimocode-code",
 	"openclaw",
 	"alma",
+	"command-code",
 ];
 
 /** Display names for the picker; the ids themselves are the CLI switches. */
@@ -96,6 +99,7 @@ export const MIGRATION_SOURCE_LABELS: Record<MigrationSourceId, string> = {
 	"mimocode-code": "MiMo Code",
 	openclaw: "OpenClaw",
 	alma: "Alma",
+	"command-code": "Command Code",
 };
 
 // Long-form design notes: docs/dev/migration-framework.md
@@ -159,6 +163,13 @@ export const SOURCE_ROOTS: Record<MigrationSourceId, string> = {
 	openclaw: OPENCLAW_DEFAULT_DIR,
 	// Long-form design notes: docs/dev/migration-framework.md
 	alma: ".config/alma",
+	// `~/.commandcode`, and this one is a plain home-relative join with no branch in
+	// either resolver below: `command-code-home.ts` records that the CLI resolves its
+	// home from `HOME ?? USERPROFILE` and appends the directory name, with no
+	// `COMMANDCODE_*` variable moving it anywhere. This entry is the answer for both
+	// `sourceRoot` and `detectionRoots`, and the only reason the table carries a
+	// constant instead of a literal is that the bundle spells the name once.
+	"command-code": COMMAND_CODE_DEFAULT_DIR,
 };
 
 // Long-form design notes: docs/dev/migration-framework.md

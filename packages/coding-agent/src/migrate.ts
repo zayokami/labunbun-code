@@ -22,6 +22,9 @@ import { readCodewhale } from "./codewhale-read.ts";
 import { planCodex, planCodexRules } from "./codex-plan.ts";
 import type { RawCodex } from "./codex-read.ts";
 import { readCodex } from "./codex-read.ts";
+import { planCommandCode } from "./command-code-plan.ts";
+import type { RawCommandCode } from "./command-code-read.ts";
+import { readCommandCode } from "./command-code-read.ts";
 import { planCursor, planCursorAssets } from "./cursor-plan.ts";
 import type { RawCursor } from "./cursor-read.ts";
 import { readCursor } from "./cursor-read.ts";
@@ -129,6 +132,7 @@ export interface RawSources {
 	mimocodeCode: RawMiMoCode;
 	openclaw: RawOpenClaw;
 	alma: RawAlma;
+	commandCode: RawCommandCode;
 }
 
 // Long-form design notes: docs/dev/migration-framework.md
@@ -165,6 +169,12 @@ export function readSources(home: string, cwd: string): RawSources {
 		// above: `APPDATA` is how Alma's `userData` root is reached on Windows, and a
 		// developer with a live install should get their own tree.
 		alma: readAlma(home, process.env),
+		// Command Code needs neither `cwd` nor `process.env`: its root is
+		// `~/.commandcode` with no override variable, and every tree this reader
+		// opens is home-relative. The project layers the CLI itself reads (the
+		// checkout's `.mcp.json`) belong to one checkout and are named in the report
+		// rather than read.
+		commandCode: readCommandCode(home),
 	};
 }
 
@@ -941,6 +951,29 @@ export function planMigration(raw: RawSources, existing: RawSettingsInput, optio
 		}
 	}
 
+	// Long-form design notes: docs/dev/migration-framework.md
+	if (only.includes("command-code") && raw.commandCode.present) {
+		if (wants("settings") || wants("assets")) {
+			planCommandCode(
+				raw.commandCode,
+				items,
+				writes,
+				claimScalar,
+				claimModePair,
+				claimPermissionList,
+				claimHooks,
+				mcpServers,
+				(hasSecret) => {
+					mcpHasSecret = mcpHasSecret || hasSecret;
+				},
+				existingMcpServers,
+				settingsPatch,
+				existing,
+				force,
+			);
+		}
+	}
+
 	if (options.historyScope === "none" && wants("history")) {
 		items.push({
 			source: only[0] ?? "claude-code",
@@ -1467,6 +1500,12 @@ function historySourcePresent(raw: RawSources, source: MigrationSourceId): boole
 	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "alma") return raw.alma.present || raw.alma.threadCount > 0;
 
+	// Command Code's sessions and its prompt list both hang off the same root
+	// (`projects/` and `history.jsonl`), and both reads are cheap directory walks:
+	// unlike the neighbours above, the deep question here costs nothing a shallow
+	// one would not already have paid.
+	if (source === "command-code") return raw.commandCode.present;
+
 	return raw.agents.present;
 }
 
@@ -1584,6 +1623,8 @@ export type { CodewhalePermissionRule, CodewhaleSkipped, RawCodewhale } from "./
 export { readCodewhale } from "./codewhale-read.ts";
 export type { RawCodex, RawRuleFile } from "./codex-read.ts";
 export { readCodex } from "./codex-read.ts";
+export type { RawCommandCode } from "./command-code-read.ts";
+export { readCommandCode } from "./command-code-read.ts";
 export type { RawDeepSeekHarness } from "./dsh-read.ts";
 export { readDeepSeekHarness } from "./dsh-read.ts";
 export type { RawGrokBuild } from "./grok-read.ts";

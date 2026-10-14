@@ -684,7 +684,7 @@ The command `yoshi` copies the setup of another agent tool. The tool reads the o
 The tool reads these values for `--from`:
 
 ```text
-one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | opencode | cursor | trae | t3-code | antigravity | qoder | codewhale | mimocode-code | openclaw | alma | all
+one source: claude-code | codex | zcode | agents | deepseek-harness | grok-build | kimi-code | minimax-code | step-code | opencode | cursor | trae | t3-code | antigravity | qoder | codewhale | mimocode-code | openclaw | alma | command-code | all
 ```
 
 The value `all` reads every source that the tool finds.

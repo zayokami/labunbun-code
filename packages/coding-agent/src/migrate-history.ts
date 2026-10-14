@@ -23,6 +23,8 @@ import { antigravityDataDirs, antigravityTreeHasContent } from "./antigravity-ho
 import { listAntigravityConversations, readAntigravityConversation } from "./antigravity-session.ts";
 import { listCodewhaleSessions, readCodewhaleSession } from "./codewhale-session.ts";
 import { codexRoot } from "./codex-home.ts";
+import { commandCodeHistoryPath, commandCodeRoot } from "./command-code-home.ts";
+import { listCommandCodeSessions, readCommandCodeSession } from "./command-code-session.ts";
 import { cursorPromptHistoryFile, cursorPromptHistoryPath } from "./cursor-home.ts";
 import { dshRoot } from "./dsh-home.ts";
 import { listDshSessions, readDshLog } from "./dsh-session.ts";
@@ -2269,6 +2271,94 @@ function readCursorPromptHistory(
 	return { ...selectPrompts(scan, options), cwdSubstitute: options.cwd };
 }
 
+// Long-form design notes: docs/dev/migration-framework.md
+/**
+ * `[preview +42L]` — the product collapses a pasted block into this token
+ * (`pastedTextToken` in the bundle, `/\[[^[\]]*\+\d+L\]/`), and the token is
+ * what reaches `history.jsonl` when the paste is the whole prompt. Anchored,
+ * so a prompt that merely *contains* one still travels as it was typed.
+ */
+const COMMAND_CODE_PASTE_TOKEN = /^\[[^[\]]*\+\d+L\]$/;
+
+/**
+ * `[Image #1]` — the product's token for a pasted image (`imagePasteToken` in
+ * the bundle). The bytes never reach the prompt list at all, so a line that is
+ * only this token is a prompt whose entire content is somewhere this importer
+ * cannot read.
+ */
+const COMMAND_CODE_IMAGE_TOKEN = /^\[Image #\d+\]$/;
+
+/**
+ * Command Code's ↑ recall list: `~/.commandcode/history.jsonl`.
+ *
+ * One JSON object per line, `{ p, t }` — the text and the time it was appended
+ * (`createPromptHistory.append` in the bundle; the parser also accepts a
+ * legacy `text` key). Two of its properties are read here rather than assumed
+ * away:
+ *
+ * 1. **The whole file is rewritten on every append, and every line is stamped
+ *    with the newest append's time** (`content: c.map(e => JSON.stringify({p:
+ *    e, t: d}))` with one `d` for the batch). So `t` is the same number on
+ *    every line of one file, and the file's own order — oldest first — is the
+ *    only ordering left. The scan therefore walks the tail **newest first**,
+ *    so the stable sort in `selectPrompts` keeps that order and the per-source
+ *    limit takes the newest end.
+ * 2. **Nothing in the list records where a prompt was typed** — there is no
+ *    session id and no directory, so every entry is filed under the directory
+ *    this run is in, with the same `cwdSubstitute` marker and the same note
+ *    Cursor's reader attaches for the same reason.
+ */
+function readCommandCodePromptHistory(
+	home: string,
+	options: { cwd: string; scope: HistoryScope; limit: number },
+): PromptHistoryInput {
+	const scan: PromptScan = { candidates: [], counts: new Map(), seen: 0, truncated: false };
+	const path = commandCodeHistoryPath(commandCodeRoot(home));
+	if (!existsSync(path)) return selectPrompts(scan, options);
+	const tail = readTailLines(path, PROMPT_HISTORY_BYTES);
+	scan.truncated = tail.truncated;
+	for (const line of [...tail.lines].reverse()) {
+		if (!line.trim()) continue;
+		const parsed = parseJsonLine(line);
+		if (!parsed) {
+			bump(scan.counts, "line not in the history shape");
+			continue;
+		}
+		// `p` first, then the legacy `text` — the parser's own order.
+		const raw = typeof parsed.p === "string" ? parsed.p : typeof parsed.text === "string" ? parsed.text : null;
+		if (raw === null) {
+			bump(scan.counts, "line not in the history shape");
+			continue;
+		}
+		scan.seen += 1;
+		const prompt = raw.trim();
+		if (!prompt) {
+			bump(scan.counts, "empty prompt");
+			continue;
+		}
+		if (prompt.startsWith("/")) {
+			bump(scan.counts, "slash command");
+			continue;
+		}
+		if (COMMAND_CODE_PASTE_TOKEN.test(prompt)) {
+			bump(scan.counts, "prompt whose text was a collapsed paste, stored as a preview token rather than its body");
+			continue;
+		}
+		if (COMMAND_CODE_IMAGE_TOKEN.test(prompt)) {
+			bump(scan.counts, "prompt that was only a pasted image, stored as its token");
+			continue;
+		}
+		scan.candidates.push({ text: prompt, cwd: options.cwd, timestamp: toEpochMs(parsed.t) });
+	}
+	if (options.scope === "cwd" && scan.candidates.length > 0) {
+		bump(
+			scan.counts,
+			"prompt from a directory the list does not record — --history-scope cwd cannot narrow this source, because every entry is filed under the current project",
+		);
+	}
+	return { ...selectPrompts(scan, options), cwdSubstitute: options.cwd };
+}
+
 /** Prompts a source remembers, ready to be merged into the recall list. */
 export function readPromptHistory(
 	source: MigrationSourceId,
@@ -2283,6 +2373,7 @@ export function readPromptHistory(
 	if (source === "kimi-code") return readKimiPromptHistory(home, options);
 	if (source === "opencode") return readOpencodePromptHistory(home, options);
 	if (source === "cursor") return readCursorPromptHistory(home, options);
+	if (source === "command-code") return readCommandCodePromptHistory(home, options);
 
 	// Long-form design notes: docs/dev/migration-framework.md
 	if (source === "minimax-code") {
@@ -2873,6 +2964,46 @@ function readAlmaHistory(candidate: HistoryCandidate): { entries: HistoryEntry[]
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Command Code
+// ---------------------------------------------------------------------------
+
+// Long-form design notes: docs/dev/migration-framework.md
+/** Every Command Code session its own picker would show, as candidates. */
+function listCommandCodeHistory(home: string): HistoryListing {
+	const listed = listCommandCodeSessions(home);
+	const counts = new Map<string, number>();
+	for (const skip of listed.skipped) counts.set(skip.reason, (counts.get(skip.reason) ?? 0) + 1);
+	return {
+		candidates: listed.sessions.map((session) => ({
+			source: "command-code",
+			sourceId: session.id,
+			// `header.cwd` is required by the format, so `""` only appears for a
+			// header that states an empty directory — and a scope filter is a
+			// question about a directory, so `""` is not one.
+			cwd: session.cwd,
+			title: session.title,
+			startedAt: session.startedAt,
+			path: session.path,
+		})),
+		notes: [...counts].map(([reason, count]) => ({ reason, count })),
+	};
+}
+
+// Long-form design notes: docs/dev/migration-framework.md
+/** Read one chosen Command Code session. */
+function readCommandCodeHistory(candidate: HistoryCandidate): { entries: HistoryEntry[]; notes: HistoryNote[] } {
+	const read = readCommandCodeSession(candidate.path, candidate.startedAt);
+	// Same rule as its neighbours: a session that could not be read — or whose
+	// every entry was bookkeeping — is reported by why rather than counted as a
+	// session that was empty.
+	if (read.entries.length === 0) {
+		if (read.notes.length > 0) return { entries: [], notes: read.notes };
+		return { entries: [], notes: [{ reason: "session transcript with no convertible message", count: 1 }] };
+	}
+	return { entries: read.entries, notes: read.notes };
+}
+
 /** What a source offers, narrowed to the requested scope. */
 export function listHistory(
 	source: MigrationSourceId,
@@ -2913,7 +3044,9 @@ export function listHistory(
 																	? listCodewhaleHistory(home)
 																	: source === "alma"
 																		? listAlmaHistory(home)
-																		: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
+																		: source === "command-code"
+																			? listCommandCodeHistory(home)
+																			: { candidates: [] as HistoryCandidate[], notes: [] as HistoryNote[] };
 	return narrowCandidates(listed, options);
 }
 
@@ -3100,6 +3233,19 @@ export function readHistory(source: MigrationSourceId, home: string, chosen: His
 				// image, which is a real state — `chat_messages.message` holds a JSON
 				// blob whose `parts` are filtered to `type === "text"`, so an Alma
 				// conversation that was nothing but edits imports as nothing and says so.
+				if (read.entries.length === 0) {
+					if (read.notes.length > 0) notes.push(...read.notes);
+					else failed += 1;
+					continue;
+				}
+				converted = read;
+			} else if (source === "command-code") {
+				const read = readCommandCodeHistory(candidate);
+				// Same rule as its neighbours: a session that could not be read — or
+				// whose every entry was bookkeeping — is reported by why rather than
+				// counted as a session that was empty. "Nothing to import" is a claim
+				// about the user's conversation, and this reader is in no position to
+				// make it when the reason it holds nothing is a file it could not open.
 				if (read.entries.length === 0) {
 					if (read.notes.length > 0) notes.push(...read.notes);
 					else failed += 1;

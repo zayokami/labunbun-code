@@ -2237,6 +2237,73 @@ That is the failure `qoder-read.ts` documents in its own header, and a first dra
 - The rule that decided a root is rendered in the report's own words. The named cases are `$OPENCODE_CONFIG_DIR` (the tool's own override, and it names the `opencode` directory itself), `$XDG_CONFIG_HOME` + `/opencode`, `$XDG_DATA_HOME` + `/opencode` and `$XDG_STATE_HOME` + `/opencode`.
 - The default case is worth spelling out rather than a bare path. On Windows the tree is at `~/.config/opencode` and not under `%APPDATA%`, because `xdg-basedir@5.1.0` has no Windows branch. A report that prints a bare path makes a reader at the usual place wonder whether the importer is broken.
 
+### Command Code
+
+Command Code writes one root, `~/.commandcode`, and reads no environment variable that moves it. Every claim below comes from a minified bundle (`G:\Bunttta\command-code\dist\cli.mjs`): the names cited are the bundle's own function names, which `__name` keeps through minification.
+
+**The session format**
+
+- A session is `<root>/projects/<slug>/<id>.jsonl`. The first non-blank line is the header, validated by `isSessionHeaderV3`: `type` is `"session"`, `version` is `3`, and `id`, `timestamp` and `cwd` are all strings. The header's `cwd` is the directory the session ran in, so no project slug is ever decoded.
+- Every line after the header is an entry, validated by `isSessionEntryV3`: `type` in the nine-member set the loader keeps, `id` a string, `parentId` `null` or a string, `timestamp` a string. A first line that parses but is not a v3 header gets its own sentence per reason: newer version, older version, missing field, or not JSON.
+- The entries are a tree, not a list. The bundle's `buildSessionPath` starts at the last entry, follows `parentId` up with a `Set` for cycle protection, and reverses the result. The reader walks the same path: the file keeps every branch, and importing them all would put conversations the user abandoned into one transcript. Branches off the path are counted.
+- `meta.entrypoint === "print"` marks a scripted `-p` run. The product's own session list hides those by default (`includePrint: false`), and this importer lists what that list shows.
+- The title is `meta.title` from the `<id>.meta.json` sidecar, then the last non-empty `session_info` name in the head window, then the first visible user text — the product's own two fallbacks, in its own order. `meta.isMeta` messages are skipped there and here. The name filter excludes the sidecars that share the extension: `.checkpoints.jsonl`, `.prompts.jsonl` and `.v2.bak`.
+- `compaction` maps onto this build's compaction entry at its own position, with `tokensBefore` carried as the product's own measurement. `branch_summary` arrives as a user message wearing the product's own framing (`dv`/`uv` beside `entryToContextMessages`), because the target has no branch concept and the product's sentence is what says so.
+- The shared repair can drop a whole message, not only a block, so the entry list is built from the **repaired** stream rather than from the pre-repair sequence; compaction marks keep their place as indices into the message stream, and if the repair dropped anything they move to the end rather than land mid-stream (the same trade the dsh and ZCode readers make).
+
+**The permission modes**
+
+- Five modes with eight aliases: `default`/`standard`/`manual`, `auto-accept`/`accept-edits`/`acceptedits`, `plan`, `bypass`/`yolo`/`bypass-permissions`/`bypasspermissions`, `dont-ask`/`dontask`.
+- `bypass` means two things at once — never ask, and no confinement. It maps to both axes (`agent` and `danger-full-access`), and the report says so.
+- `permissions.disableBypass` (true or the string `"disable"`) makes the file's own `bypass` a lie at runtime: the product falls back to `default`. The import follows what the product would do and points the user at `disableBypassPermissionsMode` in the managed settings file for the same effect here.
+- `dont-ask` has no counterpart and is reported, not approximated. `auto-accept` maps to `ask` and the line says the mode was deliberately narrowed.
+
+**The rule grammar**
+
+- `shell(X)` and `shell(X:*)` both mean "this command, or a longer command starting the same way", so one source rule becomes the pair `Bash(X)` and `Bash(X *)`.
+- `?` is a wildcard here and a plain character there, so a rule containing one is refused rather than widened.
+- A whole-server wildcard (`mcp__*`) matches only in the product's aggressive pass, which is the pass deny rules run in. It is carried on the deny side and refused on the allow side.
+- `read` covers three tools here (`Read`, `Glob`, `Grep`). A scoped `read(...)` carries the `Read` part and names the side that was left out. `edit` becomes the `Edit`/`Write` pair, over both the base path and the `/**` form.
+- `webfetch` and `agent` cannot be scoped by this build's rules and are refused with the sentence that says how to write the same allow by hand.
+- The v3 session's `tool_use`/`tool_result` blocks are Anthropic-shaped, so they translate one-for-one; a result carries no tool name and gets the call's name back, the same repair the Claude Code reader applies.
+
+**The hooks**
+
+- Matchers name display labels (`SHELL`, `READ`, `EDIT`, …), not tool names, and the table translates them. A matcher longer than 200 characters is skipped, which is what the source does too.
+- A matcher on `Stop` or `SessionStart` is dead in the source as well (it tests against an empty tool name), so the group is dropped rather than imported as a hook that never fires.
+- Timeouts are seconds there and milliseconds here; a handler with no timeout runs for 60 seconds in the target where the source stops it at 30, and the difference is a report line. `async` and `failClosed` have no field here and are named.
+
+**The MCP servers**
+
+- Three stores merge later-wins: `settings.json` `mcp.servers`, then `mcp.json`, then `.mcp.json`. Each collision gets a line naming the copy that lost.
+- An entry holds credentials in three channels a key-name scan cannot see: `env` values, a `headers` block, and an `oauth` block. The names are reported (`N environment variable(s)`, and the blocks by name) and no value is read.
+- A URL carrying a `name:password@` part or a credential-named parameter is refused whole, with the value never copied. The one shared refusal is `urlCredentialProblem` (`packages/coding-agent/src/migrate-core.ts:551`).
+- `sse` and `http` connect the same way in this build and the difference is a report line. An entry the CLI's own normalizer would refuse (stdio with no command, HTTP with no URL) is named with that reason.
+
+**The providers**
+
+- `providers.json` holds one entry per provider and the disabled ones as tombstones. The key shapes are four: `$VAR`, `{env:VAR}` (both carry as the environment variable name), a template (refused — the target's field holds one name), and a `!command` (carried as a synthesized `ID_API_KEY` name that must be filled by hand, reported as an edit). A plaintext key never leaves the file — the source itself refuses the shape — and a keyless provider has no representation here and is named.
+- The id rules run in the CLI's own order: built-in lane, then the id pattern, then the five reserved auth-file field names. The five reserved names all carry upper-case letters, so the pattern refuses them first and the reserved sentence is unreachable — in the CLI too. A test records the shadowing rather than coding around it.
+- Model fields without a destination (per-model endpoints, reasoning-effort lists, partial prices) are counted, and the models are registered with what was carried.
+
+**The assets**
+
+- Skills are found under `skills/` up to five levels down, as `SKILL.md` or `skill.md`. The CLI's own six validation rules apply before anything is written: the frontmatter name must match the directory and pass `/^[a-z0-9-]+$/`, and a description is required. A loose `.md` at the top of the directory and a directory with no manifest each get the CLI's own warning.
+- `commands/` files become skills under a dashed name (`git/commit.md` becomes `git-commit`), with the frontmatter rewritten; `$ARGUMENTS` is substituted here and `$1..$9` and inline shell expansion are not, which the line says.
+- `AGENTS.md` becomes a rule file rather than the memory document, so it merges with an existing memory instead of replacing it.
+- `~/.agents/skills` is named and not read: this repository has an `agents` source that owns that home outright, and reading it here would write every file twice.
+
+**The prompt list**
+
+- `history.jsonl` is rewritten whole on every append and every line is stamped with the newest append's time (`content: c.map(e => JSON.stringify({p: e, t: d}))` with one `d` for the batch). The file's own order is the only ordering left, so the scan walks it newest-first and the limit takes the newest end.
+- The parser accepts a legacy `text` key as well as `p`. A line that is only `[preview +42L]` or `[Image #1]` is a prompt whose content lives somewhere this importer cannot read (the paste store, the image bytes), and it is counted.
+- Nothing in the list records where a prompt was typed, so every entry is filed under the run's own directory with the substitute marker the report reads.
+
+**The credentials**
+
+- Five files are named and never opened: `auth.json`, `auth.local.json`, `auth.staging.json`, `credentials.json` and `mcp-tokens.json`. The only contact is `existsSync`.
+- The other release channels' config files (`config.local.json`, `config.staging.json`) are named too — a released build reads `config.json` and never those.
+
 ## Shared architecture
 
 Every source in this document runs the same pipeline. A home module names the data roots. A read module opens the documents and reads the sessions. A plan module turns the parsed data into labunbun settings, rules, skills, agents and MCP servers. The report names every value carried and every path left behind.
@@ -2276,6 +2343,7 @@ Each row names the module files, the default root the product uses, and the arti
 | **Step Code** | `step-home.ts`, `step-read.ts`, `step-plan.ts`, `step-session.ts`. | `STEPCODE_CONFIG_DIR`, else `<home>/.stepcode`, with `.step-harness` as the pre-rename tree. | `config.toml`, `auth.json`, `settings.json`, `models.json`, the asset trees and `agent/sessions`. |
 | **Kimi Code** | `kimi-home.ts`, `kimi-read.ts`, `kimi-plan.ts`, `kimi-session.ts`. | `$KIMI_CODE_HOME`, whose `sessions/` tree holds each conversation. | `sessions/`, `agents/<agentId>/wire.jsonl`, `state.json` and `session_index.jsonl`. |
 | **OpenCode** | `opencode-home.ts`, `opencode-read.ts`, `opencode-plan.ts`, `opencode-db.ts`. | `$OPENCODE_CONFIG_DIR`, else the XDG config base plus `opencode`. On Windows the default is `~/.config/opencode`. | the three settings documents, `AGENTS.md`, the asset trees, `opencode.db` and the named credential files. |
+| **Command Code** | `command-code-home.ts`, `command-code-read.ts`, `command-code-plan.ts`, `command-code-session.ts`. | `~/.commandcode`, with no environment variable to move it. | `settings.json`, `config.json`, `providers.json`, `mcp.json`, `.mcp.json`, the asset trees, `AGENTS.md`, `history.jsonl` and the v3 transcripts under `projects/`. |
 
 ## Coverage
 
@@ -2297,3 +2365,4 @@ The table gives, for each source, what the import carries into labunbun and what
 | **Step Code** | sessions from the canonical tree and the pre-rename `.step-harness` tree. | the directory it read, and every session-shaped file it left, each with a reason. |
 | **Kimi Code** | the folded journal of the session's main agent. | child sessions, the other agents' journals, sessions with no transcript and every dropped part (each counted). |
 | **OpenCode** | the three settings documents, the provider and MCP tables, `AGENTS.md`, skills, agents, commands and sessions from `opencode.db`. | the credential files, the four credential tables, `tui.json`, `plugin-meta.json` and the vendor trees. |
+| **Command Code** | settings, the mode pair, permission rules, hooks, MCP servers, providers, skills, agents, commands, `AGENTS.md`, sessions and the prompt list. | the credential files (by name only), the three credential channels inside MCP entries, plaintext and template provider keys, the four unread trees (`file-history/`, `sessions/`, `projects/`, `trusted-hooks.json`) and the shared `~/.agents` home. |
