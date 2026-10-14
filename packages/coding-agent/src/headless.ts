@@ -56,7 +56,7 @@ import {
 	roleOrder,
 	seatsByRef,
 } from "./model-roles.ts";
-import { withheldDefinitionNotice } from "./project-trust.ts";
+import { enclosingRepositoryRoot, withheldDefinitionNotice } from "./project-trust.ts";
 import {
 	damagedSessionNotice,
 	findSession,
@@ -456,7 +456,11 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	const withheldSkills = withheldProjectSkills(cwd, home);
 	if (withheldAgents.length + withheldSkills.length > 0) {
 		console.error(
-			withheldDefinitionNotice({ agents: withheldAgents.length, skills: withheldSkills.length }, "headless"),
+			withheldDefinitionNotice(
+				{ agents: withheldAgents.length, skills: withheldSkills.length },
+				"headless",
+				enclosingRepositoryRoot(cwd),
+			),
 		);
 	}
 	// Held-back skill folders (a name that fails validation): a scripted run has

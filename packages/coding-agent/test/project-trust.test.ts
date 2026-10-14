@@ -24,8 +24,10 @@ import { sanitizeCwd } from "@labunbun/agent";
 import {
 	approveProjectDefinitions,
 	describeWithheld,
+	enclosingRepositoryRoot,
 	isProjectTierTrusted,
 	loadTrustedDefinitionKinds,
+	withheldDefinitionNotice,
 } from "../src/project-trust.ts";
 import { loadSkills, withheldProjectSkills } from "../src/skills.ts";
 import { loadAgentDefinitions, withheldProjectAgents } from "../src/subagents.ts";
@@ -159,6 +161,76 @@ describe("project-tier skills", () => {
 		// still listed as pending would tell the user their approved skill is not
 		// loaded — every session, from then on.
 		expect(withheldProjectSkills(cwd, home)).toEqual([]);
+	});
+});
+
+/** A repository root and a nested directory under it; `.git` as file covers worktrees. */
+function repoFixture(gitKind: "dir" | "file" = "dir"): { root: string; sub: string } {
+	const root = mkdtempSync(join(tmpdir(), "lbb-repo-"));
+	if (gitKind === "dir") mkdirSync(join(root, ".git"), { recursive: true });
+	else writeFileSync(join(root, ".git"), "gitdir: ../elsewhere\n", "utf8");
+	const sub = join(root, "packages", "nested");
+	mkdirSync(sub, { recursive: true });
+	return { root, sub };
+}
+
+describe("enclosingRepositoryRoot", () => {
+	test("a cwd that is itself a repository root reports nothing", () => {
+		const { root } = repoFixture();
+		// The walk starts at the parent: a session started at the root is not "in
+		// a subdirectory of a Git project", and the note must not claim it is.
+		expect(enclosingRepositoryRoot(root)).toBeUndefined();
+	});
+
+	test("finds the root above a subdirectory, at any depth", () => {
+		const { root, sub } = repoFixture();
+		expect(enclosingRepositoryRoot(sub)).toBe(root);
+		// Purely lexical above the cwd: levels below it need not exist on disk.
+		expect(enclosingRepositoryRoot(join(sub, "deeper"))).toBe(root);
+	});
+
+	test("a .git file counts — a worktree or submodule is still a repository", () => {
+		const { root, sub } = repoFixture("file");
+		expect(enclosingRepositoryRoot(sub)).toBe(root);
+	});
+
+	test("a repository nested inside another reports its own root, not the outer one", () => {
+		const { root } = repoFixture();
+		const inner = join(root, "vendored");
+		mkdirSync(join(inner, ".git"), { recursive: true });
+		// Started at the inner root: that repository is the project, the outer one
+		// is background, and the note must not point the decision at it. This is
+		// what the walk-starting-at-start guard buys, and only this.
+		expect(enclosingRepositoryRoot(inner)).toBeUndefined();
+		// Below the inner root, the nearest root wins — the way git resolves it.
+		const deep = join(inner, "src");
+		mkdirSync(deep, { recursive: true });
+		expect(enclosingRepositoryRoot(deep)).toBe(inner);
+	});
+
+	test("no repository on the way up, nothing to say", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-norepo-"));
+		expect(enclosingRepositoryRoot(dir)).toBeUndefined();
+	});
+});
+
+describe("the git-root scope note", () => {
+	test("states this app's scope, not Codex's — the ledger is keyed by the cwd", () => {
+		const base = withheldDefinitionNotice({ agents: 1, skills: 1 }, "repl");
+		const noted = withheldDefinitionNotice({ agents: 1, skills: 1 }, "repl", join("somewhere", "repo"));
+		// The two-argument sentence is a prefix; the note is one appended line.
+		expect(noted.startsWith(`${base}\n`)).toBe(true);
+		expect(noted).toBe(
+			`${base}\nNote: you're in a subdirectory of a Git project — approval covers this directory, not the repository root at ${join("somewhere", "repo")}.`,
+		);
+	});
+
+	test("both audiences get it — scope is not a property of where the line is read", () => {
+		expect(withheldDefinitionNotice({ agents: 0, skills: 1 }, "headless", "/repo")).toContain(
+			"not the repository root at /repo.",
+		);
+		// And the two-argument form is what it always was.
+		expect(withheldDefinitionNotice({ agents: 0, skills: 1 }, "headless")).not.toContain("subdirectory");
 	});
 });
 

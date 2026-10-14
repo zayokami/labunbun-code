@@ -218,6 +218,7 @@ import {
 	approveProjectDefinitions,
 	type DefinitionKind,
 	describeWithheld,
+	enclosingRepositoryRoot,
 	withheldDefinitionNotice,
 } from "./project-trust.ts";
 import {
@@ -1921,7 +1922,11 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	if (withheldAgents.length + withheldSkills.length > 0) {
 		pushInfo(
 			handle,
-			withheldDefinitionNotice({ agents: withheldAgents.length, skills: withheldSkills.length }, "repl"),
+			withheldDefinitionNotice(
+				{ agents: withheldAgents.length, skills: withheldSkills.length },
+				"repl",
+				enclosingRepositoryRoot(cwd),
+			),
 		);
 	}
 	// Held-back skill folders, one line each: the same "a definition that was not

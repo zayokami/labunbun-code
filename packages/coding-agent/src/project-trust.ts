@@ -29,7 +29,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { sanitizeCwd } from "@labunbun/agent";
 
 /** The two project tiers one trust decision covers, named as their directories are. */
@@ -83,15 +83,55 @@ export function describeWithheld(kinds: { agents: number; skills: number }): str
  * moment the feature it is about is invisible, and nothing looked at it. Exported
  * so `help-commands.test.ts` holds these two lines to the same rule as every
  * other line of advice this app prints: the commands they name have to exist.
+ *
+ * `subdirectoryOfGitRoot` is `enclosingRepositoryRoot`'s answer for the working
+ * directory, and when it is set the notice gains the scope sentence below.
  */
 export function withheldDefinitionNotice(
 	kinds: { agents: number; skills: number },
 	audience: "repl" | "headless",
+	subdirectoryOfGitRoot?: string,
 ): string {
 	const counts = describeWithheld(kinds);
-	return audience === "repl"
-		? `This project's definitions are not loaded — ${counts}. /agents to review.`
-		: `Warning: this project's definitions are not loaded — ${counts}. Approve them in an interactive session (/agents approve).`;
+	const base =
+		audience === "repl"
+			? `This project's definitions are not loaded — ${counts}. /agents to review.`
+			: `Warning: this project's definitions are not loaded — ${counts}. Approve them in an interactive session (/agents approve).`;
+	if (subdirectoryOfGitRoot === undefined) return base;
+	// Codex's git-root note (`trust_directory.rs:144-152`), said truthfully for
+	// this app: Codex's trust applies to the repository root, ours to exactly this
+	// directory — the ledger is keyed by the cwd (`trustStorePath`) — so the
+	// sentence states our scope rather than copying Codex's claim, which here
+	// would be false. Same note for both audiences: scope is not a property of
+	// where the line is read.
+	return `${base}\nNote: you're in a subdirectory of a Git project — approval covers this directory, not the repository root at ${subdirectoryOfGitRoot}.`;
+}
+
+/**
+ * The root of the repository that encloses `cwd`, or undefined when none does.
+ *
+ * The walk starts at the parent, so a `cwd` that is itself a repository root
+ * reports nothing — "in a subdirectory of a Git project" is the one question
+ * this exists for, and a session started at the root is not in one. Nested
+ * repositories resolve to the nearest root the way `git` resolves them.
+ *
+ * Presence of `.git` is the whole test: a directory in a normal clone, a file
+ * in a worktree or submodule, so each level costs one `existsSync` and nothing
+ * shells out to `git`. The returned path is built from `cwd`'s own spelling
+ * with `dirname`/`join`, never `realpath` — a caller compares it against
+ * nothing (the parameter carries the answer), which is what keeps the
+ * `/var`-vs-`/private/var` class of spelling traps out of this.
+ */
+export function enclosingRepositoryRoot(cwd: string): string | undefined {
+	const start = resolve(cwd);
+	if (existsSync(join(start, ".git"))) return undefined;
+	let dir = dirname(start);
+	for (;;) {
+		if (existsSync(join(dir, ".git"))) return dir;
+		const parent = dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
 }
 
 /** Whether this directory's tier of `kind` may be loaded. */
