@@ -133,6 +133,7 @@ export async function runDoctorChecks(
 	const signedIn = [
 		...(signIns?.claude ? ["Claude subscription"] : []),
 		...(signIns?.chatgpt ? ["ChatGPT subscription"] : []),
+		...(signIns?.gemini ? ["Gemini subscription"] : []),
 	];
 	checks.push({
 		name: "Auth",

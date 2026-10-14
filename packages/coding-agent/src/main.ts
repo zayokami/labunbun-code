@@ -4,6 +4,7 @@ import { chunkWritesForConPTY, isConPTYHost } from "@labunbun/tui";
 import { runAcp } from "./acp.ts";
 import { runChatGptLoginCli, runChatGptLogoutCli } from "./chatgpt-login.ts";
 import { runClaudeLoginCli, runClaudeLogoutCli } from "./claude-login.ts";
+import { runGeminiLoginCli, runGeminiLogoutCli } from "./gemini-login.ts";
 import { runHeadless } from "./headless.ts";
 import { CLI_NAME, CODING_AGENT_VERSION } from "./index.ts";
 import { runInteractive } from "./interactive.ts";
@@ -68,7 +69,7 @@ interface CliArgs {
 	 * the subcommand. `null` is the Claude flow, which is what the bare forms
 	 * have always run.
 	 */
-	loginProvider: "claude" | "chatgpt" | null;
+	loginProvider: "claude" | "chatgpt" | "gemini" | null;
 	help: boolean;
 	version: boolean;
 	print: string | null;
@@ -140,7 +141,7 @@ export function parseArgs(argv: string[]): CliArgs {
 	// word anywhere else stays the error it always was.
 	if (
 		(args.subcommand === "login" || args.subcommand === "logout") &&
-		(rest[0] === "claude" || rest[0] === "chatgpt")
+		(rest[0] === "claude" || rest[0] === "chatgpt" || rest[0] === "gemini")
 	) {
 		args.loginProvider = rest[0];
 		rest = rest.slice(1);
@@ -244,8 +245,8 @@ Usage:
   labunbun                     Interactive REPL
   labunbun -p "<prompt>"       Headless: run one prompt and print the result
   labunbun acp                 Serve the Agent Client Protocol on stdio (for editors)
-  labunbun login [claude|chatgpt]   Sign in to a subscription (a browser opens)
-  labunbun logout [claude|chatgpt]  Sign out of a subscription
+  labunbun login [claude|chatgpt|gemini]  Sign in to a subscription (a browser opens)
+  labunbun logout [claude|chatgpt|gemini] Sign out of a subscription
   labunbun yoshi               Import settings from another agent tool
   labunbun --version           Show version
 
@@ -339,16 +340,16 @@ export async function main(argv: string[] = process.argv.slice(2), options: Main
 	// The subscription subcommands run here for the same reason: signing in is
 	// how someone gets a working setup, so it cannot require one first. The
 	// provider word — absent, or `claude` — selects the Claude flow the bare
-	// forms have always run.
+	// forms have always run; `gemini` selects the Gemini one.
 	if (args.subcommand === "login") {
-		return args.loginProvider === "chatgpt"
-			? runChatGptLoginCli({ home: options.home })
-			: runClaudeLoginCli({ home: options.home });
+		if (args.loginProvider === "chatgpt") return runChatGptLoginCli({ home: options.home });
+		if (args.loginProvider === "gemini") return runGeminiLoginCli({ home: options.home });
+		return runClaudeLoginCli({ home: options.home });
 	}
 	if (args.subcommand === "logout") {
-		return args.loginProvider === "chatgpt"
-			? runChatGptLogoutCli({ home: options.home })
-			: runClaudeLogoutCli({ home: options.home });
+		if (args.loginProvider === "chatgpt") return runChatGptLogoutCli({ home: options.home });
+		if (args.loginProvider === "gemini") return runGeminiLogoutCli({ home: options.home });
+		return runClaudeLogoutCli({ home: options.home });
 	}
 
 	// yoshi's own flags without the subcommand word used to parse and then be

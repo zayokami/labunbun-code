@@ -75,6 +75,7 @@ import { createChatGptCredentials } from "./chatgpt-auth.ts";
 import { createClaudeCredentials } from "./claude-auth.ts";
 import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
 import { costStateFromMessages } from "./cost-tracker.ts";
+import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, type HooksRuntime, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { writeMissionRecord } from "./mission-ledger.ts";
@@ -994,15 +995,16 @@ class AcpAgent implements acp.Agent {
 			process.stderr.write(`Warning: ${message}\n`);
 		}
 
-		// The Claude and ChatGPT subscriptions, when one is signed in: an editor
-		// session reads the same stored sign-in the REPL does, so the entry points
-		// cannot disagree about which credential serves a request.
+		// The Claude, ChatGPT and Gemini subscriptions, when one is signed in: an
+		// editor session reads the same stored sign-in the REPL does, so the entry
+		// points cannot disagree about which credential serves a request.
 		const transport: { streamFn: StreamFn; tracker?: CacheTracker } = options.streamFn
 			? { streamFn: options.streamFn }
 			: createTrackedStreamFn({
 					policy: settings.cache,
 					credentials: createClaudeCredentials({ home }),
 					chatgptCredentials: createChatGptCredentials({ home }),
+					geminiCredentials: createGeminiCredentials({ home }),
 				});
 		// The fallback chain is per-role now: `resolveChain` receives the model
 		// that actually failed, and the seat it belongs to decides what comes

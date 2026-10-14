@@ -203,6 +203,7 @@ export function wizardDetectionLines(found: {
 	for (const key of found.envKeys) lines.push(`${key} is set`);
 	if (found.signIns.claude) lines.push("Claude subscription signed in");
 	if (found.signIns.chatgpt) lines.push("ChatGPT subscription signed in");
+	if (found.signIns.gemini) lines.push("Gemini subscription signed in");
 	return lines;
 }
 

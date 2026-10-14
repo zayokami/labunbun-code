@@ -21,11 +21,13 @@
 import { apiKeyEnvNames, type Model, missingApiKey, resolveApiKey } from "@labunbun/ai";
 import { createChatGptCredentialStore } from "./chatgpt-auth.ts";
 import { type ClaudeAuthOptions, createClaudeCredentialStore } from "./claude-auth.ts";
+import { createGeminiCredentialStore } from "./gemini-auth.ts";
 
-/** The two subscriptions this machine may hold; one entry per credential store. */
+/** The subscriptions this machine may hold; one entry per credential store. */
 export interface SubscriptionSignIns {
 	claude: boolean;
 	chatgpt: boolean;
+	gemini: boolean;
 }
 
 /**
@@ -33,10 +35,10 @@ export interface SubscriptionSignIns {
  * A default rather than an error case: a caller that never asks must render
  * exactly what it rendered before subscriptions existed.
  */
-export const NO_SIGN_INS: SubscriptionSignIns = Object.freeze({ claude: false, chatgpt: false });
+export const NO_SIGN_INS: SubscriptionSignIns = Object.freeze({ claude: false, chatgpt: false, gemini: false });
 
 /**
- * Read both stores, keychain-first, and report what is signed in.
+ * Read every store, keychain-first, and report what is signed in.
  *
  * A test passes a throwaway `home` and `keychain: null` through `options` —
  * and must — because a probe that read the real keychain would report the
@@ -44,11 +46,12 @@ export const NO_SIGN_INS: SubscriptionSignIns = Object.freeze({ claude: false, c
  * the code works.
  */
 export async function detectSubscriptionSignIns(options: ClaudeAuthOptions = {}): Promise<SubscriptionSignIns> {
-	const [claude, chatgpt] = await Promise.all([
+	const [claude, chatgpt, gemini] = await Promise.all([
 		signedIn(createClaudeCredentialStore(options)),
 		signedIn(createChatGptCredentialStore(options)),
+		signedIn(createGeminiCredentialStore(options)),
 	]);
-	return { claude, chatgpt };
+	return { claude, chatgpt, gemini };
 }
 
 /** Whether a store holds anything; a missing or malformed file already answers null. */
@@ -66,9 +69,10 @@ async function signedIn(store: { load(): Promise<unknown> }): Promise<boolean> {
  * sign-ins arrive as a value and the caller decides how live they are.
  */
 export function modelMayRun(model: Model, signIns: SubscriptionSignIns): boolean {
-	// The ChatGPT wire names no environment variable by construction; being
-	// signed in is the whole availability story.
+	// The ChatGPT and Gemini wires name no environment variable by
+	// construction; being signed in is the whole availability story.
 	if (model.api === "chatgpt-responses") return signIns.chatgpt;
+	if (model.api === "gemini-code-assist") return signIns.gemini;
 	if (apiKeyEnvNames(model).length === 0) return true;
 	if (resolveApiKey(model)) return true;
 	return model.provider === "anthropic" && signIns.claude;
@@ -98,6 +102,7 @@ export function requestPathPermits(model: Model): boolean {
 export function unrunnableSuffix(model: Model, signIns: SubscriptionSignIns): string | undefined {
 	if (modelMayRun(model, signIns)) return undefined;
 	if (model.api === "chatgpt-responses") return "no ChatGPT sign-in";
+	if (model.api === "gemini-code-assist") return "no Gemini sign-in";
 	if (model.provider === "anthropic") return "no API key or sign-in";
 	return "no API key";
 }
@@ -113,8 +118,10 @@ export function missingCredentialNotice(model: Model, signIns: SubscriptionSignI
 	const fix =
 		model.api === "chatgpt-responses"
 			? "/login chatgpt to sign in"
-			: model.provider === "anthropic"
-				? "/login to sign in"
-				: `Set ${apiKeyEnvNames(model).join(" or ")} in your environment`;
+			: model.api === "gemini-code-assist"
+				? "/login gemini to sign in"
+				: model.provider === "anthropic"
+					? "/login to sign in"
+					: `Set ${apiKeyEnvNames(model).join(" or ")} in your environment`;
 	return `No credential for ${model.provider}/${model.id} yet — the first prompt will fail. ${fix}, or /yoshi to import a setup.`;
 }

@@ -85,12 +85,13 @@ describe("runDoctorChecks", () => {
 			undefined,
 			undefined,
 			undefined,
-			{ claude: true, chatgpt: true },
+			{ claude: true, chatgpt: true, gemini: true },
 		);
 		const auth = checks.find((c) => c.name === "Auth");
 		expect(auth?.status).toBe("ok");
 		expect(auth?.detail).toContain("Claude subscription");
 		expect(auth?.detail).toContain("ChatGPT subscription");
+		expect(auth?.detail).toContain("Gemini subscription");
 	});
 
 	test("with no sign-ins supplied the Auth row is the environment's row alone", async () => {

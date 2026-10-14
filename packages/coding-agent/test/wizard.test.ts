@@ -228,7 +228,7 @@ describe("wizardDetectionLines", () => {
 		const lines = wizardDetectionLines({
 			sources: ["claude-code", "codex"],
 			envKeys: ["ANTHROPIC_API_KEY"],
-			signIns: { claude: true, chatgpt: false },
+			signIns: { claude: true, chatgpt: false, gemini: true },
 		});
 		// The first row against its literal spelling, not just its parts: this is
 		// the rendering the user reads, `label — ~/tree`.
@@ -236,7 +236,8 @@ describe("wizardDetectionLines", () => {
 		expect(lines[1]).toBe(`${MIGRATION_SOURCE_LABELS.codex} — ~/${SOURCE_ROOTS.codex}`);
 		expect(lines[2]).toBe("ANTHROPIC_API_KEY is set");
 		expect(lines[3]).toBe("Claude subscription signed in");
-		expect(lines).toHaveLength(4);
+		expect(lines[4]).toBe("Gemini subscription signed in");
+		expect(lines).toHaveLength(5);
 	});
 });
 
@@ -259,13 +260,13 @@ describe("importOfferLine", () => {
 describe("firstRunRecord", () => {
 	test("stamps the run: the injected instant as ISO, both sign-in flags, the import verdict", () => {
 		const record = firstRunRecord({
-			signIns: { claude: true, chatgpt: false },
+			signIns: { claude: true, chatgpt: false, gemini: false },
 			imported: true,
 			now: new Date("2026-10-14T08:30:00Z"),
 		});
 		expect(record).toEqual({
 			offeredAt: "2026-10-14T08:30:00.000Z",
-			signedIn: { claude: true, chatgpt: false },
+			signedIn: { claude: true, chatgpt: false, gemini: false },
 			imported: true,
 		});
 	});
@@ -273,7 +274,7 @@ describe("firstRunRecord", () => {
 	test("a run that signed in nowhere and imported nothing still records — false is a fact here, not an absence", () => {
 		const record = firstRunRecord({ signIns: NO_SIGN_INS, imported: false, now: new Date(0) });
 		expect(record.offeredAt).toBe("1970-01-01T00:00:00.000Z");
-		expect(record.signedIn).toEqual({ claude: false, chatgpt: false });
+		expect(record.signedIn).toEqual({ claude: false, chatgpt: false, gemini: false });
 		expect(record.imported).toBe(false);
 	});
 });

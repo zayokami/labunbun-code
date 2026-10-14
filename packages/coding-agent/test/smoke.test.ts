@@ -53,10 +53,12 @@ describe("the provider word after login/logout", () => {
 		expect(parseArgs(["logout"])).toMatchObject({ subcommand: "logout", loginProvider: null });
 	});
 
-	test("chatgpt and claude after the subcommand name the provider", () => {
+	test("chatgpt, claude and gemini after the subcommand name the provider", () => {
 		expect(parseArgs(["login", "chatgpt"])).toMatchObject({ subcommand: "login", loginProvider: "chatgpt" });
 		expect(parseArgs(["logout", "chatgpt"])).toMatchObject({ subcommand: "logout", loginProvider: "chatgpt" });
 		expect(parseArgs(["login", "claude"])).toMatchObject({ subcommand: "login", loginProvider: "claude" });
+		expect(parseArgs(["login", "gemini"])).toMatchObject({ subcommand: "login", loginProvider: "gemini" });
+		expect(parseArgs(["logout", "gemini"])).toMatchObject({ subcommand: "logout", loginProvider: "gemini" });
 	});
 
 	test("the provider word is consumed, and flags after it still parse", () => {

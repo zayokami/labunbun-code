@@ -198,6 +198,15 @@ import {
 	padHeadline,
 	padStartupNotice,
 } from "./gamepad-runtime.ts";
+import { createGeminiCredentialStore, createGeminiCredentials } from "./gemini-auth.ts";
+import {
+	clearGeminiSubscription,
+	completeGeminiLogin,
+	type GeminiAuthHooks,
+	geminiLoginFlow,
+	geminiSignedInLine,
+	type PendingGeminiLogin,
+} from "./gemini-login.ts";
 import { appendHistory, loadHistory } from "./history.ts";
 import { advisoryHookFailures, snapshotHooks } from "./hooks.ts";
 import { CLI_NAME } from "./index.ts";
@@ -699,15 +708,17 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// request. The tracker sees every request the app makes — the loop, the
 	// compaction summary, each subagent — because they all come through here.
 	// The credentials providers ride along for the same reason: every request
-	// that ends at the anthropic or chatgpt-responses adapter gets the
-	// subscription mint when one is signed in, and `/login` swaps the stored
-	// credential under it.
+	// that ends at the anthropic, chatgpt-responses or gemini-code-assist
+	// adapter gets the subscription mint when one is signed in, and /login
+	// swaps the stored credential under it.
 	const credentials = createClaudeCredentials({ home });
 	const chatgptCredentials = createChatGptCredentials({ home });
+	const geminiCredentials = createGeminiCredentials({ home });
 	const { streamFn: baseStreamFn, tracker: cacheTracker } = createTrackedStreamFn({
 		policy: settings.cache,
 		credentials,
 		chatgptCredentials,
+		geminiCredentials,
 	});
 	// The chain handed to the pipeline is computed from the model that failed —
 	// the parameter the old fixed list ignored — and descends the order that
@@ -2529,6 +2540,13 @@ interface AppCommandContext {
 	 * browser, a network, or the operator's own keychain.
 	 */
 	chatgptAuth?: ChatGptAuthHooks;
+	/**
+	 * The Gemini subscription surface, for `/login gemini` and `/logout
+	 * gemini`. Optional for the same reason as `claudeAuth` above: a context
+	 * built by hand has to be able to drive both commands without a browser,
+	 * a network, or the operator's own keychain.
+	 */
+	geminiAuth?: GeminiAuthHooks;
 }
 
 function handleCommandDispatch(text: string, ctx: AppCommandContext): boolean {
@@ -2665,9 +2683,9 @@ export function appCommandTable(): Array<[string, string]> {
 		["/gamepad", "Control the session from a DualShock 4: /gamepad [on|off|status|watch|list|reset|approve|rumble]"],
 		[
 			"/login",
-			"Sign in to a subscription: /login [claude|chatgpt|<code#state>] — the Claude flow may ask you to paste",
+			"Sign in to a subscription: /login [claude|chatgpt|gemini|<code#state>] — the Claude and Gemini flows may ask you to paste",
 		],
-		["/logout", "Sign out of a subscription: /logout [claude|chatgpt]"],
+		["/logout", "Sign out of a subscription: /logout [claude|chatgpt|gemini]"],
 		[
 			"/mcp",
 			"List MCP servers, approve one, or read prompts and resources: /mcp [approve <name>|prompts <server>|prompt <server> <name> [key=value ...]|resources <server>|resource <server> <uri>]",
@@ -2703,6 +2721,11 @@ let claudeLoginRunning = false;
 // which the flow polls to completion inside one `/login chatgpt`, so there is
 // never a half-finished sign-in for a later command to pick up.
 let chatgptLoginRunning = false;
+// The Gemini flow's manual half behaves like the Claude one's: its paste path
+// returns a pending login, which the REPL parks until the next `/login gemini
+// <code>` hands back the code the page showed.
+let pendingGeminiLogin: PendingGeminiLogin | null = null;
+let geminiLoginRunning = false;
 
 function claudeAuthOf(ctx: AppCommandContext): ClaudeAuthHooks {
 	return (
@@ -2719,6 +2742,16 @@ function chatgptAuthOf(ctx: AppCommandContext): ChatGptAuthHooks {
 		ctx.chatgptAuth ?? {
 			store: () => createChatGptCredentialStore({ home: ctx.home }),
 			login: chatGptLoginFlow,
+		}
+	);
+}
+
+function geminiAuthOf(ctx: AppCommandContext): GeminiAuthHooks {
+	return (
+		ctx.geminiAuth ?? {
+			store: () => createGeminiCredentialStore({ home: ctx.home }),
+			login: geminiLoginFlow,
+			complete: completeGeminiLogin,
 		}
 	);
 }
@@ -3828,9 +3861,9 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 			// The first word may name the subscription. With no name — or with
 			// "claude" — this is the Claude flow it has always been, and a bare
 			// first word is the paste the manual flow asked for. A paste whose
-			// code happened to read exactly "chatgpt" would be misread as a
-			// name; the console's codes are long random strings, so the trade
-			// is deliberate.
+			// code happened to read exactly "chatgpt" or "gemini" would be
+			// misread as a name; the console's codes are long random strings,
+			// so the trade is deliberate.
 			if (words[0] === "chatgpt") {
 				if (words.length > 1) {
 					pushInfo(
@@ -3859,6 +3892,62 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 						pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
 					} finally {
 						chatgptLoginRunning = false;
+					}
+				})();
+				return true;
+			}
+			if (words[0] === "gemini") {
+				if (words.length > 1) {
+					// The paste the manual flow asked for, keyed the way /login
+					// gemini <code> spells it. The pending login survives a
+					// mis-paste for the same reason the Claude one does.
+					const pending = pendingGeminiLogin;
+					if (!pending) {
+						pushInfo(
+							ctx.handle,
+							"No Gemini sign-in is waiting for a code. Run /login gemini first, then paste what the page shows.",
+						);
+						return true;
+					}
+					const input = words.slice(1).join(" ");
+					void (async () => {
+						try {
+							const auth = geminiAuthOf(ctx);
+							const credential = await auth.complete({ input, pending, store: auth.store() });
+							pendingGeminiLogin = null;
+							pushInfo(ctx.handle, geminiSignedInLine(credential));
+						} catch (error) {
+							pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
+						}
+					})();
+					return true;
+				}
+				if (geminiLoginRunning) {
+					pushInfo(
+						ctx.handle,
+						"A Gemini sign-in is already running. Finish it in the browser, or paste its code with /login gemini <code>.",
+					);
+					return true;
+				}
+				geminiLoginRunning = true;
+				void (async () => {
+					try {
+						const auth = geminiAuthOf(ctx);
+						const result = await auth.login({
+							store: auth.store(),
+							note: (line) => pushInfo(ctx.handle, line),
+						});
+						if (result.kind === "pending") {
+							pendingGeminiLogin = result.pending;
+							pushInfo(ctx.handle, "When the page shows the code, run: /login gemini <code>");
+						} else {
+							pendingGeminiLogin = null;
+							pushInfo(ctx.handle, geminiSignedInLine(result.credential));
+						}
+					} catch (error) {
+						pushInfo(ctx.handle, `The sign-in did not complete: ${error instanceof Error ? error.message : error}`);
+					} finally {
+						geminiLoginRunning = false;
 					}
 				})();
 				return true;
@@ -3930,6 +4019,23 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 							had
 								? "Signed out of the ChatGPT subscription. The next request to a ChatGPT model asks for a sign-in."
 								: "No ChatGPT subscription was signed in.",
+						);
+					} catch (error) {
+						pushInfo(ctx.handle, `Could not sign out: ${error instanceof Error ? error.message : error}`);
+					}
+				})();
+				return true;
+			}
+			if (text.split(/\s+/)[1]?.toLowerCase() === "gemini") {
+				void (async () => {
+					try {
+						const had = await clearGeminiSubscription(geminiAuthOf(ctx).store());
+						pendingGeminiLogin = null;
+						pushInfo(
+							ctx.handle,
+							had
+								? "Signed out of the Gemini subscription. The next request to a Gemini model asks for a sign-in."
+								: "No Gemini subscription was signed in.",
 						);
 					} catch (error) {
 						pushInfo(ctx.handle, `Could not sign out: ${error instanceof Error ? error.message : error}`);

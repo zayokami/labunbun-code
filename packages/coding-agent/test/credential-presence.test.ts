@@ -42,13 +42,20 @@ function testModel(overrides: Partial<Model> = {}): Model {
 const anthropicRow = testModel({ provider: "anthropic", id: "claude-sonnet-5" });
 /** A wire that is subscription or nothing, and names no variable by construction. */
 const chatgptRow = testModel({ provider: "chatgpt", id: "gpt-5.6", api: "chatgpt-responses", apiKeyEnv: undefined });
+/** The same shape on the Gemini wire. */
+const geminiRow = testModel({
+	provider: "google",
+	id: "gemini-sub-row",
+	api: "gemini-code-assist",
+	apiKeyEnv: undefined,
+});
 /** An ordinary env-keyed row on a provider with no subscription. */
 const envRow = testModel({ id: "env-row", apiKeyEnv: "CREDENTIAL_TEST_KEY" });
 /** The local daemon's shape: no variable named at all. */
 const keylessRow = testModel({ id: "keyless", apiKeyEnv: undefined });
 
 function signIns(overrides: Partial<SubscriptionSignIns> = {}): SubscriptionSignIns {
-	return { claude: false, chatgpt: false, ...overrides };
+	return { claude: false, chatgpt: false, gemini: false, ...overrides };
 }
 
 describe("modelMayRun", () => {
@@ -79,8 +86,15 @@ describe("modelMayRun", () => {
 		expect(modelMayRun(chatgptRow, signIns({ claude: true }))).toBe(false);
 	});
 
+	test("the Gemini wire runs on its sign-in alone", () => {
+		expect(modelMayRun(geminiRow, NO_SIGN_INS)).toBe(false);
+		expect(modelMayRun(geminiRow, signIns({ gemini: true }))).toBe(true);
+		// The other subscriptions belong to different wires.
+		expect(modelMayRun(geminiRow, signIns({ claude: true, chatgpt: true }))).toBe(false);
+	});
+
 	test("a sign-in does not leak onto other providers' rows", () => {
-		expect(modelMayRun(envRow, signIns({ claude: true, chatgpt: true }))).toBe(false);
+		expect(modelMayRun(envRow, signIns({ claude: true, chatgpt: true, gemini: true }))).toBe(false);
 	});
 });
 
@@ -112,6 +126,7 @@ describe("unrunnableSuffix", () => {
 	test("the wording follows the wire, because the fix does", () => {
 		expect(unrunnableSuffix(anthropicRow, NO_SIGN_INS)).toBe("no API key or sign-in");
 		expect(unrunnableSuffix(chatgptRow, NO_SIGN_INS)).toBe("no ChatGPT sign-in");
+		expect(unrunnableSuffix(geminiRow, NO_SIGN_INS)).toBe("no Gemini sign-in");
 		expect(unrunnableSuffix(envRow, NO_SIGN_INS)).toBe("no API key");
 	});
 
@@ -132,6 +147,10 @@ describe("missingCredentialNotice", () => {
 		expect(missingCredentialNotice(chatgptRow, NO_SIGN_INS)).toContain("/login chatgpt to sign in");
 	});
 
+	test("the Gemini wire names the sign-in to ask for", () => {
+		expect(missingCredentialNotice(geminiRow, NO_SIGN_INS)).toContain("/login gemini to sign in");
+	});
+
 	test("an env row names the variable", () => {
 		expect(missingCredentialNotice(envRow, NO_SIGN_INS)).toContain("Set CREDENTIAL_TEST_KEY in your environment");
 	});
@@ -148,17 +167,35 @@ describe("detectSubscriptionSignIns", () => {
 		writeFileSync(join(home, ".labunbun", name), "{}\n");
 	}
 
-	test("an empty home reports both signed out", async () => {
+	test("an empty home reports everything signed out", async () => {
 		const home = makeHome();
-		expect(await detectSubscriptionSignIns({ home, keychain: null })).toEqual({ claude: false, chatgpt: false });
+		expect(await detectSubscriptionSignIns({ home, keychain: null })).toEqual({
+			claude: false,
+			chatgpt: false,
+			gemini: false,
+		});
 	});
 
 	test("each store answers for its own subscription", async () => {
 		const home = makeHome();
 		signInFile(home, ".credentials.json");
-		expect(await detectSubscriptionSignIns({ home, keychain: null })).toEqual({ claude: true, chatgpt: false });
+		expect(await detectSubscriptionSignIns({ home, keychain: null })).toEqual({
+			claude: true,
+			chatgpt: false,
+			gemini: false,
+		});
 		signInFile(home, ".chatgpt-credentials.json");
-		expect(await detectSubscriptionSignIns({ home, keychain: null })).toEqual({ claude: true, chatgpt: true });
+		expect(await detectSubscriptionSignIns({ home, keychain: null })).toEqual({
+			claude: true,
+			chatgpt: true,
+			gemini: false,
+		});
+		signInFile(home, "gemini-oauth.json");
+		expect(await detectSubscriptionSignIns({ home, keychain: null })).toEqual({
+			claude: true,
+			chatgpt: true,
+			gemini: true,
+		});
 	});
 
 	test("a malformed file is not a sign-in", async () => {

@@ -15,6 +15,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SubscriptionSignIns } from "../src/credential-presence.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -38,7 +39,7 @@ function fixture() {
  * is about what mounting says, not about what a request then does — the mock
  * frame's `waitUntilExit` returns immediately.
  */
-async function mount(home: string, cwd: string, signIns: { claude: boolean; chatgpt: boolean }) {
+async function mount(home: string, cwd: string, signIns: SubscriptionSignIns) {
 	const script = `
 		import { mock } from "bun:test";
 		import * as ai from "@labunbun/ai";
@@ -87,7 +88,7 @@ describe("the startup credential notice", () => {
 	test("a machine with no credential still mounts, and says the first prompt will fail", async () => {
 		const { home, cwd } = fixture();
 
-		const result = await mount(home, cwd, { claude: false, chatgpt: false });
+		const result = await mount(home, cwd, { claude: false, chatgpt: false, gemini: false });
 
 		expect(result.exitCode).toBe(0);
 		expect(result.entries.join("\n")).toContain(
@@ -98,7 +99,7 @@ describe("the startup credential notice", () => {
 	test("a signed-in machine mounts the same way and gets no notice", async () => {
 		const { home, cwd } = fixture();
 
-		const result = await mount(home, cwd, { claude: true, chatgpt: false });
+		const result = await mount(home, cwd, { claude: true, chatgpt: false, gemini: false });
 
 		expect(result.exitCode).toBe(0);
 		expect(result.entries.join("\n")).not.toContain("No credential for");

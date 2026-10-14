@@ -44,6 +44,7 @@ import { createClaudeCredentials } from "./claude-auth.ts";
 import { builtInCommands, expandPromptCommand } from "./commands.ts";
 import { type CompactionTuning, createCompactionWiring, resolveCompactionSummarizer } from "./compaction-wiring.ts";
 import { CostTracker, costStateFromMessages } from "./cost-tracker.ts";
+import { createGeminiCredentials } from "./gemini-auth.ts";
 import { advisoryHookFailures, sessionHookDeps, snapshotHooks } from "./hooks.ts";
 import { loadMemoryFiles } from "./memory.ts";
 import { writeMissionRecord } from "./mission-ledger.ts";
@@ -402,13 +403,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// The Claude subscription, when one is signed in. A `-p` run reads the
 	// same stored sign-in the REPL does, and the anthropic adapter prefers it
 	// over the environment key, so headless and interactive cannot disagree
-	// about which credential served a request. The ChatGPT subscription rides
-	// the same reasoning on its own wire.
+	// about which credential served a request. The ChatGPT and Gemini
+	// subscriptions ride the same reasoning on their own wires.
 	const credentials = createClaudeCredentials({ home });
 	const chatgptCredentials = createChatGptCredentials({ home });
+	const geminiCredentials = createGeminiCredentials({ home });
 	const transport: { streamFn: StreamFn; tracker?: CacheTracker } = options.streamFn
 		? { streamFn: options.streamFn }
-		: createTrackedStreamFn({ policy: settings.cache, credentials, chatgptCredentials });
+		: createTrackedStreamFn({ policy: settings.cache, credentials, chatgptCredentials, geminiCredentials });
 	// The same fallback the REPL wraps around its transport, from the same
 	// settings: a `-p` run that ignored `fallbackModels` kept failing on a model
 	// whose provider was down while an interactive run of the same prompt would
