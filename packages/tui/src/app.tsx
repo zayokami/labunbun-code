@@ -191,6 +191,13 @@ export interface ReplAppHandle {
 	): void;
 	/** Swap the active theme; takes effect on the next render. */
 	setTheme(theme: Theme): void;
+	/**
+	 * Show a theme without committing it: the live rows recolor, the sealed
+	 * transcript keeps the palette it was printed with, and nothing is wiped
+	 * or reprinted. What the picker calls as the highlight moves; see
+	 * `applyTheme` for what making the choice costs.
+	 */
+	previewTheme(theme: Theme): void;
 	/** Turn modal vim editing in the prompt on or off (`/vim`). */
 	setVimMode(on: boolean): void;
 	/** Turn modeless emacs editing in the prompt on or off (`/emacs`). */
@@ -251,25 +258,50 @@ function sameTail(a: string[], b: string[]): boolean {
 }
 
 /**
- * Change the theme: the palette in the store, and the screen underneath it.
+ * Commit a theme: the palette in the store, and the screen underneath it.
  *
  * Ink appends `<Static>` output and never erases it, so a row that has been
  * printed belongs to the terminal's scrollback with the colors it was born
- * with. The transcript remounts on a new theme object and ink prints every
+ * with. The transcript remounts on a new committed theme and ink prints every
  * sealed row again (see `transcriptPaintKey`) — which is a repaint only if the
  * screen is empty first, or the transcript would simply appear twice, the old
  * palette above the new. Taking the screen back takes the scrollback with it
  * on the terminals that can; Windows consoles keep it (see
  * `clearScreenSequence`). So the wipe is spent only when there is both
  * something to reprint and something to change.
+ *
+ * Committing is the expensive half, and it is for choices that are being
+ * kept — Enter in the picker, `/theme <name>`. Browsing the list previews
+ * through `previewTheme` instead, which is why this may find `theme` already
+ * equal and still have work to do: a previewed theme has not been stamped
+ * into the transcript yet, and stamping is exactly the wipe-and-reprint.
  */
 export function applyTheme(
 	store: Store<UiState>,
 	theme: Theme,
 	stream: { isTTY?: boolean; write: (data: string) => void } = process.stdout,
 ): void {
-	if (store.get().theme === theme) return;
+	if (store.get().theme === theme && store.get().themeCommit === theme) return;
 	if (stream.isTTY && sealCount(store.get().entries) > 0) stream.write(clearScreenSequence());
+	store.set((s) => ({ ...s, theme, themeCommit: theme }));
+}
+
+/**
+ * Show a theme without stamping it into the transcript.
+ *
+ * The picker previews a theme on every highlight move, and a move is not a
+ * choice. Committing each one — the old behavior — wiped the screen and
+ * reprinted the whole transcript on every arrow press, scrollback included
+ * wherever the wipe reaches it: the screen the user is reading gets redrawn
+ * per keystroke. A preview changes `theme` and stops: the live rows recolor
+ * because they re-render — the palette reaches them through the provider —
+ * while the sealed rows keep the colors they were printed with, because the
+ * list's remount key reads `themeCommit` and it has not moved. Undoing a
+ * preview costs the same one store write (`/theme`'s cancel does exactly
+ * that). Whatever preview is kept commits through `applyTheme`.
+ */
+export function previewTheme(store: Store<UiState>, theme: Theme): void {
+	if (store.get().theme === theme) return;
 	store.set((s) => ({ ...s, theme }));
 }
 
@@ -348,6 +380,9 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 			describeModeChoice(options.session.permissionMode, options.session.sandbox),
 		),
 		theme: options.theme ?? DEFAULT_THEME,
+		// What is on screen at startup was never printed before, so the stamp
+		// starts on the same palette — nothing to reprint until a choice moves it.
+		themeCommit: options.theme ?? DEFAULT_THEME,
 		modelName: options.modelName,
 	});
 
@@ -463,6 +498,9 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 			}),
 		setTheme: (theme) => {
 			applyTheme(store, theme);
+		},
+		previewTheme: (theme) => {
+			previewTheme(store, theme);
 		},
 		setSession: (next) => {
 			sessionHolder.current = next;

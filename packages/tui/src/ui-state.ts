@@ -182,6 +182,18 @@ export interface UiState {
 	 * the provider reads it from here, so a change rerenders the tree.
 	 */
 	theme: Theme;
+	/**
+	 * The palette the sealed rows were printed with — the half of the theme
+	 * `<Static>` froze into the scrollback. Moves only when the transcript is
+	 * actually reprinted under a new palette (`applyTheme`, and Ctrl+L's
+	 * repaint); a picker preview recolors the live rows through the provider
+	 * and leaves the printed ones alone, so it must not move this. The list
+	 * keys its remount on this rather than on `theme` (`transcriptPaintKey`),
+	 * which is what keeps arrow presses in the theme picker from wiping the
+	 * screen and reprinting the whole transcript per keystroke. Equal to
+	 * `theme` at rest.
+	 */
+	themeCommit: Theme;
 	/** Display name of the active model. In the store so /model switching updates the status line live. */
 	modelName: string;
 	/**
@@ -296,6 +308,7 @@ export function initialUiState(vim = false, emacs = false, modeLabel = ""): UiSt
 		backgroundShells: [],
 		queued: [],
 		theme: DEFAULT_THEME,
+		themeCommit: DEFAULT_THEME,
 		modelName: "",
 		modeLabel,
 		vim,

@@ -3548,7 +3548,17 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 		case "/theme": {
 			const arg = text.split(/\s+/)[1];
 			void (async () => {
-				/** Show a theme: the app's idea of the current one and the tree's. */
+				/**
+				 * Show a theme as a preview: the live rows recolor, and the sealed
+				 * transcript keeps the palette it was printed with. What the picker
+				 * calls as the highlight moves — a move is not a choice.
+				 */
+				const preview = (resolved: ResolvedTheme) => {
+					ctx.theme.theme = resolved.theme;
+					ctx.theme.available = resolved.available;
+					ctx.handle?.previewTheme(resolved.theme);
+				};
+				/** Show a theme as chosen: the sealed rows are wiped and reprinted under it. */
 				const apply = (resolved: ResolvedTheme) => {
 					ctx.theme.theme = resolved.theme;
 					ctx.theme.available = resolved.available;
@@ -3590,8 +3600,10 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 
 				// No name: pick from a list that previews itself. Every theme is
 				// resolved up front — including `auto`, whose probe needs stdin and
-				// cannot run while the picker owns the keyboard — so a highlight can
-				// repaint the whole screen in the same keystroke.
+				// cannot run while the picker owns the keyboard — so a highlight
+				// recolors the screen in the same keystroke. Moving previews; only
+				// Enter (or an argument) commits, and the commit is what pays for
+				// wiping the screen and reprinting the transcript.
 				//
 				// The list is read from disk here rather than taken from the startup
 				// snapshot: opening `/theme` is how a user reaches the file they just
@@ -3624,11 +3636,13 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					})),
 					{
 						initialIndex: Math.max(active, 0),
-						onHighlight: (i) => apply(resolved[i]),
+						onHighlight: (i) => preview(resolved[i]),
 						onCancel: () => {
 							ctx.theme.theme = previous;
 							ctx.theme.available = previousAvailable;
-							ctx.handle?.setTheme(previous);
+							// A preview never touched the transcript, so undoing one
+							// never has to reprint it either.
+							ctx.handle?.previewTheme(previous);
 						},
 					},
 				);

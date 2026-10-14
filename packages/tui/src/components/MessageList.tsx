@@ -452,6 +452,7 @@ export function VirtualMessageList({
 	entries,
 	liveOutputs,
 	paint = 0,
+	paintedTheme,
 }: {
 	entries: UiEntry[];
 	/** Output streamed by tools that are still running, keyed by call id. */
@@ -462,8 +463,20 @@ export function VirtualMessageList({
 	 * wiped with Ctrl+L needs them printed again without the palette changing.
 	 */
 	paint?: number;
+	/**
+	 * The palette the sealed rows were last printed with, when that is not the
+	 * one now in effect — a theme preview in the picker. The remount key
+	 * follows this rather than the context, so a preview recolors the live
+	 * rows alone and the rows above stay exactly as they were printed until
+	 * the choice is committed. Callers that do not track the two apart leave
+	 * it out and read the context, like the live rows do.
+	 */
+	paintedTheme?: Theme;
 }) {
 	const theme = useTheme();
+	// What the sealed rows were printed with: the context value, unless the
+	// caller knows the transcript is a commit behind (see `paintedTheme`).
+	const printedTheme = paintedTheme ?? theme;
 	const sealed = sealCount(entries);
 	const head = entries.slice(0, sealed);
 	const tail = entries.slice(sealed);
@@ -473,7 +486,7 @@ export function VirtualMessageList({
 
 	return (
 		<Box flexDirection="column">
-			<Static key={`${transcriptPaintKey(theme)}:${paint}`} items={head}>
+			<Static key={`${transcriptPaintKey(printedTheme)}:${paint}`} items={head}>
 				{(entry, i) => <EntryView key={`sealed-${i}`} entry={entry} />}
 			</Static>
 			{tail.map((entry, i) => (

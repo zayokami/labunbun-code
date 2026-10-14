@@ -16,7 +16,7 @@
 import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import type React from "react";
-import { applyTheme } from "../src/app.tsx";
+import { applyTheme, previewTheme } from "../src/app.tsx";
 import { transcriptPaintKey, VirtualMessageList } from "../src/components/MessageList.tsx";
 import { clearScreenSequence } from "../src/components/REPL.tsx";
 import { createStore } from "../src/store.ts";
@@ -112,6 +112,47 @@ describe("the sealed rows repaint when the palette changes", () => {
 	});
 });
 
+/**
+ * The preview half of the split: the picker's highlight moves recolor the
+ * live rows and stop there. The transcript above is the printed record of the
+ * committed palette, and it is not reprinted — or wiped, or remounted — until
+ * a choice is kept (see `previewTheme`).
+ */
+describe("a preview dresses the live rows only", () => {
+	test("moving the highlight cannot reach the sealed rows", () => {
+		const view = render(withTheme(<VirtualMessageList entries={errorThenAnswers} paintedTheme={DARK_THEME} />));
+		expect(view.lastFrame()).toContain(oldRow);
+
+		// A preview: the palette in effect changed, the committed one did not.
+		view.rerender(withTheme(<VirtualMessageList entries={errorThenAnswers} paintedTheme={DARK_THEME} />, LOUD));
+
+		// The context around the printed rows changed and they did not move —
+		// the list is keyed to the committed palette, not the previewed one.
+		const frame = view.lastFrame() ?? "";
+		expect(frame).toContain(oldRow);
+		expect(frame).not.toContain(newRow);
+		view.unmount();
+	});
+
+	test("committing after previews reprints them in the chosen palette, once", () => {
+		const view = render(withTheme(<VirtualMessageList entries={errorThenAnswers} paintedTheme={DARK_THEME} />));
+		// Three moves, as the picker would send them: none may reprint.
+		for (const preview of [LOUD, DARK_THEME, LOUD]) {
+			view.rerender(withTheme(<VirtualMessageList entries={errorThenAnswers} paintedTheme={DARK_THEME} />, preview));
+		}
+		expect(view.lastFrame() ?? "").not.toContain(newRow);
+
+		// Enter: the committed palette moves with it, and the rows arrive in it
+		// — once, and as the whole transcript.
+		view.rerender(withTheme(<VirtualMessageList entries={errorThenAnswers} paintedTheme={LOUD} />, LOUD));
+		const frame = view.lastFrame() ?? "";
+		expect(frame.match(/@@ boom/g)).toHaveLength(1);
+		expect(frame).not.toContain(oldRow);
+		expect(frame.match(/answer \d+/g)).toHaveLength(20);
+		view.unmount();
+	});
+});
+
 describe("the screen is taken back before the reprint", () => {
 	function fakeStdout(isTTY = true) {
 		const writes: string[] = [];
@@ -170,6 +211,49 @@ describe("the screen is taken back before the reprint", () => {
 		const before = store.get();
 		const { stream, writes } = fakeStdout();
 
+		applyTheme(store, DARK_THEME, stream);
+
+		expect(writes).toEqual([]);
+		expect(store.get()).toBe(before);
+	});
+
+	// The picker previews on every move, and a move is not a choice. A preview
+	// must not wipe, and must not stamp the transcript: the sealed rows are
+	// still the committed palette's until one is kept.
+	test("a preview changes the palette without touching the screen or the stamp", () => {
+		const store = storeWith(errorThenAnswers);
+		const { writes } = fakeStdout();
+
+		previewTheme(store, LOUD);
+
+		expect(writes).toEqual([]);
+		expect(store.get().theme).toBe(LOUD);
+		expect(store.get().themeCommit).toBe(DARK_THEME);
+	});
+
+	test("undone previews leave nothing behind, and the kept one pays once", () => {
+		const store = storeWith(errorThenAnswers);
+		const { stream, writes } = fakeStdout();
+
+		previewTheme(store, LOUD);
+		previewTheme(store, DARK_THEME);
+		previewTheme(store, LOUD);
+		applyTheme(store, LOUD, stream);
+
+		expect(writes).toEqual([clearScreenSequence()]);
+		expect(store.get().theme).toBe(LOUD);
+		expect(store.get().themeCommit).toBe(LOUD);
+	});
+
+	// The previewer can also land on the theme already committed — opening the
+	// list and pressing Enter without moving does exactly that — and that is
+	// not a change: nothing may be wiped for a transcript that already matches.
+	test("previewing the committed theme and committing it again is a no-op", () => {
+		const store = storeWith(errorThenAnswers);
+		const before = store.get();
+		const { stream, writes } = fakeStdout();
+
+		previewTheme(store, DARK_THEME);
 		applyTheme(store, DARK_THEME, stream);
 
 		expect(writes).toEqual([]);

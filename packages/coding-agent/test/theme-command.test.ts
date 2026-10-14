@@ -47,6 +47,9 @@ async function makeCtx(configured?: string, tiers: ReturnType<typeof settingsWit
 
 	const picks: Pick[] = [];
 	let settle: ((index: number | null) => void) | undefined;
+	/** Which palette went down which channel, by name — preview vs commit. */
+	const previewed: string[] = [];
+	const committed: string[] = [];
 	const faux = fauxProvider([{ text: "n/a" }]);
 	const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
 
@@ -54,7 +57,14 @@ async function makeCtx(configured?: string, tiers: ReturnType<typeof settingsWit
 		getSession: () => session,
 		handle: {
 			store,
-			setTheme: (theme: Theme) => store.set((s) => ({ ...s, theme })),
+			setTheme: (theme: Theme) => {
+				committed.push(theme.name);
+				store.set((s) => ({ ...s, theme }));
+			},
+			previewTheme: (theme: Theme) => {
+				previewed.push(theme.name);
+				store.set((s) => ({ ...s, theme }));
+			},
 			pickFromList: (title: string, items: Pick["items"], options?: Pick) => {
 				picks.push({ title, items, ...options });
 				return new Promise<number | null>((resolve) => {
@@ -86,6 +96,8 @@ async function makeCtx(configured?: string, tiers: ReturnType<typeof settingsWit
 		home,
 		names: registry.available,
 		picks,
+		previewed,
+		committed,
 		finish: (index: number | null) => settle?.(index),
 	};
 }
@@ -162,13 +174,18 @@ describe("/theme without an argument", () => {
 		h.finish(null);
 	});
 
-	test("moving the highlight repaints the app, and writes nothing", async () => {
+	test("moving the highlight previews the theme, and writes nothing", async () => {
 		const h = await openPicker();
 		const second = h.names[1];
 		expect(second).toBeDefined();
 		h.pick.onHighlight?.(1);
 
 		expect(h.store.get().theme.name).toBe(second);
+		// Down the preview channel, not the commit one: a move is not a choice,
+		// and the commit channel is what wipes the screen and reprints the
+		// transcript, so it must stay untouched until Enter.
+		expect(h.previewed).toEqual([second]);
+		expect(h.committed).toEqual([]);
 		expect(savedTheme(h.home)).toBeUndefined();
 		h.finish(null);
 	});
@@ -184,6 +201,10 @@ describe("/theme without an argument", () => {
 		await delay(10);
 		expect(h.store.get().theme.name).toBe(was);
 		expect(savedTheme(h.home)).toBeUndefined();
+		// Undone as a preview as well: the transcript was never reprinted, so
+		// coming back must not reprint it either.
+		expect(h.committed).toEqual([]);
+		expect(h.previewed.at(-1)).toBe(was);
 	});
 
 	test("confirming applies the highlighted theme and saves it", async () => {
@@ -196,6 +217,10 @@ describe("/theme without an argument", () => {
 		expect(h.store.get().theme.name).toBe(second);
 		expect(savedTheme(h.home)).toBe(second);
 		expect(infoTexts(h.store)).toContain(`Theme: ${second}`);
+		// The move previewed, and Enter committed — the one write in this test
+		// that may wipe the screen is the one that keeps the choice.
+		expect(h.previewed).toEqual([second]);
+		expect(h.committed).toEqual([second]);
 	});
 
 	test("auto is resolved through the picker, not just named", async () => {

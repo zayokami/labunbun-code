@@ -27,7 +27,13 @@ export {
 	batteryBar,
 	StatusLine,
 } from "./components/StatusLine.tsx";
-export { chunkForConPTY, chunkWritesForConPTY, isConPTYHost, MAX_CONPTY_WRITE } from "./conpty.ts";
+export {
+	chunkForConPTY,
+	chunkWritesForConPTY,
+	isConPTYHost,
+	MAX_CONPTY_WRITE,
+	stripScrollbackErase,
+} from "./conpty.ts";
 export {
 	type Appearance,
 	appearanceFromColorFgBg,

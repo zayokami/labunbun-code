@@ -2,12 +2,18 @@
  * The console family's write rules, without a console.
  *
  * Which hosts count, where a chunk may cut, and what the installed writer
- * does with small writes, trailing arguments and a second install — each is a
- * pure decision, so each is pinned here; the reprint that actually trips the
- * budget is measured in repl-clear-screen.
+ * does with small writes, trailing arguments, a second install and the
+ * scrollback erase — each is a pure decision, so each is pinned here; the
+ * reprint that actually trips the budget is measured in repl-clear-screen.
  */
 import { describe, expect, test } from "bun:test";
-import { chunkForConPTY, chunkWritesForConPTY, isConPTYHost, MAX_CONPTY_WRITE } from "../src/conpty.ts";
+import {
+	chunkForConPTY,
+	chunkWritesForConPTY,
+	isConPTYHost,
+	MAX_CONPTY_WRITE,
+	stripScrollbackErase,
+} from "../src/conpty.ts";
 
 describe("isConPTYHost", () => {
 	test("windows itself", () => {
@@ -74,6 +80,20 @@ describe("chunkForConPTY", () => {
 	});
 });
 
+describe("stripScrollbackErase", () => {
+	// ink's fullscreen clear, exactly as ansi-escapes spells it.
+	const clearTerminal = "\x1b[2J\x1b[3J\x1b[H";
+
+	test("the 3J goes, everything around it stays", () => {
+		expect(stripScrollbackErase(clearTerminal)).toBe("\x1b[2J\x1b[H");
+		expect(stripScrollbackErase(`head${clearTerminal}body\x1b[3J`)).toBe("head\x1b[2J\x1b[Hbody");
+	});
+
+	test("a write with no 3J is untouched", () => {
+		expect(stripScrollbackErase("\x1b[2J\x1b[Hplain")).toBe("\x1b[2J\x1b[Hplain");
+	});
+});
+
 describe("chunkWritesForConPTY", () => {
 	function fakeStream() {
 		const calls: unknown[][] = [];
@@ -128,5 +148,27 @@ describe("chunkWritesForConPTY", () => {
 
 		const once = chunkForConPTY(data);
 		expect(calls.map(([chunk]) => chunk)).toEqual(once);
+	});
+
+	test("the scrollback erase is dropped on the way out", () => {
+		const { stream, calls } = fakeStream();
+		chunkWritesForConPTY(stream);
+
+		// ink's fullscreen clear, followed by the frame it prints onto it.
+		stream.write("\x1b[2J\x1b[3J\x1b[Hnext frame");
+
+		expect(calls).toEqual([["\x1b[2J\x1b[Hnext frame"]]);
+	});
+
+	test("stripping happens before the cut, so the pieces join to the stripped data", () => {
+		const { stream, calls } = fakeStream();
+		chunkWritesForConPTY(stream);
+		const data = `${"\x1b[3J" + "y".repeat(200)}\n`.repeat(100); // ~20 KB
+
+		stream.write(data);
+
+		expect(calls.length).toBeGreaterThan(1);
+		for (const [chunk] of calls) expect((chunk as string).length).toBeLessThanOrEqual(MAX_CONPTY_WRITE);
+		expect(calls.map(([chunk]) => chunk).join("")).toBe(stripScrollbackErase(data));
 	});
 });

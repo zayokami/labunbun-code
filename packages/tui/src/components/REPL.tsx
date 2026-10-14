@@ -228,6 +228,11 @@ export function REPL({
 	// Ctrl+L wipes the screen the sealed transcript was printed onto; this is the
 	// stamp that says so, and it rides along in the list's key.
 	const paint = useStore(store, (s) => s.paint);
+	// The palette the sealed rows were printed with. Equal to the context theme
+	// except while the picker is previewing, when the transcript above still
+	// carries this one — and that is what the list's key reads, so reviewing
+	// themes cannot reprint the transcript on every arrow press.
+	const themeCommit = useStore(store, (s) => s.themeCommit);
 	// The permission mode, read from the store for the same reason `vim` is: the
 	// app layer's `/mode` writes it, and there is no event to subscribe to.
 	const modeLabel = useStore(store, (s) => s.modeLabel);
@@ -591,7 +596,11 @@ export function REPL({
 			// is byte-identical to the last one — so it skips the write and the
 			// clear is all the user sees.
 			if (stdout.isTTY) writeStdout(clearScreenSequence());
-			store.set((s) => ({ ...s, paint: s.paint + 1 }));
+			// The reprint that follows happens under the palette in effect —
+			// normally the committed one, but the picker can be previewing one —
+			// so the stamp of what the sealed rows were printed with moves with
+			// the paint. At rest it is already this value and the write is a no-op.
+			store.set((s) => ({ ...s, paint: s.paint + 1, themeCommit: s.theme }));
 			return;
 		}
 		// A dialog owns Esc while one is open: there it means "deny this request"
@@ -808,7 +817,7 @@ export function REPL({
 			) : (
 				<>
 					<TerminalTitle phase={statusPhase} dirName={dirName} actionRequired={awaitingUser} />
-					<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} />
+					<VirtualMessageList entries={entries} liveOutputs={liveOutputs} paint={paint} paintedTheme={themeCommit} />
 					<StreamingPreview text={streamingText} thinking={thinkingText} />
 					{tasks && tasks.length > 0 && <TaskStrip tasks={tasks} />}
 					<Box marginBottom={1} flexDirection="column">

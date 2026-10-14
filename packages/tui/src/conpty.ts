@@ -11,6 +11,11 @@
  * The family is wider than one product: ConPTY sits behind Windows Terminal,
  * conhost, VS Code's terminal, Tabby and Hyper alike, and a WSL shell hosted
  * by any of them crosses it too.
+ *
+ * A second rule rides along on the same write: no scrollback erase. See
+ * `stripScrollbackErase` — a Windows console reads 3J literally, and ink
+ * emits it inside the clear it performs on every redraw of a fullscreen
+ * frame there, which is the shape a picker-size dialog gives every frame.
  */
 
 /** A fourth of the smallest buffer budget anyone has reported. */
@@ -50,20 +55,41 @@ export function chunkForConPTY(data: string, max = MAX_CONPTY_WRITE): string[] {
 const chunked = new WeakSet<object>();
 
 /**
- * Replace the stream's `write` with one that chunks, in place, once — whoever
- * holds the stream afterwards (ink, a title writer) writes through it without
- * knowing. Idempotent, so an entry that runs twice installs once. A write that
- * already fits, or that carries trailing arguments (an encoding or callback —
- * nothing in this app sends one), passes through untouched.
+ * Drop the scrollback erase from a write.
+ *
+ * `3J` erases the terminal's scrollback, and a Windows console reads it
+ * literally: the scrollback goes and a reader who had scrolled up is pulled
+ * back to the screen. The app's own clears already stop at the screen on a
+ * ConPTY host (`clearScreenSequence`), but ink's own fullscreen clear is
+ * built from `ansiEscapes.clearTerminal`, which carries the 3J
+ * unconditionally — on every redraw of a fullscreen frame. Nothing this app
+ * draws lives above the screen — that is what the screen erase underneath is
+ * for — so the sequence is removed from every write headed for one.
+ */
+export function stripScrollbackErase(data: string): string {
+	return data.replaceAll("\x1b[3J", "");
+}
+
+/**
+ * Replace the stream's `write` with the ConPTY rules — chunks under the
+ * budget, no scrollback erase — in place, once; whoever holds the stream
+ * afterwards (ink, a title writer) writes through it without knowing.
+ * Idempotent, so an entry that runs twice installs once. A write carrying
+ * trailing arguments (an encoding or callback — nothing in this app sends
+ * one), passes through untouched.
  */
 export function chunkWritesForConPTY(stream: { write: (...args: any[]) => unknown }, max = MAX_CONPTY_WRITE): void {
 	if (chunked.has(stream)) return;
 	chunked.add(stream);
 	const write = stream.write.bind(stream);
 	stream.write = (data: string, ...rest: unknown[]) => {
-		if (rest.length > 0 || data.length <= max) return write(data, ...rest);
+		if (rest.length > 0) return write(data, ...rest);
+		// Stripped first, so the cut sees the bytes that will land: a chunk
+		// boundary never falls inside a sequence that no longer exists.
+		const cleaned = stripScrollbackErase(data);
+		if (cleaned.length <= max) return write(cleaned);
 		let result: unknown = true;
-		for (const chunk of chunkForConPTY(data, max)) result = write(chunk);
+		for (const chunk of chunkForConPTY(cleaned, max)) result = write(chunk);
 		return result;
 	};
 }
