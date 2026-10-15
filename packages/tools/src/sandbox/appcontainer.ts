@@ -239,6 +239,13 @@ function loadKernel32Raw() {
 			},
 			ReadFile: { args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 			WriteFile: { args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+			// HANDLE CreateFileW(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+			//   DWORD, DWORD, HANDLE) — fileapi.h. `readStoredDacl` opens its
+			//   READ_CONTROL handle through this and nothing else calls it.
+			CreateFileW: {
+				args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr],
+				returns: FFIType.u64,
+			},
 			CloseHandle: { args: [FFIType.u64], returns: FFIType.i32 },
 			WaitForSingleObject: { args: [FFIType.u64, FFIType.u32], returns: FFIType.u32 },
 			GetExitCodeProcess: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
@@ -262,6 +269,30 @@ let kernel32Cache: ReturnType<typeof loadKernel32Raw> | undefined;
 function kernel32(): ReturnType<typeof loadKernel32Raw> | null {
 	if (kernel32Cache === undefined) kernel32Cache = loadKernel32Raw();
 	return kernel32Cache;
+}
+
+/** ntdll, lazily like the rest: `readStoredDacl` is its only caller. */
+let ntdllCache: ReturnType<typeof loadNtdllRaw> | undefined;
+function ntdll(): ReturnType<typeof loadNtdllRaw> | null {
+	if (ntdllCache === undefined) ntdllCache = loadNtdllRaw();
+	return ntdllCache;
+}
+
+function loadNtdllRaw() {
+	try {
+		return dlopen("ntdll.dll", {
+			// NTSTATUS NtQuerySecurityObject(HANDLE, SECURITY_INFORMATION,
+			//   PSECURITY_DESCRIPTOR, ULONG, PULONG) — winternl.h. The
+			//   storage-faithful query; `readStoredDacl` documents why the
+			//   advapi32 readers cannot stand in for it.
+			NtQuerySecurityObject: {
+				args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.ptr],
+				returns: FFIType.i32,
+			},
+		});
+	} catch {
+		return null;
+	}
 }
 
 /** The WinBase.h enum value, Input bit set — verified against the SDK headers. */
@@ -473,6 +504,16 @@ export function sidBytes(sidAddr: number): Uint8Array | null {
 
 const SE_FILE_OBJECT = 1;
 const DACL_SECURITY_INFORMATION = 0x00000004;
+// CreateFileW's arguments for the read-only handle `readStoredDacl` opens:
+// READ_CONTROL is the one right its query needs, the share mask stays out of
+// every other reader's way, and backup semantics is the bit that lets the
+// path name a directory (measured 2026-10-16 on both this machine and a
+// GitHub windows runner).
+const READ_CONTROL = 0x0002_0000;
+const FILE_SHARE_ALL = 0x7;
+const OPEN_EXISTING = 3;
+const FILE_FLAG_BACKUP_SEMANTICS = 0x0200_0000;
+const INVALID_HANDLE_VALUE = 0xffff_ffff_ffff_ffffn;
 // The self-relative descriptor's control word, as `SetFileSecurityW` reads it:
 // SE_DACL_PRESENT says a DACL is carried, SE_DACL_PROTECTED pins that DACL
 // against inheritance. Which route sets them, and which route cannot, is
@@ -536,6 +577,76 @@ function readDacl(path: string): Uint8Array | null {
 	const dacl = new Uint8Array(memoryAt(daclAddr, used)).slice();
 	kernel32()?.symbols.LocalFree(descriptor);
 	return dacl;
+}
+
+/**
+ * The DACL of `path` as the file system stores it, or null when the object
+ * carries none or cannot be opened.
+ *
+ * The advapi32 readers are not faithful on every kernel. Measured 2026-10-16
+ * on a GitHub windows runner (kernel 26100): both `GetNamedSecurityInfoW`
+ * and the handle-based `GetSecurityInfo` re-label rows that lack the
+ * INHERITED flag and match the parent's inheritable set on the way out — a
+ * directory storing `flags=0x3` reads back `0x13`, while `icacls` and this
+ * query report the stored bytes. On this machine (kernel 26200) the same
+ * state reads back with SE_DACL_PROTECTED synthesized in the control word
+ * instead; the rows agree, so only the runner exposes the split. Nothing
+ * that will be replayed through the raw writer may be captured through an
+ * advapi32 reader: the raw writer stores bytes as given, so a promoted
+ * capture materializes the phantom flags — the exact failure the 007dbd9
+ * replay hit on the runner while staying green here.
+ *
+ * `NtQuerySecurityObject` over a READ_CONTROL handle is the storage-faithful
+ * query. The buffer is the caller's, so no LocalFree — but the descriptor
+ * bytes still leave as copies before the handle closes, the same ownership
+ * rule as `readDacl`.
+ */
+function readStoredDacl(path: string): Uint8Array | null {
+	const lib = ntdll();
+	const files = kernel32();
+	if (lib === null || files === null) return null;
+	const handle = files.symbols.CreateFileW(
+		ptr(wbuf(path)),
+		READ_CONTROL,
+		FILE_SHARE_ALL,
+		null,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS,
+		null,
+	);
+	if (handle === INVALID_HANDLE_VALUE || handle === 0n) return null;
+	let buffer = new Uint8Array(4096);
+	const needed = new Uint32Array(1);
+	let status = lib.symbols.NtQuerySecurityObject(
+		handle,
+		DACL_SECURITY_INFORMATION,
+		ptr(buffer),
+		buffer.length,
+		ptr(needed),
+	);
+	// STATUS_BUFFER_TOO_SMALL (0xC0000023) and STATUS_BUFFER_OVERFLOW
+	// (0x80000005) both mean the same thing here: retry with `needed` bytes.
+	if (status >>> 0 === 0xc0000023 || status >>> 0 === 0x80000005) {
+		buffer = new Uint8Array(needed[0]);
+		status = lib.symbols.NtQuerySecurityObject(
+			handle,
+			DACL_SECURITY_INFORMATION,
+			ptr(buffer),
+			buffer.length,
+			ptr(needed),
+		);
+	}
+	files.symbols.CloseHandle(handle);
+	if (status >>> 0 !== 0) return null;
+	// The returned descriptor is self-relative: the DWORD at +16 is the
+	// DACL's offset, and zero means the object carries none. The ACL's own
+	// size field sits at +2 of the ACL; the copy is the header and every ACE.
+	const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.length);
+	const daclOffset = view.getUint32(16, true);
+	if (daclOffset === 0) return null;
+	const used = view.getUint16(daclOffset + 2, true);
+	if (used < 8 || daclOffset + used > buffer.length) return null;
+	return buffer.slice(daclOffset, daclOffset + used);
 }
 
 /** Every ACE in a DACL, walked by size, as raw slices. */
@@ -782,6 +893,10 @@ export interface ProtectOutcome {
  * inherited on some kernels (measured 2026-10-16, a GitHub windows
  * runner), so release ends with one more raw write — the list taken before
  * the grant wrote anything, `protectedAsFound` — replayed as the last word.
+ * Both replayed lists are read through `readStoredDacl`, the storage-faithful
+ * reader: a capture through an advapi32 reader hands the raw write the
+ * promoted INHERITED bits, which it then stores as given (measured, same
+ * runner, the diagnostic's second round).
  *
  * A directory that does not exist yet carries nothing to narrow and is
  * skipped — release has nothing to write back for it either. A directory
@@ -799,7 +914,7 @@ export function protectDirForGrant(dir: string, sid: Uint8Array, grantRoots: rea
 	const inside = grantRoots.map(canonicalPathForChild).some((root) => isWithinRoot(canonical, root));
 	if (!inside) return { error: `${dir} is outside every grant root; refusing to narrow it` };
 	if (!existsSync(canonical)) return {};
-	const existing = readDacl(canonical);
+	const existing = readStoredDacl(canonical);
 	if (existing === null) return { error: `${canonical} carries no DACL to narrow` };
 	const sidString = sidStringOf(sid);
 	if (sidString === null) return { error: `the SID naming ${canonical} does not read back as a string` };
@@ -1459,7 +1574,11 @@ interface ActiveGrant {
 	 * anything, read first so release can end on the raw writer: the
 	 * reconciling writers in between re-let the inheritance engine label
 	 * explicit rows as inherited on some kernels (measured 2026-10-16, a
-	 * GitHub windows runner), and only the raw writer replays bytes as given.
+	 * GitHub windows runner), and only the raw writer replays bytes as given —
+	 * which is why the list itself is a `readStoredDacl` read: captured
+	 * through an advapi32 reader it carries that reader's promoted INHERITED
+	 * bits, and the raw write stores them for real (measured, same runner,
+	 * the diagnostic's second round).
 	 */
 	protectedAsFound: ProtectedRestore[];
 }
@@ -1576,7 +1695,9 @@ export function acquireWorkspaceGrant(
 		// The reconciling writers above clean the tree but do not steward the
 		// explicit-versus-inherited marking of what they touch, so the raw
 		// writer gets the last word, replaying the lists read before each
-		// write — same measurement as release's closing write, see there.
+		// write — same measurement as release's closing write, see there. The
+		// lists are storage-faithful reads (`readStoredDacl`), see the capture
+		// below.
 		for (const { root, aces } of touched) writeDaclProtection(root, buildDacl(aces), false);
 		for (const found of protectAsFound) writeDaclProtection(found.path, buildDacl(found.aces), false);
 		return { profile, error };
@@ -1591,17 +1712,23 @@ export function acquireWorkspaceGrant(
 	// inheritance engine re-label explicit rows as inherited on some kernels
 	// (measured 2026-10-16, a GitHub windows runner: rows born from the
 	// token's default DACL came back (I)-marked while this machine's stayed
-	// byte-identical). A path outside every write root is left out — nothing
-	// will be written there, so nothing must be restored either.
+	// byte-identical). The read is `readStoredDacl`'s: on that runner the
+	// advapi32 readers handed the same rows back already promoted, and
+	// replaying such a capture through the raw writer materialized the
+	// phantom marks — the second diagnostic round measured both halves.
+	// A path outside every write root is left out — nothing will be written
+	// there, so nothing must be restored either.
 	for (const dir of [...new Set(protectedRoots.map(canonicalPathForChild))]) {
 		if (!writeRoots.some((root) => isWithinRoot(dir, root))) continue;
 		if (!existsSync(dir)) continue;
-		const prior = readDacl(dir);
+		const prior = readStoredDacl(dir);
 		if (prior === null) continue;
 		protectAsFound.push({ path: dir, aces: acesOf(prior) });
 	}
 	for (const { root, mask } of plan) {
-		const prior = readDacl(root);
+		// Storage-faithful for the same reason as the protected list above:
+		// the rollback replays this through the raw writer.
+		const prior = readStoredDacl(root);
 		if (prior === null) return fail(`${root} carries no DACL to extend`);
 		const aces = acesOf(prior);
 		if (aces.some((ace) => aceGrants(ace, sidString, mask))) continue; // already covered
@@ -1671,7 +1798,10 @@ export function releaseWorkspaceGrant(workspace: string, network = false): strin
 	// the cycle with every row (I)-marked. The raw writer stores the ACE
 	// bytes as given (measured), and it runs here, after the sweep, so
 	// nothing writes after it: the list read before the grant is what the
-	// directory keeps.
+	// directory keeps. That read is a `readStoredDacl` read — see
+	// `ActiveGrant.protectedAsFound` for why the capture side must be
+	// storage-faithful: through an advapi32 reader the promoted INHERITED
+	// bits would ride along, and this raw write would store them for real.
 	for (const found of grant.protectedAsFound) {
 		const error = writeDaclProtection(found.path, buildDacl(found.aces), false);
 		if (error !== null && firstError === null) firstError = error;
