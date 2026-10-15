@@ -7,6 +7,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
 import { defaultOperations, detectShell, EXIT_DRAIN_GRACE_MS, type ExecOperations } from "./operations.ts";
+import {
+	acquireWorkspaceGrant,
+	type ConfinedProcess,
+	canonicalPathForChild,
+	confinedCommandLine,
+	confinedEnvBlock,
+	confinedProgramName,
+	containerCanExecute,
+	containerShellRefusal,
+	releaseWorkspaceGrant,
+	spawnConfined,
+} from "./sandbox/appcontainer.ts";
 import { detectRuntime, resolveSandboxExecution, type SandboxRuntime } from "./sandbox/index.ts";
 
 /** How much of a shell's log one read may bring back. */
@@ -92,11 +104,36 @@ export async function killPidTree(pid: number): Promise<boolean> {
 	}
 }
 
+/** The stream surface the manager reads off a shell: whatever a child-like process offers as stdout/stderr. */
+interface ShellStream {
+	setEncoding(encoding: string): void;
+	on(event: "data", listener: (chunk: string | Buffer) => void): void;
+}
+
+/**
+ * The slice of a child-like process this manager uses. A `ChildProcess` from
+ * the plain spawn and the confined runner's handle both satisfy it, which is
+ * what lets the one manager take either without a shape in between.
+ */
+interface ShellProcess {
+	readonly pid?: number;
+	readonly stdout: ShellStream | null;
+	readonly stderr: ShellStream | null;
+	on(event: "error", listener: (error: Error) => void): void;
+	on(event: "exit" | "close", listener: (code: number | null) => void): void;
+	once(event: "error", listener: (error: Error) => void): void;
+	once(event: "exit" | "close", listener: (code: number | null) => void): void;
+}
+
 interface ShellEntry {
 	info: BackgroundShell;
-	proc: ChildProcess;
+	proc: ShellProcess;
 	/** When the process was seen to end; the eviction key. Unset while running. */
 	endedAt?: number;
+	/** The confined shell's grant release: runs exactly once, at the first end. */
+	release?: () => void;
+	/** The confined shell's handle-level kill: the backstop behind the pid-tree kill. */
+	terminate?: () => void;
 }
 
 let shellCounter = 0;
@@ -142,7 +179,7 @@ export class BackgroundShellManager {
 	readonly #spawnHandlers = new Set<(shell: BackgroundShell) => void>();
 	/** Who to tell at every end, kill included; see `onSettled`. */
 	readonly #settleHandlers = new Set<(shell: BackgroundShell) => void>();
-	readonly #shell = detectShell();
+	readonly #shell: ReturnType<typeof detectShell>;
 	/** Injected for the same reason as `ChildProcessExecOperations`'s: so a test on
 	 * one platform can exercise the wrapping branch for another. */
 	readonly #runtime: SandboxRuntime;
@@ -150,9 +187,16 @@ export class BackgroundShellManager {
 	 * that confines a network cannot be built without one. */
 	readonly #operations: ExecOperations;
 
-	constructor(runtime: SandboxRuntime = detectRuntime(), operations: ExecOperations = defaultOperations()) {
+	constructor(
+		runtime: SandboxRuntime = detectRuntime(),
+		operations: ExecOperations = defaultOperations(),
+		// Injected like the runtime: so a test can pin the shell the container
+		// branch wraps without depending on what this machine has installed.
+		shell: ReturnType<typeof detectShell> = detectShell(),
+	) {
 		this.#runtime = runtime;
 		this.#operations = operations;
+		this.#shell = shell;
 	}
 
 	/**
@@ -215,6 +259,16 @@ export class BackgroundShellManager {
 	#onEnded(entry: ShellEntry): void {
 		if (entry.endedAt !== undefined) return;
 		entry.endedAt = Date.now();
+		// The confined shell's grant comes back before anyone is told the shell
+		// ended: a subscriber that immediately starts the next shell must not
+		// race the release, and a cleanup warning belongs in the log before a
+		// completion reader reads it. Exactly once, be the end a `close`, an
+		// `exit`, or a spawn error — the guard above is the once.
+		if (entry.release !== undefined) {
+			const release = entry.release;
+			entry.release = undefined;
+			release();
+		}
 		if (entry.info.status === "completed") {
 			for (const handler of this.#exitHandlers) {
 				try {
@@ -287,6 +341,7 @@ export class BackgroundShellManager {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
 		const outputFile = createLogFile(id, "");
+		const append = logAppender(outputFile);
 
 		const { command: shellCommand, args } = this.#shell;
 		const resolution = sandbox
@@ -299,29 +354,85 @@ export class BackgroundShellManager {
 					executableRoots: this.#runtime.executableRoots,
 				})
 			: ({ kind: "unconfined" } as const);
-		const [program, ...programArgs] =
-			resolution.kind === "native"
-				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
-				: [shellCommand, ...args(command)];
-		// The container backend does not serve this path: refuse rather than
-		// fall through to the bare shell.
-		// Long-form design notes: docs/dev/tools.md
-		if (resolution.kind === "appcontainer") {
-			throw new Error(
-				"run_in_background is not available while the Windows container sandbox is in force: a background shell outlives the call that starts it, and this build's confined runner waits for the child to exit. Run the command in the foreground, or turn the sandbox off for this session.",
-			);
+		// The shell has to be executable inside the container, and that check is
+		// lexical — the resolved path against System32 and the granted roots — so
+		// it refuses here, before any side effect, with the sentence the
+		// foreground path uses. The resolved name serves the spawn below too.
+		const shellProgram = confinedProgramName(shellCommand);
+		if (
+			resolution.kind === "appcontainer" &&
+			!containerCanExecute(shellProgram, [...resolution.grantRoots, ...resolution.executableRoots])
+		) {
+			throw new Error(containerShellRefusal(shellProgram));
 		}
 		// The policy's variables go last, for the reason `exec` puts them last:
 		// what confines this command outranks what this process happened to
 		// inherit. A manager with no policy spawns with no env of its own, so a
-		// session that confines nothing runs with the environment it had.
+		// session that confines nothing runs with the environment it had. For the
+		// container branch it is computed before the grant is acquired — a proxy
+		// failure must not strand an acquired grant — and folded into the env
+		// block below.
 		const proxyEnv = sandbox ? await this.#operations.networkEnvFor?.(sandbox) : undefined;
-		const proc: ChildProcess = spawn(program, programArgs, {
-			cwd,
-			windowsHide: true,
-			env: proxyEnv ? { ...process.env, ...proxyEnv } : process.env,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
+		let proc: ChildProcess | ConfinedProcess;
+		let release: (() => void) | undefined;
+		let terminate: (() => void) | undefined;
+		// Long-form design notes: docs/dev/tools.md
+		if (resolution.kind === "appcontainer") {
+			const grant = acquireWorkspaceGrant(
+				resolution.workspace,
+				resolution.network,
+				resolution.grantRoots.slice(1),
+				resolution.executableRoots,
+			);
+			if (grant.error !== undefined || grant.profile === undefined) {
+				// Fail closed and legibly, as the foreground path does: no grant
+				// means the child could not touch the workspace at all.
+				throw new Error(grant.error ?? "the container profile could not be established");
+			}
+			// The child's environment: the parent's, the policy's variables, and
+			// the block format `CreateProcessW` demands — the `undefined`
+			// pseudo-variables of `process.env` dropped, the same value `exec`
+			// feeds its env block.
+			const confinedEnv = Object.fromEntries(
+				Object.entries({ ...process.env, ...proxyEnv }).filter(
+					(entry): entry is [string, string] => entry[1] !== undefined,
+				),
+			);
+			// The child's cwd, spelled the one way every reader agrees on — the
+			// same canonicalisation the grant roots get, for the same measured
+			// reason the foreground path documents.
+			const spawned = spawnConfined(grant.profile, confinedCommandLine([shellProgram, ...args(command)]), {
+				cwd: canonicalPathForChild(cwd),
+				env: confinedEnvBlock(confinedEnv),
+			});
+			if ("error" in spawned) {
+				// The grant was acquired for this spawn, and there is no shell
+				// whose end could release it — it comes back here, and a failed
+				// cleanup rides in the thrown message rather than vanishing.
+				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network);
+				const cleanup = dropError !== null && dropError !== "" ? ` [sandbox cleanup: ${dropError}]` : "";
+				throw new Error(`${spawned.error}${cleanup}`);
+			}
+			proc = spawned;
+			release = () => {
+				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network);
+				// A failed cleanup is logged, not thrown: the shell already ran
+				// and its exit code is what the caller acts on.
+				if (dropError !== null && dropError !== "") append(`\n[sandbox cleanup: ${dropError}]`);
+			};
+			terminate = () => spawned.kill();
+		} else {
+			const [program, ...programArgs] =
+				resolution.kind === "native"
+					? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
+					: [shellCommand, ...args(command)];
+			proc = spawn(program, programArgs, {
+				cwd,
+				windowsHide: true,
+				env: proxyEnv ? { ...process.env, ...proxyEnv } : process.env,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		}
 
 		const info: BackgroundShell = {
 			id,
@@ -334,9 +445,10 @@ export class BackgroundShellManager {
 			pid: proc.pid,
 		};
 		const entry: ShellEntry = { info, proc };
+		if (release !== undefined) entry.release = release;
+		if (terminate !== undefined) entry.terminate = terminate;
 		this.#entries.set(id, entry);
 
-		const append = logAppender(outputFile);
 		proc.stdout?.setEncoding("utf8");
 		proc.stderr?.setEncoding("utf8");
 		proc.stdout?.on("data", append);
@@ -434,6 +546,10 @@ export class BackgroundShellManager {
 		// process's own close event, which settles the record and the ledger.
 		// Only a pid with no handle left to watch needs the awaited exit code.
 		void killPidTree(entry.proc.pid);
+		// Plus the handle-level stop for a confined shell — the backstop behind
+		// the pid-tree kill: taskkill races the child's own end, the handle
+		// this manager holds does not.
+		entry.terminate?.();
 		entry.info.status = "killed";
 		return true;
 	}

@@ -51,6 +51,12 @@ function isContainedInPath(programPath: string, root: string): boolean {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
+/** The refusal for a session's shell the container cannot execute — one sentence, every caller. */
+export function containerShellRefusal(shellProgram: string): string {
+	return `the Windows container sandbox cannot run this session's shell: ${shellProgram} is not in C:\\Windows\\System32 and not inside a granted root, so the confined child could not execute it. Turn the sandbox off for this session, or point the shell (LBB_BASH_PATH) at a path inside a granted root.`;
+}
+
+// Long-form design notes: docs/dev/sandbox.md
 /**
  * One Windows command line from argv, quoted the way `CreateProcessW`'s `lpCommandLine` is parsed.
  * Pure, so it is tested on every platform.
@@ -230,6 +236,10 @@ function loadKernel32Raw() {
 			CloseHandle: { args: [FFIType.u64], returns: FFIType.i32 },
 			WaitForSingleObject: { args: [FFIType.u64, FFIType.u32], returns: FFIType.u32 },
 			GetExitCodeProcess: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+			// DWORD GetProcessId(HANDLE Process) — processthreadsapi.h. The pid is
+			// what a tree kill works by once this module's own handle is the only
+			// other way to reach the child.
+			GetProcessId: { args: [FFIType.u64], returns: FFIType.u32 },
 			TerminateProcess: { args: [FFIType.u64, FFIType.u32], returns: FFIType.i32 },
 			GetLastError: { args: [], returns: FFIType.u32 },
 			// HLOCAL LocalFree(HLOCAL hMem) — winbase.h. It is listed under
@@ -268,9 +278,9 @@ const PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY = 0x0002000e;
 /** WinBase.h PROCESS_CREATION_CHILD_PROCESS_OVERRIDE — the value this launch policy takes. */
 const PROCESS_CREATION_CHILD_PROCESS_OVERRIDE = 0x02;
 /**
- * The poll slice while waiting for the child: short enough that an abort's
- * latency stays imperceptible, long enough that a fast command does not spin
- * the loop.
+ * The poll slice both runners wait on: short enough that an abort's latency
+ * stays imperceptible, long enough that a fast command does not spin the loop.
+ * The background runner uses it as its timer's period.
  */
 const POLL_MS = 25;
 
@@ -694,21 +704,9 @@ export function runConfined(
 ): ConfinedRunResult {
 	const lib = kernel32();
 	if (lib === null) return ffFailure("kernel32 FFI is unavailable");
-	{
-		const sid = deriveAppContainerSid(profile.name);
-		if (sid === null) return ffFailure(`no profile named ${profile.name} exists for this user`);
-	}
-	const sidAddr = sidAddressFor(profile.name);
-	if (sidAddr === null) return ffFailure(`no profile named ${profile.name} exists for this user`);
-
-	// The capability list the spawn's SECURITY_CAPABILITIES carries. The
-	// profile's baked-in capability would be enough on its own for a profile
-	// created with it, but the spawn-time struct is what the kernel actually
-	// reads for the token, so a net profile passes the same list here — a
-	// mismatch (net profile, empty caps) would be a network-less child under a
-	// profile that says otherwise.
-	const spawnRids = profile.network ? [CAPABILITY_INTERNET_CLIENT] : [];
-	return runConfinedWithSid(sidAddr, commandLine, options, spawnRids);
+	const sid = profileSidFor(profile);
+	if ("error" in sid) return ffFailure(sid.error);
+	return runConfinedWithSid(sid.sidAddr, commandLine, options, sid.spawnRids);
 }
 
 function sidAddressFor(name: string): number | null {
@@ -719,15 +717,47 @@ function sidAddressFor(name: string): number | null {
 	return Number(sidOut[0]);
 }
 
-function runConfinedWithSid(
+/**
+ * The SID address and the spawn-time capabilities for a profile — derived in
+ * one place, so the blocking runner and the background spawn cannot disagree
+ * about the capability list a profile was made with. The profile's baked-in
+ * capability would be enough on its own for a profile created with it, but the
+ * spawn-time struct is what the kernel actually reads for the token, so a net
+ * profile passes the same list here — a mismatch (net profile, empty caps)
+ * would be a network-less child under a profile that says otherwise.
+ */
+function profileSidFor(
+	profile: AppContainerProfile,
+): { sidAddr: number; spawnRids: readonly number[] } | { error: string } {
+	const sidAddr = sidAddressFor(profile.name);
+	if (sidAddr === null) return { error: `no profile named ${profile.name} exists for this user` };
+	return { sidAddr, spawnRids: profile.network ? [CAPABILITY_INTERNET_CLIENT] : [] };
+}
+
+/** What a successful raw spawn hands back: the process, its std read ends, and the pins that keep their memory alive. */
+interface ConfinedSpawn {
+	pi: BigUint64Array;
+	attrList: Uint8Array;
+	attrAddr: Pointer;
+	outRead: bigint;
+	errRead: bigint;
+	pid: number;
+}
+
+/**
+ * The spawn half both confined runners share: attribute list, three inherited
+ * pipes, and one `CreateProcessW` under the container capabilities. It never
+ * waits — the two runners wait in their own ways — and everything it
+ * allocated is either closed here on a failure path or handed back in
+ * `ConfinedSpawn` for the runner to close when the child ends.
+ */
+function spawnConfinedRaw(
+	lib: NonNullable<ReturnType<typeof kernel32>>,
 	sidAddr: number,
 	commandLine: string,
-	options: ConfinedRunOptions,
+	options: { cwd?: string; env?: Uint8Array },
 	spawnRids: readonly number[] = [],
-): ConfinedRunResult {
-	const lib = kernel32();
-	if (lib === null) return ffFailure("kernel32 FFI is unavailable");
-
+): ConfinedSpawn | { error: string } {
 	// The capabilities and their array stay locals across the whole function: the
 	// kernel reads both during creation, and a GC'd array under a live pointer is
 	// a wild read. `attrs` is the lifetime pin, not dead code.
@@ -745,7 +775,7 @@ function runConfinedWithSid(
 	lib.symbols.InitializeProcThreadAttributeList(null, attrCount, 0, sizeOut);
 	const attrList = new Uint8Array(Number(sizeOut[0]));
 	if (lib.symbols.InitializeProcThreadAttributeList(ptr(attrList), attrCount, 0, sizeOut) === 0) {
-		return ffFailure(`InitializeProcThreadAttributeList failed (${lib.symbols.GetLastError()})`);
+		return { error: `InitializeProcThreadAttributeList failed (${lib.symbols.GetLastError()})` };
 	}
 	const attrAddr = ptr(attrList);
 	if (
@@ -760,7 +790,7 @@ function runConfinedWithSid(
 		) === 0
 	) {
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return ffFailure(`UpdateProcThreadAttribute(capabilities) failed (${lib.symbols.GetLastError()})`);
+		return { error: `UpdateProcThreadAttribute(capabilities) failed (${lib.symbols.GetLastError()})` };
 	}
 
 	// The kernel reads lpValue at creation time, so the buffer stays a local
@@ -778,7 +808,7 @@ function runConfinedWithSid(
 		) === 0
 	) {
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return ffFailure(`UpdateProcThreadAttribute(child policy) failed (${lib.symbols.GetLastError()})`);
+		return { error: `UpdateProcThreadAttribute(child policy) failed (${lib.symbols.GetLastError()})` };
 	}
 
 	// Each pipe carries SECURITY_ATTRIBUTES with bInheritHandle = TRUE, and the
@@ -796,13 +826,13 @@ function runConfinedWithSid(
 	const errWrite = new BigUint64Array(1);
 	if (lib.symbols.CreatePipe(inRead, inWrite, ptr(inheritable), 0) === 0) {
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return ffFailure(`CreatePipe(stdin) failed (${lib.symbols.GetLastError()})`);
+		return { error: `CreatePipe(stdin) failed (${lib.symbols.GetLastError()})` };
 	}
 	if (lib.symbols.CreatePipe(outRead, outWrite, ptr(inheritable), 0) === 0) {
 		lib.symbols.CloseHandle(inRead[0]);
 		lib.symbols.CloseHandle(inWrite[0]);
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return ffFailure(`CreatePipe(stdout) failed (${lib.symbols.GetLastError()})`);
+		return { error: `CreatePipe(stdout) failed (${lib.symbols.GetLastError()})` };
 	}
 	if (lib.symbols.CreatePipe(errRead, errWrite, ptr(inheritable), 0) === 0) {
 		lib.symbols.CloseHandle(inRead[0]);
@@ -810,7 +840,7 @@ function runConfinedWithSid(
 		lib.symbols.CloseHandle(outRead[0]);
 		lib.symbols.CloseHandle(outWrite[0]);
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return ffFailure(`CreatePipe(stderr) failed (${lib.symbols.GetLastError()})`);
+		return { error: `CreatePipe(stderr) failed (${lib.symbols.GetLastError()})` };
 	}
 	lib.symbols.CloseHandle(inWrite[0]);
 
@@ -834,7 +864,7 @@ function runConfinedWithSid(
 		lib.symbols.CloseHandle(outWrite[0]);
 		lib.symbols.CloseHandle(errRead[0]);
 		lib.symbols.CloseHandle(errWrite[0]);
-		return ffFailure(`UpdateProcThreadAttribute(handles) failed (${lib.symbols.GetLastError()})`);
+		return { error: `UpdateProcThreadAttribute(handles) failed (${lib.symbols.GetLastError()})` };
 	}
 
 	// STARTUPINFOEX on x64: 104 bytes of STARTUPINFO, then lpAttributeList.
@@ -881,8 +911,32 @@ function runConfinedWithSid(
 		lib.symbols.CloseHandle(outRead[0]);
 		lib.symbols.CloseHandle(errRead[0]);
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
-		return ffFailure(`CreateProcessW failed (${err})`);
+		return { error: `CreateProcessW failed (${err})` };
 	}
+
+	return {
+		pi,
+		attrList,
+		attrAddr,
+		outRead: outRead[0],
+		errRead: errRead[0],
+		pid: lib.symbols.GetProcessId(pi[0]),
+	};
+}
+
+function runConfinedWithSid(
+	sidAddr: number,
+	commandLine: string,
+	options: ConfinedRunOptions,
+	spawnRids: readonly number[] = [],
+): ConfinedRunResult {
+	const lib = kernel32();
+	if (lib === null) return ffFailure("kernel32 FFI is unavailable");
+	const spawned = spawnConfinedRaw(lib, sidAddr, commandLine, options, spawnRids);
+	if ("error" in spawned) return ffFailure(spawned.error);
+	const { pi, attrList, attrAddr, outRead, errRead } = spawned;
+	// Held until the delete at the end — see the spawn half's pin note.
+	void attrList;
 
 	const timeoutMs = options.timeoutMs ?? 600_000;
 	const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : null;
@@ -891,9 +945,15 @@ function runConfinedWithSid(
 	const outChunks: string[] = [];
 	const errChunks: string[] = [];
 	const pumpOut = (): { eof: boolean; text: boolean } =>
-		pumpPipe(lib, outRead[0], decoderOut, outChunks, options.onStdout);
+		pumpPipe(lib, outRead, decoderOut, (chunk) => {
+			outChunks.push(chunk);
+			options.onStdout?.(chunk);
+		});
 	const pumpErr = (): { eof: boolean; text: boolean } =>
-		pumpPipe(lib, errRead[0], decoderErr, errChunks, options.onStderr);
+		pumpPipe(lib, errRead, decoderErr, (chunk) => {
+			errChunks.push(chunk);
+			options.onStderr?.(chunk);
+		});
 
 	// The wait is a poll, not one blocking call: the pipes have to be pumped
 	// while the command runs — that is what a live preview is — and an abort
@@ -960,8 +1020,8 @@ function runConfinedWithSid(
 	lib.symbols.GetExitCodeProcess(pi[0], exit);
 	lib.symbols.CloseHandle(pi[0]);
 	lib.symbols.CloseHandle(pi[1]);
-	lib.symbols.CloseHandle(outRead[0]);
-	lib.symbols.CloseHandle(errRead[0]);
+	lib.symbols.CloseHandle(outRead);
+	lib.symbols.CloseHandle(errRead);
 	lib.symbols.DeleteProcThreadAttributeList(attrAddr);
 	return {
 		exitCode: exit[0],
@@ -969,6 +1029,206 @@ function runConfinedWithSid(
 		stderr: errChunks.join(""),
 		killed: waitError !== undefined,
 		...(waitError !== undefined ? { error: waitError } : {}),
+	};
+}
+
+// ---- The background runner: the same spawn, waited on by a timer ----
+
+/**
+ * A tiny signal with node-shaped `on`/`once` — enough of an EventEmitter for a
+ * consumer typed against a child's streams, without pulling the class in. A
+ * throwing listener must not stop the pump that is delivering into it, so the
+ * emit swallows per listener, the stance the shell manager takes with its own
+ * dispatch.
+ */
+class ConfinedSignal<T> {
+	#listeners: ((value: T) => void)[] = [];
+
+	on(listener: (value: T) => void): void {
+		this.#listeners.push(listener);
+	}
+
+	once(listener: (value: T) => void): void {
+		const wrapper = (value: T): void => {
+			const index = this.#listeners.indexOf(wrapper);
+			if (index !== -1) this.#listeners.splice(index, 1);
+			listener(value);
+		};
+		this.#listeners.push(wrapper);
+	}
+
+	emit(value: T): void {
+		for (const listener of [...this.#listeners]) {
+			try {
+				listener(value);
+			} catch {
+				// A listener's bug must not stop the pump or its siblings.
+			}
+		}
+	}
+}
+
+/** The stream surface a confined child exposes: the ways the shell manager reads it, and no more. */
+export interface ConfinedStream {
+	setEncoding(encoding: string): void;
+	on(event: "data", listener: (chunk: string) => void): void;
+}
+
+/**
+ * A running confined child — the handle-based shape `runConfined` cannot give:
+ * output is delivered as it arrives and the caller decides when to wait.
+ * `error` is declared for the surface's sake and never emitted: spawn failures
+ * come back as the `{ error }` return, so nothing can fail after this object
+ * exists.
+ */
+export interface ConfinedProcess {
+	readonly pid: number;
+	readonly stdout: ConfinedStream;
+	readonly stderr: ConfinedStream;
+	on(event: "exit" | "close", listener: (code: number) => void): void;
+	on(event: "error", listener: (error: Error) => void): void;
+	once(event: "exit" | "close", listener: (code: number) => void): void;
+	once(event: "error", listener: (error: Error) => void): void;
+	kill(): void;
+}
+
+export interface ConfinedProcessOptions {
+	cwd?: string;
+	env?: Uint8Array;
+}
+
+// Long-form design notes: docs/dev/sandbox.md
+/**
+ * Start one command line inside this profile and hand the running child back.
+ *
+ * The handle-based twin of `runConfined`, for shells that outlive the call
+ * that starts them: the wait becomes a timer over non-blocking polls, and the
+ * output is emitted chunk by chunk — a long-lived shell must not accumulate
+ * its own output into an array, so nothing here grows with the shell's
+ * lifetime. `exit` then `close` fire once each, in that order, only after the
+ * pipes have drained or their bounded grace ran out: the order a Node child
+ * reports, and the one the shell manager's completion logic reads for.
+ */
+export function spawnConfined(
+	profile: AppContainerProfile,
+	commandLine: string,
+	options: ConfinedProcessOptions = {},
+): ConfinedProcess | { error: string } {
+	const lib = kernel32();
+	if (lib === null) return { error: "kernel32 FFI is unavailable" };
+	const sid = profileSidFor(profile);
+	if ("error" in sid) return sid;
+	const spawned = spawnConfinedRaw(lib, sid.sidAddr, commandLine, options, sid.spawnRids);
+	if ("error" in spawned) return spawned;
+	const { pi, attrList, attrAddr, outRead, errRead, pid } = spawned;
+	// Held until the delete in `finish` — see the spawn half's pin note.
+	void attrList;
+
+	const decoderOut = new StringDecoder("utf8");
+	const decoderErr = new StringDecoder("utf8");
+	const makeStream = (): { stream: ConfinedStream; emit: (chunk: string) => void } => {
+		const listeners: ((chunk: string) => void)[] = [];
+		return {
+			stream: {
+				setEncoding(_encoding: string): void {
+					// Accepted and ignored: this pump decodes UTF-8 itself. The
+					// method exists so the surface reads like a Node child's to
+					// the manager that consumes it.
+				},
+				on(_event: "data", listener: (chunk: string) => void): void {
+					listeners.push(listener);
+				},
+			},
+			emit: (chunk) => {
+				for (const listener of [...listeners]) {
+					try {
+						listener(chunk);
+					} catch {
+						// A listener's bug must not stop the pump or its siblings.
+					}
+				}
+			},
+		};
+	};
+	const stdout = makeStream();
+	const stderr = makeStream();
+	const exitSignal = new ConfinedSignal<number>();
+	const closeSignal = new ConfinedSignal<number>();
+	const errorSignal = new ConfinedSignal<Error>();
+
+	let settled = false;
+	let childExited = false;
+	let quietTicks = 0;
+	const finish = (): void => {
+		if (settled) return;
+		settled = true;
+		clearInterval(ticker);
+		// A stream that ends mid-character leaves the decoder holding bytes;
+		// end() flushes them as the replacement character rather than dropping
+		// them — the same tail rule the blocking runner has.
+		const tailOut = decoderOut.end();
+		const tailErr = decoderErr.end();
+		if (tailOut !== "") stdout.emit(tailOut);
+		if (tailErr !== "") stderr.emit(tailErr);
+		const exit = new Uint32Array(1);
+		lib.symbols.GetExitCodeProcess(pi[0], exit);
+		lib.symbols.CloseHandle(pi[0]);
+		lib.symbols.CloseHandle(pi[1]);
+		lib.symbols.CloseHandle(outRead);
+		lib.symbols.CloseHandle(errRead);
+		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
+		exitSignal.emit(exit[0]);
+		closeSignal.emit(exit[0]);
+	};
+	// Deliberately not unref'd: a running child keeps the process alive, the
+	// way a Node child does.
+	const ticker = setInterval(() => {
+		if (settled) return;
+		if (childExited) {
+			// The bounded drain: exit closed the child's writer ends, but a
+			// grandchild it spawned may still hold one. Quiet for 50 ticks is
+			// where the blocking runner stops too.
+			const out = pumpPipe(lib, outRead, decoderOut, stdout.emit);
+			const err = pumpPipe(lib, errRead, decoderErr, stderr.emit);
+			if (out.eof && err.eof) {
+				finish();
+				return;
+			}
+			if (out.text || err.text) {
+				quietTicks = 0;
+			} else {
+				quietTicks += 1;
+				if (quietTicks > 50) finish();
+			}
+			return;
+		}
+		pumpPipe(lib, outRead, decoderOut, stdout.emit);
+		pumpPipe(lib, errRead, decoderErr, stderr.emit);
+		// A zero-timeout wait, so the tick never blocks: signaled (0) means the
+		// child is gone, and the next tick drains what it left.
+		if (lib.symbols.WaitForSingleObject(pi[0], 0) === 0) childExited = true;
+	}, POLL_MS);
+
+	return {
+		pid,
+		stdout: stdout.stream,
+		stderr: stderr.stream,
+		on(event: "exit" | "close" | "error", listener: ((code: number) => void) | ((error: Error) => void)): void {
+			if (event === "error") errorSignal.on(listener as (error: Error) => void);
+			else if (event === "exit") exitSignal.on(listener as (code: number) => void);
+			else closeSignal.on(listener as (code: number) => void);
+		},
+		once(event: "exit" | "close" | "error", listener: ((code: number) => void) | ((error: Error) => void)): void {
+			if (event === "error") errorSignal.once(listener as (error: Error) => void);
+			else if (event === "exit") exitSignal.once(listener as (code: number) => void);
+			else closeSignal.once(listener as (code: number) => void);
+		},
+		kill(): void {
+			// Terminate through the handle this object holds — the backstop
+			// behind a pid-based tree kill, which can race the child's own end.
+			// After the end it is a no-op: the handle is closed.
+			if (!settled) lib.symbols.TerminateProcess(pi[0], 1);
+		},
 	};
 }
 
@@ -981,8 +1241,7 @@ function pumpPipe(
 	lib: NonNullable<ReturnType<typeof kernel32>>,
 	handle: bigint,
 	decoder: StringDecoder,
-	sink: string[],
-	onText: ((chunk: string) => void) | undefined,
+	onText: (chunk: string) => void,
 ): { eof: boolean; text: boolean } {
 	let text = false;
 	for (;;) {
@@ -997,8 +1256,7 @@ function pumpPipe(
 		if (count === 0) return { eof: false, text };
 		const chunk = decoder.write(Buffer.from(buffer.buffer, buffer.byteOffset, count));
 		if (chunk !== "") {
-			sink.push(chunk);
-			onText?.(chunk);
+			onText(chunk);
 			text = true;
 		}
 	}

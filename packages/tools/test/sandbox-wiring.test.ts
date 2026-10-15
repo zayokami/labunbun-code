@@ -36,6 +36,12 @@ import { createAllTools } from "../src/index.ts";
 import { ChildProcessExecOperations, defaultOperations, type ExecResult, type Operations } from "../src/operations.ts";
 import { createReadTool } from "../src/read.ts";
 import {
+	confinedCommandLine,
+	confinedProgramName,
+	ensureAppContainerProfile,
+	runConfined,
+} from "../src/sandbox/appcontainer.ts";
+import {
 	describeSandboxBackend,
 	detectNativeBackend,
 	policyFor,
@@ -1253,25 +1259,130 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		}
 	}, 30_000);
 
-	test("run_in_background under the same policy refuses, rather than falling through to a bare spawn", async () => {
-		// The escape hatch `bash.ts` named when it threaded the policy into the
-		// background manager: with the container in force, starting a background
-		// shell must not run the shell with nothing around it. Refusing is the
-		// honest option available here — the confined runner waits for the child
-		// to exit, and a background shell's whole point is a child that outlives
-		// the call.
+	test("run_in_background under the same policy runs confined, and the grant lives exactly as long as the shell", async () => {
+		// This used to be a refusal: the confined runner waited for the child to
+		// exit, and a background shell's whole point is a child that outlives the
+		// call. The handle-based spawn closed that gap, so the assertion flips —
+		// and the interesting half becomes the grant's lifetime. It must cover
+		// the shell while it runs and be gone the moment it ends, which one
+		// fixture shows twice: the shell writes its evidence into the workspace
+		// (only a live grant admits that), and then a probe that could start
+		// against a still-granted workspace fails at the cwd it can no longer
+		// reach (only a released grant explains that).
 		const cwd = workspace();
-		const manager = new BackgroundShellManager(CONTAINER_RUNTIME);
-		const policy = containerPolicy(cwd);
+		const ops = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
+		const manager = new BackgroundShellManager(CONTAINER_RUNTIME, ops, CONTAINER_SHELL);
+		try {
+			const shell = await manager.start(
+				`echo bg-confined-hello > "${cwd.replace(/\//g, "\\")}\\bg.txt"`,
+				cwd,
+				containerPolicy(cwd),
+			);
+			const code = await manager.completed(shell.id);
+			expect(code).toBe(0);
+			const log = manager.output(shell.id);
+			expect(log).toContain("[exit code: 0]");
+			// A failed release would have appended its complaint to this same log.
+			expect(log).not.toContain("[sandbox cleanup:");
+			expect(existsSync(join(cwd, "bg.txt"))).toBe(true);
+
+			// The release probe, with its own control. Writes are the observable
+			// the grant moves: reads of anything under the temp directory are
+			// admitted to the container even un-granted (measured — %TEMP%
+			// carries a read ACE for the package SID), so a read probe would
+			// answer "reachable" in every state and prove nothing. The control
+			// directory has never been granted, so what it exhibits is the
+			// un-granted state itself; the workspace after the shell ended must
+			// behave identically. That both are refused while the shell's own
+			// write above succeeded is the whole lifetime, measured in one run.
+			const attemptWrite = (dir: string, file: string): { exitCode: number; out: string; wrote: boolean } => {
+				const probe = ensureAppContainerProfile(dir, true);
+				if ("error" in probe) throw new Error(probe.error);
+				const attempt = runConfined(
+					probe,
+					confinedCommandLine([
+						confinedProgramName("cmd.exe"),
+						"/d",
+						"/s",
+						"/c",
+						`echo probe > "${join(dir, file).replace(/\//g, "\\")}"`,
+					]),
+					{ cwd: "C:\\Windows\\System32" },
+				);
+				return {
+					exitCode: attempt.exitCode,
+					out: `${attempt.stdout}${attempt.stderr}`,
+					wrote: existsSync(join(dir, file)),
+				};
+			};
+			const control = attemptWrite(workspace(), "control.txt");
+			expect(control.exitCode).not.toBe(0);
+			expect(control.out).toContain("Access is denied");
+			expect(control.wrote).toBe(false);
+			const afterRelease = attemptWrite(cwd, "released.txt");
+			expect(afterRelease.exitCode).not.toBe(0);
+			expect(afterRelease.out).toContain("Access is denied");
+			expect(afterRelease.wrote).toBe(false);
+		} finally {
+			void ops.close?.();
+		}
+	}, 30_000);
+
+	test("a shell the container cannot execute refuses a background start with the exec path's own sentence", async () => {
+		// The refusal that replaced four opaque CI failures, now shared: the
+		// lexical gate runs before anything is granted or started, and the
+		// message is the one helper both paths call — one sentence, so the two
+		// surfaces cannot drift apart. The Program Files bash is the measured
+		// fixture: `detectShell` prefers it on machines with a conventional Git
+		// install, and it is neither in System32 nor inside a granted root.
+		const cwd = workspace();
+		const gitBash = { command: "C:\\Program Files\\Git\\bin\\bash.exe", args: (cmd: string) => ["-lc", cmd] };
+		const manager = new BackgroundShellManager(CONTAINER_RUNTIME, defaultOperations(), gitBash);
 		let caught: unknown;
 		try {
-			await manager.start("echo backgrounded", cwd, policy);
+			await manager.start("echo unreachable", cwd, containerPolicy(cwd));
 		} catch (error) {
 			caught = error;
 		}
 		expect(caught).toBeInstanceOf(Error);
-		expect(String(caught)).toContain("run_in_background");
+		expect(String(caught)).toContain("cannot run this session's shell");
+		expect(String(caught)).toContain("C:\\Program Files\\Git\\bin\\bash.exe");
+		// The refusal is before the spawn, so no shell was ever tracked.
+		expect(manager.list()).toEqual([]);
 	});
+
+	test("a confined background shell is killable, and the kill lands on the record and the log", async () => {
+		// The background runner's kill is the pid-tree kill plus the process
+		// handle this manager holds — the handle is what makes the stop
+		// certain, and this test is the difference between "taskkill was asked"
+		// and "the shell is gone". The busy loop is the measured in-container
+		// sleeper shape: it outlives the kill by minutes if the kill misses.
+		const cwd = workspace();
+		const ops = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
+		const manager = new BackgroundShellManager(CONTAINER_RUNTIME, ops, CONTAINER_SHELL);
+		try {
+			// The settle hook, not `completed`: `kill` marks the record killed
+			// the moment the kill is requested, so `completed` answers from that
+			// record before the process's own end has landed. The settle event
+			// is the end itself, whichever way it arrived.
+			const ended = new Promise<void>((resolve) => {
+				const unsubscribe = manager.onSettled(() => {
+					unsubscribe();
+					resolve();
+				});
+			});
+			const shell = await manager.start("for /l %i in (1,1,20000000) do rem", cwd, containerPolicy(cwd));
+			expect(manager.kill(shell.id)).toBe(true);
+			await ended;
+			expect(manager.get(shell.id)?.status).toBe("killed");
+			expect(manager.get(shell.id)?.exitCode).not.toBeNull();
+			// The end still writes its one exit line — a killed shell's log has
+			// to say how it ended, same as any other.
+			expect(manager.output(shell.id)).toContain("[exit code:");
+		} finally {
+			void ops.close?.();
+		}
+	}, 30_000);
 });
 
 describe("a path the policy names but the disk does not have", () => {

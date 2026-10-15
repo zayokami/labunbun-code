@@ -34,6 +34,7 @@ import {
 	releaseWorkspaceGrant,
 	runConfined,
 	sidBytesFor,
+	spawnConfined,
 } from "../src/sandbox/appcontainer.ts";
 
 describe("the profile name", () => {
@@ -699,6 +700,68 @@ describeWindows("a confined process", () => {
 			deleteAppContainerProfile(profile.name);
 		}
 	});
+
+	test("the handle-based spawn streams output and settles exactly once, exit before close", async () => {
+		// The background runner in miniature: nothing blocks the caller, the
+		// output arrives on data listeners, and the end is the pair a Node child
+		// reports — `exit` then `close`, each exactly once, after the drain. A
+		// pump that dropped the tail or a finish that fired twice would break
+		// some caller's completion logic; this is where that is visible.
+		const workspace = `G:\\labunbun-bg-${process.pid}`;
+		const profile = ensureAppContainerProfile(workspace);
+		if ("error" in profile) throw new Error(profile.error);
+		try {
+			const child = spawnConfined(profile, '"C:\\Windows\\System32\\cmd.exe" /c echo bg-confined-hello');
+			if ("error" in child) throw new Error(child.error);
+			expect(child.pid).toBeGreaterThan(0);
+			const chunks: string[] = [];
+			child.stdout.on("data", (chunk) => chunks.push(chunk));
+			let exits = 0;
+			let closes = 0;
+			let closeSeenBeforeExit = false;
+			child.on("close", () => {
+				closes += 1;
+			});
+			child.on("exit", () => {
+				exits += 1;
+				closeSeenBeforeExit = closes > 0;
+			});
+			const exited = new Promise<number>((resolve) => child.once("exit", (code) => resolve(code)));
+			const closed = new Promise<number>((resolve) => child.once("close", (code) => resolve(code)));
+			expect(await exited).toBe(0);
+			expect(await closed).toBe(0);
+			expect(exits).toBe(1);
+			expect(closes).toBe(1);
+			expect(closeSeenBeforeExit).toBe(false);
+			expect(chunks.join("")).toContain("bg-confined-hello");
+		} finally {
+			deleteAppContainerProfile(profile.name);
+		}
+	}, 30_000);
+
+	test("kill ends a live child through the handle, and the end still arrives", async () => {
+		// The backstop the shell manager calls behind its pid-tree kill. The
+		// busy loop is the same in-container sleeper the timeout test uses:
+		// without the kill it runs for minutes, so a close that arrives seconds
+		// in is the kill, not a coincidence.
+		const workspace = `G:\\labunbun-bgkill-${process.pid}`;
+		const profile = ensureAppContainerProfile(workspace);
+		if ("error" in profile) throw new Error(profile.error);
+		try {
+			const child = spawnConfined(profile, '"C:\\Windows\\System32\\cmd.exe" /c for /l %i in (1,1,20000000) do rem');
+			if ("error" in child) throw new Error(child.error);
+			const completed = new Promise<number>((resolve) => child.once("close", resolve));
+			const startedAt = Date.now();
+			child.kill();
+			const code = await completed;
+			expect(code).not.toBe(0);
+			expect(Date.now() - startedAt).toBeLessThan(10_000);
+			// A second kill after the end is a no-op on a closed handle, not a crash.
+			child.kill();
+		} finally {
+			deleteAppContainerProfile(profile.name);
+		}
+	}, 30_000);
 
 	test("availability reports honestly on every platform", () => {
 		if (process.platform === "win32") expect(appContainerAvailable()).toBe(true);

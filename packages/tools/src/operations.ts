@@ -17,6 +17,7 @@ import {
 	confinedEnvBlock,
 	confinedProgramName,
 	containerCanExecute,
+	containerShellRefusal,
 	releaseWorkspaceGrant,
 	runConfined,
 } from "./sandbox/appcontainer.ts";
@@ -504,7 +505,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 			if (!containerCanExecute(shellProgram, [...resolution.grantRoots, ...resolution.executableRoots])) {
 				return {
 					stdout: "",
-					stderr: `the Windows container sandbox cannot run this session's shell: ${shellProgram} is not in C:\\Windows\\System32 and not inside a granted root, so the confined child could not execute it. Turn the sandbox off for this session, or point the shell (LBB_BASH_PATH) at a path inside a granted root.`,
+					stderr: containerShellRefusal(shellProgram),
 					exitCode: -1,
 					killed: false,
 				};
