@@ -296,6 +296,7 @@ export class BackgroundShellManager {
 					platform: this.#runtime.platform,
 					hasNativeBackend: this.#runtime.hasNativeBackend,
 					hasAppContainer: this.#runtime.hasAppContainer,
+					executableRoots: this.#runtime.executableRoots,
 				})
 			: ({ kind: "unconfined" } as const);
 		const [program, ...programArgs] =

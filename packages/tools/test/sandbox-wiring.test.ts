@@ -18,7 +18,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -745,6 +745,29 @@ describe("the Windows AppContainer branch, selected by the resolver", () => {
 		expect(resolution.grantRoots).toEqual([canonical(cwd), canonical(cache)]);
 	});
 
+	test("the executable roots ride the runtime onto the resolution, and none are invented", () => {
+		// The toolchain roots are a fact about the machine, so they arrive from
+		// the runtime rather than being derived here — and they arrive verbatim:
+		// canonicalisation is the grant's job, and the resolver must not widen a
+		// list it was not given. A runtime without them resolves to the same
+		// answer today's does: an empty list, which grants nothing extra.
+		const cwd = workspace();
+		const git = "D:\\Program Files\\Git";
+		const carried = resolveSandboxExecution({
+			...win32,
+			executableRoots: [git],
+			policy: confined(cwd, { access: "enabled", domains: [] }),
+		});
+		expect(carried.kind).toBe("appcontainer");
+		if (carried.kind !== "appcontainer") return;
+		expect(carried.executableRoots).toEqual([git]);
+		expect(carried.grantRoots).toEqual([canonical(cwd)]);
+		const bare = resolveSandboxExecution({ ...win32, policy: confined(cwd, { access: "enabled", domains: [] }) });
+		expect(bare.kind).toBe("appcontainer");
+		if (bare.kind !== "appcontainer") return;
+		expect(bare.executableRoots).toEqual([]);
+	});
+
 	test("a skip-marked root that does not exist is dropped from the grant list", () => {
 		// The same rule the translators follow, for a reason that is stronger
 		// here: granting a path that is not there fails the grant outright, so
@@ -1191,6 +1214,44 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 			void exec.close?.();
 		}
 	});
+
+	test("an executable root admits a shell the grant alone would refuse", async () => {
+		// The seam the toolchain roots ride in on, measured on one fixture with
+		// both halves: without the root the gate refuses, with it the command
+		// runs. Either half alone is passed by a gate that always answers the
+		// same way, and the running half is also evidence the read+execute grant
+		// actually covered the directory — the child loaded its image from it.
+		// The shell is a copied `cmd.exe`, which runs from anywhere (its DLLs
+		// live in System32) and needs no MSYS runtime, so the fixture works on
+		// any Windows machine rather than only where Git happens to sit.
+		const cwd = workspace();
+		const fixture = mkdtempSync(join(tmpdir(), "lbb-ac-execroot-"));
+		const bin = join(fixture, "bin");
+		mkdirSync(bin);
+		copyFileSync("C:\\Windows\\System32\\cmd.exe", join(bin, "cmd.exe"));
+		const shell = { command: join(bin, "cmd.exe"), args: (cmd: string) => ["/d", "/s", "/c", cmd] };
+		try {
+			const refused = new ChildProcessExecOperations(CONTAINER_RUNTIME, shell);
+			try {
+				const result = await refused.exec({ command: "echo exec-root-hello", cwd, sandbox: containerPolicy(cwd) });
+				expect(result.exitCode).toBe(-1);
+				expect(result.stderr).toContain("cannot run this session's shell");
+				expect(result.stdout).toBe("");
+			} finally {
+				void refused.close?.();
+			}
+			const permitted = new ChildProcessExecOperations({ ...CONTAINER_RUNTIME, executableRoots: [bin] }, shell);
+			try {
+				const result = await permitted.exec({ command: "echo exec-root-hello", cwd, sandbox: containerPolicy(cwd) });
+				expect(result.exitCode).toBe(0);
+				expect(result.stdout).toContain("exec-root-hello");
+			} finally {
+				void permitted.close?.();
+			}
+		} finally {
+			rmSync(fixture, { recursive: true, force: true });
+		}
+	}, 30_000);
 
 	test("run_in_background under the same policy refuses, rather than falling through to a bare spawn", async () => {
 		// The escape hatch `bash.ts` named when it threaded the policy into the

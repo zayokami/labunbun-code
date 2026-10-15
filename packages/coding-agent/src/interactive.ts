@@ -80,11 +80,13 @@ import {
 	type AgentTask,
 	type BackgroundShell,
 	BackgroundShellManager,
+	ChildProcessExecOperations,
 	createAllTools,
 	defaultOperations,
 	describeSandboxBackend,
 	describeWritableRoots,
 	detectRuntime,
+	detectShell,
 	killPidTree,
 	networkConfinement,
 	type Operations,
@@ -600,12 +602,18 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// tools it forgets on are the ones `createAllTools` builds from this instance.
 	const readState = new ReadFileState();
 	// One shared Operations instance: the "!" shell passthrough and the Bash
-	// tool must resolve shells and kill process trees identically.
-	const ops: Operations = defaultOperations();
+	// tool must resolve shells and kill process trees identically. The shell is
+	// resolved before the runtime — the Windows probe runs this shell — and the
+	// one runtime serves both the executor and the manager, so the sentence
+	// `/permissions` prints and the branch either spawn path takes are answers
+	// to one question about this machine.
+	const shell = detectShell();
+	const runtime = detectRuntime();
+	const ops: Operations = defaultOperations(new ChildProcessExecOperations(runtime, shell));
 	// Owned here rather than inside createAllTools so `/ps` and `/stop` can reach
 	// the same shells the Bash tool started; the factory would otherwise make a
 	// private manager nobody else can see.
-	const backgroundShells = new BackgroundShellManager(detectRuntime(), ops);
+	const backgroundShells = new BackgroundShellManager(runtime, ops);
 	// Every shell this session starts goes onto the session file too, so a
 	// later run can find the ones that outlive this process — and stop them.
 	const detachShellLedger = attachShellLedger(backgroundShells, () => store);

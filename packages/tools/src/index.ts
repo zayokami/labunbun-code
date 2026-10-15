@@ -72,10 +72,10 @@ import { createEditTool } from "./edit.ts";
 import { createGlobTool } from "./glob.ts";
 import { createGrepTool } from "./grep.ts";
 import { createLsTool } from "./ls.ts";
-import { defaultOperations, type Operations } from "./operations.ts";
+import { ChildProcessExecOperations, defaultOperations, detectShell, type Operations } from "./operations.ts";
 import { createReadTool } from "./read.ts";
 import { ReadFileState } from "./read-file-state.ts";
-import { detectRuntime } from "./sandbox/index.ts";
+import { detectRuntime, type SandboxRuntime } from "./sandbox/index.ts";
 import { createTaskTools, type TaskStore } from "./tasks.ts";
 import { createWebFetchTool, createWebSearchTool } from "./web.ts";
 import { createWriteTool } from "./write.ts";
@@ -107,10 +107,19 @@ export interface CreateAllToolsOptions {
  * tools.
  */
 export function createAllTools(cwd: string, options: CreateAllToolsOptions = {}): AnyTool[] {
-	const ops = options.operations ?? defaultOperations();
+	// The shell is resolved before the runtime, because the Windows probe runs
+	// this shell; the runtime itself is built at most once and serves both
+	// default spawners, so the sentence `/permissions` prints and the branch
+	// each spawn path takes are answers to one question about this machine — and
+	// a caller that brought both its own executor and its own manager needs no
+	// probe at all.
+	const shell = detectShell();
+	let runtime: SandboxRuntime | undefined;
+	const runtimeFor = (): SandboxRuntime => (runtime ??= detectRuntime());
+	const ops = options.operations ?? defaultOperations(new ChildProcessExecOperations(runtimeFor(), shell));
 	// The same executor, so a backgrounded command joins the proxy the foreground
 	// one uses instead of opening a second listener that nothing would close.
-	const background = options.backgroundShells ?? new BackgroundShellManager(detectRuntime(), ops);
+	const background = options.backgroundShells ?? new BackgroundShellManager(runtimeFor(), ops);
 	// One per tool set: `createAllTools` runs once at startup in both entry
 	// points (`interactive.ts:595`, `headless.ts:278`), so a second tool set in
 	// the same process is a second call and a second store. A module-level

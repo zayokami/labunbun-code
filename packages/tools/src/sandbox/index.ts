@@ -46,6 +46,12 @@ export type SandboxResolution =
 			/** Every root the ACL grant must cover, the workspace first and each path once. */
 			grantRoots: string[];
 			/**
+			 * Toolchain install roots outside the policy, granted read+execute and
+			 * never write. A separate list because the mask differs — a program
+			 * that needs executing is not a program that may be edited.
+			 */
+			executableRoots: string[];
+			/**
 			 * Always `true`: the branch that returns this kind is reachable only
 			 * with an `enabled` network axis, for the measured reason recorded
 			 * on the branch itself.
@@ -69,6 +75,12 @@ export interface ResolveSandboxOptions {
 	 * resolved, and a wrapper around the wrong shell is no wrapper at all.
 	 */
 	command: string[];
+	/**
+	 * Toolchain roots to grant read+execute under the Windows backend, carried by
+	 * the runtime rather than derived here: where a machine's shell and programs
+	 * live is a question about that machine, which this module cannot see.
+	 */
+	executableRoots?: readonly string[];
 	platform?: SandboxPlatform;
 	/** Whether the platform's native backend is installed. Injected so this is testable. */
 	hasNativeBackend?: boolean;
@@ -152,8 +164,20 @@ export interface SandboxRuntime {
 	platform: SandboxPlatform;
 	hasNativeBackend: boolean;
 	// Long-form design notes: docs/dev/sandbox.md
-	/** Whether production *selects* the Windows backend — off until the toolchain reaches the child. */
+	/** Whether production *selects* the Windows backend — decided by the probe, not by an import. */
 	hasAppContainer?: boolean;
+	/**
+	 * Toolchain roots granted read+execute when the Windows backend runs. Carried
+	 * here rather than derived at spawn time so the probe that decides
+	 * `hasAppContainer` and the grant that makes it true are answers to one
+	 * question about one machine.
+	 */
+	executableRoots?: readonly string[];
+	/**
+	 * Why the Windows backend is not selected, when the probe declined. Reported
+	 * to the user, never acted on — a reason is not a fallback.
+	 */
+	appContainerReason?: string;
 }
 
 // Long-form design notes: docs/dev/sandbox.md
@@ -196,6 +220,7 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 				kind: "appcontainer",
 				workspace: workspace.path,
 				grantRoots: [...new Set([workspace.path, ...writable.map((entry) => entry.path)])],
+				executableRoots: [...(options.executableRoots ?? [])],
 				network: true,
 			};
 		}

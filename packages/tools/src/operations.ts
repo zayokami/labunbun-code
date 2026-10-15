@@ -466,6 +466,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 					platform: this.#runtime.platform,
 					hasNativeBackend: this.#runtime.hasNativeBackend,
 					hasAppContainer: this.#runtime.hasAppContainer,
+					executableRoots: this.#runtime.executableRoots,
 				})
 			: ({ kind: "unconfined" } as const);
 		const [program, ...programArgs] =
@@ -497,7 +498,10 @@ export class ChildProcessExecOperations implements ExecOperations {
 			// execute inside the container; fail closed.
 			// Long-form design notes: docs/dev/tools.md
 			const shellProgram = confinedProgramName(shellCommand);
-			if (!containerCanExecute(shellProgram, resolution.grantRoots)) {
+			// Both grant lists count: the shell only has to be executable, and a
+			// `write` root's full-access ACE carries execute just as the
+			// read+execute roots do.
+			if (!containerCanExecute(shellProgram, [...resolution.grantRoots, ...resolution.executableRoots])) {
 				return {
 					stdout: "",
 					stderr: `the Windows container sandbox cannot run this session's shell: ${shellProgram} is not in C:\\Windows\\System32 and not inside a granted root, so the confined child could not execute it. Turn the sandbox off for this session, or point the shell (LBB_BASH_PATH) at a path inside a granted root.`,
@@ -505,7 +509,12 @@ export class ChildProcessExecOperations implements ExecOperations {
 					killed: false,
 				};
 			}
-			const grant = acquireWorkspaceGrant(resolution.workspace, resolution.network, resolution.grantRoots.slice(1));
+			const grant = acquireWorkspaceGrant(
+				resolution.workspace,
+				resolution.network,
+				resolution.grantRoots.slice(1),
+				resolution.executableRoots,
+			);
 			if (grant.error !== undefined || grant.profile === undefined) {
 				// Fail closed and legibly: no grant means the child could not
 				// touch the workspace at all, which is a worse command than a
