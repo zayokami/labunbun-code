@@ -249,6 +249,21 @@ const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009;
 /** WinBase.h enum 2 (HandleList), Input bit set — bounds handle inheritance. */
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002;
 /**
+ * WinBase.h enum 14 (ChildProcessPolicy), Input bit set. Launches into a
+ * container are children-restricted by default; this override states that the
+ * confined child may spawn programs of its own. Measured 2026-10-15: with this
+ * attribute set, a cmd inside the container starts bare and PATH-resolved
+ * programs, and in-container FFI spawns by absolute path succeed; an env sweep
+ * that dropped the attribute changed none of those outcomes, so its bearing on
+ * them is not established. (The absolute-token refusals seen from cmd are the
+ * volume-subsystem wall, not child-creation restriction.) It stays because
+ * omitting it is fail-closed in the wrong direction: a child that could never
+ * spawn anything would be unusable.
+ */
+const PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY = 0x0002000e;
+/** WinBase.h PROCESS_CREATION_CHILD_PROCESS_OVERRIDE — the value this launch policy takes. */
+const PROCESS_CREATION_CHILD_PROCESS_OVERRIDE = 0x02;
+/**
  * The poll slice while waiting for the child: short enough that an abort's
  * latency stays imperceptible, long enough that a fast command does not spin
  * the loop.
@@ -442,6 +457,12 @@ const PROTECTED_DACL_SECURITY_INFORMATION = 0x8000_0000;
 // demands the bits.
 const FILE_ALL_ACCESS = 0x001f_01ff;
 const SUB_CONTAINERS_AND_OBJECTS_INHERIT = 0x3;
+/**
+ * FILE_GENERIC_READ | FILE_GENERIC_EXECUTE — the whole grant a toolchain root
+ * gets, deliberately with no write bit. Measured 2026-10-15: a program under
+ * such a root runs in the container, and a write beside it stays refused.
+ */
+const FILE_READ_EXECUTE = 0x0012_00a9;
 
 /**
  * The DACL of `path`, as raw bytes, or null when the object carries none.
@@ -536,16 +557,50 @@ function writeDacl(path: string, dacl: Uint8Array, protect: boolean): string | n
 	return null;
 }
 
-/** Grants read+write on this root and everything under it, to this SID. */
-export function grantRootAccess(path: string, sid: Uint8Array): string | null {
+/**
+ * Whether an ACE is an allow for this SID whose mask already covers `mask`.
+ *
+ * The type byte is load-bearing: an ACCESS_DENIED_ACE for this SID grants
+ * nothing — measured 2026-10-15, such a deny is inert in the container's
+ * access check — so counting it as coverage would skip the grant the child
+ * actually needs. The mask is the other half: a covered request is a no-op,
+ * and a bigger request still lands.
+ */
+function aceGrants(ace: Uint8Array, sidString: string, mask: number): boolean {
+	// 8 bytes of ACE header plus at least 8 bytes of SID.
+	if (ace.length < 16) return false;
+	const view = new DataView(ace.buffer, ace.byteOffset, ace.length);
+	if (view.getUint8(0) !== 0) return false; // ACCESS_ALLOWED_ACE_TYPE
+	if ((view.getUint32(4, true) & mask) !== mask) return false;
+	return aceSidString(ace) === sidString;
+}
+
+function grantAccess(path: string, sid: Uint8Array, mask: number): string | null {
 	const existing = readDacl(path);
 	// A NULL DACL grants everyone everything, so writing one would be an
 	// escalation: refuse rather than guess.
 	if (existing === null) return `${path} carries no DACL to extend`;
-	if (acesOf(existing).some((ace) => aceSidString(ace) === sidStringOf(sid))) return null; // already granted
+	const sidString = sidStringOf(sid);
+	if (sidString === null) return `the SID naming ${path} does not read back as a string`;
 	const aces = acesOf(existing);
-	aces.push(allowAce(sid, FILE_ALL_ACCESS));
+	if (aces.some((ace) => aceGrants(ace, sidString, mask))) return null; // already covered
+	aces.push(allowAce(sid, mask));
 	return writeDacl(path, buildDacl(aces), false);
+}
+
+/** Grants read+write on this root and everything under it, to this SID. */
+export function grantRootAccess(path: string, sid: Uint8Array): string | null {
+	return grantAccess(path, sid, FILE_ALL_ACCESS);
+}
+
+/**
+ * Grants read+execute on this root and everything under it, to this SID.
+ *
+ * This is what a toolchain root gets: the confined child runs the programs
+ * under it and cannot write one byte back.
+ */
+export function grantReadExecuteAccess(path: string, sid: Uint8Array): string | null {
+	return grantAccess(path, sid, FILE_READ_EXECUTE);
 }
 
 export function dropAcesFor(path: string, sid: Uint8Array): string | null {
@@ -648,11 +703,12 @@ function runConfinedWithSid(
 	void attrs;
 
 	const sizeOut = new BigUint64Array(1);
-	// Two attributes, not one: the container capabilities, and — because the
-	// child must inherit its std handles — a handle list that lets exactly
-	// those through. A plain `bInheritHandles: TRUE` without the list hands
-	// the sandbox every inheritable handle this process holds.
-	const attrCount = 2;
+	// Three attributes: the container capabilities; a handle list that lets
+	// exactly the std handles through (a plain `bInheritHandles: TRUE`
+	// without the list hands the sandbox every inheritable handle this
+	// process holds); and the child-process policy that lets the confined
+	// child spawn programs of its own at all.
+	const attrCount = 3;
 	lib.symbols.InitializeProcThreadAttributeList(null, attrCount, 0, sizeOut);
 	const attrList = new Uint8Array(Number(sizeOut[0]));
 	if (lib.symbols.InitializeProcThreadAttributeList(ptr(attrList), attrCount, 0, sizeOut) === 0) {
@@ -672,6 +728,24 @@ function runConfinedWithSid(
 	) {
 		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
 		return ffFailure(`UpdateProcThreadAttribute(capabilities) failed (${lib.symbols.GetLastError()})`);
+	}
+
+	// The kernel reads lpValue at creation time, so the buffer stays a local
+	// until CreateProcessW returns, like `caps` above.
+	const childProcessPolicy = new Uint32Array([PROCESS_CREATION_CHILD_PROCESS_OVERRIDE]);
+	if (
+		lib.symbols.UpdateProcThreadAttribute(
+			attrAddr,
+			0,
+			PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+			ptr(childProcessPolicy),
+			childProcessPolicy.byteLength,
+			null,
+			null,
+		) === 0
+	) {
+		lib.symbols.DeleteProcThreadAttributeList(attrAddr);
+		return ffFailure(`UpdateProcThreadAttribute(child policy) failed (${lib.symbols.GetLastError()})`);
 	}
 
 	// Each pipe carries SECURITY_ATTRIBUTES with bInheritHandle = TRUE, and the
@@ -928,16 +1002,19 @@ export interface GrantOutcome {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** Grants the container SID write access to the workspace and any extra roots, refcounted. */
+/** Grants the container SID write access to the workspace and any extra roots, read+execute to any toolchain roots, refcounted. */
 export function acquireWorkspaceGrant(
 	workspace: string,
 	network = false,
 	extraRoots: readonly string[] = [],
+	executableRoots: readonly string[] = [],
 ): GrantOutcome {
 	const profile = ensureAppContainerProfile(workspace, network);
 	if ("error" in profile) return { error: profile.error };
 	const existing = activeGrants.get(profile.name);
 	if (existing !== undefined) {
+		// The first acquire wrote every root; a command joining the open grant
+		// is covered by it.
 		existing.refs += 1;
 		return { profile };
 	}
@@ -945,27 +1022,52 @@ export function acquireWorkspaceGrant(
 	if (sid === null) {
 		return { profile, error: `the profile for ${workspace} has no readable SID` };
 	}
-	// The workspace first, then the roots the policy adds. Every root is
-	// granted or none is: a half-grant leaves a command that can write its
-	// workspace but not its cache, which is the narrower-than-asked failure
-	// this repository already fixed once in `policyFor` — and here it would be
-	// worse, because the first write that misses is the one that fails.
+	const sidString = sidStringOf(sid);
+	if (sidString === null) {
+		return { profile, error: `the profile for ${workspace} has an unreadable SID` };
+	}
+	// The workspace first, then the roots the policy adds, then the toolchain
+	// roots read+execute closes over. Every root is granted or none is: a
+	// half-grant leaves a command that can write its workspace but not its
+	// cache, which is the narrower-than-asked failure this repository already
+	// fixed once in `policyFor` — and here it would be worse, because the
+	// first write that misses is the one that fails. The caller gets the error
+	// and runs nothing, which is the legible failure rather than an unconfined
+	// one, and the rollback below writes back the DACL each touched root
+	// carried before this call, so the rule holds on disk too.
 	//
 	// Each root is canonicalised before the ACE is written — a measured GitHub
 	// runner failure: an ACE against the 8.3 short spelling does not cover a
 	// child that opens the same directory by another spelling.
 	// Long-form design notes: docs/dev/sandbox.md
-	const roots = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
-	for (const root of roots) {
-		const grantError = grantRootAccess(root, sid);
-		if (grantError !== null) {
-			// Fail closed on the write boundary that matters: a command that runs
-			// with no grant cannot touch the workspace, which is a legible failure
-			// rather than an unconfined one.
-			return { profile, error: grantError };
-		}
+	const writeRoots = [workspace, ...extraRoots.filter((root) => root !== workspace)].map(canonicalPathForChild);
+	// A toolchain root is read and executed, never written: read+execute is
+	// the whole grant. A root the write list already covers is dropped —
+	// FILE_ALL_ACCESS is a superset, and the bigger ACE is the whole grant.
+	const execRoots = Array.from(new Set(executableRoots.map(canonicalPathForChild))).filter(
+		(root) => !writeRoots.includes(root),
+	);
+	const touched: Array<{ root: string; aces: Uint8Array[] }> = [];
+	const fail = (error: string): GrantOutcome => {
+		// Best effort: the error that got here is the one the caller acts on,
+		// and a rollback that failed would only trade it for a quieter one.
+		for (const { root, aces } of touched) writeDacl(root, buildDacl(aces), false);
+		return { profile, error };
+	};
+	const plan: Array<{ root: string; mask: number }> = [
+		...writeRoots.map((root) => ({ root, mask: FILE_ALL_ACCESS })),
+		...execRoots.map((root) => ({ root, mask: FILE_READ_EXECUTE })),
+	];
+	for (const { root, mask } of plan) {
+		const prior = readDacl(root);
+		if (prior === null) return fail(`${root} carries no DACL to extend`);
+		const aces = acesOf(prior);
+		if (aces.some((ace) => aceGrants(ace, sidString, mask))) continue; // already covered
+		const grantError = writeDacl(root, buildDacl([...aces, allowAce(sid, mask)]), false);
+		if (grantError !== null) return fail(grantError);
+		touched.push({ root, aces });
 	}
-	activeGrants.set(profile.name, { sid, refs: 1, roots });
+	activeGrants.set(profile.name, { sid, refs: 1, roots: [...writeRoots, ...execRoots] });
 	return { profile };
 }
 
@@ -986,7 +1088,7 @@ export function releaseWorkspaceGrant(workspace: string, network = false): strin
 }
 
 /** The SID bytes of a profile name, through the same derivation the profile uses. */
-function sidBytesFor(name: string): Uint8Array | null {
+export function sidBytesFor(name: string): Uint8Array | null {
 	const lib = userenv();
 	const conv = advapi();
 	if (lib === null || conv === null) return null;

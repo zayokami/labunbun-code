@@ -2,17 +2,19 @@
  * The AppContainer backend, tested against the machine it describes.
  *
  * The split is deliberate and follows the one `sandbox-simulated.test.ts`
- * established: pure logic runs on every machine, and the real-spawn half is
- * Windows-only. A skipped test must be visible, and bun reports skip counts in
- * its summary — so a non-Windows machine reports `N skip`, never green — and
- * the real coverage is the Windows CI job plus the Windows machine this was
- * written on. What is NOT done here is asserting the acquisition-semantics
- * half (the ACL grant): that is not wired yet, and a test for it would be a
- * test for code that does not exist.
+ * established: pure logic runs on every machine, and the half that needs a
+ * real machine — spawns under a live container token, ACEs in a live DACL —
+ * is Windows-only. A skipped test must be visible, and bun reports skip
+ * counts in its summary — so a non-Windows machine reports `N skip`, never
+ * green — and the real coverage is the Windows CI job plus the Windows
+ * machine this was written on. The grant half is asserted on both levels:
+ * the ACE bytes a grant writes, read back through `icacls` rather than
+ * through this module, and the behavior those bytes promise around a
+ * confined child.
  */
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AppContainerProfile,
@@ -25,9 +27,13 @@ import {
 	containerCanExecute,
 	deleteAppContainerProfile,
 	deriveAppContainerSid,
+	dropAcesFor,
 	ensureAppContainerProfile,
+	grantReadExecuteAccess,
+	grantRootAccess,
 	releaseWorkspaceGrant,
 	runConfined,
+	sidBytesFor,
 } from "../src/sandbox/appcontainer.ts";
 
 describe("the profile name", () => {
@@ -332,6 +338,149 @@ describeWindows("the grant that lets a confined command touch the workspace", ()
 			expect(existsSync(join(cache, "c2.txt"))).toBe(false);
 		} finally {
 			execSync(`cmd /c if exist "${cache}" rmdir /s /q "${cache}"`, { stdio: "ignore" });
+		}
+	});
+});
+
+describeWindows("the read+execute grant a toolchain root gets", () => {
+	// A toolchain root sits outside every writable root: the child runs the
+	// programs under it and must not write beside them. The mask is 0x001200a9
+	// — FILE_GENERIC_READ | FILE_GENERIC_EXECUTE — and the rows below pin it
+	// the two independent ways this repository asks for: the bytes on disk,
+	// read back through `icacls` instead of through this module, and the
+	// behavior those bytes promise around a confined child.
+	const tools = `${process.env.LOCALAPPDATA}\\Temp\\ac-rx-tools-${process.pid}`;
+	const workspace = `${process.env.LOCALAPPDATA}\\Temp\\ac-rx-ws-${process.pid}`;
+	const program = `${tools}\\probe.exe`;
+
+	function refresh(): AppContainerProfile {
+		execSync(`cmd /c if exist "${tools}" rmdir /s /q "${tools}"`, { stdio: "ignore" });
+		execSync(`cmd /c if exist "${workspace}" rmdir /s /q "${workspace}"`, { stdio: "ignore" });
+		execSync(`cmd /c mkdir "${tools}" "${workspace}"`, { stdio: "ignore" });
+		// A real executable, so "runs" means runs: whoami carries nothing but
+		// its own image, and its output is the proof it executed.
+		copyFileSync("C:\\Windows\\System32\\whoami.exe", program);
+		// A readable file beside it: the grant half of the test is about what
+		// the child can read *for itself*, and a read is the smallest such act.
+		writeFileSync(`${tools}\\probe.txt`, "toolchain file\n");
+		const profile = ensureAppContainerProfile(workspace);
+		if ("error" in profile) throw new Error(profile.error);
+		return profile;
+	}
+
+	function sidOf(profile: AppContainerProfile): Uint8Array {
+		const sid = sidBytesFor(profile.name);
+		if (sid === null) throw new Error(`no SID bytes for ${profile.name}`);
+		return sid;
+	}
+
+	function icaclsOf(path: string): string {
+		return execSync(`icacls "${path}"`, { encoding: "utf8" });
+	}
+
+	test("the ACE on disk is one inheritable (RX) — read+execute, never (F)", () => {
+		const profile = refresh();
+		try {
+			expect(grantReadExecuteAccess(tools, sidOf(profile))).toBeNull();
+			const listing = icaclsOf(tools);
+			expect(listing).toContain(`${profile.sid}:(OI)(CI)(RX)`);
+			expect(listing).not.toContain(`${profile.sid}:(OI)(CI)(F)`);
+		} finally {
+			dropAcesFor(tools, sidOf(profile));
+			deleteAppContainerProfile(profile.name);
+		}
+	});
+
+	test("a covered request writes nothing and a bigger one still lands", () => {
+		const profile = refresh();
+		const sid = sidOf(profile);
+		try {
+			expect(grantReadExecuteAccess(tools, sid)).toBeNull();
+			const afterRx = icaclsOf(tools);
+			// The same request again: covered, so the ACL is untouched — the
+			// same listing, not a second ACE.
+			expect(grantReadExecuteAccess(tools, sid)).toBeNull();
+			expect(icaclsOf(tools)).toBe(afterRx);
+			// The bigger request is not covered by (RX): the write grant lands
+			// as a second ACE, and repeating it is a no-op again. A check that
+			// treated any ACE naming the SID as coverage passes the first half
+			// of this and fails right here.
+			expect(grantRootAccess(tools, sid)).toBeNull();
+			const afterF = icaclsOf(tools);
+			expect(afterF).toContain(`${profile.sid}:(OI)(CI)(F)`);
+			expect(afterF).not.toBe(afterRx);
+			expect(grantRootAccess(tools, sid)).toBeNull();
+			expect(icaclsOf(tools)).toBe(afterF);
+			// And the reverse: (F) covers the read+execute request.
+			expect(grantReadExecuteAccess(tools, sid)).toBeNull();
+			expect(icaclsOf(tools)).toBe(afterF);
+		} finally {
+			dropAcesFor(tools, sid);
+			deleteAppContainerProfile(profile.name);
+		}
+	});
+
+	test("ungranted it cannot read, granted it reads and runs, a write beside it stays out, release locks it again", () => {
+		const profile = refresh();
+		try {
+			// The wall is the *read*, and it is the child's own: every file the
+			// confined process opens for itself goes through the container
+			// token. What is not a wall is the launch — measured 2026-10-15:
+			// CreateProcessW opens the image in the *caller's* context, so this
+			// module starts a program the container cannot reach. An earlier
+			// version of this test expected the ungranted start to fail, which
+			// pinned the caller's powers instead of the token's limits.
+			const ungrantedRead = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${tools}\\probe.txt"`, {
+				cwd: "C:\\Windows\\System32",
+			});
+			expect(ungrantedRead.exitCode).not.toBe(0);
+			expect(ungrantedRead.stdout).not.toContain("toolchain file");
+
+			const ungrantedRun = runConfined(profile, `"${program}"`, { cwd: "C:\\Windows\\System32" });
+			expect(ungrantedRun.exitCode).toBe(0);
+
+			const grant = acquireWorkspaceGrant(workspace, false, [], [tools]);
+			expect(grant.error).toBeUndefined();
+			try {
+				// The grant is the whole difference: the same read now comes
+				// back with the bytes, and the program still runs.
+				const grantedRead = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${tools}\\probe.txt"`, {
+					cwd: workspace,
+				});
+				expect(grantedRead.exitCode).toBe(0);
+				expect(grantedRead.stdout).toContain("toolchain file");
+
+				const grantedRun = runConfined(profile, `"${program}"`, { cwd: workspace });
+				expect(grantedRun.error).toBeUndefined();
+				expect(grantedRun.exitCode).toBe(0);
+				expect(grantedRun.stdout.trim().length).toBeGreaterThan(0);
+
+				// Read+execute, never write: the write beside the program fails
+				// and the file never appears. Checked by existence, not by the
+				// exit code — `&& exit 42` runs even when the redirection fails.
+				const write = runConfined(
+					profile,
+					`"C:\\Windows\\System32\\cmd.exe" /c echo x > "${tools}\\w.txt" && exit 42`,
+					{ cwd: workspace },
+				);
+				expect(write.exitCode).not.toBe(42);
+				expect(existsSync(`${tools}\\w.txt`)).toBe(false);
+			} finally {
+				releaseWorkspaceGrant(workspace, false);
+			}
+
+			// The release takes the read+execute ACE back too: the same read is
+			// refused again. Only the read is asserted here — the release does
+			// not unmake the caller's image open, so a spawn would still start.
+			const released = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${tools}\\probe.txt"`, {
+				cwd: "C:\\Windows\\System32",
+			});
+			expect(released.exitCode).not.toBe(0);
+			expect(released.stdout).not.toContain("toolchain file");
+		} finally {
+			execSync(`cmd /c if exist "${tools}" rmdir /s /q "${tools}"`, { stdio: "ignore" });
+			execSync(`cmd /c if exist "${workspace}" rmdir /s /q "${workspace}"`, { stdio: "ignore" });
+			deleteAppContainerProfile(profile.name);
 		}
 	});
 });
