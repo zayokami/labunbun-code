@@ -232,6 +232,10 @@ function loadKernel32Raw() {
 			GetExitCodeProcess: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
 			TerminateProcess: { args: [FFIType.u64, FFIType.u32], returns: FFIType.i32 },
 			GetLastError: { args: [], returns: FFIType.u32 },
+			// HLOCAL LocalFree(HLOCAL hMem) — winbase.h. It is listed under
+			// kernel32, not advapi32, though every allocation it frees here comes
+			// out of an advapi32 call. Verified loadable on this machine.
+			LocalFree: { args: [FFIType.u64], returns: FFIType.u64 },
 		});
 	} catch {
 		return null;
@@ -430,7 +434,13 @@ function sidString(sidAddr: number): string | null {
 	if (conv === null) return null;
 	const strOut = new BigUint64Array(1);
 	if (conv.symbols.ConvertSidToStringSidW(sidAddr as unknown as Pointer, strOut) === 0) return null;
+	// The API hands back LocalAlloc'd memory the caller owns. The string is read
+	// out *before* the free, because the read goes through a view of that same
+	// memory — `toArrayBuffer` does not copy (measured 2026-10-15) — and a
+	// `wideStringAt` over freed memory would be reading whichever allocation
+	// landed there next.
 	const value = wideStringAt(Number(strOut[0]));
+	kernel32()?.symbols.LocalFree(strOut[0]);
 	return value.startsWith("S-1-15-2-") ? value : null;
 }
 
@@ -487,11 +497,23 @@ function readDacl(path: string): Uint8Array | null {
 		ptr(out.subarray(4)),
 	);
 	if (code !== 0) return null;
+	// The security descriptor is one LocalAlloc'd block the caller owns — the
+	// fifth out-parameter — and it is freed on both exits below. The DACL bytes
+	// leave as a copy: the reads go through views of that block (`toArrayBuffer`
+	// does not copy, measured 2026-10-15), so anything read out of it must be
+	// copied before the free, not read after. This function previously freed
+	// nothing, which is why the views it returned stayed readable.
+	const descriptor = out[4];
 	const daclAddr = Number(out[2]);
-	if (daclAddr === 0) return null;
+	if (daclAddr === 0) {
+		kernel32()?.symbols.LocalFree(descriptor);
+		return null;
+	}
 	const head = new DataView(memoryAt(daclAddr, 8));
 	const used = head.getUint16(2, true);
-	return new Uint8Array(memoryAt(daclAddr, used));
+	const dacl = new Uint8Array(memoryAt(daclAddr, used)).slice();
+	kernel32()?.symbols.LocalFree(descriptor);
+	return dacl;
 }
 
 /** Every ACE in a DACL, walked by size, as raw slices. */
@@ -516,7 +538,10 @@ function aceSidString(ace: Uint8Array): string | null {
 	if (ace.length <= sidStart) return null;
 	const strOut = new BigUint64Array(1);
 	if (conv.symbols.ConvertSidToStringSidW((ptr(ace) + sidStart) as unknown as Pointer, strOut) === 0) return null;
-	return wideStringAt(Number(strOut[0]));
+	const value = wideStringAt(Number(strOut[0]));
+	// Same ownership rule as `sidString`: read, then free the API's allocation.
+	kernel32()?.symbols.LocalFree(strOut[0]);
+	return value;
 }
 
 // Long-form design notes: docs/dev/sandbox.md
@@ -606,8 +631,13 @@ export function grantReadExecuteAccess(path: string, sid: Uint8Array): string | 
 export function dropAcesFor(path: string, sid: Uint8Array): string | null {
 	const existing = readDacl(path);
 	if (existing === null) return null; // nothing to clean
-	const kept = acesOf(existing).filter((ace) => aceSidString(ace) !== sidStringOf(sid));
-	if (kept.length === acesOf(existing).length) return null;
+	// Both the SID's string form and the ACE list are hoisted out of the walk:
+	// this runs per granted root on release, and neither changes between the
+	// ACEs of one DACL. (The previous shape recomputed both per ACE.)
+	const target = sidStringOf(sid);
+	const aces = acesOf(existing);
+	const kept = aces.filter((ace) => aceSidString(ace) !== target);
+	if (kept.length === aces.length) return null;
 	return writeDacl(path, buildDacl(kept), false);
 }
 
@@ -618,7 +648,10 @@ function sidStringOf(sid: Uint8Array): string | null {
 	// the buffer holding them.
 	const strOut = new BigUint64Array(1);
 	if (conv.symbols.ConvertSidToStringSidW(ptr(sid) as unknown as Pointer, strOut) === 0) return null;
-	return wideStringAt(Number(strOut[0]));
+	const value = wideStringAt(Number(strOut[0]));
+	// Same ownership rule as `sidString`: read, then free the API's allocation.
+	kernel32()?.symbols.LocalFree(strOut[0]);
+	return value;
 }
 
 export interface ConfinedRunResult {
@@ -836,9 +869,13 @@ function runConfinedWithSid(
 		pi,
 	);
 	// The parent's copies of the write ends must close or the read loops below
-	// would wait for a writer that is already gone.
+	// would wait for a writer that is already gone. The read end of the child's
+	// stdin closes here too — this one close covers both outcomes below — because
+	// nothing on this side ever reads it, and every run that gets this far would
+	// otherwise leave one inherited handle open for the life of the process.
 	lib.symbols.CloseHandle(outWrite[0]);
 	lib.symbols.CloseHandle(errWrite[0]);
+	lib.symbols.CloseHandle(inRead[0]);
 	if (spawned === 0) {
 		const err = lib.symbols.GetLastError();
 		lib.symbols.CloseHandle(outRead[0]);
