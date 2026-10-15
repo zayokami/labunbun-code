@@ -1233,9 +1233,11 @@ describe("emacs: the reserved tables", () => {
 		// rather than left behind, so this is the assertion that keeps the promise checkable.
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("u");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("x");
-		// `C-o` is the row `shortcuts.ts` reads to decide the transcript is unreachable under
-		// emacs, so it belongs in *this* table and saying so here is what keeps the two files
+		// `C-o` is the key the `shortcuts.ts` rows cite when they explain what the engine
+		// claims, so it belongs in *this* table and saying so here is what keeps the two files
 		// from disagreeing: a reader of the shortcut list can check the claim one layer down.
+		// The claim is real; the consequence "the transcript is unreachable" was the part that
+		// was wrong, and the measure of that lives in `watch-panel.test.tsx`.
 		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-o");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-o");
 		// The control for all of it: the two keys that *are* implemented still work through the
