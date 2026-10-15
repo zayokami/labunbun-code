@@ -739,6 +739,25 @@ export function PromptInput({
 		"visual-line": "V-LINE",
 	};
 
+	/**
+	 * The badge's own colour, by mode, so the one word that changes as the user
+	 * moves through the modes is also the one word that reads at a glance.
+	 * Normal is the resting state and stays as quiet as the rest of the row;
+	 * insert is where typing happens and takes the accent, and visual wears the
+	 * same `selection` token its on-screen selection is already drawn in.
+	 * `visual-line` is `V`'s selection — the same editing mode one granularity
+	 * up, where `d`/`y`/`c` act on whole lines — so it counts as editing-ish and
+	 * takes the accent. An unknown mode would be labelled `[NORMAL]` by the
+	 * lookup beside this one, so it gets normal's colour: badge and label are
+	 * read off the same mode and cannot disagree.
+	 */
+	const BADGE_COLOR: Record<string, string> = {
+		normal: theme.textMuted,
+		insert: theme.accent,
+		visual: theme.selection,
+		"visual-line": theme.accent,
+	};
+
 	return (
 		<Box flexDirection="column">
 			{search && (
@@ -796,7 +815,7 @@ export function PromptInput({
 			{/* Above the prompt, where the suggestion lists go: it is a thing to
 			    read and press while typing, not a modal standing over the app. */}
 			{osk && <OnScreenKeyboard pageIndex={oskPageIndex} cursor={oskCursor} shift={oskShift} />}
-			<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1}>
+			<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1}>
 				{state.text.length === 0 ? (
 					// The cursor has to be drawn here too. Falling through to the
 					// placeholder alone leaves an empty prompt with no caret, so the
@@ -828,19 +847,31 @@ export function PromptInput({
 						<Text dimColor> Enter search · Esc cancel</Text>
 					</Text>
 				)}
-				<Text dimColor>
+				{/* A plain wrapper with styled children rather than a dim Text with a
+				    nested badge: ink applies a Text's `dimColor` as a transform over
+				    the whole squashed line, after nested children have been styled
+				    (`node_modules/ink/build/output.js` runs `transformers` per line at
+				    write time over the text `squash-text-nodes.js` already coloured),
+				    so a nested `dimColor={false}` cannot cancel an outer dim — the
+				    badge would render dim anyway. As siblings inside this undimmed
+				    wrapper, the badge's colour is the only styling it gets. */}
+				<Text>
 					{/* The badge is vim's alone. Emacs has no mode to name, and a line
 					    saying `[EMACS]` on a modeless prompt would be the one place the
 					    screen lied about it. */}
-					{editor.mode === "vim" ? `[${MODE_LABEL[vimMode] ?? "NORMAL"}] ` : ""}
-					{/* The permission mode is a different thing from an editor mode and
-					    says what it is: every row of `MODE_CHOICES` is a mode a user can
-					    be *in*, so the one they are in is the fact worth having on the
-					    prompt. The mode the key changes is the mode that has to be
-					    visible, which is why this sits under the editor rather than in
-					    the status line that collapses when the turn is idle. */}
-					{modeLabel ? `[${modeLabel}] ` : ""}
-					{hintLine(columns, { editor: editor.mode, vimMode })}
+					{editor.mode === "vim" ? (
+						<Text color={BADGE_COLOR[vimMode] ?? theme.textMuted}>{`[${MODE_LABEL[vimMode] ?? "NORMAL"}] `}</Text>
+					) : null}
+					<Text dimColor>
+						{/* The permission mode is a different thing from an editor mode and
+						    says what it is: every row of `MODE_CHOICES` is a mode a user can
+						    be *in*, so the one they are in is the fact worth having on the
+						    prompt. The mode the key changes is the mode that has to be
+						    visible, which is why this sits under the editor rather than in
+						    the status line that collapses when the turn is idle. */}
+						{modeLabel ? `[${modeLabel}] ` : ""}
+						{hintLine(columns, { editor: editor.mode, vimMode })}
+					</Text>
 				</Text>
 			</Box>
 		</Box>

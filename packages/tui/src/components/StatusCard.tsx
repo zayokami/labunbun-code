@@ -51,7 +51,7 @@ export function StatusCard({ data }: { data: StatusCardData }) {
 	const width = Math.max(0, ...rows.map(([label]) => label.length));
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
+		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
 			<Text color={theme.accent} bold>
 				{data.title ?? "Status"}
 			</Text>

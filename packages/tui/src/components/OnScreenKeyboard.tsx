@@ -24,7 +24,7 @@ export function OnScreenKeyboard({ pageIndex, cursor, shift }: OnScreenKeyboardP
 	const at = oskClamp(page, cursor);
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
+		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
 			<Text color={theme.accent} bold>
 				On-screen keyboard · {page.name}
 				{shift ? " · shift" : ""}

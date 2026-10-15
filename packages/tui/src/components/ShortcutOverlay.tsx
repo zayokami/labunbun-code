@@ -25,7 +25,7 @@ export function ShortcutOverlay({
 	const layout = columns >= SHORTCUT_TWO_COLUMN_MIN_COLUMNS ? splitShortcutGroups(groups) : [groups];
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
+		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
 			<Text color={theme.accent} bold>
 				Keyboard shortcuts
 			</Text>

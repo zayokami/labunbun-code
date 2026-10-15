@@ -183,7 +183,7 @@ export function ListPickerDialog({
 	const visible = items.slice(start, start + VISIBLE_ROWS);
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
+		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
 			<Text color={theme.accent} bold>
 				{title}
 			</Text>

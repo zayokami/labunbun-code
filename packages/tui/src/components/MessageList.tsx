@@ -1,5 +1,6 @@
 import { Box, Static, Text } from "ink";
 import { memo, useMemo } from "react";
+import { RESULT_INDENT, RESULT_LEAD, TOOL_DOT } from "../figures.ts";
 import { type CodeToken, highlightCode } from "../highlight.ts";
 import { LIVE_OUTPUT_LINES, LIVE_PREVIEW_MAX, liveOutputLines, livePreviewTargets } from "../live-output.ts";
 import { type Block, type ColumnAlign, type InlineSpan, parseBlocks } from "../markdown.ts";
@@ -214,6 +215,12 @@ function TableView({ block, theme }: { block: Extract<Block, { kind: "table" }>;
 	);
 }
 
+/**
+ * A tool call as one flat group: the dot and the call on the first line, the
+ * output hanging under the lead below it. No box — the dot's color carries the
+ * state, and a border around every call would charge two columns of chrome on
+ * rows that are mostly one line long.
+ */
 function ToolUseView({
 	entry,
 	full,
@@ -225,10 +232,22 @@ function ToolUseView({
 	liveText?: string;
 }) {
 	const theme = useTheme();
+	// The entry keeps no status field: a result landing *is* the state change, so
+	// "still running" and "no result yet" are the same fact.
+	const state = entry.resultText === undefined ? "running" : entry.isError ? "error" : "done";
 	return (
-		<Box marginBottom={1} flexDirection="column" borderStyle="round" borderColor={theme.toolBorder} paddingX={1}>
+		<Box marginBottom={1} flexDirection="column">
 			<Text>
-				<Text color={theme.toolName}>[{entry.toolName}]</Text> <Text color={theme.toolArgs}>{entry.inputPreview}</Text>
+				<Text
+					color={state === "running" ? undefined : state === "error" ? theme.error : theme.success}
+					dimColor={state === "running"}
+				>
+					{TOOL_DOT}{" "}
+				</Text>
+				<Text bold color={theme.toolName}>
+					{entry.toolName}
+				</Text>
+				{entry.inputPreview ? <Text color={theme.toolArgs}>({entry.inputPreview})</Text> : null}
 			</Text>
 			{entry.resultText !== undefined ? (
 				<ResultLines text={entry.resultText} isError={entry.isError} full={full} />
@@ -240,7 +259,8 @@ function ToolUseView({
 }
 
 /**
- * The tail of a running command's output, inside the tool's own box.
+ * The tail of a running command's output, hung under its call row the way a
+ * finished result is.
  *
  * Bounded to a handful of lines on purpose: this sits above the prompt, and a
  * command printing megabytes must not push the conversation off the screen. The
@@ -251,10 +271,11 @@ function LiveOutputLines({ text }: { text: string }) {
 	const lines = liveOutputLines(stripAnsi(text), LIVE_OUTPUT_LINES);
 	if (lines.length === 0) return null;
 	return (
-		<Box flexDirection="column" marginTop={1}>
+		<Box flexDirection="column">
 			{lines.map((line, i) => (
 				// biome-ignore lint/suspicious/noArrayIndexKey: the window is a sliding tail of immutable lines with no per-line state
 				<Text key={i} color={theme.textMuted} dimColor>
+					{i === 0 ? RESULT_LEAD : RESULT_INDENT}
 					{line}
 				</Text>
 			))}
@@ -267,33 +288,31 @@ function LiveOutputLines({ text }: { text: string }) {
  * live view truncates hard — layout matters more than completeness while the
  * transcript scrolls — and transcript mode passes `full` to lift that cap
  * (still bounded by what the reducer stored).
+ *
+ * The first line opens with the lead and the rest keep the indent under it, so
+ * a multi-line result reads as one group hanging from its call rather than as
+ * rows that happen to follow it.
  */
 function ResultLines({ text, isError, full }: { text: string; isError?: boolean; full?: boolean }) {
 	const theme = useTheme();
 	const sanitized = stripAnsi(text);
 	const capped = full || sanitized.length <= 400 ? sanitized || "(no output)" : `${sanitized.slice(0, 397)}...`;
-	if (isError) {
-		return (
-			<Text color={theme.error} bold={theme.bold.error}>
-				{theme.marks.error} {capped}
-			</Text>
-		);
-	}
 	const hasDiff = /^[-+@ ]/m.test(capped) && (capped.includes("\n- ") || capped.includes("\n+ "));
-	if (!hasDiff) {
-		return <Text color={theme.toolOutput}>{capped}</Text>;
-	}
 	return (
 		<Box flexDirection="column">
 			{capped.split("\n").map((line, i) => {
-				let color = theme.toolOutput;
-				if (line.startsWith("+")) color = theme.diffAdded;
-				else if (line.startsWith("-")) color = theme.diffRemoved;
-				else if (line.startsWith("@@")) color = theme.diffHeader;
+				let color = isError ? theme.error : theme.toolOutput;
+				if (!isError && hasDiff) {
+					if (line.startsWith("+")) color = theme.diffAdded;
+					else if (line.startsWith("-")) color = theme.diffRemoved;
+					else if (line.startsWith("@@")) color = theme.diffHeader;
+				}
 				return (
 					// biome-ignore lint/suspicious/noArrayIndexKey: capped is a fixed string slice split into immutable, never-reordered lines
-					<Text key={i} color={color}>
-						{line}
+					<Text key={i} color={color} bold={isError ? theme.bold.error : undefined}>
+						<Text dimColor>{i === 0 ? RESULT_LEAD : RESULT_INDENT}</Text>
+						{/* The error mark goes behind the lead — `  ⎿  ✗ text` — so it reads as the state of the output, not of the call. */}
+						{isError && i === 0 ? `${theme.marks.error} ${line}` : line}
 					</Text>
 				);
 			})}

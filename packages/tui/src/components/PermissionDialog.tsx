@@ -143,7 +143,7 @@ export function PermissionDialog({
 	});
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.permission} paddingX={1} marginBottom={1}>
+		<Box flexDirection="column" borderStyle="single" borderColor={theme.permission} paddingX={1} marginBottom={1}>
 			<Text color={theme.permission} bold>
 				Permission required
 				{queueLength !== undefined && queueLength > 1 ? ` (+${queueLength - 1} more waiting)` : ""}

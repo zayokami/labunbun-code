@@ -6,6 +6,7 @@ import { PermissionDialog } from "../src/components/PermissionDialog.tsx";
 import { ShortcutOverlay } from "../src/components/ShortcutOverlay.tsx";
 import { CONTEXT_BAR_SEGMENTS, contextBar, StatusCard } from "../src/components/StatusCard.tsx";
 import { backgroundShellRow, StatusLine, toolSummary } from "../src/components/StatusLine.tsx";
+import { RESULT_LEAD, TOOL_DOT } from "../src/figures.ts";
 import { permissionOptions } from "../src/permission-options.ts";
 import { shortcutGroups } from "../src/shortcuts.ts";
 import { createStore } from "../src/store.ts";
@@ -37,10 +38,27 @@ describe("MessageList", () => {
 		);
 		const frame = lastFrame() ?? "";
 		expect(frame).toContain("list the files");
-		expect(frame).toContain("[Bash]");
-		expect(frame).toContain("ls");
+		// The dot and the call share a row — no `[name] args` header, no box — and
+		// the result opens under the lead on the next one.
+		expect(frame).toContain(`${TOOL_DOT} Bash(ls)`);
+		expect(frame).toContain(`${RESULT_LEAD}a.txt`);
 		expect(frame).toContain("Here are the files.");
 		expect(frame).toContain("Error: boom");
+	});
+
+	// The parens are the arguments: a call that has no preview to show gets
+	// none at all, because `Bash()` would read as a call passed nothing.
+	test("a call with no arguments shows no parens at all", () => {
+		const { lastFrame } = render(
+			withTheme(
+				<MessageList
+					entries={[{ kind: "toolUse", callId: "c1", toolName: "Bash", inputPreview: "", resultText: "ok" }]}
+				/>,
+			),
+		);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain(`${TOOL_DOT} Bash`);
+		expect(frame).not.toContain("()");
 	});
 
 	test("tool result preview truncates long output", () => {

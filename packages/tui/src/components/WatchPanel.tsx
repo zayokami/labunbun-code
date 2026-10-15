@@ -217,7 +217,7 @@ export function WatchPanel({
 	const width = Math.max(8, columns - 4);
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1}>
+		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1}>
 			<Text dimColor wrap="truncate">
 				{POLL_NOTE}
 			</Text>

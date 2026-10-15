@@ -132,7 +132,7 @@ export function QuestionDialog({ questions, resolve, pad }: QuestionDialogState 
 	if (!current || current.options.length === 0) return null;
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
+		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
 			<Text color={theme.accent} bold>
 				{current.header}
 				{questions.length > 1 ? ` (${questionIndex + 1}/${questions.length})` : ""}

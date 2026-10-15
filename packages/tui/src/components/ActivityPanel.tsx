@@ -47,7 +47,7 @@ import { useTheme } from "../theme.ts";
 import type { Theme } from "../themes/tokens.ts";
 import { FRAMES, SPINNER_INTERVAL_MS } from "./StatusLine.tsx";
 
-/** Printed columns taken by the round border, one on each side. */
+/** Printed columns taken by the border, one on each side. */
 const BORDER_COLUMNS = 2;
 /** Printed columns taken by `paddingX={1}`, one on each side. */
 const PADDING_COLUMNS = 2;
@@ -367,7 +367,7 @@ export function ActivityPanel({
 	});
 
 	return (
-		<Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
+		<Box flexDirection="column" borderStyle="single" borderColor={theme.border} paddingX={1} marginBottom={1}>
 			<Text color={theme.accent} bold>
 				Activity
 			</Text>
