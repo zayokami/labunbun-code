@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { sameShells } from "../src/app.tsx";
+import { sameLines, sameShells } from "../src/app.tsx";
 import { CTRL_C_EXIT_WINDOW_MS, ctrlCShouldExit, handleCommand } from "../src/components/REPL.tsx";
 import { createStore, type Store } from "../src/store.ts";
 import { LIGHT_THEME } from "../src/themes/index.ts";
@@ -308,5 +308,34 @@ describe("sameShells", () => {
 				[shell("shell_2", "running"), shell("shell_1", "running")],
 			),
 		).toBe(false);
+	});
+});
+
+/**
+ * The watch panel's two data stops are republished on the same poll as the
+ * shells, so "did anything change" guards them with the same rule: an unchanged
+ * list must keep its identity, or every tick rerenders the tree to say what it
+ * already said — and the one tick that mattered is lost in the noise.
+ */
+describe("sameLines", () => {
+	test("the same lines, freshly built, count as unchanged", () => {
+		expect(sameLines(["a", "b"], ["a", "b"])).toBe(true);
+		expect(sameLines([], [])).toBe(true);
+	});
+
+	test("a line whose text changed is a change, in either direction", () => {
+		expect(sameLines(["cost $0.1000"], ["cost $0.1001"])).toBe(false);
+		expect(sameLines(["cost $0.1001"], ["cost $0.1000"])).toBe(false);
+	});
+
+	test("a list that grew or shrank is a change", () => {
+		expect(sameLines(["a"], ["a", "b"])).toBe(false);
+		expect(sameLines(["a", "b"], ["a"])).toBe(false);
+	});
+
+	// Position is content here: the subagent stop is ordered (running first)
+	// and the facts stop aligns its labels, so a reshuffle is a real change.
+	test("the same lines in another order are not the same list", () => {
+		expect(sameLines(["a", "b"], ["b", "a"])).toBe(false);
 	});
 });

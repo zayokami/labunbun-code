@@ -14,6 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import type { CompactionTrigger, ContextBreakdown, PreservedFile } from "@labunbun/agent";
+import { formatTokens } from "@labunbun/tui";
 
 const LOW_CONTEXT_WARN_FRACTION = 0.8;
 
@@ -99,11 +100,10 @@ export interface CompactionHistory {
 	last?: CompactionHistoryEntry;
 }
 
-/** Tokens, shortened the way the rest of the app shortens them (1234 → 1.2k). */
-export function formatTokens(tokens: number): string {
-	if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
-	return String(tokens);
-}
+// The shortening itself lives in the TUI, beside the status line and the card
+// that draw it: one implementation for every "1.2k" in the app, so the watch
+// panel's facts and the status row cannot drift into two vocabularies.
+export { formatTokens };
 
 /**
  * The card's rows, in reading order: what the context is made of, then what is

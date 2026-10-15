@@ -3,6 +3,7 @@ import { Text } from "ink";
 import { useEffect, useState } from "react";
 import { formatElapsed } from "../elapsed.ts";
 import { thinkingWord } from "../flavor.ts";
+import { formatTokens } from "../format.ts";
 import { useTheme } from "../theme.ts";
 import type { PendingTool, StatusPhase, UiBackgroundShell } from "../ui-state.ts";
 
@@ -201,9 +202,4 @@ export function StatusLine({
 			<BatterySegment pad={pad} />
 		</Text>
 	);
-}
-
-function formatTokens(tokens: number): string {
-	if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
-	return String(tokens);
 }

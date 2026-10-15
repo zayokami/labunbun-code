@@ -187,6 +187,14 @@ export interface ReplAppHandle {
 	 * whole tree to say what it already said.
 	 */
 	setBackgroundShells(shells: UiBackgroundShell[]): void;
+	/**
+	 * The watch panel's subagent stop, on the same poll. Lines the app layer
+	 * formatted, compared element-wise before publishing — every tick between
+	 * subagent spawns rebuilds the same list, and a rebuild is not a change.
+	 */
+	setWatchSubagents(lines: string[]): void;
+	/** The watch panel's facts stop, with the same poll and the same compare. */
+	setWatchStatus(lines: string[]): void;
 	setTasks(
 		tasks: Array<{ id: string; subject: string; status: "pending" | "in_progress" | "completed"; activeForm?: string }>,
 	): void;
@@ -247,12 +255,17 @@ export function sameShells(a: UiBackgroundShell[], b: UiBackgroundShell[]): bool
 			shell.id === b[i].id &&
 			shell.status === b[i].status &&
 			shell.command === b[i].command &&
-			sameTail(shell.tail, b[i].tail),
+			sameLines(shell.tail, b[i].tail),
 	);
 }
 
-/** Element-wise, and length first: two tails are the same window or they are not. */
-function sameTail(a: string[], b: string[]): boolean {
+/**
+ * Element-wise, and length first: two line lists are the same window or they
+ * are not. Shared by the shell tails and by the watch panel's two published
+ * stops, which are republished on the same poll and guarded by the same rule —
+ * an unchanged list must keep its identity or every tick costs a render.
+ */
+export function sameLines(a: string[], b: string[]): boolean {
 	if (a === b) return true;
 	if (a.length !== b.length) return false;
 	return a.every((line, i) => line === b[i]);
@@ -462,6 +475,12 @@ export function mountRepl(options: ReplAppOptions): ReplAppHandle {
 		},
 		setBackgroundShells: (shells) => {
 			store.set((s) => (sameShells(s.backgroundShells, shells) ? s : { ...s, backgroundShells: shells }));
+		},
+		setWatchSubagents: (lines) => {
+			store.set((s) => (sameLines(s.watchSubagentLines, lines) ? s : { ...s, watchSubagentLines: lines }));
+		},
+		setWatchStatus: (lines) => {
+			store.set((s) => (sameLines(s.watchStatusLines, lines) ? s : { ...s, watchStatusLines: lines }));
 		},
 		setVimMode: (on) => {
 			// Turning one on clears the other here rather than in the command, so

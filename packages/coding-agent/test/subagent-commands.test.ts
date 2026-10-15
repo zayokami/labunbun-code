@@ -16,6 +16,7 @@ import {
 	formatRetryEnding,
 	formatSubagentList,
 	formatSubagentLog,
+	formatSubagentWatchLines,
 	LOG_MESSAGE_WINDOW,
 	orderSubagents,
 	resolveSubagentId,
@@ -161,6 +162,51 @@ describe("formatSubagentList", () => {
 		const titleAt = (line: string) => line.indexOf("Fix the flaky test");
 		expect(titleAt(rows[1] ?? "")).toBe(titleAt(rows[2] ?? ""));
 		expect(titleAt(rows[1] ?? "")).toBeGreaterThan(0);
+	});
+});
+
+describe("formatSubagentWatchLines", () => {
+	test("an empty fleet still answers: the counts line is the whole stop", () => {
+		expect(formatSubagentWatchLines([], NOW)).toEqual(["No subagents have run in this session."]);
+	});
+
+	test("counts first, then one row per subagent in listing order", () => {
+		const running = handle();
+		const done = handle({
+			sidechainId: "sidechain-41-efgh",
+			title: "Write the migration",
+			startedAt: NOW - 65_000,
+			state: "finished",
+			endReason: "completed",
+			finishedAt: NOW - 60_000,
+			endedAt: 1,
+		});
+		const lines = formatSubagentWatchLines([done, running], NOW);
+		expect(lines).toHaveLength(3);
+		expect(lines[0]).toBe("2 subagents: 1 running, 1 completed");
+		expect(flat(lines[1] ?? "")).toBe("running 12s Fix the flaky test (sidechain-42-abcd)");
+		expect(flat(lines[2] ?? "")).toBe("completed 5s Write the migration (sidechain-41-efgh)");
+	});
+
+	// The panel is about half a terminal wide, and a row is cut at the edge:
+	// age before title, so the one column a stuck run is read from survives the
+	// longest title the row can carry. The reverse order would push it off.
+	test("the age sits ahead of the title, so a wide title cannot take it off the row", () => {
+		const wide = handle({ title: "W".repeat(120) });
+		const row = formatSubagentWatchLines([wide], NOW)[1] ?? "";
+		const ageAt = row.indexOf("12s");
+		const titleAt = row.indexOf("W");
+		expect(ageAt).toBeGreaterThan(-1);
+		expect(titleAt).toBeGreaterThan(ageAt);
+	});
+
+	// Same fleet, narrower row: the listing's type column and indent are what
+	// the watch form drops, and the full id stays — it is what SendMessage
+	// takes, and the count line is only a summary.
+	test("a watch row drops the listing's type column but keeps the addressable id", () => {
+		const row = formatSubagentWatchLines([handle()], NOW)[1] ?? "";
+		expect(row).toContain("(sidechain-42-abcd)");
+		expect(row).not.toContain("general-purpose");
 	});
 });
 

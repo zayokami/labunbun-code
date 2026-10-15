@@ -171,6 +171,21 @@ export interface UiState {
 	 */
 	backgroundShells: UiBackgroundShell[];
 	/**
+	 * The watch panel's subagent stop: the counts line, then one row per
+	 * subagent, preformatted by the app layer because the registry and the
+	 * ageing vocabulary live there. Lines rather than structured rows for the
+	 * same reason the shell tail is lines — the panel draws what it was handed,
+	 * and what a row says belongs to the layer that knows the fleet.
+	 */
+	watchSubagentLines: string[];
+	/**
+	 * The watch panel's facts stop: model, cost, context and cache, phrased
+	 * where the readings are and drawn verbatim. The panel exists partly so
+	 * these stop costing a `/status`, and a card and a band that describe the
+	 * same session in the same words are the point of that.
+	 */
+	watchStatusLines: string[];
+	/**
 	 * Messages typed during a run, waiting to be delivered. Reported above the
 	 * prompt because the transcript already holds them: what the user cannot see
 	 * without this is that they have not been sent *yet*.
@@ -306,6 +321,8 @@ export function initialUiState(vim = false, emacs = false, modeLabel = ""): UiSt
 		statusCard: null,
 		activity: null,
 		backgroundShells: [],
+		watchSubagentLines: [],
+		watchStatusLines: [],
 		queued: [],
 		theme: DEFAULT_THEME,
 		themeCommit: DEFAULT_THEME,

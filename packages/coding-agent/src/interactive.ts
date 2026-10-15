@@ -287,6 +287,7 @@ import {
 	formatRetryEnding,
 	formatSubagentList,
 	formatSubagentLog,
+	formatSubagentWatchLines,
 	resolveSubagentId,
 	subagentPickerItems,
 } from "./subagent-commands.ts";
@@ -2075,6 +2076,47 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// A poll must not be the reason the process stays alive.
 	shellPoll.unref();
 	publishShells();
+
+	/**
+	 * The watch panel's other two stops, on the same cadence: the subagent
+	 * listing and the session facts. Same interval as the shells because the
+	 * panel is one reader — three stops that refreshed on three schedules would
+	 * make "as of last poll" a different age per screen, and the note is one
+	 * number.
+	 *
+	 * Built here, not in the panel, because this is where the registry and the
+	 * ledger live; the panel draws what it was handed. The session may not exist
+	 * yet when this first runs, which leaves the facts stop unpublished rather
+	 * than invented — there is nothing true to say about a session that is not
+	 * there.
+	 */
+	const publishWatch = () => {
+		handle?.setWatchSubagents(formatSubagentWatchLines(subagentRegistry.list(), Date.now()));
+		const target = sessionRef;
+		if (!target) return;
+		const info = contextInfoFor(target);
+		// The same readings `/status` renders, in the same words: the reason the
+		// cost/context stop exists is that reading them here costs no command,
+		// and two vocabularies for one fact would undercut exactly that.
+		const free =
+			info.threshold > 0
+				? ` (${Math.max(0, Math.min(100, Math.round((1 - info.usedTokens / info.threshold) * 100)))}% free)`
+				: "";
+		const fact = (label: string, value: string) => `${label.padEnd(8)} ${value}`;
+		handle?.setWatchStatus([
+			fact("model", `${target.model.provider}/${target.model.id}`),
+			fact(
+				"cost",
+				`$${costTracker.sessionState.totalCostUSD.toFixed(4)} this session · $${costTracker.state.totalCostUSD.toFixed(4)} this project`,
+			),
+			fact("context", `~${formatTokens(info.usedTokens)} of ${formatTokens(info.threshold)}${free}`),
+			fact("cache", cacheStatusLine(cacheTracker.records(), target.model)),
+		]);
+	};
+	const watchPoll = setInterval(publishWatch, BACKGROUND_SHELL_POLL_MS);
+	// Same rule as the shell poll: a poll must not keep the process alive.
+	watchPoll.unref();
+	publishWatch();
 
 	// And the other half of that status row: when a shell finishes on its own,
 	// the session is told instead of being polled for it. `getSession` rather

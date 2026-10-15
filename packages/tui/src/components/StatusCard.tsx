@@ -1,4 +1,5 @@
 import { Box, Text } from "ink";
+import { formatTokens } from "../format.ts";
 import { useTheme } from "../theme.ts";
 import type { StatusCardData } from "../ui-state.ts";
 
@@ -20,12 +21,6 @@ export function contextBar(usedTokens: number, threshold: number, segments = CON
 		percent: Math.round(ratio * 100),
 		bar: `${"█".repeat(filled)}${"░".repeat(segments - filled)}`,
 	};
-}
-
-/** Tokens, shortened the way the status line shortens them (1 234 → 1.2k). */
-function formatTokens(tokens: number): string {
-	if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
-	return String(tokens);
 }
 
 /**

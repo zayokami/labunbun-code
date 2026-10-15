@@ -8,6 +8,7 @@ export {
 	type ReplAppOptions,
 	// Exported for the poll that feeds the shell row: what "unchanged" means is
 	// worth pinning down in a test, and no test mounts the whole app.
+	sameLines,
 	sameShells,
 } from "./app.tsx";
 export { type WheelEntry, wheelEntries, wheelMove, wheelStart } from "./command-wheel.ts";
@@ -52,6 +53,7 @@ export {
 	resolveEditingMode,
 } from "./editing-mode.ts";
 export { formatElapsed } from "./elapsed.ts";
+export { formatTokens } from "./format.ts";
 export { type TextInputActions, type TextInputState, useTextInput } from "./hooks/useTextInput.ts";
 export { inputTrace, installStdinTrace } from "./input-trace.ts";
 export { LIVE_OUTPUT_LINES, liveOutputLines, livePreviewTargets } from "./live-output.ts";

@@ -78,6 +78,31 @@ export function formatSubagentList(handles: SubagentHandle[], now: number): stri
 }
 
 /**
+ * The same fleet as {@link formatSubagentList}, as lines for the watch panel:
+ * the counts line, then one row per subagent in the same order.
+ *
+ * Two deliberate differences, both about the panel being narrower than the
+ * listing. The age moves ahead of the title, so at forty columns the row
+ * still answers "is it stuck" after the title has been cut; and the listing's
+ * two-column indent and type column are dropped, because the list screen is
+ * where a run is identified and this is where it is glanced at. The counts
+ * line is line zero, and an empty fleet still gets one: "nothing has run" is
+ * itself the answer to what the stop is for.
+ */
+export function formatSubagentWatchLines(handles: SubagentHandle[], now: number): string[] {
+	const counts = subagentCountsLine(handles);
+	if (handles.length === 0) return [counts];
+	return [
+		counts,
+		...orderSubagents(handles).map((handle) => {
+			const status = subagentStatus(handle).padEnd(9);
+			const age = formatElapsed(subagentAgeMs(handle, now)).padEnd(7);
+			return `${status} ${age} ${handle.title}  (${handle.sidechainId})`;
+		}),
+	];
+}
+
+/**
  * Fold text to one line and cap its length: pickers and log entries are rows,
  * and a raw newline or a whole file would push everything after it away.
  */
