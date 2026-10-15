@@ -609,6 +609,9 @@ export async function connectMcpServer(
 		};
 	}
 
+	/** The live client, once one exists: the catch below has to be able to close it. */
+	let opened: Client | null = null;
+
 	try {
 		const transport =
 			"type" in parsed.data && parsed.data.type === "http"
@@ -623,6 +626,7 @@ export async function connectMcpServer(
 					});
 
 		const client = new Client({ name: "labunbun", version: "0.1.0" });
+		opened = client;
 		const callTimeoutMs = options?.callTimeoutMs ?? CALL_TIMEOUT_MS;
 		/** The object the host holds; the notification handlers refresh it in place. */
 		const connection: McpConnection = { serverName, client, tools: [], prompts: [], resources: [] };
@@ -720,6 +724,18 @@ export async function connectMcpServer(
 
 		return connection;
 	} catch (error) {
+		// A client that connected and then failed discovery has nobody left to
+		// close it: the error connection below carries `client: null` — the same
+		// shape as a server that never opened — and `disconnectAllMcpServers`
+		// skips those, so a stdio server would stay alive, pipes and all, for the
+		// rest of the session. A server that accepts the connection and refuses
+		// the first `tools/list` is enough to leave one behind, so the close
+		// happens here or not at all. `close` is safe to call twice: after the
+		// transport is closed `Protocol.close` is a no-op, the stdio transport
+		// clears its process handle before its first await, and the HTTP
+		// transport's abort is idempotent — so this also holds on the timeout
+		// path, where `withTimeout` has already asked for the same close.
+		if (opened) await opened.close().catch(() => {});
 		return {
 			serverName,
 			client: null as never,

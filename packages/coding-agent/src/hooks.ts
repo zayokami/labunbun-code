@@ -325,6 +325,20 @@ async function runCommandHook(hook: CommandHook, payload: HookPayload): Promise<
 	return out;
 }
 
+/**
+ * Grace between killing a timed-out hook and settling without a `close`.
+ *
+ * A kill does not guarantee the pipe follows: the command may leave a
+ * grandchild holding the inherited stdout (`sleep 15 & echo started` on POSIX,
+ * `start /b ping ...` on Windows), and `close` waits for every holder of the
+ * pipe — minutes, or never. Settling on `close` alone therefore left the
+ * promise below pending, and `run()` awaits it, so a `PreToolUse` hook that
+ * hangs once holds the entire tool loop shut forever. This is the same
+ * measured family, and the same bound, as `EXIT_DRAIN_GRACE_MS` in
+ * `packages/tools/src/operations.ts`, which carries the long-form shapes.
+ */
+const TIMEOUT_KILL_GRACE_MS = 2_000;
+
 function execWithTimeout(
 	command: string,
 	stdinData: string,
@@ -343,14 +357,33 @@ function execWithTimeout(
 		let stderr = "";
 		let settled = false;
 		let timedOut = false;
+		let graceTimer: ReturnType<typeof setTimeout> | null = null;
+		/** The result a hook that had to be killed gets, whether `close` or the grace delivers it. */
+		const timeoutResult = () => ({
+			stdout,
+			stderr: stderr || `hook timed out after ${timeoutMs}ms`,
+			exitCode: 124,
+		});
 		const timer = setTimeout(() => {
 			timedOut = true;
 			if (process.platform === "win32" && child.pid) {
 				// cmd.exe doesn't propagate signals — kill the whole process tree.
-				spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+				// The killer is fire-and-forget, but an `error` with no listener on a
+				// child process is an uncaught exception; a `taskkill` that could not
+				// start must not take down the session over a hook being failed anyway.
+				spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true }).on("error", () => {});
 			} else {
 				child.kill();
 			}
+			// Settling on `close` alone waits on a drain a grandchild can hold open
+			// past the kill (see TIMEOUT_KILL_GRACE_MS). The kill has happened; give
+			// the pipe a bounded moment to follow it, then settle as the timeout it
+			// already is. A `close` inside the grace is the normal path and cancels it.
+			graceTimer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				resolve(timeoutResult());
+			}, TIMEOUT_KILL_GRACE_MS);
 		}, timeoutMs);
 
 		child.stdout.setEncoding("utf8");
@@ -361,12 +394,14 @@ function execWithTimeout(
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			if (graceTimer) clearTimeout(graceTimer);
 			resolve({ stdout, stderr: `${stderr}${error}`, exitCode: 127 });
 		});
 		child.on("close", (code, signal) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			if (graceTimer) clearTimeout(graceTimer);
 			// A hook we killed is a hook that did not finish, and it has to read as a
 			// failure. POSIX reports a signalled child as `code === null`, and
 			// `null ?? 0` is a clean exit — so without this the timeout resolved as
@@ -375,11 +410,7 @@ function execWithTimeout(
 			// not let the tool run quietly. Windows never reached that branch, because
 			// `taskkill` leaves `cmd.exe` with a non-zero code of its own.
 			if (timedOut) {
-				resolve({
-					stdout,
-					stderr: stderr || `hook timed out after ${timeoutMs}ms`,
-					exitCode: 124,
-				});
+				resolve(timeoutResult());
 				return;
 			}
 			// The same shape for a hook something *else* killed: still a child that
@@ -390,7 +421,17 @@ function execWithTimeout(
 			}
 			resolve({ stdout, stderr, exitCode: code ?? 0 });
 		});
-		child.stdin.write(`${stdinData}\n`);
-		child.stdin.end();
+		// A hook killed at its timeout can take the stdin pipe down with it, and a
+		// write crossing that moment raises EPIPE — an unhandled `error` on the
+		// stream is a thrown exception in the loop that was running the tool, over
+		// a hook whose fate is already decided. The result carries the verdict; the
+		// broken pipe only repeats it.
+		child.stdin.on("error", () => {});
+		try {
+			child.stdin.write(`${stdinData}\n`);
+			child.stdin.end();
+		} catch {
+			// The same race, thrown synchronously instead of emitted.
+		}
 	});
 }

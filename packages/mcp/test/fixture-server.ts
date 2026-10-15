@@ -14,8 +14,14 @@
  * test needs to see the last good snapshot survive a broken re-list. The
  * `stall-read` argument answers everything except `resources/read`, which it
  * holds open forever — the shape of a server that accepts a request and never
- * answers it, which only a request-level timeout can end.
+ * answers it, which only a request-level timeout can end. The `reject-tools`
+ * argument fails `tools/list` from the very first call, so the connection is
+ * accepted and the first list refused — the connect-succeeds, discovery-fails
+ * shape. `exit-marker <path>` writes that path when this server's stdin
+ * reaches EOF: the server's own account of the client having let it go, which
+ * is the only closure it can observe from outside.
  */
+import { writeFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -29,6 +35,24 @@ import {
 
 const failAfterChange = process.argv.includes("fail-refresh");
 const stallRead = process.argv.includes("stall-read");
+/** Refuse every `tools/list`, the first one included: connect succeeds, discovery does not. */
+const rejectTools = process.argv.includes("reject-tools");
+
+// `exit-marker <path>`: the client letting this process go arrives as stdin
+// reaching EOF (a kill arrives as a signal, with no chance to write), so that
+// is the moment the file is written. `exit` is the backstop for an exit path
+// that skips the stream event.
+const markerIndex = process.argv.indexOf("exit-marker");
+const exitMarker = markerIndex === -1 ? undefined : process.argv[markerIndex + 1];
+if (exitMarker) {
+	const markReleased = () => {
+		try {
+			writeFileSync(exitMarker, "stdin closed");
+		} catch {}
+	};
+	process.stdin.on("end", markReleased);
+	process.on("exit", markReleased);
+}
 
 const BASE_TOOLS = [
 	{
@@ -102,6 +126,7 @@ const server = new Server(
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
+	if (rejectTools) throw new Error("tools/list rejected by the server");
 	if (listsBroken) throw new Error("tools/list is refusing after the change");
 	return { tools: [...BASE_TOOLS, ...addedTools] };
 });

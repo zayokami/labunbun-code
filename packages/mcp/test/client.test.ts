@@ -217,6 +217,39 @@ describe("connect timeout", () => {
 	}, 30_000);
 });
 
+describe("a connect that fails after connecting", () => {
+	// The connection completes and the first discovery request is refused — the
+	// server is up and speaking, it just will not serve its list. The client
+	// object is already live at that point, and the error connection that comes
+	// back from this path carries `client: null`, so `disconnectAllMcpServers`
+	// cannot close it later: the close has to happen on the way out or the stdio
+	// child outlives the session with nothing left holding it.
+	test("a refused tools/list returns an error connection and closes what it opened", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "lbb-mcp-orphan-"));
+		const marker = join(dir, "stdin-closed.txt");
+		const connection = await connectMcpServer(
+			"refuser",
+			{ command: process.execPath, args: [FIXTURE_SERVER, "reject-tools", "exit-marker", marker] },
+			{ timeoutMs: 10_000 },
+		);
+
+		// The failure lands on the connection, not as a throw...
+		expect(connection.client).toBeFalsy();
+		expect(connection.error).toBeDefined();
+		expect(connection.error).toContain("tools/list rejected");
+		expect(connection.tools).toHaveLength(0);
+
+		// ...and the server process was let go: the marker is the server's own
+		// account of its stdin reaching EOF, which only a close can produce.
+		// Without the close on this path the file never appears — nothing else
+		// closes the client, and the test's wait is what notices.
+		await waitFor(() => existsSync(marker));
+		// The skip in disconnectAllMcpServers is why the close had to happen up
+		// here: the error connection is inert by the time a caller sees it.
+		await expect(disconnectAllMcpServers([connection])).resolves.toBeUndefined();
+	}, 20_000);
+});
+
 describe("list pagination", () => {
 	// The fixture serves five tools and three prompts, two per page. One page is
 	// exactly what a client that ignores `nextCursor` collects, and it looks

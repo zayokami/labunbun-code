@@ -142,6 +142,32 @@ describe("PreToolUse blocking", () => {
 		expect(outcome.reason).toContain("timed out");
 	}, 10_000);
 
+	// The measured family the kill grace exists for (see EXIT_DRAIN_GRACE_MS in
+	// packages/tools/src/operations.ts): the hook's own process is gone, but a
+	// grandchild inherited stdout and holds the pipe open, so `close` — the only
+	// event the runtime settled on — does not arrive while that process lives.
+	// The command detaches the grandchild from the tree the kill reaches, so
+	// nothing short of the grace ends the wait, and a `PreToolUse` hook that
+	// hangs is the whole tool loop stuck behind a hook already declared failed.
+	test("a hook whose stdout pipe outlives the kill still settles, as the timeout", async () => {
+		const command =
+			process.platform === "win32"
+				? // `start /b` returns immediately and cmd.exe exits, while ping keeps the
+					// inherited stdout pipe for the next ~19 seconds.
+					`start /b ping -n 20 127.0.0.1`
+				: // bash forks sleep into the background and exits; sleep keeps the pipe.
+					`sleep 15 & echo started`;
+		const runtime = snapshotHooks({ Notification: [{ hooks: [{ command, timeout: 300 }] }] });
+		const started = Date.now();
+		const outcome = await runtime.run("Notification", {});
+		// Bounded by the hook timeout plus the kill grace, not by the grandchild's
+		// lifetime: settling on `close` alone waited the grandchild out (~15s on
+		// POSIX, ~19s on Windows) before this grace existed.
+		expect(Date.now() - started).toBeLessThan(6_000);
+		expect(outcome.blocked).toBe(true);
+		expect(outcome.reason).toContain("timed out");
+	}, 20_000);
+
 	// A hook killed by something other than its own timeout — the OOM killer, an
 	// operator with a `kill` — never exited either, and has to read the same way.
 	// POSIX is the only platform this is expressible on: it reports a signalled
