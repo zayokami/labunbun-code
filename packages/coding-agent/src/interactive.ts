@@ -2091,7 +2091,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	 * there.
 	 */
 	const publishWatch = () => {
-		handle?.setWatchSubagents(formatSubagentWatchLines(subagentRegistry.list(), Date.now()));
+		// Doubly optional, like publishModeLabel: a hand-built handle that never
+		// learned these methods (a test's, an embedder's) costs itself the watch
+		// stops, not the run.
+		handle?.setWatchSubagents?.(formatSubagentWatchLines(subagentRegistry.list(), Date.now()));
 		const target = sessionRef;
 		if (!target) return;
 		const info = contextInfoFor(target);
@@ -2103,7 +2106,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				? ` (${Math.max(0, Math.min(100, Math.round((1 - info.usedTokens / info.threshold) * 100)))}% free)`
 				: "";
 		const fact = (label: string, value: string) => `${label.padEnd(8)} ${value}`;
-		handle?.setWatchStatus([
+		handle?.setWatchStatus?.([
 			fact("model", `${target.model.provider}/${target.model.id}`),
 			fact(
 				"cost",
