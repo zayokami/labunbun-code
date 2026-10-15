@@ -503,7 +503,7 @@ const FILE_READ_EXECUTE = 0x0012_00a9;
  * group are deliberately not asked for, because writing a DACL is this
  * module's whole job and touching an owner is not.
  */
-function readDacl(path: string): Uint8Array | null {
+export function readDacl(path: string): Uint8Array | null {
 	const lib = advapi();
 	if (lib === null) return null;
 	const pathBuf = wbuf(path);
@@ -539,7 +539,7 @@ function readDacl(path: string): Uint8Array | null {
 }
 
 /** Every ACE in a DACL, walked by size, as raw slices. */
-function acesOf(dacl: Uint8Array): Uint8Array[] {
+export function acesOf(dacl: Uint8Array): Uint8Array[] {
 	const aces: Uint8Array[] = [];
 	let offset = 8; // the 8-byte ACL header
 	while (offset + 4 <= dacl.length) {
@@ -568,7 +568,7 @@ function aceSidString(ace: Uint8Array): string | null {
 
 // Long-form design notes: docs/dev/sandbox.md
 /** A new DACL holding these ACEs. `AceCount` is the number of ACEs, not the byte length. */
-function buildDacl(aces: Uint8Array[]): Uint8Array {
+export function buildDacl(aces: Uint8Array[]): Uint8Array {
 	const size = 8 + aces.reduce((sum, ace) => sum + ace.length, 0);
 	const dacl = new Uint8Array(size);
 	const view = new DataView(dacl.buffer);
@@ -584,7 +584,7 @@ function buildDacl(aces: Uint8Array[]): Uint8Array {
 }
 
 /** An ACCESS_ALLOWED_ACE granting `mask` to `sidBytes`, inherited downward. */
-function allowAce(sid: Uint8Array, mask: number): Uint8Array {
+export function allowAce(sid: Uint8Array, mask: number): Uint8Array {
 	const ace = new Uint8Array(8 + sid.length);
 	const view = new DataView(ace.buffer);
 	view.setUint8(0, 0); // ACCESS_ALLOWED_ACE_TYPE
@@ -600,7 +600,7 @@ function allowAce(sid: Uint8Array, mask: number): Uint8Array {
  * 2026-10-15: a plain write to a protected directory leaves it protected. The
  * protection state has its own writer below.
  */
-function writeDacl(path: string, dacl: Uint8Array): string | null {
+export function writeDacl(path: string, dacl: Uint8Array): string | null {
 	const lib = advapi();
 	if (lib === null) return "advapi32 is not loadable";
 	const code = lib.symbols.SetNamedSecurityInfoW(
@@ -640,7 +640,7 @@ function sdWithDacl(dacl: Uint8Array, protect: boolean): Uint8Array {
  * leave a protected directory protected (measured), and a `.git` that stays
  * protected after release would silently stop receiving the next grant's ACE.
  */
-function writeDaclProtection(path: string, dacl: Uint8Array, protect: boolean): string | null {
+export function writeDaclProtection(path: string, dacl: Uint8Array, protect: boolean): string | null {
 	const lib = advapi();
 	if (lib === null) return "advapi32 is not loadable";
 	if (lib.symbols.SetFileSecurityW(ptr(wbuf(path)), DACL_SECURITY_INFORMATION, ptr(sdWithDacl(dacl, protect))) !== 0) {
