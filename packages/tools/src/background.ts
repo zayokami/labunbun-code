@@ -387,6 +387,7 @@ export class BackgroundShellManager {
 				resolution.network,
 				resolution.grantRoots.slice(1),
 				resolution.executableRoots,
+				resolution.protectedRoots,
 			);
 			if (grant.error !== undefined || grant.profile === undefined) {
 				// Fail closed and legibly, as the foreground path does: no grant

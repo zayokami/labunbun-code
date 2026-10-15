@@ -533,6 +533,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 				resolution.network,
 				resolution.grantRoots.slice(1),
 				resolution.executableRoots,
+				resolution.protectedRoots,
 			);
 			if (grant.error !== undefined || grant.profile === undefined) {
 				// Fail closed and legibly: no grant means the child could not

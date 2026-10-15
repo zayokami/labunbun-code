@@ -14,7 +14,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
-import { copyFileSync, existsSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	type AppContainerProfile,
@@ -31,6 +32,7 @@ import {
 	ensureAppContainerProfile,
 	grantReadExecuteAccess,
 	grantRootAccess,
+	protectDirForGrant,
 	releaseWorkspaceGrant,
 	runConfined,
 	sidBytesFor,
@@ -69,6 +71,38 @@ describe("the profile name", () => {
 		expect(net).toBe(appContainerProfileName("c:/ws", true));
 		// And a different workspace's net profile is a different profile.
 		expect(net).not.toBe(appContainerProfileName("C:\\Other", true));
+	});
+});
+
+describe("the protected narrowing's boundary", () => {
+	test("a directory outside every grant root is refused before anything is touched", () => {
+		// The domain check runs first and reads nothing: a narrowing is a
+		// narrowing of a grant, so the refusal must not depend on whether the
+		// target happens to exist. The SID bytes never leave this call, which
+		// is why an arbitrary buffer is honest here.
+		const outcome = protectDirForGrant(join(tmpdir(), "lbb-ac-outside", ".git"), new Uint8Array(8), [
+			join(tmpdir(), "lbb-ac-grant-root"),
+		]);
+		expect(outcome.error).toContain("outside every grant root");
+		expect(outcome.restore).toBeUndefined();
+	});
+
+	test("a directory that does not exist yet is skipped — neither refused nor narrowed", () => {
+		// A workspace with no repository in it must stay a workspace where
+		// commands run: protecting a path with nothing on disk has nothing to
+		// narrow, and release has nothing to write back. The root is
+		// realpath'd in the fixture because the domain check canonicalises
+		// both sides, and on macOS `tmpdir()` hands out `/var` spellings that
+		// canonicalise to `/private/var`.
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "lbb-ac-yet-")));
+		try {
+			const outcome = protectDirForGrant(join(root, ".git"), new Uint8Array(8), [root]);
+			expect(outcome.error).toBeUndefined();
+			expect(outcome.restore).toBeUndefined();
+			expect(existsSync(join(root, ".git"))).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -834,5 +868,138 @@ describeWindows("a confined process", () => {
 	test("availability reports honestly on every platform", () => {
 		if (process.platform === "win32") expect(appContainerAvailable()).toBe(true);
 		else expect(appContainerAvailable()).toBe(false);
+	});
+});
+
+describeWindows("the protected directory inside a grant", () => {
+	// The allow-side narrowing, against the machine it describes. Every
+	// judgement is made by the container child — a read that must survive
+	// (the narrowing is read+execute, not a refusal of everything) and writes
+	// that must fail with the file system as the witness, not an exit code —
+	// and by `icacls`, for the DACL a release must leave exactly as it found
+	// it.
+	const workspace = `${process.env.LOCALAPPDATA}\\Temp\\ac-protected-ws-${process.pid}`;
+	const gitDir = `${workspace}\\.git`;
+
+	function refresh(): AppContainerProfile {
+		execSync(`cmd /c if exist "${workspace}" rmdir /s /q "${workspace}"`, { stdio: "ignore" });
+		execSync(`cmd /c mkdir "${gitDir}"`, { stdio: "ignore" });
+		writeFileSync(`${gitDir}\\config`, "[core]\n");
+		const profile = ensureAppContainerProfile(workspace);
+		if ("error" in profile) throw new Error(profile.error);
+		return profile;
+	}
+
+	function icaclsOf(path: string): string {
+		return execSync(`icacls "${path}"`, { encoding: "utf8" });
+	}
+
+	function cleanup(): void {
+		execSync(`cmd /c if exist "${workspace}" rmdir /s /q "${workspace}"`, { stdio: "ignore" });
+		deleteAppContainerProfile(appContainerProfileName(workspace));
+	}
+
+	test("the child reads .git, cannot write it, and release restores the DACL byte for byte", () => {
+		const profile = refresh();
+		try {
+			const before = icaclsOf(gitDir);
+			const grant = acquireWorkspaceGrant(workspace, false, [], [], [gitDir]);
+			expect(grant.error).toBeUndefined();
+			try {
+				const read = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${gitDir}\\config"`, {
+					cwd: workspace,
+				});
+				expect(read.exitCode).toBe(0);
+				expect(read.stdout).toContain("[core]");
+
+				// Append, create, and delete, judged by the file system: `&&
+				// exit 42` runs even when the redirection fails, so the exit
+				// code alone would be no witness.
+				const append = runConfined(
+					profile,
+					`"C:\\Windows\\System32\\cmd.exe" /c echo x >> "${gitDir}\\config" && exit 42`,
+					{ cwd: workspace },
+				);
+				expect(append.exitCode).not.toBe(42);
+				expect(readFileSync(`${gitDir}\\config`, "utf8")).toBe("[core]\n");
+
+				const create = runConfined(
+					profile,
+					`"C:\\Windows\\System32\\cmd.exe" /c echo x > "${gitDir}\\evil.txt" && exit 42`,
+					{ cwd: workspace },
+				);
+				expect(create.exitCode).not.toBe(42);
+				expect(existsSync(`${gitDir}\\evil.txt`)).toBe(false);
+
+				const del = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c del "${gitDir}\\config" && exit 42`, {
+					cwd: workspace,
+				});
+				expect(del.exitCode).not.toBe(42);
+				expect(existsSync(`${gitDir}\\config`)).toBe(true);
+
+				// The host keeps full access through its own ACE: the
+				// narrowing moved the container SID's mask, nothing else.
+				writeFileSync(`${gitDir}\\host.txt`, "host\n");
+				rmSync(`${gitDir}\\host.txt`);
+			} finally {
+				releaseWorkspaceGrant(workspace, false);
+			}
+			// Byte for byte: the listing this directory carried before the
+			// grant — the same judgement the system-directory row makes,
+			// applied to the one directory this feature writes to.
+			expect(icaclsOf(gitDir)).toBe(before);
+
+			// And the released read is refused again: the original list went
+			// back, the sweep removed the grant's ACE, and the child has
+			// nothing left on this path.
+			const released = runConfined(profile, `"C:\\Windows\\System32\\cmd.exe" /c type "${gitDir}\\config"`, {
+				cwd: "C:\\Windows\\System32",
+			});
+			expect(released.exitCode).not.toBe(0);
+			expect(released.stdout).not.toContain("[core]");
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("ten acquire and release rounds leave the narrowed DACL where they found it", () => {
+		// The failure this pins is inheritance re-fusion: each release
+		// un-protects the DACL while the grant's ACE is still in place, and
+		// each acquire re-propagates that ACE into `.git` before narrowing it
+		// again. A kernel that appended a second copy of an inherited ACE
+		// instead of matching the one present would grow the listing a line
+		// per round; ten rounds make that visible.
+		refresh();
+		try {
+			const before = icaclsOf(gitDir);
+			for (let round = 0; round < 10; round++) {
+				const grant = acquireWorkspaceGrant(workspace, false, [], [], [gitDir]);
+				expect(grant.error).toBeUndefined();
+				expect(releaseWorkspaceGrant(workspace, false)).toBeNull();
+			}
+			expect(icaclsOf(gitDir)).toBe(before);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("a protected path outside the grant fails the whole acquire, leaving no ACE behind", () => {
+		// The narrowing runs after the grants and inside the same
+		// all-or-nothing rule: a bad protected path must roll the written
+		// ACEs back, not leave a grant whose protection half never landed.
+		refresh();
+		const outside = `${process.env.LOCALAPPDATA}\\Temp\\ac-protected-outside-${process.pid}`;
+		try {
+			execSync(`cmd /c mkdir "${outside}"`, { stdio: "ignore" });
+			const before = icaclsOf(workspace);
+			const grant = acquireWorkspaceGrant(workspace, false, [], [], [outside]);
+			expect(grant.error).toContain("outside every grant root");
+			// The rollback is asserted where it is observable: the workspace
+			// listing is back to what it was, so no ACE survived the failure.
+			expect(icaclsOf(workspace)).toBe(before);
+		} finally {
+			execSync(`cmd /c if exist "${outside}" rmdir /s /q "${outside}"`, { stdio: "ignore" });
+			cleanup();
+		}
 	});
 });

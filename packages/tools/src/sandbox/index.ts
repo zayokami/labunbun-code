@@ -53,6 +53,16 @@ export type SandboxResolution =
 			 */
 			executableRoots: string[];
 			/**
+			 * Protected paths inside the grant — a `<root>/.git` and whatever the
+			 * scan found. The grant narrows each one for the container on the
+			 * allow side (a deny is inert against a container token, measured) and
+			 * writes the original ACE list back on release. A path outside every
+			 * grant root is dropped here rather than carried: the narrowing
+			 * refuses domains it does not own, and a resolution must not ask for
+			 * one.
+			 */
+			protectedRoots: string[];
+			/**
 			 * Always `true`: the branch that returns this kind is reachable only
 			 * with an `enabled` network axis, for the measured reason recorded
 			 * on the branch itself.
@@ -266,6 +276,21 @@ function probeOnce(shell: ProbeShell | null): ReturnType<typeof probeAppContaine
 	return probe;
 }
 
+/**
+ * The policy's protected paths that sit strictly inside some grant root. The
+ * spelling is the one a policy uses (`canonicalPolicyPath` writes `/`), and
+ * "inside" is the strict lexical rule the narrowing itself enforces
+ * (`isWithinRoot` in `appcontainer.ts`): trailing slashes dropped, equality
+ * refused. A protected path outside every root — or equal to one, which would
+ * ask the grant to narrow the whole workspace — is dropped here rather than
+ * carried: the narrowing refuses domains it does not own, and a resolution
+ * must not ask for one.
+ */
+function protectedWithinGrant(paths: readonly string[], grantRoots: readonly string[]): string[] {
+	const stripped = grantRoots.map((root) => root.replace(/\/+$/, ""));
+	return paths.filter((path) => stripped.some((root) => path.startsWith(`${root}/`)));
+}
+
 // Long-form design notes: docs/dev/sandbox.md
 /** Pick a backend and build the argv for it. Every branch is reachable from a test on any machine. */
 export function resolveSandboxExecution(options: ResolveSandboxOptions): SandboxResolution {
@@ -288,16 +313,20 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	// The AppContainer branch sits after the unrestricted short-circuit and
 	// before the `hasNativeSandboxBackend` check, which answers false for win32.
 	// The grant list covers every writable root and is read from `present`.
+	// The policy's protected paths ride along, filtered to the grant: the grant
+	// is what narrows them, and it may only narrow what it owns.
 	// Long-form design notes: docs/dev/sandbox.md
 	if (platform === "win32" && policy.network === "enabled" && (options.hasAppContainer ?? false)) {
 		const writable = present.fileSystem.entries.filter((entry) => entry.access === "write");
 		const workspace = writable.find((entry) => entry.missingPathBehavior !== "skip");
 		if (workspace !== undefined) {
+			const grantRoots = [...new Set([workspace.path, ...writable.map((entry) => entry.path)])];
 			return {
 				kind: "appcontainer",
 				workspace: workspace.path,
-				grantRoots: [...new Set([workspace.path, ...writable.map((entry) => entry.path)])],
+				grantRoots,
 				executableRoots: [...(options.executableRoots ?? [])],
+				protectedRoots: protectedWithinGrant(policy.protected, grantRoots),
 				network: true,
 			};
 		}
@@ -424,11 +453,12 @@ export function describeSandboxBackend(
 			// Long-form design notes: docs/dev/sandbox.md
 			return `Sandbox: enforced by the OS. Commands run under ${nativeSandboxProgram(platform)}. The workspace boundary is a write boundary — version-control metadata is refused for writing — and this mode does not narrow reads, which start from the machine's own. The kernel is what holds this rather than this process, and it is attached to the process rather than to the command, so it survives however the process tree is arranged.`;
 		case "appcontainer":
-			// The `.git` promise is deliberately not repeated: the deny ACE is out,
-			// so a confined command can write `.git` inside its grant. The
-			// restricted-axis gap is stated in the fixed string.
+			// The version-control promise is made in the fixed string, on the allow
+			// side: the grant narrows an existing `.git` so the kernel refuses the
+			// write. The `.git`-that-does-not-exist-yet case and the restricted-axis
+			// gap are stated in the string too.
 			// Long-form design notes: docs/dev/sandbox.md
-			return `Sandbox: enforced by the OS. Commands run in a Windows AppContainer profile derived from this workspace, and the kernel refuses a write outside the roots the policy grants — every writable root the session names, not only the workspace. The confinement is the child's own token rather than a wrapper around it, so it is attached to the process and survives however the process tree is arranged. This mode does not narrow reads. Version-control metadata is not protected by this backend yet: a deny ACE does not bind a container token (measured), and the route that does — narrowing the package SID's own allow ACE on .git to read and execute — is not written yet, so a confined command can still write .git inside its grant and only the tool-layer rule refuses that, for calls that arrive through the tools. A restricted network axis is not confined by this backend either: the proxy that enforces it listens on loopback, which a container child cannot reach, so that command runs on the tool-layer policy and the proxy rather than being held here.`;
+			return `Sandbox: enforced by the OS. Commands run in a Windows AppContainer profile derived from this workspace, and the kernel refuses a write outside the roots the policy grants — every writable root the session names, not only the workspace. The confinement is the child's own token rather than a wrapper around it, so it is attached to the process and survives however the process tree is arranged. This mode does not narrow reads. Version-control metadata inside a granted root is narrowed on disk when it exists: the grant rewrites the container SID's own allow ACE on .git to read and execute and protects the DACL, so the kernel refuses a confined write there, and release writes the original ACE list back. The deny route is not used at all, because a deny ACE does not bind a container token (measured). A .git that does not exist yet is not narrowed, so a confined command could create one inside its grant and only the tool-layer rule refuses writes to that. A restricted network axis is not confined by this backend either: the proxy that enforces it listens on loopback, which a container child cannot reach, so that command runs on the tool-layer policy and the proxy rather than being held here.`;
 		case "unavailable":
 			return `Sandbox: not enforced. ${nativeSandboxProgram(platform)} is not installed here, so commands run without filesystem confinement. The deny rules and the dangerous-command classifier still apply — they live in this process — but the workspace boundary is not being held.`;
 		default: {

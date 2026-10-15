@@ -95,6 +95,8 @@ Press Shift+Tab to go to the next mode.
 
 Inside the workspace, the agent cannot write to `.git/`. This rule applies in every mode. It also applies to a nested repository. It also applies to a symbolic link that refers to a `.git` directory. Reading git data is not restricted.
 
+> **NOTE**: The OS backend also enforces this rule in the kernel. macOS denies the writes. Linux mounts `.git` as read-only. On Windows, a selected container backend narrows the container's access to `.git` to read and execute. The rule covers the files that are already inside `.git`.
+
 **Network.** The network axis does not use the filesystem. The tool starts a local HTTP and SOCKS5 proxy. The tool points each command at this proxy. The proxy has a list of domains that it permits.
 
 ```jsonc

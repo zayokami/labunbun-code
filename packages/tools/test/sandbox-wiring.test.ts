@@ -516,17 +516,19 @@ describe("what the user is told", () => {
 		expect(unreported).toBe(simulated);
 		// The container sentence, and the half of it that matters most: it is a
 		// real confinement, so it says "enforced by the OS" like the native one —
-		// and it must NOT borrow the native sentence's version-control promise.
-		// The deny route is out (measured inert against a container token in
-		// `appcontainer.ts`), and the allow-side replacement is not written
-		// yet, so a confined command can write .git inside its grant. A
-		// sentence that
-		// repeated the native claim here would tell a user the one thing this
-		// backend demonstrably does not do, so the absence is asserted rather
-		// than left to a reader of the string.
+		// and its version-control claim must be the conditional, allow-side one,
+		// never the native sentence's absolute promise. The narrowing shipped is
+		// allow side (the deny route is out, measured inert against a container
+		// token in `appcontainer.ts`) and it holds only for a `.git` that
+		// exists; a command can still create one inside its grant, so a
+		// sentence that repeated the native claim would tell a user the one
+		// thing this backend demonstrably does not do. Both halves are asserted,
+		// and the native phrasing's absence with them.
 		expect(appcontainer).toContain("enforced by the OS");
 		expect(appcontainer).toContain("AppContainer profile derived from this workspace");
-		expect(appcontainer).toContain("Version-control metadata is not protected by this backend");
+		expect(appcontainer).toContain("Version-control metadata inside a granted root is narrowed on disk");
+		expect(appcontainer).toContain("A .git that does not exist yet is not narrowed");
+		expect(appcontainer).not.toContain("version-control metadata is refused for writing");
 		// The restricted-axis gap is stated too, because the reader this sentence
 		// reaches cannot be handed the axis: a `restricted` command is never
 		// confined here (the proxy is on loopback, which the container child
@@ -794,6 +796,31 @@ describe("the Windows AppContainer branch, selected by the resolver", () => {
 		expect(bare.executableRoots).toEqual([]);
 	});
 
+	test("the protected paths ride the policy onto the resolution, filtered to the grant", () => {
+		// The policy derives `<root>/.git` for the workspace and every project
+		// root, so the normal path always carries at least one — and the grant
+		// is what narrows it, so the resolver hands it over. The filter runs
+		// the other way from the executable roots': those are dropped when the
+		// write list already covers them, while a protected path outside
+		// every grant root is dropped because the narrowing refuses domains it
+		// does not own — a resolution that carried one would turn every
+		// command into a failed acquire.
+		const cwd = workspace();
+		const carried = resolveSandboxExecution({ ...win32, policy: confined(cwd, { access: "enabled", domains: [] }) });
+		expect(carried.kind).toBe("appcontainer");
+		if (carried.kind !== "appcontainer") return;
+		expect(carried.protectedRoots).toEqual([canonical(join(cwd, ".git"))]);
+
+		const outside = join(tmpdir(), "lbb-ac-elsewhere");
+		const filtered = resolveSandboxExecution({
+			...win32,
+			policy: { ...policy("workspace-write", cwd), protected: [canonical(join(outside, ".git"))] },
+		});
+		expect(filtered.kind).toBe("appcontainer");
+		if (filtered.kind !== "appcontainer") return;
+		expect(filtered.protectedRoots).toEqual([]);
+	});
+
 	test("a skip-marked root that does not exist is dropped from the grant list", () => {
 		// The same rule the translators follow, for a reason that is stronger
 		// here: granting a path that is not there fails the grant outright, so
@@ -1036,6 +1063,39 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 			});
 			expect(escaped.exitCode).not.toBe(0);
 			expect(existsSync(outside)).toBe(false);
+		} finally {
+			void exec.close?.();
+		}
+	});
+
+	test("a .git in the workspace reaches the narrowing: readable in the container, not writable", async () => {
+		// The whole chain in production's spelling: the resolver derives the
+		// protected list from the policy (`/` separators), `exec` hands it to
+		// the grant, and the grant canonicalises it to the `\` spelling it
+		// compares roots in. A unit row on either end would agree with itself;
+		// running the pair is what catches a disagreement about the spelling.
+		// The narrowing's own edges — restore, the ten-round cycle — are the
+		// machine rows in `appcontainer.test.ts`.
+		const cwd = workspace();
+		mkdirSync(join(cwd, ".git"), { recursive: true });
+		writeFileSync(join(cwd, ".git", "config"), "[core]\n");
+		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, CONTAINER_SHELL);
+		try {
+			// Read first: the narrowing is read+execute, so a refusal of the
+			// read would be a different, wrong protection.
+			const read = await exec.exec({ command: `type .git\\config`, cwd, sandbox: containerPolicy(cwd) });
+			expect(read.exitCode).toBe(0);
+			expect(read.stdout).toContain("[core]");
+
+			// Judged by the file system, not by the exit code: `&& exit 42`
+			// runs even when the redirection fails.
+			const write = await exec.exec({
+				command: `echo x > .git\\evil.txt && exit 42`,
+				cwd,
+				sandbox: containerPolicy(cwd),
+			});
+			expect(write.exitCode).not.toBe(42);
+			expect(existsSync(join(cwd, ".git", "evil.txt"))).toBe(false);
 		} finally {
 			void exec.close?.();
 		}

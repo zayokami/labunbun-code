@@ -14,14 +14,14 @@ Four candidates were weighed, by what the user is looking at and where that data
 
 | The user is | What they want beside the prompt | What serves it today | Ready for a pane |
 | --- | --- | --- | --- |
-| Waiting on a dev server started with `run_in_background` | The shell's recent output, live | `list()` and `output()` on the shell manager (`packages/tools/src/background.ts:413`, `:419`), a 2 s poll (`packages/coding-agent/src/background-commands.ts:26`), a tail formatter (`:70`), a one-line status row (`packages/tui/src/components/StatusLine.tsx:91`) | Yes — every piece exists |
+| Waiting on a dev server started with `run_in_background` | The shell's recent output, live | `list()` and `output()` on the shell manager (`packages/tools/src/background.ts:531`, `:537`), a 2 s poll (`packages/coding-agent/src/background-commands.ts:26`), a tail formatter (`:70`), a one-line status row (`packages/tui/src/components/StatusLine.tsx:91`) | Yes — every piece exists |
 | Waiting on a subagent | Its status, and what it is doing | Listing and ordering (`packages/coding-agent/src/subagent-commands.ts:18`, `:68`), a retention cap of eight (`packages/coding-agent/src/subagent-registry.ts:26`); no live subscription to a running handle's stream exists | Listing yes, live stream no |
-| Reviewing what the agent changed | A diff that updates as it works | The file checkpoints `/rewind` restores from are written before each Edit/Write mutates a file (`packages/coding-agent/src/checkpoint-log.ts:322`, called from `packages/coding-agent/src/interactive.ts:1300-1303`); nothing computes a live diff | No — new plumbing |
+| Reviewing what the agent changed | A diff that updates as it works | The file checkpoints `/rewind` restores from are written before each Edit/Write mutates a file (`packages/coding-agent/src/checkpoint-log.ts:322`, called from `packages/coding-agent/src/interactive.ts:1326-1329`); nothing computes a live diff | No — new plumbing |
 | Watching the task list | The tree | Already inline above the prompt: `TaskStrip` (`packages/tui/src/components/REPL.tsx:871`) | Done — nothing to add |
 
 The user stories reduce to two shapes, and only one of them needs a pane:
 
-1. "I started a ten-minute build in the background and I want to keep working while it runs, watching its tail." The status row already names the shell; the tail currently costs four keystrokes and a picker (`/ps`, `packages/coding-agent/src/interactive.ts:3203-3220`) and then arrives as one static info block in the transcript — the opposite of watching.
+1. "I started a ten-minute build in the background and I want to keep working while it runs, watching its tail." The status row already names the shell; the tail currently costs four keystrokes and a picker (`/ps`, `packages/coding-agent/src/interactive.ts:3243-3260`) and then arrives as one static info block in the transcript — the opposite of watching.
 2. "Show me the transcript beside the thing I am watching." This is the one that cannot be built under the current model, and the rest of the document says why.
 
 ## The rendering model a pane has to live in
@@ -46,7 +46,7 @@ The ceiling matters more than the cost. When the frame's height reaches the view
 
 ### Alternate screen is available and unused
 
-ink 7.1.1 ships the option (`packages/tui/node_modules/ink/build/ink.d.ts:70-72`), enters on mount and leaves on unmount (`ink.js:549`, `:702`); the spike measured `\x1b[?1049h` on mount and `\x1b[?1049l` on unmount. `mountRepl` passes only `{ exitOnCtrlC: false }` (`packages/tui/src/app.tsx:439`) — this tree has never entered the alternate screen.
+ink 7.1.1 ships the option (`packages/tui/node_modules/ink/build/ink.d.ts:70-72`), enters on mount and leaves on unmount (`ink.js:702`, `:549`); the spike measured `\x1b[?1049h` on mount and `\x1b[?1049l` on unmount. `mountRepl` passes only `{ exitOnCtrlC: false }` (`packages/tui/src/app.tsx:439`) — this tree has never entered the alternate screen.
 
 What it buys: a screen the app owns completely, where nothing is scrollback, so panes can be laid out, re-laid out, and scrolled by the app on every frame. What it costs: the user's terminal scrollback and the transcript that currently lives in it — both are replaced by whatever the workspace re-renders from data. It also moves, rather than removes, the ceiling: inside a workspace nothing is sealed into `<Static>` (the panes render windowed slices with their own scroll offsets), so `fullStaticOutput` stays empty and the clear is one screen's worth of bytes per frame — but it is still a clear per frame on the Windows path.
 
@@ -99,7 +99,7 @@ The key inventory is tight, and one part of it is closed by measurement:
 - It spends vertical budget against the ceiling above. The height must be clamped from `useWindowSize().rows` — the precedent cited here was wrong about what it is: `packages/tui/src/components/ActivityPanel.tsx:325` reads `columns`, and nothing in this tree reads `rows`, so the panel is that hook's first user and its tests need a fixture that overrides `rows` the way the activity panel's tests override `columns` — with a reserve for the live tail, streaming preview, status block and a multi-line prompt — and the reserve needs a real-terminal check, because the spike measured the fake-TTY path only.
 - It must answer the recorded `Ctrl+O` wrinkle: while the panel is open, `Ctrl+O` either wins (panel hides with the screen and returns with it) or is muted; silence is not an option, and the choice needs a pinning test.
 
-**Implementation surface.** REPL state, one key, one render slot; `packages/tui/src/components/WatchPanel.tsx`; the poll in `packages/coding-agent/src/interactive.ts:2065-2072` publishes each shell's tail (`SHELL_TAIL_LINES = 8`, `:2049`) through the app handle (`setBackgroundShells`, `packages/tui/src/app.tsx:189`); a shortcuts row (`packages/tui/src/shortcuts.ts:128`); tests in `packages/tui/test/watch-panel.test.tsx`, modeled on `packages/tui/test/repl-transcript.test.tsx:70` and `packages/tui/test/activity-panel.test.tsx:209`.
+**Implementation surface.** REPL state, one key, one render slot; `packages/tui/src/components/WatchPanel.tsx`; the poll in `packages/coding-agent/src/interactive.ts:2092-2101` publishes each shell's tail (`SHELL_TAIL_LINES = 8`, `:2076`) through the app handle (`setBackgroundShells`, `packages/tui/src/app.tsx:189`); a shortcuts row (`packages/tui/src/shortcuts.ts:128`); tests in `packages/tui/test/watch-panel.test.tsx`, modeled on `packages/tui/test/repl-transcript.test.tsx:70` and `packages/tui/test/activity-panel.test.tsx:209`.
 
 **Risks.** The height ceiling (measured path, fake TTY only); a tail that lags 2 s behind a noisy shell (acceptable for watching, wrong for debugging — the panel should say what it is); a second source of truth for "which shell am I watching" if the user stops the shell from elsewhere.
 
@@ -166,7 +166,7 @@ Two readings that carried the design: #1 is the constraint (the transcript is no
 ## Risks and unknowns
 
 - **Real terminals were not measured.** Everything above is ink's bytes against a fake stdout. Alternate-screen behavior under Windows Console/ConPTY, and the clear-per-frame path on a real screen, are unverified — no PTY was available on this machine.
-- **The non-Windows clear path is read, not measured.** `shouldClearTerminalForFrame` (`packages/tui/node_modules/ink/build/ink.js:89-115`) was exercised on the win32 branch only; the exact-fill incremental path for other platforms comes from source.
+- **The non-Windows clear path is read, not measured.** `shouldClearTerminalForFrame` (`packages/tui/node_modules/ink/build/ink.js:89-112`) was exercised on the win32 branch only; the exact-fill incremental path for other platforms comes from source.
 - **ink's erase carries `3J` and the repo's does not.** `clearTerminal` includes the scrollback wipe (`ink.js:768`, measured bytes in #2). The repo strips it for Console hosts in its own wipe (`packages/tui/src/components/REPL.tsx:138`) because of what it costs a scrolled-up reader. What a Console host does when ink's own path takes it, once per frame, has not been watched.
 - **The 2 s poll is a display cadence.** A noisy shell shows a tail that is stale by up to the interval; fine for watching, wrong if the panel is ever pitched as live debugging output.
 - **The subagent live stream does not exist yet.** Only listing and formatting exist; what subscribing to a running handle's output would cost was not investigated.

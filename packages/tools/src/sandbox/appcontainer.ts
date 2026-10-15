@@ -6,7 +6,7 @@
 // Long-form design notes: docs/dev/sandbox.md
 import { dlopen, FFIType, type Pointer, ptr, toArrayBuffer } from "bun:ffi";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 
 /** `S-1-15-2-…`, 40 bytes on x64 — the shape the kernel checks per file access. */
@@ -195,6 +195,10 @@ function loadAdvabiRaw() {
 				args: [FFIType.ptr, FFIType.i32, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
 				returns: FFIType.u32,
 			},
+			// BOOL SetFileSecurityW(LPWSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR)
+			// — the descriptor's control word carries SE_DACL_PROTECTED; see
+			// `writeDaclProtection` for why this route and not the info-flag one.
+			SetFileSecurityW: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.i32 },
 		});
 	} catch {
 		return null;
@@ -469,7 +473,13 @@ export function sidBytes(sidAddr: number): Uint8Array | null {
 
 const SE_FILE_OBJECT = 1;
 const DACL_SECURITY_INFORMATION = 0x00000004;
-const PROTECTED_DACL_SECURITY_INFORMATION = 0x8000_0000;
+// The self-relative descriptor's control word, as `SetFileSecurityW` reads it:
+// SE_DACL_PRESENT says a DACL is carried, SE_DACL_PROTECTED pins that DACL
+// against inheritance. Which route sets them, and which route cannot, is
+// documented on `writeDaclProtection` below.
+const SE_SELF_RELATIVE = 0x8000;
+const SE_DACL_PRESENT = 0x0004;
+const SE_DACL_PROTECTED = 0x1000;
 // FILE_ALL_ACCESS, the documented value including the standard-rights bits. An
 // earlier revision of this comment claimed the missing SYNCHRONIZE bit made
 // the container unable to touch the tree at all — that was a misattribution:
@@ -585,13 +595,59 @@ function allowAce(sid: Uint8Array, mask: number): Uint8Array {
 	return ace;
 }
 
-function writeDacl(path: string, dacl: Uint8Array, protect: boolean): string | null {
+/**
+ * Replaces the DACL of `path` and leaves its protection state alone — measured
+ * 2026-10-15: a plain write to a protected directory leaves it protected. The
+ * protection state has its own writer below.
+ */
+function writeDacl(path: string, dacl: Uint8Array): string | null {
 	const lib = advapi();
 	if (lib === null) return "advapi32 is not loadable";
-	const info = DACL_SECURITY_INFORMATION | (protect ? PROTECTED_DACL_SECURITY_INFORMATION : 0);
-	const code = lib.symbols.SetNamedSecurityInfoW(ptr(wbuf(path)), SE_FILE_OBJECT, info, null, null, ptr(dacl), null);
+	const code = lib.symbols.SetNamedSecurityInfoW(
+		ptr(wbuf(path)),
+		SE_FILE_OBJECT,
+		DACL_SECURITY_INFORMATION,
+		null,
+		null,
+		ptr(dacl),
+		null,
+	);
 	if (code !== 0) return `SetNamedSecurityInfoW on ${path} failed (${code})`;
 	return null;
+}
+
+/** A self-relative security descriptor carrying this DACL and nothing else. */
+function sdWithDacl(dacl: Uint8Array, protect: boolean): Uint8Array {
+	const sd = new Uint8Array(20 + dacl.length);
+	const view = new DataView(sd.buffer);
+	view.setUint8(0, 1); // SECURITY_DESCRIPTOR_REVISION
+	view.setUint16(2, SE_SELF_RELATIVE | SE_DACL_PRESENT | (protect ? SE_DACL_PROTECTED : 0), true);
+	view.setUint32(16, 20, true); // the DACL starts right behind the 20-byte header
+	sd.set(dacl, 20);
+	return sd;
+}
+
+/**
+ * Replaces the DACL of `path` and pins its protection state to `protect`.
+ *
+ * `SetNamedSecurityInfoW` with `PROTECTED_DACL_SECURITY_INFORMATION` is not
+ * this writer: for a non-elevated token it answers 5 on this machine
+ * (measured 2026-10-15 — and .NET's `Set-Acl` names the wall directly with
+ * PrivilegeNotHeldException on SeSecurityPrivilege), while the same request
+ * through `SetFileSecurityW`, with `SE_DACL_PROTECTED` in the descriptor's
+ * control word, lands (measured, same session, same token). The unprotect
+ * side rides the same route with the bit absent: a plain DACL write would
+ * leave a protected directory protected (measured), and a `.git` that stays
+ * protected after release would silently stop receiving the next grant's ACE.
+ */
+function writeDaclProtection(path: string, dacl: Uint8Array, protect: boolean): string | null {
+	const lib = advapi();
+	if (lib === null) return "advapi32 is not loadable";
+	if (lib.symbols.SetFileSecurityW(ptr(wbuf(path)), DACL_SECURITY_INFORMATION, ptr(sdWithDacl(dacl, protect))) !== 0) {
+		return null;
+	}
+	const code = kernel32()?.symbols.GetLastError() ?? 0;
+	return `SetFileSecurityW on ${path} failed (${code})`;
 }
 
 /**
@@ -632,7 +688,7 @@ function grantAccess(path: string, sid: Uint8Array, mask: number): string | null
 	const aces = acesOf(existing);
 	if (aces.some((ace) => aceGrants(ace, sidString, mask))) return null; // already covered
 	aces.push(allowAce(sid, mask));
-	return writeDacl(path, buildDacl(aces), false);
+	return writeDacl(path, buildDacl(aces));
 }
 
 /** Grants read+write on this root and everything under it, to this SID. */
@@ -660,7 +716,7 @@ export function dropAcesFor(path: string, sid: Uint8Array): string | null {
 	const aces = acesOf(existing);
 	const kept = aces.filter((ace) => aceSidString(ace) !== target);
 	if (kept.length === aces.length) return null;
-	return writeDacl(path, buildDacl(kept), false);
+	return writeDacl(path, buildDacl(kept));
 }
 
 function sidStringOf(sid: Uint8Array): string | null {
@@ -674,6 +730,109 @@ function sidStringOf(sid: Uint8Array): string | null {
 	// Same ownership rule as `sidString`: read, then free the API's allocation.
 	kernel32()?.symbols.LocalFree(strOut[0]);
 	return value;
+}
+
+/** What release must write back for one narrowed directory: the ACE list its DACL carried when the narrowing landed. */
+export interface ProtectedRestore {
+	path: string;
+	aces: Uint8Array[];
+}
+
+export interface ProtectOutcome {
+	/** What release must write back, when the narrowing landed on a directory that exists. */
+	restore?: ProtectedRestore;
+	error?: string;
+}
+
+// Long-form design notes: docs/dev/sandbox.md
+/**
+ * Narrows the container SID's own allow ACE on `dir` to read+execute, and
+ * protects the DACL so inheritance cannot widen it back. This is the
+ * allow-side route the S0 record settled on: a deny ACE for the package
+ * SID is never consulted by the container's access check, while the SID's
+ * own allow ACE, narrowed, is (measured 2026-10-15, 10 of 10 runs).
+ *
+ * Two writes, in this order, and the order is measured (2026-10-16):
+ *
+ * (1) the raw writer (`writeDaclProtection`) pins the narrowed list with
+ * SE_DACL_PROTECTED. The raw writer is the one route the inheritance
+ * engine does not steward — the reconciling writer corrects an ACE still
+ * carrying INHERITED_ACE back to the ancestor's version (a narrowed
+ * inherited copy evaporates, answering success — the original mystery of
+ * this feature) and re-adds an ancestor ACE missing from the written list
+ * beside what was written, both measured. Protection also shields the
+ * directory from the next grant's own write above it.
+ *
+ * (2) one reconciling write (`writeDacl`) of the same list at the now
+ * protected directory. The directory itself is not re-fattened (protected),
+ * and the engine's tree walk leaves it going down: every existing
+ * descendant that lacks the narrowed ACE receives it, and every descendant
+ * carrying the grant's full-mask copy loses it — that copy's direct parent
+ * no longer provides it, and the walk deletes orphaned inherited copies
+ * (measured: pin-then-fire on a `.git` with a pre-existing `config` and a
+ * nested object, four container semantics judged on the file system after).
+ * This is how a file that predates the grant, which a plain narrowing
+ * write never reaches, becomes read-only to the container.
+ *
+ * The pin payload keeps the ACEs' flags: only the mask moves, on
+ * ACCESS_ALLOWED ACEs naming this SID. Release reverses it by writing the
+ * read-back list through the raw writer (unprotected), and the sweep that
+ * follows re-fuses inheritance for the whole tree.
+ *
+ * A directory that does not exist yet carries nothing to narrow and is
+ * skipped — release has nothing to write back for it either. A directory
+ * that exists but carries no DACL, or carries no allow ACE for this SID, is
+ * an error rather than a skip: the first would be narrowed by guessing, and
+ * the second means the grant this narrowing belongs to did not reach the
+ * path it claims to protect.
+ *
+ * `grantRoots` bounds what may be narrowed. A path outside every grant root
+ * is refused before anything is read or written: a narrowing is a narrowing
+ * of a grant, and it must not be able to reach outside one.
+ */
+export function protectDirForGrant(dir: string, sid: Uint8Array, grantRoots: readonly string[]): ProtectOutcome {
+	const canonical = canonicalPathForChild(dir);
+	const inside = grantRoots.map(canonicalPathForChild).some((root) => isWithinRoot(canonical, root));
+	if (!inside) return { error: `${dir} is outside every grant root; refusing to narrow it` };
+	if (!existsSync(canonical)) return {};
+	const existing = readDacl(canonical);
+	if (existing === null) return { error: `${canonical} carries no DACL to narrow` };
+	const sidString = sidStringOf(sid);
+	if (sidString === null) return { error: `the SID naming ${canonical} does not read back as a string` };
+	const original = acesOf(existing);
+	let narrowed = false;
+	// Only the mask moves, and only on ACCESS_ALLOWED ACEs naming this SID:
+	// the type, the inheritance flags and the length stay byte-identical, so
+	// the write-back at release reverses a mask change rather than rebuilding
+	// an ACE. The SID can be named by more than one ACE — a stale inherited
+	// copy sits beside the fresh one the grant propagated — and every one of
+	// them narrows.
+	const masked = original.map((ace) => {
+		if (ace.length < 16) return ace;
+		const view = new DataView(ace.buffer, ace.byteOffset, ace.length);
+		if (view.getUint8(0) !== 0) return ace; // ACCESS_ALLOWED_ACE_TYPE
+		if (aceSidString(ace) !== sidString) return ace;
+		const copy = ace.slice();
+		new DataView(copy.buffer).setUint32(4, FILE_READ_EXECUTE, true);
+		narrowed = true;
+		return copy;
+	});
+	if (!narrowed) {
+		return { error: `${canonical} carries no allow ACE for the container SID; the grant did not reach it` };
+	}
+	const pinError = writeDaclProtection(canonical, buildDacl(masked), true);
+	if (pinError !== null) return { error: pinError };
+	const fireError = writeDacl(canonical, buildDacl(masked));
+	if (fireError !== null) {
+		// The pin landed but the walk did not: put the bytes back, best
+		// effort — the caller's rollback acts on the error either way. No
+		// descendant has changed yet, because the pin does not descend.
+		writeDaclProtection(canonical, buildDacl(original), false);
+		return { error: fireError };
+	}
+	// The list that goes back is the one that was read: the masked copies
+	// are separate slices, so the writes above left `original` untouched.
+	return { restore: { path: canonical, aces: original } };
 }
 
 export interface ConfinedRunResult {
@@ -1289,6 +1448,8 @@ interface ActiveGrant {
 	// Long-form design notes: docs/dev/sandbox.md
 	/** Every root this grant wrote an ACE on, the workspace first. */
 	roots: string[];
+	/** The narrowed directories this grant must write back on release, with the ACE list each one carried before. */
+	protectedRestores: ProtectedRestore[];
 }
 
 const activeGrants = new Map<string, ActiveGrant>();
@@ -1310,9 +1471,16 @@ export function canonicalPathForChild(path: string): string {
  * `D:\Program Files\Git` must not count as containing `D:\Program Files\GitHub`.
  */
 function isWithinRoot(candidate: string, root: string): boolean {
-	if (candidate.length <= root.length) return false;
-	const boundary = root.endsWith("\\") ? root : `${root}\\`;
-	return candidate.toLowerCase().startsWith(boundary.toLowerCase());
+	// Separators fold before the compare: a root that exists canonicalises to
+	// backslashes, while a not-yet-existing child keeps whatever spelling it
+	// was handed — the policy spells paths with forward slashes. Measured
+	// 2026-10-15: a missing `.git` compared against its realpath'd workspace
+	// came out "outside every grant root" on every run for exactly this.
+	const candidateFolded = candidate.replace(/\//g, "\\");
+	const rootFolded = root.replace(/\//g, "\\");
+	if (candidateFolded.length <= rootFolded.length) return false;
+	const boundary = rootFolded.endsWith("\\") ? rootFolded : `${rootFolded}\\`;
+	return candidateFolded.toLowerCase().startsWith(boundary.toLowerCase());
 }
 
 export interface GrantOutcome {
@@ -1327,6 +1495,7 @@ export function acquireWorkspaceGrant(
 	network = false,
 	extraRoots: readonly string[] = [],
 	executableRoots: readonly string[] = [],
+	protectedRoots: readonly string[] = [],
 ): GrantOutcome {
 	const profile = ensureAppContainerProfile(workspace, network);
 	if ("error" in profile) return { error: profile.error };
@@ -1382,10 +1551,15 @@ export function acquireWorkspaceGrant(
 		(root) => ![...plannedWrites, ...execRoots].some((other) => other !== root && isWithinRoot(root, other)),
 	);
 	const touched: Array<{ root: string; aces: Uint8Array[] }> = [];
+	const protectRestores: ProtectedRestore[] = [];
 	const fail = (error: string): GrantOutcome => {
 		// Best effort: the error that got here is the one the caller acts on,
 		// and a rollback that failed would only trade it for a quieter one.
-		for (const { root, aces } of touched) writeDacl(root, buildDacl(aces), false);
+		// The narrowed directories first — their bytes go back raw and
+		// unprotected, so the root write-back below, which is a reconciling
+		// write, can carry the restoration on down over each one's subtree.
+		for (const restore of protectRestores) writeDaclProtection(restore.path, buildDacl(restore.aces), false);
+		for (const { root, aces } of touched) writeDacl(root, buildDacl(aces));
 		return { profile, error };
 	};
 	const plan: Array<{ root: string; mask: number }> = [
@@ -1401,11 +1575,25 @@ export function acquireWorkspaceGrant(
 		// no ACE written — and on a system-drive program directory rewriting
 		// the DACL at all would need a WRITE_DAC the user may not hold.
 		if (mask === FILE_READ_EXECUTE && aces.some((ace) => aceGrants(ace, ALL_APPLICATION_PACKAGES, mask))) continue;
-		const grantError = writeDacl(root, buildDacl([...aces, allowAce(sid, mask)]), false);
+		const grantError = writeDacl(root, buildDacl([...aces, allowAce(sid, mask)]));
 		if (grantError !== null) return fail(grantError);
 		touched.push({ root, aces });
 	}
-	activeGrants.set(profile.name, { sid, refs: 1, roots: [...writeRoots, ...execRoots] });
+	// The protected directories, narrowed now that the grant is on disk: each
+	// one has just received the SID's ACE by inheritance, and that copy is
+	// what narrows in place. Part of the same all-or-nothing rule — a failure
+	// here rolls the whole grant back through `fail`.
+	for (const dir of [...new Set(protectedRoots.map(canonicalPathForChild))]) {
+		const outcome = protectDirForGrant(dir, sid, writeRoots);
+		if (outcome.error !== undefined) return fail(outcome.error);
+		if (outcome.restore !== undefined) protectRestores.push(outcome.restore);
+	}
+	activeGrants.set(profile.name, {
+		sid,
+		refs: 1,
+		roots: [...writeRoots, ...execRoots],
+		protectedRestores: protectRestores,
+	});
 	return { profile };
 }
 
@@ -1416,8 +1604,24 @@ export function releaseWorkspaceGrant(workspace: string, network = false): strin
 	grant.refs -= 1;
 	if (grant.refs > 0) return null;
 	activeGrants.delete(appContainerProfileName(workspace, network));
-	// Every root, not just the workspace — see `ActiveGrant.roots` for why.
 	let firstError: string | null = null;
+	// The narrowed directories first: the write-back re-fuses inheritance
+	// and runs while the grant's ACEs are still in place, so the sweep that
+	// follows carries the removal past the directory and down its subtree —
+	// the same reconciling write that re-fuses is also what deletes the
+	// narrowed copies the grant's fire handed down, because their source ACE
+	// leaves the directory's list in the very same write. Each path is then
+	// swept with `dropAcesFor` rather than trusting that propagation to have
+	// reached it: the write-back restores the inherited copy of the grant's
+	// own ACE along with the rest of the original list, and the sweep is
+	// what proves the path itself is clean.
+	for (const restore of grant.protectedRestores) {
+		const restoreError = writeDaclProtection(restore.path, buildDacl(restore.aces), false);
+		const dropError = dropAcesFor(restore.path, grant.sid);
+		const error = restoreError ?? dropError;
+		if (error !== null && firstError === null) firstError = error;
+	}
+	// Every root, not just the workspace — see `ActiveGrant.roots` for why.
 	for (const root of grant.roots) {
 		const dropError = dropAcesFor(root, grant.sid);
 		if (dropError !== null && firstError === null) firstError = dropError;
