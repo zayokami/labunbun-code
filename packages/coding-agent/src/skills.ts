@@ -1,11 +1,14 @@
 /**
- * Skills: SKILL.md folders discovered from user/project dirs and exposed in two
- * ways — as prompt-type slash commands (the expansion path shared with
- * /explain etc.), and as a discovery block in the system prompt, from which the
- * model may invoke one implicitly when the task matches its description.
+ * Skills: SKILL.md folders discovered from user/project dirs and exposed in
+ * three ways — as prompt-type slash commands (the expansion path shared with
+ * /explain etc.), as the discovery block in the system prompt from which the
+ * model learns what exists, and through the Skill tool (`skill-tool.ts`), the
+ * model's own door to a body. All three read a body through
+ * `renderSkillPrompt`, so the expansion cannot mean one thing to the user who
+ * typed `/skill-x` and another to the model that called the tool.
  *
- * The second way is why the frontmatter rules are enforced here rather than
- * trusted: a skill's name and description reach the system prompt of every
+ * The discovery block is why the frontmatter rules are enforced here rather
+ * than trusted: a skill's name and description reach the system prompt of every
  * session in which it loads, so a name that is not `[a-z0-9-]`, is longer than
  * 64 characters, or disagrees with its directory is a repo-controlled string in
  * a prompt position. Both Anthropic and OpenAI converged on the same rule set
@@ -202,7 +205,8 @@ export function withheldProjectSkills(cwd: string, home = homedir()): Skill[] {
 }
 
 /**
- * Convert skills into prompt-type commands: invoking expands to the body.
+ * Expand one skill's body the one way both invocation paths read it: the slash
+ * command a user types, and the Skill tool the model calls.
  *
  * A body that says `$ARGUMENTS` — how command files written for other tools
  * address the text typed after the name — gets the arguments substituted in
@@ -211,21 +215,25 @@ export function withheldProjectSkills(cwd: string, home = homedir()): Skill[] {
  * body that uses them reads as written instead of losing its arguments
  * silently. The report says so when a migrated command relies on them.
  */
+export function renderSkillPrompt(skill: Skill, args: string): string {
+	// Whether the body addresses its arguments at all, decided per call from
+	// the body both callers hand in.
+	const placeholder = skill.body.includes("$ARGUMENTS");
+	const body = placeholder ? skill.body.replaceAll("$ARGUMENTS", args) : skill.body;
+	const tail = placeholder ? "" : `\n\n${args}`;
+	return `<skill name="${skill.name}" source="${skill.sourcePath}">\n${body}\n</skill>${tail}`.trim();
+}
+
+/** Convert skills into prompt-type commands: invoking expands to the body. */
 export function skillsAsCommands(skills: Skill[]): Command[] {
-	return skills.map((skill): PromptCommand => {
-		// Decided once, at load: whether the body addresses its arguments at all.
-		const placeholder = skill.body.includes("$ARGUMENTS");
-		return {
+	return skills.map(
+		(skill): PromptCommand => ({
 			name: `skill-${skill.name}`,
 			description: skill.description || `Skill: ${skill.name}`,
 			type: "prompt",
-			getPrompt: (args) => {
-				const body = placeholder ? skill.body.replaceAll("$ARGUMENTS", args) : skill.body;
-				const tail = placeholder ? "" : `\n\n${args}`;
-				return `<skill name="${skill.name}" source="${skill.sourcePath}">\n${body}\n</skill>${tail}`.trim();
-			},
-		};
-	});
+			getPrompt: (args) => renderSkillPrompt(skill, args),
+		}),
+	);
 }
 
 /**
@@ -247,7 +255,7 @@ export function skillDiscoveryBudgetChars(contextWindow?: number): number {
 }
 
 const DISCOVERY_HEADER =
-	"# Skills\nEach is invoked as /skill-<name>. Invoke one when the task matches its description.";
+	"# Skills\nInvoke one with the Skill tool when the task matches its description; the user can also type /skill-<name>.";
 const SHORT_DESCRIPTION_MAX_CHARS = 120;
 
 function entryLine(name: string, description: string): string {
@@ -264,7 +272,7 @@ function shortenDescription(description: string): string {
 }
 
 function noteLine(hidden: number): string {
-	return `- … and ${hidden} more skill${hidden === 1 ? "" : "s"} not listed (discovery budget); invoke one directly with /skill-<name>.`;
+	return `- … and ${hidden} more skill${hidden === 1 ? "" : "s"} not listed (discovery budget); invoke one by name with the Skill tool, or /skill-<name>.`;
 }
 
 /**
@@ -272,8 +280,9 @@ function noteLine(hidden: number): string {
  *
  * Levels, the way both vendors describe them: the name and description live in
  * every prompt (this block); the body is sent only when the skill is invoked
- * (via `skillsAsCommands`); anything else in the skill folder stays on disk
- * until the body says to read it.
+ * (via `skillsAsCommands` for the user, `skill-tool.ts` for the model);
+ * anything else in the skill folder stays on disk until the body says to read
+ * it.
  *
  * The budget is spent on the whole block, and the order in which it gives
  * ground is fixed: full descriptions, then shortened ones, then names alone,
@@ -285,7 +294,8 @@ function noteLine(hidden: number): string {
  * knowing a skill exists and not.
  *
  * Skills carrying `disable-model-invocation` are absent here by construction:
- * the flag exists to keep a skill out of this exact list.
+ * the flag exists to keep a skill out of this exact list, and the Skill tool
+ * refuses the same names for the same reason.
  */
 export function skillDiscoveryBlock(skills: Skill[], budget = SKILL_DISCOVERY_BUDGET_CHARS): string {
 	const listed = skills.filter((skill) => !skill.disableModelInvocation);

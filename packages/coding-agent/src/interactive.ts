@@ -276,6 +276,7 @@ import {
 	recoveredShellOutput,
 } from "./shell-ledger.ts";
 import { createShellPassthrough } from "./shell-passthrough.ts";
+import { createSkillTool } from "./skill-tool.ts";
 import {
 	loadSkillsWithNotes,
 	type Skill,
@@ -1049,7 +1050,9 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 		resolveModel,
 		// Read at the call, not captured: a subagent spawned after a mid-session
 		// tool addition (tools/list_changed, or `/mcp approve`) has to see it.
-		allTools: () => [...tools, ...mcpConnections.flatMap((c) => c.tools)],
+		// `skillTool` is declared below, at the skills load; the arrow defers
+		// evaluation to the spawn, which cannot precede that line.
+		allTools: () => [...tools, skillTool, ...mcpConnections.flatMap((c) => c.tools)],
 		definitions: () => agentDefinitions,
 		store: () => store,
 		permissionMode: () => sessionRef?.permissionMode ?? effectiveMode,
@@ -1095,6 +1098,12 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd);
 	markStartup("definitions+skills loaded");
+	// The model's half of the same skill list the slash commands expand for the
+	// user. Built here because the skill directory is this package's to know;
+	// the subagent factory above reads it through a getter like the rest of the
+	// live tool set — the arrow defers evaluation past this declaration, to a
+	// spawn that can only happen long after startup.
+	const skillTool = createSkillTool(skills);
 	// What the trust gate is withholding for this directory. Project-tier agent
 	// definitions and skills load only after one approval (`project-trust.ts`), and
 	// these two lists are what the startup notice and `/agents` speak for. The
@@ -1141,8 +1150,17 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 
 	// Startup list for the session, the system prompt and the pre-session
 	// fallbacks; the session's own list then moves with the servers (see
-	// `onMcpToolsChanged` above), so this is a seed, not the truth.
-	const allTools = [...tools, ...mcpConnections.flatMap((c) => c.tools), ...subagentTools, ...planTools, askUserTool];
+	// `onMcpToolsChanged` above), so this is a seed, not the truth. `skillTool`
+	// sits right after the local tools: it is part of that stable, always-there
+	// prefix, not one of the entries the servers move.
+	const allTools = [
+		...tools,
+		skillTool,
+		...mcpConnections.flatMap((c) => c.tools),
+		...subagentTools,
+		...planTools,
+		askUserTool,
+	];
 	// Whether the birth list above already holds the MCP connections; read by
 	// the refresh wiring above.
 	mcpToolsSeededAtBirth = mcpConnections.length > 0;

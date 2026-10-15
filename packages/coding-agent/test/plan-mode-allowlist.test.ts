@@ -39,10 +39,11 @@ import { createAllTools, defaultOperations, TaskStore } from "@labunbun/tools";
 import { createAskUserQuestionTool } from "../src/ask-user.ts";
 import { createBandMessageTool } from "../src/beetle.ts";
 import { createPlanModeTools, type PlanModeCallbacks } from "../src/plan-mode.ts";
+import { createSkillTool } from "../src/skill-tool.ts";
 
 const CWD = process.cwd();
 
-/** The set the app offers: the sandbox tools, then the plan and question tools. */
+/** The set the app offers: the sandbox tools, the plan and question tools, and the Skill tool. */
 function appTools(): AnyTool[] {
 	const callbacks: PlanModeCallbacks = {
 		enterPlanMode: () => {},
@@ -53,6 +54,11 @@ function appTools(): AnyTool[] {
 		...createAllTools(CWD, { taskStore: new TaskStore(), operations: defaultOperations() }),
 		...createPlanModeTools(callbacks),
 		createAskUserQuestionTool({ askUser: async () => null }),
+		// Built by this package, not `createAllTools` — the skill directory is
+		// coding-agent's to know — but the session it joins is the one this walk
+		// is about, so it is built the same way the app builds it (no skills
+		// load; the walk asks what the tool is, never runs it).
+		createSkillTool([]),
 		// Built only while a band is active, but it is the same tool object the
 		// band hands out then — and the mode's list admits it by name, so the
 		// walk has to see it. The send is never invoked here.

@@ -172,13 +172,18 @@ describe("a `-p` run and what the REPL always sent with it", () => {
 
 		expect(seen.code).toBe(0);
 		// A tool the model cannot see is a tool it cannot call: the Task tool is in
-		// the request's own tool list, not merely in this file's intent.
+		// the request's own tool list, not merely in this file's intent — and so is
+		// the Skill tool, which this package builds and both lists merge in.
 		expect(seen.toolNames[0]).toContain("Task");
+		expect(seen.toolNames[0]).toContain("Skill");
 		// Three requests: the parent's, the subagent's, and the parent's again
 		// carrying the report. The subagent's system prompt is the definition's body
-		// — which is the only proof that the definition was loaded *and* used.
-		const subagent = seen.systemPrompts.find((prompt) => prompt.includes("AGENT-BODY-MARKER"));
-		expect(subagent).toBeDefined();
+		// — which is the only proof that the definition was loaded *and* used. Its
+		// index also picks out the subagent's own tool list, which comes from the
+		// app's second list rather than the session's.
+		const subagentIndex = seen.systemPrompts.findIndex((prompt) => prompt.includes("AGENT-BODY-MARKER"));
+		expect(subagentIndex).toBeGreaterThanOrEqual(0);
+		expect(seen.toolNames[subagentIndex]).toContain("Skill");
 		const subagentRequest = seen.messages.find((messages) => messages.includes("SUBAGENT-QUESTION"));
 		expect(subagentRequest).toBeDefined();
 		// And its report came back to the parent as a tool result.

@@ -76,6 +76,15 @@ describe("the discovery block", () => {
 		expect(block.startsWith("# Skills")).toBe(true);
 	});
 
+	test("the header names both doors: the Skill tool, and the user's /skill- command", () => {
+		const block = skillDiscoveryBlock([skill({ name: "fix-ci", description: "Diagnose and fix a failing CI run." })]);
+		// The model matches a request against this block before it ever calls the
+		// tool; a header that names only the user's route leaves the door the
+		// block exists to open undiscovered.
+		expect(block).toContain("Skill tool");
+		expect(block).toContain("/skill-<name>");
+	});
+
 	test("a command-only skill is absent from the block, and others are not", () => {
 		const block = skillDiscoveryBlock([
 			skill({ name: "internal", description: "Not for the model.", disableModelInvocation: true }),

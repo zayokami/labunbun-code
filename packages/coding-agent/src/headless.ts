@@ -75,6 +75,7 @@ import {
 	type RawSettingsInput,
 	resolveMode,
 } from "./settings.ts";
+import { createSkillTool } from "./skill-tool.ts";
 import {
 	loadSkillsWithNotes,
 	skillDiscoveryBlock,
@@ -448,6 +449,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 	// a nightly job to do what they just did by hand.
 	const memory = loadMemoryFiles(cwd, home);
 	const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);
+	// The model's door to the same skills the commands beside it expand for the
+	// user; merged into both tool lists below (the session's and a subagent's).
+	const skillTool = createSkillTool(skills);
 	const commands = [...builtInCommands(), ...skillsAsCommands(skills)];
 	const agentDefinitions = loadAgentDefinitions(cwd, home);
 	// A `-p` run has no dialog to approve a project's definitions with, so an
@@ -535,7 +539,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		// `tools` or the session's own registry mid-run — the two stay equal, as
 		// the read-only note below says. Reading `mcpConnections` live here would
 		// hand a subagent a tool the parent session never got.
-		allTools: () => [...tools, ...mcpTools],
+		allTools: () => [...tools, skillTool, ...mcpTools],
 		definitions: () => agentDefinitions,
 		store: () => store,
 		registry: subagentRegistry,
@@ -574,7 +578,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 		},
 	});
 	const subagentTools = [taskTool, sendMessageTool, taskStopTool];
-	const allTools = [...tools, ...mcpTools, ...subagentTools];
+	const allTools = [...tools, skillTool, ...mcpTools, ...subagentTools];
 	// The plan gate's read-only answer, from the tool objects themselves (see
 	// `collectReadOnlyToolNames`). A constant here: unlike the REPL, nothing
 	// appends tools to this session mid-run.

@@ -99,6 +99,7 @@ import {
 	type RawSettingsInput,
 	resolveMode,
 } from "./settings.ts";
+import { createSkillTool } from "./skill-tool.ts";
 import { loadSkillsWithNotes, skillDiscoveryBlock, skillDiscoveryBudgetChars } from "./skills.ts";
 import { formatSubagentRecovery, readSubagentLedger } from "./subagent-ledger.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
@@ -1032,6 +1033,13 @@ class AcpAgent implements acp.Agent {
 
 		const memory = loadMemoryFiles(cwd, home);
 		const { skills, notes: skillNotes } = loadSkillsWithNotes(cwd, home);
+		// The model's door to the same skills the discovery block lists, merged
+		// beside the sandbox tools because the skill directory is this package's
+		// to know. No `Task` and no plan tools are built here, but a skill is a
+		// document rather than a spawner: nothing about an editor session argues
+		// the model out of reading one, and the block this host sends names the
+		// tool — a promise this host has to keep.
+		const allTools = [...tools, createSkillTool(skills)];
 		// Where headless says these on stderr because a scripted run has nowhere
 		// else to say them, an ACP session says them for the same reason: a skill
 		// the author believes is loaded and is not is worse than no skill.
@@ -1057,21 +1065,21 @@ class AcpAgent implements acp.Agent {
 		const permissions: PermissionState = {
 			cwd,
 			rules,
-			readOnlyToolNames: collectReadOnlyToolNames(tools),
+			readOnlyToolNames: collectReadOnlyToolNames(allTools),
 			announced: [],
 		};
 		// Annotated because `checkBudget` below reads this very session's
 		// messages: without it the type would be inferred from its own initializer.
 		const session: AgentSession = new AgentSession({
 			model,
-			systemPrompt: buildSystemPrompt(tools, {
+			systemPrompt: buildSystemPrompt(allTools, {
 				cwd,
 				platform: process.platform,
 				isTTY: process.stdout.isTTY ?? false,
 				memory: memory.content,
 				skills: skillDiscoveryBlock(skills, skillDiscoveryBudgetChars(model.contextWindow)),
 			}),
-			tools,
+			tools: allTools,
 			store,
 			cwd,
 			maxTurns: options.maxTurns,
