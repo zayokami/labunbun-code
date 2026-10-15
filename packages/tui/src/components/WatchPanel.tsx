@@ -1,13 +1,18 @@
 /**
- * The watch panel: the tail of one background shell, read-only.
+ * The watch panel: one source out of the background world, read-only — a
+ * shell's tail, the subagent listing, or the session's cost/context facts.
  *
  * A dev server outlives the turn that started it, which is why the status row
  * keeps counting it — but "still running" is not the question someone watching a
- * build is asking. This is the answer to "what is it saying now", inside the
- * frame that already repaints on every keystroke, so it can be read while the
- * prompt keeps being used. **It takes no keys at all** — no `useInput`, no
- * `isActive` guard to get wrong — which is the whole reason it can sit beside a
- * working prompt: every key it does not want is a key the prompt never loses.
+ * build is asking. This started as the answer to "what is it saying now",
+ * inside the frame that already repaints on every keystroke, so it can be read
+ * while the prompt keeps being used. **It takes no keys itself** — no
+ * `useInput`, no `isActive` guard to get wrong — which is the half of the
+ * reason it can sit beside a working prompt: every key it does not want is a
+ * key the prompt never loses. The other half is that the one key that moves
+ * it, Ctrl+V, belongs to the REPL: the press walks the ring there and comes
+ * back in through the `selection` prop, so a panel of several sources is still
+ * not a component that owns a key.
  *
  * Three things it is careful about:
  *
@@ -26,15 +31,17 @@
  * the panel's reach.
  *
  * **It renders what it was handed.** Which shell the tail belongs to is
- * {@link selectWatchShell}; nothing here reads a file, spawns a timer or reaches
- * the shell manager — that is the app layer's half, and it is why this file has
- * no import from `@labunbun/tools`. That shell is marked, not chosen: its header
- * row opens on a `▶` gutter (every other row carries two blank columns there, so
- * the headers stay aligned) and it is the only row so marked, which is what tells
- * a reader whose tail the rows below belong to. The selection itself is
- * unchanged — the last running shell, else the last — and picking a shell by key
- * is still not built: no key was ever decided for it, and the panel must keep
- * taking no keys.
+ * {@link selectWatchShell} until a selection arrives; nothing here reads a
+ * file, spawns a timer or reaches the shell manager — that is the app layer's
+ * half, and it is why this file has no import from `@labunbun/tools`. The
+ * watched shell is marked, not chosen: its header row opens on a `▶` gutter
+ * (every other row carries two blank columns there, so the headers stay
+ * aligned) and it is the only row so marked, which is what tells a reader
+ * whose tail the rows below belong to. The walk across sources is the REPL's;
+ * what lives here is the ring it walks ({@link watchRing}) and the one-step
+ * rule ({@link nextWatchSelection}) — pure functions, because a cycle that can
+ * only be exercised through a terminal is a cycle half of whose edges are
+ * never tested.
  */
 import { Box, Text, useWindowSize } from "ink";
 import { useTheme } from "../theme.ts";
@@ -80,35 +87,111 @@ export function selectWatchShell(shells: UiBackgroundShell[]): UiBackgroundShell
 }
 
 /**
+ * What the panel is showing: one stop of the source ring.
+ *
+ * A shell stop is an identity — a shell id, not an index — because the list
+ * reorders itself as shells start and end, and a positional pick would
+ * silently slide onto a different shell between two ticks. The other two stops
+ * are singletons: kinds without ids.
+ */
+export type WatchSelection = { kind: "shell"; id: string } | { kind: "subagents" } | { kind: "status" };
+
+/**
+ * The cycle: every shell in the order the manager lists them — each one's own
+ * tail — then the subagent listing, then the session facts, wrapping back to
+ * the first shell. Shells come first because the panel existed for them, and
+ * no shells at all is a ring of two, not an error: the other two stops answer
+ * questions that do not depend on a shell ever having run.
+ */
+export function watchRing(shells: UiBackgroundShell[]): WatchSelection[] {
+	const ring: WatchSelection[] = shells.map((shell) => ({ kind: "shell", id: shell.id }));
+	ring.push({ kind: "subagents" }, { kind: "status" });
+	return ring;
+}
+
+/**
+ * The stop one Ctrl+V press moves to. `null` is the state before the first
+ * press — the shell {@link selectWatchShell} picked on its own — and the walk
+ * starts *after* it, so the first press moves on rather than repeating what is
+ * already on screen. A pick whose shell has left the list restarts at the
+ * ring's first stop: the pick is an identity, and an identity with nothing
+ * behind it points at nothing — the alternative, treating the old index as a
+ * position, would land on whichever shell slid into that slot.
+ */
+export function nextWatchSelection(shells: UiBackgroundShell[], current: WatchSelection | null): WatchSelection {
+	const ring = watchRing(shells);
+	if (!current) {
+		const auto = selectWatchShell(shells);
+		const index = auto ? ring.findIndex((stop) => stop.kind === "shell" && stop.id === auto.id) : -1;
+		return ring[(index + 1) % ring.length];
+	}
+	const index = ring.findIndex((stop) => sameStop(stop, current));
+	return ring[(index + 1) % ring.length];
+}
+
+/** Stop identity: the kind, and for a shell the id — never the position. */
+function sameStop(a: WatchSelection, b: WatchSelection): boolean {
+	if (a.kind === "shell") return b.kind === "shell" && a.id === b.id;
+	return a.kind === b.kind;
+}
+
+/**
  * What the panel is looking at, in the panel: a row of the store, not a live
  * read. The interval is the publisher's (`BACKGROUND_SHELL_POLL_MS`), and it is
  * spelled out here rather than imported, because the TUI does not depend on the
  * app layer — if the two ever disagree, this line is the one that is wrong, and
  * a wrong sentence about staleness beats no sentence at all.
+ *
+ * The cycle hint rides on this row because this is the row that is never cut,
+ * and the panel is where the question gets asked: a key that changes what is
+ * on screen should say on the screen that it exists.
  */
-const POLL_NOTE = "as of last poll (2s)";
+const POLL_NOTE = "as of last poll (2s) · ctrl+v cycles";
 
 /**
- * The panel. Handed the published rows and nothing else.
+ * The panel. Handed the published rows, the selection, and nothing else.
  *
- * Layout, top to bottom: the poll note, one header per shell with the selected
- * shell's row opening on a `▶` gutter, then the tail of that same shell. The
- * note is never what gets cut, the headers are cut to whole rows, and the tail
- * takes what is left — down to nothing on a terminal with no room to spare.
+ * Layout, top to bottom: the poll note (which doubles as the cycle key's one
+ * always-visible telling), then the stop. For a shell stop: one header per
+ * shell with the watched shell's row opening on a `▶` gutter, then the tail of
+ * that same shell — the note is never what gets cut, the headers are cut to
+ * whole rows, and the tail takes what is left, down to nothing on a terminal
+ * with no room to spare. For the other stops the published lines are drawn
+ * from the top and cut from the bottom, because those lists are ordered
+ * most-interesting-first, while a tail ends at its newest line.
  */
-export function WatchPanel({ shells }: { shells: UiBackgroundShell[] }) {
+export function WatchPanel({
+	shells,
+	selection = null,
+	subagentLines = [],
+	statusLines = [],
+}: {
+	shells: UiBackgroundShell[];
+	/** The stop Ctrl+V moved to; `null` while the automatic shell still stands. */
+	selection?: WatchSelection | null;
+	/** The published subagent rows, counts line first (see `formatSubagentWatchLines`). */
+	subagentLines?: string[];
+	/** The published session facts, one per line (model, cost, context, cache). */
+	statusLines?: string[];
+}) {
 	const theme = useTheme();
 	const { columns, rows } = useWindowSize();
 	// The frame inside the border: everything below is budgeted in these rows.
 	const inner = Math.max(0, watchPanelHeight(rows) - 2);
-	// One row is the note's, before anything else is promised a row.
-	const shownShells = shells.slice(0, Math.max(0, inner - 1));
-	// The tail is what remains after every shell has a header — not just the ones
-	// that fit. Headers that would have been cut are not silently paid for by the
-	// tail: a panel this small shows who is running and no more.
-	const tailRows = Math.max(0, inner - 1 - shells.length);
-	const selected = selectWatchShell(shells);
-	const tail = selected ? selected.tail.slice(-tailRows) : [];
+	// The stop on screen. A picked shell that has left the list falls back to
+	// the automatic answer rather than to a neighbour: the pick is an identity,
+	// and "the one I chose is gone" must not silently become "here is another
+	// one". `null` means there is no shell to watch at all — the empty-list
+	// case, which the shells stop draws as a sentence.
+	const pickedId =
+		selection?.kind === "shell" && shells.some((shell) => shell.id === selection.id) ? selection.id : null;
+	const shellId = pickedId ?? selectWatchShell(shells)?.id;
+	const stop: WatchSelection | null =
+		selection?.kind === "subagents" || selection?.kind === "status"
+			? selection
+			: shellId !== undefined
+				? { kind: "shell", id: shellId }
+				: null;
 	// Border on both sides and one column of padding inside each: the width left
 	// for text. The `- 4` matches the box's own geometry below.
 	const width = Math.max(8, columns - 4);
@@ -118,20 +201,78 @@ export function WatchPanel({ shells }: { shells: UiBackgroundShell[] }) {
 			<Text dimColor wrap="truncate">
 				{POLL_NOTE}
 			</Text>
-			{shells.length === 0 ? (
+			{stop === null ? (
 				<Text wrap="truncate">No background shells.</Text>
+			) : stop.kind === "shell" ? (
+				<ShellStop shells={shells} watched={stop.id} inner={inner} width={width} />
 			) : (
-				shownShells.map((shell) => (
-					// Keyed by the shell id: two shells cannot share one, and a shell that
-					// ends leaves the list entirely rather than changing into another.
-					<Text key={shell.id} wrap="truncate">
-						{/* The marker and the tail compare against the one `selected` this
-						render already computed, so they cannot disagree about which shell
-						is being read. */}
-						{shellHeader(shell, width, shell === selected)}
-					</Text>
-				))
+				// The cut keeps the head, not the tail: these lists are ordered
+				// most-interesting-first (running subagents on top, the counts line
+				// above all), while a shell's tail ends at its newest line. An
+				// unpublished stop falls back to the sentence the publisher would
+				// have sent — the same words either way, so "nothing has run" reads
+				// the same whether the reason is the fleet or the first tick.
+				(stop.kind === "subagents"
+					? subagentLines.length > 0
+						? subagentLines
+						: ["No subagents have run in this session."]
+					: statusLines.length > 0
+						? statusLines
+						: ["No session facts yet."]
+				)
+					.slice(0, Math.max(0, inner - 1))
+					.map((line, index) => (
+						<Text
+							// biome-ignore lint/suspicious/noArrayIndexKey: a cut list has no id of its own — the pair of position and text is what identifies a row, and the text is in the key precisely because it changes.
+							key={`${index}\u0000${line}`}
+							wrap="truncate"
+						>
+							{cut(line, width)}
+						</Text>
+					))
 			)}
+		</Box>
+	);
+}
+
+/**
+ * The shells stop: every published shell's header, then the watched shell's
+ * tail.
+ *
+ * Every shell gets a row, not just the watched one — the list is what makes
+ * the watched shell's absence, when it ends, legible. The tail is what remains
+ * after every shell has a header, not just the ones that fit: headers that
+ * would have been cut are not silently paid for by the tail, so a panel this
+ * small shows who is running and no more.
+ */
+function ShellStop({
+	shells,
+	watched,
+	inner,
+	width,
+}: {
+	shells: UiBackgroundShell[];
+	watched: string;
+	inner: number;
+	width: number;
+}) {
+	const shownShells = shells.slice(0, Math.max(0, inner - 1));
+	const tailRows = Math.max(0, inner - 1 - shells.length);
+	const watchedShell = shells.find((shell) => shell.id === watched);
+	const tail = watchedShell ? watchedShell.tail.slice(-tailRows) : [];
+
+	return (
+		<>
+			{shownShells.map((shell) => (
+				// Keyed by the shell id: two shells cannot share one, and a shell that
+				// ends leaves the list entirely rather than changing into another.
+				<Text key={shell.id} wrap="truncate">
+					{/* The marker and the tail compare against the one `watched` id this
+					render already resolved, so they cannot disagree about which shell
+					is being read. */}
+					{shellHeader(shell, width, shell.id === watched)}
+				</Text>
+			))}
 			{tail.map((line, index) => (
 				<Text
 					// biome-ignore lint/suspicious/noArrayIndexKey: a sliding window has no id of its own — the pair of position and text is what identifies a row, and the text is in the key precisely because it changes.
@@ -142,7 +283,7 @@ export function WatchPanel({ shells }: { shells: UiBackgroundShell[] }) {
 					{cut(line, width)}
 				</Text>
 			))}
-		</Box>
+		</>
 	);
 }
 

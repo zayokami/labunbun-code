@@ -257,14 +257,15 @@ describe("splitShortcutGroups", () => {
 		// width the two-column layout was for.
 		//
 		// The number is this list's arithmetic and not a taste. Prompt plus its
-		// title is twelve rows and the Vim and Commands groups behind it are nine
-		// between them, so no split that keeps the groups whole and in order comes
-		// closer than three — the old bound of two described the list before the
-		// watch panel's row existed, not a property the splitter has. It is still
-		// asserting the thing the sentence above says: a lopsided split (the
-		// eighteen-versus-three one, say) fails this.
+		// title is thirteen rows and the Vim and Commands groups behind it are
+		// nine between them, so no split that keeps the groups whole and in order
+		// comes closer than four — two became three when the watch panel's row
+		// arrived and four when the cycle key's did, and both times it was the
+		// arithmetic that moved, not the splitter. It is still asserting the
+		// thing the sentence above says: a lopsided split (the
+		// nineteen-versus-three one, say) fails this.
 		const height = (column: typeof left) => column.reduce((sum, g) => sum + g.rows.length + 1, 0);
-		expect(Math.abs(height(left) - height(right))).toBeLessThanOrEqual(3);
+		expect(Math.abs(height(left) - height(right))).toBeLessThanOrEqual(4);
 	});
 
 	test("a single group lands in the first column, not spread across both", () => {

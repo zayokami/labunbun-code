@@ -1,6 +1,6 @@
 /**
- * The watch panel: which shell it watches, how tall it is allowed to be, and
- * what a reader actually sees.
+ * The watch panel: which shell it watches, which stop of the source ring is on
+ * screen, how tall the panel is allowed to be, and what a reader actually sees.
  *
  * The sizing tests exist because the number is the feature's exposure: the panel
  * shares the frame with the live tail, the status block and the prompt, and this
@@ -15,11 +15,13 @@ import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { render } from "ink-testing-library";
 import { connectSessionToStore, REPL } from "../src/components/REPL.tsx";
 import {
+	nextWatchSelection,
 	selectWatchShell,
 	WATCH_PANEL_DESIRED_ROWS,
 	WATCH_PANEL_RESERVE_ROWS,
 	WatchPanel,
 	watchPanelHeight,
+	watchRing,
 } from "../src/components/WatchPanel.tsx";
 import { createStore } from "../src/store.ts";
 import { initialUiState, type UiBackgroundShell, type UiState } from "../src/ui-state.ts";
@@ -113,6 +115,58 @@ describe("selectWatchShell", () => {
 
 	test("an empty list watches nothing, rather than crashing or inventing one", () => {
 		expect(selectWatchShell([])).toBeUndefined();
+	});
+});
+
+describe("the source ring", () => {
+	test("every shell in the manager's order, then the listing, then the facts", () => {
+		expect(watchRing([shell("s1"), shell("s2")])).toEqual([
+			{ kind: "shell", id: "s1" },
+			{ kind: "shell", id: "s2" },
+			{ kind: "subagents" },
+			{ kind: "status" },
+		]);
+	});
+
+	test("no shells is a ring of two, not an empty ring", () => {
+		expect(watchRing([])).toEqual([{ kind: "subagents" }, { kind: "status" }]);
+	});
+
+	// The first press moves on: from the standing automatic shell it steps to
+	// the next stop, so a keypress never spends itself repeating what is already
+	// on screen, and from nowhere-watching it starts at the listing.
+	test("the first press steps past the automatic shell rather than onto it", () => {
+		const shells = [shell("s1"), shell("s2", { status: "completed" })];
+		// The automatic answer is s1, the only running shell; one step lands on s2.
+		expect(nextWatchSelection(shells, null)).toEqual({ kind: "shell", id: "s2" });
+		expect(nextWatchSelection([], null)).toEqual({ kind: "subagents" });
+	});
+
+	// Everything ended still has an automatic answer — the last shell — and the
+	// walk continues from there rather than from the top.
+	test("the walk starts after the fallback shell when nothing is running", () => {
+		const shells = [shell("s1", { status: "completed" }), shell("s2", { status: "killed" })];
+		expect(nextWatchSelection(shells, null)).toEqual({ kind: "subagents" });
+	});
+
+	test("the walk wraps: past the last shell the listing, past the facts the first shell", () => {
+		const shells = [shell("s1")];
+		expect(nextWatchSelection(shells, { kind: "shell", id: "s1" })).toEqual({ kind: "subagents" });
+		expect(nextWatchSelection(shells, { kind: "subagents" })).toEqual({ kind: "status" });
+		expect(nextWatchSelection(shells, { kind: "status" })).toEqual({ kind: "shell", id: "s1" });
+	});
+
+	test("with no shells the facts wrap to the listing", () => {
+		expect(nextWatchSelection([], { kind: "status" })).toEqual({ kind: "subagents" });
+	});
+
+	// The pick is an identity, not a position: a shell that left the list must
+	// not hand its index to whichever shell slid into that slot.
+	test("a pick whose shell is gone restarts at the ring's first stop", () => {
+		expect(nextWatchSelection([shell("s2"), shell("s3")], { kind: "shell", id: "s1" })).toEqual({
+			kind: "shell",
+			id: "s2",
+		});
 	});
 });
 
@@ -258,6 +312,95 @@ describe("the panel", () => {
 	});
 });
 
+describe("the panel's other stops", () => {
+	test("the note row names the cycle key — it is the one row that is never cut", () => {
+		const view = render(<WatchPanel shells={[shell("shell_1")]} />);
+		expect(view.lastFrame()).toContain("ctrl+v cycles");
+		view.unmount();
+	});
+
+	test("the subagent stop draws the published lines, counts first", () => {
+		const view = render(
+			<WatchPanel
+				shells={[shell("shell_1")]}
+				selection={{ kind: "subagents" }}
+				subagentLines={["2 subagents: 1 running, 1 completed", "running   12s  Fix it  (sidechain-1)"]}
+			/>,
+		);
+		const frame = view.lastFrame() ?? "";
+		expect(frame).toContain("2 subagents: 1 running, 1 completed");
+		expect(frame).toContain("Fix it  (sidechain-1)");
+		// The gutter points at the shell whose tail is below; on this stop there
+		// is no shell row to point at, and a marker would be a lie about what
+		// the rows under it are.
+		expect(frame).not.toContain("▶");
+		// And the shells' own rows are not behind it: the stops are exclusive.
+		expect(frame).not.toContain("run shell_1");
+		view.unmount();
+	});
+
+	test("the facts stop draws its lines as handed", () => {
+		const view = render(
+			<WatchPanel
+				shells={[]}
+				selection={{ kind: "status" }}
+				statusLines={["model    anthropic/fable-5-1", "cost     $0.1200 this session · $3.4000 this project"]}
+			/>,
+		);
+		const frame = view.lastFrame() ?? "";
+		expect(frame).toContain("model    anthropic/fable-5-1");
+		expect(frame).toContain("$0.1200 this session");
+		// No shells is the ring of two; the facts do not depend on one ever
+		// having run, and the empty-list sentence is not the answer here.
+		expect(frame).not.toContain("No background shells.");
+		view.unmount();
+	});
+
+	test("a stop with nothing published yet says so rather than drawing an empty frame", () => {
+		const subagents = render(<WatchPanel shells={[]} selection={{ kind: "subagents" }} />);
+		expect(subagents.lastFrame()).toContain("No subagents have run in this session.");
+		subagents.unmount();
+
+		const facts = render(<WatchPanel shells={[]} selection={{ kind: "status" }} />);
+		expect(facts.lastFrame()).toContain("No session facts yet.");
+		facts.unmount();
+	});
+
+	// The pick is an identity and the marker follows it: with two running shells
+	// the automatic answer is the last one, so picking the first must move the
+	// gutter and the tail together — a marker that moved alone, or a tail that
+	// stayed, would be the panel reading from two places at once.
+	test("a picked shell moves the marker and the tail together", () => {
+		const view = render(
+			<WatchPanel
+				shells={[shell("shell_1", { tail: ["from the old one"] }), shell("shell_2", { tail: ["from the new one"] })]}
+				selection={{ kind: "shell", id: "shell_1" }}
+			/>,
+		);
+		const marked = rows(view).filter((row) => row.includes("▶"));
+		expect(marked).toHaveLength(1);
+		expect(marked[0]).toContain("shell_1");
+		const frame = view.lastFrame() ?? "";
+		expect(frame).toContain("from the old one");
+		expect(frame).not.toContain("from the new one");
+		view.unmount();
+	});
+
+	test("a pick whose shell has left the list falls back to the automatic shell", () => {
+		const view = render(
+			<WatchPanel
+				shells={[shell("shell_1", { tail: ["still here"] })]}
+				selection={{ kind: "shell", id: "shell_gone" }}
+			/>,
+		);
+		const marked = rows(view).filter((row) => row.includes("▶"));
+		expect(marked).toHaveLength(1);
+		expect(marked[0]).toContain("shell_1");
+		expect(view.lastFrame()).toContain("still here");
+		view.unmount();
+	});
+});
+
 /**
  * Ctrl+T at the REPL: what it opens, what it refuses to open, and what happens
  * to the keys around it.
@@ -278,9 +421,10 @@ async function waitFor(done: () => boolean, timeoutMs = 2000): Promise<void> {
 	}
 }
 
-/** The two control bytes this file presses: `Ctrl+O` is 0x0f and `Ctrl+T` is 0x14. */
+/** The control bytes this file presses: `Ctrl+O` is 0x0f, `Ctrl+T` is 0x14, `Ctrl+V` is 0x16. */
 const CTRL_O = "\x0f";
 const CTRL_T = "\x14";
+const CTRL_V = "\x16";
 
 function replSetup() {
 	const faux = fauxProvider([{ text: "n/a" }]);
@@ -413,6 +557,89 @@ describe("Ctrl+T at the REPL", () => {
 
 		await h.write("\x1b");
 		expect(h.frame()).not.toContain("VITE v5 ready");
+		h.finish();
+	}, 20_000);
+});
+
+describe("Ctrl+V at the REPL", () => {
+	test("walks the ring while the panel is open, wraps around, and never costs the prompt", async () => {
+		const h = replSetup();
+		await h.write("a draft");
+		expect(h.frame()).toContain("a draft");
+		// Closed, the key is nobody's: asserted with a live frame first, so the
+		// absence cannot pass on a frame that failed to render anything.
+		await h.write(CTRL_V);
+		expect(h.frame()).toContain("a draft");
+		expect(h.frame()).not.toContain("ctrl+v cycles");
+
+		// One shell, so the automatic stop is its tail; the first press steps to
+		// the listing, the second to the facts, the third wraps back to the tail.
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("VITE v5 ready");
+		await h.write(CTRL_V);
+		expect(h.frame()).toContain("ctrl+v cycles");
+		expect(h.frame()).not.toContain("VITE v5 ready");
+		await h.write(CTRL_V);
+		expect(h.frame()).not.toContain("VITE v5 ready");
+		await h.write(CTRL_V);
+		expect(h.frame()).toContain("VITE v5 ready");
+
+		// The prompt was in reach the whole way.
+		await h.write(" still");
+		expect(h.frame()).toContain("a draft still");
+		h.finish();
+	}, 20_000);
+
+	test("the published stops are what the ring shows", async () => {
+		const h = replSetup();
+		h.store.set((s) => ({
+			...s,
+			watchSubagentLines: ["1 subagent: 1 running", "running   3s  Ship it  (sidechain-9)"],
+			watchStatusLines: ["model    test/faux"],
+		}));
+		await delay(30);
+		await h.write(CTRL_T);
+		await h.write(CTRL_V);
+		expect(h.frame()).toContain("Ship it");
+		await h.write(CTRL_V);
+		// The harness collapses runs of whitespace, so the label column reads as
+		// one space here — the aligned form is pinned by the panel's own tests.
+		expect(h.frame()).toContain("model test/faux");
+		h.finish();
+	}, 20_000);
+
+	// The transcript owns the view-switch keys, so the cycle key dies with them:
+	// asserted in that order — the screen comes back to the stop it left, which
+	// a press that had reached the ring could not (one shell means any step
+	// lands on another stop).
+	test("the transcript keeps its keys: Ctrl+V does nothing there, and the panel is where it was", async () => {
+		const h = replSetup();
+		await h.write(CTRL_T);
+		await h.write(CTRL_O);
+		expect(h.frame()).toContain("Transcript ");
+		await h.write(CTRL_V);
+		expect(h.frame()).toContain("Transcript ");
+
+		await h.write(CTRL_O);
+		expect(h.frame()).toContain("VITE v5 ready");
+		h.finish();
+	}, 20_000);
+
+	test("a dialog owns the keyboard: Ctrl+V cycles nothing while one is up", async () => {
+		const h = replSetup();
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("VITE v5 ready");
+		h.store.set((s) => ({
+			...s,
+			dialog: { callId: "c1", toolName: "Bash", inputPreview: "rm -rf build", resolve: () => {} },
+		}));
+		await delay(30);
+		await h.write(CTRL_V);
+		h.store.set((s) => ({ ...s, dialog: null }));
+		await delay(30);
+		// Had the press reached the ring, the panel would be on the listing stop
+		// and the tail would be gone; it is exactly where it was.
+		expect(h.frame()).toContain("VITE v5 ready");
 		h.finish();
 	}, 20_000);
 });

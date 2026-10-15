@@ -120,6 +120,13 @@ export function shortcutGroups(opts: {
 				// at all. Under vim it works without a caveat — a ctrl combo that is not
 				// one of the few the engine runs is handed to the host on purpose.
 				["Ctrl+T", emacs ? "taken — transpose-chars is not in this build" : "watch panel"],
+				// The one host key neither engine contests — vim's ctrl block
+				// forwards everything but C-r, and the emacs engine binds no C-v at
+				// all — so unlike the two rows above this one needs no "taken"
+				// caveat. The open question is the terminal, not the editor:
+				// Windows Terminal may claim C-v as paste before the app sees it,
+				// which is a real-machine check the design page records.
+				["Ctrl+V", "watch panel: cycle source (shells → subagents → status)"],
 				["Ctrl+L", "clear screen"],
 				["Ctrl+C", "exit (twice when idle)"],
 			],

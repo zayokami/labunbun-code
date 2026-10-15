@@ -29,7 +29,7 @@ import { StatusCard } from "./StatusCard.tsx";
 import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
 import { TerminalTitle } from "./TerminalTitle.tsx";
-import { WatchPanel } from "./WatchPanel.tsx";
+import { nextWatchSelection, WatchPanel, type WatchSelection } from "./WatchPanel.tsx";
 
 /** Verdict from the app layer's prompt gate (UserPromptSubmit hooks). */
 export interface PromptSubmitVerdict {
@@ -211,6 +211,11 @@ export function REPL({
 	const statusCard = useStore(store, (s) => s.statusCard);
 	const activity = useStore(store, (s) => s.activity);
 	const backgroundShells = useStore(store, (s) => s.backgroundShells);
+	// The watch panel's other two stops, published by the app layer on the same
+	// poll as the shells — the REPL is a routing layer for them, the same way it
+	// is for `backgroundShells`.
+	const watchSubagentLines = useStore(store, (s) => s.watchSubagentLines);
+	const watchStatusLines = useStore(store, (s) => s.watchStatusLines);
 	const shellRow = backgroundShellRow(backgroundShells);
 	const tasks = useStore(store, (s) => s.tasks);
 	const liveOutputs = useStore(store, (s) => s.liveOutputs);
@@ -505,6 +510,12 @@ export function REPL({
 	// in step. It is kept — not remounted — across a visit to the transcript, so a
 	// panel left open is a panel still open when the screen closes.
 	const [watchOpen, setWatchOpen] = useState(false);
+	// Which stop of the ring the panel is on; `null` is the automatic shell the
+	// panel picks by itself until the first Ctrl+V. Kept across a close and a
+	// reopen, like the open state itself — a view the user aimed somewhere is
+	// not re-aimed behind their back — and the panel still falls back to the
+	// automatic answer if the picked shell has since ended out of the list.
+	const [watchSelection, setWatchSelection] = useState<WatchSelection | null>(null);
 
 	useInput((input, key) => {
 		// The key list is dismissed by either key, and while it is up the prompt is
@@ -572,6 +583,23 @@ export function REPL({
 			if (dialog || question || picker) return;
 			if (transcriptMode) return;
 			setWatchOpen((v) => !v);
+			return;
+		}
+		// Ctrl+V walks the watch panel's source ring: each shell's tail in the
+		// manager's order, then the subagent listing, then the session facts,
+		// wrapping around. Ctrl+T's refusals apply here for the same reasons —
+		// a dialog owns the keyboard, the transcript owns the view-switch keys —
+		// plus one of its own: with the panel closed this key does nothing,
+		// because a cycle key that sometimes opens the thing it cycles would
+		// make the first press ambiguous between "show me" and "move on".
+		// The key itself is free: vim hands every ctrl combo but C-r to the
+		// host, and the emacs engine binds no C-v at all — the terminal is the
+		// one place it can be swallowed (recorded in docs/dev/split-pane-design.md).
+		if (key.ctrl && input === "v") {
+			if (dialog || question || picker) return;
+			if (transcriptMode) return;
+			if (!watchOpen) return;
+			setWatchSelection((current) => nextWatchSelection(backgroundShells, current));
 			return;
 		}
 		if (transcriptMode) {
@@ -895,7 +923,14 @@ export function REPL({
 					    is inside the non-transcript branch — the branch is the reason the
 					    panel is *not* drawn there, and the condition is the reason the
 					    state it comes back to is the state it left. */}
-					{watchOpen && !transcriptMode && <WatchPanel shells={backgroundShells} />}
+					{watchOpen && !transcriptMode && (
+						<WatchPanel
+							shells={backgroundShells}
+							selection={watchSelection}
+							subagentLines={watchSubagentLines}
+							statusLines={watchStatusLines}
+						/>
+					)}
 					{ctrlCHint && <Text dimColor>Press Ctrl+C again to exit</Text>}
 					<QueuedMessages queued={queued} canSteer={canSteer} vim={vim} />
 				</>
