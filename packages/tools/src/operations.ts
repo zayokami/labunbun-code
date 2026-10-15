@@ -6,9 +6,8 @@
  * remote/container backend slot in without touching tool logic.
  */
 import { type ChildProcess, spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { access, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
 import { createStreamCapture, nextSpillPath } from "./output-capture.ts";
 import {
@@ -29,6 +28,7 @@ import {
 	sandboxBackendFor,
 } from "./sandbox/index.ts";
 import { type NetworkProxy, startNetworkProxy } from "./sandbox/proxy.ts";
+import { isFileSync, pathCandidates } from "./sandbox/toolchain-roots.ts";
 
 export type { SandboxExecution } from "./sandbox/index.ts";
 
@@ -190,15 +190,6 @@ export class NodeFileSystemOperations implements FileSystemOperations {
 	}
 }
 
-/** A path that exists and is a file — a directory named `bash.exe` is not one. */
-function isFileSync(path: string): boolean {
-	try {
-		return statSync(path).isFile();
-	} catch {
-		return false;
-	}
-}
-
 // Long-form design notes: docs/dev/tools.md
 /** Whether a `bash.exe` found on PATH is Windows' own WSL launcher. */
 function isWindowsBash(path: string): boolean {
@@ -206,16 +197,6 @@ function isWindowsBash(path: string): boolean {
 	const systemRoot = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
 	if (normalized.startsWith(`${systemRoot.toLowerCase().replace(/\//g, "\\")}\\system32\\`)) return true;
 	return normalized.includes("\\microsoft\\windowsapps\\");
-}
-
-// Long-form design notes: docs/dev/tools.md
-/** Every PATH directory that could hold an executable by that name, in order. */
-function* pathCandidates(name: string): Generator<string> {
-	for (const entry of (process.env.PATH ?? "").split(";")) {
-		const dir = entry.trim().replace(/^"|"$/g, "");
-		if (!/^[A-Za-z]:[\\/]/.test(dir)) continue;
-		yield join(dir, name);
-	}
 }
 
 // Long-form design notes: docs/dev/tools.md
