@@ -777,7 +777,11 @@ export interface ProtectOutcome {
  * The pin payload keeps the ACEs' flags: only the mask moves, on
  * ACCESS_ALLOWED ACEs naming this SID. Release reverses it by writing the
  * read-back list through the raw writer (unprotected), and the sweep that
- * follows re-fuses inheritance for the whole tree.
+ * follows re-fuses inheritance for the whole tree. The reconciling writes
+ * of that sweep re-let the inheritance engine label explicit rows as
+ * inherited on some kernels (measured 2026-10-16, a GitHub windows
+ * runner), so release ends with one more raw write — the list taken before
+ * the grant wrote anything, `protectedAsFound` — replayed as the last word.
  *
  * A directory that does not exist yet carries nothing to narrow and is
  * skipped — release has nothing to write back for it either. A directory
@@ -1450,6 +1454,14 @@ interface ActiveGrant {
 	roots: string[];
 	/** The narrowed directories this grant must write back on release, with the ACE list each one carried before. */
 	protectedRestores: ProtectedRestore[];
+	/**
+	 * The ACE list each protected directory carried before this grant wrote
+	 * anything, read first so release can end on the raw writer: the
+	 * reconciling writers in between re-let the inheritance engine label
+	 * explicit rows as inherited on some kernels (measured 2026-10-16, a
+	 * GitHub windows runner), and only the raw writer replays bytes as given.
+	 */
+	protectedAsFound: ProtectedRestore[];
 }
 
 const activeGrants = new Map<string, ActiveGrant>();
@@ -1552,6 +1564,7 @@ export function acquireWorkspaceGrant(
 	);
 	const touched: Array<{ root: string; aces: Uint8Array[] }> = [];
 	const protectRestores: ProtectedRestore[] = [];
+	const protectAsFound: ProtectedRestore[] = [];
 	const fail = (error: string): GrantOutcome => {
 		// Best effort: the error that got here is the one the caller acts on,
 		// and a rollback that failed would only trade it for a quieter one.
@@ -1560,12 +1573,33 @@ export function acquireWorkspaceGrant(
 		// write, can carry the restoration on down over each one's subtree.
 		for (const restore of protectRestores) writeDaclProtection(restore.path, buildDacl(restore.aces), false);
 		for (const { root, aces } of touched) writeDacl(root, buildDacl(aces));
+		// The reconciling writers above clean the tree but do not steward the
+		// explicit-versus-inherited marking of what they touch, so the raw
+		// writer gets the last word, replaying the lists read before each
+		// write — same measurement as release's closing write, see there.
+		for (const { root, aces } of touched) writeDaclProtection(root, buildDacl(aces), false);
+		for (const found of protectAsFound) writeDaclProtection(found.path, buildDacl(found.aces), false);
 		return { profile, error };
 	};
 	const plan: Array<{ root: string; mask: number }> = [
 		...plannedWrites.map((root) => ({ root, mask: FILE_ALL_ACCESS })),
 		...plannedExec.map((root) => ({ root, mask: FILE_READ_EXECUTE })),
 	];
+	// The lists the protected directories carry now, read before the plan
+	// writes — this is the state release and the rollback end on, through the
+	// raw writer, because the reconciling writes in between re-let the
+	// inheritance engine re-label explicit rows as inherited on some kernels
+	// (measured 2026-10-16, a GitHub windows runner: rows born from the
+	// token's default DACL came back (I)-marked while this machine's stayed
+	// byte-identical). A path outside every write root is left out — nothing
+	// will be written there, so nothing must be restored either.
+	for (const dir of [...new Set(protectedRoots.map(canonicalPathForChild))]) {
+		if (!writeRoots.some((root) => isWithinRoot(dir, root))) continue;
+		if (!existsSync(dir)) continue;
+		const prior = readDacl(dir);
+		if (prior === null) continue;
+		protectAsFound.push({ path: dir, aces: acesOf(prior) });
+	}
 	for (const { root, mask } of plan) {
 		const prior = readDacl(root);
 		if (prior === null) return fail(`${root} carries no DACL to extend`);
@@ -1593,6 +1627,7 @@ export function acquireWorkspaceGrant(
 		refs: 1,
 		roots: [...writeRoots, ...execRoots],
 		protectedRestores: protectRestores,
+		protectedAsFound: protectAsFound,
 	});
 	return { profile };
 }
@@ -1625,6 +1660,21 @@ export function releaseWorkspaceGrant(workspace: string, network = false): strin
 	for (const root of grant.roots) {
 		const dropError = dropAcesFor(root, grant.sid);
 		if (dropError !== null && firstError === null) firstError = dropError;
+	}
+	// The last word is raw. Everything above — the write-backs, the sweep,
+	// and the tree walks the sweep triggers — goes through the reconciling
+	// writers, which re-let the inheritance engine label the ACEs already
+	// on a path. Measured 2026-10-16, on a GitHub windows runner where the
+	// three rows of "the protected directory inside a grant" failed while
+	// this machine stayed green: a directory born from the token's default
+	// DACL — explicit rows, no INHERITED flag, unprotected — came back from
+	// the cycle with every row (I)-marked. The raw writer stores the ACE
+	// bytes as given (measured), and it runs here, after the sweep, so
+	// nothing writes after it: the list read before the grant is what the
+	// directory keeps.
+	for (const found of grant.protectedAsFound) {
+		const error = writeDaclProtection(found.path, buildDacl(found.aces), false);
+		if (error !== null && firstError === null) firstError = error;
 	}
 	return firstError;
 }
