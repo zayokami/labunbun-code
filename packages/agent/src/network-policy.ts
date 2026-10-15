@@ -313,7 +313,11 @@ export function needsNetworkProxy(network: "restricted" | "enabled", rules: read
 export type NetworkConfinement =
 	/** An OS sandbox wraps the command and denies outbound traffic at the kernel. */
 	| "os-namespace"
-	/** No argv-level backend exists for this platform, so nothing wraps the shell. */
+	/**
+	 * Nothing kernel-side wraps the shell: no argv-level backend exists for this
+	 * platform, or — on Windows — the container that does exist does not take
+	 * this command. `networkConfinementReason` splits the two sentences.
+	 */
 	| "no-os-backend"
 	/** A backend exists for this platform but is not installed here. */
 	| "backend-missing"
@@ -333,16 +337,56 @@ const REASON_BY_CONFINEMENT: Record<Exclude<NetworkConfinement, "os-namespace">,
 };
 
 // Long-form design notes: docs/dev/sandbox.md
-/** The one-line reason a given confinement has the proxy as the whole boundary. */
-export function networkConfinementReason(confinement: Exclude<NetworkConfinement, "os-namespace">): string {
+/**
+ * The one-line reason a given confinement has the proxy as the whole boundary.
+ *
+ * `no-os-backend`'s table sentence is about the build, and it stopped being the
+ * whole truth when Windows grew a backend: on a machine whose container exists
+ * the honest line is about the machine. The distinction lives here rather than
+ * in a caller because a caller that restated it could contradict the other
+ * sentence on the same screen — `/permissions` prints `describeSandboxBackend`
+ * and this, for one runtime — so the two Windows sentences use the same words
+ * as `describeSandboxBackend`'s for the same facts: a selected container does
+ * not take a restricted command (the proxy that enforces the axis lives on
+ * loopback, out of a container child's reach), and a declined one carries the
+ * probe's own why. `backend` is the caller's `SandboxBackend`; only
+ * `"appcontainer"` changes the sentence, and every other value lands on the
+ * machine's answer, which is the safe direction on Windows.
+ *
+ * `platform` has no default on purpose: a default of `process.platform` would
+ * make every caller that omits it — a test above all — read whichever machine
+ * it runs on, which is the drift this parameter exists to remove.
+ */
+export function networkConfinementReason(
+	confinement: Exclude<NetworkConfinement, "os-namespace">,
+	platform: string,
+	backend?: string,
+	appContainerReason?: string,
+): string {
+	if (confinement === "no-os-backend" && platform === "win32") {
+		return backend === "appcontainer"
+			? "The Windows container does not confine the network axis: the proxy that enforces it listens on loopback, which a container child cannot reach, so that command runs on the tool-layer policy and the proxy rather than being held by the container."
+			: `This machine's Windows container backend was not selected: ${appContainerReason ?? "the container probe did not select it for this session"}.`;
+	}
 	return REASON_BY_CONFINEMENT[confinement];
 }
 
-/** One sentence saying what the network half is actually doing. */
+/**
+ * One sentence saying what the network half is actually doing.
+ *
+ * `platform`, `backend` and `appContainerReason` are forwarded to
+ * `networkConfinementReason`: the caveat is per-machine on Windows, and the
+ * facts it needs are the same three `/permissions` already holds for
+ * `describeSandboxBackend` above it. Passing a different answer than that
+ * sentence got would print a screen that argues with itself.
+ */
 export function describeNetworkPolicy(
 	network: "restricted" | "enabled",
 	rules: readonly NetworkDomainRule[],
 	confinement: NetworkConfinement,
+	platform: string,
+	backend?: string,
+	appContainerReason?: string,
 ): string {
 	if (!needsNetworkProxy(network, rules)) {
 		return "Network: not restricted. Commands reach whatever the host can reach, and no proxy is interposed.";
@@ -367,7 +411,7 @@ export function describeNetworkPolicy(
 	const caveat =
 		confinement === "os-namespace"
 			? " The OS sandbox denies the command every route off the machine, the proxy included — so ignoring the proxy environment gains a program nothing, and a command that would have been allowed is refused too."
-			: ` ${REASON_BY_CONFINEMENT[confinement]} So the proxy is the whole network boundary: a program that opens a socket without consulting the proxy environment is not subject to it.`;
+			: ` ${networkConfinementReason(confinement, platform, backend, appContainerReason)} So the proxy is the whole network boundary: a program that opens a socket without consulting the proxy environment is not subject to it.`;
 
 	return `Network: restricted. ${detail}${caveat} The web tools are covered by this too, since they fetch in this process where the proxy is not in the path.`;
 }

@@ -3050,10 +3050,18 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// installed, and it says nothing about whether the mode asked for a
 				// wrapper, so keying off it told a Linux box without bubblewrap, and a
 				// Mac running `danger-full-access`, that the OS was holding the line.
+				// The three session facts still travel, for the one case where the
+				// caveat is per-machine: on Windows a selected container does not
+				// take a restricted command and a declined one carries the probe's
+				// why — read from the same `ctx` the sentence above reads, so the
+				// two lines cannot contradict each other on this screen.
 				describeNetworkPolicy(
 					session.network.access,
 					session.network.domains,
 					networkConfinement(ctx.sandboxBackend, session.sandbox, session.network.access),
+					process.platform,
+					ctx.sandboxBackend,
+					ctx.appContainerReason,
 				),
 				// The writable roots, **and this line is why the row above can be
 				// believed**: the sandbox sentence says a boundary is enforced, and
@@ -3808,6 +3816,13 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 					undefined,
 					undefined,
 					await detectSubscriptionSignIns({ home: ctx.home }),
+					// The session's own backend pair, from the same `ctx`
+					// `/permissions` reads: its Network row and that screen's
+					// sentences are the same claims about one runtime, and the
+					// row used to recompute the backend from `platform` alone
+					// and contradict them on Windows.
+					ctx.sandboxBackend,
+					ctx.appContainerReason,
 				);
 				pushInfo(ctx.handle, formatDoctorReport(checks));
 			})();

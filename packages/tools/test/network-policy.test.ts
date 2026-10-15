@@ -638,8 +638,11 @@ describe("describeNetworkPolicy", () => {
 		// when the only thing holding it is a proxy a program can ignore. So: the
 		// four non-native answers must each deny it, and the native one must be the
 		// only one that claims it.
+		// `linux` explicitly: on Windows the `no-os-backend` reason is about the
+		// machine and has its own tests below; these pins are the table's
+		// sentences, which is what a platform with no backend reads.
 		const claims = (confinement: NetworkConfinement) =>
-			describeNetworkPolicy("restricted", allow("example.com"), confinement);
+			describeNetworkPolicy("restricted", allow("example.com"), confinement, "linux");
 		// The native case no longer says "still reaches nothing" — it says the
 		// stronger and more useful thing, which is *why* a command reaches nothing.
 		// Asserting the old phrase would have pinned the vaguer sentence.
@@ -669,11 +672,11 @@ describe("describeNetworkPolicy", () => {
 	});
 
 	test("an unrestricted network with no rules says nothing is interposed", () => {
-		expect(describeNetworkPolicy("enabled", [], "os-namespace")).toContain("no proxy is interposed");
+		expect(describeNetworkPolicy("enabled", [], "os-namespace", "linux")).toContain("no proxy is interposed");
 	});
 
 	test("restricted with nothing allowed says nothing is reachable", () => {
-		expect(describeNetworkPolicy("restricted", [], "os-namespace")).toContain("Nothing is reachable");
+		expect(describeNetworkPolicy("restricted", [], "os-namespace", "linux")).toContain("Nothing is reachable");
 	});
 
 	/**
@@ -688,7 +691,12 @@ describe("describeNetworkPolicy", () => {
 	 * allowlist and is false about every entry in it.
 	 */
 	test("the native case does not tell the user their allowlist governs a command", () => {
-		const text = describeNetworkPolicy("restricted", allow("example.com", "registry.npmjs.org"), "os-namespace");
+		const text = describeNetworkPolicy(
+			"restricted",
+			allow("example.com", "registry.npmjs.org"),
+			"os-namespace",
+			"linux",
+		);
 		expect(text).not.toContain("Only the 2 listed domains may be reached");
 		expect(text).toContain("A command run through the shell reaches nothing at all here");
 		expect(text).toContain("2 listed domains");
@@ -701,9 +709,9 @@ describe("describeNetworkPolicy", () => {
 			"network-left-open",
 			"filesystem-axis-off",
 		] as const) {
-			expect(describeNetworkPolicy("restricted", allow("example.com", "registry.npmjs.org"), confinement)).toContain(
-				"Only the 2 listed domains may be reached",
-			);
+			expect(
+				describeNetworkPolicy("restricted", allow("example.com", "registry.npmjs.org"), confinement, "linux"),
+			).toContain("Only the 2 listed domains may be reached");
 		}
 	});
 
@@ -717,7 +725,12 @@ describe("describeNetworkPolicy", () => {
 	 * pins the disclosure so a future reword that drops it is a deliberate act.
 	 */
 	test("the allowlist sentence says it names domains, not ports", () => {
-		const text = describeNetworkPolicy("restricted", allow("example.com", "registry.npmjs.org"), "no-os-backend");
+		const text = describeNetworkPolicy(
+			"restricted",
+			allow("example.com", "registry.npmjs.org"),
+			"no-os-backend",
+			"linux",
+		);
 		expect(text).toContain("on any port");
 		expect(text).toContain("the list names domains, not ports");
 		// And the property it discloses is real: the decision function is port-blind,
@@ -794,6 +807,7 @@ describe("networkConfinement", () => {
 				"restricted",
 				allow("example.com"),
 				networkConfinement("native", "danger-full-access", "restricted"),
+				"linux",
 			),
 		).not.toContain("still reaches nothing");
 	});
@@ -831,17 +845,55 @@ describe("networkConfinementReason", () => {
 		// on — "install this" and "this build does not do that" are not the same
 		// advice. A table with one generic sentence would pass every assertion in
 		// the file above it and tell the user nothing here, so the distinguishing
-		// phrase is what gets asserted.
-		expect(networkConfinementReason("no-os-backend")).toContain("ships no OS-level sandbox");
-		expect(networkConfinementReason("backend-missing")).toContain("not installed here");
-		expect(networkConfinementReason("filesystem-axis-off")).toContain("sandbox axis is off");
-		expect(networkConfinementReason("network-left-open")).toContain("leaves the network open");
+		// phrase is what gets asserted. `linux` throughout: the Windows reason is
+		// per-machine and has its own test below.
+		expect(networkConfinementReason("no-os-backend", "linux")).toContain("ships no OS-level sandbox");
+		expect(networkConfinementReason("backend-missing", "linux")).toContain("not installed here");
+		expect(networkConfinementReason("filesystem-axis-off", "linux")).toContain("sandbox axis is off");
+		expect(networkConfinementReason("network-left-open", "linux")).toContain("leaves the network open");
 		const reasons = new Set(
-			(["no-os-backend", "backend-missing", "filesystem-axis-off", "network-left-open"] as const).map(
-				networkConfinementReason,
+			(["no-os-backend", "backend-missing", "filesystem-axis-off", "network-left-open"] as const).map((confinement) =>
+				networkConfinementReason(confinement, "linux"),
 			),
 		);
 		expect(reasons.size).toBe(4);
+	});
+
+	/**
+	 * The sentence that made this function take context at all.
+	 *
+	 * "This build ships no OS-level sandbox for this platform" is a claim about
+	 * the build, and it stopped being true of Windows the moment the container
+	 * backend shipped there — in a session whose `/permissions` line above it
+	 * says the OS is enforcing the filesystem. Which Windows sentence is owed
+	 * depends on the machine: a selected container does not take a restricted
+	 * command (the proxy lives on loopback, out of a container child's reach,
+	 * so the command runs on the tool-layer policy), and a declined one carries
+	 * the probe's why — the same facts, in the same words, as
+	 * `describeSandboxBackend` prints.
+	 */
+	test("on Windows the reason is about the machine, not the build", () => {
+		expect(networkConfinementReason("no-os-backend", "win32", "appcontainer")).toContain(
+			"listens on loopback, which a container child cannot reach",
+		);
+		expect(networkConfinementReason("no-os-backend", "win32", "simulated", "the probe declined")).toContain(
+			"the probe declined",
+		);
+		// Without a why, the not-selected fallback — the same phrase
+		// `describeSandboxBackend` uses for a caller without facts.
+		expect(networkConfinementReason("no-os-backend", "win32", "simulated")).toContain(
+			"the container probe did not select it for this session",
+		);
+		// Off Windows the table sentence is the true one and stays, and on
+		// Windows a different confinement keeps its own sentence too: the
+		// override is only where the table is false.
+		expect(networkConfinementReason("no-os-backend", "linux")).toContain("ships no OS-level sandbox");
+		expect(networkConfinementReason("backend-missing", "win32", "simulated")).toContain("not installed here");
+		// And the caveat `/permissions` builds carries the machine sentence —
+		// the same wording, under the sentence about the same runtime.
+		const text = describeNetworkPolicy("restricted", allow("example.com"), "no-os-backend", "win32", "appcontainer");
+		expect(text).toContain("does not confine the network axis");
+		expect(text).not.toContain("ships no OS-level sandbox");
 	});
 
 	test("the reason appears in the sentence the two surfaces share", () => {
@@ -849,8 +901,8 @@ describe("networkConfinementReason", () => {
 		// the tie between them: the caveat `describeNetworkPolicy` builds and the
 		// sentence `/doctor` prints cannot drift apart unless this goes red.
 		const confinement: NetworkConfinement = "backend-missing";
-		expect(describeNetworkPolicy("restricted", allow("example.com"), confinement)).toContain(
-			networkConfinementReason(confinement),
+		expect(describeNetworkPolicy("restricted", allow("example.com"), confinement, "linux")).toContain(
+			networkConfinementReason(confinement, "linux"),
 		);
 	});
 });

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describeSandboxBackend, type SandboxBackend } from "@labunbun/tools";
 import { COMMAND_PATHS_WITHOUT_SANDBOX, formatDoctorReport, runDoctorChecks } from "../src/doctor.ts";
 import { padConfigFrom } from "../src/gamepad-runtime.ts";
 import { SettingsSchema } from "../src/settings.ts";
@@ -234,10 +235,21 @@ describe("the Network row", () => {
 		home: string,
 		platform: string,
 		hasNativeBackend: boolean,
+		sandboxBackend?: SandboxBackend,
+		appContainerReason?: string,
 	) {
-		return runDoctorChecks(settings, cwd, home, undefined, undefined, platform, hasNativeBackend).then((checks) =>
-			checks.find((c) => c.name === "Network"),
-		);
+		return runDoctorChecks(
+			settings,
+			cwd,
+			home,
+			undefined,
+			undefined,
+			platform,
+			hasNativeBackend,
+			undefined,
+			sandboxBackend,
+			appContainerReason,
+		).then((checks) => checks.find((c) => c.name === "Network"));
 	}
 
 	const restricted = () => SettingsSchema.parse({ networkAccess: "restricted", networkDomains: ["x.test"] });
@@ -288,7 +300,7 @@ describe("the Network row", () => {
 	 */
 	test.each([
 		["linux", false, "not installed here"],
-		["win32", true, "no OS-level sandbox for this platform"],
+		["win32", true, "Windows container backend was not selected"],
 	] as const)("on %s the warn names the reason, not just the boundary", async (platform, hasNative, phrase) => {
 		const { home, cwd } = makeDirs();
 		const row = await networkRow(restricted(), cwd, home, platform, hasNative);
@@ -318,15 +330,53 @@ describe("the Network row", () => {
 		}
 	});
 
-	test("the platform without a backend says what the restriction depends on", async () => {
+	test("the Windows row without session facts says the machine, not the build", async () => {
 		const { home, cwd } = makeDirs();
 		const row = await networkRow(restricted(), cwd, home, "win32", true);
 		// The names, not "sandbox on". A user reading this row on Windows is
 		// deciding whether to trust the setting, and the difference between
 		// "restricted" and "restricted, as long as the program is honest about
-		// proxy variables" is the entire content of that decision.
+		// proxy variables" is the entire content of that decision. "This build
+		// ships no OS-level sandbox" would be false about this platform — the
+		// container exists in the build — so a caller without the session's
+		// facts gets the machine-case default instead.
 		expect(row?.detail).toContain("HTTP_PROXY/HTTPS_PROXY/ALL_PROXY");
-		expect(row?.detail).toContain("no OS-level sandbox for this platform");
+		expect(row?.detail).toContain("Windows container backend was not selected");
+		expect(row?.detail).not.toContain("ships no OS-level sandbox");
+	});
+
+	/**
+	 * One runtime, one answer. The row used to derive the backend from
+	 * `platform` alone, so on Windows it read `simulated` — "this build ships
+	 * no OS-level sandbox" — in sessions whose `/permissions` sentence said the
+	 * OS was enforcing it. These two tests hold the two surfaces to the same
+	 * words for the same facts.
+	 */
+	test("a selected container is never described as a missing build", async () => {
+		const { home, cwd } = makeDirs();
+		const row = await networkRow(restricted(), cwd, home, "win32", false, "appcontainer");
+		expect(row?.status).toBe("warn");
+		expect(row?.detail).toContain("does not confine the network axis");
+		// The shared clause, word for word: if either surface rewords the
+		// loopback fact, this fails and both get read again.
+		expect(row?.detail).toContain("listens on loopback, which a container child cannot reach");
+		const permissions = describeSandboxBackend("appcontainer", "workspace-write", "win32");
+		expect(permissions).toContain("listens on loopback, which a container child cannot reach");
+		// The two claims the row must not make: the build's absence, and a
+		// kernel denial the restricted command never got.
+		expect(row?.detail).not.toContain("ships no OS-level sandbox");
+		expect(row?.detail).not.toContain("every route off the machine");
+	});
+
+	test("a declined container carries the probe's why into the row", async () => {
+		const { home, cwd } = makeDirs();
+		const why = "the container could not run cmd.exe (the probe ended at exit 3221225794)";
+		const row = await networkRow(restricted(), cwd, home, "win32", false, "simulated", why);
+		expect(row?.status).toBe("warn");
+		expect(row?.detail).toContain("Windows container backend was not selected");
+		expect(row?.detail).toContain(why);
+		// The same why, in the sentence `/permissions` prints for that machine.
+		expect(describeSandboxBackend("simulated", "workspace-write", "win32", why)).toContain(why);
 	});
 
 	test("a session that confines nothing is reported plainly, and not as a warning", async () => {

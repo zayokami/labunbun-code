@@ -7,7 +7,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_SANDBOX_FOR_MODE, needsNetworkProxy, networkConfinementReason } from "@labunbun/agent";
 import { apiKeyEnvNames, listModels } from "@labunbun/ai";
-import { detectNativeBackend, detectShell, networkConfinement, sandboxBackendFor } from "@labunbun/tools";
+import {
+	detectNativeBackend,
+	detectShell,
+	networkConfinement,
+	type SandboxBackend,
+	sandboxBackendFor,
+} from "@labunbun/tools";
 import { AUTO_THEME_NAME, DEFAULT_THEME, resolveBuiltInTheme } from "@labunbun/tui";
 import type { SubscriptionSignIns } from "./credential-presence.ts";
 import { changedBindings, type PadConfig } from "./gamepad-runtime.ts";
@@ -76,6 +82,16 @@ export const COMMAND_PATHS_WITHOUT_SANDBOX = ["hooks", "MCP stdio servers", "MCP
  * fail by machine. A caller with the answer (the REPL, which reads it live)
  * passes it; without one the row reports the environment only, which is
  * exactly what it reported before this parameter existed.
+ *
+ * `sandboxBackend` and `appContainerReason` are the ninth and tenth, and they
+ * are the session's own answer to what backs the sandbox — the same pair
+ * `/permissions` prints. Without them the Network row recomputes the backend
+ * from `platform` alone, which on Windows answers `simulated` for every
+ * machine — including the ones whose container is selected, where
+ * `/permissions` says the OS is enforcing it. One runtime, two answers; the
+ * row must not be the one that disagrees. `hasNativeBackend` stays behind them
+ * because it is the machine question for the platforms whose backend is an
+ * argv prefix rather than a spawn-time selection.
  */
 export async function runDoctorChecks(
 	settings: Settings,
@@ -86,6 +102,8 @@ export async function runDoctorChecks(
 	platform: string = process.platform,
 	hasNativeBackend?: boolean,
 	signIns?: SubscriptionSignIns,
+	sandboxBackend?: SandboxBackend,
+	appContainerReason?: string,
 ): Promise<DoctorCheck[]> {
 	const checks: DoctorCheck[] = [];
 
@@ -190,7 +208,12 @@ export async function runDoctorChecks(
 					? "nothing is reachable"
 					: `${allowCount} domain${allowCount === 1 ? "" : "s"} allowed`
 				: `${axis.domains.length} pattern${axis.domains.length === 1 ? "" : "s"} denied`;
-		const backend = sandboxBackendFor(platform, hasNativeBackend ?? detectNativeBackend(platform));
+		// The session's own backend when the caller has one — the same value
+		// `/permissions` hands `describeSandboxBackend` — and the machine question
+		// only without it. Recomputed from `platform` alone this said `simulated`
+		// on Windows in sessions where the container had been selected, which is
+		// the disagreement the parameter exists to end.
+		const backend = sandboxBackend ?? sandboxBackendFor(platform, hasNativeBackend ?? detectNativeBackend(platform));
 		// The pairing, not just the setting: an unset `sandbox` resolves through
 		// `DEFAULT_SANDBOX_FOR_MODE`, which is how the session resolves it too. Every
 		// mode currently pairs to `workspace-write`, so this is not a place where
@@ -206,10 +229,12 @@ export async function runDoctorChecks(
 		//
 		// The other four all warn, and the *reason* is in the row rather than left to
 		// `/permissions`: "the proxy is the whole boundary" on its own tells a user
-		// they have a problem without telling them which of three they have, and the
-		// three are fixed by three different things — a build that ships no backend, a
-		// package they can install, or a setting they wrote. Read off the same table
-		// `describeNetworkPolicy` uses, so the two surfaces cannot drift apart.
+		// they have a problem without telling them which one they have, and the
+		// causes are different things — a build with no backend for the platform, a
+		// package they can install, a machine whose Windows container was not
+		// selected (the probe's own why travels in for that one), or a setting they
+		// wrote. Read off the same function `describeNetworkPolicy` uses, so the two
+		// surfaces cannot drift apart.
 		const kernelHoldsIt = confinement === "os-namespace";
 		// Only the `ok` row needs the correction, and it needs it because it is the
 		// one that over-claims. "A shell command reaches nothing" is a statement
@@ -223,7 +248,7 @@ export async function runDoctorChecks(
 			? axis.access === "restricted"
 				? `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine, proxy included, so a shell command reaches nothing and the allowed list governs the web tools${uncovered}`
 				: `${axis.access} (${reach}) · a local proxy decides, and a program that ignores HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`
-			: `${axis.access} (${reach}) · ${networkConfinementReason(confinement)} So the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`;
+			: `${axis.access} (${reach}) · ${networkConfinementReason(confinement, platform, backend, appContainerReason)} So the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`;
 		checks.push({ name: "Network", status: kernelHoldsIt ? "ok" : "warn", detail });
 	} else {
 		checks.push({
