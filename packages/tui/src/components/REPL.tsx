@@ -29,7 +29,7 @@ import { StatusCard } from "./StatusCard.tsx";
 import { backgroundShellRow, estimateOutputTokens, StatusLine, toolSummary } from "./StatusLine.tsx";
 import { TaskStrip } from "./TaskStrip.tsx";
 import { TerminalTitle } from "./TerminalTitle.tsx";
-import { nextWatchSelection, WatchPanel, type WatchSelection } from "./WatchPanel.tsx";
+import { jumpWatchSelection, nextWatchSelection, WatchPanel, type WatchSelection } from "./WatchPanel.tsx";
 
 /** Verdict from the app layer's prompt gate (UserPromptSubmit hooks). */
 export interface PromptSubmitVerdict {
@@ -600,6 +600,27 @@ export function REPL({
 			if (transcriptMode) return;
 			if (!watchOpen) return;
 			setWatchSelection((current) => nextWatchSelection(backgroundShells, current));
+			return;
+		}
+		// Alt+1..9 jumps straight to that shell — the number its header carries in
+		// the gutter, so the key's map is the panel itself. Ctrl+V's refusals apply
+		// for its reasons: a dialog owns the keyboard, the transcript owns the
+		// view-switch keys, and with the panel closed the jump would be a key that
+		// sometimes opens the thing it moves.
+		//
+		// Emacs is the one engine that reads this key itself: `M-1`..`M-9` are
+		// `digit-argument` there (`emacs.ts:1292-1296`). Ink hands every key to
+		// every active `useInput` (`node_modules/ink/build/hooks/use-input.js:115-123`),
+		// so without this gate one press would both arm a count in the prompt and
+		// move the panel. The engine has the older claim, so the jump stands down
+		// under emacs and does nothing: the user sees one action, not two.
+		if (key.meta && /^[1-9]$/.test(input)) {
+			if (dialog || question || picker) return;
+			if (transcriptMode) return;
+			if (!watchOpen) return;
+			if (emacs) return;
+			const jumpTo = Number.parseInt(input, 10);
+			setWatchSelection((current) => jumpWatchSelection(backgroundShells, jumpTo) ?? current);
 			return;
 		}
 		if (transcriptMode) {

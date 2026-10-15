@@ -134,41 +134,65 @@ describe("shortcutGroups", () => {
 		expect(ctrlR("none")).toBe("search history");
 	});
 
-	test("the Ctrl+T row admits the watch panel is unreachable under emacs", () => {
-		// The third instance of the `Ctrl+R` failure and the second of the `Ctrl+O`
-		// one, added with the row itself: `C-t` is reserved `transpose-chars` in
-		// `emacs.ts`, so the engine eats it before the host can see it, and the
-		// panel is not merely hard to reach from emacs, it is unreachable. The
-		// proof is the same one the Ctrl+O test makes — the row's claim is checked
-		// against `RESERVED_KEYS` rather than taken on trust.
+	test("the Ctrl+T row records the engine's claim without denying the key", () => {
+		// This row said "unreachable under emacs" for as long as the `Ctrl+O` one did,
+		// and both were wrong in the same direction — checked here against the frame,
+		// in `watch-panel.test.tsx` with the engine on. `C-t` is still reserved
+		// `transpose-chars` (`emacs.ts`), but the claim is made inside the prompt's
+		// own `useInput`; ink delivers the key to every active hook separately
+		// (`ink/build/hooks/use-input.js:115-123`), so the REPL still gets it and the
+		// panel opens. The row must say both halves, and it must not say "taken" —
+		// that word is true of `Ctrl+R`, whose command really is a prompt-level branch.
 		const ctrlT = (editor: "none" | "vim" | "emacs") =>
 			shortcutGroups({ editor, vimMode: "normal" })
 				.find((g) => g.title === "Prompt")
 				?.rows.find(([k]) => k === "Ctrl+T")?.[1];
-		expect(ctrlT("emacs")).toContain("taken");
 		expect(ctrlT("none")).toBe("watch panel");
 		// Vim hands a ctrl combo it does not run to the host (`vim.ts`), so the row
 		// is the same one there as at an empty prompt.
 		expect(ctrlT("vim")).toBe("watch panel");
+		expect(ctrlT("emacs")).toContain("C-t");
+		expect(ctrlT("emacs")).toContain("still gets the key");
+		expect(ctrlT("emacs")).not.toContain("taken");
+		// The engine's claim is real even though its consequence is not.
 		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-t");
 	});
 
-	test("the Ctrl+O row admits the transcript is unreachable under emacs", () => {
-		// The second instance of the `Ctrl+R` failure, ten lines apart in `shortcuts.ts`, and the
-		// reason it is worth a test of its own: the file's own header says a shortcut list that
-		// lies is worse than none, and both rows said a key did something the engine eats. Under
-		// emacs `C-o` is reserved `open-line` (`emacs.ts`, `RESERVED_KEYS`), so the host never
-		// sees it and the transcript cannot be opened at all — "unavailable" would understate it.
+	test("the Ctrl+O row records the engine's claim without denying the key", () => {
+		// The same falsified sentence, ten lines up in `shortcuts.ts`. Under emacs
+		// `C-o` is reserved `open-line` (`emacs.ts`, `RESERVED_KEYS`) — but that
+		// silences the prompt's own branches, not the REPL's, and `Ctrl+O` is a
+		// REPL branch, so the transcript opens. Measured with the engine on in
+		// `watch-panel.test.tsx`; the row says what the measurement found.
 		const ctrlO = (editor: "none" | "vim" | "emacs") =>
 			shortcutGroups({ editor, vimMode: "normal" })
 				.find((g) => g.title === "Prompt")
 				?.rows.find(([k]) => k === "Ctrl+O")?.[1];
-		expect(ctrlO("emacs")).toContain("taken");
 		expect(ctrlO("none")).toBe("transcript");
 		expect(ctrlO("vim")).toBe("transcript");
-		// The claim is checkable one layer down rather than taken on trust: the row says the key
-		// is eaten, and `RESERVED_KEYS` is where that is decided.
+		expect(ctrlO("emacs")).toContain("C-o");
+		expect(ctrlO("emacs")).toContain("still gets the key");
+		expect(ctrlO("emacs")).not.toContain("taken");
 		expect(RESERVED_KEYS.map(([token]) => token)).toContain("C-o");
+	});
+
+	// The jump key's row, and the second one whose wording depends on the engine —
+	// this time because the implementation does too: the REPL's jump branch stands
+	// down under emacs, where `M-1`..`M-9` are `digit-argument` (`emacs.ts:1292-1296`),
+	// so one press arms a count instead of jumping. "Taken" is the honest word here,
+	// and the Emacs group names the command that takes it, so the two rows cannot
+	// disagree about what the key does.
+	test("the Alt+1..9 row is honest about the engine that owns the key", () => {
+		const alt = (editor: "none" | "vim" | "emacs") =>
+			shortcutGroups({ editor, vimMode: "normal" })
+				.find((g) => g.title === "Prompt")
+				?.rows.find(([k]) => k === "Alt+1..9")?.[1];
+		expect(alt("none")).toContain("jump");
+		expect(alt("vim")).toContain("jump");
+		expect(alt("emacs")).toContain("taken");
+		// The engine half is checkable one layer down rather than taken on trust.
+		const engine = shortcutGroups({ editor: "emacs", vimMode: "normal" }).find((g) => g.title === "Emacs");
+		expect(engine?.rows.some(([keys]) => keys.includes("M-1..9"))).toBe(true);
 	});
 
 	/**
@@ -257,15 +281,15 @@ describe("splitShortcutGroups", () => {
 		// width the two-column layout was for.
 		//
 		// The number is this list's arithmetic and not a taste. Prompt plus its
-		// title is thirteen rows and the Vim and Commands groups behind it are
+		// title is fourteen rows and the Vim and Commands groups behind it are
 		// nine between them, so no split that keeps the groups whole and in order
-		// comes closer than four — two became three when the watch panel's row
-		// arrived and four when the cycle key's did, and both times it was the
-		// arithmetic that moved, not the splitter. It is still asserting the
-		// thing the sentence above says: a lopsided split (the
+		// comes closer than five — two became three when the watch panel's row
+		// arrived, four when the cycle key's did and five when the jump key's, and
+		// every time it was the arithmetic that moved, not the splitter. It is
+		// still asserting the thing the sentence above says: a lopsided split (the
 		// nineteen-versus-three one, say) fails this.
 		const height = (column: typeof left) => column.reduce((sum, g) => sum + g.rows.length + 1, 0);
-		expect(Math.abs(height(left) - height(right))).toBeLessThanOrEqual(4);
+		expect(Math.abs(height(left) - height(right))).toBeLessThanOrEqual(5);
 	});
 
 	test("a single group lands in the first column, not spread across both", () => {

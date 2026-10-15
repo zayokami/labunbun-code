@@ -108,18 +108,24 @@ export function shortcutGroups(opts: {
 				// hand-written arrow chain is the same class of bug: a fifth row would
 				// leave the overlay promising a cycle it no longer has.
 				["Shift+Tab", `cycle permission mode (${MODE_CHOICES.map((c) => c.label).join(" → ")})`],
-				// The same failure as the `Ctrl+R` row above, and the same fix: `EmacsEngine`
-				// claims `C-o` as reserved `open-line` (`emacs.ts`, `RESERVED_KEYS`), so under
-				// emacs the key is eaten and the transcript is unreachable — not merely
-				// unavailable. Two rows in one file got this wrong the same way before either
-				// was fixed, so the wording is the honest one for both.
-				["Ctrl+O", emacs ? "taken — open-line is not in this build" : "transcript"],
-				// The same admission as the row above, for the same reason and one key
-				// later: `EmacsEngine` claims `C-t` as reserved `transpose-chars`, so
-				// under emacs the host never sees the key and the panel cannot be opened
-				// at all. Under vim it works without a caveat — a ctrl combo that is not
-				// one of the few the engine runs is handed to the host on purpose.
-				["Ctrl+T", emacs ? "taken — transpose-chars is not in this build" : "watch panel"],
+				// This row said "taken" until the claim was measured, and the
+				// measurement said otherwise. `EmacsEngine` does reserve `C-o`
+				// (`emacs.ts`, `RESERVED_KEYS`), but the claim is made inside the
+				// prompt's own `useInput`, and ink hands every key to every active
+				// hook separately (`node_modules/ink/build/hooks/use-input.js:115-123`):
+				// the engine silences the prompt's later branches and nothing else.
+				// The REPL's handler still receives the key, and the transcript opens
+				// under emacs exactly as it does with no editor — measured, in the
+				// frame, in `packages/tui/test/watch-panel.test.tsx`. The honest row
+				// says both facts. (The `Ctrl+R` row above is the case where "taken"
+				// *is* the truth, because history search is a prompt-level branch and
+				// that is the one the engine suppresses.)
+				["Ctrl+O", emacs ? "transcript — the engine also claims C-o, and the REPL still gets the key" : "transcript"],
+				// The same correction one key later: `C-t` is reserved
+				// `transpose-chars` there, and the panel opens anyway. Under vim both
+				// keys work without a caveat — a ctrl combo that is not one of the few
+				// the engine runs is handed to the host on purpose.
+				["Ctrl+T", emacs ? "watch panel — the engine also claims C-t, and the REPL still gets the key" : "watch panel"],
 				// The one host key neither engine contests — vim's ctrl block
 				// forwards everything but C-r, and the emacs engine binds no C-v at
 				// all — so unlike the two rows above this one needs no "taken"
@@ -127,6 +133,17 @@ export function shortcutGroups(opts: {
 				// Windows Terminal may claim C-v as paste before the app sees it,
 				// which is a real-machine check the design page records.
 				["Ctrl+V", "watch panel: cycle source (shells → subagents → status)"],
+				// The jump key, and the second row that depends on the editor. The
+				// engine claims it first: `M-1`..`M-9` are `digit-argument` in
+				// `EmacsEngine` (`emacs.ts:1292-1296`), and because ink delivers each
+				// key to both the engine and the REPL, the REPL's jump branch stands
+				// down under emacs rather than letting one press both arm a count and
+				// move the panel. So under emacs the key is the engine's, and the row
+				// says so in the vocabulary the `Ctrl+R` row uses.
+				[
+					"Alt+1..9",
+					emacs ? "taken — M-1..9 arms a count in the prompt (see the Emacs group)" : "watch panel: jump to that shell",
+				],
 				["Ctrl+L", "clear screen"],
 				["Ctrl+C", "exit (twice when idle)"],
 			],

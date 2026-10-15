@@ -15,6 +15,8 @@ import { FAUX_MODEL, fauxProvider } from "@labunbun/ai";
 import { render } from "ink-testing-library";
 import { connectSessionToStore, REPL } from "../src/components/REPL.tsx";
 import {
+	jumpDigit,
+	jumpWatchSelection,
 	nextWatchSelection,
 	selectWatchShell,
 	WATCH_PANEL_DESIRED_ROWS,
@@ -168,6 +170,26 @@ describe("the source ring", () => {
 			id: "s2",
 		});
 	});
+
+	// `Alt+<n>`: the number is the one the header prints, so the lookup is
+	// positional and the answer is an identity — the nth shell's id, not the
+	// nth slot. Every number the key has is walked, at both ends of the list.
+	test("a jump names the nth shell by id, for every number the key has", () => {
+		const shells = [shell("s1"), shell("s2"), shell("s3")];
+		expect(jumpWatchSelection(shells, 1)).toEqual({ kind: "shell", id: "s1" });
+		expect(jumpWatchSelection(shells, 2)).toEqual({ kind: "shell", id: "s2" });
+		expect(jumpWatchSelection(shells, 3)).toEqual({ kind: "shell", id: "s3" });
+		expect(jumpWatchSelection(shells, 9)).toBeNull();
+	});
+
+	test("a number past the list names nothing rather than the nearest shell", () => {
+		expect(jumpWatchSelection([shell("s1")], 2)).toBeNull();
+		expect(jumpWatchSelection([shell("s1")], 9)).toBeNull();
+	});
+
+	test("with no shells every number names nothing", () => {
+		for (let n = 1; n <= 9; n++) expect(jumpWatchSelection([], n)).toBeNull();
+	});
 });
 
 describe("the panel", () => {
@@ -193,9 +215,11 @@ describe("the panel", () => {
 		// Exact rows including the gutter: shell_1 is the last running shell, the
 		// one the tail follows, so its row opens on the marker; shell_2's does not.
 		// Loose substrings would pass on headers with no gutter at all and would
-		// not pin which row carries the marker.
-		expect(frame).toContain("▶ shell_1  run shell_1  running");
-		expect(frame).toContain("  shell_2  run shell_2  completed");
+		// not pin which row carries the marker. The number column is pinned with
+		// the marker, because it is the map `Alt+<n>` jumps by: the rows are
+		// numbered in the manager's order, and only the marked row opens on `▶`.
+		expect(frame).toContain("▶1 shell_1  run shell_1  running");
+		expect(frame).toContain(" 2 shell_2  run shell_2  completed");
 		view.unmount();
 	});
 
@@ -258,8 +282,31 @@ describe("the panel", () => {
 
 	test("a lone shell is marked, because it is the one being read", () => {
 		const view = render(<WatchPanel shells={[shell("shell_1")]} />);
-		expect(view.lastFrame()).toContain("▶ shell_1");
+		expect(view.lastFrame()).toContain("▶1 shell_1");
 		view.unmount();
+	});
+
+	// The number column is the jump key's map, so both ends of its range are
+	// pinned. The drawn end is asserted on a frame with nine shells: the ninth
+	// row carries `▶9`, the number `Alt+9` jumps to.
+	test("numbers the headers of a full list one to nine", () => {
+		const view = render(<WatchPanel shells={Array.from({ length: 9 }, (_, i) => shell(`shell_${i + 1}`))} />);
+		const frame = view.lastFrame() ?? "";
+		expect(frame).toContain("▶9 shell_9");
+		expect(frame).toContain(" 8 shell_8");
+		view.unmount();
+	});
+
+	// The other end cannot be drawn: the panel's budget tops out at nine headers
+	// (`watchPanelHeight` 12 rows, minus border and note, minus the note's row), so
+	// the tenth shell is cut, not numbered. The rule is still pinned directly —
+	// `·` keeps the column two characters wide — because it is the rule that holds
+	// the day the budget grows, and no frame today would say if it broke.
+	test("the number column stops at nine and stays two columns wide there", () => {
+		expect(jumpDigit(0)).toBe("1");
+		expect(jumpDigit(8)).toBe("9");
+		expect(jumpDigit(9)).toBe("·");
+		expect(jumpDigit(99)).toBe("·");
 	});
 
 	test("elides a command that will not fit, keeping the id and the status word", () => {
@@ -269,7 +316,7 @@ describe("the panel", () => {
 		expect(frame).not.toContain("--logLevel info");
 		expect(frame).toContain("…");
 		// The gutter and the two load-bearing columns survive the elision.
-		expect(frame).toContain("▶ shell_1");
+		expect(frame).toContain("▶1 shell_1");
 		expect(frame).toContain("running");
 		view.unmount();
 	});
@@ -426,11 +473,11 @@ const CTRL_O = "\x0f";
 const CTRL_T = "\x14";
 const CTRL_V = "\x16";
 
-function replSetup() {
+function replSetup(options: { emacs?: boolean } = {}) {
 	const faux = fauxProvider([{ text: "n/a" }]);
 	const session = new AgentSession({ model: FAUX_MODEL, deps: { streamFn: faux.streamFn } });
 	const store = createStore<UiState>({
-		...initialUiState(),
+		...initialUiState(false, options.emacs ?? false),
 		backgroundShells: [shell("shell_1", { command: "npm run dev", tail: ["VITE v5 ready"] })],
 	});
 	const unsubscribe = connectSessionToStore(session, store);
@@ -640,6 +687,130 @@ describe("Ctrl+V at the REPL", () => {
 		// Had the press reached the ring, the panel would be on the listing stop
 		// and the tail would be gone; it is exactly where it was.
 		expect(h.frame()).toContain("VITE v5 ready");
+		h.finish();
+	}, 20_000);
+});
+
+describe("Alt+1..9 at the REPL", () => {
+	/** How a terminal spells Alt+digit, and what ink hands the handler: `{input: "2", meta: true}`. */
+	const alt = (n: number) => `\x1b${n}`;
+
+	// The same claim the ring's panel test makes, one level up: the pick is an
+	// identity, so the marker and the tail move together — a marker that moved
+	// alone, or a tail that stayed, would be the panel reading from two places at
+	// once. The automatic stop is shell_1 here (the last *running* shell), so the
+	// jump to 2 is visible as a change rather than as a no-op.
+	test("jumps to the numbered shell, moving the marker and the tail together", async () => {
+		const h = replSetup();
+		h.store.set((s) => ({
+			...s,
+			backgroundShells: [
+				shell("shell_1", { command: "npm run dev", tail: ["from the first one"] }),
+				shell("shell_2", { command: "npm test", status: "completed", tail: ["from the second one"] }),
+			],
+		}));
+		await delay(30);
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("from the first one");
+
+		await h.write(alt(2));
+		expect(h.frame()).toContain("from the second one");
+		expect(h.frame()).not.toContain("from the first one");
+		expect(h.frame()).toContain("▶2 shell_2");
+		expect(h.frame()).not.toContain("▶1 shell_1");
+		h.finish();
+	}, 20_000);
+
+	// The invariant that makes the jump safe to give the panel: it still takes no
+	// keys. A plain digit is the prompt's, panel open or not — the jump needs the
+	// modifier, and the branch requires it.
+	test("a digit typed at the open panel still reaches the prompt", async () => {
+		const h = replSetup();
+		await h.write("a draft");
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("VITE v5 ready");
+		await h.write("1");
+		expect(h.frame()).toContain("a draft1");
+		h.finish();
+	}, 20_000);
+
+	// Closed, the key is nobody's — the same rule as the cycle key, and for the
+	// same reason: a jump that first opened the panel would make the first press
+	// ambiguous. Asserted with a live frame first, so the absence cannot pass on
+	// a frame that failed to render anything.
+	test("with the panel closed the key does nothing, and types nothing", async () => {
+		const h = replSetup();
+		await h.write("a draft");
+		expect(h.frame()).toContain("a draft");
+		await h.write(alt(1));
+		expect(h.frame()).toContain("a draft");
+		expect(h.frame()).not.toContain("ctrl+v cycles");
+		// Alt+digit is not a digit: nothing was inserted either, because a meta
+		// key is not text the prompt takes.
+		expect(h.frame()).not.toContain("a draft1");
+		h.finish();
+	}, 20_000);
+
+	// The double-action gate, and the reason the branch stands down under emacs:
+	// ink hands every key to every active `useInput`, so without the gate one
+	// press would both arm the engine's count and move the panel. The count half
+	// is asserted through the buffer (`M-2 C-f X` lands two characters on, which
+	// a bare `C-f` cannot do), and the jump half through the panel: the
+	// automatic shell is still the one on screen.
+	test("under emacs the engine gets the press and the panel does not move", async () => {
+		const h = replSetup({ emacs: true });
+		h.store.set((s) => ({
+			...s,
+			backgroundShells: [
+				shell("shell_1", { command: "npm run dev", tail: ["from the first one"] }),
+				shell("shell_2", { command: "npm test", tail: ["from the second one"] }),
+			],
+		}));
+		await delay(30);
+		await h.write(CTRL_T);
+		// The automatic stop, before any key: the last running shell.
+		expect(h.frame()).toContain("from the second one");
+
+		// "hello", caret back to offset 3, then M-2 arming 2 and C-f using it.
+		await h.write("hello");
+		await h.write("\x1b[D");
+		await h.write("\x1b[D");
+		await h.write(alt(2));
+		await h.write("\x06");
+		await h.write("X");
+		expect(h.frame()).toContain("helloX");
+		expect(h.frame()).not.toContain("hellXo");
+
+		// And the panel is exactly where it was, so the one press ran once.
+		expect(h.frame()).toContain("from the second one");
+		expect(h.frame()).not.toContain("▶1 shell_1");
+		h.finish();
+	}, 20_000);
+});
+
+describe("the emacs engine and the REPL's own keys", () => {
+	// The `Ctrl+T`/`Ctrl+O` "taken" rows in `shortcuts.ts` were wrong, and this
+	// is the measurement that says so. `EmacsEngine` does claim both keys as
+	// reserved, but that claim is made inside the prompt's own `useInput`: ink
+	// hands every key to every active hook separately
+	// (`node_modules/ink/build/hooks/use-input.js:115-123`), so the engine's
+	// consumption silences the *prompt's* later branches and nothing else. The
+	// REPL's handler never asked the engine and is not asking now, so the panel
+	// and the transcript open under emacs exactly as they do without it.
+	test("a key the engine claims is still delivered to the REPL", async () => {
+		const h = replSetup({ emacs: true });
+		await h.write("a draft");
+
+		await h.write(CTRL_T);
+		expect(h.frame()).toContain("VITE v5 ready");
+		// The engine swallowed nothing from the prompt either: the draft stands.
+		expect(h.frame()).toContain("a draft");
+
+		await h.write(CTRL_T);
+		expect(h.frame()).not.toContain("VITE v5 ready");
+
+		await h.write(CTRL_O);
+		expect(h.frame()).toContain("Transcript ");
 		h.finish();
 	}, 20_000);
 });

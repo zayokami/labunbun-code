@@ -35,13 +35,15 @@
  * file, spawns a timer or reaches the shell manager — that is the app layer's
  * half, and it is why this file has no import from `@labunbun/tools`. The
  * watched shell is marked, not chosen: its header row opens on a `▶` gutter
- * (every other row carries two blank columns there, so the headers stay
- * aligned) and it is the only row so marked, which is what tells a reader
- * whose tail the rows below belong to. The walk across sources is the REPL's;
- * what lives here is the ring it walks ({@link watchRing}) and the one-step
- * rule ({@link nextWatchSelection}) — pure functions, because a cycle that can
- * only be exercised through a terminal is a cycle half of whose edges are
- * never tested.
+ * (every other row carries a blank column there, so the headers stay aligned)
+ * and it is the only row so marked, which is what tells a reader whose tail
+ * the rows below belong to. The gutter also carries the shell's number — the
+ * one `Alt+<n>` jumps to ({@link jumpWatchSelection}) — so the key's map is on
+ * the screen it moves. The walk across sources and the jump are the REPL's;
+ * what lives here is the ring it walks ({@link watchRing}), the one-step rule
+ * ({@link nextWatchSelection}) and the jump rule — pure functions, because a
+ * cycle that can only be exercised through a terminal is a cycle half of whose
+ * edges are never tested.
  */
 import { Box, Text, useWindowSize } from "ink";
 import { useTheme } from "../theme.ts";
@@ -133,6 +135,24 @@ export function nextWatchSelection(shells: UiBackgroundShell[], current: WatchSe
 function sameStop(a: WatchSelection, b: WatchSelection): boolean {
 	if (a.kind === "shell") return b.kind === "shell" && a.id === b.id;
 	return a.kind === b.kind;
+}
+
+/**
+ * The stop `Alt+<n>` jumps to: the nth shell in the manager's order — the same
+ * order, and the same numbering, the headers carry in their gutters.
+ *
+ * Shells only. The other two stops are not numbered on screen, so a number
+ * cannot name them; the key is the gutter read aloud, not a second ring.
+ *
+ * `null` for a number past the list — including every number when there are no
+ * shells: the caller keeps the selection it has, because the alternative, some
+ * nearest stop, would make `Alt+9` with three shells land somewhere the user
+ * did not name. A press that names nothing does nothing.
+ */
+export function jumpWatchSelection(shells: UiBackgroundShell[], n: number): WatchSelection | null {
+	// The number is 1-based because that is what is drawn; the list is not.
+	const picked = shells[n - 1];
+	return picked ? { kind: "shell", id: picked.id } : null;
 }
 
 /**
@@ -263,14 +283,15 @@ function ShellStop({
 
 	return (
 		<>
-			{shownShells.map((shell) => (
+			{shownShells.map((shell, index) => (
 				// Keyed by the shell id: two shells cannot share one, and a shell that
 				// ends leaves the list entirely rather than changing into another.
 				<Text key={shell.id} wrap="truncate">
 					{/* The marker and the tail compare against the one `watched` id this
 					render already resolved, so they cannot disagree about which shell
-					is being read. */}
-					{shellHeader(shell, width, shell.id === watched)}
+					is being read. The index is the row's position, which is the one
+					thing `Alt+<n>` and the printed number both mean. */}
+					{shellHeader(shell, width, index, shell.id === watched)}
 				</Text>
 			))}
 			{tail.map((line, index) => (
@@ -288,25 +309,43 @@ function ShellStop({
 }
 
 /** The gutter on the header of the shell whose tail is on screen. */
-const SELECTED_GUTTER = "▶ ";
-/** The gutter on every other header: two columns, so the rows stay aligned. */
-const PLAIN_GUTTER = "  ";
+const SELECTED_GUTTER = "▶";
+/** The gutter on every other header: one blank column, so the rows stay aligned. */
+const PLAIN_GUTTER = " ";
+
+/**
+ * The gutter's second column: the shell's number, the one `Alt+<n>` jumps to.
+ *
+ * Nine shells are what the key has keys for, so a tenth row on is drawn as `·`
+ * — the column stays two characters wide and the rows stay aligned, instead of
+ * a two-digit number no press can name widening every row's gutter.
+ *
+ * Exported for its own test rather than left to the frame: the panel's row
+ * budget caps the list at nine headers ({@link watchPanelHeight} asks for
+ * twelve rows, minus the border and the note), so the `·` edge cannot be
+ * reached by any terminal the component can be rendered in today. It is the
+ * rule that keeps the gutters aligned on the day that budget moves, and an
+ * edge no frame can draw is exactly the kind a test has to hold directly.
+ */
+export function jumpDigit(index: number): string {
+	return index < 9 ? String(index + 1) : "·";
+}
 
 /**
  * One shell's header row: who, what, and whether it is still going.
  *
- * The row opens on a two-column gutter — `▶ ` for the selected shell, two
- * spaces for the others — which is what tells a reader whose tail the rows
- * below belong to. The gutter is folded into the width budget (it rides in
- * {@link before}), so it costs the command exactly two columns of room and the
- * elision is otherwise untouched.
+ * The row opens on a two-column gutter — `▶` or a blank column, then the
+ * shell's number — which is what tells a reader whose tail the rows below
+ * belong to, and which key jumps to this same row. The gutter is folded into
+ * the width budget (it rides in {@link before}), so it costs the command
+ * exactly two columns of room and the elision is otherwise untouched.
  *
  * The command is the only part that may be elided. The id and the status word
  * are what the row is for — a wide command that pushed "running" off the edge
  * would be a row that answers neither of the two questions a watcher has.
  */
-function shellHeader(shell: UiBackgroundShell, width: number, selected: boolean): string {
-	const before = `${selected ? SELECTED_GUTTER : PLAIN_GUTTER}${shell.id}  `;
+function shellHeader(shell: UiBackgroundShell, width: number, index: number, selected: boolean): string {
+	const before = `${selected ? SELECTED_GUTTER : PLAIN_GUTTER}${jumpDigit(index)} ${shell.id}  `;
 	const after = `  ${shell.status}`;
 	const room = Math.max(0, width - before.length - after.length);
 	return `${before}${elide(shell.command, room)}${after}`;
