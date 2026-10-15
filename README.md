@@ -540,7 +540,7 @@ Use these commands in the terminal.
 
 The command `/migrate` is the previous name of `/yoshi`. The command `/quit` is an alias of `/exit`.
 
-Press Ctrl+T to show the watch panel. The panel shows the tail of one background shell and takes no keys of its own. The tool shows the last running shell, or the last shell that ended. The panel is a snapshot from the two-second poll, and it says so. Press Ctrl+T or Escape to close it. The key does nothing while a dialog, a question, the command picker, or the transcript is open. Under the Emacs editor, the engine takes `C-t`, so the key does not reach the panel.
+Press Ctrl+T to show the watch panel. The panel shows a background shell's tail, the subagent listing, or the session facts, and it takes no keys of its own. Press Ctrl+V while the panel is open to cycle the source: the shell tails in start order, then the subagent listing, then the session facts, wrapping back to the first shell. The tool shows the last running shell, or the last shell that ended. The panel is a snapshot from the two-second poll, and it says so. Press Ctrl+T or Escape to close it. The key does nothing while a dialog, a question, the command picker, or the transcript is open. Under the Emacs editor, the engine takes `C-t`, so the key does not reach the panel. A terminal that turns Ctrl+V into paste — Windows Terminal does by default — takes the key before the app sees it.
 
 ### Headless output
 
