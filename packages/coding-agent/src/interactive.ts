@@ -609,7 +609,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	// `/permissions` prints and the branch either spawn path takes are answers
 	// to one question about this machine.
 	const shell = detectShell();
-	const runtime = detectRuntime();
+	const runtime = detectRuntime(process.platform, shell);
 	const ops: Operations = defaultOperations(new ChildProcessExecOperations(runtime, shell));
 	// Owned here rather than inside createAllTools so `/ps` and `/stop` can reach
 	// the same shells the Bash tool started; the factory would otherwise make a
@@ -1910,6 +1910,7 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 				settings,
 				cwd,
 				sandboxBackend: ops.sandboxBackend,
+				appContainerReason: ops.appContainerReason,
 				home,
 				costTracker,
 				cache: {
@@ -2472,6 +2473,12 @@ interface AppCommandContext {
 	 * an absent answer renders as "simulated" rather than as the good news.
 	 */
 	sandboxBackend?: SandboxBackend;
+	/**
+	 * The Windows selection probe's own why, when it declined. Travels beside
+	 * `sandboxBackend` for its reason: a machine that has a backend and did
+	 * not select it is owed the reason, not the build's.
+	 */
+	appContainerReason?: string;
 	/** Home directory for user-owned state (MCP approvals). Defaults to the real one. */
 	home?: string;
 	costTracker: CostTracker;
@@ -3028,8 +3035,12 @@ function handleAppCommand(text: string, ctx: AppCommandContext): boolean {
 				// cannot say "enforced" on a machine where nothing wraps the shell.
 				// What the sentence never covers is the deny rules and the
 				// classifier below — those apply in every case, including the
-				// unrestricted one, and they are not the sandbox.
-				describeSandboxBackend(ctx.sandboxBackend, session.sandbox),
+				// unrestricted one, and they are not the sandbox. The Windows
+				// probe's own reason travels beside the backend for the same
+				// purpose: on a machine that has a container backend and did
+				// not select it, the sentence is owed the machine's why, not
+				// the build's.
+				describeSandboxBackend(ctx.sandboxBackend, session.sandbox, process.platform, ctx.appContainerReason),
 				// The third axis, from the same source as the other two — read off
 				// the session rather than off settings, so a session that changed it
 				// mid-run reports what it is actually running under. The caveat is

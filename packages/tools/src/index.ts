@@ -115,7 +115,7 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 	// probe at all.
 	const shell = detectShell();
 	let runtime: SandboxRuntime | undefined;
-	const runtimeFor = (): SandboxRuntime => (runtime ??= detectRuntime());
+	const runtimeFor = (): SandboxRuntime => (runtime ??= detectRuntime(process.platform, shell));
 	const ops = options.operations ?? defaultOperations(new ChildProcessExecOperations(runtimeFor(), shell));
 	// The same executor, so a backgrounded command joins the proxy the foreground
 	// one uses instead of opening a second listener that nothing would close.

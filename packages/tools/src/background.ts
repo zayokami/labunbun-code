@@ -188,13 +188,16 @@ export class BackgroundShellManager {
 	readonly #operations: ExecOperations;
 
 	constructor(
-		runtime: SandboxRuntime = detectRuntime(),
+		// Resolved in the body, not as a default: the default now depends on the
+		// shell (the Windows probe runs this session's shell), and a default
+		// parameter list cannot see one of its own.
+		runtime: SandboxRuntime | undefined = undefined,
 		operations: ExecOperations = defaultOperations(),
 		// Injected like the runtime: so a test can pin the shell the container
 		// branch wraps without depending on what this machine has installed.
 		shell: ReturnType<typeof detectShell> = detectShell(),
 	) {
-		this.#runtime = runtime;
+		this.#runtime = runtime ?? detectRuntime(process.platform, shell);
 		this.#operations = operations;
 		this.#shell = shell;
 	}
@@ -351,6 +354,7 @@ export class BackgroundShellManager {
 					platform: this.#runtime.platform,
 					hasNativeBackend: this.#runtime.hasNativeBackend,
 					hasAppContainer: this.#runtime.hasAppContainer,
+					appContainerReason: this.#runtime.appContainerReason,
 					executableRoots: this.#runtime.executableRoots,
 				})
 			: ({ kind: "unconfined" } as const);

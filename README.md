@@ -87,9 +87,11 @@ Press Shift+Tab to go to the next mode.
 
 > **WARNING**: A Linux system without `bubblewrap` confines nothing.
 
-> **WARNING**: A shell command is not confined on Windows. The tool-layer policy decides writes and nothing stops a subprocess that goes around the tools. Run `rm .git/config` through Bash on Windows. The command succeeds.
->
-> This build does carry a real Windows backend — an AppContainer child with a kernel-checked write boundary, implemented and tested in `packages/tools/src/sandbox/appcontainer.ts` — and the resolver can pick it. Production does not, for a measured reason: a confined child executes only what the grant names its package SID, and `git`, `node` and `bun` live outside every grant on this machine, so selecting the backend would confine every default-mode command into something that cannot run `git status`. The measurement is recorded on `SandboxRuntime.hasAppContainer` in `packages/tools/src/sandbox/index.ts`, and `/permissions` prints which layer is actually holding the session.
+> **WARNING**: On Windows, a shell command is confined by the kernel only when the container backend is selected. The tool selects it only after a real test: the session's own shell must start inside a live container. When the shell does not start, every Bash command runs with no kernel boundary, and only the tool-layer rules apply.
+
+> **NOTE**: The test is the backend's own question. It grants the workspace and the machine's toolchain roots to a throwaway container profile, then runs the session's shell once. Measured answers: a `cmd.exe` session selects the backend. A Git-for-Windows (msys) shell does not, because its runtime dies inside the container at startup (`0xC0000142`). A toolchain root the user cannot rewrite the ACL of — an elevated `D:\Program Files`, measured — also does not. A `restricted` network axis does not either: the proxy listens on the loopback, and a container child cannot reach it. `/permissions` prints the answer and the reason. To have a Windows session select the backend, point the shell at `cmd.exe` with `LBB_BASH_PATH`.
+
+> **NOTE**: When the backend is selected, the kernel refuses a write outside the roots the policy grants. The mode does not narrow reads — but a container child reads only what its token can reach: System32, the program directories the system drive already exposes to application packages, and the granted roots.
 
 Inside the workspace, the agent cannot write to `.git/`. This rule applies in every mode. It also applies to a nested repository. It also applies to a symbolic link that refers to a `.git` directory. Reading git data is not restricted.
 

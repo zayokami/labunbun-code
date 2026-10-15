@@ -130,6 +130,13 @@ export interface ExecOperations {
 	// Long-form design notes: docs/dev/tools.md
 	/** What confines commands run through here, when this implementation knows. */
 	readonly sandboxBackend?: SandboxBackend;
+	/**
+	 * Why the Windows container probe declined, when it declined and this
+	 * implementation knows. Carried beside the backend for the same reason the
+	 * backend is carried: "not selected" without the machine's own why is the
+	 * half a user cannot act on.
+	 */
+	readonly appContainerReason?: string;
 }
 
 export type Operations = FileSystemOperations & ExecOperations;
@@ -329,7 +336,7 @@ export const EXIT_DRAIN_GRACE_MS = 2_000;
 export class ChildProcessExecOperations implements ExecOperations {
 	#shell: ReturnType<typeof detectShell>;
 	// Long-form design notes: docs/dev/tools.md
-	/** What this machine can confine with, asked once at construction. */
+	/** What this machine can confine with: the runtime is built here, and the Windows probe inside it runs when a field is first read. */
 	readonly #runtime: SandboxRuntime;
 
 	// Long-form design notes: docs/dev/tools.md
@@ -341,9 +348,15 @@ export class ChildProcessExecOperations implements ExecOperations {
 	#epoch = 0;
 
 	// Long-form design notes: docs/dev/tools.md
-	/** `runtime` and `shell` are injectable, so tests assert the branches and not the machine's own layout. */
-	constructor(runtime: SandboxRuntime = detectRuntime(), shell: ReturnType<typeof detectShell> = detectShell()) {
-		this.#runtime = runtime;
+	/**
+	 * `runtime` and `shell` are injectable, so tests assert the branches and
+	 * not the machine's own layout. The runtime is resolved in the body rather
+	 * than as a default parameter because its default now *depends* on the
+	 * shell: on Windows the selection probe runs this session's shell, and a
+	 * default parameter list cannot see one of its own.
+	 */
+	constructor(runtime?: SandboxRuntime, shell: ReturnType<typeof detectShell> = detectShell()) {
+		this.#runtime = runtime ?? detectRuntime(process.platform, shell);
 		this.#shell = shell;
 	}
 
@@ -434,9 +447,13 @@ export class ChildProcessExecOperations implements ExecOperations {
 		// The third argument is the same fact the resolver takes, read from the
 		// same runtime: the sentence `/permissions` prints and the branch the
 		// argv comes from have to be answers to one question. A runtime that
-		// does not claim the backend reports `simulated`, which is what
-		// production still runs.
+		// does not claim the backend reports `simulated`.
 		return sandboxBackendFor(this.#runtime.platform, this.#runtime.hasNativeBackend, this.#runtime.hasAppContainer);
+	}
+
+	/** The probe's own why, when it declined — the sentence's missing half. */
+	get appContainerReason(): string | undefined {
+		return this.#runtime.appContainerReason;
 	}
 
 	async exec(options: {
@@ -467,6 +484,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 					platform: this.#runtime.platform,
 					hasNativeBackend: this.#runtime.hasNativeBackend,
 					hasAppContainer: this.#runtime.hasAppContainer,
+					appContainerReason: this.#runtime.appContainerReason,
 					executableRoots: this.#runtime.executableRoots,
 				})
 			: ({ kind: "unconfined" } as const);
@@ -720,5 +738,6 @@ export function defaultOperations(exec: ChildProcessExecOperations = new ChildPr
 		exec: (options) => exec.exec(options),
 		networkEnvFor: (policy) => exec.networkEnvFor(policy),
 		sandboxBackend: exec.sandboxBackend,
+		appContainerReason: exec.appContainerReason,
 	};
 }

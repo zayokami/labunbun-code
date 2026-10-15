@@ -486,6 +486,74 @@ describeWindows("the read+execute grant a toolchain root gets", () => {
 	});
 });
 
+describeWindows("the mirror the system drive already holds", () => {
+	// `ALL APPLICATION PACKAGES` — S-1-15-2-1 — sits in every AppContainer
+	// token, and the system drive's program directories carry its (RX) by
+	// default. A toolchain root under them therefore needs no ACE written at
+	// all, and the skip is load-bearing off elevated machines: rewriting the
+	// ACL of `C:\Program Files\...` would fail on a WRITE_DAC the child never
+	// needed, which is exactly the decline the selection probe exists to
+	// report. Two fixtures pin the skip from both sides: a directory whose
+	// mirror ACE this test writes itself — so "no ACE written" is observable
+	// on any machine, elevated or not — and the real system program
+	// directory, so the shape production meets is pinned too.
+	const workspace = `${process.env.LOCALAPPDATA}\\Temp\\ac-mirror-ws-${process.pid}`;
+	const covered = `${process.env.LOCALAPPDATA}\\Temp\\ac-mirror-covered-${process.pid}`;
+
+	function refresh(): void {
+		execSync(`cmd /c if exist "${workspace}" rmdir /s /q "${workspace}"`, { stdio: "ignore" });
+		execSync(`cmd /c if exist "${covered}" rmdir /s /q "${covered}"`, { stdio: "ignore" });
+		execSync(`cmd /c mkdir "${workspace}" "${covered}"`, { stdio: "ignore" });
+		execSync(`icacls "${covered}" /grant "*S-1-15-2-1:(OI)(CI)(RX)"`, { stdio: "ignore" });
+	}
+
+	function icaclsOf(path: string): string {
+		return execSync(`icacls "${path}"`, { encoding: "utf8" });
+	}
+
+	test("a root the application-packages group already covers gets no ACE written", () => {
+		refresh();
+		const before = icaclsOf(covered);
+		// The fixture is only a fixture if the mirror landed: without it the
+		// acquire below would write its own ACE and the equality would fail —
+		// which is the red this row is for — but asserting it here says which
+		// side broke.
+		expect(before.toLowerCase()).toMatch(/s-1-15-2-1|all application packages/);
+		const grant = acquireWorkspaceGrant(workspace, false, [], [covered]);
+		expect(grant.error).toBeUndefined();
+		try {
+			const profile = grant.profile as AppContainerProfile;
+			// Byte for byte: not "an ACE for the profile is absent" — the whole
+			// listing is untouched, so a rewrite that added and removed
+			// something would still be caught by the ordering-sensitive form.
+			expect(icaclsOf(covered)).toBe(before);
+			expect(icaclsOf(covered)).not.toContain(profile.sid);
+		} finally {
+			releaseWorkspaceGrant(workspace, false);
+			deleteAppContainerProfile(appContainerProfileName(workspace));
+		}
+	});
+
+	test("the real system program directory survives a grant and a release byte for byte", () => {
+		// The machine's own `C:\Program Files`, the root production names on a
+		// machine with a conventionally-installed toolchain. Either the mirror
+		// covers it — no write at all — or the ACL was writable and the
+		// release put it back; both end where they started. What must never
+		// remain is a standing ACE on a system directory, written by a probe.
+		refresh();
+		const before = icaclsOf("C:\\Program Files");
+		const grant = acquireWorkspaceGrant(workspace, false, [], ["C:\\Program Files"]);
+		expect(grant.error).toBeUndefined();
+		try {
+			expect(grant.profile).toBeDefined();
+		} finally {
+			releaseWorkspaceGrant(workspace, false);
+			deleteAppContainerProfile(appContainerProfileName(workspace));
+		}
+		expect(icaclsOf("C:\\Program Files")).toBe(before);
+	});
+});
+
 describeWindows("the profile lifecycle", () => {
 	test("create, derive, and delete work without elevation", () => {
 		const workspace = `G:\\labunbun-probe-${process.pid}`;

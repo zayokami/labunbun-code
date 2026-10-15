@@ -1,6 +1,8 @@
-// The Windows AppContainer backend for the filesystem sandbox. Both halves are
-// wired — profile/spawn and the refcounted ACL grant — and production stays off
-// it because the confined token cannot run this machine's toolchain (measured).
+// The Windows AppContainer backend for the filesystem sandbox: the profile and
+// spawn half, and the refcounted ACL grant. Production selects it — or does
+// not — through `appcontainer-probe.ts` alone: the one honest question is
+// whether this machine's shell runs inside a real grant, so the probe asks by
+// making one and running it (measured: nothing cheaper is evidence).
 // Long-form design notes: docs/dev/sandbox.md
 import { dlopen, FFIType, type Pointer, ptr, toArrayBuffer } from "bun:ffi";
 import { createHash } from "node:crypto";
@@ -609,6 +611,16 @@ function aceGrants(ace: Uint8Array, sidString: string, mask: number): boolean {
 	if ((view.getUint32(4, true) & mask) !== mask) return false;
 	return aceSidString(ace) === sidString;
 }
+
+/**
+ * `ALL APPLICATION PACKAGES` — the app-model group present in every
+ * AppContainer token. The system drive's program directories carry this
+ * group's read+execute by default, so a toolchain root under them needs no
+ * grant written at all; skipping is load-bearing off elevated machines,
+ * where rewriting the ACL of `C:\Program Files\...` would fail on a missing
+ * WRITE_DAC the child never needed.
+ */
+const ALL_APPLICATION_PACKAGES = "S-1-15-2-1";
 
 function grantAccess(path: string, sid: Uint8Array, mask: number): string | null {
 	const existing = readDacl(path);
@@ -1291,6 +1303,18 @@ export function canonicalPathForChild(path: string): string {
 	}
 }
 
+/**
+ * Whether `candidate` sits strictly inside `root`, both canonicalised by
+ * `canonicalPathForChild`. Case-insensitive because the two spellings came
+ * from separate `realpathSync` calls; a backslash boundary because
+ * `D:\Program Files\Git` must not count as containing `D:\Program Files\GitHub`.
+ */
+function isWithinRoot(candidate: string, root: string): boolean {
+	if (candidate.length <= root.length) return false;
+	const boundary = root.endsWith("\\") ? root : `${root}\\`;
+	return candidate.toLowerCase().startsWith(boundary.toLowerCase());
+}
+
 export interface GrantOutcome {
 	profile?: AppContainerProfile;
 	error?: string;
@@ -1342,6 +1366,21 @@ export function acquireWorkspaceGrant(
 	const execRoots = Array.from(new Set(executableRoots.map(canonicalPathForChild))).filter(
 		(root) => !writeRoots.includes(root),
 	);
+	// A root a shallower root already covers by inheritance is dropped from
+	// the plan: writing it too pays a second full-tree ACL propagation and, on
+	// the failure path, a second rollback of it. Measured 2026-10-15 on this
+	// machine: a doomed `D:\Program Files\Git` listed behind a writable
+	// `Git\usr` cost ~1.3 s of write-then-rollback on every probe; with the
+	// shallower root going first, the same machine declines in tens of
+	// milliseconds and never writes below it. One-directional on purpose: a
+	// write root under a read+execute root stays — RX does not cover F, so
+	// dropping it would narrow the grant below what was asked.
+	const plannedWrites = writeRoots.filter(
+		(root) => !writeRoots.some((other) => other !== root && isWithinRoot(root, other)),
+	);
+	const plannedExec = execRoots.filter(
+		(root) => ![...plannedWrites, ...execRoots].some((other) => other !== root && isWithinRoot(root, other)),
+	);
 	const touched: Array<{ root: string; aces: Uint8Array[] }> = [];
 	const fail = (error: string): GrantOutcome => {
 		// Best effort: the error that got here is the one the caller acts on,
@@ -1350,14 +1389,18 @@ export function acquireWorkspaceGrant(
 		return { profile, error };
 	};
 	const plan: Array<{ root: string; mask: number }> = [
-		...writeRoots.map((root) => ({ root, mask: FILE_ALL_ACCESS })),
-		...execRoots.map((root) => ({ root, mask: FILE_READ_EXECUTE })),
+		...plannedWrites.map((root) => ({ root, mask: FILE_ALL_ACCESS })),
+		...plannedExec.map((root) => ({ root, mask: FILE_READ_EXECUTE })),
 	];
 	for (const { root, mask } of plan) {
 		const prior = readDacl(root);
 		if (prior === null) return fail(`${root} carries no DACL to extend`);
 		const aces = acesOf(prior);
 		if (aces.some((ace) => aceGrants(ace, sidString, mask))) continue; // already covered
+		// Read+execute covered by the group every container token carries needs
+		// no ACE written — and on a system-drive program directory rewriting
+		// the DACL at all would need a WRITE_DAC the user may not hold.
+		if (mask === FILE_READ_EXECUTE && aces.some((ace) => aceGrants(ace, ALL_APPLICATION_PACKAGES, mask))) continue;
 		const grantError = writeDacl(root, buildDacl([...aces, allowAce(sid, mask)]), false);
 		if (grantError !== null) return fail(grantError);
 		touched.push({ root, aces });

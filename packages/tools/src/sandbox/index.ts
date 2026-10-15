@@ -12,6 +12,7 @@ import {
 	type SandboxPolicy,
 	type WritableRoot,
 } from "@labunbun/agent";
+import { type ProbeShell, probeAppContainerSelection } from "./appcontainer-probe.ts";
 import { buildBwrapArgs } from "./bwrap.ts";
 import { buildSeatbeltArgs } from "./seatbelt.ts";
 import { SIMULATED_SANDBOX_DISCLAIMER } from "./simulated.ts";
@@ -88,6 +89,11 @@ export interface ResolveSandboxOptions {
 	/** Whether the Windows AppContainer backend is usable here. Injected, and defaults to `false`. */
 	hasAppContainer?: boolean;
 	/**
+	 * Why the container probe declined, carried so the `simulated` reason can be
+	 * the probe's own answer rather than a guess about it. Only read on Windows.
+	 */
+	appContainerReason?: string;
+	/**
 	 * Whether a path exists. Injected for the same reason as the flag above, and
 	 * consulted for two decisions rather than one: the `missingPathBehavior` filter
 	 * below runs before a translator, and the bwrap translator needs the answer for
@@ -127,7 +133,13 @@ export function policyFor(options: {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** Whether this platform has an argv-level backend at all. Windows does not, in this build. */
+/**
+ * Whether this platform has an argv-level backend — one that wraps a command
+ * by placing a program before it (`bwrap`, `sandbox-exec`). Windows has no
+ * such backend: its confinement is the container, which is a spawn-time
+ * property rather than an argv prefix, and lives behind
+ * `probeAppContainerSelection`.
+ */
 export function hasNativeSandboxBackend(platform: SandboxPlatform): boolean {
 	return platform === "darwin" || platform === "linux";
 }
@@ -181,12 +193,77 @@ export interface SandboxRuntime {
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** This machine's runtime, from one `PATH` scan at construction. Deliberately does not probe AppContainer. */
-export function detectRuntime(platform: SandboxPlatform = process.platform): SandboxRuntime {
-	return {
+/**
+ * This machine's runtime: one `PATH` scan on every platform, and on Windows
+ * also the container selection probe — the profile, the grants and one real
+ * spawn of the session's shell, classified (see `appcontainer-probe.ts` for
+ * why nothing cheaper is honest). A declined probe carries its reason so the
+ * sentence `/permissions` and `/doctor` print is the same answer the spawn
+ * branch took. `shell` is optional so tests can judge a machine without one;
+ * production resolves the shell first and passes it.
+ *
+ * The Windows probe is deferred until one of its three fields is first read.
+ * A probe writes ACLs, and a single write against a large tree costs seconds —
+ * measured 2026-10-15, the probe workspace plus a doomed toolchain root was
+ * ~1.3 s of write-then-rollback, and a grant that reaches a big install tree
+ * under the user profile cost ~16 s of inheritance propagation. Eagerly that
+ * bill lands on every construction, and constructions sit on the REPL startup
+ * path, whose measured budget (408 ms, docs/dev/sandbox.md) seconds do not
+ * fit. Deferred, the first reader pays it — the first Bash command or the
+ * first `/permissions` — and `probeOnce` keeps it once per process.
+ */
+export function detectRuntime(
+	platform: SandboxPlatform = process.platform,
+	shell: ProbeShell | null = null,
+): SandboxRuntime {
+	const runtime: SandboxRuntime = {
 		platform,
 		hasNativeBackend: detectNativeBackend(platform),
 	};
+	if (platform === "win32") {
+		// The fields are getters, so reading one and running the probe are the
+		// same act: a runtime nobody reads never pays, and every reader — the
+		// backend sentence, the reason line, the spawn branch — sees the one
+		// cached answer. The values are what the eager shape produced.
+		let probed: ReturnType<typeof probeAppContainerSelection> | undefined;
+		const probe = () => {
+			probed ??= probeOnce(shell);
+			return probed;
+		};
+		Object.defineProperties(runtime, {
+			hasAppContainer: { get: () => probe().available, enumerable: true },
+			appContainerReason: { get: () => (probe().available ? undefined : probe().reason), enumerable: true },
+			executableRoots: { get: () => (probe().available ? probe().executableRoots : undefined), enumerable: true },
+		});
+	}
+	return runtime;
+}
+
+/**
+ * One probe per process and machine state. The answer is a property of the
+ * machine, and the default constructors this feeds run per tool set — a test
+ * run builds dozens, and each would otherwise pay an ACL grant and a spawn
+ * that cannot give a different answer. The key is every input the probe
+ * reads, so a caller that changed the environment still gets its own probe;
+ * the same inputs on the same machine cannot mean two things inside one
+ * process.
+ */
+let win32ProbeCache: { key: string; probe: ReturnType<typeof probeAppContainerSelection> } | null = null;
+
+function probeOnce(shell: ProbeShell | null): ReturnType<typeof probeAppContainerSelection> {
+	const env = process.env;
+	const key = [
+		shell?.command ?? "",
+		env.PATH ?? "",
+		env.USERPROFILE ?? "",
+		env.SystemRoot ?? "",
+		env.windir ?? "",
+		env.LBB_BASH_PATH ?? "",
+	].join("\u0000");
+	if (win32ProbeCache !== null && win32ProbeCache.key === key) return win32ProbeCache.probe;
+	const probe = probeAppContainerSelection(shell);
+	win32ProbeCache = { key, probe };
+	return probe;
 }
 
 // Long-form design notes: docs/dev/sandbox.md
@@ -227,6 +304,24 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	}
 
 	if (!hasNativeSandboxBackend(platform)) {
+		// Windows has a backend; it is the *selection* that declined — the probe's
+		// reason when it has one, the network axis when the container was usable
+		// but the session's network is restricted (measured: a restricted axis
+		// lives on the loopback proxy, which a container child cannot reach, so
+		// the branch above requires `enabled`). "No backend in this build" would
+		// be false about that machine, and the sentence a user reads has to be
+		// about the machine they are on.
+		if (platform === "win32") {
+			const why =
+				options.appContainerReason ??
+				(options.hasAppContainer
+					? "this session's network axis is restricted, and the proxy it confines to lives on the loopback, which a container child cannot reach"
+					: "the container backend was not probed for this session");
+			return {
+				kind: "simulated",
+				reason: `the Windows container backend was not selected: ${why}. What applies is the tool-layer path policy, the deny rules, and the dangerous-command classifier — a subprocess started outside the tools is not subject to any of them`,
+			};
+		}
 		return {
 			kind: "simulated",
 			reason:
@@ -303,11 +398,17 @@ export function networkConfinement(
 }
 
 // Long-form design notes: docs/dev/sandbox.md
-/** The sentence `/permissions` prints. Written per case; an unreported backend reads as simulated. */
+/**
+ * The sentence `/permissions` prints. Written per case; an unreported backend
+ * reads as simulated. `appContainerReason` is the selection probe's own why,
+ * printed when it declined — the machine that has a backend and did not
+ * select it deserves a sentence about the machine, not about the build.
+ */
 export function describeSandboxBackend(
 	backend: SandboxBackend | undefined,
 	sandbox: SandboxMode,
 	platform: SandboxPlatform = process.platform,
+	appContainerReason?: string,
 ): string {
 	// Asked first because it is true in all three backend cases: an unrestricted
 	// policy wraps nothing on macOS with `sandbox-exec` sitting right there, so
@@ -327,15 +428,24 @@ export function describeSandboxBackend(
 			// so a confined command can write `.git` inside its grant. The
 			// restricted-axis gap is stated in the fixed string.
 			// Long-form design notes: docs/dev/sandbox.md
-			return `Sandbox: enforced by the OS. Commands run in a Windows AppContainer profile derived from this workspace, and the kernel refuses a write outside the roots the policy grants — every writable root the session names, not only the workspace. The confinement is the child's own token rather than a wrapper around it, so it is attached to the process and survives however the process tree is arranged. This mode does not narrow reads. Version-control metadata is not protected by this backend: the deny ACE that would protect it is out until the timing anomaly in its measurement is understood, so a confined command can still write .git inside its grant and only the tool-layer rule refuses that, for calls that arrive through the tools. A restricted network axis is not confined by this backend either: the proxy that enforces it listens on loopback, which a container child cannot reach, so that command runs on the tool-layer policy and the proxy rather than being held here.`;
+			return `Sandbox: enforced by the OS. Commands run in a Windows AppContainer profile derived from this workspace, and the kernel refuses a write outside the roots the policy grants — every writable root the session names, not only the workspace. The confinement is the child's own token rather than a wrapper around it, so it is attached to the process and survives however the process tree is arranged. This mode does not narrow reads. Version-control metadata is not protected by this backend yet: a deny ACE does not bind a container token (measured), and the route that does — narrowing the package SID's own allow ACE on .git to read and execute — is not written yet, so a confined command can still write .git inside its grant and only the tool-layer rule refuses that, for calls that arrive through the tools. A restricted network axis is not confined by this backend either: the proxy that enforces it listens on loopback, which a container child cannot reach, so that command runs on the tool-layer policy and the proxy rather than being held here.`;
 		case "unavailable":
 			return `Sandbox: not enforced. ${nativeSandboxProgram(platform)} is not installed here, so commands run without filesystem confinement. The deny rules and the dangerous-command classifier still apply — they live in this process — but the workspace boundary is not being held.`;
-		default:
+		default: {
+			// Windows has a backend; the selection declined, and the reason says
+			// which machine state declined it. "This build ships no backend"
+			// would be false there, and the sentence a user reads has to be
+			// about the machine they are on.
+			if (platform === "win32") {
+				const why = appContainerReason ?? "the container probe did not select it for this session";
+				return `Sandbox: simulated, not OS-enforced. This machine's Windows container backend was not selected: ${why}. The tool-layer view: writes are ${SIMULATED_SANDBOX_DISCLAIMER}, for calls that arrive through the tools. The deny rules and the dangerous-command classifier are separate and still apply.`;
+			}
 			// "Calls that arrive through the tools" is about `Write` and `Edit`, and
 			// not about `Bash` — which builds this same policy, hands it to `exec`, and
 			// has it dropped unread the moment the resolution is not `native`. The
 			// sentence is true as written; it is worth the comment here because the
 			// gap is the kind a reader assumes is closed.
 			return `Sandbox: simulated, not OS-enforced. This build ships no filesystem-sandbox backend for this platform, and adding one would mean a helper program, which is out of scope. Writes are ${SIMULATED_SANDBOX_DISCLAIMER}. The deny rules and the dangerous-command classifier are separate and still apply.`;
+		}
 	}
 }

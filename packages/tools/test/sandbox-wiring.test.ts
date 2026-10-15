@@ -517,8 +517,10 @@ describe("what the user is told", () => {
 		// The container sentence, and the half of it that matters most: it is a
 		// real confinement, so it says "enforced by the OS" like the native one —
 		// and it must NOT borrow the native sentence's version-control promise.
-		// The deny ACE is out (the timing anomaly in `appcontainer.ts`), so a
-		// confined command can write .git inside its grant. A sentence that
+		// The deny route is out (measured inert against a container token in
+		// `appcontainer.ts`), and the allow-side replacement is not written
+		// yet, so a confined command can write .git inside its grant. A
+		// sentence that
 		// repeated the native claim here would tell a user the one thing this
 		// backend demonstrably does not do, so the absence is asserted rather
 		// than left to a reader of the string.
@@ -543,6 +545,24 @@ describe("what the user is told", () => {
 		expect(unavailable).not.toContain("enforced by the OS");
 		expect(simulated).not.toContain("enforced by the OS");
 		expect(unreported).not.toContain("enforced by the OS");
+	});
+
+	test("the Windows simulated sentence carries the probe's own why when it has one", () => {
+		// The machine that has a backend and did not select it is owed a
+		// sentence about the machine. The reason travels as the fourth
+		// argument — beside the backend, from the same runtime — and off
+		// win32 it is ignored: there is no probe and no container to blame.
+		const why =
+			"the container cannot reach this machine's toolchain: SetNamedSecurityInfoW on D:\\Program Files\\Git failed (5)";
+		const withReason = describeSandboxBackend("simulated", "workspace-write", "win32", why);
+		expect(withReason).toContain(why);
+		expect(withReason).not.toContain("the container probe did not select it");
+		// No reason (a runtime built by hand, a build without the probe): the
+		// fallback says what is true without inventing a machine state.
+		expect(describeSandboxBackend("simulated", "workspace-write", "win32")).toContain(
+			"the container probe did not select it for this session",
+		);
+		expect(describeSandboxBackend("simulated", "workspace-write", "linux", why)).not.toContain(why);
 	});
 
 	test("danger-full-access says off, whatever backend is underneath it", () => {
@@ -590,9 +610,9 @@ describe("what the user is told", () => {
 		// The container claim, and the sentence follows it: the report and the
 		// branch the argv comes from are answers to one question, so the runtime
 		// that would confine the spawn is the runtime that says so. The control
-		// beside it is production's actual shape — `detectRuntime` does not claim
-		// the backend, so what `/permissions` prints on this machine is still the
-		// simulated sentence, and the README's warning stays true.
+		// beside it is a runtime that makes no claim — what a declined probe
+		// produces, and what `/permissions` prints for one: the simulated
+		// sentence, the same answer a session gets until the probe selects.
 		expect(
 			new ChildProcessExecOperations({
 				platform: "win32",
@@ -803,10 +823,16 @@ describe("the Windows AppContainer branch, selected by the resolver", () => {
 	});
 
 	test("read-only roots stay out of the grant list", () => {
-		// A grant there buys nothing: a container child reads outside its grant
-		// by default and only writes are refused. Asserting the absence is what
-		// stops a later "grant everything the policy mentions" change from
-		// passing silently.
+		// A grant there buys nothing under this backend, and the measured
+		// shape matters: a container child reads outside its grant only where
+		// the machine's own DACLs already admit application packages
+		// (System32, the system drive's program directories) — an un-granted
+		// user directory is refused for reads too (measured 2026-10-15; an
+		// earlier premise here claimed reads were baseline-open, which the
+		// container denies). A read-only root granted read+execute would widen
+		// the grant's bookkeeping for a promise the policy never made to the
+		// confined child. Asserting the absence is what stops a later "grant
+		// everything the policy mentions" change from passing silently.
 		const cwd = workspace();
 		const readable = mkdtempSync(join(tmpdir(), "lbb-ac-readable-"));
 		const resolution = resolveSandboxExecution({
@@ -837,13 +863,37 @@ describe("the Windows AppContainer branch, selected by the resolver", () => {
 		};
 		const resolution = resolveSandboxExecution({ ...win32, policy: confined(workspace(), restricted) });
 		expect(resolution.kind).toBe("simulated");
+		// The reason is the axis, not the probe — the backend was usable — and
+		// a user reading "not selected" without the axis would go looking for
+		// a missing backend that is right there.
+		expect(resolution.kind === "simulated" ? resolution.reason : "").toContain("loopback");
+	});
+
+	test("a declined probe's own reason is the reason the resolution carries, verbatim", () => {
+		// The sentence is the machine's, not this file's: whatever the probe
+		// said — a toolchain root the user cannot rewrite the ACL of, an msys
+		// shell that dies at startup — is what the resolution repeats. The
+		// string below is shaped like a probe answer on purpose; what is
+		// pinned is the passthrough, not the wording.
+		const why = "the session's shell dies inside the container at startup (0xC0000142, STATUS_DLL_INIT_FAILED)";
+		const { hasAppContainer: _ignored, ...withoutFlag } = win32;
+		const resolution = resolveSandboxExecution({
+			...withoutFlag,
+			appContainerReason: why,
+			policy: confined(workspace(), { access: "enabled", domains: [] }),
+		});
+		expect(resolution.kind).toBe("simulated");
+		expect(resolution.kind === "simulated" ? resolution.reason : "").toContain(why);
 	});
 
 	test("without the availability flag the answer is the simulated one it has always been", () => {
 		// The default direction, and the safe one: a wrong `true` sends a
 		// command down a container path whose profile and grant were never
 		// established, while a wrong `false` costs the answer this platform
-		// already gives. No production caller passes the flag yet.
+		// already gives. Production passes the flag from the runtime the
+		// selection probe filled (`operations.ts`, `background.ts`), and on a
+		// machine the probe declined it passes false — this same answer. The
+		// row pins the branch for a caller with no runtime to ask.
 		const { hasAppContainer: _ignored, ...withoutFlag } = win32;
 		const resolution = resolveSandboxExecution({
 			...withoutFlag,
@@ -910,9 +960,11 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 	// token that refuses a write outside its grant".
 	//
 	// The injection is the same one the Linux branch uses, aimed at the fifth
-	// outcome: `hasAppContainer: true` on a machine whose `detectRuntime`
-	// already answers that is redundant, and it is written out anyway so the
-	// runtime under test is legible rather than inherited.
+	// outcome: on a machine the selection probe selects, passing
+	// `hasAppContainer: true` is redundant; on one it declined — the Windows
+	// runner's msys shell declines — the injection is what makes the branch
+	// reachable at all. Written out in both cases so the runtime under test is
+	// legible rather than inherited.
 	//
 	// **The policy here is `workspace-write`, not the file's usual
 	// `netPolicy`.** That helper builds a `danger-full-access` policy on
@@ -1203,7 +1255,11 @@ describeWindowsExec("the container path reaches a real spawn", () => {
 		// "the backend could not start the shell". The refusal names the
 		// program and the two sets it is not in, and fails closed — falling
 		// through to the unconfined spawn would run the command the user asked
-		// to confine.
+		// to confine. Since the selection probe exists, a session in production
+		// never reaches this gate with such a shell — the probe declines at
+		// selection, its reason already saying the shell cannot start — so this
+		// is the second line: it holds for a runtime injected by hand, and for
+		// a shell that stops being reachable after selection.
 		const cwd = workspace();
 		const gitBash = { command: "C:\\Program Files\\Git\\bin\\bash.exe", args: (cmd: string) => ["-lc", cmd] };
 		const exec = new ChildProcessExecOperations(CONTAINER_RUNTIME, gitBash);

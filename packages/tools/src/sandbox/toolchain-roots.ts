@@ -126,15 +126,17 @@ export function toolchainRootsFor(
 }
 
 /** The programs whose absence from a container would break a session's toolchain. */
-const TOOLCHAIN_PROGRAMS = ["git.exe", "node.exe", "bun.exe"] as const;
+export const TOOLCHAIN_PROGRAMS = ["git.exe", "node.exe", "bun.exe"] as const;
 
 /**
- * The toolchain roots a confined session needs: the shell's install root,
- * those of the toolchain programs that resolve (one PATH scan), and the known
- * `~\.bun\bin` fallback. `System32` is dropped — it is the one directory
- * every container child runs from without a grant.
+ * The programs a confined session must be able to run, resolved to full
+ * paths: the shell itself, then those of `TOOLCHAIN_PROGRAMS` that resolve on
+ * `PATH` (one scan), then the known `~\.bun\bin` fallback. Unresolvable
+ * entries are dropped — this is the list both the roots and the selection
+ * probe's script read, so the two can never disagree about which programs
+ * matter.
  */
-export function detectExecutableRoots(
+export function resolveToolchainPrograms(
 	shellCommand: string | null | undefined,
 	env: Readonly<Record<string, string | undefined>> = process.env,
 ): string[] {
@@ -155,7 +157,23 @@ export function detectExecutableRoots(
 		const bun = `${windowsPath(home).replace(/\\+$/, "")}\\.bun\\bin\\bun.exe`;
 		if (isFileSync(bun)) programs.push(bun);
 	}
+	return programs.filter((program): program is string => program !== null);
+}
+
+/**
+ * The toolchain roots a confined session needs: the shell's install root,
+ * those of the toolchain programs that resolve (one PATH scan), and the known
+ * `~\.bun\bin` fallback. `System32` is dropped — it is the one directory
+ * every container child runs from without a grant.
+ */
+export function detectExecutableRoots(
+	shellCommand: string | null | undefined,
+	env: Readonly<Record<string, string | undefined>> = process.env,
+): string[] {
+	const home = env.USERPROFILE ?? "";
 	const systemRoot = windowsPath(env.SystemRoot ?? env.windir ?? "C:\\Windows").replace(/\\+$/, "");
 	const system32 = `${systemRoot}\\system32`.toLowerCase();
-	return toolchainRootsFor(programs, { home }).filter((root) => root.toLowerCase() !== system32);
+	return toolchainRootsFor(resolveToolchainPrograms(shellCommand, env), { home }).filter(
+		(root) => root.toLowerCase() !== system32,
+	);
 }
