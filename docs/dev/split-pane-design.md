@@ -2,11 +2,11 @@
 
 Whether this TUI can show two things at once. The request behind the note is one sentence — a split screen — and the honest answer is three statements:
 
-- **A split of the transcript is not possible under this rendering model, and no layout work changes that.** The transcript's older rows live in the terminal's scrollback, printed once and no longer in any structure the app can re-lay out (`packages/tui/src/components/MessageList.tsx:476`; measured below). A two-column view would have to re-wrap rows that are no longer the app's to touch.
+- **A split of the transcript is not possible under this rendering model, and no layout work changes that.** The transcript's older rows live in the terminal's scrollback, printed once and no longer in any structure the app can re-lay out (`packages/tui/src/components/MessageList.tsx:489`; measured below). A two-column view would have to re-wrap rows that are no longer the app's to touch.
 - **A read-only watch panel is possible**, in the frame that already repaints on every keystroke, while the user keeps typing. It cannot be the transcript, but it can be the thing the request is usually about: a background shell's output tail.
 - **A full-screen workspace with real panes is mechanically available** (ink 7.1.1 ships an unused alternate screen; measured) at the price of the terminal scrollback, a full clear-and-reprint on the frame path measured on Windows, and an input-focus system this app has never had. It is the last phase of the plan, gated on whether the watch panel earns it.
 
-P1 of this plan has shipped (`3e97a67..5f636bf`): the read-only watch panel, `packages/tui/src/components/WatchPanel.tsx`, opened by `Ctrl+T` and closed by it or Escape (`packages/tui/src/components/REPL.tsx:566-571`, `:550`). The rest of the note is still a gate rather than a record: no source file points at it, the full-screen workspace (design A) is not built, and the panel cannot pick which shell's tail it shows — it auto-selects (the last running shell, else the last) and marks that shell's header with a `▶` gutter, so the reader can tell whose tail is on screen; picking a shell by key is still not built, because no key was ever decided for it. What shipped against this plan, and what each open decision settled to, is recorded under P1 and the open decisions below.
+P1 of this plan has shipped (`3e97a67..5f636bf`): the read-only watch panel, `packages/tui/src/components/WatchPanel.tsx`, opened by `Ctrl+T` and closed by it or Escape (`packages/tui/src/components/REPL.tsx:571-576`, `:555`). The rest of the note is still a gate rather than a record: no source file points at it, the full-screen workspace (design A) is not built, and the panel cannot pick which shell's tail it shows — it auto-selects (the last running shell, else the last) and marks that shell's header with a `▶` gutter, so the reader can tell whose tail is on screen; picking a shell by key is still not built, because no key was ever decided for it. What shipped against this plan, and what each open decision settled to, is recorded under P1 and the open decisions below.
 
 ## What a pane would be for
 
@@ -16,43 +16,43 @@ Four candidates were weighed, by what the user is looking at and where that data
 | --- | --- | --- | --- |
 | Waiting on a dev server started with `run_in_background` | The shell's recent output, live | `list()` and `output()` on the shell manager (`packages/tools/src/background.ts:413`, `:419`), a 2 s poll (`packages/coding-agent/src/background-commands.ts:25`), a tail formatter (`:56`), a one-line status row (`packages/tui/src/components/StatusLine.tsx:90`) | Yes — every piece exists |
 | Waiting on a subagent | Its status, and what it is doing | Listing and ordering (`packages/coding-agent/src/subagent-commands.ts:18`, `:68`), a retention cap of eight (`packages/coding-agent/src/subagent-registry.ts:26`); no live subscription to a running handle's stream exists | Listing yes, live stream no |
-| Reviewing what the agent changed | A diff that updates as it works | The file checkpoints `/rewind` restores from are written before each Edit/Write mutates a file (`packages/coding-agent/src/checkpoint-log.ts:322`, called from `packages/coding-agent/src/interactive.ts:1239-1242`); nothing computes a live diff | No — new plumbing |
-| Watching the task list | The tree | Already inline above the prompt: `TaskStrip` (`packages/tui/src/components/REPL.tsx:782`) | Done — nothing to add |
+| Reviewing what the agent changed | A diff that updates as it works | The file checkpoints `/rewind` restores from are written before each Edit/Write mutates a file (`packages/coding-agent/src/checkpoint-log.ts:322`, called from `packages/coding-agent/src/interactive.ts:1299-1302`); nothing computes a live diff | No — new plumbing |
+| Watching the task list | The tree | Already inline above the prompt: `TaskStrip` (`packages/tui/src/components/REPL.tsx:822`) | Done — nothing to add |
 
 The user stories reduce to two shapes, and only one of them needs a pane:
 
-1. "I started a ten-minute build in the background and I want to keep working while it runs, watching its tail." The status row already names the shell; the tail currently costs four keystrokes and a picker (`/ps`, `packages/coding-agent/src/interactive.ts:2986-3003`) and then arrives as one static info block in the transcript — the opposite of watching.
+1. "I started a ten-minute build in the background and I want to keep working while it runs, watching its tail." The status row already names the shell; the tail currently costs four keystrokes and a picker (`/ps`, `packages/coding-agent/src/interactive.ts:3161-3178`) and then arrives as one static info block in the transcript — the opposite of watching.
 2. "Show me the transcript beside the thing I am watching." This is the one that cannot be built under the current model, and the rest of the document says why.
 
 ## The rendering model a pane has to live in
 
 ### The transcript is scrollback, not a buffer
 
-`VirtualMessageList` keeps the newest eight entries live and seals everything older into ink's `<Static>` (`packages/tui/src/components/MessageList.tsx:411`, `:476`). `<Static>` prints its children once and takes them out of the tree — its own comment says so (`packages/tui/src/components/MessageList.tsx:428`), and a spike confirmed it byte by byte:
+`VirtualMessageList` keeps the newest eight entries live and seals everything older into ink's `<Static>` (`packages/tui/src/components/MessageList.tsx:411`, `:489`). `<Static>` prints its children once and takes them out of the tree — its own comment says so (`packages/tui/src/components/MessageList.tsx:428`), and a spike confirmed it byte by byte:
 
 - Editing the *content* of a sealed row produced **zero writes**. The edit is invisible; the row is no longer rendered.
 - Narrowing the terminal from 40 to 20 columns wrote **only the live row** — sealed rows were not re-wrapped, because re-wrapping is a layout step that no longer happens to them.
 - Appending one item printed **only the new row**, above the live region.
 
-So the transcript on screen is not a region the app repaints; it is history the terminal owns. The one way back is the wipe-and-reprint path the app already uses for theme changes (`packages/tui/src/app.tsx:238-246`), `Ctrl+L` (`packages/tui/src/components/REPL.tsx:552`) and the transcript paint key (`packages/tui/src/components/MessageList.tsx:439-448`) — a full screen wipe followed by reprinting rows at full width, driven from `entries` data the store still holds.
+So the transcript on screen is not a region the app repaints; it is history the terminal owns. The one way back is the wipe-and-reprint path the app already uses for theme changes (`packages/tui/src/app.tsx:262-286`), `Ctrl+L` (`packages/tui/src/components/REPL.tsx:588`) and the transcript paint key (`packages/tui/src/components/MessageList.tsx:439-448`) — a full screen wipe followed by reprinting rows at full width, driven from `entries` data the store still holds.
 
-The `Ctrl+O` transcript does not contradict any of this, and it is worth being precise about why: it does not re-lay out what is on screen. It renders a fresh window of the last twenty-five `entries` (`packages/tui/src/components/REPL.tsx:762-776`) — a second render from data, full width, hiding the main screen rather than splitting it. It is a screen, not a pane, and the difference is the whole note.
+The `Ctrl+O` transcript does not contradict any of this, and it is worth being precise about why: it does not re-lay out what is on screen. It renders a fresh window of the last twenty-five `entries` (`packages/tui/src/components/REPL.tsx:802-813`) — a second render from data, full width, hiding the main screen rather than splitting it. It is a screen, not a pane, and the difference is the whole note.
 
 ### The frame, and its ceiling
 
 What the app *does* repaint is the frame: the live tail, the streaming preview, the task strip, the status block, dialogs, the prompt — everything below the sealed rows. Measured on a 40-column fake TTY, a width change rewrote the frame with erase codes and fresh text (`\x1b[2K\x1b[1A\x1b[2K\x1b[G` + the live row); a 20-row frame on an 80×24 terminal cost 15.8 ms/update including the harness's own 4 ms sleep, 477 bytes per write. ink throttles frames to 30 fps (`packages/tui/node_modules/ink/build/ink.js:194`), so the budget is met with room to spare — while the frame stays below the terminal.
 
-The ceiling matters more than the cost. When the frame's height reaches the viewport height, ink leaves the incremental path: `renderInteractiveFrame` writes `clearTerminal + fullStaticOutput + frame` (`packages/tui/node_modules/ink/build/ink.js:748-768`), and `fullStaticOutput` is the accumulated reprint of every sealed row the session has produced (`ink.js:416`) — it grows with the session. On Windows the condition is not an edge case: `shouldClearTerminalForFrame` returns true whenever the frame was or is fullscreen (`ink.js:100`), so every frame clears. The spike measured exactly that shape — each frame wrote `\x1b[2J\x1b[3J\x1b[H` followed by the sealed row and all twelve frame rows, again and again. Note the `3J` in ink's erase: the repo strips `3J` from its own wipe on a Console host because it eats the scrollback (`packages/tui/src/components/REPL.tsx:130-138`, `packages/tui/src/conpty.ts:23`, pinned by `packages/tui/test/repl-clear-screen.test.tsx:124`); ink's internal clear is not stripped. The consequence for a design: **a panel must budget its rows so the frame never approaches viewport height.** This is why a "just add a pane at the bottom" design is not free even though it touches no new rendering machinery.
+The ceiling matters more than the cost. When the frame's height reaches the viewport height, ink leaves the incremental path: `renderInteractiveFrame` writes `clearTerminal + fullStaticOutput + frame` (`packages/tui/node_modules/ink/build/ink.js:748-768`), and `fullStaticOutput` is the accumulated reprint of every sealed row the session has produced (`ink.js:416`) — it grows with the session. On Windows the condition is not an edge case: `shouldClearTerminalForFrame` returns true whenever the frame was or is fullscreen (`ink.js:100`), so every frame clears. The spike measured exactly that shape — each frame wrote `\x1b[2J\x1b[3J\x1b[H` followed by the sealed row and all twelve frame rows, again and again. Note the `3J` in ink's erase: the repo strips `3J` from its own wipe on a Console host because it eats the scrollback (`packages/tui/src/components/REPL.tsx:130-138`, `packages/tui/src/conpty.ts:28`, pinned by `packages/tui/test/repl-clear-screen.test.tsx:124`); ink's internal clear is not stripped. The consequence for a design: **a panel must budget its rows so the frame never approaches viewport height.** This is why a "just add a pane at the bottom" design is not free even though it touches no new rendering machinery.
 
 ### Alternate screen is available and unused
 
-ink 7.1.1 ships the option (`packages/tui/node_modules/ink/build/ink.d.ts:70-72`), enters on mount and leaves on unmount (`ink.js:702`, `:549`); the spike measured `\x1b[?1049h` on mount and `\x1b[?1049l` on unmount. `mountRepl` passes only `{ exitOnCtrlC: false }` (`packages/tui/src/app.tsx:343-362`) — this tree has never entered the alternate screen.
+ink 7.1.1 ships the option (`packages/tui/node_modules/ink/build/ink.d.ts:70-72`), enters on mount and leaves on unmount (`ink.js:702`, `:549`); the spike measured `\x1b[?1049h` on mount and `\x1b[?1049l` on unmount. `mountRepl` passes only `{ exitOnCtrlC: false }` (`packages/tui/src/app.tsx:407-427`) — this tree has never entered the alternate screen.
 
 What it buys: a screen the app owns completely, where nothing is scrollback, so panes can be laid out, re-laid out, and scrolled by the app on every frame. What it costs: the user's terminal scrollback and the transcript that currently lives in it — both are replaced by whatever the workspace re-renders from data. It also moves, rather than removes, the ceiling: inside a workspace nothing is sealed into `<Static>` (the panes render windowed slices with their own scroll offsets), so `fullStaticOutput` stays empty and the clear is one screen's worth of bytes per frame — but it is still a clear per frame on the Windows path.
 
 ### Input has no focus system
 
-Routing is not a tree. Every listener that is active receives every key — measured directly: two `useInput` hooks both received `q`, and a third with `isActive: false` received nothing. Components guard themselves (`packages/tui/src/components/PromptInput.tsx:375`, `:476`, `:682`; `packages/tui/src/components/ListPickerDialog.tsx:132` has no guard and relies on where it is mounted). ink ships `useFocus` and `useFocusManager` and nothing in this tree uses them. A pane that takes keys would be the first thing here to need a focus model; a pane that is read-only sidesteps the problem entirely, which is a large part of why the recommendation below is read-only.
+Routing is not a tree. Every listener that is active receives every key — measured directly: two `useInput` hooks both received `q`, and a third with `isActive: false` received nothing. Components guard themselves (`packages/tui/src/components/PromptInput.tsx:390`, `:491`, `:723`; `packages/tui/src/components/ListPickerDialog.tsx:146` has no guard and relies on where it is mounted). ink ships `useFocus` and `useFocusManager` and nothing in this tree uses them. A pane that takes keys would be the first thing here to need a focus model; a pane that is read-only sidesteps the problem entirely, which is a large part of why the recommendation below is read-only.
 
 The key inventory is tight, and one part of it is closed by measurement:
 
@@ -61,15 +61,15 @@ The key inventory is tight, and one part of it is closed by measurement:
 
 | Key | Held by |
 | --- | --- |
-| `C-o` | transcript toggle (`packages/tui/src/components/REPL.tsx:536`) |
-| `C-l` | clear screen (`packages/tui/src/components/REPL.tsx:552`) |
-| `C-c` | interrupt / idle exit (`packages/tui/src/components/REPL.tsx:581`) |
-| `C-r` | prompt history search (`packages/tui/src/components/PromptInput.tsx:534`) |
-| `C-a`, `C-e`, `C-w`, `C-k`, `C-u`, `C-y`, `C-_` | line editing (`packages/tui/src/components/PromptInput.tsx:610-653`) |
+| `C-o` | transcript toggle (`packages/tui/src/components/REPL.tsx:559`) |
+| `C-l` | clear screen (`packages/tui/src/components/REPL.tsx:588`) |
+| `C-c` | interrupt / idle exit (`packages/tui/src/components/REPL.tsx:621`) |
+| `C-r` | prompt history search (`packages/tui/src/components/PromptInput.tsx:566`) |
+| `C-a`, `C-e`, `C-w`, `C-k`, `C-u`, `C-y`, `C-_` | line editing (`packages/tui/src/components/PromptInput.tsx:651-694`) |
 | `C-t`, `C-q`, `C-g`, `C-s`, `C-r` (emacs spelling) | reserved by the emacs engine and eaten under emacs — a reserved key never reaches the host there, which the shortcuts overlay already records for `Ctrl+O` (`packages/tui/src/emacs.ts:726-758`, `packages/tui/src/shortcuts.ts:112-116`) |
-| `C-v` | unclaimed: no handler in the emacs engine, none in the prompt, and the vim engine hands all ctrl combos to the host by design (`packages/tui/src/vim.ts:2579-2587`) |
+| `C-v` | unclaimed: no handler in the emacs engine, none in the prompt, and the vim engine hands all ctrl combos to the host by design (`packages/tui/src/vim.ts:2632-2643`) |
 
-- Escape has per-screen conventions already: dialogs own it when mounted, the activity panel closes on it (`packages/tui/src/components/REPL.tsx:532`, `packages/tui/src/components/ActivityPanel.tsx:361`), the transcript leaves on it (`packages/tui/src/components/REPL.tsx:545`). A recorded wrinkle sits in the code: `Ctrl+O` while the activity panel is up leaves the prompt disabled with nothing on screen explaining why — "a confusing state, not a lock", with the missing rule named but unshipped ("a modal screen owns the view-switch key", `packages/tui/src/components/REPL.tsx:520-530`). Every new panel or screen multiplies this interaction, and the watch panel design has to take a position on it rather than inherit it silently.
+- Escape has per-screen conventions already: dialogs own it when mounted, the activity panel closes on it (`packages/tui/src/components/REPL.tsx:543`, `packages/tui/src/components/ActivityPanel.tsx:361`), the transcript leaves on it (`packages/tui/src/components/REPL.tsx:582`). A recorded wrinkle sits in the code: `Ctrl+O` while the activity panel is up leaves the prompt disabled with nothing on screen explaining why — "a confusing state, not a lock", with the missing rule named but unshipped ("a modal screen owns the view-switch key", `packages/tui/src/components/REPL.tsx:525-542`). Every new panel or screen multiplies this interaction, and the watch panel design has to take a position on it rather than inherit it silently.
 
 ## Candidate designs
 
@@ -79,17 +79,17 @@ The key inventory is tight, and one part of it is closed by measurement:
 
 **Trade-offs.**
 - Real simultaneity and real re-layout — the only design that delivers the literal request. Panes can be resized, reordered, added.
-- The terminal's scrollback is gone while the workspace is open, and the transcript comes back as a re-rendered facade. Nothing is lost (the store holds `entries`; text is capped per entry at `packages/tui/src/ui-state.ts:262`), but the user's paging, selection and copy habits change in one step.
+- The terminal's scrollback is gone while the workspace is open, and the transcript comes back as a re-rendered facade. Nothing is lost (the store holds `entries`; text is capped per entry at `packages/tui/src/ui-state.ts:293`), but the user's paging, selection and copy habits change in one step.
 - Every frame is a clear plus redraw on the Windows path. One screen's bytes at 30 fps is affordable in theory; Windows Console write throughput at that rate is unverified (see risks).
 - The blast radius is the whole TUI: focus is new, the pane scroll model is new, and the existing suite mounts through `ink-testing-library`, where alternate-screen codes and focus semantics reach every test file.
 
 **Implementation surface.** `packages/tui/src/app.tsx` render options; a workspace component beside `REPL.tsx`; scroll offsets in `ui-state.ts`; a focus module; the watch data plumbing shared with B.
 
-**Risks.** Real-terminal behavior of `1049h` under Windows Console/ConPTY (unverified); dialogs and pickers rendered from inside a workspace; the theme-repaint remount path (`packages/tui/src/app.tsx:238-246`) replayed into a fullscreen context; copy from the alternate screen.
+**Risks.** Real-terminal behavior of `1049h` under Windows Console/ConPTY (unverified); dialogs and pickers rendered from inside a workspace; the theme-repaint remount path (`packages/tui/src/app.tsx:262-286`) replayed into a fullscreen context; copy from the alternate screen.
 
 ### B. A watch panel in the frame (read-only, toggled) — shipped as P1
 
-**Shape.** A bordered panel in the same bottom block the activity panel already occupies (`packages/tui/src/components/REPL.tsx:869`, the panel itself at `:883`), toggled by a key, closed by the same key or Escape. It renders rows and takes no keys of its own, so the prompt keeps the keyboard and typing continues while it is open — which is the point. Phases widen the sources; P1 is one background shell's tail on the existing 2 s cadence.
+**Shape.** A bordered panel in the same bottom block the activity panel already occupies (`packages/tui/src/components/REPL.tsx:884`, the panel itself at `:898`), toggled by a key, closed by the same key or Escape. It renders rows and takes no keys of its own, so the prompt keeps the keyboard and typing continues while it is open — which is the point. Phases widen the sources; P1 is one background shell's tail on the existing 2 s cadence.
 
 **Trade-offs.**
 - No new rendering machinery: same frame, same paint contract, and a test template that already exists (`packages/tui/test/activity-panel.test.tsx:209`).
@@ -98,20 +98,20 @@ The key inventory is tight, and one part of it is closed by measurement:
 - It spends vertical budget against the ceiling above. The height must be clamped from `useWindowSize().rows` — the precedent cited here was wrong about what it is: `packages/tui/src/components/ActivityPanel.tsx:325` reads `columns`, and nothing in this tree reads `rows`, so the panel is that hook's first user and its tests need a fixture that overrides `rows` the way the activity panel's tests override `columns` — with a reserve for the live tail, streaming preview, status block and a multi-line prompt — and the reserve needs a real-terminal check, because the spike measured the fake-TTY path only.
 - It must answer the recorded `Ctrl+O` wrinkle: while the panel is open, `Ctrl+O` either wins (panel hides with the screen and returns with it) or is muted; silence is not an option, and the choice needs a pinning test.
 
-**Implementation surface.** REPL state, one key, one render slot; `packages/tui/src/components/WatchPanel.tsx`; the poll in `packages/coding-agent/src/interactive.ts:1956-1963` publishes each shell's tail (`SHELL_TAIL_LINES = 8`, `:1940`) through the app handle (`setBackgroundShells`, `packages/tui/src/app.tsx:188`); a shortcuts row (`packages/tui/src/shortcuts.ts:122`); tests in `packages/tui/test/watch-panel.test.tsx`, modeled on `packages/tui/test/repl-transcript.test.tsx:70` and `packages/tui/test/activity-panel.test.tsx:209`.
+**Implementation surface.** REPL state, one key, one render slot; `packages/tui/src/components/WatchPanel.tsx`; the poll in `packages/coding-agent/src/interactive.ts:2064-2071` publishes each shell's tail (`SHELL_TAIL_LINES = 8`, `:2048`) through the app handle (`setBackgroundShells`, `packages/tui/src/app.tsx:189`); a shortcuts row (`packages/tui/src/shortcuts.ts:122`); tests in `packages/tui/test/watch-panel.test.tsx`, modeled on `packages/tui/test/repl-transcript.test.tsx:70` and `packages/tui/test/activity-panel.test.tsx:209`.
 
 **Risks.** The height ceiling (measured path, fake TTY only); a tail that lags 2 s behind a noisy shell (acceptable for watching, wrong for debugging — the panel should say what it is); a second source of truth for "which shell am I watching" if the user stops the shell from elsewhere.
 
 ### C. View screens: the `Ctrl+O` pattern generalized
 
-**Shape.** Keep the screen pattern and add siblings: shell output, subagent list, diff. One at a time; the prompt stays mounted under `display={... ? "none" : "flex"}` so drafts survive, exactly as `Ctrl+O` does (`packages/tui/src/components/REPL.tsx:857`) and as `packages/tui/test/repl-transcript.test.tsx:70` pins.
+**Shape.** Keep the screen pattern and add siblings: shell output, subagent list, diff. One at a time; the prompt stays mounted under `display={... ? "none" : "flex"}` so drafts survive, exactly as `Ctrl+O` does (`packages/tui/src/components/REPL.tsx:911`) and as `packages/tui/test/repl-transcript.test.tsx:70` pins.
 
 **Trade-offs.**
 - Cheapest to build and to test; reuses a pattern that already survived a bug cycle (the unmount variant lost drafts).
 - Answers "let me look at it", never "let me watch it while typing". It is the same information the watch panel shows, minus simultaneity.
 - It also spends no vertical budget and touches no new machinery.
 
-**Implementation surface.** Generalize the `transcriptMode` boolean into a screen value (`packages/tui/src/components/REPL.tsx:494`); one component per source, shaped like the transcript branch (`:769-776`).
+**Implementation surface.** Generalize the `transcriptMode` boolean into a screen value (`packages/tui/src/components/REPL.tsx:500`); one component per source, shaped like the transcript branch (`:809-817`).
 
 **Risks.** The modal-screen key wrinkle, again, per screen; and scope creep — five screens is a key map, not a feature.
 
@@ -121,7 +121,7 @@ The spine is **B**, with **C** as its natural enlargement (a panel key held with
 
 ### P1 — watch panel, background shells only
 
-**Shipped** at `3e97a67..5f636bf`. Two details landed differently than this plan wrote them — the panel takes no input to pick a shell: it watches the last running shell, else the last (`packages/tui/src/components/WatchPanel.tsx:75-80`), and marks that shell's header with a `▶` two-column gutter so the reader can tell whose tail the rows below are, but picking a shell by key is still not built (no key was ever decided — the panel takes no keys at all) — and its header rows carry id, command and status but no `shellAge` (`:167-172`) — and none of P2 or P3 is built. The key and the placement were settled from the recommendations below (`Ctrl+T`, the bottom band); the shipped panel adds one refusal this plan did not name: `Ctrl+T` is ignored while the transcript is up (`packages/tui/src/components/REPL.tsx:566-571`).
+**Shipped** at `3e97a67..5f636bf`. Two details landed differently than this plan wrote them — the panel takes no input to pick a shell: it watches the last running shell, else the last (`packages/tui/src/components/WatchPanel.tsx:75-80`), and marks that shell's header with a `▶` two-column gutter so the reader can tell whose tail the rows below are, but picking a shell by key is still not built (no key was ever decided — the panel takes no keys at all) — and its header rows carry id, command and status but no `shellAge` (`:167-172`) — and none of P2 or P3 is built. The key and the placement were settled from the recommendations below (`Ctrl+T`, the bottom band); the shipped panel adds one refusal this plan did not name: `Ctrl+T` is ignored while the transcript is up (`packages/tui/src/components/REPL.tsx:571-576`).
 
 - Toggle `Ctrl+T` (recommendation; see open decisions), Escape closes. While open the prompt keeps every key and the panel takes none. While a dialog is up, the toggle key is ignored — the least surprising of the available rules until "a modal screen owns the view-switch key" is written for real.
 - Content: one header row per running shell (id, elided command, `shellAge`, all already written — `packages/coding-agent/src/background-commands.ts:28`) and the tail of the selected shell, newest first by start order, from `liveOutputLines`/`formatShellOutput` (`packages/coding-agent/src/background-commands.ts:56`).
@@ -175,7 +175,7 @@ Two readings that carried the design: #1 is the constraint (the transcript is no
 
 Each needed a user call before P1 started. The first three were settled by the shipped panel, from the recommendations here — `Ctrl+T`, the bottom band, background shells only. The fourth was settled by a user call on 2026-10-14, along the same lines:
 
-1. **The toggle key.** Recommendation: `Ctrl+T` — unclaimed by the app, the prompt and the vim engine, and reachable in the default editor mode; under the emacs editor the engine eats it exactly as it already eats `Ctrl+O` (`packages/tui/src/emacs.ts:726`, `packages/tui/src/shortcuts.ts:112-116`), and the panel's shortcuts row must say so the way the `Ctrl+O` row does. The alternative is `Ctrl+V`, cleaner in-tree still (no engine claims it, `packages/tui/src/vim.ts:2579-2587`) but exposed to terminal-level paste — Windows Terminal's default keymap sends `Ctrl+V` to paste — which is a ten-second check on the user's real terminal that this machine cannot make (no PTY). If `Ctrl+V` survives that check it is the better key; otherwise `Ctrl+T` is the fallback and the emacs caveat is a recorded trade, not a surprise. Function keys are ruled out by measurement, not preference.
+1. **The toggle key.** Recommendation: `Ctrl+T` — unclaimed by the app, the prompt and the vim engine, and reachable in the default editor mode; under the emacs editor the engine eats it exactly as it already eats `Ctrl+O` (`packages/tui/src/emacs.ts:726`, `packages/tui/src/shortcuts.ts:112-116`), and the panel's shortcuts row must say so the way the `Ctrl+O` row does. The alternative is `Ctrl+V`, cleaner in-tree still (no engine claims it, `packages/tui/src/vim.ts:2632-2643`) but exposed to terminal-level paste — Windows Terminal's default keymap sends `Ctrl+V` to paste — which is a ten-second check on the user's real terminal that this machine cannot make (no PTY). If `Ctrl+V` survives that check it is the better key; otherwise `Ctrl+T` is the fallback and the emacs caveat is a recorded trade, not a surprise. Function keys are ruled out by measurement, not preference.
 2. **Panel placement.** Recommendation: the bottom band above the prompt, where the activity panel already lives. The right-column variant is a P2 question and only at wide terminals; a right column splits the live area, not the transcript, and may read as a split without being one.
 3. **P1 scope.** Recommendation: background shells only — the one source whose plumbing is complete. Subagents and diffs are P2/P3 questions with their own unknowns.
 4. **Is the full-screen workspace (A) a goal at all?** Decided — **not now; A stays P3** (user call, 2026-10-14). The trigger to revisit is the one recommended here: the watch panel's actual usage shows people needing the transcript and the watch *at once*, with the scrollback trade accepted explicitly at that point. Until the trigger fires, no design work is owed on A — the focus audit, selection and the diff pane stay attached to this entry, not to the panel that shipped.
