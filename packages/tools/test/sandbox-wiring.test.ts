@@ -321,6 +321,105 @@ describe("the Bash tool builds its policy from the context, per call", () => {
 	});
 });
 
+describe("a failure that reads as a refusal gets the axes named, once", () => {
+	/** A tool over an executor whose one answer the test wrote. */
+	const cannedTool = (cwd: string, result: ExecResult) =>
+		createBashTool(cwd, { ...defaultOperations(), exec: () => Promise.resolve(result) });
+
+	test("a native-wrapped failure with a refusal word carries the hedge", async () => {
+		const tool = cannedTool(workspace(), {
+			stdout: "",
+			stderr: "touch: cannot touch 'x': Read-only file system",
+			exitCode: 1,
+			killed: false,
+			sandboxBackend: "native",
+		});
+		const result = await tool.call({ command: "touch x" }, CTX("workspace-write"));
+		const text = (result.content[0] as { text: string }).text;
+		// The hedge sits between the verdict and whatever follows it, so the two
+		// lines a cut guarantees to keep are still the first two.
+		expect(text).toStartWith("[exit code: 1]\n[sandbox]");
+		expect(text).toContain('filesystem axis "restricted"');
+		expect(text).toContain('network axis "enabled"');
+		expect(text).toContain("/permissions");
+		// A label, not a verdict: whether the call failed is still the exit
+		// code's answer alone.
+		expect(result.isError).toBe(true);
+	});
+
+	test("the same output under the simulated backend gets no hedge", async () => {
+		// The simulated layer's refusals come from the tools in words of their
+		// own, and a command it let run was confined by nothing — a hedge here
+		// would blame a backend that was not there.
+		const tool = cannedTool(workspace(), {
+			stdout: "",
+			stderr: "Read-only file system",
+			exitCode: 1,
+			killed: false,
+			sandboxBackend: "simulated",
+		});
+		const result = await tool.call({ command: "touch x" }, CTX("workspace-write"));
+		expect((result.content[0] as { text: string }).text).not.toContain("[sandbox]");
+	});
+
+	test("a clean exit gets no hedge, whatever the output mentions", async () => {
+		const tool = cannedTool(workspace(), {
+			stdout: "1 passing (a suite about the sandbox)",
+			stderr: "",
+			exitCode: 0,
+			killed: false,
+			sandboxBackend: "native",
+		});
+		const result = await tool.call({ command: "bun test" }, CTX("workspace-write"));
+		const text = (result.content[0] as { text: string }).text;
+		expect(text).toContain("[exit code: 0]");
+		expect(text).not.toContain("[sandbox]");
+	});
+
+	test("a timed-out run keeps its own story and no hedge", async () => {
+		const tool = cannedTool(workspace(), {
+			stdout: "",
+			stderr: "permission denied",
+			exitCode: 124,
+			killed: true,
+			sandboxBackend: "native",
+		});
+		const result = await tool.call({ command: "sleep 999" }, CTX("workspace-write"));
+		const text = (result.content[0] as { text: string }).text;
+		expect(text).toContain("[command timed out or was killed]");
+		expect(text).not.toContain("[sandbox]");
+	});
+});
+
+describe("the executor labels what a run went through", () => {
+	test("a native resolution carries `native` onto the result — spawn error or not", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			// On this machine bwrap is absent, so the run dies at the spawn with a
+			// note naming it; on a runner that has bwrap the command runs to
+			// completion inside it. The label has to hold either way — it is the
+			// resolution's answer, not the spawn's.
+			const result = await exec.exec({ command: "echo hi", cwd, sandbox: policy("workspace-write", cwd) });
+			expect(result.sandboxBackend).toBe("native");
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("an unrestricted policy carries no label", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const result = await exec.exec({ command: "echo hi", cwd, sandbox: policy("danger-full-access", cwd) });
+			expect(result.exitCode).toBe(0);
+			expect(result.sandboxBackend).toBeUndefined();
+		} finally {
+			await exec.close();
+		}
+	});
+});
+
 describe("the policy refuses a write inside protected metadata", () => {
 	test("a real Write call is refused by the policy, not by the guard in front of it", async () => {
 		// The reachability question, answered through the tool rather than around

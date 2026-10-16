@@ -82,6 +82,14 @@ export interface ExecResult {
 	// Long-form design notes: docs/dev/tools.md
 	/** Set when the output outgrew the capture bound and the whole stream went to a file. */
 	spill?: { path: string; chars: number };
+	/**
+	 * What confined this run, when anything did: the resolver's own kind for the
+	 * policy the caller passed, so a surface can say which backend produced a
+	 * result instead of re-deriving it from the machine. Absent when nothing
+	 * confined the run — an unrestricted policy, or a refusal that returned
+	 * before any process was started.
+	 */
+	sandboxBackend?: SandboxBackend;
 }
 
 /** A live process, handed to the caller at the moment its wait expired. */
@@ -522,6 +530,11 @@ export class ChildProcessExecOperations implements ExecOperations {
 					networkPorts: proxy === undefined ? undefined : portsOf(proxy),
 				})
 			: ({ kind: "unconfined" } as const);
+		// What this run goes through, for the result to carry: the resolution's
+		// own kind, minus the case where nothing was asked for. Read once, here,
+		// because every exit below — the container branch's three, the spawn
+		// path's two — has to answer the same question the same way.
+		const runBackend: SandboxBackend | undefined = resolution.kind === "unconfined" ? undefined : resolution.kind;
 		const [program, ...programArgs] =
 			resolution.kind === "native"
 				? [resolution.execution.argv[0], ...resolution.execution.argv.slice(1)]
@@ -588,7 +601,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 			// Declared outside the try so the `finally` can append the cleanup
 			// error to whatever result the run produced, without the run's own
 			// assignment having to know the cleanup exists.
-			let result: ExecResult = { stdout: "", stderr: "", exitCode: -1, killed: false };
+			let result: ExecResult = { stdout: "", stderr: "", exitCode: -1, killed: false, sandboxBackend: runBackend };
 			try {
 				// The child's cwd, spelled the one way every reader agrees on — the
 				// same canonicalisation the grant roots get, and for the same measured
@@ -614,9 +627,16 @@ export class ChildProcessExecOperations implements ExecOperations {
 						stderr: confined.error,
 						exitCode: confined.exitCode,
 						killed: confined.killed,
+						sandboxBackend: runBackend,
 					};
 				} else {
-					result = { stdout: confined.stdout, stderr: confined.stderr, exitCode: confined.exitCode, killed: false };
+					result = {
+						stdout: confined.stdout,
+						stderr: confined.stderr,
+						exitCode: confined.exitCode,
+						killed: false,
+						sandboxBackend: runBackend,
+					};
 				}
 			} finally {
 				const dropError = releaseWorkspaceGrant(resolution.workspace, resolution.network);
@@ -683,7 +703,11 @@ export class ChildProcessExecOperations implements ExecOperations {
 			// reach it.
 			const finish = (exitCode: number) => {
 				if (settled) return;
-				settle(capture ? { ...capture.assemble(), exitCode, killed } : { stdout, stderr, exitCode, killed });
+				settle(
+					capture
+						? { ...capture.assemble(), exitCode, killed, sandboxBackend: runBackend }
+						: { stdout, stderr, exitCode, killed, sandboxBackend: runBackend },
+				);
 			};
 
 			if (timeoutMs > 0) {
@@ -703,7 +727,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 					// what the result carries, and a capture is assembled exactly once.
 					const snapshot = capture ? capture.assemble() : { stdout, stderr };
 					onTimeout({ child, killTree, startedAt, stdout: snapshot.stdout, stderr: snapshot.stderr });
-					settle({ ...snapshot, exitCode: null, killed: false, handedOff: true });
+					settle({ ...snapshot, exitCode: null, killed: false, handedOff: true, sandboxBackend: runBackend });
 				}, timeoutMs);
 			}
 

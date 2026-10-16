@@ -154,6 +154,14 @@ The appcontainer case repeats the `.git` promise, because the back end now holds
 
 The simulated case is the default, and its string embeds `SIMULATED_SANDBOX_DISCLAIMER` (`packages/tools/src/sandbox/index.ts:488`). On win32 the string names the machine rather than the build: it carries the probe's own why when there is one, because a machine that has the back end and did not select it is owed that answer (`packages/tools/src/sandbox/index.ts:494`). "Calls that arrive through the tools" means the Write and Edit tools, not Bash (`packages/tools/src/sandbox/index.ts:497`). Bash builds the same policy and hands it to `exec`, which drops it unread when the resolution is not native (`packages/tools/src/sandbox/index.ts:498`).
 
+### A failure that reads as a refusal
+
+The Bash tool prints one hedge line after the exit line of a failed command when the failure reads like a kernel refusal (`packages/tools/src/bash.ts:205`). The read is `likelySandboxDenied` (`packages/tools/src/sandbox-denial.ts:67`). The gate is asked first: only a `native` or `appcontainer` run is a candidate (`packages/tools/src/sandbox-denial.ts:72`), and a clean exit or a command that never ended is never a denial (`packages/tools/src/sandbox-denial.ts:73`). A run that no kernel backend confined cannot have failed *because of* the sandbox, and the tool-layer refusals have already said their own name in words — a hedge there would blame a backend that was not present.
+
+Past the gate the read is a keyword set — the errno spellings, the syscall-layer names, and the Windows spelling of a denied write — matched against both streams, case-insensitively (`packages/tools/src/sandbox-denial.ts:25`, `packages/tools/src/sandbox-denial.ts:83`). It is joined by the platform's own exit spelling of `SIGSYS`: 128+31 on Linux and 128+12 on macOS, because the signal number is the platform's and the other platform's spelling is a different signal (`packages/tools/src/sandbox-denial.ts:79`). The quick-reject codes are never consulted as codes; `127 command not found` is a fact about the shell, and only a refusal word in the output makes a quick-reject exit count.
+
+The hedge is a label and not a verdict (`packages/tools/src/bash.ts:204`). It names the axes from the policy the tool built — the same policy the run executes under — and points at `/permissions` and at `/mode`, which is the door that can turn the sandbox off (`packages/tools/src/bash.ts:206`). The narrow reading is deliberate: the `!` passthrough runs under the same axes as the tool, resolved per run (`packages/coding-agent/src/interactive.ts:1005`), so it is not a way around a refusal. `isError` is whatever the exit code said, and a killed run keeps its own story and gets no hedge (`packages/tools/src/bash.ts:205`). The fact behind it travels on the result: `ExecResult.sandboxBackend` is the resolution's own kind, read once in `exec` and absent when nothing confined the run (`packages/tools/src/operations.ts:92`, `packages/tools/src/operations.ts:537`).
+
 ### The workspace policy
 
 `workspace-policy.ts` is the one place that builds the workspace `SandboxPolicy` (`packages/tools/src/sandbox/workspace-policy.ts:1`). Bash and the file tools ask the same question and get the same answer. Two builders mean one refusal in one tool and a success in the other (`packages/tools/src/sandbox/workspace-policy.ts:1`).
@@ -902,6 +910,7 @@ In `flush` the code has to read the waiter from the queue before it removes the 
 - An empty `NO_PROXY` looks like a mistake and is the design (`packages/tools/src/sandbox/proxy.ts:98`). A stale lowercase `no_proxy=localhost` from the ambient environment otherwise wins on half the tools (`packages/tools/src/sandbox/proxy.ts:98`).
 - MSYS and Cygwin cannot start inside an AppContainer at all: the runtime creates its shared memory under `\BaseNamedObjects`, which a container token cannot reach by construction, and the process dies with `0xC0000142` before any grant is consulted (`packages/tools/src/sandbox/appcontainer-probe.ts:133`). No ACL arrangement is the fix; the shell itself is the wrong shell for the container.
 - A container child can be started from a path the container cannot read. `CreateProcessW` opens the image in the launching process's context, so a successful launch is not evidence of reachability — everything after the image is the child's own (`packages/tools/src/sandbox/appcontainer.ts:6`).
+- The refusal read is a keyword hedge over output the command controls. A test suite about sandboxes that fails for its own reason exits nonzero under a wrapped run, carries the word `sandbox`, and reads as a refusal (`packages/tools/src/sandbox-denial.ts:83`). The hedge says *may* for exactly that reason; `/permissions` states the axes, and the hedge only points at it (`packages/tools/src/bash.ts:204`).
 - Line references inside comments drift when another file changes. The refs in this document were re-derived at the end. The ones inside the source comments are not all current.
 
 ## Source map
@@ -921,3 +930,4 @@ In `flush` the code has to read the waiter from the queue before it removes the 
 | `packages/tools/src/sandbox/workspace-policy.ts` | The per-session workspace policy and `protectedFor`. |
 | `packages/tools/src/sandbox/protected-paths.ts` | The `.git` scan and its limits. |
 | `packages/tools/src/sandbox/default-writable-roots.ts` | The cache and global roots granted by default. |
+| `packages/tools/src/sandbox-denial.ts` | The keyword-and-signal read behind the Bash tool's refusal hedge. |

@@ -6,6 +6,7 @@ import type { Operations } from "./operations.ts";
 import { createTailBuffer } from "./output-capture.ts";
 import { resolveWritableRoots } from "./sandbox/default-writable-roots.ts";
 import { workspacePolicy } from "./sandbox/workspace-policy.ts";
+import { likelySandboxDenied } from "./sandbox-denial.ts";
 
 /** How much output the live preview keeps — the tail of it, and not the result. */
 const MAX_PREVIEW_CHARS = 30_000;
@@ -193,8 +194,19 @@ export function createBashTool(
 			// header and reuses the file the executor already wrote instead of
 			// spilling a second copy of what is shown here regardless.
 			const header = result.spill ? formatSpillHeader(result.spill.path, result.spill.chars) : "";
+			// The hedge line, right after the verdict: a nonzero exit that reads
+			// like a kernel refusal under a backend that really holds one gets
+			// the axes named once, because a sandbox's refusals speak in errno
+			// and the user is the only party who knows whether this command
+			// should have worked. A label, not a decision — `isError` stays
+			// whatever the exit code said, and a timed-out run keeps its own
+			// story without a second one.
+			const denied =
+				!result.killed && likelySandboxDenied(result, result.sandboxBackend)
+					? `[sandbox] This may be the sandbox refusing an operation, not the command failing — filesystem axis "${policy.fileSystem.kind}", network axis "${policy.network}". /permissions shows the policy; /mode can turn the sandbox off if this is the refusal.\n`
+					: "";
 			const status = result.killed ? "[command timed out or was killed]\n" : "";
-			const text = `${header}[exit code: ${result.exitCode}]\n${status}${output}`;
+			const text = `${header}[exit code: ${result.exitCode}]\n${denied}${status}${output}`;
 			return { content: [{ type: "text", text }], isError: result.exitCode !== 0 };
 		},
 	});

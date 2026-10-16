@@ -46,6 +46,8 @@ With no manager the timeout still kills, because there is no shell id to point a
 
 In the result text the spill pointer leads and the exit status comes right behind it. The pipeline cuts a long result at both ends on its way into the conversation. Two lines must survive any cut. They are the path to the rest of the output and the answer to whether the command worked.
 
+One more line follows the exit line when a failure reads like a kernel refusal under a kernel backend — the hedge `likelySandboxDenied` labels: the axes in force, `/permissions`, and `/mode` as the door that can turn the sandbox off (see `sandbox.md`). It is a label and not a verdict, because the exit code alone decides whether the call failed and a timed-out run keeps its own story.
+
 The cut in the pipeline recognizes the header and reuses the file from the executor. It does not spill a second copy. Bash itself cuts nothing. The executor bounded the capture. A cut here keeps only what the conversation already has, and it drops output that no file holds.
 
 Both streams over the bound at once put two truncation notices in one result. The pipeline's cut reads only the first, so the second count goes stale. This build accepts that. The file holds every character either way, and a marker format with ordinals is not worth the rare case.
@@ -612,3 +614,4 @@ The comments also state the measured costs and the run or date that measured the
 | `packages/tools/src/ls.ts` | The tool that lists one directory. |
 | `packages/tools/src/ignore.ts` | The gitignore subset for the walker. |
 | `packages/tools/src/web.ts` | WebFetch and WebSearch, with the SSRF guard. |
+| `packages/tools/src/sandbox-denial.ts` | The keyword-and-signal read behind the Bash tool's refusal hedge. |
