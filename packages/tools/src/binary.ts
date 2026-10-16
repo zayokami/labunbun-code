@@ -16,7 +16,10 @@
  * Two metadata blocks are searched by name, because they are the two things
  * that tell a reader *how* a binary was built: Go's build info (the toolchain
  * version and the module list) and cargo-auditable's zlib-compressed
- * `.dep-v0` dependency JSON. The buildinfo blob has two layouts — the linker
+ * `.dep-v0` dependency JSON. A third block, .NET's managed metadata, is
+ * found the way a loader finds it — through the CLI data directory a managed
+ * PE embeds — and reports the module, the assembly identity and references,
+ * and the target framework. The buildinfo blob has two layouts — the linker
  * has written the strings inline since Go 1.18, and behind two pointers
  * before that — and both are decoded here. The blob is located the way the Go
  * toolchain's own reader locates it: by section name where the platform gives
@@ -47,6 +50,7 @@ import { inflateSync } from "node:zlib";
 import { type AnyTool, buildTool, formatCutMarker } from "@labunbun/agent";
 import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
+import { dotnetManagedLines } from "./dotnet.ts";
 import { electronFuseLines } from "./electron-fuses.ts";
 
 /** Whole-report cap; past it the tail is cut with an explicit marker. */
@@ -121,10 +125,11 @@ export function createInspectBinaryTool(cwd: string): AnyTool {
 			"Reports what an executable or object file is, read from its magic bytes rather than its name: the " +
 			"container format (PE, ELF, Mach-O including fat binaries, WebAssembly, or unrecognized) and that " +
 			"format's own structure — machine/CPU type, entry point, sections or segments, for PE its " +
-			"subsystem and resource types, and for WASM its imports, exports and name section. Three known " +
+			"subsystem and resource types, and for WASM its imports, exports and name section. Four known " +
 			"metadata blocks are extracted when present: Go build info " +
-			"(toolchain version and module list), cargo-auditable `.dep-v0` dependency data, and Electron fuse " +
-			"states. It does not disassemble or decompile code. Use it to identify a binary and see how it was built.",
+			"(toolchain version and module list), cargo-auditable `.dep-v0` dependency data, Electron fuse " +
+			"states, and .NET managed metadata (assembly identity and references). It does not disassemble " +
+			"or decompile code. Use it to identify a binary and see how it was built.",
 		inputSchema: z.object({
 			path: z.string().describe("Path to the executable or object file to inspect"),
 		}),
@@ -368,6 +373,10 @@ function buildReport(displayPath: string, data: Buffer): string {
 	if (!found.metadataIncluded) {
 		lines.push(...goBuildInfoLines(view, found), ...cargoAuditableLines(found));
 	}
+	// A .NET assembly is located by its CLI data directory, which only a
+	// managed PE populates — the scan is silent when directory 14 is empty,
+	// so a native binary's report does not grow a "not managed" line.
+	if (kind === "PE") lines.push(...dotnetManagedLines(data));
 	// Electron fuses are searched across the whole file, not a mapped section:
 	// the wire sits in whatever data section the linker chose, in whichever
 	// slice of a universal binary that was. The gate is the container kind, not
