@@ -1275,6 +1275,202 @@ describe("Electron fuses", () => {
 });
 
 // ---------------------------------------------------------------------------
+// WASM interfaces
+// ---------------------------------------------------------------------------
+
+/** A WASM name: its byte length as LEB128, then the bytes. */
+function wasmName(text: string): Buffer {
+	const bytes = ascii(text);
+	return cat(leb(bytes.length), bytes);
+}
+
+/** An import section payload: a count, then module / field / descriptor per entry. */
+function wasmImports(entries: Array<{ module: string; field: string; desc: Buffer }>): Buffer {
+	return cat(
+		leb(entries.length),
+		...entries.map((entry) => cat(wasmName(entry.module), wasmName(entry.field), entry.desc)),
+	);
+}
+
+/** An export section payload: a count, then name / kind byte / index per entry. */
+function wasmExports(entries: Array<{ name: string; kind: number; index: number }>): Buffer {
+	return cat(
+		leb(entries.length),
+		...entries.map((entry) => cat(wasmName(entry.name), Buffer.from([entry.kind]), leb(entry.index))),
+	);
+}
+
+/** A `name` custom section payload: its own name, then id / size / bytes subsections. */
+function wasmNameSection(subsections: Array<{ id: number; payload: Buffer }>): Buffer {
+	return cat(
+		wasmName("name"),
+		...subsections.map((sub) => cat(Buffer.from([sub.id]), leb(sub.payload.length), sub.payload)),
+	);
+}
+
+describe("WASM interfaces", () => {
+	test("imports are listed per kind, with the descriptor each one carries", async () => {
+		const dir = tempDir();
+		fixture(
+			dir,
+			"imports.wasm",
+			buildWasm([
+				{
+					id: 2,
+					payload: wasmImports([
+						{ module: "env", field: "memory", desc: cat(Buffer.from([0x02, 0x00]), leb(1)) },
+						{ module: "wbg", field: "__wbindgen_throw", desc: cat(Buffer.from([0x00]), leb(300)) },
+						{ module: "env", field: "table", desc: cat(Buffer.from([0x01, 0x70, 0x00]), leb(1)) },
+						{ module: "env", field: "g", desc: Buffer.from([0x03, 0x7f, 0x00]) },
+					]),
+				},
+			]),
+		);
+
+		const text = textOf(await run(dir, "imports.wasm"));
+
+		expect(text).toContain("imports (4):");
+		expect(text).toContain("  env.memory (memory)");
+		expect(text).toContain("  wbg.__wbindgen_throw (func, type 300)"); // a two-byte LEB128 type index
+		expect(text).toContain("  env.table (table)");
+		expect(text).toContain("  env.g (global)");
+	});
+
+	test("exports carry their kind and index", async () => {
+		const dir = tempDir();
+		fixture(
+			dir,
+			"exports.wasm",
+			buildWasm([
+				{
+					id: 7,
+					payload: wasmExports([
+						{ name: "add", kind: 0, index: 3 },
+						{ name: "memory", kind: 2, index: 0 },
+						{ name: "t", kind: 1, index: 1 },
+						{ name: "g", kind: 3, index: 0 },
+					]),
+				},
+			]),
+		);
+
+		const text = textOf(await run(dir, "exports.wasm"));
+
+		expect(text).toContain("exports (4):");
+		expect(text).toContain("  add (func 3)");
+		expect(text).toContain("  memory (memory 0)");
+		expect(text).toContain("  t (table 1)");
+		expect(text).toContain("  g (global 0)");
+	});
+
+	test("the name section names the module and its functions", async () => {
+		const dir = tempDir();
+		const functionNames = cat(leb(2), leb(3), wasmName("add"), leb(7), wasmName("main"));
+		fixture(
+			dir,
+			"named.wasm",
+			buildWasm([
+				{
+					id: 0,
+					payload: wasmNameSection([
+						{ id: 0, payload: wasmName("my-lib") },
+						{ id: 1, payload: functionNames },
+					]),
+				},
+			]),
+		);
+
+		const text = textOf(await run(dir, "named.wasm"));
+
+		expect(text).toContain('name section: module name "my-lib"');
+		expect(text).toContain("name section: 2 function name(s)");
+		expect(text).toContain('  function 3: "add"');
+		expect(text).toContain('  function 7: "main"');
+	});
+
+	test("an import section that runs out of bytes says how much it read", async () => {
+		const dir = tempDir();
+		// The declared count is 3; the bytes hold one complete entry.
+		const one = wasmImports([{ module: "env", field: "a", desc: cat(Buffer.from([0x00]), leb(0)) }]);
+		const lying = cat(leb(3), one.subarray(1));
+		fixture(dir, "cut.wasm", buildWasm([{ id: 2, payload: lying }]));
+
+		expect(textOf(await run(dir, "cut.wasm"))).toContain("(the imports section is cut off: only 1 of 3 readable)");
+	});
+
+	test("import lists stop at 30 rows and count the rest", async () => {
+		const dir = tempDir();
+		fixture(
+			dir,
+			"many.wasm",
+			buildWasm([
+				{
+					id: 2,
+					payload: wasmImports(
+						Array.from({ length: 40 }, (_, i) => ({
+							module: "m",
+							field: `i${i}`,
+							desc: cat(Buffer.from([0x00]), leb(0)),
+						})),
+					),
+				},
+			]),
+		);
+
+		const text = textOf(await run(dir, "many.wasm"));
+
+		expect(text).toContain("imports (40):");
+		expect(text).toContain("  m.i29 (func, type 0)");
+		expect(text).not.toContain("m.i30");
+		expect(text).toContain("  ... and 10 more");
+		expect(text).not.toContain("cut off");
+	});
+
+	test("a custom section that is not `name` is not read for names", async () => {
+		const dir = tempDir();
+		fixture(
+			dir,
+			"producers.wasm",
+			buildWasm([{ id: 0, payload: cat(wasmName("producers"), ascii("anything at all")) }]),
+		);
+
+		const text = textOf(await run(dir, "producers.wasm"));
+
+		expect(text).toContain("format: WASM");
+		expect(text).not.toContain("name section");
+	});
+
+	test("a name section with no subsections says so instead of vanishing", async () => {
+		const dir = tempDir();
+		fixture(dir, "empty-name.wasm", buildWasm([{ id: 0, payload: wasmNameSection([]) }]));
+
+		expect(textOf(await run(dir, "empty-name.wasm"))).toContain(
+			"name section: present, with no module name or function names",
+		);
+	});
+
+	test("names are escaped to one line and long ones are cut with a count", async () => {
+		const dir = tempDir();
+		const long = "x".repeat(2000);
+		const functionNames = cat(leb(1), leb(5), wasmName(long));
+		fixture(
+			dir,
+			"hostile.wasm",
+			buildWasm([
+				{ id: 7, payload: wasmExports([{ name: "evil\nname", kind: 0, index: 0 }]) },
+				{ id: 0, payload: wasmNameSection([{ id: 1, payload: functionNames }]) },
+			]),
+		);
+
+		const text = textOf(await run(dir, "hostile.wasm"));
+
+		expect(text).toContain("  evil\\x0aname (func 0)");
+		expect(text).toContain("976 more byte(s)");
+		expect(text).not.toContain("x".repeat(1100));
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Mach-O structure
 // ---------------------------------------------------------------------------
 

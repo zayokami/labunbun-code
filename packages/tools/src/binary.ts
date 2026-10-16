@@ -9,8 +9,9 @@
  * from its own structures: PE's COFF and optional headers, section table and
  * resource types; ELF's header and section headers; Mach-O's load commands,
  * including fat binaries, whose slices are reported one by one; WASM's
- * section directory. A file whose first bytes match nothing gets those bytes
- * back as hex, which is an answer too.
+ * section directory and the imports, exports and name section behind it. A
+ * file whose first bytes match nothing gets those bytes back as hex, which
+ * is an answer too.
  *
  * Two metadata blocks are searched by name, because they are the two things
  * that tell a reader *how* a binary was built: Go's build info (the toolchain
@@ -119,8 +120,9 @@ export function createInspectBinaryTool(cwd: string): AnyTool {
 		description:
 			"Reports what an executable or object file is, read from its magic bytes rather than its name: the " +
 			"container format (PE, ELF, Mach-O including fat binaries, WebAssembly, or unrecognized) and that " +
-			"format's own structure — machine/CPU type, entry point, sections or segments, and for PE its " +
-			"subsystem and resource types. Three known metadata blocks are extracted when present: Go build info " +
+			"format's own structure — machine/CPU type, entry point, sections or segments, for PE its " +
+			"subsystem and resource types, and for WASM its imports, exports and name section. Three known " +
+			"metadata blocks are extracted when present: Go build info " +
 			"(toolchain version and module list), cargo-auditable `.dep-v0` dependency data, and Electron fuse " +
 			"states. It does not disassemble or decompile code. Use it to identify a binary and see how it was built.",
 		inputSchema: z.object({
@@ -1302,6 +1304,7 @@ function inspectWasm(view: Bytes): Inspection {
 	}
 	const lines = [`WASM header: version ${version}`];
 	const entries: string[] = [];
+	const payloads: Array<{ id: number; start: number; size: number }> = [];
 	let note: string | null = null;
 	let at = 8;
 	for (;;) {
@@ -1327,11 +1330,236 @@ function inspectWasm(view: Bytes): Inspection {
 			break;
 		}
 		entries.push(`  section ${id} (${nameOf(WASM_SECTIONS, id, "unknown")}) at ${hex(payload)}, ${size.value} bytes`);
+		payloads.push({ id, start: payload, size: size.value });
 		at = payload + size.value;
 	}
 	lines.push(`sections: ${entries.length}`, ...entries);
 	if (note !== null) lines.push(`  (${note})`);
+	// The three sections whose contents link the module to the outside world
+	// are read past their directory line: its imports and exports say what it
+	// needs and what it offers, and its name section says what its functions
+	// are called — facts a section listing alone does not carry.
+	for (const section of payloads) {
+		if (section.id === 2) lines.push(...wasmImportLines(view.data, section.start, section.size));
+		if (section.id === 7) lines.push(...wasmExportLines(view.data, section.start, section.size));
+		if (section.id === 0 && isNameCustomSection(view.data, section.start)) {
+			lines.push(...wasmNameLines(view.data, section.start, section.size));
+		}
+	}
 	return inspection({ format: "WASM", lines, searched: false });
+}
+
+/** Import and export rows listed before the rest are counted. */
+const MAX_WASM_ROWS = 30;
+
+/** Bytes of one WASM name decoded for display before the rest is counted. */
+const MAX_WASM_NAME_BYTES = 1024;
+
+/** The external kinds an import or export can have, by the byte that encodes them. */
+const WASM_EXTERNAL_KINDS: readonly (readonly [number, string])[] = [
+	[0, "func"],
+	[1, "table"],
+	[2, "memory"],
+	[3, "global"],
+];
+
+/** A WASM name: a LEB128 byte length, then that many UTF-8 bytes. */
+function readWasmName(data: Buffer, offset: number): { text: string; next: number } | null {
+	const length = readLeb(data, offset);
+	if (length === null || length.value > data.length - length.next) return null;
+	const shown = Math.min(length.value, MAX_WASM_NAME_BYTES);
+	const text =
+		data.subarray(length.next, length.next + shown).toString("utf8") +
+		(length.value > shown ? `… [${length.value - shown} more byte(s)]` : "");
+	return { text: printableText(text), next: length.next + length.value };
+}
+
+/** One decoded name with control characters escaped, so a name stays one line. */
+function printableText(text: string): string {
+	let out = "";
+	for (const character of text) {
+		const code = character.codePointAt(0) ?? 0;
+		out += code < 0x20 || code === 0x7f ? `\\x${code.toString(16).padStart(2, "0")}` : character;
+	}
+	return out;
+}
+
+/**
+ * The bytes a type's limits take: a flags byte, then a minimum and — when
+ * the flags' low bit is set, which is how every current encoding spells it —
+ * a maximum. Each is a LEB128 value, and each must stay inside `end`.
+ * Returns the offset past them, or null when they do not.
+ */
+function skipWasmLimits(data: Buffer, offset: number, end: number): number | null {
+	if (offset >= end) return null;
+	const flags = data[offset];
+	if (flags > 7) return null;
+	let next = offset + 1;
+	for (let read = 0; read < ((flags & 0x01) !== 0 ? 2 : 1); read++) {
+		const value = readLeb(data, next);
+		if (value === null || value.next > end) return null;
+		next = value.next;
+	}
+	return next;
+}
+
+/** What an imported or exported item's kind byte describes, or null when unknown. */
+function wasmExternalKind(data: Buffer, offset: number, end: number): { label: string; next: number } | null {
+	if (offset >= end) return null;
+	const kind = data[offset];
+	const kindAt = offset + 1;
+	if (kind === 0) {
+		const type = readLeb(data, kindAt);
+		if (type === null || type.next > end) return null;
+		return { label: `func, type ${type.value}`, next: type.next };
+	}
+	if (kind === 1) {
+		// A table type is an element type byte, then limits.
+		const next = skipWasmLimits(data, kindAt + 1, end);
+		return next === null ? null : { label: "table", next };
+	}
+	if (kind === 2) {
+		const next = skipWasmLimits(data, kindAt, end);
+		return next === null ? null : { label: "memory", next };
+	}
+	if (kind === 3) {
+		// A global type is a value type and a mutability byte. Typed
+		// references carry one more LEB128 between them.
+		const first = data[kindAt];
+		if (first === undefined || kindAt >= end) return null;
+		let afterType = kindAt + 1;
+		if (first === 0x63 || first === 0x64) {
+			const reference = readLeb(data, afterType);
+			if (reference === null || reference.next > end) return null;
+			afterType = reference.next;
+		}
+		if (afterType >= end) return null;
+		return { label: "global", next: afterType + 1 };
+	}
+	return null;
+}
+
+/** The import section: each entry's module and field names, with its kind. */
+function wasmImportLines(data: Buffer, start: number, size: number): string[] {
+	const end = start + size;
+	const declared = readLeb(data, start);
+	if (declared === null) return ["imports: the entry count is not a readable LEB128 value"];
+	const entries: string[] = [];
+	let readable = 0;
+	let at = declared.next;
+	for (let i = 0; i < declared.value; i++) {
+		if (at >= end) break;
+		const module = readWasmName(data, at);
+		if (module === null || module.next > end) break;
+		const field = readWasmName(data, module.next);
+		if (field === null || field.next > end) break;
+		const kind = wasmExternalKind(data, field.next, end);
+		if (kind === null) break;
+		readable += 1;
+		if (entries.length < MAX_WASM_ROWS) entries.push(`  ${module.text}.${field.text} (${kind.label})`);
+		at = kind.next;
+	}
+	return wasmRows("imports", declared.value, readable, entries);
+}
+
+/** The export section: each entry's name, with its kind and index. */
+function wasmExportLines(data: Buffer, start: number, size: number): string[] {
+	const end = start + size;
+	const declared = readLeb(data, start);
+	if (declared === null) return ["exports: the entry count is not a readable LEB128 value"];
+	const entries: string[] = [];
+	let readable = 0;
+	let at = declared.next;
+	for (let i = 0; i < declared.value; i++) {
+		if (at >= end) break;
+		const name = readWasmName(data, at);
+		if (name === null || name.next > end) break;
+		if (name.next >= end) break;
+		const kind = nameOf(WASM_EXTERNAL_KINDS, data[name.next], `unknown kind (${hex(data[name.next])})`);
+		const index = readLeb(data, name.next + 1);
+		if (index === null || index.next > end) break;
+		readable += 1;
+		if (entries.length < MAX_WASM_ROWS) entries.push(`  ${name.text} (${kind} ${index.value})`);
+		at = index.next;
+	}
+	return wasmRows("exports", declared.value, readable, entries);
+}
+
+/**
+ * A footer for an import or export listing: the count as declared, at most
+ * `MAX_WASM_ROWS` rows, and — when parsing stopped early — a line saying how
+ * many of the declared entries were readable before it did. `readable` counts
+ * every entry parsed, not just the listed ones, so a section that holds more
+ * rows than the cap is not mistaken for one that ran out of bytes.
+ */
+function wasmRows(label: string, declared: number, readable: number, entries: string[]): string[] {
+	const lines = [`${label} (${declared}):`, ...entries];
+	if (readable > entries.length) lines.push(`  ... and ${readable - entries.length} more`);
+	if (readable < declared) lines.push(`  (the ${label} section is cut off: only ${readable} of ${declared} readable)`);
+	return lines;
+}
+
+/** True when a custom section's own name is `name` — the section subsection 1 knows. */
+function isNameCustomSection(data: Buffer, start: number): boolean {
+	const length = readLeb(data, start);
+	if (length === null || length.value !== 4) return false;
+	return matchesAt(data, length.next, Buffer.from("name", "latin1"));
+}
+
+/**
+ * The name section's subsections: the module's own name, and the function
+ * names that let an export or an import type index be read back as words.
+ */
+function wasmNameLines(data: Buffer, start: number, size: number): string[] {
+	const end = start + size;
+	const header = readWasmName(data, start);
+	if (header === null || header.next > end) return ["name section: its own name is not readable"];
+	const lines: string[] = [];
+	let at = header.next;
+	while (at < end) {
+		const id = data[at];
+		const sub = readLeb(data, at + 1);
+		if (id === undefined || sub === null || sub.next + sub.value > end) {
+			lines.push("  (the name section is cut off inside a subsection)");
+			break;
+		}
+		const subEnd = sub.next + sub.value;
+		let cursor = sub.next;
+		if (id === 0) {
+			const moduleName = readWasmName(data, cursor);
+			if (moduleName === null || moduleName.next > subEnd) {
+				lines.push("  (the module-name subsection is not readable)");
+			} else {
+				lines.push(`name section: module name "${moduleName.text}"`);
+			}
+		} else if (id === 1) {
+			const declared = readLeb(data, cursor);
+			if (declared === null || declared.next > subEnd) {
+				lines.push("  (the function-name count is not readable)");
+			} else {
+				cursor = declared.next;
+				const entries: string[] = [];
+				let readable = 0;
+				for (let i = 0; i < declared.value; i++) {
+					const index = readLeb(data, cursor);
+					if (index === null || index.next > subEnd) break;
+					const name = readWasmName(data, index.next);
+					if (name === null || name.next > subEnd) break;
+					readable += 1;
+					if (entries.length < MAX_WASM_ROWS) entries.push(`  function ${index.value}: "${name.text}"`);
+					cursor = name.next;
+				}
+				lines.push(`name section: ${declared.value} function name(s)`);
+				lines.push(...entries);
+				if (readable > entries.length) lines.push(`  ... and ${readable - entries.length} more`);
+				if (readable < declared.value) {
+					lines.push(`  (the function-name list is cut off: only ${readable} of ${declared.value} readable)`);
+				}
+			}
+		}
+		at = subEnd;
+	}
+	return lines.length > 0 ? lines : ["name section: present, with no module name or function names"];
 }
 
 /** An unsigned LEB128 value — how WASM writes every section size. */
