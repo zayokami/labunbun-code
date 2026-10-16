@@ -63,6 +63,7 @@ export {
 // tool — the "!" shell passthrough — and must run it under the same sandbox the
 // tool would have built.
 export { workspacePolicy } from "./sandbox/workspace-policy.ts";
+export { createInspectSourceMapTool } from "./sourcemap.ts";
 export { type AgentTask, createTaskTools, TASK_BOARD_TOOL_NAMES, type TaskStatus, TaskStore } from "./tasks.ts";
 export {
 	createWebFetchTool,
@@ -91,6 +92,7 @@ import { ChildProcessExecOperations, defaultOperations, detectShell, type Operat
 import { createReadTool } from "./read.ts";
 import { ReadFileState } from "./read-file-state.ts";
 import { detectRuntime, type SandboxRuntime } from "./sandbox/index.ts";
+import { createInspectSourceMapTool } from "./sourcemap.ts";
 import { createTaskTools, type TaskStore } from "./tasks.ts";
 import { createWebFetchTool, createWebSearchTool } from "./web.ts";
 import { createWriteTool } from "./write.ts";
@@ -120,8 +122,8 @@ export interface CreateAllToolsOptions {
  * The default coding tool set. Order is frozen here so the wire-tool list
  * stays prompt-cache stable: core file/shell tools first, then task and web
  * tools, with the standalone read-only probes (Digest, InspectSqlite,
- * InspectArtifact, InspectBinary) last — a new tool is appended, never
- * inserted, so no existing tool's schema slot moves.
+ * InspectArtifact, InspectBinary, InspectSourceMap) last — a new tool is
+ * appended, never inserted, so no existing tool's schema slot moves.
  */
 export function createAllTools(cwd: string, options: CreateAllToolsOptions = {}): AnyTool[] {
 	// The shell is resolved before the runtime, because the Windows probe runs
@@ -178,5 +180,6 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		createInspectSqliteTool(cwd),
 		createInspectArtifactTool(cwd),
 		createInspectBinaryTool(cwd),
+		createInspectSourceMapTool(cwd),
 	];
 }

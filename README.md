@@ -30,6 +30,7 @@ LaBunbun Code reads files, changes files, and runs commands. It sends your reque
 | `InspectSqlite` | Report the structure and sample rows of a SQLite database file. |
 | `InspectArtifact` | Report the entries of a zip-family archive or an Electron ASAR without unpacking it. |
 | `InspectBinary` | Report the format and structure of an executable or object file, and its embedded metadata (Go build info, Rust dependencies, Electron fuses, .NET managed metadata). |
+| `InspectSourceMap` | Report what a source map file holds, and whether its VLQ mappings decode. |
 | `WebFetch` | Get one page from the network. |
 | `WebSearch` | Search the network. |
 | `TaskCreate` | Make a task. |

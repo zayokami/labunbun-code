@@ -893,6 +893,7 @@ describe("tool registry shape", () => {
 			"InspectSqlite",
 			"InspectArtifact",
 			"InspectBinary",
+			"InspectSourceMap",
 		]);
 	});
 
