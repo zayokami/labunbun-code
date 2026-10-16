@@ -165,7 +165,13 @@ describe("InspectSqlite reports a database", () => {
 		for (let i = 0; i < 600; i++) {
 			statements.push(`CREATE TABLE t${i} (v INTEGER);\nINSERT INTO t${i} VALUES (${i});`);
 		}
-		db.exec(`${statements.join("\n")}\n`);
+		// One transaction for the whole fixture. Without it every statement is
+		// its own auto-commit transaction, and on a CI runner's disk that is one
+		// fsync per statement — 1200 of them measured as a 20.5s synchronous
+		// stall on windows-latest (the 5s watchdog cannot interrupt a synchronous
+		// body, so the reported duration was the stall itself). The test measures
+		// the report cap, not the fixture's commit count.
+		db.exec(`BEGIN;\n${statements.join("\n")}\nCOMMIT;\n`);
 		db.close();
 
 		const text = textOf(await createInspectSqliteTool(dir).call({ path: "many.sqlite" }, ctx(dir)));
