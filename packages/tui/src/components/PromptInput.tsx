@@ -9,7 +9,7 @@ import { type PadPromptRef, usePadAction } from "../pad.ts";
 import { expandPasteTokens, makePasteToken, normalizePaste, shouldPlaceholderize } from "../paste.ts";
 import { applyFileCompletion, currentAtWord, filterFiles } from "../prompt-files.ts";
 import { hintLine } from "../shortcuts.ts";
-import { useTheme } from "../theme.ts";
+import { type Theme, useTheme } from "../theme.ts";
 import { OnScreenKeyboard } from "./OnScreenKeyboard.tsx";
 
 export interface PromptInputProps {
@@ -149,6 +149,37 @@ export function placeholderCaret(placeholder: string): { caret: string; rest: st
  */
 function isHostCommand(text: string): boolean {
 	return text.startsWith("/") || text.startsWith("#");
+}
+
+/**
+ * The permission badge's colour, by the label `describeModeChoice` prints.
+ *
+ * Keyed by the label rather than by the mode pair because the label is all the
+ * prompt is handed: the row holds the words for the mode, not the mode. A label
+ * with no row — an unnamed pair from `settings.json`, which `describeModeChoice`
+ * spells out rather than rounding to a neighbour — falls back to `textMuted`:
+ * it is still a mode, and the badge should not shout about a combination the
+ * picker never offered. The rows read by meaning: Ask is the resting mode and
+ * stays as quiet as the row around it; Plan is where design happens and takes
+ * the accent; Agent runs without asking, so it takes the one shade that asks to
+ * be noticed; and `Agent 无沙箱` is that same run with no confinement at all —
+ * the one thing on this row worth the permission colour.
+ */
+export const MODE_BADGE_COLOR: Readonly<Record<string, "textMuted" | "accent" | "warning" | "permission">> = {
+	Ask: "textMuted",
+	Plan: "accent",
+	Agent: "warning",
+	"Agent 无沙箱": "permission",
+};
+
+/**
+ * The colour one mode label's badge is drawn in. The fallback is a function of
+ * this lookup rather than an inline default at the call site, because "unknown
+ * labels are muted" is a decision and the mutedness itself is not something a
+ * frame can show.
+ */
+export function modeBadgeColor(label: string, theme: Theme): string {
+	return theme[MODE_BADGE_COLOR[label] ?? "textMuted"];
 }
 
 /**
@@ -862,16 +893,17 @@ export function PromptInput({
 					{editor.mode === "vim" ? (
 						<Text color={BADGE_COLOR[vimMode] ?? theme.textMuted}>{`[${MODE_LABEL[vimMode] ?? "NORMAL"}] `}</Text>
 					) : null}
-					<Text dimColor>
-						{/* The permission mode is a different thing from an editor mode and
-						    says what it is: every row of `MODE_CHOICES` is a mode a user can
-						    be *in*, so the one they are in is the fact worth having on the
-						    prompt. The mode the key changes is the mode that has to be
-						    visible, which is why this sits under the editor rather than in
-						    the status line that collapses when the turn is idle. */}
-						{modeLabel ? `[${modeLabel}] ` : ""}
-						{hintLine(columns, { editor: editor.mode, vimMode })}
-					</Text>
+					{/* The permission mode is a different thing from an editor mode and
+					    says what it is: every row of `MODE_CHOICES` is a mode a user can
+					    be *in*, so the one they are in is the fact worth having on the
+					    prompt. The mode the key changes is the mode that has to be
+					    visible, which is why this sits under the editor rather than in
+					    the status line that collapses when the turn is idle. A sibling
+					    of the dim hint rather than a run inside it: ink applies a Text's
+					    `dimColor` as a transform over the whole squashed line, so only
+					    text outside that Text can carry a colour of its own. */}
+					{modeLabel ? <Text color={modeBadgeColor(modeLabel, theme)}>{`[${modeLabel}] `}</Text> : null}
+					<Text dimColor>{hintLine(columns, { editor: editor.mode, vimMode })}</Text>
 				</Text>
 			</Box>
 		</Box>

@@ -24,8 +24,10 @@ import {
 	WatchPanel,
 	watchPanelHeight,
 	watchRing,
+	watchStatusColor,
 } from "../src/components/WatchPanel.tsx";
 import { createStore } from "../src/store.ts";
+import { DARK_THEME } from "../src/theme.ts";
 import { initialUiState, type UiBackgroundShell, type UiState } from "../src/ui-state.ts";
 
 const shell = (id: string, over: Partial<UiBackgroundShell> = {}): UiBackgroundShell => ({
@@ -444,6 +446,54 @@ describe("the panel's other stops", () => {
 		expect(marked).toHaveLength(1);
 		expect(marked[0]).toContain("shell_1");
 		expect(view.lastFrame()).toContain("still here");
+		view.unmount();
+	});
+});
+
+/**
+ * The color of a subagent row's status word. Asserted directly rather than
+ * through a frame: ink draws no color when stdout is not a TTY, which is every
+ * test run, so a frame cannot show which color a word wore — what a frame can
+ * show, and the tests below check, is that the split did not change the text.
+ */
+describe("watchStatusColor", () => {
+	test("a running agent wears the agent color, and the endings keep their state colors", () => {
+		expect(watchStatusColor("running", DARK_THEME)).toBe(DARK_THEME.agent);
+		expect(watchStatusColor("waiting", DARK_THEME)).toBe(DARK_THEME.warning);
+		expect(watchStatusColor("completed", DARK_THEME)).toBe(DARK_THEME.success);
+		expect(watchStatusColor("failed", DARK_THEME)).toBe(DARK_THEME.error);
+		expect(watchStatusColor("cancelled", DARK_THEME)).toBe(DARK_THEME.textMuted);
+		// Every status in the publisher's lifecycle order is accounted for, so a
+		// word cannot fall through to "uncolored" by being forgotten.
+		for (const status of ["running", "waiting", "completed", "failed", "cancelled"]) {
+			expect(watchStatusColor(status, DARK_THEME), status).toBeDefined();
+		}
+	});
+
+	test("the publisher's padding is not part of the word", () => {
+		// `formatSubagentWatchLines` pads to nine columns; the padded word is the
+		// same status.
+		expect(watchStatusColor("running".padEnd(9), DARK_THEME)).toBe(DARK_THEME.agent);
+		expect(watchStatusColor("waiting".padEnd(9), DARK_THEME)).toBe(DARK_THEME.warning);
+	});
+
+	test("a line that does not open on a status is left uncolored", () => {
+		// The counts line shares the stop with the rows, and its opening columns are
+		// not a status: inventing a color for them would put a state on screen the
+		// line never claimed. Same for the nothing-yet sentence.
+		expect(watchStatusColor("2 subagen", DARK_THEME)).toBeUndefined();
+		expect(watchStatusColor("No subage", DARK_THEME)).toBeUndefined();
+		expect(watchStatusColor("", DARK_THEME)).toBeUndefined();
+	});
+
+	test("the status word's padding and the row's spacing survive the color split", () => {
+		// The split runs inside what used to be one Text; the row that reaches the
+		// screen has to be the same string, padding column for padding column.
+		const row = `${"running".padEnd(9)} ${"12s".padEnd(7)} Fix it  (sidechain-1)`;
+		const view = render(
+			<WatchPanel shells={[]} selection={{ kind: "subagents" }} subagentLines={["1 subagent: 1 running", row]} />,
+		);
+		expect(view.lastFrame()).toContain(row);
 		view.unmount();
 	});
 });

@@ -46,7 +46,7 @@
  * edges are never tested.
  */
 import { Box, Text, useWindowSize } from "ink";
-import { useTheme } from "../theme.ts";
+import { type Theme, useTheme } from "../theme.ts";
 import type { UiBackgroundShell } from "../ui-state.ts";
 
 /** Rows the panel asks for when the terminal can spare them. */
@@ -241,15 +241,30 @@ export function WatchPanel({
 						: ["No session facts yet."]
 				)
 					.slice(0, Math.max(0, inner - 1))
-					.map((line, index) => (
-						<Text
-							// biome-ignore lint/suspicious/noArrayIndexKey: a cut list has no id of its own — the pair of position and text is what identifies a row, and the text is in the key precisely because it changes.
-							key={`${index}\u0000${line}`}
-							wrap="truncate"
-						>
-							{cut(line, width)}
-						</Text>
-					))
+					.map((line, index) => {
+						// Cut first, split after: at any width the two pieces concatenate
+						// to exactly what a single Text drew, so the color split cannot
+						// move the ellipsis. The color is read off the row's raw head —
+						// the status word — rather than off the cut, which may have
+						// shortened it.
+						const drawn = cut(line, width);
+						const statusColor =
+							stop.kind === "subagents" ? watchStatusColor(line.slice(0, STATUS_COLUMNS), theme) : undefined;
+						return (
+							<Text
+								// biome-ignore lint/suspicious/noArrayIndexKey: a cut list has no id of its own — the pair of position and text is what identifies a row, and the text is in the key precisely because it changes.
+								key={`${index}\u0000${line}`}
+								wrap="truncate"
+							>
+								{/* A sibling in an undimmed row rather than a dimmed Text with a
+								nested color: ink applies a Text's `dimColor` as a transform over
+								the whole squashed line, so a nested color under an outer dim
+								could not stand on its own. */}
+								<Text color={statusColor}>{drawn.slice(0, STATUS_COLUMNS)}</Text>
+								{drawn.slice(STATUS_COLUMNS)}
+							</Text>
+						);
+					})
 			)}
 		</Box>
 	);
@@ -329,6 +344,46 @@ const PLAIN_GUTTER = " ";
  */
 export function jumpDigit(index: number): string {
 	return index < 9 ? String(index + 1) : "·";
+}
+
+/**
+ * The columns a subagent row's status word occupies: the publisher pads it
+ * (`formatSubagentWatchLines` writes `status.padEnd(9)`), so the first nine
+ * columns of a row are the word and the padding after it. This is the split the
+ * panel reads to color a row without parsing anything else on it.
+ */
+const STATUS_COLUMNS = 9;
+
+/**
+ * The color of a subagent row's opening status word.
+ *
+ * `running` takes the `agent` token — the fleet's own color, and "an agent is
+ * alive" is the question this stop exists to answer. The ending words keep
+ * their state colors so the row says how a run went, with `waiting` on
+ * `warning` (a run parked on something is the one state a watcher can still act
+ * on) and `cancelled` on `textMuted` (someone stopped it — an ending, not a
+ * fault). `undefined` for everything else, and that case is load-bearing: the
+ * counts line opens the same stop, and its first nine columns are not a status.
+ * Guessing a color for it would draw a state the line never claimed.
+ *
+ * Takes the padded word as it publishes it — trimming is the function's own,
+ * so the padding column count is not something a caller has to know.
+ */
+export function watchStatusColor(status: string, theme: Theme): string | undefined {
+	switch (status.trim()) {
+		case "running":
+			return theme.agent;
+		case "waiting":
+			return theme.warning;
+		case "completed":
+			return theme.success;
+		case "failed":
+			return theme.error;
+		case "cancelled":
+			return theme.textMuted;
+		default:
+			return undefined;
+	}
 }
 
 /**

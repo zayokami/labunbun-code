@@ -19,15 +19,17 @@ export function TaskStrip({ tasks }: { tasks: UiTask[] }) {
 	const completed = tasks.filter((t) => t.status === "completed").length;
 	const active = tasks.find((t) => t.status === "in_progress");
 	const visible = tasks.filter((t) => t.status !== "completed").slice(0, 4);
-	// All-done is the one state in this strip worth colouring. The length guard
-	// is redundant on today's path — the early return above — and stays because
+	// All-done is the strip's own state; in-progress is the accent the active row
+	// below already wears, and the count picks it up while work is under way so
+	// the header is not the quietest thing in its own box. The length guard is
+	// redundant on today's path — the early return above — and stays because
 	// `0/0` satisfies the equality without being an all-done list: the claim is
 	// "finished", and an empty list has not finished anything.
 	const allDone = tasks.length > 0 && completed === tasks.length;
 
 	return (
 		<Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.toolBorder} paddingX={1}>
-			<Text color={allDone ? theme.success : theme.textMuted}>
+			<Text color={allDone ? theme.success : active ? theme.accent : theme.textMuted}>
 				Tasks {completed}/{tasks.length}
 			</Text>
 			{active?.activeForm && <Text color={theme.accent}>▸ {active.activeForm}</Text>}

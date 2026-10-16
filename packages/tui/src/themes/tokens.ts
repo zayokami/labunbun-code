@@ -104,6 +104,16 @@ export interface Theme {
 	permission: string;
 	/** Queued or not-yet-started work. */
 	pending: string;
+	/**
+	 * Agent identity: a running subagent's status word in the watch panel, and
+	 * the source of a permission ask forwarded from one. A token of its own
+	 * because it must not borrow from the neighbors it appears beside: not
+	 * `toolName` (a call row and the fleet it spawned share a screen), not
+	 * `permission` (the dialog already wears it, and the source line sits inside
+	 * that dialog), and not a state color — it marks *who* is acting, and a
+	 * running agent is not a success.
+	 */
+	agent: string;
 
 	// ---- diff and code ----
 	/** Added lines (`+`). */
@@ -196,6 +206,7 @@ export const THEME_TOKEN_KEYS: ReadonlyArray<keyof Theme> = [
 	"error",
 	"permission",
 	"pending",
+	"agent",
 	"diffAdded",
 	"diffRemoved",
 	"diffHeader",

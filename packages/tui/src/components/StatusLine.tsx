@@ -22,6 +22,17 @@ export const BATTERY_EMPTY = "▯";
 export const BATTERY_CABLE = "+";
 
 /**
+ * Free headroom below which the idle row's percentage is drawn as a warning.
+ *
+ * The idle row is where the context figure is read at a glance, and the figure
+ * only means something as a comparison: twenty percent free is the point where
+ * a session should be thinking about `/compact`, and the percentage is the one
+ * part of that row that is a reading rather than a label — which is what lets
+ * it be the one part that leaves the dim.
+ */
+export const CONTEXT_LOW_FREE_PERCENT = 20;
+
+/**
  * The battery, as a bar.
  *
  * Five cells for the pad's eleven steps, and the rounding can be seen to be
@@ -145,13 +156,16 @@ export function StatusLine({
 		return () => clearInterval(timer);
 	}, [phase, activity]);
 
-	const contextPart = contextInfo
-		? ` · ctx ${formatTokens(contextInfo.usedTokens)}${
-				contextInfo.threshold > 0
-					? ` (${Math.max(0, Math.min(100, Math.round((1 - contextInfo.usedTokens / contextInfo.threshold) * 100)))}% free)`
-					: ""
-			}`
-		: "";
+	const freePercent =
+		contextInfo && contextInfo.threshold > 0
+			? Math.max(0, Math.min(100, Math.round((1 - contextInfo.usedTokens / contextInfo.threshold) * 100)))
+			: undefined;
+	// Whole and in its parts: the rows that stay dim take `contextPart` as one
+	// string, and the idle row needs the head and the percentage apart, because
+	// the percentage is the run that may leave the dim.
+	const contextHead = contextInfo ? ` · ctx ${formatTokens(contextInfo.usedTokens)}` : "";
+	const contextFree = freePercent === undefined ? "" : ` (${freePercent}% free)`;
+	const contextPart = `${contextHead}${contextFree}`;
 
 	// The activity's own seconds ride in its label — the turn's elapsed time is
 	// already on the row, and a wait inside it that runs for most of the turn
@@ -168,9 +182,19 @@ export function StatusLine({
 		const battery = <BatterySegment pad={pad} />;
 		if (!contextPart && !pad?.battery) return null;
 		return (
-			<Text dimColor>
-				{modelName}
-				{contextPart}
+			<Text>
+				<Text dimColor>
+					{modelName}
+					{contextHead}
+				</Text>
+				{/* Siblings in an undimmed wrapper rather than one dim Text with a
+				    nested color: ink applies `dimColor` as a transform over the whole
+				    squashed line, so a nested run could not leave the dim. The low
+				    case is the warning it is; the fine case keeps the row's restful
+				    look by wearing no color at all. */}
+				<Text color={freePercent !== undefined && freePercent < CONTEXT_LOW_FREE_PERCENT ? theme.warning : undefined}>
+					{contextFree}
+				</Text>
 				{battery}
 			</Text>
 		);

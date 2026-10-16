@@ -239,7 +239,10 @@ function ToolUseView({
 		<Box marginBottom={1} flexDirection="column">
 			<Text>
 				<Text
-					color={state === "running" ? undefined : state === "error" ? theme.error : theme.success}
+					// The running dot borrows the tool name's own color, dimmed, so the
+					// row reads as one call waking up; done and error keep the state
+					// colors, and the dim is the second, color-independent channel.
+					color={state === "running" ? theme.toolName : state === "error" ? theme.error : theme.success}
 					dimColor={state === "running"}
 				>
 					{TOOL_DOT}{" "}
@@ -270,17 +273,64 @@ function LiveOutputLines({ text }: { text: string }) {
 	const theme = useTheme();
 	const lines = liveOutputLines(stripAnsi(text), LIVE_OUTPUT_LINES);
 	if (lines.length === 0) return null;
+	// A diff streamed by a command that is still running is as readable as one
+	// that has finished: the markers are on the screen the moment they arrive,
+	// and waiting for the result to recolor them would show the changed lines in
+	// the preview and in the prose of the same call in two different palettes.
+	const diff = looksLikeDiff(lines);
 	return (
 		<Box flexDirection="column">
 			{lines.map((line, i) => (
 				// biome-ignore lint/suspicious/noArrayIndexKey: the window is a sliding tail of immutable lines with no per-line state
-				<Text key={i} color={theme.textMuted} dimColor>
+				<Text key={i} color={diff ? resultLineColor(line, false, true, theme) : theme.textMuted} dimColor>
 					{i === 0 ? RESULT_LEAD : RESULT_INDENT}
 					{line}
 				</Text>
 			))}
 		</Box>
 	);
+}
+
+/**
+ * Whether a block of output reads as a unified diff.
+ *
+ * A `@@` hunk header is a claim on its own — nothing else opens a line with it
+ * — so one line is enough. A `+`/`-` line is not: a lone dash is a bullet, an
+ * aside or a range in prose far more often than it is a removed line, so the
+ * marker has to repeat on at least two lines sharing the prefix before the
+ * block is drawn in the diff palette. The old test was stricter in the wrong
+ * direction — it wanted a marker followed by a space, which is not what a diff
+ * looks like, and a top-level `+const x` went uncolored because of it.
+ */
+export function looksLikeDiff(lines: readonly string[]): boolean {
+	let plus = 0;
+	let minus = 0;
+	for (const line of lines) {
+		if (line.startsWith("@@")) return true;
+		if (line.startsWith("+")) plus++;
+		else if (line.startsWith("-")) minus++;
+	}
+	return plus >= 2 || minus >= 2;
+}
+
+/**
+ * The color one line of a tool result is drawn in — the single decision both
+ * the finished result and the running preview ask.
+ *
+ * An error keeps every line its own shade, markers included: a `git diff` that
+ * failed still prints `+` lines, and a green line inside a result the caller
+ * already flagged as failed would contradict the flag. The base is
+ * `toolOutput`; the two callers that want a quieter base (the live preview's
+ * `textMuted`) narrow around the same function rather than restating the
+ * marker rules.
+ */
+export function resultLineColor(line: string, isError: boolean | undefined, diff: boolean, theme: Theme): string {
+	if (isError) return theme.error;
+	if (!diff) return theme.toolOutput;
+	if (line.startsWith("+")) return theme.diffAdded;
+	if (line.startsWith("-")) return theme.diffRemoved;
+	if (line.startsWith("@@")) return theme.diffHeader;
+	return theme.toolOutput;
 }
 
 /**
@@ -297,25 +347,18 @@ function ResultLines({ text, isError, full }: { text: string; isError?: boolean;
 	const theme = useTheme();
 	const sanitized = stripAnsi(text);
 	const capped = full || sanitized.length <= 400 ? sanitized || "(no output)" : `${sanitized.slice(0, 397)}...`;
-	const hasDiff = /^[-+@ ]/m.test(capped) && (capped.includes("\n- ") || capped.includes("\n+ "));
+	const lines = capped.split("\n");
+	const diff = looksLikeDiff(lines);
 	return (
 		<Box flexDirection="column">
-			{capped.split("\n").map((line, i) => {
-				let color = isError ? theme.error : theme.toolOutput;
-				if (!isError && hasDiff) {
-					if (line.startsWith("+")) color = theme.diffAdded;
-					else if (line.startsWith("-")) color = theme.diffRemoved;
-					else if (line.startsWith("@@")) color = theme.diffHeader;
-				}
-				return (
-					// biome-ignore lint/suspicious/noArrayIndexKey: capped is a fixed string slice split into immutable, never-reordered lines
-					<Text key={i} color={color} bold={isError ? theme.bold.error : undefined}>
-						<Text dimColor>{i === 0 ? RESULT_LEAD : RESULT_INDENT}</Text>
-						{/* The error mark goes behind the lead — `  ⎿  ✗ text` — so it reads as the state of the output, not of the call. */}
-						{isError && i === 0 ? `${theme.marks.error} ${line}` : line}
-					</Text>
-				);
-			})}
+			{lines.map((line, i) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: capped is a fixed string slice split into immutable, never-reordered lines
+				<Text key={i} color={resultLineColor(line, isError, diff, theme)} bold={isError ? theme.bold.error : undefined}>
+					<Text dimColor>{i === 0 ? RESULT_LEAD : RESULT_INDENT}</Text>
+					{/* The error mark goes behind the lead — `  ⎿  ✗ text` — so it reads as the state of the output, not of the call. */}
+					{isError && i === 0 ? `${theme.marks.error} ${line}` : line}
+				</Text>
+			))}
 		</Box>
 	);
 }

@@ -148,7 +148,17 @@ export function PermissionDialog({
 				Permission required
 				{queueLength !== undefined && queueLength > 1 ? ` (+${queueLength - 1} more waiting)` : ""}
 			</Text>
-			{source ? <Text dimColor>Requested by {source}</Text> : null}
+			{source ? (
+				// The label stays dim and the source wears the agent token, as
+				// siblings rather than one dim Text with a nested color: ink applies
+				// `dimColor` as a transform over the whole squashed line, so a nested
+				// color could not stand on its own. Who is asking is the fact this
+				// line exists for — the session's own asks carry no source at all.
+				<Text>
+					<Text dimColor>Requested by </Text>
+					<Text color={theme.agent}>{source}</Text>
+				</Text>
+			) : null}
 			<Text>
 				Tool{" "}
 				<Text color={theme.toolName} bold>

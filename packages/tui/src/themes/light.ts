@@ -26,6 +26,7 @@ export const LIGHT_THEME: Theme = {
 	error: "#cf222e",
 	permission: "#8250df",
 	pending: "#656d76",
+	agent: "#0550ae",
 
 	diffAdded: "#1a7f37",
 	diffRemoved: "#cf222e",

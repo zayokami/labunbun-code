@@ -102,6 +102,19 @@ describe("state legibility", () => {
 		}
 	});
 
+	// The agent token marks *who* is acting, and it can sit beside any of these
+	// on one frame — a running subagent's row above a tool call, an ask's source
+	// inside the permission dialog. A palette where it duplicates one of them
+	// would be a palette where the marker vanishes into the thing it annotates.
+	test("agent is distinct from every emphasis color in every theme", () => {
+		const EMPHASIS = ["success", "warning", "error", "permission", "accent", "toolName"] as const;
+		for (const theme of ALL) {
+			for (const token of EMPHASIS) {
+				expect(theme.agent, `${theme.name}: agent duplicates ${token}`).not.toBe(theme[token]);
+			}
+		}
+	});
+
 	test("every theme carries all six marks, non-empty", () => {
 		for (const theme of ALL) {
 			expect(Object.keys(theme.marks).sort()).toEqual([

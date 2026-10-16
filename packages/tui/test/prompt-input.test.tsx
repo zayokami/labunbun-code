@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import type React from "react";
 import { MessageList, StreamingPreview } from "../src/components/MessageList.tsx";
-import { PromptInput, placeholderCaret } from "../src/components/PromptInput.tsx";
+import { MODE_BADGE_COLOR, modeBadgeColor, PromptInput, placeholderCaret } from "../src/components/PromptInput.tsx";
 import type { PadPromptRef } from "../src/pad.ts";
 import { DARK_THEME, type Theme, ThemeContext } from "../src/theme.ts";
 
@@ -891,6 +891,34 @@ describe("a covered prompt", () => {
 		rerender(editor(false));
 		await delay(30);
 		expect(padRef.current).not.toBeNull();
+		unmount();
+	});
+});
+
+/**
+ * The permission mode badge. The colours are asserted on the lookup rather than
+ * on a frame: ink draws no colour without a TTY, and the case that needs
+ * pinning hardest — a label the picker has no row for — is exactly the one a
+ * frame cannot show. What the frame is good for is the other half: the badge
+ * still renders, as text, in front of the hint it shares its line with.
+ */
+describe("the permission mode badge", () => {
+	test("each named mode has its own colour, and an unnamed pair is muted", () => {
+		expect(MODE_BADGE_COLOR.Ask).toBe("textMuted");
+		expect(MODE_BADGE_COLOR.Plan).toBe("accent");
+		expect(MODE_BADGE_COLOR.Agent).toBe("warning");
+		expect(MODE_BADGE_COLOR["Agent 无沙箱"]).toBe("permission");
+		expect(modeBadgeColor("Ask", DARK_THEME)).toBe(DARK_THEME.textMuted);
+		expect(modeBadgeColor("Plan", DARK_THEME)).toBe(DARK_THEME.accent);
+		// `describeModeChoice` spells out a pair the picker has no row for. It is
+		// still a mode, and the badge does not invent a colour for it.
+		expect(modeBadgeColor("plan · danger-full-access", DARK_THEME)).toBe(DARK_THEME.textMuted);
+	});
+
+	test("the badge reaches the row, in front of the hint it shares the line with", async () => {
+		const { lastFrame, unmount } = render(withTheme(<PromptInput onSubmit={() => {}} modeLabel="Plan" />));
+		await delay(30);
+		expect(flat(lastFrame())).toContain("[Plan] Enter send");
 		unmount();
 	});
 });

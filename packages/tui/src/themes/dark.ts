@@ -25,6 +25,7 @@ export const DARK_THEME: Theme = {
 	error: "red",
 	permission: "magenta",
 	pending: "gray",
+	agent: "blue",
 
 	diffAdded: "green",
 	diffRemoved: "red",

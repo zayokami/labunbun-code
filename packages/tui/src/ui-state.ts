@@ -361,11 +361,17 @@ function streamedText(partial: unknown): string | undefined {
 	return typeof mcpError === "string" && mcpError !== "" ? mcpError : undefined;
 }
 
-/** Extract the primary preview for common tools (command, path, pattern). */
+/**
+ * Extract the primary preview for common tools (command, path, pattern,
+ * description). The key list is ordered by priority: `description` sits last
+ * because a Task row has nothing better to show than its one-line summary,
+ * while a Bash call carrying both must keep showing its command — the row used
+ * to fall through to the JSON dump for Task, which is a preview of nothing.
+ */
 export function toolPreview(_toolName: string, input: unknown): string {
 	if (typeof input !== "object" || input === null) return previewInput(input);
 	const record = input as Record<string, unknown>;
-	const key = ["command", "file_path", "pattern", "path"].find((k) => k in record);
+	const key = ["command", "file_path", "pattern", "path", "description"].find((k) => k in record);
 	if (key) return String(record[key]);
 	return previewInput(input);
 }

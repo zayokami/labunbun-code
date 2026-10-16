@@ -5,7 +5,12 @@ import { MessageList } from "../src/components/MessageList.tsx";
 import { PermissionDialog } from "../src/components/PermissionDialog.tsx";
 import { ShortcutOverlay } from "../src/components/ShortcutOverlay.tsx";
 import { CONTEXT_BAR_SEGMENTS, contextBar, StatusCard } from "../src/components/StatusCard.tsx";
-import { backgroundShellRow, StatusLine, toolSummary } from "../src/components/StatusLine.tsx";
+import {
+	backgroundShellRow,
+	CONTEXT_LOW_FREE_PERCENT,
+	StatusLine,
+	toolSummary,
+} from "../src/components/StatusLine.tsx";
 import { RESULT_LEAD, TOOL_DOT } from "../src/figures.ts";
 import { permissionOptions } from "../src/permission-options.ts";
 import { shortcutGroups } from "../src/shortcuts.ts";
@@ -183,6 +188,31 @@ describe("StatusLine", () => {
 	test("an idle status line reports no duration at all", () => {
 		const { lastFrame } = render(withTheme(<StatusLine phase="idle" modelName="test-model" elapsedMs={5000} />));
 		expect(lastFrame() ?? "").not.toContain("5s");
+	});
+
+	test("the idle row's context figure reads the same with the percentage split out", () => {
+		// The percentage left the dim so a low one can wear `warning`; what reaches
+		// the screen is the same sentence it was, parentheses and all. The color
+		// itself is not assertable — ink draws no color without a TTY — which is
+		// why the threshold below is checked as a value.
+		const { lastFrame, unmount } = render(
+			withTheme(
+				<StatusLine
+					phase="idle"
+					modelName="test-model"
+					elapsedMs={0}
+					contextInfo={{ usedTokens: 55_000, threshold: 100_000 }}
+				/>,
+			),
+		);
+		expect(flatFrame(lastFrame() ?? "")).toContain("ctx 55.0k (45% free)");
+		unmount();
+	});
+
+	test("the low-free threshold is twenty percent, and the comparison is strict", () => {
+		// Pinned as a value: the row's own use of it is `free < threshold`, and a
+		// reader deciding what "low" means needs the number, not the expression.
+		expect(CONTEXT_LOW_FREE_PERCENT).toBe(20);
 	});
 
 	test("a compaction in flight takes the label and leaves the rest of the row", () => {
@@ -764,6 +794,16 @@ describe("ui-state reducer", () => {
 		expect(toolPreview("Bash", { command: "git status" })).toBe("git status");
 		expect(toolPreview("Read", { file_path: "/a/b.ts" })).toBe("/a/b.ts");
 		expect(toolPreview("Grep", { pattern: "foo", path: "/x" })).toBe("foo");
+	});
+
+	test("a Task preview is its description, and a command still wins over one", () => {
+		// The Task tool's input is `{ description, prompt }` — no command, path or
+		// pattern — so the row used to render the whole input as JSON. The
+		// description is the same kind of one-line summary the other keys are.
+		expect(toolPreview("Task", { description: "修 flaky 测试", prompt: "…" })).toBe("修 flaky 测试");
+		// `description` is last in the key list on purpose: a call that carries a
+		// command alongside one keeps showing the command.
+		expect(toolPreview("Bash", { command: "ls", description: "list files" })).toBe("ls");
 	});
 
 	test("agent_end commits streaming text and records error/abort entries", () => {
