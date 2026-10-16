@@ -52,7 +52,7 @@ The cut in the pipeline recognizes the header and reuses the file from the execu
 
 Both streams over the bound at once put two truncation notices in one result. The pipeline's cut reads only the first, so the second count goes stale. This build accepts that. The file holds every character either way, and a marker format with ordinals is not worth the rare case.
 
-The background manager keeps one log file per shell in the temp directory, named `lbb-<id>-<random>.log`. The random suffix makes the path unguessable, so nobody can put a file or a link at it first. The manager creates the file with `wx` and mode 0600, because the log can hold anything a command printed. Ids have the form `shell_<n>` from a module counter. `MAX_SHELL_OUTPUT_CHARS` is 30000, the most that one read returns. `MAX_RETAINED_SHELLS` is 16.
+The background manager keeps one log file per shell in the temp directory, named `lbb-<id>-<random>.log`. The random suffix makes the path unguessable, so nobody can put a file or a link at it first. The manager creates the file with `wx` and mode 0600, because the log can hold anything a command printed. Ids have the form `shell_<n>` from a module counter. `MAX_SHELL_OUTPUT_CHARS` is 30000, the most that one read returns. `MAX_RETAINED_SHELLS` is 16. An evicted record takes its file with it — once the id no longer resolves, the path is out of every reader's reach — so the temp directory holds at most the retained logs and not one file per shell ever run.
 
 `readTail` returns the last `maxChars` of a file without a read of the whole file. One character is at most four UTF-8 bytes. A byte window of `4 * maxChars` always holds at least that many characters. The window opens at `bytes - window`.
 
@@ -60,7 +60,7 @@ A window that opens in the middle of a character decodes its leftover bytes as a
 
 Two events lose text. The window did not cover the file, or it did and the characters still did not fit.
 
-Log writes are best effort. A shell's output is diagnostic, so a failed append must not take the shell down. An error that surfaces from an event handler does exactly that. A gap in a log is better than a dead shell.
+Log writes are best effort. A shell's output is diagnostic, so a failed append must not take the shell down. An error that surfaces from an event handler does exactly that. A gap in a log is better than a dead shell. Writes are batched: a chunk goes into memory and the file is written when 64 KiB accumulate or on a 100 ms sweep, so a chatty shell pays one write per batch and not one per chunk. A read settles the buffer: `output` flushes what is pending before it reads, so a caller that appends and reads back sees its own write, and batching is never visible across a read. The end of a shell always flushes first — the exit line is on disk before any subscriber is told — and a chunk for an evicted record is dropped rather than recreating the file just deleted.
 
 The two spawn paths attach the same completion handlers. The handlers mark the shell ended unless a kill already did. They record the exit code, and they put the code in the log. A reader who only ever saw the file then learns how the shell ended, and not only what it printed along the way. A spawn `error` writes a note and sets exit code 127. `close` sets the real code, with a default of zero.
 

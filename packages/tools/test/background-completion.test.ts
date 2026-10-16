@@ -18,6 +18,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { existsSync, readFileSync } from "node:fs";
 import { BackgroundShellManager } from "../src/background.ts";
 import { EXIT_DRAIN_GRACE_MS } from "../src/operations.ts";
 
@@ -104,10 +105,12 @@ describe("completion hook", () => {
 });
 
 describe("kept records", () => {
-	test("ended shells are kept newest-first, up to sixteen", () => {
+	test("ended shells are kept newest-first, up to sixteen, and an evicted record's log goes with it", () => {
 		const manager = new BackgroundShellManager();
 		const procs = Array.from({ length: 20 }, () => fakeProc());
 		const ids = procs.map((proc, index) => adopt(manager, `cmd ${index}`, proc));
+		const droppedFile = manager.get(ids[0] ?? "")?.outputFile ?? "";
+		const keptFile = manager.get(ids[19] ?? "")?.outputFile ?? "";
 		for (const proc of procs) proc.emit("close", 0);
 
 		expect(manager.list()).toHaveLength(16);
@@ -117,6 +120,12 @@ describe("kept records", () => {
 		expect(manager.get(ids[3] ?? "")).toBeUndefined();
 		expect(manager.get(ids[4] ?? "")).toBeDefined();
 		expect(manager.get(ids[19] ?? "")).toBeDefined();
+		// The eviction is about the record and its file together: the temp
+		// directory drops the evicted shell's log while a retained record's log
+		// stays exactly as readable as `output` promises.
+		expect(droppedFile).not.toBe("");
+		expect(existsSync(droppedFile)).toBe(false);
+		expect(existsSync(keptFile)).toBe(true);
 	});
 
 	test("a running shell is never evicted — its record is the only handle left", () => {
@@ -291,4 +300,27 @@ describe("lifecycle hooks", () => {
 		expect(settled).toEqual(["completed"]);
 		expect(manager.get(id)?.exitCode).toBe(127);
 	}, 10_000);
+});
+
+describe("batched log writes", () => {
+	test("a chunk past the flush threshold lands without waiting for the sweep", () => {
+		const manager = new BackgroundShellManager();
+		const proc = fakeProc();
+		const id = adopt(manager, "chatty", proc);
+		const file = manager.get(id)?.outputFile ?? "";
+		expect(file).not.toBe("");
+
+		// The threshold is 64 KiB; a chunk at it cannot wait for the 100 ms
+		// sweep, and the write is synchronous, so the read right behind it sees
+		// the bytes. Reading earlier than that would race the timer.
+		const big = "x".repeat(64 * 1024);
+		manager.append(id, big);
+		expect(readFileSync(file, "utf8")).toHaveLength(big.length);
+
+		// Whatever the threshold left buffered is flushed when the shell ends,
+		// before the announcements — the exit line included, in order.
+		manager.append(id, "tail");
+		proc.emit("close", 0);
+		expect(readFileSync(file, "utf8")).toBe(`${big}tail\n[exit code: 0]`);
+	});
 });

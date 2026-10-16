@@ -231,8 +231,14 @@ export class NodeFileSystemOperations implements FileSystemOperations {
 			await rename(tmp, path);
 		} catch {
 			// Windows rename-over-existing can fail on some filesystems.
-			await writeFile(path, content, "utf8");
-			await unlink(tmp).catch(() => {});
+			try {
+				await writeFile(path, content, "utf8");
+			} finally {
+				// The temp file goes even when the fallback fails too: the first
+				// failure is the rename, the second is the error the caller sees,
+				// and neither is a reason to leave `path.lbb-tmp-*` behind.
+				await unlink(tmp).catch(() => {});
+			}
 		}
 	}
 

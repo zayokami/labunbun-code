@@ -2,7 +2,7 @@
 // Long-form design notes: docs/dev/tools.md
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
@@ -26,6 +26,21 @@ const MAX_SHELL_OUTPUT_CHARS = 30_000;
 
 /** How many ended shells the manager keeps pollable before evicting the oldest. */
 const MAX_RETAINED_SHELLS = 16;
+
+/**
+ * How much buffered output forces a log write before the sweep.
+ *
+ * A log used to take one synchronous append per chunk — a chatty command paid
+ * a syscall on the session's thread for every line it printed. Chunks now land
+ * in memory and reach the file in batches: at this threshold immediately, and
+ * otherwise on the sweep. The end of a shell always flushes first (see
+ * `#onEnded`), so the exit line is on disk before any reader is told the shell
+ * ended — the visibility the per-chunk synchronous writer used to give.
+ */
+const LOG_FLUSH_BYTES = 64 * 1024;
+
+/** How often the sweep turns small buffered chunks into one write. */
+const LOG_FLUSH_INTERVAL_MS = 100;
 
 /** How long a killed POSIX shell gets to honour `SIGTERM` before `killPidTree` escalates to `SIGKILL`. */
 const KILL_ESCALATE_MS = 250;
@@ -148,6 +163,9 @@ interface ShellEntry {
 	release?: () => void;
 	/** The confined shell's handle-level kill: the backstop behind the pid-tree kill. */
 	terminate?: () => void;
+	/** Log chunks not yet on disk, and their byte count; see `#append`. */
+	pending?: string[];
+	pendingBytes?: number;
 }
 
 let shellCounter = 0;
@@ -168,21 +186,6 @@ function createLogFile(id: string, initial: string): string {
 	const outputFile = join(tmpdir(), `lbb-${id}-${randomBytes(8).toString("hex")}.log`);
 	writeFileSync(outputFile, initial, { flag: "wx", mode: 0o600 });
 	return outputFile;
-}
-
-/**
- * A best-effort log writer. A shell's output is diagnostic: failing to append a
- * chunk must not take the shell down, and letting the error surface from an
- * event handler would do exactly that — worse than a gap in a log.
- */
-function logAppender(outputFile: string): (chunk: Buffer | string) => void {
-	return (chunk) => {
-		try {
-			appendFileSync(outputFile, typeof chunk === "string" ? chunk : chunk.toString("utf8"));
-		} catch {
-			// best-effort logging
-		}
-	};
 }
 
 export class BackgroundShellManager {
@@ -214,6 +217,75 @@ export class BackgroundShellManager {
 		this.#runtime = runtime ?? detectRuntime(process.platform, shell);
 		this.#operations = operations;
 		this.#shell = shell;
+	}
+
+	/** The sweep timer, alive only while some entry has buffered output. */
+	#sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+	// Long-form design notes: docs/dev/tools.md
+	/**
+	 * The write path for every chunk a shell produces — its pipes, an adopted
+	 * exec's forwarded chunks, and the manager's own annotations — best-effort,
+	 * as it always was: a shell's output is diagnostic, and failing to append a
+	 * chunk must not take the shell down. Loose chunks buffer in memory and
+	 * reach the file in batches (see LOG_FLUSH_BYTES); a chunk for a shell that
+	 * no longer has a record is dropped rather than recreating a log the
+	 * eviction just deleted; and a chunk that arrives after the shell ended
+	 * writes straight through, so the drain's late output stays ordered behind
+	 * the exit line.
+	 */
+	#append(entry: ShellEntry, chunk: Buffer | string): void {
+		if (!this.#entries.has(entry.info.id)) return;
+		const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+		if (entry.endedAt !== undefined) {
+			try {
+				appendFileSync(entry.info.outputFile, text);
+			} catch {
+				// best-effort logging
+			}
+			return;
+		}
+		entry.pending ??= [];
+		entry.pending.push(text);
+		entry.pendingBytes = (entry.pendingBytes ?? 0) + Buffer.byteLength(text);
+		if (entry.pendingBytes >= LOG_FLUSH_BYTES) {
+			this.#flushEntry(entry);
+			return;
+		}
+		if (this.#sweepTimer === null) {
+			this.#sweepTimer = setInterval(() => this.#sweep(), LOG_FLUSH_INTERVAL_MS);
+			// The same rule as the session's polls: a pending write must not keep
+			// the process alive.
+			this.#sweepTimer.unref();
+		}
+	}
+
+	/** One append of everything buffered, in order. */
+	#flushEntry(entry: ShellEntry): void {
+		const chunks = entry.pending;
+		if (chunks === undefined || chunks.length === 0) return;
+		entry.pending = [];
+		entry.pendingBytes = 0;
+		try {
+			appendFileSync(entry.info.outputFile, chunks.join(""));
+		} catch {
+			// best-effort logging
+		}
+	}
+
+	/** The sweep: flush every entry with buffered output, and retire the timer when none is left. */
+	#sweep(): void {
+		let any = false;
+		for (const entry of this.#entries.values()) {
+			if (entry.pending !== undefined && entry.pending.length > 0) {
+				this.#flushEntry(entry);
+				any = true;
+			}
+		}
+		if (!any && this.#sweepTimer !== null) {
+			clearInterval(this.#sweepTimer);
+			this.#sweepTimer = null;
+		}
 	}
 
 	/**
@@ -276,6 +348,12 @@ export class BackgroundShellManager {
 	#onEnded(entry: ShellEntry): void {
 		if (entry.endedAt !== undefined) return;
 		entry.endedAt = Date.now();
+		// Whatever is still buffered goes to disk before anyone is told, so a
+		// subscriber that reads the log in its handler sees the exit line the
+		// caller appended just above. Appends after this point write through
+		// directly (see `#append`), which keeps late drain output ordered
+		// behind it.
+		this.#flushEntry(entry);
 		// The confined shell's grant comes back before anyone is told the shell
 		// ended: a subscriber that immediately starts the next shell must not
 		// race the release, and a cleanup warning belongs in the log before a
@@ -313,8 +391,20 @@ export class BackgroundShellManager {
 		const ended = [...this.#entries.entries()].filter(([, entry]) => entry.endedAt !== undefined);
 		if (ended.length <= MAX_RETAINED_SHELLS) return;
 		ended.sort((a, b) => (a[1].endedAt ?? 0) - (b[1].endedAt ?? 0));
-		for (const [id] of ended.slice(0, ended.length - MAX_RETAINED_SHELLS)) {
+		for (const [id, entry] of ended.slice(0, ended.length - MAX_RETAINED_SHELLS)) {
 			this.#entries.delete(id);
+			// The file goes with the record: once the id no longer resolves, the
+			// path inside `info` is out of every reader's reach — `output` guards
+			// on the map — so keeping the file would only pile up one log per
+			// shell per session in the temp directory forever. Best-effort, like
+			// the writes, and after the delete so a racing late chunk is already
+			// being dropped rather than recreating the file.
+			this.#flushEntry(entry);
+			try {
+				rmSync(entry.info.outputFile, { force: true });
+			} catch {
+				// best-effort: a log left behind is not worth a crash
+			}
 		}
 	}
 
@@ -358,7 +448,12 @@ export class BackgroundShellManager {
 		shellCounter += 1;
 		const id = `shell_${shellCounter}`;
 		const outputFile = createLogFile(id, "");
-		const append = logAppender(outputFile);
+		// Declared here, assigned below: the append path buffers on the entry,
+		// and the container branch builds its cleanup line before the entry
+		// literal exists. Every call reaches the closure after assignment — the
+		// pipes are wired and `release` runs only once the entry is in the map.
+		let entry: ShellEntry;
+		const append = (chunk: Buffer | string): void => this.#append(entry, chunk);
 
 		const { command: shellCommand, args } = this.#shell;
 		// The wrapper must name the enforcing proxy's own route before the argv
@@ -473,7 +568,7 @@ export class BackgroundShellManager {
 			exitCode: null,
 			pid: proc.pid,
 		};
-		const entry: ShellEntry = { info, proc };
+		entry = { info, proc };
 		if (release !== undefined) entry.release = release;
 		if (terminate !== undefined) entry.terminate = terminate;
 		this.#entries.set(id, entry);
@@ -517,7 +612,7 @@ export class BackgroundShellManager {
 		};
 		const entry: ShellEntry = { info, proc: input.child };
 		this.#entries.set(id, entry);
-		this.#attachExit(entry, logAppender(outputFile));
+		this.#attachExit(entry, (chunk) => this.#append(entry, chunk));
 		this.#onSpawned(info);
 
 		return info;
@@ -532,7 +627,7 @@ export class BackgroundShellManager {
 	append(id: string, chunk: string): void {
 		const entry = this.#entries.get(id);
 		if (!entry) return;
-		logAppender(entry.info.outputFile)(chunk);
+		this.#append(entry, chunk);
 	}
 
 	// Long-form design notes: docs/dev/tools.md
@@ -560,7 +655,12 @@ export class BackgroundShellManager {
 	/** The end of a shell's output so far, at most `maxChars` of it. */
 	output(id: string, maxChars = MAX_SHELL_OUTPUT_CHARS): string {
 		const entry = this.#entries.get(id);
-		if (!entry || !existsSync(entry.info.outputFile)) return "";
+		if (!entry) return "";
+		// A read settles the buffer: batching may delay bytes on disk, but never
+		// past the next read, so every caller that appends and then reads back
+		// (the adopted-shell handoff does exactly that) sees what it wrote.
+		this.#flushEntry(entry);
+		if (!existsSync(entry.info.outputFile)) return "";
 		const tail = readTail(entry.info.outputFile, maxChars);
 		const header = tail.truncated
 			? `[log tail: last ${tail.text.length} characters of ${tail.bytes} bytes — full log: ${entry.info.outputFile}]\n`

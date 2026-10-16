@@ -2259,6 +2259,10 @@ export async function runInteractive(options: InteractiveOptions = {}): Promise<
 	detachShellNotices();
 	detachShellLedger();
 	clearInterval(shellPoll);
+	// The watch poll is the shell poll's twin and outlives the session by
+	// exactly as much: nothing reads the watch surface once the user has quit,
+	// so the same clear the shell poll gets is the same clear it needs.
+	clearInterval(watchPoll);
 	// A band member mid-request is an in-flight request like any other, and
 	// nothing is waiting for its answer once the user has quit.
 	beetleSurface.shutdown();

@@ -686,6 +686,14 @@ export async function playDaisyBell(): Promise<Playback> {
 		// failed run does not leave a WAV behind for the OS to find.
 		rmSync(dir, { recursive: true, force: true });
 	});
+	proc.on("close", () => {
+		// And a tune that plays to the end cleans up the same way, as soon as the
+		// player exits. The handler needs this process to outlive the player — a
+		// session that quits mid-tune leaves the file for the temp directory's
+		// own cleanup — but `stdio: "ignore"` means the player's exit always
+		// raises `close`, so the residue here is bounded by that one race.
+		rmSync(dir, { recursive: true, force: true });
+	});
 
 	return {
 		played: true,
