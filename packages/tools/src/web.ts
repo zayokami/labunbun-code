@@ -95,7 +95,11 @@ async function fetchWithTimeout(url: string, init?: RequestInit, signal?: AbortS
 	// The run's own cancel has to reach the request too, or an interrupted turn
 	// stays parked on the network until the timeout above expires.
 	const onAbort = () => controller.abort();
-	signal?.addEventListener("abort", onAbort, { once: true });
+	// A signal that aborted before this listener was attached never fires
+	// "abort" again, so the already-aborted case is read first — attaching
+	// alone would let the request run on for a caller that already gave up.
+	if (signal?.aborted) onAbort();
+	else signal?.addEventListener("abort", onAbort, { once: true });
 	try {
 		return await fetch(url, { ...init, signal: controller.signal });
 	} finally {

@@ -381,6 +381,50 @@ describe("session cancellation integration", () => {
 		expect(faux.receivedContexts).toHaveLength(2);
 	});
 
+	test("a cancel that lands during the compaction check still ends the turn as aborted", async () => {
+		// The flag that marks a turn as aborted is set by a listener registered
+		// just before the stream — and a signal does not replay for a listener
+		// added after it fired. Esc that lands in a wait before that point (the
+		// compaction check, a transform hook) used to reach the stream as an
+		// already-aborted signal that a transport is free to answer without an
+		// error, which is how the turn got recorded as completed and its tool
+		// calls were dispatched after the user pressed Esc.
+		const faux = fauxProvider([{ text: "answered anyway", toolCalls: [{ id: "late", name: "probe", arguments: {} }] }]);
+		let executions = 0;
+		let seen: AbortSignal | undefined;
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			tools: [
+				probe(async () => {
+					executions++;
+					return { content: [{ type: "text", text: "ran anyway" }] };
+				}),
+			],
+			deps: {
+				streamFn: faux.streamFn,
+				checkCompaction: async (_context, options) => {
+					// The check is handed the run's own signal, and this is where
+					// the user's Esc arrives — then the check answers "send it as
+					// it is", which is honest: it decided nothing.
+					seen = options?.signal;
+					session.abort();
+					return null;
+				},
+			},
+		});
+
+		expect(await session.prompt("go")).toBe("aborted");
+		expect(executions).toBe(0);
+		expect(seen?.aborted).toBe(true);
+		const assistant = session.messages.find((m) => m.role === "assistant");
+		expect(assistant).toMatchObject({ stopReason: "aborted" });
+		const results = paired(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0].isError).toBe(true);
+		expect(session.isRunning).toBe(false);
+		expect(session.isInterrupted).toBe(true);
+	});
+
 	test("abort in an async tool-start subscriber prevents permissions and execution", async () => {
 		let calls = 0;
 		let permissions = 0;

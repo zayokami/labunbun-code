@@ -4,7 +4,15 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, Context, Model, StreamFn } from "@labunbun/ai";
-import { assistantMessage, FAUX_MODEL, fauxProvider, textContent, toolResultMessage, userMessage } from "@labunbun/ai";
+import {
+	assistantMessage,
+	FAUX_MODEL,
+	fauxProvider,
+	MessageBuilder,
+	textContent,
+	toolResultMessage,
+	userMessage,
+} from "@labunbun/ai";
 import {
 	COMPACTION_BOUNDARY_LEAD,
 	COMPACTION_DISABLED_NOTICE,
@@ -1589,5 +1597,93 @@ describe("the idle trim", () => {
 		const decision = await manager.check(idleSession(), { idleMs: IDLE_TRIM_GAP_MS, force: true });
 		expect(decision?.action).toBe("compact");
 		expect(calls).toHaveLength(1);
+	});
+});
+
+describe("an interrupted compaction", () => {
+	/** Over the 67k threshold, under the 97k hard limit: what a check may compact. */
+	const overThreshold: Context = { systemPrompt: "s".repeat(300_000), messages: [userMessage("short")] };
+
+	test("the run's signal reaches the summary request unchanged", async () => {
+		// The cancel has to survive every hop — the loop's controller into the
+		// check, the check into the summary request — or Esc during a summary does
+		// nothing and the pass runs to completion behind it. Identity, not merely
+		// presence: a copy is a signal the abort never fires on.
+		const controller = new AbortController();
+		const seen: (AbortSignal | undefined)[] = [];
+		const streamFn: StreamFn = async function* (model, context, options) {
+			seen.push(options?.signal);
+			yield* fauxProvider([{ text: "<summary>1. Request: x</summary>", usage: { input: 10, output: 10 } }]).streamFn(
+				model,
+				context,
+				options,
+			);
+		};
+		const manager = new CompactionManager(CONFIG, { streamFn, summarizerModel: SUMMARIZER });
+
+		expect((await manager.check(overThreshold, { signal: controller.signal }))?.action).toBe("compact");
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toBe(controller.signal);
+	});
+
+	test("a cancelled summary is not a failure: no breaker trip, no blocked verdict", async () => {
+		// Three cancels in a row counted as three failures, which trips the breaker
+		// and switches automatic compaction off for the session — the summarizer
+		// blamed for the user pressing Esc. And a cancel is not a verdict about the
+		// context either: "the conversation no longer fits" is the wrong report for
+		// someone who just asked everything to stop.
+		const manager = new CompactionManager(CONFIG, {
+			streamFn: fauxProvider([{ text: "<summary>1. Request: x</summary>", abortIfSignaled: true }]).streamFn,
+			summarizerModel: SUMMARIZER,
+		});
+
+		const cancelled = () => {
+			const controller = new AbortController();
+			controller.abort();
+			return controller.signal;
+		};
+		for (let i = 0; i < 3; i++) {
+			expect(await manager.check(overThreshold, { signal: cancelled() })).toBeNull();
+		}
+		expect(manager.isTripped).toBe(false);
+		// The forced path is where "blocked" would surface — the request the
+		// provider already refused may not be deferred — and a cancel is the one
+		// thing it still may answer with "not this way".
+		expect(await manager.check(overThreshold, { signal: cancelled(), force: true })).toBeNull();
+		// No receipt, either: nothing was adopted, so the last verification is not
+		// this pass's to claim.
+		expect(manager.lastVerification()).toBeUndefined();
+	});
+
+	test("a reply cut off by a cancel is not adopted as a summary", async () => {
+		// The abort arrived after a text delta: text is in hand, and none of it is
+		// a summary — a reply cut mid-sentence describes half a conversation, and
+		// adopting it would leave the session with a boundary whose content is a
+		// fragment. The pass must end without a boundary and without a record.
+		const store = SessionStore.startNew(
+			mkdtempSync(join(tmpdir(), "lbb-compact-")),
+			mkdtempSync(join(tmpdir(), "lbb-compact-home-")),
+		);
+		const streamFn: StreamFn = async function* (model) {
+			const builder = new MessageBuilder(model.provider, model.id);
+			yield builder.start();
+			yield builder.textStart(0);
+			yield builder.textDelta(0, "<summary>half a summary, cut off");
+			yield builder.aborted();
+		};
+		const manager = new CompactionManager(CONFIG, { streamFn, summarizerModel: SUMMARIZER, store });
+		const messages: AgentMessage[] = [
+			userMessage("do the thing"),
+			assistantMessage({ usage: { input: 90_000, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+		];
+		for (const message of messages) store.appendMessage(message);
+		const controller = new AbortController();
+		controller.abort();
+
+		await expect(manager.compact({ systemPrompt: "sys", messages }, { signal: controller.signal })).rejects.toThrow(
+			"interrupted",
+		);
+		expect(store.compactions()).toHaveLength(0);
+		expect(manager.lastVerification()).toBeUndefined();
 	});
 });

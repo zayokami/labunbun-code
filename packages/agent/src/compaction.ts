@@ -805,7 +805,10 @@ export class CompactionManager {
 	 * are not the same event to the user, the cache report or the session file.
 	 * `check()` is the only shape the loop asks for.
 	 */
-	async #pass(context: Context, options: { force?: boolean; idleMs?: number } = {}): Promise<CompactionPass | null> {
+	async #pass(
+		context: Context,
+		options: { force?: boolean; idleMs?: number; signal?: AbortSignal } = {},
+	): Promise<CompactionPass | null> {
 		// Every ask counts, including the ones answered "not yet": what the refill
 		// record measures is distance — how many turns of context went by between
 		// one compaction and the next — and a turn that was turned away is one of
@@ -869,8 +872,13 @@ export class CompactionManager {
 		// sets it from a provider that just answered `context_overflow`. So it is
 		// also the honest name for why this pass is happening, and it is recorded
 		// that way — a reader of the session file can tell a summary the threshold
-		// asked for from one a 400 forced.
-		return { kind: "compact", context: await this.compact(context, options.force ? { trigger: "overflow" } : {}) };
+		// asked for from one a 400 forced. The signal rides along into the summary
+		// request, which is the one step of this pass that waits.
+		const signal = options.signal;
+		return {
+			kind: "compact",
+			context: await this.compact(context, options.force ? { trigger: "overflow", signal } : { signal }),
+		};
 	}
 
 	/**
@@ -951,8 +959,17 @@ export class CompactionManager {
 	 * caller: the manager has no clock, and the wall clock belongs to whoever
 	 * listens to the user. It is what offers the idle rung; a check made without
 	 * it behaves exactly as checks always did.
+	 *
+	 * `signal` is the run's own cancellation, handed through to the summary
+	 * request — the one step of a check that waits. A cancelled pass is not a
+	 * verdict about this context: it counts nothing against the breaker and
+	 * answers nothing, rather than telling someone who just pressed Esc that
+	 * their conversation no longer fits.
 	 */
-	async check(context: Context, options: { force?: boolean; idleMs?: number } = {}): Promise<CompactionCheck | null> {
+	async check(
+		context: Context,
+		options: { force?: boolean; idleMs?: number; signal?: AbortSignal } = {},
+	): Promise<CompactionCheck | null> {
 		const overHard = options.force === true || estimateContextUsage(context) >= hardContextLimit(this.#config);
 		try {
 			const pass = await this.#pass(context, options);
@@ -961,6 +978,11 @@ export class CompactionManager {
 				? { action: "compact", context: pass.context }
 				: { action: "reduced", context: pass.context, cleared: pass.cleared };
 		} catch {
+			// A cancel is not a failure to report as one: the request it would name
+			// as unfixable ("the conversation no longer fits") is the one the user
+			// just walked away from. The turn proceeds, and the cancel reaches the
+			// run's own request from the same signal.
+			if (options.signal?.aborted) return null;
 			// The failure is already counted in #consecutiveFailures. Below the hard
 			// limit the turn goes ahead as it always did — the provider's own error is
 			// the report, and it may well fit after all.
@@ -968,8 +990,16 @@ export class CompactionManager {
 		}
 	}
 
-	/** Summarize and rebuild the context. Throws on failure (caller counts). */
-	async compact(context: Context, options: { trigger?: CompactionTrigger; focus?: string } = {}): Promise<Context> {
+	/**
+	 * Summarize and rebuild the context.
+	 *
+	 * Throws on failure (caller counts); a cancellation throws too, and the
+	 * caller reads `options.signal` to tell the two apart.
+	 */
+	async compact(
+		context: Context,
+		options: { trigger?: CompactionTrigger; focus?: string; signal?: AbortSignal } = {},
+	): Promise<Context> {
 		const trigger = options.trigger ?? "auto";
 		try {
 			const suffix = keepSuffix(context.messages);
@@ -979,7 +1009,7 @@ export class CompactionManager {
 			// it announces has not started, and the wait is the whole point of saying
 			// it — a summary is a full-prefix request that can take half a minute.
 			this.#deps.onPhase?.({ kind: "preparing" });
-			const { summary, model } = await this.#summarize(context, prefix, options.focus);
+			const { summary, model } = await this.#summarize(context, prefix, options.focus, options.signal);
 			// The reply is in; what remains is rebuilding the transcript it replaces
 			// — boundary, re-injected files, retained suffix. Quick, but it is still
 			// the pass working, and the last chance to say the pass has not ended.
@@ -1054,7 +1084,10 @@ export class CompactionManager {
 
 			return { ...context, messages };
 		} catch (error) {
-			this.#consecutiveFailures++;
+			// A cancel is not a failure of the mechanism: counting it would let three
+			// Esc presses trip the breaker and switch automatic compaction off for
+			// the session, punishing the summarizer for the user's change of mind.
+			if (!options.signal?.aborted) this.#consecutiveFailures++;
 			this.#deps.onPhase?.({ kind: "failed", trigger });
 			throw error;
 		}
@@ -1133,6 +1166,7 @@ export class CompactionManager {
 		context: Context,
 		prefix: AgentMessage[],
 		focus?: string,
+		signal?: AbortSignal,
 	): Promise<{ summary: string; model: string }> {
 		const instruction = focus?.trim() ? `${SUMMARY_PROMPT}\n\nFocus especially on: ${focus.trim()}` : SUMMARY_PROMPT;
 		// The ladder in the order the trade goes — cache first, bytes only under
@@ -1172,12 +1206,16 @@ export class CompactionManager {
 			let text = "";
 			let servedBy = model.id;
 			let announcedResponse = false;
-			// Whether the provider refused this attempt for size. Anything else that
-			// goes wrong is a real failure and keeps its own meaning.
+			// Whether the provider refused this attempt for size. A cancel is the
+			// third kind of ending, and unlike a refusal it ends the pass rather
+			// than buying a smaller request. Anything else that goes wrong is a
+			// real failure and keeps its own meaning.
 			let tooBig = false;
+			let aborted = false;
 			for await (const event of this.#deps.streamFn(model, summarizeRequest, {
 				thinkingLevel: "off",
 				maxOutputTokens,
+				signal,
 			})) {
 				if (event.type === "text_delta") {
 					if (!announcedResponse) {
@@ -1193,8 +1231,27 @@ export class CompactionManager {
 						tooBig = true;
 						break;
 					}
+					// A cancel reaches the wire as an error event with no error kind
+					// and an aborted stop reason. Recognized here so it does not read
+					// as "compaction stream failed": the stream ended because someone
+					// asked it to, and the pass unwinds below on the caller's signal.
+					if (event.message.stopReason === "aborted" || signal?.aborted) {
+						aborted = true;
+						break;
+					}
 					throw new Error(event.message.errorMessage ?? "compaction stream failed");
 				}
+			}
+			if (aborted) {
+				// Whatever arrived before the cancel is not a summary — a reply cut
+				// short mid-sentence describes half a conversation — so nothing is
+				// adopted and nothing is recorded. Thrown rather than returned for
+				// the manual pass, which has to report a cancel instead of a
+				// success: the callers read `signal.aborted` to tell this apart
+				// from a failure and count neither.
+				const cancelled = new Error("Compaction interrupted");
+				cancelled.name = "AbortError";
+				throw cancelled;
 			}
 			if (!tooBig) {
 				const summary = stripAnalysis(text);

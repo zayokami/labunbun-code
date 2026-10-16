@@ -380,8 +380,14 @@ export class AgentSession {
 				}
 				if (this.#deps.checkCompaction) {
 					// After a refusal for size, the estimate is known to be wrong about
-					// this session, so the next turn does not get to consult it.
-					const decision = await this.#deps.checkCompaction(context, { force: this.#contextOverflowed });
+					// this session, so the next turn does not get to consult it. The
+					// run's signal rides along: the check may start a summarization,
+					// which is a request like the one being prepared, and Esc has to
+					// reach it too.
+					const decision = await this.#deps.checkCompaction(context, {
+						force: this.#contextOverflowed,
+						signal: this.#abortController.signal,
+					});
 					if (decision?.action === "blocked") {
 						// Nothing was sent. Ending the run here is the whole point: the
 						// alternative is a provider 400 with no explanation, repeated on
@@ -439,7 +445,15 @@ export class AgentSession {
 				// SSE response without an error, which would otherwise be recorded as a
 				// completed turn and dispatch that turn's tool calls after the user
 				// pressed Esc.
-				let abortedWhileStreaming = false;
+				//
+				// Seeded from the signal, because a wait before this one — the
+				// compaction check, a transform hook — can be where Esc landed, and an
+				// abort is not replayed for a listener added after it (same rule the
+				// retry ladder's sleeps follow). Without the pre-check that cancel
+				// reaches the stream as an already-aborted signal, and a transport that
+				// answers one without an error would have the turn recorded as a
+				// completed one.
+				let abortedWhileStreaming = streamOptions.signal?.aborted ?? false;
 				const onAbort = () => {
 					abortedWhileStreaming = true;
 				};
@@ -656,8 +670,21 @@ export class AgentSession {
 	): Promise<ToolResultMessage[]> {
 		const resolved: ResolvedToolCall[] = [];
 		const unknownResults: ToolResultMessage[] = [];
-
+		// One dispatch per call id: the first occurrence is the call, and a repeat
+		// of it is the same call. A provider can emit an id twice — a retried
+		// stream, a replay — and the duplicate used to be dispatched again, which
+		// ran the tool's side effect twice and, because every call maps to its
+		// result by id below, put two same-id results in the transcript for the
+		// next request to pair against the same tool_use block.
+		const calls: ToolCall[] = [];
+		const seen = new Set<string>();
 		for (const call of toolCalls) {
+			if (seen.has(call.id)) continue;
+			seen.add(call.id);
+			calls.push(call);
+		}
+
+		for (const call of calls) {
 			if (earlyPromises.has(call.id)) continue; // already executing from the stream
 			const tool = this.#tools.find((t) => t.name === call.name);
 			if (!tool?.isEnabled?.()) {
@@ -705,13 +732,16 @@ export class AgentSession {
 		// drops calls it cannot map — so the missing ones are settled as
 		// interrupted here. First settlement wins, which makes this a no-op for
 		// everything that already returned.
-		for (const call of toolCalls) {
+		for (const call of calls) {
 			if (resultsByCallId.has(call.id) || earlySettled.has(call.id)) continue;
 			this.#recordToolResult(call.id, interruptedToolResult(call.id, call.name), resultsByCallId, earlySettled);
 		}
 
-		// Assemble strictly in assistant source order.
-		return toolCalls.map((call) => resultsByCallId.get(call.id)).filter((r) => r !== undefined);
+		// Assemble strictly in assistant source order, over the deduplicated calls:
+		// a repeated id has one result, and mapping the raw list would hand that
+		// one result to both copies — the same object pushed into the transcript
+		// twice.
+		return calls.map((call) => resultsByCallId.get(call.id)).filter((r) => r !== undefined);
 	}
 
 	/**
@@ -891,8 +921,13 @@ export class AgentSession {
 		await this.#awaitTools([...earlyPromises.values()]);
 		if (!assistant) return;
 		const real: ToolResultMessage[] = [];
+		// One pass per block id, for the same reason the dispatch path deduplicates:
+		// a repeated id is one call, and pushing its one result once per copy would
+		// record the same result in the transcript twice.
+		const handled = new Set<string>();
 		for (const block of assistant.content) {
-			if (block.type !== "toolCall") continue;
+			if (block.type !== "toolCall" || handled.has(block.id)) continue;
+			handled.add(block.id);
 			const result = earlyResults.get(block.id);
 			if (result) {
 				real.push(result);
@@ -929,6 +964,9 @@ export class AgentSession {
 			);
 			this.messages.push(orphan);
 			this.#store?.appendMessage(orphan);
+			// Recorded as it is written, so a second block carrying the same id —
+			// one call, repeated — is not answered with a second orphan.
+			existing.add(block.id);
 		}
 	}
 }

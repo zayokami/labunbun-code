@@ -428,8 +428,16 @@ export interface AgentDeps {
 	 * `force` says the estimate has been proven wrong about this session: the
 	 * provider refused the last request for size, so the threshold does not get
 	 * to decide again.
+	 *
+	 * `signal` is the run's own cancellation. A check is not a decision made in
+	 * an instant — it can start a summarization, a full-price request that takes
+	 * as long as a turn — and the user's Esc has to reach that wait: the pass
+	 * ends, as a cancel rather than as a failure.
 	 */
-	checkCompaction?: (context: Context, options?: { force?: boolean }) => Promise<CompactionCheck | null>;
+	checkCompaction?: (
+		context: Context,
+		options?: { force?: boolean; signal?: AbortSignal },
+	) => Promise<CompactionCheck | null>;
 	/**
 	 * Consulted before every model call, after the turn limit and before the
 	 * compaction check: `ok` sends the turn as it is, and `blocked` ends the run

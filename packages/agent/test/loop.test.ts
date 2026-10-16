@@ -142,6 +142,70 @@ describe("AgentSession loop", () => {
 		expect(results[0].isError).toBe(false);
 	});
 
+	test("a repeated call id runs once and leaves one result", async () => {
+		// A provider can emit the same id twice — a retried stream, a replay. The
+		// second copy is the same call: dispatching it again repeats the side
+		// effect, and because results are assembled by id, the one result used to
+		// be handed to both copies — the transcript grew two same-id results and
+		// the next request carried them beside the two same-id tool_use blocks.
+		const calls: unknown[] = [];
+		let executions = 0;
+		const tool = echoTool({
+			call: async (input: any) => {
+				executions++;
+				calls.push(input);
+				return { content: [{ type: "text", text: `echo:${input.text}` }] };
+			},
+		});
+		const sent: AgentMessage[][] = [];
+		const faux = fauxProvider([
+			{
+				toolCalls: [
+					{ id: "dup", name: "echo", arguments: { text: "one" } },
+					{ id: "dup", name: "echo", arguments: { text: "one" } },
+				],
+			},
+			{ text: "done" },
+		]);
+		const session = new AgentSession({
+			model: FAUX_MODEL,
+			systemPrompt: "test",
+			tools: [tool],
+			deps: {
+				streamFn: async function* (model, context, options) {
+					sent.push([...context.messages]);
+					yield* faux.streamFn(model, context, options);
+				},
+			},
+		});
+		const events: AgentEvent[] = [];
+		session.on((event) => {
+			events.push(event);
+		});
+
+		expect(await session.prompt("go")).toBe("completed");
+
+		expect(executions).toBe(1);
+		expect(calls).toEqual([{ text: "one" }]);
+		expect(events.filter((event) => event.type === "tool_execution_start")).toHaveLength(1);
+		expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(1);
+		const results = toolResultsOf(session.messages);
+		expect(results).toHaveLength(1);
+		expect(results[0].toolCallId).toBe("dup");
+		// The next request pairs: every tool_use block still resolves to a result
+		// (the duplicate block and the original share the id), and no result is an
+		// orphan. The assistant content is left as the model wrote it — collapsing
+		// the repeated block is a different change, with the wire to answer for it.
+		const second = sent[1] ?? [];
+		const callIds = second.flatMap((m) =>
+			m.role === "assistant" ? m.content.filter((b) => b.type === "toolCall").map((b) => b.id) : [],
+		);
+		const resultIds = toolResultsOf(second).map((r) => r.toolCallId);
+		expect(callIds).toEqual(["dup", "dup"]);
+		expect(resultIds).toEqual(["dup"]);
+		for (const id of callIds) expect(resultIds).toContain(id);
+	});
+
 	test("a hook's replacement still answers the call it replaced", async () => {
 		// The round is assembled by matching result ids to call ids. When a hook
 		// hands back a message keyed to a different id, the replacement used to be
