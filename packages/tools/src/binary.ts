@@ -22,8 +22,11 @@
  * it one (`.go.buildinfo`, `__go_buildinfo`), and otherwise by scanning the
  * first writable data section. That fallback is load-bearing on Windows,
  * where the linker leaves the blob inside `.data` and no name matching will
- * ever find it. A binary without either metadata block is still a fully
- * reported binary; "no Go build info found" is a finding, not a failure.
+ * ever find it. A third block, Electron's fuse wire, is found by its sentinel
+ * string anywhere in the file: it is what says how packaging configured the
+ * features Electron would otherwise accept from the environment. A binary
+ * without these blocks is still a fully reported binary; "no Go build info
+ * found" is a finding, not a failure.
  *
  * The whole file is read into one buffer, capped at 256 MiB, rather than
  * seeked into piecemeal: every structure this reports is an offset from an
@@ -43,6 +46,7 @@ import { inflateSync } from "node:zlib";
 import { type AnyTool, buildTool, formatCutMarker } from "@labunbun/agent";
 import { z } from "zod";
 import { guardPathContainment } from "./containment.ts";
+import { electronFuseLines } from "./electron-fuses.ts";
 
 /** Whole-report cap; past it the tail is cut with an explicit marker. */
 const MAX_REPORT_CHARS = 20_000;
@@ -116,9 +120,9 @@ export function createInspectBinaryTool(cwd: string): AnyTool {
 			"Reports what an executable or object file is, read from its magic bytes rather than its name: the " +
 			"container format (PE, ELF, Mach-O including fat binaries, WebAssembly, or unrecognized) and that " +
 			"format's own structure — machine/CPU type, entry point, sections or segments, and for PE its " +
-			"subsystem and resource types. Two known metadata blocks are extracted when present: Go build info " +
-			"(toolchain version and module list) and cargo-auditable `.dep-v0` dependency data. It does not " +
-			"disassemble or decompile code. Use it to identify a binary and see how it was built.",
+			"subsystem and resource types. Three known metadata blocks are extracted when present: Go build info " +
+			"(toolchain version and module list), cargo-auditable `.dep-v0` dependency data, and Electron fuse " +
+			"states. It does not disassemble or decompile code. Use it to identify a binary and see how it was built.",
 		inputSchema: z.object({
 			path: z.string().describe("Path to the executable or object file to inspect"),
 		}),
@@ -362,6 +366,14 @@ function buildReport(displayPath: string, data: Buffer): string {
 	if (!found.metadataIncluded) {
 		lines.push(...goBuildInfoLines(view, found), ...cargoAuditableLines(found));
 	}
+	// Electron fuses are searched across the whole file, not a mapped section:
+	// the wire sits in whatever data section the linker chose, in whichever
+	// slice of a universal binary that was. The gate is the container kind, not
+	// `searched`: a fat Mach-O reports per-slice metadata inside its own lines
+	// and is `searched: false`, yet a universal Electron binary is exactly that
+	// shape, with one sentinel per slice. The scan itself is silent unless the
+	// sentinel is there, so a non-Electron binary's report is unchanged.
+	if (kind !== "WASM" && kind !== "unrecognized") lines.push(...electronFuseLines(data));
 	return lines.join("\n");
 }
 

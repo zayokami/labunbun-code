@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { createInspectBinaryTool } from "../src/binary.ts";
+import { ELECTRON_FUSE_SENTINEL, electronFuseLines } from "../src/electron-fuses.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -1114,6 +1115,162 @@ describe("cargo-auditable", () => {
 		);
 
 		expect(textOf(await run(dir, "shape.elf"))).toContain("holds JSON without a packages array");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Electron fuses
+// ---------------------------------------------------------------------------
+
+/** The sentinel, a version byte, a length byte, and the fuse states behind them. */
+function fuseWire(states: number[], version = 1): Buffer {
+	return cat(ascii(ELECTRON_FUSE_SENTINEL), Buffer.from([version, states.length]), Buffer.from(states));
+}
+
+describe("Electron fuses", () => {
+	test("a wire in a PE section is reported fuse by fuse, by name", async () => {
+		const dir = tempDir();
+		const wire = fuseWire([0x31, 0x30, 0x31, 0x31, 0x30, 0x31, 0x30, 0x31, 0x30]);
+		fixture(
+			dir,
+			"app.exe",
+			buildPe([
+				{
+					name: ".data",
+					virtualAddress: 0x1000,
+					virtualSize: wire.length,
+					rawSize: wire.length,
+					characteristics: 0x40000040,
+					content: wire,
+				},
+			]),
+		);
+
+		const text = textOf(await run(dir, "app.exe"));
+
+		expect(text).toContain("electron fuses: 1 sentinel");
+		expect(text).toContain("wire version 1, 9 fuses");
+		expect(text).toContain("    RunAsNode: enabled");
+		expect(text).toContain("    EnableCookieEncryption: disabled");
+		expect(text).toContain("    GrantFileProtocolExtraPrivileges: enabled");
+		expect(text).toContain("    WasmTrapHandlers: disabled");
+	});
+
+	test("a binary without the sentinel gets no fuse lines at all", async () => {
+		const dir = tempDir();
+		fixture(dir, "plain.exe", buildPeMain());
+		fixture(dir, "plain.elf", elfWithInline());
+
+		const exe = textOf(await run(dir, "plain.exe"));
+		expect(exe).toContain("format: PE");
+		expect(exe).not.toContain("electron fuses");
+		const elf = textOf(await run(dir, "plain.elf"));
+		expect(elf).toContain("format: ELF");
+		expect(elf).not.toContain("electron fuses");
+	});
+
+	test("two sentinels — a universal binary — are both reported, at their own offsets", () => {
+		const first = fuseWire([0x31, 0x31]);
+		const second = fuseWire([0x30, 0x30]);
+		const lines = electronFuseLines(cat(first, zeros(48), second)).join("\n");
+
+		expect(lines).toContain("electron fuses: 2 sentinels");
+		expect(lines).not.toContain("more than the two");
+		expect(lines).toContain("sentinel at 0x0: wire version 1, 2 fuses");
+		expect(lines).toContain(`sentinel at 0x${(first.length + 48).toString(16)}: wire version 1, 2 fuses`);
+	});
+
+	test("removed and unrecognized state bytes are each named", () => {
+		const lines = electronFuseLines(fuseWire([0x72, 0x7a])).join("\n");
+
+		expect(lines).toContain("    RunAsNode: removed");
+		expect(lines).toContain("    EnableCookieEncryption: unknown (0x7a)");
+	});
+
+	test("a wire version with no name table reports every state by index", () => {
+		const lines = electronFuseLines(fuseWire([0x31, 0x30], 2)).join("\n");
+
+		expect(lines).toContain("wire version 2, 2 fuses");
+		expect(lines).toContain("    fuse 0: enabled");
+		expect(lines).toContain("    fuse 1: disabled");
+		expect(lines).not.toContain("RunAsNode");
+	});
+
+	test("a wire past the name table indexes the tail, caps its listing, and counts the rest", () => {
+		const lines = electronFuseLines(fuseWire(Array.from({ length: 40 }, () => 0x31))).join("\n");
+
+		expect(lines).toContain("    RunAsNode: enabled");
+		expect(lines).toContain("    WasmTrapHandlers: enabled"); // the ninth name, wire index 8
+		expect(lines).toContain("    fuse 9: enabled");
+		expect(lines).toContain("    fuse 31: enabled"); // the last one listed
+		expect(lines).not.toContain("fuse 32:");
+		expect(lines).toContain("    8 further fuse bytes not listed");
+	});
+
+	test("more than two sentinels is called out, and past four the rest are counted", () => {
+		const one = fuseWire([0x31]);
+		const step = one.length + 8;
+
+		const three = cat(one, zeros(8), one, zeros(8), one);
+		const threeLines = electronFuseLines(three).join("\n");
+		expect(threeLines).toContain(
+			"electron fuses: 3 sentinels, more than the two a universal macOS binary carries (one per slice)",
+		);
+		expect(threeLines).not.toContain("only the first");
+
+		const five = cat(one, zeros(8), one, zeros(8), one, zeros(8), one, zeros(8), one);
+		const fiveLines = electronFuseLines(five).join("\n");
+		expect(fiveLines).toContain("electron fuses: 5 sentinels");
+		expect(fiveLines).toContain("only the first 4 are listed");
+		expect(fiveLines).not.toContain(`sentinel at 0x${(4 * step).toString(16)}:`);
+	});
+
+	test("a sentinel at the end of the file names the truncation instead of guessing", () => {
+		const bare = electronFuseLines(ascii(ELECTRON_FUSE_SENTINEL)).join("\n");
+		expect(bare).toContain("sentinel at 0x0: the wire header (the version and length bytes) is truncated");
+
+		const versionOnly = cat(ascii(ELECTRON_FUSE_SENTINEL), Buffer.from([1]));
+		expect(electronFuseLines(versionOnly).join("\n")).toContain(
+			"the wire header (the version and length bytes) is truncated",
+		);
+	});
+
+	test("a declared wire longer than the file is named, not guessed", () => {
+		const short = cat(ascii(ELECTRON_FUSE_SENTINEL), Buffer.from([1, 9]), Buffer.from([0x31, 0x30, 0x31]));
+
+		expect(electronFuseLines(short).join("\n")).toContain(
+			"wire version 1 declares 9 fuses, but only 3 bytes remain in the file",
+		);
+	});
+
+	test("a WASM file carrying the sentinel is not asked about fuses", async () => {
+		const dir = tempDir();
+		fixture(dir, "sneaky.wasm", buildWasm([{ id: 0, payload: fuseWire([0x31]) }]));
+
+		const text = textOf(await run(dir, "sneaky.wasm"));
+
+		expect(text).toContain("format: WASM");
+		expect(text).not.toContain("electron fuses");
+	});
+
+	test("a fat Mach-O reports one wire per slice, both at their absolute offsets", async () => {
+		const dir = tempDir();
+		fixture(
+			dir,
+			"universal.macho",
+			buildFatSlices([
+				buildMacho64([{ name: "__fuse", content: fuseWire([0x31, 0x31, 0x30]) }], { cputype: 0x0100000c }),
+				buildMacho64([{ name: "__fuse", content: fuseWire([0x30, 0x30, 0x31]) }], { cputype: 0x01000007 }),
+			]),
+		);
+
+		const text = textOf(await run(dir, "universal.macho"));
+
+		expect(text).toContain("format: Mach-O (fat)");
+		expect(text).toContain("electron fuses: 2 sentinels");
+		expect(text.match(/sentinel at 0x/g)).toHaveLength(2);
+		expect(text).toContain("    RunAsNode: enabled");
+		expect(text).toContain("    RunAsNode: disabled");
 	});
 });
 
