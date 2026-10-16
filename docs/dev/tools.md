@@ -38,7 +38,7 @@ The tool reads the sandbox policy per call and does not capture it at constructi
 
 `home` and `tempDir` are parameters and not reads of the process. The temp directory and the package caches are per-user paths. This repository's rule is that a reader takes its home as an argument. `os.homedir()` reads only the Win32 environment block. On linux and macOS a reader that calls it reads the real config of the developer. That defect reached CI once, and the `source-env-coverage` test exists to catch it.
 
-With no background manager the tool returns an error result instead of a throw. An unavailable path is an answer the model reads, not an exception it cannot see. The message names the constraint and not the mechanism. A background shell outlives the call that starts it. The Windows container-backend runner does not return until the child exits.
+With no background manager the tool returns an error result instead of a throw. An unavailable path is an answer the model reads, not an exception it cannot see. `start` refuses in the same voice when it must — a shell the container cannot execute, a grant that could not be established — and the catch turns that refusal into the same readable shape, because the message names the constraint and not the mechanism.
 
 Adoption is opt-in, and only when a target for the process exists. The tool adopts a command that outlives the wait rather than kill it. A long build or test run then survives the timeout that gave up on it. It is the same process, not a restart. That is the difference between the work kept alive and the work done twice.
 
@@ -76,11 +76,11 @@ The code resolves the network half of the policy here too. That was the second i
 
 The method is async because a start of a listener is not something a synchronous spawn can do. A `start` that waits keeps the two spawn paths on one lifecycle instead of one listener each.
 
-The Windows container-backend refuses this path. It does not fall through to the bare shell. `bash.ts` named this exact hole when it threaded the policy in. The container kind makes the hole real in a way that the simulated answer never did. A foreground command under the same session policy runs confined. This one runs with nothing around it.
+The Windows container back end used to refuse this path. `runConfined` is a synchronous FFI wait that does not return until the child exits, and a background shell's whole point is a child that outlives the call. Examples are a server, a watcher, or a test suite that reports progress. The handle-based twin, `spawnConfined`, is what made the path real: the wait is a timer over non-blocking handle polls, and nothing accumulates while the shell runs.
 
-The reason to refuse is the runner. `runConfined` is a synchronous FFI wait that does not return until the child exits. A background shell's whole point is a child that outlives the call. Examples are a server, a watcher, or a test suite that reports progress. To hold this method until the process died blocks the session.
+The container branch here holds what the foreground branch holds. The grant is acquired before the spawn and released when the shell ends, through the entry's `release`. It runs exactly once, at the end event, before any subscriber is told, so a subscriber that immediately starts the next shell cannot race the release. A failed spawn releases before it throws, and a cleanup warning rides in the thrown message or the log rather than vanishing.
 
-The only honest options are to confine it through an async rewrite of the spawner, or to refuse to start it. This build does the second.
+`kill` stops the confined child through the entry's own `terminate`, as the backstop behind the pid-tree kill: `taskkill` races the child's own end, and the handle this manager holds does not.
 
 The proxy variables go last, for the same reason as in `exec`. What confines this command outranks what this process inherited. A manager with no policy spawns with no extra environment of its own.
 

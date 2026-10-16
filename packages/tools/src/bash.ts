@@ -86,10 +86,10 @@ export function createBashTool(
 				// Caught here rather than left to reject the tool call, for the
 				// same reason the branch above returns instead of throwing: an
 				// unavailable path is an answer the model reads, not an
-				// exception it cannot see. The message names the constraint
-				// rather than the mechanism — a background shell outlives the
-				// call that starts it, and the Windows container backend's
-				// runner does not return until the child exits.
+				// exception it cannot see. `start` refuses in the same voice
+				// when it must — a shell the container cannot execute, a grant
+				// that could not be established — and the message names the
+				// constraint rather than the mechanism.
 				try {
 					const shell = await background.start(input.command, cwd, policy);
 					return {
