@@ -14,6 +14,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { THINKING_LEVELS } from "@labunbun/ai";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -149,7 +150,11 @@ describe("/think", () => {
 		// words, and the refusal visibly a refusal.
 		expect(infos).toContain("Thinking level: unset — each model's own default");
 		expect(infos).toContain("Thinking level: high — takes effect on the next request");
-		expect(infos).toContain("Usage: /think [off|minimal|low|medium|high]");
+		// The usage line is the one the switch builds from `THINKING_LEVELS`, so the
+		// assertion derives from the same constant: a hard-coded list here went stale
+		// the moment a level was added to the wheel, and the failure it produced
+		// pointed at the wording rather than at the missing level.
+		expect(infos).toContain(`Usage: /think [${THINKING_LEVELS.join("|")}]`);
 		// Saved to the user's own file, where the next run reads it from.
 		const saved = JSON.parse(readFileSync(join(home, ".labunbun", "settings.json"), "utf8")) as {
 			thinkingLevel?: string;
