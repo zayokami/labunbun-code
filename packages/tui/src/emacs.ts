@@ -66,10 +66,10 @@
  *   - **Cursor-only moves use `EmacsOps.setCursor` and are not undoable**, exactly as in
  *     `VimEngine`.
  *
- * Out of scope for this batch, deliberately: rectangle mode, `M-z` / `M-h`, the case commands
- * `M-u M-l M-c`, transpose, `C-o`, incremental search, `C-q`, and the rest of `ctl-x-map`.
- * Their keys are listed in {@link RESERVED_KEYS} and consumed without effect, so that they are
- * *this engine's* and cannot fall through to the host as something else.
+ * Out of scope, deliberately: rectangle mode, `M-z` / `M-h`, transpose, `C-o` (`open-line`),
+ * incremental search, `C-q`, and the rest of `ctl-x-map`. Their keys are listed in
+ * {@link RESERVED_KEYS} and consumed without effect, so that they are *this engine's* and
+ * cannot fall through to the host as something else.
  *
  *   - **What `undo` does not do here**, in four places, each with the citation that says what
  *     Emacs does instead. None of them is a decision taken for convenience; two of them are one
@@ -219,6 +219,12 @@ const CMD = {
 	beginningOfBuffer: "beginning-of-buffer",
 	endOfBuffer: "end-of-buffer",
 	deleteChar: "delete-char",
+	upcaseWord: "upcase-word",
+	downcaseWord: "downcase-word",
+	capitalizeWord: "capitalize-word",
+	upcaseRegion: "upcase-region",
+	downcaseRegion: "downcase-region",
+	deleteBlankLines: "delete-blank-lines",
 	undo: "undo",
 } as const;
 
@@ -690,6 +696,60 @@ export function emacsWordBackward(text: string, pos: number, count = 1): number 
  */
 
 // ---------------------------------------------------------------------------
+// Casing
+// ---------------------------------------------------------------------------
+
+/** The three case actions, named as uemacs names them (`word.c:118`, `:150`, `:183`). */
+export type EmacsCaseAction = "up" | "down" | "capitalize";
+
+/**
+ * One span through `do_casify_multibyte_region`'s loop (`src/casefiddle.c:475-521`): a
+ * character-by-character pass where the *state* is one boolean, `inword`, and what a character
+ * becomes depends on what the previous one was.
+ *
+ * ```c
+ * bool was_inword = ctx->inword;
+ * ctx->inword = case_ch_is_word (SYNTAX (ch)) && …;
+ * if (ctx->flag == CASE_CAPITALIZE) flag = ctx->flag - was_inword;   // :122-129
+ * ```
+ *
+ * `CASE_CAPITALIZE - was_inword` is the whole of capitalize: a character whose predecessor was
+ * a word character downgrades to `CASE_DOWN` (`:128-131`), so each word's first character is
+ * upcased and its tail is downcased. The word test is `case_ch_is_word` (`src/casefiddle.c:96-99`)
+ * with `case-symbols-as-words` at its default `nil` (`:749`) — i.e. `Sword` only, which is exactly
+ * {@link emacsIsWordChar} — and **the script is not consulted**: `inword` is a syntax property,
+ * so two adjacent characters of different scripts are one run here even though `scan_words`
+ * treats them as two words. The range and the state really do use different rules in the
+ * reference, and this keeps both.
+ *
+ * The case mapping itself is JavaScript's `toUpperCase`/`toLowerCase`, and the match is closer
+ * than it looks: GNU looks the character up in the `special-uppercase` / `special-lowercase`
+ * tables (`src/casefiddle.c:140-160`), which are the Unicode SpecialCasing tables — full
+ * mappings, length changes included — and the same tables are what the JS spec applies. So
+ * `ß` upcases to `SS` and is *supposed* to, in both. `do_casify_multibyte_region`'s `added`
+ * (`:475-521`) and its point adjustment exist for exactly that. The one thing JS has no answer
+ * for is the titlecase table (`src/casefiddle.c:44-46`): capitalize's first character goes
+ * through `upcase`, so `ǆ` becomes `Ǆ` here and `ǅ` in Emacs. Four digraph pairs, named rather
+ * than hidden.
+ */
+export function emacsCasify(text: string, action: EmacsCaseAction): string {
+	let out = "";
+	let inword = false;
+	for (let i = 0; i < text.length; ) {
+		const cp = codePointAt(text, i);
+		const next = advance(text, i);
+		const ch = text.slice(i, next);
+		i = next;
+		const wasInword = inword;
+		inword = cp >= 0 && emacsIsWordChar(cp);
+		if (action === "up") out += ch.toUpperCase();
+		else if (action === "down") out += ch.toLowerCase();
+		else out += wasInword ? ch.toLowerCase() : ch.toUpperCase();
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------------
 // Reserved keys — later batches
 // ---------------------------------------------------------------------------
 
@@ -734,9 +794,6 @@ export const RESERVED_KEYS: ReadonlyArray<readonly [string, string]> = [
 	["M-z", "zap-to-char (bindings.el:1236)"],
 	["M-h", "mark-paragraph (bindings.el:1710)"],
 	["M-@", "mark-word (bindings.el:1609)"],
-	["M-u", "upcase-word (subr.el:1718)"],
-	["M-l", "downcase-word (subr.el:1719)"],
-	["M-c", "capitalize-word (subr.el:1720)"],
 	["M-x", "execute-extended-command (subr.el:1721)"],
 	["M-X", "execute-extended-command-for-buffer (subr.el:1722)"],
 	["M-\\", "delete-horizontal-space (bindings.el:1618)"],
@@ -781,7 +838,6 @@ export const CTL_X_RESERVED: ReadonlyArray<readonly [string, string]> = [
 	// bound is the same lie `shortcuts.ts` just stopped telling, one layer down.
 	["h", "mark-whole-buffer (bindings.el:1617)"],
 	["=", "what-cursor-position (bindings.el:1238)"],
-	["o", "delete-blank-lines (bindings.el:1234)"],
 	["r", "ctl-x-r-map (bindings.el:1703)"],
 ];
 
@@ -857,7 +913,10 @@ export class EmacsEngine {
 	#prefixArgLive = false;
 	/** `universal-argument-map` is open — `set-transient-map` in `universal-argument--mode`. */
 	#prefixPending = false;
-	/** `ctl-x-map` is open. `C-x C-x` and `C-x u` are implemented; the rest is read and dropped. */
+	/**
+	 * `ctl-x-map` is open. `C-x C-x`, `C-x u`, `C-x C-u`, `C-x C-l` and `C-x C-o` are
+	 * implemented; the rest is read and dropped.
+	 */
 	#ctlXPending = false;
 	/** `temporary-goal-column`: the column the current run of vertical motion returns to. */
 	#temporaryGoalColumn = 0;
@@ -961,25 +1020,34 @@ export class EmacsEngine {
 		}
 
 		if (this.#ctlXPending) {
-			// Two implemented members: `C-x C-x` is `exchange-point-and-mark`
-			// (`bindings.el:1338`) and `C-x u` is `undo` (`bindings.el:1246`). Anything else in
-			// the map is *read and dropped*: the key is consumed so the user is not typing into
-			// the prompt, and no command runs — which is what `this_command` = `Qnil` means
+			// Five implemented members: `C-x C-x` is `exchange-point-and-mark`
+			// (`bindings.el:1338`), `C-x u` is `undo` (`bindings.el:1246`), `C-x C-u` and
+			// `C-x C-l` are `upcase-region` / `downcase-region` (`subr.el:1748-1749`), and
+			// `C-x C-o` is `delete-blank-lines` (`bindings.el:1234`). Anything else in the map
+			// is *read and dropped*: the key is consumed so the user is not typing into the
+			// prompt, and no command runs — which is what `this_command` = `Qnil` means
 			// (`src/keyboard.c:1416`), and `last-command` becomes `nil`, breaking a kill chain
 			// and re-seeding the goal column exactly as any other non-kill command would.
 			//
-			// `u` is compared as a bare character because that is the member: the binding string
-			// carries no modifier (`bindings.el:1246`). The ctrl test that used to stand here made
-			// `C-x C-u` the spelling that worked while every other mention of this sequence
-			// already said `C-x u` — the field comment on `#ctlXPending`, the row in
-			// `shortcuts.ts`, and the tests named after it. What `C-x C-u` can *mean* is
-			// `upcase-region` (`subr.el:1748`), a different command, and one that is `disabled`
-			// there so it asks before it runs. It is not implemented here, and calling it undo
-			// would put undo on a key that means "uppercase the region" — the lie `shortcuts.ts`
-			// is written to prevent, one layer down. So it falls to the read-and-dropped line.
+			// The spellings come from the bindings, and they differ. `u` is compared as a bare
+			// character because `bindings.el:1246` binds the literal; the three control members
+			// are `"\C-u"`, `"\C-l"` and `"\C-o"`, so they arrive with `key.ctrl` and are
+			// compared with it. That modifier is load-bearing rather than cosmetic: the ctrl
+			// test that used to stand on the bare-`u` line made `C-x C-u` *be* undo while every
+			// other mention of the sequence said `C-x u`. The two differ by one modifier and
+			// mean two different commands, and `C-x C-u` upper-cases the region instead.
+			//
+			// One GNU nuance is kept in the open rather than smoothed over: both case-region
+			// bindings are marked `disabled` in Emacs — `subr.el:1748-1749` puts the
+			// `(put … 'disabled t)` on the same line as each `define-key`, because running it
+			// by accident is expensive. A prompt field has no way to ask, so this engine runs
+			// them; `#caseRegion` is where the rest of that decision lives.
 			this.#ctlXPending = false;
 			if (key.ctrl && input === "x") return this.#exchangePointAndMark();
 			if (input === "u" && !key.ctrl && !key.meta) return this.#undo();
+			if (key.ctrl && input === "u") return this.#caseRegion("up");
+			if (key.ctrl && input === "l") return this.#caseRegion("down");
+			if (key.ctrl && input === "o") return this.#deleteBlankLines();
 			this.#commit = true;
 			return true;
 		}
@@ -1239,6 +1307,21 @@ export class EmacsEngine {
 				this.#appendNextKill();
 				return true;
 			}
+			if (input === "h") {
+				// `M-C-H` is uemacs's `cmd_delete_previous_word` (`word.c:315`, key
+				// `ebind.h:100`) — the same command `M-DEL` runs there (`ebind.h:138`), and
+				// the same one `[C-backspace]` and `M-DEL` run here (`bindings.el:1634`,
+				// `:1613`). A pure compat alias, reusing the `#killWord (-n)` route the
+				// `key.ctrlBackspace` branch above takes. GNU gives this key to `mark-defun`
+				// (`bindings.el:1666`); the uemacs batch takes it, and the divergence is
+				// recorded here. Reachability is the other half: a terminal must send meta
+				// and ctrl *together* for `#isSelfInsert` to see this — pressing Escape then
+				// `^H` arrives as two keys and the `^H` deletes a character — so
+				// `shortcuts.ts` lists the alias with that caveat rather than dropping it.
+				this.#beginCommand(CMD.killWord);
+				this.#killWord(-emacsPrefixValue(this.#prefixArg));
+				return true;
+			}
 			return false;
 		}
 		switch (input) {
@@ -1282,6 +1365,37 @@ export class EmacsEngine {
 				this.#beginCommand(CMD.yankPop);
 				this.#yankPop(emacsPrefixValue(this.#prefixArg));
 				return true;
+			// The three case commands. GNU's bindings live on `esc-map` in one run
+			// (`subr.el:1718-1720`); uemacs has the same three on the same three keys
+			// (`ebind.h:133`, `:126`, `:120`). The shared behaviour — the region, the
+			// cursor, and which word rule measures it — is documented on `#caseWord`.
+			case "u":
+				this.#beginCommand(CMD.upcaseWord);
+				this.#caseWord("up");
+				return true;
+			case "l":
+				this.#beginCommand(CMD.downcaseWord);
+				this.#caseWord("down");
+				return true;
+			case "c":
+				this.#beginCommand(CMD.capitalizeWord);
+				this.#caseWord("capitalize");
+				return true;
+			// `M-SPC` and `M-.`, uemacs's two `cmd_set_mark` keys against GNU's one
+			// (`basic.c:431`; `ebind.h:111` and `:113`). Both trees are recorded because both
+			// are live: GNU moved `M-SPC` to `cycle-spacing` long ago (`bindings.el:1235`,
+			// with `just-one-space` still defined beside it and deferring to it —
+			// `simple.el:1162`, `:1166`) and `M-.` is `xref-find-definitions`
+			// (`progmodes/xref.el:2011`), so a reader who knows GNU knows exactly what this
+			// port is spending the keys on. The engine's answer is what runs:
+			// `PromptInput.tsx:569` consults it before the prompt's own editing, and the
+			// prompt's insert gate refuses meta-modified printable input anyway
+			// (`PromptInput.tsx:748` is plain input only), so claiming the keys costs
+			// nothing — no stray character either way. Here they become `cmd_set_mark`,
+			// which is `C-SPC`'s command, state machine included.
+			case " ":
+			case ".":
+				return this.#setMarkCommand();
 			// `esc-map "-"`, and every spelling of it: a terminal sends `M--` as `ESC -` where
 			// meta exists and as `C-_` where it does not, and both are bound (`bindings.el:1303`,
 			// `:1309`, `:1315`).
@@ -2165,6 +2279,166 @@ export class EmacsEngine {
 		const pos = this.#ops.getCursor();
 		const target = n >= 0 ? this.#forwardWord(n) : this.#backwardWord(-n);
 		this.#killRegion(pos, target);
+	}
+
+	// -- case commands and blank lines ----------------------------------------
+
+	/**
+	 * `upcase-word` (`M-u`), `downcase-word` (`M-l`) and `capitalize-word` (`M-c`) — GNU
+	 * binds all three on `esc-map` in one run (`subr.el:1718-1720`), and uemacs has the same
+	 * three commands on the same three keys (`word.c:118` / `:150` / `:183`, keys
+	 * `ebind.h:133` / `:126` / `:120`). This is a uemacs-compat batch, so the uemacs keys
+	 * are the ones taken.
+	 *
+	 * **The word rule stays this engine's**, and the divergence is named rather than left to
+	 * be discovered. `casify_word` measures its span with `scan_words` (`src/casefiddle.c:663-664`),
+	 * the same scan `M-f` uses, so the span here is `#forwardWord` / `#backwardWord` — GNU's
+	 * syntax table plus `word_boundary_p` (`emacs.ts:342`, `:533`). uemacs's `inword`
+	 * (`word.c:356`) is hard-coded letters and digits: it agrees with that rule on plain ASCII
+	 * (both trees split `foo_bar`, since `_` is neither), and differs on two points worth the
+	 * sentence — `$` and `%` are word characters here (they are `Sword`; see
+	 * {@link emacsIsWordChar}), and a script change is a word boundary here (`foo中文bar` is
+	 * three words). uemacs has neither rule, so `M-c` on `foo$bar` writes `Foo$bar` here and
+	 * `Foo$Bar` there.
+	 *
+	 * Two more deliberate alignments, both toward GNU where the two references disagree:
+	 *
+	 *   - **a negative count converts backwards.** uemacs refuses it outright (`if (n < 0)
+	 *     return FALSE`, `word.c:125-126`) while GNU's `"p"` spec makes `M-- M-u` convert the
+	 *     previous word and leave point where it was (`src/casefiddle.c:677`). The engine has
+	 *     a prefix argument and no `FALSE` to return, so GNU wins.
+	 *   - **the transform is per character over the whole span**, `inword` carried across it
+	 *     (`src/casefiddle.c:122-129`), so a counted `M-3 M-u` converts `foo bar baz` in one
+	 *     pass and the word separators come out unchanged because they are not word
+	 *     characters. The semantics of that pass are {@link emacsCasify}'s docstring.
+	 *
+	 * The cursor is the same line of C in both references — `SET_PT (casify_region (flag, PT,
+	 * farend))` (`src/casefiddle.c:667`), and `casify_region` returns the region's end after
+	 * any length change (`:581`). For a positive count that end is `farend`, so point moves
+	 * over the converted words; for a negative one the sorted end is **point itself**, which
+	 * is how "convert previous words but do not move" (`:677`) falls out of the same line.
+	 * An empty span records nothing at all (`:537-539`), so there is no write and no undo
+	 * entry — but the command still ran, which is what `C-u 0 M-u` has to leave as
+	 * `last-command`.
+	 */
+	#caseWord(action: EmacsCaseAction): void {
+		const n = emacsPrefixValue(this.#prefixArg);
+		const pos = this.#ops.getCursor();
+		const farend = n >= 0 ? this.#forwardWord(n) : this.#backwardWord(-n);
+		const from = Math.min(pos, farend);
+		const to = Math.max(pos, farend);
+		if (from === to) return;
+		const text = this.#text();
+		const replaced = emacsCasify(text.slice(from, to), action);
+		this.#write(text.slice(0, from) + replaced + text.slice(to), to + (replaced.length - (to - from)));
+	}
+
+	/**
+	 * `upcase-region` (`C-x C-u`) and `downcase-region` (`C-x C-l`), which are uemacs's
+	 * `cmd_case_region_upper` (`region.c:121`, key `ebind.h:62`) and `cmd_case_region_lower`
+	 * (`region.c:84`, `ebind.h:54`).
+	 *
+	 * The interactive spec is `(interactive (list (region-beginning) (region-end) …))`, so
+	 * this is the *geometric* region and not `use-region-p`: a set-but-inactive mark still
+	 * gives a span (`src/editfns.c:251-262`; {@link #region}), and **with no mark at all it
+	 * is a `user-error`** — `region-beginning` signals "The mark is not set now, so there is
+	 * no region" (`src/editfns.c:243`), which leaves `last-command` standing exactly as
+	 * `#killRegionCommand` documents for `C-w`. Point does not move in either reference:
+	 * `casify_region` rewrites the span in place between two markers and never touches
+	 * point, and the same is true here even though the span's length can change (`ß` → `SS`).
+	 *
+	 * One GNU nuance is deliberately not reproduced: both bindings are marked `disabled`
+	 * there — `(put 'upcase-region 'disabled t)` on the same line as each `define-key`
+	 * (`subr.el:1748-1749`) — so Emacs asks before running them. A prompt has no way to ask,
+	 * so this engine runs them; the batch records the choice rather than shipping a surprise.
+	 * An empty region is neither an error nor a write (`src/casefiddle.c:537-539`), which is
+	 * a different thing from a region whose characters are already cased — *that* one is a
+	 * modification in GNU (`modify_text` runs before the per-character pass, `:540-575`) and
+	 * is written here for the same reason: marks move and the region deactivates even when
+	 * no character changes.
+	 */
+	#caseRegion(action: "up" | "down"): boolean {
+		this.#beginCommand(action === "up" ? CMD.upcaseRegion : CMD.downcaseRegion);
+		if (this.mark === null) {
+			this.#commit = false;
+			return true;
+		}
+		const { beg, end } = this.#region();
+		if (beg === end) return true;
+		const text = this.#text();
+		const replaced = emacsCasify(text.slice(beg, end), action);
+		// Point is one of the region's two ends when the region came from the keyboard.
+		// A point at the small end does not move; a point at the large end shifts with the
+		// length change, which is `casify_region`'s `return orig_end + added`
+		// (`src/casefiddle.c:581`) applied to the position that happens to be point.
+		const pos = this.#ops.getCursor();
+		this.#write(
+			text.slice(0, beg) + replaced + text.slice(end),
+			pos >= end ? pos + (replaced.length - (end - beg)) : pos,
+		);
+		return true;
+	}
+
+	/**
+	 * `delete-blank-lines` (`C-x C-o`, `bindings.el:1234`), which is uemacs's
+	 * `cmd_delete_blank_lines` (`random.c:637`, key `ebind.h:57`). The two agree on the net
+	 * text for a run of truly empty lines; the two places they differ are both taken from
+	 * uemacs, because this is the uemacs-compat batch:
+	 *
+	 *   - **"blank" means empty, not whitespace-only.** uemacs tests `line_length (lp) == 0`
+	 *     (`random.c:645`, `:650`); GNU's blank test is `"[ \t]*$"` (`lisp/simple.el:826`), so
+	 *     a line of spaces is blank there and is deleted, and is not and is kept here.
+	 *   - **the walk is uemacs's**: from point's line, step *up* while the line is empty and a
+	 *     previous line exists, then count the consecutive empty lines below and delete that
+	 *     many line breaks (`random.c:645-657`). GNU reaches the same net text through a
+	 *     two-sided edit plus a special end-of-buffer case (`lisp/simple.el:834-852`,
+	 *     `:853-856`); every trace of an empty-line run this port can build ends the same
+	 *     way, and where the two could differ the uemacs walk is the one transcribed.
+	 *
+	 * Point ends at the start of whatever followed the run — uemacs moves `w_dotp`/`w_doto`
+	 * there before `delete_bytes` (`random.c:654-656`), and that offset is where the
+	 * following text begins once the line breaks are gone.
+	 *
+	 * The one place the *models* disagree is the last line. uemacs stores no final newline:
+	 * the last line of `"ab\n"` is `"ab"` and the newline is implied, so `"b\n\n"` is two
+	 * lines, the second one empty. This buffer stores the newline, so `"b\n\n"` has a third,
+	 * phantom empty line that uemacs has no name for — and it needs no special case: the
+	 * phantom is blank, so the walk steps straight through it to the same line it would reach
+	 * from below, and the count is capped at the last real line, so the phantom can never be
+	 * what gets deleted. (A clamp mapping the phantom down to `last` stood here until its own
+	 * falsification run deleted it and nothing changed — the convergence above is why. This
+	 * paragraph is the tombstone.)
+	 */
+	#deleteBlankLines(): boolean {
+		this.#beginCommand(CMD.deleteBlankLines);
+		const text = this.#text();
+		const pos = this.#ops.getCursor();
+		// Everything but the phantom line behind a trailing newline.
+		const last = Math.max(lineCount(text) - 1 - (text.endsWith("\n") ? 1 : 0), 0);
+		// No clamp on this: a cursor on the phantom line behind a trailing newline starts the
+		// walk one line low, but the phantom is blank, so the first step lands exactly where a
+		// clamp to `last` would have put it — and the cap below keeps the phantom out of the
+		// count. The clamp was removed by its own falsification run; see the docblock.
+		const line = lineOf(text, pos);
+		const blank = (i: number) => {
+			const start = nthLineStart(text, i);
+			return lineEndExclusive(text, start) === start;
+		};
+		// `while (line_length (lp1) == 0 && (lp2 = line_prev (lp1)) != curbp->b_linep)`
+		// (`random.c:645-646`): walk up over empty lines, stopping at line 0 — there is no
+		// previous line to stop at — so the leading newlines are never deleted.
+		let lp1 = line;
+		while (lp1 > 0 && blank(lp1)) lp1--;
+		// `while ((lp2 = line_next (lp2)) != curbp->b_linep && line_length (lp2) == 0)
+		// ++nld;` (`random.c:648-650`), capped at the last real line: with no blank run
+		// below, uemacs returns TRUE without touching the buffer, and so does this.
+		let nld = 0;
+		while (lp1 + 1 + nld <= last && blank(lp1 + 1 + nld)) nld++;
+		if (nld === 0) return true;
+		const from = nthLineStart(text, lp1 + 1);
+		const to = nthLineStart(text, lp1 + 1 + nld);
+		this.#write(text.slice(0, from) + text.slice(to), from);
+		return true;
 	}
 
 	// -- deletion ------------------------------------------------------------

@@ -311,14 +311,19 @@ The Emacs editor has no mode line. Use these keys.
 | `C-f`, `C-b` | Move one character forward or back. |
 | `C-n`, `C-p` | Move one line down or up. |
 | `M-f`, `M-b` | Move one word forward or back. |
+| `M-u`, `M-l`, `M-c` | Upcase, downcase, or capitalize one word. |
 | `C-k` | Kill to the end of the line. |
 | `C-w` | Kill the word before the point. |
 | `C-d`, `C-h` | Delete one character forward or back. |
 | `C-y`, `M-y` | Paste the last kill, or the one before it. |
 | `C-SPC` | Set the mark. |
+| `M-SPC`, `M-.` | Set the mark. The same command as `C-SPC`. |
 | `C-x C-x` | Go to the mark. |
+| `C-x C-u`, `C-x C-l` | Upcase or downcase the region. |
+| `C-x C-o` | Delete the blank lines around the point. |
 | `C-u` | The prefix argument. Its value is `(4)`. Press it again to multiply by 4. |
 | `M-1` to `M-9`, `M--` | Set the prefix argument to a number. |
+| `M-C-H` | Kill the word before the point. Most terminals cannot send this key. |
 | `?` | Show the keys that the engine uses. |
 
 The kill ring has these rules:
@@ -330,7 +335,7 @@ The kill ring has these rules:
 
 The engine uses the Emacs rule for words. A boundary is a change of script. `M-f` stops inside CJK text. `foo-bar` is 3 words.
 
-The engine takes these keys and does not use them: `C-t`, `M-u`, `M-z`, `C-s`, `C-r`. The engine uses them for nothing. They do not reach the terminal as characters. `C-r` does history search everywhere except in this editor.
+The engine takes these keys and does not use them: `C-t`, `M-z`, `C-s`, `C-r`. The engine uses them for nothing. They do not reach the terminal as characters. `C-r` does history search everywhere except in this editor.
 
 ### DualShock 4 controller
 

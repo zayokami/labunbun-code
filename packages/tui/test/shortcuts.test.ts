@@ -107,19 +107,26 @@ describe("shortcutGroups", () => {
 		const groups = shortcutGroups({ editor: "emacs", vimMode: "normal" });
 		const emacs = groups.find((g) => g.title === "Emacs");
 		const keys = emacs?.rows.map(([k]) => k) ?? [];
-		// The engine's implemented surface, spot-checked at both ends, and now at the two
-		// `ctl-x-map` members as well: `C-x C-x` has been listed since the mark batch and `C-x u`
-		// since the undo one, and a list that lagged behind by one key would be the same
-		// failure the `Ctrl+R` row below had.
+		// The engine's implemented surface, spot-checked at both ends, and now at the whole
+		// `ctl-x-map` run as well: `C-x C-x` has been listed since the mark batch, `C-x u`
+		// since the undo one, and the uemacs batch added `C-x C-u` / `C-x C-l` / `C-x C-o`
+		// beside them — a list that lagged behind by one key would be the same failure the
+		// `Ctrl+R` row below had.
 		expect(keys).toContain("C-k");
 		expect(keys).toContain("C-y / M-y");
 		expect(keys).toContain("C-S-BS");
 		expect(keys).toContain("C-x C-x");
 		expect(keys).toContain("C-x u");
+		// The five rows the uemacs batch added, each a key the engine runs today.
+		expect(keys).toContain("M-u / M-l / M-c");
+		expect(keys).toContain("M-SPC / M-.");
+		expect(keys).toContain("C-x C-u / C-x C-l");
+		expect(keys).toContain("C-x C-o");
+		expect(keys).toContain("M-C-H");
 		// Bound-but-unimplemented keys are claimed and consumed, so advertising them as
-		// working would be a lie in a new place. They must not appear.
+		// working would be a lie in a new place. They must not appear. `M-u` stood in this
+		// list until the case commands landed; it is one of the rows above now.
 		expect(keys).not.toContain("C-t");
-		expect(keys).not.toContain("M-u");
 		expect(keys).not.toContain("M-z");
 		expect(keys).not.toContain("C-s");
 		// And the Prompt row cannot still promise history search: `EmacsEngine` claims

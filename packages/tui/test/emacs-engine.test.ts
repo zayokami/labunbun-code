@@ -4,6 +4,7 @@ import {
 	CTL_X_RESERVED,
 	EmacsEngine,
 	type EmacsKey,
+	emacsCasify,
 	emacsIsWordChar,
 	emacsKeyToken,
 	emacsPrefixCar,
@@ -28,10 +29,11 @@ import {
  *     exception that proves the rule is about assertions and not about numbers: it checks the
  *     implementation's citations against the reference tree, so a citation that has drifted is
  *     caught where it is written instead of being copied into a test that would go on passing.
- *   - **Nothing here requires the Emacs tree.** These run in a bare checkout. The reference tree is
- *     `G:\Bunttta\emacs-master\`, and a test that only passes with it present fails on CI for a
- *     reason that has nothing to do with the engine. The citation guard is `existsSync`-gated for
- *     the same reason: present, it checks; absent, it skips and says so.
+ *   - **Nothing here requires the reference trees.** These run in a bare checkout. The Emacs tree
+ *     is `G:\Bunttta\emacs-master\` and the uemacs tree is `G:\Bunttta\uemacs-master\`, and a
+ *     test that only passes with them present fails on CI for a reason that has nothing to do with
+ *     the engine. The citation guard is `existsSync`-gated for the same reason: present, it
+ *     checks; absent, it skips and says so.
  *
  * The `editor` fixture is the shape used by `vim-engine.test.ts`, reduced to the operations
  * {@link EmacsEngine} asks of a host. `type` is the one thing that makes this modeless: it inserts
@@ -108,7 +110,8 @@ function pressToken(e: ReturnType<typeof editor>, token: string): boolean {
  *
  * The member is spelled the way {@link CTL_X_RESERVED} spells it — a *raw* key spelling, because
  * that is what the dispatch compares — so the reserved members (`t`, `C-@`, ` `) and the
- * implemented ones (`C-x`, `u`) come out of two vocabularies on purpose. The two reserved tables
+ * implemented ones (`C-x`, `u`, `C-u`, `C-l`, `C-o`) come out of two vocabularies on purpose. The
+ * two reserved tables
  * do not agree on spelling either: `RESERVED_KEYS` is keyed by `emacsKeyToken`, so a ctrl+meta key
  * there is `C-M-t`, while `CTL_X_RESERVED` holds `t` and `C-@` as themselves.
  *
@@ -119,7 +122,7 @@ function pressToken(e: ReturnType<typeof editor>, token: string): boolean {
  * string in `bindings.el:1246` was being overridden by a test helper's spelling of it. A fixture
  * that names a key the way the code compares it cannot notice when the comparison is the thing
  * that is wrong. `C-x u` is `pressCtlX(e, "u")`, and there is a test below that presses the raw
- * `C-x C-u` and gets nothing.
+ * `C-x C-u` and reads the region it upcased — the same helper with `C-u` for the member.
  */
 function pressCtlX(e: ReturnType<typeof editor>, member: string): boolean {
 	e.press("x", C);
@@ -1195,9 +1198,6 @@ describe("emacs: the reserved tables", () => {
 			"M-z",
 			"M-h",
 			"M-@",
-			"M-u",
-			"M-l",
-			"M-c",
 			"M-x",
 			"M-X",
 			"M-\\",
@@ -1213,26 +1213,30 @@ describe("emacs: the reserved tables", () => {
 			"M-s",
 			"M-=",
 		]);
-		expect(CTL_X_RESERVED.map(([member]) => member)).toEqual(["t", "C-@", "C-SPC", " ", "n", "h", "=", "o", "r"]);
+		expect(CTL_X_RESERVED.map(([member]) => member)).toEqual(["t", "C-@", "C-SPC", " ", "n", "h", "=", "r"]);
 	});
 
 	test("a reserved key is claimed by the table, and leaves no prefix argument behind", () => {
-		// The control for the row above: `M-u` is in the reserved table *and* a spelling the
-		// meta dispatch could plausibly have claimed. A case command would have moved the
-		// prefix argument, so a `C-u` typed next would multiply something. Nothing is the
-		// assertion — and it is the shape a table that had quietly stopped claiming a key
-		// would fail, because a case command *does* leave a count.
+		// The control for the row above: `M-z` is in the reserved table *and* a spelling the
+		// meta dispatch could plausibly have claimed — it is `zap-to-char`, one argument away
+		// from running. `M-u` stood here until the case commands arrived; it had the same shape
+		// then, and its move out of the table is what the rows above now pin. Nothing is the
+		// assertion — and it is the shape a table that had quietly stopped claiming a key would
+		// fail, because a command that *does* run leaves its own trace.
 		const e = editor("abc", 0);
-		expect(pressToken(e, "M-u")).toBe(true);
+		expect(pressToken(e, "M-z")).toBe(true);
 		expect(e.engine.prefixArg).toBeNull();
 	});
 
 	test("an implemented command is in neither reserved table, so the tables cannot drift into lying", () => {
-		// `C-x C-x` and `C-x u` are the two implemented members of `ctl-x-map`, and neither is
-		// listed. The tables' own docstring says an implemented member must be deleted from them
-		// rather than left behind, so this is the assertion that keeps the promise checkable.
+		// `C-x C-x`, `C-x u` and — since the uemacs batch — `C-u`, `C-l` and `C-o` are the
+		// implemented members of `ctl-x-map`, and none is listed. The tables' own docstring says
+		// an implemented member must be deleted from them rather than left behind, so this is
+		// the assertion that keeps the promise checkable.
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("u");
 		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("x");
+		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-u");
+		expect(CTL_X_RESERVED.map(([member]) => member)).not.toContain("C-l");
 		// `C-o` is the key the `shortcuts.ts` rows cite when they explain what the engine
 		// claims, so it belongs in *this* table and saying so here is what keeps the two files
 		// from disagreeing: a reader of the shortcut list can check the claim one layer down.
@@ -1260,38 +1264,339 @@ describe("emacs: the reserved tables", () => {
 	});
 
 	/**
-	 * The negative half of the assertion above, and the reason the fix was not "accept both".
+	 * The other half of the distinction above, and the reason the fix was not "accept both".
 	 *
-	 * `C-x C-u` is `upcase-region` (`subr.el:1748`), not undo. It is a different command, and one
-	 * that is `disabled` at that binding so Emacs asks before running it. The engine implements
-	 * neither, so the only honest answer is the one every other unbound member gets: consumed,
-	 * nothing run. What this pins is the *distinction* — the two sequences differ by one modifier
-	 * and must not both undo, because a key that means "uppercase the region" undoing is a lie
-	 * about what the key does, and the buffer here is one where a reader would never notice.
-	 *
-	 * `lastCommand` going null is load-bearing rather than incidental: it is what breaks the kill
-	 * chain (`#ctlXPending`'s own comment), so an implementation that quietly ran undo would
-	 * show up here as a *surviving* ring.
+	 * `C-x C-u` is `upcase-region` (`subr.el:1748`), not undo. It is a different command one
+	 * modifier away, one that `subr.el:1749` marks `disabled` so Emacs asks before running it,
+	 * and one uemacs also binds (`region.c:121`, `ebind.h:62`). The engine runs it now, so this
+	 * test reads the region it upcased and the command it left as `last-command`. The fixture is
+	 * deliberately the same one the `C-x u` test above uses, one modifier apart, so the two
+	 * cannot both be right: that one undoes the kill and reads a joined ring, this one upcases
+	 * the region and *then* opens a new ring entry, because `upcase-region` broke the chain the
+	 * same way a motion would.
 	 */
-	test("C-x C-u is upcase-region, which is not implemented, so it runs nothing", () => {
-		// Deliberately the same fixture as the `C-x u` test above, one modifier apart, so the two
-		// cannot both be right: that one undoes the kill and reads a joined ring, this one does
-		// neither.
+	test("C-x C-u runs upcase-region over the region, one modifier away from undo", () => {
 		const e = editor("ab\ncd", 0);
 		e.press("k", C);
 		expect(e.engine.killRing).toEqual(["ab"]);
 		expect(e.state.text).toBe("\ncd");
-		e.press("x", C);
-		expect(e.press("u", C)).toBe(true); // C-x C-u
-		expect(e.engine.lastCommand).toBeNull();
-		// No undo: the kill above is still gone from the buffer and nothing came back.
-		expect(e.state.text).toBe("\ncd");
-		// And the chain broke, so the next kill opens a new ring entry — the same `["cd", "ab"]`
+		e.press(" ", C); // C-SPC: mark at 0
+		e.repeat(2, "f", C); // point at 2, so the region is 0..2 — the newline and the "c"
+		expect(pressCtlX(e, "C-u")).toBe(true);
+		expect(e.engine.lastCommand).toBe("upcase-region");
+		expect(e.state.text).toBe("\nCd");
+		expect(e.state.cursor).toBe(2);
+		// The chain broke, so the next kill opens a new ring entry — the same `["d", "ab"]`
 		// shape the `C-x u` test ends on, reached without an undo having run.
-		e.repeat(2, "f", C);
 		e.press("k", C);
-		expect(e.state.text).toBe("\nc");
+		expect(e.state.text).toBe("\nC");
+		expect(e.state.cursor).toBe(2);
 		expect(e.engine.killRing).toEqual(["d", "ab"]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The uemacs batch: case words and regions, the mark aliases, blank lines
+// ---------------------------------------------------------------------------
+
+describe("emacs: case words", () => {
+	// `M-u`, `M-l` and `M-c` are `upcase-word`, `downcase-word` and `capitalize-word`
+	// (`subr.el:1718-1720`), and uemacs binds the same three commands on the same three keys
+	// (`ebind.h:133` / `:126` / `:120`). The case engine is GNU's, character by character; the
+	// word span is this engine's word rule, whose divergences are named on `#caseWord`. These
+	// tests pin both ends — the general behavior, and the two places the trees disagree.
+
+	test("M-u upcases over the next word and leaves point at its end", () => {
+		const e = editor("hello world", 0);
+		expect(e.press("u", M)).toBe(true);
+		expect(e.state.text).toBe("HELLO world");
+		expect(e.state.cursor).toBe(5);
+		expect(e.engine.lastCommand).toBe("upcase-word");
+	});
+
+	test("M-l lowers the next word", () => {
+		const e = editor("HELLO WORLD", 0);
+		expect(e.press("l", M)).toBe(true);
+		expect(e.state.text).toBe("hello WORLD");
+		expect(e.state.cursor).toBe(5);
+		expect(e.engine.lastCommand).toBe("downcase-word");
+	});
+
+	test("M-c capitalizes, and a second press carries on to the next word", () => {
+		const e = editor("hELLO wORLD", 0);
+		expect(e.press("c", M)).toBe(true);
+		expect(e.state.text).toBe("Hello wORLD");
+		expect(e.state.cursor).toBe(5);
+		expect(e.engine.lastCommand).toBe("capitalize-word");
+		expect(e.press("c", M)).toBe(true);
+		expect(e.state.text).toBe("Hello World");
+		expect(e.state.cursor).toBe(11);
+	});
+
+	test("from inside a word, only what point can still reach is converted", () => {
+		// Capitalize upcases the first word character whose predecessor was not one
+		// (`casefiddle.c:122-129`, the `was_inword` term), and the span starts at point with the
+		// word state reset — so mid-word it is not the word's first character but the next one
+		// point stands on: `he|llo` becomes `heLlo`, not `Hello`.
+		const e = editor("hello", 2);
+		expect(e.press("c", M)).toBe(true);
+		expect(e.state.text).toBe("heLlo");
+		expect(e.state.cursor).toBe(5);
+	});
+
+	test("$ is a word character here, so M-c takes foo$bar in one press", () => {
+		// The recorded divergence (`#caseWord`, word.c:356): uemacs's `inword` is letters and
+		// digits, so there `foo$bar` is two words and `M-c` writes `Foo$Bar`; here `$` has word
+		// syntax and the span is the whole thing.
+		const e = editor("foo$bar", 0);
+		expect(e.press("c", M)).toBe(true);
+		expect(e.state.text).toBe("Foo$bar");
+		expect(e.state.cursor).toBe(7);
+		// The other side of the same rule, where both trees agree: `_` is a symbol and splits,
+		// so the first press touches only `foo`.
+		const underscore = editor("foo_bar", 0);
+		expect(underscore.press("c", M)).toBe(true);
+		expect(underscore.state.text).toBe("Foo_bar");
+		expect(underscore.state.cursor).toBe(3);
+	});
+
+	test("a negative count converts backwards and leaves point where it was", () => {
+		// The other recorded disagreement, resolved toward GNU (`casefiddle.c:677`): uemacs
+		// refuses a negative argument (`word.c:124-125`), the `"p"` spec here converts the
+		// previous word, and the movement lands back on where point already was.
+		const e = editor("foo bar", 4);
+		e.press("-", M); // M--
+		expect(e.press("u", M)).toBe(true);
+		expect(e.state.text).toBe("FOO bar");
+		expect(e.state.cursor).toBe(4);
+		expect(e.engine.lastCommand).toBe("upcase-word");
+	});
+
+	test("a count converts that many words in one pass", () => {
+		const e = editor("foo bar baz", 0);
+		e.press("3", M); // M-3
+		expect(e.press("u", M)).toBe(true);
+		expect(e.state.text).toBe("FOO BAR BAZ");
+		expect(e.state.cursor).toBe(11);
+	});
+
+	test("an empty span writes nothing, but the command still ran", () => {
+		// `casify_region` returns before modifying for an empty region (`casefiddle.c:537-539`),
+		// and `casify_word` still runs — so there is a command to name and no edit to undo.
+		const e = editor("foo", 3);
+		expect(e.press("u", M)).toBe(true);
+		expect(e.state.text).toBe("foo");
+		expect(e.state.cursor).toBe(3);
+		expect(e.engine.lastCommand).toBe("upcase-word");
+		expect(e.undoDepth()).toBe(0);
+		// A zero count is the same empty span, and not an absence: `C-0 M-u` ran too.
+		const zero = editor("foo", 0);
+		zero.press("0", C);
+		expect(zero.press("u", M)).toBe(true);
+		expect(zero.state.text).toBe("foo");
+		expect(zero.engine.lastCommand).toBe("upcase-word");
+		expect(zero.undoDepth()).toBe(0);
+	});
+});
+
+describe("emacs: case regions (C-x C-u / C-x C-l)", () => {
+	// `upcase-region` and `downcase-region`, bound on `ctl-x-map` in `subr.el:1748-1749` and
+	// both marked `disabled` there so Emacs asks before running them — and both bound the same
+	// way by uemacs (`region.c:121`, `:84`; `ebind.h:62`, `:54`), with no ask. The region is
+	// point and mark in *either* order (the geometric region), and the mark does not have to be
+	// active for it to exist.
+
+	test("C-x C-l downcases between point and mark", () => {
+		const e = editor("AB\nCD", 0);
+		e.press(" ", C); // C-SPC: mark at 0
+		e.repeat(2, "f", C); // point at 2
+		expect(pressCtlX(e, "C-l")).toBe(true);
+		expect(e.engine.lastCommand).toBe("downcase-region");
+		expect(e.state.text).toBe("ab\nCD");
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("the mark does not have to be active for the region to exist", () => {
+		// `(interactive "r")` consults the mark, not the *active* mark — the same
+		// deactivated-mark fixture the `C-w` test uses, run through the case command.
+		const e = editor("abcdef", 0);
+		e.press(" ", C); // mark at 0
+		e.press(" ", C); // again at the same spot: the toggle deactivates it
+		e.repeat(3, "f", C);
+		expect(e.engine.markActive).toBe(false);
+		expect(pressCtlX(e, "C-u")).toBe(true);
+		expect(e.engine.lastCommand).toBe("upcase-region");
+		expect(e.state.text).toBe("ABCdef");
+		expect(e.state.cursor).toBe(3);
+	});
+
+	test("with no mark at all it is a user-error: consumed, nothing run, last-command stands", () => {
+		// With no mark, `(interactive "r")` signals (`editfns.c:243`, `the-mark-is-not-set`) —
+		// a signal, not a no-op — so the engine consumes the keys and leaves `last-command`
+		// alone. The distinction from the empty region below is the point of both tests.
+		const e = editor("hello", 2);
+		e.press("f", C);
+		expect(e.engine.lastCommand).toBe("forward-char");
+		expect(pressCtlX(e, "C-u")).toBe(true);
+		expect(e.state.text).toBe("hello");
+		expect(e.state.cursor).toBe(3);
+		expect(e.engine.lastCommand).toBe("forward-char");
+	});
+
+	test("an empty region runs the command and writes nothing", () => {
+		// `casify_region` returns early for `start == end` (`casefiddle.c:537-539`) — but the
+		// command was entered and ran, so unlike the no-mark case this one *does* take over
+		// `last-command`, and still leaves no edit to undo.
+		const e = editor("hello", 2);
+		e.press(" ", C); // mark at point
+		expect(pressCtlX(e, "C-u")).toBe(true);
+		expect(e.engine.lastCommand).toBe("upcase-region");
+		expect(e.state.text).toBe("hello");
+		expect(e.undoDepth()).toBe(0);
+	});
+
+	test("when casing changes the region's length, point at the end moves with it", () => {
+		// `casify_region` returns `orig_end + added` (`casefiddle.c:581`) and `casify_word` sets
+		// point to that, so `ß` gaining a character pushes a point sitting at the region's end.
+		const e = editor("ße", 0);
+		e.press(" ", C);
+		e.press("f", C); // point at 1, region 0..1
+		expect(pressCtlX(e, "C-u")).toBe(true);
+		expect(e.state.text).toBe("SSe");
+		expect(e.state.cursor).toBe(2);
+	});
+});
+
+describe("emacs: the mark aliases (M-SPC / M-.)", () => {
+	// uemacs sets the mark on `M-SPC` (`basic.c:431`, key `ebind.h:111`) and on `M-.` (`:113`).
+	// GNU gives those keys to `cycle-spacing` (`bindings.el:1235`) and to
+	// `xref-find-definitions` (`progmodes/xref.el:2011`) — this batch follows uemacs, and the
+	// divergence is recorded in the engine. Both are the *same command* as `C-SPC`
+	// (`set-mark-command`), not a second implementation of it: the toggle and the
+	// `last-command` naming are shared, and these tests exist to say so.
+
+	test("M-SPC sets the mark, and a second press at the same spot toggles it off", () => {
+		const e = editor("hello", 2);
+		expect(e.press(" ", M)).toBe(true);
+		expect(e.engine.mark).toBe(2);
+		expect(e.engine.markActive).toBe(true);
+		expect(e.engine.lastCommand).toBe("set-mark-command");
+		expect(e.press(" ", M)).toBe(true);
+		expect(e.engine.markActive).toBe(false);
+	});
+
+	test("M-. sets the mark, and the region it sets is a working region", () => {
+		const e = editor("hello world", 0);
+		expect(e.press(".", M)).toBe(true);
+		expect(e.engine.mark).toBe(0);
+		expect(e.engine.markActive).toBe(true);
+		expect(e.engine.lastCommand).toBe("set-mark-command");
+		e.repeat(5, "f", C);
+		e.press("w", M); // M-w: copy the region
+		expect(e.engine.killRing).toEqual(["hello"]);
+		expect(e.state.text).toBe("hello world");
+	});
+
+	test("the alias is the meta spelling only — a bare . still types itself", () => {
+		const e = editor("ab", 0);
+		expect(e.press(".", M)).toBe(true);
+		const plain = editor("ab", 0);
+		expect(plain.press(".", {})).toBe(false);
+	});
+});
+
+describe("emacs: delete blank lines (C-x C-o)", () => {
+	// uemacs's `cmd_delete_blank_lines` (`random.c:637`, key `ebind.h:57`): walk up to the
+	// first non-blank line, count the run of empty lines after it, delete it, leave point on
+	// the line that terminated the walk. "Blank" is *empty* there — a line of spaces is not
+	// blank — and the line after the final newline is a phantom the walk steps through like
+	// any other blank line. The engine is a port of that walk, not of GNU's
+	// `delete-blank-lines` (`simple.el:826`), which uses `[ \t]*$` and does not move point
+	// the same way.
+
+	test("a run of blank lines in the middle collapses to one break", () => {
+		const e = editor("a\n\n\nb", 1);
+		expect(pressCtlX(e, "C-o")).toBe(true);
+		expect(e.engine.lastCommand).toBe("delete-blank-lines");
+		expect(e.state.text).toBe("a\nb");
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("standing on a blank line takes the run above it and below it", () => {
+		const e = editor("a\n\n\nb", 3);
+		expect(pressCtlX(e, "C-o")).toBe(true);
+		expect(e.state.text).toBe("a\nb");
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("the blank run at the top of the buffer stays, because the walk stops at line 0", () => {
+		// The first line is never deleted: uemacs's walk stops when it cannot step up
+		// (`line_prev != b_linep`), which is line 0 even when line 0 is itself blank.
+		const e = editor("\n\na", 0);
+		expect(pressCtlX(e, "C-o")).toBe(true);
+		expect(e.state.text).toBe("\na");
+		expect(e.state.cursor).toBe(1);
+	});
+
+	test("at the end of the buffer the phantom line is walked through, not counted", () => {
+		// After the final newline there is no line — uemacs's line list ends at `b_linep` —
+		// but the walk needs no special case for it: the phantom is blank, so starting there
+		// converges to the same line from below, and the count is capped at the last real
+		// line, so the phantom itself never deletes anything. Its falsification run is what
+		// settled that: deleting the clamp that used to map it down changed no test.
+		const e = editor("b\n\n", 3);
+		expect(pressCtlX(e, "C-o")).toBe(true);
+		expect(e.state.text).toBe("b\n");
+		expect(e.state.cursor).toBe(2);
+	});
+
+	test("a line of spaces is not blank here — uemacs checks for an empty line", () => {
+		// The recorded divergence from GNU, which would delete the `" "` line (`simple.el:826`,
+		// `[ \t]*$`). uemacs's `line_length (lp) == 0` is the whole test.
+		const e = editor("a\n \nb", 1);
+		expect(pressCtlX(e, "C-o")).toBe(true);
+		expect(e.state.text).toBe("a\n \nb");
+		expect(e.state.cursor).toBe(1);
+	});
+
+	test("nothing to delete is still a command: no write, no undo entry", () => {
+		const e = editor("a\nb", 2);
+		expect(e.undoDepth()).toBe(0);
+		expect(pressCtlX(e, "C-o")).toBe(true);
+		expect(e.state.text).toBe("a\nb");
+		expect(e.state.cursor).toBe(2);
+		expect(e.engine.lastCommand).toBe("delete-blank-lines");
+		expect(e.undoDepth()).toBe(0);
+	});
+});
+
+describe("emacs: M-C-H kills the previous word", () => {
+	// uemacs's `cmd_delete_previous_word` (`word.c:315`, key `ebind.h:100`), which uemacs also
+	// binds on `M-DEL` (`ebind.h:138`) — and the command `[C-backspace]` runs here
+	// (`bindings.el:1634`). GNU gives `M-C-H` to `mark-defun` (`bindings.el:1666`); the compat
+	// batch takes the key, and the engine records the divergence. The twin assertion below is
+	// the other half: same fixture, same result as the `ctrlBackspace` flag.
+
+	test("M-C-H is the same command as C-backspace, on the same fixture", () => {
+		const compat = editor("aa bb cc", 8);
+		expect(compat.press("h", CM)).toBe(true);
+		const twin = editor("aa bb cc", 8);
+		twin.press("x", { ctrlBackspace: true });
+		expect(compat.state.text).toBe(twin.state.text);
+		expect(compat.engine.killRing).toEqual(twin.engine.killRing);
+		expect(compat.state.text).toBe("aa bb ");
+		expect(compat.state.cursor).toBe(6);
+		expect(compat.engine.killRing).toEqual(["cc"]);
+		expect(compat.engine.lastCommand).toBe("kill-region");
+	});
+
+	test("with a count it takes that many words", () => {
+		const e = editor("aa bb cc", 8);
+		e.press("2", M);
+		expect(e.press("h", CM)).toBe(true);
+		expect(e.state.text).toBe("aa ");
+		expect(e.state.cursor).toBe(3);
+		expect(e.engine.killRing).toEqual(["bb cc"]);
 	});
 });
 
@@ -1420,6 +1725,25 @@ describe("emacs: the exported helpers, directly", () => {
 		expect(emacsKeyToken("@", C)).toBe("C-@");
 		expect(emacsKeyToken("x", {})).toBe("x");
 	});
+
+	test("emacsCasify applies the per-character pass GNU runs, inword included", () => {
+		// The loop behind every case command (`casefiddle.c:475-521`): each character is cased on
+		// its own, and `case_character` tracks `inword` from word syntax alone (`:122-129`),
+		// which capitalize consults — a word character whose predecessor was also one downcases,
+		// and an entry into a word upcases.
+		expect(emacsCasify("hello", "up")).toBe("HELLO");
+		expect(emacsCasify("HELLO", "down")).toBe("hello");
+		expect(emacsCasify("hELLO wORLD", "capitalize")).toBe("Hello World");
+		// `_` is a symbol and therefore a boundary in both trees; `$` is a word here, so this is
+		// where the transcription of the syntax table is what decides the output.
+		expect(emacsCasify("foo_bar", "capitalize")).toBe("Foo_Bar");
+		expect(emacsCasify("foo$bar", "capitalize")).toBe("Foo$bar");
+		// The full SpecialCasing mapping, where one character becomes two (`:140-160`): `ß`
+		// upcases to `SS`, which is the length change `#caseWord` and `#caseRegion` move point
+		// past.
+		expect(emacsCasify("ß", "up")).toBe("SS");
+		expect(emacsCasify("SS", "down")).toBe("ss");
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -1427,12 +1751,18 @@ describe("emacs: the exported helpers, directly", () => {
 // ---------------------------------------------------------------------------
 
 /**
- * The reference tree, and the reason nothing above depends on it.
+ * The reference trees, and the reason nothing above depends on them.
  *
- * `G:\Bunttta\emacs-master\` is this checkout's read-only copy of the Emacs sources. It is
- * *not* a test fixture: the guard below is `existsSync`-gated so that a clone without it skips
- * rather than fails, because a test that only passes on a machine with a second source tree
- * checkout is a test that fails CI for a reason that has nothing to do with the engine.
+ * `G:\Bunttta\emacs-master\` and `G:\Bunttta\uemacs-master\` are this checkout's read-only
+ * copies of the Emacs and uEmacs/PK sources. They are *not* test fixtures: the guard below is
+ * `existsSync`-gated so that a clone without them skips rather than fails, because a test that
+ * only passes on a machine with second source-tree checkouts fails CI for a reason that has
+ * nothing to do with the engine. The two trees gate the two tests below *separately*, and
+ * deliberately: the first test reads every citation in `emacs.ts` — uemacs `file:line`s
+ * included — so it needs both trees; the second reads only the reserved-table rows, whose
+ * citations are all GNU files, so its gate is the Emacs tree alone and its failure surface on a
+ * machine that has that tree is exactly what it was before the uemacs batch. If a table row
+ * ever cites a uemacs file, that gate widens with it.
  *
  * The same gate is the reason these assertions are allowed to carry line numbers at all — they
  * are the one place in this file that does, because a *copy* of a citation in a test would be
@@ -1440,18 +1770,30 @@ describe("emacs: the exported helpers, directly", () => {
  * exactly one copy and this test is what checks it.
  */
 const EMACS_TREE = "G:/Bunttta/emacs-master";
+const UEMACS_TREE = "G:/Bunttta/uemacs-master";
 const treePresent = existsSync(EMACS_TREE);
+const uemacsPresent = existsSync(UEMACS_TREE);
 
-/** Read one file of the tree, given the spelling `emacs.ts` uses in its citations. */
+/** Read one file of either tree, given the spelling `emacs.ts` uses in its citations. */
 function readCited(spelling: string): string[] | null {
 	// `emacs.ts` cites `bindings.el` for a file that is at `lisp/bindings.el`, and `cmds.c` for one
 	// at `src/cmds.c` — the citations are named as the source names them, not as paths. The
 	// prefixes are the four directories those names live in, tried in order; `""` is for the
-	// citations that already spell the directory.
+	// citations that already spell the directory. The uemacs tree is flat (`.c` and `.h` beside
+	// the README), so its fallback needs no prefix list.
+	//
+	// **The Emacs tree is tried first, and that is the collision rule**: `fileio.c`, `window.c`
+	// and `buffer.c` exist in both trees with different contents, so a uemacs citation must name
+	// a file the Emacs tree does not have. The uemacs batch cites `word.c`, `region.c`,
+	// `random.c`, `basic.c` and `ebind.h` — none of which exists under `G:\Bunttta\emacs-master\`
+	// — and deliberately does *not* cite uemacs's `fileio.c` for the line model, because that
+	// spelling would be read from the GNU tree.
 	for (const prefix of ["", "lisp/", "src/", "lisp/progmodes/", "admin/unidata/"]) {
 		const path = `${EMACS_TREE}/${prefix}${spelling}`;
 		if (existsSync(path)) return readFileSync(path, "utf8").split(/\r?\n/);
 	}
+	const uemacsPath = `${UEMACS_TREE}/${spelling}`;
+	if (existsSync(uemacsPath)) return readFileSync(uemacsPath, "utf8").split(/\r?\n/);
 	return null;
 }
 
@@ -1461,8 +1803,11 @@ function citedSpan(first: string, last: string | undefined): { start: number; en
 }
 
 describe("emacs: the citations, where the tree is", () => {
-	test.skipIf(!treePresent)("every file:line in emacs.ts names a line in the tree", () => {
-		// The mechanical half, over *every* citation — the ~300 of them, not just the tables.
+	test.skipIf(!treePresent || !uemacsPresent)("every file:line in emacs.ts names a line in the tree", () => {
+		// The mechanical half, over *every* citation — the ~300 of them, not just the tables —
+		// which is why this one needs both trees: the corpus includes the uemacs citations the
+		// compat batch added, and one unresolved spelling there is indistinguishable from a GNU
+		// one without both trees to try.
 		// What it catches is the cheap class of rot: a path that does not exist, a line past the
 		// end, a blank where there was text. What it cannot catch is a citation that now points at
 		// the *wrong* line, because nothing in the citation says what the line should contain —
@@ -1503,6 +1848,11 @@ describe("emacs: the citations, where the tree is", () => {
 		// It is a *name* check, not an equality check, because the source's own line carries a
 		// key description (`"\C-t"`) the table spells differently. A renamed command or a moved
 		// line both make it red, and both are the failure this guard exists for.
+		//
+		// The gate here is the Emacs tree alone, unlike the test above: every row's citation is
+		// a GNU file today. A row that ever cites a uemacs file widens this gate with it —
+		// `readCited` reads uemacs spellings from the GNU tree first, and the two flat `.c`
+		// namespaces overlap (`fileio.c` is in both).
 		const source = readFileSync(new URL("../src/emacs.ts", import.meta.url), "utf8");
 		const row =
 			/\["([^"]+)",\s*"([a-z][a-z0-9+*-]*(?:-[a-z0-9+*]+)+) \(([A-Za-z0-9_./-]+\.[a-z]+):(\d+)(?:-(\d+))?\)"\]/g;

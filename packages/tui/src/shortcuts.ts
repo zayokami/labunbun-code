@@ -162,10 +162,11 @@ export function shortcutGroups(opts: {
 		});
 	}
 	if (emacs) {
-		// Only what the engine *runs*. It also claims `C-t`, `M-u`, `M-z`, `C-o` and the rest
-		// of its reserved table, consuming them so they cannot fall through as stray
-		// characters — so naming them here as if they worked would be the same lie in a new
-		// place, and they are left out rather than listed as pending.
+		// Only what the engine *runs*. It also claims `C-t`, `M-z` and the rest of its reserved
+		// table — `C-o` among them, where the binding is `open-line`, not the `C-x C-o` below —
+		// consuming them so they cannot fall through as stray characters, so naming them here as
+		// if they worked would be the same lie in a new place. They are left out rather than
+		// listed as pending.
 		groups.push({
 			title: "Emacs",
 			rows: [
@@ -173,6 +174,7 @@ export function shortcutGroups(opts: {
 				["C-f / C-b", "character forward / back"],
 				["C-n / C-p", "line down / up"],
 				["M-f / M-b", "word forward / back"],
+				["M-u / M-l / M-c", "upcase / downcase / capitalize word"],
 				["C-k", "kill to end of line"],
 				["C-w", "kill region"],
 				["M-w", "copy region as kill"],
@@ -182,17 +184,27 @@ export function shortcutGroups(opts: {
 				["C-u", "count prefix (×4 per press)"],
 				["M-1..9 / M--", "digit prefix / negative"],
 				["C-SPC", "set mark; twice toggles the region"],
+				// uemacs's spellings of the same command; GNU binds these two keys to
+				// `cycle-spacing` and `xref-find-definitions` instead, and the engine notes
+				// the divergence where the keys are taken.
+				["M-SPC / M-.", "set mark; the same command as C-SPC"],
 				["C-x C-x", "exchange point and mark"],
 				// The second implemented member of `ctl-x-map`. Its two aliases are the ones
 				// this build cannot have: `C-/` is not a byte most terminals send, and `C-_`
 				// is the byte a terminal sends for `M--`, which is `negative-argument` here.
 				// `emacs.ts` says so where the two decisions are made.
 				["C-x u", "undo"],
+				["C-x C-u / C-x C-l", "upcase / downcase the region"],
+				["C-x C-o", "delete blank lines around point"],
 				// Listed with the caveat rather than left out, because it is Emacs's `dd`
 				// and a reader coming from Emacs will look for it — but `EmacsKey` has to be
 				// told to set `ctrlShiftBackspace`, and no terminal sends the combination,
 				// so a user pressing it here may get nothing at all. Saying so is the point.
 				["C-S-BS", "kill whole line (most terminals never send it)"],
+				// The uemacs alias for the command `[C-backspace]` above runs (GNU gives the
+				// key to `mark-defun`). Same reachability caveat: meta and ctrl have to
+				// arrive together for the engine to see it.
+				["M-C-H", "kill the word before (most terminals never send it)"],
 			],
 		});
 	}
