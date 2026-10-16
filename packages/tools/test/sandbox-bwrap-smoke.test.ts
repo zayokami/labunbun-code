@@ -60,7 +60,7 @@
  */
 
 import { afterAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -671,60 +671,113 @@ const roundTrip = (port: number) =>
  * The bridge, measured across a real namespace wall.
  *
  * Everything above this row is mounts; this is the network half, and it is the
- * one claim no string comparison can make for a namespace: a fresh netns has
- * `lo` DOWN and unaddressed, so the wrapper script has to bring it up, and the
- * capability that takes is granted by `--cap-add CAP_NET_ADMIN` — exactly the
- * two things a real kernel can refuse and a mock cannot. The host side is the
+ * one claim no string comparison can make for a namespace: whether a connect
+ * inside the namespace reaches a socket the host serves. The host side is the
  * stand-in for the proxy's UDS server: a socket that upper-cases what it is
  * sent, so both directions of the relay are visible in the one exchange.
  * `network-proxy.test.ts` covers the hop from the socket into the proxy proper;
  * what is under measurement here is the hop from *inside* the namespace to the
  * socket, which only a real `bwrap` can exercise.
  *
+ * **The spawn is asynchronous, and that is not style — it is the fix for this
+ * row's first CI failure.** The upstream server lives in *this* process, and
+ * `spawnSync` freezes the event loop that has to accept and answer the
+ * bridge's connection: the first CI run measured exactly that deadlock — the
+ * spawn timed out against the test timeout, stdout and stderr both empty,
+ * and bwrap killed as a dangling process when bun's 5s limit won. The bridge
+ * itself was never the question: the same argv round-trips PING in ~100ms
+ * under a driver whose event loop stays free (the WSL reproduction recorded
+ * in `docs/dev/sandbox.md`). An async spawn keeps this process able to serve
+ * while the namespace does its work.
+ *
  * The control is the same command with no bridge in the argv — the dead network
- * this build had before the bridge existed — and it must fail to connect.
+ * this build had before the bridge existed — and it must fail to connect. Its
+ * `spawnSync` is fine, and stays: nothing in this process has to answer for
+ * it (the refusal comes from the kernel), which is exactly what the row above
+ * cannot say.
  */
-smoke("a bridged command crosses the namespace wall to the host socket", async () => {
-	const { workspace, git } = workspaceFixture();
-	const port = await freePort();
-	const socketPath = join(tmpdir(), `lbb-bridge-smoke-${process.pid}-${Date.now()}.sock`);
-	const upstream: Server = createServer((socket) => {
-		socket.on("data", (chunk: Buffer) => socket.write(chunk.toString("latin1").toUpperCase()));
-	});
-	await new Promise<void>((resolve, reject) => {
-		upstream.once("error", reject);
-		upstream.listen(socketPath, () => {
-			upstream.removeListener("error", reject);
-			resolve();
+smoke(
+	"a bridged command crosses the namespace wall to the host socket",
+	async () => {
+		const { workspace, git } = workspaceFixture();
+		const port = await freePort();
+		const socketPath = join(tmpdir(), `lbb-bridge-smoke-${process.pid}-${Date.now()}.sock`);
+		const upstream: Server = createServer((socket) => {
+			socket.on("data", (chunk: Buffer) => socket.write(chunk.toString("latin1").toUpperCase()));
 		});
-	});
-	try {
-		const argv = buildBwrapArgs(
-			bridgedPolicy(workspace, git),
-			["/bin/bash", "-c", roundTrip(port)],
-			(p) => existsSync(p),
-			{ pairs: [{ port, socket: socketPath }] },
-		);
-		const run = spawnSync("bwrap", argv, { encoding: "utf8", timeout: 15000 });
-		// The wrapper's degradation line names the fail-closed fallback; if it is
-		// here, the bridge never started and the wall is still up — the assertion
-		// below would be measuring the fallback instead of the bridge.
-		expect(run.stderr, `the bridge did not start: ${run.stderr.slice(0, 400)}`).not.toContain(
-			"the network bridge did not start",
-		);
-		expect(run.stdout, `no round trip through the bridge: ${run.stderr.slice(0, 400)}`).toBe("PING");
-	} finally {
-		await new Promise<void>((resolve) => upstream.close(() => resolve()));
-		rmSync(socketPath, { force: true });
-	}
-});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(socketPath, () => {
+				upstream.removeListener("error", reject);
+				resolve();
+			});
+		});
+		try {
+			const argv = buildBwrapArgs(
+				bridgedPolicy(workspace, git),
+				["/bin/bash", "-c", roundTrip(port)],
+				(p) => existsSync(p),
+				{ pairs: [{ port, socket: socketPath }] },
+			);
+			// The row's own kill budget, inside a test budget that no longer
+			// swallows it: the timer fires first, the child dies, and the
+			// assertions below get to report what happened instead of the
+			// harness reporting a bare timeout.
+			const run = await new Promise<{
+				stdout: string;
+				stderr: string;
+				status: number | null;
+				signal: string | null;
+				error: string | null;
+			}>((resolve) => {
+				const child = spawn("bwrap", argv, { stdio: ["ignore", "pipe", "pipe"] });
+				let stdout = "";
+				let stderr = "";
+				child.stdout.setEncoding("utf8");
+				child.stderr.setEncoding("utf8");
+				child.stdout.on("data", (chunk: string) => {
+					stdout += chunk;
+				});
+				child.stderr.on("data", (chunk: string) => {
+					stderr += chunk;
+				});
+				const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
+				child.once("error", (error) => {
+					clearTimeout(timer);
+					resolve({ stdout, stderr, status: null, signal: null, error: error.message });
+				});
+				child.once("close", (status, signal) => {
+					clearTimeout(timer);
+					resolve({ stdout, stderr, status, signal, error: null });
+				});
+			});
+			// The wrapper's degradation line names the fail-closed fallback; if it is
+			// here, the bridge never started and the wall is still up — the assertion
+			// below would be measuring the fallback instead of the bridge.
+			expect(run.stderr, `the bridge did not start: ${run.stderr.slice(0, 400)}`).not.toContain(
+				"the network bridge did not start",
+			);
+			expect(
+				run.stdout,
+				`no round trip through the bridge (status=${run.status} signal=${run.signal} error=${run.error}): ${run.stderr.slice(0, 400)}`,
+			).toBe("PING");
+		} finally {
+			await new Promise<void>((resolve) => upstream.close(() => resolve()));
+			rmSync(socketPath, { force: true });
+		}
+	},
+	25_000,
+);
 
 smoke("CONTROL: without the bridge the same connect has nowhere to go", async () => {
 	const { workspace, git } = workspaceFixture();
 	const port = await freePort();
-	// No fourth argument: no bridge, no wrapper, and a fresh netns whose `lo`
-	// is down — so this is byte-for-byte the argv every string test pins for the
-	// dead-network shape, run against a kernel.
+	// No fourth argument: no bridge, no wrapper — the bare cut-off argv,
+	// byte-for-byte the argv every string test pins for the dead-network shape,
+	// run against a kernel. The connect fails because nothing listens on that
+	// port inside the namespace; bubblewrap raises `lo` itself on `--unshare-net`
+	// (measured), and the host's socket is on the other side of the wall either
+	// way.
 	const argv = buildBwrapArgs(bridgedPolicy(workspace, git), ["/bin/bash", "-c", roundTrip(port)], (p) =>
 		existsSync(p),
 	);

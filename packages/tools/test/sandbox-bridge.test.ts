@@ -96,6 +96,16 @@ describe("wrapWithBridge", () => {
 		// Fail closed and out loud: the command still runs, and the reason the
 		// network is dead went to stderr.
 		expect(script).toContain("labunbun: the network bridge did not start; the command runs with no network reachable");
+		// The bridge's own state follows the verdict: a bridge still running
+		// when the probe never connected is a different machine from one that
+		// already exited.
+		expect(script).toContain("the bridge process is still running");
+		expect(script).toContain("the bridge process has exited");
+		// And the bridge's stderr stays attached — its error is the only
+		// account of a bridge that cannot listen, and discarding it is what
+		// made the one unreadable CI failure unreadable.
+		expect(script).toContain("</dev/null >/dev/null &");
+		expect(script).not.toContain(">/dev/null 2>&1 &");
 		expect(script).toContain('exec "$@"');
 	});
 

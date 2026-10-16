@@ -48,9 +48,13 @@ export function bridgeRuntime(exists: (path: string) => boolean = existsSync): s
  * the wrapper — and the caller then keeps the bare argv, which in a restricted
  * namespace is the dead network this build had before the bridge existed.
  *
- * The wrapper is one `bash -c` script. It brings loopback up (a fresh network
- * namespace starts with `lo` down and unaddressed, and the bridge cannot
- * listen until it is not), starts the bridge in the background, and polls both
+ * The wrapper is one `bash -c` script. It brings loopback up — belt and
+ * braces, not the mechanism: bubblewrap's own `loopback_setup()` raises `lo`
+ * on every `--unshare-net` and exits if it cannot (measured against 0.9.0,
+ * the version this repo's CI installs), so the `ip` line only covers older
+ * bubblewrap's namespaces, where `lo` stays down. Then it starts the bridge
+ * in the background — stderr attached, because a bridge that cannot listen
+ * says so there and nowhere else — and polls both
  * ports with `/dev/tcp` until a connect succeeds — the only evidence that
  * matters, because it is exactly what the confined command will do. On timeout
  * it says so on stderr and runs the command anyway: fail closed, like every
@@ -77,12 +81,15 @@ export function wrapWithBridge(
 
 	const script = [
 		"if command -v ip >/dev/null 2>&1; then ip link set lo up 2>/dev/null; ip addr add 127.0.0.1/8 dev lo 2>/dev/null; fi",
-		`${runtime.join(" ")} ${pairs.join(" ")} </dev/null >/dev/null 2>&1 &`,
+		// The bridge's stderr is *not* discarded: a bridge that cannot start
+		// reports why on its own stderr, and the first version of this line
+		// sent it to /dev/null — the one failure mode nobody could read.
+		`${runtime.join(" ")} ${pairs.join(" ")} </dev/null >/dev/null &`,
 		"_lbb_bridge=$!",
 		"_lbb_ok=0",
 		"_lbb_tries=0",
 		`while [ "$_lbb_tries" -lt 100 ]; do if ${probes}; then ${closes}; _lbb_ok=1; break; fi; kill -0 "$_lbb_bridge" 2>/dev/null || break; _lbb_tries=$((_lbb_tries + 1)); sleep 0.05; done`,
-		`if [ "$_lbb_ok" -ne 1 ]; then printf '%s\\n' 'labunbun: the network bridge did not start; the command runs with no network reachable' >&2; fi`,
+		`if [ "$_lbb_ok" -ne 1 ]; then printf '%s\\n' 'labunbun: the network bridge did not start; the command runs with no network reachable' >&2; kill -0 "$_lbb_bridge" 2>/dev/null && printf '%s\\n' 'labunbun: the bridge process is still running' >&2 || printf '%s\\n' 'labunbun: the bridge process has exited' >&2; fi`,
 		'exec "$@"',
 	].join("\n");
 

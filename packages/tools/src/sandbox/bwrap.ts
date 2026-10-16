@@ -65,13 +65,13 @@ export function buildBwrapArgs(
 		...namespaceArgs(policy.network),
 		"--cap-drop",
 		"ALL",
-		// A bridged command brings this namespace's own loopback up before the
-		// bridge can listen — a fresh network namespace starts with `lo` down
-		// and unaddressed — and that takes CAP_NET_ADMIN. The capability is
-		// scoped to the namespace its holder already lives in: it can
-		// configure these interfaces and nothing the host owns, and it is
-		// granted only when a bridge is actually in the argv. Without one the
-		// drop stays total.
+		// The wrapper's `ip` fallback for older bubblewrap's down `lo` takes
+		// CAP_NET_ADMIN; current bubblewrap raises `lo` itself on
+		// `--unshare-net` (its `loopback_setup()`, measured against 0.9.0 in
+		// CI), so on those versions this grant sits unused. It is scoped to
+		// the namespace its holder already lives in — it can configure these
+		// interfaces and nothing the host owns — and it is granted only when
+		// a bridge is actually in the argv. Without one the drop stays total.
 		...(bridged === undefined ? [] : ["--cap-add", "CAP_NET_ADMIN"]),
 		"--",
 		...effective,
