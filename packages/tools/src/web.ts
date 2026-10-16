@@ -1,27 +1,54 @@
-// Web tools: WebFetch turns a URL into readable text, WebSearch searches DuckDuckGo.
-// Network access is the job of the tools, and the tests cover the pure helpers.
+// Web tools: WebFetch turns a URL into readable text, WebSearch searches the
+// web. Both fetch in this process by default: WebFetch fetches the URL
+// directly, and WebSearch scrapes the DuckDuckGo HTML endpoint, which needs no
+// key. LBB_WEB_SEARCH=deepseek / LBB_WEB_FETCH=deepseek switch either tool to
+// the paid, keyed DeepSeek Search/Fetch APIs. The tests cover the pure helpers.
 // Long-form design notes: docs/dev/tools.md
 
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import {
-	type AnyTool,
-	buildTool,
-	decideNetworkRequest,
-	isBlockedAddress,
-	type NetworkAxis,
-	normalizeHost,
-} from "@labunbun/agent";
+import { type AnyTool, buildTool, isBlockedAddress, type NetworkAxis } from "@labunbun/agent";
 import { textContent } from "@labunbun/ai";
 import { z } from "zod";
+import { DEEPSEEK_API_KEY_ENV, deepSeekFetch, deepSeekSearch } from "./deepseek-web.ts";
+import {
+	fetchWithTimeout,
+	guardUrlWithoutDns,
+	MAX_RESPONSE_BYTES,
+	readCapped,
+	refuseByNetworkPolicy,
+	truncateWithMarker,
+} from "./web-common.ts";
 
 const MAX_CONTENT_CHARS = 40_000;
-const FETCH_TIMEOUT_MS = 30_000;
-const MAX_RESPONSE_BYTES = 10_000_000;
 
 // Long-form design notes: docs/dev/tools.md
 /** Where WebSearch goes, named so that the network axis has something to judge. */
 const SEARCH_HOST = "html.duckduckgo.com";
+
+/** The environment switches that move a web tool onto the paid DeepSeek APIs. */
+export const LBB_WEB_SEARCH_ENV = "LBB_WEB_SEARCH";
+export const LBB_WEB_FETCH_ENV = "LBB_WEB_FETCH";
+
+export type WebSearchBackend = "duckduckgo" | "deepseek";
+export type WebFetchBackend = "local" | "deepseek";
+
+/**
+ * Which backend each web tool uses. Exactly `deepseek` (trimmed, case
+ * insensitive) turns the paid backend on; every other value — including a
+ * misspelling — is the free default. The silence is deliberate: a typo must
+ * not brick a session, and the tools have no startup channel to warn on.
+ */
+export function resolveWebBackends(
+	env: { [name: string]: string | undefined },
+	overrides: { search?: WebSearchBackend; fetch?: WebFetchBackend } = {},
+): { search: WebSearchBackend; fetch: WebFetchBackend } {
+	const isDeepSeek = (name: string) => env[name]?.trim().toLowerCase() === "deepseek";
+	return {
+		search: overrides.search ?? (isDeepSeek(LBB_WEB_SEARCH_ENV) ? "deepseek" : "duckduckgo"),
+		fetch: overrides.fetch ?? (isDeepSeek(LBB_WEB_FETCH_ENV) ? "deepseek" : "local"),
+	};
+}
 
 /** Strip HTML down to readable text: drop scripts/styles/tags, decode entities, collapse whitespace. */
 export function htmlToText(html: string): string {
@@ -89,34 +116,6 @@ function decodeDdgUrl(raw: string): string {
 	}
 }
 
-async function fetchWithTimeout(url: string, init?: RequestInit, signal?: AbortSignal): Promise<Response> {
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-	// The run's own cancel has to reach the request too, or an interrupted turn
-	// stays parked on the network until the timeout above expires.
-	const onAbort = () => controller.abort();
-	// A signal that aborted before this listener was attached never fires
-	// "abort" again, so the already-aborted case is read first — attaching
-	// alone would let the request run on for a caller that already gave up.
-	if (signal?.aborted) onAbort();
-	else signal?.addEventListener("abort", onAbort, { once: true });
-	try {
-		return await fetch(url, { ...init, signal: controller.signal });
-	} finally {
-		clearTimeout(timer);
-		signal?.removeEventListener("abort", onAbort);
-	}
-}
-
-// Long-form design notes: docs/dev/tools.md
-/** The answer of the network axis for `hostname`, as a refusal string or `null`. */
-function refuseByNetworkPolicy(hostname: string, network: NetworkAxis | undefined): string | null {
-	if (!network) return null;
-	const decision = decideNetworkRequest(network.domains, normalizeHost(hostname), network.access);
-	if (decision.allowed) return null;
-	return `Network policy refuses ${hostname} (${decision.reason})`;
-}
-
 // Long-form design notes: docs/dev/tools.md
 /** The addresses a hostname stands for, at the moment of the check. */
 export type HostResolver = (hostname: string) => Promise<string[]>;
@@ -128,26 +127,17 @@ export const resolveHostWithDns: HostResolver = async (hostname) => {
 };
 
 // Long-form design notes: docs/dev/tools.md
-/** Guard against SSRF: resolve the hostname and check every returned address. */
+/** Guard against SSRF: the non-DNS checks, then resolve the hostname and check every returned address. */
 async function guardPublicUrl(
 	rawUrl: string,
 	network: NetworkAxis | undefined,
 	resolveHost: HostResolver,
 ): Promise<string | null> {
-	let url: URL;
-	try {
-		url = new URL(rawUrl);
-	} catch {
-		return "Invalid URL";
-	}
-	if (url.protocol !== "http:" && url.protocol !== "https:") {
-		return `Unsupported protocol: ${url.protocol}`;
-	}
-	const hostname = url.hostname.replace(/^\[|\]$/g, "");
-	const policyRefusal = refuseByNetworkPolicy(hostname, network);
-	if (policyRefusal) return policyRefusal;
-	if (hostname.toLowerCase() === "localhost") return "Requests to localhost are not allowed";
-	if (isIP(hostname) && isBlockedAddress(hostname)) return "Requests to private/internal addresses are not allowed";
+	const withoutDns = guardUrlWithoutDns(rawUrl, network);
+	if (withoutDns) return withoutDns;
+	// The shared guard already parsed this URL and accepted its protocol, so
+	// this second parse cannot throw and covers only the DNS half below.
+	const hostname = new URL(rawUrl).hostname.replace(/^\[|\]$/g, "");
 	if (!isIP(hostname)) {
 		let addresses: string[];
 		try {
@@ -167,30 +157,6 @@ async function guardPublicUrl(
 		}
 	}
 	return null;
-}
-
-/** Read a response body up to a byte cap, aborting the stream once exceeded. */
-async function readCapped(response: Response, maxBytes: number): Promise<string> {
-	if (!response.body) return response.text();
-	const reader = response.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (!value) continue;
-			total += value.byteLength;
-			if (total > maxBytes) {
-				await reader.cancel();
-				break;
-			}
-			chunks.push(value);
-		}
-	} finally {
-		reader.releaseLock?.();
-	}
-	return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
 }
 
 // Long-form design notes: docs/dev/tools.md
@@ -223,14 +189,23 @@ export interface WebFetchOptions {
 	 * {@link HostResolver} for why a test must not use it.
 	 */
 	resolveHost?: HostResolver;
+	/** `deepseek` routes the fetch through the DeepSeek Fetch API; `local` (the default) fetches here. */
+	backend?: WebFetchBackend;
 }
 
 export function createWebFetchTool(options: WebFetchOptions = {}): AnyTool {
+	const backend = options.backend ?? "local";
 	return buildTool({
 		name: "WebFetch",
+		// The description states the backend that is actually answering, so the
+		// model is never told "fetched directly" about a request a third party
+		// made on its behalf.
 		description:
-			"Fetches a URL and returns its readable text content (HTML stripped, truncated). " +
-			"Use for documentation pages, articles, and files served over HTTP.",
+			backend === "deepseek"
+				? "Fetches a URL via the DeepSeek Fetch API and returns its readable text content (Markdown, truncated). " +
+					"Use for documentation pages, articles, and files served over HTTP."
+				: "Fetches a URL and returns its readable text content (HTML stripped, truncated). " +
+					"Use for documentation pages, articles, and files served over HTTP.",
 		inputSchema: z.object({
 			url: z.string().url().describe("Absolute HTTP(S) URL"),
 			max_chars: z.number().int().positive().max(100_000).optional().describe("Content cap (default 40000)"),
@@ -241,6 +216,13 @@ export function createWebFetchTool(options: WebFetchOptions = {}): AnyTool {
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
 		call: async (input, ctx) => {
+			if (backend === "deepseek") {
+				return deepSeekFetch(
+					{ url: input.url, maxChars: input.max_chars ?? MAX_CONTENT_CHARS },
+					ctx,
+					process.env[DEEPSEEK_API_KEY_ENV],
+				);
+			}
 			let response: Response;
 			try {
 				const result = await fetchGuarded(
@@ -273,8 +255,7 @@ export function createWebFetchTool(options: WebFetchOptions = {}): AnyTool {
 			const contentType = response.headers.get("content-type") ?? "";
 			const body = await readCapped(response, MAX_RESPONSE_BYTES);
 			const text = contentType.includes("html") ? htmlToText(body) : body;
-			const cap = input.max_chars ?? MAX_CONTENT_CHARS;
-			const trimmed = text.length > cap ? `${text.slice(0, cap)}\n\n[truncated ${text.length - cap} chars]` : text;
+			const trimmed = truncateWithMarker(text, input.max_chars ?? MAX_CONTENT_CHARS);
 			if (!trimmed.trim()) {
 				return { content: [textContent("(empty page)")], isError: false };
 			}
@@ -283,14 +264,28 @@ export function createWebFetchTool(options: WebFetchOptions = {}): AnyTool {
 	});
 }
 
-export function createWebSearchTool(): AnyTool {
+export interface WebSearchOptions {
+	/** `deepseek` routes the search through the DeepSeek Search API; `duckduckgo` (the default) scrapes the free HTML endpoint. */
+	backend?: WebSearchBackend;
+}
+
+export function createWebSearchTool(options: WebSearchOptions = {}): AnyTool {
+	const backend = options.backend ?? "duckduckgo";
 	return buildTool({
 		name: "WebSearch",
 		description:
-			"Web search via DuckDuckGo (no API key). Returns titles, URLs, and snippets. " +
-			"Follow up with WebFetch to read a promising result.",
+			backend === "deepseek"
+				? "Web search via the DeepSeek Search API. Returns titles, URLs, and summaries. " +
+					"Follow up with WebFetch to read a promising result."
+				: "Web search via DuckDuckGo (no API key). Returns titles, URLs, and snippets. " +
+					"Follow up with WebFetch to read a promising result.",
 		inputSchema: z.object({
-			query: z.string().min(2).describe("The search query"),
+			// The DeepSeek API caps the query at 128 characters; the free path has
+			// no documented cap, so its schema stays byte-identical.
+			query:
+				backend === "deepseek"
+					? z.string().min(2).max(128).describe("The search query (up to 128 characters)")
+					: z.string().min(2).describe("The search query"),
 			max_results: z.number().int().min(1).max(10).optional().describe("Result cap (default 5)"),
 		}),
 		prompt:
@@ -299,6 +294,13 @@ export function createWebSearchTool(): AnyTool {
 		isReadOnly: () => true,
 		isConcurrencySafe: () => true,
 		call: async (input, ctx) => {
+			if (backend === "deepseek") {
+				return deepSeekSearch(
+					{ query: input.query, maxResults: input.max_results ?? 5 },
+					ctx,
+					process.env[DEEPSEEK_API_KEY_ENV],
+				);
+			}
 			// The destination is a constant, so this reads like it cannot need a
 			// check — and that is exactly why it needs one. The query is free text
 			// the model chose, and it leaves the machine inside a URL to a third

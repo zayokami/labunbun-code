@@ -116,6 +116,8 @@ The value `enabled` is the default. It starts no proxy. It restricts nothing. A 
 
 Only the user tier can set `networkAccess` and `networkDomains`. A repository must not set them. A repository that turns the network off makes `bun install` fail for every user who clones it.
 
+**Web tools.** WebFetch and WebSearch work without a key. Two environment switches move one tool at a time to the paid DeepSeek APIs. Set `LBB_WEB_SEARCH=deepseek` for WebSearch, `LBB_WEB_FETCH=deepseek` for WebFetch, or both. Each tool then needs `DEEPSEEK_API_KEY`. Put the key in the shell environment or in `settings.json` under `env`. Each API costs ¥5 per 1000 successful requests. A request that fails or finds nothing is free. Each API allows 5 requests per second per account. A failed request is one attempt: the tool reports the error and does not retry or fall back. Unset the switch to return to the free path. The network axis covers both backends. Each tool checks the DeepSeek host before any request. The fetch backend checks the target URL against the session domain table too.
+
 Use `/permissions` to see which of the three confinements you have. Use `/doctor` to see the full report.
 
 ### Session files

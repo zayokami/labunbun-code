@@ -72,8 +72,12 @@ export {
 	htmlToText,
 	parseDuckDuckGoResults,
 	resolveHostWithDns,
+	resolveWebBackends,
 	type SearchResult,
+	type WebFetchBackend,
 	type WebFetchOptions,
+	type WebSearchBackend,
+	type WebSearchOptions,
 } from "./web.ts";
 export { createWriteTool } from "./write.ts";
 
@@ -94,7 +98,13 @@ import { ReadFileState } from "./read-file-state.ts";
 import { detectRuntime, type SandboxRuntime } from "./sandbox/index.ts";
 import { createInspectSourceMapTool } from "./sourcemap.ts";
 import { createTaskTools, type TaskStore } from "./tasks.ts";
-import { createWebFetchTool, createWebSearchTool } from "./web.ts";
+import {
+	createWebFetchTool,
+	createWebSearchTool,
+	resolveWebBackends,
+	type WebFetchBackend,
+	type WebSearchBackend,
+} from "./web.ts";
 import { createWriteTool } from "./write.ts";
 
 export interface CreateAllToolsOptions {
@@ -102,6 +112,8 @@ export interface CreateAllToolsOptions {
 	taskStore?: TaskStore;
 	backgroundShells?: BackgroundShellManager;
 	webTools?: boolean;
+	/** Which backend each web tool uses. Absent fields resolve from LBB_WEB_SEARCH / LBB_WEB_FETCH. */
+	webBackends?: { search?: WebSearchBackend; fetch?: WebFetchBackend };
 	/** Directories outside the workspace Read may still open (the spill dir). */
 	readOnlyRoots?: string[];
 	// Long-form design notes: docs/dev/tools.md
@@ -171,7 +183,14 @@ export function createAllTools(cwd: string, options: CreateAllToolsOptions = {})
 		createKillBashTool(background),
 	];
 	const taskTools = options.taskStore ? createTaskTools(options.taskStore) : [];
-	const web = options.webTools === false ? [] : [createWebFetchTool(), createWebSearchTool()];
+	// Read once, at startup, after applySettingsEnv — the switches and the key
+	// can come from settings.env. The factories take the answer as a parameter,
+	// so a unit test that builds a tool directly never reads this process's env.
+	const webBackends = resolveWebBackends(process.env, options.webBackends);
+	const web =
+		options.webTools === false
+			? []
+			: [createWebFetchTool({ backend: webBackends.fetch }), createWebSearchTool({ backend: webBackends.search })];
 	return [
 		...coreTools,
 		...taskTools,
