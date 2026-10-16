@@ -13,6 +13,7 @@ import {
 	type WritableRoot,
 } from "@labunbun/agent";
 import { type ProbeShell, probeAppContainerSelection } from "./appcontainer-probe.ts";
+import type { UnixBridge } from "./bridge.ts";
 import { buildBwrapArgs } from "./bwrap.ts";
 import { buildSeatbeltArgs } from "./seatbelt.ts";
 import { SIMULATED_SANDBOX_DISCLAIMER } from "./simulated.ts";
@@ -94,15 +95,25 @@ export interface ResolveSandboxOptions {
 	executableRoots?: readonly string[];
 	/**
 	 * Loopback ports the confined command must still reach: the proxy that
-	 * enforces a restricted network axis listens on them, and only the macOS
-	 * profile can express that — it denies every route and then permits the
+	 * enforces a restricted network axis listens on them, and the macOS
+	 * profile expresses that by denying every route and then permitting the
 	 * proxy's own ports. The caller starts that proxy first and passes its
 	 * ports here; with none, the profile stays a dead network, which is the
-	 * fail-closed shape. Bubblewrap does not consume them (its namespace takes
-	 * the proxy down with everything else until a loopback bridge lands), and
-	 * the Windows container branch is reachable only with an open axis.
+	 * fail-closed shape. Bubblewrap does not read them — on Linux the same
+	 * reach is carried by `networkBridge` instead — and the Windows container
+	 * branch is reachable only with an open axis.
 	 */
 	networkPorts?: readonly number[];
+	/**
+	 * The host side of the Linux loopback bridge, when one is running. A
+	 * bubblewrap namespace denies every route off the machine, the proxy
+	 * included, so the bridge is the one route back: a process inside the
+	 * namespace listens on the proxy's own ports and forwards over a Unix
+	 * socket to this side. With no bridge the namespace stays a dead network —
+	 * the fail-closed shape, same as no ports on macOS. Only the Linux backend
+	 * consumes it.
+	 */
+	networkBridge?: UnixBridge;
 	platform?: SandboxPlatform;
 	/** Whether the platform's native backend is installed. Injected so this is testable. */
 	hasNativeBackend?: boolean;
@@ -387,7 +398,7 @@ export function resolveSandboxExecution(options: ResolveSandboxOptions): Sandbox
 	const args =
 		platform === "darwin"
 			? buildSeatbeltArgs(present, options.command, options.networkPorts)
-			: buildBwrapArgs(present, options.command, exists);
+			: buildBwrapArgs(present, options.command, exists, options.networkBridge);
 
 	return { kind: "native", execution: { argv: [program, ...args], simulated: false }, program };
 }
@@ -424,15 +435,18 @@ export function sandboxBackendFor(
 /**
  * Which of `describeNetworkPolicy`'s caveats applies here. The question order
  * is the function: an open axis beats a working backend, and a mode that asked
- * for no wrapper beats one too. The platform then splits the native case — a
- * macOS profile permits the enforcing proxy's own loopback ports while denying
- * every other route (`proxy-ports`), which the bubblewrap namespace cannot yet
- * — it denies the proxy with everything else (`os-namespace`) until the
- * loopback bridge lands. `platform` is defaulted the way
- * `describeSandboxBackend` defaults it, and keying on it can only ever move
- * the answer toward the stronger claim on a Mac, where the profile really does
- * carry the port rules: the executor passes them every time it runs a
- * restricted policy, because the same call starts the proxy.
+ * for no wrapper beats one too. The platform then splits the native case, and
+ * both answers leave exactly one route standing — the enforcing proxy: a macOS
+ * profile permits the proxy's own loopback ports while denying every other
+ * route (`proxy-ports`), and the bubblewrap namespace carries the same reach
+ * through its loopback bridge (`proxy-bridge`), the one route back across the
+ * namespace wall. A command with no running proxy to name gets no ports or
+ * bridge either and the wrapper in that case denies everything, the proxy
+ * included. `platform` is defaulted the way `describeSandboxBackend` defaults
+ * it, and keying on it can only ever move the answer toward the stronger
+ * claim, where the wrapper really does carry the route rules: the executor
+ * passes them every time it runs a restricted policy, because the same call
+ * starts the proxy.
  */
 export function networkConfinement(
 	backend: SandboxBackend | undefined,
@@ -442,7 +456,7 @@ export function networkConfinement(
 ): NetworkConfinement {
 	if (network === "enabled") return "network-left-open";
 	if (sandbox === "danger-full-access") return "filesystem-axis-off";
-	if (backend === "native") return platform === "darwin" ? "proxy-ports" : "os-namespace";
+	if (backend === "native") return platform === "darwin" ? "proxy-ports" : "proxy-bridge";
 	if (backend === "unavailable") return "backend-missing";
 	// `simulated`, an unreported backend, and `appcontainer` all land here. The
 	// third is not an oversight — see the function's own doc for why a restricted

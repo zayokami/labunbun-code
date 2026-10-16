@@ -24,6 +24,7 @@ import {
 	networkConfinementReason,
 	normalizeHost,
 } from "@labunbun/agent";
+import type { UnixBridge } from "../src/sandbox/bridge.ts";
 import { networkConfinement, resolveSandboxExecution } from "../src/sandbox/index.ts";
 
 const allow = (...patterns: string[]): NetworkDomainRule[] =>
@@ -636,17 +637,24 @@ describe("describeNetworkPolicy", () => {
 		// outbound traffic to the command itself". A build that prints it where
 		// nothing wraps the command has told the user their network is kernel-held
 		// when the only thing holding it is a proxy a program can ignore. So: the
-		// four non-native answers must each deny it, and the native one must be the
-		// only one that claims it.
+		// four non-native answers must each deny it, and the native answers must be
+		// the only ones that claim it.
 		// `linux` explicitly: on Windows the `no-os-backend` reason is about the
 		// machine and has its own tests below; these pins are the table's
 		// sentences, which is what a platform with no backend reads.
 		const claims = (confinement: NetworkConfinement) =>
 			describeNetworkPolicy("restricted", allow("example.com"), confinement, "linux");
-		// The native case no longer says "still reaches nothing" — it says the
-		// stronger and more useful thing, which is *why* a command reaches nothing.
-		// Asserting the old phrase would have pinned the vaguer sentence.
-		expect(claims("os-namespace")).toContain("denies the command every route off the machine, the proxy included");
+		// The native cases say the stronger and more useful thing: which single
+		// route the kernel leaves standing, and what holds it there. Asserting the
+		// vaguer sentence would have pinned words weaker than the mechanism.
+		expect(claims("proxy-bridge")).toContain(
+			"denies the command every route off the machine except the loopback bridge into the proxy",
+		);
+		// Including the fail-closed half: when the bridge cannot start, the
+		// wrapper's fallback is the dead network, not an open one.
+		expect(claims("proxy-bridge")).toContain(
+			"when the bridge cannot start the namespace refuses everything, the proxy included",
+		);
 		for (const confinement of [
 			"no-os-backend",
 			"backend-missing",
@@ -672,14 +680,15 @@ describe("describeNetworkPolicy", () => {
 	});
 
 	/**
-	 * The macOS sentence, which is deliberately not the Linux one.
+	 * The macOS sentence names its own mechanism, which is deliberately not the
+	 * Linux one.
 	 *
-	 * On Linux a confined command reaches nothing, so the allowlist governs only
-	 * the web tools; on macOS the profile leaves the enforcing proxy's own
-	 * loopback ports standing, so the allowlist governs a shell too — through the
-	 * one route the kernel permits. Reusing either sentence on the other platform
-	 * is false in one direction or the other, which is why this case exists at
-	 * all rather than folding into `os-namespace`.
+	 * Both kernel-held cases leave exactly one route standing — the proxy — so
+	 * both say the allowlist governs a shell. What differs is what the kernel
+	 * permits on the way there: a macOS profile permits the proxy's own loopback
+	 * ports, and a bubblewrap namespace only its loopback bridge. Reusing either
+	 * sentence on the other platform would name a route that side does not have,
+	 * which is why this case exists rather than folding into `proxy-bridge`.
 	 */
 	test("the macOS case says the proxy is reachable and the allowlist governs a shell", () => {
 		const text = describeNetworkPolicy(
@@ -705,37 +714,44 @@ describe("describeNetworkPolicy", () => {
 	});
 
 	test("an unrestricted network with no rules says nothing is interposed", () => {
-		expect(describeNetworkPolicy("enabled", [], "os-namespace", "linux")).toContain("no proxy is interposed");
+		expect(describeNetworkPolicy("enabled", [], "proxy-bridge", "linux")).toContain("no proxy is interposed");
 	});
 
 	test("restricted with nothing allowed says nothing is reachable", () => {
-		expect(describeNetworkPolicy("restricted", [], "os-namespace", "linux")).toContain("Nothing is reachable");
+		expect(describeNetworkPolicy("restricted", [], "proxy-bridge", "linux")).toContain("Nothing is reachable");
 	});
 
 	/**
-	 * A restricted network under a native backend does not mean "this list is
-	 * enforced on the shell". It means the shell has no route at all.
+	 * A restricted network under a native backend means the proxy is the one
+	 * route — so the list *does* govern a shell, through it.
 	 *
-	 * The domain list is enforced at the proxy, and the proxy is reached over
-	 * loopback — which `--unshare-net` and a `(deny default)` seatbelt profile both
-	 * take away. So the list governs the web tools, which fetch in this process, and
-	 * a command reaches nothing whether its host is listed or not. The old wording
-	 * said "Only the 2 listed domains may be reached", which reads as a working
-	 * allowlist and is false about every entry in it.
+	 * The domain list is enforced at the proxy, and on Linux the proxy is
+	 * reached through the namespace's loopback bridge: the wrapper denies every
+	 * other route, so a program that ignores the proxy environment still has
+	 * nowhere to go, and the list governs what a command may reach as much as
+	 * what the web tools may fetch. The old wording claimed the shell reached
+	 * nothing, which was true before the bridge and false after it.
 	 */
-	test("the native case does not tell the user their allowlist governs a command", () => {
+	test("the native case tells the user their allowlist governs a command through the one route left", () => {
 		const text = describeNetworkPolicy(
 			"restricted",
 			allow("example.com", "registry.npmjs.org"),
-			"os-namespace",
+			"proxy-bridge",
 			"linux",
 		);
-		expect(text).not.toContain("Only the 2 listed domains may be reached");
-		expect(text).toContain("A command run through the shell reaches nothing at all here");
+		expect(text).toContain("reaches the local proxy and nothing else");
 		expect(text).toContain("2 listed domains");
-		expect(text).toContain("web tools may fetch");
-		// And the four cases where the list *does* govern a command still say so,
-		// so this is not a sentence that was simply softened everywhere.
+		expect(text).toContain("for a command as much as for the web tools");
+		// The kernel-held detail is the route sentence above, never the shared
+		// "Only the ... may be reached" — that one belongs to the four cases
+		// where nothing kernel-side holds the boundary.
+		expect(text).not.toContain("Only the 2 listed domains may be reached");
+		// Both neighboring sentences stay false here: the command does not reach
+		// nothing, and the proxy is not the whole boundary.
+		expect(text).not.toContain("reaches nothing at all");
+		expect(text).not.toContain("proxy is the whole network boundary");
+		// And the four cases where the list governs a command say so in their own
+		// shared words, so this is not a sentence that was strengthened everywhere.
 		for (const confinement of [
 			"no-os-backend",
 			"backend-missing",
@@ -781,13 +797,18 @@ describe("describeNetworkPolicy", () => {
 	 *
 	 * Every "honest reporting" claim in this repo is only worth something if the
 	 * reporting and the argv come from the same fact. This is the test that ties
-	 * them together: if someone implements the loopback narrowing the module header
-	 * used to describe, this goes red and they have to revisit the sentence, and if
-	 * someone drops `--unshare-net` without thinking, the control below is what says
-	 * so.
+	 * them together: the kernel-held rows below pin the argv the `proxy-ports`
+	 * and `proxy-bridge` sentences claim — the port rules on one side, the
+	 * bridge wrapper on the other — and if someone drops `--unshare-net`
+	 * without thinking, the control below is what says so.
 	 */
 	test("and that sentence is true of the argv a native backend is given", () => {
-		const argvFor = (network: "restricted" | "enabled", platform: "darwin" | "linux", networkPorts?: number[]) => {
+		const argvFor = (
+			network: "restricted" | "enabled",
+			platform: "darwin" | "linux",
+			networkPorts?: number[],
+			networkBridge?: UnixBridge,
+		) => {
 			const resolution = resolveSandboxExecution({
 				policy: buildSandboxPolicy({ sandbox: "workspace-write", workspace: "/w/repo", network }),
 				command: ["/bin/sh", "-lc", "true"],
@@ -795,6 +816,7 @@ describe("describeNetworkPolicy", () => {
 				hasNativeBackend: true,
 				exists: () => true,
 				networkPorts,
+				networkBridge,
 			});
 			if (resolution.kind !== "native") throw new Error(`expected native, got ${resolution.kind}`);
 			return resolution.execution.argv.join(" ");
@@ -819,11 +841,29 @@ describe("describeNetworkPolicy", () => {
 		// No blanket rule came along: the port rules are the whole of it.
 		expect(narrowed).not.toContain("(allow network-outbound)");
 		expect(narrowed).not.toContain("(allow network-inbound)");
-		// Linux does not consume the ports yet — `--unshare-net` takes the proxy with
-		// everything else — so passing them there must change nothing. When the
-		// loopback bridge lands, this is the row that fails and sends the reader
-		// back to the `os-namespace` sentence, which is the point of asserting it.
+
+		// Restricted, ports named on Linux: `--unshare-net` takes the proxy with
+		// everything else, so ports alone change nothing there — the bridge below
+		// is the route that sentence claims.
 		expect(argvFor("restricted", "linux", [41234])).not.toContain("41234");
+
+		// Restricted, bridged: the argv of the `proxy-bridge` sentence. The
+		// wrapper preludes the one route back — loopback up, the bridge started
+		// on the proxy's own ports, both probed — and carries the host side's
+		// socket, while the capability the loopback setup needs rides along.
+		const bridged = argvFor("restricted", "linux", undefined, {
+			pairs: [{ port: 41234, socket: "/tmp/lbb-bridge-x/port-41234.sock" }],
+		});
+		expect(bridged).toContain("--unshare-net");
+		expect(bridged).toContain("/bin/bash");
+		expect(bridged).toContain("41234");
+		expect(bridged).toContain("/tmp/lbb-bridge-x/port-41234.sock");
+		expect(bridged).toContain("--cap-add CAP_NET_ADMIN");
+		// Without a bridge the argv keeps the dead-network shape: no wrapper, no
+		// capability — the fail-closed fallback the sentence names.
+		const dead = argvFor("restricted", "linux");
+		expect(dead).not.toContain("/bin/bash");
+		expect(dead).not.toContain("--cap-add");
 
 		// The control: `enabled` leaves the network open, which is the other half of
 		// what makes `network-left-open` the right answer for it.
@@ -843,7 +883,11 @@ describe("networkConfinement", () => {
 		// the default would read whichever machine runs the suite, which is the
 		// drift the parameter exists to remove.
 		expect(networkConfinement("native", "workspace-write", "enabled")).toBe("network-left-open");
-		expect(networkConfinement("native", "workspace-write", "restricted", "linux")).toBe("os-namespace");
+		// Linux places the same wrapper, and the namespace it generates keeps
+		// the loopback bridge to the enforcing proxy — the one route back across
+		// the wall. The executor passes the bridge on every restricted run (the
+		// same call starts the proxy), so the sentence may claim it.
+		expect(networkConfinement("native", "workspace-write", "restricted", "linux")).toBe("proxy-bridge");
 		// macOS places the same wrapper, and the profile it generates keeps the
 		// enforcing proxy's own loopback ports — the one route the kernel leaves
 		// standing. The executor passes those ports on every restricted run
@@ -876,17 +920,18 @@ describe("networkConfinement", () => {
 		// reachable only with an `enabled` axis, because the proxy that
 		// enforces `restricted` listens on loopback and a container child
 		// cannot reach it — so the command being asked about resolved to
-		// `simulated` and runs on the proxy. Reading `os-namespace` here would
+		// `simulated` and runs on the proxy. Reading `proxy-bridge` here would
 		// describe a kernel denial the command never got, which is the
 		// over-claim direction: a user told the OS denies every route while
 		// their proxy-routed command is wide open.
 		["appcontainer", "linux", "no-os-backend"],
 		["unavailable", "linux", "backend-missing"],
-		["native", "linux", "os-namespace"],
+		["native", "linux", "proxy-bridge"],
 		// The platform split on the native case, both directions named: the
 		// same placed wrapper reads `proxy-ports` on macOS, where the generated
-		// profile carries the proxy's own port rules, and stays `os-namespace`
-		// everywhere else — bubblewrap denies the proxy with everything else.
+		// profile carries the proxy's own port rules, and `proxy-bridge`
+		// everywhere else — bubblewrap denies every route but the loopback
+		// bridge it starts into the proxy.
 		["native", "darwin", "proxy-ports"],
 		["appcontainer", "darwin", "no-os-backend"],
 	] as const)("backend %s on %s with a confined filesystem", (backend, platform, expected) => {

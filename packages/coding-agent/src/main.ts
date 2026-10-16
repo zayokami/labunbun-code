@@ -319,6 +319,18 @@ export interface MainOptions {
 }
 
 export async function main(argv: string[] = process.argv.slice(2), options: MainOptions = {}): Promise<number> {
+	// The Linux loopback bridge re-enters this same executable with `__bridge`
+	// when it was built rather than run from a checkout — on disk there is no
+	// script to point at, so the binary is the script. It runs before
+	// `parseArgs`, which would read the arguments as a broken subcommand, and
+	// it never returns: `runBridge` serves until the namespace around it is
+	// torn down, and a returned `main` would `process.exit` on a live bridge.
+	// The import is dynamic so an ordinary start-up pays nothing for it.
+	if (argv[0] === "__bridge") {
+		const { runBridge } = await import("@labunbun/tools");
+		await runBridge(argv.slice(1));
+		return 0;
+	}
 	const args = parseArgs(argv);
 
 	if (args.version) {

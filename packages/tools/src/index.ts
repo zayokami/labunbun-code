@@ -36,6 +36,11 @@ export {
 	type ReadFileStateEntry,
 	type RecordReadInput,
 } from "./read-file-state.ts";
+// The bridge process, reached two ways: a source checkout runs
+// `sandbox/bridge-main.ts` beside the tools package, and a compiled binary
+// re-enters the CLI's main with `__bridge` — see `bridgeRuntime` in
+// `sandbox/bridge.ts` for what tells the two shapes apart.
+export { runBridge } from "./sandbox/bridge.ts";
 export {
 	describeWritableRoots,
 	resolveWritableRoots,

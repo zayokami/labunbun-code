@@ -5,7 +5,12 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_MODE_CHOICE, DEFAULT_SANDBOX_FOR_MODE, needsNetworkProxy, networkConfinementReason } from "@labunbun/agent";
+import {
+	DEFAULT_MODE_CHOICE,
+	DEFAULT_SANDBOX_FOR_MODE,
+	needsNetworkProxy,
+	networkConfinementReason,
+} from "@labunbun/agent";
 import { apiKeyEnvNames, listModels } from "@labunbun/ai";
 import {
 	detectNativeBackend,
@@ -201,12 +206,11 @@ export async function runDoctorChecks(
 	//
 	// The wording is `describeNetworkPolicy`'s, for the same reason — and it matters
 	// that the native case is *not* "the proxy, with the OS holding the rest",
-	// because "the rest" is not what the kernel denies. On Linux a native backend
-	// denies the proxy as well, so the proxy is not belt-and-braces there, it is
-	// simply unreachable from a shell; on macOS the profile leaves the proxy's own
-	// loopback ports standing, so the allowlist does govern a shell — through the
-	// one route the kernel permits. This row says which of the three it is rather
-	// than averaging them.
+	// because "the rest" is not what the kernel denies. On each platform the
+	// kernel denies every route off the machine and leaves exactly one standing —
+	// macOS the proxy's own loopback ports, Linux the namespace's loopback bridge
+	// to them — so the allowlist does govern a shell, through the route the row
+	// names. This row says which shape it is rather than averaging them.
 	const axis = networkAxisFrom(settings);
 	if (needsNetworkProxy(axis.access, axis.domains)) {
 		const allowCount = axis.domains.filter((rule) => rule.permission === "allow").length;
@@ -230,13 +234,12 @@ export async function runDoctorChecks(
 		const sandbox = settings.sandbox ?? DEFAULT_SANDBOX_FOR_MODE[settings.permissionMode ?? DEFAULT_MODE_CHOICE.mode];
 		const confinement = networkConfinement(backend, sandbox, axis.access, platform);
 		// `ok` is reserved for the cases where the kernel, not the program, is what
-		// holds the boundary: under `os-namespace` the OS denies every route, so the
-		// restriction holds more completely than a proxy could manage — at the price
-		// of the allowlist having no effect on a shell, and the detail says so rather
-		// than the status pretending otherwise. Under `proxy-ports` the kernel leaves
-		// exactly one route standing — the enforcing proxy's own loopback ports — so
-		// both the restriction and the allowlist hold for a shell, through that
-		// route; the detail says that instead.
+		// holds the boundary: under `proxy-ports` the kernel leaves exactly one
+		// route standing — the enforcing proxy's own loopback ports — and under
+		// `proxy-bridge` exactly one route takes their place — the namespace's
+		// loopback bridge into the proxy — so in both cases the restriction holds
+		// in the kernel and the allowlist still governs a shell, through that one
+		// route; the detail says which route it is.
 		//
 		// The other four all warn, and the *reason* is in the row rather than left to
 		// `/permissions`: "the proxy is the whole boundary" on its own tells a user
@@ -246,21 +249,21 @@ export async function runDoctorChecks(
 		// selected (the probe's own why travels in for that one), or a setting they
 		// wrote. Read off the same function `describeNetworkPolicy` uses, so the two
 		// surfaces cannot drift apart.
-		const kernelHoldsIt = confinement === "os-namespace" || confinement === "proxy-ports";
+		const kernelHoldsIt = confinement === "proxy-bridge" || confinement === "proxy-ports";
 		// Only the `ok` row needs the correction, and it needs it because it is the
-		// one that over-claims. "A shell command reaches nothing" is a statement
-		// about a command that went through the Bash tool and was handed a policy;
-		// the path below is never handed one — there is no spawn to confine, its
-		// traffic is this process's own — so on this machine it is the one that can
-		// still reach the network. The two `warn` rows are already hedged by the
-		// "a program that ignores HTTP_PROXY… is not subject to it" clause they
-		// carry, and a longer sentence does not make them more true.
+		// one that over-claims: "shell traffic goes through the proxy" is a
+		// statement about a command that went through the Bash tool and was handed
+		// a policy; the path below is never handed one — there is no spawn to
+		// confine, its traffic is this process's own — so on this machine it is the
+		// one that can still reach the network. The two `warn` rows are already
+		// hedged by the "a program that ignores HTTP_PROXY… is not subject to it"
+		// clause they carry, and a longer sentence does not make them more true.
 		const uncovered = `, and ${COMMAND_PATHS_WITHOUT_SANDBOX.join(", ")} are started without one, so they are outside all of it`;
 		const detail = kernelHoldsIt
 			? axis.access === "restricted"
 				? confinement === "proxy-ports"
 					? `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine except the local proxy's own loopback ports, so shell traffic goes through the proxy and the allowed list governs both shell and web tools${uncovered}`
-					: `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine, proxy included, so a shell command reaches nothing and the allowed list governs the web tools${uncovered}`
+					: `${axis.access} (${reach}) · the OS sandbox denies a command every route off the machine except the loopback bridge into the proxy, so shell traffic goes through the proxy and the allowed list governs both shell and web tools${uncovered}`
 				: `${axis.access} (${reach}) · a local proxy decides, and a program that ignores HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`
 			: `${axis.access} (${reach}) · ${networkConfinementReason(confinement, platform, backend, appContainerReason)} So the proxy is the whole boundary: a program that opens a socket without consulting HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is not subject to it`;
 		checks.push({ name: "Network", status: kernelHoldsIt ? "ok" : "warn", detail });

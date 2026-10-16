@@ -3,6 +3,7 @@
 // `exists` is injected so a test's verdict is a fact about the policy.
 // Long-form design notes: docs/dev/sandbox.md
 import { canWrite, type SandboxPolicy } from "@labunbun/agent";
+import { type UnixBridge, wrapWithBridge } from "./bridge.ts";
 
 // Long-form design notes: docs/dev/sandbox.md
 /** Build the `bwrap` argument vector for `policy`, wrapping `command`. */
@@ -10,9 +11,21 @@ export function buildBwrapArgs(
 	policy: SandboxPolicy,
 	command: string[],
 	exists: (path: string) => boolean = () => true,
+	bridge?: UnixBridge,
 ): string[] {
+	// The bridge only ever wraps a command the namespace is about to cut off.
+	// On an open axis there is no namespace and nothing to bridge; with no
+	// bridge, or with no `/bin/bash` to run the wrapper (wrapping declines),
+	// the command keeps the bare argv it had — the dead network, which is the
+	// fail-closed shape. Computed once, here, because both branches below
+	// reach the same `--unshare-net` and a bridge on only one of them would be
+	// the same bug the shared `namespaceArgs` exists to prevent.
+	const bridged =
+		policy.network === "enabled" || bridge === undefined ? undefined : wrapWithBridge(command, bridge, exists);
+	const effective = bridged ?? command;
+
 	if (policy.fileSystem.kind === "unrestricted") {
-		return policy.network === "enabled" ? [...command] : [...fullFilesystemArgs(), "--", ...command];
+		return policy.network === "enabled" ? [...command] : [...fullFilesystemArgs(bridged), "--", ...effective];
 	}
 
 	const writable = policy.fileSystem.entries.filter((entry) => canWrite(entry.access));
@@ -52,8 +65,16 @@ export function buildBwrapArgs(
 		...namespaceArgs(policy.network),
 		"--cap-drop",
 		"ALL",
+		// A bridged command brings this namespace's own loopback up before the
+		// bridge can listen — a fresh network namespace starts with `lo` down
+		// and unaddressed — and that takes CAP_NET_ADMIN. The capability is
+		// scoped to the namespace its holder already lives in: it can
+		// configure these interfaces and nothing the host owns, and it is
+		// granted only when a bridge is actually in the argv. Without one the
+		// drop stays total.
+		...(bridged === undefined ? [] : ["--cap-add", "CAP_NET_ADMIN"]),
 		"--",
-		...command,
+		...effective,
 	];
 }
 
@@ -92,7 +113,7 @@ function namespaceArgs(network: SandboxPolicy["network"]): string[] {
  * flags. Reached only by the branch documented on `buildBwrapArgs`; the fully
  * unconfined case returns the command instead of building this.
  */
-function fullFilesystemArgs(): string[] {
+function fullFilesystemArgs(bridged: string[] | undefined): string[] {
 	return [
 		"--new-session",
 		"--die-with-parent",
@@ -104,5 +125,9 @@ function fullFilesystemArgs(): string[] {
 		...namespaceArgs("restricted"),
 		"--cap-drop",
 		"ALL",
+		// Same grant and same reason as the restricted-filesystem branch on
+		// `buildBwrapArgs`: only a bridged command needs to configure its own
+		// namespace's loopback.
+		...(bridged === undefined ? [] : ["--cap-add", "CAP_NET_ADMIN"]),
 	];
 }

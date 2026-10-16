@@ -3,8 +3,11 @@
 // Long-form design notes: docs/dev/sandbox.md
 
 import type { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
-import { createServer as createTcpServer, connect as netConnect, type Socket } from "node:net";
+import { createServer as createTcpServer, connect as netConnect, type Server, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Duplex } from "node:stream";
 import {
 	decideNetworkRequest,
@@ -13,6 +16,7 @@ import {
 	type NetworkDomainRule,
 	needsNetworkProxy,
 } from "@labunbun/agent";
+import type { BridgePair, UnixBridge } from "./bridge.ts";
 
 /** SOCKS5 reply codes. RFC 1928 §6. */
 const SOCKS_SUCCESS = 0x00;
@@ -39,6 +43,15 @@ export interface NetworkProxyOptions {
 	// Long-form design notes: docs/dev/sandbox.md
 	/** The address blocklist. Defaults to {@link isBlockedNetworkHost}. Injectable so a test can watch a permitted connection. */
 	isBlockedHost?: (host: string) => boolean;
+	/**
+	 * Also serve this proxy over Unix sockets, one per loopback port, in a
+	 * fresh directory under the system temp. The Linux loopback bridge is the
+	 * only consumer: a confined command's traffic reaches those sockets over
+	 * the shared filesystem, the one route a network namespace leaves
+	 * standing. Off by default, so every existing caller keeps the two
+	 * listeners it had.
+	 */
+	unixBridge?: boolean;
 }
 
 // Long-form design notes: docs/dev/sandbox.md
@@ -56,6 +69,13 @@ export interface NetworkProxy {
 	socksUrl: string;
 	/** The environment a child process needs for its traffic to arrive here. */
 	env: Record<string, string>;
+	/**
+	 * The Unix-socket side of this proxy, when `unixBridge` asked for one: the
+	 * pairs the Linux loopback bridge forwards to. Absent means no bridge
+	 * process can reach this proxy, which on a namespace backend is the dead
+	 * network this build had before the bridge existed.
+	 */
+	bridge?: UnixBridge;
 	/** Stop listening and drop every connection this proxy opened. */
 	close(): Promise<void>;
 }
@@ -156,16 +176,74 @@ export async function startNetworkProxy(options: NetworkProxyOptions): Promise<N
 
 	const httpUrl = `http://${host}:${portOf(httpServer)}`;
 	const socksUrl = `socks5://${host}:${portOf(socksServer)}`;
+	// Deduplicated the way `portsOf` deduplicates the published pair: the two
+	// listeners are separate today, and a bridge must not carry one port twice
+	// if that ever changes.
+	const started = options.unixBridge
+		? await startUnixBridge(host, [...new Set([portOf(httpServer), portOf(socksServer)])], live)
+		: undefined;
 
 	return {
 		httpUrl,
 		socksUrl,
 		env: proxyEnv(httpUrl, socksUrl),
+		// Spread rather than assigned: with `exactOptionalPropertyTypes` an
+		// explicit `undefined` here would not type-check against the optional
+		// field, and the key's absence is the honest shape for "no bridge".
+		...(started === undefined ? {} : { bridge: started.pair }),
 		close: async () => {
 			for (const socket of live) socket.destroy();
-			await Promise.all([closed(httpServer), closed(socksServer)]);
+			const servers = [httpServer, socksServer, ...(started?.servers ?? [])];
+			await Promise.all(servers.map((server) => closed(server)));
+			if (started !== undefined) rmSync(started.dir, { recursive: true, force: true });
 		},
 	};
+}
+
+// Long-form design notes: docs/dev/sandbox.md
+/**
+ * The Unix-socket mirror of the TCP listeners, one socket per port in a fresh
+ * directory under the system temp — the one directory every sandbox inherits
+ * as writable, so the rendezvous file is reachable from inside the namespace
+ * as well as outside it. Each socket speaks whatever its port speaks: a
+ * connection accepted here is piped straight to the loopback port, where the
+ * decisions were always made. The directory is removed on close; a crash that
+ * skips that leaves a stale socket under temp, which is what temp is for.
+ */
+async function startUnixBridge(
+	host: string,
+	ports: readonly number[],
+	live: Set<Duplex>,
+): Promise<{ pair: UnixBridge; servers: Server[]; dir: string }> {
+	const dir = mkdtempSync(join(tmpdir(), "lbb-bridge-"));
+	const pairs: BridgePair[] = [];
+	const servers: Server[] = [];
+	for (const port of ports) {
+		const socket = join(dir, `port-${port}.sock`);
+		const server = createTcpServer((client) => {
+			const upstream = netConnect(port, host);
+			// Both halves are tracked like every other socket here: `close()`
+			// destroys them, and without that a bridge connection parked on an
+			// idle client would hold `server.close()` open forever.
+			live.add(upstream);
+			upstream.once("close", () => live.delete(upstream));
+			const teardown = () => {
+				client.destroy();
+				upstream.destroy();
+			};
+			client.on("error", teardown);
+			upstream.on("error", teardown);
+			client.pipe(upstream);
+			upstream.pipe(client);
+		});
+		servers.push(server);
+		// Tracked before listening, so no connection can arrive before its
+		// socket is in the set.
+		trackServer(server, live);
+		await listenSocket(server, socket);
+		pairs.push({ port, socket });
+	}
+	return { pair: { pairs }, servers, dir };
 }
 
 /** `CONNECT host:port` — the shape every `HTTPS_PROXY` client uses. */
@@ -443,6 +521,22 @@ function listen(server: ListeningServer, host: string): Promise<void> {
 	return new Promise((resolve, reject) => {
 		server.once("error", reject);
 		server.listen(0, host, () => {
+			server.removeListener("error", reject);
+			resolve();
+		});
+	});
+}
+
+/**
+ * `listen` for a Unix socket. A helper of its own rather than an overload of
+ * the port-shaped one, because the two disagree about their address types and
+ * `portOf` refuses a string address — widening `listen` to take both would
+ * move that refusal into a caller that cannot act on it.
+ */
+function listenSocket(server: Server, path: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(path, () => {
 			server.removeListener("error", reject);
 			resolve();
 		});

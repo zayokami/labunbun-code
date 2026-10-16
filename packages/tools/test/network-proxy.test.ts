@@ -19,8 +19,10 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { connect, createServer as createTcpServer, type Socket, type Server as TcpServer } from "node:net";
+import { dirname } from "node:path";
 import type { NetworkDomainRule } from "@labunbun/agent";
 import { portsOf, splitHostPort, startNetworkProxy } from "../src/sandbox/proxy.ts";
 
@@ -211,6 +213,21 @@ function reader(socket: Socket) {
  */
 async function exchange(port: number, request: string): Promise<{ head: string; body: string }> {
 	const socket = await open(port);
+	return exchangeOver(socket, request);
+}
+
+/** The same exchange over a Unix socket — the bridge's own transport. */
+async function exchangePath(path: string, request: string): Promise<{ head: string; body: string }> {
+	const socket = await new Promise<Socket>((resolve, reject) => {
+		const candidate = connect({ path });
+		candidate.once("connect", () => resolve(candidate));
+		candidate.once("error", reject);
+	});
+	return exchangeOver(socket, request);
+}
+
+/** One absolute-form request over an established socket, read back to `Content-Length`. */
+async function exchangeOver(socket: Socket, request: string): Promise<{ head: string; body: string }> {
 	const io = reader(socket);
 	socket.write(request);
 	const head = await io.until("\r\n\r\n");
@@ -413,6 +430,88 @@ describe("startNetworkProxy", () => {
 					() => "refused",
 				),
 			).toBe("refused");
+		}
+	});
+});
+
+// --- the Unix bridge ------------------------------------------------------
+
+/**
+ * The host half of the Linux loopback bridge.
+ *
+ * The confined command's half is the wrapper argv (pinned in
+ * `sandbox-bridge.test.ts`) plus the namespace itself (`sandbox-bwrap-smoke`);
+ * what lives here is the proxy's own side: a socket per listener, forwarding
+ * into the listener, published only when asked and removed with the rest.
+ */
+describe("the Unix bridge", () => {
+	test("no bridge is published unless one was asked for", async () => {
+		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("example.com") });
+		if (!proxy) throw new Error("expected a proxy");
+		try {
+			expect(proxy.bridge).toBeUndefined();
+		} finally {
+			await proxy.close();
+		}
+	});
+
+	test("a bridged proxy publishes the listeners' own ports, with a socket for each", async () => {
+		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("example.com"), unixBridge: true });
+		if (!proxy) throw new Error("expected a proxy");
+		const bridge = proxy.bridge;
+		if (!bridge) throw new Error("expected the bridge");
+		try {
+			// The ports are the listeners' own, in the order `portsOf` reports
+			// them, so the confined command's proxy variables need no rewriting.
+			expect(bridge.pairs.map((pair) => pair.port)).toEqual(portsOf(proxy));
+			for (const pair of bridge.pairs) {
+				// On Windows the path is a named pipe, not a file; everywhere the
+				// bridge actually runs it is a socket under the temp root — the
+				// one directory a confined command can already reach.
+				if (process.platform !== "win32") expect(existsSync(pair.socket)).toBe(true);
+				expect(pair.socket).toContain("lbb-bridge-");
+			}
+		} finally {
+			await proxy.close();
+		}
+	});
+
+	test("close removes the socket directory along with the listeners", async () => {
+		const proxy = await startNetworkProxy({ network: "restricted", rules: allow("example.com"), unixBridge: true });
+		if (!proxy) throw new Error("expected a proxy");
+		const first = proxy.bridge?.pairs[0];
+		if (first === undefined) throw new Error("expected a pair");
+		const dir = dirname(first.socket);
+		await proxy.close();
+		expect(existsSync(dir)).toBe(false);
+	});
+
+	test("a request written to the socket arrives at the origin, routed by the real proxy", async () => {
+		// The whole relay in one exchange: socket in, UDS server, TCP into the
+		// proxy's own HTTP listener, rules, upstream. The bytes that come back
+		// are the proxy's own answer, so this is the host half of what a
+		// confined command will see.
+		const upstream = await startUpstream();
+		const proxy = await startNetworkProxy({
+			network: "restricted",
+			rules: allow("127.0.0.1"),
+			isBlockedHost: blockNothing,
+			unixBridge: true,
+		});
+		if (!proxy) throw new Error("expected a proxy");
+		const httpPair = proxy.bridge?.pairs.find((pair) => pair.port === portOfUrl(proxy.httpUrl));
+		if (httpPair === undefined) throw new Error("expected the HTTP pair");
+		try {
+			const { head, body } = await exchangePath(
+				httpPair.socket,
+				`GET http://127.0.0.1:${upstream.port}/via-bridge HTTP/1.1\r\nHost: 127.0.0.1:${upstream.port}\r\n\r\n`,
+			);
+			expect(head).toContain("200 OK");
+			expect(body).toBe("upstream saw /via-bridge\n");
+			expect(upstream.seen()).toEqual(["/via-bridge"]);
+		} finally {
+			await proxy.close();
+			await upstream.close();
 		}
 	});
 });

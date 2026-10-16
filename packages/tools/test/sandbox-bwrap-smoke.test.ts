@@ -62,6 +62,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxPolicy } from "@labunbun/agent";
@@ -620,6 +621,117 @@ smoke("MEASURE: which ancestor mount order keeps the workspace writable", () => 
  * and the row has to print the argv it ran**, because the failure mode here was
  * silent: the numbers looked plausible and measured nothing.
  */
+
+/**
+ * A free loopback port, the portable way: ask the kernel, give it back, and
+ * let the listener inside the namespace take it a moment later.
+ */
+function freePort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const scout = createServer();
+		scout.once("error", reject);
+		scout.listen(0, "127.0.0.1", () => {
+			const address = scout.address();
+			if (address === null || typeof address === "string") {
+				reject(new Error("no port"));
+				return;
+			}
+			const chosen = address.port;
+			scout.close(() => resolve(chosen));
+		});
+	});
+}
+
+/**
+ * The policy the bridge row runs under: the workspace, plus the temp directory —
+ * which is where the proxy publishes its sockets, and which the product's own
+ * writable-root set already carries as a `data` root, so this is a replica
+ * rather than a convenience.
+ */
+function bridgedPolicy(workspace: string, git: string): SandboxPolicy {
+	return {
+		fileSystem: {
+			kind: "restricted",
+			entries: [
+				{ path: workspace, access: "write" },
+				{ path: tmpdir(), access: "write" },
+			],
+		},
+		network: "restricted",
+		networkRules: [],
+		protected: [git],
+	};
+}
+
+/** The confined command the bridge rows run: one connect, one round trip, read back. */
+const roundTrip = (port: number) =>
+	`exec 3<>/dev/tcp/127.0.0.1/${port} && printf ping >&3 && dd bs=1 count=4 <&3 2>/dev/null`;
+
+/**
+ * The bridge, measured across a real namespace wall.
+ *
+ * Everything above this row is mounts; this is the network half, and it is the
+ * one claim no string comparison can make for a namespace: a fresh netns has
+ * `lo` DOWN and unaddressed, so the wrapper script has to bring it up, and the
+ * capability that takes is granted by `--cap-add CAP_NET_ADMIN` — exactly the
+ * two things a real kernel can refuse and a mock cannot. The host side is the
+ * stand-in for the proxy's UDS server: a socket that upper-cases what it is
+ * sent, so both directions of the relay are visible in the one exchange.
+ * `network-proxy.test.ts` covers the hop from the socket into the proxy proper;
+ * what is under measurement here is the hop from *inside* the namespace to the
+ * socket, which only a real `bwrap` can exercise.
+ *
+ * The control is the same command with no bridge in the argv — the dead network
+ * this build had before the bridge existed — and it must fail to connect.
+ */
+smoke("a bridged command crosses the namespace wall to the host socket", async () => {
+	const { workspace, git } = workspaceFixture();
+	const port = await freePort();
+	const socketPath = join(tmpdir(), `lbb-bridge-smoke-${process.pid}-${Date.now()}.sock`);
+	const upstream: Server = createServer((socket) => {
+		socket.on("data", (chunk: Buffer) => socket.write(chunk.toString("latin1").toUpperCase()));
+	});
+	await new Promise<void>((resolve, reject) => {
+		upstream.once("error", reject);
+		upstream.listen(socketPath, () => {
+			upstream.removeListener("error", reject);
+			resolve();
+		});
+	});
+	try {
+		const argv = buildBwrapArgs(
+			bridgedPolicy(workspace, git),
+			["/bin/bash", "-c", roundTrip(port)],
+			(p) => existsSync(p),
+			{ pairs: [{ port, socket: socketPath }] },
+		);
+		const run = spawnSync("bwrap", argv, { encoding: "utf8", timeout: 15000 });
+		// The wrapper's degradation line names the fail-closed fallback; if it is
+		// here, the bridge never started and the wall is still up — the assertion
+		// below would be measuring the fallback instead of the bridge.
+		expect(run.stderr, `the bridge did not start: ${run.stderr.slice(0, 400)}`).not.toContain(
+			"the network bridge did not start",
+		);
+		expect(run.stdout, `no round trip through the bridge: ${run.stderr.slice(0, 400)}`).toBe("PING");
+	} finally {
+		await new Promise<void>((resolve) => upstream.close(() => resolve()));
+		rmSync(socketPath, { force: true });
+	}
+});
+
+smoke("CONTROL: without the bridge the same connect has nowhere to go", async () => {
+	const { workspace, git } = workspaceFixture();
+	const port = await freePort();
+	// No fourth argument: no bridge, no wrapper, and a fresh netns whose `lo`
+	// is down — so this is byte-for-byte the argv every string test pins for the
+	// dead-network shape, run against a kernel.
+	const argv = buildBwrapArgs(bridgedPolicy(workspace, git), ["/bin/bash", "-c", roundTrip(port)], (p) =>
+		existsSync(p),
+	);
+	const run = spawnSync("bwrap", argv, { encoding: "utf8", timeout: 15000 });
+	expect(run.stdout).not.toBe("PING");
+	expect(run.status, `connect was supposed to fail without a bridge: ${run.stderr.slice(0, 300)}`).not.toBe(0);
+});
 
 test("where bwrap is installed, this file does not skip", () => {
 	// The control for the gate. A skip is the honest answer to "can this machine

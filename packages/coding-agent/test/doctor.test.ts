@@ -312,25 +312,26 @@ describe("the Network row", () => {
 	test("the ok row says which kernel shape it is, and the two shapes differ", async () => {
 		// The sentence `/permissions` prints for each native case, and the reason
 		// each row needs its own copy: `ok` means the kernel, not the program, is
-		// what holds the boundary — and the two shapes pay different prices. On
-		// Linux the OS denies every route, so the allowlist has no effect on a
-		// shell; a green row with no mention of that reads as "your allowlist
-		// works", which is false of every entry. On macOS the profile deliberately
-		// leaves the proxy's own loopback ports standing, so the allowlist does
-		// govern a shell — through the one route the kernel permits — and a row
-		// that reused the Linux sentence would be false in the other direction,
-		// saying a command reaches nothing while its proxy traffic flows.
+		// what holds the boundary — and the one route the kernel leaves standing
+		// is a different mechanism per platform. On macOS the seatbelt profile
+		// keeps the proxy's own loopback ports open; on Linux the proxy sits
+		// outside the namespace and a loopback bridge carries its ports inward. A
+		// row that averaged the two would name a mechanism the other platform
+		// does not have.
 		const { home, cwd } = makeDirs();
 		const linux = await networkRow(restricted(), cwd, home, "linux", true);
 		expect(linux?.status).toBe("ok");
-		expect(linux?.detail).toContain("denies a command every route off the machine, proxy included");
-		expect(linux?.detail).toContain("the allowed list governs the web tools");
+		expect(linux?.detail).toContain(
+			"denies a command every route off the machine except the loopback bridge into the proxy",
+		);
+		expect(linux?.detail).toContain("the allowed list governs both shell and web tools");
+		expect(linux?.detail).not.toContain("the local proxy's own loopback ports");
 
 		const darwin = await networkRow(restricted(), cwd, home, "darwin", true);
 		expect(darwin?.status).toBe("ok");
 		expect(darwin?.detail).toContain("except the local proxy's own loopback ports");
 		expect(darwin?.detail).toContain("the allowed list governs both shell and web tools");
-		expect(darwin?.detail).not.toContain("proxy included");
+		expect(darwin?.detail).not.toContain("loopback bridge");
 		// The inverse: the four proxy-only cases must not claim a kernel holds it.
 		for (const [platform, hasNative] of [
 			["linux", false],
@@ -415,15 +416,14 @@ describe("the Network row", () => {
 	/**
 	 * The `ok` row's over-claim, and the guard that keeps it from becoming one.
 	 *
-	 * "The OS sandbox denies a command every route off the machine … so a shell
-	 * command reaches nothing" is a true statement about a command the Bash tool
-	 * handed a policy, and a false statement about the repo in general: the HTTP
-	 * MCP transport is not handed one — there is no spawn to confine, its
-	 * traffic is this process's own — so on the very machine where the row says
-	 * `ok`, that is the path that can still reach out. The row says so. (The `!`
-	 * prompt prefix and then hooks and MCP stdio servers each left this list
-	 * when they were handed the workspace policy; all three moved to the control
-	 * below.)
+	 * "Shell traffic goes through the proxy" is a true statement about a command
+	 * the Bash tool handed a policy, and a false statement about the repo in
+	 * general: the HTTP MCP transport is not handed one — there is no spawn to
+	 * confine, its traffic is this process's own — so on the very machine where
+	 * the row says `ok`, that is the path that can still reach out. The row says
+	 * so. (The `!` prompt prefix and then hooks and MCP stdio servers each left
+	 * this list when they were handed the workspace policy; all three moved to
+	 * the control below.)
 	 *
 	 * The second table is the part that matters, because a sentence is the
 	 * cheapest thing in the repo to leave stale — nothing fails when a path

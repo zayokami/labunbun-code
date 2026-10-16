@@ -21,6 +21,7 @@ import {
 	releaseWorkspaceGrant,
 	runConfined,
 } from "./sandbox/appcontainer.ts";
+import type { UnixBridge } from "./sandbox/bridge.ts";
 import {
 	detectRuntime,
 	resolveSandboxExecution,
@@ -63,6 +64,9 @@ export interface FileSystemOperations {
 /** How much of each captured stream stays in memory: a head and a tail of this many characters. */
 const CAPTURE_HEAD_CHARS = 30_000;
 const CAPTURE_TAIL_CHARS = 30_000;
+
+/** How long a killed POSIX child gets to honour `SIGTERM` before the tree kill escalates to `SIGKILL`. */
+const KILL_ESCALATE_MS = 250;
 
 export interface ExecResult {
 	stdout: string;
@@ -163,6 +167,16 @@ export interface ExecOperations {
 	 * `networkEnvFor` hands out variables for.
 	 */
 	networkPortsFor?(policy: SandboxPolicy): Promise<readonly number[] | undefined>;
+
+	// Long-form design notes: docs/dev/tools.md
+	/**
+	 * The host side of the Linux loopback bridge a running proxy for `policy`
+	 * publishes, or `undefined` when none runs. The bwrap wrapper names the
+	 * bridge's sockets before the spawn, the same way the macOS profile names
+	 * the ports — from the same listener `networkEnvFor` hands out variables
+	 * for.
+	 */
+	networkBridgeFor?(policy: SandboxPolicy): Promise<UnixBridge | undefined>;
 
 	// Long-form design notes: docs/dev/tools.md
 	/**
@@ -466,6 +480,10 @@ export class ChildProcessExecOperations implements ExecOperations {
 		const starting = startNetworkProxy({
 			network: policy.network,
 			rules: policy.networkRules,
+			// The bridge is Linux-only: that is the one platform whose
+			// namespace wall has no other way across, and asking for it
+			// elsewhere would open a listener nothing can ever dial.
+			unixBridge: this.#runtime.platform === "linux",
 		});
 		this.#starting = starting;
 		try {
@@ -508,15 +526,27 @@ export class ChildProcessExecOperations implements ExecOperations {
 		return proxy === undefined ? undefined : portsOf(proxy);
 	}
 
+	/**
+	 * The host side of the Linux loopback bridge, or `undefined` when none runs.
+	 * Public for the same reason as the ports above — the background manager
+	 * builds its own argv — and separate from them because the bwrap wrapper
+	 * needs the socket names, not the numbers: inside the namespace the ports
+	 * are mirrored as they are, and the bridge is what answers on them.
+	 */
+	async networkBridgeFor(policy: SandboxPolicy): Promise<UnixBridge | undefined> {
+		return (await this.#proxyFor(policy))?.bridge;
+	}
+
 	// Long-form design notes: docs/dev/tools.md
 	/**
 	 * The wrapping `exec` gives a command line, delivered as a spawn spec.
 	 *
 	 * The proxy starts before the resolution for the same reason `exec`
-	 * documents: the macOS profile has to name the enforcing listener's ports
-	 * before the argv is built, and `#proxyFor` decides from the policy alone,
-	 * so sharing the order here shares the listener — a server and a shell
-	 * under one policy reach the same proxy. The container backends are not
+	 * documents: the wrapper has to name the enforcing listener — the macOS
+	 * profile its ports, the bwrap one its bridge — before the argv is built,
+	 * and `#proxyFor` decides from the policy alone, so sharing the order here
+	 * shares the listener: a server and a shell under one policy reach the
+	 * same proxy. The container backends are not
 	 * attached: a plain `child_process` spawn has no attribute channel, so
 	 * those come back as the plain spec with the proxy variables still added,
 	 * which is also what an unconfined `exec` injects.
@@ -538,6 +568,7 @@ export class ChildProcessExecOperations implements ExecOperations {
 			appContainerReason: this.#runtime.appContainerReason,
 			executableRoots: this.#runtime.executableRoots,
 			networkPorts: proxy === undefined ? undefined : portsOf(proxy),
+			networkBridge: proxy?.bridge,
 		});
 		// The policy's variables go last, as they do in `exec`'s child
 		// environment: what confines this spawn outranks what the caller's
@@ -586,12 +617,14 @@ export class ChildProcessExecOperations implements ExecOperations {
 
 		// The proxy starts **before** the resolution, and the order is the point:
 		// on macOS the profile must name the enforcing proxy's own loopback ports
-		// — it denies every other route — so the listener has to exist before the
-		// argv that permits it can be built. `#proxyFor` decides from the policy
-		// alone, so this reorder changes nothing about *whether* a proxy runs;
-		// it only makes its ports known where the wrapper is chosen. A restricted
-		// policy always gets a proxy (`needsNetworkProxy`), so the profile and
-		// the listener cannot disagree about which mode this command is in.
+		// — it denies every other route — and on Linux the bwrap wrapper must
+		// name the bridge that same proxy publishes, so the listener has to
+		// exist before the argv that reaches it can be built. `#proxyFor`
+		// decides from the policy alone, so this reorder changes nothing about
+		// *whether* a proxy runs; it only makes its one route known where the
+		// wrapper is chosen. A restricted policy always gets a proxy
+		// (`needsNetworkProxy`), so the wrapper and the listener cannot disagree
+		// about which mode this command is in.
 		const proxy = sandbox ? await this.#proxyFor(sandbox) : undefined;
 
 		// The shell is named here and nowhere else, so this is the only place the
@@ -611,8 +644,10 @@ export class ChildProcessExecOperations implements ExecOperations {
 					appContainerReason: this.#runtime.appContainerReason,
 					executableRoots: this.#runtime.executableRoots,
 					// Read from the running listener rather than re-derived from the
-					// policy: a port is a fact about the proxy that is actually up.
+					// policy: a port or a socket is a fact about the proxy that is
+					// actually up.
 					networkPorts: proxy === undefined ? undefined : portsOf(proxy),
+					networkBridge: proxy?.bridge,
 				})
 			: ({ kind: "unconfined" } as const);
 		// What this run goes through, for the result to carry: the resolution's
@@ -760,9 +795,23 @@ export class ChildProcessExecOperations implements ExecOperations {
 
 			const killTree = () => {
 				if (process.platform === "win32" && child.pid) {
-					spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+					// An unhandled `error` event on a ChildProcess throws, and a
+					// taskkill that never starts (not on PATH, spawn failure)
+					// must not take the whole call down with it — the child, not
+					// the killer, is what this function is about.
+					spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true }).on("error", () => {});
 				} else {
-					child.kill();
+					// `SIGTERM` alone reaches the shell, and a shell blocked in
+					// `wait` can take the signal and leave the command running —
+					// so a short escalation to `SIGKILL` follows. It is unref'd
+					// so it cannot hold the process open, it is a no-op once the
+					// child exits (through a settled call the handle is gone),
+					// and the `settled` guard keeps it from reaching a process
+					// its adopter now owns after a timeout handoff.
+					child.kill("SIGTERM");
+					setTimeout(() => {
+						if (!settled) child.kill("SIGKILL");
+					}, KILL_ESCALATE_MS).unref?.();
 				}
 			};
 
@@ -770,7 +819,12 @@ export class ChildProcessExecOperations implements ExecOperations {
 				killed = true;
 				killTree();
 			};
-			signal?.addEventListener("abort", onAbort, { once: true });
+			// A signal that aborted before this listener was attached never fires
+			// "abort" again, so attaching alone would leave the child running for
+			// a caller that had already given up — the already-aborted case is
+			// read first, in the same turn the listener would have fired in.
+			if (signal?.aborted) onAbort();
+			else signal?.addEventListener("abort", onAbort, { once: true });
 
 			/** The one exit from this call: whichever path arrives first decides, the rest are no-ops. */
 			const settle = (result: ExecResult) => {
@@ -882,6 +936,7 @@ export function defaultOperations(exec: ChildProcessExecOperations = new ChildPr
 		exec: (options) => exec.exec(options),
 		networkEnvFor: (policy) => exec.networkEnvFor(policy),
 		networkPortsFor: (policy) => exec.networkPortsFor(policy),
+		networkBridgeFor: (policy) => exec.networkBridgeFor(policy),
 		sandboxBackend: exec.sandboxBackend,
 		appContainerReason: exec.appContainerReason,
 	};

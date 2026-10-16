@@ -756,13 +756,17 @@ describe("the network axis does not smuggle a wrapper around an unrestricted fil
 	// Both translators carry a branch for "unconfined filesystem, restricted
 	// network" that still wraps, and this pins the short-circuit that keeps it
 	// unreachable. The tempting change is to delete the short-circuit so the
-	// network axis looks like it is held at the kernel in both modes — and on
-	// Linux that silently breaks the network instead of confining it, because
-	// `--unshare-net` puts the command in a namespace where the proxy on
-	// `127.0.0.1` is unreachable and allowed domains fail alongside denied ones.
-	// A build that reaches that branch can only do so because it pairs
-	// `--unshare-net` with a TCP→UDS→TCP bridge; this build has no bridge, so
-	// "wrap anyway" would enforce the axis by breaking the network.
+	// network axis looks like it is held at the kernel in both modes. Before
+	// the loopback bridge existed, that change on Linux would have broken the
+	// network instead of confining it — `--unshare-net` left the command in a
+	// namespace where the proxy on `127.0.0.1` was unreachable, so allowed
+	// domains failed alongside denied ones. The bridge removes that obstacle,
+	// which moves the decision rather than settling it: `danger-full-access`
+	// is the mode whose meaning is the absence of a sandbox, and wrapping it
+	// would confine the network of the mode named for full access — a product
+	// change to make on purpose, with its own tests, not a repair. Until then
+	// the short-circuit stands and the translators' branch below is reachable
+	// only by deleting it.
 	test.each(["darwin", "linux"] as const)(
 		"an unrestricted filesystem wraps nothing on %s, whatever the network",
 		(platform) => {
@@ -1881,8 +1885,12 @@ describe("the confiner hands the non-Bash spawns exec's own answer", () => {
 			expect(spec.command).toBe("bwrap");
 			expect(spec.args).toContain("--unshare-net");
 			// The tail is the caller's spawn untouched — the confiner wraps, it does
-			// not rewrite — and the `--` above it is the argv shape it always had.
-			expect(spec.args.slice(-4)).toEqual(["--", "node", "-e", "1"]);
+			// not rewrite. What sits above the command is the host's half of the
+			// shape: `--` alone, or the bridge wrapper where a `/bin/bash` exists
+			// to run it (the restricted network's one route back to the proxy).
+			// That the command itself rides last, verbatim, is this test's half —
+			// so the assertion pins the command, not the separator above it.
+			expect(spec.args.slice(-3)).toEqual(["node", "-e", "1"]);
 			// The increment names the proxy this process is actually holding, the
 			// same reading the `exec` tests above pinned.
 			expect(spec.env?.HTTP_PROXY).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
@@ -2016,16 +2024,17 @@ describe("the confiner hands the non-Bash spawns exec's own answer", () => {
 });
 
 /**
- * One proxy, two readings — and on macOS they have to be the same numbers.
+ * One proxy, several readings — and they have to be the same numbers.
  *
- * `exec` reads the proxy it started twice: once as the environment a child is
- * handed, and once as the loopback ports a profile is built from. Nothing in
- * the type system ties the two readings together, and on macOS the drift
- * between them is the one failure the profile cannot recover from: the kernel
- * would permit a port the environment does not name and deny the one it does,
- * so every request fails while every string in the build still looks right.
- * The comparison below is therefore between the two readers, not against a
- * shape.
+ * `exec` reads the proxy it started more than once: as the environment a child
+ * is handed, as the loopback ports a macOS profile is built from, and as the
+ * socket pairs a Linux namespace's bridge dials back through. Nothing in the
+ * type system ties the readings together, and drift between them is the one
+ * failure the confinement cannot recover from: on macOS the kernel would
+ * permit a port the environment does not name and deny the one it does, and on
+ * Linux the bridge would listen where the environment points nowhere — every
+ * request fails while every string in the build still looks right. The
+ * comparisons below are therefore between the readers, not against a shape.
  */
 describe("one proxy, two readings", () => {
 	test("the ports a restricted policy publishes are the ones its environment names", async () => {
@@ -2059,6 +2068,49 @@ describe("one proxy, two readings", () => {
 		const exec = new ChildProcessExecOperations(FAKE_LINUX);
 		try {
 			expect(await exec.networkPortsFor(netPolicy(cwd, "enabled", []))).toBeUndefined();
+			expect(exec.networkProxyRunning).toBe(false);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("the bridge a restricted policy opens lands on the ports its environment names", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			const policy = netPolicy(cwd, "restricted", []);
+			// The bridge is opened for a confined linux command, on the reading the
+			// fake runtime claims to be — the same reading `exec` itself takes.
+			const bridge = await exec.networkBridgeFor(policy);
+			const env = await exec.networkEnvFor(policy);
+			if (bridge === undefined || env === undefined) {
+				throw new Error(`expected a restricted policy to hold a bridge, got bridge=${bridge} and env=${env}`);
+			}
+			// Two pairs for the two listeners, and the numbers have to cross the
+			// namespace boundary unchanged: inside it the ports are mirrored as
+			// they are, so a bridge on any other number would answer a port the
+			// command's environment does not name. Sorted, because the pair order
+			// is the proxy's to choose and the reader's is not.
+			const sorted = (values: number[]) => [...values].sort((a, b) => a - b);
+			expect(sorted(bridge.pairs.map((pair) => pair.port))).toEqual(
+				sorted([Number(new URL(env.HTTP_PROXY ?? "").port), Number(new URL(env.ALL_PROXY ?? "").port)]),
+			);
+			// The socket side is the host's half: one file per port, named for it,
+			// under the temporary directory the host proxy will clean up.
+			for (const pair of bridge.pairs) expect(pair.socket).toMatch(/port-\d+\.sock$/);
+		} finally {
+			await exec.close();
+		}
+	});
+
+	test("a policy that confines no network opens no bridge", async () => {
+		const cwd = workspace();
+		const exec = new ChildProcessExecOperations(FAKE_LINUX);
+		try {
+			// The fail-closed half, read from the bridge's side: with no proxy
+			// there are no pairs and no sockets, so the namespace keeps its dead
+			// network rather than gaining a route to nothing.
+			expect(await exec.networkBridgeFor(netPolicy(cwd, "enabled", []))).toBeUndefined();
 			expect(exec.networkProxyRunning).toBe(false);
 		} finally {
 			await exec.close();

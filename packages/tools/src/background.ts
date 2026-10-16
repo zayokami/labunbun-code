@@ -27,6 +27,9 @@ const MAX_SHELL_OUTPUT_CHARS = 30_000;
 /** How many ended shells the manager keeps pollable before evicting the oldest. */
 const MAX_RETAINED_SHELLS = 16;
 
+/** How long a killed POSIX shell gets to honour `SIGTERM` before `killPidTree` escalates to `SIGKILL`. */
+const KILL_ESCALATE_MS = 250;
+
 // Long-form design notes: docs/dev/tools.md
 /** The last `maxChars` characters of a file, without reading the whole thing. */
 export function readTail(path: string, maxChars: number): { text: string; truncated: boolean; bytes: number } {
@@ -97,7 +100,18 @@ export async function killPidTree(pid: number): Promise<boolean> {
 		});
 	}
 	try {
-		process.kill(pid);
+		// `SIGTERM` can be caught or ignored, and it reaches the one process —
+		// there is no group to signal, because nothing here spawns detached — so
+		// a short grace is followed by a `SIGKILL` to the same pid. The hard
+		// kill throwing means the pid was already gone: the graceful signal was
+		// delivered and did its job, which is still a stop that happened.
+		process.kill(pid, "SIGTERM");
+		await new Promise((resolve) => setTimeout(resolve, KILL_ESCALATE_MS));
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Already dead — the confirmation the escalation was for.
+		}
 		return true;
 	} catch {
 		return false;
@@ -347,12 +361,14 @@ export class BackgroundShellManager {
 		const append = logAppender(outputFile);
 
 		const { command: shellCommand, args } = this.#shell;
-		// The macOS profile must name the enforcing proxy's own ports before the
-		// argv is built — the same order, and the same reason, as the foreground
-		// path documents — so the running listener is asked for them first. A
-		// manager with no policy, or an operations bundle from before this
-		// method existed, asks for nothing and gets the dead-network shape.
+		// The wrapper must name the enforcing proxy's own route before the argv
+		// is built — the macOS profile its ports, the bwrap one its bridge — the
+		// same order, and the same reason, as the foreground path documents — so
+		// the running listener is asked for them first. A manager with no policy,
+		// or an operations bundle from before these methods existed, asks for
+		// nothing and gets the dead-network shape.
 		const networkPorts = sandbox ? await this.#operations.networkPortsFor?.(sandbox) : undefined;
+		const networkBridge = sandbox ? await this.#operations.networkBridgeFor?.(sandbox) : undefined;
 		const resolution = sandbox
 			? resolveSandboxExecution({
 					policy: sandbox,
@@ -363,6 +379,7 @@ export class BackgroundShellManager {
 					appContainerReason: this.#runtime.appContainerReason,
 					executableRoots: this.#runtime.executableRoots,
 					networkPorts,
+					networkBridge,
 				})
 			: ({ kind: "unconfined" } as const);
 		// The shell has to be executable inside the container, and that check is

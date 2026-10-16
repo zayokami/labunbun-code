@@ -8,12 +8,12 @@ Every claim about this repository cites `path:line`. Every claim about Codex cit
 
 ### The call path from an empty home
 
-Bare `labunbun` enters at `packages/coding-agent/src/main.ts:499-501`, parses arguments (`main.ts:292-302`), and dispatches. Subcommands run before the model resolves and before any key is needed — `yoshi` (`main.ts:321-337`), `login`/`logout` (`main.ts:343-352`), `acp` (`main.ts:410-436`) — deliberately, because "importing a configuration is exactly what someone does when they have no working configuration yet" (`main.ts:318-320`).
+Bare `labunbun` enters at `packages/coding-agent/src/main.ts:511-513`, parses arguments (`main.ts:292-302`), and dispatches. Subcommands run before the model resolves and before any key is needed — `yoshi` (`main.ts:321-349`), `login`/`logout` (`main.ts:355-364`), `acp` (`main.ts:422-448`) — deliberately, because "importing a configuration is exactly what someone does when they have no working configuration yet" (`main.ts:318-320`).
 
 The interactive path prints one line and hands over:
 
-- `main.ts:486` — `labunbun 0.1.0 — starting interactive mode…`. This is the first thing a new user sees on any platform.
-- `main.ts:487-496` → `runInteractive` (`packages/coding-agent/src/interactive.ts:386`).
+- `main.ts:498` — `labunbun 0.1.0 — starting interactive mode…`. This is the first thing a new user sees on any platform.
+- `main.ts:499-508` → `runInteractive` (`packages/coding-agent/src/interactive.ts:386`).
 
 `runInteractive` then does, in order:
 
@@ -68,8 +68,8 @@ Nothing is drawn for a new user's benefit. All startup text goes to stderr throu
 
 Nothing below is speculative; each is a mechanism the first-run flow can reuse:
 
-- **20 migration sources** — `MIGRATION_SOURCE_IDS` (`packages/coding-agent/src/migrate-types.ts:58-79`) with labels (`:82-103`); `detectSources(home)` answers "which of these has content here" by looking inside the trees, not at directory existence (`migrate-types.ts:225-236`). The REPL flow is `/yoshi` (`packages/coding-agent/src/commands.ts:154-183` → `runMigrationWizard`, `packages/coding-agent/src/migrate-wizard.ts:250-317`), the CLI spelling is `labunbun yoshi` (`main.ts:321-337`), and the default is a dry run with the report printed.
-- **Two subscription sign-ins** — `/login [claude|chatgpt]` (`interactive.ts:2762-2765`; handler at the `/login` case, `interactive.ts:3960`) and the CLI (`main.ts:343-352`). The Claude flow prints a URL, opens a browser, and falls back to a pasted `code#state` when the loopback port is taken (`packages/coding-agent/src/claude-login.ts:161-210`); the ChatGPT flow falls back to a device code instead (`packages/coding-agent/src/chatgpt-login.ts:124-166`). Both are console-capable and take injected `askCode`/`listen`/`openBrowser`, so a wizard can drive them.
+- **20 migration sources** — `MIGRATION_SOURCE_IDS` (`packages/coding-agent/src/migrate-types.ts:58-79`) with labels (`:82-103`); `detectSources(home)` answers "which of these has content here" by looking inside the trees, not at directory existence (`migrate-types.ts:225-236`). The REPL flow is `/yoshi` (`packages/coding-agent/src/commands.ts:154-183` → `runMigrationWizard`, `packages/coding-agent/src/migrate-wizard.ts:250-317`), the CLI spelling is `labunbun yoshi` (`main.ts:321-349`), and the default is a dry run with the report printed.
+- **Two subscription sign-ins** — `/login [claude|chatgpt]` (`interactive.ts:2762-2765`; handler at the `/login` case, `interactive.ts:3960`) and the CLI (`main.ts:355-364`). The Claude flow prints a URL, opens a browser, and falls back to a pasted `code#state` when the loopback port is taken (`packages/coding-agent/src/claude-login.ts:161-210`); the ChatGPT flow falls back to a device code instead (`packages/coding-agent/src/chatgpt-login.ts:124-166`). Both are console-capable and take injected `askCode`/`listen`/`openBrowser`, so a wizard can drive them.
 - **A diagnostics surface** — `/doctor` (`interactive.ts:2721`, checks in `doctor.ts:80+`).
 - **Project-tier trust** for repo-shipped agents and skills, held back until approved, with a notice that names the command to review it (`packages/coding-agent/src/project-trust.ts:1-29`, `:90-108`; printed at `interactive.ts:1977-1984`).
 - **A startup line that reaches the transcript** — `pushInfo` (`interactive.ts:1976-1993`), including the precedent of printing nothing when nothing is wrong (`interactive.ts:2017-2019`).
@@ -316,7 +316,7 @@ Import your Claude Code setup? Settings, MCP servers, skills and this project's
 conversations. You will see the full plan before anything is written. [Y/n]:
 ```
 
-- `Y` runs `runMigration({ only: ["settings", "assets"], from: <detected sources>, home, cwd })` — the dry run — prints `result.report` (`main.ts:321-337` shows the exact shape), and then reuses the wizard's own confirm wording: `Apply these N file(s)?` with `Apply` / `Cancel` (`migrate-wizard.ts:302-311`). `--force` stays off, so nothing already present is overwritten (`docs/dev/migration-framework.md`).
+- `Y` runs `runMigration({ only: ["settings", "assets"], from: <detected sources>, home, cwd })` — the dry run — prints `result.report` (`main.ts:321-349` shows the exact shape), and then reuses the wizard's own confirm wording: `Apply these N file(s)?` with `Apply` / `Cancel` (`migrate-wizard.ts:302-311`). `--force` stays off, so nothing already present is overwritten (`docs/dev/migration-framework.md`).
 - History stays out of the first-run offer by default: it is the slowest category and the one with the least claim on a first launch. `/yoshi` keeps offering it (`migrate-wizard.ts:161-247`).
 - **Implemented after the write, not before** (the heading's "question 2" is the design's order, not the built one). The dry run's `Apply these N file(s)?` must count the tree the apply will actually meet: with the wizard's answers already on disk and `--force` off, `claimScalar` skips every key the wizard wrote — the confirm is over the real plan, and the import can add but never clobber. The built question also drops the sketch's "and this project's conversations": history is the one category this offer omits, and a question must not promise what its plan will not count (`importOfferLine`, `wizard.ts:219-223`; the offer at `wizard.ts:329-381`, called at `wizard.ts:540`).
 - The console path cannot use `askUser`; it asks with `askChoice` (`wizard.ts:235-248`) and prints what the wizard would have printed. The scripted path (`/yoshi`, `labunbun yoshi`) is untouched.
